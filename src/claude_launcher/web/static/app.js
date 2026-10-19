@@ -47696,7 +47696,8 @@ function noticeFilterOf(value) {
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], spawn: [], ask: [] };
+const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], spawn: [], ask: [],
+  nudge: [] };
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -47982,13 +47983,14 @@ function noticeGateRefresh(type) {
   if (type === "kill") return refreshKillGate();
   if (type === "spawn") return refreshSpawnGate();
   if (type === "ask") return urgentAskSync(urgentAskRows);
+  if (type === "nudge") return refreshNudgeGate();
   return null;
 }
 
 function gatePendingCount() {
   return gatePending.restart.length + gatePending.goto.length +
     gatePending.reposync.length + gatePending.resume.length + gatePending.kill.length +
-    gatePending.spawn.length + gatePending.ask.length;
+    gatePending.spawn.length + gatePending.ask.length + gatePending.nudge.length;
 }
 
 /* The rail's bell (and its phone twin): the number is the requests waiting
@@ -48263,6 +48265,15 @@ function noticePanelGateRow(type, rec) {
       "Open", "", `open ${rec.session}, where its run's strip answers this`,
       () => { noticePanelToggle(false); urgentAskOpen(rec); }
     ));
+  } else if (type === "nudge") {
+    head.appendChild(gateSessionLink(rec.session));
+    head.appendChild(el("span", "notice-title", ` needs you: ${nudgeWhat(rec)}`));
+    row.appendChild(head);
+    if (rec.message) row.appendChild(el("div", "notice-sub gate-reason", rec.message));
+    actions.appendChild(noticePanelButton(
+      "Open", "", `open ${rec.session}, where its run's strip answers this`,
+      () => { noticePanelToggle(false); nudgeOpen(rec); }
+    ));
   } else {
     const plan = rec.plan || {};
     head.appendChild(el(
@@ -48378,7 +48389,7 @@ function noticePanelPaint() {
   if (!body) return;
   body.innerHTML = "";
   const waiting = [];
-  for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask"]) {
+  for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask", "nudge"]) {
     for (const rec of gatePending[type]) waiting.push([type, rec]);
   }
   body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
@@ -49774,6 +49785,93 @@ function urgentAskSync(rows) {
 }
 
 /* ------------------------------------------------------------------ */
+/* nudges: a driver asking its person to act on its cflow run          */
+/* ------------------------------------------------------------------ */
+/* An agent whose run stops on something only a person releases -- a
+   `chooser: user` choice such as the worker's end decision, an ask that fell
+   to a person, its move request, a loop or visit limit, a halt, a v1 run's
+   waiting_selection/approval -- calls the flow_nudge MCP tool
+   (claunch-g08xz). The daemon keeps one request per run slot and settles it
+   itself once none of what it names is owed any more
+   (GET /api/cflow/nudges, daemon/flow_nudge.py). The card answers nothing:
+   the session's terminal strip and its run page carry the presses, so a
+   click opens the session. */
+const NUDGE_PREFIX = "nudge-";
+
+function nudgeWhat(rec) {
+  return (rec.items || []).join(", ") || "its run";
+}
+
+function nudgeOpen(rec) {
+  location.hash = "#/s/" + encodeURIComponent(rec.session);
+}
+
+async function refreshNudgeGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/cflow/nudges")).json();
+  } catch {
+    return;
+  }
+  const all = (body && body.requests ? body.requests : []).map((r) => (
+    r.status === "pending" ? r : { ...r, status: r.status || "settled" }
+  ));
+  const pending = all.filter((r) => r.status === "pending");
+  gateHistorySync("nudge", pending, all);
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = NUDGE_PREFIX + rec.id;
+    gateHistoryOpen(
+      "nudge", String(rec.id),
+      `${rec.session} needs you: ${nudgeWhat(rec)}`,
+      rec.message || "", { session: rec.session }
+    );
+    if (gateIsHidden("nudge", rec.id)) continue;
+    seen.add(key);
+    const card = notices.get(key);
+    if (card && card.node.isConnected) {
+      // asking again within the window updates the message, not the card
+      const why = card.node.querySelector(".gate-reason");
+      if (why && rec.message && why.textContent !== rec.message) why.textContent = rec.message;
+      continue;
+    }
+    dismissNotice(key);
+    const node = el("div", "notice warn gate nudge");
+    const title = el("div", "notice-title");
+    title.appendChild(gateSessionLink(rec.session));
+    title.appendChild(el("span", null, ` needs you: ${nudgeWhat(rec)}`));
+    node.appendChild(title);
+    if (rec.message) node.appendChild(el("div", "notice-sub gate-reason", rec.message));
+    if (rec.workflow) {
+      node.appendChild(el("div", "notice-sub",
+        `workflow ${rec.workflow}` + (rec.version === 1 ? " (cflow v1)" : "")));
+    }
+    const actions = el("div", "gate-actions");
+    const open = el("button", "wf-btn approve", "Open");
+    open.type = "button";
+    open.title = `open ${rec.session}, where its run's strip answers this`;
+    open.addEventListener("click", (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      nudgeOpen(rec);
+    });
+    actions.appendChild(open);
+    actions.appendChild(gateHideButton("nudge", rec.id, key,
+      "close this card only — nothing is answered, the run keeps waiting; the " +
+      "bell keeps it in the notification history"));
+    node.appendChild(actions);
+    node.title = `open ${rec.session}`;
+    node.addEventListener("click", () => nudgeOpen(rec));
+    host.appendChild(node);
+    notices.set(key, { node, timer: null });
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(NUDGE_PREFIX) && !seen.has(key)) dismissNotice(key);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 /* The poll is installed here rather than at the end of boot(), and is never
@@ -50584,7 +50682,7 @@ async function pollOnce() {
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
   refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate(),
-    refreshKillGate(), refreshSpawnGate());
+    refreshKillGate(), refreshSpawnGate(), refreshNudgeGate());
   await Promise.all(refreshes);
 }
 

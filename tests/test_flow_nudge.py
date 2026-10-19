@@ -1,0 +1,263 @@
+"""flow_nudge: a driver raising its run on the dashboard (claunch-g08xz).
+
+A run stopped on something only a person releases (a ``chooser: user``
+choice, a human ask, a move request, a limit, a halt, a v1 run's
+waiting_selection) used to wait for as long as nobody looked at the driver's
+terminal. ``flow_nudge`` files a request the dashboard shows as a card; the
+daemon reads what is owed from the run's own files, refuses a nudge for a
+run that owes nothing, keeps one card per run, and settles it once the
+person acts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+
+import pytest
+
+from claude_launcher import mcp_server
+from claude_launcher.cflow import engine, state as state_mod
+from claude_launcher.cflow2 import layers, mcp as cflow2_mcp, runtime
+from claude_launcher.daemon import api as api_mod, cflow2_web, flow_nudge
+from claude_launcher.daemon.manager import SessionManager
+
+PICK = """\
+cflow: 2
+name: pick
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  seq:
+    - id: end-decision
+      choose:
+        prompt: which way?
+        chooser: user
+        options:
+          left: {then: a}
+          right: {then: end}
+"""
+
+V1_USER_BRANCH = """
+steps:
+  landing:
+    select:
+      prompt: integrate now?
+      chooser: user
+      options:
+        request: {description: "integrate now", next: after}
+        hold:    {description: "later", next: after}
+  after:
+    instructions: continue
+"""
+
+
+@pytest.fixture
+def proj(home, tmp_path, monkeypatch):
+    d = tmp_path / "proj"
+    (d / ".claunch" / "workflows" / "v2").mkdir(parents=True)
+    (d / ".claunch" / "workflows" / "v2" / "pick.yaml").write_text(PICK, encoding="utf-8")
+    (d / ".claunch" / "workflows" / "branchy.yaml").write_text(V1_USER_BRANCH,
+                                                               encoding="utf-8")
+    monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
+    monkeypatch.setattr(cflow2_web, "_RAIL", {})
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.chdir(d)
+    return d
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _board(owed_by, clock=None, alive=None):
+    return flow_nudge.NudgeBoard(read_owed=lambda cwd, scope: owed_by.get((cwd, scope)),
+                                 clock=clock or Clock(), alive=alive)
+
+
+def _owing(*items, run="r1"):
+    return {"version": 2, "run": run, "workflow": "w", "items": list(items)}
+
+
+# --------------------------------------------------------------------------- #
+# the board
+# --------------------------------------------------------------------------- #
+
+def test_a_run_that_owes_nobody_is_not_nudged():
+    board = _board({("/p", "s1"): _owing()})
+    with pytest.raises(flow_nudge.NudgeRefused, match="waits on no person"):
+        board.submit(session="s1", cwd="/p", scope="s1", message="pick please")
+    with pytest.raises(flow_nudge.NudgeRefused, match="no cflow run"):
+        board.submit(session="s1", cwd="/q", scope="s1", message="pick please")
+    with pytest.raises(flow_nudge.NudgeRefused) as exc:
+        _board({("/p", "s1"): _owing("choose: x")}).submit(
+            session="s1", cwd="/p", scope="s1", message="  ")
+    assert exc.value.status == 400
+    assert board.list() == []
+
+
+def test_one_card_per_run_until_the_window_passes_or_the_wait_changes():
+    clock = Clock()
+    owed_by = {("/p", "s1"): _owing("choose: end-decision")}
+    board = _board(owed_by, clock)
+    first = board.submit(session="s1", cwd="/p", scope="s1", message="take the new task")
+    assert first["raised"] is True
+    assert first["request"]["items"] == ["choose: end-decision"]
+
+    clock.now += 60
+    again = board.submit(session="s1", cwd="/p", scope="s1", message="still waiting")
+    assert again["raised"] is False and again["request"]["id"] == first["request"]["id"]
+    assert [r["message"] for r in board.list()] == ["still waiting"]
+
+    clock.now += flow_nudge.REPEAT_AFTER
+    later = board.submit(session="s1", cwd="/p", scope="s1", message="still waiting")
+    assert later["raised"] is True and later["request"]["id"] != first["request"]["id"]
+
+    owed_by[("/p", "s1")] = _owing("move: round")
+    moved = board.submit(session="s1", cwd="/p", scope="s1", message="approve the move")
+    assert moved["raised"] is True
+    statuses = {r["id"]: r["status"] for r in board.list()}
+    assert statuses == {first["request"]["id"]: flow_nudge.SUPERSEDED,
+                        later["request"]["id"]: flow_nudge.SUPERSEDED,
+                        moved["request"]["id"]: flow_nudge.PENDING}
+
+
+def test_a_card_settles_when_the_person_acts_or_the_session_ends():
+    owed_by = {("/p", "s1"): _owing("choose: end-decision"),
+               ("/p", "s2"): _owing("approval: land")}
+    alive = {"s1": True, "s2": True}
+    board = _board(owed_by, alive=lambda name: alive[name])
+    one = board.submit(session="s1", cwd="/p", scope="s1", message="m")["request"]["id"]
+    two = board.submit(session="s2", cwd="/p", scope="s2", message="m")["request"]["id"]
+    assert {r["status"] for r in board.list()} == {flow_nudge.PENDING}
+
+    owed_by[("/p", "s1")] = _owing()           # the person picked
+    alive["s2"] = False                        # the driver went away
+    statuses = {r["id"]: r["status"] for r in board.list()}
+    assert statuses == {one: flow_nudge.SETTLED, two: flow_nudge.ENDED}
+
+
+def test_a_new_run_in_the_slot_settles_the_old_card():
+    owed_by = {("/p", "s1"): _owing("choose: x", run="r1")}
+    board = _board(owed_by)
+    board.submit(session="s1", cwd="/p", scope="s1", message="m")
+    owed_by[("/p", "s1")] = _owing("choose: x", run="r2")
+    assert [r["status"] for r in board.list()] == [flow_nudge.SETTLED]
+
+
+# --------------------------------------------------------------------------- #
+# what a run owes, read from its files
+# --------------------------------------------------------------------------- #
+
+def test_a_v2_user_choice_is_owed_until_the_person_picks(proj):
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+    found = flow_nudge.owed(cwd, "s1")
+    assert found["version"] == 2 and found["items"] == ["choose: end-decision"]
+
+    board = flow_nudge.NudgeBoard()
+    rid = board.submit(session="s1", cwd=cwd, scope="s1",
+                       message="end-decision: take the new task in")["request"]["id"]
+    runtime.select(None, "right", caller=runtime.CALLER_USER, cwd=cwd, scope="s1")
+    cflow2_web._RAIL.clear()
+    assert flow_nudge.owed(cwd, "s1")["items"] == []
+    assert [(r["id"], r["status"]) for r in board.list()] == [(rid, flow_nudge.SETTLED)]
+
+
+def test_a_v1_user_selection_is_owed(proj):
+    cwd = str(proj)
+    engine.start("branchy")
+    found = flow_nudge.owed(cwd, state_mod.DEFAULT_SCOPE)
+    assert found["version"] == 1
+    assert len(found["items"]) == 1 and found["items"][0].startswith("selection: ")
+    assert flow_nudge.owed(cwd, "nobody") is None
+
+
+# --------------------------------------------------------------------------- #
+# where the agent learns of it
+# --------------------------------------------------------------------------- #
+
+def test_the_refused_self_pick_and_the_status_point_at_flow_nudge(proj):
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s2", caps={})
+    with pytest.raises(runtime.FlowError, match="flow_nudge"):
+        runtime.select(None, "left", cwd=cwd, scope="s2")
+    status = runtime.status(cwd=cwd, scope="s2")
+    assert "flow_nudge" in status["next"]
+    assert "pick with flow_select" not in status["next"]
+
+
+def test_a_v1_gate_brief_points_at_flow_nudge(proj):
+    engine.start("branchy")
+    payload = engine.select("request", "green", by="agent")
+    assert "flow_nudge" in payload["how_to_unblock"]
+
+
+# --------------------------------------------------------------------------- #
+# the MCP tool and the daemon routes
+# --------------------------------------------------------------------------- #
+
+class FakeClient:
+    def __init__(self, answer):
+        self.answer = answer
+        self.posts = []
+
+    def post(self, path, body=None, **kw):
+        self.posts.append((path, body))
+        return self.answer
+
+
+def test_the_tool_posts_this_sessions_own_run(proj, monkeypatch):
+    from claude_launcher import daemon_client
+
+    assert "flow_nudge" in {t["name"] for t in mcp_server.TOOLS}
+    client = FakeClient({"raised": True, "note": "raised",
+                         "request": {"id": "nudge-1", "items": ["choose: x"]}})
+    monkeypatch.setattr(daemon_client, "connect_with_diagnosis", lambda **kw: (client, {}))
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    out = cflow2_mcp.call_tool("flow_nudge", {"message": "pick right"})
+    assert out == {"raised": True, "request": "nudge-1", "owed": ["choose: x"],
+                   "note": "raised"}
+    path, body = client.posts[0]
+    assert path == "/api/cflow/nudge"
+    assert body == {"session": "s7", "cwd": str(proj), "scope": "s7", "message": "pick right"}
+
+    cflow2_mcp.call_tool("flow_nudge", {"message": "m", "side": "stack"})
+    assert client.posts[1][1]["scope"].startswith("s7") \
+        and client.posts[1][1]["scope"].endswith("+stack")
+
+    with pytest.raises(runtime.FlowError, match="message"):
+        cflow2_mcp.call_tool("flow_nudge", {"message": ""})
+    monkeypatch.delenv("CLAUNCH_SESSION")
+    with pytest.raises(runtime.FlowError, match="CLAUNCH_SESSION"):
+        cflow2_mcp.call_tool("flow_nudge", {"message": "m"})
+
+
+def test_the_routes(proj):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
+        app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic())
+        app["flow_nudge"] = _board({("/p", "s1"): _owing("choose: x")})
+        app["flow_nudge"].submit(session="s1", cwd="/p", scope="s1", message="m")
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            unknown = await client.post("/api/cflow/nudge", headers=bearer,
+                                        json={"session": "ghost", "message": "m"})
+            unauth = await client.get("/api/cflow/nudges")
+            listed = await (await client.get("/api/cflow/nudges", headers=bearer)).json()
+            return unknown.status, unauth.status, listed
+        finally:
+            await client.close()
+
+    unknown, unauth, listed = asyncio.run(run())
+    assert unknown == 404 and unauth == 401
+    assert [(r["session"], r["items"], r["status"]) for r in listed["requests"]] == \
+        [("s1", ["choose: x"], "pending")]

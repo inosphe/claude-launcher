@@ -392,6 +392,34 @@ TOOLS = [
         },
     },
     {
+        "name": "flow_nudge",
+        "description": (
+            "Raise this session's run on the user's dashboard notification channel (a "
+            "corner card, a row in the notification history, the bell's waiting count) "
+            "when it waits on something only a person releases and they may not be "
+            "watching this terminal: a choice whose chooser is 'user' (e.g. an end "
+            "decision where a new task must be taken in), an ask that fell to a person, "
+            "your flow_request_move, a loop/visit limit, a halt -- or a cflow v1 run's "
+            "waiting_selection/waiting_approval. Works for v1 and v2 runs. Refused when "
+            "the run waits on no person. Write your decision brief in the terminal "
+            "first; 'message' is the card's one or two lines: what to decide and your "
+            "recommendation. One card per run: asking again within a few minutes for the "
+            "same thing only updates its message, and the card settles by itself once "
+            "the person acts. Then stop your turn and wait."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string",
+                            "description": "what the person is asked to do, in one or two "
+                                           "lines (required): the decision and your "
+                                           "recommendation"},
+                "side": _SIDE,
+            },
+            "required": ["message"],
+        },
+    },
+    {
         "name": "flow_rule",
         "description": (
             "Read one of the run's rules: its text, and 'why' (the incident or "
@@ -686,10 +714,41 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         return runtime.request_move(node, str(args.get("reason") or ""), by=by,
                                     cwd=cwd, scope=scope, outcome=outcome,
                                     value=args.get("value"))
+    if name == "flow_nudge":
+        return _nudge(args, session)
     if name == "flow_rule":
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)
     raise runtime.FlowError(f"unknown tool {name!r}")
+
+
+def _nudge(args: dict, session: str) -> Dict[str, Any]:
+    """``flow_nudge``: ask the daemon to raise this session's own run (main
+    or a side run) on the dashboard (``daemon/flow_nudge.py``). The daemon
+    reads what the run owes a person from its files, v1 or v2 alike, and
+    refuses when it owes nothing."""
+    from .. import daemon_client
+    from ..daemon import flow_nudge
+
+    if not session:
+        raise runtime.FlowError("flow_nudge works inside a managed claunch session "
+                                "($CLAUNCH_SESSION is not set)")
+    message = str(args.get("message") or "").strip()
+    if not message:
+        raise runtime.FlowError("'message' is required: what the person is asked to do")
+    side = str(args.get("side") or "").strip()
+    scope = store.side_scope(store.normalize_scope(None), side) if side else session
+    client, why = daemon_client.connect_with_diagnosis()
+    if client is None:
+        raise runtime.FlowError(f"cannot reach the claunch daemon: "
+                                f"{daemon_client.unreachable_reason(why)}")
+    try:
+        result = client.post("/api/cflow/nudge", {
+            "session": session, "cwd": os.getcwd(), "scope": scope, "message": message,
+        })
+    except daemon_client.DaemonClientError as exc:
+        raise runtime.FlowError(f"nudge not raised: {exc}") from None
+    return flow_nudge.reply(result)
 
 
 def _start_side(side: str, args: dict, cwd: str, own: str, session: str) -> Dict[str, Any]:
