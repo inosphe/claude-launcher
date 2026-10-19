@@ -113,6 +113,34 @@ def progress_of(entry):
     return {"checks": checks, "issue": issue}
 
 
+PR_FIELDS = ("number", "url", "status", "branch", "base", "issues")
+
+
+def landing_of(entry):
+    """One session's board issue, branch and recorded PRs, and ``landed``
+    read off the PR states: ``merged`` when any PR merged, else ``open`` when
+    one is open, ``closed`` when every one closed unmerged, ``no-pr`` with
+    none, ``unknown`` when the record holds no state (a wizard-only PR).
+    The PR state is the authority because a squash merge leaves the branch's
+    own commits off master, so an ancestry check reads it as unlanded."""
+    entry = entry or {}
+    prs = [{k: p[k] for k in PR_FIELDS if p.get(k) is not None}
+           for p in entry.get("prs") or [] if isinstance(p, dict)]
+    states = {str(p.get("status") or "").lower() for p in prs}
+    if not prs:
+        landed = "no-pr"
+    elif "merged" in states:
+        landed = "merged"
+    elif "open" in states:
+        landed = "open"
+    elif states == {"closed"}:
+        landed = "closed"
+    else:
+        landed = "unknown"
+    issue = entry.get("issue") if isinstance(entry.get("issue"), dict) else None
+    return {"issue": issue, "branch": entry.get("branch") or None, "prs": prs, "landed": landed}
+
+
 def progress_changes(before, after):
     """What moved between two ``progress_of`` readings; ``before`` None is a
     first reading and says nothing."""
@@ -1208,10 +1236,10 @@ class OperatorsV2:
                 break
         return {"operator": rec["id"], "entries": rows}
 
-    async def session_list(self, name, query):
-        """The sessions in scope with their project, state, issue and status
-        checks. ``state`` is ``live`` (default), ``ended`` or ``all``."""
-        rec = self.bound(name)
+    def scoped(self, rec, query):
+        """The in-scope sessions a list query selects, and how many matched
+        before ``limit``. ``state`` is ``live`` (default), ``ended`` or
+        ``all``; ``project`` narrows to one project."""
         state = query.get("state") or "live"
         if state not in ("live", "ended", "all"):
             raise ValueError("state must be live, ended or all")
@@ -1226,8 +1254,13 @@ class OperatorsV2:
             if project and project_of(session) != projects.normalize(project):
                 continue
             rows.append(session)
-        total = len(rows)
-        rows = rows[:limit]
+        return rows[:limit], len(rows)
+
+    async def session_list(self, name, query):
+        """The sessions in scope with their project, state, issue and status
+        checks. ``state`` is ``live`` (default), ``ended`` or ``all``."""
+        rec = self.bound(name)
+        rows, total = self.scoped(rec, query)
         work, work_ok = await self.work_read(rows)
         return {"operator": rec["id"], "total": total, "truncated": total > len(rows),
                 "degraded": [] if work_ok else ["board"],
@@ -1235,6 +1268,19 @@ class OperatorsV2:
                               "category": session_category(s), "status": s.info().get("status"),
                               "cwd": getattr(s.sdef, "cwd", None),
                               **progress_of(work.get(s.sdef.name))} for s in rows]}
+
+    async def landing(self, name, query):
+        """Where each in-scope session's work stands, in one call: board
+        issue, branch, recorded PRs and ``landed`` (see ``landing_of``).
+        Same filters as ``session_list``."""
+        rec = self.bound(name)
+        rows, total = self.scoped(rec, query)
+        work, work_ok = await self.work_read(rows)
+        return {"operator": rec["id"], "total": total, "truncated": total > len(rows),
+                "degraded": [] if work_ok else ["board"],
+                "sessions": [{"name": s.sdef.name, "project": project_of(s),
+                              "category": session_category(s), "status": s.info().get("status"),
+                              **landing_of(work.get(s.sdef.name))} for s in rows]}
 
     async def session_detail(self, name, target):
         rec = self.bound(name)
@@ -1544,6 +1590,10 @@ def install(app, *, create=None, gates=None, work=None):
         return await ops.session_list(request.match_info["name"], request.query)
 
     @guarded
+    async def agent_landing(request):
+        return await ops.landing(request.match_info["name"], request.query)
+
+    @guarded
     async def agent_session(request):
         return await ops.session_detail(request.match_info["name"], request.match_info["target"])
 
@@ -1575,6 +1625,7 @@ def install(app, *, create=None, gates=None, work=None):
     r.add_post(agent + "/resume", agent_resume)
     r.add_get(agent + "/history", agent_history)
     r.add_get(agent + "/sessions", agent_sessions)
+    r.add_get(agent + "/landing", agent_landing)
     r.add_get(agent + "/sessions/{target}", agent_session)
     r.add_get(agent + "/sessions/{target}/commits", agent_commits)
     r.add_get(agent + "/transcript-search", agent_search)

@@ -128,6 +128,16 @@ TOOLS = [
          "state": {"type": "string", "enum": ["live", "ended", "all"]},
          "project": {"type": "string"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
+    {"name": "opv2_landing",
+     "description": "Where the work of the sessions in your scope stands, in one call: board issue and its status, "
+                    "branch, recorded PRs and `landed` (merged, open, closed, no-pr, unknown). Judge landing by "
+                    "`landed`: a squash merge leaves a branch's commits off master, so ancestry calls it unlanded. "
+                    "PR states are the recorded ones (no network read); `unknown` means a PR with no state on record. "
+                    "Same `state`/`project`/`limit` as opv2_sessions.",
+     "inputSchema": {"type": "object", "properties": {
+         "state": {"type": "string", "enum": ["live", "ended", "all"]},
+         "project": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
     {"name": "opv2_session",
      "description": "One session of your scope in detail, running or ended: its task, Observer state and summary, "
                     "last events, board issue, status checks and latest commits.",
@@ -201,6 +211,8 @@ def call_tool(name, args):
         return client.get(base + "/history" + _query(args, ("kind", "session", "thread", "q", "limit")))
     if name == "opv2_sessions":
         return client.get(base + "/sessions" + _query(args, ("state", "project", "limit")))
+    if name == "opv2_landing":
+        return client.get(base + "/landing" + _query(args, ("state", "project", "limit")))
     if name in ("opv2_session", "opv2_commits") and not args.get("session"):
         raise OperatorV2McpError("session is required")
     target = quote(str(args.get("session") or ""), safe="")
