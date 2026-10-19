@@ -102,6 +102,22 @@ def test_work_goes_to_the_session_already_doing_it(tmp_path):
     assert {"opv2_spawn", "opv2_resume"} <= tools
 
 
+def test_landing_questions_go_to_opv2_landing(tmp_path):
+    """claunch-iw5i8.10: the task and the role pack send a landing question
+    to opv2_landing and its `landed`, since ancestry misreads a squash merge;
+    `no-pr` is not unlanded, and the checks are the session's own report."""
+    from importlib import resources
+
+    from claude_launcher import operator_v2_mcp
+
+    prompt = Run(tmp_path).st["tasks"][0]["prompt"]
+    pack = resources.files("claude_launcher").joinpath("prompt_packs/role-operator.md").read_text("utf-8")
+    for text in (prompt, pack):
+        assert "opv2_landing" in text and "`landed`" in text and "squash" in text
+        assert "no-pr" in text and "`merged <" in text and "`checks`" in text
+    assert "opv2_landing" in {t["name"] for t in operator_v2_mcp.TOOLS}
+
+
 def test_answers_go_to_the_thread_the_input_came_from(tmp_path):
     """claunch-iw5i8.12: a post with neither thread nor reply_to lands in the
     most recently active thread, so the task and the role pack tell the

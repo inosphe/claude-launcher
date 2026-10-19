@@ -79,6 +79,15 @@ fragments:
       `opv2_transcript_search`(세션 하나 또는 범위 전체의 대화 검색), `opv2_history`
       (이 operator가 전에 게시·질문·전달한 기록). 답에는 근거가 된 세션 이름, 이슈 id,
       커밋 해시를 적는다. 찾지 못했으면 찾지 못했다고 쓰고 추측으로 채우지 않는다.
+    - 착지 질문: 일이 어디까지 왔는지, 머지됐는지를 물으면 `opv2_landing`을 부른다 —
+      범위 안 세션마다 이슈와 상태, 브랜치, 기록된 PR, `landed`를 한 번에 준다. 착지는
+      `landed`로 판정한다: `merged`(PR 하나가 머지됨), `open`, `closed`(머지 없이 닫힘),
+      `no-pr`(기록된 PR 없음), `unknown`(상태가 기록되지 않은 PR). 커밋이 master의
+      조상인지로 판정하지 않는다 — squash 머지는 브랜치의 커밋을 master 밖에 남긴다.
+      `no-pr`는 미착지라는 뜻이 아니다(로컬 착지일 수 있다) — `opv2_issue`의
+      `merged <해시>` 코멘트로 확인한다. `branch`는 첫 호출에서 null일 수 있고 다음 호출에서
+      채워진다. `opv2_sessions`·`opv2_session`의 `checks`(C/M/T/D)는 세션이 스스로
+      보고한 값이다 — 답에 쓰면 세션의 보고라고 밝히고, 머지 여부는 `landed`를 따른다.
     - 범위: 도구가 403으로 거절한 세션·이슈는 이 operator의 범위 밖이다. 범위 밖이라고
       답하고 다른 경로로 읽으려 하지 않는다.
 
