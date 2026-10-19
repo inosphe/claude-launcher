@@ -20,8 +20,12 @@
       from the assignee) and the head of its description (headings dropped,
       cut at six lines), and leaving hides it;
    4. painting adds the line under the cwd line whenever either list is
-      non-empty, replaces it on a repaint, and removes it when both are
-      gone.
+      non-empty or the session has done work, replaces it on a repaint, and
+      removes it when all three are gone;
+   5. the line opens with the work count (claunch-9f8ag): "N left" over the
+      assigned issues only, one count per status that has any in the Queues
+      page's words, "N done" summed over every board, and a `title` that
+      spells out every count, zeros included.
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
@@ -132,14 +136,14 @@ let listEl = null;
 function $(id) { return id === "session-list" ? listEl : null; }
 function setList(l) { listEl = l; }
 function setBeads(m) { railBeads = m; }
-`;
+` + src.match(/const RAIL_BEADS_COUNTS = \[[\s\S]*?\n\];/)[0] + "\n";
 
 const ctx = {};
 new Function(
   "exports", "document", "el",
   stubs
   + slice("refreshRailBeads") + slice("railBeadsIndex") + slice("applyRailBeads")
-  + slice("railBeadsLine") + slice("showBeadPop") + slice("hideBeadPop")
+  + slice("railBeadsLine") + slice("railBeadsCount") + slice("showBeadPop") + slice("hideBeadPop")
   + slice("beadsStripMeta") + slice("beadPopExcerpt")
   + `
 Object.assign(exports, {
@@ -213,7 +217,9 @@ check("the rest is counted and named", [more.text, more.title], ["+2", "x-5 [blo
 let stopped = 0;
 pills[0].fire("click", { stopPropagation: () => stopped++ });
 check("a pill's click does not attach the row", stopped, 1);
-check("no queue draws no pill", ctx.line("s1", { issues: [], summary: {} }).children.length, 0);
+check("no queue draws no pill, only the count",
+      ctx.line("s1", { issues: [], summary: {} }).children.map((k) => k.className),
+      ["rail-beads-count"]);
 
 const withCreated = ctx.line("s1", {
   issues: [{ id: "m-1", status: "open", title: "held" }],
@@ -328,6 +334,40 @@ ctx.setBeads(new Map());
 ctx.apply();
 check("a queue that is gone takes its line with it",
       [r1.find("rail-beads").length, r2.find("rail-beads").length], [0, 0]);
+
+/* ---- 5. the work count -------------------------------------------------- */
+const counted = ctx.line("s1", { ...LANE, created: [{ id: "c-1", status: "open" }], done: 3 });
+const count = counted.children[0];
+check("the count opens the line", count.className, "rail-beads-count");
+check("left is the assigned issues, every status, follow-ups out; then each status; then done",
+      count.children.map((k) => [k.className, k.text]),
+      [["rail-beads-left", "6 left"], ["rail-beads-n waiting", "3 waiting"],
+       ["rail-beads-n working", "1 working"], ["rail-beads-n landing", "1 landing"],
+       ["rail-beads-n blocked", "1 blocked"], ["rail-beads-n done", "3 done"]]);
+check("its title spells every count out",
+      count.title, "assigned issues: 6 left · 3 waiting · 1 working · 1 landing · 1 blocked · 3 done");
+const sparse = ctx.line("s1", { issues: [{ id: "q-1", status: "in_progress" }], summary: {} }).children[0];
+check("a status with none draws no count, and nothing done draws no done",
+      sparse.children.map((k) => k.text), ["1 left", "1 working"]);
+check("but the title keeps the zeros",
+      sparse.title, "assigned issues: 1 left · 0 waiting · 1 working · 0 landing · 0 blocked · 0 done");
+const finished = ctx.line("s1", { issues: [], summary: {}, done: 2 }).children[0];
+check("a finished queue reads as finished",
+      finished.children.map((k) => [k.className, k.text]),
+      [["rail-beads-left none", "0 left"], ["rail-beads-n done", "2 done"]]);
+check("done is part of the line's signature, so a close repaints it",
+      ctx.line("s1", { issues: [], summary: {}, done: 2 })._railSig
+        === ctx.line("s1", { issues: [], summary: {}, done: 3 })._railSig, false);
+const idx2 = ctx.index({ boards: [
+  { root: "/a", lanes: [{ session: "s1", known: true, issues: [], summary: { done: 2 } }] },
+  { root: "/b", lanes: [{ session: "s1", known: true, issues: [], summary: { done: 1 } }] },
+  { root: "/c", lanes: [{ session: "s2", known: true, issues: [], summary: {} }] },
+] });
+check("done is summed over every board", [idx2.get("s1").done, idx2.get("s2").done], [3, 0]);
+ctx.setBeads(new Map([["s1", { issues: [], created: [], summary: {}, done: 2 }]]));
+ctx.apply();
+check("a session with only done work keeps the line for the count",
+      r1.find("rail-beads").length, 1);
 
 if (failures) process.exit(1);
 console.log("railbeads_check ok");
