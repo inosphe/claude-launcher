@@ -1904,3 +1904,47 @@ def test_the_conftest_writes_the_result_with_timeouts_pytest_cut_from_the_summar
     result = json.loads(result_file.read_text("utf-8"))
     assert result["timeouts"] == 1 and result["failed"] == 1
     assert result["collected"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# claunch-jcxe: the queued runner calls cmd_run without going through main
+
+
+def test_a_strict_cp949_stdout_does_not_cost_the_receipt(repo, receipts, monkeypatch):
+    """``delayed_sweep.run_one`` loads sweep.py by path and calls ``cmd_run``
+    itself, so ``main``'s ``errors="replace"`` reconfigure never applies to its
+    stdout (a cp949 log file). The suite's output carried U+FFFD (undecodable
+    bytes) and U+016C; ``print(output)`` raised UnicodeEncodeError before the
+    receipt was written, and every attempt ended with a full sweep and no
+    verdict.
+    """
+    import io
+    import types
+
+    emit = repo.parent / "emit.py"
+    emit.write_text(
+        "import sys; "
+        "sys.stdout.buffer.write(bytes([255, 197, 172]) + b' failed' + bytes([10])); "
+        "print('1 failed, 2 passed in 1.0s'); sys.exit(1)",
+        encoding="utf-8",
+    )
+    suite = f'"{sys.executable}" "{emit}"'
+    seen = {}
+    real = sweep.cmd_run
+    monkeypatch.setattr(sweep, "cmd_run", lambda args: seen.setdefault("args", args) and 0)
+    _run(repo, receipts, "--command", suite)
+    monkeypatch.setattr(sweep, "cmd_run", real)
+
+    raw = io.BytesIO()
+    strict = io.TextIOWrapper(raw, encoding="cp949", errors="strict")
+    monkeypatch.setattr(sys, "stdout", strict)
+    monkeypatch.setattr(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp949"))
+    with pytest.raises(UnicodeEncodeError):
+        print("�", file=strict, flush=True)  # the stream really is strict
+
+    assert real(seen["args"]) == 1
+
+    commit = _git(repo, "rev-parse", "master").strip()
+    filed = json.loads(sweep.receipt_path(repo, commit, receipts).read_text("utf-8"))
+    assert filed["counts"] == {"failed": 1, "passed": 2}
+    assert filed["exit_code"] == 1
