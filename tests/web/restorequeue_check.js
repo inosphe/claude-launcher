@@ -6,8 +6,10 @@ const path = require("path");
 const vm = require("vm");
 
 const root = path.join(__dirname, "..", "..");
+// A checkout with core.autocrlf=true has CRLF in the working tree, and the
+// "\n}\n" a function is cut at would never match (claunch-oo8au.2).
 const src = fs.readFileSync(path.join(
-  root, "src", "claude_launcher", "web", "static", "app.js"), "utf8");
+  root, "src", "claude_launcher", "web", "static", "app.js"), "utf8").replace(/\r\n/g, "\n");
 const css = fs.readFileSync(path.join(
   root, "src", "claude_launcher", "web", "static", "style.css"), "utf8");
 const html = fs.readFileSync(path.join(

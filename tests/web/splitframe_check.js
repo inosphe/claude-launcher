@@ -19,7 +19,9 @@ const path = require("path");
 const vm = require("vm");
 
 const STATIC = path.join(__dirname, "../../src/claude_launcher/web/static");
-const read = (f) => fs.readFileSync(path.join(STATIC, f), "utf8");
+// A checkout with core.autocrlf=true has CRLF in the working tree, and the
+// "\n};\n" a constant is cut at would never match (claunch-oo8au.2).
+const read = (f) => fs.readFileSync(path.join(STATIC, f), "utf8").replace(/\r\n/g, "\n");
 
 class N {
   constructor(tag) {
