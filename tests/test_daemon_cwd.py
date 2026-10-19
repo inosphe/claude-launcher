@@ -99,7 +99,10 @@ def test_a_caller_whose_directory_was_removed_still_spawns_one(tmp_path, monkeyp
     gone = tmp_path / "gone"
     gone.mkdir()
     monkeypatch.chdir(gone)
-    gone.rmdir()
+    try:
+        gone.rmdir()
+    except PermissionError:
+        pytest.skip("Windows will not remove the current directory of a process")
     assert Path(_spawned_cwd(monkeypatch)) == Path.home()
 
 
