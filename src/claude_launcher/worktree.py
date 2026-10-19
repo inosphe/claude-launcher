@@ -745,8 +745,14 @@ def create(root: Path, name: str, *, start: str = "") -> Worktree:
         )
         done = _git(args, cwd=str(root))
         if done.returncode != 0:
-            detail = (done.stderr or done.stdout or "").strip()
-            raise WorktreeError(f"git worktree add failed: {detail}")
+            # git writes its progress line ("Preparing worktree ...") to
+            # stderr ahead of the refusal, and some failures leave stdout as
+            # the only place with a reason, so keep both and the exit status.
+            parts = [(done.stderr or "").strip(), (done.stdout or "").strip()]
+            detail = "\n".join(p for p in parts if p)
+            raise WorktreeError(
+                f"git worktree add failed (exit {done.returncode}): {detail}"
+            )
     _record_creation(path, mode, hook)
     inherit_mcp_approval(root, path)
     return Worktree(
