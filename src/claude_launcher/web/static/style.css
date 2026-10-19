@@ -606,7 +606,7 @@ html[data-theme="light"] .xterm {
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
+   (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
    .rail-note, .rail-progress, .rail-procs, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
    and the selected card's .rail-role-line) are full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
@@ -1280,6 +1280,15 @@ html[data-theme="light"] .xterm {
   min-width: 0; padding-left: 16px; margin-top: 2px;
   white-space: nowrap; overflow: hidden; line-height: 16px;
 }
+/* when the session was made (reader's clock) and how long it has lived
+   (claunch-y8ibz): the attention line's shape and its pair classes, one line
+   under it. No stale colour -- an old session is not a problem by age. */
+#session-list .rail-life {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 8px;
+  min-width: 0; padding-left: 16px;
+  white-space: nowrap; overflow: hidden; line-height: 16px;
+}
+#session-list .rail-life:empty { display: none; }
 #session-list .rail-seen-pair { flex: none; display: flex; gap: 3px; align-items: baseline; }
 #session-list .rail-seen-key { font-size: 10px; color: #6e7681; }
 #session-list .rail-seen-val {

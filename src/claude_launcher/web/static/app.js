@@ -5200,6 +5200,10 @@ async function refreshSessions(options) {
     // scanning for "which of these has nobody touched" finds it in one
     // column rather than hunting a different offset on every row.
     const railSeen = railSeenLine(s);
+    // And when it was made and how long it has lived, under the attention
+    // line (claunch-y8ibz). Guarded like the tps line: the node harnesses
+    // slice this builder without it.
+    const railLife = typeof railLifeLine === "function" ? railLifeLine(s) : null;
     // The role again, on a line of its own under the name. Drawn only on the
     // selected card (CSS, li.active), where the name line's copy is hidden:
     // squeezed beside the name, the handle and the rooms, the role is the
@@ -5216,7 +5220,8 @@ async function refreshSessions(options) {
     li.append(dot, head, meta, roleLine, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
-              railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []),
+              railSeen, ...(railLife ? [railLife] : []),
+              ...(plus ? [plus] : []), ...(pin ? [pin] : []),
               ...(observePin ? [observePin] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
@@ -8077,6 +8082,87 @@ function railSeenLine(s) {
   return line;
 }
 
+/* ------------------------------------------------------------------ */
+/* when it was made and how long it has lived: the rail row's age line */
+/* ------------------------------------------------------------------ */
+/* Two readings off the record's own stamps (claunch-y8ibz): `created`, the
+   moment the session was made, in the READER's clock -- the daemon stamps
+   UTC, and a rail read in Seoul that said 09:07 for a session made at 18:07
+   would be a number the reader has to convert -- and `lifetime`, how long it
+   has existed: up to now while it runs, up to `exited_at` once it ended, so
+   an exited row stops counting instead of ageing forever.
+
+   `created_at` survives a restore, a respawn and a redefine (the session
+   continuing, see daemon/session.py), so the lifetime spans daemon
+   restarts; that is the age of the session, not of its current process. */
+
+/* A daemon stamp as epoch ms. The daemon writes an offset (+00:00); one
+   without a zone is UTC too, as localStamp reads it -- Date.parse alone
+   would take it as the browser's local time. */
+function lifeParse(iso) {
+  const s = String(iso || "");
+  return Date.parse(/[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(s) ? `${s.replace(" ", "T")}Z` : s);
+}
+
+/* The creation stamp, as short as the day allows: the clock alone today,
+   the month and day this year, the date alone before that. */
+function lifeCreatedText(iso, now = Date.now()) {
+  const t = lifeParse(iso);
+  if (!Number.isFinite(t)) return "";
+  const d = new Date(t);
+  const n = new Date(now);
+  const p2 = (v) => String(v).padStart(2, "0");
+  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  if (d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth()
+      && d.getDate() === n.getDate()) return hm;
+  if (d.getFullYear() === n.getFullYear()) return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${hm}`;
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+
+/* Seconds the session has existed, or null without a creation stamp. */
+function lifeSecs(s, now = Date.now()) {
+  const born = lifeParse(s && s.created_at);
+  if (!Number.isFinite(born)) return null;
+  const died = s.status === "exited" ? lifeParse(s.exited_at) : NaN;
+  const end = Number.isFinite(died) ? died : now;
+  return Math.max(0, Math.floor((end - born) / 1000));
+}
+
+/* fmtAge, carried on to days: a lifetime runs to days routinely, and
+   "51h00m" is arithmetic for the reader. */
+function lifeSpanText(secs) {
+  if (secs === null || secs === undefined) return "";
+  if (secs < 86400) return fmtAge(secs);
+  const days = Math.floor(secs / 86400);
+  return `${days}d${String(Math.floor((secs % 86400) / 3600)).padStart(2, "0")}h`;
+}
+
+function railLifeLine(s, now = Date.now()) {
+  const line = el("span", "rail-life");
+  const created = lifeCreatedText(s && s.created_at, now);
+  if (!created) return line;
+  const ended = s.status === "exited" && Number.isFinite(lifeParse(s.exited_at));
+  const pair = (key, val, title) => {
+    const p = el("span", "rail-seen-pair");
+    p.append(el("span", "rail-seen-key", key), el("span", "rail-seen-val", val));
+    p.title = title;
+    return p;
+  };
+  const zone = (() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; }
+  })();
+  line.append(
+    pair("created", created,
+         `when this session was created, in this browser's time` +
+         `${zone ? ` (${zone})` : ""}\n${localStamp(s.created_at)}`),
+    pair("lifetime", lifeSpanText(lifeSecs(s, now)),
+         ended
+           ? `how long it existed: created to exit\nexited ${localStamp(s.exited_at)}`
+           : "how long it has existed so far: created to now")
+  );
+  return line;
+}
+
 /* The seen line again, redrawn on the rows a poll kept.
 
    The stamps it reads are the one part of a row that changes on most polls
@@ -8123,6 +8209,15 @@ function refreshRailSeen(list) {
     // and a swap on every tick was a mutation per row per poll (claunch-v87).
     const sk = seenKey(s);
     if (old._railKey !== sk) swap(old, railSeenLine(s))._railKey = sk;
+    // The lifetime counts up on a running row the same way the ages above
+    // do, and `created` turns from a clock into a date at midnight; keyed on
+    // what the line prints, so it swaps once a minute at most.
+    const life = li.querySelector(".rail-life");
+    if (life && typeof life.replaceWith === "function" && typeof railLifeLine === "function") {
+      const lk = JSON.stringify([s.created_at || null, s.status, s.exited_at || null,
+        lifeCreatedText(s.created_at), lifeSpanText(lifeSecs(s))]);
+      if (life._railKey !== lk) swap(life, railLifeLine(s))._railKey = lk;
+    }
     // The dot's grade is read off the same moving stamps (plus moved_rows),
     // so it is re-shaded on the same tick.
     // The status dot is the row's first child (see the li.append in
