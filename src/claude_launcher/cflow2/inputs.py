@@ -508,6 +508,9 @@ def settle(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str
             value, err = _coerce(decl, raw)
             if err:
                 raise InputsError(f"{decl['label']} {err}")
+            # ' , ' coerces to [] for a list: still a clear, so required holds
+            if decl.get("required") and decl["type"] != T_BOOL and _is_empty(value):
+                raise InputsError(f"{decl['label']} is required")
     else:
         if not _is_empty(current):
             exc = InputsError(f"input {name!r} already holds "
