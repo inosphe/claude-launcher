@@ -896,6 +896,7 @@ def attach(
     index: Optional[Dict[str, List[dict]]] = None,
     max_age: Optional[float] = None,
     live: Optional[Dict[str, List[dict]]] = None,
+    groups: Optional[Dict[str, dict]] = None,
 ) -> dict:
     """``info`` (a session record) with a ``tps`` key when there is one to give.
 
@@ -916,11 +917,13 @@ def attach(
     live file, the key carries ``live`` (:func:`live_brief`): whether a call is
     in flight right now, which the finished-call summary cannot say. A session
     whose first call is still in flight has ``live`` and nothing else.
+    ``groups``: :func:`live_groups` over ``live``, taken once by that build;
+    with it, ``live.parallel`` says how the session's shim is shared now.
     """
     name = info.get("name")
     if name:
         summary = session_summary(str(name), index=index, max_age=max_age)
-        brief = live_brief(str(name), live) if live is not None else None
+        brief = live_brief(str(name), live, groups=groups) if live is not None else None
         if brief:
             summary = dict(summary or {})
             summary["live"] = brief
@@ -1136,6 +1139,8 @@ def live_summary(
     now: Optional[float] = None,
     span: float = LIVE_SPAN_S,
     docs: Optional[List[dict]] = None,
+    peers: Optional[Dict[str, List[dict]]] = None,
+    groups: Optional[Dict[str, dict]] = None,
 ) -> Optional[dict]:
     """What the session's backend is doing now, merged across its shims.
 
@@ -1150,8 +1155,15 @@ def live_summary(
 
     ``series`` is tokens per second per :data:`LIVE_BIN_S` bin over the last
     ``span`` seconds, oldest first, ending at the bin that holds ``now``.
+
+    ``peers`` is a :func:`live_index` (every session's live files) and
+    ``groups`` the :func:`live_groups` already taken over it. With either,
+    a session that shares its shim with other sessions active now also gets
+    ``parallel`` (:func:`parallel_for`): the shim's total rate, the mean per
+    session and how many sessions it is split between (claunch-b28pp).
     """
-    docs = _live_docs(session) if docs is None else docs
+    if docs is None:
+        docs = _live_docs(session) if peers is None else (peers.get(session) or [])
     if not docs:
         return None
     now = time.time() if now is None else now
@@ -1190,7 +1202,7 @@ def live_summary(
         state = "waiting"
     else:
         state = "streaming"
-    return {
+    out = {
         "state": state,
         "inflight": inflight,
         "waiting": waiting,
@@ -1202,6 +1214,95 @@ def live_summary(
         "bin_s": LIVE_BIN_S,
         "series": series,
     }
+    if groups is None and peers is not None:
+        groups = live_groups(peers, now=now)
+    parallel = parallel_for(session, groups) if groups else None
+    if parallel:
+        out["parallel"] = parallel
+    return out
+
+
+def _doc_activity(doc: dict, now: float) -> tuple:
+    """``(in flight, estimated tokens/s over the rate window)`` of one live file.
+
+    The same two readings :func:`live_summary` takes, for one file alone: a
+    file whose shim stopped writing has nothing in flight, and the rate is
+    the window's tokens over :data:`LIVE_RATE_WINDOW_S`.
+    """
+    fresh = now - float(doc.get("updated") or 0) <= LIVE_STALE_S
+    inflight = int(doc.get("inflight") or 0) if fresh else 0
+    floor = now - LIVE_RATE_WINDOW_S
+    tokens = 0.0
+    for pair in doc.get("bins") or []:
+        try:
+            t, v = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if t + LIVE_BIN_S > floor and t <= now:
+            tokens += v
+    return inflight, tokens / LIVE_RATE_WINDOW_S
+
+
+def live_groups(live: Dict[str, List[dict]], now: Optional[float] = None) -> Dict[str, dict]:
+    """The sessions active now on each shim, keyed by the shim's fingerprint.
+
+    One shim serves every session on the same upstream, so sessions that run
+    at once share its throughput. A session counts on a shim while it has a
+    call in flight there or produced output inside the rate window -- the
+    same window :func:`live_summary` takes its ``rate`` over. Each group is
+    ``{"rates": {session: tokens/s}, "total": tokens/s}``; a shim with no
+    active session has no group.
+
+    One pass over ``live`` (a :func:`live_index`): a session-list build takes
+    it once and hands it to every row, rather than walking every file per row.
+    """
+    now = time.time() if now is None else now
+    out: Dict[str, dict] = {}
+    for session, docs in live.items():
+        for doc in docs:
+            fp = doc.get("fingerprint")
+            if not fp:
+                continue
+            inflight, rate = _doc_activity(doc, now)
+            if not inflight and rate <= 0:
+                continue
+            group = out.setdefault(str(fp), {"rates": {}, "total": 0.0})
+            group["rates"][session] = group["rates"].get(session, 0.0) + rate
+            group["total"] += rate
+    return out
+
+
+def _parallel_brief(group: dict) -> dict:
+    n = len(group["rates"])
+    total = group["total"]
+    return {
+        "sessions": n,
+        "total": round(total, 1),
+        "mean": round(total / n, 1) if n else 0.0,
+        "estimated": True,
+        "window_s": LIVE_RATE_WINDOW_S,
+    }
+
+
+def parallel_for(session: str, groups: Dict[str, dict]) -> Optional[dict]:
+    """The shim ``session`` shares with other active sessions, or ``None``.
+
+    ``sessions`` is how many sessions are active on that shim now (this one
+    included), ``total`` their summed estimated tokens/s and ``mean`` the
+    total over ``sessions``. ``None`` unless the session itself is active on
+    a shim with at least one other active session: a session running alone
+    has nothing to share, and its own rate already is the shim's total.
+    When a session is active on more than one shared shim, the one with the
+    most sessions (then the higher total) is given.
+    """
+    best = None
+    for group in groups.values():
+        if session not in group["rates"] or len(group["rates"]) < 2:
+            continue
+        key = (len(group["rates"]), group["total"])
+        if best is None or key > best[0]:
+            best = (key, group)
+    return _parallel_brief(best[1]) if best else None
 
 
 _live_cache: Dict[str, tuple] = {}
@@ -1240,9 +1341,20 @@ def live_index() -> Dict[str, List[dict]]:
     return out
 
 
-def live_brief(session: str, live: Dict[str, List[dict]], now: Optional[float] = None) -> Optional[dict]:
-    """:func:`live_summary` without the series: what a session row carries."""
-    summary = live_summary(session, now=now, docs=live.get(session) or [])
+def live_brief(
+    session: str,
+    live: Dict[str, List[dict]],
+    now: Optional[float] = None,
+    groups: Optional[Dict[str, dict]] = None,
+) -> Optional[dict]:
+    """:func:`live_summary` without the series: what a session row carries.
+
+    ``groups``: :func:`live_groups` over ``live``, taken once by a caller that
+    answers many rows; left out, it is taken here.
+    """
+    if groups is None:
+        groups = live_groups(live, now=now)
+    summary = live_summary(session, now=now, docs=live.get(session) or [], groups=groups)
     if summary is None:
         return None
     summary.pop("series", None)

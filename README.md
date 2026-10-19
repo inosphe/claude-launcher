@@ -1129,6 +1129,17 @@ metering:
   summary_max_age: 600          # a call describes the session for this long
 ```
 
+One shim serves every session on the same upstream, so sessions that run at
+the same time share its throughput. When a session and at least one other
+session are active on the same shim (a call in flight, or output in the last
+two seconds), the live reading also carries `parallel`: how many sessions are
+active on that shim (`sessions`), their summed estimated rate (`total`) and
+that total divided by the session count (`mean`). The rail line and the
+header badge append it as `×3 Σ≈120 avg≈40`, the terminal overlay and the
+tooltip spell it out, and `claunch tps` prints a `live now` section with the
+same three numbers per shim. A session running alone on its shim shows no
+`parallel` figure, since its own rate is already the shim's total.
+
 ## Migrating skills & MCP servers
 
 Seeding copies the global `settings.json`, so the MCP servers defined there come

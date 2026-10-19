@@ -1449,3 +1449,93 @@ def test_web_page_draws_the_live_view_over_the_pty():
     assert 'if (l.state === "idle") return "idle";' in js
     assert 'if (t && t.live) return t.live.state === "idle" ? " stale idle" : " live";' in js
     assert "#term-tps-overlay.live" in css and ".term-tps-chart polyline" in css
+
+
+def _two_sessions_streaming(clock, fp="fp", other_fp=None):
+    """s1 and s2 streaming 40 and 80 chars every 0.25s (40 and 80 tok/s)."""
+    a = metering.LiveBoard(fp, clock=clock)
+    b = a if other_fp is None else metering.LiveBoard(other_fp, clock=clock)
+    m1, m2 = _streaming_meter("s1"), _streaming_meter("s2")
+    a.begin(m1)
+    b.begin(m2)
+    for _ in range(8):
+        clock.t += 0.25
+        m1.chunk(_delta("x" * 40))
+        m2.chunk(_delta("x" * 80))
+        a.flush()
+        if b is not a:
+            b.flush()
+    return a, b
+
+
+def test_sessions_sharing_a_shim_carry_its_total_mean_and_count(home):
+    """claunch-b28pp: parallel sessions on one shim show the shim's total
+    throughput, the mean per session and how many sessions share it."""
+    clock = _Clock()
+    _two_sessions_streaming(clock)
+    peers = metering.live_index()
+    one = metering.live_summary("s1", now=clock.t, peers=peers)
+    assert one["rate"] == 40.0
+    assert one["parallel"] == {
+        "sessions": 2, "total": 120.0, "mean": 60.0,
+        "estimated": True, "window_s": metering.LIVE_RATE_WINDOW_S,
+    }
+    assert metering.live_summary("s2", now=clock.t, peers=peers)["parallel"]["total"] == 120.0
+    # Without the other sessions' files the summary cannot say, and does not.
+    assert "parallel" not in metering.live_summary("s1", now=clock.t)
+
+
+def test_a_session_alone_on_its_shim_has_no_parallel_figure(home):
+    clock = _Clock()
+    _two_sessions_streaming(clock, fp="fpa", other_fp="fpb")
+    peers = metering.live_index()
+    assert "parallel" not in metering.live_summary("s1", now=clock.t, peers=peers)
+    groups = metering.live_groups(peers, now=clock.t)
+    assert set(groups) == {"fpa", "fpb"}
+    assert groups["fpa"]["rates"] == {"s1": 40.0}
+
+
+def test_a_quiet_session_does_not_count_as_parallel(home):
+    clock = _Clock()
+    board, _ = _two_sessions_streaming(clock)
+    for m in [c["meter"] for c in board._sessions["s2"]["calls"].values()]:
+        board.end(m)
+    board.flush()
+    later = clock.t + metering.LIVE_RATE_WINDOW_S + 1
+    clock.t = later
+    board.flush()  # s1 still in flight: its heartbeat keeps it fresh
+    peers = metering.live_index()
+    assert metering.live_groups(peers, now=later)["fp"]["rates"].keys() == {"s1"}
+    assert "parallel" not in metering.live_summary("s1", now=later, peers=peers)
+
+
+def test_attach_hangs_parallel_on_the_rows_live_brief(home):
+    clock = _Clock()
+    _two_sessions_streaming(clock)
+    live = metering.live_index()
+    groups = metering.live_groups(live, now=clock.t)
+    info = {"name": "s2"}
+    metering.attach(info, live=live, groups=groups)
+    assert info["tps"]["live"]["parallel"]["sessions"] == 2
+    assert info["tps"]["live"]["parallel"]["mean"] == 60.0
+
+
+def test_claunch_tps_prints_live_totals_by_proxy(home, capsys):
+    from claude_launcher import cli
+
+    clock = _Clock()
+    _two_sessions_streaming(clock)
+    lines = cli._tps_live_lines(metering.live_groups(metering.live_index(), now=clock.t))
+    assert lines[1].split() == ["fp", "sessions", "2", "total", "120.0", "mean", "60.0"]
+    assert lines[2].split() == ["s1", "40.0", "s2", "80.0"]
+    assert cli._tps_live_lines({}) == []
+
+
+def test_web_page_draws_parallel_sessions_on_the_live_reading():
+    from pathlib import Path
+
+    static = Path(metering.__file__).with_name("web") / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    assert "function tpsParallelText(" in js
+    assert "tpsParallelText(t.live.parallel, true)" in js
+    assert "tpsParallelText(l.parallel, false)" in js
