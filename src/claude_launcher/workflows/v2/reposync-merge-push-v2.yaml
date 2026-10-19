@@ -27,6 +27,9 @@ nodes:
       충돌 또는 실패가 있으면 children 확인 후 별도 worktree의 worker 세션을
       workflow reposync-conflict-v2와 cflow_inputs assignment/execution_error로
       spawn한다. 생성과 동시에 그 workflow를 실행한다. 반환된 후보를 직접 검증한다.
+      그 spawn은 사람의 승인을 기다리고 응답은 `pending`과 요청 id다(claunch-iw5i8.16).
+      세션 이름은 `[claunch spawn-request <id>]` 블록에서 읽고, 거절이면 충돌을 직접
+      해결하거나 사용자에게 올린다.
       PR-only 대상에는 검증된 후보로 PR을 준비하고 지정 authority에게 통합을 요청한다.
       관리자 또는 복구 세션 생성은 merge/push 승인에 해당하지 않는다.
     done_when: 후보 SHA·테스트 tree·정확한 게시 대상과 독립 검토 자료가 준비되었다
