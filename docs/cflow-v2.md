@@ -762,48 +762,68 @@ inputs:
     `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
     `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
 
-#### 시작 뒤에 채우는 입력(set_by)
+#### 시작 뒤에 쓰는 입력(set_by)
 
-시작 입력은 런이 만들어질 때 한 번 기록된다. 선언에 `set_by: [agent]`가 있는
-입력만 예외로, 런이 시작된 뒤에 그 런의 드라이버가 한 번 채울 수 있다
-(claunch-7d4nt). 시작 입력은 런을 시작한 요청의 값이므로, 이 쓰기는 시작 때
-비워 둔 값을 나중에 사용자나 부모가 정해 주었을 때를 위한 것이다.
-improv-worker-v2의 `inputs.issue`가 그 예다: 이슈를 비워 두고 시작한 런에 뒤늦게
-시작 이슈가 지정되면 에이전트가 그 id를 채운다. 런이 진행 중에 스스로 정한
-값(예: 회차가 확정한 이슈)은 시작 입력이 아니며, 워크플로가 `bind`로 다른
-`$data` 이름에 기록한다. 그 값을 `inputs`로 옮겨 적는 경로는 두지 않는다.
+시작 입력은 런이 만들어질 때 한 번 기록된다. 선언의 `set_by`가 시작 뒤에 그
+입력을 쓸 수 있는 쪽을 정한다. 값은 둘이고 함께 둘 수 있다.
+
+- `agent`: 런의 드라이버가 비어 있는 입력을 한 번 채운다(claunch-7d4nt). 시작 때
+  비워 둔 값을 나중에 사용자나 부모가 정해 주었을 때를 위한 것이다.
+  improv-worker-v2의 `inputs.issue`가 그 예다: 이슈를 비워 두고 시작한 런에 뒤늦게
+  시작 이슈가 지정되면 에이전트가 그 id를 채운다. 런이 진행 중에 스스로 정한
+  값(예: 회차가 확정한 이슈)은 시작 입력이 아니며, 워크플로가 `bind`로 다른
+  `$data` 이름에 기록한다. 그 값을 `inputs`로 옮겨 적는 경로는 두지 않는다.
+- `user`: 사람이 런 도중에 값을 바꾼다(claunch-umq1f). 현재 값이 있어도 덮어쓴다.
+  improv-worker-v2의 `require_coding_approval`과 `max_rounds`가 그 예다: 일감마다
+  `coding-approval-check`가, 회차마다 회차 루프의 `while`이 그 값을 다시 읽으므로,
+  사람이 런 도중에 승인 게이트를 켜면 다음 일감부터 승인을 기다린다.
 
 ```yaml
 inputs:
   issue: {type: string, default: "", set_by: [agent]}
+  require_coding_approval: {type: bool, default: false, set_by: [user]}
 ```
 
-- `set_by`의 값은 `agent` 하나다. `set_by`가 없는 입력은 시작 뒤에 바꿀 수 없다.
-  `set_by`를 둘 수 있는 type은 `string`, `text`, `int`, `enum`, `list`다. `bool`은
-  빈 값이 없고(채우지 않은 값이 `false`다), `invariants`·`acceptance`는 시작할 때
-  규칙과 모니터로 접히므로 시작 뒤 쓰기가 그것을 다시 만들지 못한다. 그 밖의
+- `set_by`가 없는 입력은 시작 뒤에 바꿀 수 없다. `agent`를 둘 수 있는 type은
+  `string`, `text`, `int`, `enum`, `list`다. `bool`은 빈 값이 없으므로(채우지 않은
+  값이 `false`다) 「비어 있을 때 한 번」 규칙이 성립하지 않는다. `user`는 그 다섯에
+  `bool`을 더한다. `invariants`·`acceptance`는 시작할 때 규칙과 모니터로 접히므로
+  시작 뒤 쓰기가 그것을 다시 만들지 못하고, 어느 쪽도 둘 수 없다. 허용되지 않는
   type에 `set_by`를 쓰면 컴파일 오류다.
-- 쓰기 도구: MCP `flow_input`(`name`, `value`, `scope`/`cwd`/`side`는 다른 `flow_*`
-  도구와 같다)과 CLI `claunch cflow2 input <이름> <값> [--json-value] [-t 슬롯]`.
-  둘 다 엔진 함수 `runtime.set_input` 하나를 부른다. 호출자는 런의 드라이버여야
-  한다(`runtime.may_drive`, 다른 `flow_*` 도구와 같은 판정). 멈춘(halt) 런과 끝난
-  런은 거절한다.
-- 덮어쓰기 금지: 현재 값이 비어 있을 때(`null`, 빈 문자열, 빈 목록)만 쓴다. 값이
-  있으면 거절하고 오류에 현재 값을 싣는다. 시작할 때 데몬이 넣은 Board 이슈도
-  이 규칙으로 보호된다. `default`가 비어 있지 않은 입력은 시작 때 그 값을 가지므로
-  쓸 수 없다(검사 경고 `set-by-default`). `required: true`인 입력도 시작 때
-  반드시 채워지므로 같다(검사 경고 `set-by-required`). 사람이 값을 덮어쓰는 경로는 없다.
+- 쓰기 도구와 호출자:
+  - `agent`: MCP `flow_input`(`name`, `value`, `scope`/`cwd`/`side`는 다른 `flow_*`
+    도구와 같다)과 CLI `claunch cflow2 input <이름> <값> [--json-value] [-t 슬롯]`.
+    호출자는 런의 드라이버여야 한다(`runtime.may_drive`, 다른 `flow_*` 도구와 같은
+    판정). 멈춘(halt) 런과 끝난 런은 거절한다.
+  - `user`: CLI `claunch cflow2 input <이름> <값> --user`, 웹 런 페이지의 inputs
+    블록(`set_by`에 `user`가 있는 입력마다 편집기가 붙는다: `bool`은 체크박스,
+    `enum`은 목록, 그 밖은 입력란), 데몬 `POST /api/cflow2/input`(본문 `cwd`,
+    `scope`, `name`, `value`). CLI는 다른 사람용 명령처럼 그 런을 운전하는 세션의
+    셸에서 실행하면 거절한다. 멈춘 런에도 쓸 수 있고(아무것도 진행시키지 않는다),
+    끝난 런은 거절한다. 쓰고 나면 드라이버 세션에 새 값을 알리는 한 줄이 타이핑된다.
+    MCP에는 이 경로가 없다 — 에이전트가 사람이 켠 승인 게이트를 끌 수 없게 한다.
+  - 셋 모두 엔진 함수 `runtime.set_input` 하나를 부른다(`caller` agent/user).
+- `agent`의 덮어쓰기 금지: 현재 값이 비어 있을 때(`null`, 빈 문자열, 빈 목록)만
+  쓴다. 값이 있으면 거절하고 오류에 현재 값을 싣는다. 시작할 때 데몬이 넣은 Board
+  이슈도 이 규칙으로 보호된다. `default`가 비어 있지 않은 입력은 시작 때 그 값을
+  가지므로 `agent`가 쓸 수 없다(검사 경고 `set-by-default`). `required: true`인
+  입력도 시작 때 반드시 채워지므로 같다(검사 경고 `set-by-required`). 두 경고는
+  `user`에는 해당하지 않는다.
+- `user`의 빈 값: 빈 값은 그 입력을 비운다(type의 빈 값 — `null`, 빈 목록; `bool`의
+  빈 표기는 `false`). `required: true`인 입력은 비울 수 없다.
 - 값 검사는 시작 입력과 같다(`inputs.settle`이 `inputs.normalize`와 같은 형식
-  변환과 `enum` 검사를 쓴다). 빈 값은 쓰지 않는다. 그 입력을 읽는
+  변환과 `enum` 검사를 쓴다). `agent`는 빈 값을 쓰지 않는다. 그 입력을 읽는
   `input_constraints`는 새 값을 넣은 전체 입력으로 다시 평가해 어기면 거절한다.
 - 쓰는 자리는 `data.inputs.<선언된 이름>` 하나다. 도구는 그 밖의 `$data` 경로를
   쓰지 않는다. 반대로 노드는 `data.inputs`를 쓰지 않는다: `bind: inputs`와 최상위
   `data:`의 `inputs` 키는 컴파일 오류다.
-- 저널: `input_set {name, value, by, was}`(`by`는 쓴 세션, `was`는 이전 값).
+- 저널: `input_set {name, value, by, was}`(`by`는 쓴 세션, 사람이 쓰면 `user`;
+  `was`는 이전 값).
 - 쓴 값은 `data.inputs.<이름>`에 들어간다. 그 뒤에 렌더링되는 프롬프트의
-  `${data.inputs.<이름>}`, `flow_status`·`claunch cflow2 status`·웹의 `inputs`가 새
-  값을 보인다. `chart.json` 스냅샷은 시작 때 값 그대로다. 다음 회차(2.1 recur)는
-  런 상태의 `data.inputs`를 이어받는다.
+  `${data.inputs.<이름>}`, 그 뒤에 평가되는 가드, `flow_status`·`claunch cflow2
+  status`·웹의 `inputs`가 새 값을 보인다. 이미 지난 가드는 다시 평가되지 않는다.
+  `chart.json` 스냅샷은 시작 때 값 그대로다. 다음 회차(2.1 recur)는 런 상태의
+  `data.inputs`를 이어받는다.
 
 #### 입력 사이의 제약(input_constraints)
 
@@ -1234,8 +1254,8 @@ status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 
 | `unknown-side` | `sides:`를 선언한 차트에서 `side:<이름>:` 주소나 `side('<이름>')`이 선언에 없는 이름을 씀. side 런 정의 쪽의 `main:`·형제 주소는 실행 시점에 해석한다 |
 | `peer-write` | `do:`의 `push`·`set`·`remove`가 `main:`·`side:` 주소를 씀 |
 | `unbounded-visits` (경고) | `max_visits: 0` |
-| `set-by-default` (경고) | `set_by`를 선언한 입력에 비어 있지 않은 `default`가 있다. 시작 때부터 그 값을 가지므로 시작 뒤에 쓸 수 없다(2.6) |
-| `set-by-required` (경고) | `set_by`를 선언한 입력이 `required: true`다. 시작 검사가 빈 값을 거절하므로 시작 뒤에 쓸 수 없다(2.6) |
+| `set-by-default` (경고) | `set_by: [agent]`를 선언한 입력에 비어 있지 않은 `default`가 있다. 시작 때부터 그 값을 가지므로 에이전트가 시작 뒤에 쓸 수 없다(2.6). `user`에는 해당하지 않는다 |
+| `set-by-required` (경고) | `set_by: [agent]`를 선언한 입력이 `required: true`다. 시작 검사가 빈 값을 거절하므로 에이전트가 시작 뒤에 쓸 수 없다(2.6). `user`에는 해당하지 않는다 |
 
 **v1과의 차이.** v1 하위 런(`runs/<세션>/sub/<이름>/`)은 `publishes`/`awaits`의
 게시 횟수로 만났다. v2는 log 컬렉션과 이름별 cursor로 만난다. v1 하위 런 도구의
@@ -1699,6 +1719,7 @@ body:
 | 중단 | `claunch cflow2 abort --reason R` | `POST /api/cflow2/abort {cwd, scope, reason}` | 없음 |
 | 보관 | `claunch cflow2 archive` | `POST /api/cflow2/archive {cwd, scope}` | 없음 |
 | 재촉 | 없음 | `POST /api/cflow2/nudge {cwd, scope}` | 없음 |
+| 시작 입력 변경(`set_by: [user]`, 2.6) | `claunch cflow2 input <이름> <값> --user` | `POST /api/cflow2/input {cwd, scope, name, value}` | 없음(`flow_input`은 `set_by: [agent]`만) |
 
 - CLI의 `move`·`report`는 런을 드라이브하는 세션의 셸에서 실행하면 거절한다
   (`_refuse_own_session`, `select`·`approve`와 같다).
@@ -2204,7 +2225,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
-| `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
+| `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6). `set_by: [user]` 입력은 쓰지 못한다 |
 | `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
 
 상태를 돌려주는 `flow_*` 툴은 상태를 요약판으로 돌려준다(`mcp.brief`, claunch-ejvoy.1).
@@ -2607,8 +2628,10 @@ spec:
     (컴파일 트리, 검사 결과, 시작 입력 선언, 읽기 전용. `name`은 정의 이름만 받고
     경로면 400), `POST /api/cflow2/select`(사용자 선택, `caller=user`),
     `POST /api/cflow2/extend`(`loop_limit` 응답: `by`·`reset`·`stop`, 본문에
-    `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/nudge | abort | archive | report | move`
-    (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
+    `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/input`
+    (사람의 시작 입력 변경, `set_by: [user]`, 2.6), `POST /api/cflow2/nudge | abort | archive | report | move`
+    (사람의 조작, 2.11). 런 상세의 `input_decls`는 시작 입력 선언 목록이다(런 화면의
+    입력 편집기가 읽는다). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
     싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
   - 런 상세의 `calls`(`daemon/cflow2_web.calls`)는 동적 호출 목록이다(2.12):
     호출한 작업, 프로시저, 상태, 결과, callee 런의 `scope`·`cwd`. 런 화면의 Calls

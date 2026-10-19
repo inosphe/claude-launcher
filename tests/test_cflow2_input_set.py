@@ -84,9 +84,9 @@ def test_set_by_is_kept_in_the_schema():
 @pytest.mark.parametrize("decl,msg", [
     ("{type: string, set_by: [person]}", "unknown set_by 'person'"),
     ("{type: string, set_by: 3}", "set_by must be a list"),
-    ("{type: bool, set_by: [agent]}", "set_by applies to types"),
-    ("{type: invariants, set_by: [agent]}", "set_by applies to types"),
-    ("{type: acceptance, set_by: [agent]}", "set_by applies to types"),
+    ("{type: bool, set_by: [agent]}", "set_by agent applies to types"),
+    ("{type: invariants, set_by: [agent]}", "set_by agent applies to types"),
+    ("{type: acceptance, set_by: [agent]}", "set_by agent applies to types"),
 ])
 def test_bad_set_by_is_a_compile_error(decl, msg):
     with pytest.raises(inputs.InputsError, match=msg):

@@ -168,11 +168,17 @@ inputs:
     type: int
     label: 최대 회차 수
     help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지)
+    # 회차 루프의 while이 회차마다 읽는다. 사람이 런 도중에 바꿀 수 있다
+    # (claunch cflow2 input --user, 웹 런 페이지 — docs 2.6, claunch-umq1f).
+    set_by: [user]
   require_coding_approval:
     type: bool
     default: false
     label: 코딩 시작 전 사용자 승인
     help: 켜면 일감별 구현·재작업 전에 변경 계획을 제시하고 사용자 승인을 기다린다. 끄면 기존처럼 자동 진행한다
+    # item의 coding-approval-check가 일감마다 읽으므로, 사람이 런 도중에 켜면
+    # 다음 일감부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
+    set_by: [user]
   force_pr:
     type: bool
     label: PR 강제(force to make PR)

@@ -894,6 +894,7 @@ def build_app(
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
+    r.add_post("/api/cflow2/input", h_cflow2_input)
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
     r.add_post("/api/cflow2/nudge", h_cflow2_nudge)
     r.add_post("/api/cflow2/abort", h_cflow2_abort)
@@ -5358,6 +5359,11 @@ NUDGE_CFLOW2_REPORTED = (
     "cflow2: the user reported your run's task from the dashboard - stop working "
     "on it; call the flow_status tool and continue"
 )
+#: A start input the user changed from the dashboard (claunch-umq1f).
+NUDGE_CFLOW2_INPUT_SET = (
+    "cflow2: the user changed your run's start input {name} to {value} from the "
+    "dashboard - steps read it from now on; call the flow_status tool and continue"
+)
 NUDGE_CFLOW2_ABORTED = (
     "cflow2: the user aborted your v2 workflow run from the dashboard - stop "
     "working on it; flow_status shows it aborted"
@@ -5626,6 +5632,30 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope,
         NUDGE_CFLOW2_PICKED.format(option=option, **words),
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_input(request: web.Request) -> web.Response:
+    """Change a start input of a v2 run from the dashboard, as the user
+    (claunch-umq1f): the input's ``set_by`` names ``user``; the value
+    overwrites what it holds (an empty one clears it). Body: cwd, scope,
+    name, value. The run's driver is told the new value."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return json_error(400, "'name' required in the JSON body")
+    payload = await asyncio.to_thread(
+        cflow2_runtime.set_input, name, body.get("value"),
+        caller=cflow2_runtime.CALLER_USER, cwd=cwd, scope=scope,
+    )
+    got = json.dumps((payload.get("inputs") or {}).get(name), ensure_ascii=False)
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope,
+        NUDGE_CFLOW2_INPUT_SET.format(name=name, value=got),
     )
     return json_response(payload)
 

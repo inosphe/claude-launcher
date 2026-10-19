@@ -35049,7 +35049,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   const runInputs = run.inputs || ((run.data || {}).inputs);
   if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
-    root.appendChild(cflow2InputsBlock(runInputs));
+    root.appendChild(cflow2InputsBlock(runInputs, data.input_decls, live ? post : null));
   }
 
   const cols = el("div", "cf2-cols");
@@ -35607,11 +35607,18 @@ function cflow2CollectionTable(name, col, post) {
   return wrap;
 }
 
-/* The run's start inputs (data.inputs), folded shut. */
-function cflow2InputsBlock(values) {
+/* The run's start inputs (data.inputs), folded shut. An input whose
+   declaration (data.input_decls) has set_by: [user] gets an editor while the
+   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
+function cflow2InputsBlock(values, decls, post) {
+  const declOf = {};
+  for (const d of decls || []) declOf[d.name] = d;
+  const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
+  const nEdit = Object.keys(values).filter(editable).length;
   const box = document.createElement("details");
   box.className = "cf2-run-inputs";
-  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})`));
+  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})` +
+    (nEdit ? ` · ${nEdit} editable` : "")));
   for (const [k, v] of Object.entries(values)) {
     const row = el("div", "cf2-run-input");
     row.appendChild(el("span", "mono cf2-fact-k", k));
@@ -35624,9 +35631,64 @@ function cflow2InputsBlock(values) {
     row.appendChild(text.length > 80 || text.includes("\n")
       ? mdInto(el("div", "md cf2-run-input-value"), text)
       : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
+    if (editable(k)) row.appendChild(cflow2InputEditor(k, v, declOf[k], post));
     box.appendChild(row);
   }
   return box;
+}
+
+/* A person's editor for one set_by: [user] input: a checkbox for a bool, a
+   picker for an enum, a text field otherwise (a list as one item per line).
+   The press confirms, then posts; the run page redraws from the answer. */
+function cflow2InputEditor(name, value, decl, post) {
+  const wrap = el("div", "cf2-run-input-edit");
+  const label = decl.label || name;
+  const send = async (next, shown) => {
+    if (!confirm(`Change the run's start input '${label}' to ${shown}?\n\n` +
+                 "Steps read the new value from now on; the agent driving the run is told.")) {
+      return false;
+    }
+    await post("/api/cflow2/input", { name, value: next });
+    return true;
+  };
+  if (decl.type === "bool") {
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = !!value;
+    box.addEventListener("change", async () => {
+      box.disabled = true;
+      if (!await send(box.checked, String(box.checked))) box.checked = !box.checked;
+      box.disabled = false;
+    });
+    const lab = el("label", "cf2-run-input-toggle");
+    lab.append(box, document.createTextNode(" on"));
+    wrap.appendChild(lab);
+    return wrap;
+  }
+  let field;
+  if (decl.type === "enum") {
+    field = el("select");
+    if (!decl.required) field.appendChild(el("option", null, "—")).value = "";
+    for (const c of decl.choices || []) field.appendChild(el("option", null, c)).value = c;
+    field.value = value == null ? "" : String(value);
+  } else if (decl.type === "text" || decl.type === "list") {
+    field = el("textarea");
+    field.rows = 2;
+    field.value = Array.isArray(value) ? value.join("\n") : (value == null ? "" : String(value));
+  } else {
+    field = el("input");
+    field.type = decl.type === "int" ? "number" : "text";
+    field.value = value == null ? "" : String(value);
+  }
+  const btn = el("button", "wf-btn sm", "Set");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const raw = field.value;
+    await send(raw, raw.trim() ? JSON.stringify(raw) : "empty (clear it)");
+    btn.disabled = false;
+  });
+  wrap.append(field, btn);
+  return wrap;
 }
 
 /* Consecutive undecided probe results per live wait instance, from the
