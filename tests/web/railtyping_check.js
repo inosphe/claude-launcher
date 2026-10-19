@@ -45,6 +45,7 @@ function advance(ms) {
   }
 }
 let redraws = 0;
+let lastRedraw;
 
 const ctx = {};
 new Function(
@@ -57,16 +58,20 @@ new Function(
   + line(/^let railTypedAt = .+$/m, "railTypedAt")
   + line(/^let railTypingSince = .+$/m, "railTypingSince")
   + line(/^let railTypingTimer = .+$/m, "railTypingTimer")
-  + slice("railHeld") + slice("railTyping") + slice("noteRailTyping")
+  + line(/^let railSeenPending = .+$/m, "railSeenPending")
+  + line(/^const RAIL_TEXT_INPUT_TYPES = [\s\S]+?\);$/m, "RAIL_TEXT_INPUT_TYPES")
+  + slice("railHeld") + slice("railTextTarget") + slice("railTyping")
+  + slice("noteRailTyping")
   + `
 Object.assign(exports, {
   held: () => railHeld(),
   key: noteRailTyping,
   owe: (v) => { railRedrawPending = v; },
+  oweSeen: (v) => { railSeenPending = v; },
   quiet: RAIL_TYPING_QUIET_MS,
   max: RAIL_TYPING_MAX_MS,
 });`)(ctx, { now: () => now }, fakeSetTimeout, fakeClearTimeout,
-       () => { redraws++; });
+       (opts) => { redraws++; lastRedraw = opts; });
 
 let failures = 0;
 function check(what, got, want) {
@@ -95,12 +100,36 @@ check("...and owes its redraw until they stop", redraws, 0);
 advance(200);
 check("the hold ends once the keys go quiet", ctx.held(), false);
 check("...and the redraw it owed runs then", redraws, 1);
+check("...from the cache, with no request of its own", lastRedraw, { cached: true });
 
 ctx.owe(false);
 ctx.key(input);
 check("a key in an input holds the rail", ctx.held(), true);
 advance(ctx.quiet + 1);
 check("a quiet end with nothing owed redraws nothing", redraws, 1);
+
+/* A checkbox, radio or button input takes keys without being typed into
+   (claunch-4thlk.7); only the text kinds hold. */
+for (const type of ["checkbox", "radio", "button", "submit", "range", "color", "file"]) {
+  ctx.key({ target: { tagName: "INPUT", type } });
+  check(`a key on an input of type ${type} does not hold the rail`, ctx.held(), false);
+}
+for (const type of ["text", "search", "email", "url", "tel", "password", "number", "TEXT"]) {
+  ctx.key({ target: { tagName: "INPUT", type } });
+  check(`a key in an input of type ${type} holds the rail`, ctx.held(), true);
+  advance(ctx.quiet + 1);
+}
+
+/* The seen lines a held poll skipped are owed to the pause, even when no
+   row changed: without that they waited for the next poll that changed. */
+ctx.owe(false);
+ctx.oweSeen(true);
+const before = redraws;
+ctx.key(textarea);
+advance(ctx.quiet + 1);
+check("a pause moves on the seen lines the burst held", redraws, before + 1);
+check("...from the cache", lastRedraw, { cached: true });
+ctx.oweSeen(false);
 
 ctx.key(editable);
 check("a key in an editable element holds the rail", ctx.held(), true);

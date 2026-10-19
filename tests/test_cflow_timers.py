@@ -30,7 +30,7 @@ import pytest
 from claude_launcher import store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.daemon import api as api_mod
-from claude_launcher.daemon import cflow_clock
+from claude_launcher.daemon import cflow_clock, wallclock
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -99,9 +99,14 @@ class _FakeManager:
         return self._sessions[name]
 
 
+#: The monotonic instant the fake tables were read at.
+NOW = 5000.0
+
+
 def _snaps(reminder=None, ping=None) -> dict:
     """The shape :func:`api._clock_snapshots` hands to the composer."""
     return {
+        "now": NOW,
         "reminder": reminder or {"running": True, "timers": {}},
         "ping": ping or {"running": True, "timers": {}},
     }
@@ -240,13 +245,14 @@ def test_the_readout_names_every_way_a_clock_can_be_quiet(proj):
         cfg, cwd, "w1", payload,
     )
     assert out["reminder"]["state"] == "stopped"
-    assert out["reminder"]["due_in"] is None
+    assert out["reminder"]["due_at"] is None
 
     # Running, enabled, but the tick has not seen this run yet.
     assert read()["reminder"]["state"] == "arming"
 
-    # Running and enabled with a timer: counting, and the remaining seconds
-    # are the interval less the age — the number the strip draws.
+    # Running and enabled with a timer: counting, and the deadline is the
+    # interval less the age from the read — published as an absolute time,
+    # so the next poll reads the same bytes (claunch-4thlk.1).
     snaps = _snaps(reminder={
         "running": True,
         "timers": {(cwd, "w1"): {"armed_ago": 240.0, "fired_ago": None,
@@ -254,7 +260,19 @@ def test_the_readout_names_every_way_a_clock_can_be_quiet(proj):
                                  "probed_ago": None, "probe_code": None}},
     })
     rem = read(snaps=snaps)["reminder"]
-    assert (rem["state"], rem["due_in"], rem["interval"]) == ("counting", 360.0, 600.0)
+    assert (rem["state"], rem["due_at"], rem["interval"]) == (
+        "counting", wallclock.wall(NOW + 360.0), 600.0)
+    assert "due_in" not in rem and "fired_ago" not in rem
+    # The same timer read ten seconds later (its age ten seconds more) is the
+    # same deadline: nothing about the clock moved.
+    later = _snaps(reminder={
+        "running": True,
+        "timers": {(cwd, "w1"): {"armed_ago": 250.0, "fired_ago": None,
+                                 "fired_kind": None, "held_ago": None,
+                                 "probed_ago": None, "probe_code": None}},
+    })
+    later["now"] = NOW + 10.0
+    assert read(snaps=later)["reminder"] == rem
 
     # Past the interval with the session working: due. With it stopped: held —
     # the same timer, and the opposite thing to tell a reader.
@@ -262,9 +280,9 @@ def test_the_readout_names_every_way_a_clock_can_be_quiet(proj):
     assert read(snaps=snaps)["reminder"]["state"] == "due"
     idle = _FakeManager({"w1": _FakeSession("w1", cwd, status="idle")})
     assert read(manager=idle, snaps=snaps)["reminder"]["state"] == "held"
-    # ...and due_in stays negative rather than clamped: the overshoot is
+    # ...and due_at stays in the past rather than clamped: the overshoot is
     # exactly the stretch somebody looking at a held clock wants to see.
-    assert read(manager=idle, snaps=snaps)["reminder"]["due_in"] == -300.0
+    assert read(manager=idle, snaps=snaps)["reminder"]["due_at"] == wallclock.wall(NOW - 300.0)
 
     # Which block that due fire will be. The reminder pastes the step once at
     # a position and points at it after, so "due now" is two very different
@@ -391,7 +409,7 @@ def test_the_api_publishes_the_timers_on_both_cflow_doors(proj):
                 # nothing has measured yet.
                 assert timers["reminder"] == {
                     "running": True, "enabled": True, "interval": 600.0,
-                    "due_in": None, "fired_ago": None, "state": "arming",
+                    "due_at": None, "fired_at": None, "state": "arming",
                     # nothing restated here yet, so the next fire is the
                     # step in full — the size a reader has to know about
                     "form": "full",

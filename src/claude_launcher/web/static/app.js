@@ -223,7 +223,7 @@ function controlMessage(sock, ev) {
   if (typeof msg.ch === "number") { channelFrame(msg); return; }
   if (msg.type === "pong") { latencyPong(msg); return; }
   if (msg.type === "read_part") { controlPart(sock, msg); return; }
-  if (msg.type === "read_result") { controlAnswer(msg); return; }
+  if (msg.type === "read_result") { controlAnswer(msg, ev.data); return; }
   if (msg.type === "init") { p2pInit(sock, msg); return; }
   if (msg.type === "p2p_answer" || msg.type === "p2p_error") p2pSignal(msg);
 }
@@ -512,7 +512,7 @@ function controlRetiredMessage(sock, ev) {
     let msg = null;
     try { msg = JSON.parse(ev.data); } catch { /* not a read */ }
     if (msg && msg.type === "read_part") controlPart(sock, msg);
-    else if (msg && msg.type === "read_result") controlAnswer(msg);
+    else if (msg && msg.type === "read_result") controlAnswer(msg, ev.data);
   }
   controlRetireCheck(sock);
 }
@@ -549,8 +549,13 @@ function ensureControlSocket() {
 /* Ask for these paths over the socket. Resolves the way a batch does, or
    rejects — on a socket that is down, a frame that will not send, or an
    answer that does not come — and every rejection is a signal to the caller
-   to use HTTP instead. */
-function controlRead(paths) {
+   to use HTTP instead.
+
+   `held` maps a path to the answer this page kept from its last read of it
+   ({hash, text}); its digest goes with the read, and the daemon leaves that
+   answer out when it has not changed (claunch-4thlk.2). Every read says
+   what it holds, so the daemon keeps nothing per page. */
+function controlRead(paths, held, args) {
   if (!controlUp()) return Promise.reject(new Error("control socket down"));
   const id = ++controlSeq;
   const sock = controlSock;
@@ -567,7 +572,13 @@ function controlRead(paths) {
     controlWaiting.set(id, waiter);
     try {
       // `parts`: this page puts a large answer back together (controlPart).
-      sock.send(JSON.stringify({ type: "read", id, paths, parts: true }));
+      const hashes = {};
+      for (const [path, kept] of held || []) hashes[path] = kept.hash;
+      // `spans`: where each answer's text sits in the reply, so it can be
+      // kept as text without encoding the parsed answer again.
+      const frame = { type: "read", id, paths, parts: true, hashes, spans: true };
+      if (args && Object.keys(args).length) frame.args = args;
+      sock.send(JSON.stringify(frame));
     } catch (err) {
       controlWaiting.delete(id);
       clearTimeout(waiter.timer);
@@ -576,16 +587,24 @@ function controlRead(paths) {
   });
 }
 
-/* One answered read, whole: settle whoever is waiting on it. */
-function controlAnswer(msg) {
+/* One answered read, whole: settle whoever is waiting on it. `raw` is the
+   reply as it arrived; with `spans` it yields each answer's own text. */
+function controlAnswer(msg, raw) {
   const waiter = controlWaiting.get(msg.id);
   if (!waiter) return;                 // timed out already, and re-sent
   controlWaiting.delete(msg.id);
   clearTimeout(waiter.timer);
+  const spans = msg.spans && typeof raw === "string" ? msg.spans : null;
   waiter.resolve({
     answers: msg.answers || {},
     errors: msg.errors || {},
     statuses: msg.statuses || {},
+    hashes: msg.hashes || null,
+    unchanged: Array.isArray(msg.unchanged) ? msg.unchanged : [],
+    text: (path) => {
+      const span = spans && spans[path];
+      return Array.isArray(span) ? raw.slice(span[0], span[1]) : null;
+    },
   });
 }
 
@@ -611,16 +630,17 @@ function controlPart(sock, msg) {
   waiter.parts.push(typeof msg.data === "string" ? msg.data : "");
   waiter.arm();
   if (msg.more) return;
+  const raw = waiter.parts.join("");
   let whole;
   try {
-    whole = JSON.parse(waiter.parts.join(""));
+    whole = JSON.parse(raw);
   } catch (err) {
     controlWaiting.delete(msg.id);
     clearTimeout(waiter.timer);
     waiter.reject(err);
     return;
   }
-  controlAnswer(whole);
+  controlAnswer(whole, raw);
 }
 
 /* Say something the daemon should write down, with no answer expected.
@@ -1167,15 +1187,66 @@ let batchPending = null;       // path -> [{resolve, reject}], while one is open
    reports one (`statuses`), because callers branch on it: the briefing card
    tells 400 "not configured" and 404 "no record" from a 502 failure. 502 is
    what is left when the read failed without a route status (claunch-authx). */
-function batchResponse(payload, ok, status) {
-  const body = JSON.stringify(payload === undefined ? null : payload);
+/* The answer is handed over as the object the reply was parsed into,
+   rather than encoded to text and parsed again (claunch-4thlk.4: the two
+   were 31ms and 32ms of one dashboard trace). That object belongs to the
+   one caller: a caller may change what it was given, so a second reader of
+   the same answer gets its own copy, parsed from `text` -- the answer's
+   text as it arrived, or encoded once from the object before it is given
+   away (see batchResponses). Like a fetch Response, read it once. */
+function batchResponse(payload, ok, status, text) {
+  const value = payload === undefined ? null : payload;
+  let body = typeof text === "string" ? text : null;
+  let given = false;
+  const encoded = () => (body === null ? (body = JSON.stringify(value)) : body);
   return {
     ok,
     status: ok ? 200 : (Number.isInteger(status) && status >= 400 ? status : 502),
     batched: true,
-    json: async () => JSON.parse(body),
-    text: async () => body,
+    json: async () => {
+      if (!given) { given = true; return value; }
+      return JSON.parse(encoded());
+    },
+    text: async () => encoded(),
   };
+}
+
+/* One answer for `count` callers: the first gets the parsed object, the
+   rest a copy parsed from the text -- encoded here, before the object is
+   given away, when the reply did not carry it. */
+function batchResponses(payload, count, text) {
+  if (count <= 1) return [batchResponse(payload, true, undefined, text)];
+  const body = typeof text === "string"
+    ? text : JSON.stringify(payload === undefined ? null : payload);
+  const out = [batchResponse(payload, true, undefined, body)];
+  while (out.length < count) out.push(batchKeptResponse(body));
+  return out;
+}
+
+/* An answer this page kept as text: a fresh object on every read of it. */
+function batchKeptResponse(text) {
+  return {
+    ok: true,
+    status: 200,
+    batched: true,
+    json: async () => JSON.parse(text),
+    text: async () => text,
+  };
+}
+
+/* The answers kept for the next conditional read (claunch-4thlk.2): path ->
+   {hash, text}. Text rather than the object, because the object went to a
+   caller that may have changed it. Bounded, oldest first out, so paths that
+   are read once (one session's detail, one run) do not pile up. */
+const BATCH_KEPT_MAX = 64;
+const batchKept = new Map();
+
+function batchKeep(path, hash, text) {
+  batchKept.delete(path);
+  batchKept.set(path, { hash, text });
+  while (batchKept.size > BATCH_KEPT_MAX) {
+    batchKept.delete(batchKept.keys().next().value);
+  }
 }
 
 function batchable(path, opts) {
@@ -1194,6 +1265,10 @@ function batchQueue(path, opts) {
   if (first) batchPending = new Map();
   const waiting = batchPending.get(path) || [];
   const promise = new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+  // `readArgs`: what the socket read carries beside this path (the sessions
+  // rail's row digests). The last caller's wins; HTTP does not carry it, and
+  // the route answers in full without it.
+  if (opts.readArgs) waiting.args = opts.readArgs;
   batchPending.set(path, waiting);
   // Flushed a turn later, which is what gathers the callers that fired
   // together: every refresh in one tick has queued by then.
@@ -1211,6 +1286,12 @@ async function batchFlush() {
       if (error) waiter.reject(error);
       else waiter.resolve(response);
     }
+  };
+  // A good answer goes to each waiter as its own response (batchResponses).
+  const settleAnswer = (path, payload, text) => {
+    const waiting = pending.get(path) || [];
+    const responses = batchResponses(payload, waiting.length, text);
+    waiting.forEach((waiter, i) => waiter.resolve(responses[i]));
   };
   // A set larger than the endpoint takes goes out the ordinary way rather
   // than being refused for being too many. A lone read does NOT: it costs
@@ -1238,8 +1319,21 @@ async function batchFlush() {
   // rejection, so the paths go out over HTTP; read per path, it showed as
   // "not answered" on every one of them (claunch-yty47).
   let refused = null;
+  // What this page holds for these paths, taken now: an answer the daemon
+  // calls unchanged is this one, whatever happens to the keep meanwhile.
+  const held = new Map();
+  for (const path of paths) {
+    const kept = batchKept.get(path);
+    if (kept) held.set(path, kept);
+  }
+  const args = {};
+  for (const path of paths) {
+    const waiting = pending.get(path);
+    if (waiting && waiting.args) args[path] = waiting.args;
+  }
+  let carried = null;
   try {
-    const carried = await controlRead(paths);
+    carried = await controlRead(paths, held, args);
     answers = carried.answers;
     errors = carried.errors;
     statuses = carried.statuses || {};
@@ -1255,9 +1349,21 @@ async function batchFlush() {
     answers = null;
   }
   if (answers !== null) {
+    const unchanged = new Set((carried && carried.unchanged) || []);
+    const hashes = (carried && carried.hashes) || {};
     for (const path of paths) {
-      if (Object.prototype.hasOwnProperty.call(answers, path)) {
-        settle(path, batchResponse(answers[path], true));
+      if (unchanged.has(path) && held.has(path)) {
+        const text = held.get(path).text;
+        batchKeep(path, held.get(path).hash, text);
+        for (const waiter of pending.get(path) || []) {
+          waiter.resolve(batchKeptResponse(text));
+        }
+      } else if (Object.prototype.hasOwnProperty.call(answers, path)) {
+        const text = carried && carried.text ? carried.text(path) : null;
+        if (typeof hashes[path] === "string" && typeof text === "string") {
+          batchKeep(path, hashes[path], text);
+        }
+        settleAnswer(path, answers[path], text);
       } else {
         settle(path, batchResponse(
           { error: errors[path] || errors[""] || "not answered" }, false, statuses[path]
@@ -1299,7 +1405,7 @@ async function batchFlush() {
   }
   for (const path of paths) {
     if (Object.prototype.hasOwnProperty.call(answers, path)) {
-      settle(path, batchResponse(answers[path], true));
+      settleAnswer(path, answers[path]);
     } else {
       settle(path, batchResponse(
         { error: errors[path] || errors[""] || refused || "not answered" }, false,
@@ -1708,6 +1814,23 @@ const RAIL_TYPING_MAX_MS = 15000;
 let railTypedAt = 0;
 let railTypingSince = 0;
 let railTypingTimer = 0;
+/* The seen lines a held poll did not move on (refreshRailSeen is skipped
+   while the rail is held); the pause that ends a burst moves them. */
+let railSeenPending = false;
+
+/* The <input> types a key is typed into. A checkbox, radio or button takes
+   keys too (space, the arrows) without being typed into, and holding the
+   rail for those held it for nothing (claunch-4thlk.7). An input with no
+   type is a text box. */
+const RAIL_TEXT_INPUT_TYPES = new Set(
+  ["", "text", "search", "email", "url", "tel", "password", "number"]);
+
+function railTextTarget(t) {
+  if (!t) return false;
+  if (t.tagName === "TEXTAREA" || t.isContentEditable) return true;
+  if (t.tagName !== "INPUT") return false;
+  return RAIL_TEXT_INPUT_TYPES.has(String(t.type || "").toLowerCase());
+}
 
 function railTyping() {
   if (!railTypedAt) return false;
@@ -1717,15 +1840,17 @@ function railTyping() {
 }
 
 function noteRailTyping(ev) {
-  const t = ev && ev.target;
-  if (!t || !(t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) return;
+  if (!railTextTarget(ev && ev.target)) return;
   const now = Date.now();
   if (now - railTypedAt >= RAIL_TYPING_QUIET_MS) railTypingSince = now;
   railTypedAt = now;
   clearTimeout(railTypingTimer);
   railTypingTimer = setTimeout(() => {
     railTypingTimer = 0;
-    if (railRedrawPending && !railHeld()) refreshSessions();
+    if (railHeld()) return;
+    // What the burst held is already in the cache: a redraw from it covers
+    // both the rows owed and the seen lines, with no request of its own.
+    if (railRedrawPending || railSeenPending) refreshSessions({ cached: true });
   }, RAIL_TYPING_QUIET_MS);
 }
 
@@ -1919,9 +2044,19 @@ function syncSessionSearchNote() {
 }
 
 function setSessionSearch(q) {
+  const was = sessionSearch.q;
   sessionSearch = { q: String(q || ""), hits: null, pending: false, error: "", index: null };
   syncSessionSearchNote();
   syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
+  railFoldFollowSearch(was);
+}
+
+/* A search is answered over every row, folded ones included
+   (railExitedFolds), so the rail is drawn again when one starts or ends --
+   only then, since this runs on every key typed into the box. */
+function railFoldFollowSearch(was) {
+  if (!String(was || "").trim() === !String(sessionSearch.q || "").trim()) return;
+  if (typeof railExitedFoldState === "function") refreshSessions({ cached: true });
 }
 
 /* The box's own clear button (index.html #session-search-clear). It is shown
@@ -1981,8 +2116,10 @@ async function runSessionSearch(q) {
     syncSessionSearchNote();
     return;
   }
+  const was = sessionSearch.q;
   sessionSearch = { q, hits: null, pending: true, error: "", index: null };
   syncSessionSearchNote();
+  railFoldFollowSearch(was);
   let next;
   try {
     const resp = await api(`/api/search?kind=sessions&q=${encodeURIComponent(q)}&limit=50`);
@@ -2164,7 +2301,8 @@ let sessionOriginFilter = (() => {
 function filterSessionOrigin(rows, origin) {
   if (origin !== "local" && origin !== "remote") return rows;
   const drop = origin === "local" ? "shadow" : "session";
-  const kept = rows.filter((r) => r.type !== drop);
+  const kept = rows.filter((r) => r.type !== drop
+    && !(drop === "session" && r.type === "fold"));
   return kept.filter((row, i) => {
     if (row.type !== "group" || (!row.level && row.group !== "remote")) return true;
     for (let j = i + 1; j < kept.length; j++) {
@@ -3676,6 +3814,112 @@ function showSessionGridTip(cell, row, col, name, inView, pin = false) {
 }
 /* ---- end rail grid view ---------------------------------------------- */
 
+/* Exited rows fold away at the foot of their group (claunch-4thlk.6).
+   Most of a working machine's rail is sessions that have exited -- 144 of
+   165 rows when the poll bytes were measured -- and every one of them was a
+   full card in the DOM on every rebuild. They are folded by default under
+   one line that says how many there are; opening it draws them as before.
+   The fold is rail-wide (one line per group, one switch for all of them)
+   and the browser remembers it; storage that cannot be read reads as
+   folded, the default.
+
+   Only where the reader sees live rows beside them: a state filter without
+   "running" picked the exited rows on purpose, and a search is answered
+   over every row, so neither folds. An exited row stays where it stands
+   when it is the session open in the terminal or the detail panel, or when
+   a live session descends from it -- the lineage would otherwise point at a
+   parent that is not drawn. */
+const RAIL_EXITED_OPEN_KEY = `claunch_rail_exited_open:${BASE}`;
+let railExitedOpen = (() => {
+  try { return localStorage.getItem(RAIL_EXITED_OPEN_KEY) === "1"; } catch { return false; }
+})();
+
+function railExitedFolds() {
+  if (typeof sessionSearch === "object" && sessionSearch
+      && String(sessionSearch.q || "").trim()) return false;
+  return typeof sessionFilter === "undefined" || !Array.isArray(sessionFilter)
+    || sessionFilter.includes("running");
+}
+
+/* The names an open fold would not hide anyway, among the exited records. */
+function railExitedShown() {
+  const out = [];
+  for (const name of [typeof currentName === "string" ? currentName : null,
+                      typeof sessName === "string" ? sessName : null]) {
+    if (name && !out.includes(name)
+        && sessionsCache.some((s) => s.name === name && s.status === "exited")) out.push(name);
+  }
+  return out;
+}
+
+/* What the fold adds to the rail's signature: a change to any of it moves
+   rows in or out of the fold, which a record change alone would not show. */
+function railExitedFoldState() {
+  return [railExitedFolds(), railExitedOpen, railExitedShown()];
+}
+
+/* One bucket's session items, the exited ones that fold moved to its foot
+   behind a `fold` item. Folded rows stay in the list (marked `folded`) so the
+   counts the tabs and filters take from it are unchanged; the drawing loop
+   skips them. Their depth is counted again among themselves (regroupDepths),
+   since a parent left in place is no longer above them. */
+function railFoldExited(items) {
+  if (!railExitedFolds()) return items;
+  const shown = new Set([typeof currentName === "string" ? currentName : null,
+                         typeof sessName === "string" ? sessName : null]);
+  const live = new Set();
+  // A row keeps its place when anything live descends from it: walk the
+  // items backwards, so a child is seen before its parent.
+  const byName = new Map(items.map((item) => [item.session.name, item.session]));
+  for (let i = items.length - 1; i >= 0; i--) {
+    const s = items[i].session;
+    if (s.status !== "exited" || live.has(s.name)) {
+      let up = s.parent;
+      const seen = new Set();
+      while (up && byName.has(up) && !seen.has(up)) {
+        seen.add(up);
+        live.add(up);
+        up = byName.get(up).parent;
+      }
+    }
+  }
+  const stay = [];
+  const fold = [];
+  for (const item of items) {
+    const s = item.session;
+    (s.status === "exited" && !shown.has(s.name) && !live.has(s.name) ? fold : stay).push(item);
+  }
+  if (!fold.length) return items;
+  const depths = regroupDepths(fold.map((item) => [item.session, item.depth]));
+  return [
+    ...stay,
+    { type: "fold", count: fold.length, open: railExitedOpen, meshGroup: fold[0].meshGroup },
+    ...fold.map((item, i) => ({ ...item, depth: depths[i][1], folded: !railExitedOpen })),
+  ];
+}
+
+function toggleRailExitedFold() {
+  railExitedOpen = !railExitedOpen;
+  try {
+    if (railExitedOpen) localStorage.setItem(RAIL_EXITED_OPEN_KEY, "1");
+    else localStorage.removeItem(RAIL_EXITED_OPEN_KEY);
+  } catch { /* the choice lasts for this page */ }
+  refreshSessions({ cached: true });
+}
+
+/* A session picked while its row is folded away -- from a tab, the address,
+   a link -- has no row to mark. Its row is kept out of the fold
+   (railExitedShown); this draws the rail again so it is there. */
+function railRevealFolded(name) {
+  if (!name || !railExitedFolds() || railExitedOpen) return;
+  const list = $("session-list");
+  if (!list || typeof list.querySelector !== "function") return;
+  if (list.querySelector(`li[data-name="${CSS.escape(name)}"]`)) return;
+  if (sessionsCache.some((s) => s.name === name && s.status === "exited")) {
+    refreshSessions({ cached: true });
+  }
+}
+
 /* Re-measure lineage depth inside one bucket of rows.
 
    `byLineage` numbers the whole rail, and grouping then cuts that tree up:
@@ -3762,8 +4006,11 @@ function bucketWithDescendants(entries, inside) {
    (shadowLineage) among the shadows of that bucket. */
 function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows = []) {
   if (level >= groups.length) return [
-    ...regroupDepths(entries).map(([session, depth, kin]) =>
-      ({ type: "session", session, depth, meshGroup, kin: !!kin })),
+    // Guarded like the helpers below: a harness that lifts only this
+    // function gets every row in lineage order.
+    ...(typeof railFoldExited === "function" ? railFoldExited : (items) => items)(
+      regroupDepths(entries).map(([session, depth, kin]) =>
+        ({ type: "session", session, depth, meshGroup, kin: !!kin }))),
     // Guarded like the other late-defined helpers: a harness that lifts only
     // this function gets the shadows flat, in the order they came.
     ...(typeof shadowLineage === "function"
@@ -4565,6 +4812,69 @@ if (typeof document !== "undefined" && document.addEventListener) {
 
 /* ---- end rail keyboard focus ---------------------------------------- */
 
+/* The rail rows this page holds, per poll state, as the daemon sent them:
+   name -> {hash, text} (claunch-4thlk.3). The poll sends the digests and
+   gets back only the rows that changed, plus every name in order. Text, not
+   the row object: the object goes into sessionsCache, where the page writes
+   its optimistic overrides, and a row the daemon calls unchanged has to be
+   the row as the daemon sent it. */
+const sessionRowsKept = new Map();
+
+function sessionRowDigests(state) {
+  const kept = sessionRowsKept.get(state);
+  const out = {};
+  if (kept) for (const [name, row] of kept) out[name] = row.hash;
+  return out;
+}
+
+/* The poll's rows, whole, from an answer that may carry only the changed
+   ones. null when the answer names a row this page does not hold -- the
+   keep is dropped, so the next poll sends no digests and gets every row. */
+function sessionRowsTake(state, data) {
+  const rows = data.sessions || [];
+  if (!data.delta || !Array.isArray(data.names)) {
+    // A whole answer without digests: HTTP, or an older daemon.
+    sessionRowsKept.delete(state);
+    return rows;
+  }
+  const kept = sessionRowsKept.get(state) || new Map();
+  const changed = new Map(rows.map((row) => [row.name, row]));
+  const digests = data.row_hashes || {};
+  const fresh = new Map();
+  const out = [];
+  for (const name of data.names) {
+    const row = changed.get(name);
+    if (row) {
+      fresh.set(name, { hash: digests[name], text: JSON.stringify(row) });
+      out.push(row);
+      continue;
+    }
+    const held = kept.get(name);
+    if (!held) {
+      sessionRowsKept.delete(state);
+      return null;
+    }
+    fresh.set(name, held);
+    out.push(JSON.parse(held.text));
+  }
+  sessionRowsKept.set(state, fresh);
+  return out;
+}
+
+/* The rail list names each status check once (`status_check_defs`, id ->
+   {name, question}) and each row carries only its answers
+   (claunch-4thlk.5); every reader of a row's checks reads them whole, so
+   they are put back together here, on the rows this poll just made. */
+function sessionRowsJoin(rows, defs) {
+  if (!defs || typeof defs !== "object") return rows;
+  for (const row of rows) {
+    if (!Array.isArray(row.status_checks)) continue;
+    row.status_checks = row.status_checks.map((check) => (
+      check && defs[check.id] ? Object.assign({}, defs[check.id], check) : check));
+  }
+  return rows;
+}
+
 async function refreshSessions(options) {
   // The recurring poll asks for every unarchived record, not the running
   // ones alone. The rail's "current" view is running plus killed plus paused,
@@ -4586,12 +4896,16 @@ async function refreshSessions(options) {
   const cached = !!(options && options.cached);
   if (!cached) {
     let data;
+    // The row digests ride beside the read (claunch-4thlk.3); reduced
+    // harnesses that run this poll alone have no keep and read whole.
+    const rowKeep = typeof sessionRowsTake === "function";
     try {
       // Every project, always: the rail narrows what it draws itself
       // (railSessions), so a project pick redraws without a round trip and
       // a session of another project open in a tab keeps a real record.
       const resp = await api(
-        `/api/sessions?view=rail&state=${encodeURIComponent(state)}`);
+        `/api/sessions?view=rail&state=${encodeURIComponent(state)}`,
+        rowKeep ? { readArgs: { rows: sessionRowDigests(state) } } : undefined);
       // An error response carries a JSON body of its own, so `resp.json()`
       // succeeds and `data.sessions` is simply absent -- which used to read as
       // "this daemon has no sessions" and empty the rail, drop every parked
@@ -4602,7 +4916,9 @@ async function refreshSessions(options) {
     } catch {
       return;
     }
-    const incoming = data.sessions || [];
+    const incoming = rowKeep ? sessionRowsTake(state, data) : (data.sessions || []);
+    if (!incoming) return;
+    if (typeof sessionRowsJoin === "function") sessionRowsJoin(incoming, data.status_check_defs);
     const incomingNames = new Set(incoming.map((s) => s.name));
     // A request answers for one category of records. Keep every cached record
     // outside that category (the archived ones an operator explicitly opened,
@@ -4657,6 +4973,7 @@ async function refreshSessions(options) {
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
   const unstamped = (key, value) => (
     key === "due_in" || key === "fired_ago" ||
+    key === "due_at" || key === "fired_at" ||
     key === "last_visited_at" || key === "last_input_at" ||
     key === "last_activity_at" || key === "last_output_at" ||
     key === "viewers" || key === "moved_rows" || key === "tool_calls" ||
@@ -4673,7 +4990,9 @@ async function refreshSessions(options) {
      // The open tab picks which rows are drawn.
      typeof sessionGroupTab === "object" ? sessionGroupTab : null,
      // The mesh header's local/remote pick drops rows from the same cache.
-     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both"],
+     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both",
+     // What the exited fold hides (claunch-4thlk.6).
+     typeof railExitedFoldState === "function" ? railExitedFoldState() : null],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -4720,12 +5039,16 @@ async function refreshSessions(options) {
   const keptRows = new Map();
   const keptGroups = new Map();
   const keptShadows = new Map();
+  const keptFolds = new Map();
   if (inPlace) {
     const harvest = (box) => {
       for (const n of Array.from(box.childNodes)) {
         if (n._railGroupKey) {
           keptGroups.set(n._railGroupKey, n);
           harvest(n._railGroupBody);
+        } else if (n._railFoldSig) {
+          if (!keptFolds.has(n._railFoldSig)) keptFolds.set(n._railFoldSig, []);
+          keptFolds.get(n._railFoldSig).push(n);
         } else if (n._railShadowSig) {
           if (!keptShadows.has(n._railShadowSig)) keptShadows.set(n._railShadowSig, []);
           keptShadows.get(n._railShadowSig).push(n);
@@ -4923,6 +5246,38 @@ async function refreshSessions(options) {
       groupCounts[row.level] = count;
       groupKeys.length = row.level;
       groupKeys[row.level] = groupKey;
+      continue;
+    }
+    if (row.type === "fold") {
+      // The line the exited rows fold behind (railFoldExited). The rows it
+      // holds are counted under the headings above it either way.
+      const parent = nestedGroupContainers
+        ? (groupBodies[groupBodies.length - 1] || list) : list;
+      const sig = JSON.stringify([row.count, row.open]);
+      let fold = inPlace && keptFolds.has(sig) ? keptFolds.get(sig).shift() : null;
+      if (!fold) {
+        fold = document.createElement("li");
+        fold.className = `rail-fold${row.open ? " open" : ""}`;
+        fold.tabIndex = 0;
+        fold.setAttribute("role", "button");
+        fold.setAttribute("aria-expanded", String(!!row.open));
+        fold.textContent = `${row.open ? "\u25be" : "\u25b8"} exited \u00b7 ${row.count}`;
+        fold.title = row.open
+          ? "fold the exited sessions away"
+          : `${row.count} exited session${row.count === 1 ? "" : "s"} folded away -- open to list them`;
+        fold.addEventListener("click", toggleRailExitedFold);
+        fold.addEventListener("keydown", (ev) => {
+          if (ev.key !== "Enter" && ev.key !== " ") return;
+          ev.preventDefault();
+          toggleRailExitedFold();
+        });
+        if (inPlace) fold._railFoldSig = sig;
+      }
+      place(parent, fold);
+      continue;
+    }
+    if (row.folded) {
+      countRow();
       continue;
     }
     if (row.type === "shadow") {
@@ -5295,7 +5650,13 @@ async function refreshSessions(options) {
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
   // lost click the hold exists to prevent, and the redraw it owes covers it.
-  if ((!rebuild || inPlace) && !railHeld() && typeof refreshRailSeen === "function") {
+  // Typing holds them too: in the claunch-oo8au trace they took ~300 ms of
+  // script over 32 s of polls, the kind of stall the typing hold keeps out
+  // of a burst. They are owed to the pause that ends it (noteRailTyping), so
+  // a held seen line trails by at most the quiet window once the keys stop.
+  const seenHeld = railHeld();
+  if (typeof railSeenPending !== "undefined") railSeenPending = seenHeld;
+  if ((!rebuild || inPlace) && !seenHeld && typeof refreshRailSeen === "function") {
     refreshRailSeen(list);
   }
   // The create form offers these same conversations and sessions, but this
@@ -6298,14 +6659,42 @@ const RAIL_TIMER_RANK = {
   arming: 5, stopped: 6, blocked: 7, paused: 8, off: 9,
 };
 
+/* One clock's reading as of `nowMs`: the remaining and elapsed seconds.
+
+   The daemon publishes a clock's times as absolute epoch seconds (`due_at`,
+   `fired_at`) so an unchanged timer reads the same bytes on every poll
+   (claunch-4thlk.1); the seconds left are this page's clock against them,
+   the way the term timer rows read `due`. A reading from an older daemon
+   carries `due_in`/`fired_ago` already and passes through. */
+function timerReading(c, nowMs) {
+  if (!c || typeof c !== "object") return c;
+  if (!("due_at" in c) && !("fired_at" in c)) return c;
+  const t = (nowMs === undefined ? Date.now() : nowMs) / 1000;
+  const due = c.due_at === null || c.due_at === undefined ? null : Number(c.due_at);
+  const fired = c.fired_at === null || c.fired_at === undefined ? null : Number(c.fired_at);
+  return Object.assign({}, c, {
+    due_in: due === null ? null : due - t,
+    fired_ago: fired === null ? null : Math.max(0, t - fired),
+  });
+}
+
+/* A clock re-armed here, ahead of the poll that will say so: due one
+   `interval` from now, in both the published shape and the older one. */
+function timerRearmed(c, interval) {
+  return Object.assign({}, c, {
+    state: "counting", due_in: interval, due_at: Date.now() / 1000 + interval,
+  });
+}
+
 /* The clock a run's strip speaks for, or null when the daemon published no
-   timers for it (an older daemon, or a slot that is idle or errored). */
-function railTimerPick(run) {
+   timers for it (an older daemon, or a slot that is idle or errored).
+   `nowMs` is the moment the remaining seconds are taken at. */
+function railTimerPick(run, nowMs) {
   const timers = (run && run.timers) || null;
   if (!timers) return null;
   const cands = [];
   for (const clock of ["reminder", "role", "ping"]) {
-    const c = timers[clock];
+    const c = timerReading(timers[clock], nowMs);
     if (c && c.state) cands.push(Object.assign({}, c, { clock }));
   }
   if (!cands.length) return null;
@@ -6444,7 +6833,7 @@ function termTimerSubject(run, sessionReminder) {
   // before either repeating source reaches the terminal.
   if (sessionReminder && sessionReminder.paused && timers.reminder) {
     timers.reminder = Object.assign({}, timers.reminder, {
-      state: "paused", due_in: null,
+      state: "paused", due_in: null, due_at: null,
     });
   }
   if (!Object.keys(timers).length) return null;
@@ -6477,8 +6866,9 @@ function renderTermTimer() {
   const run = termTimerRun();
   const sessionReminder = termSessionReminder();
   const subject = termTimerSubject(run, sessionReminder);
+  const at = Date.now();
   termTimerRead = {
-    name: currentName, pick: railTimerPick(subject), at: Date.now(),
+    name: currentName, pick: railTimerPick(subject, at), at,
     remind: (run && run.timers && run.timers.reminder) || null,
     sessionReminder,
   };
@@ -6687,16 +7077,14 @@ async function termTimerClick() {
       state.paused = hold.on;
       if (state.role) {
         state.role = Object.assign({}, state.role, {
-          state: hold.on ? "paused" : "arming", due_in: null,
+          state: hold.on ? "paused" : "arming", due_in: null, due_at: null,
         });
       }
     }
     const run = termTimerRun();
     const reminder = run && run.timers && run.timers.reminder;
     if (!hold.on && reminder && reminder.interval) {
-      run.timers.reminder = Object.assign({}, reminder, {
-        state: "counting", due_in: reminder.interval,
-      });
+      run.timers.reminder = timerRearmed(reminder, reminder.interval);
     }
     termTimerBusy = false;
     renderTermTimer();
@@ -6798,13 +7186,9 @@ async function termTimerSkipClick() {
   if (skip.session && read && read.sessionReminder && read.sessionReminder.role) {
     const role = read.sessionReminder.role;
     if (role.interval) {
-      read.sessionReminder.role = Object.assign({}, role, {
-        state: "counting", due_in: role.interval,
-      });
+      read.sessionReminder.role = timerRearmed(role, role.interval);
       if (read.pick && read.pick.clock === "role") {
-        read.pick = Object.assign({}, read.pick, {
-          state: "counting", due_in: role.interval,
-        });
+        read.pick = timerRearmed(read.pick, role.interval);
         read.at = Date.now();
       }
     }
@@ -6812,16 +7196,12 @@ async function termTimerSkipClick() {
   const cflowInterval = skip.session && read && read.remind
     ? read.remind.interval : skip.interval;
   if (read && read.remind && cflowInterval) {
-    read.remind = Object.assign({}, read.remind, {
-      state: "counting", due_in: cflowInterval,
-    });
+    read.remind = timerRearmed(read.remind, cflowInterval);
     // Only when the line is speaking for the reminder. When the ping is the
     // loudest clock the chip is telling the ping's story, and restamping the
     // reading would rewind the ping's countdown along with it.
     if (read.pick && read.pick.clock === "reminder") {
-      read.pick = Object.assign({}, read.pick, {
-        state: "counting", due_in: cflowInterval,
-      });
+      read.pick = timerRearmed(read.pick, cflowInterval);
       read.at = Date.now();
     }
   }
@@ -9365,7 +9745,8 @@ async function refreshCflow() {
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
   const signature = JSON.stringify(
     runs,
-    (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
+    (key, value) => key === "due_in" || key === "fired_ago" ||
+      key === "due_at" || key === "fired_at" ? undefined : value,
   );
   const repaintRail = currentPage === "flows" || signature !== cflowRailRendered;
   if (currentPage === "flows") cflowRailRendered = null;
@@ -19533,6 +19914,7 @@ async function snapshotAttach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
+  if (typeof railRevealFolded === "function") railRevealFolded(name);
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
   // And which card unfolds its commits (claunch-7myrv).
@@ -19623,6 +20005,7 @@ function freshAttach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
+  if (typeof railRevealFolded === "function") railRevealFolded(name);
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
   // And which card unfolds its commits (claunch-7myrv).
@@ -36907,6 +37290,7 @@ function repointDetail(name) {
   stopSessRun();
   stopSessKids();
   sessName = name;
+  if (typeof railRevealFolded === "function") railRevealFolded(name);
   sessStartBox = null;
   sessSendBox = null;
   sessJoinBox = null;
@@ -37189,7 +37573,11 @@ function railPrFrame(pr, commits, session) {
    them once from /rail-commits and draws those instead. Kept per session
    under a key that moves when the session commits again, so a poll redraw
    costs no request and a new commit costs one. A failed read leaves the
-   `+N` in place until the key moves. */
+   `+N` in place until the key moves.
+
+   An exited card's commits are not on the poll at all
+   (`rail_commits_deferred`, claunch-4thlk.5): an exited session commits no
+   more, so they are read the same way, once, when its card is selected. */
 const railCommitsAll = new Map();
 
 function railCommitsKey(rc) {
@@ -37200,8 +37588,9 @@ function railCommitsKey(rc) {
 function railCommitsUnfolded(li, s, rc) {
   const open = !!(li.classList && li.classList.contains("active"));
   li._railCommitsOpen = open;
-  if (!open || !rc || !(rc.more > 0)) return rc;
-  const key = railCommitsKey(rc);
+  const deferred = !rc && !!s.rail_commits_deferred;
+  if (!open || (!deferred && !(rc && rc.more > 0))) return rc;
+  const key = deferred ? "deferred" : railCommitsKey(rc);
   const got = railCommitsAll.get(s.name);
   if (got && got.key === key) return got.rc || rc;
   railCommitsAll.set(s.name, { key, rc: null });

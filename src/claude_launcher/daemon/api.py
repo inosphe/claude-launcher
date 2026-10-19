@@ -64,7 +64,7 @@ from . import loop_lag as loop_lag_mod
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
-from . import shared_reads
+from . import shared_reads, wallclock
 from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
@@ -188,7 +188,14 @@ class JSONText(str):
     """
 
 
-def _with_answers(head: dict, answers: dict) -> str:
+def _utf16_len(text: str) -> int:
+    """``text``'s length as JavaScript counts it (UTF-16 code units)."""
+    if text.isascii():
+        return len(text)
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _with_answers(head: dict, answers: dict, *, spans: bool = False) -> str:
     """``head`` as JSON text with an ``answers`` member spliced in last.
 
     The reply of a batch and of a control-socket read: everything but the
@@ -196,15 +203,30 @@ def _with_answers(head: dict, answers: dict) -> str:
     route's own text, anything else (a read with no body, a test's stub) is
     encoded. Joined once, so each answer is copied once: a rail is a
     megabyte, and every intermediate string would be another.
+
+    ``spans`` adds a ``spans`` member after the answers: path -> [start, end)
+    of that answer's text within this reply, in UTF-16 code units, which is
+    how the page's ``String.slice`` counts. The page parses the reply once
+    and still has each answer's own text to keep, without encoding the
+    parsed answer back to text (claunch-4thlk.4) -- which is what it keeps
+    for the next conditional read (claunch-4thlk.2).
     """
     text = _dumps(head)
     parts = [text[:-1], ", " if head else "", '"answers": {']
+    at = sum(_utf16_len(p) for p in parts)
+    where: dict = {}
     for i, (key, value) in enumerate(answers.items()):
-        if i:
-            parts.append(", ")
-        parts += [_dumps(key), ": ",
-                  value if isinstance(value, JSONText) else _dumps(value)]
-    parts.append("}}")
+        lead = (", " if i else "") + _dumps(key) + ": "
+        body = value if isinstance(value, JSONText) else _dumps(value)
+        parts += [lead, body]
+        at += _utf16_len(lead)
+        end = at + _utf16_len(body)
+        where[key] = [at, end]
+        at = end
+    if spans:
+        parts.append('}, "spans": ' + _dumps(where) + "}")
+    else:
+        parts.append("}}")
     return "".join(parts)
 
 
@@ -1444,7 +1466,7 @@ def _refusal_message(response) -> str:
     return f"HTTP {status}"
 
 
-async def _batch_one(template: web.Request, path: str):
+async def _batch_one(template: web.Request, path: str, args: Optional[dict] = None):
     """Run one of this app's own GET routes and hand back its JSON.
 
     The route is resolved through the same router that serves it normally,
@@ -1456,8 +1478,15 @@ async def _batch_one(template: web.Request, path: str):
     (claunch-xrrn0). That trusts the route's ``application/json`` to be
     JSON, which holds for :func:`json_response` and aiohttp's own, the two
     ways a route here writes one. Any other body is parsed, as before.
+
+    ``args`` is what a control read sent for this path beside it
+    (``read_args``, see :func:`h_control_ws`); a route reads it with
+    ``request.get("read_args")``. A direct GET never has it, so a route must
+    answer in full without it.
     """
     sub = template.clone(rel_url=path)
+    if isinstance(args, dict):
+        sub["read_args"] = args
     match = await template.app.router.resolve(sub)
     handler = getattr(match, "handler", None)
     if handler is None or getattr(match, "http_exception", None) is not None:
@@ -1524,6 +1553,13 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     - A read carrying ``"parts": true`` may be answered in ``read_part``
       frames; the page acknowledges each with ``{"type":"read_ack","id":N,
       "seq":K}`` -> not answered. See :class:`channel.Carrier`.
+    - A read carrying ``"hashes": {path: digest}`` is answered conditionally:
+      the reply has ``hashes`` for every answer and lists in ``unchanged``
+      the paths whose digest the page already holds, leaving their answers
+      out (see :func:`_read_hashes`). ``"spans": true`` adds where each
+      answer's text sits in the reply (see :func:`_with_answers`).
+      ``"args": {path: {...}}`` hands a route arguments that do not belong in
+      its path (see :func:`_batch_one`): the sessions rail's row digests.
 
     The socket being open is itself the liveness answer, which is what
     retires the probe the page used to spend a connection on.
@@ -1550,26 +1586,37 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
         await carrier.send_soon(json.dumps(frame))
 
     async def answer_read(frame: dict) -> None:
+        known = frame.get("hashes")
         try:
             answers, errors, statuses = await _control_read(
-                template, frame.get("paths")
+                template, frame.get("paths"), frame.get("args")
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- one read, not the socket
             log.debug("control read failed", exc_info=True)
             answers, errors, statuses = {}, {"": repr(exc)}, {}
+        head = {
+            "type": "read_result",
+            "id": frame.get("id"),
+            "errors": errors,
+            "statuses": statuses,
+        }
+        if isinstance(known, dict):
+            hashes, unchanged = _read_hashes(answers, known)
+            head["hashes"] = hashes
+            head["unchanged"] = unchanged
+            for path in unchanged:
+                del answers[path]
         # The bulk lane: a pong or a terminal's output queued after this goes
         # ahead of it, and a page that takes parts gets it in parts
         # (claunch-iss86, see channel.Carrier).
         # Encoded around the routes' own text, not parsed and re-encoded
         # (claunch-xrrn0): this runs on the loop every terminal waits on.
-        await carrier.send_bulk(_with_answers({
-            "type": "read_result",
-            "id": frame.get("id"),
-            "errors": errors,
-            "statuses": statuses,
-        }, answers), parts=frame.get("parts") is True, key=frame.get("id"))
+        await carrier.send_bulk(
+            _with_answers(head, answers, spans=frame.get("spans") is True),
+            parts=frame.get("parts") is True, key=frame.get("id"),
+        )
 
     try:
         init = {"type": "init"}
@@ -1703,7 +1750,39 @@ def _control_pong_text(request: web.Request, frame: dict, received: float) -> st
     return json.dumps(pong)
 
 
-async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]:
+def _answer_hash(value) -> str:
+    """A short digest of one answer as it goes on the wire."""
+    text = value if isinstance(value, JSONText) else _dumps(value)
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _read_hashes(answers: dict, known: dict) -> tuple[dict, list]:
+    """Each answer's digest, and the paths whose digest the page already holds.
+
+    A read frame that carries ``hashes`` (path -> the digest of the answer the
+    page kept from its last read of that path) is answered conditionally:
+    a path whose answer has the same digest is listed in ``unchanged`` and
+    left out of ``answers``, and the page reuses what it kept
+    (claunch-4thlk.2). The answer is still built -- what this saves is the
+    wire and the page's parse, which for a dashboard that changes nothing
+    between two polls was the whole of both. Nothing is kept here: the page
+    says what it holds on every read, so a reconnect, a second tab or a page
+    that dropped its copy simply sends no digest for that path and gets the
+    answer. A frame without ``hashes`` (an older page) is answered as before.
+    """
+    hashes: dict = {}
+    unchanged: list = []
+    for path, value in answers.items():
+        digest = _answer_hash(value)
+        hashes[path] = digest
+        if known.get(path) == digest:
+            unchanged.append(path)
+    return hashes, unchanged
+
+
+async def _control_read(
+    template: web.Request, paths, args=None,
+) -> tuple[dict, dict, dict]:
     """The read half of :func:`h_control_ws`, with the same rules as a batch.
 
     Kept beside the socket rather than shared with :func:`h_batch` at the
@@ -1722,8 +1801,12 @@ async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]
         if not isinstance(raw, str) or not raw.startswith("/api/"):
             errors[str(raw)] = "only this daemon's /api/ paths"
             continue
+        extra = args.get(raw) if isinstance(args, dict) else None
         try:
-            answers[raw] = await _batch_one(template, raw)
+            answers[raw] = await (
+                _batch_one(template, raw, extra) if isinstance(extra, dict)
+                else _batch_one(template, raw)
+            )
         except _ReadRefused as exc:
             errors[raw] = exc.message
             statuses[raw] = exc.status
@@ -4402,14 +4485,17 @@ def _clock_snapshots(app) -> dict:
     and inventing a number for either is worse than saying so.
     """
     clocks = app.get("cflow_clocks") or {}
-    out = {}
+    # One instant for both tables, kept beside them: the ages are relative to
+    # it, and _cflow_timers turns them back into absolute times with it.
+    now = time.monotonic()
+    out = {"now": now}
     for kind in _CLOCK_KINDS:
         clock = clocks.get(kind)
         if clock is None:
             out[kind] = {"running": False, "timers": {}}
             continue
         try:
-            out[kind] = {"running": bool(clock.running), "timers": clock.timers()}
+            out[kind] = {"running": bool(clock.running), "timers": clock.timers(now)}
         except Exception:  # noqa: BLE001 — a readout must never break the poll
             # Swallowed without a trace on purpose: this module keeps no
             # logger, and the failure it can actually take is a table read
@@ -4437,10 +4523,13 @@ def _cflow_timers(
     no: it is armed and correctly saying nothing, and which of the several
     ways that happens is the whole content of the answer.
 
-    ``due_in`` may be negative. That is not a bug to clamp away: past zero
-    the clock is due and has not delivered — held for a session that stopped,
-    or inside the fifteen seconds until the next poll — and a floor of zero
-    would hide exactly the stretch a reader is trying to see.
+    The times are absolute (``due_at``, ``fired_at``: epoch seconds,
+    :mod:`.wallclock`), so an unchanged timer reads the same bytes on every
+    poll; the page subtracts its own clock (claunch-4thlk.1). ``due_at`` may
+    be in the past. That is not a bug to clamp away: past it the clock is due
+    and has not delivered — held for a session that stopped, or inside the
+    fifteen seconds until the next poll — and a floor of "now" would hide
+    exactly the stretch a reader is trying to see.
     """
     cfg = cfg or {}
     key = (cwd, scope)
@@ -4455,24 +4544,31 @@ def _cflow_timers(
     except Exception:  # noqa: BLE001 — raced with an exit
         busy = False
 
+    now = snaps.get("now")
+    if now is None:
+        now = time.monotonic()
+
     def base(kind, enabled, interval):
         snap = snaps.get(kind) or {}
         timer = (snap.get("timers") or {}).get(key)
+        fired_ago = (timer or {}).get("fired_ago")
         view = {
             "running": bool(snap.get("running")),
             "enabled": bool(enabled),
             "interval": interval,
-            "due_in": None,
-            "fired_ago": (timer or {}).get("fired_ago"),
+            "due_at": None,
+            "fired_at": None if fired_ago is None else wallclock.wall(now - fired_ago),
             "state": "",
         }
+        due_in = None
         if timer is not None and interval > 0:
-            view["due_in"] = interval - timer["armed_ago"]
-        return view, timer
+            due_in = interval - timer["armed_ago"]
+            view["due_at"] = wallclock.wall(now + due_in)
+        return view, timer, due_in
 
     awaits = payload.get("awaits") or {}
     enabled, interval = cflow_clock.reminder_policy(payload, cfg)
-    rem, timer = base("reminder", enabled, interval)
+    rem, timer, due_in = base("reminder", enabled, interval)
     if not rem["running"]:
         rem["state"] = "stopped"
     elif not enabled:
@@ -4488,7 +4584,7 @@ def _cflow_timers(
         # The one configuration where this clock says nothing but news: no
         # repeat, and an `awaits` probe watching for the thing to move.
         rem["state"] = "watching"
-    elif rem["due_in"] > 0:
+    elif due_in > 0:
         rem["state"] = "counting"
     else:
         rem["state"] = "held" if not busy else "due"
@@ -4502,7 +4598,7 @@ def _cflow_timers(
         rem["probe_code"] = (timer or {}).get("probe_code")
 
     enabled, interval = cflow_clock.ping_policy(cfg)
-    ping, timer = base("ping", enabled, interval)
+    ping, timer, due_in = base("ping", enabled, interval)
     if not ping["running"]:
         ping["state"] = "stopped"
     elif not enabled:
@@ -4517,7 +4613,7 @@ def _cflow_timers(
         # being reset every pass, and a countdown drawn without this reads as
         # a clock that has frozen.
         ping["state"] = "waiting"
-    elif ping["due_in"] > 0:
+    elif due_in > 0:
         ping["state"] = "counting"
     else:
         ping["state"] = "due"
@@ -6303,9 +6399,32 @@ async def h_mesh_list(request: web.Request) -> web.Response:
                 if projects.matches(m.project, project_filter)
             ],
             "outgoing": mm.outgoing_list(),
-            "relay": request.app["relay_state"](),
+            "relay": (
+                _relay_rail(request.app["relay_state"]())
+                if rail_view else request.app["relay_state"]()
+            ),
         }
     )
+
+
+#: The relay round-trip readings (relay_uplink.RelayUplink.latency). They
+#: move on every uplink ping, five seconds apart, so a rail answer carrying
+#: them was never the same bytes twice (claunch-4thlk.1). The rail's relay
+#: badge does not draw them; the latency badge gets the same numbers on the
+#: control socket's pong, which is where a fresh reading belongs.
+_RELAY_LATENCY_KEYS = ("rtt_ms", "rtt_age", "pending_ms")
+
+
+def _relay_rail(relay):
+    """``relay`` without the per-ping latency readings, for the rail poll."""
+    if not isinstance(relay, dict) or not isinstance(relay.get("relays"), list):
+        return relay
+    rows = [
+        {k: v for k, v in row.items() if k not in _RELAY_LATENCY_KEYS}
+        if isinstance(row, dict) else row
+        for row in relay["relays"]
+    ]
+    return {**relay, "relays": rows}
 
 
 async def h_mesh_create(request: web.Request) -> web.Response:
@@ -8388,8 +8507,40 @@ async def h_peer_ops_lease(request: web.Request) -> web.Response:
     return json_response(result)
 
 
-@shared_reads.shared("sessions")
 async def h_sessions_list(request: web.Request) -> web.Response:
+    """The session list; for a rail read that sends its row digests, only
+    the rows that changed (claunch-4thlk.3, :func:`_rail_rows_delta`).
+
+    The list itself is a shared read, one answer for every page; the digests
+    are this page's own, so the cut is made here, after it, from the per-row
+    texts the shared answer carries beside its body (``rail_rows``).
+    """
+    response = await _sessions_list(request)
+    known = (request.get("read_args") or {}).get("rows")
+    rows = response.get("rail_rows") if isinstance(known, dict) else None
+    if rows is None:
+        return response
+    changed, digests = [], {}
+    for name, digest, text in zip(rows["names"], rows["digests"], rows["texts"]):
+        if known.get(name) != digest:
+            changed.append(text)
+            digests[name] = digest
+    head = {**rows["head"], "names": rows["names"], "row_hashes": digests,
+            "delta": True}
+    return json_text_response(_with_member(head, "sessions", "[" + ", ".join(changed) + "]"))
+
+
+h_sessions_list.shared_read = "sessions"
+
+
+def _with_member(head: dict, key: str, text: str) -> str:
+    """``head`` as JSON text with ``key`` spliced in last as ``text``."""
+    encoded = _dumps(head)
+    return encoded[:-1] + (", " if head else "") + _dumps(key) + ": " + text + "}"
+
+
+@shared_reads.shared("sessions")
+async def _sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     rail_view = request.query.get("view") == "rail"
     list_state = request.query.get("state") or "all"
@@ -8627,6 +8778,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         prog = published.get(info.get("name") or "")
         if prog:
             info["progress"] = prog
+    check_defs: dict = {}
     if rail_view:
         # The dashboard reads this resource repeatedly. The detail panel has
         # its own /meta request, so an opening task and environment do not
@@ -8674,12 +8826,88 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             {key: value for key, value in info.items() if key in rail_fields}
             for info in attached
         ]
-    body = {
-        "sessions": attached, "llm_configured": llm_ok, "rag_configured": rag_ok,
-    }
+        # The tps reading's ``age_s`` grows by the poll interval on every
+        # answer, so no two rail answers were the same bytes; the rail draws
+        # the age from ``ts`` itself (claunch-4thlk.1).
+        for row in attached:
+            tps = row.get("tps")
+            if isinstance(tps, dict) and "age_s" in tps:
+                row["tps"] = {k: v for k, v in tps.items() if k != "age_s"}
+        check_defs = _rail_slim_rows(attached)
+    body = {"llm_configured": llm_ok, "rag_configured": rag_ok}
     if queue_status:
         body["restore_queue"] = queue_status
-    return json_response(body)
+    if rail_view and check_defs:
+        body["status_check_defs"] = check_defs
+    if not rail_view:
+        return json_response({"sessions": attached, **body})
+    # Each rail row encoded on its own and joined, so the same texts serve a
+    # page that asks for only the rows it does not hold (h_sessions_list).
+    # Kept on the response for that cut; a shared read keeps them with the
+    # stored answer (shared_reads._Stored.extra).
+    texts = [_dumps(row) for row in attached]
+    response = json_text_response(
+        _with_member(body, "sessions", "[" + ", ".join(texts) + "]"))
+    response["rail_rows"] = {
+        "head": body,
+        "names": [row.get("name") for row in attached],
+        "digests": [_row_digest(text) for text in texts],
+        "texts": texts,
+    }
+    return response
+
+
+#: The parts of a status check that are the check's, not the session's
+#: answer: the same on every row that reports it.
+_CHECK_DEF_KEYS = ("name", "question")
+
+
+def _rail_slim_rows(rows: list) -> dict:
+    """Take what repeats on every rail row out of the rows (claunch-4thlk.5).
+
+    Measured on a working daemon: the status checks were 76KB of a 360KB
+    rail, nearly all of it each check's name and question repeated on every
+    row that answered it, and an exited row's commit chips another large
+    share for cards that are folded away. So, in place:
+
+    - each row's checks keep their ``id`` and the session's answer; the
+      name and question go once into the returned ``{id: {name, question}}``,
+      which the list carries as ``status_check_defs`` and the page joins
+      back (``sessionRowsJoin`` in app.js);
+    - an exited row's ``rail_commits`` is left out and the row says
+      ``rail_commits_deferred``; the page reads them from
+      ``/api/sessions/<name>/rail-commits`` when the card is selected.
+    """
+    defs: dict = {}
+    for row in rows:
+        checks = row.get("status_checks")
+        if isinstance(checks, list):
+            slim = []
+            for check in checks:
+                if isinstance(check, dict) and check.get("id"):
+                    defs.setdefault(check["id"], {k: check.get(k) for k in _CHECK_DEF_KEYS})
+                    check = {k: v for k, v in check.items() if k not in _CHECK_DEF_KEYS}
+                slim.append(check)
+            row["status_checks"] = slim
+        if row.get("status") == "exited" and row.get("rail_commits"):
+            del row["rail_commits"]
+            row["rail_commits_deferred"] = True
+    return defs
+
+
+def _row_digest(text: str) -> str:
+    """The digest a page keeps for one rail row (claunch-4thlk.3).
+
+    The page sends ``{name: digest}`` for the rows it kept from its last
+    read, beside the read (``read_args.rows``), and gets back only the rows
+    whose digest differs (new ones included), every row's name in order --
+    a name missing from it is a row gone -- and the digests of the rows it
+    got, to keep for the next read. Nothing is kept here: a page that sends
+    no digests (its first read, a reconnect, an error) gets every row, and a
+    read with no ``rows`` at all (HTTP, an older page) gets the answer it
+    always had.
+    """
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:

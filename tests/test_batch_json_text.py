@@ -33,11 +33,21 @@ async def _plain_prose(request):
     return web.Response(text="not json", content_type="text/plain")
 
 
+_ticks = [0]
+
+
+async def _ticking(request):
+    """An answer that is different on every read."""
+    _ticks[0] += 1
+    return web.json_response({"tick": _ticks[0]})
+
+
 async def _serve():
     mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
     app = build_app(mgr, "sekrit", started_at=time.monotonic())
     app.router.add_get("/api/_test/plain-list", _plain_list)
     app.router.add_get("/api/_test/plain-prose", _plain_prose)
+    app.router.add_get("/api/_test/ticking", _ticking)
     client = TestClient(TestServer(app))
     await client.start_server()
     return client
@@ -192,3 +202,61 @@ def test_pre_encoded_text_still_goes_in_parts_held_to_the_window():
         await carrier.shutdown()
 
     asyncio.run(run())
+
+
+def test_a_read_that_says_what_it_holds_gets_only_what_changed(home):
+    """The conditional read (claunch-4thlk.2) and its spans (claunch-4thlk.4).
+
+    A read that carries ``hashes`` gets every answer's digest back; sent
+    again with those digests, an answer that has not changed is left out and
+    named in ``unchanged``. ``spans`` says where each answer's text sits in
+    the reply, counted the way the page's ``String.slice`` counts. A read
+    without either is answered exactly as before."""
+
+    async def run():
+        client = await _serve()
+        try:
+            async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                await ws.receive()  # init
+                paths = ["/api/_test/plain-list", "/api/_test/ticking"]
+                raw, first = await _read(ws, {"type": "read", "id": 1, "paths": paths,
+                                              "hashes": {}, "spans": True})
+                assert set(first["answers"]) == set(paths)
+                assert first["unchanged"] == []
+                assert set(first["hashes"]) == set(paths)
+                units = raw.encode("utf-16-le")
+                for path in paths:
+                    start, end = first["spans"][path]
+                    text = units[2 * start:2 * end].decode("utf-16-le")
+                    assert json.loads(text) == first["answers"][path]
+                # The ticking route changes on every read, so only the plain
+                # list is the same twice; that is the one left out.
+                _, second = await _read(ws, {"type": "read", "id": 2, "paths": paths,
+                                             "hashes": first["hashes"], "spans": True})
+                assert second["unchanged"] == ["/api/_test/plain-list"]
+                assert list(second["answers"]) == ["/api/_test/ticking"]
+                # A digest the page does not hold is just a full answer.
+                _, third = await _read(ws, {"type": "read", "id": 3, "paths": paths[:1],
+                                            "hashes": {paths[0]: "0" * 16}})
+                assert third["answers"] == {paths[0]: [1, 2]}
+                assert "spans" not in third
+                # An older page: no hashes, no spans, the reply it always had.
+                _, old = await _read(ws, {"type": "read", "id": 4, "paths": paths[:1]})
+                assert old["answers"] == {paths[0]: [1, 2]}
+                assert "hashes" not in old and "unchanged" not in old
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_spans_count_utf16_units_past_korean_and_astral_text():
+    text = _with_answers(
+        {"type": "read_result", "id": 9},
+        {"/a": JSONText('{"t": "한글 😀"}'), "/b": [1, "😀"]},
+        spans=True,
+    )
+    data = json.loads(text)
+    units = text.encode("utf-16-le")
+    for path, (start, end) in data["spans"].items():
+        assert json.loads(units[2 * start:2 * end].decode("utf-16-le")) == data["answers"][path]

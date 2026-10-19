@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .. import digests, prompt_packs, store, workspaces
 from ..cflow import engine as cflow_engine, state as cflow_state
-from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal
+from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal, wallclock
 from .session import STATUS_BUSY
 
 log = logging.getLogger("claunch.daemon.session-reminder")
@@ -938,17 +938,18 @@ class SessionReminderService:
             cfg = self._config()
         enabled, interval = role_reminder_policy(cfg or {})
         timer = self._roles.get(name)
+        # Absolute times, not ages: an age moves on every poll and made every
+        # sessions answer different bytes (claunch-4thlk.1, daemon/wallclock).
         view = {
             "running": self.running,
             "enabled": enabled,
             "interval": interval,
-            "due_in": None,
-            "fired_ago": None,
+            "due_at": None,
+            "fired_at": None,
             "state": "",
         }
         if timer is not None:
-            fired = timer.get("fired_at")
-            view["fired_ago"] = None if fired is None else max(0.0, at - fired)
+            view["fired_at"] = wallclock.wall(timer.get("fired_at"))
 
         if not self.running:
             view["state"] = "stopped"
@@ -960,7 +961,7 @@ class SessionReminderService:
             view["state"] = "arming"
         else:
             due = interval - max(0.0, at - timer["at"])
-            view["due_in"] = due
+            view["due_at"] = wallclock.wall(timer["at"] + interval)
             if due > 0:
                 view["state"] = "counting"
             else:

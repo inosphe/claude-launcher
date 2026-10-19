@@ -21,7 +21,7 @@ import pytest
 from claude_launcher import profile, store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow.engine import CflowError
-from claude_launcher.daemon import cflow_clock, mesh_roles, rebrief, session_reminder
+from claude_launcher.daemon import cflow_clock, mesh_roles, rebrief, session_reminder, wallclock
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -1300,7 +1300,15 @@ def test_role_timer_status_reports_session_pause_without_a_cflow_run(proj):
     )
     assert status["paused"] is False
     assert status["role"]["state"] == "counting"
-    assert status["role"]["due_in"] == 480.0
+    # Armed at 1000 with a 600s interval: due at 1600 on the monotonic clock,
+    # published as that instant's wall time so it holds still between polls.
+    assert status["role"]["due_at"] == wallclock.wall(1600.0)
+    later = service.status(
+        "w1",
+        now=1125.0,
+        cfg={"role_reminder": True, "role_reminder_interval": 600.0},
+    )
+    assert later == status
 
     service.set_paused("w1", True, now=1120.0)
     status = service.status(

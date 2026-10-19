@@ -159,6 +159,22 @@ assert.equal(li.querySelector(".rail-commits"), null, "cleared commits remove th
   assert.equal(li.querySelector(".rail-commits").children.at(-1).textContent, "+2");
   api.decorateCommitsRow(li, {...t, rail_commits: {commits: [commits[1]], more: 2}});
   assert.equal(railCalls.filter((p) => p.includes("/s2/")).length, 2, "a new commit reads again");
+
+  // An exited card's commits are not on the poll (claunch-4thlk.5): none
+  // drawn while it is folded, one read when it is selected, then reused.
+  const gone = {name: "s3", status: "exited", prs: [], rail_commits_deferred: true};
+  li = card();
+  api.decorateCommitsRow(li, gone);
+  assert.equal(li.querySelector(".rail-commits"), null, "a folded exited card draws no line");
+  assert.equal(railCalls.filter((p) => p.includes("/s3/")).length, 0, "and reads nothing");
+  li = selected();
+  railAnswer = {session: "s3", rail_commits: {commits: [commits[0]], more: 0}};
+  api.decorateCommitsRow(li, gone);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(railCalls.filter((p) => p.includes("/s3/")), ["/api/sessions/s3/rail-commits"]);
+  assert.equal(li.querySelector(".rail-commits").children.length, 1, "selected: its commits");
+  api.decorateCommitsRow(li, gone);
+  assert.equal(railCalls.filter((p) => p.includes("/s3/")).length, 1, "read once");
   console.log("selected card unfolds its commits: passed");
 })().catch((e) => { console.error(e); process.exit(1); });
 
