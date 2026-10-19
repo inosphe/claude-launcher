@@ -184,6 +184,20 @@ Exit codes match ``tools/deploy_check.py``: 0 = the selected tests passed (or
 there were none), 1 = they failed, 2 = could not tell -- which is what
 ``--check`` returns when no receipt answers, because "nobody has run this"
 and "this is fine" are the two things a gate must never spell the same way.
+
+A red run is not yet a verdict about this change (``claunch-wuaup``). Before
+the gate says 1 it runs the same selection once more at the merge base, in a
+throwaway worktree, and splits the failing node ids in two: the ones that fail
+there too are *preexisting* and the rest are *new*. Only new failures make the
+exit status 1; the preexisting ones are printed and written into the receipt
+(``preexisting``, ``new_failures``, ``base_commit``) so the round reports them
+instead of looping on them. The measured case: 21 Windows-only failures on
+master ``2ba6082a`` (``claunch-mli4r``) entered a selection, the fix loop could
+not end, and a person had to decide by hand to drop three modules and re-run
+-- by a pytest command that left no receipt. ``--no-compare-base`` turns the
+second run off. ``--deselect``/``--known-failures`` leave tests out on
+purpose, and say so in the receipt, which is where a hand-run pytest left
+nothing.
 """
 
 from __future__ import annotations
@@ -1229,15 +1243,18 @@ def worktree_tree(repo: Path) -> str:
         return _git(repo, "write-tree", env=env)
 
 
-def selection_key(files: List[str]) -> str:
+def selection_key(files: List[str], deselect: tuple = ()) -> str:
     """Which modules a receipt speaks for -- part of the key, not a detail.
 
     Two runs over the same tree that selected different modules are two
     different verdicts, and the smaller one must never answer for the larger
     (``claunch-p5n`` names this explicitly). Folding the selection into the
-    key makes that impossible rather than merely discouraged.
+    key makes that impossible rather than merely discouraged. A deselected
+    node id narrows the run the same way, so it is folded in too; with none
+    the key is what it always was.
     """
-    return hashlib.sha1("\n".join(sorted(files)).encode("utf-8")).hexdigest()[:12]
+    parts = sorted(files) + [f"!{d}" for d in sorted(set(deselect))]
+    return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
 def receipts_dir(repo: Path, override: Optional[Path] = None) -> Path:
@@ -1254,13 +1271,39 @@ def receipts_dir(repo: Path, override: Optional[Path] = None) -> Path:
 
 
 def receipt_path(
-    repo: Path, tree: str, files: List[str], override: Optional[Path] = None
+    repo: Path,
+    tree: str,
+    files: List[str],
+    override: Optional[Path] = None,
+    deselect: tuple = (),
 ) -> Path:
-    return receipts_dir(repo, override) / f"{tree}-{selection_key(files)}.json"
+    return receipts_dir(repo, override) / f"{tree}-{selection_key(files, deselect)}.json"
+
+
+def receipt_passes(receipt: dict) -> bool:
+    """Green, or red only with failures the merge base has too.
+
+    The second half is ``claunch-wuaup``: a receipt whose every failure also
+    fails at the base, measured by :func:`base_failures` and named in
+    ``preexisting``, says nothing against this change. An empty
+    ``new_failures`` alone is not enough -- a run that died before printing
+    any ``FAILED`` line has none either, and that is no verdict at all.
+    """
+    if sweep.is_green({**receipt, "dirty": False}):
+        return True
+    return (
+        receipt.get("exit_code") == 1
+        and receipt.get("new_failures") == []
+        and bool(receipt.get("preexisting"))
+    )
 
 
 def find_receipt(
-    repo: Path, tree: str, files: List[str], override: Optional[Path] = None
+    repo: Path,
+    tree: str,
+    files: List[str],
+    override: Optional[Path] = None,
+    deselect: tuple = (),
 ) -> Optional[dict]:
     """The green receipt that already answers for this tree and selection.
 
@@ -1284,7 +1327,7 @@ def find_receipt(
     same shape, see ``sweep._newest_green``. A silent skip here is a round
     re-measuring what it had already measured.
     """
-    path = receipt_path(repo, tree, files, override)
+    path = receipt_path(repo, tree, files, override, deselect)
     if not path.is_file():
         return None
     try:
@@ -1302,11 +1345,13 @@ def find_receipt(
             file=sys.stderr,
         )
         return None
-    if receipt.get("tree") != tree or sorted(receipt.get("selection") or []) != sorted(
-        files
+    if (
+        receipt.get("tree") != tree
+        or sorted(receipt.get("selection") or []) != sorted(files)
+        or sorted(set(receipt.get("deselected") or [])) != sorted(set(deselect))
     ):
         return None                       # a hash collision, or a hand-edited file
-    return receipt if sweep.is_green({**receipt, "dirty": False}) else None
+    return receipt if receipt_passes(receipt) else None
 
 
 def describe(receipt: dict) -> str:
@@ -1319,11 +1364,21 @@ def describe(receipt: dict) -> str:
     """
     counts = receipt.get("counts") or {}
     summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
-    return (
+    text = (
         f"{summary} in {receipt.get('seconds')}s, run by "
         f"{receipt.get('session')} at {receipt.get('finished_at')} "
         f"on commit {(receipt.get('commit') or '?')[:12]}"
     )
+    preexisting = receipt.get("preexisting") or []
+    if preexisting:
+        text += (
+            f"; {len(preexisting)} failure(s) preexisting at base "
+            f"{(receipt.get('base_commit') or '?')[:12]}, 0 new"
+        )
+    deselected = receipt.get("deselected") or []
+    if deselected:
+        text += f"; {len(deselected)} node id(s) deselected"
+    return text
 
 
 def build_command(
@@ -1331,6 +1386,7 @@ def build_command(
     *,
     basetemp: Optional[str] = None,
     workers: Optional[int] = None,
+    deselect: tuple = (),
 ) -> List[str]:
     """pytest over exactly ``files``, parallel only when it pays."""
     session = os.environ.get("CLAUNCH_SESSION", "worker")
@@ -1338,8 +1394,197 @@ def build_command(
     if len(files) > 1:
         width = MAX_WORKERS if workers is None else max(1, workers)
         cmd += ["-n", str(min(width, len(files)))]
+    for nodeid in deselect:
+        cmd += ["--deselect", nodeid]
     cmd += [f"--basetemp={basetemp or session_basetemp(session)}"]
     return cmd
+
+
+def read_known_failures(path: Path) -> List[str]:
+    """Node ids from a ``--known-failures`` file: one per line, ``#`` comments.
+
+    A trailing comment is allowed so the file can say why each line is there
+    (``tests/test_x.py::test_y  # claunch-mli4r, Windows only``); the reason
+    stays in the file and the node id is what reaches pytest and the receipt.
+    """
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        nodeid = line.split("#", 1)[0].strip()
+        if nodeid and nodeid not in out:
+            out.append(nodeid)
+    return out
+
+
+def failed_nodeids(output: str) -> List[str]:
+    """The node ids of pytest's ``FAILED``/``ERROR`` summary lines, in order.
+
+    ``FAILED tests/test_x.py::test_y - AssertionError: ...`` gives
+    ``tests/test_x.py::test_y``; a collection error gives the module path.
+    The message after `` - `` is dropped because it is the one part that
+    differs between two runs of the same failure (addresses, timings), and
+    the comparison below is by identity, not by wording.
+    """
+    out = []
+    for line in sweep._failure_lines(output, limit=None):
+        rest = line.split(" ", 1)[1] if " " in line else ""
+        nodeid = rest.split(" - ", 1)[0].strip()
+        if nodeid and nodeid not in out:
+            out.append(nodeid)
+    return out
+
+
+def merge_base(repo: Path, base: str) -> Optional[str]:
+    """The commit this branch was measured against, or None if git cannot say.
+
+    The same ``merge-base`` that :func:`changed_paths` diffs from, so the
+    comparison run stands on the commit the selection was derived from --
+    for a branch cut from master and not yet rebased, the ``base_hash`` its
+    branch-setup recorded.
+    """
+    try:
+        return _git(repo, "merge-base", base, "HEAD").strip() or None
+    except LookupError:
+        return None
+
+
+def _at_base(cmd: List[str], repo: Path) -> List[str]:
+    """``cmd`` run from the base worktree with *this* tree's environment.
+
+    The throwaway worktree has no ``.venv``, and ``uv run --no-sync`` there
+    would make an empty one and find no pytest (or another checkout's, see
+    :func:`foreign_pytest`). ``--project`` keeps the interpreter and plugins
+    this gate already vetted while the working directory -- and so pytest's
+    rootdir and its ``pythonpath = src`` -- is the base tree. Same pytest,
+    other source: the one difference the comparison is about.
+    """
+    if cmd[:3] == ["uv", "run", "--no-sync"]:
+        return cmd[:3] + ["--project", str(repo)] + cmd[3:]
+    return list(cmd)
+
+
+def base_receipt_path(
+    repo: Path,
+    commit: str,
+    files: List[str],
+    override: Optional[Path] = None,
+    deselect: tuple = (),
+) -> Path:
+    return receipts_dir(repo, override) / (
+        f"base-{commit}-{selection_key(files, deselect)}.json"
+    )
+
+
+def base_failures(
+    repo: Path,
+    commit: str,
+    files: List[str],
+    *,
+    deselect: tuple = (),
+    override: Optional[Path] = None,
+    environment: Optional[dict] = None,
+    avoid: Optional[str] = None,
+) -> Optional[dict]:
+    """Run ``files`` at ``commit`` and return what failed there, or None.
+
+    Cached by (commit, selection): a fix loop re-runs the gate after every
+    edit, the base does not move under it, and paying a second run each time
+    would double the cost of exactly the rounds that are already red.
+    Modules that do not exist at ``commit`` are left out -- they are this
+    branch's own, so nothing in them can be preexisting.
+
+    None means the comparison could not be made (no worktree, a run that
+    ended with something other than pass/fail). The caller then treats
+    every failure as new: the conservative reading, and the one this gate
+    gave before the comparison existed.
+    """
+    cached = base_receipt_path(repo, commit, files, override, deselect)
+    if cached.is_file():
+        try:
+            return json.loads(cached.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass                          # re-measure; the write below replaces it
+
+    present = []
+    for rel in files:
+        try:
+            _git(repo, "cat-file", "-e", f"{commit}:{rel}")
+            present.append(rel)
+        except LookupError:
+            continue
+    result = {
+        "kind": "changed_tests_base",
+        "commit": commit,
+        "selection": sorted(files),
+        "ran": present,
+        "deselected": sorted(set(deselect)),
+        "failed": [],
+        "exit_code": 0,
+    }
+    if present:
+        session = os.environ.get("CLAUNCH_SESSION", "worker")
+        scratch = os.environ.get("CLAUNCH_SCRATCH") or None
+        if scratch:
+            Path(scratch).mkdir(parents=True, exist_ok=True)
+        where = Path(tempfile.mkdtemp(prefix=f"{session}-base-", dir=scratch))
+        try:
+            _git(repo, "worktree", "add", "--detach", "--force", str(where), commit)
+        except LookupError as exc:
+            print(f"WARNING: no worktree at base {commit[:12]}: {exc}", file=sys.stderr)
+            shutil.rmtree(where, ignore_errors=True)
+            return None
+        try:
+            # Its own generation, so the head run's timeline survives; a run
+            # that finished inside the same second gets a suffix instead.
+            basetemp = session_basetemp(session)
+            if basetemp == avoid:
+                basetemp += "b"
+            pytest_basetemp.ensure(basetemp_root())
+            cmd = _at_base(
+                build_command(present, basetemp=basetemp, deselect=deselect),
+                repo,
+            )
+            print(f"$ (at base {commit[:12]}) {' '.join(cmd)}", flush=True)
+            started = time.monotonic()
+            proc = subprocess.run(
+                cmd,
+                cwd=str(where),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                env=environment,
+            )
+        finally:
+            try:
+                _git(repo, "worktree", "remove", "--force", str(where))
+            except LookupError:
+                shutil.rmtree(where, ignore_errors=True)
+                try:
+                    _git(repo, "worktree", "prune")
+                except LookupError:
+                    pass
+        output = proc.stdout or ""
+        result.update(
+            exit_code=proc.returncode,
+            counts=sweep.parse_counts(output),
+            failed=failed_nodeids(output),
+            command=cmd,
+            seconds=round(time.monotonic() - started, 1),
+        )
+        if proc.returncode not in (0, 1):
+            print(
+                f"WARNING: the run at base {commit[:12]} ended with exit "
+                f"{proc.returncode}, not pass/fail; every failure is counted "
+                f"as new.",
+                file=sys.stderr,
+            )
+            return None
+    try:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"WARNING: could not write the base receipt: {exc}", file=sys.stderr)
+    return result
 
 
 def apply_worker_advice(cmd: List[str], workers: int) -> List[str]:
@@ -1453,6 +1698,9 @@ def run_and_record(
     *,
     environment: Optional[dict[str, str]] = None,
     window: Optional[dict] = None,
+    deselect: tuple = (),
+    known_failures: Optional[str] = None,
+    compare_at: Optional[str] = None,
 ) -> int:
     """Run the selection, and leave a receipt whatever the outcome.
 
@@ -1500,7 +1748,18 @@ def run_and_record(
         "finished_at": finished.isoformat(),
     })
 
+    failing = failed_nodeids(output) if code != 0 else []
+    comparison = None
+    if code == 1 and failing and compare_at:
+        comparison = compare_with_base(
+            repo, compare_at, files, failing,
+            deselect=deselect, override=override, environment=environment,
+            avoid=basetemp,
+        )
+
     if tree is None:
+        if comparison is not None and not comparison["new_failures"]:
+            return 0
         return 0 if code == 0 else 1      # no key, so nothing to file it under
 
     receipt = {
@@ -1520,12 +1779,16 @@ def run_and_record(
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),
+        "deselected": sorted(set(deselect)),
+        "known_failures": known_failures,
     }
+    if comparison is not None:
+        receipt.update(comparison)
     try:
         receipt["commit"] = _git(repo, "rev-parse", "HEAD")
     except LookupError:
         receipt["commit"] = None          # an address for the reader, not the key
-    dest = receipt_path(repo, tree, files, override)
+    dest = receipt_path(repo, tree, files, override, deselect)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
@@ -1533,7 +1796,77 @@ def run_and_record(
     except OSError as exc:
         # Never turn a finished run into a failure over its bookkeeping.
         print(f"WARNING: could not write the receipt: {exc}", file=sys.stderr)
+    if comparison is not None and not comparison["new_failures"]:
+        return 0
     return 0 if code == 0 else 1
+
+
+def compare_with_base(
+    repo: Path,
+    commit: str,
+    files: List[str],
+    failing: List[str],
+    *,
+    deselect: tuple = (),
+    override: Optional[Path] = None,
+    environment: Optional[dict] = None,
+    avoid: Optional[str] = None,
+) -> Optional[dict]:
+    """Split ``failing`` into preexisting and new by a run at ``commit``.
+
+    Returns the receipt fields, or None when the base could not be measured
+    -- then the receipt carries no split and the gate stays red, as before.
+    Printed in full either way: an exit 0 over failing tests is only honest
+    if every one of those tests is named on the screen and in the receipt
+    (``--check`` and the reviewer read the receipt as a pass).
+
+    The base run reuses this run's window grant rather than queueing for a
+    second one, so it adds no ``wait_seconds``; its own duration is
+    ``base_seconds``, and ``base_cached`` says when it was read from an
+    earlier run instead.
+    """
+    cached = base_receipt_path(repo, commit, files, override, deselect).is_file()
+    base = base_failures(
+        repo, commit, files,
+        deselect=deselect, override=override, environment=environment,
+        avoid=avoid,
+    )
+    if base is None:
+        print(
+            f"base comparison: unavailable at {commit[:12]}; all "
+            f"{len(failing)} failure(s) count as new."
+        )
+        return None
+    at_base = set(base.get("failed") or [])
+    preexisting = [n for n in failing if n in at_base]
+    new = [n for n in failing if n not in at_base]
+    print(
+        f"base comparison at {commit[:12]} ({len(base.get('ran') or [])} of "
+        f"{len(files)} module(s) exist there"
+        f"{', cached' if cached else ''}): "
+        f"{len(preexisting)} preexisting, {len(new)} new."
+    )
+    if preexisting:
+        print(
+            f"preexisting: {len(preexisting)} failure(s) also fail at base "
+            f"{commit[:12]} -- report them, they are not this change's:"
+        )
+        for n in preexisting:
+            print(f"  {n}")
+    if new:
+        print(f"new failures: {len(new)}")
+        for n in new:
+            print(f"  {n}")
+    else:
+        print("new failures: 0")
+    return {
+        "base_commit": commit,
+        "preexisting": preexisting,
+        "new_failures": new,
+        "base_seconds": base.get("seconds"),
+        "base_cached": cached,
+        "base_receipt": str(base_receipt_path(repo, commit, files, override, deselect)),
+    }
 
 
 def relations_tried(rel: str) -> str:
@@ -1631,6 +1964,34 @@ def main(argv: Optional[list] = None) -> int:
         default=None,
         help="override the receipt root (tests)",
     )
+    ap.add_argument(
+        "--deselect",
+        action="append",
+        default=[],
+        metavar="NODEID",
+        help=(
+            "leave this node id out of the run (pytest --deselect; repeatable). "
+            "Recorded in the receipt and part of its key"
+        ),
+    )
+    ap.add_argument(
+        "--known-failures",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=(
+            "a file of node ids to deselect, one per line, '#' comments; "
+            "recorded in the receipt like --deselect"
+        ),
+    )
+    ap.add_argument(
+        "--no-compare-base",
+        action="store_true",
+        help=(
+            "on a red run, do not re-run the selection at the merge base to "
+            "split preexisting failures from new ones (claunch-wuaup)"
+        ),
+    )
     args = ap.parse_args(argv)
 
     repo, how_repo = _resolve_repo(args.repo)
@@ -1686,6 +2047,16 @@ def main(argv: Optional[list] = None) -> int:
         return CANNOT_TELL
 
     files = select(repo, paths)
+    deselect = list(args.deselect)
+    if args.known_failures is not None:
+        try:
+            for nodeid in read_known_failures(args.known_failures):
+                if nodeid not in deselect:
+                    deselect.append(nodeid)
+        except OSError as exc:
+            print(f"cannot tell: --known-failures {args.known_failures}: {exc}")
+            return CANNOT_TELL
+    deselect = tuple(deselect)
     loose = unmapped(repo, paths)
     if loose:
         # Printed whether or not anything was selected: a change can map
@@ -1741,13 +2112,17 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 0                          # a pass, for --check too: see below
 
-    cmd = build_command(files, basetemp=args.basetemp)
+    cmd = build_command(files, basetemp=args.basetemp, deselect=deselect)
     print(
         f"{len(files)} test module(s) selected from {len(paths)} changed path(s) "
         f"vs {base}{_base_note(how)}:"
     )
     for f in files:
         print(f"  {f}")
+    if deselect:
+        print(f"{len(deselect)} node id(s) deselected (recorded in the receipt):")
+        for nodeid in deselect:
+            print(f"  {nodeid}")
 
     # The key, before anything is run. A failure here costs the reuse, never
     # the gate: standing on no receipt is the behaviour this tool has always
@@ -1764,7 +2139,9 @@ def main(argv: Optional[list] = None) -> int:
         )
 
     found = (
-        find_receipt(repo, tree, files, args.receipts) if tree is not None else None
+        find_receipt(repo, tree, files, args.receipts, deselect)
+        if tree is not None
+        else None
     )
 
     if args.check:
@@ -1797,7 +2174,7 @@ def main(argv: Optional[list] = None) -> int:
         print(
             f"not running: tree {tree[:12]} with this selection is already "
             f"green.\n  {describe(found)}\n"
-            f"  receipt: {receipt_path(repo, tree, files, args.receipts)}\n"
+            f"  receipt: {receipt_path(repo, tree, files, args.receipts, deselect)}\n"
             f"  (--no-reuse runs it anyway; any edit changes the tree and so "
             f"the key)"
         )
@@ -1838,8 +2215,10 @@ def main(argv: Optional[list] = None) -> int:
         return CANNOT_TELL
 
     cmd = apply_worker_advice(
-        build_command(files, basetemp=args.basetemp), grant.advisory_n
+        build_command(files, basetemp=args.basetemp, deselect=deselect),
+        grant.advisory_n,
     )
+    compare_at = None if args.no_compare_base else merge_base(repo, base)
     print(f"$ {' '.join(cmd)}", flush=True)
     try:
         return run_and_record(
@@ -1851,6 +2230,11 @@ def main(argv: Optional[list] = None) -> int:
             args.receipts,
             environment=grant.child_env(),
             window=grant.receipt(),
+            deselect=deselect,
+            known_failures=(
+                str(args.known_failures) if args.known_failures is not None else None
+            ),
+            compare_at=compare_at,
         )
     finally:
         grant.release()
