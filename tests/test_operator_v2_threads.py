@@ -20,6 +20,7 @@ What has to hold:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import sqlite3
 
@@ -258,6 +259,34 @@ def test_the_operator_opens_threads_of_its_own(world):
     assert run(ops.message(world.alpha["id"], {"text": "확인"}))["thread"] == tid
 
 
+def test_retrying_a_thread_open_returns_the_same_thread(world):
+    ops = world.ops
+    first = ops.open_thread("opa", {"title": "배포", "text": "시작", "request_id": "t-1"})
+    again = ops.open_thread("opa", {"title": "배포", "text": "시작", "request_id": "t-1"})
+    assert again["thread"] == first["thread"] and again["entry"]["id"] == first["entry"]["id"]
+    assert [t["title"] for t in ops.agent_threads("opa")["threads"]].count("배포") == 1
+    with pytest.raises(web.HTTPConflict):
+        ops.open_thread("opa", {"title": "다른 제목", "text": "시작", "request_id": "t-1"})
+    with pytest.raises(web.HTTPConflict):
+        ops.open_thread("opa", {"title": "배포", "text": "다른 본문", "request_id": "t-1"})
+
+
+def test_reading_an_answer_does_not_make_its_thread_the_active_one(world, monkeypatch):
+    ops, aid = world.ops, world.alpha["id"]
+    # one second per write, after the threads the fixture opened
+    tick = itertools.count()
+    monkeypatch.setattr(S, "_now", lambda: f"2099-01-01T00:{next(tick):05d}")
+    a = ops.open_thread("opa", {"title": "A", "text": "a"})["thread"]["id"]
+    ask = ops.ask("opa", {"text": "멈출까요?", "type": "approve", "thread": a, "request_id": "k"})
+    run(ops.answer(aid, ask["id"], {"decision": "approve"}))
+    b = run(ops.open_user_thread(aid, {"title": "B", "text": "새 일"}))["thread"]["id"]
+    assert ops.thread_of(ops.get(aid)) == b
+    inbox = ops.inbox("opa")
+    assert ask["id"] in [m["id"] for m in inbox["messages"] if m["kind"] == "ask"]
+    assert ops.thread_of(ops.get(aid)) == b
+    assert [t["id"] for t in ops.agent_threads("opa")["threads"]][0] == b
+
+
 def test_deleting_an_operator_removes_its_threads(world):
     ops = world.ops
     run(ops.message(world.alpha["id"], {"text": "x"}))
@@ -359,13 +388,13 @@ def test_the_mcp_tools_pass_the_thread(monkeypatch):
     monkeypatch.setattr(M.daemon_client, "connect_with_diagnosis", lambda: (Client(), None))
     M.call_tool("opv2_post", {"text": "t", "thread": "th-aaaaaa", "request_id": "r"})
     M.call_tool("opv2_dispatch", {"target": "a1", "text": "t", "on_behalf_of": "u", "thread": "th-aaaaaa"})
-    M.call_tool("opv2_thread_open", {"title": "x", "text": "y"})
+    M.call_tool("opv2_thread_open", {"title": "x", "text": "y", "request_id": "r-t"})
     M.call_tool("opv2_threads", {})
     M.call_tool("opv2_history", {"thread": "th-aaaaaa"})
     assert calls[0] == ("POST", "/api/operators/agent/opa/post",
                         {"text": "t", "thread": "th-aaaaaa", "request_id": "r"})
     assert calls[1][2]["thread"] == "th-aaaaaa"
-    assert calls[2] == ("POST", "/api/operators/agent/opa/threads", {"title": "x", "text": "y"})
+    assert calls[2] == ("POST", "/api/operators/agent/opa/threads", {"title": "x", "text": "y", "request_id": "r-t"})
     assert calls[3] == ("GET", "/api/operators/agent/opa/threads")
     assert calls[4] == ("GET", "/api/operators/agent/opa/history?thread=th-aaaaaa")
     schema = {t["name"]: t["inputSchema"] for t in M.TOOLS}

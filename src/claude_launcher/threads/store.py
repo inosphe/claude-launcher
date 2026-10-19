@@ -717,16 +717,18 @@ class ThreadStore:
             ).fetchone()
             return _message(r) if r else None
 
-    def update_data(self, owner: str, seq: int, data: dict) -> dict:
+    def update_data(self, owner: str, seq: int, data: dict, *, touch: bool = True) -> dict:
         """Replace the ``data`` of ``owner``'s message ``seq`` (an ask that
-        was answered); its thread counts as active now."""
+        was answered); its thread counts as active now unless ``touch`` is
+        false (a read mark is not activity)."""
         raw = _data(data)
         with self._write() as db:
             r = db.execute("SELECT * FROM messages WHERE seq = ? AND session = ?", (int(seq), owner)).fetchone()
             if r is None:
                 raise NotFound(f"{owner} has no message {seq}")
             db.execute("UPDATE messages SET data = ? WHERE seq = ?", (raw, int(seq)))
-            db.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (_now(), r["thread"]))
+            if touch:
+                db.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (_now(), r["thread"]))
             return _message(db.execute("SELECT * FROM messages WHERE seq = ?", (int(seq),)).fetchone())
 
     def scan(self, owner: str, *, kinds=None, author: Optional[str] = None, after: int = 0,

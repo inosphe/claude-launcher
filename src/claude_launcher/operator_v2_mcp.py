@@ -65,7 +65,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string", "description": "the topic, <=200 chars"},
          "text": {"type": "string", "description": "the first post, markdown, <=4000 chars"},
-         "level": LEVEL, "refs": REFS}, "required": ["title", "text"]}},
+         "level": LEVEL, "refs": REFS, "request_id": REQUEST_ID}, "required": ["title", "text", "request_id"]}},
     {"name": "opv2_threads",
      "description": "Your threads with the user, most recently active first: id, title, status, entry count, "
                     "unanswered asks and the last entry.",
@@ -186,7 +186,7 @@ def call_tool(name, args):
     if name == "opv2_inbox":
         return client.get(base + "/inbox")
     if name == "opv2_thread_open":
-        return client.post(base + "/threads", pick("title", "text", "level", "refs"))
+        return client.post(base + "/threads", pick("title", "text", "level", "refs", "request_id"))
     if name == "opv2_threads":
         return client.get(base + "/threads")
     if name == "opv2_dispatch":

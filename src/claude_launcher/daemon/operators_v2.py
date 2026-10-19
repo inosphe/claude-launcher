@@ -257,7 +257,7 @@ class OperatorsV2:
                     rec = self._defaults(data)
                     try:
                         self.migrate(rec, raw)
-                    except Exception:  # noqa: BLE001 -- the next read tries again
+                    except Exception:  # noqa: BLE001 -- the file keeps its feed; the next daemon start tries again
                         log.exception("operator v2: moving the feed of %s into threads failed", rec["id"])
                     self.cache[data["id"]] = rec
         return self.cache
@@ -770,8 +770,19 @@ class OperatorsV2:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         refs = self._refs(rec, body.get("refs"))
         store, owner = self.threads(), self.owner(rec)
+        token = body.get("request_id")
+        found = self._idempotent(rec, token, {"kind": "post", "text": text, "level": level, "refs": refs})
+        if found:
+            # a retry: the thread its first post opened, when the title agrees
+            thread = next(t for t in store.list(owner)["threads"] if t["id"] == found["thread"])
+            if thread["title"] != title:
+                raise web.HTTPConflict(text="request_id reused with different content")
+            return {"operator": rec["id"], "thread": {"id": thread["id"], "title": thread["title"]}, "entry": found}
+        data = {"level": level, "refs": refs}
+        if token is not None:
+            data["request_id"] = token
         thread = store.open(owner, owner, title)["thread"]
-        entry = self.write(rec, thread["id"], text, data={"level": level, "refs": refs})
+        entry = self.write(rec, thread["id"], text, data=data)
         return {"operator": rec["id"], "thread": {"id": thread["id"], "title": thread["title"]}, "entry": entry}
 
     def agent_threads(self, name):
@@ -916,7 +927,7 @@ class OperatorsV2:
             self.save(rec)
         for m in rows:
             if m["kind"] == "ask":
-                store.update_data(owner, m["seq"], {**m["data"], "answer_read": True})
+                store.update_data(owner, m["seq"], {**m["data"], "answer_read": True}, touch=False)
         out = []
         for m in rows:
             e = entry_of(thread_images.attach(m))
