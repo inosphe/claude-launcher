@@ -6,7 +6,12 @@
    +5 min, a resume card Resume / New session / Reject / +5 min; each press
    posts to its own route; Manual opens the New session tab (never a child)
    filled with the request's task, and the form remembers the request so
-   its create can be linked back; the panel row offers the same answers. */
+   its create can be linked back; the panel row offers the same answers.
+
+   claunch-iw5i8.16: a top-level request says what no answer does (created
+   as the asker's child instead); a child request names its parent, says it
+   is created as asked, and its Manual opens the spawn child tab under the
+   asker, filled with the request. */
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -16,12 +21,17 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
 const soon = () => new Date(Date.now() + 272000).toISOString();
 const SPEC = { profile: 'p', project: 'alpha', cwd: '/repo/alpha', task: 'Fix the login bug\nwith details',
   workflow: 'improv-worker-v2', worktree: '', issue: 'alpha-7' };
-const spawnRec = () => ({ id: 'aaa111', kind: 'spawn', session: 'op1', status: 'pending',
+const spawnRec = () => ({ id: 'aaa111', kind: 'spawn', scope: 'root', session: 'op1', status: 'pending',
   reason: 'no running session does it', deadline: soon(), extensions: 0, spec: SPEC,
   basis: { operator_name: 'Alpha', user_text: 'fix login' }, requested_at: new Date().toISOString() });
 const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status: 'pending', target: 'old1',
   reason: 'it did this work', deadline: soon(), extensions: 1, fallback: SPEC,
   basis: { operator_name: 'Alpha' }, requested_at: new Date().toISOString() });
+const CHILD = { task: 'Write the parser tests\nall of them', role: 'worker', name: 'kid',
+  workflow: 'improv-worker-v2', project: 'alpha' };
+const childRec = () => ({ id: 'ccc333', kind: 'spawn', scope: 'child', session: 'w1', status: 'pending',
+  reason: 'Write the parser tests', deadline: soon(), extensions: 0, spec: CHILD, basis: {},
+  requested_at: new Date().toISOString() });
 
 (async () => {
   const browser = await chromium.launch({ headless: true,
@@ -30,7 +40,7 @@ const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status:
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
     const posts = [];
-    let rows = [spawnRec(), resumeRec()];
+    let rows = [spawnRec(), resumeRec(), childRec()];
     page.on('pageerror', e => errors.push(e.message));
     await page.route('http://gate.test/**', async route => {
       const url = new URL(route.request().url());
@@ -62,14 +72,15 @@ const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status:
     await page.evaluate(() => { window.batchable = () => false; });
     await page.evaluate(() => refreshSpawnGate());
 
-    const spawnCard = page.locator('.notice.spawn-gate', { hasText: 'new session requested' });
+    const spawnCard = page.locator('.notice.spawn-gate', { hasText: 'new top-level session requested' });
+    const childCard = page.locator('.notice.spawn-gate', { hasText: 'child session requested under' });
     const resumeCard = page.locator('.notice.spawn-gate', { hasText: 'session resume requested' });
     await spawnCard.waitFor();
     const spawnText = await spawnCard.innerText();
     assert.match(spawnText, /op1 \(operator Alpha\) on your message: “fix login”/);
     assert.match(spawnText, /reason: no running session does it/);
     assert.match(spawnText, /project alpha · issue alpha-7 · improv-worker-v2 — Fix the login bug/);
-    assert.match(spawnText, /auto-approves in 4:3\d/);
+    assert.match(spawnText, /no answer in 4:3\d: no top-level session — created as op1's child instead/);
     const buttons = async card => (await card.locator('.gate-actions button').allInnerTexts()).map(t => t.trim());
     assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
 
@@ -78,15 +89,20 @@ const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status:
     assert.match(resumeText, /otherwise a new session: project alpha/);
     assert.match(resumeText, /not resumed — a new session is asked for instead — in 4:3\d \(extended 1×\)/);
     assert.deepEqual(await buttons(resumeCard), ['Resume', 'New session', 'Reject', '+5 min', 'Hide']);
-    assert.equal(await page.evaluate(() => gatePending.spawn.length), 2, 'the bell counts both');
+    const childText = await childCard.innerText();
+    assert.match(childText, /child session requested under w1/);
+    assert.match(childText, /project alpha · role worker · improv-worker-v2 · name kid — Write the parser tests/);
+    assert.match(childText, /auto-approves in 4:3\d — created as asked/);
+    assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
+    assert.equal(await page.evaluate(() => gatePending.spawn.length), 3, 'the bell counts all three');
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-cards.png') });
     }
 
     // +5 min posts extend and the card stays, with the new count
     await resumeCard.getByRole('button', { name: '+5 min' }).click();
-    await page.waitForFunction(() => document.querySelector('.notice.spawn-gate:last-child .gate-clock')
-      ?.textContent.includes('extended 2×'));
+    await page.waitForFunction(() => [...document.querySelectorAll('.notice.spawn-gate .gate-clock')]
+      .some(n => n.textContent.includes('extended 2×')));
     assert.deepEqual(posts.at(-1), ['bbb222', 'extend']);
 
     // the panel row offers the same answers
@@ -124,7 +140,29 @@ const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status:
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-manual.png') });
     }
+
+    // Manual on a child request: the spawn child tab under the asker
+    await page.evaluate(() => sessionModalClose({ route: false }));
+    // the other requests' cards stayed up through the first Manual
+    await page.evaluate(() => {
+      sessionsCache = [{ name: 'w1', status: 'idle', harness: 'claude', profile: 'p', cwd: '/repo/alpha' }];
+    });
+    await childCard.getByRole('button', { name: 'Manual' }).click();
+    await page.waitForFunction(() => typeof sessionModal === 'object' && sessionModal
+      && sessionModal.spawnRequest === 'ccc333');
+    assert.deepEqual(posts.at(-1), ['ccc333', 'manual']);
+    const child = await page.evaluate(() => ({
+      tab: sessionFormView().mode,
+      task: $('new-session').task.value,
+      name: $('new-session').name.value,
+      parent: sessionFormView().parent || '',
+    }));
+    assert.deepEqual(child, { tab: 'spawn', task: CHILD.task, name: 'kid', parent: 'w1' });
+    await childCard.waitFor({ state: 'detached' });
+    if (process.env.CLAUNCH_SCRATCH) {
+      await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-child-manual.png') });
+    }
     assert.deepEqual(errors, []);
-    console.log('spawngate_browser: ok (spawn + resume cards, extend, panel row, manual form)');
+    console.log('spawngate_browser: ok (root/child/resume cards, extend, panel row, manual forms)');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exit(1); });

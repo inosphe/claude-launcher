@@ -1800,12 +1800,30 @@ function railEndedText(s) {
 
 function railCreatedText(s) {
   const a = s.created_by;
-  return a && a.kind ? `spawned by ${actorWho(a)}` : "";
+  if (!a || !a.kind) return "";
+  const setup = spawnGateSetup(a);
+  return `spawned by ${actorWho(a)}` + (setup === "agent" ? " · agent setup" : "");
+}
+
+/* Who set up a session the spawn gate created (claunch-iw5i8.16): "agent"
+   when nobody answered and the agent's own spec was used, "approved" when
+   the person approved it. A session the person made in the form is
+   created_by the user, so it needs no word here. */
+function spawnGateSetup(a) {
+  if (!a || a.via !== "spawn-gate") return "";
+  const m = /^setup:(\w+)$/.exec(a.reason || "");
+  return m ? m[1] : "";
 }
 
 /* The long form for a title: "agent s12", "user (web)", "cflow s3 [kill-on-end]". */
 function actorLabel(a) {
   if (!a || !a.kind) return "unknown";
+  const setup = spawnGateSetup(a);
+  if (setup) {
+    return `agent ${a.name || "?"} — ` + (setup === "agent"
+      ? "agent setup: no answer on the approval card, created from the agent's spec"
+      : "approved by the person on the approval card");
+  }
   let text = a.kind;
   if (a.name) text += ` ${a.name}`;
   if (a.via) text += ` (${a.via})`;
@@ -14246,10 +14264,11 @@ $("new-session").addEventListener("submit", async (e) => {
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
     const made = info.session || info;
-    // A Manual answer to an operator's spawn request (claunch-iw5i8.15): the
-    // request learns which session the person made from it.
+    // A Manual answer to an agent's spawn request (claunch-iw5i8.15/.16):
+    // the request learns which session the person made from it, top-level
+    // or child.
     const spawnRid = sessionModal && sessionModal.spawnRequest;
-    if (spawnRid && !parent && made.name) spawnGateLink(spawnRid, made.name);
+    if (spawnRid && made.name) spawnGateLink(spawnRid, made.name);
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
     // on the next line and the page leaves for the new terminal.
@@ -49266,26 +49285,38 @@ async function refreshResumeGate() {
 /* ------------------------------------------------------------------ */
 /* the spawn gate: an operator asks for a session                      */
 /* ------------------------------------------------------------------ */
-/* An operator v2 files a request with daemon/spawn_gate.py
-   (claunch-iw5i8.15) when no running session does the work the user gave
-   it: a new session (opv2_spawn), or an exited one back (opv2_resume). The
-   card counts down five minutes. A new-session request is approved by the
-   clock; a resume request is not resumed by it -- its fallback is filed as
-   a new-session request instead. Manual settles the request and opens the
-   New session form filled with what was asked; the form's create tells the
-   request which session it made. */
+/* An agent files a request with daemon/spawn_gate.py when it asks for a
+   session (claunch-iw5i8.15, widened by claunch-iw5i8.16): a child of its
+   own (MCP spawn; a reviewer child is not gated), a top-level session
+   (spawn with root, or an operator's opv2_spawn), or an exited session back
+   (opv2_resume). The card counts down five minutes. With no answer a child
+   request is created as asked, a top-level request is created as the
+   asker's CHILD instead, and a resume request is not resumed -- its
+   fallback is filed as a new-session request. Manual settles the request
+   and opens the form filled with what was asked -- the New session tab for
+   a top-level request, the spawn child tab under the asker for a child
+   one; the form's create tells the request which session it made. */
 const SPAWN_GATE_PREFIX = "spawn-gate-";
 
 function spawnGateTitle(rec) {
-  return rec.kind === "resume" ? "session resume requested: " : "new session requested";
+  if (rec.kind === "resume") return "session resume requested: ";
+  if (rec.scope === "child") return "child session requested under ";
+  if (rec.scope === "root") return "new top-level session requested";
+  return "new session requested";
 }
 
 function spawnGateClock(rec) {
   const left = gateCountdown(rec.deadline);
   const more = (rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "";
-  return rec.kind === "resume"
-    ? `not resumed — a new session is asked for instead — in ${left}${more}`
-    : `auto-approves in ${left}${more}`;
+  if (rec.kind === "resume") {
+    return `not resumed — a new session is asked for instead — in ${left}${more}`;
+  }
+  if (rec.scope === "child") return `auto-approves in ${left} — created as asked${more}`;
+  if (rec.scope === "root") {
+    return `no answer in ${left}: no top-level session — created as ` +
+      `${rec.session || "the asker"}'s child instead${more}`;
+  }
+  return `auto-approves in ${left}${more}`;
 }
 
 /* What the session would be: project, issue, the first line of its task. */
@@ -49294,8 +49325,9 @@ function spawnGateSpecText(spec) {
   const task = String(spec.task || "").trim().split("\n")[0];
   return [
     spec.project ? `project ${spec.project}` : "",
+    spec.role ? `role ${spec.role}` : "",
     spec.issue ? `issue ${spec.issue}` : "",
-    spec.workflow ? spec.workflow : "",
+    spec.workflow && spec.workflow !== "-" ? spec.workflow : "",
     spec.name ? `name ${spec.name}` : "",
   ].filter(Boolean).join(" · ") + (task ? ` — ${task}` : "");
 }
@@ -49306,6 +49338,7 @@ function spawnGateBody(node, rec, head) {
   const title = head || el("div", "notice-title");
   title.appendChild(el("span", head ? "notice-title" : null, spawnGateTitle(rec)));
   if (rec.kind === "resume") title.appendChild(gateSessionLink(rec.target));
+  else if (rec.scope === "child") title.appendChild(gateSessionLink(rec.session));
   if (!head) node.appendChild(title);
   else node.appendChild(head);
   const basis = rec.basis || {};
@@ -49353,17 +49386,36 @@ async function spawnGatePost(rec, verb, btn, body) {
   return settled;
 }
 
-/* Manual: the New session form, filled with the request's spec. The
-   session is top-level, so it is the New session tab, never a child. */
+/* Manual: the form, filled with the request's spec. A top-level request
+   opens the New session tab; a child request opens the spawn child tab
+   with the asker as the parent, where the person edits name, role,
+   project, workspace, workflow and profile before creating it. */
 async function spawnGateManual(rec) {
   const spec = rec.spec || {};
   const seed = { name: spec.name || "", task: spec.task || "" };
   if (spec.project) seed.project = spec.project;
   if (spec.profile) seed.profile = spec.profile;
-  if (spec.workflow) Object.assign(seed, { workflow: spec.workflow, workflow_version: 2 });
+  if (spec.workflow) {
+    seed.workflow = spec.workflow === "-" ? "" : spec.workflow;
+    if (/-v2$/.test(spec.workflow)) seed.workflow_version = 2;
+  }
+  if (spec.cflow_inputs) seed.cflow_inputs = spec.cflow_inputs;
+  if (spec.issue) seed.issue = spec.issue;
+  if (rec.scope === "child") {
+    if (spec.mesh !== undefined) seed.mesh = spec.mesh === "-" ? "" : spec.mesh;
+    if (spec.role) seed.role = spec.role;
+    if (spec.subroles) seed.subroles = spec.subroles;
+    if (spec.worktree) seed.worktree = "new";
+    if (spec.workspace) seed.workspace = spec.workspace;
+    if (spec.cwd) seed.cwd = spec.cwd;
+    if (spec.prompt_packs) seed.prompt_packs = spec.prompt_packs;
+    await openSessionModal({
+      tab: "spawn", parent: rec.session, seed, spawnRequest: rec.id,
+    });
+    return;
+  }
   if (spec.worktree !== undefined) seed.worktree = "new";
   if (spec.cwd) seed.cwd = spec.cwd;
-  if (spec.issue) seed.issue = spec.issue;
   await openSessionModal({
     tab: "new", seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
     spawnRequest: rec.id,
@@ -49403,13 +49455,22 @@ function spawnGateButtons(rec, done) {
     add("New session", "", "leave it exited and ask for a new session from the fallback instead",
       (btn) => spawnGatePost(rec, "spawn", btn));
   } else {
-    add("Approve", "approve", "create the session now, as asked",
+    add("Approve", "approve",
+      rec.scope === "child" ? `create the child of ${rec.session} now, as asked`
+        : "create the top-level session now, as asked",
       (btn) => spawnGatePost(rec, "approve", btn));
-    add("Manual", "", "open the New session form filled with this request, and create it yourself",
+    add("Manual", "",
+      rec.scope === "child"
+        ? `open the spawn child form under ${rec.session} filled with this request, ` +
+          "edit it and create it yourself"
+        : "open the New session form filled with this request, edit it and create it yourself",
       async (btn) => {
         const settled = await spawnGatePost(rec, "manual", btn);
         if (settled) {
-          noticePanelToggle(false);
+          // Out of the form's way when pressed from the panel. Only then:
+          // closing the panel puts every waiting card away, and a press on a
+          // corner card must not hide the other requests' cards.
+          if (noticePanelOpen()) noticePanelToggle(false);
           await spawnGateManual(settled);
         }
         return settled;
