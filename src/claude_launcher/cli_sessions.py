@@ -2623,12 +2623,16 @@ _LIVE_KEYS = (
     "auto_archive_killed_days", "auto_archive_interval_s", "auto_archive_batch",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
+    # read by improv-worker-v2 at each delegation (claunch-yl0to)
+    "delegate_profile", "delegate_model",
 )
 
 
 #: Keys that set whether a person approves what an agent does. A managed
 #: session (CLAUNCH_SESSION set) may read them but not write them.
-_PERSON_ONLY_KEYS = ("reposync_push",)
+#: delegate_*: which profile (and so whose account and bill) an agent's
+#: delegated work runs on is the person's choice (claunch-yl0to).
+_PERSON_ONLY_KEYS = ("reposync_push", "delegate_profile", "delegate_model")
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:

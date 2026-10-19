@@ -545,6 +545,13 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # Where improv-worker-v2's session routing sends an easy task
+    # (claunch-yl0to): the fork child's profile and model preset (one of
+    # provider_spec.MODEL_ROLES, or a model name). The run's start inputs
+    # delegate_profile/delegate_model override these; the web Settings page
+    # edits them. Read by the workflow at each delegation, so LIVE.
+    "delegate_profile": "ds4",
+    "delegate_model": "small",
     # Post-merge sweeps (delayed_sweep, claunch-yfkt2). Background sweeps are
     # grouped: delayed_sweep_batch_size merges (0 = every merge alone) or the
     # oldest queued merge having waited delayed_sweep_batch_settle seconds.

@@ -839,6 +839,8 @@ def build_app(
     r.add_put("/api/wsl-reg-stub", h_wsl_reg_stub_set)
     r.add_get("/api/pty-host-setting", h_pty_host_setting_get)
     r.add_put("/api/pty-host-setting", h_pty_host_setting_set)
+    r.add_get("/api/delegate-setting", h_delegate_setting_get)
+    r.add_put("/api/delegate-setting", h_delegate_setting_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
     r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
@@ -3982,6 +3984,71 @@ async def h_pty_host_setting_set(request: web.Request) -> web.Response:
     try:
         store.set_daemon_field("pty_host", enabled)
         return json_response(_pty_host_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+#: The model names the Settings page offers for a delegated child: the
+#: claunch model presets, resolved per harness by spawn (claunch-yl0to).
+_DELEGATE_FIELDS = ("profile", "model")
+
+
+def _delegate_setting_state() -> dict:
+    from .. import provider_spec
+
+    cfg = store.daemon_config()
+    return {
+        "profile": str(cfg.get("delegate_profile") or ""),
+        "model": str(cfg.get("delegate_model") or ""),
+        "defaults": {
+            "profile": store.DAEMON_DEFAULTS["delegate_profile"],
+            "model": store.DAEMON_DEFAULTS["delegate_model"],
+        },
+        "profiles": [p.name for p in profile_mod.list_all()],
+        "presets": list(provider_spec.MODEL_ROLES),
+    }
+
+
+async def h_delegate_setting_get(request: web.Request) -> web.Response:
+    """``daemon.delegate_profile`` / ``delegate_model``: the profile and model
+    preset improv-worker-v2 hands an easy task's child (claunch-yl0to), with
+    the profiles and presets to choose from. A run's start inputs of the same
+    names take precedence over these."""
+    try:
+        return json_response(_delegate_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_delegate_setting_set(request: web.Request) -> web.Response:
+    """Set either field (``{"profile": str, "model": str}``); ``null``
+    restores the built-in default. A profile must exist, and a model must be
+    one of the claunch model presets."""
+    from .. import provider_spec
+
+    body = await _json_body(request)
+    writes = {}
+    for field in _DELEGATE_FIELDS:
+        if field not in body:
+            continue
+        value = body[field]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            return json_error(400, f"'{field}' must be a non-empty string or null")
+        writes[field] = value.strip() if isinstance(value, str) else None
+    if not writes:
+        return json_error(400, "give 'profile' and/or 'model'")
+    if writes.get("profile") and writes["profile"] not in {
+        p.name for p in profile_mod.list_all()
+    }:
+        return json_error(400, f"no profile named {writes['profile']!r}")
+    if writes.get("model") and writes["model"] not in provider_spec.MODEL_ROLES:
+        return json_error(
+            400, f"'model' must be one of {', '.join(provider_spec.MODEL_ROLES)}"
+        )
+    try:
+        for field, value in writes.items():
+            store.set_daemon_field(f"delegate_{field}", value)
+        return json_response(_delegate_setting_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
