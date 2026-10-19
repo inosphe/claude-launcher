@@ -19472,11 +19472,20 @@ function attachGpuRenderer(t) {
   }
 }
 
+/* The terminal background is the dashboard dark page background, kept in
+   one place as the --term-page custom property (style.css); the canvas and
+   the card around it read the same value and cannot drift apart. */
+function terminalPageBackground() {
+  const probe = document.getElementById("terminal");
+  const fromCss = probe && getComputedStyle(probe).getPropertyValue("--term-page").trim();
+  return fromCss || "#14161a";
+}
+
 function buildCliTerm() {
   cliTerm = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
-    theme: { background: "#14161a" },
+    theme: { background: terminalPageBackground() },
     // The session terminal runs scrollback: 0 because the daemon serves the
     // wheel from its own history. A raw shell has no daemon-side screen —
     // the ring the daemon keeps is only catch-up on attach — so this
@@ -19737,7 +19746,7 @@ function freshAttach(name) {
   term = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
-    theme: { background: "#14161a" },
+    theme: { background: terminalPageBackground() },
     // A real scrollback, like the CLI tab's. It used to be 0, on the reading
     // that the daemon's history served the wheel instead — but that history
     // is one or two lines deep for a session running claude (it repaints the
