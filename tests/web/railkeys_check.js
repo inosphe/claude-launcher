@@ -159,6 +159,7 @@ let attachedPid = null, linkState = "down", sessName = null, snapshotName = null
 let keptTerms = new Map();
 const killUiState = new Map();
 function syncSessionKillControls() {}
+function syncKillFeedback() {}
 function modalInfo() {}
 /* Archiving a LIVE session ends it, so the page asks first. The stub
    records what was asked and answers with whatever the check set, which is

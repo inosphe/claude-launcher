@@ -52,19 +52,57 @@ const refreshSessions = async () => { refreshes += 1; };
 const setSessionFilter = (value) => { filter = value; };
 const $ = (id) => buttons[id];
 
+/* A rail card, as much of one as decorateKillRow touches: the row's classes,
+   its .rail-head and the name inside it, and whatever tag gets inserted. */
+function card(name) {
+  const classes = new Set();
+  const label = { className: "rail-name" };
+  const head = {
+    children: [label],
+    querySelector(sel) { return sel === ".rail-name" ? label : null; },
+    insertBefore(node, ref) {
+      const at = ref ? this.children.indexOf(ref) : -1;
+      node.remove = () => { this.children.splice(this.children.indexOf(node), 1); };
+      if (at < 0) this.children.push(node); else this.children.splice(at, 0, node);
+    },
+  };
+  label.nextSibling = null;
+  return {
+    dataset: { name }, classes, head,
+    classList: {
+      toggle(n, on) { on ? classes.add(n) : classes.delete(n); },
+      contains(n) { return classes.has(n); },
+    },
+    querySelector(sel) {
+      if (sel === ".rail-head") return head;
+      if (sel === ".rail-killing-tag") {
+        return head.children.find((c) => c.className === "rail-killing-tag") || null;
+      }
+      return null;
+    },
+    tag() { return this.querySelector(".rail-killing-tag"); },
+  };
+}
+const cards = [card("s1"), card("s2")];
+const document = {
+  createElement: () => ({ className: "", textContent: "", title: "" }),
+  querySelectorAll: (sel) => (sel === "#session-list li.sess-card" ? cards : []),
+};
+
 const ctx = {};
 new Function(
   "exports", "$", "api", "modalInfo", "refreshSessions", "setSessionFilter",
+  "document",
   `let currentName = "s1";
    let sessionsCache = [{name: "s1", status: "busy"}];
    ${code}
    Object.assign(exports, {
      killControlState, reconcileKillUiState, syncSessionKillControls,
-     killCurrentSession,
+     killCurrentSession, killSession, decorateKillRow,
      sessions: () => sessionsCache,
      setSessions: (value) => { sessionsCache = value; },
    });`
-)(ctx, $, api, modalInfo, refreshSessions, setSessionFilter);
+)(ctx, $, api, modalInfo, refreshSessions, setSessionFilter, document);
 
 let failures = 0;
 function check(name, actual, expected) {
@@ -143,6 +181,49 @@ const response = (body, ok = true, status = 200) => ({
         ["kill", false, ["Could not kill 's1'", "offline"]]);
   check("refresh follows every completed request", refreshes, 4);
   check("a wind-down response does not select the killed filter", filter, null);
+
+  /* The rail card's `k` (claunch-5g6zp): the card pressed need not be the
+     attached session, so the header says nothing about it. The card itself
+     acknowledges the press before the route answers, keeps it through the
+     graceful termination, and drops it once the poll sees the exit. */
+  ctx.setSessions([{ name: "s1", status: "busy" }, { name: "s2", status: "busy" }]);
+  const headerBefore = buttons["term-kill"].textContent;
+  const railKill = ctx.killSession("s2");
+  check("the pressed card shows the pending kill at once",
+        [cards[1].classes.has("rail-killing"), !!cards[1].tag(),
+         cards[1].tag() && cards[1].tag().textContent],
+        [true, true, "ending…"]);
+  check("the tag sits right after the session name",
+        cards[1].head.children.map((c) => c.className),
+        ["rail-name", "rail-killing-tag"]);
+  check("other cards and the attached session's header stay as they were",
+        [cards[0].classes.has("rail-killing"), !!cards[0].tag(),
+         buttons["term-kill"].textContent],
+        [false, false, headerBefore]);
+  replies.shift().resolve(response({ name: "s2", status: "busy" }));
+  await railKill;
+  check("the card stays pending while the session is being terminated",
+        [cards[1].classes.has("rail-killing"), !!cards[1].tag()], [true, true]);
+  ctx.decorateKillRow(cards[1], "s2");
+  check("redrawing the row does not add a second tag",
+        cards[1].head.children.length, 2);
+  ctx.setSessions([{ name: "s1", status: "busy" }, { name: "s2", status: "exited" }]);
+  ctx.reconcileKillUiState();
+  ctx.decorateKillRow(cards[1], "s2");
+  check("the exited poll clears the card",
+        [cards[1].classes.has("rail-killing"), !!cards[1].tag()], [false, false]);
+  const railRefused = ctx.killSession("s1");
+  check("a press on the attached session marks its card as well",
+        cards[0].classes.has("rail-killing"), true);
+  replies.shift().resolve(response({ error: "denied" }, false, 409));
+  await railRefused;
+  check("a refused kill takes the card's pending state back",
+        [cards[0].classes.has("rail-killing"), !!cards[0].tag()], [false, false]);
+  errors.length = 0;
+  check("the card's pending state is drawn and pulses",
+        [/li\.sess-card\.rail-killing\s*\{[^}]*animation:/s.test(css),
+         /\.rail-killing-tag\s*\{/.test(css)],
+        [true, true]);
 
   /* A paused record (claunch-zpyzf): the press files the pause as killed.
      Nothing is running, so there is no wind-down to ask for and the reply

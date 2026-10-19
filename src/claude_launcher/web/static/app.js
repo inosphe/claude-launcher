@@ -5266,6 +5266,7 @@ async function refreshSessions(options) {
       decorateProcsRow(keptRow, s);
       if (typeof decorateCommitsRow === "function") decorateCommitsRow(keptRow, s);
       if (typeof decorateTalkRow === "function") decorateTalkRow(keptRow, s.name);
+      if (typeof decorateKillRow === "function") decorateKillRow(keptRow, s.name);
       place(nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
       countRow();
@@ -5581,6 +5582,8 @@ async function refreshSessions(options) {
     decorateProcsRow(li, s);
     // Its newest commits, framed by the PR that carries them (claunch-h5m6f).
     if (typeof decorateCommitsRow === "function") decorateCommitsRow(li, s);
+    // A kill pressed and not yet seen through (decorateKillRow).
+    if (typeof decorateKillRow === "function") decorateKillRow(li, s.name);
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     place(parent, li);
@@ -15264,6 +15267,47 @@ function syncSessionKillControls(name = currentName) {
   }
 }
 
+/* The rail card's half of the same acknowledgement. `k` names a card that
+   need not be the attached session, so the header buttons above say nothing
+   about it, and the kill route can take a second or more to answer (the
+   wind-down check reads the board first). Until this the card stayed exactly
+   as it was through that interval, and a press read as a missed one
+   (claunch-5g6zp). The card now wears the pending state from the moment of
+   the press to the poll that sees the session exit, like the buttons do.
+   Idempotent: the row builder calls it on every row it draws or keeps. */
+function decorateKillRow(li, name) {
+  if (!li || !li.classList) return;
+  const pending = killUiState.has(name);
+  li.classList.toggle("rail-killing", pending);
+  const tag = li.querySelector ? li.querySelector(".rail-killing-tag") : null;
+  if (!pending) {
+    if (tag) tag.remove();
+    return;
+  }
+  if (tag || typeof document === "undefined") return;
+  const head = li.querySelector ? li.querySelector(".rail-head") : null;
+  if (!head) return;
+  const node = document.createElement("span");
+  node.className = "rail-killing-tag";
+  node.textContent = "ending…";
+  node.title = "kill requested; waiting for the session to exit";
+  const label = head.querySelector(".rail-name");
+  head.insertBefore(node, label ? label.nextSibling : head.firstChild);
+}
+
+function syncRailKillCard(name) {
+  if (typeof document === "undefined" || !document.querySelectorAll) return;
+  for (const li of document.querySelectorAll("#session-list li.sess-card")) {
+    if (li.dataset && li.dataset.name === name) decorateKillRow(li, name);
+  }
+}
+
+/* Everything on the page that shows a kill's progress, for one session. */
+function syncKillFeedback(name) {
+  syncSessionKillControls(name);
+  syncRailKillCard(name);
+}
+
 /* Kill ends, remove forgets, and the two buttons never share a meaning:
    kill posts to the kill route (which leaves an exited session alone), and
    remove is the only thing on the page that makes a session unresumable.
@@ -15277,7 +15321,7 @@ async function killSession(name) {
   // reads the second kill that way, this only says so in the URL.
   const winding = !!(sessionsCache.find((s) => s.name === name) || {}).winddown;
   killUiState.set(name, "requesting");
-  syncSessionKillControls(name);
+  syncKillFeedback(name);
   try {
     const resp = await api(
       `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
@@ -15310,7 +15354,7 @@ async function killSession(name) {
                     err && err.message ? err.message : "request failed");
   } finally {
     if (killUiState.get(name) === "requesting") killUiState.delete(name);
-    syncSessionKillControls(name);
+    syncKillFeedback(name);
     await refreshSessions({ state: "current" });
   }
 }
