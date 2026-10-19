@@ -257,3 +257,27 @@ def test_the_sessions_rail_sends_only_the_rows_a_page_does_not_hold(home, tmp_pa
             await client.close()
 
     asyncio.run(run())
+
+
+def test_the_rail_names_each_status_check_once_and_defers_exited_commits():
+    """claunch-4thlk.5: what repeated on every rail row is said once."""
+    check = {"id": "c1", "name": "C", "question": "committed?", "answer": "yes",
+             "reported_at": "2026-10-19T00:00:00+00:00", "source": "agent"}
+    rows = [
+        {"name": "live", "status": "running", "status_checks": [dict(check)],
+         "rail_commits": {"commits": [{"sha": "a"}], "more": 0}},
+        {"name": "gone", "status": "exited",
+         "status_checks": [dict(check, answer="no")],
+         "rail_commits": {"commits": [{"sha": "b"}], "more": 3}},
+        {"name": "bare", "status": "exited"},
+    ]
+    defs = api_mod._rail_slim_rows(rows)
+    assert defs == {"c1": {"name": "C", "question": "committed?"}}
+    assert rows[0]["status_checks"] == [{"id": "c1", "answer": "yes",
+                                         "reported_at": "2026-10-19T00:00:00+00:00",
+                                         "source": "agent"}]
+    assert rows[1]["status_checks"][0]["answer"] == "no"
+    # A live card keeps its chips; an exited one reads them when selected.
+    assert rows[0]["rail_commits"]["commits"] == [{"sha": "a"}]
+    assert "rail_commits" not in rows[1] and rows[1]["rail_commits_deferred"] is True
+    assert rows[2] == {"name": "bare", "status": "exited"}

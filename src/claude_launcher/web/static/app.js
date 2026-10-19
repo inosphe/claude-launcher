@@ -4720,6 +4720,20 @@ function sessionRowsTake(state, data) {
   return out;
 }
 
+/* The rail list names each status check once (`status_check_defs`, id ->
+   {name, question}) and each row carries only its answers
+   (claunch-4thlk.5); every reader of a row's checks reads them whole, so
+   they are put back together here, on the rows this poll just made. */
+function sessionRowsJoin(rows, defs) {
+  if (!defs || typeof defs !== "object") return rows;
+  for (const row of rows) {
+    if (!Array.isArray(row.status_checks)) continue;
+    row.status_checks = row.status_checks.map((check) => (
+      check && defs[check.id] ? Object.assign({}, defs[check.id], check) : check));
+  }
+  return rows;
+}
+
 async function refreshSessions(options) {
   // The recurring poll asks for every unarchived record, not the running
   // ones alone. The rail's "current" view is running plus killed plus paused,
@@ -4763,6 +4777,7 @@ async function refreshSessions(options) {
     }
     const incoming = rowKeep ? sessionRowsTake(state, data) : (data.sessions || []);
     if (!incoming) return;
+    if (typeof sessionRowsJoin === "function") sessionRowsJoin(incoming, data.status_check_defs);
     const incomingNames = new Set(incoming.map((s) => s.name));
     // A request answers for one category of records. Keep every cached record
     // outside that category (the archived ones an operator explicitly opened,
@@ -37370,7 +37385,11 @@ function railPrFrame(pr, commits, session) {
    them once from /rail-commits and draws those instead. Kept per session
    under a key that moves when the session commits again, so a poll redraw
    costs no request and a new commit costs one. A failed read leaves the
-   `+N` in place until the key moves. */
+   `+N` in place until the key moves.
+
+   An exited card's commits are not on the poll at all
+   (`rail_commits_deferred`, claunch-4thlk.5): an exited session commits no
+   more, so they are read the same way, once, when its card is selected. */
 const railCommitsAll = new Map();
 
 function railCommitsKey(rc) {
@@ -37381,8 +37400,9 @@ function railCommitsKey(rc) {
 function railCommitsUnfolded(li, s, rc) {
   const open = !!(li.classList && li.classList.contains("active"));
   li._railCommitsOpen = open;
-  if (!open || !rc || !(rc.more > 0)) return rc;
-  const key = railCommitsKey(rc);
+  const deferred = !rc && !!s.rail_commits_deferred;
+  if (!open || (!deferred && !(rc && rc.more > 0))) return rc;
+  const key = deferred ? "deferred" : railCommitsKey(rc);
   const got = railCommitsAll.get(s.name);
   if (got && got.key === key) return got.rc || rc;
   railCommitsAll.set(s.name, { key, rc: null });

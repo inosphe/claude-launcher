@@ -8778,6 +8778,7 @@ async def _sessions_list(request: web.Request) -> web.Response:
         prog = published.get(info.get("name") or "")
         if prog:
             info["progress"] = prog
+    check_defs: dict = {}
     if rail_view:
         # The dashboard reads this resource repeatedly. The detail panel has
         # its own /meta request, so an opening task and environment do not
@@ -8832,9 +8833,12 @@ async def _sessions_list(request: web.Request) -> web.Response:
             tps = row.get("tps")
             if isinstance(tps, dict) and "age_s" in tps:
                 row["tps"] = {k: v for k, v in tps.items() if k != "age_s"}
+        check_defs = _rail_slim_rows(attached)
     body = {"llm_configured": llm_ok, "rag_configured": rag_ok}
     if queue_status:
         body["restore_queue"] = queue_status
+    if rail_view and check_defs:
+        body["status_check_defs"] = check_defs
     if not rail_view:
         return json_response({"sessions": attached, **body})
     # Each rail row encoded on its own and joined, so the same texts serve a
@@ -8851,6 +8855,44 @@ async def _sessions_list(request: web.Request) -> web.Response:
         "texts": texts,
     }
     return response
+
+
+#: The parts of a status check that are the check's, not the session's
+#: answer: the same on every row that reports it.
+_CHECK_DEF_KEYS = ("name", "question")
+
+
+def _rail_slim_rows(rows: list) -> dict:
+    """Take what repeats on every rail row out of the rows (claunch-4thlk.5).
+
+    Measured on a working daemon: the status checks were 76KB of a 360KB
+    rail, nearly all of it each check's name and question repeated on every
+    row that answered it, and an exited row's commit chips another large
+    share for cards that are folded away. So, in place:
+
+    - each row's checks keep their ``id`` and the session's answer; the
+      name and question go once into the returned ``{id: {name, question}}``,
+      which the list carries as ``status_check_defs`` and the page joins
+      back (``sessionRowsJoin`` in app.js);
+    - an exited row's ``rail_commits`` is left out and the row says
+      ``rail_commits_deferred``; the page reads them from
+      ``/api/sessions/<name>/rail-commits`` when the card is selected.
+    """
+    defs: dict = {}
+    for row in rows:
+        checks = row.get("status_checks")
+        if isinstance(checks, list):
+            slim = []
+            for check in checks:
+                if isinstance(check, dict) and check.get("id"):
+                    defs.setdefault(check["id"], {k: check.get(k) for k in _CHECK_DEF_KEYS})
+                    check = {k: v for k, v in check.items() if k not in _CHECK_DEF_KEYS}
+                slim.append(check)
+            row["status_checks"] = slim
+        if row.get("status") == "exited" and row.get("rail_commits"):
+            del row["rail_commits"]
+            row["rail_commits_deferred"] = True
+    return defs
 
 
 def _row_digest(text: str) -> str:

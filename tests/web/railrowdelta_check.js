@@ -35,7 +35,9 @@ const ctx = new Function([
   "const sessionRowsKept = new Map();",
   slice("sessionRowDigests"),
   slice("sessionRowsTake"),
-  "return { take: sessionRowsTake, digests: sessionRowDigests, kept: sessionRowsKept };",
+  slice("sessionRowsJoin"),
+  "return { take: sessionRowsTake, digests: sessionRowDigests, kept: sessionRowsKept,",
+  "         join: sessionRowsJoin };",
 ].join("\n"))();
 
 const row = (name, v) => ({ name, status: "running", v });
@@ -80,5 +82,19 @@ assert.strictEqual(ctx.take("current", {
   delta: true, names: ["a", "zz"], sessions: [], row_hashes: {},
 }), null);
 assert.deepStrictEqual(ctx.digests("current"), {}, "the next poll asks for every row");
+
+// Status checks: the list names each check once and a row carries only its
+// answers (claunch-4thlk.5); the poll's rows get the whole check back.
+const joined = ctx.join([
+  { name: "a", status_checks: [{ id: "c1", answer: "yes" }, { id: "zz", answer: "no" }] },
+  { name: "b" },
+], { c1: { name: "C", question: "committed?" } });
+assert.deepStrictEqual(joined[0].status_checks, [
+  { name: "C", question: "committed?", id: "c1", answer: "yes" },
+  { id: "zz", answer: "no" },
+], "a check the list did not name is left as it came");
+assert.deepStrictEqual(joined[1], { name: "b" });
+const plain = [{ name: "a", status_checks: [{ id: "c1", name: "C", question: "q", answer: "yes" }] }];
+assert.deepStrictEqual(ctx.join(plain, undefined), plain, "an older daemon's whole checks pass through");
 
 console.log("railrowdelta_check ok");
