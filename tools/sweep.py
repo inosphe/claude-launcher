@@ -702,6 +702,23 @@ def _truncated(
     )
 
 
+def _say(text: str, *, file=None) -> None:
+    """Print `text` without letting the stream's codec decide the run's fate.
+
+    ``main`` reconfigures the standard streams with ``errors="replace"``, but a
+    caller that imports this module and calls ``cmd_run`` itself does not pass
+    through ``main``. On such a stream an unencodable character raises
+    UnicodeEncodeError; it is re-encoded with replacement instead.
+    """
+    stream = file or sys.stdout
+    try:
+        print(text, file=stream, flush=True)
+    except UnicodeEncodeError:
+        codec = getattr(stream, "encoding", None) or "ascii"
+        print(text.encode(codec, errors="replace").decode(codec, errors="replace"),
+              file=stream, flush=True)
+
+
 def cmd_run(args) -> int:
     repo = (args.repo or Path(".")).resolve()
     try:
@@ -763,7 +780,7 @@ def cmd_run(args) -> int:
         pytest_basetemp.ensure(pytest_basetemp.root())
 
     started = datetime.now(timezone.utc)
-    print(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}", flush=True)
+    _say(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}")
     # The suite's output is read as utf-8 with undecodable bytes replaced,
     # never with the locale ``text=True`` picks. Measured at 5516c651c732 on a
     # cp949 machine: the first Korean byte in a failure dump
@@ -810,7 +827,6 @@ def cmd_run(args) -> int:
     # failing test that was never named. Say which one this was.
     lost = [n for n in ("stdout", "stderr") if getattr(proc, n) is None]
     output = (proc.stdout or "") + (proc.stderr or "")
-    print(output)
 
     counts = parse_counts(output)
     receipt = {
@@ -832,7 +848,7 @@ def cmd_run(args) -> int:
     }
     if home_writes:
         receipt["suite_home_writes"] = home_writes[:40]
-        print(f"WARNING: the suite wrote into the launcher home it was handed "
+        _say(f"WARNING: the suite wrote into the launcher home it was handed "
               f"(a test without an isolated home): {', '.join(home_writes[:40])}",
               file=sys.stderr)
     if lost:
@@ -963,6 +979,13 @@ def cmd_run(args) -> int:
             receipt["output"] = saved.name
 
     dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+    # Echoed only now that the verdict is on disk (claunch-jcxe). The queued
+    # runner (``delayed_sweep.run_one``) loads this file by path and calls
+    # ``cmd_run`` directly, so ``main``'s reconfigure never ran there; its
+    # stdout is a cp949 log file, and an unencodable character in the suite
+    # output used to end the process before the receipt existed.
+    _say(output)
 
     summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
     print(
