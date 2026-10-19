@@ -3717,11 +3717,12 @@ procedures:
                 run: found-issue
                 limit: 3
                 do:
-                  cond:
+                  - cond:
                     - if: "$data.inputs.session_routing == true and $data.route.mode == 'delegate'"
                       then:
                         # 자식이 멈추거나(escalated) 실패하면 사람이 다음 진행을 정한다:
-                        # 직접 이어서, 다시 위임(이 루프의 다음 회차), 계획부터 다시
+                        # 직접 이어서(경로를 direct로 바꾸고 아래 work로), 다시 위임
+                        # (이 루프의 다음 회차), 계획부터 다시
                         id: delegated
                         loop:
                           while: "true"
@@ -3736,12 +3737,18 @@ procedures:
                                 catch:
                                   rework-direct:
                                     - {seq: [route-direct], bind: route}
-                                    - {seq: [work], bind: work_report}
                                     - {break: delegated}
                                   rework-delegate: {seq: [route-delegate], bind: route}
                                   reject: {continue: plan-work}
                               failed: *delegated-rework
-                    - else: {seq: [work], bind: work_report}
+                    - else: []
+                  # work는 이 자리 하나에서만 부른다: 라벨이 하나여야 `work`로
+                  # 보이고 result['work']로 읽힌다. 위임이 끝까지 갔으면 경로가
+                  # delegate로 남아 건너뛴다.
+                  - cond:
+                    - if: "$data.inputs.session_routing != true or $data.route.mode != 'delegate'"
+                      then: {seq: [work], bind: work_report}
+                    - else: []
             - id: test-decision
               choose:
                 chooser: agent
