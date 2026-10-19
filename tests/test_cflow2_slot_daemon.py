@@ -253,7 +253,8 @@ def test_migrate_moves_own_slots_once_and_leaves_a_link(tmp_path, monkeypatch):
     done = slot_migration.migrate([str(tmp_path)], "main", sessions, apply=True)
     assert [(e.slot, e.action, e.target) for e in done.of(slot_migration.MOVE)] == [
         ("s15", "move", "s15@main")]
-    assert (runs / "s15").is_symlink() and os.readlink(runs / "s15") == "s15@main"
+    if os.name != "nt" or (runs / "s15").is_symlink():  # move() only warns when Windows withholds the privilege
+        assert (runs / "s15").is_symlink() and os.readlink(runs / "s15") == "s15@main"
     st = RunStore(str(tmp_path), "s15")
     assert not st.legacy and st.dir == runs / "s15@main"
     state = st.load_state()

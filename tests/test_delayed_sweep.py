@@ -839,9 +839,9 @@ def test_git_identity_lookup_runs_off_the_event_loop(repo, tmp_path, monkeypatch
 
 
 def test_runner_path_starts_with_the_interpreters_directory(repo, tmp_path, monkeypatch):
-    monkeypatch.setenv("PATH", "/usr/bin")
     q = mod.Queue()
-    job, _ = enqueue(q, repo, "a")
+    job, _ = enqueue(q, repo, "a")  # runs git, so PATH is narrowed only afterwards
+    monkeypatch.setenv("PATH", "/usr/bin")
     seen = []
     async def launch(*args, **kwargs):
         seen.append(kwargs["env"])

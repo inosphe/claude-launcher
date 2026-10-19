@@ -274,7 +274,7 @@ class FakeBoard:
 
     async def show(self, root, issue_id):
         try:
-            return self.issues[(str(root), issue_id)]
+            return self.issues[(Path(root).as_posix(), issue_id)]
         except KeyError:
             raise cli_beads.BeadsError(f"no issue {issue_id!r}") from None
 

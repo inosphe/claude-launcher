@@ -47,7 +47,9 @@ def remote_key(repo: str, remote: str) -> str:
         return key
     if value.startswith("file://"):
         return "file://" + os.path.realpath(value[7:])
-    if ":" not in value:
+    # A Windows drive path (C:\... or C:/...) carries a ':' that is not an
+    # scp-style host separator; git reads it as a local path, and so do we.
+    if ":" not in value or (os.name == "nt" and os.path.isabs(value)):
         return "file://" + os.path.realpath(os.path.join(repo, value))
     raise PolicyError("remote identity cannot be normalized; explicit mapping required")
 

@@ -320,7 +320,8 @@ def checkout_of(repo: str, branch: str) -> Optional[str]:
         if line.startswith("worktree "):
             path = line[len("worktree "):]
         elif line == f"branch refs/heads/{branch}" and path:
-            return path
+            # git prints C:/... on Windows; callers compare it with OS paths.
+            return os.path.normpath(path)
     return None
 
 

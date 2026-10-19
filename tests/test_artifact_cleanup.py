@@ -53,7 +53,7 @@ def test_plan_reads_and_apply_deletes_only_owned_completed_runs(setup):
     result = service.apply("s1", plan["plan_id"])
     assert not mine.exists() and all(p.exists() for p in others) and unknown.exists()
     assert (result["removed"], result["cleanup_pending"]) == (1, 1)
-    receipt = json.loads(Path(result["receipt"]).read_text())
+    receipt = json.loads(Path(result["receipt"]).read_text(encoding="utf-8"))
     assert receipt["items"][0]["path"]
     removed = next(x for x in receipt["items"] if x["status"] == "removed")
     assert removed["run"]["counts"] == {"passed": 3}
@@ -104,7 +104,7 @@ def test_deletion_failure_has_real_reason_and_saved_intent(setup, monkeypatch):
     mine = completed(root / "s1c1012000000")
     plan = service.plan("s1")
     def fail(path):
-        receipt = json.loads((ac.paths.session_dir("s1") / "cleanup" / (plan["plan_id"] + ".json")).read_text())
+        receipt = json.loads((ac.paths.session_dir("s1") / "cleanup" / (plan["plan_id"] + ".json")).read_text(encoding="utf-8"))
         assert receipt["items"][0]["status"] == "deleting"
         raise PermissionError("denied by filesystem")
     monkeypatch.setattr(shutil, "rmtree", fail)
@@ -289,6 +289,12 @@ def test_worktree_fixtures_whose_gitdir_is_in_the_same_tree_are_removed(setup):
         "commit", "--allow-empty", "-m", "init")
     git(repo, "worktree", "add", "--detach", str(mine / "test_registered_preview0" / "wt"))
     assert (mine / "test_registered_preview0" / "wt" / ".git").is_file()
+    if os.name == "nt":
+        # git writes loose objects read-only; apply() records that as pending and
+        # never changes permissions, so the fixture is made removable up front.
+        for walked, _, names in os.walk(repo / ".git"):
+            for name in names:
+                os.chmod(os.path.join(walked, name), 0o666)
     plan = service.plan("s1")
     assert plan["items"][0]["status"] == "ready", plan["items"][0]
     result = service.apply("s1", plan["plan_id"])
@@ -508,7 +514,7 @@ def test_scratch_artifacts_are_listed_whatever_their_name(setup, tmp_path):
     completed(scratch / "runs-1")
     (scratch / "notes").mkdir()
     (scratch / "report.md").write_text("kept")
-    (scratch / "linked").symlink_to(preview, target_is_directory=True)
+    link(scratch / "linked", preview)
     plan = service.plan("s1")
     rows = {Path(row["path"]).name: row for row in plan["items"]}
     assert set(rows) == {"preview-r2", "bt-preview", "runs-1"}
@@ -542,7 +548,7 @@ def test_fingerprint_names_entries_as_relative_paths(setup, tmp_path, monkeypatc
     mine = completed(root / "s1c1012000000")
     (mine / "a" / "b").mkdir(parents=True)
     (mine / "a" / "b" / "f").write_text("x")
-    (mine / "a" / "link").symlink_to(tmp_path)
+    link(mine / "a" / "link", tmp_path)
     nested_gitfile(mine / "a", "gone")
     fed = []
     real = ac.hashlib.sha256
