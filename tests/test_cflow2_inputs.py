@@ -215,6 +215,7 @@ def test_worker_v2_declares_the_reviewers_profile_and_harness():
     sch = chart.meta["inputs"]
     for name in ("reviewer_profile", "reviewer_harness"):
         assert sch[name]["type"] == "string" and sch[name]["default"] == ""
+        assert sch[name]["set_by"] == ["user"]  # claunch-gqgcz.1
     values, errors = inputs.normalize(sch, {"reviewer_harness": "codex"},
                                       chart.meta["input_constraints"])
     assert errors == {} and values["reviewer_profile"] == ""

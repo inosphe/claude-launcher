@@ -168,6 +168,18 @@ def test_a_constraint_holds_against_a_persons_write(tmp_path):
     assert (_values(tmp_path)["pr"], _values(tmp_path)["no_pr"]) == (False, True)
 
 
+@pytest.mark.parametrize("raw", [" , ", ",", "\n \n", []])
+def test_a_required_list_is_not_cleared_through_blank_items(raw):
+    """claunch-txjqr: ' , ' is not empty text but coerces to [] -- still a
+    clear, so a required input refuses it like an empty value."""
+    sch = inputs.schema({"tags": {"type": "list", "required": True, "set_by": ["user"]}})
+    with pytest.raises(inputs.InputsError, match="is required"):
+        inputs.settle(sch, {"tags": ["a"]}, "tags", raw, inputs.SETTER_USER)
+    assert inputs.settle(sch, {"tags": ["a"]}, "tags", " b , ", inputs.SETTER_USER) == ["b"]
+    loose = inputs.schema({"tags": {"type": "list", "set_by": ["user"]}})
+    assert inputs.settle(loose, {"tags": ["a"]}, "tags", " , ", inputs.SETTER_USER) == []
+
+
 def test_the_agent_cannot_write_a_user_input(tmp_path):
     """The agent's door keeps its own setter: an approval gate the person
     turned on is not the agent's to turn off."""
@@ -290,4 +302,9 @@ def test_improv_worker_lets_a_person_change_the_approval_gate():
     sch = chart.meta["inputs"]
     assert sch["require_coding_approval"]["set_by"] == ["user"]
     assert sch["max_rounds"]["set_by"] == ["user"]
+    # claunch-gqgcz.1: reviewer-ensure reads these every round
+    assert sch["reviewer_profile"]["set_by"] == ["user"]
+    assert sch["reviewer_harness"]["set_by"] == ["user"]
+    assert inputs.settle(sch, {"reviewer_profile": ""}, "reviewer_profile", "work",
+                         inputs.SETTER_USER) == "work"
     assert sch["issue"]["set_by"] == ["agent"]  # the start issue stays the agent's

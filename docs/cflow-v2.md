@@ -777,6 +777,8 @@ inputs:
   improv-worker-v2의 `require_coding_approval`과 `max_rounds`가 그 예다: 일감마다
   `coding-approval-check`가, 회차마다 회차 루프의 `while`이 그 값을 다시 읽으므로,
   사람이 런 도중에 승인 게이트를 켜면 다음 일감부터 승인을 기다린다.
+  `reviewer_profile`·`reviewer_harness`도 같다(10b). required 입력은 빈 값으로
+  비울 수 없다 — `' , '`처럼 빈 항목만 준 list도 비우는 값으로 본다.
 
 ```yaml
 inputs:
@@ -2909,8 +2911,12 @@ PR은 닫고 브랜치는 지웠다.
 - 기존 리뷰어: 응답자 판정이 0이어도 자식 리뷰어 그룹이 비었고 두 입력 중 하나가
   있으면 자식 리뷰어를 세운다. 형제·조상 리뷰어는 사람이 고른 profile로 서 있지
   않고, peer-review는 자식 리뷰어를 먼저 묻는다.
-- 시작 뒤 변경: 두 입력에는 `set_by`가 없다. 런 중에 사람이 바꾸는 경로는
-  `set_by: [user]`(claunch-umq1f)가 착지한 뒤 붙인다.
+- 시작 뒤 변경: 두 입력은 `set_by: [user]`다(claunch-gqgcz.1). 사람이 런 도중에
+  `claunch cflow2 input --user` 또는 웹 런 페이지의 inputs 편집기로 바꾼다(2.6).
+  에이전트는 쓰지 못한다. `reviewer-ensure`가 회차마다 `${data.inputs.reviewer_*}`를
+  읽으므로 새 값은 그 뒤에 세우는 리뷰어부터 적용된다. 이미 살아 있는 자식
+  리뷰어는 응답자 판정이 0으로 닿아 그대로 다시 쓰이고, 다른 profile로 바꿔
+  세우지 않는다.
 
 ## 11. 단계
 

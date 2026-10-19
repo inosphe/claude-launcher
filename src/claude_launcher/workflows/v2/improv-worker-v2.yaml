@@ -211,6 +211,9 @@ inputs:
       켜져 있어야 한다
     placeholder: 예) work
     default: ""
+    # reviewer-ensure가 회차마다 읽으므로, 사람이 런 도중에 바꾸면 그 뒤에 세우는
+    # 리뷰어부터 적용된다(claunch-gqgcz.1). 이미 살아 있는 리뷰어는 그대로 쓴다.
+    set_by: [user]
   reviewer_harness:
     type: string
     label: 리뷰어 harness
@@ -220,6 +223,7 @@ inputs:
       그 profile이 허용하는 harness여야 한다
     placeholder: 예) codex
     default: ""
+    set_by: [user]
 
 collections:
   # 이 런이 stack side 런에 보내는 신호(cut-wanted, frozen, landed, rebased). stack 런은
