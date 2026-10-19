@@ -8,6 +8,7 @@ a resolved :class:`~claude_launcher.profile.Profile`.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from . import (
     routing,
     store,
     translators,
+    wsl_reg_stub,
 )
 from .profile import Profile
 
@@ -668,8 +670,16 @@ def _spawn(
     provider_override: Optional[str] = None,
     null_token: bool = False,
     cwd: Optional[str] = None,
+    hide_reg_exe: bool = False,
 ) -> int:
     cmd = [config.claude_bin(), *args]
+    # Through the same reg.exe shim as daemon sessions (wsl_reg_stub.py):
+    # every claude launch probes reg.exe, and a WSL relay that never finishes
+    # pins a host core until `wsl --shutdown`. Only when claude resolves, so a
+    # missing executable still fails below with its own message rather than
+    # as the shim's exit 127.
+    if hide_reg_exe and shutil.which(cmd[0]):
+        cmd = wsl_reg_stub.spawn_argv(cmd)
     try:
         completed = subprocess.run(
             cmd,
@@ -744,6 +754,7 @@ def run(
     null_token: bool = False,
     cwd: Optional[str] = None,
     tools: Optional[Sequence[str]] = None,
+    keep_reg_exe: bool = False,
 ) -> int:
     """Launch the harness selected by the profile.
 
@@ -752,6 +763,9 @@ def run(
     with no OAuth token at all (see :func:`child_env`). ``cwd`` (from ``run
     --worktree``) starts claude in another directory; ``None`` inherits this
     process's, which is what every run that did not ask for a worktree wants.
+    Under WSL claude starts with ``reg.exe`` hidden, as daemon sessions do
+    (``daemon.wsl_hide_reg_exe``); ``keep_reg_exe`` (from ``run
+    --keep-reg-exe``) skips that for this run, e.g. to use ``sudo`` inside it.
     """
     harness = profile_harness(profile)
     require_compact_fits(
@@ -765,6 +779,8 @@ def run(
             incompatible.append("--provider")
         if null_token:
             incompatible.append("--null")
+        if keep_reg_exe:
+            incompatible.append("--keep-reg-exe")
         if incompatible:
             raise RunnerError(
                 f"{', '.join(incompatible)} only applies to the claude harness; "
@@ -816,6 +832,7 @@ def run(
         provider_override=provider,
         null_token=null_token,
         cwd=cwd,
+        hide_reg_exe=not keep_reg_exe,
     )
 
 

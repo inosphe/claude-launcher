@@ -18,7 +18,10 @@ With the setting on, the daemon starts each new session through
 unshares a user namespace and a mount namespace, bind-mounts a two-line
 ``exit 1`` script over ``reg.exe`` inside them, and ``exec``\\ s the session's
 own command -- so no extra process is left in the tree, and nothing outside the
-session sees the change. ``exit 1`` is what ``reg.exe query`` answers for a key
+session sees the change. ``claunch run`` starts claude the same way
+(``runner._spawn``), since a run from a WSL shell probes ``reg.exe`` just as
+a daemon session does; ``run --keep-reg-exe`` opts one run out. ``exit 1`` is
+what ``reg.exe query`` answers for a key
 that does not exist, so Claude Code reads "no policy", as it does on a machine
 without one, and no Windows process is started.
 

@@ -370,6 +370,18 @@ def no_linux_clipboard_reads(monkeypatch):
     monkeypatch.setattr("claude_launcher.daemon.clipboard._wsl_bridge", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def no_reg_exe_shim(monkeypatch):
+    """Launch commands are the commands themselves, on WSL as anywhere else.
+
+    Under WSL both daemon sessions and ``claunch run`` start claude through
+    the reg.exe shim (``wsl_reg_stub``), so a test that records a launch would
+    see ``python -m claude_launcher.wsl_reg_stub ...`` in front of it only on
+    a WSL machine. The tests of the shim itself set ``is_wsl`` back on.
+    """
+    monkeypatch.setattr("claude_launcher.wsl_reg_stub.is_wsl", lambda: False)
+
+
 @pytest.fixture(scope="session")
 def repo_template(tmp_path_factory):
     """Build a git repository once per worker, then copy it per test.

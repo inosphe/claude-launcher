@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from claude_launcher import (
     providers,
     runner,
     store,
+    wsl_reg_stub,
 )
 
 
@@ -530,14 +532,25 @@ def test_path_qualified_selector_prints_namespaced_harness_home(home, capsys):
 _REAL_RUN = subprocess.run
 
 
+_SHIM = [sys.executable, "-m", "claude_launcher.wsl_reg_stub"]
+
+
 def _capture_launch(monkeypatch):
-    """A ``subprocess.run`` that records the claude launch and really runs git."""
+    """A ``subprocess.run`` that records the claude launch and really runs git.
+
+    A launch through the reg.exe shim (WSL) is recorded as the command it
+    wraps, with ``captured["shim"]`` saying it was wrapped.
+    """
     captured = {}
 
     def fake_launch(cmd, **kwargs):
         if cmd and cmd[0] == "git":
             return _REAL_RUN(cmd, **kwargs)
+        shim = list(cmd[:3]) == _SHIM
+        if shim:
+            cmd = cmd[6:]  # --stub PATH --
         if cmd and cmd[0] == config.claude_bin():
+            captured["shim"] = shim
             captured["args"] = list(cmd[1:])
             captured["env"] = kwargs.get("env")
         return type("Done", (), {"returncode": 0})()
@@ -566,6 +579,62 @@ def test_run_without_null_still_injects_token(home, monkeypatch, capsys):
     capsys.readouterr()
     assert run("run", "work", "--no-worktree") == 0
     assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-X"
+
+
+def _pretend_wsl(monkeypatch, *, setting=True):
+    """WSL with reg.exe and claude on PATH, ``daemon.wsl_hide_reg_exe`` = setting."""
+    if not hasattr(wsl_reg_stub.os, "unshare"):
+        pytest.skip("os.unshare needs Python 3.12+")
+    monkeypatch.setattr(wsl_reg_stub.sys, "platform", "linux")
+    monkeypatch.setattr(wsl_reg_stub, "is_wsl", lambda: True)
+    monkeypatch.setattr(wsl_reg_stub.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/bin/" + name)
+    store.set_daemon_field(wsl_reg_stub.SETTING, setting)
+
+
+def test_run_hides_reg_exe_under_wsl_like_daemon_sessions(home, monkeypatch, capsys):
+    # claude probes reg.exe on every launch; a `claunch run` from a WSL shell
+    # must go through the same shim as a daemon session.
+    run("create", "work", "--no-seed")
+    _pretend_wsl(monkeypatch)
+    captured = _capture_launch(monkeypatch)
+    assert run("run", "work", "--no-worktree", "--resume") == 0
+    assert captured["shim"] is True
+    assert captured["args"] == ["--resume"]
+
+
+def test_run_keep_reg_exe_launches_claude_plainly(home, monkeypatch, capsys):
+    run("create", "work", "--no-seed")
+    _pretend_wsl(monkeypatch)
+    captured = _capture_launch(monkeypatch)
+    assert run("run", "work", "--keep-reg-exe", "--no-worktree", "--resume") == 0
+    assert captured["shim"] is False
+    assert captured["args"] == ["--resume"]  # the flag is the launcher's, not claude's
+
+
+def test_run_follows_the_daemon_setting_off(home, monkeypatch, capsys):
+    run("create", "work", "--no-seed")
+    _pretend_wsl(monkeypatch, setting=False)
+    captured = _capture_launch(monkeypatch)
+    assert run("run", "work", "--no-worktree") == 0
+    assert captured["shim"] is False
+
+
+def test_run_without_claude_on_path_skips_the_shim(home, monkeypatch, capsys):
+    # The shim would turn "not installed" into its own exit 127; unwrapped,
+    # the missing executable still gets runner's message.
+    run("create", "work", "--no-seed")
+    _pretend_wsl(monkeypatch)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    captured = _capture_launch(monkeypatch)
+    assert run("run", "work", "--no-worktree") == 0
+    assert captured["shim"] is False
+
+
+def test_keep_reg_exe_is_claude_only(home, capsys):
+    run("create", "pi-work", "--no-seed")
+    with pytest.raises(runner.RunnerError, match="--keep-reg-exe"):
+        runner.run(profile.require_selector("pi-work:pi"), keep_reg_exe=True)
 
 
 def test_non_claude_run_does_not_steal_the_harness_provider_flag(

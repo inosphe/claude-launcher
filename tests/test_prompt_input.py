@@ -65,6 +65,7 @@ def test_run_injects_append_system_prompt(home, monkeypatch, capsys):
         provider_override=None,
         null_token=False,
         cwd=None,
+        hide_reg_exe=False,
     ):
         captured["args"] = list(args)
         return 0
@@ -96,6 +97,7 @@ def test_run_empty_prompt_skips_injection(home, monkeypatch, capsys):
         provider_override=None,
         null_token=False,
         cwd=None,
+        hide_reg_exe=False,
     ):
         captured["args"] = list(args)
         return 0
