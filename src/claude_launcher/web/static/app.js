@@ -4657,6 +4657,7 @@ async function refreshSessions(options) {
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
   const unstamped = (key, value) => (
     key === "due_in" || key === "fired_ago" ||
+    key === "due_at" || key === "fired_at" ||
     key === "last_visited_at" || key === "last_input_at" ||
     key === "last_activity_at" || key === "last_output_at" ||
     key === "viewers" || key === "moved_rows" || key === "tool_calls" ||
@@ -6298,14 +6299,42 @@ const RAIL_TIMER_RANK = {
   arming: 5, stopped: 6, blocked: 7, paused: 8, off: 9,
 };
 
+/* One clock's reading as of `nowMs`: the remaining and elapsed seconds.
+
+   The daemon publishes a clock's times as absolute epoch seconds (`due_at`,
+   `fired_at`) so an unchanged timer reads the same bytes on every poll
+   (claunch-4thlk.1); the seconds left are this page's clock against them,
+   the way the term timer rows read `due`. A reading from an older daemon
+   carries `due_in`/`fired_ago` already and passes through. */
+function timerReading(c, nowMs) {
+  if (!c || typeof c !== "object") return c;
+  if (!("due_at" in c) && !("fired_at" in c)) return c;
+  const t = (nowMs === undefined ? Date.now() : nowMs) / 1000;
+  const due = c.due_at === null || c.due_at === undefined ? null : Number(c.due_at);
+  const fired = c.fired_at === null || c.fired_at === undefined ? null : Number(c.fired_at);
+  return Object.assign({}, c, {
+    due_in: due === null ? null : due - t,
+    fired_ago: fired === null ? null : Math.max(0, t - fired),
+  });
+}
+
+/* A clock re-armed here, ahead of the poll that will say so: due one
+   `interval` from now, in both the published shape and the older one. */
+function timerRearmed(c, interval) {
+  return Object.assign({}, c, {
+    state: "counting", due_in: interval, due_at: Date.now() / 1000 + interval,
+  });
+}
+
 /* The clock a run's strip speaks for, or null when the daemon published no
-   timers for it (an older daemon, or a slot that is idle or errored). */
-function railTimerPick(run) {
+   timers for it (an older daemon, or a slot that is idle or errored).
+   `nowMs` is the moment the remaining seconds are taken at. */
+function railTimerPick(run, nowMs) {
   const timers = (run && run.timers) || null;
   if (!timers) return null;
   const cands = [];
   for (const clock of ["reminder", "role", "ping"]) {
-    const c = timers[clock];
+    const c = timerReading(timers[clock], nowMs);
     if (c && c.state) cands.push(Object.assign({}, c, { clock }));
   }
   if (!cands.length) return null;
@@ -6444,7 +6473,7 @@ function termTimerSubject(run, sessionReminder) {
   // before either repeating source reaches the terminal.
   if (sessionReminder && sessionReminder.paused && timers.reminder) {
     timers.reminder = Object.assign({}, timers.reminder, {
-      state: "paused", due_in: null,
+      state: "paused", due_in: null, due_at: null,
     });
   }
   if (!Object.keys(timers).length) return null;
@@ -6477,8 +6506,9 @@ function renderTermTimer() {
   const run = termTimerRun();
   const sessionReminder = termSessionReminder();
   const subject = termTimerSubject(run, sessionReminder);
+  const at = Date.now();
   termTimerRead = {
-    name: currentName, pick: railTimerPick(subject), at: Date.now(),
+    name: currentName, pick: railTimerPick(subject, at), at,
     remind: (run && run.timers && run.timers.reminder) || null,
     sessionReminder,
   };
@@ -6687,16 +6717,14 @@ async function termTimerClick() {
       state.paused = hold.on;
       if (state.role) {
         state.role = Object.assign({}, state.role, {
-          state: hold.on ? "paused" : "arming", due_in: null,
+          state: hold.on ? "paused" : "arming", due_in: null, due_at: null,
         });
       }
     }
     const run = termTimerRun();
     const reminder = run && run.timers && run.timers.reminder;
     if (!hold.on && reminder && reminder.interval) {
-      run.timers.reminder = Object.assign({}, reminder, {
-        state: "counting", due_in: reminder.interval,
-      });
+      run.timers.reminder = timerRearmed(reminder, reminder.interval);
     }
     termTimerBusy = false;
     renderTermTimer();
@@ -6798,13 +6826,9 @@ async function termTimerSkipClick() {
   if (skip.session && read && read.sessionReminder && read.sessionReminder.role) {
     const role = read.sessionReminder.role;
     if (role.interval) {
-      read.sessionReminder.role = Object.assign({}, role, {
-        state: "counting", due_in: role.interval,
-      });
+      read.sessionReminder.role = timerRearmed(role, role.interval);
       if (read.pick && read.pick.clock === "role") {
-        read.pick = Object.assign({}, read.pick, {
-          state: "counting", due_in: role.interval,
-        });
+        read.pick = timerRearmed(read.pick, role.interval);
         read.at = Date.now();
       }
     }
@@ -6812,16 +6836,12 @@ async function termTimerSkipClick() {
   const cflowInterval = skip.session && read && read.remind
     ? read.remind.interval : skip.interval;
   if (read && read.remind && cflowInterval) {
-    read.remind = Object.assign({}, read.remind, {
-      state: "counting", due_in: cflowInterval,
-    });
+    read.remind = timerRearmed(read.remind, cflowInterval);
     // Only when the line is speaking for the reminder. When the ping is the
     // loudest clock the chip is telling the ping's story, and restamping the
     // reading would rewind the ping's countdown along with it.
     if (read.pick && read.pick.clock === "reminder") {
-      read.pick = Object.assign({}, read.pick, {
-        state: "counting", due_in: cflowInterval,
-      });
+      read.pick = timerRearmed(read.pick, cflowInterval);
       read.at = Date.now();
     }
   }
@@ -9365,7 +9385,8 @@ async function refreshCflow() {
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
   const signature = JSON.stringify(
     runs,
-    (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
+    (key, value) => key === "due_in" || key === "fired_ago" ||
+      key === "due_at" || key === "fired_at" ? undefined : value,
   );
   const repaintRail = currentPage === "flows" || signature !== cflowRailRendered;
   if (currentPage === "flows") cflowRailRendered = null;

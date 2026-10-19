@@ -64,7 +64,7 @@ from . import loop_lag as loop_lag_mod
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
-from . import shared_reads
+from . import shared_reads, wallclock
 from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
@@ -4402,14 +4402,17 @@ def _clock_snapshots(app) -> dict:
     and inventing a number for either is worse than saying so.
     """
     clocks = app.get("cflow_clocks") or {}
-    out = {}
+    # One instant for both tables, kept beside them: the ages are relative to
+    # it, and _cflow_timers turns them back into absolute times with it.
+    now = time.monotonic()
+    out = {"now": now}
     for kind in _CLOCK_KINDS:
         clock = clocks.get(kind)
         if clock is None:
             out[kind] = {"running": False, "timers": {}}
             continue
         try:
-            out[kind] = {"running": bool(clock.running), "timers": clock.timers()}
+            out[kind] = {"running": bool(clock.running), "timers": clock.timers(now)}
         except Exception:  # noqa: BLE001 — a readout must never break the poll
             # Swallowed without a trace on purpose: this module keeps no
             # logger, and the failure it can actually take is a table read
@@ -4437,10 +4440,13 @@ def _cflow_timers(
     no: it is armed and correctly saying nothing, and which of the several
     ways that happens is the whole content of the answer.
 
-    ``due_in`` may be negative. That is not a bug to clamp away: past zero
-    the clock is due and has not delivered — held for a session that stopped,
-    or inside the fifteen seconds until the next poll — and a floor of zero
-    would hide exactly the stretch a reader is trying to see.
+    The times are absolute (``due_at``, ``fired_at``: epoch seconds,
+    :mod:`.wallclock`), so an unchanged timer reads the same bytes on every
+    poll; the page subtracts its own clock (claunch-4thlk.1). ``due_at`` may
+    be in the past. That is not a bug to clamp away: past it the clock is due
+    and has not delivered — held for a session that stopped, or inside the
+    fifteen seconds until the next poll — and a floor of "now" would hide
+    exactly the stretch a reader is trying to see.
     """
     cfg = cfg or {}
     key = (cwd, scope)
@@ -4455,24 +4461,31 @@ def _cflow_timers(
     except Exception:  # noqa: BLE001 — raced with an exit
         busy = False
 
+    now = snaps.get("now")
+    if now is None:
+        now = time.monotonic()
+
     def base(kind, enabled, interval):
         snap = snaps.get(kind) or {}
         timer = (snap.get("timers") or {}).get(key)
+        fired_ago = (timer or {}).get("fired_ago")
         view = {
             "running": bool(snap.get("running")),
             "enabled": bool(enabled),
             "interval": interval,
-            "due_in": None,
-            "fired_ago": (timer or {}).get("fired_ago"),
+            "due_at": None,
+            "fired_at": None if fired_ago is None else wallclock.wall(now - fired_ago),
             "state": "",
         }
+        due_in = None
         if timer is not None and interval > 0:
-            view["due_in"] = interval - timer["armed_ago"]
-        return view, timer
+            due_in = interval - timer["armed_ago"]
+            view["due_at"] = wallclock.wall(now + due_in)
+        return view, timer, due_in
 
     awaits = payload.get("awaits") or {}
     enabled, interval = cflow_clock.reminder_policy(payload, cfg)
-    rem, timer = base("reminder", enabled, interval)
+    rem, timer, due_in = base("reminder", enabled, interval)
     if not rem["running"]:
         rem["state"] = "stopped"
     elif not enabled:
@@ -4488,7 +4501,7 @@ def _cflow_timers(
         # The one configuration where this clock says nothing but news: no
         # repeat, and an `awaits` probe watching for the thing to move.
         rem["state"] = "watching"
-    elif rem["due_in"] > 0:
+    elif due_in > 0:
         rem["state"] = "counting"
     else:
         rem["state"] = "held" if not busy else "due"
@@ -4502,7 +4515,7 @@ def _cflow_timers(
         rem["probe_code"] = (timer or {}).get("probe_code")
 
     enabled, interval = cflow_clock.ping_policy(cfg)
-    ping, timer = base("ping", enabled, interval)
+    ping, timer, due_in = base("ping", enabled, interval)
     if not ping["running"]:
         ping["state"] = "stopped"
     elif not enabled:
@@ -4517,7 +4530,7 @@ def _cflow_timers(
         # being reset every pass, and a countdown drawn without this reads as
         # a clock that has frozen.
         ping["state"] = "waiting"
-    elif ping["due_in"] > 0:
+    elif due_in > 0:
         ping["state"] = "counting"
     else:
         ping["state"] = "due"
@@ -6303,9 +6316,32 @@ async def h_mesh_list(request: web.Request) -> web.Response:
                 if projects.matches(m.project, project_filter)
             ],
             "outgoing": mm.outgoing_list(),
-            "relay": request.app["relay_state"](),
+            "relay": (
+                _relay_rail(request.app["relay_state"]())
+                if rail_view else request.app["relay_state"]()
+            ),
         }
     )
+
+
+#: The relay round-trip readings (relay_uplink.RelayUplink.latency). They
+#: move on every uplink ping, five seconds apart, so a rail answer carrying
+#: them was never the same bytes twice (claunch-4thlk.1). The rail's relay
+#: badge does not draw them; the latency badge gets the same numbers on the
+#: control socket's pong, which is where a fresh reading belongs.
+_RELAY_LATENCY_KEYS = ("rtt_ms", "rtt_age", "pending_ms")
+
+
+def _relay_rail(relay):
+    """``relay`` without the per-ping latency readings, for the rail poll."""
+    if not isinstance(relay, dict) or not isinstance(relay.get("relays"), list):
+        return relay
+    rows = [
+        {k: v for k, v in row.items() if k not in _RELAY_LATENCY_KEYS}
+        if isinstance(row, dict) else row
+        for row in relay["relays"]
+    ]
+    return {**relay, "relays": rows}
 
 
 async def h_mesh_create(request: web.Request) -> web.Response:
@@ -8674,6 +8710,13 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             {key: value for key, value in info.items() if key in rail_fields}
             for info in attached
         ]
+        # The tps reading's ``age_s`` grows by the poll interval on every
+        # answer, so no two rail answers were the same bytes; the rail draws
+        # the age from ``ts`` itself (claunch-4thlk.1).
+        for row in attached:
+            tps = row.get("tps")
+            if isinstance(tps, dict) and "age_s" in tps:
+                row["tps"] = {k: v for k, v in tps.items() if k != "age_s"}
     body = {
         "sessions": attached, "llm_configured": llm_ok, "rag_configured": rag_ok,
     }

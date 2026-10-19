@@ -115,7 +115,8 @@ new Function(
   "exports", "$", "el", "location", "cflowAction", "refreshSessions",
   "let currentName = null, cflowCache = [], sessionsCache = [];\n" +
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
-   slice("fmtCountdown"), slice("timerClockName"), slice("railTimerPick"),
+   slice("fmtCountdown"), slice("timerClockName"), slice("timerReading"),
+   slice("timerRearmed"), slice("railTimerPick"),
    slice("railTimerTitle"),
    slice("railTimerLine"), slice("scopeSession"), slice("sessCflowRun"),
    slice("termTimerRun"), slice("termSessionReminder"),
@@ -578,6 +579,32 @@ check("skipping a Role session uses the Session reminder endpoint",
 await settle();
 check("the Role countdown restarts at its full interval immediately",
       chip.kids.map((k) => k.text)[1], "role reminder in 5:00");
+
+/* The daemon publishes the clock as an absolute time (claunch-4thlk.1): the
+   chip reads it against this page's clock, and a pause or skip made here has
+   to override that absolute time too, or the next render would put the
+   daemon's old deadline back on screen. */
+posts.length = 0;
+ctx.setWorld("role-at", [], {
+  paused: false,
+  role: { running: true, enabled: true, interval: 300,
+          due_at: Date.now() / 1000 + 120.4, fired_at: null, state: "counting" },
+});
+ctx.render();
+check("a due_at Role reading counts down on the chip",
+      chip.kids.map((k) => k.text)[1], "role reminder in 2:00");
+skipBtn.fire("click");
+await settle();
+check("...a skip re-arms it at the full interval",
+      chip.kids.map((k) => k.text)[1], "role reminder in 5:00");
+ctx.render();
+check("...and a fresh render of the re-armed reading agrees",
+      chip.kids.map((k) => k.text)[1], "role reminder in 5:00");
+posts.length = 0;
+chip.fire("click");
+await settle();
+check("pausing a due_at reading shows paused, not the old deadline",
+      chip.kids.map((k) => k.text), ["▶", "session reminders paused"]);
 
 /* ---- the skip's hover text ------------------------------------------- */
 /* The one thing a reader cannot get from the icon: what it does NOT do.

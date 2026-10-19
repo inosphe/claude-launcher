@@ -63,11 +63,13 @@ const ctx = {};
 new Function(
   "exports", "currentName", "cflowCache",
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
-   slice("fmtCountdown"), slice("timerClockName"), slice("railTimerPick"), slice("railTimerTitle"),
+   slice("fmtCountdown"), slice("timerClockName"), slice("timerReading"),
+   slice("railTimerPick"), slice("railTimerTitle"),
    slice("railTimerLine")].join("\n") + `
 exports.fmtCountdown = fmtCountdown;
 exports.pick = railTimerPick;
 exports.line = railTimerLine;
+exports.reading = timerReading;
 `)(ctx, null, []);
 
 let failures = 0;
@@ -131,6 +133,33 @@ check("a tie goes to whichever fires first",
 check("an unknown deadline sorts last, not first",
       ctx.pick(timers(REM({ due_in: null }),
                       PING({ enabled: true, state: "counting", due_in: 500 }))).clock,
+      "ping");
+
+/* ---- absolute times on the wire (claunch-4thlk.1) ---------------------- */
+/* The daemon sends `due_at`/`fired_at` (epoch seconds) so an unchanged clock
+   is the same bytes on every poll; the seconds left are this page's clock
+   against them, taken at the moment the pick is made. */
+const T0 = 1760000000000;                 // ms, the page's "now" for these
+const AT = (over) => Object.assign(
+  { running: true, enabled: true, interval: 600, due_at: T0 / 1000 + 360,
+    fired_at: null, state: "counting" }, over);
+check("a due_at reading counts down from the page's clock",
+      ctx.line(ctx.pick(timers(AT(), PING()), T0)).text, "cflow reminder in 6:00");
+check("...and the same reading, read 60s later, has a minute less",
+      ctx.line(ctx.pick(timers(AT(), PING()), T0 + 60000)).text,
+      "cflow reminder in 5:00");
+check("fired_at reads back as seconds since",
+      ctx.reading(AT({ fired_at: T0 / 1000 - 90 }), T0).fired_ago, 90);
+check("a null due_at is an unknown, not a zero",
+      ctx.reading(AT({ due_at: null }), T0).due_in, null);
+check("a due_at in the past stays negative, the stretch a held clock shows",
+      ctx.reading(AT({ due_at: T0 / 1000 - 300 }), T0).due_in, -300);
+check("an older daemon's due_in passes through untouched",
+      ctx.reading(REM({ due_in: 42 }), T0).due_in, 42);
+check("a tie between due_at clocks still goes to whichever fires first",
+      ctx.pick(timers(AT({ due_at: T0 / 1000 + 400 }),
+                      PING({ enabled: true, state: "counting", due_in: null,
+                             due_at: T0 / 1000 + 90 })), T0).clock,
       "ping");
 
 /* ---- the countdown between polls ------------------------------------- */

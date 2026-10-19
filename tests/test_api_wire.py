@@ -135,3 +135,60 @@ def test_the_mesh_list_leaves_the_member_graph_to_the_mesh_view(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_the_rail_polls_carry_no_number_that_moves_by_itself(home, tmp_path, monkeypatch):
+    """A rail answer is the same bytes until something happens (claunch-4thlk.1).
+
+    Measured on a working daemon, the sessions, cflow and mesh rails were 0/5
+    identical five seconds apart, and none of the differences was news: a
+    countdown's remaining seconds, the tps reading's age, the relay's last
+    round trip. The countdowns became absolute times (test_cflow_timers,
+    test_reminder_clock); these two are left off the rail, which does not
+    draw them -- the age is drawn from ``ts``, and the latency badge reads the
+    relay's round trip off the control socket's pong. The full mesh view
+    still carries the round trip for whoever asks for it."""
+
+    _register_py_harness()
+    relay = {
+        "configured": True, "connected": True, "count": 1, "connected_count": 1,
+        "relays": [{"id": "r1", "url": "wss://r", "connected": True,
+                    "rtt_ms": 41.5, "rtt_age": 3.2, "pending_ms": None}],
+    }
+
+    def tps(info, *args, **kwargs):
+        info["tps"] = {"ts": "2026-10-19T10:00:00+00:00", "age_s": 12, "idle": False}
+        return info
+
+    monkeypatch.setattr(api_mod.metering, "attach", tps)
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm,
+                        relay_state=lambda: json.loads(json.dumps(relay)))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+            rail = await (await client.get("/api/mesh?view=rail", headers=BEARER)).json()
+            (row,) = rail["relay"]["relays"]
+            assert row == {"id": "r1", "url": "wss://r", "connected": True}
+            full = await (await client.get("/api/mesh", headers=BEARER)).json()
+            assert full["relay"]["relays"][0]["rtt_ms"] == 41.5
+
+            listed = await (await client.get(
+                "/api/sessions?view=rail&state=current", headers=BEARER)).json()
+            (w1,) = [s for s in listed["sessions"] if s["name"] == "w1"]
+            assert w1["tps"] == {"ts": "2026-10-19T10:00:00+00:00", "idle": False}
+            # The non-rail list is unchanged: its readers may want the age.
+            listed = await (await client.get("/api/sessions", headers=BEARER)).json()
+            (w1,) = [s for s in listed["sessions"] if s["name"] == "w1"]
+            assert w1["tps"]["age_s"] == 12
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
