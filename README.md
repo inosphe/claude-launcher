@@ -43,8 +43,8 @@ the flag uv takes whichever interpreter it finds first, so a reinstall can move
 the daemon to another Python version. With the flag, uv records `python = "3.14"`
 in the tool's receipt and `uv tool upgrade` keeps it. `.python-version` pins the
 same version for `uv run` / `uv sync` in a checkout (tests, the shim below).
-`requires-python` in `pyproject.toml` stays at `>=3.9`: it is the range the
-package installs on, not the version the daemon is run with. An existing
+`requires-python` in `pyproject.toml` is `>=3.14`, so `uv sync` resolves only for
+the interpreter range the daemon runs on. An existing
 `.venv` made with another version keeps working under `uv run --no-sync` (uv
 prints a warning); `uv sync --extra test` rebuilds it on 3.14.
 
