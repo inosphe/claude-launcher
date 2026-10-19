@@ -32,6 +32,13 @@
    of the session's question ids is linked by the daemon the same way
    (claunch-236ei).
 
+   Renaming (claunch-6st9p): the topic is edited in place -- a click on the
+   conversation's title (or its ✎, or a double click on the thread in the
+   list) turns the title into a box; Enter or 저장 posts it to
+   /api/threads/<id>/title, Esc or 취소 puts the title back. A title that
+   names one of the session's question ids is linked as at opening. What is
+   typed survives a poll's redraw (it is kept in `drafts`).
+
    Images (claunch-shl2r): a picture pasted (Ctrl+V), dropped or picked
    (🖼 button) in a composer waits under it as a thumbnail until the message
    is sent; then each one is uploaded (POST /api/threads/images, the
@@ -60,6 +67,7 @@ globalThis.ThreadsPane = (() => {
   let convo = null;          // {id, thread, messages}
   let composing = false;     // the new-thread form is open
   let composeQa = null;      // {id, title}: the question the new thread is about
+  let renaming = "";         // the thread whose title is being edited
   let notice = "";
   let wanted = null;         // {session, tid}: the thread to show at the next mount there
   let focusCompose = false;  // a thread was just opened: its composer takes the focus
@@ -503,6 +511,30 @@ globalThis.ThreadsPane = (() => {
     return act(() => request(`/api/threads/${encodeURIComponent(tid)}/${verb}`, {}));
   }
 
+  const RENAME = "\u0000rename";   // drafts key of the title being edited
+
+  function startRename(tid) {
+    if (renaming !== tid) drafts.delete(RENAME);
+    renaming = tid;
+    render();
+  }
+
+  function stopRename() {
+    renaming = "";
+    drafts.delete(RENAME);
+    render();
+  }
+
+  /* A blank or unchanged title closes the box without a post; a failed post
+     keeps the box and what was typed, and the head says why. */
+  function rename(tid, title, was) {
+    if (!title || title === was) { stopRename(); return undefined; }
+    return once(RENAME, () => act(async () => {
+      await request(`/api/threads/${encodeURIComponent(tid)}/title`, {title});
+      if (renaming === tid) { renaming = ""; drafts.delete(RENAME); }
+    }));
+  }
+
   /* ---- drawing ---- */
 
   function typingIn(n) {
@@ -725,6 +757,10 @@ globalThis.ThreadsPane = (() => {
         convo = null;
         load();
       });
+      li.addEventListener("dblclick", () => {
+        if (current !== t.id) { current = t.id; convo = null; load(); }
+        startRename(t.id);
+      });
       ul.append(li);
     }
     side.append(ul);
@@ -737,7 +773,36 @@ globalThis.ThreadsPane = (() => {
     }
     const t = convo.thread;
     const head = node("div", "th-convo-head");
-    head.append(node("h3", "th-convo-title", t.title), node("span", "th-meta", t.id));
+    if (renaming === t.id) {
+      const box = node("input", "th-rename-input");
+      box.value = drafts.has(RENAME) ? drafts.get(RENAME) : t.title;
+      box.placeholder = "쓰레드 주제";
+      box.title = "Enter 저장 · Esc 취소 · qa-xxxxxxxx를 넣으면 그 QA 질문과 연결";
+      box.addEventListener("input", () => drafts.set(RENAME, box.value));
+      const save = () => rename(t.id, box.value.trim(), t.title);
+      box.addEventListener("keydown", (e) => {
+        if (sendKey(e)) { e.preventDefault(); save(); }
+        else if (e.key === "Escape") { e.preventDefault(); stopRename(); }
+      });
+      const ok = node("button", "term-btn th-rename-save", inflight.has(RENAME) ? "저장 중…" : "저장");
+      ok.type = "button";
+      ok.disabled = inflight.has(RENAME);
+      ok.addEventListener("click", save);
+      const no = node("button", "term-btn th-rename-cancel", "취소");
+      no.type = "button";
+      no.addEventListener("click", stopRename);
+      head.append(box, ok, no);
+    } else {
+      const title = node("h3", "th-convo-title", t.title);
+      title.title = "눌러서 주제 수정";
+      title.addEventListener("click", () => startRename(t.id));
+      const edit = node("button", "th-rename-btn", "✎");
+      edit.type = "button";
+      edit.title = "주제 수정";
+      edit.setAttribute("aria-label", "주제 수정");
+      edit.addEventListener("click", () => startRename(t.id));
+      head.append(title, edit, node("span", "th-meta", t.id));
+    }
     const toggle = node("button", "term-btn", t.status === "closed" ? "다시 열기" : "닫기");
     toggle.type = "button";
     toggle.title = t.status === "closed"
@@ -849,17 +914,25 @@ globalThis.ThreadsPane = (() => {
       renderList(side, threads, read);
     }
     const t = convo && convo.thread;
+    const editing = !!convo && renaming === convo.id;
     const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length,
                                             inflight.has(convo.id), pending.get(convo.id) || null,
-                                            (attached.get(convo.id) || []).length] : null);
+                                            (attached.get(convo.id) || []).length,
+                                            editing, inflight.has(RENAME)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
+    const wasEditing = !!main.querySelector(".th-rename-input");
     drawn.main = mainSig;
     const keep = main.querySelector(".th-compose textarea");
     const focused = keep && document.activeElement === keep;
     renderConvo(main);
     const box = main.querySelector(".th-compose textarea");
     if (box) fit(box);
-    if (focused || (focusCompose && convo)) box?.focus();
+    const titleBox = main.querySelector(".th-rename-input");
+    if (titleBox) {
+      // The box takes the focus when it opens and keeps it through a redraw.
+      titleBox.focus();
+      if (!wasEditing) titleBox.select?.();
+    } else if (focused || (focusCompose && convo)) box?.focus();
     if (convo) focusCompose = false;
   }
 
