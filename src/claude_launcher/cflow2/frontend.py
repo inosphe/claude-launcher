@@ -200,8 +200,9 @@ TASK_KEYS = (
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
-#: through ``flow_input`` -- never by a node. A ``bind`` or ``data:`` key of
-#: this name is a compile error (claunch-7d4nt).
+#: through ``flow_input``, or for ``set_by: [user]`` by a person at any time
+#: (claunch-umq1f) -- never by a node. A ``bind`` or ``data:`` key of this
+#: name is a compile error (claunch-7d4nt).
 DATA_INPUTS = "inputs"
 
 COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers",

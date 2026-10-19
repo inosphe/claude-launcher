@@ -7515,6 +7515,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-run-input { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 10px; padding: 3px 0; align-items: baseline; }
 .cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .cf2-run-input-value.empty { color: #484f58; }
+.cf2-run-input-edit { grid-column: 2; display: flex; gap: 6px; align-items: flex-start; }
+.cf2-run-input-edit textarea, .cf2-run-input-edit input[type=text],
+.cf2-run-input-edit input[type=number] { flex: 1; min-width: 0; font: inherit; }
 .cf2-undecidable { color: #d29922; }
 
 .cf2-inputs { border: 1px solid #58677c; border-radius: 6px; padding: 14px; margin: 6px 0; min-width: 0; }

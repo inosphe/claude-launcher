@@ -3885,36 +3885,45 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
     return out["executor"]
 
 
-def set_input(name: str, value: Any, *, session: str = "", cwd: Optional[str] = None,
-              scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
-    """Write a started run's empty start input ``name`` (docs/cflow-v2.md
-    2.6): ``data.inputs.<name>`` takes ``value``, checked by
-    :func:`.inputs.settle` -- the input's ``set_by`` names ``agent``, it is
-    still empty, and the value passes the start's type, enum and constraint
-    checks. Only the run's driver writes (:func:`may_drive`). Journal
+def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_AGENT,
+              cwd: Optional[str] = None, scope: Optional[str] = None,
+              now: Optional[float] = None) -> Dict[str, Any]:
+    """Write a started run's start input ``name`` (docs/cflow-v2.md 2.6):
+    ``data.inputs.<name>`` takes ``value``, checked by :func:`.inputs.settle`
+    with the start's type, enum and constraint checks.
+
+    ``caller`` agent (``flow_input``, ``claunch cflow2 input``): the input's
+    ``set_by`` names ``agent``, it is still empty, and only the run's driver
+    writes (:func:`may_drive`). ``caller`` user (``claunch cflow2 input
+    --user``, ``POST /api/cflow2/input``): a person changes an input whose
+    ``set_by`` names ``user``, whatever it holds (claunch-umq1f). Journal
     ``input_set {name, value, by, was}``. Returns the status payload."""
     from . import inputs as inputs_mod
 
     session = str(session or "").strip()
+    person = caller == CALLER_USER
 
     def op(r: Run) -> None:
-        _require_progress(r)
-        if not may_drive(r.state, session):
+        # a person may change an input of a halted run (it moves nothing)
+        _require_live(r) if person else _require_progress(r)
+        if not person and not may_drive(r.state, session):
             raise FlowError(f"run {r.state.get('run_id')} is driven by "
                             f"{driver_of(r.state) or 'no session'}; "
                             f"{session or 'an unmanaged caller'} may not write its inputs")
         meta = r.chart.meta or {}
         data = r.state.setdefault("data", {})
         current = dict(data.get("inputs") or {})
+        setter = inputs_mod.SETTER_USER if person else inputs_mod.SETTER_AGENT
         try:
             got = inputs_mod.settle(meta.get("inputs") or {}, current, name, value,
-                                    inputs_mod.SETTERS[0], meta.get("input_constraints"))
+                                    setter, meta.get("input_constraints"))
         except inputs_mod.InputsError as exc:
             raise FlowError(f"input not written: {exc}") from None
         was = current.get(name)
         current[name] = got
         data["inputs"] = current
-        r.emit("input_set", name=name, value=got, by=session or "unmanaged")
+        by = CALLER_USER if person else (session or "unmanaged")
+        r.emit("input_set", name=name, value=got, by=by)
         r.events[-1]["was"] = was  # kept when empty: what the write replaced
     _mutate(cwd, scope, now, op)
     return status(cwd=cwd, scope=scope, now=now, tick=False)
