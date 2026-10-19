@@ -7658,14 +7658,16 @@ def spawn_gate_verbs() -> Tuple[str, ...]:
 
 
 class _GateRequest:
-    """What :func:`_create_session` reads off a request, for a create the
-    spawn gate makes with no HTTP request in hand (an approval by the clock,
-    or by a person's press on a different route): the app, and the actor --
-    the asking agent, which is who the session was created for."""
+    """What :func:`_create_session` and :func:`_spawn_child` read off a
+    request, for a create the spawn gate makes with no HTTP request in hand
+    (an approval by the clock, or by a person's press on a different route):
+    the app, and the actor -- the asking agent, which is who the session was
+    created for, with ``via: spawn-gate`` and who set it up."""
 
-    def __init__(self, app, asker: str) -> None:
+    def __init__(self, app, asker: str, actor: Optional[dict] = None) -> None:
         self.app = app
         self.headers = {actors.HEADER: actors.header_value(actors.AGENT, asker)}
+        self.gate_actor = actor
         self.match_info: dict = {}
 
     def get(self, key, default=None):
@@ -7673,9 +7675,15 @@ class _GateRequest:
 
 
 async def _spawn_gate_create(app, spec: dict, asker: str, record: dict) -> Tuple[int, dict]:
-    """Create the session an approved spawn request asks for, through the
-    same path as the dashboard's New session form."""
-    return await _create_session(_GateRequest(app, asker), dict(spec))
+    """Create the session a settled spawn request asks for: top-level through
+    the same path as the dashboard's New session form, or as the asker's
+    child through the same path as an agent's spawn."""
+    actor = actors.make(actors.AGENT, asker, via="spawn-gate",
+                        reason=f"setup:{record.get('setup') or spawn_gate.SETUP_APPROVED}")
+    request = _GateRequest(app, asker, actor)
+    if record.get("created_as") == spawn_gate.CHILD:
+        return await _spawn_child(request, asker, dict(spec), created_by=actor)
+    return await _create_session(request, dict(spec))
 
 
 async def h_spawn_requests_list(request: web.Request) -> web.Response:
@@ -8906,8 +8914,10 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     definition.pop("prompt_packs", None)
     # v2 start inputs belong to the run (chart.json), not to the session.
     definition.pop("cflow_inputs", None)
-    # Who created it is the request's, never the body's (claunch-o6xws).
-    definition["created_by"] = actors.from_request(request)
+    # Who created it is the request's, never the body's (claunch-o6xws). A
+    # create the spawn gate makes carries its own actor (who set it up).
+    definition["created_by"] = (getattr(request, "gate_actor", None)
+                                or actors.from_request(request))
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
@@ -9447,34 +9457,123 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         manager.get(parent)
     except ManagerError as exc:
         return json_error(404, str(exc))
+    actor = actors.from_request(request)
+    root = bool(body.pop("root", False))
+    reason = body.pop("reason", None)
+    if root and actor.get("kind") != actors.AGENT:
+        return json_error(400, "'root' is an agent's request for a top-level session; "
+                          "a person creates one with the New session form")
+    # An agent's spawn waits behind the person's approval (claunch-iw5i8.16)
+    # -- except a reviewer, which a workflow stands up at every landing and
+    # the user chose to keep off the card.
+    if actor.get("kind") == actors.AGENT and (root or not spawn_gate_exempt(body)):
+        return await _file_spawn_request(request, parent, body, root=root, reason=reason)
+    status, payload = await _spawn_child(request, parent, body, created_by=actor)
+    return json_response(payload, status=status)
+
+
+def spawn_gate_exempt(body: dict) -> bool:
+    """Whether an agent's child spawn skips the spawn-request gate: a
+    ``reviewer`` child (the user's decision, th-17c48c)."""
+    return str(body.get("role") or "").strip().lower() == "reviewer"
+
+
+#: The children-body keys a top-level ask carries over to its
+#: ``POST /api/sessions`` spec; profile, project, cwd and worktree are set
+#: from the asker (:func:`_root_spec`).
+ROOT_SPEC_KEYS = (
+    "name", "task", "workflow", "workflow_version", "workflow_params", "cflow_inputs",
+    "context", "issue", "issue_text", "beads", "prompt_packs", "daemon_prompt",
+    "workspace_prompt",
+)
+
+
+def _root_spec(manager, parent: str, body: dict) -> dict:
+    """The top-level session an agent's ``root`` spawn asks for: the
+    asker's profile and project, the project's default workspace (else the
+    asker's directory), on a fresh worktree."""
+    sdef = manager.get(parent).sdef
+    project = projects.normalize(str(body.get("project") or getattr(sdef, "project", "") or ""))
+    if project == projects.DEFAULT:
+        project = ""
+    spec = {k: body[k] for k in ROOT_SPEC_KEYS if body.get(k) not in (None, "")}
+    if body.get("beads") is False:
+        spec["beads"] = False
+    cwd = projects.default_cwd(project) if project else ""
+    spec.update({"profile": sdef.profile, "cwd": cwd or sdef.cwd, "worktree": ""})
+    if project:
+        spec["project"] = project
+    return spec
+
+
+async def _file_spawn_request(request: web.Request, parent: str, body: dict, *,
+                              root: bool, reason) -> web.Response:
+    gate: spawn_gate.SpawnGate = request.app["spawn_gate"]
+    manager: SessionManager = request.app["manager"]
+    reason = spawn_gate.clean_reason(reason) or _first_line(body.get("task")) or (
+        f"{parent} asks for a {'top-level session' if root else 'child session'}")
+    try:
+        if root:
+            record = gate.submit_spawn(session=parent, spec=_root_spec(manager, parent, body),
+                                       child_spec=dict(body), reason=reason,
+                                       scope=spawn_gate.ROOT)
+        else:
+            record = gate.submit_spawn(session=parent, spec=dict(body), reason=reason,
+                                       scope=spawn_gate.CHILD)
+    except spawn_gate.GateRefused as exc:
+        return json_error(exc.status, str(exc))
+    unanswered = ("created as your child from this spec" if root
+                  else "created as asked")
+    return json_response({
+        "pending": True,
+        "request": record,
+        "note": (f"spawn request {record['id']} is waiting for the person (deadline "
+                 f"{record['deadline']}); unanswered, it is {unanswered}. The outcome is "
+                 "typed into your terminal as a [claunch spawn-request] block -- do not "
+                 "spawn again for the same work."),
+    }, status=202)
+
+
+def _first_line(text) -> str:
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return spawn_gate.clean_reason(line.strip()[:300])
+    return ""
+
+
+async def _spawn_child(request, parent: str, body: dict, *,
+                       created_by: Optional[dict]) -> Tuple[int, dict]:
+    """Stage, enrol and launch a child of ``parent`` -- the agent's spawn,
+    and the spawn gate's create of a child it approved."""
+    manager: SessionManager = request.app["manager"]
     warnings: list = []
     try:
-        session = manager.stage_child(parent, body, warnings=warnings,
-                                      created_by=actors.from_request(request))
+        session = manager.stage_child(parent, body, warnings=warnings, created_by=created_by)
     except spawn_mod.SpawnDenied as exc:
-        return json_error(403, str(exc))
+        return 403, {"error": str(exc)}
     except worktree_mod.WorktreeError as exc:
         # A checkout that was asked for and could not be cut (or could not be
         # brought up to date) fails the spawn, exactly as it fails a launch:
         # an agent started in a directory that is not the one it was promised
         # is worse than one that was never started.
-        return json_error(400, str(exc))
+        return 400, {"error": str(exc)}
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad spawn request: {exc}")
+        return 400, {"error": f"bad spawn request: {exc}"}
     except ManagerError as exc:
-        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+        return (409 if "already exists" in str(exc) else 400), {"error": str(exc)}
     try:
         result = await _onboard_and_launch(request, session, body, parent=parent)
     except onboard.OnboardError as exc:
-        return json_response(onboard.error_body(exc), status=400)
+        return 400, onboard.error_body(exc)
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad spawn request: {exc}")
-    body_out = {"session": session.info(), "parent": parent, **result}
+        return 400, {"error": f"bad spawn request: {exc}"}
+    body_out = {"session": session.info(), "parent": parent, "name": session.sdef.name,
+                **result}
     # Only when there is one: an always-present empty list would read, to a
     # client eyeballing the response, as a field that never says anything.
     if warnings:
         body_out["warnings"] = warnings
-    return json_response(body_out, status=201)
+    return 201, body_out
 
 
 async def h_session_reparent(request: web.Request) -> web.Response:

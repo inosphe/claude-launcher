@@ -127,7 +127,7 @@ new Function(
   stubs + capLine[0] + "\n"
   + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")
-  + slice("actorWho") + slice("railEndedText") + slice("railCreatedText") + slice("actorLabel")
+  + slice("actorWho") + slice("railEndedText") + slice("railCreatedText") + slice("spawnGateSetup") + slice("actorLabel")
   + slice("refreshSessions")
   + `
 Object.assign(exports, {
@@ -194,12 +194,24 @@ check("both, in order: ender first (claunch-5aysr), state, identity, creator",
                     created_by: { kind: "agent", name: "lead" } })),
       "killed by cflow · exit 0 · nc/claude · spawned by lead");
 
+check("a child the spawn gate made when nobody answered says the agent set it up",
+      ctx.text({ ...base, status: "idle",
+                 created_by: { kind: "agent", name: "lead", via: "spawn-gate", reason: "setup:agent" } }),
+      "nc/claude · spawned by lead · agent setup");
+check("...and one the person approved says nothing more on the row",
+      ctx.text({ ...base, status: "idle",
+                 created_by: { kind: "agent", name: "lead", via: "spawn-gate", reason: "setup:approved" } }),
+      "nc/claude · spawned by lead");
+
 /* ---- the long form ------------------------------------------------------- */
 check("the hover label carries every part",
       ctx.label({ kind: "cflow", name: "s3", reason: "kill-on-end" }),
       "cflow s3 [kill-on-end]");
 check("...and the surface a person used",
       ctx.label({ kind: "user", via: "web" }), "user (web)");
+check("the spawn gate's setup, in words (claunch-iw5i8.16)",
+      ctx.label({ kind: "agent", name: "lead", via: "spawn-gate", reason: "setup:approved" }),
+      "agent lead — approved by the person on the approval card");
 
 /* ---- on the row, built by the real code -------------------------------- */
 served = { sessions: [

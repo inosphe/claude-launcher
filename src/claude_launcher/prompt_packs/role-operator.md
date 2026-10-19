@@ -57,8 +57,10 @@ back with opv2_resume, carrying the new session to ask for instead as
 `fallback`. Only when no session has been doing it, ask for a new one
 with opv2_spawn. Both requests cite the user's message (`on_behalf_of`)
 and give the reason the user reads on the card. Each waits five minutes
-on the user: a new-session request is approved when nobody answers; a
-resume request is not resumed then, and its fallback becomes a
-new-session request. The outcome is typed into your terminal as
+on the user. A new-session request asks for a top-level session: approved,
+it is made top-level; when nobody answers, no top-level session is made
+and the same session (project, task, issue, name, workflow) is created as
+your child instead. A resume request is not resumed when nobody answers,
+and its fallback becomes a new-session request. The outcome is typed into your terminal as
 `[claunch spawn-request <id>]` and kept in the thread of the request; tell the user the
 name of a session that was created. Never create sessions any other way.

@@ -1032,6 +1032,15 @@ class OperatorsV2:
             spec["issue"] = found["issue"].get("id") if isinstance(found.get("issue"), dict) else issue_id
         return spec
 
+    @staticmethod
+    def child_spec(spec):
+        """The same session as a child of the operator (a children body):
+        what an unanswered top-level ask creates instead (claunch-iw5i8.16).
+        No profile or directory -- a child inherits the operator's, and the
+        project puts it in the project's default workspace."""
+        return {k: spec[k] for k in ("name", "project", "task", "workflow", "issue")
+                if spec.get(k) not in (None, "")}
+
     def _request_basis(self, rec, basis):
         return {"operator": rec["id"], "operator_name": rec["name"], "on_behalf_of": basis["id"],
                 "user_text": str(basis.get("text") or "")[:400]}
@@ -1046,6 +1055,7 @@ class OperatorsV2:
         reason = _text(body.get("reason"), 4000, "reason")
         spec = await self.spawn_spec(name, rec, body)
         record = self._gate_call(self._gate().submit_spawn, session=name, spec=spec, reason=reason,
+                                 child_spec=self.child_spec(spec),
                                  basis=self._request_basis(rec, basis))
         self.system(rec, f"세션 생성 요청 {record['id']}: {spec['project']} — {reason}",
                     thread=basis["thread"], on_behalf_of=basis["id"])
@@ -1067,7 +1077,8 @@ class OperatorsV2:
             raise ValueError("fallback is required: the new session to ask for if the resume is not approved")
         spec = await self.spawn_spec(name, rec, fallback, project_fallback=project_of(target))
         record = self._gate_call(self._gate().submit_resume, session=name, target=target.sdef.name,
-                                 reason=reason, fallback=spec, basis=self._request_basis(rec, basis))
+                                 reason=reason, fallback=spec, fallback_child=self.child_spec(spec),
+                                 basis=self._request_basis(rec, basis))
         self.system(rec, f"세션 재개 요청 {record['id']}: {target.sdef.name} — {reason}",
                     thread=basis["thread"], on_behalf_of=basis["id"], refs=[target.sdef.name])
         return {"operator": rec["id"], "request": record}
