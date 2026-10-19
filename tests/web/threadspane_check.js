@@ -371,6 +371,17 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   rbox = host.querySelector(".th-rename-input");
   assert.equal(rbox.value, "Log format v2", "a poll keeps what is typed");
   assert.equal(document.activeElement, rbox, "and the focus");
+  // a poll does not pull the focus from the composer into the title box
+  const composer = host.querySelector(".th-compose .th-text");
+  composer.focus();
+  messages["th-1"].push({seq: 4, author: "agent", body: "even more", at: "2026-10-13T00:00:03+00:00"});
+  threads[0].last_seq = 4;
+  timers.filter(Boolean).forEach((fn) => fn());
+  await settle();
+  assert.ok(host.querySelector(".th-rename-input"), "the box stays open");
+  assert.ok(document.activeElement.classList.contains("th-text"), "the composer keeps the focus through a poll");
+  rbox = host.querySelector(".th-rename-input");
+  rbox.focus();
   // a failed rename keeps the box and says why
   failRename = true;
   rbox.fire("keydown", {key: "Enter"});
@@ -384,6 +395,20 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(!host.querySelector(".th-rename-input"), "a saved title closes the box");
   assert.equal(host.querySelector(".th-convo-title").textContent, "Log format v2", "the head shows the new title");
   assert.equal(host.querySelector(".th-item .th-item-title").textContent, "Log format v2", "and so does the list");
+  // moving to another thread drops an open box and its draft
+  host.querySelector(".th-rename-btn").fire("click");
+  rbox = host.querySelector(".th-rename-input");
+  rbox.value = "abandoned";
+  rbox.fire("input");
+  host.querySelectorAll(".th-item")[1].fire("click");
+  await settle();
+  assert.ok(!host.querySelector(".th-rename-input"), "another thread opens without a box");
+  host.querySelectorAll(".th-item")[0].fire("click");
+  await settle();
+  assert.ok(!host.querySelector(".th-rename-input"), "coming back does not reopen it");
+  host.querySelector(".th-rename-btn").fire("click");
+  assert.equal(host.querySelector(".th-rename-input").value, "Log format v2", "the abandoned draft is gone");
+  host.querySelector(".th-rename-cancel").fire("click");
   // a double click in the list opens that thread with its title in a box
   host.querySelectorAll(".th-item")[1].fire("dblclick");
   await settle();

@@ -753,6 +753,7 @@ globalThis.ThreadsPane = (() => {
       li.title = `${t.id} · ${t.opened_by === "agent" ? "세션이 연 쓰레드" : "내가 연 쓰레드"}`;
       li.addEventListener("click", () => {
         if (current === t.id) return;
+        if (renaming) { renaming = ""; drafts.delete(RENAME); }
         current = t.id;
         convo = null;
         load();
@@ -920,19 +921,22 @@ globalThis.ThreadsPane = (() => {
                                             (attached.get(convo.id) || []).length,
                                             editing, inflight.has(RENAME)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
-    const wasEditing = !!main.querySelector(".th-rename-input");
+    const oldTitleBox = main.querySelector(".th-rename-input");
+    const titleFocused = !!oldTitleBox && document.activeElement === oldTitleBox;
     drawn.main = mainSig;
     const keep = main.querySelector(".th-compose textarea");
     const focused = keep && document.activeElement === keep;
     renderConvo(main);
     const box = main.querySelector(".th-compose textarea");
     if (box) fit(box);
+    // The title box takes the focus when it opens and keeps it through a
+    // redraw; the composer keeps it the same way when the focus went there.
     const titleBox = main.querySelector(".th-rename-input");
-    if (titleBox) {
-      // The box takes the focus when it opens and keeps it through a redraw.
+    if (titleBox && !oldTitleBox) {
       titleBox.focus();
-      if (!wasEditing) titleBox.select?.();
-    } else if (focused || (focusCompose && convo)) box?.focus();
+      titleBox.select?.();
+    } else if (titleBox && titleFocused) titleBox.focus();
+    else if (focused || (focusCompose && convo)) box?.focus();
     if (convo) focusCompose = false;
   }
 
