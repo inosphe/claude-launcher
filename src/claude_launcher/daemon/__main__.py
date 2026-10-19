@@ -22,7 +22,7 @@ from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
-from . import hold as hold_mod, instance_manifest, restore_queue, session_procs, session_reminder
+from . import hold as hold_mod, instance_manifest, operator_keepalive, restore_queue, session_procs, session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -483,7 +483,15 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # moment somebody uses the harness's own model switch; this closes that.
     model_clock_task = asyncio.ensure_future(_model_reconcile_clock(manager))
     # Idle sessions give their program back and wake on use (claunch-5l35i).
-    hold_clock = hold_mod.HoldClock(manager)
+    # Operator sessions always carry keep-alive (claunch-higqx): set once now
+    # for the ones restore brought back, then before every hold pass.
+    def _operator_keepalive() -> None:
+        operator_keepalive.ensure(
+            manager, operators=app.get("operators_v2"), mesh_mgr=mesh_manager
+        )
+
+    _operator_keepalive()
+    hold_clock = hold_mod.HoldClock(manager, before=_operator_keepalive)
     hold_clock.start()
 
     try:

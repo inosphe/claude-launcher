@@ -1121,6 +1121,13 @@ def install(app, *, create=None, gates=None, work=None):
         if status >= 300:
             return web.json_response(payload, status=status)
         ops.bind(rec, payload["name"])
+        # An operator session always carries keep-alive (claunch-higqx,
+        # daemon/operator_keepalive.py): set it now, before any clock looks.
+        try:
+            ops.manager.set_keep_alive(payload["name"], True)
+            payload["keep_alive"] = True
+        except Exception:  # noqa: BLE001 -- the hold pass sets it again
+            log.exception("operator keep-alive of %r failed", payload["name"])
         return web.json_response(payload, status=201)
 
     async def stop(request):

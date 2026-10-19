@@ -100,10 +100,15 @@ class HoldClock:
         *,
         interval: float = INTERVAL,
         config: Callable[[], dict] = store.daemon_config,
+        before: Optional[Callable[[], object]] = None,
     ) -> None:
         self.manager = manager
         self.interval = interval
         self.config = config
+        #: Run at the top of every pass, whatever the threshold: the daemon
+        #: passes :func:`operator_keepalive.ensure` so an operator session
+        #: carries keep-alive before this pass could hold it.
+        self.before = before
         self._task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
@@ -120,6 +125,11 @@ class HoldClock:
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.interval)
+            if self.before is not None:
+                try:
+                    self.before()
+                except Exception:  # noqa: BLE001 -- the hold pass still runs
+                    log.exception("idle hold pre-pass failed")
             try:
                 sweep(self.manager, threshold_seconds(self.config()),
                       time.monotonic())
