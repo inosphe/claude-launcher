@@ -12,6 +12,8 @@ T6 bad input: empty title/text, unknown thread, too many open threads
 T7 read pages with after/limit
 T8 history: every session's threads, newest activity first, paged, filtered
    by session and status, each with its last messages (claunch-8k02k)
+T9 images on a message, from the user (claunch-shl2r) or the agent
+   (claunch-euaz6); an images-only reply still has a notice line
 """
 
 import pytest
@@ -238,13 +240,37 @@ def test_t9_bad_images(st):
     tid = st.open(S.USER, "s1", "Bug")["thread"]["id"]
     with pytest.raises(S.ThreadError, match="text is required"):
         st.post(S.USER, tid, "", images=[])
-    with pytest.raises(S.ThreadError, match="only the user"):
-        st.post("s1", tid, "look", images=[IMG])
     with pytest.raises(S.ThreadError, match="not a stored thread image"):
         st.post(S.USER, tid, "x", images=[{"name": "../../etc/passwd"}])
     with pytest.raises(S.ThreadError, match="at most"):
         st.post(S.USER, tid, "x", images=[IMG] * (S.MAX_IMAGES + 1))
     assert st.read(tid)["messages"] == []
+
+
+def test_t9_the_agent_attaches_images_too(st):
+    """The owning session attaches images the way the user does
+    (claunch-euaz6): on its own message, alone or with text, when it opens
+    a thread or replies in one; another session still may not write there."""
+    res = st.open("s1", "s1", "Chart", "here it is", images=[IMG])
+    tid = res["thread"]["id"]
+    assert res["message"]["author"] == S.AGENT and res["message"]["images"] == [IMG]
+    only = st.post("s1", tid, "", images=[IMG])["message"]
+    assert only["body"] == "" and only["images"] == [IMG]
+    assert st.has_image(tid, IMG["name"])
+    with pytest.raises(S.Forbidden):
+        st.post("s2", tid, "", images=[IMG])
+    assert [m["images"] for m in st.read(tid)["messages"]] == [[IMG], [IMG]]
+
+
+def test_t9_an_images_only_reply_has_a_notice_line(st):
+    """The rail's excerpt counts a reply's pictures, so an images-only reply
+    is not a blank notice card (claunch-euaz6)."""
+    tid = st.open(S.USER, "s1", "Chart", "show me")["thread"]["id"]
+    st.post("s1", tid, "", images=[IMG, IMG])
+    st.post("s1", tid, "with words", images=[IMG])
+    st.post("s1", tid, "words only")
+    assert [r["excerpt"] for r in st.rail()["s1"]["replies"]] == [
+        "\U0001f5bc \uc774\ubbf8\uc9c0 2\uc7a5", "with words \U0001f5bc1", "words only"]
 
 
 def test_t9_a_v2_database_is_rebuilt_with_its_rows(tmp_path):

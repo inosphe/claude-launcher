@@ -261,6 +261,29 @@ def test_images_are_kept_listed_in_the_block_and_served(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_the_agent_attaches_images_to_its_own_message(tmp_path):
+    """A session's thread_reply / thread_open carries staged images too
+    (claunch-euaz6): they are kept and served like the user's, and nothing
+    is typed into the session for its own message."""
+    from claude_launcher.daemon import thread_images
+
+    async def scenario(req, mgr):
+        first, second = _stage(), _stage()
+        res = await req("POST", "/api/threads", {"session": "s1", "title": "Chart", "text": "see",
+                                                 "images": [first]})
+        tid = res["thread"]["id"]
+        assert res["message"]["author"] == "agent"
+        assert res["message"]["images"][0]["path"] == str(thread_images.folder() / first)
+        res = await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "images": [second]})
+        assert res["message"]["body"] == "" and [i["name"] for i in res["message"]["images"]] == [second]
+        assert mgr.sessions["s1"].delivered == []
+        got = await req("GET", f"/api/threads/{tid}")
+        assert [[i["name"] for i in m["images"]] for m in got["messages"]] == [[first], [second]]
+        assert (thread_images.folder() / second).read_bytes() == PNG
+
+    run(tmp_path, scenario)
+
+
 def test_image_route_serves_only_a_threads_own_images(tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -294,10 +317,10 @@ def test_bad_images_are_refused_and_leave_nothing_kept(tmp_path):
                         {"images": ["0123456789abcdef0123.png"]}, status=400)
         assert "not on this daemon" in err["error"]
         name = _stage()
-        err = await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "x", "images": [name]},
-                        status=400)
-        assert "only the user" in err["error"]
         # refused by the store after the move: the file goes back to staging
+        await req("POST", f"/api/threads/{tid}/messages", {"session": "s2", "text": "x", "images": [name]},
+                  status=403)
+        assert (opening_images.stage_dir() / name).is_file()
         await req("POST", "/api/threads/th-nope00/messages", {"text": "x", "images": [name]}, status=404)
         assert (opening_images.stage_dir() / name).is_file()
         assert not (thread_images.folder() / name).exists()
