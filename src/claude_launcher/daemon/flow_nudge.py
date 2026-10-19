@@ -197,7 +197,8 @@ def end_request_reply(target: str, decision: dict, result: dict) -> Dict[str, An
             f"its workflow's own ending. Nothing has been ended yet and nothing is typed "
             f"back to you: the session's exit is the answer (its mesh row reads exited). "
             f"Do not ask again. To file a plain kill request anyway, call kill again with "
-            f"skip_end_decision: true"
+            f"skip_end_decision: true (CLI: --skip-end-decision); a forced kill files it "
+            f"as well"
         ),
     }
 

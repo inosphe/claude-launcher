@@ -7504,9 +7504,12 @@ async def _gated_kill(request: web.Request, target, by: dict, *,
         return None
     if target.exited and not getattr(target, "held_at", None):
         return None
-    ended = await _end_instead_of_kill(request, target, by, reason)
-    if ended is not None:
-        return ended
+    if not force:
+        # A forced kill skips the end decision as it skips the wind-down
+        # (claunch-g08xz.2): the caller has already decided the session ends now.
+        ended = await _end_instead_of_kill(request, target, by, reason)
+        if ended is not None:
+            return ended
     try:
         record = request.app["kill_gate"].submit(
             session=str(by.get("name") or ""), target=name, reason=reason,
@@ -7572,7 +7575,8 @@ async def _end_instead_of_kill(request: web.Request, target, by: dict,
     through a nudge card instead of a kill request -- the run then ends the
     session through its own ending. None (file the kill request as before)
     when the target is not standing there, the caller asked to skip it
-    (``skip_end_decision``), or no card could be raised."""
+    (``skip_end_decision``), or no card could be raised. A forced kill never
+    gets here (:func:`_gated_kill`)."""
     if target.exited:
         return None
     body = await _json_body(request)
