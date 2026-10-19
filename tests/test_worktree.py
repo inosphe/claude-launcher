@@ -197,6 +197,28 @@ def test_the_directory_is_relocatable_by_env_and_refused_when_taken(
     assert wt.path == elsewhere / "moved"
 
 
+def test_a_failed_worktree_add_reports_stderr_stdout_and_exit_status(
+    repo, monkeypatch
+):
+    """The progress line alone ("Preparing worktree") hid the real refusal."""
+    real = worktree._git
+
+    def failing(args, **kw):
+        if args[:2] == ["worktree", "add"]:
+            return subprocess.CompletedProcess(
+                args, 128, "stdout reason", "Preparing worktree (new branch 'x')"
+            )
+        return real(args, **kw)
+
+    monkeypatch.setattr(worktree, "_git", failing)
+    with pytest.raises(worktree.WorktreeError) as caught:
+        worktree.create(repo, "x")
+    text = str(caught.value)
+    assert "exit 128" in text
+    assert "Preparing worktree" in text
+    assert "stdout reason" in text
+
+
 # --------------------------------------------------------------------------- #
 # inheriting the MCP approval
 # --------------------------------------------------------------------------- #
