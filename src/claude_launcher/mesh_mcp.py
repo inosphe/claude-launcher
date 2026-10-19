@@ -650,7 +650,13 @@ TOOLS = [
             "with evidence, or a HANDOFF comment), waits for that turn (a "
             "bounded grace), then terminates; the reply says winding_down. "
             "Once it has exited, its in_progress issues go back to open with "
-            "a SESSION ENDED comment, ready to reassign."
+            "a SESSION ENDED comment, ready to reassign. A child whose cflow "
+            "run already stands on its end decision (an ask or user choice "
+            "with an 'end' option, e.g. improv-worker-v2's end-decision) is "
+            "not filed as a kill: the user is asked on the dashboard to "
+            "answer 'end', which ends it through its workflow; the reply "
+            "says end_requested (claunch-g08xz.1). 'skip_end_decision: "
+            "true' files the plain kill request instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -675,6 +681,14 @@ TOOLS = [
                     "description": (
                         "why the child should end (its work is reported, "
                         "where), shown to the user on the approval card"
+                    ),
+                },
+                "skip_end_decision": {
+                    "type": "boolean",
+                    "description": (
+                        "file a kill request even when the child's run "
+                        "stands on its end decision (default false: the user "
+                        "is asked to answer 'end' there instead)"
                     ),
                 },
             },
@@ -1211,7 +1225,8 @@ def call_tool(name: str, args: dict) -> dict:
         q = "?force=1" if args.get("force") else ""
         return _client().post(
             f"/api/sessions/{_session()}/children/{child}/kill{q}",
-            {"reason": str(args.get("reason") or "")},
+            {"reason": str(args.get("reason") or ""),
+             "skip_end_decision": bool(args.get("skip_end_decision"))},
         )
     if name == "resume_session":
         return _resume_session(args)

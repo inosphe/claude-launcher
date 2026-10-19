@@ -96,6 +96,7 @@ from . import mesh_roles
 from . import reposync_gate
 from . import resume_gate
 from . import kill_gate
+from . import flow_nudge
 from . import spawn_gate
 from . import reposync_agent
 from . import host_code, restart_gate
@@ -554,6 +555,9 @@ def build_app(
         notify=functools.partial(_deliver_to_session, manager),
         end=functools.partial(_kill_gate_end, app),
     )
+    #: A driver's request that its person act on its cflow run
+    #: (claunch-g08xz); see flow_nudge. In memory, settled from the run files.
+    app["flow_nudge"] = flow_nudge.NudgeBoard(alive=functools.partial(_nudge_alive, manager))
     #: The approval gate an operator's request for a session waits behind
     #: (claunch-iw5i8.15); see spawn_gate. Five minutes, unanswered counts
     #: as approved (a resume expires into a new session); kept on disk.
@@ -991,6 +995,11 @@ def build_app(
     r.add_post("/api/kill-requests/{rid}/approve", h_kill_request_approve)
     r.add_post("/api/kill-requests/{rid}/reject", h_kill_request_reject)
     r.add_post("/api/kill-requests/{rid}/withdraw", h_kill_request_withdraw)
+    # A driver asking its person to act on its cflow run (claunch-g08xz,
+    # :mod:`flow_nudge`): filed by the flow_nudge MCP tool, read by the web
+    # UI's notification card; settles itself when the run stops waiting.
+    r.add_post("/api/flow-nudges", h_flow_nudge_file)
+    r.add_get("/api/flow-nudges", h_flow_nudges_list)
     # Requests for a session (claunch-iw5i8.15, :mod:`spawn_gate`): filed by
     # the operator v2 agent routes, read and answered from the web UI's
     # notification card -- approve, reject, +5 min, manual (spawn) or a new
@@ -4170,31 +4179,10 @@ _CFLOW_LIST_DROP = (
 )
 
 
-def _operator_gate_kind(entry: dict) -> str:
-    """Which press settles this run position, or '' when no person's does.
-
-    The same reading as the dashboard's rail (app.js ``sessCflowGated``): an
-    approval, a user-chosen branch, a goto request, or an agent question that
-    reached nobody. A timer, a checklist, a window and a question still with
-    another agent wait on no one here, so the operator does not raise them.
-    """
-    status = str(entry.get("status") or "")
-    if status == "waiting_approval":
-        return "approval"
-    if status == "waiting_selection":
-        return "selection"
-    if status == "waiting_goto":
-        return "goto"
-    if status == "waiting_answer" and not ((entry.get("ask") or {}).get("asked") or []):
-        return "selection" if _operator_gate_options(entry) else "approval"
-    return ""
-
-
-def _operator_gate_options(entry: dict) -> list:
-    ask = entry.get("ask") or {}
-    raw = ask.get("options") if ask.get("kind") == "branch" else entry.get("options")
-    return [{"name": str(o.get("name")), "description": o.get("description") or ""}
-            for o in raw or [] if isinstance(o, dict) and o.get("name")]
+#: Which press settles a v1 run position, and its options -- shared with the
+#: nudge requests (:mod:`flow_nudge`), which ask the same question.
+_operator_gate_kind = flow_nudge.v1_gate_kind
+_operator_gate_options = flow_nudge.v1_gate_options
 
 
 def _operator_gates(sessions) -> list:
@@ -7516,6 +7504,9 @@ async def _gated_kill(request: web.Request, target, by: dict, *,
         return None
     if target.exited and not getattr(target, "held_at", None):
         return None
+    ended = await _end_instead_of_kill(request, target, by, reason)
+    if ended is not None:
+        return ended
     try:
         record = request.app["kill_gate"].submit(
             session=str(by.get("name") or ""), target=name, reason=reason,
@@ -7524,6 +7515,93 @@ async def _gated_kill(request: web.Request, target, by: dict, *,
     except kill_gate.GateRefused as exc:
         return json_error(exc.status, str(exc))
     return json_response({**target.info(), **kill_gate.pending_reply(record)},
+                         status=202)
+
+
+def _nudge_alive(manager, name: str) -> bool:
+    try:
+        return not manager.get(name).exited
+    except ManagerError:
+        return False
+
+
+async def h_flow_nudge_file(request: web.Request) -> web.Response:
+    """``POST /api/flow-nudges`` ``{session, message, scope?, cwd?}``: raise
+    ``session``'s run on the dashboard's notification channel
+    (:mod:`flow_nudge`). The run is the session's own -- its directory, and
+    its own slot or one of its side runs -- so a session nudges for nothing
+    but the run it drives. 409 when that run waits on no person."""
+    body = await _json_body(request)
+    if not isinstance(body, dict):
+        return json_error(400, "body must be a JSON object")
+    name = str(body.get("session") or "").strip()
+    manager: SessionManager = request.app["manager"]
+    try:
+        session = manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    actor = actors.from_request(request)
+    if actor.get("kind") == actors.AGENT and actor.get("name") not in (None, "", name):
+        return json_error(403, f"{actor.get('name')} cannot nudge for {name}'s run")
+    cwd = _session_cwd(session)
+    if body.get("cwd"):
+        cwd = cflow_state.resolve_cwd(str(body["cwd"]))
+    if not cwd:
+        return json_error(409, f"session {name!r} has no directory, so no run")
+    scope = str(body.get("scope") or "").strip() or name
+    if scope.split("@")[0].split("+")[0] != name:
+        return json_error(403, f"scope {scope!r} is not {name}'s own run")
+    try:
+        result = await asyncio.to_thread(
+            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=scope,
+            message=str(body.get("message") or ""))
+    except flow_nudge.NudgeRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response(result)
+
+
+async def h_flow_nudges_list(request: web.Request) -> web.Response:
+    rows = await asyncio.to_thread(request.app["flow_nudge"].list)
+    return json_response({"requests": rows})
+
+
+async def _end_instead_of_kill(request: web.Request, target, by: dict,
+                               reason: str) -> Optional[web.Response]:
+    """An agent's kill of a session whose run stands on its end decision
+    (claunch-g08xz.1): the person is asked to answer that decision's 'end'
+    through a nudge card instead of a kill request -- the run then ends the
+    session through its own ending. None (file the kill request as before)
+    when the target is not standing there, the caller asked to skip it
+    (``skip_end_decision``), or no card could be raised."""
+    if target.exited:
+        return None
+    body = await _json_body(request)
+    if body.get("skip_end_decision") in (True, "1", "true", 1):
+        return None
+    name = target.sdef.name
+    cwd = _session_cwd(target)
+    if not cwd:
+        return None
+    try:
+        decision = await asyncio.to_thread(flow_nudge.end_decision, cwd, name)
+    except Exception:  # noqa: BLE001 - an unreadable run gets the kill request
+        log.exception("end decision of %s could not be read", name)
+        return None
+    if decision is None:
+        return None
+    asker = str(by.get("name") or "an agent")
+    message = (f"{asker} asks to end {name}: its run stands on {decision.get('label')} -- "
+               f"answer '{flow_nudge.END_OPTION}' there to end it. Reason: "
+               f"{reason.strip() or '(no reason given)'}")
+    try:
+        result = await asyncio.to_thread(
+            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=name,
+            message=message, by=asker)
+    except flow_nudge.NudgeRefused as exc:
+        log.info("end decision of %s not raised (%s); filing the kill request", name, exc)
+        return None
+    return json_response({**target.info(),
+                          **flow_nudge.end_request_reply(name, decision, result)},
                          status=202)
 
 

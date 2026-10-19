@@ -2206,6 +2206,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
 | `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
+| `flow_nudge` | 자기 런(본 런 또는 `side`)이 사람을 기다릴 때(`chooser: user` 선택, 사람에게 넘어간 ask, 이동 요청, 루프·방문 한도, halt, v1 런의 waiting_selection·approval) 대시보드 알림 채널(코너 카드·알림 기록·벨 대기 수)에 올림(`message`). 사람을 기다리는 것이 없으면 거절하고, 런당 카드는 하나이며 기다리던 것이 풀리면 데몬이 스스로 정산한다(`daemon/flow_nudge.py`, claunch-g08xz). 아무것도 옮기지 않는다 |
 
 상태를 돌려주는 `flow_*` 툴은 상태를 요약판으로 돌려준다(`mcp.brief`, claunch-ejvoy.1).
 `runtime.status`는 바뀌지 않으므로 웹 UI·CLI·데몬은 전체 payload를 읽는다.
