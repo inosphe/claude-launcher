@@ -358,7 +358,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     window_reminder_clock = window_mod.WindowReminderClock(manager, app["window"])
     window_reminder_clock.start()
     from .delayed_sweep import Clock as DelayedSweepClock
-    delayed_sweep_clock = DelayedSweepClock(manager, window=app["window"])
+    delayed_sweep_clock = DelayedSweepClock(manager, window=app["window"], batch=True)
     delayed_sweep_clock.start()
     ping_clock = cflow_clock.StallPingClock(manager)
     ping_clock.start()
