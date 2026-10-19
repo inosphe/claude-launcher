@@ -471,6 +471,7 @@ nodes:
       ok: {}
       blocked: {kind: str, thread: str, reason: str}
     done_when: 활성 실패마다 수정 이슈·자식과 repair 등록이 기록돼 있다. 사용자 결정이 필요한 막힘은 알림 thread id와 함께 blocked로 보고돼 있다
+    rules: [spawn-pending]
     effects: [board.write, session.spawn, fs.write]
 
   batch-failed:

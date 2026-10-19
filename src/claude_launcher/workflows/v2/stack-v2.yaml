@@ -149,11 +149,13 @@ nodes:
         첫 줄 `STACK @ <스택 tip>`). 메시지로 돌리지 않는다.
     done_when: |
       스택 브랜치 `<세션>-stack`과 그 워크트리 경로, 시작 tip(= 입력 base),
-      첫 자식의 세션·이슈 id, `STACK @ <tip>` 코멘트가 보고에 있다. 입력
+      첫 자식의 세션·이슈 id(승인 대기가 길어지면 `pending <요청 id>`,
+      spawn-pending), `STACK @ <tip>` 코멘트가 보고에 있다. 입력
       remote가 있으면 원격 스택 브랜치(`<tip> @ <remote>/<세션>-stack`, ls-remote로
       확인한 값) 또는 두지 못한 사유가 보고에 있다.
     returns:
       ok: {branch: str, worktree: str, tip: str, children: list, remote_ref: "str?"}
+    rules: [spawn-pending]
     effects: [git.branch, git.push, fs.write, session.spawn, board.write, mesh.send]
     # 스택 기준점(restack·rebase-notice의 upstream)의 첫 값
     do:

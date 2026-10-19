@@ -256,6 +256,14 @@ yours to carry out, with `spawn`.
   of retyped at every spawn. `workflow: NAME` overrides it and starts that run
   scoped to the child's own session; `workflow: '-'` gives a child no run
   where the pair would have given it one.
+- **A spawn waits for the person's approval** unless its `role` is
+  `reviewer`: the answer is `pending` with a request id, not a session. The
+  outcome is typed into your terminal as a `[claunch spawn-request <id>]`
+  block, which names the session created (approved, unanswered after 5
+  minutes, or made by hand -- then the name may differ from your `handle`).
+  Until that block arrives, do not message, connect or kill the child or
+  write its name anywhere, and do not spawn again for the same work. A
+  rejection means nothing was created: carry on without the child.
 - A refusal that mentions `spawn.<something>` is policy, not a bug: the limit
   is in the user's `~/.claunch.yaml`. Do not retry it — tell the user which
   key would allow it, and carry on without the child.

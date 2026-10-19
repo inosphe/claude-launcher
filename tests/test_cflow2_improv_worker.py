@@ -1844,3 +1844,35 @@ def test_every_issue_a_run_starts_gets_its_own_external_ref():
         assert "--external-ref <run id>/<id>`" in prompt, label
     intake = _words(labelled["intake-issue"].get("prompt"))
     assert "run id만 쓰면 같은 런의 둘째 이슈에서 보드가 거절한다" in intake
+
+
+def test_a_child_spawn_waits_for_the_spawn_request_block():
+    """An agent's non-reviewer child spawn answers 202 pending since
+    f9fccdd2 (claunch-iw5i8.16): the name arrives later in a
+    [claunch spawn-request <id>] block. Every node that spawns a child
+    carries the spawn-pending rule; a node that does not spawn does not
+    (claunch-fuw9o)."""
+    spawning = {
+        "improv-worker-v2": ("work", "wrapup", "found-handoff"),
+        "stack-v2": ("open",),
+        "improv-leader-v2": ("handle-regression",),
+    }
+    for name, labels in spawning.items():
+        labelled = {n.label: n for n in layers.load(name).nodes.values() if n.label}
+        for label in labels:
+            prompt = _words(labelled[label].get("prompt"))
+            assert "자식 spawn은 승인 대기로 돌아온다" in prompt, (name, label)
+            assert "[claunch spawn-request <id>]" in prompt, (name, label)
+    leader = {n.label: n for n in layers.load("improv-leader-v2").nodes.values() if n.label}
+    assert "자식 spawn은 승인 대기로 돌아온다" not in _words(leader["wrapup"].get("prompt"))
+    # the definitions and texts outside improv-common say the same inline
+    pkg = Path(claude_launcher.__file__).parent
+    inline = [
+        "workflows/v2/improv-coordinator-v2.yaml", "workflows/v2/perf-monitor-v2.yaml",
+        "workflows/v2/reposync-merge-push-v2.yaml", "workflows/improv-worker.yaml",
+        "workflows/improv-leader.yaml", "workflows/improv-pm.yaml", "workflows/stack.yaml",
+        "workflows/e2e-session-roundtrip.yaml", "prompt_packs/child-agents.md",
+        "mesh_install.py",
+    ]
+    for rel in inline:
+        assert "[claunch spawn-request <id>]" in (pkg / rel).read_text(encoding="utf-8"), rel
