@@ -11,6 +11,7 @@ the launcher home.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -1167,7 +1168,11 @@ def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
     assert 'if (typeof renderTermTps === "function") renderTermTps();' in js  # every poll
     for sel in ("#session-list .rail-tps-line", ".sess-brief-tps", ".badge.tps", "#term-tps-overlay"):
         assert sel in css
-    assert "pointer-events: none" in css.split("#term-tps-overlay {", 1)[1].split("}", 1)[0]
+    # the base rule, anchored at line start: theme-scoped copies of the
+    # selector (html[data-theme="light"] #term-tps-overlay) also contain
+    # this text and must not satisfy the parse
+    block = re.search(r"^#term-tps-overlay\s*\{([^}]*)\}", css, re.M)
+    assert block and "pointer-events: none" in block.group(1)
 
 
 def test_web_page_draws_an_idle_session_as_none_rather_than_its_last_number():
