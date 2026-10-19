@@ -829,10 +829,21 @@ steps:
          --no-ff 머지의 트리와 같다(프리뷰 스윕이 그 트리를 쓴다). 이 push는
          리더의 자기 판단 범위다(사용자 결정, 2026-09-11) — 단 그 증거는
          fast-forward다: `git merge-base --is-ancestor <remote>/<base> master`가
-         0일 때만 push한다. 0이 아니면 원격 base에 로컬 master에 없는 커밋이
-         있다는 뜻이고(누군가 원격에 직접 올렸다), 그것은 push로 덮을 일이
-         아니라 사용자에게 올릴 일이다 — 이 PR 후보는 이번 배치에서 빼고
-         이유를 그 이슈에 적는다. `--force`는 어느 경우에도 쓰지 않는다.
+         0일 때만 push한다. 0이 아니면 반대 방향을 검사한다:
+         `git merge-base --is-ancestor master <remote>/<base>`가 0이면 로컬
+         master가 원격 base보다 뒤처진 것(갈라진 것이 아니다)이므로 push하지
+         않고 `git merge --ff-only <remote>/<base>`로 로컬 master를 따라
+         올린다. 그러면 프리뷰 사슬과 그 트리가 낡으므로 프리뷰를 **새 tip에서
+         다시 짓고** 프리뷰 스윕을 새로 돌린다 — 낡은 프리뷰의 영수증을
+         재사용하지 않는다(머지 커밋의 트리 해시 대조가 재사용을 막는다,
+         「프리뷰 스윕이 곧 이 배치의 스윕이다」 절). 배치의 나머지 후보
+         심사도 새 tip 기준으로 다시 잰다 — behind가 0이 아니어져 재측정
+         요구가 다시 도는 것은 이 절차의 정상 결과다(프리뷰 머지 ref로
+         갈음할 수 있다). 두 방향이 모두 0이 아니면 진짜 갈라짐이다 —
+         원격 base에 로컬 master에 없는 커밋이 있고 로컬 master에도 원격에
+         없는 커밋이 있다는 뜻이고, 그것은 push나 pull로 덮을 일이 아니라
+         사용자에게 올릴 일이다 — 이 PR 후보는 이번 배치에서 빼고 이유를
+         그 이슈에 적는다. `--force`는 어느 경우에도 쓰지 않는다.
       2. **머지는 gh로, tip을 고정해서.** `gh pr merge <url> -R
          <host>/<owner>/<repo> --merge --match-head-commit <tip> --subject
          "<저장소 관례의 한 줄>"` — `--merge`가 merge commit(로컬 --no-ff와

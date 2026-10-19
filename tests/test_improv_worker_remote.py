@@ -247,6 +247,9 @@ def test_the_leader_reads_a_pr_row_as_a_candidate_in_the_same_table(layer):
     assert "git push <remote> master:refs/heads/<base>" in integrate
     # the base push is the leader's own call, on fast-forward evidence only
     assert "git merge-base --is-ancestor <remote>/<base> master" in integrate
+    # a base that is only ahead is followed with ff-only (then the preview is
+    # rebuilt); the user gate is for a real divergence — neither side ahead
+    assert "git merge-base --is-ancestor master <remote>/<base>" in integrate
     # and the chore(beads) commit rides to the remote base too
     assert "git push <remote> master:refs/heads/<base>" in leader.steps["sweep"].instructions
 
