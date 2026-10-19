@@ -261,3 +261,99 @@ def test_the_routes(proj):
     assert unknown == 404 and unauth == 401
     assert [(r["session"], r["items"], r["status"]) for r in listed["requests"]] == \
         [("s1", ["choose: x"], "pending")]
+
+
+# --------------------------------------------------------------------------- #
+# a kill of a session standing on its end decision (claunch-g08xz.1)
+# --------------------------------------------------------------------------- #
+
+ENDING = """\
+cflow: 2
+name: ending
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  seq:
+    - id: end-decision
+      choose:
+        prompt: end this session?
+        chooser: user
+        options:
+          end: {then: end}
+          hold: {then: a}
+"""
+
+
+class FakeRequest:
+    def __init__(self, app, body):
+        self.app = app
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+def _target(name, cwd):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(exited=False, sdef=SimpleNamespace(name=name, cwd=cwd),
+                           info=lambda: {"name": name})
+
+
+@pytest.fixture
+def ending(proj):
+    (proj / ".claunch" / "workflows" / "v2" / "ending.yaml").write_text(ENDING,
+                                                                      encoding="utf-8")
+    return proj
+
+
+def test_the_end_decision_is_found_in_v2_and_v1_runs(ending):
+    cwd = str(ending)
+    runtime.start(layers.load("ending", cwd), cwd=cwd, scope="w1", caps={})
+    found = flow_nudge.end_decision(cwd, "w1")
+    assert found["version"] == 2 and found["label"] == "end-decision"
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="w2", caps={})
+    assert flow_nudge.end_decision(cwd, "w2") is None   # no 'end' option
+    assert flow_nudge.end_decision(cwd, "nobody") is None
+
+
+def test_a_kill_of_a_session_on_its_end_decision_asks_for_end(ending):
+    import json
+
+    cwd = str(ending)
+    runtime.start(layers.load("ending", cwd), cwd=cwd, scope="w1", caps={})
+    app = {"flow_nudge": flow_nudge.NudgeBoard()}
+    by = {"kind": "agent", "name": "lead"}
+
+    resp = asyncio.run(api_mod._end_instead_of_kill(
+        FakeRequest(app, {"reason": "its PR merged"}), _target("w1", cwd), by,
+        "its PR merged"))
+    assert resp.status == 202
+    body = json.loads(resp.text)
+    assert body["end_requested"] is True and body["kill_request"] is None
+    assert body["decision"] == "end-decision" and "skip_end_decision" in body["note"]
+    [rec] = app["flow_nudge"].list()
+    assert rec["session"] == "w1" and rec["by"] == "lead"
+    assert "its PR merged" in rec["message"] and "'end'" in rec["message"]
+
+    skipped = asyncio.run(api_mod._end_instead_of_kill(
+        FakeRequest(app, {"skip_end_decision": True}), _target("w1", cwd), by, ""))
+    assert skipped is None
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="w2", caps={})
+    elsewhere = asyncio.run(api_mod._end_instead_of_kill(
+        FakeRequest(app, {}), _target("w2", cwd), by, ""))
+    assert elsewhere is None
+
+
+def test_the_kill_tool_passes_skip_end_decision(monkeypatch):
+    from claude_launcher import mesh_mcp
+
+    client = FakeClient({"pending": True})
+    monkeypatch.setattr(mesh_mcp, "_client", lambda: client)
+    monkeypatch.setenv("CLAUNCH_SESSION", "lead")
+    tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "kill")
+    assert "skip_end_decision" in tool["inputSchema"]["properties"]
+    mesh_mcp.call_tool("kill", {"session": "kid", "reason": "done",
+                                "skip_end_decision": True})
+    assert client.posts[-1] == ("/api/sessions/lead/children/kid/kill",
+                                {"reason": "done", "skip_end_decision": True})

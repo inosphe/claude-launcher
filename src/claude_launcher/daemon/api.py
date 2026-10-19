@@ -7504,6 +7504,9 @@ async def _gated_kill(request: web.Request, target, by: dict, *,
         return None
     if target.exited and not getattr(target, "held_at", None):
         return None
+    ended = await _end_instead_of_kill(request, target, by, reason)
+    if ended is not None:
+        return ended
     try:
         record = request.app["kill_gate"].submit(
             session=str(by.get("name") or ""), target=name, reason=reason,
@@ -7560,6 +7563,46 @@ async def h_cflow_nudge(request: web.Request) -> web.Response:
 async def h_cflow_nudges(request: web.Request) -> web.Response:
     rows = await asyncio.to_thread(request.app["flow_nudge"].list)
     return json_response({"requests": rows})
+
+
+async def _end_instead_of_kill(request: web.Request, target, by: dict,
+                               reason: str) -> Optional[web.Response]:
+    """An agent's kill of a session whose run stands on its end decision
+    (claunch-g08xz.1): the person is asked to answer that decision's 'end'
+    through a nudge card instead of a kill request -- the run then ends the
+    session through its own ending. None (file the kill request as before)
+    when the target is not standing there, the caller asked to skip it
+    (``skip_end_decision``), or no card could be raised."""
+    if target.exited:
+        return None
+    body = await _json_body(request)
+    if body.get("skip_end_decision") in (True, "1", "true", 1):
+        return None
+    name = target.sdef.name
+    cwd = _session_cwd(target)
+    if not cwd:
+        return None
+    try:
+        decision = await asyncio.to_thread(flow_nudge.end_decision, cwd, name)
+    except Exception:  # noqa: BLE001 - an unreadable run gets the kill request
+        log.exception("end decision of %s could not be read", name)
+        return None
+    if decision is None:
+        return None
+    asker = str(by.get("name") or "an agent")
+    message = (f"{asker} asks to end {name}: its run stands on {decision.get('label')} -- "
+               f"answer '{flow_nudge.END_OPTION}' there to end it. Reason: "
+               f"{reason.strip() or '(no reason given)'}")
+    try:
+        result = await asyncio.to_thread(
+            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=name,
+            message=message, by=asker)
+    except flow_nudge.NudgeRefused as exc:
+        log.info("end decision of %s not raised (%s); filing the kill request", name, exc)
+        return None
+    return json_response({**target.info(),
+                          **flow_nudge.end_request_reply(name, decision, result)},
+                         status=202)
 
 
 async def h_kill_requests_list(request: web.Request) -> web.Response:

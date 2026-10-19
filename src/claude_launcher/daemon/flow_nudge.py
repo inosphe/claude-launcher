@@ -137,6 +137,71 @@ def owed(cwd: str, scope: str) -> Optional[dict]:
     return _owed_v1(cwd, scope)
 
 
+#: The option a run's end decision ends the session with (improv-worker-v2's
+#: end-decision, and any workflow that names its ending the same way).
+END_OPTION = "end"
+
+
+def end_decision(cwd: str, scope: str) -> Optional[dict]:
+    """The open decision in ``(cwd, scope)``'s run that a person answers with
+    ``end`` -- an ask (improv-worker-v2's end-decision is one) or a ``chooser:
+    user`` choice whose options include :data:`END_OPTION`, or a v1 run
+    waiting on a selection that offers it: ``{version, instance, label}``, or
+    None (claunch-g08xz.1).
+
+    A session standing there has finished its round; ending it through that
+    answer runs the workflow's own ending (the end notice, the record of who
+    approved it) where a kill cuts it off."""
+    from ..cflow2 import ir, runtime, store as store2
+
+    if store2.RunStore(cwd, scope).exists():
+        payload = runtime.status(cwd=cwd, scope=scope, tick=False)
+        if payload.get("status") not in runtime.LIVE_STATUSES:
+            return None
+        for a in payload.get("asks") or []:
+            if END_OPTION in {o.get("name") for o in a.get("options") or []}:
+                return {"version": 2, "instance": a.get("instance"),
+                        "label": a.get("label") or a.get("node")}
+        for c in payload.get("choices") or []:
+            if (c.get("chooser") or ir.CHOOSER_AGENT) != ir.CHOOSER_USER:
+                continue
+            if END_OPTION in {o.get("name") for o in c.get("options") or []}:
+                return {"version": 2, "instance": c.get("instance"),
+                        "label": c.get("label") or c.get("node")}
+        return None
+    from ..cflow import engine, model, state as state_mod
+
+    try:
+        entry = engine.status(cwd, scope=scope)
+    except (engine.CflowError, model.WorkflowError, state_mod.StateError, OSError):
+        return None
+    if v1_gate_kind(entry) != "selection":
+        return None
+    if END_OPTION not in {o["name"] for o in v1_gate_options(entry)}:
+        return None
+    return {"version": 1, "instance": entry.get("step_id"),
+            "label": entry.get("title") or entry.get("step_id")}
+
+
+def end_request_reply(target: str, decision: dict, result: dict) -> Dict[str, Any]:
+    """What an agent's kill of a session standing on its end decision answers
+    instead of filing a kill request (claunch-g08xz.1)."""
+    req = result.get("request") or {}
+    return {
+        "pending": True, "kill_request": None, "end_requested": True,
+        "target": target, "decision": decision.get("label"), "nudge": req.get("id"),
+        "note": (
+            f"{target} stands on its end decision ({decision.get('label')}), so no kill "
+            f"request was filed: the person is asked on the dashboard to answer "
+            f"'{END_OPTION}' there (nudge {req.get('id')}), which ends the session through "
+            f"its workflow's own ending. Nothing has been ended yet and nothing is typed "
+            f"back to you: the session's exit is the answer (its mesh row reads exited). "
+            f"Do not ask again. To file a plain kill request anyway, call kill again with "
+            f"skip_end_decision: true"
+        ),
+    }
+
+
 class NudgeBoard:
     """The daemon's nudge requests. ``read_owed`` is :func:`owed`, injectable
     for tests; ``alive`` answers whether a session is still registered."""
@@ -170,7 +235,8 @@ class NudgeBoard:
         for rec in settled[:max(0, len(settled) - KEEP_SETTLED)]:
             self._records.pop(rec["id"], None)
 
-    def submit(self, *, session: str, cwd: str, scope: str, message: str) -> dict:
+    def submit(self, *, session: str, cwd: str, scope: str, message: str,
+               by: Optional[str] = None) -> dict:
         """File a nudge for ``session``'s run in ``(cwd, scope)``. Returns
         ``{raised, request, note}``; raises :class:`NudgeRefused` when the run
         waits on nobody."""
@@ -211,6 +277,7 @@ class NudgeBoard:
                 "version": found.get("version"), "run": found.get("run"),
                 "workflow": found.get("workflow"), "items": items, "message": message,
                 "status": PENDING, "opened": now, "closed": None, "asked": 1,
+                "by": by or session,
             }
             self._records[rec["id"]] = rec
             self._prune()
