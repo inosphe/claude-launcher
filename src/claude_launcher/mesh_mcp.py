@@ -291,7 +291,18 @@ TOOLS = [
             "~/.claunch.yaml. The child cap is SOFT: at the limit the spawn "
             "still goes through and the answer carries a 'warnings' entry "
             "saying so, so a full parent is a thing to notice, not a wall to "
-            "work around. The depth limit is hard and does refuse."
+            "work around. The depth limit is hard and does refuse. "
+            "APPROVAL: a spawn waits for the person (claunch-iw5i8.16) -- the "
+            "call returns at once with 'pending' and a request id, the person "
+            "sees a card and approves, rejects, extends it or makes the session "
+            "by hand in a form, and the outcome (with the created session's "
+            "name) is typed into your terminal as a [claunch spawn-request] "
+            "block. With no answer in 5 minutes the child is created as you "
+            "asked. Do not spawn again for the same work while it waits. A "
+            "'reviewer' child is not gated: it is created at once. 'root' asks "
+            "for a TOP-LEVEL session instead of a child (your profile and "
+            "project, the project's default workspace, a fresh worktree); "
+            "unanswered, it is created as your child."
         ),
         "inputSchema": {
             "type": "object",
@@ -299,6 +310,21 @@ TOOLS = [
                 "name": {
                     "type": "string",
                     "description": "session name (auto-generated if omitted)",
+                },
+                "root": {
+                    "type": "boolean",
+                    "description": (
+                        "ask for a top-level session (no parent) instead of a "
+                        "child; the person approves it, and with no answer it "
+                        "is created as your child"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why this session: the person reads it on the approval "
+                        "card (default: the first line of 'task')"
+                    ),
                 },
                 "mesh": {
                     "type": "string",
@@ -1442,7 +1468,7 @@ _SPAWN_KEYS = (
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
     "fork", "tools", "project", "prompt_packs", "workflow_version", "workflow_params",
-    "cflow_inputs",
+    "cflow_inputs", "root", "reason",
 )
 
 

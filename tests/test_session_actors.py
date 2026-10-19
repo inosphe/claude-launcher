@@ -177,8 +177,14 @@ def test_creation_records_the_dashboard_a_shell_and_an_agent(home, tmp_path):
     asyncio.run(run())
 
 
-def test_a_spawn_records_the_agent_the_dashboard_or_the_run(home, tmp_path):
+def test_a_spawn_records_the_agent_the_dashboard_or_the_run(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon import api
+
     _register("w", WAIT)
+    # An agent's spawn waits for the person (claunch-iw5i8.16) unless it is
+    # exempt (a reviewer, which needs a mesh this test does not set up): the
+    # exempt one is created at once and recorded as the agent's.
+    monkeypatch.setattr(api, "spawn_gate_exempt", lambda body: body.get("name") == "byagent")
 
     async def run():
         mgr = _manager()
@@ -193,6 +199,11 @@ def test_a_spawn_records_the_agent_the_dashboard_or_the_run(home, tmp_path):
             assert resp.status == 201, await resp.json()
             assert (await resp.json())["session"]["created_by"] == {
                 "kind": "agent", "name": "lead"}
+            resp = await client.post("/api/sessions/lead/children",
+                                     json={**spawn, "name": "asked"},
+                                     headers={**BEARER, actors.HEADER: "agent:lead"})
+            assert resp.status == 202 and (await resp.json())["pending"] is True
+            assert "asked" not in {s.sdef.name for s in mgr.list()}
 
             resp = await client.post("/api/sessions/lead/children",
                                      json={**spawn, "name": "byperson"},

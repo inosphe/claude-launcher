@@ -84,9 +84,11 @@ TOOLS = [
      "description": "Ask the user for a NEW session to do work that no running session in your scope is doing "
                     "(check opv2_sessions first; a running session doing it gets opv2_dispatch instead). The "
                     "request waits on a notification card for 5 minutes: the user approves, rejects, extends it or "
-                    "creates the session by hand; no answer counts as approval. The new session is top-level, in "
-                    "the project's default workspace on a fresh worktree, running improv-worker-v2. Returns at "
-                    "once; the outcome is typed into your terminal and posted to your feed.",
+                    "creates the session by hand. Approved, the new session is top-level, in the project's "
+                    "default workspace on a fresh worktree, running improv-worker-v2. With no answer no top-level "
+                    "session is made: the same session is created as YOUR child instead (project, task, issue, "
+                    "name and workflow kept). Returns at once; the outcome is typed into your terminal and posted "
+                    "to your feed.",
      "inputSchema": {"type": "object", "properties": {
          "project": {"type": "string", "description": "a project in your scope (omit when your scope is one project)"},
          "task": {"type": "string", "description": "the new session's opening task, faithful to what the user said"},

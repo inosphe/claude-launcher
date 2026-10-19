@@ -743,6 +743,13 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     except daemon_client.DaemonClientError as exc:
         print(exc)
         return 1
+    if result.get("pending"):
+        # An agent's spawn waits for the person (claunch-iw5i8.16).
+        request = result.get("request") or {}
+        print(f"spawn request {request.get('id')} is waiting for the person "
+              f"(deadline {request.get('deadline')})")
+        print(f"  {result.get('note') or ''}".rstrip())
+        return 0
     child = result.get("session") or {}
     # Before the success line, not after: a warning that scrolls past the
     # thing it is about reads as being about whatever came next.

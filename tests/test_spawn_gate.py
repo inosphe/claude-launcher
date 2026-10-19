@@ -398,3 +398,191 @@ def test_the_gate_request_carries_the_asker_as_creator(home):
 
     request = _GateRequest({"manager": None}, "op")
     assert actors.from_request(request) == actors.make(actors.AGENT, "op")
+
+
+# --------------------------------------------------------------------------- #
+# claunch-iw5i8.16: child and root requests (th-d9e343 extended, th-715f44,
+# th-17c48c, 2026-10-19)
+#
+# * an agent's child spawn waits on the card too; unanswered, it is created
+#   as asked, set up by the agent;
+# * a root (top-level) ask, unanswered, makes no top-level session: the same
+#   session is created as the asker's child instead (an operator's ask is a
+#   root ask);
+# * ``setup`` tells the agent's own setup (``agent``) from the person's
+#   approval (``approved``) and the person's form (``custom``);
+# * a reviewer child is not gated.
+# --------------------------------------------------------------------------- #
+CHILD = {"task": "review the branch", "project": "alpha", "workflow": "improv-worker-v2"}
+
+
+def test_a_root_ask_unanswered_is_created_as_the_askers_child(home, tmp_path):
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world, child_spec=dict(CHILD))["id"]
+        await asyncio.sleep(0.3)
+        return world, rid
+
+    world, rid = asyncio.run(run())
+    record = world.gate.get(rid)
+    assert record["scope"] == "root" and record["status"] == "approved"
+    assert record["decided_by"] == "timeout"
+    assert record["created_as"] == "child" and record["setup"] == "agent"
+    assert world.created == [(CHILD, "op", rid)]   # the child spec, not the root one
+    assert "no top-level session" in world.notes[-1][1]
+
+
+def test_a_root_ask_without_a_child_spec_falls_back_on_its_own_spec(home, tmp_path):
+    world = _World(tmp_path)
+    record = _spawn(world)
+    assert record["scope"] == "root" and record["child_spec"] == SPEC
+
+
+def test_a_root_ask_approved_is_top_level(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world, child_spec=dict(CHILD))["id"]
+    record = asyncio.run(world.gate.approve(rid))
+    assert record["created_as"] == "root" and record["setup"] == "approved"
+    assert world.created == [(SPEC, "op", rid)]
+    assert "top-level" in world.notes[-1][1]
+
+
+def test_a_child_ask_unanswered_is_created_as_asked(home, tmp_path):
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r",
+                                      scope="child")["id"]
+        await asyncio.sleep(0.3)
+        return world, rid
+
+    world, rid = asyncio.run(run())
+    record = world.gate.get(rid)
+    assert "child_spec" not in record
+    assert record["status"] == "approved" and record["decided_by"] == "timeout"
+    assert record["created_as"] == "child" and record["setup"] == "agent"
+    assert world.created == [(CHILD, "op", rid)]
+    assert "created as your child" in world.notes[-1][1]
+
+
+def test_a_child_ask_approved_or_taken_by_hand(home, tmp_path):
+    world = _World(tmp_path)
+    one = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
+    record = asyncio.run(world.gate.approve(one))
+    assert record["created_as"] == "child" and record["setup"] == "approved"
+    two = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
+    record = world.gate.manual(two)
+    assert record["setup"] == "custom" and "spawn child form" in world.notes[-1][1]
+
+
+@pytest.mark.parametrize("kw", [{"scope": "sideways"}, {"child_spec": "x"}])
+def test_a_spawn_ask_refuses_a_bad_scope_or_child_spec(home, tmp_path, kw):
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        _spawn(_World(tmp_path), **kw)
+    assert err.value.status == 400
+
+
+def test_a_resume_fallback_carries_its_child_spec(home, tmp_path):
+    world = _World(tmp_path)
+    rid = world.gate.submit_resume(session="op", target="old", reason="r",
+                                   fallback=dict(SPEC), fallback_child=dict(CHILD))["id"]
+    record = world.gate.spawn_instead(rid)
+    follow = world.gate.get(record["followup"])
+    assert follow["scope"] == "root" and follow["child_spec"] == CHILD
+
+
+def test_the_operator_child_spec_drops_profile_and_directory(home):
+    from claude_launcher.daemon.operators_v2 import OperatorsV2
+
+    spec = {**SPEC, "cwd": "/w/alpha", "name": "w1", "issue": "x-1"}
+    assert OperatorsV2.child_spec(spec) == {
+        "name": "w1", "project": "alpha", "task": "do the thing",
+        "workflow": "improv-worker-v2", "issue": "x-1"}
+
+
+def test_an_agents_spawn_files_a_request_and_a_reviewer_does_not(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon import api
+
+    made = []
+
+    async def spawn_child(request, parent, body, *, created_by):
+        made.append((parent, dict(body), created_by))
+        return 201, {"name": "kid", "session": {"name": "kid"}, "parent": parent}
+
+    monkeypatch.setattr(api, "_spawn_child", spawn_child)
+
+    async def run():
+        op = _FakeSession("op")
+        op.sdef = SessionDef(name="op", harness="py", cwd="/w/op", profile="p")
+        mgr = _manager(op)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        gate = app["spawn_gate"]
+        gate.path = tmp_path / spawn_gate.FILE
+        client = await _client(app)
+        agent = {**AUTH, "X-Claunch-Actor": "agent:op"}
+        try:
+            # an agent's child spawn: a pending request, nothing made
+            resp = await client.post("/api/sessions/op/children", headers=agent,
+                                     json={"task": "fix it\nin detail", "name": "kid"})
+            body = await resp.json()
+            assert resp.status == 202 and body["pending"] is True
+            record = body["request"]
+            assert record["scope"] == "child" and record["session"] == "op"
+            assert record["spec"] == {"task": "fix it\nin detail", "name": "kid"}
+            assert record["reason"] == "fix it" and made == []
+
+            # a root ask: the top-level spec from the asker, the body as the child
+            resp = await client.post("/api/sessions/op/children", headers=agent,
+                                     json={"task": "new line of work", "root": True,
+                                           "reason": "nobody does it"})
+            record = (await resp.json())["request"]
+            assert resp.status == 202 and record["scope"] == "root"
+            assert record["reason"] == "nobody does it"
+            assert record["spec"] == {"task": "new line of work", "profile": "p",
+                                      "cwd": "/w/op", "worktree": ""}
+            assert record["child_spec"] == {"task": "new line of work"}
+
+            # a reviewer child is not gated
+            resp = await client.post("/api/sessions/op/children", headers=agent,
+                                     json={"role": "reviewer", "handle": "op-rev"})
+            assert resp.status == 201 and made[0][0] == "op"
+            assert made[0][2] == {"kind": "agent", "name": "op"}
+
+            # a person's spawn is not gated; a person cannot ask for 'root' here
+            resp = await client.post("/api/sessions/op/children", headers=AUTH,
+                                     json={"task": "t"})
+            assert resp.status == 201 and len(made) == 2
+            resp = await client.post("/api/sessions/op/children", headers=AUTH,
+                                     json={"task": "t", "root": True})
+            assert resp.status == 400
+            assert len([r for r in gate.list() if r["status"] == "pending"]) == 2
+        finally:
+            await gate.cancel()
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_gate_creates_a_child_or_a_root_with_its_setup(home, monkeypatch):
+    from claude_launcher.daemon import api
+
+    calls = []
+
+    async def spawn_child(request, parent, body, *, created_by):
+        calls.append(("child", parent, body, created_by))
+        return 201, {"name": "kid"}
+
+    async def create_session(request, body):
+        calls.append(("root", body, request.gate_actor))
+        return 201, {"name": "top"}
+
+    monkeypatch.setattr(api, "_spawn_child", spawn_child)
+    monkeypatch.setattr(api, "_create_session", create_session)
+    asyncio.run(api._spawn_gate_create({}, dict(CHILD), "op",
+                                       {"created_as": "child", "setup": "agent"}))
+    asyncio.run(api._spawn_gate_create({}, dict(SPEC), "op",
+                                       {"created_as": "root", "setup": "approved"}))
+    assert calls[0] == ("child", "op", CHILD, {"kind": "agent", "name": "op",
+                                               "via": "spawn-gate", "reason": "setup:agent"})
+    assert calls[1] == ("root", SPEC, {"kind": "agent", "name": "op",
+                                       "via": "spawn-gate", "reason": "setup:approved"})
