@@ -819,7 +819,7 @@ def gate(repo, tmp_path, monkeypatch):
     state = {"exit": 0}
     body = f"open(r{str(tally)!r}, 'a').write('x'); print('1 passed')"
 
-    def stub(files, *, basetemp=None):
+    def stub(files, *, basetemp=None, **_):
         return [sys.executable, "-c", f"{body}; raise SystemExit({state['exit']})"]
 
     monkeypatch.setattr(changed_tests, "build_command", stub)
@@ -2208,3 +2208,204 @@ def test_a_korean_subject_is_read_whole(tmp_path):
     out = changed_tests._git(repo, "log", "-1", "--format=%s")
 
     assert out.strip() == "표적 선택이 한글 제목을 읽는다"
+
+
+# --------------------------------------------------------------------------- #
+# claunch-wuaup: failures the merge base has too are reported, not looped on
+# --------------------------------------------------------------------------- #
+#: The stand-in pytest for ``split_gate``. It fails what ``fails.txt`` in its
+#: working directory lists, minus any id passed as an argument (a deselect),
+#: and tallies ``h`` when run in the branch's tree and ``b`` anywhere else.
+_SPLIT_STUB = """\
+import pathlib, sys
+tally, repo = sys.argv[1], sys.argv[2]
+here = pathlib.Path.cwd().resolve() == pathlib.Path(repo).resolve()
+with open(tally, "a") as fh:
+    fh.write("h" if here else "b")
+p = pathlib.Path("fails.txt")
+ids = p.read_text().split() if p.exists() else []
+ids = [x for x in ids if x not in sys.argv[3:]]
+for i in ids:
+    print("FAILED " + i + " - AssertionError: boom")
+print(str(len(ids)) + " failed, 3 passed" if ids else "3 passed")
+raise SystemExit(1 if ids else 0)
+"""
+
+
+@pytest.fixture
+def split_gate(repo, tmp_path, monkeypatch):
+    """A gate whose stand-in pytest fails what ``fails.txt`` in its cwd lists.
+
+    The file is committed, so the throwaway worktree at the merge base reads
+    the base's list and the branch reads its own: the two runs differ exactly
+    where a real suite's would, by the tree they stand in.
+    """
+    tally = tmp_path / "runs.txt"
+    monkeypatch.setenv("CLAUNCH_SCRATCH", str(tmp_path / "scratch"))
+    seen = {}
+
+    def stub(files, *, basetemp=None, deselect=(), **_):
+        seen["deselect"] = tuple(deselect)
+        return [sys.executable, "-c", _SPLIT_STUB, str(tally), str(repo), *deselect]
+
+    monkeypatch.setattr(changed_tests, "build_command", stub)
+    _seed_on_base(repo, {"fails.txt": "tests/test_mesh.py::test_old\n"})
+
+    class Gate:
+        receipts = tmp_path / "receipts"
+        command = seen
+
+        def __call__(self, *extra):
+            return changed_tests.main(
+                ["--repo", str(repo), "--base", "master",
+                 "--receipts", str(self.receipts), *extra]
+            )
+
+        def runs(self):
+            return tally.read_text() if tally.exists() else ""
+
+        def receipt(self, deselect=()):
+            tree = changed_tests.worktree_tree(repo)
+            files = changed_tests.select(
+                repo, changed_tests.changed_paths(repo, "master")
+            )
+            path = changed_tests.receipt_path(
+                repo, tree, files, self.receipts, tuple(deselect)
+            )
+            return json.loads(path.read_text(encoding="utf-8"))
+
+    return Gate()
+
+
+def test_a_failure_the_base_has_too_does_not_fail_the_gate(repo, split_gate, capsys):
+    """The 21-failure loop of claunch-mli4r, in miniature: new failures 0.
+
+    The run is red, the base is red on the same node id, so the gate passes --
+    and says so: the count is on stdout and in the receipt, because an exit 0
+    over a failing test is only honest when the failing test is named.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert split_gate() == 0
+    assert split_gate.runs() == "hb"
+
+    receipt = split_gate.receipt()
+    assert receipt["exit_code"] == 1, "the run itself stays what it was"
+    assert receipt["preexisting"] == ["tests/test_mesh.py::test_old"]
+    assert receipt["new_failures"] == []
+    assert receipt["base_commit"] == _git(repo, "rev-parse", "master").strip()
+    assert receipt["base_cached"] is False
+    assert isinstance(receipt["base_seconds"], float)
+
+    out = capsys.readouterr().out
+    assert "1 preexisting, 0 new" in out
+    assert "  tests/test_mesh.py::test_old" in out
+    assert "new failures: 0" in out
+
+
+def test_check_reads_a_preexisting_only_receipt_as_a_pass_and_names_the_count(
+    repo, split_gate, capsys
+):
+    """``--check`` is the reviewer's door; it must not hide what it stood on."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert split_gate() == 0
+    capsys.readouterr()
+
+    assert split_gate("--check") == 0
+    out = capsys.readouterr().out
+    assert "1 failure(s) preexisting at base" in out
+    assert "0 new" in out
+
+
+def test_a_new_failure_still_fails_and_the_old_one_is_still_reported(repo, split_gate):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _write(repo, "fails.txt", "tests/test_mesh.py::test_old\ntests/test_mesh.py::test_new\n")
+
+    assert split_gate() == 1
+
+    receipt = split_gate.receipt()
+    assert receipt["new_failures"] == ["tests/test_mesh.py::test_new"]
+    assert receipt["preexisting"] == ["tests/test_mesh.py::test_old"]
+    assert split_gate("--check") == changed_tests.CANNOT_TELL
+
+
+def test_the_base_run_is_paid_once_per_base_and_selection(repo, split_gate):
+    """A fix loop re-runs the gate after every edit; the base does not move."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _write(repo, "fails.txt", "tests/test_mesh.py::test_old\ntests/test_mesh.py::test_new\n")
+    assert split_gate() == 1
+    _write(repo, "src/pkg/mesh.py", "x = 3\n")
+    assert split_gate() == 1
+
+    assert split_gate.runs() == "hbh"
+    assert split_gate.receipt()["base_cached"] is True
+
+
+def test_no_compare_base_keeps_the_old_red(repo, split_gate):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert split_gate("--no-compare-base") == 1
+    assert split_gate.runs() == "h"
+    assert "preexisting" not in split_gate.receipt()
+
+
+def test_the_base_worktree_is_removed_after_the_run(repo, split_gate):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    split_gate()
+
+    listed = _git(repo, "worktree", "list", "--porcelain")
+    assert listed.count("worktree ") == 1, listed
+
+
+def test_deselected_node_ids_reach_the_run_and_the_receipt(repo, split_gate, tmp_path):
+    """What a hand-run pytest left nowhere is now in the receipt and its key."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    known = tmp_path / "known.txt"
+    known.write_text(
+        "# claunch-mli4r, Windows only\n"
+        "tests/test_mesh.py::test_old  # fails on master too\n",
+        encoding="utf-8",
+    )
+
+    assert split_gate("--known-failures", str(known), "--no-compare-base") == 0
+    assert split_gate.command["deselect"] == ("tests/test_mesh.py::test_old",)
+
+    receipt = split_gate.receipt(["tests/test_mesh.py::test_old"])
+    assert receipt["deselected"] == ["tests/test_mesh.py::test_old"]
+    assert receipt["known_failures"] == str(known)
+    assert receipt["exit_code"] == 0
+
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    assert changed_tests.find_receipt(repo, tree, files, split_gate.receipts) is None, (
+        "a run with a test left out must not answer for the full selection"
+    )
+
+
+def test_deselect_flag_reaches_the_real_pytest_command():
+    cmd = changed_tests.build_command(
+        ["tests/test_a.py"], basetemp="C:/t/x", deselect=("tests/test_a.py::t",)
+    )
+    assert cmd[cmd.index("--deselect") + 1] == "tests/test_a.py::t"
+
+
+def test_the_base_run_keeps_this_trees_environment(tmp_path):
+    """Same pytest, other source: ``--project`` names the vetted environment."""
+    cmd = changed_tests._at_base(
+        ["uv", "run", "--no-sync", "pytest", "tests/test_a.py"], tmp_path
+    )
+    assert cmd[:5] == ["uv", "run", "--no-sync", "--project", str(tmp_path)]
+    assert cmd[5:] == ["pytest", "tests/test_a.py"]
+
+
+@pytest.mark.parametrize(
+    "line, nodeid",
+    [
+        ("FAILED tests/test_x.py::test_y - AssertionError: a - b", "tests/test_x.py::test_y"),
+        ("FAILED tests/test_x.py::test_p[a b] - x", "tests/test_x.py::test_p[a b]"),
+        ("ERROR tests/test_x.py - ImportError: no", "tests/test_x.py"),
+        ("FAILED tests/test_x.py::test_z", "tests/test_x.py::test_z"),
+    ],
+)
+def test_failed_nodeids_keep_the_id_and_drop_the_message(line, nodeid):
+    assert changed_tests.failed_nodeids(f"...\n{line}\n1 failed\n") == [nodeid]

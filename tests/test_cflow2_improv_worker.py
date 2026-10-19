@@ -1796,6 +1796,67 @@ def test_a_skip_goes_from_the_choice_to_commit_without_a_test_task(tmp_path, mon
     assert "review" not in seen and "targeted-test" not in seen
 
 
+# -- claunch-wuaup: the tests loop ends on new failures, not on preexisting ones
+
+
+def _to_targeted_test(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, None)
+    [work] = st["tasks"]
+    st = runtime.report(work["instance"], "ok", {}, **kw)
+    [choice] = st["choices"]
+    st = runtime.select(choice["instance"], "run", reason="code change", **kw)
+    [review] = st["tasks"]
+    assert review["label"] == "review"
+    st = runtime.report(review["instance"], "ok",
+                        {"modules": ["tests/test_mesh.py"], "surfaces": "관련 표면 없음",
+                         "tried": []}, **kw)
+    [measure] = st["tasks"]
+    assert measure["label"] == "targeted-test"
+    return measure, kw
+
+
+_MEASURED = {"modules": ["tests/test_mesh.py"], "passed": 40, "tree": "abc",
+             "env": "worktree venv", "receipt": "r.json", "tried": []}
+
+
+@pytest.mark.parametrize("value, next_label", [
+    # every failure also fails at the merge base: the loop ends
+    ({"failed": 21, "new_failed": 0,
+      "preexisting": ["tests/test_mesh.py::test_old"]}, "commit"),
+    # one of them is this change's: back to review
+    ({"failed": 22, "new_failed": 1,
+      "preexisting": ["tests/test_mesh.py::test_old"]}, "review"),
+    # a report without the split keeps the old condition (failed == 0)
+    ({"failed": 2}, "review"),
+    ({"failed": 0}, "commit"),
+])
+def test_the_tests_loop_judges_new_failures_only(tmp_path, monkeypatch, value, next_label):
+    from claude_launcher.cflow2 import runtime
+
+    measure, kw = _to_targeted_test(tmp_path, monkeypatch)
+    st = runtime.report(measure["instance"], "ok", {**_MEASURED, **value}, **kw)
+    assert [t["label"] for t in st["tasks"]] == [next_label]
+
+
+def test_the_targeted_test_prompt_says_how_preexisting_failures_are_reported():
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    nodes = doc["nodes"]
+    measure = _flat(nodes["targeted-test"]["prompt"])
+    for anchor in ("PREEXISTING FAILURES @ <base_commit>", "--known-failures <파일>",
+                   "--deselect <nodeid>", "--no-compare-base", "--labels found",
+                   "가르지 못한 실패는 새 실패로 센다"):
+        assert anchor in measure, f"targeted-test lost {anchor!r}"
+    returns = nodes["targeted-test"]["returns"]["ok"]
+    assert returns["new_failed"] == "int?" and returns["preexisting"] == "list?"
+    assert "새 실패부터 고친다" in _flat(nodes["review"]["prompt"])
+    assert "기존 실패: <건수> @ <base_commit>" in _flat(
+        nodes["integration-request"]["prompt"])
+
+
 # -- series batching (claunch-7r1qr) -------------------------------------------
 
 
