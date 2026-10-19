@@ -641,11 +641,17 @@ def test_codex_fork_uses_native_command_and_requires_rollout(tmp_path, source_ar
     assert child["args"] == ["--no-alt-screen", "fork", parent["conversation_id"]]
     assert not child.get("conversation_id")
     assert not child.get("resume") and not child.get("fork_session")
+    # Another codex profile is accepted (claunch-yl0to): the rollout is not
+    # there yet, and carry_forked_conversation puts a copy there at launch.
     other = profile.create("other-cx")
     lineage.set_harness(other, "codex")
-    with pytest.raises(spawn.SpawnDenied, match="child's profile"):
-        spawn.check(_policy(allow_profile=True), {"fork": True, "profile": "other-cx"},
-                    parent=parent, depth=0, children=0)
+    moved = spawn.check(_policy(allow_profile=True), {"fork": True, "profile": "other-cx"},
+                        parent=parent, depth=0, children=0)
+    assert moved["args"] == ["--no-alt-screen", "fork", parent["conversation_id"]]
+    spawn.carry_forked_conversation(moved, {"fork": True}, parent=parent)
+    copied = harnesses.get("codex").profile_home(other.config_dir) / "sessions" / "rollout.jsonl"
+    assert copied.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+    assert path.exists()  # a copy, never a move
 
 
 @pytest.mark.parametrize(
@@ -1531,3 +1537,85 @@ def test_exempt_depth_does_not_switch_spawning_back_on():
     policy = _policy(enabled=False)
     with pytest.raises(spawn.SpawnDenied, match="switched off"):
         spawn.check(policy, {}, parent=PARENT, depth=0, children=0, exempt_depth=True)
+
+
+# --------------------------------------------------------------------------- #
+# model presets and cross-profile forks (claunch-yl0to)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "preset, expected",
+    [("default", None), ("small", "haiku"), ("large", "opus"), ("xlarge", "fable")],
+)
+def test_a_claude_model_preset_becomes_the_alias_its_profile_resolves(preset, expected):
+    """The aliases read the profile's own environment, so a profile that
+    declares no models still gets Claude's tiers."""
+    child = spawn.check(
+        _policy(allow_args=True), {"model": preset}, parent=TALKER, depth=0, children=0
+    )
+    assert child["model"] == expected
+
+
+def test_a_model_name_that_is_no_preset_passes_through():
+    child = spawn.check(
+        _policy(allow_args=True), {"model": "claude-x-1"}, parent=TALKER, depth=0, children=0
+    )
+    assert child["model"] == "claude-x-1"
+
+
+def test_the_subagent_preset_falls_back_to_small_without_a_declared_id():
+    child = spawn.check(
+        _policy(allow_args=True), {"model": "subagent"}, parent=TALKER, depth=0, children=0
+    )
+    assert child["model"] == "haiku"
+
+
+def test_a_codex_preset_needs_the_id_its_profile_declares(monkeypatch):
+    """Codex never reads spec.models, so the word itself would launch
+    ``-c model=small``: an undeclared slot is refused, naming the profile."""
+    prof = profile.create("cx")
+    lineage.set_harness(prof, "codex")
+    parent = {**PARENT, "harness": "codex", "profile": "cx:codex"}
+    with pytest.raises(spawn.SpawnDenied, match="models.small"):
+        spawn.check(_policy(allow_args=True), {"model": "small"},
+                    parent=parent, depth=0, children=0)
+
+    class _Spec:
+        def model(self, role):
+            return {"small": "gpt-mini"}.get(role)
+
+    monkeypatch.setattr(spawn.providers, "spec_for", lambda prof: _Spec())
+    child = spawn.check(_policy(allow_args=True), {"model": "small"},
+                        parent=parent, depth=0, children=0)
+    assert child["model"] == "gpt-mini"
+
+
+def test_a_claude_fork_onto_another_profile_carries_the_transcript(short_cwd):
+    from claude_launcher import transcripts
+
+    cheap = profile.create("cheap")
+    parent = _wrote_a_transcript({**TALKER, "cwd": short_cwd})
+    child = spawn.check(
+        _policy(allow_profile=True, allow_args=True),
+        {"fork": True, "profile": "cheap", "model": "small"},
+        parent=parent, depth=0, children=0,
+    )
+    assert child["resume"] == "c-1" and child["model"] == "haiku"
+    spawn.carry_forked_conversation(child, {"fork": True}, parent=parent)
+    copied = transcripts.project_dir(cheap.config_dir, short_cwd) / "c-1.jsonl"
+    assert copied.read_text(encoding="utf-8") == "{}"
+    source = transcripts.find(profile.require("talk").config_dir, "c-1")
+    assert source is not None and source.exists()
+
+
+def test_a_same_profile_fork_copies_nothing(short_cwd, monkeypatch):
+    parent = _wrote_a_transcript({**TALKER, "cwd": short_cwd})
+    child = spawn.check(_policy(), {"fork": True}, parent=parent, depth=0, children=0)
+    monkeypatch.setattr("shutil.copy2", lambda *a, **k: pytest.fail("copied"))
+    spawn.carry_forked_conversation(child, {"fork": True}, parent=parent)
+    spawn.carry_forked_conversation(child, {}, parent=parent)
+
+
+def test_the_mesh_spawn_tool_passes_model_and_effort():
+    from claude_launcher import mesh_mcp
+
+    assert {"model", "effort"} <= set(mesh_mcp._SPAWN_KEYS)

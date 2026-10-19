@@ -1484,6 +1484,9 @@ _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
+    # model/effort ride the allow_args gate (spawn._GATED_FIELDS); a workflow
+    # delegating to a cheaper model preset names one (claunch-yl0to)
+    "model", "effort",
     "fork", "tools", "project", "prompt_packs", "workflow_version", "workflow_params",
     "cflow_inputs", "root", "reason",
 )

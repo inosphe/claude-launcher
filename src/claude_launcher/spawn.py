@@ -73,6 +73,7 @@ refusal.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import (
@@ -82,6 +83,7 @@ from . import (
     lineage,
     profile as profile_mod,
     projects,
+    provider_spec,
     providers,
     store,
     transcripts,
@@ -546,12 +548,142 @@ def check(
             child["env"], enabled=enabled, window=window
         )
 
+    if "model" in request:
+        # After the profile re-resolution: a preset names a slot in the
+        # CHILD's profile, which is only known now (claunch-yl0to).
+        _resolve_model_preset(child)
+
     _file_under_project(policy, child, request, parent=parent, warnings=warnings)
 
     if request.get("fork"):
         _fork_parents_conversation(child, parent, request)
 
     return child
+
+
+#: The Claude alias that reaches each model role through the profile's
+#: environment (``--model=haiku`` reads ``ANTHROPIC_DEFAULT_HAIKU_MODEL``).
+#: Read off the two tables rather than typed: a role whose variables carry no
+#: alias (``subagent``) has none here and resolves to its declared id.
+_CLAUDE_ROLE_ALIASES: Dict[str, str] = {
+    role: alias
+    for role, variables in provider_spec.CLAUDE_MODEL_VARS.items()
+    for alias, var in provider_spec.CLAUDE_ALIAS_VARS.items()
+    if var in variables
+}
+
+
+def _resolve_model_preset(child: dict) -> None:
+    """Turn a model preset (``small``, ``large``...) into the child's model.
+
+    A preset is one of :data:`provider_spec.MODEL_ROLES` and names a slot in
+    the child's profile, not a model: a workflow can ask for "the small
+    model" without knowing which backend the profile it delegates to talks
+    to. How the slot reaches the backend differs by harness:
+
+    * claude: ``default`` is the harness default (no ``--model``: the profile
+      already pins ``ANTHROPIC_MODEL``); ``small``/``large``/``xlarge`` are
+      the aliases Claude Code resolves through the profile's environment
+      (``haiku``/``opus``/``fable``), so a profile that declares no models
+      still gets Claude's own tiers; a role without an alias (``subagent``)
+      is the id the profile declares for it, falling back like the env does.
+    * every other harness (codex): the id the profile declares for the role.
+      Codex never reads ``spec.models`` (translators.codex), so an undeclared
+      slot has no answer, and passing the word through would launch
+      ``-c model=small``. That is refused, naming the profile.
+
+    Any other value is a model name the harness takes as it is.
+    """
+    role = str(child.get("model") or "").strip()
+    if role not in provider_spec.MODEL_ROLES:
+        return
+    claude = child.get("harness") == harnesses.CLAUDE_HARNESS
+    if claude and role == "default":
+        child["model"] = None
+        return
+    if claude and role in _CLAUDE_ROLE_ALIASES:
+        child["model"] = _CLAUDE_ROLE_ALIASES[role]
+        return
+    selector = str(child.get("profile") or "").strip()
+    declared = None
+    if selector:
+        try:
+            declared = providers.spec_for(profile_mod.require_selector(selector)).model(role)
+        except (profile_mod.ProfileError, providers.ProviderError) as exc:
+            raise SpawnDenied(
+                f"model preset {role!r} could not be read from profile "
+                f"{selector!r}: {exc}"
+            ) from None
+    if declared:
+        child["model"] = declared
+        return
+    if claude:
+        # subagent with no declared id: the env's own fallback is small
+        child["model"] = _CLAUDE_ROLE_ALIASES.get(provider_spec.ROLE_FALLBACKS.get(role, ""))
+        return
+    where = f"profile {selector!r}" if selector else "this session's provider"
+    raise SpawnDenied(
+        f"model preset {role!r} has no model in {where} for the "
+        f"{child.get('harness')!r} harness: declare it as models.{role} of the "
+        "profile's provider, or name the model itself"
+    )
+
+
+def _same_profile(child: dict, parent: dict) -> bool:
+    """Whether the child keeps the parent's profile name (harness aside)."""
+    def name(d: dict) -> str:
+        value = str(d.get("profile") or "").strip()
+        return value.split(":", 1)[0] if value else ""
+
+    return name(child) == name(parent)
+
+
+def carry_forked_conversation(child: dict, request: dict, *, parent: dict) -> None:
+    """Copy the parent's conversation into the child's profile for a fork.
+
+    A fork reopens the parent's transcript, and a harness looks for it under
+    the CHILD's config dir: claude in ``projects/<cwd>/<id>.jsonl``, codex in
+    ``<CODEX_HOME>/sessions/**``. With the same profile that is the parent's
+    own file. With another one (claunch-yl0to: a cheaper profile for an easy
+    task) nothing is there, so the copy is put there -- a copy, never a move:
+    the parent's conversation is untouched, as a fork promises.
+
+    Called once nothing can refuse the request any more (beside
+    :func:`make_worktree`), so a refused spawn leaves no file behind and the
+    copy is as fresh as the moment the child launches.
+    """
+    if not request.get("fork"):
+        return
+    parent_sel = str(parent.get("profile") or "").strip()
+    child_sel = str(child.get("profile") or "").strip()
+    if not parent_sel or not child_sel:
+        return
+    try:
+        src_prof = profile_mod.require_selector(parent_sel)
+        dst_prof = profile_mod.require_selector(child_sel)
+    except profile_mod.ProfileError as exc:
+        raise SpawnDenied(f"cannot copy the conversation for the fork: {exc}") from None
+    if src_prof.config_dir == dst_prof.config_dir:
+        return
+    import shutil
+
+    conversation = str(parent.get("conversation_id") or "")
+    if child.get("harness") == "codex":
+        from .daemon import codex_sessions
+
+        entry = harnesses.get("codex")
+        src_home = entry.profile_home(src_prof.config_dir)
+        src = codex_sessions.find(src_home, conversation)
+        if src is None:
+            raise SpawnDenied(f"the parent's Codex conversation {conversation} is not on disk")
+        dst = entry.profile_home(dst_prof.config_dir) / Path(src).relative_to(src_home)
+    else:
+        src = transcripts.find(src_prof.config_dir, conversation)
+        if src is None:
+            raise SpawnDenied(f"the parent's conversation {conversation} is not on disk")
+        dst = transcripts.project_dir(dst_prof.config_dir, str(child.get("cwd") or "")) / Path(src).name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
 
 
 def _file_under_project(
@@ -742,7 +874,10 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
 
         # Codex mints the copy's UUID. The manager snapshots rollouts before
         # launch and pins the new UUID; never pin the source UUID as the copy.
-        if not _on_disk({**child, "conversation_id": conversation}):
+        # A child on another profile finds the rollout there only after
+        # carry_forked_conversation copies it in; the parent's own copy,
+        # checked above, is then the thing that has to exist.
+        if _same_profile(child, parent) and not _on_disk({**child, "conversation_id": conversation}):
             raise SpawnDenied("the parent's Codex conversation is not in the child's profile")
         args = without_restore_subcommand(child["args"], "resume")
         args = without_restore_subcommand(args, "fork")
