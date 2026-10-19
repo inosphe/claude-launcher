@@ -223,7 +223,7 @@ function controlMessage(sock, ev) {
   if (typeof msg.ch === "number") { channelFrame(msg); return; }
   if (msg.type === "pong") { latencyPong(msg); return; }
   if (msg.type === "read_part") { controlPart(sock, msg); return; }
-  if (msg.type === "read_result") { controlAnswer(msg); return; }
+  if (msg.type === "read_result") { controlAnswer(msg, ev.data); return; }
   if (msg.type === "init") { p2pInit(sock, msg); return; }
   if (msg.type === "p2p_answer" || msg.type === "p2p_error") p2pSignal(msg);
 }
@@ -512,7 +512,7 @@ function controlRetiredMessage(sock, ev) {
     let msg = null;
     try { msg = JSON.parse(ev.data); } catch { /* not a read */ }
     if (msg && msg.type === "read_part") controlPart(sock, msg);
-    else if (msg && msg.type === "read_result") controlAnswer(msg);
+    else if (msg && msg.type === "read_result") controlAnswer(msg, ev.data);
   }
   controlRetireCheck(sock);
 }
@@ -549,8 +549,13 @@ function ensureControlSocket() {
 /* Ask for these paths over the socket. Resolves the way a batch does, or
    rejects — on a socket that is down, a frame that will not send, or an
    answer that does not come — and every rejection is a signal to the caller
-   to use HTTP instead. */
-function controlRead(paths) {
+   to use HTTP instead.
+
+   `held` maps a path to the answer this page kept from its last read of it
+   ({hash, text}); its digest goes with the read, and the daemon leaves that
+   answer out when it has not changed (claunch-4thlk.2). Every read says
+   what it holds, so the daemon keeps nothing per page. */
+function controlRead(paths, held, args) {
   if (!controlUp()) return Promise.reject(new Error("control socket down"));
   const id = ++controlSeq;
   const sock = controlSock;
@@ -567,7 +572,13 @@ function controlRead(paths) {
     controlWaiting.set(id, waiter);
     try {
       // `parts`: this page puts a large answer back together (controlPart).
-      sock.send(JSON.stringify({ type: "read", id, paths, parts: true }));
+      const hashes = {};
+      for (const [path, kept] of held || []) hashes[path] = kept.hash;
+      // `spans`: where each answer's text sits in the reply, so it can be
+      // kept as text without encoding the parsed answer again.
+      const frame = { type: "read", id, paths, parts: true, hashes, spans: true };
+      if (args && Object.keys(args).length) frame.args = args;
+      sock.send(JSON.stringify(frame));
     } catch (err) {
       controlWaiting.delete(id);
       clearTimeout(waiter.timer);
@@ -576,16 +587,24 @@ function controlRead(paths) {
   });
 }
 
-/* One answered read, whole: settle whoever is waiting on it. */
-function controlAnswer(msg) {
+/* One answered read, whole: settle whoever is waiting on it. `raw` is the
+   reply as it arrived; with `spans` it yields each answer's own text. */
+function controlAnswer(msg, raw) {
   const waiter = controlWaiting.get(msg.id);
   if (!waiter) return;                 // timed out already, and re-sent
   controlWaiting.delete(msg.id);
   clearTimeout(waiter.timer);
+  const spans = msg.spans && typeof raw === "string" ? msg.spans : null;
   waiter.resolve({
     answers: msg.answers || {},
     errors: msg.errors || {},
     statuses: msg.statuses || {},
+    hashes: msg.hashes || null,
+    unchanged: Array.isArray(msg.unchanged) ? msg.unchanged : [],
+    text: (path) => {
+      const span = spans && spans[path];
+      return Array.isArray(span) ? raw.slice(span[0], span[1]) : null;
+    },
   });
 }
 
@@ -611,16 +630,17 @@ function controlPart(sock, msg) {
   waiter.parts.push(typeof msg.data === "string" ? msg.data : "");
   waiter.arm();
   if (msg.more) return;
+  const raw = waiter.parts.join("");
   let whole;
   try {
-    whole = JSON.parse(waiter.parts.join(""));
+    whole = JSON.parse(raw);
   } catch (err) {
     controlWaiting.delete(msg.id);
     clearTimeout(waiter.timer);
     waiter.reject(err);
     return;
   }
-  controlAnswer(whole);
+  controlAnswer(whole, raw);
 }
 
 /* Say something the daemon should write down, with no answer expected.
@@ -1167,15 +1187,66 @@ let batchPending = null;       // path -> [{resolve, reject}], while one is open
    reports one (`statuses`), because callers branch on it: the briefing card
    tells 400 "not configured" and 404 "no record" from a 502 failure. 502 is
    what is left when the read failed without a route status (claunch-authx). */
-function batchResponse(payload, ok, status) {
-  const body = JSON.stringify(payload === undefined ? null : payload);
+/* The answer is handed over as the object the reply was parsed into,
+   rather than encoded to text and parsed again (claunch-4thlk.4: the two
+   were 31ms and 32ms of one dashboard trace). That object belongs to the
+   one caller: a caller may change what it was given, so a second reader of
+   the same answer gets its own copy, parsed from `text` -- the answer's
+   text as it arrived, or encoded once from the object before it is given
+   away (see batchResponses). Like a fetch Response, read it once. */
+function batchResponse(payload, ok, status, text) {
+  const value = payload === undefined ? null : payload;
+  let body = typeof text === "string" ? text : null;
+  let given = false;
+  const encoded = () => (body === null ? (body = JSON.stringify(value)) : body);
   return {
     ok,
     status: ok ? 200 : (Number.isInteger(status) && status >= 400 ? status : 502),
     batched: true,
-    json: async () => JSON.parse(body),
-    text: async () => body,
+    json: async () => {
+      if (!given) { given = true; return value; }
+      return JSON.parse(encoded());
+    },
+    text: async () => encoded(),
   };
+}
+
+/* One answer for `count` callers: the first gets the parsed object, the
+   rest a copy parsed from the text -- encoded here, before the object is
+   given away, when the reply did not carry it. */
+function batchResponses(payload, count, text) {
+  if (count <= 1) return [batchResponse(payload, true, undefined, text)];
+  const body = typeof text === "string"
+    ? text : JSON.stringify(payload === undefined ? null : payload);
+  const out = [batchResponse(payload, true, undefined, body)];
+  while (out.length < count) out.push(batchKeptResponse(body));
+  return out;
+}
+
+/* An answer this page kept as text: a fresh object on every read of it. */
+function batchKeptResponse(text) {
+  return {
+    ok: true,
+    status: 200,
+    batched: true,
+    json: async () => JSON.parse(text),
+    text: async () => text,
+  };
+}
+
+/* The answers kept for the next conditional read (claunch-4thlk.2): path ->
+   {hash, text}. Text rather than the object, because the object went to a
+   caller that may have changed it. Bounded, oldest first out, so paths that
+   are read once (one session's detail, one run) do not pile up. */
+const BATCH_KEPT_MAX = 64;
+const batchKept = new Map();
+
+function batchKeep(path, hash, text) {
+  batchKept.delete(path);
+  batchKept.set(path, { hash, text });
+  while (batchKept.size > BATCH_KEPT_MAX) {
+    batchKept.delete(batchKept.keys().next().value);
+  }
 }
 
 function batchable(path, opts) {
@@ -1194,6 +1265,10 @@ function batchQueue(path, opts) {
   if (first) batchPending = new Map();
   const waiting = batchPending.get(path) || [];
   const promise = new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+  // `readArgs`: what the socket read carries beside this path (the sessions
+  // rail's row digests). The last caller's wins; HTTP does not carry it, and
+  // the route answers in full without it.
+  if (opts.readArgs) waiting.args = opts.readArgs;
   batchPending.set(path, waiting);
   // Flushed a turn later, which is what gathers the callers that fired
   // together: every refresh in one tick has queued by then.
@@ -1211,6 +1286,12 @@ async function batchFlush() {
       if (error) waiter.reject(error);
       else waiter.resolve(response);
     }
+  };
+  // A good answer goes to each waiter as its own response (batchResponses).
+  const settleAnswer = (path, payload, text) => {
+    const waiting = pending.get(path) || [];
+    const responses = batchResponses(payload, waiting.length, text);
+    waiting.forEach((waiter, i) => waiter.resolve(responses[i]));
   };
   // A set larger than the endpoint takes goes out the ordinary way rather
   // than being refused for being too many. A lone read does NOT: it costs
@@ -1238,8 +1319,21 @@ async function batchFlush() {
   // rejection, so the paths go out over HTTP; read per path, it showed as
   // "not answered" on every one of them (claunch-yty47).
   let refused = null;
+  // What this page holds for these paths, taken now: an answer the daemon
+  // calls unchanged is this one, whatever happens to the keep meanwhile.
+  const held = new Map();
+  for (const path of paths) {
+    const kept = batchKept.get(path);
+    if (kept) held.set(path, kept);
+  }
+  const args = {};
+  for (const path of paths) {
+    const waiting = pending.get(path);
+    if (waiting && waiting.args) args[path] = waiting.args;
+  }
+  let carried = null;
   try {
-    const carried = await controlRead(paths);
+    carried = await controlRead(paths, held, args);
     answers = carried.answers;
     errors = carried.errors;
     statuses = carried.statuses || {};
@@ -1255,9 +1349,21 @@ async function batchFlush() {
     answers = null;
   }
   if (answers !== null) {
+    const unchanged = new Set((carried && carried.unchanged) || []);
+    const hashes = (carried && carried.hashes) || {};
     for (const path of paths) {
-      if (Object.prototype.hasOwnProperty.call(answers, path)) {
-        settle(path, batchResponse(answers[path], true));
+      if (unchanged.has(path) && held.has(path)) {
+        const text = held.get(path).text;
+        batchKeep(path, held.get(path).hash, text);
+        for (const waiter of pending.get(path) || []) {
+          waiter.resolve(batchKeptResponse(text));
+        }
+      } else if (Object.prototype.hasOwnProperty.call(answers, path)) {
+        const text = carried && carried.text ? carried.text(path) : null;
+        if (typeof hashes[path] === "string" && typeof text === "string") {
+          batchKeep(path, hashes[path], text);
+        }
+        settleAnswer(path, answers[path], text);
       } else {
         settle(path, batchResponse(
           { error: errors[path] || errors[""] || "not answered" }, false, statuses[path]
@@ -1299,7 +1405,7 @@ async function batchFlush() {
   }
   for (const path of paths) {
     if (Object.prototype.hasOwnProperty.call(answers, path)) {
-      settle(path, batchResponse(answers[path], true));
+      settleAnswer(path, answers[path]);
     } else {
       settle(path, batchResponse(
         { error: errors[path] || errors[""] || refused || "not answered" }, false,
@@ -4565,6 +4671,55 @@ if (typeof document !== "undefined" && document.addEventListener) {
 
 /* ---- end rail keyboard focus ---------------------------------------- */
 
+/* The rail rows this page holds, per poll state, as the daemon sent them:
+   name -> {hash, text} (claunch-4thlk.3). The poll sends the digests and
+   gets back only the rows that changed, plus every name in order. Text, not
+   the row object: the object goes into sessionsCache, where the page writes
+   its optimistic overrides, and a row the daemon calls unchanged has to be
+   the row as the daemon sent it. */
+const sessionRowsKept = new Map();
+
+function sessionRowDigests(state) {
+  const kept = sessionRowsKept.get(state);
+  const out = {};
+  if (kept) for (const [name, row] of kept) out[name] = row.hash;
+  return out;
+}
+
+/* The poll's rows, whole, from an answer that may carry only the changed
+   ones. null when the answer names a row this page does not hold -- the
+   keep is dropped, so the next poll sends no digests and gets every row. */
+function sessionRowsTake(state, data) {
+  const rows = data.sessions || [];
+  if (!data.delta || !Array.isArray(data.names)) {
+    // A whole answer without digests: HTTP, or an older daemon.
+    sessionRowsKept.delete(state);
+    return rows;
+  }
+  const kept = sessionRowsKept.get(state) || new Map();
+  const changed = new Map(rows.map((row) => [row.name, row]));
+  const digests = data.row_hashes || {};
+  const fresh = new Map();
+  const out = [];
+  for (const name of data.names) {
+    const row = changed.get(name);
+    if (row) {
+      fresh.set(name, { hash: digests[name], text: JSON.stringify(row) });
+      out.push(row);
+      continue;
+    }
+    const held = kept.get(name);
+    if (!held) {
+      sessionRowsKept.delete(state);
+      return null;
+    }
+    fresh.set(name, held);
+    out.push(JSON.parse(held.text));
+  }
+  sessionRowsKept.set(state, fresh);
+  return out;
+}
+
 async function refreshSessions(options) {
   // The recurring poll asks for every unarchived record, not the running
   // ones alone. The rail's "current" view is running plus killed plus paused,
@@ -4586,12 +4741,16 @@ async function refreshSessions(options) {
   const cached = !!(options && options.cached);
   if (!cached) {
     let data;
+    // The row digests ride beside the read (claunch-4thlk.3); reduced
+    // harnesses that run this poll alone have no keep and read whole.
+    const rowKeep = typeof sessionRowsTake === "function";
     try {
       // Every project, always: the rail narrows what it draws itself
       // (railSessions), so a project pick redraws without a round trip and
       // a session of another project open in a tab keeps a real record.
       const resp = await api(
-        `/api/sessions?view=rail&state=${encodeURIComponent(state)}`);
+        `/api/sessions?view=rail&state=${encodeURIComponent(state)}`,
+        rowKeep ? { readArgs: { rows: sessionRowDigests(state) } } : undefined);
       // An error response carries a JSON body of its own, so `resp.json()`
       // succeeds and `data.sessions` is simply absent -- which used to read as
       // "this daemon has no sessions" and empty the rail, drop every parked
@@ -4602,7 +4761,8 @@ async function refreshSessions(options) {
     } catch {
       return;
     }
-    const incoming = data.sessions || [];
+    const incoming = rowKeep ? sessionRowsTake(state, data) : (data.sessions || []);
+    if (!incoming) return;
     const incomingNames = new Set(incoming.map((s) => s.name));
     // A request answers for one category of records. Keep every cached record
     // outside that category (the archived ones an operator explicitly opened,

@@ -188,7 +188,14 @@ class JSONText(str):
     """
 
 
-def _with_answers(head: dict, answers: dict) -> str:
+def _utf16_len(text: str) -> int:
+    """``text``'s length as JavaScript counts it (UTF-16 code units)."""
+    if text.isascii():
+        return len(text)
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _with_answers(head: dict, answers: dict, *, spans: bool = False) -> str:
     """``head`` as JSON text with an ``answers`` member spliced in last.
 
     The reply of a batch and of a control-socket read: everything but the
@@ -196,15 +203,30 @@ def _with_answers(head: dict, answers: dict) -> str:
     route's own text, anything else (a read with no body, a test's stub) is
     encoded. Joined once, so each answer is copied once: a rail is a
     megabyte, and every intermediate string would be another.
+
+    ``spans`` adds a ``spans`` member after the answers: path -> [start, end)
+    of that answer's text within this reply, in UTF-16 code units, which is
+    how the page's ``String.slice`` counts. The page parses the reply once
+    and still has each answer's own text to keep, without encoding the
+    parsed answer back to text (claunch-4thlk.4) -- which is what it keeps
+    for the next conditional read (claunch-4thlk.2).
     """
     text = _dumps(head)
     parts = [text[:-1], ", " if head else "", '"answers": {']
+    at = sum(_utf16_len(p) for p in parts)
+    where: dict = {}
     for i, (key, value) in enumerate(answers.items()):
-        if i:
-            parts.append(", ")
-        parts += [_dumps(key), ": ",
-                  value if isinstance(value, JSONText) else _dumps(value)]
-    parts.append("}}")
+        lead = (", " if i else "") + _dumps(key) + ": "
+        body = value if isinstance(value, JSONText) else _dumps(value)
+        parts += [lead, body]
+        at += _utf16_len(lead)
+        end = at + _utf16_len(body)
+        where[key] = [at, end]
+        at = end
+    if spans:
+        parts.append('}, "spans": ' + _dumps(where) + "}")
+    else:
+        parts.append("}}")
     return "".join(parts)
 
 
@@ -1444,7 +1466,7 @@ def _refusal_message(response) -> str:
     return f"HTTP {status}"
 
 
-async def _batch_one(template: web.Request, path: str):
+async def _batch_one(template: web.Request, path: str, args: Optional[dict] = None):
     """Run one of this app's own GET routes and hand back its JSON.
 
     The route is resolved through the same router that serves it normally,
@@ -1456,8 +1478,15 @@ async def _batch_one(template: web.Request, path: str):
     (claunch-xrrn0). That trusts the route's ``application/json`` to be
     JSON, which holds for :func:`json_response` and aiohttp's own, the two
     ways a route here writes one. Any other body is parsed, as before.
+
+    ``args`` is what a control read sent for this path beside it
+    (``read_args``, see :func:`h_control_ws`); a route reads it with
+    ``request.get("read_args")``. A direct GET never has it, so a route must
+    answer in full without it.
     """
     sub = template.clone(rel_url=path)
+    if isinstance(args, dict):
+        sub["read_args"] = args
     match = await template.app.router.resolve(sub)
     handler = getattr(match, "handler", None)
     if handler is None or getattr(match, "http_exception", None) is not None:
@@ -1524,6 +1553,13 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     - A read carrying ``"parts": true`` may be answered in ``read_part``
       frames; the page acknowledges each with ``{"type":"read_ack","id":N,
       "seq":K}`` -> not answered. See :class:`channel.Carrier`.
+    - A read carrying ``"hashes": {path: digest}`` is answered conditionally:
+      the reply has ``hashes`` for every answer and lists in ``unchanged``
+      the paths whose digest the page already holds, leaving their answers
+      out (see :func:`_read_hashes`). ``"spans": true`` adds where each
+      answer's text sits in the reply (see :func:`_with_answers`).
+      ``"args": {path: {...}}`` hands a route arguments that do not belong in
+      its path (see :func:`_batch_one`): the sessions rail's row digests.
 
     The socket being open is itself the liveness answer, which is what
     retires the probe the page used to spend a connection on.
@@ -1550,26 +1586,37 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
         await carrier.send_soon(json.dumps(frame))
 
     async def answer_read(frame: dict) -> None:
+        known = frame.get("hashes")
         try:
             answers, errors, statuses = await _control_read(
-                template, frame.get("paths")
+                template, frame.get("paths"), frame.get("args")
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- one read, not the socket
             log.debug("control read failed", exc_info=True)
             answers, errors, statuses = {}, {"": repr(exc)}, {}
+        head = {
+            "type": "read_result",
+            "id": frame.get("id"),
+            "errors": errors,
+            "statuses": statuses,
+        }
+        if isinstance(known, dict):
+            hashes, unchanged = _read_hashes(answers, known)
+            head["hashes"] = hashes
+            head["unchanged"] = unchanged
+            for path in unchanged:
+                del answers[path]
         # The bulk lane: a pong or a terminal's output queued after this goes
         # ahead of it, and a page that takes parts gets it in parts
         # (claunch-iss86, see channel.Carrier).
         # Encoded around the routes' own text, not parsed and re-encoded
         # (claunch-xrrn0): this runs on the loop every terminal waits on.
-        await carrier.send_bulk(_with_answers({
-            "type": "read_result",
-            "id": frame.get("id"),
-            "errors": errors,
-            "statuses": statuses,
-        }, answers), parts=frame.get("parts") is True, key=frame.get("id"))
+        await carrier.send_bulk(
+            _with_answers(head, answers, spans=frame.get("spans") is True),
+            parts=frame.get("parts") is True, key=frame.get("id"),
+        )
 
     try:
         init = {"type": "init"}
@@ -1703,7 +1750,39 @@ def _control_pong_text(request: web.Request, frame: dict, received: float) -> st
     return json.dumps(pong)
 
 
-async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]:
+def _answer_hash(value) -> str:
+    """A short digest of one answer as it goes on the wire."""
+    text = value if isinstance(value, JSONText) else _dumps(value)
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _read_hashes(answers: dict, known: dict) -> tuple[dict, list]:
+    """Each answer's digest, and the paths whose digest the page already holds.
+
+    A read frame that carries ``hashes`` (path -> the digest of the answer the
+    page kept from its last read of that path) is answered conditionally:
+    a path whose answer has the same digest is listed in ``unchanged`` and
+    left out of ``answers``, and the page reuses what it kept
+    (claunch-4thlk.2). The answer is still built -- what this saves is the
+    wire and the page's parse, which for a dashboard that changes nothing
+    between two polls was the whole of both. Nothing is kept here: the page
+    says what it holds on every read, so a reconnect, a second tab or a page
+    that dropped its copy simply sends no digest for that path and gets the
+    answer. A frame without ``hashes`` (an older page) is answered as before.
+    """
+    hashes: dict = {}
+    unchanged: list = []
+    for path, value in answers.items():
+        digest = _answer_hash(value)
+        hashes[path] = digest
+        if known.get(path) == digest:
+            unchanged.append(path)
+    return hashes, unchanged
+
+
+async def _control_read(
+    template: web.Request, paths, args=None,
+) -> tuple[dict, dict, dict]:
     """The read half of :func:`h_control_ws`, with the same rules as a batch.
 
     Kept beside the socket rather than shared with :func:`h_batch` at the
@@ -1722,8 +1801,12 @@ async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]
         if not isinstance(raw, str) or not raw.startswith("/api/"):
             errors[str(raw)] = "only this daemon's /api/ paths"
             continue
+        extra = args.get(raw) if isinstance(args, dict) else None
         try:
-            answers[raw] = await _batch_one(template, raw)
+            answers[raw] = await (
+                _batch_one(template, raw, extra) if isinstance(extra, dict)
+                else _batch_one(template, raw)
+            )
         except _ReadRefused as exc:
             errors[raw] = exc.message
             statuses[raw] = exc.status
@@ -8424,8 +8507,40 @@ async def h_peer_ops_lease(request: web.Request) -> web.Response:
     return json_response(result)
 
 
-@shared_reads.shared("sessions")
 async def h_sessions_list(request: web.Request) -> web.Response:
+    """The session list; for a rail read that sends its row digests, only
+    the rows that changed (claunch-4thlk.3, :func:`_rail_rows_delta`).
+
+    The list itself is a shared read, one answer for every page; the digests
+    are this page's own, so the cut is made here, after it, from the per-row
+    texts the shared answer carries beside its body (``rail_rows``).
+    """
+    response = await _sessions_list(request)
+    known = (request.get("read_args") or {}).get("rows")
+    rows = response.get("rail_rows") if isinstance(known, dict) else None
+    if rows is None:
+        return response
+    changed, digests = [], {}
+    for name, digest, text in zip(rows["names"], rows["digests"], rows["texts"]):
+        if known.get(name) != digest:
+            changed.append(text)
+            digests[name] = digest
+    head = {**rows["head"], "names": rows["names"], "row_hashes": digests,
+            "delta": True}
+    return json_text_response(_with_member(head, "sessions", "[" + ", ".join(changed) + "]"))
+
+
+h_sessions_list.shared_read = "sessions"
+
+
+def _with_member(head: dict, key: str, text: str) -> str:
+    """``head`` as JSON text with ``key`` spliced in last as ``text``."""
+    encoded = _dumps(head)
+    return encoded[:-1] + (", " if head else "") + _dumps(key) + ": " + text + "}"
+
+
+@shared_reads.shared("sessions")
+async def _sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     rail_view = request.query.get("view") == "rail"
     list_state = request.query.get("state") or "all"
@@ -8717,12 +8832,40 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             tps = row.get("tps")
             if isinstance(tps, dict) and "age_s" in tps:
                 row["tps"] = {k: v for k, v in tps.items() if k != "age_s"}
-    body = {
-        "sessions": attached, "llm_configured": llm_ok, "rag_configured": rag_ok,
-    }
+    body = {"llm_configured": llm_ok, "rag_configured": rag_ok}
     if queue_status:
         body["restore_queue"] = queue_status
-    return json_response(body)
+    if not rail_view:
+        return json_response({"sessions": attached, **body})
+    # Each rail row encoded on its own and joined, so the same texts serve a
+    # page that asks for only the rows it does not hold (h_sessions_list).
+    # Kept on the response for that cut; a shared read keeps them with the
+    # stored answer (shared_reads._Stored.extra).
+    texts = [_dumps(row) for row in attached]
+    response = json_text_response(
+        _with_member(body, "sessions", "[" + ", ".join(texts) + "]"))
+    response["rail_rows"] = {
+        "head": body,
+        "names": [row.get("name") for row in attached],
+        "digests": [_row_digest(text) for text in texts],
+        "texts": texts,
+    }
+    return response
+
+
+def _row_digest(text: str) -> str:
+    """The digest a page keeps for one rail row (claunch-4thlk.3).
+
+    The page sends ``{name: digest}`` for the rows it kept from its last
+    read, beside the read (``read_args.rows``), and gets back only the rows
+    whose digest differs (new ones included), every row's name in order --
+    a name missing from it is a row gone -- and the digests of the rows it
+    got, to keep for the next read. Nothing is kept here: a page that sends
+    no digests (its first read, a reconnect, an error) gets every row, and a
+    read with no ``rows`` at all (HTTP, an older page) gets the answer it
+    always had.
+    """
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:

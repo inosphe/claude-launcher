@@ -139,6 +139,11 @@ class _Stored:
     headers: Tuple[Tuple[str, str], ...]
     body: bytes
     compress: bool
+    #: What the route put on its response object beside the body (a
+    #: StreamResponse is a mapping), handed to every reader with the bytes:
+    #: the session rail's per-row texts, which a reader cuts its own answer
+    #: from (api.h_sessions_list). Read-only by the readers.
+    extra: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -272,6 +277,7 @@ def _capture(response, generation: int, done_at: float) -> _Stored:
         generation=generation, done_at=done_at,
         status=getattr(response, "status", 200), headers=headers, body=bytes(body),
         compress=bool(getattr(response, "compression", False)),
+        extra=dict(response) if hasattr(response, "keys") else {},
     )
 
 
@@ -281,6 +287,7 @@ def _rebuild(stored: _Stored) -> web.Response:
     resp = web.Response(body=stored.body, status=stored.status, headers=list(stored.headers))
     if stored.compress:
         resp.enable_compression()
+    resp.update(stored.extra)
     return resp
 
 

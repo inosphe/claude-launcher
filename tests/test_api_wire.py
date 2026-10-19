@@ -192,3 +192,68 @@ def test_the_rail_polls_carry_no_number_that_moves_by_itself(home, tmp_path, mon
             await client.close()
 
     asyncio.run(run())
+
+
+def test_the_sessions_rail_sends_only_the_rows_a_page_does_not_hold(home, tmp_path):
+    """The row delta (claunch-4thlk.3), through the control socket that
+    carries it, with shared reads on -- the list is one answer for every
+    page, and the cut from it is each page's own.
+
+    A read that sends ``rows: {}`` gets every row with its digest; sent
+    again with those digests it gets no rows, every name, ``delta``; a row
+    that changed comes back alone; a page holding other digests (a second
+    tab) gets its own cut; and HTTP, which carries no digests, gets the list
+    it always had."""
+
+    _register_py_harness()
+    path = "/api/sessions?view=rail&state=current"
+
+    async def read(ws, rid, rows):
+        await ws.send_json({"type": "read", "id": rid, "paths": [path],
+                            "args": {path: {"rows": rows}}})
+        while True:
+            data = json.loads((await asyncio.wait_for(ws.receive(), 10)).data)
+            if data.get("type") == "read_result" and data.get("id") == rid:
+                return data["answers"][path]
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm,
+                        shared_read_max_age=60.0)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            for name in ("a1", "a2"):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+            async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                await ws.receive()  # init
+                first = await read(ws, 1, {})
+                assert first["delta"] is True
+                assert sorted(first["names"]) == ["a1", "a2"]
+                assert sorted(r["name"] for r in first["sessions"]) == ["a1", "a2"]
+                held = first["row_hashes"]
+                assert sorted(held) == ["a1", "a2"]
+
+                second = await read(ws, 2, held)
+                assert second["sessions"] == [] and second["row_hashes"] == {}
+                assert second["names"] == first["names"]
+
+                # Another page holding a stale digest for a1 gets a1, from the
+                # same shared answer.
+                other = await read(ws, 3, {**held, "a1": "0" * 16})
+                assert [r["name"] for r in other["sessions"]] == ["a1"]
+                assert other["row_hashes"] == {"a1": held["a1"]}
+
+            # HTTP carries no digests: the whole list, no delta.
+            whole = await (await client.get(path, headers=BEARER)).json()
+            assert "delta" not in whole
+            assert sorted(r["name"] for r in whole["sessions"]) == ["a1", "a2"]
+            assert whole["sessions"] == first["sessions"]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())

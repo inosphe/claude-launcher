@@ -385,6 +385,11 @@ async function flushPrefersSocketThenFallsBack() {
       slice("api"),
       slice("budgeted"),
       slice("batchResponse"),
+      slice("batchResponses"),
+      slice("batchKeptResponse"),
+      slice("batchKeep"),
+      "const BATCH_KEPT_MAX = 64;",
+      "const batchKept = new Map();",
       slice("batchable"),
       slice("batchQueue"),
       slice("batchFlush"),
@@ -490,6 +495,54 @@ async function flushPrefersSocketThenFallsBack() {
   const kept = await mixed.api("/api/sessions");
   assert.deepStrictEqual(await kept.json(), { ok: 1 });
   assert.strictEqual(mixed.calls.length, 0);
+
+  // A conditional read (claunch-4thlk.2). The page sends the digest of what
+  // it kept for each path; the daemon leaves out an answer whose digest
+  // matches and names it in `unchanged`; the page answers from its keep.
+  let version = 1;
+  const heldSeen = [];
+  const conditional = buildFlush(async (paths, held) => {
+    heldSeen.push(new Map(held));
+    const hash = `h${version}`;
+    const out = { answers: {}, errors: {}, hashes: {}, unchanged: [],
+                  text: (p) => JSON.stringify({ path: p, version }) };
+    for (const p of paths) {
+      out.hashes[p] = hash;
+      if (held.has(p) && held.get(p).hash === hash) out.unchanged.push(p);
+      else out.answers[p] = { path: p, version };
+    }
+    return out;
+  });
+  const first = await conditional.api("/api/cflow?view=rail");
+  const firstBody = await first.json();
+  assert.deepStrictEqual(firstBody, { path: "/api/cflow?view=rail", version: 1 });
+  assert.strictEqual(heldSeen[0].size, 0, "nothing held before the first read");
+  // The caller changes what it was given (the page does: optimistic
+  // overrides on the cached rows). The keep is text, so that cannot leak.
+  firstBody.version = "mutated";
+  const second = await conditional.api("/api/cflow?view=rail");
+  assert.strictEqual(heldSeen[1].get("/api/cflow?view=rail").hash, "h1",
+                     "the next read carries the kept digest");
+  assert.deepStrictEqual(await second.json(), { path: "/api/cflow?view=rail", version: 1 },
+                         "an unchanged answer is the kept one, untouched by the caller");
+  version = 2;
+  const third = await conditional.api("/api/cflow?view=rail");
+  assert.deepStrictEqual(await third.json(), { path: "/api/cflow?view=rail", version: 2 },
+                         "a changed answer comes through whole");
+  assert.strictEqual(conditional.calls.length, 0, "all of it on the socket");
+
+  // Two callers of one path in one tick each get their own object: the
+  // first the parsed answer, the second a copy (claunch-4thlk.4).
+  const shared = buildFlush(async (paths) => ({
+    answers: { [paths[0]]: { rows: [1] } }, errors: {},
+  }));
+  const [a, b] = await Promise.all([
+    shared.api("/api/sessions"), shared.api("/api/sessions"),
+  ]);
+  const aBody = await a.json();
+  aBody.rows.push(2);
+  assert.deepStrictEqual(await b.json(), { rows: [1] },
+                         "a change by one caller does not reach the other");
 }
 
 /* ---- 9. a large answer in parts (claunch-iss86) ------------------------ */
@@ -522,6 +575,24 @@ async function readsInParts() {
   const got = await reading;
   assert.deepStrictEqual(got.answers, { "/api/sessions": { rows: ["a", "b"] } });
   assert.strictEqual(app.waiting(), 0);
+
+  // The read asks for spans and says what it holds (nothing, here); with
+  // spans in the reply each answer's own text is cut out of it, not
+  // re-encoded (claunch-4thlk.4).
+  assert.deepStrictEqual(sock.sent[0].hashes, {});
+  assert.strictEqual(sock.sent[0].spans, true);
+  assert.strictEqual(got.text("/api/sessions"), null, "no spans, no text");
+  const spanned = app.controlRead(["/api/cflow"]);
+  const sid = sock.sent.at(-1).id;
+  const head = `{"type": "read_result", "id": ${sid}, "errors": {}, "statuses": {}, ` +
+    `"hashes": {"/api/cflow": "ab"}, "unchanged": [], "answers": {"/api/cflow": `;
+  const body = '{"k": "한글 😀", "n": [1, 2]}';
+  const reply = head + body + `}, "spans": {"/api/cflow": [${head.length}, ` +
+    `${head.length + body.length}]}}`;
+  sock.say({ type: "read_part", id: sid, seq: 0, more: false, data: reply });
+  const sgot = await spanned;
+  assert.strictEqual(sgot.text("/api/cflow"), body);
+  assert.deepStrictEqual(sgot.hashes, { "/api/cflow": "ab" });
 
   // Parts for a read already given up on are still acknowledged.
   sock.say({ type: "read_part", id: 999, seq: 0, more: true, data: "{" });
