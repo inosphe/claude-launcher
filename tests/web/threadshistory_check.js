@@ -2,7 +2,9 @@
    for a page and its filters, what it draws for each thread, and the pager;
    and its view modes (claunch-zny1o): tree (sessions > threads list panel and
    the picked thread), newest (the thread list and only the newest thread),
-   feed (the cards). */
+   feed (the cards). And the composer under the thread shown in tree and
+   newest (claunch-1qj0b): text and images posted the way the session's
+   threads pane posts them. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -18,6 +20,7 @@ class Node {
     this._text = '';
     this.value = '';
     this.disabled = false;
+    this.classList = { add() {}, remove() {} };
   }
   append(...nodes) { this.children.push(...nodes); }
   appendChild(n) { this.children.push(n); return n; }
@@ -40,10 +43,13 @@ const calls = [];
 let reply = null;
 const ctx = vm.createContext({
   document: { createElement: tag => new Node(tag), getElementById: id => id === 'threads-view' ? view : null },
-  Option, URLSearchParams, Date, Math, Number, String,
+  Option, URLSearchParams, Date, Math, Number, String, JSON, Object, Array,
   api: async url => { calls.push(url); return { ok: true, status: 200, json: async () => reply(url) }; },
 });
 ctx.globalThis = ctx;
+// The dashboard loads threads-pane.js first; the page borrows its helpers.
+vm.runInContext(fs.readFileSync(
+  path.join(__dirname, '../../src/claude_launcher/web/static/threads-pane.js'), 'utf8'), ctx);
 vm.runInContext(fs.readFileSync(
   path.join(__dirname, '../../src/claude_launcher/web/static/threads-history.js'), 'utf8'), ctx);
 const page = ctx.ThreadsHistoryPage;
@@ -248,6 +254,7 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   assert.deepStrictEqual(calls, ['/api/threads/history?page=1']);
   assert.strictEqual(view.byClass('thh-split').length, 0);
   assert.deepStrictEqual(view.byClass('thh-thread').map(c => c.dataset.thread), ['th-a']);
+  assert.strictEqual(view.byClass('thh-compose').length, 0);   // feed stays read-only
 
   // Images the user attached stay on the record (claunch-shl2r): an images-only
   // message draws its pictures, each linked to the full one, and no empty body.
@@ -262,6 +269,105 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   assert.strictEqual(links.length, 1);
   assert.strictEqual(links[0].href, 'api/threads/th-p/images/ab.png');
   assert.strictEqual(links[0].children[0].src, links[0].href);
+
+  // ---- the composer (claunch-1qj0b) ----
+  const posts = [];
+  let postReply = () => ({ status: 200, data: { delivered: true } });
+  let staged = 0;
+  ctx.api = async (url, opts = {}) => {
+    calls.push(url);
+    if (opts.method === 'POST') {
+      posts.push({ url, type: opts.headers['Content-Type'], body: opts.body });
+      if (url === '/api/threads/images') return { ok: true, status: 200, json: async () => ({ id: `img-${++staged}` }) };
+      const r = postReply();
+      return { ok: r.status < 400, status: r.status, json: async () => r.data };
+    }
+    const m = url.match(/^\/api\/threads\/(th-[^?]+)$/);
+    const data = url.startsWith('/api/threads/index') ? indexFor(url) : m ? conversation(m[1]) : { error: 'unexpected ' + url };
+    return { ok: !data.error, status: data.error ? 404 : 200, json: async () => data };
+  };
+  page.open('tree', 'th-1');
+  await settle();
+  const composer = () => view.byClass('thh-compose')[0];
+  const textArea = () => composer().byClass('th-text')[0];
+  const sendBtn = () => composer().byClass('th-send')[0];
+  assert.strictEqual(composer().dataset.thread, 'th-1');
+  assert.strictEqual(textArea().placeholder, 's1에게 보내기');
+
+  // Enter sends the text; the composer empties and the thread is read again.
+  textArea().value = '  hello there ';
+  textArea().listeners.input();
+  let prevented = false;
+  calls.length = 0;
+  textArea().listeners.keydown({ key: 'Enter', shiftKey: false, preventDefault: () => { prevented = true; } });
+  assert.ok(prevented);
+  assert.ok(sendBtn().disabled && sendBtn().textContent === '전송 중…');
+  await settle();
+  assert.deepStrictEqual(posts.map(p => [p.url, p.type]), [['/api/threads/th-1/messages', 'application/json']]);
+  assert.deepStrictEqual(JSON.parse(posts[0].body), { text: 'hello there' });
+  assert.deepStrictEqual(calls, ['/api/threads/th-1/messages', '/api/threads/th-1']);
+  assert.strictEqual(textArea().value, '');
+  assert.ok(!sendBtn().disabled);
+  // Shift+Enter is a new line: nothing is sent.
+  textArea().listeners.keydown({ key: 'Enter', shiftKey: true, preventDefault: () => assert.fail('sent') });
+  // An empty composer sends nothing.
+  posts.length = 0;
+  sendBtn().listeners.click();
+  await settle();
+  assert.strictEqual(posts.length, 0);
+
+  // A pasted screenshot waits under the box; a picked non-image is left out.
+  const png = { name: 'shot.png', type: 'image/png' };
+  let pasted = false;
+  textArea().listeners.paste({ clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => png }] },
+    preventDefault: () => { pasted = true; } });
+  assert.ok(pasted);
+  assert.strictEqual(composer().byClass('th-attach-item').length, 1);
+  const input = composer().all(c => c.tagName === 'INPUT')[0];
+  input.files = [{ name: 'notes.txt', type: 'text/plain' }, { name: 'b.webp', type: '' }];
+  input.listeners.change();
+  assert.strictEqual(composer().byClass('th-attach-item').length, 2);
+  assert.ok(view.byClass('thh-notice')[0].textContent.includes('이미지가 아닌 파일 1개'));
+  // × takes one back out.
+  composer().byClass('th-attach-drop')[1].listeners.click();
+  assert.strictEqual(composer().byClass('th-attach-item').length, 1);
+
+  // A failed post keeps the text and the image for a retry and says why.
+  textArea().value = 'see this';
+  textArea().listeners.input();
+  postReply = () => ({ status: 409, data: { error: 'thread is an operator thread' } });
+  sendBtn().listeners.click();
+  await settle();
+  assert.deepStrictEqual(posts.map(p => [p.url, p.type]),
+    [['/api/threads/images', 'image/png'], ['/api/threads/th-1/messages', 'application/json']]);
+  assert.strictEqual(posts[0].body, png);
+  assert.deepStrictEqual(JSON.parse(posts[1].body), { text: 'see this', images: ['img-1'] });
+  assert.strictEqual(textArea().value, 'see this');
+  assert.strictEqual(composer().byClass('th-attach-item').length, 1);
+  assert.ok(view.byClass('thh-notice')[0].textContent.includes('operator thread'));
+
+  // The retry goes through; a held delivery is said with the thread's session.
+  posts.length = 0;
+  postReply = () => ({ status: 200, data: { delivered: true, hold: 'draft' } });
+  sendBtn().listeners.click();
+  await settle();
+  assert.deepStrictEqual(JSON.parse(posts[1].body), { text: 'see this', images: ['img-2'] });
+  assert.strictEqual(textArea().value, '');
+  assert.strictEqual(composer().byClass('th-attach-item').length, 0);
+  assert.ok(view.byClass('thh-notice')[0].textContent.includes('s1 터미널 입력창'));
+
+  // An images-only message is a message; the notice belongs to its thread.
+  posts.length = 0;
+  postReply = () => ({ status: 200, data: { delivered: true } });
+  composer().listeners.drop({ dataTransfer: { items: [], files: [png] }, preventDefault() {} });
+  sendBtn().listeners.click();
+  await settle();
+  assert.deepStrictEqual(JSON.parse(posts[1].body), { text: '', images: ['img-3'] });
+  // newest shows the composer too, for the newest thread.
+  page.open('newest');
+  await settle();
+  assert.strictEqual(composer().dataset.thread, 'th-4');
+  assert.strictEqual(textArea().placeholder, 's1에게 보내기');
 
   // An unknown mode falls back to tree.
   page.open('nope');

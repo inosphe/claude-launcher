@@ -7906,6 +7906,11 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-attach-drop:hover { background: #da3633; border-color: #da3633; }
 .th-pick { padding: 2px 8px; }
 .th-compose.dragover, .th-newform.dragover { border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950; }
+/* The same composer under the thread shown on the all-threads page
+   (threads-history.js, claunch-1qj0b): kept in view at the bottom while a
+   long conversation scrolls, and resizable by hand. */
+.thh-compose { position: sticky; bottom: 0; }
+.thh-compose .th-text { resize: vertical; }
 
 /* The session's conversation pane (talk-pane.js, claunch-78dpm): a tab bar
    over the threads pane, the QA pane, or both in two columns. Each column

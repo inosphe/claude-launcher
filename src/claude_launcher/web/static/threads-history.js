@@ -1,7 +1,9 @@
 /* All threads page (#/threads, claunch-8k02k): every session's thread
    conversations on one screen. The threads pane beside a terminal shows one
    session's threads; this page reads the same store across sessions.
-   Read-only: writing stays in the session's threads pane.
+   tree and newest carry a composer under the thread shown (claunch-1qj0b),
+   the same post as the session's threads pane: text, and images pasted,
+   dropped or picked (🖼), each staged first. feed stays read-only.
 
    Three view modes (claunch-zny1o), each its own route:
    - tree   (#/threads, #/threads/tree/<thread>): a list panel of sessions,
@@ -24,7 +26,12 @@
     open: false, view: "tree", selected: "", page: 1, session: "", status: "",
     data: null, index: null, detail: null, error: "", detailError: "",
     collapsed: new Set(), seq: 0, detailSeq: 0,
+    // The composer, per thread: typed text, images waiting to be sent
+    // ([{file, src}]), posts still out, and what the last post said.
+    drafts: new Map(), attached: new Map(), sending: new Set(), notice: null, refocus: "",
   };
+  // The threads pane's helpers (threads-pane.js loads first on the dashboard).
+  const pane = () => globalThis.ThreadsPane || {};
   const node = (tag, cls, text) => {
     const value = document.createElement(tag);
     if (cls) value.className = cls;
@@ -119,6 +126,74 @@
       state.detailError = error.message || String(error);
     }
     if (state.open) render();
+  }
+
+  // One image to the staging area (the pane's stage()); its id names it in the post.
+  async function stage(file) {
+    const resp = await globalThis.api("/api/threads/images", {
+      method: "POST", headers: { "Content-Type": pane().imageKind(file) }, body: file,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.id) throw new Error(data.error || `이미지 업로드 실패 (HTTP ${resp.status})`);
+    return data.id;
+  }
+
+  function dropAttached(tid) {
+    for (const a of state.attached.get(tid) || []) {
+      try { URL.revokeObjectURL(a.src); } catch { /* no object URLs here */ }
+    }
+    state.attached.delete(tid);
+  }
+
+  // Image files for thread `tid`'s composer; what is not an image is left out.
+  function attach(tid, files) {
+    const list = Array.from(files || []);
+    const pics = list.filter(f => pane().imageKind(f));
+    state.notice = list.length > pics.length
+      ? { tid, text: `이미지가 아닌 파일 ${list.length - pics.length}개는 첨부하지 않았습니다.` } : null;
+    const have = state.attached.get(tid) || [];
+    for (const file of pics) {
+      let src = "";
+      try { src = URL.createObjectURL(file); } catch { /* no object URLs here */ }
+      have.push({ file, src });
+    }
+    if (have.length) state.attached.set(tid, have);
+    render();
+  }
+
+  // Post what thread `t`'s composer holds. The text and the images stay in
+  // the composer until the post is in, so a failure keeps them for a retry.
+  async function send(t) {
+    const tid = t.id;
+    const text = (state.drafts.get(tid) || "").trim();
+    const pics = state.attached.get(tid) || [];
+    if (state.sending.has(tid) || (!text && !pics.length)) return;
+    state.sending.add(tid);
+    state.notice = null;
+    render();
+    try {
+      const body = { text };
+      const ids = [];
+      for (const a of pics) ids.push(await stage(a.file));
+      if (ids.length) body.images = ids;
+      const resp = await globalThis.api(`/api/threads/${encodeURIComponent(tid)}/messages`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      const res = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(res.error || `HTTP ${resp.status}`);
+      state.drafts.delete(tid);
+      dropAttached(tid);
+      const said = pane().deliveryNotice ? pane().deliveryNotice(res, t.session) : "";
+      state.notice = said ? { tid, text: said } : null;
+    } catch (error) {
+      state.notice = { tid, text: error.message || String(error) };
+    } finally {
+      state.sending.delete(tid);
+      state.refocus = tid;     // the box was disabled while the post was out
+    }
+    if (!state.open) return;
+    render();
+    return loadDetail();
   }
 
   function refilter() {
@@ -294,6 +369,83 @@
     return list;
   }
 
+  // The composer under the thread shown: Enter sends, Shift+Enter is a new
+  // line; images come in by paste, drop or the 🖼 button.
+  function composer(t) {
+    const tid = t.id;
+    const sending = state.sending.has(tid);
+    const box = node("div", "th-compose thh-compose");
+    box.dataset.thread = tid;
+    const strip = node("div", "th-attach");
+    const pics = state.attached.get(tid) || [];
+    strip.hidden = !pics.length;
+    pics.forEach((a, i) => {
+      const item = node("span", "th-attach-item");
+      const pic = node("img");
+      pic.src = a.src;
+      pic.alt = a.file.name || "첨부 이미지";
+      const drop = node("button", "th-attach-drop", "×");
+      drop.type = "button";
+      drop.title = "첨부 취소";
+      drop.disabled = sending;
+      drop.addEventListener("click", () => {
+        const rest = pics.filter((_, j) => j !== i);
+        try { URL.revokeObjectURL(a.src); } catch { /* no object URLs here */ }
+        if (rest.length) state.attached.set(tid, rest); else state.attached.delete(tid);
+        render();
+      });
+      item.append(pic, drop);
+      strip.append(item);
+    });
+    const text = node("textarea", "th-text");
+    text.rows = 2;
+    text.placeholder = `${t.session}에게 보내기`;
+    text.value = state.drafts.get(tid) || "";
+    text.disabled = sending;
+    text.addEventListener("input", () => state.drafts.set(tid, text.value));
+    text.addEventListener("keydown", (e) => {
+      if (pane().sendKey && pane().sendKey(e)) { e.preventDefault(); send(t); }
+    });
+    text.addEventListener("paste", (e) => {
+      const files = pane().imageFiles ? pane().imageFiles(e.clipboardData) : [];
+      if (!files.length) return;
+      e.preventDefault();
+      attach(tid, files);
+    });
+    box.addEventListener("dragover", (e) => {
+      if (!Array.from((e.dataTransfer || {}).types || []).includes("Files")) return;
+      e.preventDefault();
+      box.classList.add("dragover");
+    });
+    box.addEventListener("dragleave", () => box.classList.remove("dragover"));
+    box.addEventListener("drop", (e) => {
+      box.classList.remove("dragover");
+      const files = pane().imageFiles ? pane().imageFiles(e.dataTransfer) : [];
+      if (!files.length) return;
+      e.preventDefault();
+      attach(tid, files);
+    });
+    const input = node("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/gif,image/webp";
+    input.multiple = true;
+    input.hidden = true;
+    input.addEventListener("change", () => { attach(tid, input.files); input.value = ""; });
+    const pick = node("button", "term-btn th-pick", "🖼");
+    pick.type = "button";
+    pick.title = "이미지 첨부 — 입력창에 붙여넣거나(Ctrl+V) 끌어다 놓아도 됩니다";
+    pick.disabled = sending;
+    pick.addEventListener("click", () => input.click());
+    const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
+    go.type = "button";
+    go.disabled = sending;
+    go.addEventListener("click", () => send(t));
+    const foot = node("div", "th-compose-foot");
+    foot.append(pick, input, node("span", "th-hint", "Enter 전송 · Shift+Enter 줄바꿈 · markdown 지원 · 이미지 붙여넣기"), go);
+    box.append(strip, text, foot);
+    return box;
+  }
+
   function detail() {
     const box = node("section", "thh-detail");
     const id = target();
@@ -323,16 +475,21 @@
     if (d.more) {
       box.append(node("p", "wf-note", "Later messages not shown — the session's threads pane has the whole thread."));
     }
+    box.append(composer(t));
+    if (state.notice && state.notice.tid === t.id) box.append(node("p", "wf-warning thh-notice", state.notice.text));
     return box;
   }
 
   function render() {
     const view = document.getElementById("threads-view");
     if (!view) return;
+    // A redraw rebuilds the composer: whoever was typing in it keeps the focus.
+    const was = view.querySelector?.(".thh-compose textarea");
+    const typing = !!was && document.activeElement === was;
     view.replaceChildren(controls());
     const [, , note] = VIEWS.find(([name]) => name === state.view);
     view.append(node("p", "wf-note thh-modenote",
-      note + " Reply from the session's threads pane."));
+      note + (state.view === "feed" ? " Reply from Sessions › threads or the session's threads pane." : "")));
     if (state.error) view.append(node("p", "wf-warning", state.error));
     if (state.view === "feed") return renderFeed(view);
     const index = state.index;
@@ -344,6 +501,9 @@
     const split = node("div", `thh-split thh-split-${state.view}`);
     split.append(state.view === "tree" ? treeList(index) : flatList(index), detail());
     view.append(split);
+    const box = view.querySelector?.(".thh-compose textarea");
+    if (box && (typing || state.refocus === box.closest?.(".thh-compose")?.dataset.thread)) box.focus();
+    state.refocus = "";
   }
 
   function renderFeed(view) {
