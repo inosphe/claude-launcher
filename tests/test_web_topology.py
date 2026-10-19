@@ -349,11 +349,29 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 WEB = Path(__file__).resolve().parent / "web"
+
+
+def _run_node(argv, **kwargs):
+    """``subprocess.run``, retried when Windows refuses to start the process.
+
+    Under a loaded sweep ``CreateProcess`` answers ``[WinError 5]`` for a
+    moment (a scanner holds the executable), and the same call succeeds a
+    fraction of a second later. Any other error is raised at once.
+    """
+    for delay in (0.05, 0.1, 0.2, 0.4, 0.8):
+        try:
+            return subprocess.run(argv, **kwargs)
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32):
+                raise
+            time.sleep(delay)
+    return subprocess.run(argv, **kwargs)
 
 
 # Every harness in tests/web is named here, and `test_every_harness_is_registered`
@@ -638,7 +656,7 @@ def test_topology_diagram_logic(script):
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
-    proc = subprocess.run(
+    proc = _run_node(
         [node, str(WEB / script)],
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
@@ -691,12 +709,12 @@ def test_browser_harness(script):
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
-    available = subprocess.run(
+    available = _run_node(
         [node, "-e", "require.resolve('playwright')"], capture_output=True, timeout=10,
     )
     if available.returncode:
         pytest.skip("Playwright is not installed (or not on NODE_PATH)")
-    proc = subprocess.run(
+    proc = _run_node(
         [node, str(WEB / script)],
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )

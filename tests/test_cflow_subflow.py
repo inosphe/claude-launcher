@@ -54,7 +54,7 @@ inputs:
 steps:
   derive:
     instructions: derive the list
-    verify: 'true'
+    verify: 'python -c "pass"'
     next: inspect
   inspect:
     instructions: inspect each
