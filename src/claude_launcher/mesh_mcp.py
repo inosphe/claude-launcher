@@ -28,9 +28,14 @@ session's children inherit — exactly like the CLI.
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import quote
 
 from . import daemon_client, mcp_rpc
+
+#: How often ``await_connect`` asks the daemon again. There is no deadline:
+#: the call returns when the peer answers, however long that takes.
+CONNECT_POLL_SECONDS = 2.0
 
 TOOLS = [
     {
@@ -976,6 +981,67 @@ TOOLS = [
         },
     },
     {
+        "name": "join",
+        "description": (
+            "Join this session to a mesh as a member. A session on this "
+            "daemon joins at once; the handle defaults to the session name "
+            "and the role to the handle's leading word. Joining a mesh that "
+            "lives on another machine (a 'name@machine' address) without a "
+            "'code' waits for that mesh's owner to approve — the answer then "
+            "says so and carries the request id. Join first: 'connect_request' "
+            "and 'await_connect' need you to be a member."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "handle": {"type": "string", "description": "optional handle"},
+                "role": {"type": "string", "description": "optional role"},
+                "code": {
+                    "type": "string",
+                    "description": "invite ticket for a mesh on another machine",
+                },
+            },
+            "required": ["mesh"],
+        },
+    },
+    {
+        "name": "connect_request",
+        "description": (
+            "Ask to message a member you are not connected to, before you have "
+            "anything to send. Files the same request a refused send files; the "
+            "mesh's approver is told and answers by connecting you (granted) or "
+            "declining with a reason. Returns the pair's standing at once. Both "
+            "of you must be members. Follow it with 'await_connect'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "peer": {"type": "string", "description": "the member's handle"},
+            },
+            "required": ["mesh", "peer"],
+        },
+    },
+    {
+        "name": "await_connect",
+        "description": (
+            "Wait for the answer to a 'connect_request' to the member 'peer'. "
+            "Blocks until the approver connects you ('connected'), declines "
+            "('declined', with the reason) or cuts an edge that was granted "
+            "('cut'). There is no deadline: a decision that takes a day keeps "
+            "this call open for a day. Needs a request filed first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "peer": {"type": "string", "description": "the member's handle"},
+            },
+            "required": ["mesh", "peer"],
+        },
+    },
+    {
         "name": "loops",
         "description": (
             "What this session is waiting on -- its open loops. Stored "
@@ -1187,6 +1253,31 @@ def call_tool(name: str, args: dict) -> dict:
             f"/api/mesh/{mesh}/members/{a}/links/{b}",
             {"enabled": name == "connect", "actor": _session()},
         )
+    if name == "join":
+        return _client().post(
+            f"/api/mesh/{mesh}/join",
+            {
+                "session": _session(),
+                "handle": str(args.get("handle") or ""),
+                "role": str(args.get("role") or ""),
+                "code": str(args.get("code") or ""),
+            },
+        )
+    if name in ("connect_request", "await_connect"):
+        peer = str(args.get("peer") or "").strip()
+        if not peer:
+            raise MeshMcpError("'peer' is required")
+        me = _my_handle(_client().get(f"/api/mesh/{mesh}").get("members") or [])
+        if not me:
+            raise MeshMcpError(
+                f"this session is not a member of mesh {mesh!r} — join it first"
+            )
+        if name == "connect_request":
+            return _client().post(
+                f"/api/mesh/{mesh}/wire-requests",
+                {"requester": me, "target": peer},
+            )
+        return _await_connect(mesh, me, peer)
     if name == "wire_requests":
         decline = str(args.get("decline") or "").strip()
         if decline:
@@ -1305,6 +1396,33 @@ def _my_handle(members: list) -> str:
         if isinstance(member, dict) and member.get("session") == session:
             return str(member.get("handle") or "")
     return ""
+
+
+def _await_connect(mesh: str, me: str, peer: str) -> dict:
+    """Poll the pair's standing until the approver answers, with no deadline.
+
+    Refuses to wait on a pair nobody asked about: with no request filed the
+    answer can never come, and a wait that never ends is worse than an error.
+    """
+    path = f"/api/mesh/{mesh}/connect-status?" + "&".join(
+        (f"a={quote(me)}", f"b={quote(peer)}")
+    )
+    while True:
+        status = _client().get(path)
+        request = status.get("request")
+        if request is None and not status.get("connected"):
+            raise MeshMcpError(
+                f"no connect request between {me!r} and {peer!r} in mesh "
+                f"{mesh!r} — file one with 'connect_request' first"
+            )
+        if status.get("connected"):
+            return {**status, "outcome": "connected"}
+        state = (request or {}).get("state")
+        if state == "declined":
+            return {**status, "outcome": "declined"}
+        if state == "granted":
+            return {**status, "outcome": "cut"}
+        time.sleep(CONNECT_POLL_SECONDS)
 
 
 #: Keys passed straight through to the spawn endpoint. Listed rather than
