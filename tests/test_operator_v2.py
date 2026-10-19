@@ -119,7 +119,7 @@ def test_definitions_survive_a_restart(world):
     rows = {r["name"]: r for r in again.listing()["operators"]}
     assert set(rows) == {"Alpha", "Everything"}
     assert rows["Alpha"]["projects"] == ["alpha"] and rows["Alpha"]["operator"]["name"] == "opa"
-    feed = again.get(world.alpha["id"])["feed"]
+    feed = again.feed(again.get(world.alpha["id"]))
     assert [e["text"] for e in feed if e["kind"] == "post"] == ["hello"]
 
 
@@ -128,7 +128,7 @@ def test_rescoping_and_watch_are_recorded_and_watch_nudges(world):
     out = run(ops.update(world.alpha["id"], {"projects": ["alpha", "beta"], "watch": False}))
     assert out["projects"] == ["alpha", "beta"] and out["watch"] is False and out["nudge"] == "sent"
     assert "꺼짐" in world.sessions["opa"].sent[-1]
-    assert "범위: alpha, beta" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert "범위: alpha, beta" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
     assert run(ops.poll("opa"))["watch"] is False
     assert ops.inbox("opa")["watch"] is False
     # b1 is in scope now
@@ -154,8 +154,8 @@ def test_only_a_bound_session_may_act_and_it_acts_as_its_own_operator(world):
         ops.post("ghost", {"text": "hi", "request_id": "x"})
     ops.post("opa", {"text": "from alpha", "request_id": "1"})
     ops.post("opall", {"text": "from all", "request_id": "1"})
-    alpha = [e["text"] for e in ops.get(world.alpha["id"])["feed"] if e["kind"] == "post"]
-    every = [e["text"] for e in ops.get(world.every["id"])["feed"] if e["kind"] == "post"]
+    alpha = [e["text"] for e in ops.feed(ops.get(world.alpha["id"])) if e["kind"] == "post"]
+    every = [e["text"] for e in ops.feed(ops.get(world.every["id"])) if e["kind"] == "post"]
     assert alpha == ["from alpha"] and every == ["from all"]
 
 
@@ -328,11 +328,11 @@ def test_spawn_files_a_gated_request_for_a_top_level_worker(world, monkeypatch):
                               "task": "로그인 버그 수정", "workflow": "improv-worker-v2", "worktree": ""}
     assert "parent" not in record["spec"]
     assert record["basis"]["operator"] == world.alpha["id"] and record["basis"]["on_behalf_of"] == msg["id"]
-    assert "세션 생성 요청" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert "세션 생성 요청" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
     assert [r["id"] for r in run(ops.poll("opa"))["requests"]] == [record["id"]]
     # the settlement lands in the operator's feed
     gate.reject(record["id"])
-    assert "rejected" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert "rejected" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
 
 
 def test_spawn_needs_the_users_word_and_a_project_in_scope(world, monkeypatch):
