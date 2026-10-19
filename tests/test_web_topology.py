@@ -557,6 +557,7 @@ CHECKS = [
         "chat_check.js",
         "worktreespage_check.js",
         "commitpage_check.js",
+        "chartpage_check.js",
         "glossarypage_check.js",
         "categorypage_check.js",
         "simpage_check.js",
@@ -585,6 +586,7 @@ CHECKS = [
 # tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
+    "chart_browser.cjs",
     "sessionprs_browser.cjs",
     "commandcopy_browser.cjs",
     "termcflow_browser.cjs",

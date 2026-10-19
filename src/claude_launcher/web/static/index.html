@@ -304,6 +304,7 @@
       <a href="#/sims" data-page="sims"><span>◬</span>Sims</a>
       <a href="#/window" data-page="window"><span>▦</span>Window</a>
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
+      <a href="#/chart" data-page="chart"><span>☰</span>Chart</a>
       <a href="#/profile-usage" data-page="profile-usage"><span>◷</span>Usage</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
       <a href="#/category" data-page="category"><span>⌘</span>Category</a>
@@ -1475,6 +1476,10 @@
          acquire/release stay with the processes whose test runs own grants. -->
     <div id="window-view" class="hidden"></div>
     <div id="stats-view" class="hidden"></div>
+    <!-- Every session on one time axis: creation to exit, state, lifetime
+         and cflow state, narrowed by project and mesh/workspace; drawn by
+         chart-page.js from the rail's own caches. -->
+    <div id="chart-view" class="hidden"></div>
     <div id="profile-usage-view" class="hidden"></div>
     <!-- System performance: CPU, memory and disk I/O history (sysperf-page.js). -->
     <div id="sysperf-view" class="hidden"></div>
@@ -1539,6 +1544,7 @@
 <script src="static/search-anything.js"></script>
 <script src="static/worktrees-page.js"></script>
 <script src="static/commit-page.js"></script>
+<script src="static/chart-page.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/spec-page.js"></script>
 <script src="static/sim-page.js"></script>

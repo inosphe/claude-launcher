@@ -10624,6 +10624,7 @@ function setCurrentProject(name) {
   refreshSessions({ cached: true });
   refreshMeshList({ cached: true });
   if (currentPage === "home") renderHome();
+  if (currentPage === "chart") globalThis.ChartPage?.render(true);
 }
 
 /* The rail's project rides the address as `?project=`. An address that
@@ -21018,6 +21019,7 @@ function mobileTitle() {
       ? "workflows · definitions" : "workflows";
     case "window": return "measurement window";
     case "stats": return "session statistics";
+    case "chart": return "session chart";
     case "settings": return "settings";
     case "workspaces": return "workspaces";
     case "beads": return beadsSection === "reports" ? "reports"
@@ -21186,6 +21188,7 @@ const VIEWS = {
   flows: "flows-view",
   window: "window-view",
   stats: "stats-view",
+  chart: "chart-view",
   "profile-usage": "profile-usage-view",
   sysperf: "sysperf-view",
   cli: "cli-view",
@@ -21910,6 +21913,7 @@ function parseHash(h) {
       ? parts[1] : "" };
   }
   if (parts[0] === "window") return { page: "window" };
+  if (parts[0] === "chart") return { page: "chart" };
   if (parts[0] === "profile-usage") return { page: "profile-usage" };
   if (parts[0] === "sysperf") return { page: "sysperf" };
   // #/stats opens on a default session; #/stats/<name> names one.
@@ -22005,6 +22009,7 @@ function route() {
   if (r.page !== "settings") closeWorkspaces();
   if (r.page !== "window") stopWindowPoll();
   if (r.page !== "stats") stopStatsPoll();
+  if (r.page !== "chart") globalThis.ChartPage?.stop();
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
@@ -22088,6 +22093,7 @@ function route() {
     case "flows": openFlows(r.section); break;
     case "window": openWindowPage(); break;
     case "stats": openStatsPage(r.name, r.compare); break;
+    case "chart": showView("chart"); globalThis.ChartPage.open(); break;
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "sysperf": showView("sysperf"); globalThis.SysPerfPage.open(); break;
     case "cli": openCli(); break;
