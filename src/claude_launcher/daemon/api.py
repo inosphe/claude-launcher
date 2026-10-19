@@ -69,7 +69,7 @@ from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
-from . import session_timers, session_prs, session_procs
+from . import rail_superseded, session_timers, session_prs, session_procs
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -8585,10 +8585,13 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # unmerged, since the list carries hundreds of those
             # (claunch-0gysk, claunch-ork3b).
             if not s.exited:
-                chips = session_commits.rail(
-                    info.get(work_checkout.FIELD) or _session_cwd(s),
-                    info["name"], info.get("prs"),
-                )
+                rail_cwd = info.get(work_checkout.FIELD) or _session_cwd(s)
+                chips = session_commits.rail(rail_cwd, info["name"], info.get("prs"))
+                # A rebased-away commit is struck through: its change landed
+                # under another hash. Judged once per commit and kept in the
+                # session's directory (rail_superseded, claunch-rqtpe).
+                rail_superseded.mark(info["name"], functools.partial(
+                    session_commits.rail_superseded, rail_cwd, info["name"], chips))
                 if chips:
                     info["rail_commits"] = chips
             # A kill that is still a wind-down (see beads.Board): the row says
@@ -10196,8 +10199,11 @@ async def h_session_rail_commits(request: web.Request) -> web.Response:
         # it moved into, else that same directory.
         home = _session_cwd(session)
         cwd = work_checkout.of(session.sdef) or home
-        return session_commits.rail(
+        found = session_commits.rail(
             cwd, name, session_prs.for_session(home, name), everything=True)
+        rail_superseded.mark(name, functools.partial(
+            session_commits.rail_superseded, cwd, name, found))
+        return found
 
     chips = await asyncio.to_thread(read)
     return json_response({"session": name, "rail_commits": chips})
