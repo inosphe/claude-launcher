@@ -302,4 +302,9 @@ def test_improv_worker_lets_a_person_change_the_approval_gate():
     sch = chart.meta["inputs"]
     assert sch["require_coding_approval"]["set_by"] == ["user"]
     assert sch["max_rounds"]["set_by"] == ["user"]
+    # claunch-gqgcz.1: reviewer-ensure reads these every round
+    assert sch["reviewer_profile"]["set_by"] == ["user"]
+    assert sch["reviewer_harness"]["set_by"] == ["user"]
+    assert inputs.settle(sch, {"reviewer_profile": ""}, "reviewer_profile", "work",
+                         inputs.SETTER_USER) == "work"
     assert sch["issue"]["set_by"] == ["agent"]  # the start issue stays the agent's
