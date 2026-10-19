@@ -19476,7 +19476,8 @@ function attachGpuRenderer(t) {
    one place as the --term-page custom property (style.css); the canvas and
    the card around it read the same value and cannot drift apart. */
 function terminalPageBackground() {
-  const probe = document.getElementById("terminal");
+  const doc = typeof document === "undefined" ? null : document;
+  const probe = doc && typeof doc.getElementById === "function" ? doc.getElementById("terminal") : null;
   const fromCss = probe && getComputedStyle(probe).getPropertyValue("--term-page").trim();
   return fromCss || "#14161a";
 }
