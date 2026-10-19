@@ -1814,6 +1814,23 @@ const RAIL_TYPING_MAX_MS = 15000;
 let railTypedAt = 0;
 let railTypingSince = 0;
 let railTypingTimer = 0;
+/* The seen lines a held poll did not move on (refreshRailSeen is skipped
+   while the rail is held); the pause that ends a burst moves them. */
+let railSeenPending = false;
+
+/* The <input> types a key is typed into. A checkbox, radio or button takes
+   keys too (space, the arrows) without being typed into, and holding the
+   rail for those held it for nothing (claunch-4thlk.7). An input with no
+   type is a text box. */
+const RAIL_TEXT_INPUT_TYPES = new Set(
+  ["", "text", "search", "email", "url", "tel", "password", "number"]);
+
+function railTextTarget(t) {
+  if (!t) return false;
+  if (t.tagName === "TEXTAREA" || t.isContentEditable) return true;
+  if (t.tagName !== "INPUT") return false;
+  return RAIL_TEXT_INPUT_TYPES.has(String(t.type || "").toLowerCase());
+}
 
 function railTyping() {
   if (!railTypedAt) return false;
@@ -1823,15 +1840,17 @@ function railTyping() {
 }
 
 function noteRailTyping(ev) {
-  const t = ev && ev.target;
-  if (!t || !(t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) return;
+  if (!railTextTarget(ev && ev.target)) return;
   const now = Date.now();
   if (now - railTypedAt >= RAIL_TYPING_QUIET_MS) railTypingSince = now;
   railTypedAt = now;
   clearTimeout(railTypingTimer);
   railTypingTimer = setTimeout(() => {
     railTypingTimer = 0;
-    if (railRedrawPending && !railHeld()) refreshSessions();
+    if (railHeld()) return;
+    // What the burst held is already in the cache: a redraw from it covers
+    // both the rows owed and the seen lines, with no request of its own.
+    if (railRedrawPending || railSeenPending) refreshSessions({ cached: true });
   }, RAIL_TYPING_QUIET_MS);
 }
 
@@ -5471,7 +5490,13 @@ async function refreshSessions(options) {
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
   // lost click the hold exists to prevent, and the redraw it owes covers it.
-  if ((!rebuild || inPlace) && !railHeld() && typeof refreshRailSeen === "function") {
+  // Typing holds them too: in the claunch-oo8au trace they took ~300 ms of
+  // script over 32 s of polls, the kind of stall the typing hold keeps out
+  // of a burst. They are owed to the pause that ends it (noteRailTyping), so
+  // a held seen line trails by at most the quiet window once the keys stop.
+  const seenHeld = railHeld();
+  if (typeof railSeenPending !== "undefined") railSeenPending = seenHeld;
+  if ((!rebuild || inPlace) && !seenHeld && typeof refreshRailSeen === "function") {
     refreshRailSeen(list);
   }
   // The create form offers these same conversations and sessions, but this
