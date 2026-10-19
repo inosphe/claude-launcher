@@ -24,7 +24,12 @@
                   (held between its floor and what leaves the conversation
                   room), the width is kept at release and comes back at the
                   next mount, a double click forgets it, and the bar is hidden
-                  for a one-half pane and on a phone (claunch-46lbf).
+                  for a one-half pane and on a phone (claunch-46lbf);
+                  a click on the title (or ✎, or a double click in the
+                  list) opens a box: Enter posts {title} to /title, Esc
+                  and a blank or unchanged title post nothing, a failed
+                  rename keeps the box and its text, and a poll keeps
+                  what is typed (claunch-6st9p).
      rail      -- 🗪 threads lights while the session has an open thread, and
                   carries has-news when the session wrote past what this
                   browser saw; a session never seen here starts caught up.
@@ -147,10 +152,12 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   let failCreate = false;
   let postHold = null;
   let failPost = false;
+  let failRename = false;
   const api = async (p, opts = {}) => {
     calls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
     if (failCreate && p === "/api/threads") return {ok: false, status: 500, json: async () => ({error: "boom"})};
     if (failPost && p === "/api/threads/th-1/messages") return {ok: false, status: 500, json: async () => ({error: "lost"})};
+    if (failRename && p.endsWith("/title")) return {ok: false, status: 400, json: async () => ({error: "title too long"})};
     let doc = {};
     if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
@@ -161,6 +168,11 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     } else if (p === "/api/threads/th-1/messages") doc = {message: {seq: 3}, delivered: true, hold: postHold};
     else if (p === "/api/threads") doc = {thread: {id: "th-9"}, delivered: false};
     else if (p.endsWith("/close")) doc = {thread: threads[0]};
+    else if (/^\/api\/threads\/th-\d\/title$/.test(p)) {
+      const t = threads.find((x) => p === `/api/threads/${x.id}/title`);
+      t.title = JSON.parse(opts.body).title;
+      doc = {thread: t};
+    }
     return {ok: true, status: 200, json: async () => doc};
   };
   let changed = 0;
@@ -322,6 +334,95 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(/@media \(max-width: 820px\) \{\s*\.th-split \{ display: none; \}/.test(phone),
             "the phone hides the bar, after the rule that shows it");
   assert.ok(/\.th-split \{[^}]*width: 8px;[^}]*cursor: col-resize/.test(css), "#rail-split's shape");
+
+  // rename (claunch-6st9p): the title turns into a box, Enter posts it
+  const renames = () => calls.filter((c) => c[0] === "POST" && c[1].endsWith("/title"));
+  host.querySelector(".th-convo-title").fire("click");
+  let rbox = host.querySelector(".th-convo-head .th-rename-input");
+  assert.ok(rbox, "a click on the title opens the box");
+  assert.equal(rbox.value, "Log format", "the box starts with the title");
+  assert.equal(document.activeElement, rbox, "the box takes the focus");
+  rbox.fire("keydown", {key: "Escape"});
+  assert.ok(!host.querySelector(".th-rename-input"), "Esc closes the box");
+  assert.equal(host.querySelector(".th-convo-title").textContent, "Log format");
+  host.querySelector(".th-rename-btn").fire("click");
+  rbox = host.querySelector(".th-rename-input");
+  assert.ok(rbox, "✎ opens the box");
+  rbox.fire("keydown", {key: "Enter"});
+  await settle();
+  assert.equal(renames().length, 0, "an unchanged title posts nothing");
+  assert.ok(!host.querySelector(".th-rename-input"));
+  host.querySelector(".th-rename-btn").fire("click");
+  rbox = host.querySelector(".th-rename-input");
+  rbox.value = "   ";
+  rbox.fire("input");
+  rbox.fire("keydown", {key: "Enter"});
+  await settle();
+  assert.equal(renames().length, 0, "a blank title posts nothing");
+  // what is typed survives a poll's redraw
+  host.querySelector(".th-rename-btn").fire("click");
+  rbox = host.querySelector(".th-rename-input");
+  rbox.value = "Log format v2";
+  rbox.fire("input");
+  messages["th-1"].push({seq: 3, author: "agent", body: "more", at: "2026-10-13T00:00:02+00:00"});
+  threads[0].last_seq = 3;
+  timers.filter(Boolean).forEach((fn) => fn());
+  await settle();
+  rbox = host.querySelector(".th-rename-input");
+  assert.equal(rbox.value, "Log format v2", "a poll keeps what is typed");
+  assert.equal(document.activeElement, rbox, "and the focus");
+  // a poll does not pull the focus from the composer into the title box
+  const composer = host.querySelector(".th-compose .th-text");
+  composer.focus();
+  messages["th-1"].push({seq: 4, author: "agent", body: "even more", at: "2026-10-13T00:00:03+00:00"});
+  threads[0].last_seq = 4;
+  timers.filter(Boolean).forEach((fn) => fn());
+  await settle();
+  assert.ok(host.querySelector(".th-rename-input"), "the box stays open");
+  assert.ok(document.activeElement.classList.contains("th-text"), "the composer keeps the focus through a poll");
+  rbox = host.querySelector(".th-rename-input");
+  rbox.focus();
+  // a failed rename keeps the box and says why
+  failRename = true;
+  rbox.fire("keydown", {key: "Enter"});
+  await settle();
+  failRename = false;
+  assert.equal(host.querySelector(".th-rename-input").value, "Log format v2", "a failed rename keeps the text");
+  assert.match(host.querySelector(".th-head").text(), /title too long/);
+  host.querySelector(".th-rename-save").fire("click");
+  await settle();
+  assert.deepEqual(renames().pop(), ["POST", "/api/threads/th-1/title", {title: "Log format v2"}]);
+  assert.ok(!host.querySelector(".th-rename-input"), "a saved title closes the box");
+  assert.equal(host.querySelector(".th-convo-title").textContent, "Log format v2", "the head shows the new title");
+  assert.equal(host.querySelector(".th-item .th-item-title").textContent, "Log format v2", "and so does the list");
+  // moving to another thread drops an open box and its draft
+  host.querySelector(".th-rename-btn").fire("click");
+  rbox = host.querySelector(".th-rename-input");
+  rbox.value = "abandoned";
+  rbox.fire("input");
+  host.querySelectorAll(".th-item")[1].fire("click");
+  await settle();
+  assert.ok(!host.querySelector(".th-rename-input"), "another thread opens without a box");
+  host.querySelectorAll(".th-item")[0].fire("click");
+  await settle();
+  assert.ok(!host.querySelector(".th-rename-input"), "coming back does not reopen it");
+  host.querySelector(".th-rename-btn").fire("click");
+  assert.equal(host.querySelector(".th-rename-input").value, "Log format v2", "the abandoned draft is gone");
+  host.querySelector(".th-rename-cancel").fire("click");
+  // a double click in the list opens that thread with its title in a box
+  host.querySelectorAll(".th-item")[1].fire("dblclick");
+  await settle();
+  rbox = host.querySelector(".th-rename-input");
+  assert.ok(rbox, "a double click on a thread opens its box");
+  assert.equal(rbox.value, "Old topic");
+  rbox.value = "New topic";
+  rbox.fire("input");
+  rbox.fire("keydown", {key: "Enter"});
+  await settle();
+  assert.deepEqual(renames().pop(), ["POST", "/api/threads/th-2/title", {title: "New topic"}]);
+  assert.match(css, /\.th-rename-input \{/, "the box is styled");
+  host.querySelectorAll(".th-item")[0].fire("click");
+  await settle();
 
   // close
   const toggle = host.querySelector(".th-convo-head .term-btn");
