@@ -84,15 +84,21 @@ class DaemonClient:
         *,
         timeout: float = 30.0,
         raw: bool = False,
+        data: Optional[bytes] = None,
+        content_type: Optional[str] = None,
     ):
+        """``body`` goes as JSON; ``data`` instead sends those bytes as they
+        are under ``content_type`` (an image upload's raw body)."""
         url = self.base_url + path
-        data = json.dumps(body).encode("utf-8") if body is not None else None
+        if data is None and body is not None:
+            data = json.dumps(body).encode("utf-8")
+            content_type = "application/json"
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.token}")
         if self.actor:
             req.add_header(actors.HEADER, self.actor)
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
+        if data is not None and content_type:
+            req.add_header("Content-Type", content_type)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = resp.read()

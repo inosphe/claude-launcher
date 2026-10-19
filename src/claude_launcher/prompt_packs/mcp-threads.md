@@ -24,6 +24,12 @@ GitHub-flavored markdown: the pane renders it (headings, lists, **bold**,
 shows raw HTML as text, and a reply wrapped whole in one code fence shows as
 a code block.
 
+To show the user a picture (a screenshot, a rendered chart, a diagram), pass
+the image files' paths in `images` on `thread_reply` or `thread_open` (PNG,
+JPEG, GIF or WebP, at most 10). The pane shows them under the message's text,
+and a message may be images alone. A markdown image link to a local path does
+not render; attach the file instead.
+
 ### One thread, one topic
 
 A thread's title names its topic, and the user finds a conversation by that

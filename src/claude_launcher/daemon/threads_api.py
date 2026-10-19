@@ -20,6 +20,10 @@ and every message returns its ``images`` with each file's ``path``. The
 block typed into the session lists those paths; on a live session whose
 harness takes images, the images are first pasted into its composer the
 way the session line's image paste does, so the message arrives with them.
+The agent attaches images the same way (claunch-euaz6): thread_reply /
+thread_open stage each file it names through the same upload and post the
+ids, and the pane shows them on the agent's message; nothing is typed into
+the session for its own message.
 
 A blank title opens the thread under the session's next default name
 (``Thread #N``); without ``text`` the thread starts empty and nothing is
@@ -248,15 +252,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                     thread_images.attach(m)
         return res, None
 
-    async def keep_images(body: dict, actor: str):
+    async def keep_images(body: dict):
         """``body["images"]`` (staged ids) moved into the kept folder, as
         the store's records; or an error response."""
         raw = body.get("images")
         if raw in (None, []):
             return [], None
-        if actor != thread_store.USER:
-            return None, web.json_response(
-                {"error": "only the user attaches images to a thread message"}, status=400)
         try:
             ids = thread_images.check(raw)
             return await asyncio.to_thread(thread_images.keep, ids), None
@@ -313,7 +314,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             # questions (claunch-236ei).
             rows = await asyncio.to_thread(qa_rows, target)
             qid = talk_links.subject_in(body.get("title"), body.get("text"), rows)
-        images, err = await keep_images(body, actor)
+        images, err = await keep_images(body)
         if err:
             return err
         res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid,
@@ -340,7 +341,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     async def h_post(request):
         body = await body_of(request)
         actor = actor_of(body)
-        images, err = await keep_images(body, actor)
+        images, err = await keep_images(body)
         if err:
             return err
         res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"), images=images)

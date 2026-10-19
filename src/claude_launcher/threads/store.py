@@ -14,8 +14,9 @@ Rows:
             it, the last message seq, how far the agent has read, and the
             QA question it was opened about (``qa``, claunch-78dpm)
   messages  the conversation, globally sequenced (``seq``); ``author`` is
-            ``user`` or ``agent``; ``images`` lists the pictures the user
-            attached to it (claunch-shl2r), NULL when there are none
+            ``user`` or ``agent``; ``images`` lists the pictures attached to
+            it -- by the user (claunch-shl2r) or the agent (claunch-euaz6),
+            NULL when there are none
 
 Who may write. The user (the dashboard) may open, post, close and reopen in
 any session's threads; a session may do the same only in its own. Posting to
@@ -163,6 +164,17 @@ def _excerpt(body: str) -> str:
     """The first non-blank line of a message, cut to RAIL_EXCERPT."""
     line = next((ln.strip() for ln in (body or "").splitlines() if ln.strip()), "")
     return line if len(line) <= RAIL_EXCERPT else line[:RAIL_EXCERPT - 1] + "…"
+
+
+def _reply_excerpt(body: str, images) -> str:
+    """A reply's notice line: its excerpt, with the pictures it carries
+    counted (claunch-euaz6) so an images-only reply is not a blank card --
+    the same wording as the threads pane's list (threads-pane.js lastLine)."""
+    text = _excerpt(body)
+    n = len(json.loads(images)) if images else 0
+    if not n:
+        return text
+    return f"{text} 🖼{n}" if text else f"🖼 이미지 {n}장"
 
 
 def _default_title(db, session: str) -> str:
@@ -325,7 +337,7 @@ class ThreadStore:
             raise Forbidden(f"session {actor} may open threads only in its own conversation, not in {session}")
         title = _text(title, "title", MAX_TITLE, required=False)
         body = _text(text, "text", MAX_BODY, required=False)
-        images = self._user_images(actor, images)
+        images = _images(images)
         qa = _qa_id(qa)
         with self._write() as db:
             if not title:
@@ -348,16 +360,9 @@ class ThreadStore:
             row = self._row(db, tid)
             return {"thread": _thread(row, self._unread(db, row), message), "message": message}
 
-    @staticmethod
-    def _user_images(actor: str, images) -> list[dict]:
-        images = _images(images)
-        if images and actor != USER:
-            raise ThreadError("only the user attaches images to a thread message")
-        return images
-
     def post(self, actor: str, tid: str, text, *, images=None) -> dict:
-        """A message: text, attached ``images`` (the user's only), or both."""
-        images = self._user_images(actor, images)
+        """A message: text, attached ``images``, or both."""
+        images = _images(images)
         body = _text(text, "text", MAX_BODY, required=not images)
         with self._write() as db:
             row = self._row(db, tid)
@@ -572,8 +577,8 @@ class ThreadStore:
             ):
                 row(r["session"])["agent_seq"] = int(r["seq"] or 0)
             for r in db.execute(
-                "SELECT m.seq, m.session, m.thread, m.body, m.at, t.title FROM ("
-                " SELECT seq, session, thread, body, at,"
+                "SELECT m.seq, m.session, m.thread, m.body, m.images, m.at, t.title FROM ("
+                " SELECT seq, session, thread, body, images, at,"
                 " ROW_NUMBER() OVER (PARTITION BY session ORDER BY seq DESC) AS n"
                 " FROM messages WHERE author = 'agent') AS m"
                 " JOIN threads t ON t.id = m.thread WHERE m.n <= ? ORDER BY m.seq",
@@ -581,6 +586,6 @@ class ThreadStore:
             ):
                 row(r["session"])["replies"].append({
                     "seq": r["seq"], "thread": r["thread"], "title": r["title"],
-                    "excerpt": _excerpt(r["body"]), "at": r["at"],
+                    "excerpt": _reply_excerpt(r["body"], r["images"]), "at": r["at"],
                 })
         return out
