@@ -235,6 +235,218 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
     assert ask["urgent"] is True
 
 
+# -- session routing (claunch-yl0to) ----------------------------------------
+
+
+def _routing_item(tmp_path, monkeypatch, values, data=None):
+    """The real item route with the implementation tasks stubbed, as above,
+    plus delegate-work: the routing decisions are what is under test."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, inputs, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["body"] = [{"call": "item"}]
+    doc.pop("spec", None)
+    for name in ("work", "test-skipped", "commit", "review"):
+        doc["nodes"][name] = {"prompt": name}
+    doc["nodes"]["targeted-test"] = {"prompt": "measure",
+                                     "returns": {"ok": {"failed": "int"}}}
+    doc["data"].update(data or {})
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    chart = inputs.apply(chart, values)
+    kw = {"cwd": str(tmp_path), "scope": "routing", "now": 1.0}
+    return runtime.start(chart, caps={}, **kw), kw
+
+
+def _one(st, label):
+    [task] = st["tasks"]
+    assert task["label"] == label, (task["label"], label)
+    return task["instance"]
+
+
+DELEGATE = {"mode": "delegate", "profile": "ds4", "model": "small", "difficulty": "easy"}
+DIRECT = {"mode": "direct", "difficulty": "hard"}
+DONE = {"files": ["a.py"], "summary": "s", "tried": [], "child": "c1", "commits": ["abc"]}
+
+
+def _finish_skip(st, kw):
+    from claude_launcher.cflow2 import runtime
+
+    st = runtime.select(st["choices"][0]["instance"], "skip", reason="fixture", **kw)
+    for label in ("test-skipped", "commit"):
+        st = runtime.report(_one(st, label), "ok", {}, **kw)
+    return st
+
+
+def test_routing_declares_three_human_inputs_off_by_default():
+    sch = _chart().meta["inputs"]
+    assert sch["session_routing"]["type"] == "bool"
+    assert sch["session_routing"]["default"] is False
+    for name in ("session_routing", "delegate_profile", "delegate_model"):
+        assert sch[name]["set_by"] == ["user"], name
+    assert sch["delegate_profile"]["default"] == "" == sch["delegate_model"]["default"]
+
+
+def test_routing_without_a_gate_follows_the_plans_recommendation(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
+    plan = {"brief": "edit a.py", "difficulty": "easy", "recommend": "delegate", "why": "one file"}
+    st = runtime.report(_one(st, "coding-plan"), "ok", plan, **kw)
+    assert not st.get("asks")  # no gate: nobody is asked
+    st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
+    # the delegate does the work in place of `work`
+    st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
+    assert _finish_skip(st, kw)["status"] == "done"
+
+
+def test_routing_hard_plan_keeps_the_work_here(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok",
+                        {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw)
+    st = runtime.report(_one(st, "route-planned"), "ok", DIRECT, **kw)
+    st = runtime.report(_one(st, "work"), "ok", {}, **kw)
+    assert _finish_skip(st, kw)["status"] == "done"
+
+
+@pytest.mark.parametrize("answer, route, worker", [
+    ("approve-as-planned", "route-planned", "delegate-work"),
+    ("approve-no-delegate", "route-direct", "work"),
+    ("approve-down-delegate", "route-delegate", "delegate-work"),
+])
+def test_routing_gate_offers_four_answers(tmp_path, monkeypatch, answer, route, worker):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch,
+                           {"session_routing": True, "require_coding_approval": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok",
+                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "coding-approval-routing" and ask["urgent"] is True
+    assert [o["name"] for o in ask["options"]][:4] == [
+        "approve-as-planned", "approve-no-delegate", "approve-down-delegate", "reject"]
+    with pytest.raises(runtime.FlowError, match="not yours to answer"):
+        runtime.approve(None, decision=answer, caller="agent", **kw)
+    runtime.approve(None, decision=answer, reason="r", **kw)
+    st = runtime.status(**kw)
+    value = DIRECT if route == "route-direct" else DELEGATE
+    st = runtime.report(_one(st, route), "ok", value, **kw)
+    st = runtime.report(_one(st, worker), "ok", DONE, **kw)
+    assert _finish_skip(st, kw)["status"] == "done"
+
+
+@pytest.mark.parametrize("routing", [True, False])
+def test_reject_rewrites_the_plan(tmp_path, monkeypatch, routing):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch,
+                           {"session_routing": routing, "require_coding_approval": True})
+    for visit in (1, 2):
+        st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": f"plan {visit}"}, **kw)
+        [ask] = st["asks"]
+        assert f"plan {visit}" in ask["prompt"]
+        if visit == 1:
+            if routing:
+                runtime.approve(None, decision="reject", reason="too broad", **kw)
+            else:
+                # the plain approval's decline is the reject
+                runtime.approve(None, decline=True, reason="too broad", **kw)
+            st = runtime.status(**kw)
+    assert ask["label"] == ("coding-approval-routing" if routing else "coding-approval")
+
+
+@pytest.mark.parametrize("outcome", ["escalated", "failed"])
+def test_a_stopped_delegate_asks_the_person(tmp_path, monkeypatch, outcome):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok",
+                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
+    stopped = ({"reason": "needs a design call", "commits": [], "remaining": "all"}
+               if outcome == "escalated" else {"reason": "spawn refused"})
+    st = runtime.report(_one(st, "delegate-work"), outcome, stopped, **kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "delegated-rework-approval"
+    assert ask["resolution"] == "human" and ask["urgent"] is True
+    assert [o["name"] for o in ask["options"]][:3] == ["rework-direct", "rework-delegate", "reject"]
+    # rework-delegate: delegate again with the same setting
+    runtime.approve(None, decision="rework-delegate", reason="try again", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-delegate"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), outcome, stopped, **kw)
+    # rework-direct: this session takes it over
+    runtime.approve(None, decision="rework-direct", reason="mine now", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
+    st = runtime.report(_one(st, "work"), "ok", {}, **kw)
+    assert _finish_skip(st, kw)["status"] == "done"
+
+
+def test_a_stopped_delegate_rejected_goes_back_to_the_plan(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), "escalated",
+                        {"reason": "r", "commits": [], "remaining": "x"}, **kw)
+    runtime.approve(None, decision="reject", reason="plan again", **kw)
+    assert _one(runtime.status(**kw), "coding-plan")
+
+
+def test_a_failed_parent_test_on_delegated_work_asks_the_person(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
+    st = runtime.select(st["choices"][0]["instance"], "run", reason="fixture", **kw)
+    st = runtime.report(_one(st, "review"), "ok", {}, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 2}, **kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "delegated-rework-approval"
+    runtime.approve(None, decision="rework-direct", reason="fix here", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
+    # the test loop goes on with this session: the next failure asks nobody
+    st = runtime.report(_one(st, "review"), "ok", {}, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 1}, **kw)
+    assert not st.get("asks")
+    st = runtime.report(_one(st, "review"), "ok", {}, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 0}, **kw)
+    st = runtime.report(_one(st, "commit"), "ok", {}, **kw)
+    assert st["status"] == "done"
+
+
+def test_delegated_work_sent_back_by_review_asks_first(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(
+        tmp_path, monkeypatch, {"session_routing": True},
+        data={"route": DELEGATE, "land_out": {"reason": "CHANGES REQUESTED", "rework": True}})
+    assert not st["tasks"]
+    [ask] = st["asks"]
+    assert ask["label"] == "delegated-rework-approval"
+    assert "CHANGES REQUESTED" in ask["prompt"]
+    runtime.approve(None, decision="reject", reason="new plan", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
+    # rejected: back to the plan, and the gate does not reopen
+    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b2", "recommend": "direct"}, **kw)
+    st = runtime.report(_one(st, "route-planned"), "ok", DIRECT, **kw)
+    assert _one(st, "work")
+
+
+def test_routing_off_keeps_todays_path_even_with_a_delegate_route(tmp_path, monkeypatch):
+    st, _ = _routing_item(tmp_path, monkeypatch, {},
+                          data={"route": DELEGATE, "land_out": {"rework": True}})
+    assert [t["label"] for t in st["tasks"]] == ["work"]
+    assert not st.get("asks")
+
+
 # -- compile and check -------------------------------------------------------
 
 
