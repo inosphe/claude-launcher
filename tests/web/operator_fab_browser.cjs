@@ -9,7 +9,10 @@
    Above the conversation a session line names the operator, its session and
    that session's state and links to the session's page (claunch-iw5i8.13);
    the dialog is resized from its edges about its centre and the size is kept
-   in localStorage (claunch-iw5i8.14).
+   in localStorage (claunch-iw5i8.14). The conversation is threads
+   (claunch-iw5i8.12.1): at the default width the list and the selected
+   thread take turns, a message goes to the thread on screen, and a dialog
+   resized past 640px shows the two side by side.
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/operator_fab_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -32,6 +35,8 @@ const ops = {
          feed: [{ id: "p2", at: at(2), kind: "post", role: "bot", text: "beta 보고\n\n- **s2**: `pytest` 대기", level: "info", refs: ["s2"] },
                 { id: "a1", at: at(3), kind: "ask", role: "bot", type: "approve", text: "s2를 재시작할까요?", choices: [], level: "urgent", refs: ["s2"], answer: null }] },
 };
+for (const o of Object.values(ops)) for (const e of o.feed) e.thread = "th-main";
+ops.opB.feed.unshift({ id: "h1", at: at(0), kind: "post", role: "bot", text: "옛 기록", level: "info", refs: [], thread: "th-old" });
 function summary(o) {
   const open = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id);
   return { id: o.id, name: o.name, all: o.all, projects: o.projects, profile: "p1:claude", watch: o.watch,
@@ -46,10 +51,19 @@ function operatorsApi(req, res, body) {
   if (!parts.length) return json({ operators: Object.values(ops).map(summary) });
   const o = ops[parts[0]], rest = parts.slice(1).join("/");
   if (!o) return json({ error: "no such operator" }, 404);
-  if (!rest) return json({ ...summary(o), feed: o.feed, sessions: [], gates: [] });
+  if (!rest) {
+    const ids = [...new Set(o.feed.map(e => e.thread))];
+    const threads = ids.map(id => {
+      const own = o.feed.filter(e => e.thread === id);
+      return { id, title: id === "th-main" ? "운영" : "기록", status: "open", updated_at: own.at(-1).at, messages: own.length,
+        pending: own.filter(e => e.kind === "ask" && !e.answer).length, last: own.at(-1) };
+    }).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    const thread = new URL(req.url, "http://x").searchParams.get("thread") || threads[0]?.id || null;
+    return json({ ...summary(o), threads, thread, feed: o.feed.filter(e => e.thread === thread), sessions: [], gates: [] });
+  }
   if (rest === "seen") { o.seen = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id); return json(summary(o)); }
   if (rest === "message") {
-    const entry = { id: `m${o.feed.length}`, at: new Date().toISOString(), kind: "user", role: "user", text: data.text };
+    const entry = { id: `m${o.feed.length}`, at: new Date().toISOString(), kind: "user", role: "user", text: data.text, thread: data.thread || "th-main" };
     o.feed.push(entry);
     return json({ ...entry, nudge: o.session ? "sent" : "no-operator" });
   }
@@ -164,7 +178,18 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.fill(text, "s2는 지금 무엇을 하고 있습니까?");
     await page.press(text, "Enter");
     await page.waitForFunction(() => [...document.querySelectorAll("#opfab-view .op-user")].some(e => e.textContent.includes("s2는 지금 무엇을")));
-    assert.deepEqual(lastSent("POST", "/api/operators/opB/message").body, { text: "s2는 지금 무엇을 하고 있습니까?" });
+    assert.deepEqual(lastSent("POST", "/api/operators/opB/message").body, { text: "s2는 지금 무엇을 하고 있습니까?", thread: "th-main" });
+    // At the default width the list and the thread take turns.
+    const shown = sel => page.locator(`#opfab-view ${sel}`).first().isVisible();
+    assert.deepEqual([await shown(".op-thread-list"), await shown(".op-thread-view")], [false, true]);
+    await page.click("#opfab-view .op-thread-back");
+    assert.deepEqual([await shown(".op-thread-list"), await shown(".op-thread-view")], [true, false]);
+    assert.deepEqual(await page.locator("#opfab-view .op-thread-name").allInnerTexts(), ["운영", "기록"]);
+    await page.click('#opfab-view .op-thread-row[data-thread="th-old"]');
+    await page.waitForSelector('#opfab-view .op-entry[data-entry="h1"]');
+    await page.click("#opfab-view .op-thread-back");
+    await page.click('#opfab-view .op-thread-row[data-thread="th-main"]');
+    await page.waitForSelector('#opfab-view .op-entry[data-entry="p2"]');
     assert.equal(await page.inputValue(text), "");
     assert.match(await page.textContent("#opfab-view .op-composer-status"), /operator beta-ops: 메시지 전달됨/);
 
@@ -242,6 +267,16 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.click(".operator-fab");
     await page.waitForSelector(".opfab-modal[open]");
     assert.deepEqual(await box(), { w: 960, h: 320, cx: 640, cy: 450 }, "kept across a reload");
+    // Wide, the list and the thread sit side by side and there is no 「← 목록」.
+    await page.locator("#opfab-view .op-tab", { hasText: "beta-ops" }).click();
+    await page.waitForSelector("#opfab-view .op-thread-row");
+    const side = await page.evaluate(() => {
+      const l = document.querySelector("#opfab-view .op-thread-list").getBoundingClientRect();
+      const v = document.querySelector("#opfab-view .op-thread-view").getBoundingClientRect();
+      return { both: l.width > 0 && v.width > 0, beside: l.right <= v.left, back: document.querySelector("#opfab-view .op-thread-back").getBoundingClientRect().width };
+    });
+    assert.deepEqual(side, { both: true, beside: true, back: 0 });
+    if (process.env.CLAUNCH_SCREENSHOT_WIDE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_WIDE });
     await page.locator(".opfab-grip-e").dblclick();
     assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 });
     assert.equal(await stored(), null);
@@ -259,7 +294,7 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
 
     // On a phone the dialog takes the screen; its conversation is the one
     // scroller and nothing runs sideways.
-    for (let i = 0; i < 30; i++) ops.opB.feed.push({ id: `q${i}`, at: at(10 + i), kind: "post", role: "bot", text: `줄 ${i} `.repeat(12), level: "info", refs: [] });
+    for (let i = 0; i < 30; i++) ops.opB.feed.push({ id: `q${i}`, at: at(10 + i), kind: "post", role: "bot", text: `줄 ${i} `.repeat(12), level: "info", refs: [], thread: "th-main" });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.click(".operator-fab");
     await page.waitForSelector('#opfab-view .op-entry[data-entry="q29"]');
@@ -288,6 +323,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.isVisible(".chat-fab"), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: one dock with both segments, markdown bodies, badge sum and alert, session-scoped default operator, seen on show, no management in the dialog, ask answer, Enter send, per-operator drafts, Alt+O toggle, link closes dialog, session line with link, centred resize kept in localStorage, phone full-screen with one scroller, hidden on Observer");
+    console.log("PASS: threads taking turns at the default width and side by side when resized wide, a message into the thread on screen, one dock with both segments, markdown bodies, badge sum and alert, session-scoped default operator, seen on show, no management in the dialog, ask answer, Enter send, per-operator drafts, Alt+O toggle, link closes dialog, session line with link, centred resize kept in localStorage, phone full-screen with one scroller, hidden on Observer");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

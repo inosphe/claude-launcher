@@ -4170,8 +4170,20 @@ conversation and an input row; closed, the cards take the full width. The
 choice is kept per browser (`localStorage` key
 `claunch-observer-operator-dock`) and starts closed. Each operator has
 a name and a project scope — tick one project, several, or *all projects* —
-and its own feed, bound session and watch switch, so two operators over
-overlapping projects never share a conversation. **Start** picks a profile
+and its own threads, bound session and watch switch, so two operators over
+overlapping projects never share a conversation. The conversation is a set of
+threads (owner `operator:<id>` in the daemon's thread store, kept out of the
+session rail and thread history): the thread list and the selected thread sit
+side by side when the conversation column is at least 640px wide and take
+turns below that. **New thread** opens one with a title and a first message;
+the bot opens one with `opv2_thread_open`. A message you type can carry
+images (the 🖼 button, paste or drop), which the bot reads from `opv2_inbox`
+as file paths. A post, ask or dispatch report lands in the thread its call
+names, else in the thread of what it answers, else in the most recently
+active thread. On first read after upgrading, an operator's old single feed
+moves into one thread titled 「이전 대화」 and the original record is kept as
+`<id>.feed-backup.json` beside it; the move runs once and a repeat changes
+nothing. **Start** picks a profile
 (and the model and effort when its harness declares them) and creates one
 session running the bundled `operator-v2` workflow with the operator's id as
 its input; **Stop** ends it (an agent may not stop an operator — that is the
@@ -4204,7 +4216,9 @@ it may type into another session of its scope with `opv2_dispatch` only to
 relay an instruction of yours (the call names the message or answered ask it
 carries). HTTP: `GET/POST /api/operators`, `GET/PATCH/DELETE
 /api/operators/{id}`, `POST /api/operators/{id}/start`, `…/stop`,
-`…/message {text}`, `…/asks/{entry}/answer`, `…/seen`; the bot's own calls
+`…/message {text, thread?, images?}`, `…/threads {title, text, images?}`,
+`…/threads/{thread}/close|reopen|title`, `…/asks/{entry}/answer`, `…/seen`
+(`GET /api/operators/{id}?thread=<id>` returns that thread's messages); the bot's own calls
 live under `/api/operators/agent/{session}/…` and are refused to any session
 that is not that operator's bound session. (Operator v1 — one bot per
 project on its own page — was removed in claunch-iw5i8.6.)
