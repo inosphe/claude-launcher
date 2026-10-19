@@ -3721,11 +3721,13 @@ procedures:
                     - if: "$data.inputs.session_routing == true and $data.route.mode == 'delegate'"
                       then:
                         # 자식이 멈추거나(escalated) 실패하면 사람이 다음 진행을 정한다:
-                        # 직접 이어서(경로를 direct로 바꾸고 아래 work로), 다시 위임
-                        # (이 루프의 다음 회차), 계획부터 다시
+                        # 직접 이어서(경로가 direct가 되어 루프를 나가 아래 work로),
+                        # 다시 위임(이 루프의 다음 회차), 계획부터 다시. 루프를 나가는
+                        # 조건이 경로라서 아래 catch 본문에 break 라벨이 없다 — 같은
+                        # 본문을 test-rework-route의 재위임 루프가 그대로 쓴다.
                         id: delegated
                         loop:
-                          while: "true"
+                          while: "$data.route.mode == 'delegate'"
                           max: 5
                           do:
                             try:
@@ -3735,11 +3737,13 @@ procedures:
                               escalated: &delegated-rework
                                 try: [delegated-rework-approval]
                                 catch:
-                                  rework-direct:
-                                    - {seq: [route-direct], bind: route}
-                                    - {break: delegated}
+                                  rework-direct: {seq: [route-direct], bind: route}
                                   rework-delegate: {seq: [route-delegate], bind: route}
-                                  reject: {continue: plan-work}
+                                  reject:
+                                    # direct로 표시해야 계획 재작성으로 간다(위임 경로로
+                                    # 남으면 rework-route가 다시 열린다)
+                                    - {seq: [route-direct], bind: route}
+                                    - {continue: plan-work}
                               failed: *delegated-rework
                     - else: []
                   # work는 이 자리 하나에서만 부른다: 라벨이 하나여야 `work`로
@@ -3801,11 +3805,26 @@ procedures:
                                   id: test-rework-route
                                   try: [delegated-rework-approval]
                                   catch:
+                                    # rework-direct: 경로만 바꾼다 — 고치는 것은 이 루프의
+                                    # 다음 review(앞 측정의 실패부터 고친다)다
                                     rework-direct: {seq: [route-direct], bind: route}
                                     rework-delegate:
                                       - {seq: [route-delegate], bind: route}
-                                      - {seq: [delegate-work], bind: work_report}
-                                    reject: {continue: plan-work}
+                                      # 다시 멈추거나 실패한 자식도 같은 게이트로 받는다
+                                      - id: redelegated
+                                        loop:
+                                          while: "$data.route.mode == 'delegate'"
+                                          max: 5
+                                          do:
+                                            try:
+                                              - {seq: [delegate-work], bind: work_report}
+                                              - {break: redelegated}
+                                            catch:
+                                              escalated: *delegated-rework
+                                              failed: *delegated-rework
+                                    reject:
+                                      - {seq: [route-direct], bind: route}
+                                      - {continue: plan-work}
                               - else: []
                   skip:
                     description: 셀프 게이트 셋이 전부 참 — 표적 테스트를 생략하고 사유를 보드에 기록한 뒤 착지 요청으로 간다.

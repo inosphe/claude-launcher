@@ -395,7 +395,9 @@ def test_a_stopped_delegate_rejected_goes_back_to_the_plan(tmp_path, monkeypatch
     st = runtime.report(_one(st, "delegate-work"), "escalated",
                         {"reason": "r", "commits": [], "remaining": "x"}, **kw)
     runtime.approve(None, decision="reject", reason="plan again", **kw)
-    assert _one(runtime.status(**kw), "coding-plan")
+    # marked direct first, so the plan is rewritten instead of the gate reopening
+    st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
+    assert _one(st, "coding-plan")
 
 
 def test_a_failed_parent_test_on_delegated_work_asks_the_person(tmp_path, monkeypatch):
@@ -420,6 +422,70 @@ def test_a_failed_parent_test_on_delegated_work_asks_the_person(tmp_path, monkey
     st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 0}, **kw)
     st = runtime.report(_one(st, "commit"), "ok", {}, **kw)
     assert st["status"] == "done"
+
+
+def _failed_parent_test(tmp_path, monkeypatch):
+    """Delegated work whose parent targeted test fails once."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
+    st = runtime.select(st["choices"][0]["instance"], "run", reason="fixture", **kw)
+    st = runtime.report(_one(st, "review"), "ok", {}, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 2}, **kw)
+    return st, kw
+
+
+@pytest.mark.parametrize("outcome", ["escalated", "failed"])
+def test_a_redelegated_child_that_stops_asks_again(tmp_path, monkeypatch, outcome):
+    """The test-failure path's rework-delegate: a child that stops again is
+    caught by the same gate instead of failing the run (review of fb313ba9)."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _failed_parent_test(tmp_path, monkeypatch)
+    runtime.approve(None, decision="rework-delegate", reason="again", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-delegate"), "ok", DELEGATE, **kw)
+    stopped = ({"reason": "r", "commits": [], "remaining": "x"}
+               if outcome == "escalated" else {"reason": "spawn refused"})
+    st = runtime.report(_one(st, "delegate-work"), outcome, stopped, **kw)
+    assert st["status"] != "failed"
+    [ask] = st["asks"]
+    assert ask["label"] == "delegated-rework-approval"
+    # rework-delegate once more: the loop retries and stops at the gate again
+    runtime.approve(None, decision="rework-delegate", reason="again", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-delegate"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), outcome, stopped, **kw)
+    # then rework-direct: this session fixes it in the test loop's next review
+    runtime.approve(None, decision="rework-direct", reason="mine", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
+    st = runtime.report(_one(st, "review"), "ok", {}, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 0}, **kw)
+    st = runtime.report(_one(st, "commit"), "ok", {}, **kw)
+    assert st["status"] == "done"
+
+
+def test_a_redelegated_child_that_finishes_goes_on_testing(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _failed_parent_test(tmp_path, monkeypatch)
+    runtime.approve(None, decision="rework-delegate", reason="again", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-delegate"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
+    st = runtime.report(_one(st, "review"), "ok", {}, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {"failed": 0}, **kw)
+    st = runtime.report(_one(st, "commit"), "ok", {}, **kw)
+    assert st["status"] == "done"
+
+
+def test_a_failed_parent_test_rejected_rewrites_the_plan(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _failed_parent_test(tmp_path, monkeypatch)
+    runtime.approve(None, decision="reject", reason="plan again", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
+    assert _one(st, "coding-plan")
 
 
 def test_delegated_work_sent_back_by_review_asks_first(tmp_path, monkeypatch):
