@@ -145,8 +145,10 @@
     state.attached.delete(tid);
   }
 
-  // Image files for thread `tid`'s composer; what is not an image is left out.
+  // Image files for thread `tid`'s composer; what is not an image is left
+  // out. Nothing is added while a post is out: it sends what it took.
   function attach(tid, files) {
+    if (state.sending.has(tid)) return;
     const list = Array.from(files || []);
     const pics = list.filter(f => pane().imageKind(f));
     state.notice = list.length > pics.length

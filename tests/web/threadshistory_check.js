@@ -361,7 +361,10 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   postReply = () => ({ status: 200, data: { delivered: true } });
   composer().listeners.drop({ dataTransfer: { items: [], files: [png] }, preventDefault() {} });
   sendBtn().listeners.click();
+  // A drop while the post is out is not taken (the post sends what it had).
+  composer().listeners.drop({ dataTransfer: { items: [], files: [png] }, preventDefault() {} });
   await settle();
+  assert.strictEqual(composer().byClass('th-attach-item').length, 0);
   assert.deepStrictEqual(JSON.parse(posts[1].body), { text: '', images: ['img-3'] });
   // newest shows the composer too, for the newest thread.
   page.open('newest');
