@@ -545,6 +545,12 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # Post-merge sweeps (delayed_sweep, claunch-yfkt2). Background sweeps are
+    # grouped: delayed_sweep_batch_size merges (0 = every merge alone) or the
+    # oldest queued merge having waited delayed_sweep_batch_settle seconds.
+    # One child session per batch tip watches it and is nudged on a timer.
+    "delayed_sweep_batch_size": 5,
+    "delayed_sweep_batch_settle": 600.0,
     # World-model simulations (sim/store.py, claunch-efnbt): the pi profiles
     # a new simulation's interpreter (B) and judge (C) run on, and the model
     # of each (one its profile offers; the judge's belongs to the

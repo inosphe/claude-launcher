@@ -2923,6 +2923,35 @@ scratch 경로에 둔다. 실행 중인 PID가 살아 있으면 재시작한 데
 OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 우선순위를
 낮출 수 있으며 양수 우선순위·force는 운영자 권한을 유지한다.
 
+#### 배치 스윕과 감시 자식 세션 (claunch-yfkt2)
+
+리더의 머지 관문은 워커의 표적 단위 테스트와 `merge_ready` 심사까지다. 전체 스윕은 머지 뒤
+큐가 맡고 리더는 기다리지 않는다. 머지마다 enqueue하는 규칙은 그대로이고, 큐가 스윕 횟수를
+줄인다.
+
+- 묶기(`Queue.dispatch`): 같은 git common directory의 대기 중 일반 작업(priority<0,
+  `queued`)을 `delayed_sweep_batch_size`(기본 5)건 또는 가장 오래된 작업이
+  `delayed_sweep_batch_settle`(기본 600초) 대기했을 때 한 묶음으로 만든다. 체크포인트는
+  누적(A, A+B, A+B+C)이므로 묶음의 가장 새 작업이 tip이고, tip이 포함하는 앞선 작업은
+  `covered`(`covered_by`=tip)가 된다. 스윕은 tip 스냅샷(detached 워크트리) 하나만 돈다.
+  수정 머지(priority 0)와 재시도는 묶지 않는다. size 0이면 묶지 않는다(머지마다 따로).
+- 판정 전파: tip이 `passed`면 covered 작업은 같은 영수증으로 `passed`(통지 없음)가 된다.
+  tip이 실패하면 covered 작업은 그대로 두고, `unbatch --job <tip>`이 그것들을 개별
+  `queued` 작업으로 풀어(`bisect_of`=tip, 저장소 pause 중에도 실행) 개별 스윕으로 원인 머지를
+  좁힌다. tip을 `cancel`하면 covered 작업은 묶기 풀로 돌아간다.
+- 감시 자식: 데몬 Clock이 tip마다 `sweep-job-v2` 런을 도는 자식 세션을 리더의 자식으로
+  spawn한다(동시에 3개까지, 실패하면 300초 뒤 재시도, 실패해도 스윕은 돈다). 스윕 프로세스는
+  전과 같이 데몬이 시작하고 테스트 창에서 priority -1로 대기한다. 자식은 직접 테스트를
+  돌리지 않는다.
+- 주기 알림: 자식의 `wait`(probe `job-state`, 60초 poll)는 900초마다 timeout으로 런을 옮기고,
+  데몬 clock이 드라이버에 「the run moved」 블록을 보내 idle hold된 자식도 깨운다(6.5).
+  깨어난 자식은 `tools/delayed_sweep.py nudge --job <id>`의 문구를 읽는다: 창을 쥐고 돌 때는
+  TEST WINDOW HELD(건드리지 않는다), 창 순번을 기다릴 때는 WAITING FOR WINDOW 또는 QUEUED
+  (할 일 없음). 판정이 나면 `result` 단계가 passed는 보고만, failed는 `unbatch`와 원인 머지
+  좁히기 후 리더에게 한 줄을 보낸다.
+- 우선순위: 스윕은 priority -1이라 대기 중 단위 테스트(0)를 막지 않는다. 실행 중인 스윕은
+  완료까지 독점한다.
+
 회귀 실패가 기록되면 큐는 해당 git common directory의 일반 머지를 중단한다.
 리더는 `handle-regression`에서 원래 머지 이슈의 자식 수정 이슈를 만들고
 별도 워크트리의 `improv-worker-v2` 자식 세션에 위임한다. `repair`로 등록한
@@ -2985,6 +3014,9 @@ uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sh
 uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
 uv run --no-sync python tools/delayed_sweep.py remeasure --repo <repo> --job <failed-job> --reason <why>
 uv run --no-sync python tools/delayed_sweep.py release --repo <repo> --job <failed-job> --reason <사유>
+uv run --no-sync python tools/delayed_sweep.py unbatch --job <failed-tip>
+uv run --no-sync python tools/delayed_sweep.py job-state --job <job>   # 0 판정 있음, 1 대기
+uv run --no-sync python tools/delayed_sweep.py nudge --job <job>
 ```
 
 다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.

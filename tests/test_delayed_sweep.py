@@ -876,3 +876,217 @@ def test_runner_gets_the_origins_config_file_with_its_home(repo, tmp_path, monke
     env = seen[0]["env"]
     assert env["CLAUDE_LAUNCHER_HOME"] == str(home.resolve())
     assert env["CLAUDE_LAUNCHER_SYNC_FILE"] == str(origin_cfg.resolve())
+
+
+# --- batches and watching sessions (claunch-yfkt2) ---------------------------------------
+
+
+def merges(q, repo, names):
+    return [enqueue(q, repo, n)[0] for n in names]
+
+
+def test_a_full_batch_is_swept_once_at_its_newest_checkpoint(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    claimed = q.claim(batch=(5, 3600))
+    assert claimed["id"] == jobs[-1]["id"]
+    assert [q.get(j["id"])["status"] for j in jobs[:-1]] == ["covered"] * 4
+    assert {q.get(j["id"])["covered_by"] for j in jobs[:-1]} == {jobs[-1]["id"]}
+    q.finish(claimed["id"], "passed", "receipt")
+    done = [q.get(j["id"]) for j in jobs[:-1]]
+    assert {j["status"] for j in done} == {"passed"}
+    assert all(j["notified"] == 1 and j["receipt"] == "receipt" for j in done)
+
+
+def test_equal_creation_times_keep_the_order_the_merges_were_enqueued_in(repo, tmp_path, monkeypatch):
+    # time.time() repeats within one clock tick; the job id is a hash, so a tie broken by id
+    # picked a random batch tip, a random status order and a random claim order.
+    monkeypatch.setattr(mod.time, "time", lambda: 1000.0)
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    assert [j["id"] for j in q.status()["jobs"]] == [j["id"] for j in jobs]
+    assert q.claim(batch=(5, 3600))["id"] == jobs[-1]["id"]
+    assert [j["id"] for j in q.members(jobs[-1]["id"])] == [j["id"] for j in jobs[:-1]]
+    solo = queue(tmp_path / "solo")
+    singles = merges(solo, repo, list("fghij"))
+    claimed = []
+    for _ in singles:
+        job = solo.claim()
+        claimed.append(job["id"])
+        solo.finish(job["id"], "passed", "receipt")
+    assert claimed == [j["id"] for j in singles]
+
+
+def test_a_short_group_waits_for_company_until_the_settle_time(repo, tmp_path):
+    q = queue(tmp_path)
+    merges(q, repo, ["a", "b"])
+    assert q.claim(batch=(5, 3600)) is None
+    job = q.claim(batch=(5, 0))
+    assert job is not None and len(q.members(job["id"])) == 1
+
+
+def test_a_batch_takes_at_most_its_size_and_the_rest_form_the_next(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcdefg"))
+    first = q.claim(batch=(5, 3600))
+    assert first["id"] == jobs[4]["id"]
+    q.finish(first["id"], "passed", "r")
+    assert q.claim(batch=(5, 3600)) is None  # two merges, settle not reached
+    assert q.get(jobs[5]["id"])["formed"] == 0
+
+
+def test_a_failed_batch_is_narrowed_by_unbatch_even_while_paused(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abc"))
+    tip = q.claim(batch=(3, 0))
+    q.finish(tip["id"], "failed", "r", "boom")
+    assert q.status(repo)["pauses"][0]["job"] == tip["id"]
+    assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["covered", "covered"]
+    assert q.unbatch(tip["id"])["released"] == 2
+    again = q.claim(batch=(3, 0))
+    assert again["id"] == jobs[0]["id"] and again["bisect_of"] == tip["id"]
+
+
+def test_unbatch_refuses_a_tip_that_has_no_verdict(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, ["a", "b"])
+    tip = q.claim(batch=(2, 0))
+    with pytest.raises(ValueError):
+        q.unbatch(tip["id"])
+
+
+def test_cancelling_a_tip_returns_its_merges_to_the_pool(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, ["a", "b", "c"])
+    tip = q.claim(batch=(3, 0))
+    q.cancel(tip["id"], "operator")
+    assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["queued", "queued"]
+    assert all(q.get(j["id"])["covered_by"] is None for j in jobs[:2])
+
+
+def test_a_repair_is_never_batched(repo, tmp_path):
+    q = queue(tmp_path)
+    bad = paused_on(q, repo)
+    q.repair(repo, bad["id"], "fix")
+    fix, _ = enqueue(q, repo, "fix", issue="fix")
+    other, _ = enqueue(q, repo, "other")
+    assert q.get(fix["id"])["priority"] == 0
+    assert q.claim(batch=(5, 0))["id"] == fix["id"]
+    assert q.get(fix["id"])["status"] == "running" and q.get(fix["id"])["covered_by"] is None
+
+
+def test_without_a_batch_policy_every_merge_is_claimed_alone(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, ["a", "b"])
+    assert q.claim()["id"] == jobs[0]["id"]
+
+
+def test_job_state_reports_the_tip_verdict_for_a_covered_merge(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, ["a", "b"])
+    tip = q.claim(batch=(2, 0))
+    db = tmp_path / "jobs.sqlite3"
+    tool = TOOL.with_name("delayed_sweep.py")
+    run = lambda *a: subprocess.run([sys.executable, str(tool), "--database", str(db), *a],
+                                    capture_output=True, text=True)
+    waiting = run("job-state", "--job", jobs[0]["id"])
+    assert waiting.returncode == 1 and json.loads(waiting.stdout)["tip"] == tip["id"]
+    q.finish(tip["id"], "passed", "r")
+    out = run("job-state", "--job", jobs[0]["id"])
+    assert out.returncode == 0 and json.loads(out.stdout)["status"] == "passed"
+    assert run("job-state", "--job", tip["id"]).returncode == 0
+    assert run("nudge", "--job", jobs[0]["id"]).stdout.startswith("DONE")
+
+
+def test_nudge_tells_a_waiting_job_to_stay_put(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    db = tmp_path / "jobs.sqlite3"
+    out = subprocess.run([sys.executable, str(TOOL.with_name("delayed_sweep.py")), "--database", str(db),
+                          "nudge", "--job", job["id"]], capture_output=True, text=True)
+    assert out.returncode == 0
+    assert out.stdout.split()[0] in ("QUEUED:", "WAITING")
+    assert "Nothing needs doing" in out.stdout or "nothing needs doing" in out.stdout
+
+
+def test_a_queue_file_without_the_batch_columns_is_upgraded(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, common TEXT NOT NULL, "
+               "sha TEXT NOT NULL, ref TEXT NOT NULL, issue TEXT NOT NULL, owner TEXT NOT NULL, "
+               "tool TEXT NOT NULL, python TEXT NOT NULL, command TEXT, status TEXT NOT NULL, "
+               "created REAL NOT NULL, UNIQUE(common, sha))")
+    db.commit()
+    db.close()
+    with mod.Queue(path).connect() as conn:
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    assert {"covered_by", "formed", "child", "bisect_of"} <= columns
+
+
+def spawner(names, fail=False):
+    calls = []
+    def spawn(parent, body):
+        calls.append((parent, body))
+        if fail:
+            raise RuntimeError("daemon refused")
+        return names[len(calls) - 1]
+    return calls, spawn
+
+
+def live_manager():
+    return SimpleNamespace(get=lambda name: SimpleNamespace(exited=False))
+
+
+def test_the_clock_gives_each_batch_tip_one_watching_child_and_still_sweeps(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    calls, spawn = spawner(["w1", "w2"])
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(live_manager(), q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.tick())
+    asyncio.run(clock.tick())
+    assert len(calls) == 1
+    parent, body = calls[0]
+    assert parent == "leader" and body["workflow"] == "sweep-job-v2" and body["workflow_version"] == 2
+    assert body["cflow_inputs"]["job"] == jobs[-1]["id"] and body["beads"] is False
+    assert q.get(jobs[-1]["id"])["child"] == "w1"
+    assert q.get(jobs[-1]["id"])["status"] == "running"
+
+
+def test_a_failed_spawn_is_retried_later_and_does_not_stop_the_sweep(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    calls, spawn = spawner([], fail=True)
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(live_manager(), q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.tick())
+    asyncio.run(clock.tick())
+    assert len(calls) == 1  # backed off
+    assert q.get(jobs[-1]["id"])["status"] == "running"
+    assert q.get(jobs[-1]["id"])["child"] == ""
+
+
+def test_an_exited_watcher_is_replaced(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    q.dispatch(5, 0)
+    q.attach_child(jobs[-1]["id"], "gone")
+    calls, spawn = spawner(["w2"])
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    manager = SimpleNamespace(get=lambda name: SimpleNamespace(exited=(name == "gone")))
+    asyncio.run(Clock(manager, q, batch=True, spawn=spawn, policy=(5, 3600)).tick())
+    assert q.get(jobs[-1]["id"])["child"] == "w2"
+
+
+def test_batching_follows_the_daemon_settings(monkeypatch):
+    assert daemon_sweep.batch_policy({}) == (5, 600.0)
+    assert daemon_sweep.batch_policy({"delayed_sweep_batch_size": 0}) is None
+    assert daemon_sweep.batch_policy({"delayed_sweep_batch_size": 3,
+                                      "delayed_sweep_batch_settle": 60}) == (3, 60.0)
