@@ -44,6 +44,12 @@ fragments:
   inbox: |
     사용자 입력 처리: `opv2_inbox`를 부른다. 메시지마다 답을 `opv2_post`로
     게시한다(참조한 세션은 `refs`에). 처리할 입력이 없으면 아무것도 게시하지 않는다.
+    - thread: 사용자와의 대화는 thread 여러 개로 나뉜다. inbox 항목마다 `thread`가
+      있고, 그 항목에 대한 답·`opv2_ask`·`opv2_dispatch`에는 그 값을 `thread`로
+      넘긴다(그 항목을 `reply_to`로 지정해도 같은 thread에 간다). `thread`와
+      `reply_to`가 둘 다 없으면 가장 최근에 활성인 thread에 게시되므로, 여러 thread의
+      입력을 한 번에 받았을 때 답이 다른 thread에 간다. 사용자에게 새 주제를 꺼낼
+      때(감시 중 발견 등)는 `opv2_thread_open`으로 thread를 열고 그 id에 쓴다.
     `opv2_post`·`opv2_ask`의 본문은 markdown으로 쓴다(rule `markdown-body`).
     - 지시 전달: 사용자가 다른 세션에 무엇을 하라고 지시했으면 `opv2_dispatch`에 그
       메시지의 id를 `on_behalf_of`로 실어 대상 세션에 전달하고, 사용자가 한 말을
@@ -62,7 +68,7 @@ fragments:
       요청은 사용자 알림 카드로 5분 기다린다. 새 세션 요청은 무응답이면 승인되고,
       재개 요청은 무응답이면 재개하지 않고 `fallback`을 새 세션 요청으로 올린다.
       결과(승인·거절·manual·실패)는 터미널에 `[claunch spawn-request <id>]`로 오고
-      피드에도 남는다. 대기 중인 요청은 `opv2_poll`의 `requests`에 있다. 같은 일로
+      요청한 thread에도 남는다. 대기 중인 요청은 `opv2_poll`의 `requests`에 있다. 같은 일로
       요청을 다시 올리지 않는다. 거절되면 그 사실을 사용자에게 게시하고 지시를
       기다린다. 새 세션이 만들어지면 그 이름을 사용자에게 알린다.
     - 작업 질문: 처리 중이거나 처리했던 일감·작업을 물으면 근거를 찾아 답한다 —
@@ -80,7 +86,7 @@ rules:
       사용자와의 대화는 터미널이 아니라 opv2_* 도구로만 한다 — 터미널에 쓴 글은
       사용자에게 보이지 않는다. v1 operator_* 도구는 쓰지 않는다.
     why: >-
-      Operator v2의 화면은 Observer의 operator 피드다(daemon/operators_v2.py).
+      Operator v2의 화면은 Observer의 operator thread 대화다(daemon/operators_v2.py).
       operator_* 도구는 v1의 프로젝트당 bot에 묶여 있어 v2 세션은 거절된다.
     deliver: all
   inbox-anytime:
@@ -118,7 +124,7 @@ rules:
       이름·이슈 id·커밋 해시는 `코드`로, 여러 항목은 목록으로, 표가 필요하면 markdown
       표로 쓴다. 제목(#)은 쓰지 않는다. 터미널용 정렬 공백이나 ANSI 문자를 넣지 않는다.
     why: >-
-      Observer의 operator 피드와 Operator 대화창이 본문을 markdown으로 렌더링한다
+      Observer의 operator thread 대화와 Operator 대화창이 본문을 markdown으로 렌더링한다
       (claunch-iw5i8.10, 사용자 지시 2026-10-18).
     deliver: all
 
