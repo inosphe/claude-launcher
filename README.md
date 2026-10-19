@@ -120,7 +120,7 @@ claunch run work:claude                  # explicit Claude selector
 | `create <name>`        | Create a profile (`--harness`, `--parent` to inherit). Claude profiles seed/apply Claude config; other harnesses start clean. |
 | `set-harness <name> [h]` | Show or pin the profile's harness; `--clear` inherits from its parent/default. |
 | `login <name[:harness]>` | Run the selected OAuth harness's login flow (Claude setup-token, Codex/Kimi/Cursor login). |
-| `run <name[:harness]> [args...]` | Launch the profile default or an explicit harness. `--borrow BASE_PROFILE` works for Claude and declared API-key harnesses; `--null`, `--provider` and `--add-prompt` are Claude-only. Other args pass through untouched. |
+| `run <name[:harness]> [args...]` | Launch the profile default or an explicit harness. `--borrow BASE_PROFILE` works for Claude and declared API-key harnesses; `--null`, `--provider`, `--add-prompt` and `--keep-reg-exe` are Claude-only. Under WSL claude starts with Windows `reg.exe` hidden, like daemon sessions (`daemon.wsl_hide_reg_exe`); `--keep-reg-exe` skips that for one run (e.g. to use `sudo`). Other args pass through untouched. |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show the profile template (the layer under every profile) or write its bootstrap file. |

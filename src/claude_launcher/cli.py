@@ -538,9 +538,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     wt_choice, rest = _extract_worktree(list(args.args or []))
     borrow_name, rest = _extract_borrow(rest)
     provider_name = None
-    null_token = add_prompt = False
+    null_token = add_prompt = keep_reg_exe = False
     if selected == harnesses.CLAUDE_HARNESS:
         null_token, rest = _extract_null(rest)
+        keep_reg_exe, rest = _extract_keep_reg_exe(rest)
         if null_token and borrow_name is not None:
             raise profile.ProfileError(
                 "--null launches without any OAuth token; "
@@ -617,6 +618,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             null_token=null_token,
             cwd=str(tree.path) if tree is not None else None,
             tools=tools_choice,
+            keep_reg_exe=keep_reg_exe,
         )
     finally:
         if labelled:
@@ -1254,6 +1256,17 @@ def _extract_null(args: List[str]) -> "tuple[bool, List[str]]":
     return _extract_bool_flag(args, "--null")
 
 
+def _extract_keep_reg_exe(args: List[str]) -> "tuple[bool, List[str]]":
+    """Pull a boolean ``--keep-reg-exe`` flag out of run passthrough.
+
+    Under WSL ``run`` starts claude with Windows ``reg.exe`` hidden, as daemon
+    sessions are (``daemon.wsl_hide_reg_exe``, see ``wsl_reg_stub``); this
+    flag starts it in the plain namespace instead, where ``sudo`` works and a
+    registry-deployed managed policy is read.
+    """
+    return _extract_bool_flag(args, "--keep-reg-exe")
+
+
 def _fmt_reset(resets_at: Optional[str]) -> str:
     if not resets_at:
         return ""
@@ -1421,6 +1434,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="launch PROFILE or PROFILE:HARNESS (extra args pass through; "
         "--borrow NAME uses another profile's token for this run only; "
         "--null clears CLAUDE_CODE_OAUTH_TOKEN and injects nothing; "
+        "--keep-reg-exe leaves Windows reg.exe visible under WSL (sudo works); "
         "--provider NAME overrides the API provider for this run only; "
         "--add-prompt opens an editor to append text to the system prompt; "
         "--worktree[=NAME] / --no-worktree answer the git-worktree question "
@@ -1431,7 +1445,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "args",
         nargs=argparse.REMAINDER,
-        help="--borrow NAME, --null, --provider NAME, --add-prompt, "
+        help="--borrow NAME, --null, --keep-reg-exe, --provider NAME, --add-prompt, "
         "--worktree[=NAME] (bare = name it after this pane and the time; the "
         "value form needs the '='), --no-worktree, and/or arguments forwarded "
         "to claude",
