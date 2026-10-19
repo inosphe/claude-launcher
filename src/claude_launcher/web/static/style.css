@@ -1242,6 +1242,19 @@ html[data-theme="light"] .xterm {
 #session-list .rail-bead.created { border-style: dashed; }
 #session-list .rail-bead:hover { border-color: #58a6ff; color: #e6edf3; }
 #session-list .rail-bead-more { cursor: default; }
+/* the work count at the head of the line (claunch-9f8ag): what is left,
+   split by status in the pills' own tints, then what is done */
+#session-list .rail-beads-count {
+  display: inline-flex; gap: 6px; align-items: baseline; font-size: 10.5px;
+  color: #8b949e; white-space: nowrap; margin-right: 2px; cursor: default;
+}
+#session-list .rail-beads-left { color: #e6edf3; font-weight: 600; }
+#session-list .rail-beads-left.none { color: #56d364; }
+#session-list .rail-beads-n.waiting { color: #79c0ff; }
+#session-list .rail-beads-n.working { color: #d29922; }
+#session-list .rail-beads-n.landing { color: #d2a8ff; }
+#session-list .rail-beads-n.blocked { color: #ff7b72; }
+#session-list .rail-beads-n.done { color: #6e7681; }
 /* the hover card: fixed beside the pill, over everything */
 .rail-bead-pop {
   position: fixed; z-index: 60; width: 320px; max-width: calc(100vw - 16px);

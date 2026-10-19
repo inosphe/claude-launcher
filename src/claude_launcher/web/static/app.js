@@ -7630,7 +7630,15 @@ function railCwdLine(s) {
    payload, which carries the listing's rows in full -- no second fetch.
    The card is an issue pill's ONLY hover affordance: a native `title` would
    draw the browser's own tooltip a second late, on top of the card that is
-   already open (see claunch-1qa8e). */
+   already open (see claunch-1qa8e).
+
+   The line opens with the work count (claunch-9f8ag): how many assigned
+   issues are left, split by where they stand, and how many are done -- the
+   pills stop at four, so the count is what says how much is still queued.
+   Follow-ups the session filed for others are not its work left and stay
+   out of it. A session whose assigned work is all closed keeps the line for
+   the count alone ("0 left · 3 done"), so a finished queue reads as finished
+   rather than as a row with nothing on it. */
 let railBeads = new Map();   // session name -> lane (issues, created, summary)
 let railBeadsAt = 0;         // when the queues were last asked for
 let railBeadsBusy = false;
@@ -7664,14 +7672,17 @@ function railBeadsIndex(data) {
     for (const lane of b.lanes || []) {
       if (!lane.session || !lane.known) continue;
       const cur = out.get(lane.session);
+      const done = (lane.summary && lane.summary.done) || 0;
       if (cur) {
         cur.issues = cur.issues.concat(lane.issues || []);
         cur.created = cur.created.concat(lane.created || []);
+        cur.done += done;
       } else {
         out.set(lane.session, {
           issues: [...(lane.issues || [])],
           created: [...(lane.created || [])],
           summary: lane.summary || {},
+          done,
           root: b.root,
         });
       }
@@ -7686,7 +7697,7 @@ function applyRailBeads() {
   for (const li of list.querySelectorAll("li[data-name]")) {
     const lane = railBeads.get(li.dataset.name);
     let line = li.querySelector(".rail-beads");
-    if (!lane || (!(lane.issues || []).length && !(lane.created || []).length)) {
+    if (!lane || (!(lane.issues || []).length && !(lane.created || []).length && !lane.done)) {
       if (line) line.remove();
       continue;
     }
@@ -7719,7 +7730,8 @@ function railBeadsLine(name, lane) {
   const all = (lane.issues || []).map((i) => ({ i, created: false }))
     .concat((lane.created || []).map((i) => ({ i, created: true })));
   const shown = all.slice(0, RAIL_BEADS_MAX);
-  line._railSig = JSON.stringify([name, next || null, all]);
+  line._railSig = JSON.stringify([name, next || null, all, lane.done || 0]);
+  line.appendChild(railBeadsCount(lane));
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
@@ -7744,6 +7756,38 @@ function railBeadsLine(name, lane) {
     line.appendChild(more);
   }
   return line;
+}
+
+/* The rail's work-count rows, in the order they are drawn: the Queues
+   page's own words (beadsQueueSummaryText) for the same statuses. */
+const RAIL_BEADS_COUNTS = [
+  ["waiting", (s) => s === "open" || s === "in_ready"],
+  ["working", (s) => s === "in_progress"],
+  ["landing", (s) => s === "in_review"],
+  ["blocked", (s) => s === "blocked"],
+];
+
+/* The count at the head of a row's beads line: "N left" over the assigned
+   issues, then one count per status that has any, then "N done". Counted
+   from the issues themselves rather than the lane summary, because a
+   session on two boards carries both boards' issues but only the first
+   board's summary (railBeadsIndex). The native `title` spells it out in
+   full, zeros included. */
+function railBeadsCount(lane) {
+  const issues = lane.issues || [];
+  const done = lane.done || 0;
+  const box = el("span", "rail-beads-count");
+  box.appendChild(el("span", `rail-beads-left${issues.length ? "" : " none"}`, `${issues.length} left`));
+  const full = [`${issues.length} left`];
+  for (const [word, has] of RAIL_BEADS_COUNTS) {
+    const n = issues.filter((i) => has(i.status)).length;
+    full.push(`${n} ${word}`);
+    if (n) box.appendChild(el("span", `rail-beads-n ${word}`, `${n} ${word}`));
+  }
+  full.push(`${done} done`);
+  if (done) box.appendChild(el("span", "rail-beads-n done", `${done} done`));
+  box.title = `assigned issues: ${full.join(" · ")}`;
+  return box;
 }
 
 /* The hover card: one element for the whole rail, filled per pill. Fixed
