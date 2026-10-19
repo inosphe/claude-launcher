@@ -11,6 +11,7 @@ answers 0/1, inside one the checkout's own script runs.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -99,13 +100,25 @@ def test_this_checkout_resolves_to_its_own_tools_script():
     assert cli_gate.checkout_script("landed_check", str(ROOT)) == ROOT / "tools" / "landed_check.py"
 
 
+# Probes that still name a tools/ script, each measuring claude-launcher's own
+# daemon, so only meaningful in this repository. Moving them into the package
+# is claunch-bxxji / claunch-l6aay.1; a new entry here needs the same reason.
+_TOOLS_PROBES_STILL_ALLOWED = {
+    ("improv-leader-v2.yaml", "tools/deploy_check.py"),
+    ("perf-monitor-v2.yaml", "tools/perf_probe.py"),
+}
+
+
 def test_no_packaged_v2_probe_names_a_tools_script():
     """A v2 definition is read from the package in every repository; a probe
     naming this repository's tools/ cannot run anywhere else."""
     for path in sorted(layers.package_dir().glob("*.yaml")):
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if line.strip().startswith("probe:"):
-                assert "tools/landed_check.py" not in line, f"{path.name}:{n}: {line.strip()}"
+            if not line.strip().startswith("probe:"):
+                continue
+            for script in re.findall(r"tools/[\w.-]+", line):
+                assert (path.name, script) in _TOOLS_PROBES_STILL_ALLOWED, \
+                    f"{path.name}:{n}: {line.strip()}"
 
 
 def test_the_landed_wait_probe_uses_claunch_gate():
