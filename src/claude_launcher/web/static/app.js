@@ -23160,7 +23160,7 @@ function syncCflowInputs() {
     const seeded = pendingSeedInputs;
     if (seeded) pendingSeedInputs = null;
     cflowInputsForm(box, fields, entry.input_constraints || [], seeded);
-    cflowInputsLive(box, f.workflow.value, newSessionCwd);
+    cflowInputsLive(box, f.workflow.value, newSessionCwd, f.profile);
     // TEMPORARY (claunch-z7b0n, v1 -> v2 migration): the daemon writes the
     // issue the Board answer settles into the run's `issue` input. The field
     // stays; it says so. Remove with api.py's overwrite once no v2 workflow
@@ -23184,12 +23184,16 @@ function syncCflowInputs() {
    checkbox may be turned on. The start still re-checks; this only says it
    earlier. */
 let cflowInputsCheckSeq = 0;
-function cflowInputsLive(box, picked, cwdOf) {
+/* The live check of the box drawn last, for the Profile picker's one
+   listener (an `options` list may hang on the new session's profile). */
+let cflowInputsRecheck = null;
+function cflowInputsLive(box, picked, cwdOf, profileEl) {
   let timer = null;
   const run = async () => {
     const seq = ++cflowInputsCheckSeq;
     const body = Object.assign(cflowPickBody(picked, workflowsCache), {
       cwd: cwdOf() || undefined, cflow_inputs: cflowInputsValues(box),
+      profile: (profileEl && profileEl.value) || undefined,
     });
     try {
       const resp = await api("/api/cflow2/inputs/check", {
@@ -23199,6 +23203,7 @@ function cflowInputsLive(box, picked, cwdOf) {
       const doc = await resp.json().catch(() => ({}));
       if (seq !== cflowInputsCheckSeq || !resp.ok) return;
       cflowInputsErrors(box, doc.errors || {});
+      cflowInputsOptions(box, doc.options || {});
       const general = box.querySelector(".cf2-constraint-error");
       if (general) {
         const msg = (doc.errors || {})._constraints || "";
@@ -23212,6 +23217,14 @@ function cflowInputsLive(box, picked, cwdOf) {
   box.addEventListener("change", schedule);
   for (const row of box.querySelectorAll('.cf2-input[data-precheck="gh"]')) {
     cflowGhPrecheck(row, cwdOf, schedule);
+  }
+  if (box.querySelector("datalist")) {
+    cflowInputsRecheck = schedule;
+    if (profileEl && !profileEl.dataset.cf2Recheck) {
+      profileEl.dataset.cf2Recheck = "1";
+      profileEl.addEventListener("change", () => cflowInputsRecheck && cflowInputsRecheck());
+    }
+    schedule();  // fill the lists before anything is typed
   }
 }
 
@@ -23349,10 +23362,62 @@ function cflowInputControl(field) {
     add.type = "button";
     add.addEventListener("click", () => addRow(null));
     wrap.append(rows, add);
+  } else if (field.options) {
+    // A combobox (claunch-iq1xc): the list is the daemon's, refilled from
+    // each POST /api/cflow2/inputs/check answer (cflowInputsOptions), so a
+    // dependent list follows the profile picked above it. Typing stays
+    // possible; the check refuses a value off the list.
+    const i = text("cf2-input-value", field.default, field.placeholder);
+    const list = document.createElement("datalist");
+    list.id = `cf2-opt-${field.name}-${++cflowOptionSeq}`;
+    i.setAttribute("list", list.id);
+    wrap.append(i, list);
   } else {
     wrap.appendChild(text("cf2-input-value", field.default, field.placeholder));
   }
   return wrap;
+}
+
+let cflowOptionSeq = 0;
+
+/* An `options` input's datalist set to `items`; false when it already
+   held them (a redraw would close an open suggestion list). */
+function cflowOptionsFill(list, items) {
+  const want = (items || []).map(String);
+  const have = [...list.children].map((c) => c.value);
+  if (want.join("\n") === have.join("\n")) return false;
+  while (list.firstChild) list.removeChild(list.firstChild);
+  for (const v of want) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    list.appendChild(opt);
+  }
+  return true;
+}
+
+/* The line under an `options` input: which list it offers and of which
+   profile (`{from, profile, items}` from the daemon; items null = the
+   daemon cannot say, so nothing is checked). */
+function cflowOptionsNote(o) {
+  if (!o) return "";
+  const of = o.profile ? ` of profile ${o.profile}` : "";
+  if (o.items == null) {
+    return o.profile ? `no ${o.from} list${of}; the value is not checked`
+      : `${o.from}: depends on a profile the form does not know; the value is not checked`;
+  }
+  return `${o.from}${of}: ${o.items.join(", ") || "none"}`;
+}
+
+/* Every `options` row of a box refilled from an answer's `options`. */
+function cflowInputsOptions(box, options) {
+  for (const row of box.querySelectorAll(".cf2-input")) {
+    const o = (options || {})[row.dataset.input];
+    const list = row.querySelector("datalist");
+    if (!o || !list) continue;
+    cflowOptionsFill(list, o.items);
+    const note = row.querySelector(".cf2-input-options");
+    if (note) note.textContent = cflowOptionsNote(o);
+  }
 }
 
 function cflowInputsForm(box, fields, constraints, seeded) {
@@ -23380,6 +23445,7 @@ function cflowInputsForm(box, fields, constraints, seeded) {
       row.appendChild(control);
     }
     if (field_.help) row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
+    if (field_.options) row.appendChild(el("p", "wf-note mono cf2-input-options", ""));
     row.appendChild(el("p", "cf2-input-error hidden"));
     box.appendChild(row);
   }
@@ -35933,7 +35999,8 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   const runInputs = run.inputs || ((run.data || {}).inputs);
   if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
-    root.appendChild(cflow2InputsBlock(runInputs, data.input_decls, live ? post : null));
+    root.appendChild(cflow2InputsBlock(runInputs, data.input_decls, live ? post : null,
+                                       data.input_options));
   }
 
   const cols = el("div", "cf2-cols");
@@ -36494,7 +36561,7 @@ function cflow2CollectionTable(name, col, post) {
 /* The run's start inputs (data.inputs), folded shut. An input whose
    declaration (data.input_decls) has set_by: [user] gets an editor while the
    run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
-function cflow2InputsBlock(values, decls, post) {
+function cflow2InputsBlock(values, decls, post, options) {
   const declOf = {};
   for (const d of decls || []) declOf[d.name] = d;
   const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
@@ -36515,16 +36582,20 @@ function cflow2InputsBlock(values, decls, post) {
     row.appendChild(text.length > 80 || text.includes("\n")
       ? mdInto(el("div", "md cf2-run-input-value"), text)
       : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
-    if (editable(k)) row.appendChild(cflow2InputEditor(k, v, declOf[k], post));
+    if (editable(k)) {
+      row.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
+    }
     box.appendChild(row);
   }
   return box;
 }
 
 /* A person's editor for one set_by: [user] input: a checkbox for a bool, a
-   picker for an enum, a text field otherwise (a list as one item per line).
-   The press confirms, then posts; the run page redraws from the answer. */
-function cflow2InputEditor(name, value, decl, post) {
+   picker for an enum, a combobox for an input with `options` (the daemon's
+   list for the run's current values, run detail's input_options), a text
+   field otherwise (a list as one item per line). The press confirms, then
+   posts; the run page redraws from the answer. */
+function cflow2InputEditor(name, value, decl, post, opts) {
   const wrap = el("div", "cf2-run-input-edit");
   const label = decl.label || name;
   const send = async (next, shown) => {
@@ -36563,6 +36634,14 @@ function cflow2InputEditor(name, value, decl, post) {
     field = el("input");
     field.type = decl.type === "int" ? "number" : "text";
     field.value = value == null ? "" : String(value);
+  }
+  if (decl.options && opts) {
+    const list = el("datalist");
+    list.id = `cf2-run-opt-${name}-${++cflowOptionSeq}`;
+    cflowOptionsFill(list, opts.items);
+    field.setAttribute("list", list.id);
+    field.title = cflowOptionsNote(opts);
+    wrap.appendChild(list);
   }
   const btn = el("button", "wf-btn sm", "Set");
   btn.addEventListener("click", async () => {

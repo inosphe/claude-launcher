@@ -510,7 +510,8 @@ def preflight(
                     chart, body.get("workflow_params"), str(body.get("context") or "")
                 )
                 cflow2_web.check_params(chart, workflow_params)
-                cflow_inputs = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))
+                cflow_inputs = cflow2_web.check_inputs(chart, body.get("cflow_inputs"),
+                                                       profile or None)
                 workflow_version = 2
         except cflow2_web.InputsInvalid as exc:
             raise OnboardError(str(exc), exc.errors) from None

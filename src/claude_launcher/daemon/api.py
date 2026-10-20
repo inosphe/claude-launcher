@@ -5585,8 +5585,9 @@ async def _cflow2_start(request: web.Request, cwd: str, scope: str, body: dict,
         return None
     ref, chart = chosen
     params = cflow2_web.params_for(chart, body.get("workflow_params"), context or "")
-    values = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))  # InputsInvalid -> 400
     profile = _scope_profile(request.app["manager"], scope)
+    values = await asyncio.to_thread(  # InputsInvalid -> 400
+        cflow2_web.check_inputs, chart, body.get("cflow_inputs"), profile)
     mesh = _scope_home_mesh(request, scope)
 
     def start() -> dict:
@@ -5625,7 +5626,8 @@ async def h_cflow2_run(request: web.Request) -> web.Response:
     live instances, per-node visits and the delegation rows."""
     cwd, scope = _cflow2_slot(request)
     prompts = request.query.get("prompts") in ("1", "true", "yes")
-    data = await asyncio.to_thread(cflow2_web.run_detail, cwd, scope, prompts)
+    data = await asyncio.to_thread(cflow2_web.run_detail, cwd, scope, prompts,
+                                   _scope_profile(request.app["manager"], scope))
     data["sessions"] = _scope_sessions(request.app["manager"], cwd, scope)
     data["collections"] = (
         await asyncio.to_thread(_cflow2_collections, cwd, scope) if data.get("run") else {}
@@ -5763,8 +5765,9 @@ async def h_cflow2_inputs_check(request: web.Request) -> web.Response:
     """Check start inputs without starting (the new-session form calls it as
     the user edits): per-field errors, cross-input constraints included
     (docs/cflow-v2.md 2.6). Body: workflow, workflow_version?, cwd?,
-    cflow_inputs. 200 ``{ok, values, errors}``; 404 when the workflow is not
-    a startable v2 definition."""
+    cflow_inputs, profile? (the new session's: what an empty
+    ``options.empty: session`` input stands for). 200 ``{ok, values, errors,
+    options}``; 404 when the workflow is not a startable v2 definition."""
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 - malformed body
@@ -5780,7 +5783,8 @@ async def h_cflow2_inputs_check(request: web.Request) -> web.Response:
         chosen = cflow2_web.choose(workflow, body.get("workflow_version"), cwd=cwd)
         if chosen is None:
             return None
-        return cflow2_web.inputs_check(chosen[1], body.get("cflow_inputs"))
+        return cflow2_web.inputs_check(chosen[1], body.get("cflow_inputs"),
+                                       str(body.get("profile") or "") or None)
 
     try:
         out = await asyncio.to_thread(run)
@@ -5832,6 +5836,7 @@ async def h_cflow2_input(request: web.Request) -> web.Response:
     payload = await asyncio.to_thread(
         cflow2_runtime.set_input, name, body.get("value"),
         caller=cflow2_runtime.CALLER_USER, cwd=cwd, scope=scope,
+        catalog=cflow2_web.input_catalog(_scope_profile(request.app["manager"], scope)),
     )
     got = json.dumps((payload.get("inputs") or {}).get(name), ensure_ascii=False)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(

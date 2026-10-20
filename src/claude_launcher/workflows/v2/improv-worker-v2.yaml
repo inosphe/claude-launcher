@@ -202,6 +202,8 @@ inputs:
   # 둘 다 비우면 지금처럼 리뷰어가 이 세션의 profile과 harness를 물려받는다.
   # spawn의 profile selector(PROFILE[:HARNESS], harness만이면 :HARNESS)로
   # 합쳐 넘기므로 데몬의 spawn.allow_profile 게이트가 그대로 적용된다.
+  # options:는 값을 데몬이 채우는 목록에서 고르게 한다(claunch-iq1xc, docs 2.6):
+  # 폼은 combobox로 그리고, 목록 밖의 값은 시작에서도 런 도중 변경에서도 거절된다.
   reviewer_profile:
     type: string
     label: 리뷰어 profile
@@ -211,6 +213,7 @@ inputs:
       켜져 있어야 한다
     placeholder: 예) work
     default: ""
+    options: {from: profiles, empty: session}
     # reviewer-ensure가 회차마다 읽으므로, 사람이 런 도중에 바꾸면 그 뒤에 세우는
     # 리뷰어부터 적용된다(claunch-gqgcz.1). 이미 살아 있는 리뷰어는 그대로 쓴다.
     set_by: [user]
@@ -220,9 +223,13 @@ inputs:
     help: >-
       자식 리뷰어의 harness(claunch harnesses의 이름). 비우면 리뷰어 profile의 기본
       harness다. profile만 비우고 이것만 주면 이 세션의 profile에서 harness만 바꾼다.
-      그 profile이 허용하는 harness여야 한다
+      그 profile이 허용하는 harness여야 한다(목록은 리뷰어 profile, 비었으면 이 세션의
+      profile에서 harness 정책이 허용하는 것이다)
     placeholder: 예) codex
     default: ""
+    # 리뷰어 profile을 바꿔 이 값이 그 profile에서 허용되지 않게 되면 그 변경은
+    # 거절된다 — 이 값을 먼저 바꾸거나 비운다.
+    options: {from: harnesses, of: reviewer_profile}
     set_by: [user]
   # 난이도 기반 세션 라우팅(claunch-yl0to). 켜면 coding-plan이 일감마다 난이도와
   # 위임 권장을 내고, 쉬운 일감은 이 세션의 대화를 fork한 자식이 하위 설정으로
@@ -250,16 +257,21 @@ inputs:
       ~/.claunch.yaml의 spawn.allow_profile이 켜져 있어야 한다
     placeholder: 예) ds4
     default: ""
+    options: {from: profiles, empty: delegate}
     set_by: [user]
   delegate_model:
     type: string
     label: 위임 자식 model preset
     help: >-
-      위임 자식의 모델. preset 이름(default, small, large, xlarge, subagent)이면 자식
-      profile에서 그 자리의 모델로 바뀐다. 비우면 데몬 설정 delegate_model(웹 Settings)을
-      쓴다. 다른 값은 harness가 받는 모델 이름 그대로 넘어간다(spawn.allow_args 필요)
+      위임 자식의 모델. 위임 자식 profile(비었으면 데몬 설정 delegate_profile)의 harness가
+      받는 값만 고를 수 있다. preset 이름(default, small, large, xlarge, subagent)이면 자식
+      profile에서 그 자리의 모델로 바뀐다 — claude는 preset 다섯이 모두 되고, codex와 그 밖의
+      harness는 profile의 provider가 그 role의 모델을 선언한 preset만 된다. 그 harness의 모델
+      선택지(claude의 haiku·sonnet·opus·fable, codex의 luna·sol 등)도 고를 수 있다(preset이
+      아닌 값은 spawn.allow_args 필요). 비우면 데몬 설정 delegate_model(웹 Settings)을 쓴다
     placeholder: 예) small
     default: ""
+    options: {from: models, of: delegate_profile}
     set_by: [user]
 
 collections:

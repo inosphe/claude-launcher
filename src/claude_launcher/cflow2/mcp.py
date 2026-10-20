@@ -450,6 +450,15 @@ def _session() -> str:
     return os.environ.get(store.SESSION_ENV, "").strip()
 
 
+def _input_catalog() -> Any:
+    """The catalog that checks inputs with ``options:`` (claunch-iq1xc),
+    with this session's profile read from its environment (the MCP server
+    runs in the calling session)."""
+    from .. import input_options
+
+    return input_options.Catalog(session_profile=input_options.profile_from_env())
+
+
 def _where(args: dict) -> tuple:
     """``(cwd, scope)`` a tool works on, refused unless the caller may drive
     that run (:func:`runtime.authorize`)."""
@@ -604,7 +613,8 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
             mesh = asks.home_mesh(session, cwd=cwd)
         return runtime.start(chart, cwd=cwd, scope=own, params=params, inputs=inputs,
                              caps=runtime.resolve_caps(), force=force,
-                             driver=session, caller=runtime.CALLER_AGENT, mesh=mesh)
+                             driver=session, caller=runtime.CALLER_AGENT, mesh=mesh,
+                             catalog=_input_catalog())
     if name == "flow_status":
         cwd, scope = _where(args)
         st = store.RunStore(cwd, scope)
@@ -698,7 +708,8 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
     if name == "flow_input":
         cwd, scope = _where(args)
         return runtime.set_input(str(args.get("name") or "").strip(), args.get("value"),
-                                 session=session, cwd=cwd, scope=scope)
+                                 session=session, cwd=cwd, scope=scope,
+                                 catalog=_input_catalog())
     if name == "flow_request_move":
         cwd, scope = _where(args)
         by = session or runtime.CALLER_AGENT
