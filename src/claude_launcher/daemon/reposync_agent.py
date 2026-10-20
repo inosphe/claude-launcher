@@ -11,9 +11,12 @@ import json
 import os
 
 
+MARKER_PREFIX = "Workspace sync assignment "
+
+
 def marker(repo: str) -> str:
     key = os.path.normcase(os.path.realpath(repo))
-    return "Workspace sync assignment " + hashlib.sha256(key.encode()).hexdigest()
+    return MARKER_PREFIX + hashlib.sha256(key.encode()).hexdigest()
 
 
 def active(manager, repo: str):
@@ -77,7 +80,16 @@ def task(card: dict, *, error: str = "", mode: str = "agent") -> str:
         "compare-and-swap update (or reset --keep in its checked-out directory after "
         "checking HEAD and local edits); coordinate with its owner. A changed tip "
         "requires replanning. Never reset --hard or force-push to bypass a refusal.\n"
-        "Delegation does not approve a push. Use the existing reposync approval "
+        "Merge pause: from prepare until execute ends, the daemon pauses ordinary "
+        "merges into this repository (the leader's admit refuses them, naming you and "
+        "the local commit above). inspect does not pause: if the local branch moved "
+        "after inspect, replan when prepare begins. Each run report renews the pause "
+        "until you file the approval card; after that it lasts until the card's "
+        "deadline plus 10 minutes. It ends by itself at receipt, when the run ends "
+        "or is aborted, or when this session ends. Tell your parent with one mesh fyi "
+        "line when prepare begins: 'SYNC PAUSE START <repo> local=<sha> run=<run id>', "
+        "and one when it ends: 'SYNC PAUSE END <repo> reason=<receipt|failed|aborted>'.\n"
+        "Delegation does not approve a push.Use the existing reposync approval "
         "flow for the final plan and final resolved commit, respecting "
         "daemon.reposync_push. An approval from the failed attempt cannot authorize "
         "different tips. Do not approve your own request or bypass the gate with "

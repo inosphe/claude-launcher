@@ -41302,7 +41302,22 @@ async function wsSyncPreviewPrompt(name, kind) {
 function wsSyncParentLabel(p) {
   const meshes = (p.meshes || []).map((m) => `${m.role || "no role"} @ ${m.mesh}`);
   const held = p.held ? ", hold — woken on delegate" : "";
-  return `${p.name} (${p.profile}${held}) · ${meshes.length ? meshes.join(", ") : "no mesh"}`;
+  const pause = p.merge_pause === false ? " · no merge pause" : "";
+  return `${p.name} (${p.profile}${held}) · ${meshes.length ? meshes.join(", ") : "no mesh"}${pause}`;
+}
+
+/* Why the parent list holds what it holds (claunch-z6da6): a repository with
+   a mesh leader offers only its leaders, whose merges the sync pauses; one
+   without offers only sessions in no mesh, and nobody's merges are paused. */
+function wsSyncParentNote(doc) {
+  const empty = !(doc && (doc.agent_parents || []).length);
+  if (doc && doc.agent_parents_mode === "leader") {
+    return "Only this repository's mesh leader can parent a sync agent: its merges pause from prepare until the push.";
+  }
+  if (empty) {
+    return "No mesh leader works in this repository and no session outside a mesh is running. Start a leader, or a session in no mesh, to enable delegation.";
+  }
+  return "No mesh leader works in this repository: only sessions in no mesh are listed, and no merges are paused during the sync.";
 }
 
 /* What each execution mode does, shown under the picker for the one picked. */
@@ -41333,9 +41348,7 @@ function wsSyncAgentControls(st, name) {
     for (const p of (st.doc && st.doc.agent_parents) || []) {
       parent.appendChild(new Option(wsSyncParentLabel(p), p.name));
     }
-    if (!(st.doc && (st.doc.agent_parents || []).length)) {
-      box.appendChild(el("p", "wf-note", "Start a parent agent session to enable delegation."));
-    }
+    if (st.doc) box.appendChild(el("p", "wf-note ws-sync-parent-note", wsSyncParentNote(st.doc)));
     parent.value = st.agentParent;
     parent.disabled = !!st.busy;
     parent.addEventListener("change", () => { st.agentParent = parent.value; renderWorkspaces(); });

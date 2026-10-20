@@ -443,6 +443,13 @@ DAEMON_DEFAULTS = {
     # applied (see daemon/goto_gate.py). Seconds; same start-time wiring as
     # the restart gate's timeout above.
     "goto_approval_timeout": 300.0,
+    # How long a Workspaces sync agent's merge pause lasts before it filed an
+    # approval card, counted from the run's last report and renewed by each
+    # one (daemon/reposync_pause.py, claunch-z6da6). Seconds. After the card
+    # the pause lasts until the card's deadline plus 10 minutes instead. The
+    # 1800 is an assumption to be replaced by measured checks times. Read LIVE
+    # on every admit check.
+    "reposync_pause_precard_s": 1800.0,
     # Seconds a finished answer of a route every dashboard polls (the session
     # list, the board queues) is served again to the next reader, instead of
     # each open tab running it anew -- daemon/shared_reads.py, claunch-jkvpv.

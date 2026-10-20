@@ -108,7 +108,7 @@ from . import resume_gate
 from . import kill_gate
 from . import flow_nudge
 from . import spawn_gate
-from . import reposync_agent
+from . import reposync_agent, reposync_pause
 from . import host_code, restart_gate
 from . import restart_notice
 from .harness import PI_HARNESS, HarnessError, SessionDef, carries_opening, check_kind
@@ -1128,6 +1128,7 @@ def build_app(
     r.add_get("/api/relay/peers/{machine}/repos", h_relay_peer_repos)
     r.add_get("/api/reposync/repos", h_reposync_repos)
     r.add_get("/api/reposync/requests", h_reposync_requests_list)
+    r.add_get("/api/reposync/pause", h_reposync_pause)
     r.add_post("/api/reposync/requests", h_reposync_request_submit)
     r.add_get("/api/reposync/requests/{rid}", h_reposync_request_get)
     r.add_post("/api/reposync/requests/{rid}/approve", h_reposync_request_approve)
@@ -8860,15 +8861,9 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     doc["agent"] = reposync_agent.summary(agent) if agent else None
     # The picker labels each candidate with its meshes and its role in each,
     # so a parent is chosen by what it is on the team (claunch-7ez8s).
-    mesh_mgr = request.app["mesh"]
-    doc["agent_parents"] = [
-        {"name": s.sdef.name, "profile": s.sdef.profile,
-         "held": bool(s.exited and getattr(s, "held_at", None)),
-         "meshes": [{"mesh": m["mesh"], "role": m["role"]}
-                    for m in mesh_mgr.meshes_for_session(s.sdef.name)]}
-        for s in request.app["manager"].list()
-        if _ws_parent_usable(s)
-    ]
+    parents = await asyncio.to_thread(_ws_parent_candidates, request.app, doc.get("repo") or path)
+    doc["agent_parents"] = parents["parents"]
+    doc["agent_parents_mode"] = parents["mode"]
     return json_response(doc)
 
 
@@ -8972,7 +8967,7 @@ async def _ws_sync_serialized(request: web.Request, handler) -> web.Response:
         return await handler(request)
 
 
-def _ws_agent_options(request: web.Request, body: dict) -> str:
+async def _ws_agent_options(request: web.Request, body: dict, path: str) -> str:
     mode = body.get("agent_mode", "commands")
     if mode not in ("commands", "agent", "on_failure"):
         raise ValueError("agent_mode must be commands, agent or on_failure")
@@ -8983,7 +8978,42 @@ def _ws_agent_options(request: web.Request, body: dict) -> str:
         session = request.app["manager"].get(parent)
         if not _ws_parent_usable(session):
             raise ValueError("the sync agent needs a live agent parent session")
+        allowed = await asyncio.to_thread(_ws_parent_candidates, request.app, path)
+        if parent not in {p["name"] for p in allowed["parents"]}:
+            raise ValueError(
+                "the sync agent's parent must be this repository's mesh leader"
+                if allowed["mode"] == "leader" else
+                "with no mesh leader for this repository, the parent must be a session in no mesh")
     return mode
+
+
+def _ws_parent_candidates(app, repo: str) -> dict:
+    """Who may parent a sync agent for ``repo`` (claunch-z6da6, user decision
+    qa-f8fbee5b): the mesh leaders whose checkout is this repository, live or
+    held -- the session whose merges the sync pauses. With no such leader,
+    only sessions in no mesh, marked ``merge_pause: False``: nobody's merges
+    are held back then. A mesh member that is not a leader never qualifies.
+    ``mode`` is ``leader`` or ``no-leader``."""
+    from ..cflow import landing as cflow_landing
+
+    mesh_mgr = app["mesh"]
+    usable = [s for s in app["manager"].list() if _ws_parent_usable(s)]
+    memberships = {s.sdef.name: mesh_mgr.meshes_for_session(s.sdef.name) for s in usable}
+    target = cflow_landing.common_dir(repo) if repo else None
+
+    def row(s, pause: bool) -> dict:
+        return {"name": s.sdef.name, "profile": s.sdef.profile,
+                "held": bool(s.exited and getattr(s, "held_at", None)),
+                "merge_pause": pause,
+                "meshes": [{"mesh": m["mesh"], "role": m["role"]} for m in memberships[s.sdef.name]]}
+
+    leaders = [s for s in usable
+               if any("leader" in (m.get("roles") or [m.get("role")]) for m in memberships[s.sdef.name])
+               and target and cflow_landing.common_dir(s.sdef.cwd or "") == target]
+    if leaders:
+        return {"mode": "leader", "parents": [row(s, True) for s in leaders]}
+    return {"mode": "no-leader",
+            "parents": [row(s, False) for s in usable if not memberships[s.sdef.name]]}
 
 
 def _ws_parent_usable(session) -> bool:
@@ -9052,7 +9082,7 @@ async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
         return err
     body = await _json_body(request)
     try:
-        mode = _ws_agent_options(request, body)
+        mode = await _ws_agent_options(request, body, path)
     except (ValueError, ManagerError) as exc:
         return json_error(400, str(exc))
     try:
@@ -9134,7 +9164,7 @@ async def _h_reposync_ws_branch_push(request: web.Request) -> web.Response:
         return err
     body = await _json_body(request)
     try:
-        mode = _ws_agent_options(request, body)
+        mode = await _ws_agent_options(request, body, path)
     except (ValueError, ManagerError) as exc:
         return json_error(400, str(exc))
     if not str(body.get("branch") or ""):
@@ -9248,6 +9278,24 @@ async def h_reposync_request_reject(request: web.Request) -> web.Response:
     if record is None:
         return json_error(409, "no pending reposync request with that id")
     return json_response({"ok": True, "request": record})
+
+
+def _reposync_pause(app, repo: str) -> dict:
+    from ..cflow import landing as cflow_landing
+    return reposync_pause.for_repo(
+        app["manager"], repo, cards=app["reposync_gate"].list(),
+        common_dir=cflow_landing.common_dir, load_state=cflow2_web.live_run,
+    )
+
+
+async def h_reposync_pause(request: web.Request) -> web.Response:
+    """Whether a Workspaces sync agent holds the merge pause on ``?repo=``'s
+    repository (:mod:`daemon.reposync_pause`). ``tools/delayed_sweep.py admit``
+    reads this and refuses every candidate but the sync's own issue."""
+    repo = request.query.get("repo") or ""
+    if not repo or not os.path.isabs(repo):
+        return json_error(400, "repo must be an absolute path")
+    return json_response(await asyncio.to_thread(_reposync_pause, request.app, repo))
 
 
 def _deliver_to_session(manager: SessionManager, name: str, message: str) -> bool:

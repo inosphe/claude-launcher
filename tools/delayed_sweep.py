@@ -149,6 +149,42 @@ def check_merges(queue, value):
     return {"checked": len(items)}
 
 
+def daemon_sync_pause(repo):
+    """The daemon's answer to ``GET /api/reposync/pause`` for ``repo``, or None
+    when no daemon runs (then no sync agent runs either). A daemon that is up
+    but does not answer refuses: a pause it could not report is not absent."""
+    from urllib.parse import quote
+    from claude_launcher import daemon_client
+    client, report = daemon_client.connect_with_diagnosis()
+    if client is None:
+        if daemon_client.is_absent(report):
+            return None
+        raise ValueError(f"the daemon did not answer the sync pause check ({report.get('state')}); "
+                         "defer this candidate and admit it again")
+    try:
+        return client.get("/api/reposync/pause?repo=" + quote(str(Path(repo).resolve()), safe=""))
+    except daemon_client.DaemonClientError as exc:
+        if getattr(exc.__cause__, "code", None) == 404:
+            # a daemon started before the route existed has no sync pause to report
+            print("delayed sweep: the daemon does not report sync pauses yet "
+                  "(restart it to enable them)", file=sys.stderr)
+            return None
+        raise ValueError(f"sync pause check failed: {exc}; defer this candidate") from exc
+
+
+def admit(queue, repo, issue, sync_pause=daemon_sync_pause):
+    """The regression pause (``Queue.admit``), then the sync merge pause
+    (claunch-z6da6): while a Workspaces sync agent stands in prepare..execute,
+    only that sync's own issue may merge."""
+    queue.admit(repo, issue)
+    answer = sync_pause(repo) or {}
+    pauses = (answer.get("pauses") or [answer["pause"]]) if answer.get("paused") else []
+    for pause in pauses:
+        if pause.get("issue") != issue:
+            from claude_launcher.daemon import reposync_pause
+            raise ValueError(reposync_pause.refusal(pause))
+
+
 VERDICTS = ("passed", "failed", "stuck", "cancelled")
 
 
@@ -263,7 +299,7 @@ def main(argv=None):
             result = queue.enqueue(args.repo, args.merge, args.issue, args.owner or "",
                                    Path(__file__).with_name("sweep.py"), args.command)
         elif args.action == "admit":
-            queue.admit(args.repo, args.issue)
+            admit(queue, args.repo, args.issue)
             result = {"admitted": args.issue}
         elif args.action == "repair":
             queue.repair(args.repo, args.job, args.issue)
@@ -317,7 +353,7 @@ def main(argv=None):
                 check_commit(repo, value["master"])
             for item in items:
                 if args.action == "check-batch":
-                    queue.admit(repo, item["issue"])
+                    admit(queue, repo, item["issue"])
                 else:
                     sha = merge_sha_of(repo, item)
                     job = find_job(queue, repo, sha)

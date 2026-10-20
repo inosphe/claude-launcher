@@ -202,6 +202,8 @@ nodes:
       2. 각 후보를 넣기 전에 `uv run --no-sync python tools/delayed_sweep.py
          admit --repo <대상 저장소> --issue <이슈>`를 실행한다. 거절되면 그 후보는
          deferred(사유: 저장소 회귀 실패로 일반 머지 중단)다. 수정 이슈만 통과한다.
+         거절 사유가 sync 정지(`repository paused by sync session ...`)면 그 후보도
+         deferred(사유: sync 세션 이름과 기준 local SHA)다. 그 sync의 이슈만 통과한다.
          그다음 각 후보를 `uv run --no-sync python tools/merge_ready.py --repo <대상 저장소>
          --branch <브랜치>`(원격이면 `<remote>/<브랜치>`)로 심사한다. 큐의 tip과 브랜치 tip이
          다르면 그 후보는 이번 배치에서 빼고 워커에게 tip 불일치를 알린다.
@@ -255,7 +257,9 @@ nodes:
       각 PR 또는 로컬 머지를 시작하기 직전에 `tools/delayed_sweep.py admit
       --repo <대상 저장소> --issue <이슈>`를 다시 실행한다. 회귀 실패가 배치
       도중 확인되면 이미 시작한 머지의 결과를 기록하고, 이후 일반 후보는
-      deferred로 둔다. 수정 이슈만 계속할 수 있다.
+      deferred로 둔다. 수정 이슈만 계속할 수 있다. sync 정지로 거절되면 같은
+      방식으로 이후 일반 후보를 deferred로 두고(사유: sync 세션 이름과 기준 local
+      SHA), 그 sync의 이슈만 계속할 수 있다.
       성공한 머지는 매번 즉시 `uv run --no-sync python tools/delayed_sweep.py
       enqueue --repo <대상 저장소> --merge <40자 머지 SHA> --issue <이슈>
       --owner <이 리더 세션>`으로 기록한다. 다른 저장소의 스윕 명령은

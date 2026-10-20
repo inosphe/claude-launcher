@@ -1461,3 +1461,95 @@ def test_remote_comparisons_fetch_failure_and_api(world, monkeypatch):
         assert sorted(fetched) == ["alias", "broken", "origin"]
 
     _with_app(body)
+
+
+# --------------------------------------------------------------------------- #
+# claunch-z6da6: the sync parent is this repository's mesh leader
+# --------------------------------------------------------------------------- #
+def _extra_session(client, name, cwd):
+    from claude_launcher.daemon.harness import SessionDef
+    return client.app["manager"].stage(SessionDef(name=name, profile="sync-test", cwd=str(cwd)))
+
+
+async def _parents(client):
+    status = await (await client.get("/api/reposync/workspaces/proj/status?peers=0&fetch=0",
+                                    headers=AUTH)).json()
+    return status["agent_parents_mode"], {p["name"]: p for p in status["agent_parents"]}
+
+
+def test_agent_parents_are_only_the_leader_when_the_repository_has_one(world, monkeypatch):
+    _commit(world["a"], "mine.txt")
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        _extra_session(client, "member", world["a"])
+        _extra_session(client, "loner", world["a"])
+        mm = client.app["mesh"]
+        mm.create("team")
+        await mm.join("team", parent.sdef.name, handle="lead", role="leader")
+        await mm.join("team", "member", handle="w1", role="worker")
+        mode, rows = await _parents(client)
+        assert mode == "leader" and list(rows) == [parent.sdef.name]
+        assert rows[parent.sdef.name]["merge_pause"] is True
+        # held: still the leader, still offered
+        parent.exited, parent.held_at = True, "2026-10-20T00:00:00+00:00"
+        mode, rows = await _parents(client)
+        assert mode == "leader" and rows[parent.sdef.name]["held"] is True
+        parent.exited, parent.held_at = False, None
+        # naming anyone else is refused by the server too
+        plan = await _status_plan(client)
+        for other in ("member", "loner"):
+            req = _shown(plan, agent_mode="agent", agent_parent=other)
+            resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+            assert resp.status == 400 and "mesh leader" in (await resp.json())["error"]
+        assert not assignments
+        req = _shown(plan, agent_mode="agent", agent_parent=parent.sdef.name)
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+        assert resp.status == 202, await resp.json()
+
+    _with_app(body)
+
+
+def test_agent_parents_without_a_leader_are_sessions_in_no_mesh(world, monkeypatch):
+    async def body(client):
+        parent, _ = _agent_parent(client, world, monkeypatch)
+        _extra_session(client, "member", world["a"])
+        _extra_session(client, "far-lead", world["b"])  # a leader of another repository
+        mm = client.app["mesh"]
+        mm.create("team")
+        await mm.join("team", "member", handle="w1", role="worker")
+        await mm.join("team", "far-lead", handle="lead", role="leader")
+        mode, rows = await _parents(client)
+        assert mode == "no-leader"
+        assert parent.sdef.name in rows and rows[parent.sdef.name]["merge_pause"] is False
+        assert "member" not in rows and "far-lead" not in rows
+
+    _with_app(body)
+
+
+def test_pause_route_reports_the_sync_session_holding_the_repository(world, monkeypatch):
+    import json as _json
+    from claude_launcher.daemon import cflow2_web, reposync_agent
+
+    async def body(client):
+        _agent_parent(client, world, monkeypatch)  # creates the sync-test profile
+        from claude_launcher.daemon.harness import SessionDef
+        client.app["manager"].stage(SessionDef(
+            name="sync1", profile="sync-test", cwd=str(world["a"]), issue="claunch-sync",
+            task="Synchronize\n\n" + reposync_agent.marker(str(world["a"]))))
+        state = {"run_id": "r1", "workflow": "reposync-merge-push-v2", "status": "running",
+                 "active": ["execute@5"], "updated": "2099-01-01T00:00:00+00:00",
+                 "data": {"inputs": {"assignment": _json.dumps({"local": "a" * 40})}}}
+        monkeypatch.setattr(cflow2_web, "live_run",
+                            lambda cwd, scope: state if scope == "sync1" else None)
+        url = "/api/reposync/pause?repo=" + str(world["a"])
+        doc = await (await client.get(url, headers=AUTH)).json()
+        assert doc["paused"] and doc["pause"]["session"] == "sync1"
+        assert doc["pause"]["local"] == "a" * 40 and doc["pause"]["issue"] == "claunch-sync"
+        state["active"] = ["receipt@6"]
+        doc = await (await client.get(url, headers=AUTH)).json()
+        assert not doc["paused"]
+        resp = await client.get("/api/reposync/pause?repo=relative", headers=AUTH)
+        assert resp.status == 400
+
+    _with_app(body)
