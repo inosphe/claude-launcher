@@ -51119,6 +51119,16 @@ function urgentAskOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
 }
 
+/* The card's way into the session, under the nudge card's rule
+   (claunch-yjm0v): the card goes exactly as its Hide press would put it away,
+   and then the session opens. The ask is not answered by this -- it stays
+   pending, listed in the panel with Show card and counted by the bell. */
+function urgentAskGo(rec, key) {
+  gateHide("ask", String(rec.id));
+  dismissNotice(key);
+  urgentAskOpen(rec);
+}
+
 function urgentAskButtons(rec, after) {
   const out = [];
   for (const name of urgentAskPresses(rec.answer) || []) {
@@ -51194,7 +51204,7 @@ function urgentAskSync(rows) {
       "bell keeps it in the notification history"));
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
-    node.addEventListener("click", () => urgentAskOpen(rec));
+    node.addEventListener("click", () => urgentAskGo(rec, key));
     host.appendChild(node);
     notices.set(key, { node, timer: null });
   }
@@ -51223,6 +51233,18 @@ function nudgeWhat(rec) {
 
 function nudgeOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
+}
+
+/* Open means "I am going in there": the card goes the way Hide puts it away,
+   then the session opens. Left up, it sat over the terminal of the session it
+   had just opened, saying the same thing twice and needing a second press to
+   leave (claunch-yjm0v). The request itself stays pending -- the panel lists
+   it with Show card and the bell keeps counting -- because nothing was
+   answered. */
+function nudgeGo(rec, key) {
+  gateHide("nudge", String(rec.id));
+  dismissNotice(key);
+  nudgeOpen(rec);
 }
 
 async function refreshNudgeGate() {
@@ -51273,7 +51295,7 @@ async function refreshNudgeGate() {
     open.title = `open ${rec.session}, where its run's strip answers this`;
     open.addEventListener("click", (ev) => {
       if (ev && ev.stopPropagation) ev.stopPropagation();
-      nudgeOpen(rec);
+      nudgeGo(rec, key);
     });
     actions.appendChild(open);
     actions.appendChild(gateHideButton("nudge", rec.id, key,
@@ -51281,7 +51303,7 @@ async function refreshNudgeGate() {
       "bell keeps it in the notification history"));
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
-    node.addEventListener("click", () => nudgeOpen(rec));
+    node.addEventListener("click", () => nudgeGo(rec, key));
     host.appendChild(node);
     notices.set(key, { node, timer: null });
   }

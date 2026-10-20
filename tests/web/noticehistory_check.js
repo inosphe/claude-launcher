@@ -156,7 +156,7 @@ function build(opts) {
 
   const apiCalls = [];
   const apiBodies = [];
-  const gate = { restart: null, goto: [], reposync: [] };
+  const gate = { restart: null, goto: [], reposync: [], nudges: [] };
   const apiStub = async (p, opts) => {
     apiCalls.push(p);
     if (opts && opts.body) apiBodies.push([p, JSON.parse(opts.body)]);
@@ -165,6 +165,7 @@ function build(opts) {
     if (p === "/api/daemon/restart-request") return answer({ request: gate.restart });
     if (p === "/api/cflow/goto-requests") return answer({ requests: gate.goto });
     if (p === "/api/reposync/requests") return answer({ requests: gate.reposync });
+    if (p === "/api/flow-nudges") return answer({ requests: gate.nudges });
     if (p === "/api/daemon/restart-request/reject") {
       gate.restart = { ...gate.restart, status: "rejected" };
       return answer({ ok: true });
@@ -201,6 +202,7 @@ function build(opts) {
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
+    " refreshNudgeGate," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " get cards() { return [...notices.keys()]; }};"
@@ -908,9 +910,6 @@ function gotoRec(rec) {
             w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask").length === 1,
           w.said());
 
-    w.strip()[0].click();
-    check("a click on the card opens the session", w.loc.hash === "#/s/s5", w.loc.hash);
-
     w.press(w.nodes.notices, "approve").click();
     await new Promise((r) => setImmediate(r));
     const posted = w.apiBodies.find(([p]) => p === "/api/cflow2/approve");
@@ -953,6 +952,55 @@ function gotoRec(rec) {
     check("a session gone from the rail settles it", w.badge() === "" &&
             w.api.noticeHistory.some((e) => e.gate && e.gate.rid === "ask2-cc" &&
               e.status === "no longer pending"), w.api.noticeHistory);
+  }
+
+  /* --- Open puts the card away on the way in (claunch-yjm0v) ------------ */
+  {
+    const w = build();
+    const pending = () => ({ id: "n1", session: "s7", items: ["its end decision"],
+      message: "the run waits on your pick", workflow: "improv-worker-v2",
+      status: "pending" });
+    w.gate.nudges = [pending()];
+    await w.api.refreshNudgeGate();
+    check("a pending nudge draws its card",
+          w.strip().length === 1 && /s7\s+needs you/.test(w.said()), w.said());
+    w.press(w.nodes.notices, "Open").click();
+    check("Open opens the session AND puts the card away",
+          w.loc.hash === "#/s/s7" && w.strip().length === 0 &&
+            w.api.gateIsHidden("nudge", "n1"), [w.loc.hash, w.said()]);
+    check("...without answering it: the bell still counts the wait",
+          w.badge() === "1", w.badge());
+    await w.api.refreshNudgeGate();
+    check("and the next poll does not draw it again", w.strip().length === 0, w.said());
+    w.api.noticePanelToggle(true);
+    check("the panel keeps it, so nothing is lost by going in",
+          /Waiting on you \(1\)/.test(w.panel()), w.panel());
+  }
+  {
+    // the card's own body is the same way in
+    const w = build();
+    w.gate.nudges = [{ id: "n2", session: "s8", items: ["a pick"],
+      status: "pending" }];
+    await w.api.refreshNudgeGate();
+    w.strip()[0].click();
+    check("a click on the nudge card opens the session and puts the card away",
+          w.loc.hash === "#/s/s8" && w.strip().length === 0 &&
+            w.api.gateIsHidden("nudge", "n2"), [w.loc.hash, w.said()]);
+  }
+  {
+    // and the urgent ask's card, which has no Open button of its own
+    const w = build();
+    w.api.urgentAskSync({ s5: { cwd: "/w/s5", scope: "s5", urgent_asks: [{ id: "ask2-dd",
+      instance: "i9", label: "coding-approval", status: "open", resolution: "human" }],
+      answers: [{ kind: "ask", ask: "ask2-dd", instance: "i9", prompt: "start coding?",
+                  require_reason: false,
+                  options: [{ name: "approve" }, { name: "decline" }] }] } });
+    w.strip()[0].click();
+    check("a click on the urgent-ask card opens the session and puts the card away",
+          w.loc.hash === "#/s/s5" && w.strip().length === 0 &&
+            w.api.gateIsHidden("ask", "ask2-dd"), [w.loc.hash, w.said()]);
+    check("...still unanswered: the bell counts it and the panel lists it",
+          w.badge() === "1", w.badge());
   }
 
   /* --- no storage is not an error --------------------------------------- */
