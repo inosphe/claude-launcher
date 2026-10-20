@@ -1250,8 +1250,11 @@ def live_groups(live: Dict[str, List[dict]], now: Optional[float] = None) -> Dic
     at once share its throughput. A session counts on a shim while it has a
     call in flight there or produced output inside the rate window -- the
     same window :func:`live_summary` takes its ``rate`` over. Each group is
-    ``{"rates": {session: tokens/s}, "total": tokens/s}``; a shim with no
-    active session has no group.
+    ``{"rates": {session: tokens/s}, "calls": {session: in flight},
+    "total": tokens/s}``; a shim with no active session has no group. The
+    call counts are what tells a shim's total apart from one session's share
+    of it: two sessions at 40 and 80 tok/s can be two calls and five
+    (claunch-v4jgh).
 
     One pass over ``live`` (a :func:`live_index`): a session-list build takes
     it once and hands it to every row, rather than walking every file per row.
@@ -1266,19 +1269,38 @@ def live_groups(live: Dict[str, List[dict]], now: Optional[float] = None) -> Dic
             inflight, rate = _doc_activity(doc, now)
             if not inflight and rate <= 0:
                 continue
-            group = out.setdefault(str(fp), {"rates": {}, "total": 0.0})
+            group = out.setdefault(str(fp), {"rates": {}, "calls": {}, "total": 0.0})
             group["rates"][session] = group["rates"].get(session, 0.0) + rate
+            group["calls"][session] = group["calls"].get(session, 0) + inflight
             group["total"] += rate
     return out
 
 
-def _parallel_brief(group: dict) -> dict:
-    n = len(group["rates"])
+def _parallel_brief(group: dict, session: str) -> dict:
+    """The shared shim's figures, with ``session``'s own share first.
+
+    ``counts`` is each active session's in-flight calls, the reader's own
+    first and the rest by rate -- "1+5" says at a glance that the shim's
+    total is not split evenly. ``by_session`` is the same list with names and
+    rates for the tooltip, and ``calls`` their sum.
+    """
+    rates = group["rates"]
+    calls = group.get("calls") or {}
+    n = len(rates)
     total = group["total"]
+    order = sorted(rates, key=lambda name: (name != session, -rates[name], name))
+    counts = [int(calls.get(name, 0)) for name in order]
     return {
         "sessions": n,
         "total": round(total, 1),
         "mean": round(total / n, 1) if n else 0.0,
+        "calls": sum(counts),
+        "counts": counts,
+        "by_session": [
+            {"session": name, "calls": int(calls.get(name, 0)),
+             "rate": round(rates[name], 1), "self": name == session}
+            for name in order
+        ],
         "estimated": True,
         "window_s": LIVE_RATE_WINDOW_S,
     }
@@ -1289,7 +1311,9 @@ def parallel_for(session: str, groups: Dict[str, dict]) -> Optional[dict]:
 
     ``sessions`` is how many sessions are active on that shim now (this one
     included), ``total`` their summed estimated tokens/s and ``mean`` the
-    total over ``sessions``. ``None`` unless the session itself is active on
+    total over ``sessions``. ``counts`` is their in-flight calls,
+    ``session``'s own first, and ``by_session`` the same per session with its
+    name and rate (claunch-v4jgh). ``None`` unless the session itself is active on
     a shim with at least one other active session: a session running alone
     has nothing to share, and its own rate already is the shim's total.
     When a session is active on more than one shared shim, the one with the
@@ -1302,7 +1326,7 @@ def parallel_for(session: str, groups: Dict[str, dict]) -> Optional[dict]:
         key = (len(group["rates"]), group["total"])
         if best is None or key > best[0]:
             best = (key, group)
-    return _parallel_brief(best[1]) if best else None
+    return _parallel_brief(best[1], session) if best else None
 
 
 _live_cache: Dict[str, tuple] = {}

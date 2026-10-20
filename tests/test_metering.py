@@ -1483,11 +1483,58 @@ def test_sessions_sharing_a_shim_carry_its_total_mean_and_count(home):
     assert one["rate"] == 40.0
     assert one["parallel"] == {
         "sessions": 2, "total": 120.0, "mean": 60.0,
+        "calls": 2, "counts": [1, 1],
+        "by_session": [
+            {"session": "s1", "calls": 1, "rate": 40.0, "self": True},
+            {"session": "s2", "calls": 1, "rate": 80.0, "self": False},
+        ],
         "estimated": True, "window_s": metering.LIVE_RATE_WINDOW_S,
     }
     assert metering.live_summary("s2", now=clock.t, peers=peers)["parallel"]["total"] == 120.0
     # Without the other sessions' files the summary cannot say, and does not.
     assert "parallel" not in metering.live_summary("s1", now=clock.t)
+
+
+def test_an_uneven_split_names_each_sessions_calls_and_rate(home):
+    """claunch-v4jgh: two sessions on one shim read "1+5", not an even mean.
+
+    The card showed total ≈1249 and avg ≈624 while this session was one call
+    at ≈152 and the other five at ≈1.1k; the mean alone looked like a
+    contradiction. The counts are what says whose share is whose.
+    """
+    clock = _Clock()
+    a = metering.LiveBoard("fp", clock=clock)
+    b = metering.LiveBoard("fp", clock=clock)
+    one = _streaming_meter("s1")
+    a.begin(one)
+    others = []
+    for i in range(5):
+        m = _streaming_meter("s2")
+        b.begin(m)
+        others.append(m)
+    for _ in range(8):
+        clock.t += 0.25
+        one.chunk(_delta("x" * 40))
+        for m in others:
+            m.chunk(_delta("x" * 80))
+        a.flush()
+        b.flush()
+    peers = metering.live_index()
+    live = metering.live_summary("s1", now=clock.t, peers=peers)
+    par = live["parallel"]
+    assert par["sessions"] == 2
+    assert par["counts"] == [1, 5]           # this session's calls first
+    assert par["calls"] == 6
+    assert par["by_session"][0]["self"] is True
+    assert par["by_session"][0]["session"] == "s1"
+    assert par["by_session"][0]["calls"] == 1
+    assert par["by_session"][1]["calls"] == 5
+    assert par["total"] == round(live["rate"] + par["by_session"][1]["rate"], 1)
+    assert par["mean"] == round(par["total"] / 2, 1)
+    # The other session reads the same structure with itself first.
+    other = metering.live_summary("s2", now=clock.t, peers=peers)["parallel"]
+    assert other["counts"] == [5, 1]
+    assert other["by_session"][0]["self"] is True
 
 
 def test_a_session_alone_on_its_shim_has_no_parallel_figure(home):
@@ -1531,8 +1578,8 @@ def test_claunch_tps_prints_live_totals_by_proxy(home, capsys):
     clock = _Clock()
     _two_sessions_streaming(clock)
     lines = cli._tps_live_lines(metering.live_groups(metering.live_index(), now=clock.t))
-    assert lines[1].split() == ["fp", "sessions", "2", "total", "120.0", "mean", "60.0"]
-    assert lines[2].split() == ["s1", "40.0", "s2", "80.0"]
+    assert lines[1].split() == ["fp", "sessions", "2", "calls", "2", "total", "120.0", "mean", "60.0"]
+    assert lines[2].split() == ["s1", "40.0", "(1", "calls)", "s2", "80.0", "(1", "calls)"]
     assert cli._tps_live_lines({}) == []
 
 
