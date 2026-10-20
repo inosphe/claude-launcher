@@ -219,6 +219,18 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     threads = store or thread_store.ThreadStore(paths.threads_db())
     app["threads"] = threads
 
+    def guest_ended(session) -> None:
+        """Exit hook: a session that ended is no guest any more
+        (claunch-tee5g) -- off the chips, the delivery list and the cap."""
+        try:
+            threads.drop_guest(session.sdef.name)
+        except Exception:  # noqa: BLE001 -- never break the exit fan-out
+            log.exception("threads: could not drop the ended guest %s", getattr(session, "sdef", session))
+
+    hooks = getattr(manager, "exit_hooks", None)
+    if hooks is not None:
+        hooks.append(guest_ended)
+
     def paste_step(session, images: list[dict], text: str):
         """``(before, text)`` for a message carrying images: the images go
         into the composer first, the way the session line's image paste does

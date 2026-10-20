@@ -382,6 +382,21 @@ def test_t10_a_guest_post_does_not_reopen_a_closed_thread(st):
     assert st.get(tid)["status"] == "open"
 
 
+def test_t10_an_ended_guest_is_dropped_everywhere(st):
+    # claunch-tee5g: the exit hook's store call.
+    a = st.open(S.USER, "s1", "A")["thread"]["id"]
+    b = st.open(S.USER, "s3", "B")["thread"]["id"]
+    for tid in (a, b):
+        st.invite(S.USER, tid, "s2")
+    st.invite(S.USER, a, "s4")
+    st.post("s2", a, "advice")
+    assert st.drop_guest("s2") == 2
+    assert st.guests_of(a) == ["s4"] and st.guests_of(b) == []
+    assert st.list("s2")["guest_threads"] == []
+    assert [m["guest"] for m in st.read(a)["messages"]] == ["s2"]    # what it wrote stays
+    assert st.drop_guest("s2") == 0
+
+
 def test_t10_guest_limits(st):
     tid = st.open(S.USER, "s1", "Review")["thread"]["id"]
     for i in range(S.MAX_GUESTS):

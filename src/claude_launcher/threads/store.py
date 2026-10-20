@@ -940,6 +940,13 @@ class ThreadStore:
             return {r["thread"]: int(r["n"]) for r in db.execute(
                 "SELECT thread, COUNT(*) AS n FROM messages WHERE session = ? GROUP BY thread", (owner,))}
 
+    def drop_guest(self, session: str) -> int:
+        """Remove ``session`` from every thread it is a guest in (it ended,
+        claunch-tee5g); returns how many threads it left. Its messages stay
+        in those threads."""
+        with self._write() as db:
+            return db.execute("DELETE FROM guests WHERE session = ?", (str(session or ""),)).rowcount
+
     def delete_owner(self, owner: str) -> int:
         """Remove every thread and message of ``owner`` (an operator that was
         deleted); returns how many threads went."""
