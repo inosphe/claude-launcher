@@ -48354,7 +48354,7 @@ function notify(title, sub, opts) {
   const timer = o.sticky
     ? null
     : setTimeout(() => dismissNotice(key), o.ms || NOTICE_MS);
-  notices.set(key, { node, timer, sync: o.sync || "" });
+  notices.set(key, { node, timer, sync: o.sync || "", title, sub: sub || "", at: rec.at });
   return node;
 }
 
@@ -48517,15 +48517,16 @@ function noticeUnread(e) {
 /* Sets `read` on the rows with these ids; repaints only when one changed. */
 function noticeMarkRead(ids, read) {
   const want = new Set(ids);
-  let changed = false;
+  const refs = [];
   for (const e of noticeHistory) {
     if (want.has(e.id) && e.read !== read) {
       e.read = read;
-      changed = true;
+      refs.push(noticeTabsRef(e.sync, e.title, e.sub, e.at));
       if (e.sync) noticeSyncQueue(e.sync, { read });
     }
   }
-  if (!changed) return;
+  if (!refs.length) return;
+  noticeTabsPost({ t: "read", read, refs });
   noticeHistorySave();
   noticeBellPaint();
   noticePanelPaint();
@@ -48603,6 +48604,11 @@ function noticeSyncOf(key) {
 function noticeSyncDismiss(key) {
   const sync = noticeSyncOf(key);
   if (sync) noticeSyncQueue(sync, { dismissed: true });
+  // This browser's other tabs hear of every card, sync id or not (claunch-j6lg0).
+  const card = notices.get(key);
+  if (card && (card.sync || card.title !== undefined)) {
+    noticeTabsPost({ t: "dismiss", ref: noticeTabsRef(card.sync, card.title, card.sub, card.at) });
+  }
 }
 
 /* The daemon's word on one record: its card goes when dismissed, its rows
@@ -48671,6 +48677,117 @@ async function noticeSyncTick() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* notice tabs — this browser's other tabs on the same daemon (claunch-j6lg0) */
+/* ------------------------------------------------------------------ */
+/* Every tab open on this daemon polls the same gates and puts up the same
+   cards, so the same request stood in every tab's corner, and a card
+   clicked, put away or hidden in one tab stayed up in the others: the
+   notice sync above reaches them only through the daemon at its loose pace,
+   and only for the notices that carry `sync`. Tabs of one browser share an
+   origin, so what a person does with a card here is also told to the other
+   tabs at once over a BroadcastChannel; each applies it to its own cards
+   and rows and does not pass it on (the daemon hears it from this tab).
+
+   Told: a card put away (×, a click, the panel opened, the threads pane
+   shown), rows read or unread, a gate card hidden or shown again, and a gate
+   answered (the other tabs re-poll the gates instead of waiting their turn).
+   Each tab keeps its own history rows under its own ids, so a row is found
+   by its sync id, and a row without one by its title and text within
+   NOTICE_TAB_MATCH_MS of when it was written here. A browser without
+   BroadcastChannel keeps each tab on its own, as before. */
+const NOTICE_TAB_CHANNEL = "claunch.notices";
+const NOTICE_TAB_MATCH_MS = 60000;
+const noticeTabs = { chan: null, applying: false };
+
+function noticeTabsOpen() {
+  try {
+    if (typeof BroadcastChannel !== "function") return;
+    noticeTabs.chan = new BroadcastChannel(NOTICE_TAB_CHANNEL);
+    noticeTabs.chan.onmessage = (ev) => noticeTabsApply(ev && ev.data);
+  } catch {
+    noticeTabs.chan = null;
+  }
+}
+
+/* What this tab did, for the others. Nothing goes out while a message from
+   another tab is being applied: that would echo it back. */
+function noticeTabsPost(msg) {
+  if (!noticeTabs.chan || noticeTabs.applying) return;
+  try {
+    noticeTabs.chan.postMessage(msg);
+  } catch {
+    /* closed or refused: this tab still did it */
+  }
+}
+
+/* How another tab names a card or a row: its sync id, or its words. */
+function noticeTabsRef(sync, title, sub, at) {
+  return sync ? { sync } : { title: title || "", sub: sub || "", at: at || 0 };
+}
+
+function noticeTabsRowMatch(e, ref) {
+  if (ref.sync) return e.sync === ref.sync;
+  return !e.sync && !e.gate && e.title === ref.title && (e.sub || "") === ref.sub &&
+    Math.abs((e.at || 0) - ref.at) <= NOTICE_TAB_MATCH_MS;
+}
+
+function noticeTabsCardMatch(card, ref) {
+  if (ref.sync) return card.sync === ref.sync;
+  return !card.sync && card.title === ref.title && card.sub === ref.sub;
+}
+
+function noticeTabsDismissed(ref) {
+  for (const [key, card] of [...notices]) {
+    if (noticeTabsCardMatch(card, ref)) dismissNotice(key);
+  }
+}
+
+function noticeTabsApply(msg) {
+  if (!msg || typeof msg !== "object") return;
+  noticeTabs.applying = true;
+  try {
+    if (msg.t === "dismiss" && msg.ref) {
+      noticeTabsDismissed(msg.ref);
+    } else if (msg.t === "read" && Array.isArray(msg.refs)) {
+      const read = msg.read === true;
+      let changed = false;
+      for (const ref of msg.refs) {
+        if (!ref) continue;
+        for (const e of noticeHistory) {
+          if (e.read !== read && noticeTabsRowMatch(e, ref)) { e.read = read; changed = true; }
+        }
+        // A read row's card goes, as when the daemon says it was read.
+        if (read) noticeTabsDismissed(ref);
+      }
+      if (changed) {
+        noticeHistorySave();
+        noticeBellPaint();
+        noticePanelPaint();
+      }
+    } else if (msg.t === "gate-hide" && msg.type) {
+      if (!gateIsHidden(msg.type, msg.rid)) {
+        gateHide(msg.type, String(msg.rid));
+        noticeGateRefresh(msg.type);
+      }
+    } else if (msg.t === "gate-unhide" && msg.type) {
+      if (gateIsHidden(msg.type, msg.rid)) gateUnhide(msg.type, String(msg.rid));
+    } else if (msg.t === "gates") {
+      for (const type of Object.keys(gatePending)) noticeGateRefresh(type);
+    }
+  } finally {
+    noticeTabs.applying = false;
+  }
+}
+
+/* A gate answered here: the other tabs re-poll rather than show it pending
+   until their next tick. */
+function noticeTabsGates() {
+  noticeTabsPost({ t: "gates" });
+}
+
+noticeTabsOpen();
+
 function gateHistoryEntry(type, rid) {
   return noticeHistory.find(
     (e) => e.gate && e.gate.type === type && e.gate.rid === rid
@@ -48731,6 +48848,7 @@ function gateIsHidden(type, rid) {
 
 function gateHide(type, rid) {
   gateHiddenIds.add(`${type}:${rid}`);
+  noticeTabsPost({ t: "gate-hide", type, rid: String(rid) });
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
   if (entry) {
@@ -48743,6 +48861,7 @@ function gateHide(type, rid) {
 
 function gateUnhide(type, rid) {
   gateHiddenIds.delete(`${type}:${rid}`);
+  noticeTabsPost({ t: "gate-unhide", type, rid: String(rid) });
   if (noticePanelOpen()) gateShownInPanel.add(`${type}:${rid}`);
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
@@ -49448,6 +49567,7 @@ async function gatePost(path, btn) {
     btn.disabled = false;
     return false;
   }
+  noticeTabsGates();
   return true;
 }
 
@@ -49471,7 +49591,10 @@ async function restartGateApprove(btn, body) {
     btn.disabled = false;
     return "failed";
   }
-  if (resp.ok) return "ok";
+  if (resp.ok) {
+    noticeTabsGates();
+    return "ok";
+  }
   btn.disabled = false;
   if (resp.status === 409) {
     const refused = await resp.json().catch(() => ({}));
@@ -50164,6 +50287,7 @@ async function spawnGatePost(rec, verb, btn, body) {
     return null;
   }
   const settled = doc.request || {};
+  noticeTabsGates();
   if (settled.status === "failed") {
     notify(rec.kind === "resume" ? `resume of ${rec.target} failed` : "session create failed",
       settled.error || "unknown error", { kind: "warn", sticky: true });
@@ -50528,6 +50652,7 @@ async function urgentAskPost(rec, decision, btn) {
     btn.disabled = false;
     return false;
   }
+  noticeTabsGates();
   return true;
 }
 

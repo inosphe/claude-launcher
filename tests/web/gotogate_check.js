@@ -115,6 +115,9 @@ function build() {
                      "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
   const api = new Function(
     "$", "el", "setTimeout", "clearTimeout", "Date", "api", "location",
+    // Left without an argument: Node's real BroadcastChannel would hold the
+    // process open (claunch-j6lg0).
+    "BroadcastChannel",
     code + "\nreturn { refreshGotoGate," +
     " get cards() { return [...notices.keys()]; } };"
   )(
