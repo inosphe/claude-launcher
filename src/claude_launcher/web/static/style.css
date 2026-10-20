@@ -7673,6 +7673,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .thh-msg { max-width: 85%; padding: 6px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
 .thh-msg.thh-user { align-self: flex-end; background: #10203a; border: 1px solid #1f6feb; }
 .thh-msg.thh-agent { align-self: flex-start; background: #161b22; border: 1px solid #30363d; }
+.thh-msg.thh-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477; }
 .thh-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; font-size: 11px; color: #7d8590; }
 .thh-who { font-weight: 600; }
 /* View modes (claunch-zny1o): tree / newest share a list panel | detail split. */

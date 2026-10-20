@@ -64,7 +64,7 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
 (async () => {
   // First page: two threads, three pages in all.
   reply = () => ({ threads: [
-    thread('th-a', 's1', 'open', [['user', 'hello'], ['agent', 'hi back']], 4),
+    thread('th-a', 's1', 'open', [['user', 'hello'], ['agent', 'hi back'], ['guest', 'try B']], 4),
     thread('th-b', 's2', 'closed', []),
   ], total: 5, page: 1, per_page: 2, pages: 3, sessions });
   page.open('feed');
@@ -74,8 +74,9 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   const cards = view.byClass('thh-thread');
   assert.deepStrictEqual(cards.map(c => c.dataset.thread), ['th-a', 'th-b']);
   const msgs = cards[0].byClass('thh-msg');
-  assert.deepStrictEqual(msgs.map(m => m.className), ['thh-msg thh-user', 'thh-msg thh-agent']);
+  assert.deepStrictEqual(msgs.map(m => m.className), ['thh-msg thh-user', 'thh-msg thh-agent', 'thh-msg thh-guest']);
   assert.ok(msgs[0].textContent.includes('hello') && msgs[1].textContent.includes('s1'));
+  assert.ok(msgs[2].textContent.includes('(guest)') && !msgs[2].textContent.includes('s1'));  // claunch-p9wes
   assert.ok(cards[0].textContent.includes('4 older message(s) not shown'));
   assert.ok(cards[1].textContent.includes('no messages yet'));
   assert.strictEqual(cards[0].byClass('thh-sess')[0].href, '#/s/s1');
