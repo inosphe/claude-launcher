@@ -6273,6 +6273,12 @@ body.embed #main { width: 100%; }
    just be swatted away, and a stray click on a decision is a restart. */
 .notice.gate { cursor: default; }
 .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
+/* A spawn card's project / profile / workspace / role / workflow rows
+   (claunch-mgope): label column, value column. */
+.gate-facts { display: grid; grid-template-columns: max-content 1fr; gap: 1px 8px; margin-top: 4px; }
+.gate-fact-key { color: #6e7681; }
+.gate-fact-val { color: #c9d1d9; overflow-wrap: anywhere; }
+.gate-fact-from { color: #6e7681; }
 .gate-actions { display: flex; gap: 8px; margin-top: 8px; }
 .gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
 /* A session named on a gate card opens that session. Marked as a press the

@@ -70,7 +70,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from .. import atomic
+from .. import atomic, projects, workspaces
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +154,66 @@ def clean_reason(text) -> str:
     if len(reason) > REASON_MAX:
         reason = reason[:REASON_MAX].rstrip() + " ...(truncated)"
     return reason
+
+
+#: The five rows a spawn card spells out (claunch-mgope), in display order.
+CARD_FIELDS = ("project", "profile", "workspace", "role", "workflow")
+
+
+def _dir_label(path: str) -> str:
+    """A directory as the person registered it: the workspace it lives in
+    (``name`` or ``name/sub``), else the path itself."""
+    try:
+        owner = workspaces.owning(path)
+    except Exception:  # a broken config must not take the card down
+        owner = None
+    if owner is None:
+        return path
+    sub = workspaces.subpath(owner, path)
+    return f"{owner.name}/{sub}" if sub else owner.name
+
+
+def card_facts(spec: Optional[dict], asker: Optional[dict] = None) -> Dict[str, dict]:
+    """What the session a request would create runs as, one row per
+    :data:`CARD_FIELDS` -- ``{"value": str, "inherited": bool}``.
+
+    ``spec`` is the request's spec; ``asker`` the asking session's
+    definition (``SessionDef.to_dict()``), or ``None`` when it is gone. A
+    field the spec leaves out is filled the way the spawn path fills it
+    (:func:`claude_launcher.spawn.validate`): profile, directory and project
+    from the asker, a named project with no directory to its default
+    workspace. Those rows say ``inherited`` so the card can tell the person
+    which values the agent chose and which it merely did not touch. An
+    empty ``value`` means there is none (no role, no workflow)."""
+    spec = spec or {}
+    asker = asker or {}
+
+    def row(value, inherited=False):
+        return {"value": str(value or ""), "inherited": bool(inherited and value)}
+
+    def pick(key):
+        own = str(spec.get(key) or "").strip()
+        return row(own) if own else row(str(asker.get(key) or "").strip(), True)
+
+    facts = {"project": pick("project"), "profile": pick("profile")}
+    if not facts["project"]["value"]:
+        facts["project"] = row(projects.DEFAULT)
+    home = projects.default_cwd(str(spec["project"])) if spec.get("project") else None
+    if spec.get("workspace"):
+        where = row(str(spec["workspace"]))
+    elif spec.get("cwd"):
+        where = row(_dir_label(str(spec["cwd"])))
+    elif home:
+        where = row(_dir_label(home))
+    else:
+        where = row(_dir_label(str(asker.get("cwd") or "")) if asker.get("cwd") else "", True)
+    if spec.get("worktree") and where["value"]:
+        where["value"] += " (new worktree)"
+    facts["workspace"] = where
+    facts["role"] = row(str(spec.get("role") or "").strip())
+    flow = str(spec.get("workflow") or "").strip()
+    facts["workflow"] = row("" if flow == "-" else flow)
+    return facts
 
 
 def outcome_message(record: dict) -> str:

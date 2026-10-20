@@ -7936,15 +7936,30 @@ async def _spawn_gate_create(app, spec: dict, asker: str, record: dict) -> Tuple
     return await _create_session(request, dict(spec))
 
 
+def _with_card_facts(manager: SessionManager, record: dict) -> dict:
+    """``record`` plus ``facts``: the project, profile, workspace, role and
+    workflow its session would run as, inherited values resolved against
+    the asker (claunch-mgope). Read-time only -- the stored record keeps
+    the spec as the agent sent it."""
+    spec = record.get("fallback") if record.get("kind") == spawn_gate.RESUME else record.get("spec")
+    try:
+        asker = manager.get(str(record.get("session") or "")).sdef.to_dict()
+    except Exception:  # the asker is gone: show the spec alone
+        asker = None
+    return {**record, "facts": spawn_gate.card_facts(spec, asker)}
+
+
 async def h_spawn_requests_list(request: web.Request) -> web.Response:
-    return json_response({"requests": request.app["spawn_gate"].list()})
+    manager: SessionManager = request.app["manager"]
+    return json_response({"requests": [_with_card_facts(manager, rec)
+                                       for rec in request.app["spawn_gate"].list()]})
 
 
 async def h_spawn_request_get(request: web.Request) -> web.Response:
     record = request.app["spawn_gate"].get(request.match_info["rid"])
     if record is None:
         return json_error(404, "no spawn request with that id")
-    return json_response({"request": record})
+    return json_response({"request": _with_card_facts(request.app["manager"], record)})
 
 
 async def h_spawn_request_settle(request: web.Request) -> web.Response:

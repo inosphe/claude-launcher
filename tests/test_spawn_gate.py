@@ -356,6 +356,12 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
 
             rows = (await (await client.get("/api/spawn-requests", headers=AUTH)).json())["requests"]
             assert {r["id"] for r in rows} == {one, two}
+            # the card's rows ride on the listing, resolved against the asker
+            assert rows[0]["facts"]["profile"] == {"value": "p", "inherited": False}
+            assert rows[0]["facts"]["workspace"] == {"value": "/w/op", "inherited": True}
+            got = await (await client.get(f"/api/spawn-requests/{one}", headers=AUTH)).json()
+            assert got["request"]["facts"]["workflow"]["value"] == "improv-worker-v2"
+            assert "facts" not in gate.get(one), "the stored record keeps the spec only"
 
             resp = await client.post(f"/api/spawn-requests/{one}/extend", headers=AUTH)
             assert resp.status == 200 and (await resp.json())["request"]["extensions"] == 1
@@ -586,3 +592,50 @@ def test_the_gate_creates_a_child_or_a_root_with_its_setup(home, monkeypatch):
                                                "via": "spawn-gate", "reason": "setup:agent"})
     assert calls[1] == ("root", SPEC, {"kind": "agent", "name": "op",
                                        "via": "spawn-gate", "reason": "setup:approved"})
+
+
+# --- the card's facts rows (claunch-mgope) ----------------------------------
+
+
+def test_card_facts_fill_a_childs_blanks_from_its_asker(home, tmp_path):
+    from claude_launcher import workspaces
+
+    (tmp_path / "repo").mkdir()
+    workspaces.add(str(tmp_path / "repo"), "repo")
+    asker = {"profile": "work", "cwd": str(tmp_path / "repo" / ".claude" / "worktrees" / "w1"),
+             "project": "alpha"}
+    facts = spawn_gate.card_facts({"role": "worker", "workflow": "improv-worker-v2",
+                                   "worktree": "w1-kid"}, asker)
+    assert list(facts) == list(spawn_gate.CARD_FIELDS)
+    assert facts["project"] == {"value": "alpha", "inherited": True}
+    assert facts["profile"] == {"value": "work", "inherited": True}
+    assert facts["workspace"] == {"value": "repo/.claude/worktrees/w1 (new worktree)",
+                                  "inherited": True}
+    assert facts["role"] == {"value": "worker", "inherited": False}
+    assert facts["workflow"] == {"value": "improv-worker-v2", "inherited": False}
+
+
+def test_card_facts_keep_what_the_spec_names(home, tmp_path):
+    from claude_launcher import projects, workspaces
+
+    (tmp_path / "hq").mkdir()
+    workspaces.add(str(tmp_path / "hq"), "hq")
+    projects.add("beta", default_workspace="hq")
+    asker = {"profile": "work", "cwd": "/elsewhere"}
+    facts = spawn_gate.card_facts({"project": "beta", "profile": "p2", "workflow": "-"}, asker)
+    assert facts["project"] == {"value": "beta", "inherited": False}
+    assert facts["profile"] == {"value": "p2", "inherited": False}
+    # a named project with no directory starts in its default workspace
+    assert facts["workspace"] == {"value": "hq", "inherited": False}
+    # a declined workflow and a missing role read as none
+    assert facts["workflow"] == {"value": "", "inherited": False}
+    assert facts["role"] == {"value": "", "inherited": False}
+    named = spawn_gate.card_facts({"workspace": "hq"}, asker)["workspace"]
+    assert named == {"value": "hq", "inherited": False}
+
+
+def test_card_facts_without_an_asker_show_the_spec_alone(home):
+    facts = spawn_gate.card_facts({"cwd": "/not/registered"}, None)
+    assert facts["project"] == {"value": "default", "inherited": False}
+    assert facts["profile"] == {"value": "", "inherited": False}
+    assert facts["workspace"] == {"value": "/not/registered", "inherited": False}
