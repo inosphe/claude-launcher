@@ -851,7 +851,11 @@ globalThis.ThreadsPane = (() => {
       go.addEventListener("click", submit);
       title.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); first.focus(); } });
       dropTarget(form, "");
-      form.append(title, ...(about ? [about] : []), first, strip(""), ...pickButton(""), go);
+      // One row for the form's buttons (claunch-o1wg6): the two attach
+      // buttons lead it, 시작 sits at the right end.
+      const foot = node("div", "th-newform-foot");
+      foot.append(...pickButton(""), go);
+      form.append(title, ...(about ? [about] : []), first, strip(""), foot);
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
