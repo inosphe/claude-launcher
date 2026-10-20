@@ -1887,7 +1887,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `transcript ls\|path\|show\|search` | Read the conversation a session's harness keeps on disk — the record `capture-pane` cannot reach, because a claude session repaints its screen instead of scrolling it and nothing older than the last frame is in any scrollback. `ls` lists the sessions that have a transcript (path, size, mtime), `path S` prints one file's path, `show S` reads a page of it (`--limit`, `--before SEQ` walks backwards, `--prose` drops tool traffic), and `search PATTERN` says where something was said — across the recently written transcripts in the fleet, or in one with `--session S`. Each match carries the record's `seq`, which `show --before` reads in context. The same files and the same byte-offset index behind the web UI's transcript page. |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
-| `rebrief [--session S] [--id ID \| --pack ID]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. The same hook also posts the payload's `session_id` back to the daemon: `/clear` mints a new conversation id, and reporting it keeps the pinned conversation (what a daemon restart resumes, and what the transcript page reads) pointing at the conversation the session is actually in. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. `--id` prints one block by the text id it was given with; `--pack mcp-<family>` prints an `mcp-*` prompt pack for the session (the MCP `rebrief` tool's `pack`), whether or not it was ticked at creation. |
+| `rebrief [--session S] [--id ID \| --pack ID]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. The same hook also posts the payload's `session_id` back to the daemon: `/clear` mints a new conversation id, and reporting it keeps the pinned conversation (what a daemon restart resumes, and what the transcript page reads) pointing at the conversation the session is actually in. Defaults to `$CLAUNCH_SESSION`; also the **↻ rebrief** button in the web UI, which opens the session's packs pane (below, "Sending a pack to a running session") with this block's preview and a send button that types it into the session's terminal. `--id` prints one block by the text id it was given with; `--pack mcp-<family>` prints an `mcp-*` prompt pack for the session (the MCP `rebrief` tool's `pack`), whether or not it was ticked at creation. |
 | `quick-fork [S] [--as NAME] [--task T] [--mesh M] [--workflow W] [--role R] [--sibling] [-a]` | Start a **copy** of `S`'s conversation as a child of it (`--sibling`: beside it, under `S`'s parent), marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. The copy joins no mesh and drives no run unless `--mesh`/`--workflow` say otherwise; `.` means the origin's mesh and, for the workflow, the pair the origin's run declares (`default_child_cflow`). `--role` sets the copy's role in that mesh; a second leader is refused. It always shares the origin's checkout. |
 | `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin (or, when it has ended, the nearest live session above it) and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. With no live session above, nothing is typed, the wrap-up is saved beside the copy's record and the copy is kept (exit 1). |
 | `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
@@ -2845,6 +2845,31 @@ From the CLI: `claunch new-session --prompt-pack beads --prompt-pack common`
 the workspace has not installed goes in as claunch's copy and the create
 response lists it under `prompt_packs_shipped`; one that exists in neither
 place refuses the create with a 400 and nothing is staged.
+
+### Sending a pack to a running session
+
+The **↻ rebrief** button in a session's terminal toolbar opens the packs pane
+on the right (`web/static/packs-pane.js`, `daemon/session_packs.py`). It
+lists the briefing, the packs the session's opening carried (with why each is
+there, its text id, and "file edited since" when the file it came from has
+changed), the packs the opening did not carry, and a log of what was sent from
+the pane. Every row has **view** (the exact block a send types) and **send**,
+which types that block into the terminal once, after a confirm:
+
+- a pack the opening carried is sent as its recorded opening block, so it
+  keeps its text id;
+- an `mcp-*` pack is sent as the block `rebrief --pack` loads;
+- an on-demand pack (`retrospective`) is sent as the block `claunch retro` sends;
+- any other pack goes in under a header saying it was sent by a person, not
+  part of the opening.
+
+The session definition is not changed. A delivered `mcp-*` or other pack is
+instead *held* in the session's `packs-sent.json`, text included: the session
+reminder's Prompt packs section names it with "(sent)" and `rebrief` with its
+text id serves it back after a compaction, the text as it was sent. **drop**
+stops holding it; on-demand packs are not held. Routes:
+`GET /api/sessions/{name}/packs` (the view; `?pack=<id>` for one block),
+`POST` with `{"pack": "<id>"}` to send, `DELETE ?pack=<id>` to drop.
 
 Two settings sit under the matrix, stored in `~/.claunch.yaml` under
 `prompt_packs`:

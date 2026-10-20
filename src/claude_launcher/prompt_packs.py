@@ -566,6 +566,30 @@ def loaded_block(pack: Pack) -> str:
     )
 
 
+def sent_block(pack: Pack) -> str:
+    """Any other pack as a person sends it to a running session.
+
+    The packs panel of the web UI (``daemon.session_packs``) sends a pack the
+    session was not given at creation and that is neither an mcp- pack nor an
+    on-demand one. Like :func:`on_demand_block` it is not recorded on the
+    definition, and the header says so: a compaction loses it, and the person
+    sends it again.
+    """
+    if pack.source == PACKAGE:
+        where = f"file: (not installed in this workspace; claunch's {pack.id}.md)"
+    else:
+        where = f"file: {(INSTALL_DIR / (pack.id + '.md')).as_posix()}"
+    return (
+        "---\n"
+        f"# claunch prompt pack: {pack.id} -- sent by a person to this running "
+        "session, not part of its opening\n"
+        f"text id: {text_id(pack.body)}\n"
+        f"{where}\n"
+        "---\n"
+        f"{pack.body.strip()}"
+    )
+
+
 def records(
     packs: List[Pack], *,
     required: Optional[Dict[str, List[str]]] = None, asked=(),

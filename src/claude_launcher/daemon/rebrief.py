@@ -65,7 +65,7 @@ from typing import Dict, List, Optional, Tuple
 from .. import digests, prompt_packs, workspaces
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
-from . import loops
+from . import loops, session_packs
 from .mesh import MeshError
 
 log = logging.getLogger(__name__)
@@ -148,6 +148,20 @@ def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
                 "text": text,
                 "given": True,
             }
+    # A pack a person sent from the packs pane after creation, held with the
+    # text as it was sent (session_packs, claunch-6esft.1): the reminder names
+    # it beside the opening's packs, so this answers for it the same way.
+    try:
+        kept = session_packs.held(name)
+    except Exception:  # noqa: BLE001 — an unreadable record holds nothing
+        kept = {}
+    for pack_id, row in kept.items():
+        text = row["text"].strip()
+        out.setdefault(block_digest(text), {
+            "kind": f"prompt pack ({pack_id}, sent)",
+            "text": text,
+            "given": True,
+        })
     stance_found = False
     if mesh_mgr is not None:
         try:

@@ -76,7 +76,7 @@ from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2
 from ..cflow2 import layers as cflow2_layers
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
-    rebrief, session_input, status_checks,
+    rebrief, session_input, session_packs, status_checks,
 )
 from . import paths
 from . import daemon_prompt
@@ -1207,6 +1207,9 @@ def build_app(
     r.add_get("/api/sessions/{name}/retrospective", h_session_retrospective)
     r.add_post("/api/sessions/{name}/retrospective", h_session_retrospective)
     r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
+    r.add_get("/api/sessions/{name}/packs", h_session_packs)
+    r.add_post("/api/sessions/{name}/packs", h_session_packs)
+    r.add_delete("/api/sessions/{name}/packs", h_session_packs)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
     # (see SessionManager.repin_conversation).
@@ -12949,6 +12952,57 @@ async def h_session_retrospective(request: web.Request) -> web.Response:
     return json_response(
         {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
     )
+
+
+async def h_session_packs(request: web.Request) -> web.Response:
+    """The session's prompt packs, for the web UI's packs pane.
+
+    GET returns what :func:`session_packs.view` draws: the packs the opening
+    carried, the others the session could be sent, and the sends recorded so
+    far. ``GET ?pack=`` returns the block sending that pack would type, so the
+    pane previews exactly what goes in. POST ``{"pack": id}`` types it into
+    the terminal once and records the send (claunch-6esft.1); nothing is
+    written to the session definition. A delivered mcp- or other pack the
+    opening did not carry is also held, so the session reminder names its id
+    and ``rebrief`` serves it back after a compaction
+    (:func:`session_packs.held_entries`); ``DELETE ?pack=`` stops holding it.
+    An on-demand pack is not held: it asks for work once.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    session = manager.get(name)
+    if request.method == "DELETE":
+        pack = (request.query.get("pack") or "").strip().lower()
+        dropped = await asyncio.to_thread(session_packs.drop, name, pack)
+        return json_response({"ok": True, "session": name, "pack": pack, "dropped": dropped})
+    if request.method == "GET":
+        pack = (request.query.get("pack") or "").strip()
+        if not pack:
+            return json_response(
+                await asyncio.to_thread(session_packs.view, name, manager=manager)
+            )
+    else:
+        body = await _json_body(request)
+        pack = body.get("pack")
+        if not isinstance(pack, str) or not pack.strip():
+            return json_error(400, "'pack' must be a prompt pack id")
+    try:
+        block, how, text = await asyncio.to_thread(
+            session_packs.block_for, name, pack, manager=manager
+        )
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    pack_id = pack.strip().lower()
+    if request.method == "GET":
+        return json_response({
+            "session": name, "pack": pack_id, "how": how, "block": block,
+            "text_id": session_packs.text_id_of(block),
+        })
+    delivered = await session.deliver(block)
+    row = session_packs.sent_row(pack_id, how, block, delivered)
+    keep = text if how in (session_packs.MCP, session_packs.OTHER) else None
+    await asyncio.to_thread(session_packs.record_sent, name, row, keep)
+    return json_response({"ok": True, "session": name, **row})
 
 
 async def h_session_conversation(request: web.Request) -> web.Response:

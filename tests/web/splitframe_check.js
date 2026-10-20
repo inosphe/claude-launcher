@@ -142,7 +142,7 @@ function frameModule() {
     setSessLayout: (name, patch) => layouts.push([name, {...patch}]),
     refreshQaRail() {}, refreshThreadsRail() {},
     globalThis: {
-      SplitFrame: F, SimPane: pane("sims"), CategoryPane: pane("category"),
+      SplitFrame: F, SimPane: pane("sims"), CategoryPane: pane("category"), PacksPane: pane("packs"),
       TalkPane: {mount: (host, name, o) => into.push(["talk", host, o]), unmount() {}, setMode() {}},
       DurableFlow: {mount: (host) => { into.push(["chart", host]); return {unmount() {}}; }},
     },
@@ -163,7 +163,7 @@ function frameModule() {
     this.SPLIT_PANES = SPLIT_PANES;
   `, ctx);
 
-  for (const kind of ["run", "sims", "category", "chart", "threads"]) {
+  for (const kind of ["run", "sims", "category", "chart", "packs", "threads"]) {
     into.length = 0;
     layouts.length = 0;
     ctx.openSplit("s1", kind);
@@ -195,7 +195,7 @@ function frameModule() {
   }
 
   /* --- buttons -------------------------------------------------------------- */
-  const toggles = ["term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-qabtn", "term-threadsbtn"];
+  const toggles = ["term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn"];
   for (const id of toggles) {
     assert.match(html, new RegExp(`<button id="${id}" class="term-btn split-btn[ "]`), `${id} carries .split-btn`);
     assert.ok(app.includes(`$("${id}").addEventListener("click", () => toggleSplitPane(`), `${id} toggles the pane`);

@@ -113,7 +113,7 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-qabtn", "term-threadsbtn"]) nodes[id] = node(id);
+  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn"]) nodes[id] = node(id);
   const body = node("body");
   const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [], cleared: [] };
   const ctx = {};
@@ -346,6 +346,13 @@ check("the key carries the base path",
         w.calls.kinds[w.calls.kinds.length - 1] === "category"
         && w.nodes["term-categorybtn"].attrs["aria-pressed"] === "true"
         && w.nodes["term-simsbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
+  // The briefing and prompt packs pane (↻ rebrief, claunch-6esft.1) is another.
+  w.ctx.setSessLayout("s15", { pane: "packs" });
+  check("the packs pane opens with the packs view and lights ↻ only",
+        w.calls.kinds[w.calls.kinds.length - 1] === "packs"
+        && w.nodes["term-rebrief"].attrs["aria-pressed"] === "true"
+        && w.nodes["term-categorybtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
+  check("...and the packs choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "packs");
   w.ctx.setSessLayout("s15", { pane: "sims" });
   // A pi-durable session's chart (◇) is a third content of the same pane.
   w.ctx.setSessLayout("s15", { pane: "chart" });
