@@ -10,7 +10,7 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 |---|---|---|
 | 저장소 | `src/claude_launcher/threads/store.py` | 데몬 SQLite `daemon_dir()/threads.sqlite3`. 표 `threads`(세션, 제목, open/closed, 연 쪽, 마지막 seq, 에이전트가 읽은 seq)와 `messages`(전역 seq, author `user`/`agent`, 본문, 첨부 이미지) |
 | HTTP | `src/claude_launcher/daemon/threads_api.py` | `/api/threads` 라우트. 사용자 메시지를 세션 터미널에 전달 |
-| MCP | `src/claude_launcher/threads_mcp.py` | `thread_list` / `thread_read` / `thread_reply` / `thread_open` / `thread_close` |
+| MCP | `src/claude_launcher/threads_mcp.py` | `thread_list` / `thread_read` / `thread_reply` / `thread_open` / `thread_close` / `thread_invite` / `thread_uninvite` |
 | 웹 | `src/claude_launcher/web/static/threads-pane.js` | 터미널 헤더의 `🗪 threads` 버튼, 분할 영역(`#term-wf`)의 쓰레드 목록·대화·입력창 |
 
 ## 흐름
@@ -31,12 +31,45 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 
 ## 규칙
 
-- 사용자는 모든 세션의 쓰레드에 쓸 수 있다. 세션은 자기 쓰레드에만 쓸 수 있다(다른 세션 쓰레드는 403).
+- 사용자는 모든 세션의 쓰레드에 쓸 수 있다. 세션은 자기 쓰레드와 게스트로 초대된 쓰레드에만 쓸 수 있다(그 밖의 쓰레드는 403).
+  게스트는 메시지만 쓸 수 있고 닫기·이름 변경·초대는 할 수 없다(아래 「게스트」).
 - 닫힌 쓰레드에 어느 쪽이든 메시지를 쓰면 다시 열린다.
 - 세션 하나당 열린 쓰레드는 50개까지다(`MAX_OPEN_PER_SESSION`).
 - 세션이 종료되어 전달할 수 없으면 메시지는 쓰레드에 남고, 응답의 `delivered`가 `false`다. 패널이 그 사실을 표시한다.
 - 에이전트의 읽음 위치(`agent_read`)는 소유 세션이 `thread_read`로 읽거나 `thread_reply`로 답할 때 이동한다.
-  `thread_list`의 `agent_unread`는 그 뒤의 사용자 메시지 수다. 사용자의 읽음 위치는 브라우저 localStorage에 있다.
+  `thread_list`의 `agent_unread`는 그 뒤의 사용자·게스트 메시지 수다. 사용자의 읽음 위치는 브라우저 localStorage에 있다.
+
+## 게스트 (claunch-p9wes)
+
+쓰레드 하나에 다른 세션을 게스트로 초대할 수 있다. 게스트의 역할은 리뷰와 조언이다. 게스트는 그 쓰레드의 작업을
+직접 수행하지 않고(파일 수정·커밋·명령·자식 세션 없음), 그 쓰레드에 관해 QA 도구(`qa_*`)를 쓰지 않는다. 작업과
+사용자에게 하는 질문은 소유 세션이 맡는다.
+
+| 동작 | 경로 | 할 수 있는 쪽 |
+|---|---|---|
+| 초대 | `POST /api/threads/{id}/guests {session?, guest}`, MCP `thread_invite` | 사용자, 소유 세션 |
+| 해제 | `POST /api/threads/{id}/guests/{guest}/remove {session?}`, MCP `thread_uninvite` | 사용자, 소유 세션, 게스트 자신(나가기) |
+| 읽기·쓰기 | `thread_read` / `thread_reply` | 게스트(메시지 `author`가 `guest`, `guest`에 세션 이름) |
+
+- 저장: 표 `guests`(쓰레드, 세션, 초대한 쪽, 초대 시각, 게스트의 읽음 위치 `read_seq`). 쓰레드 하나의 게스트는
+  `MAX_GUESTS`(5)명까지다. 소유 세션 자신, operator, operator 쓰레드는 초대할 수 없다. 스키마 v6에서 `messages`에
+  `guest` 열이 생기고 `author`에 `guest`가 추가된다(v5 표는 행과 seq를 유지한 채 다시 만든다).
+- 전달:
+  - 초대되면 게스트 세션에 역할을 적은 블록이 전달된다. 사용자가 초대했으면 소유 세션에도 한 줄이 전달된다.
+  - 사용자 메시지는 소유 세션과 모든 게스트에게 전달된다(응답의 `guests_delivered`).
+  - 게스트 메시지는 소유 세션에 조언으로 전달된다. 다른 게스트에게는 전달되지 않는다.
+  - 소유 세션의 답은 게스트에게 전달되지 않는다. 게스트는 `thread_read`로 읽는다. 두 에이전트가 서로의 답에
+    응답하는 반복을 막기 위한 규칙이다.
+  - 해제되면 게스트에게 한 줄이 전달된다. 스스로 나간 경우에는 전달하지 않는다.
+- 목록: `GET /api/threads?session=<게스트>`와 `thread_list`는 게스트로 초대된 쓰레드를 `guest_threads`에 따로 싣는다.
+  각 항목의 `guest`에 초대한 쪽, 초대 시각, 읽지 않은 메시지 수(`unread`, 자기 메시지와 system 메시지 제외)가 있다.
+  모든 쓰레드는 `guests`(게스트 목록)를 싣는다.
+- 웹 패널: 목록 아래 「초대된 쓰레드」 구획에 `guest_threads`를 소유 세션 이름과 함께 표시한다. 대화 머리의
+  「게스트 초대」가 세션 이름 입력 상자를 열고, 게스트마다 칩과 ×(해제)를 표시한다. 게스트 메시지는 게스트 이름으로
+  표시된다.
+- 서버가 강제하는 범위: 게스트의 쓰기는 메시지로 제한된다(닫기·이름 변경·초대는 403). QA 질문을 쓰레드에 연결하는
+  `qa_ask thread=`는 쓰레드 소유 세션만 할 수 있어 게스트는 400을 받는다. 그 밖의 「작업을 직접 하지 않음」,
+  「QA 도구를 쓰지 않음」은 전달 블록과 `mcp-threads` 프롬프트 팩의 지시로만 제한된다.
 
 ## 이미지 첨부 (claunch-shl2r)
 
@@ -138,5 +171,6 @@ id는 무시한다(거절하지 않는다). 판정은 `talk_links.subject_in`이
 
 ## 범위 밖
 
-- 메시 연합: 쓰레드는 그 세션을 실행하는 데몬에만 저장된다.
+- 메시 연합: 쓰레드는 그 세션을 실행하는 데몬에만 저장된다. 게스트도 같은 데몬의 세션만 초대할 수 있다.
+- 게스트 메시지의 대시보드 알림: rail의 `replies`는 소유 세션의 답만 싣는다. 게스트 메시지는 패널의 점(●)으로만 표시된다.
 - 모바일 레이아웃: 분할 영역은 넓은 화면에서만 열린다.

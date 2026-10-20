@@ -52,8 +52,8 @@ class FakeManager:
         return True
 
 
-def run(tmp_path, scenario):
-    mgr = FakeManager([FakeSession("s1"), FakeSession("s2")])
+def run(tmp_path, scenario, names=("s1", "s2")):
+    mgr = FakeManager([FakeSession(n) for n in names])
     app = web.Application()
     app["manager"] = mgr
     threads_api.install(app, S.ThreadStore(tmp_path / "threads.sqlite3"))
@@ -368,3 +368,76 @@ def test_a_live_session_that_takes_images_gets_them_pasted_first(tmp_path, monke
         assert len(steps) == 1                                  # a harness without images: paths only
 
     run(tmp_path, scenario)
+
+
+def test_a_guest_is_invited_told_its_role_and_listed_apart(tmp_path):
+    """claunch-p9wes: the user invites s2 into s1's thread; s2 is told it is a
+    reviewer and advisor only, s1 is told who joined, and s2's list carries
+    the thread under guest_threads."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "Plan", "text": "draft"}))["thread"]["id"]
+        res = await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        assert res["added"] is True and res["delivered"] is True and res["owner_delivered"] is True
+        block = mgr.sessions["s2"].delivered[-1]
+        assert block.startswith(f'{threads_api.PREFIX} {tid} "Plan"]') and "guest" in block
+        assert "reviewer and advisor only" in block and "Do not use the QA tools" in block
+        assert "Do not carry out the thread's work yourself" in block
+        assert "invited session s2" in mgr.sessions["s1"].delivered[-1]
+        again = await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        assert again["added"] is False and "delivered" not in again   # nobody is told twice
+        doc = await req("GET", "/api/threads?session=s2")
+        assert doc["threads"] == [] and [t["id"] for t in doc["guest_threads"]] == [tid]
+        assert doc["guest_threads"][0]["guest"]["invited_by"] == "user"
+        owner = await req("GET", "/api/threads?session=s1")
+        assert [g["session"] for g in owner["threads"][0]["guests"]] == ["s2"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "ghost"}, status=404)
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s1"}, status=400)
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s2", "guest": "s3"}, status=403)
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_messages_reach_the_owner_and_the_guests_without_a_loop(tmp_path):
+    """A user message goes to the owner and every guest; a guest's message
+    goes to the owner as advice; the owner's reply goes to nobody."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"session": "s1", "title": "Design"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s2"})
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s3"})
+        assert mgr.sessions["s1"].delivered == []        # the owner invited them itself
+        before = {n: len(s.delivered) for n, s in mgr.sessions.items()}
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "which way?"})
+        assert res["delivered"] is True and res["guests_delivered"] == {"s2": True, "s3": True}
+        g = mgr.sessions["s2"].delivered[-1]
+        assert "(you are a guest of session s1 here)" in g and "  > which way?" in g
+        assert "reviewer and advisor only" in g
+        assert "  > which way?" in mgr.sessions["s1"].delivered[-1]
+        res = await req("POST", f"/api/threads/{tid}/messages", {"session": "s2", "text": "option B"})
+        assert res["message"]["author"] == "guest" and res["message"]["guest"] == "s2"
+        o = mgr.sessions["s1"].delivered[-1]
+        assert "Guest session s2 (reviewer and advisor) wrote" in o and "  > option B" in o
+        assert len(mgr.sessions["s3"].delivered) == before["s3"] + 1      # guests do not hear each other
+        counts = {n: len(s.delivered) for n, s in mgr.sessions.items()}
+        await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "going with B"})
+        assert {n: len(s.delivered) for n, s in mgr.sessions.items()} == counts
+        await req("POST", f"/api/threads/{tid}/close", {"session": "s2"}, status=403)
+        await req("POST", f"/api/threads/{tid}/title", {"session": "s2", "title": "x"}, status=403)
+        read = await req("GET", f"/api/threads/{tid}?reader=s2")
+        assert [m["author"] for m in read["messages"]] == ["user", "guest", "agent"]
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_a_guest_is_removed_or_leaves(tmp_path):
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "Plan"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s3"})
+        res = await req("POST", f"/api/threads/{tid}/guests/s2/remove", {})
+        assert res["removed"] is True and res["delivered"] is True
+        assert "no longer a guest" in mgr.sessions["s2"].delivered[-1]
+        await req("POST", f"/api/threads/{tid}/messages", {"session": "s2", "text": "x"}, status=403)
+        n = len(mgr.sessions["s3"].delivered)
+        res = await req("POST", f"/api/threads/{tid}/guests/s3/remove", {"session": "s3"})
+        assert "delivered" not in res and len(mgr.sessions["s3"].delivered) == n   # leaving is not announced back
+        await req("POST", f"/api/threads/{tid}/guests/s3/remove", {}, status=404)
+        assert (await req("GET", "/api/threads?session=s3"))["guest_threads"] == []
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))

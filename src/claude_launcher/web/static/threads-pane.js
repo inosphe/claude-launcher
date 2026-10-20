@@ -63,7 +63,15 @@
    written down once at release (SIDE_W_KEY, every session); a double click
    forgets it. With nothing stored the stylesheet's width holds (220px, 170px
    beside the QA column). The bar is hidden while the pane has one half
-   (.th-solo, .th-folded) and on a phone. */
+   (.th-solo, .th-folded) and on a phone.
+
+   Guests (claunch-p9wes): "게스트 초대" in the conversation head opens a box
+   for a session name; 초대 posts {guest} to /api/threads/<id>/guests, and
+   each guest is a chip whose × posts to .../guests/<name>/remove. A guest
+   reviews and advises only; its messages show under its own name. The
+   threads another session invited this one into (`guest_threads` of the
+   list) are listed apart, under 「초대된 쓰레드」, each with the session it
+   belongs to; choosing one opens it like any other thread. */
 globalThis.ThreadsPane = (() => {
   "use strict";
   const POLL_MS = 3000;
@@ -75,6 +83,7 @@ globalThis.ThreadsPane = (() => {
   let composing = false;     // the new-thread form is open
   let composeQa = null;      // {id, title}: the question the new thread is about
   let renaming = "";         // the thread whose title is being edited
+  let inviting = "";         // the thread whose guest box is open
   let notice = "";
   let wanted = null;         // {session, tid}: the thread to show at the next mount there
   let focusCompose = false;  // a thread was just opened: its composer takes the focus
@@ -169,9 +178,25 @@ globalThis.ThreadsPane = (() => {
   function unseen(threads, read) {
     const out = new Set();
     for (const t of threads || []) {
-      if (t.last && t.last.author === "agent" && t.last_seq > (read[t.id] || 0)) out.add(t.id);
+      if (t.last && (t.last.author === "agent" || t.last.author === "guest") && t.last_seq > (read[t.id] || 0)) {
+        out.add(t.id);
+      }
     }
     return out;
+  }
+
+  /* Who wrote message `m` of a thread of session `owner`: the owner, a
+     guest by its name (claunch-p9wes), or the user ("나"). */
+  function speaker(m, owner) {
+    if (m && m.author === "agent") return owner;
+    if (m && m.author === "guest") return `${m.guest || "게스트"} (게스트)`;
+    return "나";
+  }
+
+  /* Every thread the pane can show: the session's own, then the ones it
+     is a guest in. */
+  function allThreads(doc) {
+    return ((doc && doc.threads) || []).concat((doc && doc.guest_threads) || []);
   }
 
   /* Enter sends, Shift+Enter is a new line; an IME composition is never
@@ -435,7 +460,7 @@ globalThis.ThreadsPane = (() => {
       if (mine !== seq || want !== name) return;
       error = "";
       list = doc;
-      current = pick(list.threads, current);
+      current = pick(allThreads(list), current);
       remember(current);
       await loadThread(early);
     } catch (e) {
@@ -456,7 +481,7 @@ globalThis.ThreadsPane = (() => {
     if (!tid) { convo = null; return; }
     const have = convo && convo.id === tid ? convo : null;
     const after = have && have.messages.length ? have.messages[have.messages.length - 1].seq : 0;
-    const row = (list.threads || []).find((t) => t.id === tid);
+    const row = allThreads(list).find((t) => t.id === tid);
     if (have && row && row.last_seq <= after) { have.thread = row; return; }
     const read = early && early.tid === tid && early.after === after ? early : readThread(tid, after);
     const doc = await read.promise;
@@ -554,6 +579,23 @@ globalThis.ThreadsPane = (() => {
   }
 
   const RENAME = "\u0000rename";   // drafts key of the title being edited
+  const INVITE = "\u0000invite";   // drafts key of the guest being invited
+
+  function invite(tid, guest) {
+    if (!guest) { inviting = ""; drafts.delete(INVITE); render(); return undefined; }
+    // The box lets go of the focus, so the redraw after the answer is not
+    // held back for a box that is still being typed in.
+    if (typeof document !== "undefined" && document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    return once(INVITE, () => act(async () => {
+      const res = await request(`/api/threads/${encodeURIComponent(tid)}/guests`, {guest});
+      if (inviting === tid) { inviting = ""; drafts.delete(INVITE); }
+      notice = res.added === false ? `${guest}는 이미 이 쓰레드의 게스트입니다.` : deliveryNotice(res, guest);
+    }));
+  }
+
+  function uninvite(tid, guest) {
+    return act(() => request(`/api/threads/${encodeURIComponent(tid)}/guests/${encodeURIComponent(guest)}/remove`, {}));
+  }
 
   function startRename(tid) {
     if (renaming !== tid) drafts.delete(RENAME);
@@ -746,11 +788,11 @@ globalThis.ThreadsPane = (() => {
     return box;
   }
 
-  function bubble(author, text, when, state, images = [], files = [], tid = "") {
+  function bubble(author, text, when, state, images = [], files = [], tid = "", who = "") {
     const row = node("div", `th-msg th-${author}`);
     if (state) row.classList.add(`th-${state}`);
     const meta = node("div", "th-msg-meta");
-    meta.append(node("span", "th-msg-who", author === "agent" ? name : "나"));
+    meta.append(node("span", "th-msg-who", who || (author === "agent" ? name : "나")));
     if (when) meta.append(node("span", "th-msg-at", when));
     if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
     if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
@@ -799,11 +841,23 @@ globalThis.ThreadsPane = (() => {
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
+    const guestOf = (list && list.guest_threads) || [];
     if (!threads.length) {
       side.append(node("p", "wf-note", "쓰레드가 없습니다. 주제별로 쓰레드를 열면 세션과 따로 대화할 수 있습니다. 주제와 첫 메시지는 비워 두어도 됩니다."));
-      return;
+    } else {
+      side.append(listOf(threads, fresh));
     }
-    const ul = node("ul", "th-list");
+    if (guestOf.length) {
+      const sec = node("div", "th-guest-sec");
+      sec.append(node("h4", "th-guest-head", `초대된 쓰레드 ${guestOf.length}`));
+      sec.append(node("p", "th-guest-note", "다른 세션이 이 세션을 게스트(리뷰·조언)로 초대한 쓰레드입니다."));
+      sec.append(listOf(guestOf, fresh, true));
+      side.append(sec);
+    }
+  }
+
+  function listOf(threads, fresh, guest = false) {
+    const ul = node("ul", guest ? "th-list th-list-guest" : "th-list");
     for (const t of threads) {
       const li = node("li", "th-item");
       li.classList.toggle("on", t.id === current);
@@ -813,6 +867,12 @@ globalThis.ThreadsPane = (() => {
       const top = node("div", "th-item-top");
       top.append(node("span", "th-item-title", t.title));
       if (t.status === "closed") top.append(node("span", "th-chip", "닫힘"));
+      if (guest) top.append(node("span", "th-chip th-chip-owner", t.session));
+      else if ((t.guests || []).length) {
+        const g = node("span", "th-chip th-chip-guests", `게스트 ${t.guests.length}`);
+        g.title = t.guests.map((x) => x.session).join("\n");
+        top.append(g);
+      }
       if ((t.links || []).length) {
         const q = node("span", "th-chip th-chip-qa", `QA ${t.links.length}`);
         q.title = t.links.map(linkLabel).join("\n");
@@ -821,10 +881,11 @@ globalThis.ThreadsPane = (() => {
       if (fresh.has(t.id)) top.append(node("span", "th-dot", "●"));
       li.append(top);
       if (t.last) {
-        const who = t.last.author === "agent" ? `${name}: ` : "나: ";
-        li.append(node("div", "th-item-last", who + lastLine(t.last)));
+        li.append(node("div", "th-item-last", `${speaker(t.last, t.session)}: ` + lastLine(t.last)));
       }
-      li.title = `${t.id} · ${t.opened_by === "agent" ? "세션이 연 쓰레드" : "내가 연 쓰레드"}`;
+      li.title = guest
+        ? `${t.id} · ${t.session}의 쓰레드 · 게스트로 초대됨` + (t.guest && t.guest.invited_by ? ` (${t.guest.invited_by === "user" ? "사용자" : t.guest.invited_by})` : "")
+        : `${t.id} · ${t.opened_by === "agent" ? "세션이 연 쓰레드" : "내가 연 쓰레드"}`;
       li.addEventListener("click", () => {
         if (current === t.id) return;
         if (renaming) { renaming = ""; drafts.delete(RENAME); }
@@ -838,7 +899,7 @@ globalThis.ThreadsPane = (() => {
       });
       ul.append(li);
     }
-    side.append(ul);
+    return ul;
   }
 
   function renderConvo(main) {
@@ -894,7 +955,45 @@ globalThis.ThreadsPane = (() => {
       const v = ((box && box.value) || "").trim();
       send(t.id, v || ASK_QA_TEXT, true);
     });
-    head.append(toggle, askQa);
+    const inv = node("button", "term-btn th-invite", "게스트 초대");
+    inv.type = "button";
+    inv.title = "다른 세션을 이 쓰레드에 게스트로 초대합니다. 게스트는 리뷰와 조언만 하고 작업을 직접 하거나 QA 도구를 쓰지 않습니다.";
+    inv.addEventListener("click", () => { inviting = inviting === t.id ? "" : t.id; drafts.delete(INVITE); render(); });
+    head.append(toggle, askQa, inv);
+
+    let guests = null;
+    if ((t.guests || []).length || inviting === t.id || t.session !== name) {
+      guests = node("div", "th-guests");
+      if (t.session !== name) guests.append(node("span", "th-guest-role", `${t.session}의 쓰레드 · ${name}는 게스트(리뷰·조언)`));
+      for (const g of t.guests || []) {
+        const chip = node("span", "th-guest-chip", g.session);
+        chip.title = `게스트 · ${g.invited_by === "user" ? "사용자가" : g.invited_by + "가"} 초대`;
+        const x = node("button", "th-guest-x", "×");
+        x.type = "button";
+        x.title = `${g.session}를 게스트에서 뺍니다`;
+        x.setAttribute("aria-label", x.title);
+        x.addEventListener("click", () => uninvite(t.id, g.session));
+        chip.append(x);
+        guests.append(chip);
+      }
+      if (inviting === t.id) {
+        const box = node("input", "th-invite-input");
+        box.placeholder = "초대할 세션 이름";
+        box.value = drafts.get(INVITE) || "";
+        box.addEventListener("input", () => drafts.set(INVITE, box.value));
+        const go = () => invite(t.id, box.value.trim());
+        box.addEventListener("keydown", (e) => {
+          if (sendKey(e)) { e.preventDefault(); go(); }
+          else if (e.key === "Escape") { e.preventDefault(); inviting = ""; drafts.delete(INVITE); render(); }
+        });
+        const ok = node("button", "term-btn th-invite-go", inflight.has(INVITE) ? "초대 중…" : "초대");
+        ok.type = "button";
+        ok.disabled = inflight.has(INVITE);
+        ok.addEventListener("click", go);
+        guests.append(box, ok);
+        setTimeout(() => box.focus(), 0);
+      }
+    }
 
     let links = null;
     if ((t.links || []).length) {
@@ -912,7 +1011,7 @@ globalThis.ThreadsPane = (() => {
     const msgs = node("div", "th-messages");
     for (const m of convo.messages) {
       msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
-                         m.files || [], t.id));
+                         m.files || [], t.id, speaker(m, t.session)));
     }
     const out = pending.get(t.id);
     if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || [], out.files || []));
@@ -926,7 +1025,9 @@ globalThis.ThreadsPane = (() => {
       const v = box.value.trim();
       if (v || (attached.get(t.id) || []).length) send(t.id, v);
     };
-    const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 1);
+    const nGuests = (t.guests || []).length;
+    const box = textBox("th-text", t.id, nGuests ? `${t.session}와 게스트 ${nGuests}명에게 보내기` : `${t.session || name}에게 보내기`,
+                        submit, 1);
     const foot = node("div", "th-compose-foot");
     foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter/Ctrl+J 줄바꿈 · markdown 지원 · 이미지 붙여넣기 · 📎 파일 첨부"));
     const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
@@ -937,7 +1038,7 @@ globalThis.ThreadsPane = (() => {
     dropTarget(compose, t.id);
     compose.append(strip(t.id), box, foot);
 
-    main.replaceChildren(head, ...(links ? [links] : []), msgs, compose);
+    main.replaceChildren(head, ...(guests ? [guests] : []), ...(links ? [links] : []), msgs, compose);
     msgs.scrollTop = msgs.scrollHeight;
     const last = convo.messages[convo.messages.length - 1];
     if (last) markRead(t.id, last.seq);
@@ -983,7 +1084,7 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
+    const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
                                     (attached.get("") || []).length]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
@@ -991,11 +1092,13 @@ globalThis.ThreadsPane = (() => {
     }
     const t = convo && convo.thread;
     const editing = !!convo && renaming === convo.id;
-    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length,
+    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], t.guests || [],
+                                            inviting === convo.id, inflight.has(INVITE), convo.messages.length,
                                             inflight.has(convo.id), pending.get(convo.id) || null,
                                             (attached.get(convo.id) || []).length,
                                             editing, inflight.has(RENAME)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
+    if (typingIn(main.querySelector(".th-guests"))) return;
     const oldTitleBox = main.querySelector(".th-rename-input");
     const titleFocused = !!oldTitleBox && document.activeElement === oldTitleBox;
     drawn.main = mainSig;
@@ -1046,6 +1149,7 @@ globalThis.ThreadsPane = (() => {
     current = "";
     composing = false;
     composeQa = null;
+    inviting = "";
     focusCompose = false;
     inflight.clear();
     pending.clear();
@@ -1081,6 +1185,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, newlineKey, pick, linkLabel, stamp,
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, stamp,
           imageKind, imageFiles, imageSrc, fileSrc, sizeOf, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
 })();
