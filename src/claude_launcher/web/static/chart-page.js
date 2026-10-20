@@ -3,6 +3,11 @@
    lived and where its cflow run stands. Narrowed like the rail: by project,
    and by one mesh or workspace group.
 
+   Two columns split by a draggable divider: the timeline on the left and,
+   on the right, the detail of the row the viewer clicked (that row stays
+   highlighted). The divider's place and the picked session are kept with
+   the rest of the view in localStorage.
+
    It owns no poll of its own for the live fleet. The records come from the
    caches app.js already keeps current (sessionsCache, the v1 runs behind
    sessCflowRun, cflow2RailCache, the mesh index behind sessMeshes); the page
@@ -25,6 +30,8 @@ globalThis.ChartPage = (() => {
   const GROUPS = [["", "Off"], ["mesh", "Mesh"], ["workspace", "Workspace"]];
   const REDRAW_MS = 5000;
   const STORE_KEY = "claunch_chart_view";
+  // The timeline column's share of the split, in percent.
+  const SPLIT_DEFAULT = 64, SPLIT_MIN = 30, SPLIT_MAX = 82;
 
   /* The rail's five categories (app.js sessionCategory), repeated here so the
      model runs without app.js. */
@@ -40,6 +47,25 @@ globalThis.ChartPage = (() => {
   /* app.js recordProject: a record that never named a project is "default". */
   function projectOf(s) {
     return String((s && s.project) || "").trim() || "default";
+  }
+
+  /* The role a row names, as the rail spells it (app.js renderRow): the
+     session's own field first, then the role it holds in the mesh the rows
+     are grouped under, then its first membership, else "free-role".
+     memberships are sessMeshes(name) entries: {mesh, handle, label}. */
+  function roleOf(s, memberships, meshGroup) {
+    if (s && s.role) return String(s.role);
+    const ms = memberships || [];
+    const under = meshGroup ? ms.find((m) => m.mesh === meshGroup) : null;
+    if (under && under.label) return under.label;
+    const first = ms.find((m) => m.label);
+    return first ? first.label : "free-role";
+  }
+
+  function clampSplit(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return SPLIT_DEFAULT;
+    return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, n));
   }
 
   function ms(iso) {
@@ -113,7 +139,8 @@ globalThis.ChartPage = (() => {
      groupValue(group, s) -> the group a record is filed under, groupPick
      ("" = every group), range (a RANGES key), archived (include archived
      records), sort ("created" | "lifetime"), cflowOf(name) -> {state,
-     label, version} or null.
+     label, version} or null, meshesOf(name) -> the session's mesh
+     memberships (for its role).
 
      A record is kept when its bar overlaps the range window. The axis runs
      from the window's start (or, for "all", the earliest kept creation) to
@@ -126,6 +153,7 @@ globalThis.ChartPage = (() => {
     const group = opts.group || "";
     const groupValue = opts.groupValue || (() => "");
     const cflowOf = opts.cflowOf || (() => null);
+    const meshesOf = opts.meshesOf || (() => []);
     const base = [];
     for (const s of sessions || []) {
       if (!s || !s.name) continue;
@@ -134,10 +162,13 @@ globalThis.ChartPage = (() => {
       if (cat === "archived" && !opts.archived) continue;
       const span = spanOf(s, now);
       if (!span || span.end < from) continue;
+      const g = group ? groupValue(group, s) : "";
+      const meshes = meshesOf(s.name) || [];
       base.push({
         name: s.name, session: s, category: cat, span,
         lifetime: span.end - span.start,
-        group: group ? groupValue(group, s) : "",
+        group: g, meshes,
+        role: roleOf(s, meshes, group === "mesh" ? g : ""),
         cflow: cflowOf(s.name),
       });
     }
@@ -198,12 +229,14 @@ globalThis.ChartPage = (() => {
   // ---- the page -------------------------------------------------------
 
   let timer = null;
+  let dragging = false;
   let archivedRecords = [];
   let archivedLoading = false;
   let archivedError = "";
   const state = (() => {
     const fallback = { group: "", groupPick: "", range: "7d",
-                       archived: false, sort: "created" };
+                       archived: false, sort: "created",
+                       split: SPLIT_DEFAULT, selected: "" };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
       return Object.assign(fallback, saved && typeof saved === "object" ? saved : {});
@@ -256,6 +289,10 @@ globalThis.ChartPage = (() => {
                label: `${v1.workflow || "cflow"} · ${sessCflowLabel(v1)}` };
     }
     return null;
+  }
+
+  function appMeshesOf(name) {
+    return typeof sessMeshes === "function" ? sessMeshes(name) || [] : [];
   }
 
   /* The project is the page's one shared pick (app.js currentProject, the
@@ -403,15 +440,28 @@ globalThis.ChartPage = (() => {
     return row;
   }
 
+  function pick(name) {
+    state.selected = state.selected === name ? "" : name;
+    remember();
+    render(true);
+  }
+
   function sessionRow(r, model) {
-    const row = node("div", `chart-row cat-${r.category}`);
-    const name = node("a", "chart-name");
-    name.href = "#/s/" + encodeURIComponent(r.name);
+    const on = r.name === state.selected;
+    const row = node("div", `chart-row cat-${r.category}${on ? " selected" : ""}`);
+    row.dataset.name = r.name;
+    row.tabIndex = 0;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(on));
+    row.onclick = () => pick(r.name);
+    row.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(r.name); }
+    };
+    const name = node("div", "chart-name");
     name.title = r.name;
     name.appendChild(node("span", `chart-dot cat-${r.category}`));
     name.appendChild(node("span", "chart-name-text", r.name));
-    const role = r.session.role;
-    if (role) name.appendChild(node("span", "chart-role", role));
+    name.appendChild(node("span", "chart-role", r.role));
     row.appendChild(name);
 
     const track = node("div", "chart-track");
@@ -447,19 +497,159 @@ globalThis.ChartPage = (() => {
     return row;
   }
 
+  /* The right column: everything known about the picked session. The record
+     is looked up in every session the page holds, so a pick that the
+     current filter hides still shows (with a note saying so). */
+  function detail(model, sessions) {
+    const box = node("aside", "chart-detail");
+    box.setAttribute("aria-label", "session detail");
+    const name = state.selected;
+    if (!name) {
+      box.appendChild(node("p", "chart-muted chart-detail-hint",
+        "왼쪽에서 세션 행을 클릭하면 상세 정보가 여기에 표시된다."));
+      return box;
+    }
+    let r = model.rows.find((x) => x.name === name);
+    const hidden = !r;
+    if (!r) {
+      const s = sessions.find((x) => x.name === name);
+      if (!s) {
+        box.appendChild(node("p", "chart-muted chart-detail-hint",
+          `세션 ${name}의 기록이 지금 목록에 없다.`));
+        return box;
+      }
+      const span = spanOf(s, model.now) || { start: null, end: null, alive: false };
+      const meshes = appMeshesOf(s.name);
+      r = { name: s.name, session: s, category: category(s), span,
+            lifetime: span.start === null ? null : span.end - span.start,
+            meshes, role: roleOf(s, meshes, ""), cflow: appCflowOf(s.name) };
+    }
+    const s = r.session;
+    const head = node("div", "chart-detail-head");
+    head.appendChild(node("span", `chart-dot cat-${r.category}`));
+    head.appendChild(node("h3", "chart-detail-name", r.name));
+    const close = node("button", "chart-detail-close", "×");
+    close.type = "button";
+    close.title = "선택 해제";
+    close.onclick = () => pick(r.name);
+    head.appendChild(close);
+    box.appendChild(head);
+    if (hidden) box.appendChild(node("p", "chart-muted chart-detail-note",
+      "현재 필터 조건에는 이 세션이 포함되지 않는다."));
+
+    const dl = node("dl", "chart-detail-list");
+    const item = (label, value) => {
+      if (value === undefined || value === null || value === "") return;
+      dl.appendChild(node("dt", null, label));
+      const dd = node("dd");
+      if (value instanceof Node) dd.appendChild(value); else dd.textContent = String(value);
+      dl.appendChild(dd);
+    };
+    item("상태", CATEGORY_LABEL[r.category]);
+    item("role", r.role);
+    item("생성", r.span.start === null ? "" : formatTime(r.span.start));
+    item("종료", r.span.alive ? "(실행 중)" : r.span.end === null ? "" : formatTime(r.span.end));
+    item("생존 시간", r.lifetime === null ? "" : formatDuration(r.lifetime));
+    item("프로젝트", projectOf(s));
+    item("workspace", s.cwd || "");
+    item("parent", s.parent && s.parent !== s.name ? s.parent : "");
+    item("profile", s.profile || "");
+    item("harness", s.harness || "");
+    item("model", s.model || "");
+    const last = ms(s.last_activity_at);
+    item("마지막 활동", last === null ? "" : formatTime(last));
+    if (r.meshes && r.meshes.length) {
+      const ul = node("ul", "chart-detail-meshes");
+      for (const m of r.meshes) {
+        ul.appendChild(node("li", null,
+          `${m.mesh} · ${m.handle || "?"}${m.label ? ` (${m.label})` : ""}`));
+      }
+      item("mesh", ul);
+    }
+    if (r.cflow) {
+      const f = node("span", "chart-flow");
+      const glyph = typeof WF_GLYPH !== "undefined" ? WF_GLYPH[r.cflow.state] || "" : "";
+      f.appendChild(node("span", `wf-mark wf-mark-${r.cflow.state}`, glyph));
+      f.appendChild(node("span", "chart-flow-ver", r.cflow.version));
+      f.appendChild(node("span", "chart-detail-flow-text", r.cflow.label));
+      item("cflow", f);
+    } else {
+      item("cflow", "없음");
+    }
+    box.appendChild(dl);
+    const link = node("a", "chart-detail-open", "세션 열기 →");
+    link.href = "#/s/" + encodeURIComponent(r.name);
+    box.appendChild(link);
+    return box;
+  }
+
+  /* The bar between the columns. Dragging it (or the arrow keys while it has
+     focus) moves the split; the new share is stored once the drag ends. */
+  function divider(split) {
+    const bar = node("div", "chart-divider");
+    bar.tabIndex = 0;
+    bar.setAttribute("role", "separator");
+    bar.setAttribute("aria-orientation", "vertical");
+    bar.setAttribute("aria-label", "열 너비 조절");
+    bar.setAttribute("aria-valuemin", String(SPLIT_MIN));
+    bar.setAttribute("aria-valuemax", String(SPLIT_MAX));
+    bar.setAttribute("aria-valuenow", String(Math.round(state.split)));
+    const apply = (v) => {
+      state.split = clampSplit(v);
+      split.style.setProperty("--chart-left", `${state.split}%`);
+      bar.setAttribute("aria-valuenow", String(Math.round(state.split)));
+    };
+    bar.onpointerdown = (e) => {
+      e.preventDefault();
+      dragging = true;
+      bar.classList.add("dragging");
+      if (bar.setPointerCapture) { try { bar.setPointerCapture(e.pointerId); } catch {} }
+      const move = (ev) => {
+        const box = split.getBoundingClientRect();
+        if (box.width > 0) apply(((ev.clientX - box.left) / box.width) * 100);
+      };
+      const up = () => {
+        dragging = false;
+        bar.classList.remove("dragging");
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        remember();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    };
+    bar.onkeydown = (e) => {
+      const step = e.key === "ArrowLeft" ? -2 : e.key === "ArrowRight" ? 2 : 0;
+      if (!step) return;
+      e.preventDefault();
+      apply(state.split + step);
+      remember();
+    };
+    return bar;
+  }
+
   function render(force = false) {
     const root = view();
     if (!root || root.classList.contains("hidden")) return;
     // A redraw replaces the toolbar; skip the timer's while a picker is open
-    // in it, or the list would close under the viewer's pointer.
+    // in it, or the list would close under the viewer's pointer. A drag of
+    // the divider is skipped the same way.
+    if (!force && dragging) return;
     const focused = typeof document !== "undefined" && document.activeElement;
     if (!force && focused && focused.tagName === "SELECT" && root.contains(focused)) return;
-    const top = root.scrollTop;
+    const keepFocus = focused && root.contains(focused)
+      ? (focused.classList.contains("chart-divider") ? "divider"
+         : focused.dataset && focused.dataset.name ? focused.dataset.name : "")
+      : "";
+    const oldMain = root.querySelector(".chart-main");
+    const oldSide = root.querySelector(".chart-detail");
+    const tops = [oldMain ? oldMain.scrollTop : 0, oldSide ? oldSide.scrollTop : 0];
     const sessions = liveSessions();
     const model = buildModel(sessions, {
       now: Date.now(), project: currentProjectPick(), group: state.group,
       groupValue: appGroupValue, groupPick: state.groupPick, range: state.range,
       archived: state.archived, sort: state.sort, cflowOf: appCflowOf,
+      meshesOf: appMeshesOf,
     });
     root.innerHTML = "";
     const head = node("div", "wf-head");
@@ -485,8 +675,24 @@ globalThis.ChartPage = (() => {
       }
       chart.appendChild(sessionRow(r, model));
     }
-    root.appendChild(chart);
-    root.scrollTop = top;
+    const split = node("div", "chart-split");
+    split.style.setProperty("--chart-left", `${clampSplit(state.split)}%`);
+    const main = node("div", "chart-main");
+    main.setAttribute("role", "listbox");
+    main.setAttribute("aria-label", "sessions");
+    main.appendChild(chart);
+    split.appendChild(main);
+    split.appendChild(divider(split));
+    const side = detail(model, sessions);
+    split.appendChild(side);
+    root.appendChild(split);
+    main.scrollTop = tops[0];
+    side.scrollTop = tops[1];
+    if (keepFocus === "divider") split.querySelector(".chart-divider").focus();
+    else if (keepFocus) {
+      const again = [...main.querySelectorAll(".chart-row")].find((x) => x.dataset.name === keepFocus);
+      if (again) again.focus({ preventScroll: true });
+    }
   }
 
   function open() {
@@ -502,5 +708,5 @@ globalThis.ChartPage = (() => {
   }
 
   return { open, stop, render, category, projectOf, spanOf, formatDuration,
-           median, ticks, buildModel, barGeometry, RANGES };
+           median, ticks, buildModel, barGeometry, roleOf, clampSplit, RANGES };
 })();
