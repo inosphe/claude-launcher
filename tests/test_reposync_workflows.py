@@ -139,5 +139,5 @@ def test_conflict_repair_follows_the_integration_input(tmp_path, monkeypatch, gi
     st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
     repair = st["tasks"][0]
     assert repair["label"] == "repair"
-    assert f"통합 방식은\n{shown}을 따른다" in repair["prompt"] or f"{shown}을 따른다" in repair["prompt"]
+    assert f"{shown}을 따른다" in repair["prompt"]
     assert "--rebase-merges로 재현" in repair["prompt"] and "`git merge`로 재현" in repair["prompt"]
