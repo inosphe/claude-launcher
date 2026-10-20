@@ -123,8 +123,9 @@ check("a current preset saved before delayed and failed existed gains both",
       ctx.restore('["running","hold","killed","paused"]'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
 check("a running-paused preset saved before hold existed gains hold and delayed",
       ctx.restore('["running","paused"]'), ["running", "hold", "delayed", "paused"]);
-check("invalid storage resets", ctx.restore('{bad'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
-check("invalid state resets", ctx.restore('["unknown"]'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
+check("nothing saved starts on running + paused", ctx.restore(null), ["running", "hold", "delayed", "paused"]);
+check("invalid storage resets", ctx.restore('{bad'), ["running", "hold", "delayed", "paused"]);
+check("invalid state resets", ctx.restore('["unknown"]'), ["running", "hold", "delayed", "paused"]);
 check("empty selection survives reload", ctx.restore('[]'), []);
 check("saved combination survives reload", ctx.restore('["running","archived"]'), ["running", "archived"]);
 

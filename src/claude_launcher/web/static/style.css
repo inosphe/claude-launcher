@@ -524,14 +524,6 @@ html[data-theme="light"] #term-tps-overlay {
   font-size: 10px; z-index: 1;
 }
 #session-list > li.session-filtered { display: none; }
-/* The line exited rows fold behind (claunch-4thlk.6, railFoldExited). */
-#session-list li.rail-fold {
-  padding: 4px 10px; color: #7d8590; font-size: 11px; cursor: pointer;
-  border-top: 1px dashed #2a2e36; list-style: none; user-select: none;
-  font-variant-numeric: tabular-nums;
-}
-#session-list li.rail-fold:hover,
-#session-list li.rail-fold:focus-visible { color: #c9d1d9; background: #161b22; }
 #session-list li[data-name].session-filtered { display: none; }
 /* The gap and the right padding are tight on purpose: this row carries a
    name, a role, the rooms it is in, its profile and two buttons inside about

@@ -357,7 +357,7 @@ check("the pick is applied to mesh and ungrouped rows before the tabs split",
       /sessionGroupTabRows\(originRows, groupOrder\[0\]\)/.test(src) &&
       /const rows = tabbed \? tabbed.rows : originRows;/.test(src), true);
 check("the pick is part of the rail's rebuild signature",
-      /typeof sessionOriginFilter === "string" \? sessionOriginFilter : "both"[,\]]/.test(src), true);
+      /typeof sessionOriginFilter === "string" \? sessionOriginFilter : "both"\]/.test(src), true);
 check("the pick has its own styling, on and off",
       [/\.session-origin-option\.active\s*\{/.test(css),
        /\.session-origin-filter\s*\{/.test(css)], [true, true]);

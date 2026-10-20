@@ -2062,19 +2062,9 @@ function syncSessionSearchNote() {
 }
 
 function setSessionSearch(q) {
-  const was = sessionSearch.q;
   sessionSearch = { q: String(q || ""), hits: null, pending: false, error: "", index: null };
   syncSessionSearchNote();
   syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
-  railFoldFollowSearch(was);
-}
-
-/* A search is answered over every row, folded ones included
-   (railExitedFolds), so the rail is drawn again when one starts or ends --
-   only then, since this runs on every key typed into the box. */
-function railFoldFollowSearch(was) {
-  if (!String(was || "").trim() === !String(sessionSearch.q || "").trim()) return;
-  if (typeof railExitedFoldState === "function") refreshSessions({ cached: true });
 }
 
 /* The box's own clear button (index.html #session-search-clear). It is shown
@@ -2134,10 +2124,8 @@ async function runSessionSearch(q) {
     syncSessionSearchNote();
     return;
   }
-  const was = sessionSearch.q;
   sessionSearch = { q, hits: null, pending: true, error: "", index: null };
   syncSessionSearchNote();
-  railFoldFollowSearch(was);
   let next;
   try {
     const resp = await api(`/api/search?kind=sessions&q=${encodeURIComponent(q)}&limit=50`);
@@ -2174,9 +2162,17 @@ const SESSION_FILTERS = ["current", "running-paused", "running", "hold", "delaye
 const SESSION_FILTER_CURRENT = ["running", "hold", "delayed", "failed", "killed", "paused"];
 const SESSION_FILTER_RUNNING_PAUSED = ["running", "hold", "delayed", "paused"];
 const SESSION_GROUPS = ["mesh", "workspace"];
+/* A browser with nothing saved, or with storage that cannot be read back,
+   starts on running + paused (claunch-jhvdu). Most of a working machine's
+   records are killed sessions -- 866 of 1048 when this was set -- and every
+   row the filter lets through is a full card in the DOM; the filter is the
+   one switch that keeps them out, so the rail has no second fold for them.
+   A pick the browser saved, Current included, is kept as it was. */
 function restoreSessionFilter(saved) {
   const current = SESSION_FILTER_CURRENT.slice();
-  if (!saved || saved === "current") return current;
+  const fallback = SESSION_FILTER_RUNNING_PAUSED.slice();
+  if (!saved) return fallback;
+  if (saved === "current") return current;
   if (saved === "running-paused") return SESSION_FILTER_RUNNING_PAUSED.slice();
   if (SESSION_FILTERS.includes(saved)) return [saved];
   try {
@@ -2193,8 +2189,8 @@ function restoreSessionFilter(saved) {
       if (states.includes("killed") && !states.includes("failed")) states.push("failed");
       return SESSION_FILTERS.filter((s) => states.includes(s));
     }
-  } catch { /* Old or invalid browser storage falls back to Current. */ }
-  return current;
+  } catch { /* Old or invalid browser storage falls back to the default. */ }
+  return fallback;
 }
 let sessionFilter = restoreSessionFilter(localStorage.getItem(SESSION_FILTER_KEY));
 /* At most one grouping at a time: the rail shows one group per tab, and a
@@ -2319,8 +2315,7 @@ let sessionOriginFilter = (() => {
 function filterSessionOrigin(rows, origin) {
   if (origin !== "local" && origin !== "remote") return rows;
   const drop = origin === "local" ? "shadow" : "session";
-  const kept = rows.filter((r) => r.type !== drop
-    && !(drop === "session" && r.type === "fold"));
+  const kept = rows.filter((r) => r.type !== drop);
   return kept.filter((row, i) => {
     if (row.type !== "group" || (!row.level && row.group !== "remote")) return true;
     for (let j = i + 1; j < kept.length; j++) {
@@ -3832,112 +3827,6 @@ function showSessionGridTip(cell, row, col, name, inView, pin = false) {
 }
 /* ---- end rail grid view ---------------------------------------------- */
 
-/* Exited rows fold away at the foot of their group (claunch-4thlk.6).
-   Most of a working machine's rail is sessions that have exited -- 144 of
-   165 rows when the poll bytes were measured -- and every one of them was a
-   full card in the DOM on every rebuild. They are folded by default under
-   one line that says how many there are; opening it draws them as before.
-   The fold is rail-wide (one line per group, one switch for all of them)
-   and the browser remembers it; storage that cannot be read reads as
-   folded, the default.
-
-   Only where the reader sees live rows beside them: a state filter without
-   "running" picked the exited rows on purpose, and a search is answered
-   over every row, so neither folds. An exited row stays where it stands
-   when it is the session open in the terminal or the detail panel, or when
-   a live session descends from it -- the lineage would otherwise point at a
-   parent that is not drawn. */
-const RAIL_EXITED_OPEN_KEY = `claunch_rail_exited_open:${BASE}`;
-let railExitedOpen = (() => {
-  try { return localStorage.getItem(RAIL_EXITED_OPEN_KEY) === "1"; } catch { return false; }
-})();
-
-function railExitedFolds() {
-  if (typeof sessionSearch === "object" && sessionSearch
-      && String(sessionSearch.q || "").trim()) return false;
-  return typeof sessionFilter === "undefined" || !Array.isArray(sessionFilter)
-    || sessionFilter.includes("running");
-}
-
-/* The names an open fold would not hide anyway, among the exited records. */
-function railExitedShown() {
-  const out = [];
-  for (const name of [typeof currentName === "string" ? currentName : null,
-                      typeof sessName === "string" ? sessName : null]) {
-    if (name && !out.includes(name)
-        && sessionsCache.some((s) => s.name === name && s.status === "exited")) out.push(name);
-  }
-  return out;
-}
-
-/* What the fold adds to the rail's signature: a change to any of it moves
-   rows in or out of the fold, which a record change alone would not show. */
-function railExitedFoldState() {
-  return [railExitedFolds(), railExitedOpen, railExitedShown()];
-}
-
-/* One bucket's session items, the exited ones that fold moved to its foot
-   behind a `fold` item. Folded rows stay in the list (marked `folded`) so the
-   counts the tabs and filters take from it are unchanged; the drawing loop
-   skips them. Their depth is counted again among themselves (regroupDepths),
-   since a parent left in place is no longer above them. */
-function railFoldExited(items) {
-  if (!railExitedFolds()) return items;
-  const shown = new Set([typeof currentName === "string" ? currentName : null,
-                         typeof sessName === "string" ? sessName : null]);
-  const live = new Set();
-  // A row keeps its place when anything live descends from it: walk the
-  // items backwards, so a child is seen before its parent.
-  const byName = new Map(items.map((item) => [item.session.name, item.session]));
-  for (let i = items.length - 1; i >= 0; i--) {
-    const s = items[i].session;
-    if (s.status !== "exited" || live.has(s.name)) {
-      let up = s.parent;
-      const seen = new Set();
-      while (up && byName.has(up) && !seen.has(up)) {
-        seen.add(up);
-        live.add(up);
-        up = byName.get(up).parent;
-      }
-    }
-  }
-  const stay = [];
-  const fold = [];
-  for (const item of items) {
-    const s = item.session;
-    (s.status === "exited" && !shown.has(s.name) && !live.has(s.name) ? fold : stay).push(item);
-  }
-  if (!fold.length) return items;
-  const depths = regroupDepths(fold.map((item) => [item.session, item.depth]));
-  return [
-    ...stay,
-    { type: "fold", count: fold.length, open: railExitedOpen, meshGroup: fold[0].meshGroup },
-    ...fold.map((item, i) => ({ ...item, depth: depths[i][1], folded: !railExitedOpen })),
-  ];
-}
-
-function toggleRailExitedFold() {
-  railExitedOpen = !railExitedOpen;
-  try {
-    if (railExitedOpen) localStorage.setItem(RAIL_EXITED_OPEN_KEY, "1");
-    else localStorage.removeItem(RAIL_EXITED_OPEN_KEY);
-  } catch { /* the choice lasts for this page */ }
-  refreshSessions({ cached: true });
-}
-
-/* A session picked while its row is folded away -- from a tab, the address,
-   a link -- has no row to mark. Its row is kept out of the fold
-   (railExitedShown); this draws the rail again so it is there. */
-function railRevealFolded(name) {
-  if (!name || !railExitedFolds() || railExitedOpen) return;
-  const list = $("session-list");
-  if (!list || typeof list.querySelector !== "function") return;
-  if (list.querySelector(`li[data-name="${CSS.escape(name)}"]`)) return;
-  if (sessionsCache.some((s) => s.name === name && s.status === "exited")) {
-    refreshSessions({ cached: true });
-  }
-}
-
 /* Re-measure lineage depth inside one bucket of rows.
 
    `byLineage` numbers the whole rail, and grouping then cuts that tree up:
@@ -4024,11 +3913,8 @@ function bucketWithDescendants(entries, inside) {
    (shadowLineage) among the shadows of that bucket. */
 function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows = []) {
   if (level >= groups.length) return [
-    // Guarded like the helpers below: a harness that lifts only this
-    // function gets every row in lineage order.
-    ...(typeof railFoldExited === "function" ? railFoldExited : (items) => items)(
-      regroupDepths(entries).map(([session, depth, kin]) =>
-        ({ type: "session", session, depth, meshGroup, kin: !!kin }))),
+    ...regroupDepths(entries).map(([session, depth, kin]) =>
+      ({ type: "session", session, depth, meshGroup, kin: !!kin })),
     // Guarded like the other late-defined helpers: a harness that lifts only
     // this function gets the shadows flat, in the order they came.
     ...(typeof shadowLineage === "function"
@@ -5008,9 +4894,7 @@ async function refreshSessions(options) {
      // The open tab picks which rows are drawn.
      typeof sessionGroupTab === "object" ? sessionGroupTab : null,
      // The mesh header's local/remote pick drops rows from the same cache.
-     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both",
-     // What the exited fold hides (claunch-4thlk.6).
-     typeof railExitedFoldState === "function" ? railExitedFoldState() : null],
+     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both"],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -5057,16 +4941,12 @@ async function refreshSessions(options) {
   const keptRows = new Map();
   const keptGroups = new Map();
   const keptShadows = new Map();
-  const keptFolds = new Map();
   if (inPlace) {
     const harvest = (box) => {
       for (const n of Array.from(box.childNodes)) {
         if (n._railGroupKey) {
           keptGroups.set(n._railGroupKey, n);
           harvest(n._railGroupBody);
-        } else if (n._railFoldSig) {
-          if (!keptFolds.has(n._railFoldSig)) keptFolds.set(n._railFoldSig, []);
-          keptFolds.get(n._railFoldSig).push(n);
         } else if (n._railShadowSig) {
           if (!keptShadows.has(n._railShadowSig)) keptShadows.set(n._railShadowSig, []);
           keptShadows.get(n._railShadowSig).push(n);
@@ -5264,38 +5144,6 @@ async function refreshSessions(options) {
       groupCounts[row.level] = count;
       groupKeys.length = row.level;
       groupKeys[row.level] = groupKey;
-      continue;
-    }
-    if (row.type === "fold") {
-      // The line the exited rows fold behind (railFoldExited). The rows it
-      // holds are counted under the headings above it either way.
-      const parent = nestedGroupContainers
-        ? (groupBodies[groupBodies.length - 1] || list) : list;
-      const sig = JSON.stringify([row.count, row.open]);
-      let fold = inPlace && keptFolds.has(sig) ? keptFolds.get(sig).shift() : null;
-      if (!fold) {
-        fold = document.createElement("li");
-        fold.className = `rail-fold${row.open ? " open" : ""}`;
-        fold.tabIndex = 0;
-        fold.setAttribute("role", "button");
-        fold.setAttribute("aria-expanded", String(!!row.open));
-        fold.textContent = `${row.open ? "\u25be" : "\u25b8"} exited \u00b7 ${row.count}`;
-        fold.title = row.open
-          ? "fold the exited sessions away"
-          : `${row.count} exited session${row.count === 1 ? "" : "s"} folded away -- open to list them`;
-        fold.addEventListener("click", toggleRailExitedFold);
-        fold.addEventListener("keydown", (ev) => {
-          if (ev.key !== "Enter" && ev.key !== " ") return;
-          ev.preventDefault();
-          toggleRailExitedFold();
-        });
-        if (inPlace) fold._railFoldSig = sig;
-      }
-      place(parent, fold);
-      continue;
-    }
-    if (row.folded) {
-      countRow();
       continue;
     }
     if (row.type === "shadow") {
@@ -20384,7 +20232,6 @@ async function snapshotAttach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
-  if (typeof railRevealFolded === "function") railRevealFolded(name);
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
   // And which card unfolds its commits (claunch-7myrv).
@@ -20475,7 +20322,6 @@ function freshAttach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
-  if (typeof railRevealFolded === "function") railRevealFolded(name);
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
   // And which card unfolds its commits (claunch-7myrv).
@@ -38180,7 +38026,6 @@ function repointDetail(name) {
   stopSessRun();
   stopSessKids();
   sessName = name;
-  if (typeof railRevealFolded === "function") railRevealFolded(name);
   sessStartBox = null;
   sessSendBox = null;
   sessJoinBox = null;
