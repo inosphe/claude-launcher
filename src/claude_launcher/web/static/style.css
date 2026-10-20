@@ -7684,25 +7684,98 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-run-input-edit input[type=number] { flex: 1; min-width: 0; font: inherit; }
 .cf2-undecidable { color: #d29922; }
 
-.cf2-inputs { border: 1px solid #58677c; border-radius: 6px; padding: 14px; margin: 6px 0; min-width: 0; }
-.cf2-inputs-title { margin: 0 0 6px; font-size: 14px; color: #d8dbe0; }
-.cf2-input { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid #30363d; min-width: 0; }
+/* A v2 workflow's start inputs (docs/cflow-v2.md 2.6). A workflow declares a
+   sentence or three of help per input, and spent inline that made this box the
+   tallest part of the create form (claunch-npfyd). So the fields sit two to a
+   row, each row is one line -- caption, control, and a "?" that unfolds that
+   input's help where it stands -- and a control that needs the width (a
+   textarea, a row list) takes the whole box with its caption above. */
+.cf2-inputs {
+  border: 1px solid #58677c; border-radius: 6px; padding: 10px 12px 12px;
+  margin: 6px 0; min-width: 0;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px; row-gap: 3px; align-items: start;
+}
+.cf2-inputs-title { margin: 0 0 2px; font-size: 14px; color: #d8dbe0; }
+.cf2-inputs > :is(.cf2-inputs-title, .wf-note, .cf2-constraints) { grid-column: 1 / -1; }
+/* Every row is its own grid, so the caption and the "?" get fixed tracks:
+   that is what lines the controls up from row to row, whether or not a row
+   has help to unfold. A caption longer than its track wraps rather than
+   pushing its control right. */
+.cf2-input {
+  display: grid; grid-template-columns: 128px 18px minmax(0, 1fr);
+  column-gap: 6px; align-items: center; min-width: 0;
+  margin: 0; padding: 1px 0;
+}
+.cf2-input > .cf2-input-label { grid-column: 1; grid-row: 1; margin: 0; line-height: 1.25; }
+/* The form's own label rule (#new-session label) is an id selector: it would
+   otherwise put 6px under every caption and break the one-line row. */
+#new-session .cf2-input > .cf2-input-label { margin-bottom: 0; }
+.cf2-input > .cf2-input-help-toggle { grid-column: 2; grid-row: 1; }
+.cf2-input > .cf2-input-control { grid-column: 3; grid-row: 1; min-width: 0; }
+.cf2-input > :is(.cf2-input-help, .cf2-input-options, .cf2-input-error,
+                 .cf2-precheck, .cf2-input-board) { grid-column: 1 / -1; }
+/* A checkbox row has no control column: the caption carries the box and the
+   "?" follows the caption rather than the cell's right edge. */
+.cf2-input:has(> .cf2-input-label.check) { grid-template-columns: minmax(0, max-content) 18px minmax(0, 1fr); }
+.cf2-input:has(> .cf2-input-label.check) > .cf2-input-label { grid-column: 1; }
 .cf2-input-label.check { display: flex; align-items: flex-start; gap: 8px; }
 .cf2-input-label.check .cf2-input-control { flex: 0 0 auto; }
-#new-session .cf2-input-control input[type=checkbox] { width: auto; margin: 3px 0 0; padding: 0; }
+#new-session .cf2-input-control input[type=checkbox] { width: auto; margin: 1px 0 0; padding: 0; }
+/* The one-line form: the input's own row padding is enough here. */
+#new-session .cf2-input-control input, #new-session .cf2-input-control select {
+  margin-top: 0; padding: 5px 8px;
+}
+#new-session .cf2-input-control textarea { margin-top: 0; padding: 6px 8px; }
+/* A textarea or a row list takes the whole box; its caption stays above. */
+.cf2-input-wide { grid-column: 1 / -1; }
+.cf2-input-wide > .cf2-input-control { grid-column: 1 / -1; grid-row: 2; }
+/* The "?" that unfolds one input's help. It is a plain round button, not the
+   form's green action button (#new-session button). */
+#new-session .cf2-input-help-toggle {
+  width: 18px; height: 18px; margin: 0; padding: 0; border-radius: 50%;
+  border: 1px solid #30363d; background: transparent; color: #8b949e;
+  font-size: 11px; font-weight: 600; line-height: 1; cursor: pointer;
+}
+#new-session .cf2-input-help-toggle:hover { color: #e6edf3; border-color: #58677c; }
+.cf2-input.help-open > .cf2-input-help-toggle { color: #58a6ff; border-color: #1f6feb; }
+/* Folded, but still in the row: the toggle flips the class and nothing else,
+   so the help text stays readable by anything that reads the row. */
+.cf2-input-help { display: none; margin: 2px 0 1px; }
+.cf2-input.help-open > .cf2-input-help { display: block; }
+.cf2-input-help, .cf2-precheck { overflow-wrap: anywhere; }
+/* The list an `options` input is checked against: one line, the rest in the
+   title (cflowInputsOptions). Empty until the check answers, so it takes no
+   room until then. */
+.cf2-input-options {
+  margin: 1px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Hangs under its own control, not under the caption column, where it would
+   read as a line of the next row. */
+.cf2-input > .cf2-input-options { grid-column: 3; }
+.cf2-input-options:empty { display: none; }
 #new-session .cf2-input-row input { margin-top: 0; }
 #new-session .cf2-input-row button { margin-top: 0; flex: 0 0 auto; align-self: stretch; }
 #new-session .cf2-input-add { margin-top: 6px; }
-.cf2-input-help, .cf2-precheck { overflow-wrap: anywhere; }
 #new-session .cf2-precheck-again { margin-top: 0; flex: 0 0 auto; }
 .cf2-input-label { display: block; font-weight: 600; }
 .cf2-input-control textarea, .cf2-input-control input[type=text],
 .cf2-input-control input[type=number], .cf2-input-control select { width: 100%; box-sizing: border-box; }
 .cf2-input-row { display: flex; gap: 4px; margin: 2px 0; }
 .cf2-input-row input { flex: 1 1 0; min-width: 0; }
-.cf2-input-help { margin: 2px 0 0; }
 .cf2-input.invalid .cf2-input-control { outline: 1px solid #f85149; border-radius: 4px; }
 .cf2-input-error { color: #f85149; margin: 2px 0 0; }
+/* One column once the form is 640px wide or narrower: below that, two columns
+   split the captions from their controls and leave the controls too narrow to
+   use. Every row then puts its caption on the line above. */
+@container session-form (max-width: 640px) {
+  .cf2-inputs { grid-template-columns: minmax(0, 1fr); }
+  .cf2-input, .cf2-input:has(> .cf2-input-label.check) { grid-template-columns: minmax(0, 1fr) 18px; }
+  .cf2-input > .cf2-input-label { grid-column: 1; grid-row: 1; }
+  .cf2-input > .cf2-input-help-toggle { grid-column: 2; grid-row: 1; justify-self: end; }
+  .cf2-input > .cf2-input-control { grid-column: 1 / -1; grid-row: 2; }
+  .cf2-input > .cf2-input-options { grid-column: 1 / -1; }
+}
 
 /* Start inputs: a readiness check beside an input (precheck: gh) and the
    cross-input rules under the fields (docs/cflow-v2.md 2.6). */

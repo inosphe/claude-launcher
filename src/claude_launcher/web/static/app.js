@@ -23405,8 +23405,35 @@ function cflowInputsOptions(box, options) {
     if (!o || !list) continue;
     cflowOptionsFill(list, o.items);
     const note = row.querySelector(".cf2-input-options");
-    if (note) note.textContent = cflowOptionsNote(o);
+    if (note) {
+      // The line is clipped to one row of the compact layout (style.css), so
+      // the whole list has to stay reachable: the title carries it.
+      const text = cflowOptionsNote(o);
+      note.textContent = text;
+      note.title = text;
+    }
   }
+}
+
+/* The inputs a workflow's help is worth a paragraph each, and a paragraph
+   per input spent inline made this box the tallest part of the form
+   (claunch-npfyd). So each row is one line -- caption, control, and a "?"
+   that unfolds that input's help where it stands -- and a wide input (a
+   textarea, a row list) keeps its caption above the control instead of
+   squeezing both onto one line. */
+function cflowInputHelpToggle(row, label) {
+  const b = el("button", "cf2-input-help-toggle", "?");
+  b.type = "button";
+  b.title = `show help for ${label}`;
+  b.setAttribute("aria-expanded", "false");
+  b.setAttribute("aria-label", `help for ${label}`);
+  b.addEventListener("click", () => {
+    const open = !row.classList.contains("help-open");
+    row.classList.toggle("help-open", open);
+    b.setAttribute("aria-expanded", String(open));
+    b.title = `${open ? "hide" : "show"} help for ${label}`;
+  });
+  return b;
 }
 
 function cflowInputsForm(box, fields, constraints, seeded) {
@@ -23418,14 +23445,22 @@ function cflowInputsForm(box, fields, constraints, seeded) {
     const field_ = seeded && Object.prototype.hasOwnProperty.call(seeded, field.name)
       ? Object.assign({}, field, { default: seeded[field.name] })
       : field;
+    const type = field_.type || "string";
     const row = el("div", "cf2-input");
     row.dataset.input = field_.name;
-    row.dataset.type = field_.type || "string";
+    row.dataset.type = type;
     if (field_.precheck) row.dataset.precheck = field_.precheck;
+    // A control that needs the width -- a textarea, a row list -- takes the
+    // whole box and puts its caption on the line above (style.css,
+    // .cf2-input-wide).
+    if (type === "text" || type === "list" || CFLOW_INPUT_CHECK_TYPES.includes(type)) {
+      row.classList.add("cf2-input-wide");
+    }
+    const labelText = field_.label || field_.name;
     const label = el("label", "cf2-input-label",
-                     (field_.label || field_.name) + (field_.required ? " *" : ""));
+                     labelText + (field_.required ? " *" : ""));
     const control = cflowInputControl(field_);
-    if (field_.type === "bool") {
+    if (type === "bool") {
       label.classList.add("check");
       label.insertBefore(control, label.firstChild);
       row.appendChild(label);
@@ -23433,7 +23468,12 @@ function cflowInputsForm(box, fields, constraints, seeded) {
       row.appendChild(label);
       row.appendChild(control);
     }
-    if (field_.help) row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
+    // The paragraph stays in the row whether or not it is shown: the toggle
+    // only flips the class the stylesheet reads.
+    if (field_.help) {
+      row.appendChild(cflowInputHelpToggle(row, labelText));
+      row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
+    }
     if (field_.options) row.appendChild(el("p", "wf-note mono cf2-input-options", ""));
     row.appendChild(el("p", "cf2-input-error hidden"));
     box.appendChild(row);

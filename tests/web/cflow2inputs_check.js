@@ -180,6 +180,9 @@ console.log("cflow2inputs_check: ok");
         return c;
       },
       addEventListener() {},
+      // The help toggle carries its state in aria-expanded (cflowInputHelpToggle);
+      // the stub only has to accept the write.
+      setAttribute() {},
       querySelector(q) { return byClass(e, q)[0] || null; },
       querySelectorAll(q) { return byClass(e, q); },
     };
@@ -200,6 +203,7 @@ console.log("cflow2inputs_check: ok");
      }
      ${slice("cflowInputsForm")}
      ${slice("cflowInputControl")}
+     ${slice("cflowInputHelpToggle")}
      ctx.cflowInputsForm = cflowInputsForm;`)(fctx, fctx.document, fctx.Option);
 
   const FIELDS = [
@@ -210,6 +214,8 @@ console.log("cflow2inputs_check: ok");
     { name: "force_pr", type: "bool", default: false },
     { name: "scope", type: "list", default: [] },
     { name: "color", type: "enum", choices: ["red", "blue"], default: "red" },
+    { name: "reviewer", type: "string", label: "Reviewer",
+      help: "who reviews the landing" },
   ];
   const b = elem("div");
   fctx.cflowInputsForm(b, FIELDS, [], {
@@ -226,4 +232,20 @@ console.log("cflow2inputs_check: ok");
   assert.deepStrictEqual(ctx.cflowInputsValues(d), {
     relation: "stacked", force_pr: false, color: "red",
   });
+
+  // Help is folded behind a per-row toggle (claunch-npfyd): the paragraph is
+  // in the row, the toggle carries the open state, and a field without help
+  // has none.
+  const reviewer = byClass(d, ".cf2-input")
+    .find((r) => r.dataset.input === "reviewer");
+  assert.ok(reviewer, "the row is drawn");
+  assert.equal(byClass(reviewer, ".cf2-input-help").length, 1,
+    "the help paragraph stays in the row");
+  assert.equal(byClass(reviewer, ".cf2-input-help-toggle").length, 1,
+    "a field with help has one toggle");
+  assert.equal(reviewer.classList.contains("cf2-input-wide"), false,
+    "a one-line string keeps the one-line row");
+  const goalRow = byClass(d, ".cf2-input").find((r) => r.dataset.input === "goal");
+  assert.equal(goalRow.classList.contains("cf2-input-wide"), true,
+    "a textarea takes the whole box");
 }
