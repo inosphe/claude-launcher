@@ -253,6 +253,16 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
     `sims: deny` 단계에 있음)이며 `partial`에 시뮬레이션 id를 싣는다.
   - 전수 탐색과 오류 주입 시험은 아직 없으므로 `exhaustive`·`controls`는 null이고 한계에 적힌다.
   - 기본값(도달 칸 비율 0.5, 1800초)은 검증된 기준이 아닌 제안값이다.
+- `improv-worker-v2`의 시작 입력 `simulation`(claunch-qrh0a)이 회차에서 sim-run을 쓰는 강도를 정한다.
+  값은 `off`(기본)·`advisory`·`required`이고 런 도중에 사람이 바꿀 수 있다(`set_by: user`).
+  - `off`가 아니면 full 회차마다 한 번, 착지 매체를 정한 뒤·코딩 전에 `sim-check`가 sim-run을 동적 호출로 부른다.
+    원천은 이슈 본문(`issue:<id>` 참조)과 지금 코드다. 결과는 런 데이터 `sim`과 이슈의 `SIMULATION @` 코멘트에 남고,
+    착지 요청의 증거 묶음에 한 줄로 실린다. 실행할 수 없으면(Settings에 모델이 없는 등) `unavailable`로 남긴다.
+  - `advisory`는 결과를 싣기만 하고 착지를 막지 않는다.
+  - `required`는 착지 절차 앞의 `sim-gate`가 `findings`가 `clear`일 때까지 `sim-recheck`를 세운다. 구현을 고쳐야
+    하면 `sim-recheck`가 `rework`로 끝나 일감을 작업부터 다시 돌리고(그때도 `sim_id`는 런 데이터에 남아 같은
+    시뮬레이션을 이어 쓴다), 사용자가 정할 질문이면 답을 기다린다.
+    stack-only 회차는 이 세션의 구현이 없으므로 막지 않는다. 게이트 상한(5회)에 닿으면 사람이 연장하거나 입력을 바꾼다.
 
 ## 모델 규칙
 

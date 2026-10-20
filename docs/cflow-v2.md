@@ -3011,6 +3011,29 @@ PR은 닫고 브랜치는 지웠다.
   rollout이다. 원본은 그대로 둔다. MCP `spawn` 툴은 이제 `model`·`effort`를
   전달한다(`spawn.allow_args` 게이트).
 
+## 10d. 시뮬레이션 입력 (improv-worker-v2, claunch-qrh0a)
+
+시작 입력 `simulation`(enum `off`/`advisory`/`required`, 기본 `"off"`, `set_by: [user]`)이
+회차에서 `sim-run` 절차를 쓰는 강도를 정한다. `off`는 YAML 1.1에서 불리언 false로 읽히므로
+선언에서 따옴표로 감싼다.
+
+| 값 | sim-check (full 회차, 코딩 전) | sim-gate (착지 절차 앞) |
+|---|---|---|
+| `off` | 돌지 않음 | 돌지 않음 |
+| `advisory` | 1회 | 돌지 않음 |
+| `required` | 1회 | `findings`가 `clear`가 될 때까지 `sim-recheck` (최대 5회) |
+
+- 두 작업 모두 `calls: [sim-run]`으로 동적 호출하고 결과를 `data.sim`에 묶는다.
+- `sim-precheck`의 조건은 `advisory`/`required`를 명시한다. 입력이 없는 기존 런의 null 값은
+  `off`로 처리된다.
+- `sim-recheck`의 `rework`는 batch의 기존 catch(`rework: {continue: batch}`)로 작업부터 다시 돈다.
+  `bind`는 outcome과 무관하게 값을 대입하므로 `rework`도 `reason`과 함께 `ok`와 같은 필드를 싣는다.
+  그래야 다시 선 `sim-recheck`가 같은 `sim_id`를 이어 받는다.
+- 회차에서 `sim-check`가 돌지 않으면 `sim-precheck`의 else가 `sim-idle` 절차로 `data.sim`을
+  초기값으로 되돌린다. 회차 중에 `required`로 바뀌어도 앞 회차의 `findings: clear`로 게이트를 통과하지 않는다.
+- stack-only 회차에서는 게이트가 막지 않는다.
+- 결과 해석과 원천 규칙은 `docs/simulation.md`의 해당 절에 있다.
+
 ## 11. 단계
 
 | 단계 | 내용 |
