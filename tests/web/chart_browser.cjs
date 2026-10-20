@@ -74,6 +74,31 @@ const server = http.createServer((req, res) => {
 const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) .chart-name-text",
   (els) => els.map((e) => e.textContent).sort());
 
+/* The axis labels a viewer can read, left to right, with the column's edges. */
+const visibleTicks = (page) => page.$$eval("#chart-view .chart-axis .chart-track", (tracks) => {
+  const t = tracks[0].getBoundingClientRect();
+  return Array.from(tracks[0].querySelectorAll(".chart-tick"), (e) => {
+    const b = e.getBoundingClientRect();
+    return { text: e.textContent, left: b.left, right: b.right,
+             visible: getComputedStyle(e).visibility !== "hidden",
+             track: { left: t.left, right: t.right } };
+  }).filter((x) => x.visible).sort((a, b) => a.left - b.left);
+});
+
+/* The labels must not touch each other, and must stay inside the column. */
+function assertTicksApart(ticks, where) {
+  assert.ok(ticks.length >= 2, `${where}: visible ticks: ${ticks.map((t) => t.text).join(" | ")}`);
+  for (let i = 1; i < ticks.length; i++) {
+    assert.ok(ticks[i].left >= ticks[i - 1].right,
+      `${where}: "${ticks[i - 1].text}" [${ticks[i - 1].left}, ${ticks[i - 1].right}] touches ` +
+      `"${ticks[i].text}" [${ticks[i].left}, ${ticks[i].right}]`);
+  }
+  for (const t of ticks) {
+    assert.ok(t.left >= t.track.left - 0.5 && t.right <= t.track.right + 0.5,
+      `${where}: "${t.text}" is cut by the column`);
+  }
+}
+
 (async () => {
   const port = await safeListen(server);
   const browser = await chromium.launch();
@@ -125,6 +150,16 @@ const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) 
     assert.equal(flowRows.find((r) => r.name === "beta").age, "", "no run, no age");
     const stat = await page.$$eval("#chart-view .chart-stat", (els) => els.map((e) => e.textContent));
     assert.ok(stat.includes("1정지 의심"), stat.join(" | "));
+
+    // 2c. No two visible axis labels touch, and none is cut by the column.
+    // At this viewport the timeline column is narrow (the detail pane takes
+    // the rest), so labels that fit their gap as a percentage of the page do
+    // not fit the column: "1d 전" and "12h 전" read as one before this check.
+    assertTicksApart(await visibleTicks(page), "log axis");
+    // The same holds for the linear axis, whose labels are clock times.
+    await page.click("#chart-view .chart-seg-btn:text-is('선형')");
+    assertTicksApart(await visibleTicks(page), "linear axis");
+    await page.click("#chart-view .chart-seg-btn:text-is('로그')");
 
     if (process.env.CHART_SHOT) await page.screenshot({ path: process.env.CHART_SHOT, fullPage: true });
 

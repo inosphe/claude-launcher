@@ -6995,7 +6995,6 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-track { position: relative; height: 14px; background: #161b22; border-radius: 3px; }
 .chart-axis .chart-track { background: transparent; height: 16px; }
 .chart-tick { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
-.chart-tick:first-child, .chart-tick:last-child { visibility: hidden; }
 .chart-bar { position: absolute; top: 2px; height: 10px; border-radius: 3px; background: #6e7681; }
 .chart-bar.clipped { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .chart-bar.alive { border-top-right-radius: 0; border-bottom-right-radius: 0; }

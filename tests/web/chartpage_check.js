@@ -208,6 +208,25 @@ const logTicks = C.axisTicks({ axisStart: now - 40 * 24 * H, t1: now, scale: 'lo
 assert.ok(logTicks.length >= 4 && logTicks.length <= 8, `${logTicks.length} ticks`);
 assert.ok(logTicks.every((t) => t < now && t >= now - 40 * 24 * H));
 
+// Tick spacing is a question about pixels, not about a percentage of the
+// axis: the split view's timeline column is a fraction of the page, and a
+// label wider than the gap it sits in reads as one with its neighbour
+// (claunch-c2emv review -- measured 6.4px and 7.8px overlaps at 200px).
+const WEEK = { axisStart: now - 7 * 86400000, t1: now, scale: 'log', axisWidthPct: 100 };
+const labelPx = (t) => `${C.formatDuration(now - t)} 전`.length * 6.2;
+const keptOn = (trackPx) => C.axisTicks(WEEK, { trackPx });
+const wide7 = keptOn(800);
+const narrow7 = keptOn(200);
+assert.ok(narrow7.length < wide7.length, `200px keeps ${narrow7.length}, 800px ${wide7.length}`);
+assert.ok(narrow7.length >= 2, `${narrow7.length} labels on a 200px column`);
+for (const [track, kept] of [[200, narrow7], [800, wide7]]) {
+  for (let i = 1; i < kept.length; i++) {
+    const gap = (C.positionOf(kept[i], WEEK) - C.positionOf(kept[i - 1], WEEK)) * (track / 100);
+    const need = (labelPx(kept[i]) + labelPx(kept[i - 1])) / 2 + 6;
+    assert.ok(gap >= need - 1e-9, `track ${track}: ${gap.toFixed(1)}px between labels needing ${need.toFixed(1)}px`);
+  }
+}
+
 // Bar geometry: proportional, clipped on the left, never invisible.
 const LIN = { axisStart: 0, t1: 100, scale: 'linear' };
 let g = C.barGeometry({ start: 25, end: 75 }, LIN);

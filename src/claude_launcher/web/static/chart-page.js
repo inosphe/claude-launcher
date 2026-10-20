@@ -47,6 +47,13 @@ globalThis.ChartPage = (() => {
     86400000, 2 * 86400000, 7 * 86400000, 14 * 86400000, 30 * 86400000,
     90 * 86400000,
   ];
+  /* How wide an axis label renders, per character, and the least clear space
+     between two of them. The labels are drawn at 11px, so roughly 6px a
+     character; measured, "1d 전" is 28.5px and "12h 전" 35.5px. Estimates
+     stand in for measuring while the ticks are being chosen, and the laid-out
+     labels are then measured for what the estimate cannot promise. */
+  const TICK_CHAR_PX = 6.2;
+  const TICK_GAP_PX = 6;
 
   /* The rail's five categories (app.js sessionCategory), repeated here so the
      model runs without app.js. */
@@ -271,6 +278,7 @@ globalThis.ChartPage = (() => {
   // ---- the page -------------------------------------------------------
 
   let timer = null;
+  let onResize = null;
   let dragging = false;
   let archivedRecords = [];
   let archivedLoading = false;
@@ -497,14 +505,26 @@ globalThis.ChartPage = (() => {
     return box;
   }
 
+  /* The label a log tick carries: the age it stands for, not a clock time. */
+  function logTickText(model, at) {
+    return `${formatDuration(model.t1 - at)} 전`;
+  }
+
   /* The instants the axis labels. Linear spaces them evenly (more of them on
      a widened grid); the log axis labels round ages, because the spacing it
-     draws them at is not the spacing of clock time. */
-  function axisTicks(model) {
+     draws them at is not the spacing of clock time.
+
+     `opts.trackPx` is the timeline column's width when it is known. Two labels
+     sit on top of each other once they are narrower apart than their own
+     widths, so the log axis drops a tick whose label would touch the one kept
+     to its left -- a percentage of the axis cannot answer that, because the
+     column is only part of the page (claunch-c2emv). */
+  function axisTicks(model, opts = {}) {
     if (model.scale === "log") {
       const span = model.t1 - model.axisStart;
       const ages = LOG_TICKS_MS.filter((a) => a < span);
       const step = Math.max(1, Math.ceil(ages.length / 10));
+      const trackPx = opts.trackPx;
       const out = [];
       let last = -Infinity;
       // Oldest first, so the positions ascend and "too close" compares
@@ -512,9 +532,16 @@ globalThis.ChartPage = (() => {
       for (let i = ages.length - 1; i >= 0; i -= step) {
         const at = model.t1 - ages[i];
         const pos = positionOf(at, model);
-        // Drop a label that would land on top of the previous one: the log
-        // positions bunch up near now, and the timeline column is only part
-        // of the page's width (the detail pane takes the rest).
+        if (trackPx > 0) {
+          const px = (pos / 100) * trackPx;
+          const half = (logTickText(model, at).length * TICK_CHAR_PX) / 2;
+          if (px - half < last + TICK_GAP_PX) continue;
+          out.push(at);
+          last = px + half;
+          continue;
+        }
+        // Without a width: the old percentage rule, which only keeps apart
+        // labels of a track wide enough for it.
         if (pos - last < 8) continue;
         out.push(at);
         last = pos;
@@ -525,24 +552,46 @@ globalThis.ChartPage = (() => {
     return ticks(model.axisStart, model.t1, count);
   }
 
-  function axis(model) {
+  /* The axis header. Its ticks are placed by layoutTicks once the column has
+     been laid out and its width is a number. */
+  function axis() {
     const row = node("div", "chart-row chart-axis");
     row.appendChild(node("div", "chart-name", "session"));
-    const track = node("div", "chart-track");
-    const span = model.t1 - model.axisStart;
-    const marks = axisTicks(model);
-    const spacing = marks.length > 1 ? span / (marks.length - 1) : span;
-    for (const t of marks) {
-      const text = model.scale === "log"
-        ? `${formatDuration(model.t1 - t)} 전` : formatTick(t, spacing);
-      const tick = node("span", "chart-tick", text);
-      tick.style.left = `${positionOf(t, model)}%`;
-      track.appendChild(tick);
-    }
-    row.appendChild(track);
+    row.appendChild(node("div", "chart-track"));
     row.appendChild(node("div", "chart-life", "생존"));
     row.appendChild(node("div", "chart-flow", "cflow"));
     return row;
+  }
+
+  /* Place the axis labels against the column's real width: choose ticks by
+     their labels' widths, then measure the labels themselves and hide the ones
+     that still touch a neighbour or would be cut by the column's edge. */
+  function layoutTicks(main, model) {
+    const track = main.querySelector(".chart-axis .chart-track");
+    if (!track) return;
+    track.textContent = "";
+    const marks = axisTicks(model, { trackPx: track.clientWidth });
+    const span = model.t1 - model.axisStart;
+    const spacing = marks.length > 1 ? span / (marks.length - 1) : span;
+    const built = [];
+    for (const t of marks) {
+      const text = model.scale === "log" ? logTickText(model, t) : formatTick(t, spacing);
+      const tick = node("span", "chart-tick", text);
+      tick.style.left = `${positionOf(t, model)}%`;
+      track.appendChild(tick);
+      built.push(tick);
+    }
+    const edge = track.getBoundingClientRect();
+    let lastRight = -Infinity;
+    for (const tick of built) {
+      const box = tick.getBoundingClientRect();
+      if (box.left < edge.left - 0.5 || box.right > edge.right + 0.5 ||
+          box.left < lastRight + TICK_GAP_PX) {
+        tick.style.visibility = "hidden";
+        continue;
+      }
+      lastRight = box.right;
+    }
   }
 
   function pick(name) {
@@ -792,7 +841,7 @@ globalThis.ChartPage = (() => {
     }
     const chart = node("div", "chart-grid");
     chart.style.width = `${model.axisWidthPct}%`;
-    chart.appendChild(axis(model));
+    chart.appendChild(axis());
     if (!model.rows.length) {
       chart.appendChild(node("p", "chart-muted chart-empty", "이 조건에 맞는 세션이 없다."));
     }
@@ -821,6 +870,9 @@ globalThis.ChartPage = (() => {
     const side = detail(model, sessions);
     split.appendChild(side);
     root.appendChild(split);
+    // The tick spacing is a question about pixels, so it waits for the column
+    // to have a width.
+    layoutTicks(main, model);
     main.scrollTop = tops[0];
     side.scrollTop = tops[1];
     // Same axis width: the viewer keeps their place. A new width (range or
@@ -839,6 +891,14 @@ globalThis.ChartPage = (() => {
     render();
     if (timer) clearInterval(timer);
     timer = setInterval(() => render(), REDRAW_MS);
+    // A window that changed width would keep the old tick spacing until the
+    // next redraw. Registered once; a redraw of the hidden view does nothing.
+    if (!onResize) {
+      onResize = () => render();
+      if (typeof window !== "undefined" && window.addEventListener) {
+        window.addEventListener("resize", onResize);
+      }
+    }
   }
 
   function stop() {
