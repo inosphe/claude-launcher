@@ -528,10 +528,34 @@ function mount(element, changed) {
   }
   render();
 }
-/* The view's own input row: Enter sends to the selected operator, Shift+Enter
-   breaks the line. A draft -- text and images -- is kept per operator while
-   the page is loaded. */
+/* The view's own input row: Enter sends to the selected operator, Ctrl+J
+   breaks the line at the caret (Shift+Enter still does, as a textarea
+   default). A draft -- text and images -- is kept per operator while the
+   page is loaded. */
 const drafts = new Map(), pictureDrafts = new Map();
+/* Ctrl+J is the newline chord the page's own composer uses (app.js
+   isCtrlJ/onTermInputKeydown), so the two inputs move the same way. Firefox
+   reports "j" for the chord; keyCode 74 covers a layout that gives this
+   physical key another label, and "\n" is what a terminal-style keymap
+   sends for the same chord. */
+function isOpCtrlJ(ev) {
+  if(!ev.ctrlKey || ev.altKey || ev.metaKey) return false;
+  return ev.key === "j" || ev.key === "J" || ev.key === "\n" || ev.keyCode === 74;
+}
+/* One place that writes into the composer at the caret, so the chord and a
+   future paste land the same way and leave the caret after what was put in.
+   A field that reports no selection (an older browser, a stub) is appended
+   to. The draft map picks the new value up through the field's own
+   oninput. */
+function insertOpText(field, chunk) {
+  if(!field) return;
+  const start = Number.isInteger(field.selectionStart) ? field.selectionStart : field.value.length;
+  const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+  field.value = field.value.slice(0, start) + chunk + field.value.slice(end);
+  const caret = start + chunk.length;
+  if(field.setSelectionRange) field.setSelectionRange(caret, caret);
+  field.dispatchEvent(new Event("input", {bubbles: true}));
+}
 const IMAGE_KINDS = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp"};
 function imageKind(file) {
   if(Object.values(IMAGE_KINDS).includes(file?.type)) return file.type;
@@ -583,7 +607,7 @@ async function stage(file) {
 function composerBox() {
   const box = node("form", "", "op-composer");
   const text = document.createElement("textarea");
-  text.rows = 2; text.placeholder = "operator에게 메시지 (Enter 전송, Shift+Enter 줄바꿈)";
+  text.rows = 2; text.placeholder = "operator에게 메시지 (Enter 전송, Ctrl+J 줄바꿈)";
   text.setAttribute("aria-label", "operator에게 보낼 메시지");
   const pick = document.createElement("input");
   pick.type = "file"; pick.accept = "image/png,image/jpeg,image/gif,image/webp"; pick.multiple = true; pick.hidden = true;
@@ -599,8 +623,25 @@ function composerBox() {
   box.append(strip, row, status);
   text.oninput = () => drafts.set(selected, text.value);
   text.addEventListener("keydown", event => {
+    /* The chord is answered before the Enter branch, so a newline is never
+       a send. An IME composing a syllable owns the key while it composes
+       (isComposing / keyCode 229): committing a Hangul block with the chord
+       must not also break the line. */
+    if(isOpCtrlJ(event) && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); insertOpText(text, "\n"); return; }
     if(event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); box.requestSubmit(); }
   });
+  /* Ctrl+J taken before the browser gets to it: a Firefox-family browser
+     opens the downloads panel on the chord and a field listener cannot
+     cancel that, so the window claims the key in the capture phase while
+     this composer holds focus (the same split as app.js onWindowCtrlJ).
+     A Ctrl+J pressed anywhere else on the page is the browser's. */
+  window.addEventListener("keydown", event => {
+    if(!isOpCtrlJ(event) || event.isComposing || event.keyCode === 229) return;
+    if(document.activeElement !== text) return;
+    event.preventDefault();
+    event.stopPropagation();
+    insertOpText(text, "\n");
+  }, true);
   text.addEventListener("paste", event => {
     const files = imageFiles(event.clipboardData);
     if(files.length) { event.preventDefault(); attach(files); }
