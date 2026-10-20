@@ -1113,7 +1113,10 @@ nodes:
       2. 미결마다 처리한다.
          - 구현이 규칙을 빠뜨렸거나 어겼다: 코드를 여기서 고치지 않는다. outcome
            `rework`로 보고한다(reason에 고칠 것). 착지 절차가 일감을 작업부터 다시
-           돌리고, 고친 뒤 이 게이트가 다시 선다.
+           돌리고, 고친 뒤 이 게이트가 다시 선다. rework 값은 data.sim에 그대로
+           묶이므로 reason과 함께 지금 시뮬레이션의 sim_id·run_seq·assessment·
+           findings·open·limits를 위 값(마지막 실행 결과)대로 싣는다 — 빠뜨리면
+           다시 선 이 작업이 sim_id를 잃고 모델과 답한 질문을 버린 채 새로 만든다.
          - 원천이 정하지 않아 사용자가 정할 질문이다: 사용자가 시뮬레이션 페이지에서
            답할 때까지 이 작업을 보고하지 않고 기다린다(답이 오면 터미널에
            `[claunch simulation]` 줄이 온다). 기다리는 동안 이슈에 `BLOCKED:
@@ -1140,8 +1143,16 @@ nodes:
         findings: str
         open: "dict?"
         limits: list
+      # bind는 outcome과 무관하게 값을 대입한다(runtime._complete) — rework도
+      # 같은 모양을 실어야 sim-gate가 다시 돌 때 data.sim.sim_id가 남는다.
       rework:
         reason: str
+        sim_id: "str?"
+        run_seq: "int?"
+        assessment: str
+        findings: str
+        open: "dict?"
+        limits: list
     effects: [sim.write, board.write]
   coding-plan:
     title: 코딩 승인 요청 준비
@@ -3553,6 +3564,16 @@ nodes:
     effects: [board.write, mesh.send]
 
 procedures:
+  sim-idle:
+    description: >-
+      이 회차에 sim-check가 돌지 않았을 때 data.sim을 초기값으로 되돌린다(claunch-qrh0a).
+    returns:
+      ok: {sim_id: "str?", run_seq: "int?", assessment: "str?", findings: "str?",
+           open: "dict?", limits: list}
+    body:
+      - return: ok
+        value: {sim_id: null, run_seq: null, assessment: null, findings: null,
+                open: null, limits: []}
   local-landing:
     params:
       reason: {type: str, required: true}
@@ -4676,7 +4697,10 @@ procedures:
                 cond:
                   - if: "$data.inputs.simulation == 'advisory' or $data.inputs.simulation == 'required'"
                     then: {seq: [sim-check], bind: sim}
-                  - else: []
+                  # data.sim은 회차 사이에 남는다. 이 회차에 돌지 않았으면 초기값으로
+                  # 되돌려, 착지 전에 required로 바뀌었을 때 sim-gate가 앞 회차의
+                  # findings=clear로 통과하지 않게 한다.
+                  - else: {call: sim-idle, bind: sim}
       - id: batch
         loop:
           while: "true"

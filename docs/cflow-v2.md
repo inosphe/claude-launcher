@@ -3027,6 +3027,10 @@ PR은 닫고 브랜치는 지웠다.
 - `sim-precheck`의 조건은 `advisory`/`required`를 명시한다. 입력이 없는 기존 런의 null 값은
   `off`로 처리된다.
 - `sim-recheck`의 `rework`는 batch의 기존 catch(`rework: {continue: batch}`)로 작업부터 다시 돈다.
+  `bind`는 outcome과 무관하게 값을 대입하므로 `rework`도 `reason`과 함께 `ok`와 같은 필드를 싣는다.
+  그래야 다시 선 `sim-recheck`가 같은 `sim_id`를 이어 받는다.
+- 회차에서 `sim-check`가 돌지 않으면 `sim-precheck`의 else가 `sim-idle` 절차로 `data.sim`을
+  초기값으로 되돌린다. 회차 중에 `required`로 바뀌어도 앞 회차의 `findings: clear`로 게이트를 통과하지 않는다.
 - stack-only 회차에서는 게이트가 막지 않는다.
 - 결과 해석과 원천 규칙은 `docs/simulation.md`의 해당 절에 있다.
 

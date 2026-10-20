@@ -49,13 +49,15 @@ def _find(obj, block_id):
     return None
 
 
-def _run(tmp_path, monkeypatch, values, mode="full"):
-    """sim-precheck -> work -> batch{try: [sim-gate, land], catch rework}."""
+def _run(tmp_path, monkeypatch, values, mode="full", sim=None):
+    """sim-precheck -> work -> batch{try: [sim-gate, land], catch rework}.
+
+    ``sim`` seeds data.sim as a previous round would have left it."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = _doc()
     rnd = doc["procedures"]["worker-round"]
     pre, gate = _find(rnd, "sim-precheck"), _find(rnd, "sim-gate")
-    doc["procedures"] = {}
+    doc["procedures"] = {"sim-idle": doc["procedures"]["sim-idle"]}
     doc.pop("spec", None)
     doc.pop("sides", None)
     doc["params"]["mode"] = {"type": "str", "default": mode}
@@ -69,6 +71,8 @@ def _run(tmp_path, monkeypatch, values, mode="full"):
     chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
                                   resolve_include=layers.resolver())
     chart = inputs.apply(chart, values)
+    if sim is not None:
+        chart.data["sim"] = sim
     kw = {"cwd": str(tmp_path), "scope": "sim", "now": 1.0}
     return runtime.start(chart, caps={}, **kw), kw
 
@@ -185,7 +189,11 @@ def test_required_rework_goes_back_through_the_batch_catch(tmp_path, monkeypatch
     st, kw = _run(tmp_path, monkeypatch, {"simulation": "required"})
     st = _report(st, kw, "sim-check", value=GAPS)
     st = _report(st, kw, "work")
-    st = _report(st, kw, "sim-recheck", "rework", {"reason": "rule R2 not implemented"})
+    st = _report(st, kw, "sim-recheck", "rework",
+                 {**GAPS, "reason": "rule R2 not implemented"})
+    # bind takes the rework value too: the simulation must still be there
+    assert st["data"]["sim"]["sim_id"] == "sim-1"
+    assert st["data"]["sim"]["findings"] == "gaps"
     # the catch continued the batch: the gate stands again before land
     st = _report(st, kw, "sim-recheck", value=CLEAR)
     st = _report(st, kw, "land")
@@ -198,3 +206,11 @@ def test_the_gate_does_not_hold_a_stack_only_round(tmp_path, monkeypatch):
     st = _report(st, kw, "work")
     st = _report(st, kw, "land")
     assert st["status"] == "done"
+
+
+def test_a_round_without_the_check_does_not_carry_the_last_rounds_clear(tmp_path, monkeypatch):
+    # off at round start, required by the time the batch lands: the gate
+    # must not read the previous round's clear
+    st, kw = _run(tmp_path, monkeypatch, {"simulation": "off"}, sim=CLEAR)
+    assert st["data"]["sim"]["sim_id"] is None
+    assert st["data"]["sim"]["findings"] is None
