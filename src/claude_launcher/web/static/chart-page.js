@@ -32,6 +32,28 @@ globalThis.ChartPage = (() => {
   const STORE_KEY = "claunch_chart_view";
   // The timeline column's share of the split, in percent.
   const SPLIT_DEFAULT = 64, SPLIT_MIN = 30, SPLIT_MAX = 82;
+  /* The longest span one screen width draws. A fleet whose oldest session
+     dates back weeks would otherwise squeeze a session made ten minutes ago
+     into a sliver: past this the track grows and the grid scrolls, so the
+     axis stays proportional to time instead of distorting to fit. */
+  const AXIS_CAP_MS = 7 * 86400000;
+  /* The unit of the log axis: a run of a few minutes still gets a visible
+     bar next to one that has lived for weeks. */
+  const LOG_UNIT_MS = 3600000;
+  /* Ages the log axis labels, so its ticks read as "1시간 전" rather than as
+     clock times whose spacing the scale does not honour. */
+  const LOG_TICKS_MS = [
+    60000, 300000, 900000, 1800000, 3600000, 7200000, 21600000, 43200000,
+    86400000, 2 * 86400000, 7 * 86400000, 14 * 86400000, 30 * 86400000,
+    90 * 86400000,
+  ];
+  /* How wide an axis label renders, per character, and the least clear space
+     between two of them. The labels are drawn at 11px, so roughly 6px a
+     character; measured, "1d 전" is 28.5px and "12h 전" 35.5px. Estimates
+     stand in for measuring while the ticks are being chosen, and the laid-out
+     labels are then measured for what the estimate cannot promise. */
+  const TICK_CHAR_PX = 6.2;
+  const TICK_GAP_PX = 6;
 
   /* The rail's five categories (app.js sessionCategory), repeated here so the
      model runs without app.js. */
@@ -116,13 +138,16 @@ globalThis.ChartPage = (() => {
     return out;
   }
 
-  function formatTick(t, span) {
+  /* A label sized to the space between ticks (not to the whole axis): a
+     widened grid puts them hours apart, and "10/20, 10/20, 10/20" says
+     nothing. */
+  function formatTick(t, spacing) {
     const d = new Date(t);
     const pad = (n) => String(n).padStart(2, "0");
     const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    if (span <= 86400000) return hm;
     const md = `${d.getMonth() + 1}/${d.getDate()}`;
-    return span <= 3 * 86400000 ? `${md} ${hm}` : md;
+    if (spacing <= 3600000) return hm;
+    return spacing <= 86400000 ? `${md} ${hm}` : md;
   }
 
   function formatTime(t) {
@@ -194,7 +219,7 @@ globalThis.ChartPage = (() => {
     }
     if (!(now > t0)) t0 = now - 3600000;
     const counts = Object.fromEntries(CATEGORIES.map((c) => [c, 0]));
-    const flow = { running: 0, yours: 0, other: 0, none: 0 };
+    const flow = { running: 0, yours: 0, other: 0, none: 0, stalled: 0 };
     for (const r of rows) {
       counts[r.category]++;
       if (!r.cflow) flow.none++;
@@ -202,9 +227,23 @@ globalThis.ChartPage = (() => {
       else if (r.cflow.state === "running" || r.cflow.state === "held" ||
                r.cflow.state === "peer") flow.running++;
       else flow.other++;
+      if (cflowAge(r.cflow, now).stalled) flow.stalled++;
     }
+    /* What one screen width holds, per scale (claunch-c2emv). Both scales
+       place every time against the same window t0..t1 -- that is what the
+       range picker means, and it is what keeps the bars and the ticks in one
+       coordinate system:
+       - "log" compresses the distance from now, so a session made minutes
+         ago and one a month old are both visible in one screen;
+       - "linear" keeps distances proportional and draws at most AXIS_CAP_MS
+         per screen: the grid is widened by span/CAP and the viewer scrolls
+         left for the older sessions, which stay at their real positions. */
+    const scale = opts.scale === "linear" ? "linear" : "log";
+    const axisStart = t0;
+    const axisWidthPct = scale === "log" ? 100
+      : Math.max(100, ((now - t0) / AXIS_CAP_MS) * 100);
     return {
-      now, t0, t1: now, rows, groups, groupPick: pick,
+      now, t0, t1: now, axisStart, axisWidthPct, scale, rows, groups, groupPick: pick,
       summary: {
         total: rows.length, counts, flow,
         medianLifetime: median(rows.map((r) => r.lifetime)),
@@ -213,22 +252,33 @@ globalThis.ChartPage = (() => {
     };
   }
 
-  /* The bar's place on the axis, in percent of the track. A bar that started
-     before the window is clipped at its left edge; one too short to see keeps
-     a sliver so the row is never blank. */
-  function barGeometry(span, t0, t1) {
-    const width = t1 - t0;
-    if (!(width > 0)) return { left: 0, width: 0, clipped: false };
-    const s = Math.max(span.start, t0), e = Math.min(span.end, t1);
-    const left = ((s - t0) / width) * 100;
-    const w = Math.max(((e - s) / width) * 100, 0.25);
-    return { left: Math.min(left, 99.75), width: Math.min(w, 100 - Math.min(left, 99.75)),
-             clipped: span.start < t0 };
+  /* Where a time sits across the track, in percent, for the model's scale.
+     0 is the axis start (the left edge), 100 is now. */
+  function positionOf(t, model) {
+    const wide = model.t1 - model.axisStart;
+    if (!(wide > 0)) return 0;
+    if (model.scale !== "log") return ((t - model.axisStart) / wide) * 100;
+    const den = Math.log1p(wide / LOG_UNIT_MS);
+    if (!(den > 0)) return 0;
+    const age = Math.max(0, model.t1 - t);
+    return (1 - Math.log1p(age / LOG_UNIT_MS) / den) * 100;
+  }
+
+  /* The bar's place on the axis. Its two ends are placed independently, so
+     the same rule serves both scales. A bar that started before the axis is
+     clipped at its left edge; one too short to see keeps a sliver so the row
+     is never blank. */
+  function barGeometry(span, model) {
+    const left = Math.max(0, Math.min(positionOf(span.start, model), 99.75));
+    const right = Math.max(left, positionOf(span.end, model));
+    const width = Math.min(Math.max(right - left, 0.25), 100 - left);
+    return { left, width, clipped: span.start < model.axisStart };
   }
 
   // ---- the page -------------------------------------------------------
 
   let timer = null;
+  let onResize = null;
   let dragging = false;
   let archivedRecords = [];
   let archivedLoading = false;
@@ -236,7 +286,7 @@ globalThis.ChartPage = (() => {
   const state = (() => {
     const fallback = { group: "", groupPick: "", range: "7d",
                        archived: false, sort: "created",
-                       split: SPLIT_DEFAULT, selected: "" };
+                       split: SPLIT_DEFAULT, selected: "", scale: "log" };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
       return Object.assign(fallback, saved && typeof saved === "object" ? saved : {});
@@ -276,12 +326,26 @@ globalThis.ChartPage = (() => {
     return value;
   }
 
-  /* The session's cflow run, v2 first (its own rail line), then v1. */
+  /* When the run last moved, in epoch ms: the state file's `updated` (every
+     report, choice and approval writes it), or the oldest active task's
+     `entered_at` for a run whose state carries no `updated`. null when the
+     row has neither, and the page then shows the status without an age. */
+  function cflowChangedAt(r) {
+    const updated = ms(r && r.updated);
+    if (updated !== null) return updated;
+    const entered = r && r.entered_at;
+    return typeof entered === "number" && Number.isFinite(entered)
+      ? entered * 1000 : null;
+  }
+
+  /* The session's cflow run, v2 first (its own rail line), then v1. `changedAt`
+     is what the chart's stall mark reads; a v1 run has no such clock here. */
   function appCflowOf(name) {
     const v2 = typeof cflow2RailCache !== "undefined" ? (cflow2RailCache || {})[name] : null;
     if (v2 && typeof cflow2RailMarkState === "function") {
       return { version: "v2", state: cflow2RailMarkState(v2),
-               label: `${v2.workflow || "cflow2"} · ${cflow2RailLabel(v2)}` };
+               label: `${v2.workflow || "cflow2"} · ${cflow2RailLabel(v2)}`,
+               changedAt: cflowChangedAt(v2) };
     }
     const v1 = typeof sessCflowRun === "function" ? sessCflowRun(name) : null;
     if (v1 && typeof wfMarkState === "function") {
@@ -293,6 +357,20 @@ globalThis.ChartPage = (() => {
 
   function appMeshesOf(name) {
     return typeof sessMeshes === "function" ? sessMeshes(name) || [] : [];
+  }
+
+  /* A run in one task this long has stopped moving until something says
+     otherwise. Not a verdict: a full sweep is a long task too, so the page
+     marks it and the reader judges. */
+  const STALL_MS = 30 * 60000;
+
+  /* The age to show beside a row's cflow line, and whether it is old enough
+     to mark. A run a person owes (`yours`) is not stalled -- it is waiting
+     on the reader, and the summary counts those apart. */
+  function cflowAge(cflow, now) {
+    if (!cflow || !Number.isFinite(cflow.changedAt)) return { elapsed: null, stalled: false };
+    const elapsed = Math.max(0, now - cflow.changedAt);
+    return { elapsed, stalled: cflow.state === "running" && elapsed >= STALL_MS };
   }
 
   /* The project is the page's one shared pick (app.js currentProject, the
@@ -390,6 +468,8 @@ globalThis.ChartPage = (() => {
     }
     bar.appendChild(seg("Range", RANGES.map((r) => [r[0], r[1]]), state.range,
       (v) => set({ range: v })));
+    bar.appendChild(seg("Scale", [["log", "로그"], ["linear", "선형"]], state.scale,
+      (v) => set({ scale: v })));
     bar.appendChild(seg("Sort", [["created", "생성 순"], ["lifetime", "생존 시간 순"]],
       state.sort, (v) => set({ sort: v })));
     const arch = node("label", "chart-check");
@@ -420,24 +500,98 @@ globalThis.ChartPage = (() => {
     stat("생존 시간 중앙값", s.medianLifetime === null ? "—" : formatDuration(s.medianLifetime));
     stat("cflow 진행", s.flow.running, "flow-running");
     stat("사람 대기", s.flow.yours, "flow-yours");
+    stat("정지 의심", s.flow.stalled, "flow-stall");
     stat("cflow 없음", s.flow.none);
     return box;
   }
 
-  function axis(model) {
+  /* The label a log tick carries: the age it stands for, not a clock time. */
+  function logTickText(model, at) {
+    return `${formatDuration(model.t1 - at)} 전`;
+  }
+
+  /* The instants the axis labels. Linear spaces them evenly (more of them on
+     a widened grid); the log axis labels round ages, because the spacing it
+     draws them at is not the spacing of clock time.
+
+     `opts.trackPx` is the timeline column's width when it is known. Two labels
+     sit on top of each other once they are narrower apart than their own
+     widths, so the log axis drops a tick whose label would touch the one kept
+     to its left -- a percentage of the axis cannot answer that, because the
+     column is only part of the page (claunch-c2emv). */
+  function axisTicks(model, opts = {}) {
+    if (model.scale === "log") {
+      const span = model.t1 - model.axisStart;
+      const ages = LOG_TICKS_MS.filter((a) => a < span);
+      const step = Math.max(1, Math.ceil(ages.length / 10));
+      const trackPx = opts.trackPx;
+      const out = [];
+      let last = -Infinity;
+      // Oldest first, so the positions ascend and "too close" compares
+      // against the label already placed to the left.
+      for (let i = ages.length - 1; i >= 0; i -= step) {
+        const at = model.t1 - ages[i];
+        const pos = positionOf(at, model);
+        if (trackPx > 0) {
+          const px = (pos / 100) * trackPx;
+          const half = (logTickText(model, at).length * TICK_CHAR_PX) / 2;
+          if (px - half < last + TICK_GAP_PX) continue;
+          out.push(at);
+          last = px + half;
+          continue;
+        }
+        // Without a width: the old percentage rule, which only keeps apart
+        // labels of a track wide enough for it.
+        if (pos - last < 8) continue;
+        out.push(at);
+        last = pos;
+      }
+      return out;
+    }
+    const count = Math.min(24, Math.max(6, Math.round(6 * model.axisWidthPct / 100)));
+    return ticks(model.axisStart, model.t1, count);
+  }
+
+  /* The axis header. Its ticks are placed by layoutTicks once the column has
+     been laid out and its width is a number. */
+  function axis() {
     const row = node("div", "chart-row chart-axis");
     row.appendChild(node("div", "chart-name", "session"));
-    const track = node("div", "chart-track");
-    const span = model.t1 - model.t0;
-    for (const t of ticks(model.t0, model.t1)) {
-      const tick = node("span", "chart-tick", formatTick(t, span));
-      tick.style.left = `${((t - model.t0) / span) * 100}%`;
-      track.appendChild(tick);
-    }
-    row.appendChild(track);
+    row.appendChild(node("div", "chart-track"));
     row.appendChild(node("div", "chart-life", "생존"));
     row.appendChild(node("div", "chart-flow", "cflow"));
     return row;
+  }
+
+  /* Place the axis labels against the column's real width: choose ticks by
+     their labels' widths, then measure the labels themselves and hide the ones
+     that still touch a neighbour or would be cut by the column's edge. */
+  function layoutTicks(main, model) {
+    const track = main.querySelector(".chart-axis .chart-track");
+    if (!track) return;
+    track.textContent = "";
+    const marks = axisTicks(model, { trackPx: track.clientWidth });
+    const span = model.t1 - model.axisStart;
+    const spacing = marks.length > 1 ? span / (marks.length - 1) : span;
+    const built = [];
+    for (const t of marks) {
+      const text = model.scale === "log" ? logTickText(model, t) : formatTick(t, spacing);
+      const tick = node("span", "chart-tick", text);
+      tick.style.left = `${positionOf(t, model)}%`;
+      track.appendChild(tick);
+      built.push(tick);
+    }
+    const edge = track.getBoundingClientRect();
+    let lastRight = -Infinity;
+    for (const tick of built) {
+      const box = tick.getBoundingClientRect();
+      if (box.left < edge.left - 0.5 || box.right > edge.right + 0.5 ||
+          box.left < lastRight + TICK_GAP_PX) {
+        tick.style.visibility = "hidden";
+        continue;
+      }
+      lastRight = box.right;
+    }
   }
 
   function pick(name) {
@@ -465,31 +619,45 @@ globalThis.ChartPage = (() => {
     row.appendChild(name);
 
     const track = node("div", "chart-track");
-    const geo = barGeometry(r.span, model.t0, model.t1);
+    const geo = barGeometry(r.span, model);
     const bar = node("span", `chart-bar cat-${r.category}${geo.clipped ? " clipped" : ""}` +
       (r.span.alive ? " alive" : ""));
     bar.style.left = `${geo.left}%`;
     bar.style.width = `${geo.width}%`;
+    const change = cflowAge(r.cflow, model.now);
     bar.title = [
       r.name,
       `상태: ${CATEGORY_LABEL[r.category]}`,
       `생성: ${formatTime(r.span.start)}`,
       r.span.alive ? "종료: (실행 중)" : `종료: ${formatTime(r.span.end)}`,
       `생존 시간: ${formatDuration(r.lifetime)}`,
-      r.cflow ? `cflow ${r.cflow.version}: ${r.cflow.label}` : "cflow: 없음",
+      r.cflow ? `cflow ${r.cflow.version}: ${r.cflow.label}` +
+        (change.elapsed !== null ? ` · 마지막 갱신 ${formatDuration(change.elapsed)} 전` : "")
+        : "cflow: 없음",
     ].join("\n");
     track.appendChild(bar);
     row.appendChild(track);
 
     row.appendChild(node("div", "chart-life", formatDuration(r.lifetime)));
 
-    const flow = node("div", "chart-flow");
+    const age = cflowAge(r.cflow, model.now);
+    const flow = node("div", `chart-flow${age.stalled ? " stalled" : ""}`);
     if (r.cflow) {
       const glyph = typeof WF_GLYPH !== "undefined" ? WF_GLYPH[r.cflow.state] || "" : "";
       flow.appendChild(node("span", `wf-mark wf-mark-${r.cflow.state}`, glyph));
       flow.appendChild(node("span", "chart-flow-ver", r.cflow.version));
       flow.appendChild(node("span", "chart-flow-text", r.cflow.label));
-      flow.title = r.cflow.label;
+      if (age.elapsed !== null) {
+        flow.appendChild(node("span", "chart-flow-age",
+          (age.stalled ? "⚠ " : "") + formatDuration(age.elapsed)));
+      }
+      flow.title = [
+        r.cflow.label,
+        age.elapsed !== null
+          ? `마지막 갱신: ${formatDuration(age.elapsed)} 전` +
+            (age.stalled ? ` (${formatDuration(STALL_MS)} 이상 무변화)` : "")
+          : null,
+      ].filter(Boolean).join("\n");
     } else {
       flow.appendChild(node("span", "chart-muted", "—"));
     }
@@ -644,12 +812,18 @@ globalThis.ChartPage = (() => {
     const oldMain = root.querySelector(".chart-main");
     const oldSide = root.querySelector(".chart-detail");
     const tops = [oldMain ? oldMain.scrollTop : 0, oldSide ? oldSide.scrollTop : 0];
+    // The grid keeps its own horizontal place across a redraw; read it before
+    // the rebuild replaces the node. The timeline column (.chart-main) is the
+    // scroller, so the axis header and the name column stick to it.
+    const prevScroll = root.querySelector(".chart-main");
+    const prevLeft = prevScroll ? prevScroll.scrollLeft : null;
+    const prevPct = prevScroll ? prevScroll.dataset.widthpct : null;
     const sessions = liveSessions();
     const model = buildModel(sessions, {
       now: Date.now(), project: currentProjectPick(), group: state.group,
       groupValue: appGroupValue, groupPick: state.groupPick, range: state.range,
       archived: state.archived, sort: state.sort, cflowOf: appCflowOf,
-      meshesOf: appMeshesOf,
+      meshesOf: appMeshesOf, scale: state.scale,
     });
     root.innerHTML = "";
     const head = node("div", "wf-head");
@@ -660,8 +834,14 @@ globalThis.ChartPage = (() => {
     root.appendChild(toolbar(sessions, model));
     if (archivedError) root.appendChild(node("p", "chart-error", `archived 읽기 실패: ${archivedError}`));
     root.appendChild(summary(model));
+    if (model.axisWidthPct > 100) {
+      root.appendChild(node("p", "chart-muted chart-hint",
+        `가로 스크롤: 한 화면에 ${AXIS_CAP_MS / 86400000}일까지 그린다. ` +
+        "왼쪽으로 넘기면 이전 구간이 나온다."));
+    }
     const chart = node("div", "chart-grid");
-    chart.appendChild(axis(model));
+    chart.style.width = `${model.axisWidthPct}%`;
+    chart.appendChild(axis());
     if (!model.rows.length) {
       chart.appendChild(node("p", "chart-muted chart-empty", "이 조건에 맞는 세션이 없다."));
     }
@@ -680,14 +860,25 @@ globalThis.ChartPage = (() => {
     const main = node("div", "chart-main");
     main.setAttribute("role", "listbox");
     main.setAttribute("aria-label", "sessions");
+    main.dataset.widthpct = String(model.axisWidthPct);
+    // The timeline scrolls sideways inside the split's left column when the
+    // axis is wider than one screen (AXIS_CAP_MS); the detail pane beside it
+    // does not.
     main.appendChild(chart);
     split.appendChild(main);
     split.appendChild(divider(split));
     const side = detail(model, sessions);
     split.appendChild(side);
     root.appendChild(split);
+    // The tick spacing is a question about pixels, so it waits for the column
+    // to have a width.
+    layoutTicks(main, model);
     main.scrollTop = tops[0];
     side.scrollTop = tops[1];
+    // Same axis width: the viewer keeps their place. A new width (range or
+    // cap changed) opens on the newest time -- the right edge.
+    const sameWidth = prevPct !== null && prevPct === String(model.axisWidthPct);
+    main.scrollLeft = sameWidth ? prevLeft : main.scrollWidth;
     if (keepFocus === "divider") split.querySelector(".chart-divider").focus();
     else if (keepFocus) {
       const again = [...main.querySelectorAll(".chart-row")].find((x) => x.dataset.name === keepFocus);
@@ -700,6 +891,14 @@ globalThis.ChartPage = (() => {
     render();
     if (timer) clearInterval(timer);
     timer = setInterval(() => render(), REDRAW_MS);
+    // A window that changed width would keep the old tick spacing until the
+    // next redraw. Registered once; a redraw of the hidden view does nothing.
+    if (!onResize) {
+      onResize = () => render();
+      if (typeof window !== "undefined" && window.addEventListener) {
+        window.addEventListener("resize", onResize);
+      }
+    }
   }
 
   function stop() {
@@ -708,5 +907,7 @@ globalThis.ChartPage = (() => {
   }
 
   return { open, stop, render, category, projectOf, spanOf, formatDuration,
-           median, ticks, buildModel, barGeometry, roleOf, clampSplit, RANGES };
+           median, ticks, buildModel, barGeometry, roleOf, clampSplit,
+           positionOf, axisTicks, cflowAge, cflowChangedAt,
+           RANGES, STALL_MS, AXIS_CAP_MS, LOG_UNIT_MS };
 })();

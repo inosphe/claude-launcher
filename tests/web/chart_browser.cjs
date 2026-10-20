@@ -35,6 +35,15 @@ const CURRENT = [
 const ARCHIVED = [
   { name: "delta", status: "exited", created_at: ago(10), exited_at: ago(8), archived_at: ago(7), project: "default", cwd: "F:/w/repo2" },
 ];
+// Two v2 runs: alpha's clock is old enough to be marked, gamma's is not.
+const RAIL = {
+  alpha: { workflow: "improv-worker-v2", status: "running", round: 2, current: ["작업 실행"],
+           gated: false, owed: [], answers: [], urgent_asks: [], updated: ago(0.75),
+           entered_at: (now - 45 * 60000) / 1000 },
+  gamma: { workflow: "improv-worker-v2", status: "running", round: 1, current: ["intake"],
+           gated: false, owed: [], answers: [], urgent_asks: [], updated: ago(1 / 60),
+           entered_at: (now - 60000) / 1000 },
+};
 let archivedAsked = 0;
 
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
@@ -46,6 +55,9 @@ const server = http.createServer((req, res) => {
       const archived = url.searchParams.get("state") === "archived";
       if (archived) archivedAsked++;
       return res.end(JSON.stringify({ sessions: archived ? ARCHIVED : CURRENT }));
+    }
+    if (url.pathname === "/api/cflow2/rail") {
+      return res.end(JSON.stringify({ rows: RAIL }));
     }
     res.statusCode = 404;
     return res.end("{}");
@@ -61,6 +73,31 @@ const server = http.createServer((req, res) => {
 
 const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) .chart-name-text",
   (els) => els.map((e) => e.textContent).sort());
+
+/* The axis labels a viewer can read, left to right, with the column's edges. */
+const visibleTicks = (page) => page.$$eval("#chart-view .chart-axis .chart-track", (tracks) => {
+  const t = tracks[0].getBoundingClientRect();
+  return Array.from(tracks[0].querySelectorAll(".chart-tick"), (e) => {
+    const b = e.getBoundingClientRect();
+    return { text: e.textContent, left: b.left, right: b.right,
+             visible: getComputedStyle(e).visibility !== "hidden",
+             track: { left: t.left, right: t.right } };
+  }).filter((x) => x.visible).sort((a, b) => a.left - b.left);
+});
+
+/* The labels must not touch each other, and must stay inside the column. */
+function assertTicksApart(ticks, where) {
+  assert.ok(ticks.length >= 2, `${where}: visible ticks: ${ticks.map((t) => t.text).join(" | ")}`);
+  for (let i = 1; i < ticks.length; i++) {
+    assert.ok(ticks[i].left >= ticks[i - 1].right,
+      `${where}: "${ticks[i - 1].text}" [${ticks[i - 1].left}, ${ticks[i - 1].right}] touches ` +
+      `"${ticks[i].text}" [${ticks[i].left}, ${ticks[i].right}]`);
+  }
+  for (const t of ticks) {
+    assert.ok(t.left >= t.track.left - 0.5 && t.right <= t.track.right + 0.5,
+      `${where}: "${t.text}" is cut by the column`);
+  }
+}
 
 (async () => {
   const port = await safeListen(server);
@@ -89,6 +126,41 @@ const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) 
       assert.ok(b.inside, "bar stays inside its track");
       assert.match(b.life, /^(<1m|\d+[dhm]( \d+[hm])?)$/);
     }
+    // 2b. The cflow column carries the v2 run's state and how long since it
+    // moved; a run in one task past the stall window is marked, a fresh one
+    // is not, and a session without a run shows no age.
+    await page.waitForFunction(() =>
+      document.querySelectorAll("#chart-view .chart-flow-age").length >= 2, null, { timeout: 15000 });
+    const flowRows = await page.$$eval("#chart-view .chart-row:not(.chart-axis)", (rows) => rows.map((r) => {
+      const f = r.querySelector(".chart-flow");
+      return {
+        name: r.querySelector(".chart-name-text").textContent,
+        text: f ? f.textContent : "",
+        stalled: !!(f && f.classList.contains("stalled")),
+        age: (r.querySelector(".chart-flow-age") || {}).textContent || "",
+      };
+    }));
+    const alpha = flowRows.find((r) => r.name === "alpha");
+    const gamma = flowRows.find((r) => r.name === "gamma");
+    assert.match(alpha.text, /improv-worker-v2 · running · round 2 · 작업 실행/);
+    assert.equal(alpha.age, "⚠ 45m", "a stalled row carries the mark with its age");
+    assert.equal(alpha.stalled, true, "a run in one task for 45m is marked");
+    assert.equal(gamma.age, "1m");
+    assert.equal(gamma.stalled, false, "a run that moved a minute ago is not marked");
+    assert.equal(flowRows.find((r) => r.name === "beta").age, "", "no run, no age");
+    const stat = await page.$$eval("#chart-view .chart-stat", (els) => els.map((e) => e.textContent));
+    assert.ok(stat.includes("1정지 의심"), stat.join(" | "));
+
+    // 2c. No two visible axis labels touch, and none is cut by the column.
+    // At this viewport the timeline column is narrow (the detail pane takes
+    // the rest), so labels that fit their gap as a percentage of the page do
+    // not fit the column: "1d 전" and "12h 전" read as one before this check.
+    assertTicksApart(await visibleTicks(page), "log axis");
+    // The same holds for the linear axis, whose labels are clock times.
+    await page.click("#chart-view .chart-seg-btn:text-is('선형')");
+    assertTicksApart(await visibleTicks(page), "linear axis");
+    await page.click("#chart-view .chart-seg-btn:text-is('로그')");
+
     if (process.env.CHART_SHOT) await page.screenshot({ path: process.env.CHART_SHOT, fullPage: true });
 
     // 3. The project picker narrows and moves the shared project.

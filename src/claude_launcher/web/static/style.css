@@ -6974,13 +6974,19 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-stat.cat-archived { border-left: 3px solid #6e7681; }
 .chart-stat.flow-yours { border-left: 3px solid #f0883e; }
 .chart-stat.flow-running { border-left: 3px solid #a371f7; }
+.chart-stat.flow-stall { border-left: 3px solid #d29922; }
+/* The timeline column (.chart-main) scrolls both ways: the axis is wider than
+   one screen when the fleet is old (chart-page.js AXIS_CAP_MS), and the axis
+   header, the name column and the cflow column stay in view while the bars
+   scroll under them. */
+.chart-hint { margin: -4px 0 8px; }
 .chart-grid { display: flex; flex-direction: column; font-size: 12px; min-width: 640px; }
-.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px minmax(140px, 300px); gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
+.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
 .chart-row:not(.chart-axis) { cursor: pointer; }
 .chart-row:not(.chart-axis):hover { background: #161b22; }
 .chart-row.selected, .chart-row.selected:hover { background: #1f2d3d; box-shadow: inset 3px 0 0 #388bfd; }
 .chart-row:focus-visible { outline: 1px solid #388bfd; outline-offset: -1px; }
-.chart-axis { position: sticky; top: 0; z-index: 1; background: #0d1117; color: #8b949e; font-size: 11px; min-height: 26px; border-bottom: 1px solid #30363d; }
+.chart-axis { position: sticky; top: 0; z-index: 3; background: #0d1117; color: #8b949e; font-size: 11px; min-height: 26px; border-bottom: 1px solid #30363d; }
 .chart-group-head { margin-top: 12px; padding: 4px 2px; font-weight: 600; color: #c9d1d9; border-bottom: 1px solid #30363d; overflow-wrap: anywhere; }
 .chart-name { display: flex; align-items: center; gap: 6px; min-width: 0; color: #c9d1d9; text-decoration: none; }
 .chart-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6989,7 +6995,6 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-track { position: relative; height: 14px; background: #161b22; border-radius: 3px; }
 .chart-axis .chart-track { background: transparent; height: 16px; }
 .chart-tick { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
-.chart-tick:first-child, .chart-tick:last-child { visibility: hidden; }
 .chart-bar { position: absolute; top: 2px; height: 10px; border-radius: 3px; background: #6e7681; }
 .chart-bar.clipped { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .chart-bar.alive { border-top-right-radius: 0; border-bottom-right-radius: 0; }
@@ -7000,8 +7005,21 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .cat-archived.chart-bar, .cat-archived.chart-dot { background: #6e7681; }
 .chart-life { text-align: right; color: #c9d1d9; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .chart-flow { display: flex; align-items: center; gap: 5px; min-width: 0; color: #c9d1d9; }
+/* Pinned ends: the session and what its run is doing while the bars move. */
+.chart-name, .chart-life, .chart-flow { background: #0d1117; }
+.chart-name { position: sticky; left: 0; z-index: 2; }
+.chart-life, .chart-flow { position: sticky; z-index: 2; }
+.chart-life { right: 220px; }
+.chart-flow { right: 0; }
+.chart-axis .chart-name, .chart-axis .chart-life, .chart-axis .chart-flow { z-index: 4; }
+.chart-row:not(.chart-axis):hover .chart-name,
+.chart-row:not(.chart-axis):hover .chart-life,
+.chart-row:not(.chart-axis):hover .chart-flow { background: #161b22; }
 .chart-flow-ver { flex: none; font-size: 10px; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 0 3px; }
 .chart-flow-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-flow-age { flex: none; color: #8b949e; font-variant-numeric: tabular-nums; }
+.chart-flow.stalled .chart-flow-age { color: #d29922; }
+.chart-flow.stalled .chart-flow-text { color: #d29922; }
 .chart-empty { padding: 16px 2px; }
 /* Two columns: the timeline (.chart-main) and the picked row's detail
    (.chart-detail), with a draggable divider whose place is --chart-left. */
