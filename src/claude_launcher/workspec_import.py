@@ -193,6 +193,14 @@ class DaemonBackend(Backend):
             out = self.client.post("/api/sessions", body)
             return str(out.get("name") or (out.get("session") or {}).get("name"))
         out = self.client.post(f"/api/sessions/{parent}/children", body)
+        if out.get("pending"):
+            # An agent's spawn waits for the person (claunch-iw5i8.16); an
+            # import needs each child's name for the next step, so it cannot
+            # run from a managed session's shell.
+            raise SpecImportError(
+                f"the spawn of a child of {parent} is waiting for approval "
+                f"({(out.get('request') or {}).get('id')}): run the import from "
+                "your own shell, not from a managed session")
         return str((out.get("session") or {}).get("name"))
 
     def connect(self, mesh, a, b):

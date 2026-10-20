@@ -1,0 +1,116 @@
+cflow: 2
+name: sweep-job-v2
+description: >-
+  배치 스윕 하나를 지켜보는 일회성 자식 세션의 워크플로. 스윕 자체는 데몬 큐 실행기가
+  테스트 창에서 낮은 우선순위로 돌린다. 이 런은 결과가 나올 때까지 probe로 기다리고,
+  주기마다 대기 중 세션이 idle hold로 내려가지 않도록 알림(nudge)을 받는다. 창을 쥔 동안과
+  창을 기다리는 동안의 알림 문구가 다르다. 실패하면 배치를 분해해 원인 머지를 좁히고
+  리더에게 보고한 뒤 끝난다.
+
+# 왜 이 워크플로가 있는가 (claunch-yfkt2)
+# 스윕 자식이 테스트 창을 기다리는 동안 에이전트 턴이 없으면 데몬의 idle hold가 그
+# 세션의 프로그램을 내린다(daemon/hold.py). 깨우는 것은 mesh 메시지나 cflow 통지뿐이다.
+# wait의 timeout이 런을 옮기면 데몬 clock이 드라이버에 「the run moved」 블록을
+# 보내므로(docs/cflow-v2.md 6.5), 주기 wait가 곧 주기 nudge다. 판정은 probe(데몬이 실행,
+# 에이전트 턴 없음)가 하고, 에이전트는 깨어났을 때 `tools/delayed_sweep.py nudge`가
+# 돌려주는 문구 한 줄을 읽는 일만 한다.
+#
+# 이 런은 recur도 escalate도 선언하지 않는다: done에 닿으면 데몬이 세션을 종료한다
+# (kill-on-end, oneshot-job-v2와 같다).
+
+inputs:
+  job:
+    type: string
+    label: 검증 작업 id
+    help: 지켜볼 지속 큐 작업(배치 tip)의 id. 데몬이 세션을 만들 때 채운다
+    required: true
+  python:
+    type: string
+    label: 큐 도구를 돌릴 파이썬
+    default: ""
+  tool:
+    type: string
+    label: tools/delayed_sweep.py의 절대 경로
+    default: ""
+  database:
+    type: string
+    label: 큐 DB 경로
+    default: ""
+
+nodes:
+  attend:
+    title: 스윕 작업 인수
+    prompt: |
+      이 세션은 지속 큐의 스윕 작업 하나를 지켜보려고 만들어졌다. 스윕은 데몬이
+      테스트 창에서 낮은 우선순위(-1)로 돌린다. 직접 테스트를 돌리지 않는다 —
+      두 번째 스윕은 양쪽 수치를 함께 무효로 만든다.
+      먼저 지금 상태를 읽는다:
+        `${data.inputs.python} ${data.inputs.tool} --database ${data.inputs.database} nudge --job ${data.inputs.job}`
+      (세 값이 비어 있으면 오프닝 태스크가 적은 명령을 쓴다.) 출력 첫 단어가
+      DONE이면 바로 report로 간다. 그 밖이면 기다리는 것이 이 세션의 일이다.
+      이 단계에서 할 일은 상태 한 줄을 보고에 옮기는 것뿐이다.
+    done_when: nudge 출력 한 줄이 보고에 있다
+    returns:
+      ok: {state: str}
+    effects: [fs.read]
+
+  nudge:
+    title: 주기 알림
+    prompt: |
+      대기 시간이 한 주기 지났다. 아래를 읽고 그대로 따른다:
+        `${data.inputs.python} ${data.inputs.tool} --database ${data.inputs.database} nudge --job ${data.inputs.job}`
+      · TEST WINDOW HELD: 스윕이 창을 쥐고 돌고 있다. 아무것도 하지 않는다.
+        프로세스를 죽이거나 다시 돌리지 않는다.
+      · WAITING FOR WINDOW / QUEUED: 창 대기다(스윕은 단위 테스트보다 뒤에 선다).
+        아무것도 하지 않는다. 대기가 길다는 것은 고장이 아니다.
+      · DONE: 결과가 났다. 보고하고 다음 대기로 돌아가면 곧 결과 단계로 넘어간다.
+      보고에는 읽은 첫 단어만 싣는다. 이 단계에서 파일을 만들거나 메시지를
+      보내지 않는다.
+    done_when: nudge 출력의 첫 단어가 보고에 있다
+    returns:
+      ok: {word: str}
+    effects: [fs.read]
+
+  result:
+    title: 스윕 결과 처리
+    prompt: |
+      스윕이 판정에 닿았다. 큐의 기록을 읽는다:
+        `${data.inputs.python} ${data.inputs.tool} --database ${data.inputs.database} status --repo <작업의 repo>`
+      (작업의 repo는 `job-state` 출력과 status의 jobs[].repo에 있다.)
+      · passed: 결과를 지속 큐가 이미 기록했고 데몬이 리더에게 통지한다. 보고만
+        하고 끝난다. 이슈 코멘트나 메시지를 추가로 만들지 않는다.
+      · failed: 영수증(receipt 경로)과 실패 테스트 이름·오류 꼬리를 읽는다. 배치였다면
+        (`status`에서 covered_by가 이 작업을 가리키는 항목이 있다) 먼저
+        `tools/delayed_sweep.py unbatch --job ${data.inputs.job}`로 덮었던 머지를 개별
+        작업으로 풀어 원인 머지를 좁히게 한다. 원인이 어느 머지인지 확정되면 그 SHA와
+        이슈를 보고에 적는다. 확정하지 못했으면 「원인 미상」이라고 쓴다.
+        수정은 하지 않는다 — 리더의 handle-regression이 수정 자식을 만든다.
+      · stuck 또는 cancelled: 상세(detail)를 그대로 보고에 옮긴다.
+      리더에게는 mesh로 한 줄(작업 id, 상태, 영수증 경로)만 보낸다. 긴 증거는
+      영수증 파일이 정본이다.
+    done_when: 판정(passed/failed/stuck/cancelled)과 근거(영수증 경로, 실패면 좁힌 머지 또는 「원인 미상」)가 보고에 있다
+    returns:
+      ok: {status: str, receipt: "str?", suspect: "str?"}
+    effects: [fs.read, fs.write, mesh.send]
+
+body:
+  seq:
+    - attend
+    - id: watch
+      loop:
+        while: "true"
+        max: 400
+        do:
+          seq:
+            - id: sweep-wait
+              wait:
+                probe: ["$CFLOW_IN_PYTHON", "$CFLOW_IN_TOOL", "--database", "$CFLOW_IN_DATABASE",
+                        "job-state", "--job", "$CFLOW_IN_JOB"]
+                poll: 60
+                seconds: 900
+                describe: 스윕 작업(또는 그 배치 tip)이 판정에 닿았다
+              on:
+                timeout: {seq: [nudge, {continue: watch}]}
+                undecidable: {seq: [nudge, {continue: watch}]}
+            - {break: watch}
+    - result

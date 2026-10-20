@@ -29,7 +29,10 @@ description: 실제 일감을 맡길 에이전트는 claunch MCP spawn으로 만
 2. `spawn`으로 만든다. `handle`·`role`·`task`를 주고, 코드를 고치는 자식에게는
    `worktree`(이름 앞에 세션 이름)를 준다. 미리 써 둔 이슈가 있으면 `issue`로
    넘겨 중복 이슈가 생기지 않게 한다. `mesh`·`workflow`는 생략한다
-   (`mesh` 스킬의 Step 4).
+   (`mesh` 스킬의 Step 4). role이 reviewer가 아니면 spawn은 사람의 승인을
+   기다린다: 응답은 `pending`과 요청 id이고, 만들어진 세션 이름은 터미널에 오는
+   `[claunch spawn-request <id>]` 블록에 있다. 그 블록을 받기 전에는 3·4를
+   하지 않고 같은 일로 다시 spawn하지 않는다. 거절이면 자식 없이 진행한다.
 3. 소통은 claunch MCP `send` 도구로 한다. 여러 자식에게 서로 다른 지시를 줄 때는
    `sections`로 한 번에 보낸다. 지시는 `say`/`ask`로 보내고, 상태 알림만
    `fyi`/`ack`로 보낸다.

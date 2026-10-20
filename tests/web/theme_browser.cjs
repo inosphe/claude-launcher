@@ -5,10 +5,11 @@
      1. a first visit is dark, and the switch in the rail header offers light;
      2. pressing it turns the page light (background light, text dark), keeps
         the choice in localStorage, and flips the switch's glyph;
-     3. the terminals are inverted as a picture (.xterm carries the filter),
-        and the vendored xterm.css is not rewritten; the picture keeps its
-        tones: no channel of a pale colour is clipped to 0, text is a soft
-        black, dim text stays grey (claunch-bj6ee);
+     3. the terminals keep the dark palette on the light page: the panel and
+        the throughput overlay stay the dark page's colours (the --term-*
+        custom properties), no picture filter is applied, so coloured and
+        bold text shows un-inverted (claunch-bj6ee.1); the vendored xterm.css
+        is not rewritten;
      4. switching back restores every rewritten declaration to the text it
         had: the sheets after light-then-dark equal the sheets before;
      5. a reload comes back light before any app script has run;
@@ -53,10 +54,16 @@ const lum = (css) => {
 };
 
 /* The colours a light-theme terminal shows for a few dark-palette colours.
-   A filter's output is only on screen, so the swatches are photographed and
-   the photo read back through a canvas. */
+   A rule's output is only on screen, so the swatches are photographed and
+   the photo read back through a canvas. With no picture filter the photo
+   matches the input: the terminal keeps the dark page's palette, so bg
+   stays dark, white text stays white, and ANSI-coloured / bright (bold)
+   text stays the saturated colour the program chose (claunch-bj6ee.1). */
 async function terminalSwatches(page) {
-  const names = { bg: "#14161a", text: "#ffffff", dim: "#999999", lavender: "#b1b9f9" };
+  const names = {
+    bg: "#14161a", text: "#ffffff", dim: "#999999", lavender: "#b1b9f9",
+    red: "rgb(204, 51, 51)", bright: "#ff7b72",
+  };
   await page.evaluate((names) => {
     const x = document.createElement("div");
     x.className = "xterm";
@@ -132,6 +139,9 @@ async function terminalSwatches(page) {
         glyph: document.getElementById("theme-toggle").textContent,
         pressed: document.getElementById("theme-toggle").getAttribute("aria-pressed"),
         filter: getComputedStyle(x).filter,
+        panel: getComputedStyle(x).backgroundColor,
+        ring: getComputedStyle(document.getElementById("terminal")).backgroundColor,
+        overlay: getComputedStyle(document.getElementById("term-tps-overlay")).backgroundColor,
       };
       x.remove();
       return out;
@@ -144,17 +154,36 @@ async function terminalSwatches(page) {
     assert.equal(light.stored, "light");
     assert.equal(light.glyph, "☾");
     assert.equal(light.pressed, "true");
-    // 3. terminals are inverted as a picture; xterm.css is untouched
-    assert.match(light.filter, /url\("?#claunch-light-term"?\)/);
+    // 3. terminals keep the dark palette as a card; xterm.css is untouched
+    assert.equal(light.filter, "none", `terminal picture filtered: ${light.filter}`);
+    assert.equal(light.panel, "rgb(20, 22, 26)", `terminal panel ${light.panel}`);
+    assert.equal(light.ring, "rgb(20, 22, 26)", `terminal padding ring ${light.ring}`);
+    {
+      // color-mix serialises as color(srgb r g b / a)
+      const m = light.overlay.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+) \/ ([\d.]+)\)/);
+      assert.ok(m, `throughput overlay ${light.overlay}`);
+      const ch = [20 / 255, 22 / 255, 26 / 255, 0.78];
+      assert.ok(m.slice(1).every((v, i) => Math.abs(Number(v) - ch[i]) < 0.01),
+        `throughput overlay ${light.overlay}`);
+    }
     const swatch = await terminalSwatches(page);
-    assert.ok(lum(swatch.bg) > 0.85, `terminal background ${swatch.bg}`);
-    // the dark palette's lavender (inline code) stays a blue, not a clipped navy
-    const lav = swatch.lavender.match(/\d+/g).map(Number);
-    assert.ok(Math.min(...lav) >= 30 && lav[2] === Math.max(...lav), `lavender became ${swatch.lavender}`);
-    const text = swatch.text.match(/\d+/g).map(Number);
-    assert.ok(Math.min(...text) >= 10 && Math.max(...text) <= 60, `white text became ${swatch.text}`);
-    assert.ok(lum(swatch.dim) - lum(swatch.text) > 0.15 && lum(swatch.bg) - lum(swatch.dim) > 0.3,
-      `dim text ${swatch.dim} between text ${swatch.text} and background ${swatch.bg}`);
+    assert.ok(lum(swatch.bg) < 0.15, `terminal background ${swatch.bg}`);
+    // every swatch shows the colour the program chose: nothing is inverted
+    const near = (css, rgb, tol) => {
+      const got = css.match(/\d+/g).slice(0, 3).map(Number);
+      return got.every((v, i) => Math.abs(v - rgb[i]) <= tol);
+    };
+    assert.ok(near(swatch.text, [255, 255, 255], 6), `white text became ${swatch.text}`);
+    assert.ok(near(swatch.dim, [153, 153, 153], 6), `dim text became ${swatch.dim}`);
+    assert.ok(near(swatch.lavender, [177, 185, 249], 6), `lavender became ${swatch.lavender}`);
+    // the reported cases: ANSI red and the bright (bold) red stay saturated
+    // dark reds, not the pale pastels the inversion produced (claunch-bj6ee.1)
+    const red = swatch.red.match(/\d+/g).slice(0, 3).map(Number);
+    assert.ok(red[0] - Math.max(red[1], red[2]) > 100 && lum(swatch.red) < 0.55,
+      `ANSI red became ${swatch.red}`);
+    const bright = swatch.bright.match(/\d+/g).slice(0, 3).map(Number);
+    assert.ok(bright[0] > 240 && bright[0] - Math.max(bright[1], bright[2]) > 80,
+      `bright red became ${swatch.bright}`);
     const vendorLight = await page.evaluate(() =>
       Array.from(Array.from(document.styleSheets).find((s) => /vendor\/xterm\.css/.test(s.href)).cssRules)
         .map((r) => r.cssText).join("\n"));

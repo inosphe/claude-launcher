@@ -91,25 +91,37 @@ option:disabled { color: #6b7280; }
 }
 #theme-toggle:hover { color: #58a6ff; }
 
-/* The light theme's terminals: the picture is inverted rather than the
-   palette re-chosen, because a session's program draws in 24-bit colour the
-   xterm palette never sees (theme.js says why). The filter is the SVG
-   #claunch-light-term in index.html, two steps:
-     1. feColorMatrix inverts luma and keeps hue and chroma: every channel
-        moves by the same amount, c' = c + 1 - 2Y (Y the Rec. 709 luma), so
-        Y' = 1 - Y and the channel differences are unchanged. This is what
-        invert(1) hue-rotate(180deg) computes.
-     2. feComponentTransfer is a tone curve through 11 points: it keeps the
-        terminal background where step 1 put it (0.91 stays 0.91), lowers mid
-        tones so coloured text reads on a near-white page, and lifts 0 to
-        0.10, so text is a soft black.
-   The filter before this (claunch-bj6ee) followed step 1 with brightness(0.8)
-   contrast(1.8), a linear stretch v' = 1.44 v - 0.4. It sends every channel
-   below 0.28 to 0: the dark palette's lavender (177,185,249) became navy
-   (0,0,83), white text became black, dim grey text became near black, and
-   chroma grew by 1.44. A curve with a finite slope at 0 has no such floor. */
+/* The light theme's terminals keep the dark page's palette instead of
+   inverting the picture. A session draws with whatever its program asks
+   for -- 16 ANSI colours, 256-colour indices and 24-bit RGB alike -- and
+   the inverted picture turned bold and coloured text into saturated
+   pastels on near-white: the complaint this answers (claunch-bj6ee.1).
+   The panel reads as a dark card on the light page, so every colour a
+   program chose for a dark background stays as readable as it was.
+
+   The card's colours are the dashboard dark theme's own, as custom
+   properties. The theme switcher (theme.js) rewrites every colour it
+   finds for the light theme, but skips a rule whose selector names
+   .xterm, so the properties are defined under `#terminal, .xterm` and
+   keep their dark values; the light-only rules below reach them with
+   var(), which the rewrite leaves alone (no colour token in a var()
+   reference). */
+#terminal, .xterm {
+  --term-page: #14161a;   /* the dark page background (body) */
+  --term-border: #30363d; /* hairline borders */
+}
+html[data-theme="light"] #terminal { background: var(--term-page); }
 html[data-theme="light"] .xterm {
-  filter: url(#claunch-light-term);
+  background: var(--term-page);
+  /* the card's edge against the light page (outline: no layout change) */
+  outline: 1px solid var(--term-border);
+}
+/* The throughput overlay floats on the terminal picture; its translucent
+   dark wash is rewritten for the light page like anything else's, so pin
+   the wash to the same dark palette. Its state colours (yellow/green,
+   set by .live/.stale) stay readable on the dark wash as rewritten. */
+html[data-theme="light"] #term-tps-overlay {
+  background: color-mix(in srgb, var(--term-page) 78%, transparent);
 }
 
 /* Keep the filter panel and session list visually continuous. */
@@ -627,7 +639,7 @@ html[data-theme="light"] .xterm {
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
+   (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
    .rail-note, .rail-progress, .rail-procs, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
    and the selected card's .rail-role-line) are full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
@@ -944,6 +956,10 @@ html[data-theme="light"] .xterm {
 #session-list .rail-commit-pushed .rail-commit-mark { color: #79c0ff; }
 #session-list .rail-commit-local .rail-commit-mark { color: #e3b341; }
 #session-list .rail-commit-unknown .rail-commit-mark { color: #8b949e; }
+/* A rebased-away commit (claunch-rqtpe): master has its change under the
+   hash its tooltip names, so it is struck through and dimmed. */
+#session-list .rail-commit-superseded { opacity: 0.55; }
+#session-list .rail-commit-superseded .rail-commit-sha { text-decoration: line-through; }
 #session-list .rail-prgroup {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   flex-wrap: wrap; padding: 0 5px 0 0; border: 1px solid #3b6ea8; border-radius: 4px;
@@ -1263,6 +1279,19 @@ html[data-theme="light"] .xterm {
 #session-list .rail-bead.created { border-style: dashed; }
 #session-list .rail-bead:hover { border-color: #58a6ff; color: #e6edf3; }
 #session-list .rail-bead-more { cursor: default; }
+/* the work count at the head of the line (claunch-9f8ag): what is left,
+   split by status in the pills' own tints, then what is done */
+#session-list .rail-beads-count {
+  display: inline-flex; gap: 6px; align-items: baseline; font-size: 10.5px;
+  color: #8b949e; white-space: nowrap; margin-right: 2px; cursor: default;
+}
+#session-list .rail-beads-left { color: #e6edf3; font-weight: 600; }
+#session-list .rail-beads-left.none { color: #56d364; }
+#session-list .rail-beads-n.waiting { color: #79c0ff; }
+#session-list .rail-beads-n.working { color: #d29922; }
+#session-list .rail-beads-n.landing { color: #d2a8ff; }
+#session-list .rail-beads-n.blocked { color: #ff7b72; }
+#session-list .rail-beads-n.done { color: #6e7681; }
 /* the hover card: fixed beside the pill, over everything */
 .rail-bead-pop {
   position: fixed; z-index: 60; width: 320px; max-width: calc(100vw - 16px);
@@ -1301,6 +1330,15 @@ html[data-theme="light"] .xterm {
   min-width: 0; padding-left: 16px; margin-top: 2px;
   white-space: nowrap; overflow: hidden; line-height: 16px;
 }
+/* when the session was made (reader's clock) and how long it has lived
+   (claunch-y8ibz): the attention line's shape and its pair classes, one line
+   under it. No stale colour -- an old session is not a problem by age. */
+#session-list .rail-life {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 8px;
+  min-width: 0; padding-left: 16px;
+  white-space: nowrap; overflow: hidden; line-height: 16px;
+}
+#session-list .rail-life:empty { display: none; }
 #session-list .rail-seen-pair { flex: none; display: flex; gap: 3px; align-items: baseline; }
 #session-list .rail-seen-key { font-size: 10px; color: #6e7681; }
 #session-list .rail-seen-val {
@@ -5507,6 +5545,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .new-check-row .new-check-label { min-width: 90px; }
 .new-check-list { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .new-check-list label.check { display: inline-flex; gap: 4px; align-items: baseline; margin: 0; }
+/* The Workflow row's recent picks (renderWorkflowRecent), styled as the
+   prompt-pack chips; the one the row holds now is lit. */
+.wf-recent-list.new-check-list { gap: 6px; }
+.wf-recent {
+  padding: 3px 8px; border: 1px solid #30363d; border-radius: 4px;
+  background: #14161a; color: #9aa4b0; font-size: 12px; cursor: pointer;
+  max-width: 100%; overflow-wrap: anywhere;
+}
+.wf-recent:hover { border-color: #8b949e; color: #d8dbe0; }
+.wf-recent[aria-pressed="true"] { border-color: #2f81f7; background: #10233d; color: #d8dbe0; }
 /* Prompt packs as chips (renderPromptPackRow): grouped, the box hidden
    inside the chip, which is lit when on; badges say why a chip is locked and
    where its text comes from; "view" opens the text below the chips.
@@ -7561,6 +7609,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-run-input { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 10px; padding: 3px 0; align-items: baseline; }
 .cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .cf2-run-input-value.empty { color: #484f58; }
+.cf2-run-input-edit { grid-column: 2; display: flex; gap: 6px; align-items: flex-start; }
+.cf2-run-input-edit textarea, .cf2-run-input-edit input[type=text],
+.cf2-run-input-edit input[type=number] { flex: 1; min-width: 0; font: inherit; }
 .cf2-undecidable { color: #d29922; }
 
 .cf2-inputs { border: 1px solid #58677c; border-radius: 6px; padding: 14px; margin: 6px 0; min-width: 0; }
@@ -7937,6 +7988,11 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-attach-drop:hover { background: #da3633; border-color: #da3633; }
 .th-pick { padding: 2px 8px; }
 .th-compose.dragover, .th-newform.dragover { border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950; }
+/* The same composer under the thread shown on the all-threads page
+   (threads-history.js, claunch-1qj0b): kept in view at the bottom while a
+   long conversation scrolls, and resizable by hand. */
+.thh-compose { position: sticky; bottom: 0; }
+.thh-compose .th-text { resize: vertical; }
 
 /* The session's conversation pane (talk-pane.js, claunch-78dpm): a tab bar
    over the threads pane, the QA pane, or both in two columns. Each column

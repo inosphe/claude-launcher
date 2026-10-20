@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from .. import atomic, session_commits
-from . import ctxsize, paths, session_prs, tokenusage, work_checkout
+from . import ctxsize, paths, rail_superseded, session_prs, tokenusage, work_checkout
 from .harness import CLAUDE_HARNESS
 
 #: The row keys this module keeps as they were read. ``context`` is kept as
@@ -235,6 +235,12 @@ def _attach_rail(session: Any, info: dict, cwd: str) -> None:
             _rails.clear()
         _rails[name] = record
     chips = session_commits.kept_view(record)
+    if chips and record:
+        # The strike a live card had stays after the exit: the same
+        # verdicts, its pool the kept rows (rail_superseded, claunch-rqtpe).
+        rail_superseded.mark(name, lambda verdicts: session_commits.supersede(
+            record.get("common"), chips["commits"], record.get("rows") or [],
+            verdicts))
     if chips:
         info["rail_commits"] = chips
 

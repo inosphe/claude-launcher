@@ -981,6 +981,26 @@ def _tps_summary_lines(label: str, s: dict) -> List[str]:
     ]
 
 
+def _tps_live_lines(groups: dict) -> List[str]:
+    """The shims with sessions active now: total, mean per session, count.
+
+    Live rates are estimates from the characters streamed over the last
+    ``LIVE_RATE_WINDOW_S`` seconds (claunch-b28pp).
+    """
+    if not groups:
+        return []
+    out = [f"live now (estimated tok/s over the last {metering.LIVE_RATE_WINDOW_S:g}s, by proxy):"]
+    for fp, group in sorted(groups.items()):
+        rates = group["rates"]
+        n = len(rates)
+        total = group["total"]
+        out.append(
+            f"  {fp}  sessions {n}  total {total:.1f}  mean {total / n:.1f}"
+        )
+        out.append("    " + "  ".join(f"{name} {rate:.1f}" for name, rate in sorted(rates.items())))
+    return out
+
+
 def _cmd_tps(args: argparse.Namespace) -> int:
     """Throughput of API-key provider calls, from the shim's records."""
     if args.clear:
@@ -993,6 +1013,8 @@ def _cmd_tps(args: argparse.Namespace) -> int:
         return 0
     doc = store.load()
     print(f"records: {metering.records_dir()}  (metering {'on' if metering.enabled(doc) else 'OFF'})")
+    for line in _tps_live_lines(metering.live_groups(metering.live_index())):
+        print(line)
     if not records:
         print("no records yet — one is written per /v1/messages call that goes "
               "through a provider shim (API-key providers on the claude harness)")

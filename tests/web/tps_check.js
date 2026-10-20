@@ -79,7 +79,7 @@ const ctx = {};
 new Function(
   "exports", "el", "$", "sessionsCache", "currentName", "railOpen",
   ["fmtAge", "modelShort", "terminalOnScreen", "tpsFmt", "tpsAgeSecs", "ttftFmt",
-   "tpsLatencyText", "tpsSecs", "tpsLiveText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
+   "tpsLatencyText", "tpsSecs", "tpsLiveText", "tpsParallelText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
    "tpsChip", "renderTermTps"].map(slice).join("\n") + `
 exports.text = tpsText;
 exports.tooltip = tpsTooltip;
@@ -297,6 +297,19 @@ check("the tooltip says what is in flight before the last call",
       "waiting for the first token (1 call in flight)");
 check("a session whose first call is still in flight has only the live part",
       ctx.text({ live: { state: "waiting", inflight: 1, since_s: 0.5 } }), "waiting 0.5s");
+/* Parallel sessions on one shim (claunch-b28pp): the shim's total, the mean
+   per session and the session count ride on the live glance and spell out in
+   the tooltip; a session alone on its shim carries no `parallel` and shows
+   only its own rate. */
+const PAR = { sessions: 3, total: 120.4, mean: 40.13, estimated: true, window_s: 2 };
+check("a session sharing its shim appends the total, the mean and the count",
+      ctx.text(LIVE({ state: "streaming", rate: 42, inflight: 1, parallel: PAR })),
+      "≈42.0 tok/s · ×3 Σ≈120 avg≈40.1");
+check("the tooltip spells the shared proxy out",
+      ctx.tooltip(LIVE({ state: "streaming", rate: 42, parallel: PAR })).split("\n")[1],
+      "shared proxy: 3 sessions active now, total ≈120 tokens/s, avg ≈40.1 tokens/s per session (last 2s)");
+check("a session alone on its shim shows only its own rate",
+      ctx.text(LIVE({ state: "streaming", rate: 42 })), "≈42.0 tok/s");
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

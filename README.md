@@ -1129,6 +1129,17 @@ metering:
   summary_max_age: 600          # a call describes the session for this long
 ```
 
+One shim serves every session on the same upstream, so sessions that run at
+the same time share its throughput. When a session and at least one other
+session are active on the same shim (a call in flight, or output in the last
+two seconds), the live reading also carries `parallel`: how many sessions are
+active on that shim (`sessions`), their summed estimated rate (`total`) and
+that total divided by the session count (`mean`). The rail line and the
+header badge append it as `×3 Σ≈120 avg≈40`, the terminal overlay and the
+tooltip spell it out, and `claunch tps` prints a `live now` section with the
+same three numbers per shim. A session running alone on its shim shows no
+`parallel` figure, since its own rate is already the shim's total.
+
 ## Migrating skills & MCP servers
 
 Seeding copies the global `settings.json`, so the MCP servers defined there come
@@ -1880,7 +1891,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `quick-fork [S] [--as NAME] [--task T] [--mesh M] [--workflow W] [--role R] [--sibling] [-a]` | Start a **copy** of `S`'s conversation as a child of it (`--sibling`: beside it, under `S`'s parent), marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. The copy joins no mesh and drives no run unless `--mesh`/`--workflow` say otherwise; `.` means the origin's mesh and, for the workflow, the pair the origin's run declares (`default_child_cflow`). `--role` sets the copy's role in that mesh; a second leader is refused. It always shares the origin's checkout. |
 | `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin (or, when it has ended, the nearest live session above it) and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. With no live session above, nothing is typed, the wrap-up is saved beside the copy's record and the copy is kept (exit 1). |
 | `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
-| `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
+| `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). From inside a managed session it files a kill request for a person instead; if the target's run stands on its end decision the person is asked to answer 'end' there (`--skip-end-decision` or `--force` files the kill request anyway). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
 | `detach S`            | End a session's parent/child relation: it becomes a root, its own children stay under it. The operator's form of the agents' `detach` MCP tool (scoped to the caller's own subtree). Cuts the private parent channel the daemon opened for the pair; there is no re-attach verb beyond `reparent`. Also a `detach` button on the detail panel's "spawned by" row. |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
@@ -3895,7 +3906,9 @@ with a `stack` sub run beside it).
   Harness itself has no spawn unlock: it is derived from the inherited or
   allowed replacement profile. If that profile changes the harness, inherited
   args, model selection and Claude-only auth choices are dropped because they
-  belonged to the parent's program.
+  belonged to the parent's program. The selector is `PROFILE[:HARNESS]`;
+  `:HARNESS` alone keeps the parent's profile and changes only the harness
+  (it is still a profile choice, so it needs `allow_profile` too).
 - **A child may be sent to another directory — by name, not by path.**
   `allow_workspace` lets the agent pass a `workspace` from your
   [registry](#workspaces-where-a-session-may-be-spawned); `allow_cwd` lets it
@@ -4171,8 +4184,20 @@ conversation and an input row; closed, the cards take the full width. The
 choice is kept per browser (`localStorage` key
 `claunch-observer-operator-dock`) and starts closed. Each operator has
 a name and a project scope — tick one project, several, or *all projects* —
-and its own feed, bound session and watch switch, so two operators over
-overlapping projects never share a conversation. **Start** picks a profile
+and its own threads, bound session and watch switch, so two operators over
+overlapping projects never share a conversation. The conversation is a set of
+threads (owner `operator:<id>` in the daemon's thread store, kept out of the
+session rail and thread history): the thread list and the selected thread sit
+side by side when the conversation column is at least 640px wide and take
+turns below that. **New thread** opens one with a title and a first message;
+the bot opens one with `opv2_thread_open`. A message you type can carry
+images (the 🖼 button, paste or drop), which the bot reads from `opv2_inbox`
+as file paths. A post, ask or dispatch report lands in the thread its call
+names, else in the thread of what it answers, else in the most recently
+active thread. On first read after upgrading, an operator's old single feed
+moves into one thread titled 「이전 대화」 and the original record is kept as
+`<id>.feed-backup.json` beside it; the move runs once and a repeat changes
+nothing. **Start** picks a profile
 (and the model and effort when its harness declares them) and creates one
 session running the bundled `operator-v2` workflow with the operator's id as
 its input; **Stop** ends it (an agent may not stop an operator — that is the
@@ -4199,13 +4224,18 @@ watch switch off it only answers what you ask. Ask it
 about work — what a session in its scope is doing or did, its issue, its
 commits, where something was said — and it answers from the record with
 `opv2_sessions`, `opv2_session`, `opv2_issue`, `opv2_commits`,
-`opv2_transcript_search` and `opv2_history`. What you type reaches the bot
+`opv2_transcript_search` and `opv2_history`; `opv2_landing` answers in one
+call where each session's work stands — issue status, branch, recorded PRs
+and a `landed` verdict read off the PR state, since a squash merge leaves the
+branch's commits off master. What you type reaches the bot
 through `opv2_inbox`, never its terminal, which only gets a one-line nudge;
 it may type into another session of its scope with `opv2_dispatch` only to
 relay an instruction of yours (the call names the message or answered ask it
 carries). HTTP: `GET/POST /api/operators`, `GET/PATCH/DELETE
 /api/operators/{id}`, `POST /api/operators/{id}/start`, `…/stop`,
-`…/message {text}`, `…/asks/{entry}/answer`, `…/seen`; the bot's own calls
+`…/message {text, thread?, images?}`, `…/threads {title, text, images?}`,
+`…/threads/{thread}/close|reopen|title`, `…/asks/{entry}/answer`, `…/seen`
+(`GET /api/operators/{id}?thread=<id>` returns that thread's messages); the bot's own calls
 live under `/api/operators/agent/{session}/…` and are refused to any session
 that is not that operator's bound session. (Operator v1 — one bot per
 project on its own page — was removed in claunch-iw5i8.6.)

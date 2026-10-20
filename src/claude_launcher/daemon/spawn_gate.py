@@ -1,34 +1,42 @@
 """The approval gate an agent's request for a session waits behind
-(claunch-iw5i8.15).
+(claunch-iw5i8.15, widened by claunch-iw5i8.16).
 
-An operator that takes a piece of work from the user either hands it to a
-session that is already doing it, or asks for a session to do it. Creating a
-session is the person's action (``claunch new-session`` is refused inside a
-managed session), so the operator's ask goes through this gate: the web UI
-shows it as a notification card with a countdown, and the person approves,
-rejects, extends the deadline or takes it over by hand.
+Creating a session is the person's action (``claunch new-session`` is refused
+inside a managed session), so an agent's ask for one goes through this gate:
+the web UI shows it as a notification card with a countdown, and the person
+approves, rejects, extends the deadline or takes it over by hand.
 
-The gate is generic -- a record names its asker and carries the session
-definition it asks for -- but the only door that files one today is the
-operator v2 agent route (:mod:`operators_v2`), whose request must name the
-user message it acts on.
+Who files one: an agent's child spawn (MCP ``spawn`` or ``claunch spawn`` from
+a managed session, except a ``reviewer`` child), an agent's ask for a
+top-level session (``spawn`` with ``root``), and the operator v2 agent route
+(:mod:`operators_v2`), whose request must name the user message it acts on
+and is a top-level ask.
 
 Two kinds of request:
 
-``spawn`` -- create a new session from ``spec`` (a ``POST /api/sessions``
-body).
+``spawn`` -- create a new session. ``scope`` says which:
 
-* **Approved** -- the session is created through the same path as the
-  dashboard's form (``create``). A create that fails settles the request as
-  ``failed`` with the error.
-* **Manual** -- the person opens the New session form seeded with ``spec``
-  and creates it themselves (or does not). The request is settled; the
-  form's create reports the session it made back here (:meth:`link`) so the
-  asker learns its name.
+* ``root`` -- a top-level session from ``spec`` (a ``POST /api/sessions``
+  body); ``child_spec`` is the same session as a child of the asker (a
+  ``POST /api/sessions/{asker}/children`` body), the fallback.
+* ``child`` -- a child of the asker from ``spec`` (a children body).
+
+* **Approved** -- the session is created as asked (``create``). A create
+  that fails settles the request as ``failed`` with the error.
+* **Manual** -- the person opens the New session form (root) or the spawn
+  child form (child) seeded with ``spec`` and creates it themselves (or does
+  not). The request is settled; the form's create reports the session it
+  made back here (:meth:`link`) so the asker learns its name.
 * **Rejected** -- nothing is created.
-* **Unanswered** -- after :data:`GATE_TIMEOUT` (plus every extension) the
-  request counts as approved: the user's decision (th-d9e343) is that an
-  absent person does not hold up the work.
+* **Unanswered** -- after :data:`GATE_TIMEOUT` (plus every extension) a
+  child request counts as approved (th-d9e343), and a root request creates
+  no top-level session: its ``child_spec`` is created as the asker's child
+  instead (claunch-iw5i8.16).
+
+``setup`` on a settled spawn says who set the session up: ``agent`` (nobody
+answered; created from the agent's spec as it asked), ``approved`` (the
+person approved the agent's spec), ``custom`` (the person made it in the
+form). ``created_as`` says whether it was made ``root`` or ``child``.
 
 ``resume`` -- bring an exited session back on its own conversation.
 
@@ -85,6 +93,16 @@ SPAWN = "spawn"
 RESUME = "resume"
 KINDS = (SPAWN, RESUME)
 
+#: Where a spawn request's session goes: top-level, or under the asker.
+ROOT = "root"
+CHILD = "child"
+SCOPES = (ROOT, CHILD)
+
+#: Who set a created session up (``setup`` on a settled spawn).
+SETUP_AGENT = "agent"
+SETUP_APPROVED = "approved"
+SETUP_CUSTOM = "custom"
+
 PENDING = "pending"
 CREATING = "creating"
 RESUMING = "resuming"
@@ -101,6 +119,9 @@ MOOT = "moot"
 OPEN = (PENDING, CREATING, RESUMING)
 
 #: ``(spec, asker, record) -> (status, payload)``: the session-create path.
+#: ``record["created_as"]`` says which: ``root`` (``spec`` is a
+#: ``POST /api/sessions`` body) or ``child`` (a children body, under the
+#: asker); ``record["setup"]`` says who set it up.
 Create = Callable[[dict, str, dict], Awaitable[Tuple[int, dict]]]
 
 
@@ -161,15 +182,25 @@ def outcome_message(record: dict) -> str:
         else:
             body = f"{status}: session {target}"
         return f"{head} {body}"
-    if status == APPROVED:
-        body = (f"approved (by {by}): session {record.get('created') or '?'} was created. "
+    created = record.get("created") or "?"
+    if status == APPROVED and record.get("setup") == SETUP_AGENT:
+        if record.get("scope") == ROOT:
+            body = (f"nobody answered: no top-level session was made; session {created} "
+                    "was created as your child from your spec instead. It starts on the "
+                    "task you gave.")
+        else:
+            body = (f"nobody answered: session {created} was created as your child from "
+                    "your spec. It starts on the task you gave.")
+    elif status == APPROVED:
+        where = "as your child" if record.get("created_as") == CHILD else "top-level"
+        body = (f"approved (by {by}): session {created} was created {where}. "
                 "It starts on the task you gave; follow it from your poll.")
     elif status == MANUAL:
-        created = record.get("created")
-        body = (f"the person created session {created} by hand from your request."
-                if created else
+        form = "spawn child form" if record.get("scope") == CHILD else "New session form"
+        body = (f"the person created session {record['created']} by hand from your request."
+                if record.get("created") else
                 f"taken over by hand ({by}): the person is creating the session in the "
-                "New session form. You are told its name if they create it.")
+                f"{form}. You are told its name if they create it.")
     elif status == REJECTED:
         body = f"rejected (by {by}): nothing was created. Do not ask again for the same work."
     elif status == FAILED:
@@ -295,14 +326,16 @@ class SpawnGate:
         asyncio.ensure_future(self.expire(rid))
 
     async def expire(self, rid: str) -> Optional[dict]:
-        """The deadline passed with no answer: a spawn request counts as
-        approved, a resume request expires into its fallback spawn."""
+        """The deadline passed with no answer: a child spawn is created as
+        asked, a root spawn is created as the asker's child instead, and a
+        resume request expires into its fallback spawn."""
         row = self.records.get(rid)
         if row is None or row.get("status") != PENDING:
             return None
         if row.get("kind") == RESUME:
             return self._resume_to_spawn(row, EXPIRED, "timeout")
-        return await self.approve(rid, decided_by="timeout")
+        self._clear(rid)
+        return await self._create_from(row, "timeout", as_child=True, setup=SETUP_AGENT)
 
     # ------------------------------------------------------------------ #
     # the ask
@@ -334,17 +367,28 @@ class SpawnGate:
         }
 
     def submit_spawn(self, *, session: str, spec: dict, reason: str,
-                     basis: Optional[dict] = None, origin: Optional[str] = None) -> dict:
-        """File a request to create a session from ``spec``."""
+                     basis: Optional[dict] = None, origin: Optional[str] = None,
+                     scope: str = ROOT, child_spec: Optional[dict] = None) -> dict:
+        """File a request to create a session from ``spec``: top-level
+        (``scope`` root; ``child_spec``, default ``spec``, is what an
+        unanswered request creates under the asker instead) or as the
+        asker's child (``scope`` child)."""
         session = str(session or "").strip()
         reason = clean_reason(reason)
         self._check_asker(session)
+        if scope not in SCOPES:
+            raise GateRefused(400, f"scope must be one of {', '.join(SCOPES)}")
         if not isinstance(spec, dict) or not spec:
             raise GateRefused(400, "spec (the session to create) is required")
+        if child_spec is not None and not isinstance(child_spec, dict):
+            raise GateRefused(400, "child_spec must be a session spec")
         if not reason:
             raise GateRefused(400, "reason is required: the person decides on it alone")
         record = self._record(SPAWN, session, reason, basis)
+        record["scope"] = scope
         record["spec"] = dict(spec)
+        if scope == ROOT:
+            record["child_spec"] = dict(child_spec or spec)
         if origin:
             record["origin"] = origin
         self.records[record["id"]] = record
@@ -360,9 +404,11 @@ class SpawnGate:
 
     def submit_resume(self, *, session: str, target: str, reason: str,
                       fallback: Optional[dict] = None,
+                      fallback_child: Optional[dict] = None,
                       basis: Optional[dict] = None) -> dict:
         """File a request to resume the exited ``target``; ``fallback`` is
-        the spawn spec filed when the person declines or does not answer."""
+        the (root) spawn spec filed when the person declines or does not
+        answer, ``fallback_child`` that spawn's ``child_spec``."""
         session = str(session or "").strip()
         target = str(target or "").strip()
         reason = clean_reason(reason)
@@ -391,6 +437,8 @@ class SpawnGate:
         record["target"] = target
         record["target_cwd"] = getattr(getattr(found, "sdef", None), "cwd", "") or ""
         record["fallback"] = dict(fallback) if fallback else None
+        if fallback and fallback_child:
+            record["fallback_child"] = dict(fallback_child)
         self.records[record["id"]] = record
         self._save()
         self._arm(record)
@@ -464,13 +512,25 @@ class SpawnGate:
             else:
                 self._mark(row, APPROVED, decided_by)
             return self._finish(row)
+        return await self._create_from(row, decided_by, as_child=row.get("scope") == CHILD,
+                                       setup=SETUP_APPROVED)
+
+    async def _create_from(self, row: dict, decided_by: str, *, as_child: bool,
+                           setup: str) -> dict:
+        """Create the session of the spawn request ``row``: top-level from
+        ``spec``, or under the asker (``spec`` of a child request, the
+        ``child_spec`` of a root one)."""
         row["status"] = CREATING
+        row["setup"] = setup
+        row["created_as"] = CHILD if as_child else ROOT
         if self._create is None:
             self._mark(row, FAILED, decided_by)
             row["error"] = "this daemon cannot create sessions from the gate"
             return self._finish(row)
+        spec = row["spec"] if row.get("scope") == CHILD or not as_child else (
+            row.get("child_spec") or row["spec"])
         try:
-            status, payload = await self._create(dict(row["spec"]), row["session"], row)
+            status, payload = await self._create(dict(spec), row["session"], row)
         except Exception as exc:  # noqa: BLE001 -- reported to the asker
             status, payload = 500, {"error": str(exc) or type(exc).__name__}
         if 200 <= status < 300 and payload.get("name"):
@@ -489,11 +549,13 @@ class SpawnGate:
         return self._finish(row)
 
     def manual(self, rid: str, *, decided_by: str = "web") -> dict:
-        """The person takes the spawn over in the New session form. The
-        reply carries ``spec`` for the form to be seeded with."""
+        """The person takes the spawn over in the New session form (root)
+        or the spawn child form (child). The reply carries ``spec`` for the
+        form to be seeded with."""
         row = self._pending(rid, SPAWN)
         self._clear(rid)
         self._mark(row, MANUAL, decided_by)
+        row["setup"] = SETUP_CUSTOM
         return self._finish(row)
 
     def spawn_instead(self, rid: str, *, decided_by: str = "web") -> dict:
@@ -508,6 +570,7 @@ class SpawnGate:
         if row.get("fallback"):
             follow = self.submit_spawn(
                 session=row["session"], spec=row["fallback"],
+                child_spec=row.get("fallback_child"),
                 reason=row.get("reason") or "", basis=row.get("basis"),
                 origin=row["id"])
             row["followup"] = follow["id"]

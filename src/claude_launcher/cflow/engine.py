@@ -171,8 +171,11 @@ def _asking_well(lead: str) -> str:
         f"while the run waits; your recommendation, its reasoning, and what "
         f"would overturn it; and the weakest part of your own case. Close "
         f"with how to answer, and make clear any option is theirs to take, "
-        f"including one you did not recommend. Then wait to be nudged -- no "
-        f"urgency you invented, no asking again."
+        f"including one you did not recommend. The user may not be watching "
+        f"this terminal: after the brief, call the flow_nudge tool once "
+        f"(message: the decision and your recommendation) to raise it on their "
+        f"dashboard. Then wait to be nudged -- no urgency you invented, no "
+        f"asking again."
     )
 
 
@@ -2967,7 +2970,8 @@ def _position_payload(
                     "this decision is the user's, open from the moment it is "
                     "presented — record your recommendation with the 'select' "
                     "tool ({option, reason}) and the run stays here for the "
-                    "user to confirm"
+                    "user to confirm; if they may not be watching this "
+                    "terminal, flow_nudge raises it on their dashboard"
                 ),
             }
         payload = {

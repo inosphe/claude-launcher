@@ -5706,6 +5706,42 @@ class MeshManager:
         )
         return req.to_dict()
 
+    def request_connect(self, name: str, requester: str, target: str) -> dict:
+        """File the connect ask ``requester`` makes of ``target`` on purpose.
+
+        The refusal of a send files the same request as a side effect; this
+        is the door for a member that needs the edge before it has anything
+        to send. Both ends must already be members (joining is the step
+        before this one). Nothing is decided here: the approver is notified
+        as for any refusal, and the answer is connecting or declining.
+
+        Returns the pair's standing (see :meth:`connect_status`).
+        """
+        mesh = self.get(name)
+        self._validate_member_edge(mesh, requester, target)
+        if mesh.connected(requester, target):
+            return self.connect_status(name, requester, target)
+        if self.file_wire_request(mesh, requester, target) is None:
+            raise MeshError(
+                f"cannot file a connect request for {requester!r} -> {target!r}"
+            )
+        return self.connect_status(name, requester, target)
+
+    def connect_status(self, name: str, a: str, b: str) -> dict:
+        """Whether ``a`` and ``b`` may message each other, and the request
+        between them if one was filed: ``connected`` is the edge as it stands,
+        ``request`` the wire request row (``None`` when nobody asked).
+        """
+        mesh = self.get(name)
+        self._validate_member_edge(mesh, a, b)
+        req = mesh.wire_requests.get(wire.pair_key(a, b))
+        return {
+            "a": a,
+            "b": b,
+            "connected": mesh.connected(a, b),
+            "request": req.to_dict() if req is not None else None,
+        }
+
     def wire_request_rows(self, name: str, *, state: str = "") -> List[dict]:
         """The mesh's wire requests, open ones first then most recent.
 

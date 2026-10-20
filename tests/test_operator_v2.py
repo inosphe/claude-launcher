@@ -119,7 +119,7 @@ def test_definitions_survive_a_restart(world):
     rows = {r["name"]: r for r in again.listing()["operators"]}
     assert set(rows) == {"Alpha", "Everything"}
     assert rows["Alpha"]["projects"] == ["alpha"] and rows["Alpha"]["operator"]["name"] == "opa"
-    feed = again.get(world.alpha["id"])["feed"]
+    feed = again.feed(again.get(world.alpha["id"]))
     assert [e["text"] for e in feed if e["kind"] == "post"] == ["hello"]
 
 
@@ -128,7 +128,7 @@ def test_rescoping_and_watch_are_recorded_and_watch_nudges(world):
     out = run(ops.update(world.alpha["id"], {"projects": ["alpha", "beta"], "watch": False}))
     assert out["projects"] == ["alpha", "beta"] and out["watch"] is False and out["nudge"] == "sent"
     assert "꺼짐" in world.sessions["opa"].sent[-1]
-    assert "범위: alpha, beta" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert "범위: alpha, beta" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
     assert run(ops.poll("opa"))["watch"] is False
     assert ops.inbox("opa")["watch"] is False
     # b1 is in scope now
@@ -154,8 +154,8 @@ def test_only_a_bound_session_may_act_and_it_acts_as_its_own_operator(world):
         ops.post("ghost", {"text": "hi", "request_id": "x"})
     ops.post("opa", {"text": "from alpha", "request_id": "1"})
     ops.post("opall", {"text": "from all", "request_id": "1"})
-    alpha = [e["text"] for e in ops.get(world.alpha["id"])["feed"] if e["kind"] == "post"]
-    every = [e["text"] for e in ops.get(world.every["id"])["feed"] if e["kind"] == "post"]
+    alpha = [e["text"] for e in ops.feed(ops.get(world.alpha["id"])) if e["kind"] == "post"]
+    every = [e["text"] for e in ops.feed(ops.get(world.every["id"])) if e["kind"] == "post"]
     assert alpha == ["from alpha"] and every == ["from all"]
 
 
@@ -240,6 +240,77 @@ def test_session_list_filters_by_state(world):
     assert {s["name"] for s in everything["sessions"]} == {"b1"}
     with pytest.raises(ValueError):
         run(world.ops.session_list("opa", {"state": "bogus"}))
+
+
+def test_work_reads_status_checks_from_the_store_not_the_session_info(monkeypatch):
+    """claunch-iw5i8.11: ``session.info()`` carries no status checks (the
+    session-list handler attaches them to its own rows), so reading it gave
+    every operator an empty list. The answers and the recorded PRs come from
+    their stores."""
+    from claude_launcher.daemon import api, status_checks
+
+    rows = status_checks.set_entries([{"name": "C", "question": "Committed?"},
+                                      {"name": "M", "question": "Merged?"}])
+    status_checks.report("a1", [{"id": rows[0]["id"], "answer": "yes"}])
+    pr = {"url": "https://h/o/r/pull/7", "number": 7, "status": "merged", "branch": "a1-x"}
+    monkeypatch.setattr(api.session_prs, "for_session", lambda cwd, name: [pr] if name == "a1" else [])
+    work = run(api._operator_work({}, [FakeSession("a1"), FakeSession("a2")]))
+    assert operators_v2.progress_of(work["a1"])["checks"] == [
+        {"name": "C", "question": "Committed?", "answer": "yes"},
+        {"name": "M", "question": "Merged?", "answer": None}]
+    assert work["a1"]["prs"] == [pr] and work["a2"]["prs"] == []
+    assert work["a1"]["branch"] == ""      # no checkout: no branch, not an error
+    # the poll's progress lines now see an answer change
+    before = operators_v2.progress_of(work["a2"])
+    status_checks.report("a2", [{"id": rows[1]["id"], "answer": "yes"}])
+    after = operators_v2.progress_of(run(api._operator_work({}, [FakeSession("a2")]))["a2"])
+    assert operators_v2.progress_changes(before, after) == ["Merged? → yes"]
+
+
+def test_landing_reads_the_pr_state_in_scope(world):
+    def pr(n, status=None):
+        return {"number": n, "url": f"https://h/o/r/pull/{n}", "branch": f"b{n}",
+                **({"status": status} if status else {})}
+
+    entries = {
+        "a1": {"issue": {"id": "x-1", "status": "closed"}, "branch": "a1-x",
+               "prs": [pr(1, "closed"), pr(2, "merged")]},
+        "a2": {"prs": [pr(3)]},
+        "a-old": {"prs": [pr(4, "open"), pr(5)]},
+        "b1": {"prs": [pr(6, "merged")]},
+    }
+
+    async def work(sessions):
+        return {s.sdef.name: entries.get(s.sdef.name) for s in sessions}
+
+    world.ops.work = work
+    out = run(world.ops.landing("opa", {"state": "all"}))
+    rows = {r["name"]: r for r in out["sessions"]}
+    assert set(rows) == {"a1", "a2", "a-old"}           # b1 is outside Alpha's scope
+    assert rows["a1"]["landed"] == "merged" and rows["a1"]["issue"]["status"] == "closed"
+    assert rows["a1"]["branch"] == "a1-x" and [p["number"] for p in rows["a1"]["prs"]] == [1, 2]
+    assert rows["a2"]["landed"] == "unknown"            # a PR with no state on record
+    assert rows["a-old"]["landed"] == "open"
+    live = run(world.ops.landing("opa", {}))
+    assert {r["name"] for r in live["sessions"]} == {"a1", "a2"}
+    assert operators_v2.landing_of(None) == {"issue": None, "branch": None, "prs": [], "landed": "no-pr"}
+    assert operators_v2.landing_of({"prs": [pr(9, "closed")]})["landed"] == "closed"
+    with pytest.raises(ValueError):
+        run(world.ops.landing("opa", {"state": "bogus"}))
+
+
+def test_the_landing_tool_calls_the_landing_route(monkeypatch):
+    calls = []
+
+    class Client:
+        def get(self, path):
+            calls.append(path)
+            return {}
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "opa")
+    monkeypatch.setattr(operator_v2_mcp.daemon_client, "connect_with_diagnosis", lambda: (Client(), None))
+    operator_v2_mcp.call_tool("opv2_landing", {"state": "all", "project": "alpha"})
+    assert calls == ["/api/operators/agent/opa/landing?state=all&project=alpha"]
 
 
 def test_transcript_search_reads_only_the_scope(world, monkeypatch):
@@ -328,11 +399,11 @@ def test_spawn_files_a_gated_request_for_a_top_level_worker(world, monkeypatch):
                               "task": "로그인 버그 수정", "workflow": "improv-worker-v2", "worktree": ""}
     assert "parent" not in record["spec"]
     assert record["basis"]["operator"] == world.alpha["id"] and record["basis"]["on_behalf_of"] == msg["id"]
-    assert "세션 생성 요청" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert "세션 생성 요청" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
     assert [r["id"] for r in run(ops.poll("opa"))["requests"]] == [record["id"]]
     # the settlement lands in the operator's feed
     gate.reject(record["id"])
-    assert "rejected" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert "rejected" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
 
 
 def test_spawn_needs_the_users_word_and_a_project_in_scope(world, monkeypatch):
@@ -445,7 +516,7 @@ def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
     run(go())
     spec = created[0]
     assert spec["project"] == "beta" and spec["beads"] is False and spec["model"] == "m"
-    assert "mesh" not in spec and "opv2_inbox" in spec["task"]
+    assert "mesh" not in spec and "opv2_inbox" in spec["task"] and "opv2_landing" in spec["task"]
     # the session runs the operator-v2 workflow with this operator's id as its input
     assert spec["workflow"] == "operator-v2" == operators_v2.WORKFLOW
     assert spec["cflow_inputs"] == {"operator": made[0]["id"]}

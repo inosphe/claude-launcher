@@ -149,6 +149,62 @@ def check_merges(queue, value):
     return {"checked": len(items)}
 
 
+VERDICTS = ("passed", "failed", "stuck", "cancelled")
+
+
+def job_state(queue, ident):
+    """A job's own verdict state; a covered merge reports its batch tip's."""
+    row = queue.get(ident)
+    if row["status"] == "covered":
+        tip = queue.get(row["covered_by"])
+        return {"job": ident, "status": tip["status"], "tip": tip["id"], "done": tip["status"] in VERDICTS}
+    return {"job": ident, "status": row["status"], "tip": ident, "done": row["status"] in VERDICTS}
+
+
+def window_entries(sha, ref):
+    """(holders, queue) entries of the daemon's test window that name this job, or None."""
+    try:
+        from claude_launcher import daemon_client
+        client, _ = daemon_client.connect_with_diagnosis()
+        if client is None:
+            return None
+        status = client.get("/api/window")
+    except Exception:
+        return None
+    def mine(entry):
+        label = str(entry.get("label") or "")
+        return sha in label or ref in label
+    holders = [e for e in status.get("holders") or [] if mine(e)]
+    waiting = [i for i, e in enumerate(status.get("queue") or [], 1) if mine(e)]
+    return holders, waiting, len(status.get("holders") or []), len(status.get("queue") or [])
+
+
+def nudge_text(queue, ident):
+    """The reminder a sweep-watching session reads on every wake-up.
+
+    A session whose sweep holds the test window is told to leave it alone; one
+    still waiting for the window is told it has nothing to do but stay. Both are
+    told the exit conditions, because an idle session is held (ended) by the
+    daemon and only a message or a workflow notice brings it back."""
+    state = job_state(queue, ident)
+    row = queue.get(state["tip"])
+    head = f"sweep job {row['id']} ({row['sha'][:12]}, {1 + len(queue.members(row['id']))} merge(s))"
+    if state["done"]:
+        return (f"DONE: {head} is {state['status']}. Read tools/delayed_sweep.py status for the "
+                "receipt and report it; there is nothing left to wait for.")
+    window = window_entries(row["sha"], row["ref"])
+    if row["status"] == "running" and window and window[0]:
+        return (f"TEST WINDOW HELD: {head} is running and holds the sweep window. Do not kill, "
+                "restart or re-run it, and do not start any other test: a second sweep invalidates "
+                "both. The result arrives through the queue. Wait for the next wake-up.")
+    if window and window[1]:
+        return (f"WAITING FOR WINDOW: {head} is number {window[1][0]} of {window[3]} in the test "
+                "window queue (sweeps rank below unit tests, so the wait can be long). "
+                "Nothing is wrong and nothing needs doing. Stay in the workflow's wait.")
+    return (f"QUEUED: {head} is {row['status']} and not yet in the window queue; the daemon starts "
+            "it when the window is idle. Nothing needs doing. Stay in the workflow's wait.")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path)
@@ -186,6 +242,12 @@ def main(argv=None):
         if action == "check-enqueued":
             p.add_argument("--classify", action="store_true",
                            help="print the class (ok/missing/mismatch/conflict/invalid) and exit 2 unless ok")
+    p = sub.add_parser("unbatch", help="release the merges a failed batch tip covered so each is swept alone")
+    p.add_argument("--job", required=True)
+    p = sub.add_parser("job-state", help="exit 0 once the job (or its batch tip) has a verdict, 1 while it waits")
+    p.add_argument("--job", required=True)
+    p = sub.add_parser("nudge", help="print the reminder for a session watching this sweep job")
+    p.add_argument("--job", required=True)
     p = sub.add_parser("run-one")
     p.add_argument("--job", required=True)
     p.add_argument("--scratch", type=Path, required=True)
@@ -210,6 +272,15 @@ def main(argv=None):
         elif args.action == "requeue":
             queue.requeue(args.job)
             result = queue.get(args.job)
+        elif args.action == "unbatch":
+            result = queue.unbatch(args.job)
+        elif args.action == "job-state":
+            result = job_state(queue, args.job)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0 if result["done"] else 1
+        elif args.action == "nudge":
+            print(nudge_text(queue, args.job))
+            return 0
         elif args.action == "remeasure":
             queue.remeasure(args.repo, args.job, args.reason)
             result = queue.get(args.job)

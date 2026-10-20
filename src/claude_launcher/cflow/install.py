@@ -465,7 +465,8 @@ unchanged; these are the parts that differ.
    this rule exists for (claunch-kgfr5). Instead, in this order:
    - If the open question itself offers a way to take the work (an end
      decision with a `new-task` option), tell the user that the answer to
-     that question is how the work gets in, and stop. You cannot answer a
+     that question is how the work gets in, raise the question on their
+     dashboard with `flow_nudge {message}`, and stop. You cannot answer a
      user's question for them.
    - Otherwise, if the definition marks a node `force_target` that starts
      the work over (a worker's `round` — a new round from intake), file
@@ -473,7 +474,8 @@ unchanged; these are the parts that differ.
      then stop your turn and write the person a brief: where the run must
      go, what it cancels, and what staying costs. They answer from the run
      page (Move / Refuse), the terminal strip, or
-     `claunch cflow2 move --approve|--deny`.
+     `claunch cflow2 move --approve|--deny`. Then `flow_nudge {message}` so
+     the request reaches them even when they are not watching this terminal.
    - Otherwise the run must be retired first: the user aborts it
      (`claunch cflow2 abort`) and you `flow_start` fresh with the new task,
      or the user gives the explicit go-ahead for `flow_start` with
@@ -489,9 +491,12 @@ unchanged; these are the parts that differ.
 4. **Waiting on a person means stopping.** A `chooser: user` choice, an ask
    that reached a human, a loop or visit limit, a halt — all are answered
    outside your tools (`claunch cflow2 select|approve|extend|resume`, or
-   the web dashboard). Present the question and your recommendation, then
-   end your turn; you are nudged when it is answered. Waits fire on the
-   daemon's clock; do not poll them.
+   the web dashboard). Present the question and your recommendation, call
+   `flow_nudge {message}` once (it raises a card, a notification-history row
+   and the bell's count on the dashboard, v1 runs included; it is refused
+   when nothing waits on a person, and one card per run settles by itself
+   once they act), then end your turn; you are nudged when it is answered.
+   Waits fire on the daemon's clock; do not poll them.
 5. **A task you cannot report the normal way is a request too.** When
    only a person may report a task's result (a forced report: your own
    report is refused, or the result is theirs to decide), do NOT write

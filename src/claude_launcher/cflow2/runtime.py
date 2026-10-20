@@ -3172,6 +3172,15 @@ def _with_verify_note(payload: Dict[str, Any], job: Dict[str, Any]) -> Dict[str,
     return payload
 
 
+#: Appended wherever the run stops on a person (claunch-g08xz): a person who
+#: is not watching the driver's terminal does not see the brief written there,
+#: and the run waits for as long as nobody looks. flow_nudge raises it on the
+#: dashboard's notification channel (daemon/flow_nudge.py).
+NUDGE_HINT = ("The user may not be watching this terminal: after writing the brief, call "
+              "flow_nudge(message) once to raise it on their dashboard (card, notification "
+              "history, bell), then wait")
+
+
 def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
            caller: str = CALLER_AGENT, cwd: Optional[str] = None,
            scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
@@ -3187,7 +3196,7 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             raise FlowError(
                 f"choice {n.label or n.id} is the user's (chooser: user). Present the "
                 f"options and your recommendation to the user; they pick with "
-                f"'claunch cflow2 select {iid} <option>'"
+                f"'claunch cflow2 select {iid} <option>' or on the run page. {NUDGE_HINT}"
             )
         opts = {o["name"]: o for o in n.get("options") or []}
         if option not in opts:
@@ -3876,36 +3885,45 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
     return out["executor"]
 
 
-def set_input(name: str, value: Any, *, session: str = "", cwd: Optional[str] = None,
-              scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
-    """Write a started run's empty start input ``name`` (docs/cflow-v2.md
-    2.6): ``data.inputs.<name>`` takes ``value``, checked by
-    :func:`.inputs.settle` -- the input's ``set_by`` names ``agent``, it is
-    still empty, and the value passes the start's type, enum and constraint
-    checks. Only the run's driver writes (:func:`may_drive`). Journal
+def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_AGENT,
+              cwd: Optional[str] = None, scope: Optional[str] = None,
+              now: Optional[float] = None) -> Dict[str, Any]:
+    """Write a started run's start input ``name`` (docs/cflow-v2.md 2.6):
+    ``data.inputs.<name>`` takes ``value``, checked by :func:`.inputs.settle`
+    with the start's type, enum and constraint checks.
+
+    ``caller`` agent (``flow_input``, ``claunch cflow2 input``): the input's
+    ``set_by`` names ``agent``, it is still empty, and only the run's driver
+    writes (:func:`may_drive`). ``caller`` user (``claunch cflow2 input
+    --user``, ``POST /api/cflow2/input``): a person changes an input whose
+    ``set_by`` names ``user``, whatever it holds (claunch-umq1f). Journal
     ``input_set {name, value, by, was}``. Returns the status payload."""
     from . import inputs as inputs_mod
 
     session = str(session or "").strip()
+    person = caller == CALLER_USER
 
     def op(r: Run) -> None:
-        _require_progress(r)
-        if not may_drive(r.state, session):
+        # a person may change an input of a halted run (it moves nothing)
+        _require_live(r) if person else _require_progress(r)
+        if not person and not may_drive(r.state, session):
             raise FlowError(f"run {r.state.get('run_id')} is driven by "
                             f"{driver_of(r.state) or 'no session'}; "
                             f"{session or 'an unmanaged caller'} may not write its inputs")
         meta = r.chart.meta or {}
         data = r.state.setdefault("data", {})
         current = dict(data.get("inputs") or {})
+        setter = inputs_mod.SETTER_USER if person else inputs_mod.SETTER_AGENT
         try:
             got = inputs_mod.settle(meta.get("inputs") or {}, current, name, value,
-                                    inputs_mod.SETTERS[0], meta.get("input_constraints"))
+                                    setter, meta.get("input_constraints"))
         except inputs_mod.InputsError as exc:
             raise FlowError(f"input not written: {exc}") from None
         was = current.get(name)
         current[name] = got
         data["inputs"] = current
-        r.emit("input_set", name=name, value=got, by=session or "unmanaged")
+        by = CALLER_USER if person else (session or "unmanaged")
+        r.emit("input_set", name=name, value=got, by=by)
         r.events[-1]["was"] = was  # kept when empty: what the write replaced
     _mutate(cwd, scope, now, op)
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -5467,8 +5485,13 @@ def describe(r: Run) -> Dict[str, Any]:
     hints = []
     if tasks:
         hints.append("do each task, then flow_report(node=<instance>, outcome, value)")
-    if choices:
+    if any((c.get("chooser") or ir.CHOOSER_AGENT) != ir.CHOOSER_USER for c in choices):
         hints.append("pick with flow_select(node, option, reason)")
+    users = [c.get("instance") for c in choices
+             if (c.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER]
+    if users:
+        hints.append(f"{', '.join(map(str, users))}: the user's choice (chooser: user) -- "
+                     f"brief them and stop your turn. {NUDGE_HINT}")
     if any(d.get("status") == "pending" for d in dels):
         hints.append("run each pending delegation's brief in a sub-agent, then "
                      "flow_delegate(delegation, outcome, value)")
@@ -5479,10 +5502,11 @@ def describe(r: Run) -> Dict[str, Any]:
     if waits:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:
-        hints.append("a loop hit its max: the user decides with 'claunch cflow2 extend'")
+        hints.append(f"a loop hit its max: the user decides with 'claunch cflow2 extend'. "
+                     f"{NUDGE_HINT}")
     if visit_limits:
-        hints.append("a node passed the run's max_visits: the user decides with "
-                     "'claunch cflow2 extend --visits'")
+        hints.append(f"a node passed the run's max_visits: the user decides with "
+                     f"'claunch cflow2 extend --visits'. {NUDGE_HINT}")
     if verifying:
         hints.append("verify commands are running; call flow_status again later")
     if windows:
@@ -5501,7 +5525,7 @@ def describe(r: Run) -> Dict[str, Any]:
         hints.append("the run reached its end; its acceptance checks are running")
     if halts:
         hints.insert(0, f"HALTED by monitor {', '.join(halts)}: nothing moves until a person "
-                        f"resumes the run ('claunch cflow2 resume'); tell the user")
+                        f"resumes the run ('claunch cflow2 resume'); tell the user. {NUDGE_HINT}")
     for a in asks:
         hints.append(f"{a['instance']}: {a['how']}")
     if isinstance(move_req, dict) and not move_req.get("decision") \
@@ -5510,12 +5534,13 @@ def describe(r: Run) -> Dict[str, Any]:
                         f"as {move_req.get('outcome')!r} ({move_req.get('id')}): nothing "
                         f"advances by your hand until a person answers (run page "
                         f"Report/Refuse, 'claunch cflow2 move --approve|--deny'); stop your "
-                        f"turn, or withdraw it with flow_request_move(cancel=true)")
+                        f"turn, or withdraw it with flow_request_move(cancel=true). "
+                        f"{NUDGE_HINT}")
     elif isinstance(move_req, dict) and not move_req.get("decision"):
         hints.insert(0, f"MOVE REQUESTED to {move_req.get('node')!r} ({move_req.get('id')}): "
                         f"nothing advances by your hand until a person answers (run page "
                         f"Move/Refuse, 'claunch cflow2 move --approve|--deny'); stop your turn, "
-                        f"or withdraw it with flow_request_move(cancel=true)")
+                        f"or withdraw it with flow_request_move(cancel=true). {NUDGE_HINT}")
     elif isinstance(move_req, dict) and move_req.get("decision") == "denied":
         what = ("report request for" if move_req.get("kind") == MOVE_KIND_REPORT
                 else "move request to")
@@ -6068,7 +6093,8 @@ def _ask_how(iid: str, rec: Dict[str, Any]) -> str:
     if res == RES_SELF:
         return f"nobody could be asked and the workflow leaves it to you: {tool}"
     return (f"a person decides: {cli} from a terminal that is not the run's own session, or "
-            f"the web UI. Do not work around it; tell the user what is waiting")
+            f"the web UI. Do not work around it; tell the user what is waiting. "
+            f"{NUDGE_HINT}")
 
 
 def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
