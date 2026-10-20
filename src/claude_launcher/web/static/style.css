@@ -8014,10 +8014,30 @@ body.split-max #term-wf { flex: 1 1 0; }
 .talk-body { flex: 1 1 0; min-height: 0; display: flex; gap: 14px; }
 .talk-col { flex: 1 1 0; min-width: 0; min-height: 0; }
 .talk-col.talk-qa { overflow-y: auto; overscroll-behavior: contain; }
-.talk-body[data-mode="both"] .talk-threads { border-right: 1px solid #21262d; padding-right: 14px; }
+/* The bar between the two columns in "both" (claunch-816mz): .th-split's
+   skin, in the 14px gap the columns kept apart, with the rule the threads
+   column used to draw on its right edge. Dragging it writes --talk-qa-w;
+   with a width set (.talk-sized) the QA column holds it and the threads
+   column takes the rest. Hidden in a one-column mode and on a phone. */
+.talk-body[data-mode="both"] { gap: 0; }
+.talk-split {
+  flex: none; width: 14px; cursor: col-resize; touch-action: none;
+  display: none; align-items: center; justify-content: center;
+  background: linear-gradient(#21262d, #21262d) no-repeat center / 1px 100%;
+}
+.talk-split::after {
+  content: ""; height: 44px; width: 2px; border-radius: 2px; background: #4d5566;
+}
+.talk-split:hover::after, .talk-split.dragging::after { background: #58a6ff; }
+.talk-body[data-mode="both"] .talk-split { display: flex; }
+.talk-body.talk-sized[data-mode="both"] .talk-qa { flex: 0 0 var(--talk-qa-w); max-width: calc(100% - 414px); }
 .talk-body[data-mode="both"] .th-side { flex-basis: var(--th-side-w, 170px); }
 .talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
 @media (max-width: 820px) {
+  .talk-body[data-mode="both"] { gap: 14px; }
+  .talk-body[data-mode="both"] .talk-split { display: none; }
+  .talk-body.talk-sized[data-mode="both"] .talk-qa { flex: 1 1 0; max-width: none; }
+  .talk-body[data-mode="both"] .talk-threads { border-right: 1px solid #21262d; padding-right: 14px; }
   .talk-body[data-mode="both"] .th-side { flex-basis: 170px; }
   .talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
 }
