@@ -790,3 +790,23 @@ def test_the_route_sends_exited_timelines_only_on_request(setup, monkeypatch):
     by = lambda d: {row["name"]: row for row in d["sessions"]}
     assert by(plain)["old"]["events"] == [] and by(plain)["s1"]["events"]
     assert by(asked)["old"]["events"]
+
+
+def test_the_route_sends_utf8_and_compresses_a_large_answer(setup, monkeypatch):
+    service, _ = exited_and_running(setup, monkeypatch)
+    service.data["sessions"]["s1"]["summary"] = "관찰 결과 " * 8000
+    async def routed():
+        app = web.Application(); app["manager"] = service.manager; app["mesh"] = service.mesh
+        observer.install(app)
+        made = app["observer"]
+        made.data["sessions"].update(service.data["sessions"]); made.loaded |= service.loaded
+        made.records_imported = True
+        monkeypatch.setattr(made.session_events, "rows", service.session_events.rows)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/observer", headers={"Accept-Encoding": "gzip"}, auto_decompress=False)
+            return response.headers.get("Content-Encoding"), await response.read()
+    encoding, raw = asyncio.run(routed())
+    assert encoding == "gzip"
+    import gzip
+    body = gzip.decompress(raw).decode("utf-8")
+    assert "관찰 결과" in body and "\\ud" not in body.lower()

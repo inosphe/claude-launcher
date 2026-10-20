@@ -3,6 +3,7 @@
 Unrecognized or mixed content stays visible. This does not delete source
 records, and explicit questions and attachments always remain available.
 """
+import functools
 import re
 
 
@@ -29,7 +30,18 @@ _RECEIPT = re.compile(
 )
 
 
+@functools.lru_cache(maxsize=32768)
+def _communication_only(text):
+    return _check(text)
+
+
 def communication_only(text):
+    # The snapshot re-filters every event of every live session on each poll,
+    # and the same texts come back unchanged; the regexes were most of its time.
+    return _communication_only(text) if isinstance(text, str) else _check(text)
+
+
+def _check(text):
     if not isinstance(text, str) or not text.strip() or _RESULT.search(text):
         return False
     # Require every sentence to be a known receipt; a result in the same
