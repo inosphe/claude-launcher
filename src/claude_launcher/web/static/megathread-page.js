@@ -409,6 +409,7 @@ globalThis.MegaThreadPage = (() => {
     head.appendChild(node("h2", null, state.mega.title));
     head.appendChild(node("span", "wf-note", `${membersOf().length}명 · 상태 ${state.mega.status}`));
     main.appendChild(head);
+    main.appendChild(membersStrip());
 
     const scored = scores();
     const threshold = (state.judgment && state.judgment.threshold)
@@ -460,6 +461,46 @@ globalThis.MegaThreadPage = (() => {
     root.appendChild(main);
   }
 
+  /* Who is at the table, and the two ways it changes: a member leaves, or a
+     session joins (with its most recent open thread, or a new one — the
+     daemon decides that side). */
+  function membersStrip() {
+    const strip = node("div", "mt-members");
+    for (const m of membersOf()) {
+      const chip = node("span", "mt-chip");
+      chip.appendChild(node("span", "mt-chip-name", `${m.session} · ${m.thread_title || m.thread}`));
+      if (m.status && m.status !== "idle" && m.status !== "busy") {
+        chip.appendChild(node("span", "mt-chip-dead", m.status));
+      }
+      const drop = node("button", "mt-chip-x", "×");
+      drop.type = "button";
+      drop.title = `${m.session}의 이 쓰레드를 내보냅니다`;
+      drop.addEventListener("click", () => removeMember(m.thread));
+      chip.appendChild(drop);
+      strip.appendChild(chip);
+    }
+    const add = document.createElement("select");
+    add.className = "mt-add-session";
+    add.title = "이 mega thread에 세션을 더합니다";
+    for (const name of sessionNames()) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      add.appendChild(option);
+    }
+    strip.appendChild(add);
+    const button = node("button", "wf-btn mt-add", "추가");
+    button.type = "button";
+    button.disabled = state.busy || !sessionNames().length;
+    button.addEventListener("click", addMember);
+    strip.appendChild(button);
+    return strip;
+  }
+
+  const VERDICT_KO = {
+    auto: "단독", choose: "선택", manual: "직접 선택", none: "후보 없음", error: "실패",
+  };
+
   /* The composer's button follows the draft and the ticks without a redraw. */
   function syncSend() {
     const root = view();
@@ -502,7 +543,8 @@ globalThis.MegaThreadPage = (() => {
     }
     for (const row of state.routes) {
       const card = node("div", "mt-log-row");
-      card.appendChild(node("div", "mt-log-at", `${row.at} · ${row.verdict} · ${Number(row.tokens || 0).toLocaleString()} tokens`));
+      const kind = VERDICT_KO[row.verdict] || row.verdict;
+      card.appendChild(node("div", "mt-log-at", `${row.at} · ${kind} · ${Number(row.tokens || 0).toLocaleString()} tokens`));
       card.appendChild(node("div", "mt-log-body", row.body));
       const scored = (row.candidates || []).slice(0, 6)
         .map((c) => `${c.session} ${logitText(c.logit)}`).join(" · ");

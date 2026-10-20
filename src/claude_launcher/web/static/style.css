@@ -8401,3 +8401,10 @@ a.category-ref:hover { text-decoration: underline; }
   .mt-inner { grid-template-columns: 1fr; grid-auto-rows: min-content; }
   .mt-list, .mt-log { border: none; }
 }
+.mt-members { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mt-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px;
+  border: 1px solid #30363d; border-radius: 12px; background: #161b22; font-size: 11px; color: #c6cdd5; }
+.mt-chip-dead { color: #8b949e; }
+.mt-chip-x { background: none; border: none; color: #8b949e; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; }
+.mt-chip-x:hover { color: #ff7b72; }
+.mt-add-session { background: #0d1117; color: #c6cdd5; border: 1px solid #30363d; border-radius: 5px; font-size: 11px; padding: 2px 4px; }

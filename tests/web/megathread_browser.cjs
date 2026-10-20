@@ -111,6 +111,12 @@ const server = http.createServer((req, res) => {
     const nodes = await page.$$eval("#megathreads-view .mt-node .mt-node-name", (els) => els.map((e) => e.textContent));
     assert.deepEqual(nodes.sort(), ["s1", "s2"]);
     assert.equal(await page.$$eval("#megathreads-view .mt-me-label", (els) => els.length), 1);
+    // The table can change shape: one chip per member, and the sessions that
+    // could join are offered.
+    const chips = await page.$$eval("#megathreads-view .mt-chip-name", (els) => els.map((e) => e.textContent));
+    assert.equal(chips.length, 2);
+    const joinable = await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.map((e) => e.value));
+    assert.deepEqual(joinable.sort(), ["s1", "s2"]);
 
     // 3. An ambiguous answer offers both members with their scores.
     await page.fill("#megathreads-view .mt-compose textarea", "both of you, the log line and the deploy");
