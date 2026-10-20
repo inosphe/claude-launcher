@@ -10,6 +10,8 @@ import json
 import os
 import shutil
 import stat
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -248,6 +250,26 @@ def test_history_drops_rows_past_retention(tmp_path):
     _run_tree(tmp_path / "t", "s1c1011010955")
 
     _reaper(tmp_path, [("s1", True)]).reap_ended()
+
+    assert [r["session"] for r in _rows(tmp_path)] == ["s1"], (
+        history.read_text(encoding="utf-8"), sorted(p.name for p in history.parent.iterdir()))
+
+
+def test_history_write_survives_a_reader_holding_the_file(tmp_path):
+    # A scanner or indexer holding the history file for a moment made
+    # os.replace answer WinError 5 and the row was never written (claunch-xqk1w).
+    history = tmp_path / "daemon" / br.HISTORY_NAME
+    history.parent.mkdir(parents=True)
+    history.write_text("", encoding="utf-8")
+    _run_tree(tmp_path / "t", "s1c1011010955")
+
+    def release_soon(handle):
+        time.sleep(0.1)
+        handle.close()
+
+    with open(history, "rb") as handle:  # no FILE_SHARE_DELETE, as Python's open()
+        threading.Thread(target=release_soon, args=(handle,)).start()
+        _reaper(tmp_path, [("s1", True)]).reap_ended()
 
     assert [r["session"] for r in _rows(tmp_path)] == ["s1"]
 

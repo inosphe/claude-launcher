@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
-from .. import pytest_basetemp
+from .. import atomic, pytest_basetemp
 from . import paths
 
 log = logging.getLogger(__name__)
@@ -353,7 +353,7 @@ class BasetempReaper:
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".tmp")
             tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
-            os.replace(tmp, dest)
+            atomic.replace(tmp, dest)
         except OSError:
             log.exception("basetemp history: could not write %s", dest)
 

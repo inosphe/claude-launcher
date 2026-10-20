@@ -41,6 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from .. import atomic
 from . import store as store_mod
 
 log = logging.getLogger(__name__)
@@ -192,7 +193,9 @@ def move(path: Path, target_name: str, daemon: str) -> Path:
         if target.exists():
             raise store_mod.StoreError(f"{target} already exists")
         state = st.load_state()
-        os.rename(path, target)
+        # a scanner or indexer may hold a handle inside the slot for a moment
+        # (WinError 5 / 32): the retry absorbs that, a real conflict still raises
+        atomic.replace(path, target)
         moved = store_mod.RunStore.at(target)
         moved.commit(requalify(state, daemon),
                      [{"event": EVENT, "from": path.name, "to": target_name}])

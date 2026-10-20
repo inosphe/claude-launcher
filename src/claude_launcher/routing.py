@@ -283,7 +283,7 @@ def _shim_env() -> dict:
     return env
 
 
-def _spawn(upstream: str, block: Dict, port: int, fp: str) -> None:
+def _spawn(upstream: str, block: Dict, port: int, fp: str) -> "subprocess.Popen":
     """Start a detached shim process; its output goes to the fingerprint's log."""
     state_dir().mkdir(parents=True, exist_ok=True)
     log = open(log_file(fp), "ab")
@@ -295,7 +295,7 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str) -> None:
     else:
         kwargs["start_new_session"] = True
     try:
-        subprocess.Popen(
+        return subprocess.Popen(
             [
                 sys.executable,
                 "-m",
@@ -333,6 +333,20 @@ def _record(fp: str, port: int, upstream: str, block: Dict, pid) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _start_diagnosis(child, port: int) -> str:
+    """What is known about a shim that never answered: whether its process is
+    still running (and its exit code if not), whether the port is bound, and
+    what a health request gets now. Said in the error so a timeout that was
+    the machine's load and one that was a dead process read differently."""
+    code = child.poll() if child is not None else None
+    state = "process not tracked" if child is None else (
+        f"process {child.pid} still running" if code is None
+        else f"process {child.pid} exited with code {code}")
+    health_now = health(port, timeout=1.0)
+    return (f"{state}; port {port} {'free' if _port_free(port) else 'bound'}; "
+            f"health now {'answers' if health_now else 'silent'}")
 
 
 def _log_tail(fp: str, lines: int = 12) -> str:
@@ -446,7 +460,7 @@ def ensure_shim(upstream: str, block: Dict) -> str:
                 f"no free loopback port for the routing shim in "
                 f"{candidate_ports(fp)[0]}..{candidate_ports(fp)[-1]}"
             )
-        _spawn(upstream, block, start_port, fp)
+        child = _spawn(upstream, block, start_port, fp)
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             info = health(start_port, timeout=0.5)
@@ -457,7 +471,8 @@ def ensure_shim(upstream: str, block: Dict) -> str:
         tail = _log_tail(fp)
         raise RoutingError(
             f"routing shim for {upstream} did not come up on port {start_port} "
-            f"within {int(START_TIMEOUT)}s (see {log_file(fp)})"
+            f"within {int(START_TIMEOUT)}s (see {log_file(fp)}); "
+            f"{_start_diagnosis(child, start_port)}"
             + (("\n" + tail) if tail else "")
         )
     finally:
