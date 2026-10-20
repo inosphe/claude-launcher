@@ -34,6 +34,12 @@
   const descriptions = new WeakMap();
   let overflow = [];
   let frame = 0;
+  // Each item's width as the last fit left it. A text change inside an item
+  // that leaves its width where it was cannot change what fits, and the
+  // reminder countdown changes its text every second -- the measuring pass
+  // for that was a forced style and layout of the header once a second
+  // (claunch-i3es6).
+  let widths = new Map();
   function populateMenu() {
     menu.replaceChildren();
     for (const item of overflow) {
@@ -184,18 +190,45 @@
     // Again now the overflow is settled: a group moved into the menu has no
     // stop on the row.
     syncLifeTabstop();
+    widths = new Map(items.map(el => [el, el.getBoundingClientRect().width]));
     watch();
+  }
+  // True when every text change in `records` sits inside an item the last
+  // fit measured, on the row, at the width it was measured at. A change to
+  // the row itself (an item added or removed) or to an item in the menu is
+  // not, and neither is anything the last fit did not see. Only a row that
+  // is neither compact nor overflowing is the state fit measures in, so only
+  // there does an unchanged width mean an unchanged answer: a compact button
+  // is a fixed-width glyph whatever its label says.
+  function sameWidths(records) {
+    if (header.classList.contains("term-compact") || overflow.length) return false;
+    const touched = new Set();
+    for (const r of records) {
+      let node = r.target.nodeType === Node.ELEMENT_NODE ? r.target : r.target.parentElement;
+      while (node && node !== header && !widths.has(node)) node = node.parentElement;
+      if (!node || node === header) return false;
+      touched.add(node);
+    }
+    for (const el of touched) {
+      if (el.classList.contains("toolbar-overflow")) return false;
+      if (Math.abs(el.getBoundingClientRect().width - widths.get(el)) > 0.5) return false;
+    }
+    return true;
   }
   function watch() {
     observer.observe(header, { subtree: true, childList: true, characterData: true, attributes: true,
       attributeFilter: ["class", "title", "disabled", "aria-pressed", "aria-checked"] });
   }
   function schedule() { if (!frame) frame = requestAnimationFrame(fit); }
-  // A tooltip or a pressed state does not change what fits on the line, so
-  // those alone re-describe the controls without the measuring pass, which
-  // takes the compact and overflow classes off and puts them back.
+  // A tooltip or a pressed state does not change what fits on the line, and
+  // neither does a text change that leaves its item as wide as it was
+  // (sameWidths), so those alone re-describe the controls without the
+  // measuring pass, which takes the compact and overflow classes off and
+  // puts them back.
+  const quiet = r => r.type === "attributes" && (r.attributeName === "title" || r.attributeName === "aria-pressed" || r.attributeName === "aria-checked");
   const observer = new MutationObserver((records) => {
-    if (records.every(r => r.type === "attributes" && (r.attributeName === "title" || r.attributeName === "aria-pressed" || r.attributeName === "aria-checked"))) {
+    const texts = records.filter(r => !quiet(r));
+    if (texts.every(r => r.type !== "attributes") && (!texts.length || sameWidths(texts))) {
       if (frame) return;
       observer.disconnect();
       describe();
