@@ -286,6 +286,19 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     const visible = sel => page.locator(`#observer-operators ${sel}`).first().isVisible();
     assert.equal(await visible(".op-thread-list"), false);
     assert.equal(await page.locator("#observer-operators .op-thread-title").innerText(), "이전 대화");
+    // The thread's head holds to the top of the conversation as it scrolls
+    // (claunch-1ruqi): 「← 목록」 stays where the reader needs it.
+    const pinnedHead = await page.evaluate(() => {
+      const area = document.querySelector("#observer-operators .op-area");
+      area.scrollTop = area.scrollHeight;
+      const box = area.getBoundingClientRect();
+      // Sticky offsets are measured from the scroller's content box.
+      const pad = parseFloat(getComputedStyle(area).paddingTop) || 0;
+      const head = document.querySelector("#observer-operators .op-thread-head").getBoundingClientRect();
+      const back = document.querySelector("#observer-operators .op-thread-back").getBoundingClientRect();
+      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top - pad), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom };
+    });
+    assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true }, "the head, and 「← 목록」 in it, stays at the top of the scrolled conversation");
     await page.click("#observer-operators .op-thread-back");
     assert.equal(await visible(".op-thread-list"), true);
     assert.equal(await visible(".op-thread-view"), false);
@@ -472,6 +485,26 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.isVisible("#observer-mobile-operator"), true);
     assert.equal(await page.getAttribute("#observer-mobile-operator", "aria-pressed"), "true");
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
+    // The thread's head holds to the top of the page once the conversation
+    // reaches it — on a phone the page is the one scroller (claunch-1ruqi).
+    // The long thread of ops-a first: a short one scrolls away with the section.
+    await tab("ops-a").click();
+    await page.waitForSelector('#observer-operators .op-thread-row[data-thread="th-a"]', { state: "attached" });
+    await page.click("#observer-operators .op-thread-back");
+    await page.click('#observer-operators .op-thread-row[data-thread="th-a"]');
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "이전 대화"
+      && document.querySelector("#observer-operators .op-entry"));
+    const pageHead = await page.evaluate(() => {
+      const view = document.getElementById("observer-view");
+      const head = () => document.querySelector("#observer-operators .op-thread-head").getBoundingClientRect();
+      const box = view.getBoundingClientRect();
+      const natural = view.scrollTop + (head().top - box.top);
+      view.scrollTop = natural + 60;
+      const back = document.querySelector("#observer-operators .op-thread-back").getBoundingClientRect();
+      return { scrolled: view.scrollTop > 0, offset: Math.round(head().top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom };
+    });
+    assert.deepEqual(pageHead, { scrolled: true, offset: 0, back: true }, "the thread head holds to the top of the stepped page");
+    await page.evaluate(() => { document.getElementById("observer-view").scrollTop = 0; });
     // On the phone the list and the conversation take turns as well.
     await page.click("#observer-operators .op-thread-back");
     assert.equal(await page.locator("#observer-operators .op-thread-list").isVisible(), true);
