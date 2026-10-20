@@ -7718,9 +7718,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-input-row input { flex: 1 1 0; min-width: 0; }
 .cf2-input.invalid .cf2-input-control { outline: 1px solid #f85149; border-radius: 4px; }
 .cf2-input-error { color: #f85149; margin: 2px 0 0; }
-/* One column when the form is narrow enough that two would split captions
-   from their controls: every row then puts its caption on the line above. */
-@container session-form (max-width: 620px) {
+/* One column once the form is 640px wide or narrower: below that, two columns
+   split the captions from their controls and leave the controls too narrow to
+   use. Every row then puts its caption on the line above. */
+@container session-form (max-width: 640px) {
   .cf2-inputs { grid-template-columns: minmax(0, 1fr); }
   .cf2-input, .cf2-input:has(> .cf2-input-label.check) { grid-template-columns: minmax(0, 1fr) 18px; }
   .cf2-input > .cf2-input-label { grid-column: 1; grid-row: 1; }

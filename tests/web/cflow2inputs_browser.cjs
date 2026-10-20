@@ -246,6 +246,27 @@ const OPTIONS = {
       assert.equal(narrow.helpDisplay, 'none', `${width}: help stays folded`);
     }
 
+    // ---- the breakpoint: 640px of form width is one column --------------
+    // The issue's rule is "640px or narrower -> one column", and a value in
+    // style.css that drifts from it is invisible without this: the band it
+    // leaves out is a form a few pixels too narrow to hold two controls.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    for (const [formWidth, columns] of [[640, 1], [641, 2]]) {
+      const got = await page.evaluate((w) => {
+        const form = document.getElementById('new-session');
+        form.style.width = `${w}px`;
+        const box = document.getElementById('new-inputs');
+        return {
+          formWidth: form.clientWidth,
+          columns: getComputedStyle(box).gridTemplateColumns
+            .split(/\s+/).filter(Boolean).length,
+        };
+      }, formWidth);
+      assert.equal(got.columns, columns,
+        `${formWidth}px of form width is ${columns} column(s), measured on ${got.formWidth}px`);
+    }
+    await page.evaluate(() => { document.getElementById('new-session').style.width = ''; });
+
     assert.deepEqual(errors, [], `the page ran without errors: ${errors.join('; ')}`);
     console.log('cflow2inputs_browser: ok');
   } finally {
