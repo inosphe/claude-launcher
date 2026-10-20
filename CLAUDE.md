@@ -133,6 +133,10 @@
     세션이 시작되기 전에 이미 만들어져 있다. 하네스가 따로 주는 스크래치패드가
     있으면 그쪽도 같은 용도다.
   - 굳이 `/tmp`를 써야 하면 파일 이름에 세션을 넣는다: `/tmp/$CLAUNCH_SESSION-...`.
+  - 테스트 산출물 중 pytest basetemp 밖의 것(브라우저 프로필, playwright 리포트,
+    node 테스트 출력)은 `$CLAUNCH_TEST_DIR`(테스트 산출물 루트의 세션별 하위
+    디렉터리, kill/아카이브 시 데몬이 회수)에 쓴다. 루트는 `daemon.test_output_dir`
+    설정으로 명시한다(미설정 시 Windows `C:/t`, POSIX `<런처 홈>/basetemp`).
   - 저장소가 실행하는 파일에 고정 이름 `/tmp/<이름>`이 들어오면
     `uv run --no-sync python tools/check_tmp_paths.py`가 거절한다
     (대상: `tools/`, `src/claude_launcher/`의 스크립트와 워크플로의 명령 줄).

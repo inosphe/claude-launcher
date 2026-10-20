@@ -98,6 +98,26 @@ def test_evidence_write_failure_prevents_deletion(setup, monkeypatch):
     assert mine.exists()
 
 
+def test_the_general_test_dir_is_listed_but_never_deleted_mid_life(setup):
+    """``<root>/<session>`` ($CLAUNCH_TEST_DIR) shows in the plan, and stays.
+
+    It carries mixed, possibly in-use artifacts (a browser profile) rather
+    than one completed run, so the round-close cleanup keeps it pending;
+    its lifecycle is the exit reaper's, not this tool's.
+    """
+    service, root, _, _ = setup
+    general = root / "s1"
+    (general / "browser-profile").mkdir(parents=True)
+    (general / "browser-profile" / "prefs.js").write_text("x", encoding="utf-8")
+    plan = service.plan("s1")
+    item = next(i for i in plan["items"] if i["path"] == str(general))
+    assert item["status"] == "cleanup_pending"
+    assert "claunch-run.json" in item["reason"]
+    result = service.apply("s1", plan["plan_id"])
+    assert general.exists()
+    assert all(i["status"] != "removed" for i in result["items"])
+
+
 def test_deletion_failure_has_real_reason_and_saved_intent(setup, monkeypatch):
     import shutil
     service, root, _, _ = setup

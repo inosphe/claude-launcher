@@ -28,7 +28,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .. import atomic
 from .. import harnesses as harness_registry
-from .. import wsl_reg_stub
+from .. import pytest_basetemp, wsl_reg_stub
 from . import compacting, keys as keys_mod, process_priority, progress
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
@@ -730,6 +730,12 @@ class Session:
         # variable names a directory that exists from the session's first
         # command, rather than one its first writer has to remember to make.
         paths.session_scratch_dir(sdef.name).mkdir(parents=True, exist_ok=True)
+        # Same for the general test directory named in ``CLAUNCH_TEST_DIR``
+        # (``pytest_basetemp.session_test_dir``): per-session by name under
+        # the test-output root, reaped by the exit reaper with the basetemps.
+        # ensure() makes the root too -- pytest would not, and the parent of
+        # a first-run root does not exist yet on a fresh host.
+        pytest_basetemp.ensure(pytest_basetemp.session_test_dir(sdef.name))
         self._log_path = paths.session_log(sdef.name)
         self._log = open(self._log_path, "ab")
         #: Bytes posted to the loop by the reader thread and not yet consumed

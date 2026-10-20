@@ -45,6 +45,7 @@ CLAUNCH_SESSION_ENV = (
     "CLAUNCH_SESSION",
     "CLAUNCH_PROJECT",
     "CLAUNCH_SCRATCH",
+    "CLAUNCH_TEST_DIR",  # pytest_basetemp.session_test_dir: one session's test artifacts
     "CLAUNCH_PROC_OWNER",  # daemon.session_procs.OWNER_ENV
     "CLAUNCH_CFLOW_RUN",  # cflow.state.RUN_ENV
     "CLAUNCH_WINDOW",  # test_window.WINDOW_*_ENV: one session's test grant

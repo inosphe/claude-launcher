@@ -225,6 +225,14 @@ def home(tmp_path, monkeypatch):
         "claude_launcher.daemon.basetemp_reaper.default_root",
         lambda: tmp_path / ".basetemp-root",
     )
+    # The session constructor creates its $CLAUNCH_TEST_DIR under the same
+    # root machinery; on Windows that root is the real C:/t whatever the
+    # throwaway home above, so the directory a constructed Session would
+    # make there is redirected with it (same hazard, same fix).
+    monkeypatch.setattr(
+        "claude_launcher.pytest_basetemp.session_test_dir",
+        lambda name: tmp_path / ".test-output" / name,
+    )
     return h
 
 
