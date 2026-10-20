@@ -2319,7 +2319,7 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
     return r
 
 
-def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]]
+def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]], catalog: Any = None
                   ) -> Tuple[ir.Chart, Optional[Dict[str, Any]]]:
     """Fold typed start inputs into the chart before it is snapshotted
     (:mod:`.inputs`): ``data.inputs``, invariant rules and monitors,
@@ -2339,7 +2339,7 @@ def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]]
     if raw is not None and not isinstance(raw, dict):
         raise FlowError("inputs must be an object of name -> value")
     values, errors = inputs_mod.normalize(schema, raw or {},
-                                          (chart.meta or {}).get("input_constraints"))
+                                          (chart.meta or {}).get("input_constraints"), catalog)
     if errors:
         raise FlowError("invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
     try:
@@ -2445,8 +2445,12 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           inputs: Optional[Dict[str, Any]] = None,
           side: Optional[Dict[str, Any]] = None,
           next_round_of: Optional[str] = None,
-          mesh: Optional[str] = None) -> Dict[str, Any]:
+          mesh: Optional[str] = None, catalog: Any = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
+
+    ``catalog`` checks the start inputs that declare ``options:`` (see
+    :mod:`.inputs`; ``claude_launcher.input_options.Catalog``). Without one
+    they are checked as plain strings.
 
     ``mesh`` is the mesh the run's asks are routed in (``state.mesh``,
     claunch-5itbf). The callers that know the session pin it here: the daemon
@@ -2473,7 +2477,7 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
                         f"from its session's main run (start_side, flow_start side)")
     if force and caller != CALLER_USER:
         inputs = _carry_checks(chart, inputs, RunStore(cwd, scope))
-    chart, input_values = _apply_inputs(chart, inputs)
+    chart, input_values = _apply_inputs(chart, inputs, catalog)
     problems = check_shell_refs(chart)
     if problems:
         raise FlowError("refused: " + "; ".join(problems))
@@ -3887,7 +3891,7 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
 
 def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_AGENT,
               cwd: Optional[str] = None, scope: Optional[str] = None,
-              now: Optional[float] = None) -> Dict[str, Any]:
+              now: Optional[float] = None, catalog: Any = None) -> Dict[str, Any]:
     """Write a started run's start input ``name`` (docs/cflow-v2.md 2.6):
     ``data.inputs.<name>`` takes ``value``, checked by :func:`.inputs.settle`
     with the start's type, enum and constraint checks.
@@ -3897,7 +3901,10 @@ def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_
     writes (:func:`may_drive`). ``caller`` user (``claunch cflow2 input
     --user``, ``POST /api/cflow2/input``): a person changes an input whose
     ``set_by`` names ``user``, whatever it holds (claunch-umq1f). Journal
-    ``input_set {name, value, by, was}``. Returns the status payload."""
+    ``input_set {name, value, by, was}``. Returns the status payload.
+
+    ``catalog`` checks an input with ``options:`` (:mod:`.inputs`); without
+    one it is checked as a plain string."""
     from . import inputs as inputs_mod
 
     session = str(session or "").strip()
@@ -3916,7 +3923,7 @@ def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_
         setter = inputs_mod.SETTER_USER if person else inputs_mod.SETTER_AGENT
         try:
             got = inputs_mod.settle(meta.get("inputs") or {}, current, name, value,
-                                    setter, meta.get("input_constraints"))
+                                    setter, meta.get("input_constraints"), catalog)
         except inputs_mod.InputsError as exc:
             raise FlowError(f"input not written: {exc}") from None
         was = current.get(name)

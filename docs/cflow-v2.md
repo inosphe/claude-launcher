@@ -728,7 +728,8 @@ inputs:
 
 - 선언 키: `type`(기본 `string`), `label`, `help`, `required`(기본 false),
   `default`, `choices`(`enum`만), `placeholder`, `precheck`, `set_by`(아래
-  「시작 뒤에 채우는 입력」). 이름은 식별자 규칙을 따른다.
+  「시작 뒤에 채우는 입력」), `options`(`string`만, 아래 「목록에서 고르는 입력」).
+  이름은 식별자 규칙을 따른다.
   모르는 type, type과 맞지 않는 `default`, `enum`이 아닌 입력의 `choices`는
   컴파일 오류다.
 - 값 검사(`inputs.normalize`): 폼·CLI에서 온 문자열을 type으로 바꾼다(`int`,
@@ -852,8 +853,8 @@ input_constraints:
   먼저다). 거짓인 제약의 문구는 `fields`의 입력마다 오류로 붙고, `fields`가 빈
   목록이면 `_constraints` 키에 붙는다.
 - 폼은 입력을 바꿀 때마다 `POST /api/cflow2/inputs/check`(본문 `workflow`,
-  `workflow_version`, `cwd`, `cflow_inputs`)를 부른다. 응답은 `{ok, values,
-  errors}`이고 시작과 같은 검사다. 정의 목록 항목과 `GET /api/cflow2/definition`은
+  `workflow_version`, `cwd`, `cflow_inputs`, `profile`)를 부른다. 응답은 `{ok, values,
+  errors, options}`이고 시작과 같은 검사다. 정의 목록 항목과 `GET /api/cflow2/definition`은
   `input_constraints`(제약 목록)를 싣고, 폼은 입력 칸 아래에 그 문구를 보여 준다.
 
 #### 사전 확인(precheck)
@@ -866,6 +867,49 @@ input_constraints:
 설치·로그인 명령을 함께 보여 준다. 다시 확인 버튼이 있다. 이 확인은 안내이고, 값을
 쓰는 쪽(워크플로의 작업)이 실행 시점에 다시 확인한다. 현재 `precheck` 값은 `gh`
 하나다.
+
+#### 목록에서 고르는 입력(options)
+
+`string` 입력의 `options`는 그 값을 실행 시점의 목록에서 고르게 한다
+(claunch-iq1xc). `enum`의 `choices`는 정의에 적힌 고정 목록이고, `options`의
+목록은 이 머신의 런처 설정에서 읽는다.
+
+```yaml
+reviewer_profile:  {type: string, default: "", options: {from: profiles, empty: session}}
+reviewer_harness:  {type: string, default: "", options: {from: harnesses, of: reviewer_profile}}
+delegate_profile:  {type: string, default: "", options: {from: profiles, empty: delegate}}
+delegate_model:    {type: string, default: "", options: {from: models, of: delegate_profile}}
+```
+
+| `from` | 목록 |
+|---|---|
+| `profiles` | profile 이름(`claunch ls`). `NAME:HARNESS` selector는 목록에 없다 |
+| `harnesses` | 그 profile에서 harness 정책(`harness_policy`)이 허용하는 harness. spawn의 `PROFILE:HARNESS` selector가 통과하는 것과 같다 |
+| `models` | 그 profile의 harness가 spawn의 `model`로 받는 값. claude는 preset 다섯(`default`, `small`, `large`, `xlarge`, `subagent`) 전부와 harness의 모델 선택지, codex는 profile의 provider가 모델을 선언한 preset과 harness의 모델 선택지다. 그 밖의 harness는 codex와 같은 규칙이다(`input_options.claude_models`/`codex_models`/`declared_models`) |
+
+- `of`: `harnesses`·`models` 목록이 어느 profile의 것인지를 정하는 상위 입력.
+  `from: profiles`인 입력만 쓸 수 있고, 아니면 컴파일 오류다.
+- `empty`: `profiles` 입력이 비었을 때 무엇을 뜻하는지. `session`(기본)은 런을
+  돌리는 세션의 profile, `delegate`는 데몬 설정 `delegate_profile`(없으면 내장
+  기본값)이다. `of`가 없거나 상위 입력이 비면 하위 목록은 이 값의 profile을 쓴다.
+- 검사: 목록 밖의 값은 `enum`과 같이 거절된다. 시작(`inputs.normalize`)과 시작 뒤
+  변경(`inputs.settle`) 모두 같다. 시작 뒤에 상위 입력을 바꿔 하위 입력의 값이 새
+  목록 밖이 되면 그 변경을 거절한다. 하위 값을 먼저 바꾸거나 비운다.
+- 목록은 호출자가 넘기는 catalog(`claude_launcher.input_options.Catalog`)가
+  답한다. 엔진은 런처 설정을 읽지 않으므로 catalog 없이 부르면 `options` 검사를
+  하지 않는다. catalog가 답하지 못하는 목록(존재하지 않는 profile, 읽을 수 없는
+  provider, 세션의 profile을 모르는 경우)도 검사하지 않는다.
+- 세션의 profile은 데몬에서는 런 scope의 세션 기록, 새 세션 폼에서는 폼이 보낸
+  `profile`, 세션 안의 CLI·MCP(`claunch cflow2 start|input`, `flow_start`,
+  `flow_input`)에서는 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`이 가리키는 profile
+  디렉터리에서 얻는다. 사람의 셸에서 부르는 `claunch cflow2 input --user`는 런의
+  세션 profile을 알지 못하므로 `empty: session`인 빈 상위 입력에 기대는 목록을
+  검사하지 않는다.
+- 폼: 새 세션 폼과 런 페이지 편집기는 combobox(`<input list>`와 `<datalist>`)를
+  그린다. `POST /api/cflow2/inputs/check`의 응답 `options`(입력 이름 →
+  `{from, profile, items}`, `items`가 null이면 목록 없음)로 목록을 채우고, 상위
+  입력이나 Profile을 바꾸면 다시 채운다. 런 상세(`GET /api/cflow2/run`)는 같은
+  모양의 `input_options`를 싣는다.
 
 ### 2.7 컬렉션(collections)
 

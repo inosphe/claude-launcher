@@ -46,8 +46,10 @@ new Function("ctx",
    ${slice("cflowInputsValues")} ${slice("cflowInputsErrors")}
    ${slice("cflow2UndecidedCounts")} ${slice("cflow2Undecidable")}
    ${slice("cflowGhVerdict")}
+   ${slice("cflowOptionsFill")} ${slice("cflowOptionsNote")} ${slice("cflowInputsOptions")}
    Object.assign(ctx, { cflowInputsValues, cflowInputsErrors,
-                        cflow2UndecidedCounts, cflow2Undecidable, cflowGhVerdict });`)(ctx);
+                        cflow2UndecidedCounts, cflow2Undecidable, cflowGhVerdict,
+                        cflowOptionsFill, cflowOptionsNote, cflowInputsOptions });`)(ctx);
 
 const rows = [
   row("goal", "text", { value: { value: "ship it" } }),
@@ -81,6 +83,39 @@ const journal = [
 ];
 assert.deepStrictEqual(ctx.cflow2UndecidedCounts(journal), { "w@4": 2 });
 assert.deepStrictEqual(ctx.cflow2Undecidable(journal).map((e) => e.node), ["cut-wait"]);
+// options: comboboxes (claunch-iq1xc) -- a stub datalist and document
+function datalist() {
+  const l = { children: [] };
+  Object.defineProperty(l, "firstChild", { get: () => l.children[0] || null });
+  l.appendChild = (c) => { l.children.push(c); return c; };
+  l.removeChild = (c) => { l.children.splice(l.children.indexOf(c), 1); };
+  return l;
+}
+global.document = { createElement: () => ({ value: "" }) };
+const dl = datalist();
+assert.strictEqual(ctx.cflowOptionsFill(dl, ["work", "cheap"]), true);
+assert.deepStrictEqual(dl.children.map((c) => c.value), ["work", "cheap"]);
+assert.strictEqual(ctx.cflowOptionsFill(dl, ["work", "cheap"]), false);  // unchanged: no redraw
+assert.strictEqual(ctx.cflowOptionsFill(dl, null), true);
+assert.deepStrictEqual(dl.children, []);
+
+assert.strictEqual(ctx.cflowOptionsNote({ from: "harnesses", profile: "work",
+                                          items: ["claude", "codex"] }),
+                   "harnesses of profile work: claude, codex");
+assert.match(ctx.cflowOptionsNote({ from: "models", profile: "ghost", items: null }),
+             /no models list of profile ghost; the value is not checked/);
+assert.match(ctx.cflowOptionsNote({ from: "harnesses", profile: null, items: null }),
+             /does not know/);
+
+const hdl = datalist(), note = { textContent: "" };
+const optRow = { dataset: { input: "rh" },
+                 querySelector: (q) => (q === "datalist" ? hdl
+                   : q === ".cf2-input-options" ? note : null) };
+const plainRow = { dataset: { input: "goal" }, querySelector: () => null };
+ctx.cflowInputsOptions({ querySelectorAll: () => [plainRow, optRow] },
+                       { rh: { from: "harnesses", profile: "cheap", items: ["claude"] } });
+assert.deepStrictEqual(hdl.children.map((c) => c.value), ["claude"]);
+assert.strictEqual(note.textContent, "harnesses of profile cheap: claude");
 console.log("cflow2inputs_check: ok");
 
 // The gh readiness line under an input declared `precheck: gh`

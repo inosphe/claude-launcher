@@ -35,6 +35,23 @@ What :func:`apply` does with the values:
   delivered to every task, so the last task's prompt carries them for the
   agent's own check of the text-only items.
 
+A ``string`` input may declare ``options: {from, of, empty}``: its value is
+picked from a list the host fills at run time instead of a fixed ``choices``
+(the form draws a combobox, docs/cflow-v2.md 2.6). ``from`` names the list:
+``profiles`` (the launcher's profiles), ``harnesses`` (the harnesses a
+profile may run) or ``models`` (the model presets and model choices a
+profile's harness takes). ``harnesses`` and ``models`` depend on a profile:
+``of`` names the ``profiles`` input that holds it; without ``of``, or while
+that input is empty, the profile is what an empty value of it means.
+``empty`` on a ``profiles`` input says what that is: ``session`` (default,
+the run's own session's profile) or ``delegate`` (the daemon's
+``delegate_profile`` setting). The lists come from a *catalog* the caller
+hands :func:`normalize` and :func:`settle` (``claude_launcher.input_options``
+builds one); without a catalog the engine does not check them -- the
+engine has no launcher config of its own. A value outside its list is
+refused like an enum's, and so is a parent change that leaves a dependent's
+value outside the parent's new list.
+
 An input declared ``set_by: [agent]`` may be written once more after the
 run started, while it is still empty, by the run's driver
 (``runtime.set_input`` through ``flow_input`` / ``claunch cflow2 input``).
@@ -80,7 +97,20 @@ LIST_TYPES = (T_LIST, T_INVARIANTS, T_ACCEPTANCE)
 CHECK_TYPES = (T_INVARIANTS, T_ACCEPTANCE)
 
 KEYS = ("type", "label", "help", "required", "default", "choices", "placeholder", "precheck",
-        "set_by")
+        "set_by", "options")
+#: What ``options.from`` may name (the module docstring): the lists a host's
+#: catalog answers.
+OPT_PROFILES = "profiles"
+OPT_HARNESSES = "harnesses"
+OPT_MODELS = "models"
+OPTION_SOURCES = (OPT_PROFILES, OPT_HARNESSES, OPT_MODELS)
+#: Lists that are a profile's, and so take ``of``.
+OPTION_DEPENDENT = (OPT_HARNESSES, OPT_MODELS)
+OPTION_KEYS = ("from", "of", "empty")
+#: What an empty ``profiles`` input stands for (``options.empty``).
+EMPTY_SESSION = "session"
+EMPTY_DELEGATE = "delegate"
+EMPTY_MEANINGS = (EMPTY_SESSION, EMPTY_DELEGATE)
 #: What ``precheck:`` may name: a readiness check the start form runs before
 #: the user may turn the input on (``gh``: GET /api/tools/gh?cwd= says the
 #: client is installed and signed in to the repository's host). Advisory --
@@ -194,6 +224,7 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
             if SETTER_USER in set_by and typ not in USER_SETTABLE_TYPES:
                 raise InputsError(f"input {name!r}: set_by {SETTER_USER} applies to types "
                                   f"{', '.join(USER_SETTABLE_TYPES)}, not {typ}")
+        options = _options_decl(name, typ, decl.get("options"))
         entry = {
             "type": typ,
             "label": decl.get("label") or name,
@@ -204,6 +235,7 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
             "placeholder": decl.get("placeholder") or "",
             "precheck": precheck,
             "set_by": sorted(set(set_by or [])),
+            "options": options,
         }
         if decl.get("default") is not None:
             value, err = _coerce(entry, decl["default"], strict=True)
@@ -211,7 +243,58 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
                 raise InputsError(f"input {name!r}: default {decl['default']!r} {err}")
             entry["default"] = value
         out[name] = entry
+    for name, entry in out.items():
+        parent = (entry.get("options") or {}).get("of")
+        if parent is None:
+            continue
+        pdecl = out.get(parent)
+        if pdecl is None:
+            raise InputsError(f"input {name!r}: options.of names {parent!r}, which is not "
+                              f"declared")
+        if ((pdecl.get("options") or {}).get("from")) != OPT_PROFILES:
+            raise InputsError(f"input {name!r}: options.of names {parent!r}, which is not an "
+                              f"input with options from {OPT_PROFILES}")
     return out
+
+
+def _options_decl(name: str, typ: str, raw: Any) -> Optional[Dict[str, Any]]:
+    """``options:`` checked: ``{from, of, empty}`` with every key present
+    (``of``/``empty`` ``None`` where they do not apply)."""
+    if raw is None:
+        return None
+    if typ != T_STRING:
+        raise InputsError(f"input {name!r}: options apply to type string only")
+    if isinstance(raw, str):
+        raw = {"from": raw}
+    if not isinstance(raw, dict):
+        raise InputsError(f"input {name!r}: options must be a mapping (from, of, empty)")
+    unknown = [k for k in raw if k not in OPTION_KEYS]
+    if unknown:
+        raise InputsError(f"input {name!r}: unknown options key {unknown[0]!r} "
+                          f"(allowed: {', '.join(OPTION_KEYS)})")
+    src = raw.get("from")
+    if src not in OPTION_SOURCES:
+        raise InputsError(f"input {name!r}: options.from must be one of "
+                          f"{', '.join(OPTION_SOURCES)}")
+    of = raw.get("of")
+    if of is not None:
+        if src not in OPTION_DEPENDENT:
+            raise InputsError(f"input {name!r}: options.of applies to "
+                              f"{', '.join(OPTION_DEPENDENT)} only")
+        if not isinstance(of, str) or not NAME_RE.match(of):
+            raise InputsError(f"input {name!r}: options.of must name another input")
+        if of == name:
+            raise InputsError(f"input {name!r}: options.of names the input itself")
+    empty = raw.get("empty")
+    if empty is not None:
+        if src != OPT_PROFILES:
+            raise InputsError(f"input {name!r}: options.empty applies to {OPT_PROFILES} only")
+        if empty not in EMPTY_MEANINGS:
+            raise InputsError(f"input {name!r}: options.empty must be one of "
+                              f"{', '.join(EMPTY_MEANINGS)}")
+    elif src == OPT_PROFILES:
+        empty = EMPTY_SESSION
+    return {"from": src, "of": of, "empty": empty}
 
 
 def _input_refs(text: str) -> List[str]:
@@ -419,8 +502,108 @@ def _coerce(decl: Dict[str, Any], value: Any, strict: bool = False) -> Tuple[Any
     return items, None
 
 
+# --------------------------------------------------------------------------- #
+# options lists (a host's catalog)
+# --------------------------------------------------------------------------- #
+#: A catalog answers the lists ``options:`` names. Any object with these
+#: methods; ``None`` from a profile's list means "cannot say" (an unknown or
+#: unreadable profile -- its own input reports that), and the value is not
+#: checked against it:
+#:
+#: - ``profiles() -> list``
+#: - ``harnesses(profile) -> list | None``
+#: - ``models(profile) -> list | None``
+#: - ``empty_profile(meaning) -> str | None`` -- what an empty ``profiles``
+#:   input stands for (:data:`EMPTY_MEANINGS`); ``None`` when unknown.
+Catalog = Any
+
+
+def option_profile(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str,
+                   catalog: Catalog) -> Optional[str]:
+    """The profile input ``name``'s list is of (its ``options.of`` value,
+    or what an empty one means); ``None`` for a ``profiles`` list."""
+    opts = (schema_.get(name) or {}).get("options") or {}
+    if opts.get("from") not in OPTION_DEPENDENT:
+        return None
+    of = opts.get("of")
+    value = (values or {}).get(of) if of else None
+    if not _is_empty(value):
+        return str(value)
+    meaning = ((schema_.get(of) or {}).get("options") or {}).get("empty") if of else None
+    return catalog.empty_profile(meaning or EMPTY_SESSION)
+
+
+def option_items(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str,
+                 catalog: Catalog) -> Optional[List[str]]:
+    """The values input ``name`` may take now; ``None`` when the catalog
+    cannot say (or the input declares no ``options``)."""
+    opts = (schema_.get(name) or {}).get("options") or {}
+    src = opts.get("from")
+    if src == OPT_PROFILES:
+        return list(catalog.profiles())
+    if src not in OPTION_DEPENDENT:
+        return None
+    profile = option_profile(schema_, values, name, catalog)
+    if not profile:
+        return None
+    got = catalog.harnesses(profile) if src == OPT_HARNESSES else catalog.models(profile)
+    return None if got is None else list(got)
+
+
+def _option_error(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str,
+                  catalog: Catalog) -> Optional[str]:
+    decl = schema_[name]
+    value = (values or {}).get(name)
+    if not decl.get("options") or _is_empty(value):
+        return None
+    items = option_items(schema_, values, name, catalog)
+    if items is None or value in items:
+        return None
+    shown = ", ".join(items) or "none"
+    src = decl["options"]["from"]
+    if src == OPT_PROFILES:
+        return f"{decl['label']} {value!r} is not a profile (profiles: {shown})"
+    profile = option_profile(schema_, values, name, catalog)
+    what, verb = ("a harness", "may run") if src == OPT_HARNESSES else ("a model", "takes")
+    return f"{decl['label']} {value!r} is not {what} profile {profile!r} {verb} (choices: {shown})"
+
+
+def option_errors(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any],
+                  catalog: Catalog) -> Dict[str, str]:
+    """name -> why, for every input with ``options`` whose value is outside
+    its list. Inputs absent from ``values`` (already refused) are skipped."""
+    out: Dict[str, str] = {}
+    if catalog is None:
+        return out
+    for name in schema_ or {}:
+        if name not in (values or {}):
+            continue
+        err = _option_error(schema_, values, name, catalog)
+        if err:
+            out[name] = err
+    return out
+
+
+def option_lists(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any],
+                 catalog: Catalog) -> Dict[str, Dict[str, Any]]:
+    """What a form fills its comboboxes with: name -> ``{from, profile,
+    items}`` for every input with ``options`` (``items`` ``None`` when the
+    catalog cannot say, ``profile`` the profile a dependent list is of)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if catalog is None:
+        return out
+    for name, decl in (schema_ or {}).items():
+        if not decl.get("options"):
+            continue
+        out[name] = {"from": decl["options"]["from"],
+                     "profile": option_profile(schema_, values, name, catalog),
+                     "items": option_items(schema_, values, name, catalog)}
+    return out
+
+
 def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
-              constraints_: Optional[List[Dict[str, Any]]] = None
+              constraints_: Optional[List[Dict[str, Any]]] = None,
+              catalog: Catalog = None
               ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """``(values, errors)`` for the raw values a form, CLI or tool sent.
 
@@ -434,7 +617,10 @@ def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
 
     ``constraints_`` (:func:`constraints`) are evaluated when every input
     they read passed its own check; a violated one is reported under each
-    of its ``fields`` (or :data:`CONSTRAINT_ERROR_KEY` when it has none)."""
+    of its ``fields`` (or :data:`CONSTRAINT_ERROR_KEY` when it has none).
+
+    ``catalog`` (see :data:`Catalog`) checks the inputs that declare
+    ``options``; without one they are checked as plain strings."""
     raw = raw or {}
     errors: Dict[str, str] = {}
     values: Dict[str, Any] = {}
@@ -458,6 +644,9 @@ def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
             errors[name] = f"{decl['label']} is required"
             continue
         values[name] = value
+    for name, err in option_errors(schema_, values, catalog).items():
+        errors.setdefault(name, err)
+        values.pop(name, None)
     ready = [c for c in constraints_ or []
              if all(r in values for r in _input_refs(c["assert"]))]
     for c in violations(ready, values):
@@ -468,10 +657,11 @@ def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
 
 
 def check(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
-          constraints_: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+          constraints_: Optional[List[Dict[str, Any]]] = None,
+          catalog: Catalog = None) -> Dict[str, Any]:
     """:func:`normalize` that raises :class:`InputsError` (message lists
     every field; ``.errors`` holds the mapping)."""
-    values, errors = normalize(schema_, raw, constraints_)
+    values, errors = normalize(schema_, raw, constraints_, catalog)
     if errors:
         exc = InputsError("invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
         exc.errors = errors  # type: ignore[attr-defined]
@@ -481,7 +671,8 @@ def check(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
 
 def settle(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str,
            raw: Any, setter: str,
-           constraints_: Optional[List[Dict[str, Any]]] = None) -> Any:
+           constraints_: Optional[List[Dict[str, Any]]] = None,
+           catalog: Catalog = None) -> Any:
     """The value ``setter`` may write into the started run's input ``name``
     (docs/cflow-v2.md 2.6), checked the way a start checks it. ``values`` is
     the run's current ``data.inputs``. Raises :class:`InputsError` when the
@@ -491,7 +682,12 @@ def settle(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str
     ``agent`` fills an empty input once: refused when the input already
     holds a value (the message carries it) or the value is empty. ``user``
     overwrites whatever the input holds; an empty value clears it unless the
-    input is required."""
+    input is required.
+
+    With a ``catalog`` an input with ``options`` is checked against its
+    list, and a ``profiles`` input is refused when the new value leaves a
+    dependent (``options.of`` naming it) holding a value outside its new
+    list -- the dependent is changed or cleared first."""
     decl = (schema_ or {}).get(name)
     if decl is None:
         raise InputsError(f"unknown input {name!r} (declared: {', '.join(schema_ or {}) or 'none'})")
@@ -526,6 +722,16 @@ def settle(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str
         if _is_empty(value):
             raise InputsError(f"input {name!r}: an empty value writes nothing")
     merged = {**(values or {}), name: value}
+    if catalog is not None:
+        err = _option_error(schema_, merged, name, catalog)
+        if err:
+            raise InputsError(err)
+        for dep, ddecl in schema_.items():
+            if (ddecl.get("options") or {}).get("of") != name:
+                continue
+            err = _option_error(schema_, merged, dep, catalog)
+            if err:
+                raise InputsError(f"input {name!r}: {err}; change or clear {dep!r} first")
     ready = [c for c in constraints_ or []
              if name in _input_refs(c["assert"])
              and all(r in merged for r in _input_refs(c["assert"]))]
@@ -616,4 +822,4 @@ def view(schema_: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 __all__ = ("TYPES", "InputsError", "schema", "constraints", "violations", "normalize", "check",
-           "settle", "apply", "view")
+           "settle", "apply", "view", "option_items", "option_errors", "option_lists")
