@@ -23,6 +23,38 @@
    nodes whose state changed. Nothing is redrawn wholesale -- a hover, the
    scroll position and the pane's size survive every poll.
 
+   Parallel work (claunch-qk2nc). A producer that asks many questions at
+   once says so with two optional events; a log without them draws as above.
+   - ``{"event":"ask_start","at","key","askRole"?,"unit"?}`` -- the moment a
+     question really went out (past the producer's concurrency semaphore).
+     It ends at the ``ask`` with the same key, which may also carry
+     ``"unit"?``: the id of the unit the question belongs to.
+   - A question that throws (cost cap, stop, harness error) still logs its
+     ``ask`` -- without usage, with ``"error":"<one line>"`` -- so the pair
+     closes. Its node turns warn and shows the error in its tip.
+   - ``{"event":"unit","at","unit":"<id>","state":"start"|"done"|"failed"|
+     "skipped"|"interrupted","label"?,"phase"?,"after"?:["<unit id>"...],
+     "note"?}`` -- a unit of work. Its start carries the label, a phase (a
+     hint for the column's name) and ``after``: the units it actually waited
+     for. A later event may carry the state alone. Units not linked through
+     ``after`` may have run at the same time.
+   Drawing rules:
+   - A unit is one node (its questions, tokens, questions in flight, state)
+     in the column of its depth: the longest ``after`` chain behind it, fixed
+     at its start. Its only edges are its ``after`` edges -- no chain edge
+     runs into or out of a unit, and a node drawn after a unit is not chained
+     to the node drawn before that unit.
+   - A question without a unit draws as before. A grouped (sim2) stage node
+     is not chained to the stage above it in its column -- they ran side by
+     side -- but hangs off the node its column was entered from.
+   - Ungrouped questions (a claunch simulation, which asks one at a time)
+     keep their chain.
+   - The headline counts the questions in flight and the most that were in
+     flight at once, from ask_start/ask pairs. An ask_start left without its
+     ask counts as closed at its unit's end event, and at run_end, done,
+     error, interrupted and session_shutdown (the process died before it
+     could log the ask).
+
    ``model(events, live, progress)`` is the pure half (tests/web/durableflow_check.js);
    ``mount(host, session)`` owns the poll and the SVG. */
 (function () {
@@ -40,6 +72,7 @@
 
   function phaseTitle(phase) {
     if (phase.startsWith("round:")) return "라운드 " + phase.slice(6);
+    if (phase.startsWith("unit:")) return "단계 " + (Number(phase.slice(5)) + 1);
     return PHASE_TITLE[phase] || phase;
   }
 
@@ -131,6 +164,10 @@
     const byId = new Map();
     const seen = new Map(); // ask key -> times drawn (a resumed run asks again)
     let tokensTotal = 0, asks = 0, ended = null, first = null, lastAt = null;
+    const units = new Map(); // unit id -> its node
+    const open = new Map();  // ask key -> [unit id | null] of starts not yet answered
+    const keyUnit = new Map(); // ask key -> the unit its last ask_start named
+    let running = 0, peak = 0, starts = 0;
 
     // A phase entered again gets a new column -- except a grouped (sim2)
     // stage, whose questions interleave: it keeps the column it opened.
@@ -173,6 +210,36 @@
       if (note) node.sub = node.sub ? node.sub + " · " + note : note;
       return node;
     }
+    // A unit's node: placed once, at the depth its start's ``after`` gives.
+    function unitNode(id, ev) {
+      let node = units.get(id);
+      if (node) return node;
+      const after = (Array.isArray(ev && ev.after) ? ev.after : []).map(String).filter((a) => units.has(a));
+      const depth = after.reduce((d, a) => Math.max(d, units.get(a).depth + 1), 0);
+      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, label: id, count: 0, tok: 0,
+                                                  running: 0, state: "start", status: "run", note: "" }, true);
+      units.set(id, node);
+      return node;
+    }
+    // Close the starts left without their ask (all, or one unit's).
+    function closeOpen(unit) {
+      for (const [key, pend] of open) {
+        const keep = [];
+        for (const u of pend) {
+          if (unit !== undefined && u !== unit) { keep.push(u); continue; }
+          running -= 1;
+          if (u !== null) { units.get(u).running -= 1; unitSub(units.get(u)); }
+        }
+        if (keep.length) open.set(key, keep); else open.delete(key);
+      }
+    }
+    const UNIT_STATUS = { start: "run", done: "ok", failed: "fail", skipped: "skip", interrupted: "warn" };
+    const UNIT_STATE = { skipped: "건너뜀", interrupted: "중단", failed: "실패" };
+    function unitSub(node) {
+      node.sub = ["물음 " + node.count, tokens(node.tok) + " tok",
+                  node.running ? "진행 " + node.running : "", UNIT_STATE[node.state] || ""]
+        .filter(Boolean).join(" · ");
+    }
 
     for (const ev of events || []) {
       if (!ev || typeof ev !== "object") continue;
@@ -198,7 +265,80 @@
           else add("start", "start", { label: "시작", sub, tip: [when, tip] });
           break;
         }
+        case "unit": {
+          if (ev.unit == null) break;
+          const id = String(ev.unit);
+          const node = unitNode(id, ev);
+          const state = UNIT_STATUS[ev.state] ? ev.state : "start";
+          node.state = state;
+          node.status = node.cut && state === "done" ? "warn" : UNIT_STATUS[state];
+          if (state !== "start") closeOpen(id);
+          if (ev.label) node.label = String(ev.label);
+          if (ev.note) node.note = String(ev.note);
+          if (state === "start" && ev.phase) {
+            const c = cols[node.col];
+            c.hints = c.hints || [];
+            if (!c.hints.includes(String(ev.phase))) {
+              c.hints.push(String(ev.phase));
+              c.title = c.hints.join(" · ");
+            }
+          }
+          if (state === "start") {
+            node.tip = [when + " " + id + (node.after.length ? " ← " + node.after.join(", ") : "")];
+          } else {
+            node.tip.push(when + " " + state);
+          }
+          if (ev.note) node.tip.push(String(ev.note));
+          unitSub(node);
+          break;
+        }
+        case "ask_start": {
+          const key = String(ev.key || "");
+          const unit = ev.unit != null ? String(ev.unit) : null;
+          if (!open.has(key)) open.set(key, []);
+          open.get(key).push(unit);
+          if (unit !== null) keyUnit.set(key, unit);
+          starts += 1;
+          running += 1;
+          peak = Math.max(peak, running);
+          if (unit !== null) {
+            const node = unitNode(unit, null);
+            node.running += 1;
+            unitSub(node);
+          }
+          break;
+        }
         case "ask": {
+          const pend = open.get(String(ev.key || ""));
+          let unit = ev.unit != null ? String(ev.unit) : null;
+          const failed = ev.error ? String(ev.error).split("\n")[0] : "";
+          if (unit === null && keyUnit.has(String(ev.key || ""))) unit = keyUnit.get(String(ev.key || ""));
+          if (pend && pend.length) {
+            const from = pend.shift();
+            if (!pend.length) open.delete(String(ev.key || ""));
+            running -= 1;
+            if (from !== null) {
+              const node = units.get(from);
+              node.running -= 1;
+              unitSub(node);
+            }
+            if (unit === null) unit = from;
+          }
+          if (unit !== null) {
+            const node = unitNode(unit, null);
+            const u = ev.usage || {};
+            tokensTotal += Number(u.totalTokens) || 0;
+            asks += 1;
+            node.count += 1;
+            node.tok += Number(u.totalTokens) || 0;
+            if ((ev.stop && ev.stop !== "stop") || failed) {
+              node.cut = true;
+              if (node.status === "ok") node.status = "warn";
+            }
+            if (failed) node.tip.push(when + " " + String(ev.key || "") + ": " + failed);
+            unitSub(node);
+            break;
+          }
           if (ev.askRole) {
             // sim2: one node per stage group, counted.
             const g = sim2Group(ev.key);
@@ -207,14 +347,15 @@
             asks += 1;
             let node = byId.get("grp:" + g.group);
             if (!node) {
-              node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, tok: 0, status: "done" }, true);
+              node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, tok: 0, status: "done", grouped: true }, true);
             }
             node.count += 1;
             node.tok += Number(u.totalTokens) || 0;
             node.label = g.label + " ×" + node.count;
             node.sub = ev.askRole + " · " + tokens(node.tok) + " tok";
-            if (ev.stop && ev.stop !== "stop") node.status = "warn";
-            node.tip = [when + " 마지막 " + String(ev.key || ""), "stop " + (ev.stop || "?")];
+            if ((ev.stop && ev.stop !== "stop") || failed) node.status = "warn";
+            if (failed) node.errors = [...(node.errors || []), when + " " + String(ev.key || "") + ": " + failed];
+            node.tip = [when + " 마지막 " + String(ev.key || ""), "stop " + (ev.stop || "?"), ...(node.errors || [])];
             break;
           }
           asks += 1;
@@ -226,10 +367,10 @@
           add(keyPhase(key), "ask:" + key, {
             key, label: askLabel(key),
             sub: (ev.role || "?") + " · " + tokens(u.totalTokens) + " tok",
-            status: ev.stop && ev.stop !== "stop" ? "warn" : "done",
+            status: (ev.stop && ev.stop !== "stop") || failed ? "warn" : "done",
             tip: [when, key, "role " + (ev.role || "?"),
                   `in ${u.input || 0} · cache ${u.cacheRead || 0} · out ${u.output || 0} · gen ${u.generations || 0}`,
-                  "stop " + (ev.stop || "?")],
+                  "stop " + (ev.stop || "?"), failed].filter(Boolean),
           });
           break;
         }
@@ -282,6 +423,7 @@
           });
           break;
         case "done":
+          closeOpen();
           ended = { failed: !!ev.failed, reason: ev.reason || "" };
           add("end", "done", { label: ev.failed ? "실패" : "끝", sub: String(ev.reason || "").slice(0, 40),
                                status: ev.failed ? "fail" : "ok", tip: [when, String(ev.reason || "")] });
@@ -290,15 +432,18 @@
           settle(byId.get("done") || null, "warn", "데몬 보고 실패", "end", "끝");
           break;
         case "error":
+          closeOpen();
           ended = ended || { failed: true, reason: String(ev.error || "").split("\n")[0] };
           add("end", "error", { label: "오류", sub: String(ev.error || "").split("\n")[0].slice(0, 40),
                                 status: "fail", tip: [when, String(ev.error || "").slice(0, 400)] });
           break;
         case "interrupted":
+          closeOpen();
           add("end", "interrupted", { label: "중단", sub: String(ev.error || "").slice(0, 40), status: "warn",
                                       tip: [when, String(ev.error || "")] });
           break;
         case "run_end": {
+          closeOpen();
           // done, stopped (asked to stop), or anything else (it broke).
           const stopped = ev.state === "stopped" && !ev.error;
           const failed = !stopped && (ev.state !== "done" || !!ev.error);
@@ -318,6 +463,7 @@
           break;
         }
         case "session_shutdown": {
+          closeOpen();
           const tail = nodes[nodes.length - 1];
           if (tail && cols[tail.col].phase === "end") {
             tail.tip.push(when + " session_shutdown " + (ev.reason || ""));
@@ -326,9 +472,11 @@
           }
           break;
         }
-        default:
-          add(cols.length ? cols[cols.length - 1].phase : "other", "ev:" + ev.event,
+        default: {
+          const last = cols.length ? cols[cols.length - 1].phase : "other";
+          add(last.startsWith("unit:") ? "other" : last, "ev:" + ev.event,
               { label: String(ev.event || "?"), tip: [when, JSON.stringify(ev).slice(0, 300)] });
+        }
       }
     }
     // Still running: a dashed node after the last one, where the next
@@ -341,19 +489,35 @@
                   sub: (progress && progress.text) || "", status: "live", tip: [] };
     }
     // Each node hangs off the one drawn before it -- or, when a grouped stage
-    // landed back in an earlier column, off the node above it there.
+    // landed back in an earlier column, off the node above it there. A
+    // grouped stage below another in its column hangs off the node the column
+    // was entered from instead: the stages ran side by side. A unit hangs off
+    // its ``after`` units only, and the chain does not run across units.
     const edges = [];
-    for (let i = 1; i < nodes.length; i++) {
-      const to = nodes[i];
-      let from = nodes[i - 1];
-      if (to.col < from.col) from = to.row ? byId.get(cols[to.col].nodes[to.row - 1]) : null;
+    const entry = new Map(); // column -> the node its first node hangs off
+    let prev = null, crossed = false;
+    for (const to of nodes) {
+      if (to.unit !== undefined) {
+        for (const a of to.after) {
+          const from = units.get(a);
+          edges.push({ id: from.id + ">" + to.id, from, to });
+        }
+        crossed = true;
+        continue;
+      }
+      let from = crossed ? null : prev;
+      if (from && to.grouped && (to.row || to.col <= from.col)) from = entry.get(to.col) || null;
+      else if (from && to.col < from.col) from = to.row ? byId.get(cols[to.col].nodes[to.row - 1]) : null;
       if (from) edges.push({ id: from.id + ">" + to.id, from, to });
+      if (!to.row) entry.set(to.col, from);
+      prev = to;
+      crossed = false;
     }
-    if (pending && nodes.length) {
+    if (pending && nodes.length && nodes[nodes.length - 1].unit === undefined) {
       edges.push({ id: "live-edge", from: nodes[nodes.length - 1], to: pending });
     }
     return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt,
-             count: (events || []).length };
+             count: (events || []).length, running, peak, starts, units: units.size };
   }
 
   function pos(n) {
@@ -361,14 +525,17 @@
   }
 
   // Same column: straight down. Next column: out of the right side, in at
-  // the left side of the target, with an elbow halfway.
+  // the left side of the target, with an elbow halfway. Edges into a unit
+  // turn at an x set by the source's row, so the buses of two sources that
+  // feed the same column do not meet and read as one.
   function edgePath(a, b) {
     const p = pos(a), q = pos(b);
     if (a.col === b.col) {
       const x = p.x + W / 2;
       return `M${x},${p.y + H} L${x},${q.y}`;
     }
-    const x1 = p.x + W, y1 = p.y + H / 2, x2 = q.x, y2 = q.y + H / 2, mx = x1 + GAP_X / 2;
+    const lane = b.unit !== undefined ? ((a.row % 5) - 2) * 5 : 0;
+    const x1 = p.x + W, y1 = p.y + H / 2, x2 = q.x, y2 = q.y + H / 2, mx = x1 + GAP_X / 2 + lane;
     return `M${x1},${y1} L${mx},${y1} L${mx},${y2} L${x2},${y2}`;
   }
 
@@ -445,7 +612,7 @@
       for (const n of m.nodes) drawNode(n);
       if (m.pending) drawNode(m.pending);
       // The pending node and its edge are the only things that ever go away.
-      if (!m.pending || !m.nodes.length) {
+      if (!m.edges.some((e) => e.id === "live-edge")) {
         const pe = edges.get("live-edge");
         if (pe) { pe.remove(); edges.delete("live-edge"); }
       }
@@ -475,6 +642,10 @@
   function summary(m, data) {
     const parts = [data.sim || "", data.live ? (m.ended ? "끝남" : "실행 중") : "세션 종료"];
     parts.push("사건 " + m.count, "질문 " + m.asks, "토큰 " + tokens(m.tokens));
+    if (m.starts) {
+      if (data.live && !m.ended) parts.push("진행 중 " + m.running);
+      parts.push("최대 동시 " + m.peak);
+    }
     if (m.first && m.lastAt) parts.push("경과 " + elapsed(m.first, m.lastAt));
     return parts.filter(Boolean).join(" · ");
   }

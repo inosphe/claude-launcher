@@ -4320,6 +4320,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-node.st-ok rect { stroke: #2f6f43; }
 .dfl-node.st-fail rect { stroke: #b0413e; fill: #2a1617; }
 .dfl-node.st-warn rect { stroke: #d29922; }
+.dfl-node.st-run rect { stroke: #58a6ff; }
+.dfl-node.st-skip { opacity: 0.55; }
 .dfl-node.round rect { fill: #14233a; stroke: #3b6ea8; }
 .dfl-node.st-live rect { fill: none; stroke: #58a6ff; stroke-dasharray: 6 4; animation: dfl-march 1s linear infinite; }
 .dfl-node { transition: transform 0.3s ease-out; }

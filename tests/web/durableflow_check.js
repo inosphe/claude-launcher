@@ -227,6 +227,168 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(DF.sim2Group("B:combat-ranged|x
   { phase: "model", group: "B:combat-ranged", label: "기능 combat-ranged" });
 console.log("durableflow_check: sim2 ok");
 
+// -- parallel work: unit / ask_start (claunch-qk2nc) -------------------------
+const ids = (mm) => Array.from(mm.edges, (e) => e.id).filter((x) => x !== "live-edge");
+const plain = (x) => JSON.parse(JSON.stringify(x));   // out of the vm realm, for deepStrictEqual
+// Every prefix keeps the places AND the edges the whole log gives.
+function stable(log, name) {
+  const full = DF.model(log, false);
+  const at = Object.fromEntries(full.nodes.map((n) => [n.id, [n.col, n.row]]));
+  const all = new Set(ids(full));
+  for (let k = 1; k <= log.length; k++) {
+    const part = DF.model(log.slice(0, k), true);
+    for (const n of part.nodes) assert.deepStrictEqual([n.col, n.row], at[n.id], `${name} prefix ${k}: ${n.id} moved`);
+    for (const e of ids(part)) assert.ok(all.has(e), `${name} prefix ${k}: edge ${e} is not in the full model`);
+  }
+}
+
+// (a) A sequential claunch simulation keeps its chain: the edges are the
+// consecutive pairs, and ask_start before each ask changes no node or edge.
+assert.deepStrictEqual(ids(m), plain(m.nodes.slice(1).map((n, i) => m.nodes[i].id + ">" + n.id)));
+const LOG_S = LOG.flatMap((e) => e.event === "ask" ? [{ at: e.at, event: "ask_start", key: e.key }, e] : [e]);
+const ms = DF.model(LOG_S, false);
+assert.deepStrictEqual(ms.nodes.map((n) => [n.id, n.col, n.row]), m.nodes.map((n) => [n.id, n.col, n.row]));
+assert.deepStrictEqual(ids(ms), ids(m));
+assert.deepStrictEqual([ms.starts, ms.peak, ms.running], [6, 1, 0], "one at a time");
+stable(LOG, "sim"); stable(LOG_S, "sim+start");
+
+// (b) An old sim2/rules2 log (askRole, no unit): the stages of a column ran
+// side by side, so no edge joins two of them; each hangs off the column's entry.
+const R2 = "|rules2|docu-x|docu-x@1|b0|h|t0";
+const OLD = [
+  { at: a2("20:58"), event: "session_start", reason: "startup" },
+  { at: a2("21:01"), event: "run_start", preset: "game/items" },
+  ...["items/_system", "07-grid-place/_feature", "05-open-state/_feature", "items/_system",
+      "07-grid-place/01-incoming", "05-open-state/02-open"].map((d, i) =>
+    ({ at: a2("22:" + String(10 + i)), event: "ask", askRole: "B", key: "B:" + d + R2, usage: u(100), stop: "stop" })),
+];
+const mo = DF.model(OLD, true);
+const byo = Object.fromEntries(mo.nodes.map((n) => [n.id, n]));
+assert.strictEqual(mo.cols.length, 2);
+assert.strictEqual(byo["grp:B:items/_system"].label, "기능 items/_system ×2");
+assert.strictEqual(mo.cols[1].nodes.length, 5, "one node per document");
+assert.ok(mo.edges.every((e) => e.id === "live-edge" || e.from.col !== e.to.col), ids(mo).join(" "));
+assert.deepStrictEqual(ids(mo), plain(mo.cols[1].nodes.map((id) => "start>" + id)), "every stage hangs off the start");
+assert.strictEqual(mo.pending.col, 1);
+assert.ok(s2.edges.every((e) => e.from.col !== e.to.col), "the sim2 run above has no same-column edge either");
+stable(OLD, "old rules2"); stable(SIM2, "sim2");
+
+// (c) A rules2 run that logs units: _system, then 13 feature documents that
+// waited for it, then cards that waited for their feature. Three depth
+// columns after the start; the only edges are the after edges.
+const U = [
+  { at: a2("30:00"), event: "session_start", reason: "startup" },
+  { at: a2("30:01"), event: "run_start", preset: "game/items" },
+  { at: a2("30:02"), event: "unit", unit: "items/_system", state: "start", label: "_system", phase: "시스템" },
+  { at: a2("30:03"), event: "ask_start", key: "B:sys:1", askRole: "B", unit: "items/_system" },
+  { at: a2("30:03"), event: "ask_start", key: "B:sys:2", askRole: "B", unit: "items/_system" },
+  { at: a2("30:04"), event: "ask", askRole: "B", key: "B:sys:1", usage: u(1000), stop: "stop" },
+  { at: a2("30:05"), event: "ask", askRole: "B", key: "B:sys:2", unit: "items/_system", usage: u(500), stop: "length" },
+  { at: a2("30:06"), event: "unit", unit: "items/_system", state: "done" },
+];
+const FEAT = Array.from({ length: 13 }, (_, i) => String(i + 1).padStart(2, "0") + "-f");
+for (const f of FEAT) {
+  U.push({ at: a2("31:00"), event: "unit", unit: f, state: "start", label: f, phase: "기능", after: ["items/_system"] });
+  U.push({ at: a2("31:01"), event: "ask_start", key: "B:" + f, askRole: "B", unit: f });
+}
+for (const f of FEAT) U.push({ at: a2("32:00"), event: "ask", askRole: "B", key: "B:" + f, unit: f, usage: u(10), stop: "stop" });
+for (const f of FEAT.slice(0, 12)) U.push({ at: a2("32:01"), event: "unit", unit: f, state: "done" });
+U.push({ at: a2("32:02"), event: "unit", unit: "13-f", state: "failed", note: "no json" });
+U.push({ at: a2("33:00"), event: "unit", unit: "01-f/card-a", state: "start", label: "card-a", phase: "카드", after: ["01-f"] });
+U.push({ at: a2("33:00"), event: "unit", unit: "02-f/card-b", state: "start", label: "card-b", phase: "카드", after: ["02-f", "ghost"] });
+U.push({ at: a2("33:01"), event: "ask_start", key: "B:ca", askRole: "B", unit: "01-f/card-a" });
+U.push({ at: a2("33:01"), event: "unit", unit: "02-f/card-b", state: "skipped" });
+U.push({ at: a2("33:02"), event: "ask", askRole: "B", key: "B:noun", usage: u(1), stop: "stop" });   // no unit: drawn as before
+const mu = DF.model(U, true);
+const byu = Object.fromEntries(mu.nodes.map((n) => [n.id, n]));
+assert.deepStrictEqual(Array.from(mu.cols, (c) => c.title), ["시작", "시스템", "기능", "카드", "모델 구성"]);
+assert.deepStrictEqual(Array.from(mu.cols, (c) => c.nodes.length), [1, 1, 13, 2, 1]);
+assert.strictEqual(mu.units, 16);
+assert.deepStrictEqual([byu["unit:items/_system"].col, byu["unit:01-f"].col, byu["unit:01-f/card-a"].col], [1, 2, 3]);
+const after = [...FEAT.map((f) => "unit:items/_system>unit:" + f), "unit:01-f>unit:01-f/card-a", "unit:02-f>unit:02-f/card-b"];
+assert.deepStrictEqual(ids(mu).filter((e) => e.includes("unit:")).sort(), after.sort(), "unit edges are the after edges");
+assert.ok(!mu.edges.some((e) => e.to.id === "grp:B:noun" || e.from.id === "start"), "the chain does not run across units");
+assert.ok(mu.pending && mu.edges.some((e) => e.id === "live-edge"), "live: a pending node after the unit-less question");
+const sys = byu["unit:items/_system"];
+assert.deepStrictEqual([sys.label, sys.count, sys.tok, sys.status], ["_system", 2, 1500, "warn"], "a cut-off answer marks its unit");
+assert.strictEqual(sys.sub, "물음 2 · 1.5k tok");
+assert.deepStrictEqual([byu["unit:01-f"].status, byu["unit:13-f"].status, byu["unit:13-f"].sub], ["ok", "fail", "물음 1 · 10 tok · 실패"]);
+assert.ok(byu["unit:13-f"].tip.includes("no json"));
+assert.deepStrictEqual([byu["unit:01-f/card-a"].status, byu["unit:01-f/card-a"].sub], ["run", "물음 0 · 0 tok · 진행 1"]);
+assert.deepStrictEqual(plain([byu["unit:02-f/card-b"].status, byu["unit:02-f/card-b"].after]), ["skip", ["02-f"]], "an unknown after is dropped");
+assert.deepStrictEqual([mu.starts, mu.peak, mu.running, mu.asks], [16, 13, 1, 16]);
+stable(U, "units");
+// A unit drawn before its start event (an ask_start came first) stays at depth 0.
+const early = DF.model([{ event: "ask_start", key: "k", unit: "u1" }, { event: "unit", unit: "u1", state: "start", after: ["zz"] }], true);
+assert.deepStrictEqual([early.nodes[0].id, early.nodes[0].col, early.nodes[0].status], ["unit:u1", 0, "run"]);
+// A question that threw logs its ask with an error and no usage: the pair
+// closes, the node turns warn and its tip carries the error.
+const thrown = DF.model([
+  { event: "unit", unit: "d", state: "start", label: "doc" },
+  { event: "ask_start", key: "B:d:1", askRole: "B", unit: "d" },
+  { event: "ask", askRole: "B", key: "B:d:1", error: "cost cap reached\nstack", stop: "error" },
+  { event: "unit", unit: "d", state: "done" },
+  { event: "ask_start", key: "B:g|x", askRole: "B" },
+  { event: "ask", askRole: "B", key: "B:g|x", error: "harness closed" },
+  { event: "ask_start", key: "formalize:1" },
+  { event: "ask", role: "B", key: "formalize:1", error: "aborted" },
+], true);
+const byt = Object.fromEntries(thrown.nodes.map((n) => [n.id, n]));
+assert.deepStrictEqual([byt["unit:d"].status, byt["unit:d"].count, byt["unit:d"].running], ["warn", 1, 0]);
+assert.ok(byt["unit:d"].tip.some((t) => / B:d:1: cost cap reached$/.test(t)), byt["unit:d"].tip.join("|"));
+assert.deepStrictEqual([byt["grp:B:g"].status, byt["ask:formalize:1"].status], ["warn", "warn"]);
+assert.ok(byt["grp:B:g"].tip.some((t) => /harness closed/.test(t)));
+assert.ok(byt["ask:formalize:1"].tip.includes("aborted"));
+assert.deepStrictEqual([thrown.running, thrown.peak], [0, 1]);
+// An ask_start left without its ask is closed by its unit's end, and every
+// one still open by the run's end (the process died before the ask).
+const dead = [
+  { event: "unit", unit: "a", state: "start" }, { event: "unit", unit: "b", state: "start" },
+  { event: "ask_start", key: "ka", unit: "a" }, { event: "ask_start", key: "kb", unit: "b" },
+  { event: "ask_start", key: "kb2", unit: "b" }, { event: "ask_start", key: "kn" },
+];
+const dm = (tail) => DF.model([...dead, ...tail], true);
+assert.deepStrictEqual([dm([]).running, dm([]).peak], [4, 4]);
+const da = dm([{ event: "unit", unit: "a", state: "interrupted" }]);
+assert.deepStrictEqual([da.running, da.nodes[0].running, da.nodes[1].running, da.nodes[0].status], [3, 0, 2, "warn"]);
+for (const end of ["run_end", "done", "error", "interrupted", "session_shutdown"]) {
+  const e = dm([{ event: end, state: "failed" }]);
+  assert.deepStrictEqual([e.running, e.nodes[1].running, e.peak], [0, 0, 4], end);
+  assert.strictEqual(e.nodes[1].sub, "물음 0 · 0 tok", end);
+}
+// The ask that comes after its start was closed counts into the start's unit and changes nothing else.
+const late = dm([{ event: "unit", unit: "b", state: "done" }, { event: "ask", key: "kb", usage: u(7) }]);
+assert.deepStrictEqual([late.running, late.nodes[1].count, late.nodes[1].running], [2, 1, 0]);
+stable([...dead, { event: "unit", unit: "a", state: "done" }, { event: "run_end", state: "done" }], "dead");
+console.log("durableflow_check: units ok");
+
+// (d) mount: the pending edge goes once a unit is the last node, and the
+// headline counts the questions in flight.
+(async () => {
+  const feeds = [2, 5, U.length];
+  let i = 0;
+  const api = async (url) => {
+    const since = Number(new URL(url, "http://x").searchParams.get("since"));
+    const upto = feeds[Math.min(i++, feeds.length - 1)];
+    return { ok: true, json: async () => ({ sim: "rules2", live: true, total: upto, since, events: U.slice(since, upto) }) };
+  };
+  const host = new El("div");
+  const v = DF.mount(host, "rules2-run", { doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 1000 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(v.view.edges.has("live-edge"), "start -> pending");
+  await v.refresh();
+  assert.ok(!v.view.edges.has("live-edge"), "a unit is last: no pending edge");
+  assert.match(host.children[0].children[1].textContent, /진행 중 2 · 최대 동시 2/);
+  const sysG = v.view.nodes.get("unit:items/_system").g;
+  await v.refresh();
+  assert.strictEqual(v.view.nodes.get("unit:items/_system").g, sysG, "a unit node is kept");
+  assert.strictEqual(v.view.edges.size, after.length + 1, "the after edges and the pending edge off the unit-less question");
+  assert.match(host.children[0].children[1].textContent, /진행 중 1 · 최대 동시 13/);
+  assert.strictEqual(sysG.getAttribute("class"), "dfl-node st-warn");
+  v.unmount();
+  console.log("durableflow_check: units mount ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+
 // -- app.js: ◇ chart opens the flow; ⬒ run is the workflow run ---------------
 (async () => {
   const src = fs.readFileSync(path.join(__dirname, "../../src/claude_launcher/web/static/app.js"), "utf8");
