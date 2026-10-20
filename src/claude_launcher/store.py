@@ -629,6 +629,16 @@ DAEMON_DEFAULTS = {
     "deep_think_max": 3,
     "deep_think_timeout": 1800.0,
     "deep_think_grace": 300.0,
+    # The root every session's test outputs are written under — pytest
+    # basetemps (<session>c<stamp>, <session>w, <session>-<gist>) and the
+    # general per-session test directory each session is handed as
+    # $CLAUNCH_TEST_DIR (<root>/<session>, for browser profiles, playwright
+    # reports and other non-pytest artifacts). Empty keeps the built-in
+    # per-platform root (C:/t on Windows, <launcher home>/basetemp on
+    # POSIX, claude_launcher.pytest_basetemp); a relative value is anchored
+    # at the launcher home. The exit reaper reaps a session's whole subtree
+    # under this root when the session ends. Read LIVE on every root call.
+    "test_output_dir": "",
     # Base URL of a prompter server (daemon/prompter.py) whose prompt
     # snippets the web UI lists beside the footer's prompt presets. None =
     # off. Read LIVE on every request, so the settings page's PUT applies

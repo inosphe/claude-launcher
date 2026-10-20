@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import profile
+from claude_launcher import profile, pytest_basetemp
 from claude_launcher.daemon import harness, paths
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.session import Session
@@ -121,6 +121,57 @@ def test_assembling_the_command_creates_nothing(home, tmp_path):
     sdef = harness.normalize(SessionDef(name="sy", profile="work", cwd=str(tmp_path)))
     harness.build_command(sdef)
     assert not paths.session_scratch_dir("sy").exists()
+    assert not pytest_basetemp.session_test_dir("sy").exists()
+
+
+# -- the general test directory ($CLAUNCH_TEST_DIR) --------------------------- #
+
+
+def test_every_session_is_told_where_its_test_dir_is(home, tmp_path):
+    """``CLAUNCH_TEST_DIR`` is set for every harness, like ``CLAUNCH_SCRATCH``.
+
+    pytest basetemps already have a per-session home under the test-output
+    root; this variable is the same isolation for everything else a test
+    run leaves behind (browser profiles, playwright reports, node output).
+    """
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="sx", profile="work", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+    assert env["CLAUNCH_TEST_DIR"] == str(pytest_basetemp.session_test_dir("sx"))
+    assert env["CLAUNCH_TEST_DIR"] != env["CLAUNCH_SCRATCH"]
+
+
+def test_two_sessions_never_share_a_test_dir(home, tmp_path):
+    profile.create("work")
+    values = []
+    for name in ("sa", "sb"):
+        sdef = harness.normalize(
+            SessionDef(name=name, profile="work", cwd=str(tmp_path))
+        )
+        _, env, _ = harness.build_command(sdef)
+        values.append(env["CLAUNCH_TEST_DIR"])
+    assert values[0] != values[1]
+
+
+def test_the_test_directory_exists_before_the_session_runs_anything(home, tmp_path):
+    """Same contract as the scratch: the named directory exists up front."""
+    async def run():
+        session = Session(
+            SessionDef(name="tcreated", cwd=str(tmp_path)),
+            idle_threshold=2,
+            scrollback=20,
+        )
+        try:
+            test_dir = pytest_basetemp.session_test_dir("tcreated")
+            assert test_dir.is_dir()
+            probe = test_dir / "report.json"
+            probe.write_text("{}", encoding="utf-8")
+            assert probe.read_text(encoding="utf-8") == "{}"
+        finally:
+            session._feeder.close()
+            session._log.close()
+
+    asyncio.run(run())
 
 
 def test_the_directory_exists_before_the_session_runs_anything(home, tmp_path):

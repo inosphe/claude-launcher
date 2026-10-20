@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .. import borrowing, harnesses as harness_registry, session_env
+from .. import borrowing, harnesses as harness_registry, pytest_basetemp, session_env
 from .. import lineage, metering, pi_provider, profile as profile_mod, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
@@ -1312,6 +1312,12 @@ def build_command(
     # of our own rather than a redirect. Assembling the env is pure -- the
     # directory itself is created by ``Session.__init__``, next to the log.
     env["CLAUNCH_SCRATCH"] = str(paths.session_scratch_dir(sdef.name))
+    # The session's general test directory: non-pytest artifacts (browser
+    # profiles, playwright reports, node test output) go here, per session by
+    # name under the test-output root, and the exit reaper takes the tree
+    # when the session ends. Assembling the env is pure -- the directory
+    # itself is created by ``Session.__init__``, like the scratch above.
+    env["CLAUNCH_TEST_DIR"] = str(pytest_basetemp.session_test_dir(sdef.name))
     if sdef.harness == CLAUDE_HARNESS and routing.is_shim_url(
         env.get("ANTHROPIC_BASE_URL")
     ):

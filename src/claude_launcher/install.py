@@ -213,14 +213,16 @@ GATE_ALLOW_RULES = (f"mcp__{MCP_NAME}",)
 #: SHELL TERM USER, while the codex process above it also held CLAUNCH_PROJECT
 #: and CLAUNCH_SCRATCH. So every variable the daemon sets for claunch's own use
 #: is named here: the session's identity, project and scratch directory
-#: (:func:`daemon.harness.build_command`), and the daemon instance with every
-#: variable its manifest may set. Without the instance, a session of a
+#: (:func:`daemon.harness.build_command`), its general test directory
+#: (``CLAUNCH_TEST_DIR``), and the daemon instance with every variable its
+#: manifest may set. Without the instance, a session of a
 #: ``claunch -L NAME`` daemon resolves the default instance's ``daemon.json``,
 #: and its mesh and spawn tools act on the default daemon's sessions.
 MCP_SESSION_ENV = (
     cflow_state.SESSION_ENV,
     projects.SESSION_ENV,
     "CLAUNCH_SCRATCH",
+    "CLAUNCH_TEST_DIR",
     daemon_paths.INSTANCE_ENV,
     *instance_manifest.ENV_VARS,
 )

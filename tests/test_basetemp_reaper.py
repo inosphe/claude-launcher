@@ -57,14 +57,14 @@ def _session(name: str) -> SimpleNamespace:
     ("s995c1011010955", "s995", True),
     ("s995w", "s995", True),
     ("s995-iso", "s995", True),
-    ("s995", "s995", False),            # the bare name is nobody's basetemp shape
+    ("s995", "s995", True),             # the bare name: the general test directory
     ("s995-", "s995", False),
     ("s995c101101095", "s995", False),  # nine digits: not changed_tests' stamp
     ("s995ww", "s995", False),
     ("s995c1011010955", "s99", False),  # s99 is a prefix of s995, not its owner
     ("s99c1011010955", "s995", False),
 ])
-def test_matches_only_the_three_shapes(name, session, expected):
+def test_matches_only_the_shapes(name, session, expected):
     assert br.matches(name, session) is expected
 
 
@@ -74,6 +74,7 @@ def test_owner_is_the_longest_matching_name():
     assert br.owner("s995-iso", names) == "s995"
     assert br.owner("s995c1011010955", names) == "s995"
     assert br.owner("s99w", names) == "s99"
+    assert br.owner("s995", names) == "s995"
     assert br.owner("unrelated", names) is None
 
 
@@ -99,6 +100,27 @@ def test_exit_removes_the_sessions_basetemps_and_leaves_a_row(tmp_path):
     assert row["run"] == summary
     assert "started_at" in row and "ended_at" in row and "reaped_at" in row
     assert rows["s995w"]["workers"] == 4
+
+
+def test_exit_removes_the_general_test_directory_too(tmp_path):
+    """``<root>/<session>`` ($CLAUNCH_TEST_DIR) is reaped with the basetemps.
+
+    That is the kill/archive cleanup: whatever a session wrote there
+    (browser profiles, playwright reports) goes when the session ends,
+    without the session remembering to clean it.
+    """
+    root = tmp_path / "t"
+    general = root / "s995"
+    (general / "browser-profile").mkdir(parents=True)
+    (general / "browser-profile" / "prefs.js").write_text("x", encoding="utf-8")
+    keep = _run_tree(root, "s995c1011010955")
+
+    _reaper(tmp_path, [("s995", True)]).session_exited(_session("s995"))
+
+    assert not general.exists()
+    assert not keep.exists()
+    names = {Path(r["path"]).name for r in _rows(tmp_path)}
+    assert names == {"s995", "s995c1011010955"}
 
 
 def test_exit_leaves_other_sessions_with_nested_names_alone(tmp_path):

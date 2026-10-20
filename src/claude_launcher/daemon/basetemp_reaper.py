@@ -6,7 +6,9 @@ after the session that ran it:
 
 * ``<session>c<MMDDHHMMSS>`` -- ``tools/changed_tests.py`` (one per run),
 * ``<session>w`` -- ``tools/sweep.py``,
-* ``<session>-<anything>`` -- a basetemp a session pinned by hand.
+* ``<session>-<anything>`` -- a basetemp a session pinned by hand,
+* ``<session>`` (the bare name) -- the session's general test directory
+  (``$CLAUNCH_TEST_DIR``), non-pytest artifacts included.
 
 ``changed_tests.prune_basetemps`` keeps the newest eight of a session's own
 while the session is still running. Nothing reclaimed them after it ended,
@@ -78,11 +80,18 @@ def default_root() -> Path:
 
 
 def matches(name: str, session: str) -> bool:
-    """Whether directory ``name`` has one of ``session``'s basetemp shapes."""
+    """Whether directory ``name`` has one of ``session``'s shapes under the root.
+
+    The bare ``<session>`` name is the session's general test directory
+    (``$CLAUNCH_TEST_DIR``, pytest_basetemp.session_test_dir): non-pytest
+    artifacts a session writes there are reaped at its exit exactly like
+    its basetemps. It was nobody's shape before that directory existed,
+    so claiming it breaks no existing attribution.
+    """
     if not session or not name.startswith(session):
         return False
     rest = name[len(session):]
-    return rest == "w" or bool(_STAMP.fullmatch(rest)) or (
+    return rest == "" or rest == "w" or bool(_STAMP.fullmatch(rest)) or (
         rest.startswith("-") and len(rest) > 1
     )
 
