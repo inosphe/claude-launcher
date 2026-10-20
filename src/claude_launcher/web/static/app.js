@@ -6248,17 +6248,40 @@ function isPiDurable(name) {
   return !!name && sessionsCache.some((s) => s.name === name && s.kind === "pi-durable");
 }
 
+/* An operator v2's bound session (daemon/operators_v2.py) talks to the user
+   in the Operator view, not in this session's panes: its conversation is a
+   thread owned by `operator:<id>`, which the session-thread surfaces leave
+   out (threads/store.py), and its questions are opv2_ask, not session QA.
+   🗪 threads and ? qa are dead doors there, so they are not drawn. The rail
+   already carries the run's workflow for every session, so its name is the
+   mark — no extra request, and the daemon refused the QA writes besides
+   (daemon/qa_api.py). */
+function isOperatorSession(name) {
+  return !!name && (cflow2RailCache[name]?.workflow || "") === "operator-v2";
+}
+
 function syncSessionResourceButtons() {
   const name = currentPage === "terminal" ? currentName : null;
   const chart = $("term-chartbtn");
   if (chart && chart.classList.contains("hidden") === isPiDurable(name))
     chart.classList.toggle("hidden", !isPiDurable(name));
+  // The header also sits over the session's log page (sessionLineOnPage);
+  // the shipped page always has it, a sliced harness may not.
+  const lineName = typeof sessionLineOnPage === "function"
+    ? (sessionLineOnPage(currentPage) ? currentName : null)
+    : name;
+  const operator = isOperatorSession(lineName);
+  for (const id of ["term-qabtn", "term-threadsbtn"]) {
+    const btn = $(id);
+    if (btn && btn.classList.contains("hidden") !== operator)
+      btn.classList.toggle("hidden", operator);
+  }
   const present = {
     "term-simsbtn": !!name && sessionSimCache.some(s => s.owner === name),
     "term-splitbtn": !!name && !!(sessCflowRun(name) || cflow2RailCache[name]),
     "term-chartbtn": isPiDurable(name),
-    "term-qabtn": !!name && (qaRailCache[name]?.unresolved || 0) > 0,
-    "term-threadsbtn": !!name && (threadsRailCache[name]?.open || 0) > 0,
+    "term-qabtn": !operator && !!name && (qaRailCache[name]?.unresolved || 0) > 0,
+    "term-threadsbtn": !operator && !!name && (threadsRailCache[name]?.open || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
@@ -6266,7 +6289,7 @@ function syncSessionResourceButtons() {
       btn.classList.toggle("has-resource", hasResource);
   }
   const threads = $("term-threadsbtn");
-  const news = threadsNews(name);
+  const news = !operator && threadsNews(name);
   if (threads && threads.classList.contains("has-news") !== news)
     threads.classList.toggle("has-news", news);
 }
@@ -6367,6 +6390,8 @@ function markQaSeen(name) {
    opens only for questions still waiting: its closed history is no news. */
 function maybeOpenQaPane() {
   const name = currentPage === "terminal" ? currentName : null;
+  // An operator session has no session QA pane to open (isOperatorSession).
+  if (isOperatorSession(name)) { markQaSeen(name); return; }
   const row = name && qaRailCache[name];
   if (!row || !row.agent_seq) return;
   const seen = loadQaSeen()[name];
@@ -21639,7 +21664,13 @@ function syncSplitPane() {
   // conversation page (sessionLineOnPage) — the pane goes under the
   // conversation there, at the same remembered ratio.
   const name = sessionLineOnPage(currentPage) ? currentName : null;
-  const lay = name ? sessLayoutFor(name) : null;
+  const remembered = name ? sessLayoutFor(name) : null;
+  // An operator session has neither a threads nor a session QA pane (see
+  // isOperatorSession); a layout remembered from before it became one is
+  // not honoured, so the terminal takes the column back.
+  const talkAway = !!remembered && isOperatorSession(name)
+    && (talkShows(remembered.pane, "threads") || talkShows(remembered.pane, "qa"));
+  const lay = talkAway ? null : remembered;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
   $("term-split").classList.toggle("hidden", !up);
   $("term-wf").classList.toggle("hidden", !up);

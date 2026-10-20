@@ -28,6 +28,9 @@ const ctx = vm.createContext({
   currentName: "a", currentPage: "terminal", cflow2RailCache: {},
   sessionsCache: [{name: "a", kind: ""}, {name: "b", kind: "pi-durable"}],
   v1: null, sessCflowRun(name) { return ctx.v1?.scope === name ? ctx.v1 : null; },
+  // maybeOpenQaPane writes the layout directly; on an operator session it
+  // must return before it ever gets there (claunch-4278b.1).
+  setSessLayout(name) { throw new Error("opened a talk pane on " + name); },
   api: async () => { requests++; if (fail) throw Error("offline"); return {ok: true, json: async () => ({sims: rows})}; },
 });
 vm.runInContext(src.slice(src.indexOf("let sessionSimCache ="), src.indexOf("async function refreshCflow2Rail(")), ctx);
@@ -96,5 +99,26 @@ const has = n => n.classList.contains("has-resource");
   ctx.syncSessionResourceButtons(); assert.ok(has(threads), "an open thread lights 🗪 threads");
   ctx.currentName = "b"; ctx.syncSessionResourceButtons(); assert.ok(!has(threads), "closed threads only: dark");
   ctx.currentName = "ghost"; ctx.syncSessionResourceButtons(); assert.ok(!has(threads), "no threads: dark");
+  // An operator v2's session draws neither door (claunch-4278b.1): its
+  // conversation is the Operator view, its questions opv2_ask. The rail's
+  // workflow is the mark; the caches above still hold resources for "a", so
+  // hiding is what keeps them dark.
+  ctx.currentPage = "terminal"; ctx.currentName = "a";
+  ctx.cflow2RailCache.a = {workflow: "operator-v2"};
+  ctx.syncSessionResourceButtons();
+  assert.ok(qa.classList.contains("hidden"), "an operator session draws no ? qa");
+  assert.ok(threads.classList.contains("hidden"), "an operator session draws no 🗪 threads");
+  assert.ok(!has(qa) && !has(threads), "and neither is lit despite cached resources");
+  // The QA pane does not open by itself there either (the stub would throw).
+  vm.runInContext('qaRailCache = {a: {unresolved: 1, agent_seq: 99}}', ctx);
+  ctx.maybeOpenQaPane();
+  // A session that is not an operator's keeps both doors.
+  ctx.currentName = "b"; ctx.syncSessionResourceButtons();
+  assert.ok(!qa.classList.contains("hidden") && !threads.classList.contains("hidden"),
+    "a plain session keeps ? qa and 🗪 threads");
+  delete ctx.cflow2RailCache.a;
+  ctx.currentName = "a"; ctx.syncSessionResourceButtons();
+  assert.ok(!qa.classList.contains("hidden") && !threads.classList.contains("hidden"),
+    "the mark gone, the buttons return");
   console.log("session resources checks passed");
 })().catch(e => { console.error(e); process.exitCode = 1; });

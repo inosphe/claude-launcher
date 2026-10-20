@@ -89,6 +89,11 @@ let transcriptMachine = null;
 function applySplitRatio(r) { calls.ratios.push(r); }
 function openSplit(name, kind) { splitFor = name; splitKind = kind; calls.opened.push(name); calls.kinds.push(kind); }
 function closeSplit() { splitFor = null; splitKind = null; calls.closed++; }
+// Which sessions are operator v2's (app.js isOperatorSession; that predicate
+// itself is exercised in sessionresources_check). This file only needs what
+// syncSplitPane asks of it.
+let operatorSessions = new Set();
+function isOperatorSession(name) { return operatorSessions.has(name); }
 // The 🗪 threads button's news mark (threadspane_check holds what it reads).
 function threadsNews() { return true; }
 function markThreadsSeen(name) { calls.seen.push(name); }
@@ -102,6 +107,7 @@ Object.assign(exports, {
   splitFor: () => splitFor,
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
+  setOperator: (n, on) => { if (on) operatorSessions.add(n); else operatorSessions.delete(n); },
   setTranscript: (n, m = null) => { transcriptName = n; transcriptMachine = m; },
 });`;
 
@@ -254,6 +260,36 @@ check("the key carries the base path",
   w.ctx.syncSplitPane();
   check("...and so does a shadow's of the same name",
         w.nodes["term-wf"].classes.has("hidden"));
+}
+
+/* --- an operator v2's session has no talk pane (claunch-4278b.1) --------- */
+/* Its conversation is the Operator view (threads owned by operator:<id>,
+   opv2_ask questions), so a threads or qa pane remembered from before the
+   session became one is not honoured — and a pane that is not a talk pane
+   (the run chart) is still the session's. */
+{
+  const w = build({ stored: JSON.stringify({ s15: { split: true, pane: "threads", ratio: 0.55 } }) });
+  w.ctx.setOperator("s15", true);
+  w.ctx.syncSplitPane();
+  check("an operator session does not honour a remembered threads pane",
+        w.nodes["term-wf"].classes.has("hidden")
+        && w.nodes["term-threadsbtn"].attrs["aria-pressed"] === "false",
+        { hidden: w.nodes["term-wf"].classes.has("hidden"), calls: w.calls });
+  w.ctx.setSessLayout("s15", { pane: "qa" });
+  w.ctx.syncSplitPane();
+  check("...nor a remembered qa pane",
+        w.nodes["term-wf"].classes.has("hidden")
+        && w.nodes["term-qabtn"].attrs["aria-pressed"] === "false");
+  w.ctx.setSessLayout("s15", { pane: "chart" });
+  w.ctx.syncSplitPane();
+  check("...but a non-talk pane still opens",
+        !w.nodes["term-wf"].classes.has("hidden"));
+  w.ctx.setOperator("s15", false);
+  w.ctx.setSessLayout("s15", { pane: "threads" });
+  w.ctx.syncSplitPane();
+  check("a session that is not an operator's keeps its threads pane",
+        !w.nodes["term-wf"].classes.has("hidden")
+        && w.calls.kinds[w.calls.kinds.length - 1] === "threads");
 }
 {
   const w = build({ stored: JSON.stringify({ s15: { split: true } }),

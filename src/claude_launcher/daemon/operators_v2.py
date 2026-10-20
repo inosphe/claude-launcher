@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
-from .. import atomic, projects
+from .. import atomic, projects, session_env
 from ..threads import store as thread_store
 from . import paths, session_events, thread_images
 from .session import (
@@ -689,6 +689,22 @@ class OperatorsV2:
         rec["session"] = name
         self.save(rec)
         self.system(rec, f"Operator 세션 {name}이 시작되었습니다.")
+
+    def operator_of_session(self, name):
+        """The operator whose bound session is ``name``, or None.
+
+        The daemon reads this to keep a bound session to the operator's
+        surface (``daemon/qa_api.py`` refuses session QA there): the session's
+        conversation is the Operator view, not the session's threads or QA
+        panes.
+        """
+        name = str(name or "").strip()
+        if not name:
+            return None
+        for rec in self.records().values():
+            if rec.get("session") == name:
+                return rec
+        return None
 
     # -- the bot's output --------------------------------------------------
     def _idempotent(self, rec, token, payload):
@@ -1476,6 +1492,11 @@ def install(app, *, create=None, gates=None, work=None):
         scope = "전체 프로젝트" if rec["all"] else ", ".join(rec["projects"])
         spec = {"profile": profile, "project": projects.DEFAULT if rec["all"] else rec["projects"][0],
                 "context": json.dumps({"operator_v2": rec["id"]}), "beads": False,
+                # The session carries which operator it serves, so the MCP
+                # server it spawns keeps its surface (no session QA,
+                # mcp_server._hidden_tools) without asking the daemon at a
+                # moment the binding may not be written yet.
+                "env": {session_env.OPERATOR_ENV: rec["id"]},
                 "name": str(body.get("name") or "").strip(),
                 "task": (f"너는 Operator v2 '{rec['name']}'(id {rec['id']})이다. 담당 범위: {scope}. "
                          "사용자와의 대화는 터미널이 아니라 opv2_* 도구로 한다. opv2_poll로 범위 안 "

@@ -390,6 +390,9 @@ function q(over = {}) {
       localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) },
       sessLayoutFor: (n) => ({ split: false, pane: "run", ...(layouts[n] || {}) }),
       setSessLayout: (n, p) => { layouts[n] = { ...(layouts[n] || {}), ...p }; },
+      // No session here is an operator's (sessionresources_check holds that
+      // mark): this block is about the pane opening on a session's change.
+      isOperatorSession: () => false,
       JSON,
     });
     vm.runInContext(src.slice(src.indexOf("let qaRailCache ="), src.indexOf("async function refreshQaRail(")), ctx);

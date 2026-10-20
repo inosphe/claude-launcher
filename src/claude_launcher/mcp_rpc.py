@@ -45,7 +45,18 @@ class Server:
     tools: Tuple[dict, ...]
     dispatch: Callable[[str, dict], dict]
     errors: Tuple[type, ...]
+    #: The guidance text ``initialize`` hands the host.
     instructions: str = ""
+    #: Tool names this process leaves out of ``tools/list`` and refuses in
+    #: ``tools/call``, read on every request rather than fixed at import: one
+    #: shipped server serves every session, and a session whose surface
+    #: differs (an operator v2 has no session QA) hides that family for
+    #: itself by what its environment says it is.
+    hide: Optional[Callable[[], Sequence[str]]] = None
+
+    def hidden(self) -> frozenset:
+        """The tool names hidden from this process right now."""
+        return frozenset(self.hide() or ()) if self.hide is not None else frozenset()
 
     def handle(self, msg: dict) -> Optional[dict]:
         """Return a response dict, or ``None`` for notifications."""
@@ -78,11 +89,15 @@ class Server:
         if method == "ping":
             return _result(msg_id, {})
         if method == "tools/list":
-            return _result(msg_id, {"tools": list(self.tools)})
+            hidden = self.hidden()
+            tools = self.tools if not hidden else [t for t in self.tools if t.get("name") not in hidden]
+            return _result(msg_id, {"tools": list(tools)})
         if method == "tools/call":
             name = str(params.get("name") or "")
             args = params.get("arguments") or {}
             try:
+                if name in self.hidden():
+                    raise self.errors[0](f"tool {name!r} is not available to this session")
                 payload = self.dispatch(name, args if isinstance(args, dict) else {})
                 text = json.dumps(payload, ensure_ascii=False, indent=2)
                 return _result(
@@ -128,7 +143,9 @@ class Server:
         return 0
 
 
-def merge(name: str, servers: Sequence[Server]) -> Server:
+def merge(name: str, servers: Sequence[Server],
+          hide: Optional[Callable[[], Sequence[str]]] = None,
+          instructions: Optional[str] = None) -> Server:
     """One server offering every tool of ``servers``, dispatched by name.
 
     Tool names stay as they are — no prefixing. The agent-facing names are
@@ -136,6 +153,11 @@ def merge(name: str, servers: Sequence[Server]) -> Server:
     and a merge that renamed them would make the docs lie for the sake of a
     namespace nothing is currently competing for. :class:`ToolNameCollision`
     is what keeps that assumption honest as tools are added.
+
+    ``hide`` is the merged surface's own :attr:`Server.hide`: a process that
+    serves one session with a narrower surface decides it there, since the
+    per-feature servers below it are shared by every session. ``instructions``
+    likewise overrides the joined guidance, for the same reason.
     """
     owner: Dict[str, Server] = {}
     tools: List[dict] = []
@@ -164,7 +186,9 @@ def merge(name: str, servers: Sequence[Server]) -> Server:
     )
     return Server(
         name=name, tools=tuple(tools), dispatch=dispatch, errors=errors,
-        instructions="\n\n".join(s.instructions for s in servers if s.instructions),
+        instructions=(instructions if instructions is not None
+                      else "\n\n".join(s.instructions for s in servers if s.instructions)),
+        hide=hide,
     )
 
 

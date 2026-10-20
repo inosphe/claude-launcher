@@ -84,11 +84,17 @@ class FakeManager:
         return True
 
 
-def run(tmp_path, scenario, sessions=None):
+def run(tmp_path, scenario, sessions=None, operator_sessions=()):
     sessions = sessions or [FakeSession("s1"), FakeSession("s2")]
     mgr = FakeManager(sessions)
     app = web.Application()
     app["manager"] = mgr
+    if operator_sessions:
+        # What daemon/api.py installs before this module: the operator store.
+        class _Operators:
+            def operator_of_session(self, name):
+                return {"id": f"op-{name}"} if name in operator_sessions else None
+        app["operators_v2"] = _Operators()
     qa_api.install(app, Q.QaStore(tmp_path / "qa.sqlite3"))
 
     async def go():
@@ -151,6 +157,32 @@ def test_identity_rules(tmp_path):
         await req("POST", f"/api/qa/{q['id']}/delete", {"session": "s1", "revision": 1})
         await req("GET", "/api/qa", status=400)
     run(tmp_path, scenario)
+
+
+def test_an_operator_session_has_no_session_qa(tmp_path):
+    """An operator v2's session asks in the Operator view (opv2_ask).
+
+    The MCP server hides qa_* from it (mcp_server._hidden_tools); the routes
+    refuse the same writes, including for a session started before that
+    switch, and the refusal says where its questions go instead.
+    """
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/qa", {"session": "op1", "title": "Q"}, status=403)
+        assert "opv2_ask" in res["error"]
+        # a question asked before the session belonged to an operator stays
+        # editable by the user but not by that session
+        q = (await req("POST", "/api/qa", {"session": "s1", "title": "Q"}))["question"]
+        await req("POST", f"/api/qa/{q['id']}", {"session": "op1", "revision": 1, "title": "x"}, status=403)
+        await req("POST", f"/api/qa/{q['id']}/close", {"session": "op1", "revision": 1}, status=403)
+        await req("POST", f"/api/qa/{q['id']}/delete", {"session": "op1", "revision": 1}, status=403)
+        await req("POST", "/api/qa/nudge/latest/nothing", {"session": "op1"}, status=403)
+        # reads still answer, and the user's own writes are untouched
+        assert (await req("GET", "/api/qa?session=op1"))["questions"] == []
+        await req("POST", f"/api/qa/{q['id']}/answer", {"revision": 1, "text": "user says"}, status=200)
+        # an ordinary session is unaffected
+        await req("POST", "/api/qa", {"session": "s2", "title": "Q2"}, status=200)
+    run(tmp_path, scenario, [FakeSession("s1"), FakeSession("s2"), FakeSession("op1")],
+        operator_sessions={"op1"})
 
 
 def test_a_held_session_is_woken_with_the_answer(tmp_path):

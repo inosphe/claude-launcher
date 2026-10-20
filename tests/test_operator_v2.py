@@ -26,7 +26,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher import cli_beads, mcp_server, operator_v2_mcp, session_commits
+from claude_launcher import cli_beads, mcp_server, operator_v2_mcp, qa_mcp, session_commits, session_env
 from claude_launcher.daemon import operators_v2, transcript_view
 
 
@@ -520,6 +520,54 @@ def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
     # the session runs the operator-v2 workflow with this operator's id as its input
     assert spec["workflow"] == "operator-v2" == operators_v2.WORKFLOW
     assert spec["cflow_inputs"] == {"operator": made[0]["id"]}
+    # and carries the id into its environment, so the MCP server it spawns
+    # knows whose surface it is (claunch-4278b.1)
+    assert spec["env"] == {session_env.OPERATOR_ENV: made[0]["id"]}
+
+
+def test_operator_of_session_names_the_bound_record(world):
+    """The daemon's way from a session name to its operator (raises no one)."""
+    assert world.ops.operator_of_session("opa")["id"] == world.alpha["id"]
+    assert world.ops.operator_of_session("opall")["id"] == world.every["id"]
+    assert world.ops.operator_of_session("a1") is None  # an ordinary session
+    assert world.ops.operator_of_session("") is None
+    assert world.ops.operator_of_session(None) is None
+
+
+def test_an_operator_session_is_offered_no_session_qa(monkeypatch):
+    """qa_* is not part of an operator session's surface (claunch-4278b.1).
+
+    Its questions are opv2_ask in the Operator view. The merged server keeps
+    the whole shipped list for every other session, and a call for a hidden
+    tool is refused rather than dispatched.
+    """
+    def list_names():
+        resp = mcp_server.SERVER.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        return {t["name"] for t in resp["result"]["tools"]}
+
+    monkeypatch.delenv(session_env.OPERATOR_ENV, raising=False)
+    plain = list_names()
+    assert set(qa_mcp.TOOL_NAMES) <= plain
+    assert {"thread_list", "opv2_poll"} <= plain
+    assert "Session QA" in mcp_server._instructions()
+
+    monkeypatch.setenv(session_env.OPERATOR_ENV, "0123456789ab")
+    operator = list_names()
+    assert not (set(qa_mcp.TOOL_NAMES) & operator)
+    # the guidance paragraph leaves with the tools (built once per process)
+    assert "Session QA" not in mcp_server._instructions()
+    assert "Session threads" in mcp_server._instructions()
+    # only that family leaves: threads and opv2 stay
+    assert plain - operator == set(qa_mcp.TOOL_NAMES)
+    # the shipped list is not narrowed — the installer reports what exists
+    assert set(qa_mcp.TOOL_NAMES) <= {t["name"] for t in mcp_server.TOOLS}
+
+    resp = mcp_server.SERVER.handle({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "qa_ask", "arguments": {"title": "x"}}})
+    result = resp["result"]
+    assert result["isError"] is True
+    assert "not available" in result["content"][0]["text"]
 
 
 def test_the_v2_tools_are_merged_and_v1_is_gone():

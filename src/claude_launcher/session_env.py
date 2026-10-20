@@ -32,6 +32,12 @@ import os
 from pathlib import Path
 from typing import Dict, List, Mapping, MutableMapping, Optional
 
+#: The operator v2 a session belongs to (``daemon.operators_v2``), carried by
+#: the session so the MCP server it spawns can tell whose surface it is
+#: without asking the daemon: an operator's session has no session QA
+#: (``qa_*``) — its questions are ``opv2_ask`` in the Operator view.
+OPERATOR_ENV = "CLAUNCH_OPERATOR_V2"
+
 #: claunch's own per-session variables. Each is set by the daemon for one
 #: session (or by a tool for one session's run) and names that session, its
 #: files or its grants.
@@ -47,6 +53,7 @@ CLAUNCH_SESSION_ENV = (
     "CLAUNCH_WINDOW_ADVISORY_N",
     "CLAUNCH_WINDOW_REPORT",
     "CLAUNCH_SIM_ID",  # a simulation's run session (daemon.sim_api)
+    OPERATOR_ENV,  # an operator v2's bound session (daemon.operators_v2)
 )
 
 #: What a harness exports into its own tool shell about the conversation that
