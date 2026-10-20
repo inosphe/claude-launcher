@@ -412,10 +412,16 @@ function threadsBox(op) {
 /* The session line: which operator this conversation is with, the session
    it runs in and that session's state, and the way to that session's page.
    A stopped session keeps its link: its page shows an ended session too. */
+/* The thread head pins below this row where the page is the scroller, so the
+   sticky offset it uses is this row's height (observer.css). Measured after
+   the row is drawn: its content is what gives it height. */
+function syncSessionbarHeight() {
+  if(root) root.style.setProperty("--op-sessionbar-h", `${bar?.offsetHeight || 0}px`);
+}
 function sessionBar(op) {
   if(!bar) return;
   bar.hidden = !op;
-  if(!op) { bar.replaceChildren(); return; }
+  if(!op) { bar.replaceChildren(); syncSessionbarHeight(); return; }
   const who = node("span", "", "op-bar-who");
   who.append(dot(op), node("strong", op.name));
   const parts = [who];
@@ -428,6 +434,7 @@ function sessionBar(op) {
     parts.push(link);
   } else parts.push(node("span", "세션 없음", "op-bar-session"));
   bar.replaceChildren(...parts);
+  syncSessionbarHeight();
 }
 function head(op) {
   const box = node("div", "", "op-head");

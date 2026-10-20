@@ -317,14 +317,15 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       const area = document.querySelector("#opfab-view .op-area");
       area.scrollTop = area.scrollHeight;
       const box = area.getBoundingClientRect();
-      // Sticky offsets are measured from the scroller's content box (its top
-      // padding stays above the row), so the padding is not part of the drift.
-      const pad = parseFloat(getComputedStyle(area).paddingTop) || 0;
-      const head = document.querySelector("#opfab-view .op-thread-head").getBoundingClientRect();
+      const headBox = document.querySelector("#opfab-view .op-thread-head");
+      const head = headBox.getBoundingClientRect();
       const back = document.querySelector("#opfab-view .op-thread-back").getBoundingClientRect();
-      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top - pad), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom };
+      // The row covers the scroller's top padding too: a point just under the
+      // scroller's own top edge lands in the head, not in an entry.
+      const probe = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
+      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
     });
-    assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true }, "the thread head stays at the top of the phone's scroller");
+    assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the thread head covers the top of the scroller, padding included, and keeps 「← 목록」");
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT });
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector(".opfab-modal").open);

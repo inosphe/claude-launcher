@@ -402,12 +402,20 @@
 /* The thread's head -- 「← 목록」, the title and 닫기 -- holds to the top of the
    conversation however far the reader has scrolled (claunch-1ruqi), the way
    the session line above it does. It keeps the surface behind it so entries
-   pass under the row instead of through it, and sits above the session line
-   where a page has one scroller: on a phone the page scrolls, so both rows
-   would otherwise stick to its top edge. --op-surface is the host's own
-   background (#opfab-view is the floating dialog's). */
-:is(#observer-operators, #opfab-view) .op-thread-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; min-width: 0; padding-bottom: 6px; border-bottom: 1px solid #2a2e36; background: var(--op-surface, #161b22); }
+   pass under the row instead of through it. Two details come from where the
+   scrolling happens:
+   --op-surface is the host's background (#opfab-view is the floating dialog's).
+   --op-scroll-pad pulls the row up over the scroller's own top padding; a
+   sticky offset is measured from the content box, so top: 0 would leave that
+   band showing the entries scrolling under it.
+   Where the page is the one scroller the row holds below the session line
+   instead of over it (its height is measured into --op-sessionbar-h): both
+   rows stay on screen, and the session line keeps the pinning it had. */
+:is(#observer-operators, #opfab-view) .op-thread-head { position: sticky; top: calc(-1 * var(--op-scroll-pad, 0px)); z-index: 2; display: flex; align-items: center; gap: 8px; min-width: 0; padding-bottom: 6px; border-bottom: 1px solid #2a2e36; background: var(--op-surface, #161b22); }
 #opfab-view { --op-surface: #14171c; }
+@media (max-width: 820px) {
+  #observer-operators .op-thread-head { top: var(--op-sessionbar-h, 0px); }
+}
 :is(#observer-operators, #opfab-view) .op-thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 :is(#observer-operators, #opfab-view) .op-thread-title-input { flex: 1; min-width: 0; font: inherit; color: #d8dbe0; background: #1b1e24; border: 1px solid #3b424e; border-radius: 6px; padding: 6px 10px; min-height: 32px; }
 :is(#observer-operators, #opfab-view) :is(.op-thread-back, .op-thread-close, .op-thread-new) { flex: none; min-height: 32px; }
@@ -455,7 +463,7 @@
   #observer-view.dock-open > .observer-layout { display: grid; grid-template-columns: minmax(0,1fr) clamp(320px,34%,560px); }
   #observer-view.dock-open #observer-dock { align-self: start; position: sticky; top: 0; height: var(--observer-viewport,100vh); display: flex; flex-direction: column; min-width: 0; box-sizing: border-box; border-left: 1px solid #2a2e36; background: #161b22; }
   #observer-view.dock-open #observer-operators { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0; padding: 0; border: 0; border-radius: 0; }
-  #observer-view.dock-open #observer-operators .op-area { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; }
+  #observer-view.dock-open #observer-operators .op-area { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; --op-scroll-pad: 10px; }
 }
 @media(max-width:820px) {
   #observer-view.dock-open #observer-dock { order: -1; margin: 8px 12px 0; }
