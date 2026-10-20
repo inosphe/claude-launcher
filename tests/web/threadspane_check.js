@@ -697,7 +697,11 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const noticed = [], cleared = [];
   const actx = vm.createContext({
     BASE: "/", currentPage: "terminal", currentName: "s1", sessionSimCache: [], cflow2RailCache: {},
-    sessionsCache: [], sessCflowRun: () => null, isPiDurable: () => false, $: (id) => (id === "term-threadsbtn" ? btn : null),
+    sessionsCache: [], sessCflowRun: () => null, isPiDurable: () => false,
+    // Not an operator session here: this file holds the threads rail, and
+    // sessionresources_check holds the operator mark itself.
+    isOperatorSession: () => false,
+    $: (id) => (id === "term-threadsbtn" ? btn : null),
     sessLayoutFor: () => ({split: false, pane: "run"}),
     talkShows: (pane, what) => pane === what || pane === "both",
     localStorage: {getItem: (k) => (appStore.has(k) ? appStore.get(k) : null), setItem: (k, v) => appStore.set(k, String(v))},

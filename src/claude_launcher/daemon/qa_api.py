@@ -325,6 +325,32 @@ def install(app, store: Optional[qa_store.QaStore] = None):
         except Exception:  # noqa: BLE001 -- no such session
             return False
 
+    def operator_session(name: str) -> bool:
+        """Whether ``name`` is an operator v2's bound session.
+
+        Such a session has no session QA: the user it talks to is in the
+        Operator view, where its questions are ``opv2_ask``. The MCP server
+        hides the ``qa_*`` tools from it (mcp_server._hidden_tools); this is
+        the enforcement, since a session started before that switch — or one
+        whose environment is not the MCP server's — could still call the
+        routes. ``operators_v2`` is read late, like the threads store above.
+        """
+        ops = app.get("operators_v2")
+        try:
+            return bool(ops is not None and ops.operator_of_session(name))
+        except Exception:  # noqa: BLE001 -- an unreadable operator store refuses nothing
+            log.exception("qa: could not read the operator bindings")
+            return False
+
+    def no_session_qa(name: str) -> Optional[web.Response]:
+        """The refusal for an operator session's QA write, or None."""
+        if name == qa_store.USER or not operator_session(name):
+            return None
+        return web.json_response(
+            {"error": f"{name} is an operator v2's session; its questions go through the Operator view "
+                      "(opv2_ask), not session QA"},
+            status=403)
+
     def thread_of(tid: str) -> Optional[dict]:
         threads = app.get("threads")
         if threads is None:
@@ -379,6 +405,9 @@ def install(app, store: Optional[qa_store.QaStore] = None):
     async def h_ask(request):
         body = await body_of(request)
         actor = actor_of(body)
+        refusal = no_session_qa(actor)
+        if refusal is not None:
+            return refusal
         if actor != qa_store.USER and not known(actor):
             return web.json_response({"error": f"no session {actor!r} on this daemon"}, status=404)
         tid = body.get("thread")
@@ -398,20 +427,32 @@ def install(app, store: Optional[qa_store.QaStore] = None):
 
     async def h_update(request):
         body = await body_of(request)
-        res, err = await call(qa.update, actor_of(body), request.match_info["id"], body.get("revision"),
+        actor = actor_of(body)
+        refusal = no_session_qa(actor)
+        if refusal is not None:
+            return refusal
+        res, err = await call(qa.update, actor, request.match_info["id"], body.get("revision"),
                               title=body.get("title"), body=body.get("body"),
                               options=body.get("options"), multi=body.get("multi"))
         return err or web.json_response({"question": res})
 
     async def h_close(request):
         body = await body_of(request)
-        res, err = await call(qa.close, actor_of(body), request.match_info["id"], body.get("revision"),
+        actor = actor_of(body)
+        refusal = no_session_qa(actor)
+        if refusal is not None:
+            return refusal
+        res, err = await call(qa.close, actor, request.match_info["id"], body.get("revision"),
                               note=body.get("note"))
         return err or web.json_response({"question": res})
 
     async def h_delete(request):
         body = await body_of(request)
-        res, err = await call(qa.delete, actor_of(body), request.match_info["id"], body.get("revision"))
+        actor = actor_of(body)
+        refusal = no_session_qa(actor)
+        if refusal is not None:
+            return refusal
+        res, err = await call(qa.delete, actor, request.match_info["id"], body.get("revision"))
         return err or web.json_response(res)
 
     async def h_answer(request):
@@ -465,8 +506,12 @@ def install(app, store: Optional[qa_store.QaStore] = None):
 
     async def h_nothing(request):
         body = await body_of(request)
+        actor = actor_of(body)
+        refusal = no_session_qa(actor)
+        if refusal is not None:
+            return refusal
         nid = request.match_info["id"]
-        res, err = await call(qa.nothing, actor_of(body), None if nid == "latest" else nid,
+        res, err = await call(qa.nothing, actor, None if nid == "latest" else nid,
                               note=body.get("note"))
         return err or web.json_response({"nudge": res})
 

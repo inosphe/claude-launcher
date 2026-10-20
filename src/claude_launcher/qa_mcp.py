@@ -81,6 +81,11 @@ TOOLS = [
      }}},
 ]
 
+#: The names of the tools above, for a process that offers this surface to
+#: some sessions and not others (mcp_server hides them from an operator v2's
+#: session, whose questions are opv2_ask in the Operator view).
+TOOL_NAMES = tuple(str(tool["name"]) for tool in TOOLS)
+
 
 class QaMcpError(Exception):
     pass
