@@ -92,6 +92,7 @@ globalThis.ThreadsPane = (() => {
   const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
   const composers = new WeakMap(); // composer textarea -> its draft key
   const attached = new Map(); // thread id ("" = new thread) -> [{file, src, isFile?}]: attachments waiting to be sent
+  const unfolded = new Set(); // thread ids whose closed question chips are shown
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
   const SIDE_W_KEY = "claunch_threadsidew"; // localStorage: the list column's width in px
@@ -263,6 +264,14 @@ globalThis.ThreadsPane = (() => {
     const rel = link.rel === "subject" ? "다루는 질문" : "여기서 만든 질문";
     const title = link.status === "deleted" ? "(삭제됨)" : excerpt(link.title, 40);
     return `${rel} · ${link.id} ${title}`;
+  }
+
+  /* A thread's link chips to draw: the closed questions' only when `open`,
+     and how many closed ones there are (0: no fold toggle). */
+  function splitLinks(links, open) {
+    const all = links || [];
+    const folded = all.filter((l) => l.status === "closed").length;
+    return {shown: open ? all : all.filter((l) => l.status !== "closed"), folded};
   }
 
   /* The default text of a "QA로 정리 요청" post when the composer is empty. */
@@ -995,16 +1004,31 @@ globalThis.ThreadsPane = (() => {
       }
     }
 
+    // Closed questions stay folded behind a toggle until it is pressed
+    // (claunch-cedjc); the box scrolls inside a capped height in the stylesheet.
     let links = null;
     if ((t.links || []).length) {
       links = node("div", "th-links");
-      for (const link of t.links) {
+      const {shown, folded} = splitLinks(t.links, unfolded.has(t.id));
+      for (const link of shown) {
         const chip = node("button", `th-link-chip qa-st-${link.status}`, linkLabel(link));
         chip.type = "button";
         chip.disabled = link.status === "deleted" || !onQuestion;
         chip.title = link.status === "deleted" ? "삭제된 질문" : "QA 카드로 이동";
         chip.addEventListener("click", () => onQuestion && onQuestion(link.id));
         links.append(chip);
+      }
+      if (folded) {
+        const open = unfolded.has(t.id);
+        const more = node("button", "th-links-fold", open ? `닫힌 질문 ${folded}개 접기 ▴` : `닫힌 질문 ${folded}개 펼치기 ▾`);
+        more.type = "button";
+        more.setAttribute("aria-expanded", open ? "true" : "false");
+        more.addEventListener("click", () => {
+          if (open) unfolded.delete(t.id);
+          else unfolded.add(t.id);
+          render();
+        });
+        links.append(more);
       }
     }
 
@@ -1096,7 +1120,7 @@ globalThis.ThreadsPane = (() => {
                                             inviting === convo.id, inflight.has(INVITE), convo.messages.length,
                                             inflight.has(convo.id), pending.get(convo.id) || null,
                                             (attached.get(convo.id) || []).length,
-                                            editing, inflight.has(RENAME)] : null);
+                                            editing, inflight.has(RENAME), unfolded.has(convo.id)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
     if (typingIn(main.querySelector(".th-guests"))) return;
     const oldTitleBox = main.querySelector(".th-rename-input");
@@ -1185,6 +1209,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, stamp,
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, splitLinks, stamp,
           imageKind, imageFiles, imageSrc, fileSrc, sizeOf, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
 })();
