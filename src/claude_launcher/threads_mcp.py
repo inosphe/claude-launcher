@@ -77,7 +77,7 @@ TOOLS = [
      "description": "Write a message in one of your threads. The text is GitHub-flavored markdown, "
                     "rendered in the threads pane (lists, code fences, tables, links). Attach pictures "
                     "with 'images' (file paths); a message may be images alone. Replying to a "
-                    "closed thread reopens it. Only for the thread's own topic: when the text is about "
+                    "closed thread reopens it, except as a guest (the thread stays closed). Only for the thread's own topic: when the text is about "
                     "another subject than the thread's title, use thread_open for a new thread instead.",
      "inputSchema": {"type": "object", "properties": {
          **_TID, "text": {"type": "string", "description": "the message, in markdown"}, **_IMAGES},
@@ -110,7 +110,7 @@ TOOLS = [
          "required": ["thread_id"]}},
     {"name": "thread_close",
      "description": "Close one of your threads once its topic is settled (kept for the record; a new "
-                    "message from either side reopens it).",
+                    "message from you or the user reopens it; a guest's does not).",
      "inputSchema": {"type": "object", "properties": _TID, "required": ["thread_id"]}},
 ]
 
