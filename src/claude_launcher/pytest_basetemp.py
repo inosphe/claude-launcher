@@ -37,7 +37,7 @@ import logging
 import os
 from pathlib import Path
 
-from . import config, store
+from . import config
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,11 @@ def root() -> Path:
     (claunch-wt12o.5). Read live: the setting applies to the next run.
     """
     try:
+        # Imported here, not at module level: ``store`` pulls in ``yaml``, and
+        # the gate tools import this module under ``python -S`` (stdlib only,
+        # tests/test_gates_run_this_checkout.py), where that import fails.
+        from . import store
+
         configured = store.daemon_config().get("test_output_dir")
     except Exception as exc:
         # Housekeeping never decides a gate: an unreadable config falls back
