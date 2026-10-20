@@ -21938,6 +21938,7 @@ const VIEWS = {
   worktrees: "worktrees-view",
   commit: "commit-view",
   threads: "threads-view",
+  megathreads: "megathreads-view",
   glossary: "glossary-view",
   sims: "sims-view",
   spec: "spec-view",
@@ -22688,6 +22689,8 @@ function parseHash(h) {
       cwd: q.get("cwd") || "" };
   }
   if (parts[0] === "threads") return { page: "threads", view: parts[1] || "", id: parts[2] || "" };
+  // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
+  if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
   // #/category is the tree of the last workspace; #/category/<workspace> names one.
   if (parts[0] === "category") {
@@ -22761,6 +22764,7 @@ function route() {
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
   if (r.page !== "commit") globalThis.CommitPage?.stop();
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
+  if (r.page !== "megathreads") globalThis.MegaThreadPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
@@ -22849,6 +22853,7 @@ function route() {
     case "commit": showView("commit");
       globalThis.CommitPage.open(r.sha, { session: r.session, cwd: r.cwd }); break;
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
+    case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
