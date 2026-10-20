@@ -4,7 +4,7 @@ claunch-v5nhp. 여러 세션의 쓰레드에 **한 번의 입력**으로 말하�
 자기 입력창을 두고, 데몬이 그 메시지가 어느 `(세션, 쓰레드)`의 것인지 Jev로 판정해 전달한다. 선택되지 않은
 멤버는 그 메시지를 받지 않고, 나중에 그 대화를 참조할 수도 없다.
 
-이 문서는 회차 1(백엔드)의 구현을 설명한다. 웹 원탁 UI(`web/static/megathread-page.js`)는 회차 2다.
+회차 1이 백엔드(저장소·라우팅·API)를, 회차 2가 웹 원탁 UI(`web/static/megathread-page.js`)를 맡았다.
 
 ## 용어
 
@@ -135,8 +135,10 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
   한 멤버 실패 격리, 정책 기본값.
 - `tests/test_megathread_api.py` — 입장 시 쓰레드 생성, 소유권 거절, 단독 라우팅이 **한 멤버에게만**
   전달되는지, 선택 후 전달, 예산 429, 설정 조회·수정.
+- `tests/web/megathread_check.js` — 링 배치·선 굵기·판정별 행과 문구·전송 본문·SVG 노드 수, 그리고
+  페이지가 주소·레일·`VIEWS`·라우터에 배선됐는지.
 - 회귀: `tests/test_threads_store.py`, `tests/test_threads_api.py`, `tests/test_threads_mcp.py`,
-  `tests/test_qa_nudge.py`.
+  `tests/test_qa_nudge.py`, `tests/test_web_topology.py`.
 
 ## 실측 (2026-10-21, jev-latest)
 
@@ -157,9 +159,43 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 - 예산은 라우팅 단위로만 잰다. Jev가 응답에 `usage.input_tokens`를 주지 않으면 글자 수 추정으로 대신한다.
 - 반올림된 확률(0.95/0.05 같은 값)이 자주 나온다. 임계값이 그 사이에 있으면 판정이 거칠다.
 
-## 다음 회차
+## 화면 (회차 2)
 
-- 웹 원탁 UI: 사용자 노드와 멤버 노드를 SVG 링으로 배치하고, 라우팅 결과의 logit을 선 굵기로 보여 준다.
-  `svg.mesh-ring`(`app.js:45036`)의 배치 방식을 재사용한다.
-- 설정 카드에 예산과 기능별 모델 선택을 붙인다. 엔드포인트(`/api/megathreads/settings`,
-  `/api/qa-nudge`의 `jev_models`)는 회차 1에 이미 있다.
+`#/megathreads` — 좌측 사이드바 하단 `#rail-nav`의 `◍ Mega`로 들어간다.
+
+| 부분 | 파일 | 내용 |
+|---|---|---|
+| 페이지 | `web/static/megathread-page.js` | `globalThis.MegaThreadPage = {open, stop, render}` |
+| 배선 | `index.html`, `app.js` | nav 링크, `#megathreads-view`, `VIEWS`, `parseHash`, 라우터 case, 중앙 stop 목록 |
+| 스타일 | `style.css` | `.mt-*` 규칙 |
+
+세 열이다.
+
+1. **왼쪽**: 클러스터 목록과 `새 mega thread`(제목 + 세션 체크박스). 만든 클러스터는 `#/megathreads/<id>`로
+   열린다.
+2. **가운데**: 원탁 SVG. 사용자 노드가 중심이고, 멤버 `(세션, 쓰레드)`가 링에 놓인다. 마지막 라우팅의
+   logit이 중심에서 각 노드로 가는 선의 굵기다. 임계값을 넘은 노드는 초록, 0 이상은 노랑, 그 아래는 회색이며
+   종료된 세션은 흐리게 그린다. 노드를 누르면 그 세션의 터미널로 간다.
+3. **오른쪽**: 최근 라우팅 20건 — 입력, 판정, 사용 토큰, 멤버별 logit, 전달한 곳의 수.
+
+입력은 아래 입력창에서 한다. `Ctrl/Cmd+Enter`로 보낸다.
+
+- `auto`면 데몬이 이미 전달했다. 노드가 초록으로 서고 전달 결과(`전달됨` / `대기 중` / `hold`)가 아래 줄에 뜬다.
+- `choose`/`none`이면 후보 카드가 열린다. 각 후보에 `p(mine)`과 `logit`이 있고, 체크박스로 여러 곳을 고른 뒤
+  `선택한 곳으로 보내기`를 누르면 `{text, choose: [...]}`가 같은 엔드포인트로 간다. 이 경로는 Jev를 다시
+  부르지 않는다.
+- 오류(키 없음, 예산 초과, Jev 실패)는 숨기지 않고 그대로 표시한다.
+
+페이지가 열려 있는 동안 5초마다 목록·멤버·로그를 다시 읽는다. 라우터가 다른 페이지로 옮길 때
+`MegaThreadPage.stop()`이 폴링을 멈춘다.
+
+### 좌하단 nav
+
+데스크톱에서 `#rail-nav`는 첫 행만 보이고 hover하면 펼쳐진다. 펼침 상한은 `--rail-nav-rows`(24) × 행
+높이이고, 그 수는 링크 수(현재 21) 이상이어야 한다. 링크를 더 넣으면 이 값을 같이 올린다.
+
+### 아직 하지 않은 것
+
+- 모바일 레이아웃: 900px 이하에서 세 열이 한 열로 접히기만 한다.
+- 실제 데몬 화면 확인: 정적 파일은 데몬이 서빙하므로 새 페이지를 보려면 데몬 재기동이 필요하다. 재기동은
+  운영자 명령이다(AGENTS.md). 이번 회차의 증거는 `tests/web/megathread_check.js`와 DOM 수준 검사다.
