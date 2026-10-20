@@ -1008,14 +1008,33 @@ globalThis.ThreadsPane = (() => {
       }
     }
 
-    const msgs = node("div", "th-messages");
-    for (const m of convo.messages) {
+    // A redraw of the thread already on screen keeps its message list in
+    // the page and appends only the messages it has not drawn yet
+    // (claunch-a69sl). Rebuilding every bubble -- markdown included -- and
+    // reading scrollHeight over the fresh list laid the whole conversation
+    // out again on each new message or send: 30ms of forced layout and a
+    // 41ms commit in the trace. A thread's messages only grow at the end,
+    // so the drawn ones stay valid while the last of them is still there.
+    // Reduced harnesses whose stub DOM cannot move a node rebuild as before.
+    const kept = main.querySelector(".th-messages");
+    const n = convo.messages.length;
+    const keep = !!kept && kept._thread === t.id && kept._drawn <= n
+      && (!kept._drawn || convo.messages[kept._drawn - 1].seq === kept._lastSeq)
+      && typeof main.insertBefore === "function" && typeof kept.removeChild === "function";
+    const msgs = keep ? kept : node("div", "th-messages");
+    const from = keep ? kept._drawn : 0;
+    // The pending bubble and the empty note always sit after the messages.
+    if (keep) while (msgs.childNodes.length > from) msgs.removeChild(msgs.lastChild);
+    for (const m of convo.messages.slice(from)) {
       msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
                          m.files || [], t.id, speaker(m, t.session)));
     }
+    msgs._thread = t.id;
+    msgs._drawn = n;
+    msgs._lastSeq = n ? convo.messages[n - 1].seq : null;
     const out = pending.get(t.id);
     if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || [], out.files || []));
-    if (!convo.messages.length && !out) {
+    if (!n && !out) {
       msgs.append(node("p", "th-empty", "아직 메시지가 없습니다. 아래 입력창에 첫 메시지를 쓰세요."));
     }
 
@@ -1038,7 +1057,17 @@ globalThis.ThreadsPane = (() => {
     dropTarget(compose, t.id);
     compose.append(strip(t.id), box, foot);
 
-    main.replaceChildren(head, ...(guests ? [guests] : []), ...(links ? [links] : []), msgs, compose);
+    if (keep) {
+      // The kept list is never taken out of the page: a node that leaves
+      // and comes back is laid out again whole.
+      for (const c of Array.from(main.childNodes)) if (c !== msgs) main.removeChild(c);
+      main.insertBefore(head, msgs);
+      if (guests) main.insertBefore(guests, msgs);
+      if (links) main.insertBefore(links, msgs);
+      main.append(compose);
+    } else {
+      main.replaceChildren(head, ...(guests ? [guests] : []), ...(links ? [links] : []), msgs, compose);
+    }
     msgs.scrollTop = msgs.scrollHeight;
     const last = convo.messages[convo.messages.length - 1];
     if (last) markRead(t.id, last.seq);
