@@ -8030,7 +8030,7 @@ body.split-max #term-wf { flex: 1 1 0; }
 }
 .talk-split:hover::after, .talk-split.dragging::after { background: #58a6ff; }
 .talk-body[data-mode="both"] .talk-split { display: flex; }
-.talk-body.talk-sized[data-mode="both"] .talk-qa { flex: 0 0 var(--talk-qa-w); max-width: calc(100% - 414px); }
+.talk-body.talk-sized[data-mode="both"] .talk-qa { flex: 0 0 var(--talk-qa-w); max-width: max(220px, calc(100% - 414px)); }
 .talk-body[data-mode="both"] .th-side { flex-basis: var(--th-side-w, 170px); }
 .talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
 @media (max-width: 820px) {

@@ -257,6 +257,10 @@ function harness() {
     assert.ok(/\.talk-body\[data-mode="both"\] \.talk-split \{ display: flex; \}/.test(css), "shown in both");
     assert.ok(/\.talk-body\.talk-sized\[data-mode="both"\] \.talk-qa \{ flex: 0 0 var\(--talk-qa-w\)/.test(css),
               "a set width fixes the QA column");
+    // The same floors as clampQaW: the threads column keeps 400px (+14px bar)
+    // until the QA column would drop under its 220px floor, which wins.
+    assert.ok(/\.talk-qa \{ flex: 0 0 var\(--talk-qa-w\); max-width: max\(220px, calc\(100% - 414px\)\); \}/.test(css),
+              "the stylesheet's ceiling keeps the QA floor, as clampQaW does");
     const phone = css.slice(css.indexOf('.talk-body[data-mode="both"] .talk-split { display: flex; }'));
     assert.ok(/@media \(max-width: 820px\) \{[^}]*\}\s*\.talk-body\[data-mode="both"\] \.talk-split \{ display: none; \}/.test(phone),
               "the phone hides the bar, after the rule that shows it");
