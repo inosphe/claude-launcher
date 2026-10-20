@@ -11558,6 +11558,17 @@ let newWorktreeGit = { repo: false, worktrees: [] };
    narrowing is on screen. */
 let newWorktreeFilter = "";
 
+/* The same, for the box above the Branch from picker. */
+let newWorktreeFromFilter = "";
+
+/* How many branches the Branch from picker lists while its box is empty. A
+   repository that has been spawning for weeks has well over a thousand
+   branches, and every one was an <option>: building or replacing that list
+   held the page for about a second (claunch-mu5ex). The daemon sends them
+   newest commit first (worktree.branches), so the head of the list is the
+   part an operator reaches for; the rest is one word away in the box. */
+const WORKTREE_FROM_BRANCH_LIMIT = 30;
+
 /* A remembered worktree MODE, held until the row can say whether it is
    answerable at all. That answer depends on two fetches that land after the
    form is drawn — the git read for the picked directory, and a child's
@@ -11610,7 +11621,10 @@ function updateWorktreeOptions(sel, rows) {
   const signature = JSON.stringify(rows);
   if (sel._worktreeSignature === signature) return;
   sel.innerHTML = "";
-  for (const [label, value] of rows) sel.appendChild(new Option(label, value));
+  for (const [label, value, disabled] of rows) {
+    const o = sel.appendChild(new Option(label, value));
+    if (disabled) o.disabled = true;
+  }
   sel._worktreeSignature = signature;
 }
 
@@ -11751,7 +11765,12 @@ function renderWorktreeSessionOptions() {
    it has checked out (the parent's own first, for a child); then the
    branches no listed worktree stands on. A branch row's value is spelled
    `refs/heads/<name>` so it can never be read as a worktree of the same name
-   (worktree.start_point takes a worktree name first). */
+   (worktree.start_point takes a worktree name first).
+
+   The box above narrows the worktree and branch rows by name; HEAD always
+   stays. With the box empty only the newest WORKTREE_FROM_BRANCH_LIMIT
+   branches are listed, plus the picked one wherever it sits, and a greyed
+   last row says how many more the box can find. */
 function renderWorktreeFromOptions() {
   const f = $("new-session");
   const sel = f && f.worktree_from;
@@ -11761,10 +11780,14 @@ function renderWorktreeFromOptions() {
   const owners = worktreeSessions();
   const offer = worktreeParentOffer();
   const kept = sel.value;
+  const q = (newWorktreeFromFilter || "").trim().toLowerCase();
+  const matches = (...words) =>
+    !q || words.some((w) => String(w || "").toLowerCase().includes(q));
   const head = git.root_branch || "";
   const rows = [[
     head ? `repository HEAD — ${head}` : "repository HEAD (detached)", ""]];
-  const names = (git.worktrees || []).slice();
+  const names = (git.worktrees || [])
+    .filter((n) => matches(n, onWt[n]));
   if (offer && offer.name && names.includes(offer.name)) {
     names.splice(names.indexOf(offer.name), 1);
     names.unshift(offer.name);
@@ -11778,9 +11801,21 @@ function renderWorktreeFromOptions() {
     rows.push([`worktree ${name}${branch}${who}`, name]);
   }
   const taken = new Set(Object.values(onWt).filter(Boolean));
-  for (const b of git.branches || []) {
-    if (taken.has(b)) continue;
-    rows.push([`branch ${b}`, `refs/heads/${b}`]);
+  const free = (git.branches || []).filter((b) => !taken.has(b) && matches(b));
+  let shown = free;
+  if (!q && free.length > WORKTREE_FROM_BRANCH_LIMIT) {
+    shown = free.slice(0, WORKTREE_FROM_BRANCH_LIMIT);
+    // A pick past the cut stays on offer, so a re-render never moves it.
+    const picked = kept.startsWith("refs/heads/")
+      ? kept.slice("refs/heads/".length) : "";
+    if (picked && !shown.includes(picked) && free.includes(picked)) {
+      shown.push(picked);
+    }
+  }
+  for (const b of shown) rows.push([`branch ${b}`, `refs/heads/${b}`]);
+  if (shown.length < free.length) {
+    rows.push([`… ${free.length - shown.length} more branches — ` +
+      "type in the box above to find one", "", true]);
   }
   updateWorktreeOptions(sel, rows);
   sel.value = [...sel.options].some((o) => o.value === kept) ? kept : "";
@@ -11865,6 +11900,9 @@ function syncNewWorktree() {
   // refuses the pair together (worktree._checkout), so the form never shows
   // both.
   if (f.worktree_from) f.worktree_from.disabled = !usable || mode !== "new";
+  if (f.worktree_from_filter) {
+    f.worktree_from_filter.disabled = !usable || mode !== "new";
+  }
   f.worktree_rebase.disabled = !usable || mode !== "existing" || inParent;
   $("new-worktree-name-row").classList.toggle("hidden", mode !== "new");
   const fromRow = $("new-worktree-from-row");
@@ -11976,6 +12014,8 @@ async function refreshNewWorktree() {
   // on screen is what the list was built from.
   newWorktreeFilter = "";
   if (f.worktree_filter) f.worktree_filter.value = "";
+  newWorktreeFromFilter = "";
+  if (f.worktree_from_filter) f.worktree_from_filter.value = "";
   let git;
   try {
     const resp = await api(`/api/git?cwd=${encodeURIComponent(cwd)}`);
@@ -23621,6 +23661,14 @@ $("new-session").worktree_existing.addEventListener("change", () => {
    Guarded like the filter box: an older markup without it must still boot. */
 const worktreeFrom = $("new-session").worktree_from;
 if (worktreeFrom) worktreeFrom.addEventListener("change", syncNewWorktree);
+const worktreeFromSearch = $("new-session").worktree_from_filter;
+if (worktreeFromSearch) {
+  worktreeFromSearch.addEventListener("input", () => {
+    newWorktreeFromFilter = worktreeFromSearch.value;
+    renderWorktreeFromOptions();
+    syncNewWorktree();
+  });
+}
 const worktreeBySession = $("new-session").worktree_session;
 if (worktreeBySession) {
   worktreeBySession.addEventListener("change", () => {

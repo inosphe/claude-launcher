@@ -1111,7 +1111,12 @@
                only: an existing one keeps the branch it has, and bringing
                that one up to date is the Rebase onto row's question, which
                shows under "existing worktree" and nowhere else. -->
+          <!-- The box narrows the rows by name. With it empty only the newest
+               branches are listed (WORKTREE_FROM_BRANCH_LIMIT in app.js). -->
           <label id="new-worktree-from-row">Branch from
+            <input name="worktree_from_filter" type="search"
+                   placeholder="filter — worktree or branch name"
+                   autocomplete="off">
             <select name="worktree_from"></select></label>
           <!-- How the new checkout will be made -- copy-on-write clone or a
                bare git worktree add -- decided by the daemon before anything
