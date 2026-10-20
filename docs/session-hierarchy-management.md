@@ -48,7 +48,7 @@
 | `detach` | 자기 자손을 루트로 만든다 | 자기 자손 |
 | `reparent` | 자기 자손(서브트리 포함)을 자신 또는 자기 자손 밑으로 옮긴다 | actor가 child와 parent를 모두 명령해야 한다 |
 
-`reparent` 도구 설명도 "only your own subtree can be moved"라고 적는다(`mesh_mcp.py:936-949`). 이 경계가 이번 요구의 출발점이다.
+`reparent` 도구 설명은 "Move a session you spawned (or a descendant of one) — with its whole subtree — under another session you command"라고 적고(`mesh_mcp.py:936-949`), `mesh-delegate` 스킬 설명은 같은 경계를 "only your own subtree can be moved"로 한 줄로 적는다(`mesh_topology.py:98`). 이 경계가 이번 요구의 출발점이다.
 
 ### 1.3 `reparent`가 바꾸는 것과 남기는 것
 
@@ -92,7 +92,7 @@
 - `pm` 역할의 alias가 `[project-manager, planner, coordinator]`다(`daemon/mesh_roles.py:452-468`). 오늘 `role: coordinator`는 `pm`으로 정규화된다.
 - 역할별 프롬프트 묶음은 `prompt_packs.DEFAULT_ROLE_PACKS`에 있다(`prompt_packs.py:649-662`). `coordinator` 항목은 없다.
 - `improv-coordinator-v2`는 `filter_roles: {type: whitelist, roles: [worker]}`이고 `default_role`이 없다(`workflows/v2/improv-coordinator-v2.yaml:9-11`).
-- `filter_roles`는 런을 몰 후보를 가르는 조회에 쓰인다(`cflow/responders.py:157-160`, `wizard.py:1142-1175`). 강제 집행 지점은 아니다.
+- `filter_roles`는 세 곳에서 읽힌다. (a) v1 cflow 시작(`cflow/engine.py:3449`)과 요청(`3675`) 경로가 `_enforce_role_filter`(`3265-3297`)로 강제한다 — 운전 세션의 mesh 역할을 읽어 필터가 거절하면 `CflowError`다. (b) 답할 사람을 고르는 조회가 읽는다(`cflow/responders.py:157-160`). (c) 위저드·폼의 워크플로 선택이 읽는다(`wizard.py:1142-1175`). v2 런타임(`cflow2/`)에는 이 강제 지점이 없다(확인: `cflow2/`의 `filter_roles` 참조는 파싱과 메타 노출뿐이고 `_enforce_role_filter` 호출이 없다). 그래서 v2 정의인 `improv-coordinator-v2`의 `filter_roles` 변경은 오늘의 시작 게이트가 아니지만, v1 정의와 같은 어휘를 쓰므로 역할 분리 때 함께 검토한다.
 
 ## 2. 요구사항 정렬
 
@@ -117,7 +117,7 @@
 
 ### N2. "부모-자식 통째 편입"과 "자식만 가져오기"의 구분
 
-**사실**: 트리 연산으로는 둘이 같다. `reparent`는 대상과 그 서브트리를 함께 옮긴다(`manager.py:1564-1567`). 사용자가 말한 두 동작의 차이는 **원 부모를 어떻게 처분하는가**다.
+**사실**: 트리 연산으로는 둘이 같다. `reparent`는 대상과 그 서브트리를 함께 옮긴다(메서드 계약은 `manager.py:1564-1587`, 실제 변경은 `1623-1625`). 사용자가 말한 두 동작의 차이는 **원 부모를 어떻게 처분하는가**다.
 
 | 요청 | 트리 연산 | 원 부모 처분 |
 |---|---|---|
@@ -179,9 +179,11 @@
 | 도구 | 입력 | 권한 | 트리 효과 | 부수 효과 | 거절 |
 |---|---|---|---|---|---|
 | `orphans` | `project?` | 읽기 | 없음 | 없음 | 없음 |
-| `adopt` | `session`, `source?: keep\|retire\|adopt_parent`, `reason` | `coordinator` + 같은 project. 살아 있는 부모가 있으면 동의 또는 사용자 승인 | 대상과 서브트리를 호출자 밑으로 | mesh edge 열기, 이동 공지, 보드 코멘트, 런 재지정 계획 반환 | `not-a-coordinator`, `not-in-scope`, `no-consent`, `cycle`, `depth`, `target-exited`, `mid-landing`, `relation-conflict` |
+| `adopt` | `session`, `source?: keep\|retire\|adopt_parent`, `reason` | `coordinator` + 같은 project. 살아 있는 부모가 있으면 동의 또는 사용자 승인 | 대상과 서브트리를 호출자 밑으로 | mesh edge 열기, 이동 공지, 보드 코멘트, 런 재지정 계획 반환 | `not-a-coordinator`, `not-in-scope`, `no-consent`, `cycle`, `depth`, `parent-exited`, `mid-landing`, `relation-conflict` |
 | `adopt_request` | `session`, `reason` | 자손 아님·coordinator 아님도 가능 | 없음 | 원 부모 또는 사용자에게 승인 요청 | 같은 목록 |
 | `give` | `session`, `parent` | 자기 자손, 그리고 호출자가 coordinator | 자기 자손을 다른 세션 밑으로 | `adopt`와 같다 | `reparent`와 같다 |
+
+단계 배분: `orphans`와 `adopt`(고아 경로)는 1단계, `adopt_request`와 `give`는 2단계다(5.5절).
 
 ### 3.1 `orphans`
 
@@ -197,7 +199,7 @@
 
 ### 3.3 승인 게이트
 
-`adopt` 중 살아 있는 트리를 건드리는 호출은 사용자 승인 카드를 거친다. 기존 spawn·kill 게이트와 같은 형태를 쓴다(spawn은 `daemon/spawn_gate.py`, `claunch-iw5i8.16`). 고아 입양은 카드 없이 진행한다.
+`adopt` 중 살아 있는 트리를 건드리는 호출(2단계)은 사용자 승인 카드를 거친다. 기존 spawn·kill 게이트와 같은 형태를 쓴다(spawn은 `daemon/spawn_gate.py`, `claunch-iw5i8.16`). 고아 입양은 카드 없이 진행한다.
 
 ### 3.4 거절 조건의 근거
 
@@ -205,7 +207,7 @@
 |---|---|
 | `mid-landing` | `mesh-retopology`가 이미 "착지 중에는 옮기지 않는다"고 적는다(`mesh_topology.py:285-287`) |
 | `depth` | `manager.reparent`의 `spawn.max_depth` 검사(`manager.py:1611-1622`)를 그대로 쓴다 |
-| `target-exited` | `manager.py:1597-1601` |
+| `parent-exited` | `manager.reparent`가 **새 부모**의 종료를 거절한다(`manager.py:1597-1601`, `new_parent.exited`). 대상 세션 자신의 종료 여부는 검사하지 않는다 — 종료된 세션의 레코드도 옮길 수 있다 |
 | `cycle` | `manager.py:1602-1606` |
 | `relation-conflict` | N5의 규칙. stacked 워커를 스택 없는 부모 밑으로 옮기려 할 때 |
 
@@ -269,8 +271,8 @@
 
 | 단계 | 내용 | 완료 조건 |
 |---|---|---|
-| 1 | `orphans` 읽기 도구, 고아 입양(자동), 보드·mesh 부수 효과, 브리핑 문구. `coordinator` 역할과 묶음 | 고아 입양이 한 번의 호출로 끝나고, 이동 공지·보드 코멘트·`plan`이 남는다. 표적 테스트 green |
-| 2 | 살아 있는 트리 입양(동의·사용자 승인), `relation` 재지정, 착지 레코드 회수 | `independent` 워커 입양 뒤 다음 착지 요청이 올바른 큐로 간다 |
+| 1 | `orphans` 읽기 도구, 고아 입양(자동), 보드·mesh 부수 효과, 브리핑 문구, `coordinator` 역할과 묶음. 이 단계는 `relation`을 재지정하지 않고 `relation-conflict`로 거절한다: stacked 고아를 스택을 소유하지 않은 부모 밑으로 옮기려는 호출, 그리고 착지·스택 상태를 정산할 수 없는 호출이다. `adopt_request`·`give`는 이 단계에 넣지 않는다(단계 2) | 고아 입양이 한 번의 호출로 끝나고, 이동 공지·보드 코멘트·`plan`이 남는다. 거절 코드가 테스트로 고정된다. 표적 테스트 green |
+| 2 | 살아 있는 트리 입양(`adopt_request`, `give`, 원 부모 동의·사용자 승인 게이트), `relation` 재지정, 착지 레코드 회수, coordinator `jobs` 등록 | `independent` 워커 입양 뒤 다음 착지 요청이 올바른 큐로 간다 |
 | 3 | 스택 소유 워커 입양, stack-v2 `rehome` 프로시저 | 입양 뒤 스택이 새 기준 위로 옮겨지고 자식이 재정렬된다 |
 
 ## 6. 위계 정리 운영 절차 (제안)
@@ -299,10 +301,13 @@ coordinator가 쓰는 절차는 다음과 같다.
 
 | 이슈 | 내용 | 선행 |
 |---|---|---|
-| (이 문서에서 만든다) | 1단계: coordinator 역할·묶음·워크플로 메타 | 없음 |
-| (이 문서에서 만든다) | 1단계: `orphans`/`adopt`(고아) 도구와 부수 효과 | 역할 |
-| (이 문서에서 만든다) | 2단계: `relation` 재지정과 착지 레코드 회수 | 1단계, D3 |
-| (이 문서에서 만든다) | 3단계: stack-v2 `rehome`과 스택 소유 워커 입양 | 2단계 |
+| `claunch-fnnrk.1` | 1단계: coordinator 역할·묶음·워크플로 메타 | 없음 |
+| `claunch-fnnrk.2` | 1단계: `orphans`/`adopt`(고아) 도구, 부수 효과, `relation-conflict` 거절 | `.1` |
+| `claunch-fnnrk.5` | 2단계: 살아 있는 트리 입양(`adopt_request`·`give`·동의/승인 게이트) | `.2` |
+| `claunch-fnnrk.3` | 2단계: `relation` 재지정, 착지 레코드 회수, `jobs` 등록 | `.2`, D3 |
+| `claunch-fnnrk.4` | 3단계: stack-v2 `rehome`과 스택 소유 워커 입양 | `.3` |
+
+`.3`과 `.5`는 `.2` 위에서 병렬로 진행할 수 있다. `.4`는 `.3`의 재지정 경로를 전제로 한다.
 
 ## 9. 근거
 
@@ -312,6 +317,7 @@ coordinator가 쓰는 절차는 다음과 같다.
 - `src/claude_launcher/daemon/landing_route.py:1-192` — 착지 라우팅
 - `src/claude_launcher/daemon/mesh_roles.py:411-574` — 역할 어휘
 - `src/claude_launcher/prompt_packs.py:649-662` — 역할별 묶음
+- `src/claude_launcher/cflow/engine.py:3265-3297,3449,3675` — v1 cflow의 `filter_roles` 강제(`_enforce_role_filter`)
 - `src/claude_launcher/mesh_mcp.py:912-971` — detach·reparent 도구 설명
 - `src/claude_launcher/mesh_topology.py:238-358` — mesh-retopology 절차
 - `src/claude_launcher/workflows/v2/improv-worker-v2.yaml` — `relation`(191-200), `branch-setup`(829-881), `delegate-work`(1304-1352), `integration-request`(2647-2800)
