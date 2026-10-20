@@ -1675,6 +1675,18 @@ def _at_base(cmd: List[str], repo: Path) -> List[str]:
     return list(cmd)
 
 
+def interpreter_tag() -> str:
+    """Which Python a base verdict was measured under, e.g. ``cpython-3.14.8-win32``.
+
+    The base does not move under a fix loop, but the interpreter can: a
+    worktree re-synced to another Python, or a gate run from another venv.
+    A failure list taken under one is no evidence about the other, so the
+    tag is part of the cache key (claunch-wuaup.1).
+    """
+    v = sys.version_info
+    return f"{sys.implementation.name}-{v.major}.{v.minor}.{v.micro}-{sys.platform}"
+
+
 def base_receipt_path(
     repo: Path,
     commit: str,
@@ -1683,8 +1695,30 @@ def base_receipt_path(
     deselect: tuple = (),
 ) -> Path:
     return receipts_dir(repo, override) / (
-        f"base-{commit}-{selection_key(files, deselect)}.json"
+        f"base-{commit}-{selection_key(files, deselect)}-{interpreter_tag()}.json"
     )
+
+
+def _drop_base_worktree(repo: Path, where: Path, admin: Optional[Path]) -> None:
+    """Undo one throwaway worktree when ``git worktree remove`` would not.
+
+    Only this worktree: its directory and its own admin entry under
+    ``<common dir>/worktrees/``. ``git worktree prune`` would do the second
+    half for *every* entry whose directory is not visible right now --
+    another session's worktree on a drive that is briefly away included --
+    and the cleanup rules (claunch-u87as) do not prune globally. What could
+    not be removed is named on stderr, so it is found rather than guessed.
+    """
+    shutil.rmtree(where, ignore_errors=True)
+    if admin is not None and admin.parent.name == "worktrees":
+        shutil.rmtree(admin, ignore_errors=True)
+    left = [str(p) for p in (where, admin) if p is not None and p.exists()]
+    if left:
+        print(
+            f"WARNING: the base worktree was not fully removed; left: "
+            f"{', '.join(left)}",
+            file=sys.stderr,
+        )
 
 
 def base_failures(
@@ -1699,7 +1733,7 @@ def base_failures(
 ) -> Optional[dict]:
     """Run ``files`` at ``commit`` and return what failed there, or None.
 
-    Cached by (commit, selection): a fix loop re-runs the gate after every
+    Cached by (commit, selection, interpreter): a fix loop re-runs the gate after every
     edit, the base does not move under it, and paying a second run each time
     would double the cost of exactly the rounds that are already red.
     Modules that do not exist at ``commit`` are left out -- they are this
@@ -1730,6 +1764,7 @@ def base_failures(
         "selection": sorted(files),
         "ran": present,
         "deselected": sorted(set(deselect)),
+        "interpreter": interpreter_tag(),
         "failed": [],
         "exit_code": 0,
     }
@@ -1745,6 +1780,12 @@ def base_failures(
             print(f"WARNING: no worktree at base {commit[:12]}: {exc}", file=sys.stderr)
             shutil.rmtree(where, ignore_errors=True)
             return None
+        try:
+            admin: Optional[Path] = Path(
+                _git(where, "rev-parse", "--absolute-git-dir")
+            )
+        except LookupError:
+            admin = None
         try:
             # Its own generation, so the head run's timeline survives; a run
             # that finished inside the same second gets a suffix instead.
@@ -1771,11 +1812,7 @@ def base_failures(
             try:
                 _git(repo, "worktree", "remove", "--force", str(where))
             except LookupError:
-                shutil.rmtree(where, ignore_errors=True)
-                try:
-                    _git(repo, "worktree", "prune")
-                except LookupError:
-                    pass
+                _drop_base_worktree(repo, where, admin)
         output = proc.stdout or ""
         result.update(
             exit_code=proc.returncode,
