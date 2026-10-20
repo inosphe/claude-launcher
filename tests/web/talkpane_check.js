@@ -325,14 +325,21 @@ function harness() {
     const more = host.querySelector(".th-links .th-links-fold");
     assert.ok(more && more.textContent.includes("1개 펼치기"), "the fold toggle counts the hidden chips");
     assert.equal(more.attrs["aria-expanded"], "false");
+    // The toggle redraws only the chip box: the conversation keeps its node
+    // and its scroll position (claunch-cedjc.1).
+    const msgs = host.querySelector(".th-messages");
+    msgs.scrollTop = 37;
     more.fire("click");
     await settle();
     assert.deepEqual(chipIds(), ["qa-1", "qa-3"], "pressing the toggle shows the closed question");
+    assert.equal(host.querySelector(".th-messages"), msgs, "the toggle does not rebuild the conversation");
+    assert.equal(msgs.scrollTop, 37, "the conversation keeps its scroll position");
     const less = host.querySelector(".th-links .th-links-fold");
     assert.ok(less.textContent.includes("접기") && less.attrs["aria-expanded"] === "true");
     less.fire("click");
     await settle();
     assert.deepEqual(chipIds(), ["qa-1"], "pressing it again folds them away");
+    assert.equal(host.querySelector(".th-messages"), msgs, "folding again keeps the conversation too");
     const sp = ctx.ThreadsPane.splitLinks;
     assert.equal(sp([{status: "open"}, {status: "answered"}], false).folded, 0, "no closed link: no toggle");
     assert.equal(sp([{status: "closed"}], false).shown.length, 0);
