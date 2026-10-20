@@ -43,6 +43,16 @@ def _manager() -> SessionManager:
     return SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
 
 
+async def _screen_has(session, needle: str, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await session.screen_synced()
+        if needle in "\n".join(session.capture(history=True) + session.capture()):
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
 def _staged(tmp_path, **kw):
     _register_py_harness()
     mgr = _manager()
@@ -178,6 +188,9 @@ def test_the_routes_preview_send_hold_and_drop(home, tmp_path):
             assert resp.status == 200 and sent["ok"] is True
             assert sent["delivered"] is True and sent["text_id"] == preview["text_id"]
             assert "mcp-qa" in session_packs.held("root")
+            # delivered=True says the terminal took input; the echo says it
+            # was this block.
+            assert await _screen_has(mgr.get("root"), "echo:# claunch prompt pack: mcp-qa")
 
             # An on-demand pack asks for work once: sent, never held.
             resp = await client.post("/api/sessions/root/packs", headers=BEARER,
@@ -196,7 +209,13 @@ def test_the_routes_preview_send_hold_and_drop(home, tmp_path):
             for body in ({"pack": "nope-pack"}, {"pack": "../x"}, {}):
                 resp = await client.post("/api/sessions/root/packs", headers=BEARER, json=body)
                 assert resp.status == 400, body
+            # An unknown session is refused the same way by every method.
             resp = await client.get("/api/sessions/ghost/packs", headers=BEARER)
+            assert resp.status == 400
+            resp = await client.post("/api/sessions/ghost/packs", headers=BEARER,
+                                     json={"pack": "mcp-qa"})
+            assert resp.status == 400
+            resp = await client.delete("/api/sessions/ghost/packs?pack=mcp-qa", headers=BEARER)
             assert resp.status == 400
         finally:
             try:

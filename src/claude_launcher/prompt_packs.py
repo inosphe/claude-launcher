@@ -572,8 +572,9 @@ def sent_block(pack: Pack) -> str:
     The packs panel of the web UI (``daemon.session_packs``) sends a pack the
     session was not given at creation and that is neither an mcp- pack nor an
     on-demand one. Like :func:`on_demand_block` it is not recorded on the
-    definition, and the header says so: a compaction loses it, and the person
-    sends it again.
+    definition, and the header says so. A delivered send is held instead
+    (``session_packs.record_sent``): the session reminder names its text id
+    and ``rebrief`` serves it back after a compaction, until a person drops it.
     """
     if pack.source == PACKAGE:
         where = f"file: (not installed in this workspace; claunch's {pack.id}.md)"
