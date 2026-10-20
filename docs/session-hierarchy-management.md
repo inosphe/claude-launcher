@@ -92,7 +92,7 @@
 - `pm` 역할의 alias가 `[project-manager, planner, coordinator]`다(`daemon/mesh_roles.py:452-468`). 오늘 `role: coordinator`는 `pm`으로 정규화된다.
 - 역할별 프롬프트 묶음은 `prompt_packs.DEFAULT_ROLE_PACKS`에 있다(`prompt_packs.py:649-662`). `coordinator` 항목은 없다.
 - `improv-coordinator-v2`는 `filter_roles: {type: whitelist, roles: [worker]}`이고 `default_role`이 없다(`workflows/v2/improv-coordinator-v2.yaml:9-11`).
-- `filter_roles`는 세 곳에서 읽힌다. (a) v1 cflow 시작(`cflow/engine.py:3449`)과 요청(`3675`) 경로가 `_enforce_role_filter`(`3265-3297`)로 강제한다 — 운전 세션의 mesh 역할을 읽어 필터가 거절하면 `CflowError`다. (b) 답할 사람을 고르는 지원(volunteering) 조회가 읽는다(`cflow/engine.py:3104-3167`, 강제가 아니라 항목에 `refused` 사유를 실어 보고한다). 데몬의 워크플로 목록·피커 응답도 같은 필터를 항목에 싣는다(`daemon/api.py:4988-4990`, `5302-5305`). (c) 위저드·폼의 워크플로 선택이 읽는다(`wizard.py:1142-1175`). v2 런타임(`cflow2/`)에는 이 강제 지점이 없다(확인: `cflow2/`의 `filter_roles` 참조는 파싱과 메타 노출뿐이고 `_enforce_role_filter` 호출이 없다). 그래서 v2 정의인 `improv-coordinator-v2`의 `filter_roles` 변경은 오늘의 시작 게이트가 아니지만, v1 정의와 같은 어휘를 쓰므로 역할 분리 때 함께 검토한다.
+- `filter_roles`는 세 곳에서 읽힌다. (a) v1 cflow 시작(`cflow/engine.py:3449`)과 요청(`3675`) 경로가 `_enforce_role_filter`(`3265-3297`)로 강제한다 — 운전 세션의 mesh 역할을 읽어 필터가 거절하면 `CflowError`다. (b) 답할 사람을 고르는 지원(volunteering) 조회가 읽는다(`cflow/engine.py:3104-3167`, 강제가 아니라 항목에 `refused` 사유를 실어 보고한다). 데몬의 워크플로 목록·피커 응답도 같은 필터를 항목에 싣는다(`daemon/api.py:4988-4990`, `5306-5309`). (c) 위저드·폼의 워크플로 선택이 읽는다(`wizard.py:1142-1175`). v2 런타임(`cflow2/`)에는 이 강제 지점이 없다(확인: `cflow2/`의 `filter_roles` 참조는 파싱과 메타 노출뿐이고 `_enforce_role_filter` 호출이 없다). 그래서 v2 정의인 `improv-coordinator-v2`의 `filter_roles` 변경은 오늘의 시작 게이트가 아니지만, v1 정의와 같은 어휘를 쓰므로 역할 분리 때 함께 검토한다.
 
 ## 2. 요구사항 정렬
 
@@ -281,7 +281,7 @@ coordinator가 쓰는 절차는 다음과 같다.
 
 1. `orphans`로 대상과 런 상태를 읽는다. 이동할 세션의 런이 사람의 선택을 기다리는 중이면 먼저 그 사실을 사용자에게 알린다.
 2. 이동을 한 줄로 적는다: 누가, 어디서, 어디로, 왜. 이것이 공지와 보드 코멘트가 된다.
-3. `adopt`를 호출한다. 살아 있는 부모면 승인 경로를 거친다.
+3. `adopt`를 호출한다. 모든 호출은 사용자 승인 카드를 거친다(D1). 살아 있는 원 부모가 있고 D2가 동의 병행으로 결정되면 동의도 함께 받는다.
 4. 반환된 `plan`을 실행한다: rebase, 착지 레코드 회수, 보드 링크, `jobs` 등록.
 5. 이동한 세션·새 부모·옛 부모에게 한 번의 batch send로 알린다.
 6. 정리한 위계를 보드 상위 이슈 코멘트에 남긴다.
