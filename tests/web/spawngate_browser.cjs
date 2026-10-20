@@ -11,7 +11,11 @@
    claunch-iw5i8.16: a top-level request says what no answer does (created
    as the asker's child instead); a child request names its parent, says it
    is created as asked, and its Manual opens the spawn child tab under the
-   asker, filled with the request. */
+   asker, filled with the request.
+
+   claunch-uzo40: Manual pauses the clock and leaves the request pending.
+   A held request keeps its card, says the clock is paused, answers Approve /
+   Open form / Reject / +5 min, and Open form brings the same form back. */
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -37,6 +41,12 @@ const CHILD_FACTS = { project: { value: 'alpha', inherited: false }, profile: { 
 const childRec = () => ({ id: 'ccc333', kind: 'spawn', scope: 'child', session: 'w1', status: 'pending',
   reason: 'Write the parser tests', deadline: soon(), extensions: 0, spec: CHILD, facts: CHILD_FACTS,
   basis: {}, requested_at: new Date().toISOString() });
+// A request the person took over by hand and whose form was closed without
+// creating anything (claunch-uzo40): still pending, clock paused.
+const heldRec = () => ({ id: 'ddd444', kind: 'spawn', scope: 'root', session: 'op2', status: 'pending',
+  hold: 'manual', held_by: 'web', held_at: new Date().toISOString(), setup: 'custom',
+  created_as: 'root', reason: 'waiting for the form', deadline: soon(), extensions: 0,
+  spec: SPEC, basis: {}, requested_at: new Date().toISOString() });
 // The card's labelled rows, as [label, value] pairs.
 const factRows = card => card.locator('.gate-facts').evaluate(box => {
   const cells = [...box.children].map(n => n.textContent);
@@ -52,7 +62,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
     const posts = [];
-    let rows = [spawnRec(), resumeRec(), childRec()];
+    let rows = [spawnRec(), resumeRec(), childRec(), heldRec()];
     page.on('pageerror', e => errors.push(e.message));
     await page.route('http://gate.test/**', async route => {
       const url = new URL(route.request().url());
@@ -64,6 +74,11 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
           const rec = rows.find(r => r.id === m[1]);
           if (m[2] === 'extend') {
             rec.extensions += 1;
+            return route.fulfill({ json: { ok: true, request: rec } });
+          }
+          // Manual on an already-held request changes nothing: the request
+          // stays pending and the form opens again (claunch-uzo40).
+          if (m[2] === 'manual' && rec.hold === 'manual') {
             return route.fulfill({ json: { ok: true, request: rec } });
           }
           rows = rows.filter(r => r.id !== m[1]);
@@ -84,9 +99,10 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     await page.evaluate(() => { window.batchable = () => false; });
     await page.evaluate(() => refreshSpawnGate());
 
-    const spawnCard = page.locator('.notice.spawn-gate', { hasText: 'new top-level session requested' });
+    const spawnCard = page.locator('.notice.spawn-gate', { hasText: 'no running session does it' });
     const childCard = page.locator('.notice.spawn-gate', { hasText: 'child session requested under' });
     const resumeCard = page.locator('.notice.spawn-gate', { hasText: 'session resume requested' });
+    const heldCard = page.locator('.notice.spawn-gate', { hasText: 'waiting for the form' });
     await spawnCard.waitFor();
     const spawnText = await spawnCard.innerText();
     assert.match(spawnText, /op1 \(operator Alpha\) on your message: “fix login”/);
@@ -112,7 +128,12 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       ['workspace', 'alpha (inherited from w1)'], ['role', 'worker'], ['workflow', 'improv-worker-v2']]);
     assert.match(childText, /auto-approves in 4:3\d — created as asked/);
     assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
-    assert.equal(await page.evaluate(() => gatePending.spawn.length), 3, 'the bell counts all three');
+    assert.equal(await page.evaluate(() => gatePending.spawn.length), 4, 'the bell counts all four');
+    // A request taken over by hand stays on the card with its clock paused
+    // and the form reachable again (claunch-uzo40).
+    const heldText = await heldCard.innerText();
+    assert.match(heldText, /taken by hand \(web\) — no clock: approve, reject, or \+5 min to start the countdown again/);
+    assert.deepEqual(await buttons(heldCard), ['Approve', 'Open form', 'Reject', '+5 min', 'Hide']);
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-cards.png') });
     }
@@ -180,7 +201,17 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-child-manual.png') });
     }
+    // Open form on a held request: the form comes back with the same spec and
+    // the request stays up (the mock keeps a held row pending).
+    await page.evaluate(() => sessionModalClose({ route: false }));
+    await heldCard.getByRole('button', { name: 'Open form' }).click();
+    await page.waitForFunction(() => typeof sessionModal === 'object' && sessionModal
+      && sessionModal.spawnRequest === 'ddd444');
+    assert.deepEqual(posts.at(-1), ['ddd444', 'manual']);
+    assert.equal(await page.evaluate(() => $('new-session').task.value), SPEC.task);
+    assert.ok(await heldCard.isVisible(), 'the request stays on the card');
+    await page.evaluate(() => sessionModalClose({ route: false }));
     assert.deepEqual(errors, []);
-    console.log('spawngate_browser: ok (root/child/resume cards, extend, panel row, manual forms)');
+    console.log('spawngate_browser: ok (root/child/resume/held cards, extend, panel row, manual forms)');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exit(1); });
