@@ -48,14 +48,21 @@ The split is deliberate, and not a matter of budget: only immutable text is
 addressable. Roster, owed mail, children and run position all move under the
 agent's feet, so they are pushed in full every time, and an id for them
 would name something different by the time it was called in.
+
+A fifth door loads text the session may never have been given: an ``mcp-*``
+prompt pack, the guidance of one claunch tool family, read when the family
+is first used the way a SKILL document is (:func:`load_pack`,
+claunch-6esft). The opening may carry it (ticked at creation) or not; either
+way the copy served is the one an opening would carry, under the same id.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .. import digests
+from .. import digests, prompt_packs, workspaces
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
 from . import loops
@@ -232,6 +239,15 @@ def recall(name: str, digest: str, *, manager, mesh_mgr) -> dict:
             "kind": found["kind"],
             "text": found["text"],
         }
+    # An mcp- pack the session loaded later is not in ``addressable`` (it is
+    # not recorded on the definition), yet its text id was printed beside
+    # it; and an agent may well pass the pack's name where an id goes.
+    workspace = _workspace(manager, name)
+    if prompt_packs.is_mcp(digest):
+        return load_pack(name, digest, manager=manager)
+    for pack_id in prompt_packs.mcp_ids(workspace):
+        if _pack_digest(workspace, pack_id) == digest:
+            return load_pack(name, pack_id, manager=manager)
     return {
         "status": "stale_id",
         "id": digest,
@@ -245,6 +261,68 @@ def recall(name: str, digest: str, *, manager, mesh_mgr) -> dict:
             "was edited or removed -- do not go on acting from what you "
             "remember of it. Call 'rebrief' with no id for the current state."
         ),
+    }
+
+
+def _workspace(manager, name: str) -> Optional[Path]:
+    """The registered workspace of a session's directory, or None."""
+    try:
+        cwd = manager.get(name).sdef.cwd
+        owner = workspaces.owning(str(cflow_state.resolve_cwd(cwd or None)))
+    except Exception:  # noqa: BLE001 — no workspace means claunch's copy
+        return None
+    return Path(owner.path) if owner is not None else None
+
+
+def _pack_digest(workspace: Optional[Path], pack_id: str) -> str:
+    try:
+        return prompt_packs.text_id(
+            prompt_packs.loadable_copy(workspace, pack_id).body
+        )
+    except prompt_packs.PackError:
+        return ""
+
+
+def load_pack(name: str, pack_id: str, *, manager) -> dict:
+    """An mcp- prompt pack for a running session, whether or not it was ticked.
+
+    The guidance for a claunch tool family is read the way a SKILL document
+    is: when the family is first used. A session created without the pack
+    loads it here (claunch-6esft), from the copy its workspace would have put
+    in the opening (:func:`prompt_packs.loadable_copy`), so a pack loaded now
+    and one ticked at creation are the same text under the same text id.
+    Nothing is recorded on the definition: after a compaction the agent loads
+    it again by name, or recalls it by the id printed beside it (:func:`recall`).
+
+    ``given`` says the opening already carries this pack -- loading it again
+    costs nothing, but the agent that thought it lacked the pack should know.
+    """
+    manager.get(name)  # an unknown session is refused, as compose does
+    pack_id = (pack_id or "").strip().lower()
+    workspace = _workspace(manager, name)
+    try:
+        pack = prompt_packs.loadable_copy(workspace, pack_id)
+    except prompt_packs.PackError as exc:
+        return {
+            "status": "unknown_pack",
+            "pack": pack_id,
+            "loadable": prompt_packs.mcp_ids(workspace),
+            "note": str(exc),
+        }
+    ident = prompt_packs.text_id(pack.body)
+    sdef = manager.get(name).sdef
+    given = any(
+        block_digest(r.get("text") or "") == ident
+        for r in getattr(sdef, "prompt_packs", ()) or ()
+    )
+    return {
+        "status": "loaded",
+        "pack": pack.id,
+        "id": ident,
+        "kind": f"prompt pack ({pack.id})",
+        "source": pack.source,
+        "given": given,
+        "text": prompt_packs.loaded_block(pack),
     }
 
 

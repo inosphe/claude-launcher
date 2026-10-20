@@ -5,8 +5,11 @@ ticked by default and delivered in a session's opening; the server
 instructions only point at them, because clients cut the merged
 instructions short (Claude Code keeps the first 4096 characters). A session
 whose opening lacks a pack -- unticked at creation, or a saved default list
-that predates the pack -- reads it here, the copy its workspace would get.
-Read-only and local: no daemon call.
+that predates the pack -- loads it through the ``rebrief`` tool's ``pack``
+argument (claunch-6esft, :func:`daemon.rebrief.load_pack`), which answers
+with the text id the session can recall it by later. This tool stays the
+plain reader: any pack, or the list of them, read-only and local (no daemon
+call), the copy its workspace would get.
 """
 
 from __future__ import annotations
@@ -19,16 +22,18 @@ from . import mcp_rpc, prompt_packs
 
 INSTRUCTIONS = """\
 Prompt packs: the guidance for claunch's tool families is in the mcp-*
-prompt packs, normally in your opening as "# claunch prompt pack: <id>".
-When the pack for a family you use is missing there, read it with
-prompt_pack first.
+prompt packs. Read one like a skill, when you first use its family: if your
+opening has no "# claunch prompt pack: <id>" block for it, call rebrief with
+pack=<id> first (it loads whether or not it was ticked at creation). After a
+compaction, load it again the same way.
 """
 
 TOOLS = [
     {"name": "prompt_pack",
      "description": "Read one prompt pack: the text a session created in this workspace is given for "
                     "it (the workspace's installed copy, else claunch's). Without 'id', lists the packs "
-                    "claunch ships (id, title, description).",
+                    "claunch ships (id, title, description). To load an mcp-* pack into this session, "
+                    "use rebrief with 'pack'.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string", "description": "pack id, e.g. mcp-threads"}}}},
 ]

@@ -507,6 +507,65 @@ def on_demand_block(workspace: Optional[Path], pack_id: str = RETROSPECTIVE) -> 
     )
 
 
+#: The id prefix of the packs that carry a claunch tool family's guidance
+#: (``mcp-threads``, ``mcp-qa``, ``mcp-sim``). The MCP server instructions
+#: only point at them, so a session may read one when it first uses that
+#: family instead of carrying it from creation (:func:`loadable_copy`).
+MCP_PREFIX = "mcp-"
+
+
+def is_mcp(pack_id: str) -> bool:
+    """Whether ``pack_id`` names a tool family's guidance pack."""
+    return str(pack_id or "").startswith(MCP_PREFIX)
+
+
+def mcp_ids(workspace: Optional[Path] = None) -> List[str]:
+    """The mcp- packs a session may load: claunch's, plus a workspace's own."""
+    ids = {p.id for p in catalog() if is_mcp(p.id) and not p.on_demand}
+    if workspace is not None:
+        ids.update(p.id for p in installed(workspace) if is_mcp(p.id) and not p.on_demand)
+    return sorted(ids)
+
+
+def loadable_copy(workspace: Optional[Path], pack_id: str) -> Pack:
+    """The copy of an mcp- pack a running session loads through ``rebrief``.
+
+    The same copy an opening would carry (:func:`pack_copy`), so a pack
+    loaded later and one ticked at creation are the same text under the
+    same id. Only the mcp- packs: they read like a SKILL document, needed
+    when a tool family is used and not before. Any other pack is either
+    part of an opening, where the agent already has it, or an on-demand
+    pack a person sends (:func:`on_demand_block`). Raises :class:`PackError`.
+    """
+    pack_id = check_id(pack_id)
+    if not is_mcp(pack_id):
+        raise PackError(
+            f"{pack_id} is not an MCP tool family pack; only {MCP_PREFIX}* "
+            "packs load through rebrief (the prompt_pack tool reads any pack)"
+        )
+    pack = pack_copy(workspace, pack_id)
+    if pack.on_demand:
+        raise PackError(f"{pack_id} is delivered on demand by a person, not loaded")
+    return pack
+
+
+def loaded_block(pack: Pack) -> str:
+    """An mcp- pack as ``rebrief`` hands it to a running session."""
+    if pack.source == PACKAGE:
+        where = f"file: (not installed in this workspace; claunch's {pack.id}.md)"
+    else:
+        where = f"file: {(INSTALL_DIR / (pack.id + '.md')).as_posix()}"
+    return (
+        "---\n"
+        f"# claunch prompt pack: {pack.id} -- loaded on demand through "
+        "rebrief, not part of the opening\n"
+        f"text id: {text_id(pack.body)}\n"
+        f"{where}\n"
+        "---\n"
+        f"{pack.body.strip()}"
+    )
+
+
 def records(
     packs: List[Pack], *,
     required: Optional[Dict[str, List[str]]] = None, asked=(),

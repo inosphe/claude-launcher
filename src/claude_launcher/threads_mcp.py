@@ -26,7 +26,7 @@ INSTRUCTIONS = """\
 Session threads (thread_* tools): answer a "[claunch thread th-... ]" block
 with thread_reply on that thread, in markdown. When the user must act now,
 alert them in a thread (every message there is a dashboard notice). Full
-guidance: prompt pack 'mcp-threads'.
+guidance: prompt pack 'mcp-threads' (load it on demand, see Prompt packs).
 """
 
 _TID = {"thread_id": {"type": "string", "description": "thread id (th-xxxxxx)"}}
