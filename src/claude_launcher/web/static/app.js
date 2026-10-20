@@ -22553,6 +22553,63 @@ $("detail-split").addEventListener("dblclick", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* the notification panel's width: the bar on its left edge            */
+/* ------------------------------------------------------------------ */
+/* The panel is a column of the layout (claunch-w8q00), so it takes the
+   detail bar's contract: applied live while the hand moves, written down
+   once at release, reset by a double click, remembered per browser by its
+   own key. The phone hides the bar, because there the panel is laid over
+   the page. */
+const NOTICE_W_KEY = `claunch_noticew:${BASE}`;
+const NOTICE_W_DEFAULT = 380;   // what the stylesheet ships
+const NOTICE_W_MIN = 280;       // narrower and a request's buttons wrap to a column
+const noticeWMax = () => Math.max(NOTICE_W_MIN, Math.round(window.innerWidth / 2));
+
+function clampNoticeW(px) {
+  if (!Number.isFinite(px)) return NOTICE_W_DEFAULT;
+  return Math.min(noticeWMax(), Math.max(NOTICE_W_MIN, Math.round(px)));
+}
+
+function applyNoticeW(px) {
+  $("layout").style.setProperty("--notice-w", `${px}px`);
+}
+applyNoticeW(clampNoticeW(Number(localStorage.getItem(NOTICE_W_KEY)) || NOTICE_W_DEFAULT));
+
+let noticeDragW = null;   // non-null only mid-drag
+
+if ($("notice-split")) {
+  $("notice-split").addEventListener("pointerdown", (e) => {
+    e.preventDefault();   // a drag must not start selecting notice text
+    $("notice-split").setPointerCapture(e.pointerId);
+    $("notice-split").classList.add("dragging");
+    noticeDragW = $("notice-panel").getBoundingClientRect().width;
+  });
+  $("notice-split").addEventListener("pointermove", (e) => {
+    if (noticeDragW === null) return;
+    // The bar is the panel's left edge: the panel's right edge stays put.
+    noticeDragW = clampNoticeW($("notice-panel").getBoundingClientRect().right - e.clientX);
+    applyNoticeW(noticeDragW);
+    refitSoon();   // debounced: the real refit lands when the hand pauses
+  });
+  const endNoticeDrag = () => {
+    if (noticeDragW === null) return;
+    $("notice-split").classList.remove("dragging");
+    localStorage.setItem(NOTICE_W_KEY, String(noticeDragW));
+    noticeDragW = null;
+    refitSoon(60);
+    if (currentPage === "cli") cliRefit(60);
+  };
+  $("notice-split").addEventListener("pointerup", endNoticeDrag);
+  $("notice-split").addEventListener("pointercancel", endNoticeDrag);
+  $("notice-split").addEventListener("dblclick", () => {
+    applyNoticeW(NOTICE_W_DEFAULT);
+    localStorage.setItem(NOTICE_W_KEY, String(NOTICE_W_DEFAULT));
+    refitSoon(60);
+    if (currentPage === "cli") cliRefit(60);
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* the run page's column split: the diagram against the reports beside */
 /* it (.wf-diagram / .wf-side), dragged like the bars above             */
 /* ------------------------------------------------------------------ */
@@ -48882,6 +48939,11 @@ function noticePanelToggle(force) {
   noticeHideAll(open);
   if (open) noticePanelPaint();
   noticeBellPaint();
+  // The panel is a column of the layout (claunch-w8q00): opening or closing
+  // it changes the session area's width without a window resize, so the
+  // terminal is refitted here.
+  if (typeof refitSoon === "function") refitSoon(0);
+  if (typeof cliRefit === "function" && currentPage === "cli") cliRefit(0);
 }
 
 /* Requests whose card was put back with the panel's "Show card" while the

@@ -46,18 +46,6 @@
      purpose: that prompt is the restart's most confusing symptom, so the
      sentence explaining it has to be readable over the top of it. -->
 <div id="notices" aria-live="polite" aria-atomic="false"></div>
-<!-- The notification history behind the bell: the approval requests still
-     waiting (hidden cards included, with their buttons) and every notice this
-     browser has shown. Kept in localStorage; the waiting list is re-read from
-     the daemon on every poll (app.js, noticePanelPaint). -->
-<aside id="notice-panel" class="hidden" aria-label="notification history">
-  <div id="notice-panel-head">
-    <h2>Notifications</h2>
-    <button id="notice-panel-close" type="button" title="close (Esc)">×</button>
-  </div>
-  <div id="notice-panel-body"></div>
-</aside>
-
 <div id="layout">
   <!-- Mobile only: the status line that stands in for the rail while a page
        is on screen. Its ☰ flips the whole screen over to the rail. -->
@@ -1556,6 +1544,23 @@
     </span>
     <span class="mb-go">terminal ›</span>
   </div>
+  <!-- The notification history behind the bell: the approval requests still
+       waiting (hidden cards included, with their buttons) and every notice
+       this browser has shown. Kept in localStorage; the waiting list is
+       re-read from the daemon on every poll (app.js, noticePanelPaint).
+       The last column of the layout (claunch-w8q00): open, it takes its
+       width from the session area instead of covering the session's own
+       buttons, a run's approve strip among them. A phone overlays it. -->
+  <aside id="notice-panel" class="hidden" aria-label="notification history">
+    <!-- #detail-split's skin on the panel's left edge: dragging it resizes
+         the panel, a double click resets it. -->
+    <div id="notice-split" title="drag to resize · double-click to reset"></div>
+    <div id="notice-panel-head">
+      <h2>Notifications</h2>
+      <button id="notice-panel-close" type="button" title="close (Esc)">×</button>
+    </div>
+    <div id="notice-panel-body"></div>
+  </aside>
 </div>
 
 <script src="static/quietdom.js"></script>

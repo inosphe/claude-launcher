@@ -34,6 +34,10 @@
    hidden, so closing it brings none back; a request that came in while it
    was open is hidden on close, unless "Show card" put it back in the panel.
 
+   The panel is a column of the layout on a desktop (claunch-w8q00): open, it
+   narrows the session area, so a run's approve strip stays on screen beside
+   it. A phone lays it over the page.
+
    Marks and the All / Kept filter (claunch-knuet; Kept was labelled Marked
    before claunch-v995u): ☆ on a history row marks
    it ★ without reading it or opening its target; Kept shows only those
@@ -1092,7 +1096,25 @@ function gotoRec(rec) {
   check("so does the phone bar", /id="m-notice-bell"/.test(html));
   check("the panel and its body exist",
         /id="notice-panel"[^>]*class="hidden"/.test(html) && /id="notice-panel-body"/.test(html));
-  check("the panel is styled", /#notice-panel\s*\{[^}]*position:\s*fixed/.test(css));
+  // A column of the layout on a desktop, laid over the page on a phone
+  // (claunch-w8q00): open, it narrows the session area instead of covering
+  // the session's buttons.
+  const layoutAt = html.indexOf('<div id="layout">');
+  const panelAt = html.indexOf('<aside id="notice-panel"');
+  check("the panel sits inside the layout", layoutAt >= 0 && panelAt > layoutAt, [layoutAt, panelAt]);
+  const desk = css.match(/^#notice-panel\s*\{([^}]*)\}/m);
+  check("on a desktop it is a column of the layout, not laid over it",
+        !!desk && /flex:\s*none/.test(desk[1]) && !/position:\s*fixed/.test(desk[1]),
+        desk && desk[1]);
+  check("on a phone it is laid over the page",
+        /@media \(max-width: 820px\)\s*\{\s*#notice-panel\s*\{[^}]*position:\s*fixed/.test(css));
+  check("the panel carries a resize bar", /<aside id="notice-panel"[\s\S]*?id="notice-split"/.test(html));
+  check("the bar sets the panel's width",
+        /width:\s*var\(--notice-w/.test(css) && /claunch_noticew:/.test(src)
+          && /\$\("notice-split"\)\.addEventListener\("pointermove"/.test(src));
+  check("a phone hides the bar", /#notice-split\s*\{\s*display:\s*none/.test(css));
+  check("toggling it refits the terminal",
+        /function noticePanelToggle[\s\S]*?refitSoon\(0\)[\s\S]*?\n\}/.test(src));
   check("the panel head has its close button", /id="notice-panel-close"/.test(html));
   check("the open panel hides the strip", /#notices\.panel-open\s*\{[^}]*display:\s*none/.test(css));
   check("the card's × is styled", /\.notice-close\s*\{/.test(css));
