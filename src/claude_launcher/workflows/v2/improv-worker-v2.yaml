@@ -3171,6 +3171,16 @@ nodes:
         브랜치끼리 그 파일로 충돌하지 않는다.
 
       ── 테스트 부산물 정리 (claunch-u87as) ──
+      0. 산출물을 만들 때부터 갈래를 탄다: pytest 실행은 실행마다 유일한
+         `--basetemp`(루트와 이름 규칙은 아래 측정 절)를 쓰고, basetemp
+         밖의 테스트 산출물(브라우저 프로필, playwright 리포트, node 출력)은
+         `$CLAUNCH_TEST_DIR`(테스트 산출물 루트의 이 세션 이름 하위
+         디렉터리)에만 쓴다. 루트는 `daemon.test_output_dir` 설정이 명시하고
+         비어 있으면 `claude_launcher.pytest_basetemp`의 기본
+         (Windows `C:/t`, POSIX `<런처 홈>/basetemp`)이다. 이 디렉터리의
+         최종 회수는 세션 종료(kill/아카이브 포함) 퍼널의
+         basetemp 정리기가 한다 — 계획에 cleanup_pending으로 남아 있어도
+         그것은 지워야 할 남은 것이 아니라 정리기가 가져갈 것이다.
       1. MCP `artifact_cleanup {}`로 이 세션의 정리 계획을 조회한다.
          경로·완료 실행 증거·용량·ready/cleanup_pending·사유를 읽는다.
          도구는 호스트의 basetemp 루트와 이 세션 scratch의 제한된 이름만
