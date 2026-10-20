@@ -5181,6 +5181,7 @@ async function refreshSessions(options) {
       decorateProgressRow(keptRow, s);
       decorateProcsRow(keptRow, s);
       if (typeof decorateCommitsRow === "function") decorateCommitsRow(keptRow, s);
+      if (typeof decorateTalkRow === "function") decorateTalkRow(keptRow, s.name);
       place(nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
       countRow();
@@ -5486,6 +5487,7 @@ async function refreshSessions(options) {
     li.addEventListener("keydown", (ev) => railCardKey(ev, s.name));
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
+    if (typeof decorateTalkRow === "function") decorateTalkRow(li, s.name);
     // The reader's own note for this session, when there is one.
     decorateNoteRow(li, s);
     // What the session last published about its own progress.
@@ -6195,6 +6197,7 @@ async function refreshThreadsRail() {
   threadsRailSig = sig;
   threadsRailCache = rows;
   threadNoticeSync(rows);
+  if (typeof applyTalkRows === "function") applyTalkRows();
   // A pane open on the threads is caught up with them.
   const lay = currentPage === "terminal" && currentName ? sessLayoutFor(currentName) : null;
   if (lay && lay.split && talkShows(lay.pane, "threads")) {
@@ -6267,10 +6270,97 @@ async function refreshQaRail() {
     qaRailSig = sig;
     qaRailCache = rows;
     qaNoticeSync(rows);
+    if (typeof applyTalkRows === "function") applyTalkRows();
     syncSessionResourceButtons();
     if (isTalkPane(splitKind)) globalThis.TalkPane?.refreshQa();
   }
   maybeOpenQaPane();
+}
+
+/* Session-card labels for what waits on the reader in the talk panes
+   (claunch-wp90t): a pill per kind on the rail row, from the same rail
+   caches the terminal header buttons read (/api/qa/rail, /api/threads/rail).
+   The QA pill counts questions still unanswered (open or stale — the
+   `waiting` list); the threads pill counts agent replies this browser has
+   not shown yet, the same seen-mark the header's 🗪 keeps, so a row, the
+   header button and the observer card cannot disagree about what is news.
+   Nothing waiting → no line. */
+function talkRowState(name) {
+  const qaRow = qaRailCache[name];
+  const questions = qaRow && Array.isArray(qaRow.waiting) ? qaRow.waiting : [];
+  const tRow = threadsRailCache[name];
+  let replies = [];
+  if (tRow && tRow.agent_seq) {
+    const seen = loadThreadsSeen()[name];
+    if (seen !== undefined)
+      replies = (tRow.replies || []).filter((r) => Number(r.seq) > Number(seen));
+  }
+  return { questions, replies };
+}
+
+/* Open the session with the pane a pill names — the same layout write the
+   pane buttons and the notice cards use. */
+function openTalkFromRail(name, pane) {
+  try {
+    const lay = sessLayoutFor(name);
+    if (!(lay.split && talkShows(lay.pane, pane)))
+      setSessLayout(name, { split: true,
+        pane: lay.split && lay.pane === "threads" ? "both" : pane });
+  } catch { /* storage off: the session still opens */ }
+  location.hash = "#/s/" + encodeURIComponent(name);
+}
+
+function decorateTalkRow(li, name) {
+  const { questions, replies } = talkRowState(name);
+  const line = li.querySelector(".rail-talk");
+  if (!questions.length && !replies.length) {
+    if (line) line.remove();
+    return;
+  }
+  // Rebuilt only when what it would print moves: this runs on every rail
+  // refresh for every row, and a mutation per row per poll is what the
+  // status-check chips above were bitten by (claunch-v87).
+  const key = JSON.stringify([
+    questions.map((q) => [q.id, q.status, q.revision]),
+    replies.map((r) => [r.seq, r.thread]),
+  ]);
+  if (line && line._railKey === key) return;
+  const fresh = el("div", "rail-talk");
+  fresh._railKey = key;
+  if (questions.length) {
+    const chip = el("button", "rail-talk-pill talk-qa", `? qa ${questions.length}`);
+    chip.type = "button";
+    chip.title = "답하지 않은 질문 — 클릭하면 이 세션을 QA 창과 함께 엽니다\n"
+      + questions.map((q) => `· ${q.title || q.id}${q.status === "stale" ? " (재질문)" : ""}`).join("\n");
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();   // the row attaches; a pill opens the pane
+      openTalkFromRail(name, "qa");
+    });
+    fresh.appendChild(chip);
+  }
+  if (replies.length) {
+    const chip = el("button", "rail-talk-pill talk-threads", `🗪 ${replies.length}`);
+    chip.type = "button";
+    chip.title = "확인하지 않은 쓰레드 답장 — 클릭하면 이 세션을 쓰레드 창과 함께 엽니다\n"
+      + replies.map((r) => `· 「${r.title}」 ${r.excerpt || ""}`).join("\n");
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openTalkFromRail(name, "threads");
+    });
+    fresh.appendChild(chip);
+  }
+  if (line) line.replaceWith(fresh);
+  else li.appendChild(fresh);
+}
+
+/* The rail caches update without a sessions poll (refreshThreadsRail /
+   refreshQaRail), and the seen marks move when a pane opens — both have to
+   re-draw the rows the same way the cflow2 badge does. */
+function applyTalkRows() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const li of list.querySelectorAll("li[data-name]"))
+    decorateTalkRow(li, li.dataset.name);
 }
 
 async function refreshCflow2Rail() {
@@ -8679,6 +8769,9 @@ function refreshRailSeen(list) {
     // that is just as time-based as the seen line above, so it needs the same
     // tick even though the report itself did not change.
     decorateBriefingRow(li, s);
+    // So does the talk line: the QA and threads pills count what waits on the
+    // reader, and the caches they read move without this session's record.
+    if (typeof decorateTalkRow === "function") decorateTalkRow(li, s.name);
     // So do the tps line ("N ago", and its stale class past max_age_s) and the
     // context reading's age in the gauge's and the row's tooltips. A row the
     // in-place redraw keeps would otherwise show the ages it was built with
@@ -21644,6 +21737,8 @@ function syncSplitPane() {
     threadNoticeClear(name);
     threads.classList.toggle("has-news", false);
   }
+  // Either pane catching up can clear this session's pill on the rail rows.
+  if ((qaOn || threadsOn) && typeof applyTalkRows === "function") applyTalkRows();
   if (up) {
     applySplitRatio(lay.ratio);
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
