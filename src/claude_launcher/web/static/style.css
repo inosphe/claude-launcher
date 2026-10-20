@@ -7741,12 +7741,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-input > .cf2-input-control { grid-column: 3; grid-row: 1; min-width: 0; }
 .cf2-input > :is(.cf2-input-help, .cf2-input-options, .cf2-input-error,
                  .cf2-precheck, .cf2-input-board) { grid-column: 1 / -1; }
-/* A checkbox row has no control column: the caption carries the box and the
-   "?" follows the caption rather than the cell's right edge. */
-.cf2-input:has(> .cf2-input-label.check) { grid-template-columns: minmax(0, max-content) 18px minmax(0, 1fr); }
-.cf2-input:has(> .cf2-input-label.check) > .cf2-input-label { grid-column: 1; }
-.cf2-input-label.check { display: flex; align-items: flex-start; gap: 8px; }
-.cf2-input-label.check .cf2-input-control { flex: 0 0 auto; }
+/* A checkbox is a control like any other: it takes the control column, to
+   the right of the caption, so a bool row keeps the same "name, then input"
+   rule as the combobox rows around it (claunch-ngfo3). */
 #new-session .cf2-input-control input[type=checkbox] { width: auto; margin: 1px 0 0; padding: 0; }
 /* The one-line form: the input's own row padding is enough here. */
 #new-session .cf2-input-control input, #new-session .cf2-input-control select {
@@ -7796,7 +7793,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    use. Every row then puts its caption on the line above. */
 @container session-form (max-width: 640px) {
   .cf2-inputs { grid-template-columns: minmax(0, 1fr); }
-  .cf2-input, .cf2-input:has(> .cf2-input-label.check) { grid-template-columns: minmax(0, 1fr) 18px; }
+  .cf2-input { grid-template-columns: minmax(0, 1fr) 18px; }
   .cf2-input > .cf2-input-label { grid-column: 1; grid-row: 1; }
   .cf2-input > .cf2-input-help-toggle { grid-column: 2; grid-row: 1; justify-self: end; }
   .cf2-input > .cf2-input-control { grid-column: 1 / -1; grid-row: 2; }

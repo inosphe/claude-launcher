@@ -23518,14 +23518,12 @@ function cflowInputsForm(box, fields, constraints, seeded) {
     const label = el("label", "cf2-input-label",
                      labelText + (field_.required ? " *" : ""));
     const control = cflowInputControl(field_);
-    if (type === "bool") {
-      label.classList.add("check");
-      label.insertBefore(control, label.firstChild);
-      row.appendChild(label);
-    } else {
-      row.appendChild(label);
-      row.appendChild(control);
-    }
+    // A checkbox takes the control column like every other input: every row
+    // reads "name, then control" whichever shape the control is. Nesting the
+    // box inside the caption put it ahead of the name and broke the one rule
+    // the combobox rows keep (claunch-ngfo3).
+    row.appendChild(label);
+    row.appendChild(control);
     // The paragraph stays in the row whether or not it is shown: the toggle
     // only flips the class the stylesheet reads.
     if (field_.help) {
