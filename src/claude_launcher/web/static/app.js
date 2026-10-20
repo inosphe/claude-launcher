@@ -50364,10 +50364,13 @@ async function refreshResumeGate() {
    (opv2_resume). The card counts down five minutes. With no answer a child
    request is created as asked, a top-level request is created as the
    asker's CHILD instead, and a resume request is not resumed -- its
-   fallback is filed as a new-session request. Manual settles the request
-   and opens the form filled with what was asked -- the New session tab for
-   a top-level request, the spawn child tab under the asker for a child
-   one; the form's create tells the request which session it made. */
+   fallback is filed as a new-session request. Manual does NOT settle the
+   request (claunch-uzo40): it opens the form filled with what was asked --
+   the New session tab for a top-level request, the spawn child tab under
+   the asker for a child one -- and pauses the clock, so a form closed
+   without creating anything leaves a card that still answers Approve /
+   Reject / Manual (the same form again). The form's create tells the
+   request which session it made, and that ends it. */
 const SPAWN_GATE_PREFIX = "spawn-gate-";
 
 function spawnGateTitle(rec) {
@@ -50378,8 +50381,14 @@ function spawnGateTitle(rec) {
 }
 
 function spawnGateClock(rec) {
-  const left = gateCountdown(rec.deadline);
   const more = (rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "";
+  // Manual is a pause (claunch-uzo40): the request stays pending with no
+  // timer, so there is no countdown to show until a press restarts it.
+  if (rec.hold === "manual") {
+    return `taken by hand${rec.held_by ? ` (${rec.held_by})` : ""} — no clock: ` +
+      `approve, reject, or +5 min to start the countdown again${more}`;
+  }
+  const left = gateCountdown(rec.deadline);
   if (rec.kind === "resume") {
     return `not resumed — a new session is asked for instead — in ${left}${more}`;
   }
@@ -50560,11 +50569,14 @@ function spawnGateButtons(rec, done) {
       rec.scope === "child" ? `create the child of ${rec.session} now, as asked`
         : "create the top-level session now, as asked",
       (btn) => spawnGatePost(rec, "approve", btn));
-    add("Manual", "",
-      rec.scope === "child"
-        ? `open the spawn child form under ${rec.session} filled with this request, ` +
-          "edit it and create it yourself"
-        : "open the New session form filled with this request, edit it and create it yourself",
+    const held = rec.hold === "manual";
+    add(held ? "Open form" : "Manual", "",
+      held ? "open the form again with this request's spec — the request stays open "
+          + "and its clock stays paused until you create it or reject it"
+        : rec.scope === "child"
+          ? `open the spawn child form under ${rec.session} filled with this request, ` +
+            "edit it and create it yourself"
+          : "open the New session form filled with this request, edit it and create it yourself",
       async (btn) => {
         const settled = await spawnGatePost(rec, "manual", btn);
         if (settled) {
@@ -50581,7 +50593,9 @@ function spawnGateButtons(rec, done) {
     rec.kind === "resume" ? "nothing is resumed and nothing is created" : "nothing is created",
     (btn) => spawnGatePost(rec, "reject", btn));
   add("+5 min", "gate-extend",
-    "not a decision: the deadline moves out and the request stays open",
+    rec.hold === "manual"
+      ? "start the countdown again with five more minutes — the request stays open"
+      : "not a decision: the deadline moves out and the request stays open",
     (btn) => spawnGatePost(rec, "extend", btn));
   return out;
 }
@@ -50618,8 +50632,11 @@ async function refreshSpawnGate() {
       const actions = el("div", "gate-actions");
       for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
       actions.appendChild(gateHideButton("spawn", rec.id, key,
-        "close this card only — the request stays open and its deadline runs; " +
-        "the bell keeps it in the notification history"));
+        rec.hold === "manual"
+          ? "close this card only — the request stays open with its clock paused; " +
+            "the bell keeps it in the notification history"
+          : "close this card only — the request stays open and its deadline runs; " +
+            "the bell keeps it in the notification history"));
       node.appendChild(actions);
       host.appendChild(node);
       notices.set(key, { node, timer: null });

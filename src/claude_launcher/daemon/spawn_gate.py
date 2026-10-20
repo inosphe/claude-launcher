@@ -24,9 +24,13 @@ Two kinds of request:
 * **Approved** -- the session is created as asked (``create``). A create
   that fails settles the request as ``failed`` with the error.
 * **Manual** -- the person opens the New session form (root) or the spawn
-  child form (child) seeded with ``spec`` and creates it themselves (or does
-  not). The request is settled; the form's create reports the session it
-  made back here (:meth:`link`) so the asker learns its name.
+  child form (child) seeded with ``spec`` and creates it themselves. The
+  request does NOT settle: it stays pending with the clock paused
+  (:data:`HOLD_MANUAL`) so closing the form, or not creating anything,
+  leaves a card that still offers Approve / Reject / Manual (the same form
+  again). It ends only when the form's create reports its session back
+  (:meth:`link`), the person rejects it, or the asker withdraws it —
+  claunch-uzo40. ``+5 min`` on a held request restarts the countdown.
 * **Rejected** -- nothing is created.
 * **Unanswered** -- after :data:`GATE_TIMEOUT` (plus every extension) a
   child request counts as approved (th-d9e343), and a root request creates
@@ -106,7 +110,19 @@ SETUP_CUSTOM = "custom"
 PENDING = "pending"
 CREATING = "creating"
 RESUMING = "resuming"
+
+#: ``hold`` on a pending spawn request: the person pressed Manual and took
+#: the session over in the form. The status stays ``pending`` -- the request
+#: still holds the gate and the card still answers -- but its clock is paused
+#: and no timer is armed, so an abandoned form never auto-creates a session
+#: behind the person's back (claunch-uzo40). :meth:`SpawnGate.link`,
+#: :meth:`SpawnGate.reject` and :meth:`SpawnGate.withdraw` end it;
+#: :meth:`SpawnGate.extend` clears the hold and restarts the countdown.
+HOLD_MANUAL = "manual"
 APPROVED = "approved"
+#: Read-only now: daemons before claunch-uzo40 settled a request here when
+#: the person pressed Manual, which is the bug that change fixed. A held
+#: request is ``pending`` with :data:`HOLD_MANUAL`, so nothing writes this.
 MANUAL = "manual"
 REJECTED = "rejected"
 WITHDRAWN = "withdrawn"
@@ -265,7 +281,18 @@ def outcome_message(record: dict) -> str:
             body = f"{status}: session {target}"
         return f"{head} {body}"
     created = record.get("created") or "?"
-    if status == APPROVED and record.get("setup") == SETUP_AGENT:
+    form = "spawn child form" if record.get("scope") == CHILD else "New session form"
+    if record.get("hold") == HOLD_MANUAL:
+        # Still open: the person pressed Manual (claunch-uzo40). The request
+        # waits with its clock paused until they create the session, reject
+        # it, or the asker withdraws it.
+        by = record.get("held_by") or by
+        body = (f"taken over by hand ({by}): the person is creating the session in the "
+                f"{form}. The request stays open -- you are told when a session is "
+                "created for it, or when it is rejected or withdrawn.")
+    elif status == APPROVED and record.get("setup") == SETUP_CUSTOM:
+        body = f"the person created session {created} by hand from your request ({by})."
+    elif status == APPROVED and record.get("setup") == SETUP_AGENT:
         if record.get("scope") == ROOT:
             body = (f"nobody answered: no top-level session was made; session {created} "
                     "was created as your child from your spec instead. It starts on the "
@@ -277,12 +304,6 @@ def outcome_message(record: dict) -> str:
         where = "as your child" if record.get("created_as") == CHILD else "top-level"
         body = (f"approved (by {by}): session {created} was created {where}. "
                 "It starts on the task you gave; follow it from your poll.")
-    elif status == MANUAL:
-        form = "spawn child form" if record.get("scope") == CHILD else "New session form"
-        body = (f"the person created session {record['created']} by hand from your request."
-                if record.get("created") else
-                f"taken over by hand ({by}): the person is creating the session in the "
-                f"{form}. You are told its name if they create it.")
     elif status == REJECTED:
         body = f"rejected (by {by}): nothing was created. Do not ask again for the same work."
     elif status == FAILED:
@@ -369,7 +390,9 @@ class SpawnGate:
         floor = _now() + timedelta(seconds=BOOT_GRACE)
         changed = False
         for row in self.records.values():
-            if row.get("status") != PENDING:
+            # A request the person took over by hand has no clock to arm: the
+            # deadline it carries is only where it stopped (claunch-uzo40).
+            if row.get("status") != PENDING or row.get("hold"):
                 continue
             deadline = _parse(row.get("deadline"))
             if deadline is None or deadline < floor:
@@ -403,7 +426,7 @@ class SpawnGate:
     def _fire(self, rid: str) -> None:
         self._timers.pop(rid, None)
         row = self.records.get(rid)
-        if row is None or row.get("status") != PENDING:
+        if row is None or row.get("status") != PENDING or row.get("hold"):
             return
         asyncio.ensure_future(self.expire(rid))
 
@@ -412,7 +435,7 @@ class SpawnGate:
         asked, a root spawn is created as the asker's child instead, and a
         resume request expires into its fallback spawn."""
         row = self.records.get(rid)
-        if row is None or row.get("status") != PENDING:
+        if row is None or row.get("status") != PENDING or row.get("hold"):
             return None
         if row.get("kind") == RESUME:
             return self._resume_to_spawn(row, EXPIRED, "timeout")
@@ -573,6 +596,9 @@ class SpawnGate:
         row["status"] = status
         row["decided_by"] = decided_by
         row["decided_at"] = _stamp()
+        # Every settlement ends a manual hold: the clock pause exists only
+        # while the request is still waiting (claunch-uzo40).
+        row.pop("hold", None)
 
     def _finish(self, row: dict) -> dict:
         self._tell(row)
@@ -633,12 +659,26 @@ class SpawnGate:
     def manual(self, rid: str, *, decided_by: str = "web") -> dict:
         """The person takes the spawn over in the New session form (root)
         or the spawn child form (child). The reply carries ``spec`` for the
-        form to be seeded with."""
+        form to be seeded with.
+
+        The request stays open with its clock paused (:data:`HOLD_MANUAL`):
+        closing the form without creating anything leaves the card up, and
+        pressing Manual again hands the same spec back to reopen it. The
+        asker is told the take-over is not an answer, and is told the
+        outcome when the request really ends (claunch-uzo40)."""
+        self.reconcile()
         row = self._pending(rid, SPAWN)
+        if row.get("hold") == HOLD_MANUAL:
+            return dict(row)      # already taken over: no second note, same spec
         self._clear(rid)
-        self._mark(row, MANUAL, decided_by)
+        row["hold"] = HOLD_MANUAL
+        row["held_at"] = _stamp()
+        row["held_by"] = decided_by
         row["setup"] = SETUP_CUSTOM
-        return self._finish(row)
+        row["created_as"] = CHILD if row.get("scope") == CHILD else ROOT
+        self._announce(row)
+        self._save()
+        return dict(row)
 
     def spawn_instead(self, rid: str, *, decided_by: str = "web") -> dict:
         """A resume request answered with a new session instead."""
@@ -659,9 +699,14 @@ class SpawnGate:
         return self._finish(row)
 
     def link(self, rid: str, created: str) -> dict:
-        """The manual form created ``created`` for the request ``rid``."""
-        row = self.records.get(rid)
-        if row is None or row.get("status") != MANUAL:
+        """The manual form created ``created`` for the request ``rid``.
+
+        This is what ends a hold: the request settles ``approved`` with
+        ``setup: custom`` and the asker learns the session's name. A request
+        the person never took over cannot be linked."""
+        self.reconcile()
+        row = self._pending(rid, SPAWN)
+        if row.get("hold") != HOLD_MANUAL:
             raise GateRefused(409, "no manual spawn request with that id")
         if row.get("created"):
             raise GateRefused(409, f"request {rid} is already linked to {row['created']}")
@@ -670,12 +715,21 @@ class SpawnGate:
             raise GateRefused(400, "session (the created session) is required")
         row["created"] = created
         row["created_at"] = _stamp()
+        row["setup"] = SETUP_CUSTOM
+        self._mark(row, APPROVED, row.get("held_by") or "web")
         return self._finish(row)
 
     def extend(self, rid: str, *, decided_by: str = "web") -> dict:
-        """Push the deadline out by :data:`EXTENSION`; nothing settles."""
+        """Push the deadline out by :data:`EXTENSION`; nothing settles.
+
+        On a request the person took over by hand this is also the way back
+        to the clock: the hold is cleared and the countdown starts again,
+        five minutes out (claunch-uzo40)."""
         row = self._pending(rid)
         now = _now()
+        row.pop("hold", None)
+        row.pop("held_at", None)
+        row.pop("held_by", None)
         current = _parse(row.get("deadline")) or now
         row["deadline"] = _stamp(max(current, now) + timedelta(seconds=EXTENSION))
         row["extensions"] = int(row.get("extensions") or 0) + 1
@@ -695,11 +749,20 @@ class SpawnGate:
         return dict(row)
 
     def _tell(self, row: dict) -> None:
+        """A settled request: the operator's feed line, then the asker's."""
         if self.on_settle is not None:
             try:
                 self.on_settle(dict(row))
             except Exception:  # noqa: BLE001 -- the answer stands without the line
                 log.exception("spawn request %s: on_settle failed", row.get("id"))
+        self._announce(row)
+
+    def _announce(self, row: dict) -> None:
+        """Tell the asking session what just happened to its request.
+
+        Separate from :meth:`_tell` because a manual take-over is not a
+        settlement: it goes to the asker's terminal without a feed line that
+        would read as "answered" (claunch-uzo40)."""
         if self._notify is None or not row.get("session"):
             return
         try:
