@@ -455,7 +455,10 @@ console.log("durableflow_check: plan ok");
 // drawn, and no edge runs across a box. The live run gds6 rules-v2
 // 20261020-195925 named the root in every card's ``after`` next to its
 // feature, and one card also waited for a sibling feature.
-// Every segment of every drawn edge stays out of every box's inside.
+// Every segment of every drawn edge stays out of every box's inside. A
+// reduced edge stays in the model, hidden, so a unit that comes back keeps
+// the edge ids already drawn.
+const shown = (mm) => Array.from(mm.edges).filter((e) => e.id !== "live-edge" && !e.gone && !e.reduced).map((e) => e.id);
 function crossings(mm) {
   const host = new El("div"), vw = DF.makeView(doc, host);
   vw.draw(mm);
@@ -465,6 +468,7 @@ function crossings(mm) {
   });
   const out = [];
   for (const [id, path] of vw.edges) {
+    if (/ gone/.test(path.getAttribute("class"))) continue;
     const pts = path.getAttribute("d").match(/-?[\d.]+,-?[\d.]+/g).map((s) => s.split(",").map(Number));
     for (let i = 1; i < pts.length; i++) {
       const [ax, ay] = pts[i - 1], [bx, by] = pts[i];
@@ -487,10 +491,11 @@ function crossings(mm) {
     { at: a2("50:03"), event: "unit", unit: R, state: "done" },
     { at: a2("50:04"), event: "unit", unit: "01-run/02-dash", state: "start", after: [F[0], R] }];
   const me = DF.model(E, true), be = byOf(me);
-  assert.deepStrictEqual(ids(me).sort(), [
+  assert.deepStrictEqual(shown(me).sort(), [
     "unit:" + F[0] + ">unit:01-run/01-walk", "unit:" + F[0] + ">unit:01-run/02-dash",
     "unit:" + F[1] + ">unit:02-stamina/01-drain", "unit:" + F[2] + ">unit:01-run/01-walk",
     ...F.map((f) => "unit:" + R + ">unit:" + f)].sort(), "root -> card edges implied through a feature are not drawn");
+  assert.ok(me.edges.find((e) => e.id === "unit:" + R + ">unit:01-run/01-walk").reduced, "they stay in the model, hidden");
   assert.deepStrictEqual(plain(be["unit:01-run/01-walk"].after), [F[2], F[0], R], "the unit keeps its whole after list");
   assert.ok(be["unit:01-run/01-walk"].tip[0].endsWith(" ← " + [F[2], F[0], R].join(", ")), "and its tip lists it");
   assert.ok(be["unit:01-run/02-dash"].tip.some((t) => t.endsWith(" ← " + [F[0], R].join(", "))));
@@ -506,13 +511,38 @@ function crossings(mm) {
   const ms2 = DF.model(S, false), bs = byOf(ms2);
   assert.deepStrictEqual(plain(["a", "z", "y", "b", "x", "d"].map((x) => [bs["unit:" + x].col, bs["unit:" + x].row])),
     [[0, 0], [0, 1], [1, 0], [1, 1], [2, 0], [3, 0]]);
-  assert.ok(ids(ms2).includes("unit:a>unit:d"), "a is not behind x: its edge stays");
+  assert.ok(shown(ms2).includes("unit:a>unit:d"), "a is not behind x: its edge stays");
   assert.deepStrictEqual(crossings(ms2), []);
   // A target below the first row turns in through the gap above it.
   const S2 = [S[0], S[1], S[2], S[3], S[4], { event: "unit", unit: "e", state: "start", after: ["x"] }, { event: "unit", unit: "d", state: "start", after: ["a", "x"] }];
   const m3 = DF.model(S2, false);
   assert.strictEqual(byOf(m3)["unit:d"].row, 1);
   assert.deepStrictEqual(crossings(m3), []);
+}
+{
+  // Only a path through drawn units reduces an edge. C waits for B and A; a
+  // replan drops B before it starts, so A > C is C's one visible edge. B
+  // comes back on a third plan and A > C hides again under the same id.
+  const pl = (units) => ({ at: a2("51:00"), event: "plan", units });
+  const A = { unit: "A" }, B = { unit: "B", after: ["A"] }, C = { unit: "C", after: ["B", "A"] };
+  const G = [pl([A, B, C]), { at: a2("51:01"), event: "unit", unit: "A", state: "start", after: [] }, pl([A, { unit: "C", after: ["A"] }])];
+  const mg = DF.model(G, true);
+  assert.strictEqual(byOf(mg)["unit:B"].status, "gone");
+  assert.deepStrictEqual(shown(mg), ["unit:A>unit:C"], "B is hidden: A > C is drawn");
+  assert.deepStrictEqual(ids(mg).sort(), ["unit:A>unit:B", "unit:A>unit:C", "unit:B>unit:C"]);
+  stable(G, "gone");
+  const G2 = [...G, pl([A, B, C])], mb = DF.model(G2, true);
+  assert.strictEqual(byOf(mb)["unit:B"].status, "plan");
+  assert.deepStrictEqual(shown(mb).sort(), ["unit:A>unit:B", "unit:B>unit:C"], "B is back: A > C hides again");
+  assert.deepStrictEqual(ids(mb).sort(), ids(mg).sort(), "the same edge ids");
+  stable(G2, "back");
+  const host = new El("div"), vw = DF.makeView(doc, host);
+  vw.draw(mg);
+  const ac = vw.edges.get("unit:A>unit:C");
+  assert.doesNotMatch(ac.getAttribute("class"), /gone/);
+  vw.draw(mb);
+  assert.strictEqual(vw.edges.get("unit:A>unit:C"), ac, "the drawn edge is kept");
+  assert.match(ac.getAttribute("class"), /gone/);
 }
 console.log("durableflow_check: edges ok");
 
