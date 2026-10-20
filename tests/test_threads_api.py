@@ -38,6 +38,7 @@ class FakeManager:
     def __init__(self, sessions):
         self.sessions = {s.sdef.name: s for s in sessions}
         self.woken = []
+        self.exit_hooks = []
 
     def get(self, name):
         if name not in self.sessions:
@@ -440,4 +441,20 @@ def test_a_guest_is_removed_or_leaves(tmp_path):
         assert "delivered" not in res and len(mgr.sessions["s3"].delivered) == n   # leaving is not announced back
         await req("POST", f"/api/threads/{tid}/guests/s3/remove", {}, status=404)
         assert (await req("GET", "/api/threads?session=s3"))["guest_threads"] == []
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_an_ended_guest_leaves_its_threads(tmp_path):
+    # claunch-tee5g: the exit hook drops the session from every thread it was a guest in.
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "Plan"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s3"})
+        for hook in mgr.exit_hooks:
+            hook(mgr.sessions["s2"])
+        got = (await req("GET", f"/api/threads/{tid}"))["thread"]["guests"]
+        assert [g["session"] for g in got] == ["s3"]
+        n = len(mgr.sessions["s2"].delivered)
+        await req("POST", f"/api/threads/{tid}/messages", {"text": "still there?"})
+        assert len(mgr.sessions["s2"].delivered) == n          # no longer typed into
     run(tmp_path, scenario, names=("s1", "s2", "s3"))

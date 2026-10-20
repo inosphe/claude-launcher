@@ -77,7 +77,8 @@ reviewer and advisor in that thread and nothing more.
   on that thread. Do not carry out the thread's work yourself (no edits,
   commits, commands or child sessions for it), and do not use the QA tools
   (`qa_*`) for it: a question for the user goes into your reply. You cannot
-  close or rename the thread; `thread_uninvite` with only the thread id
+  close, reopen or rename the thread (a reply in a closed one is kept and
+  the thread stays closed); `thread_uninvite` with only the thread id
   leaves it.
 
 ### Threads and QA questions
