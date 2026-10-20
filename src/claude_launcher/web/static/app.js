@@ -4678,6 +4678,10 @@ function renderSessionGroupTabs(group, tabs, active) {
   bar.classList.toggle("hidden", !group || !tabs.length);
   bar.textContent = "";
   bar.dataset.active = active ?? "";
+  // Guarded: reduced harnesses slice this without the title state.
+  if (typeof noteRailOpenGroup === "function") {
+    noteRailOpenGroup(group || "", group && tabs.length ? active : null);
+  }
   if (!group) {
     renderSessionGroupHeader("", null);
     return;
@@ -14416,6 +14420,7 @@ function setCurrentProject(name) {
     applyProjectDefaultCwd(form);
   }
   if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
+  if (typeof syncTabTitle === "function") syncTabTitle();
   // Both lists hold every project already: redraw them from the cache now,
   // with no request, so the pick shows the moment it is made.
   refreshSessions({ cached: true });
@@ -14437,6 +14442,102 @@ function syncRouteProject() {
     const want = named.get("project") || "";
     if (want !== currentProject) setCurrentProject(want);
   } else if (currentProject) syncProjectHash();
+}
+
+/* The browser tab's title (claunch-9thjl). Several windows on one daemon are
+   common, and every one of them used to read "claunch sessions" in the
+   browser's tab strip. By default the title names what the rail is looking
+   at: the open group tab (a mesh, or a workspace) and the picked project. A
+   person can name a window instead (the ✎ beside the rail's title).
+
+   That name belongs to one browser tab, so it is kept out of localStorage:
+   every tab of this origin shares that, and naming one window would rename
+   the others on their next load. It rides the address as `?title=` beside
+   `?project=` -- a reload, a bookmark and a duplicated tab keep it -- and
+   sessionStorage, which the browser keeps per tab, holds it for an address
+   that names none (every link inside the page is written without it). */
+const TAB_TITLE_KEY = `claunch_tab_title:${BASE}`;
+const TAB_TITLE_DEFAULT = "claunch sessions";
+let customTabTitle = (() => {
+  try {
+    const h = typeof location !== "undefined" ? location.hash || "" : "";
+    const q = h.indexOf("?");
+    const params = new URLSearchParams(q < 0 ? "" : h.slice(q + 1));
+    if (params.has("title")) return (params.get("title") || "").trim();
+  } catch {}
+  try { return (sessionStorage.getItem(TAB_TITLE_KEY) || "").trim(); } catch { return ""; }
+})();
+// The rail's open group tab, as renderSessionGroupTabs last drew it.
+let railOpenGroup = { group: "", value: null };
+function noteRailOpenGroup(group, value) {
+  if (railOpenGroup.group === group && railOpenGroup.value === value) return;
+  railOpenGroup = { group, value };
+  syncTabTitle();
+}
+
+/* The title the rail's state gives: the open group tab, then the project,
+   each left out when there is none. The `(no mesh)` bucket is not a name. */
+function autoTabTitle(project, group, value) {
+  const parts = [];
+  if (group && value && value !== "(no mesh)") {
+    parts.push(group === "workspace" ? sessionWorkspaceLabel(value) : value);
+  }
+  if (project) parts.push(project);
+  return parts.length ? `${parts.join(" · ")} · claunch` : TAB_TITLE_DEFAULT;
+}
+
+/* The same address with the custom title set to `name`, or taken out. */
+function hashWithTitle(h, name) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  const params = new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+  if (name) params.set("title", name);
+  else params.delete("title");
+  const qs = params.toString();
+  return (s.split("?")[0] || "#/") + (qs ? "?" + qs : "");
+}
+
+function syncTabTitle() {
+  if (typeof document === "undefined") return;
+  const want = customTabTitle
+    || autoTabTitle(currentProject, railOpenGroup.group, railOpenGroup.value);
+  if (document.title !== want) document.title = want;
+  const btn = typeof $ === "function" ? $("tab-title-edit") : null;
+  if (btn) {
+    btn.classList.toggle("custom", !!customTabTitle);
+    btn.title = customTabTitle
+      ? `browser tab named "${customTabTitle}" — click to rename or clear`
+      : "name this browser tab (now follows the open mesh and project)";
+  }
+}
+
+/* Name this browser tab; "" goes back to the automatic title. Written into
+   the address in place, like the project: a name is not a place to go Back
+   to. */
+function setCustomTabTitle(name) {
+  const next = String(name || "").trim();
+  customTabTitle = next;
+  try {
+    if (next) sessionStorage.setItem(TAB_TITLE_KEY, next);
+    else sessionStorage.removeItem(TAB_TITLE_KEY);
+  } catch {}
+  if (typeof location !== "undefined" && typeof history !== "undefined") {
+    const want = hashWithTitle(location.hash, next);
+    if ((location.hash || "#/") !== want) history.replaceState(history.state, "", want);
+  }
+  syncTabTitle();
+}
+
+/* The custom title rides the address as `?title=`, the way the project
+   does (syncRouteProject): an address that names one is obeyed, and one
+   that names none is given the current name back. Called by route(). */
+function syncRouteTitle() {
+  const named = hashQuery(location.hash);
+  if (named.has("title")) {
+    const want = (named.get("title") || "").trim();
+    if (want !== customTabTitle) setCustomTabTitle(want);
+  } else if (customTabTitle) setCustomTabTitle(customTabTitle);
+  syncTabTitle();
 }
 
 /* Opening a session while the rail is narrowed to another project moves the
@@ -19841,6 +19942,12 @@ window.claunchNotices = {
   shown: (id) => noticeSourceShown(id),
   record: (entry) => noticeRecord(Object.assign({ kind: "" }, entry)),
 };
+
+$("tab-title-edit").addEventListener("click", () => {
+  const got = prompt("Name this browser tab (empty: follow the open mesh and project)",
+    customTabTitle);
+  if (got !== null) setCustomTabTitle(got);
+});
 
 $("refresh-all").addEventListener("click", async () => {
   const btn = $("refresh-all");
@@ -29367,6 +29474,7 @@ function route() {
   r.detail = hashDetail(location.hash);
   // Guarded: reduced harnesses slice route() without the project state.
   if (typeof syncRouteProject === "function") syncRouteProject();
+  if (typeof syncRouteTitle === "function") syncRouteTitle();
   // An open rail follows the terminal: the rail describes the session on
   // screen, and one left pointing at the session we came *from* quietly
   // mislabels everything in it, its cflow run most of all. The links that
