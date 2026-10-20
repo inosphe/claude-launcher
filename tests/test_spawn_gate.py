@@ -12,8 +12,10 @@ What these pin:
 
 * filing creates nothing; approve creates through the create path and tells
   the asker the new name; a failed create settles ``failed``;
-* reject creates nothing; manual settles the request, and the form's create
-  links its session back; the deadline counts as approval;
+* reject creates nothing; manual leaves the request pending with the clock
+  paused (claunch-uzo40), the form's create links its session back and ends
+  it, and approve / reject / withdraw still answer a held request;
+  the deadline counts as approval;
 * extend moves the deadline out and keeps the request pending, as often as
   pressed;
 * resume: approve respawns; "spawn instead" and the deadline file the
@@ -158,17 +160,104 @@ def test_reject_creates_nothing(home, tmp_path):
     assert world.created == [] and "rejected" in world.notes[0][1]
 
 
-def test_manual_settles_and_the_form_links_its_session(home, tmp_path):
+def test_manual_holds_the_request_open_until_the_form_links_its_session(home, tmp_path):
     world = _World(tmp_path)
     rid = _spawn(world)["id"]
     record = world.gate.manual(rid)
-    assert record["status"] == "manual" and record["spec"] == SPEC
-    assert world.created == []
-    assert "by hand" in world.notes[-1][1]
+    # The bug (claunch-uzo40): pressing Manual used to settle the request, so
+    # a form closed without creating anything left no way back.
+    assert record["status"] == "pending" and record["hold"] == "manual"
+    assert record["spec"] == SPEC and record["setup"] == "custom"
+    assert world.created == [] and world.settled == []
+    assert "stays open" in world.notes[-1][1] and "by hand (web)" in world.notes[-1][1]
+    assert [r["id"] for r in world.gate.list() if r["status"] == "pending"] == [rid]
+
     linked = world.gate.link(rid, "hand-made")
+    assert linked["status"] == "approved" and linked["setup"] == "custom"
     assert linked["created"] == "hand-made" and "hand-made" in world.notes[-1][1]
+    assert "hold" not in linked and world.settled[-1]["id"] == rid
     with pytest.raises(spawn_gate.GateRefused):
         world.gate.link(rid, "again")
+
+
+def test_manual_again_hands_the_same_spec_back(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    told = len(world.notes)
+    again = world.gate.manual(rid)
+    assert again["status"] == "pending" and again["spec"] == SPEC
+    assert len(world.notes) == told, "a second press does not tell the asker again"
+
+
+def test_a_held_request_has_no_clock(home, tmp_path):
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world)["id"]
+        world.gate.manual(rid)
+        held_deadline = world.gate.get(rid)["deadline"]
+        await asyncio.sleep(0.3)
+        return world, rid, held_deadline
+
+    world, rid, held_deadline = asyncio.run(run())
+    record = world.gate.get(rid)
+    assert record["status"] == "pending" and record["hold"] == "manual"
+    assert record["deadline"] == held_deadline, "the deadline is only where it stopped"
+    assert world.created == [] and rid not in world.gate._timers
+
+
+def test_extend_restarts_a_paused_clock(home, tmp_path):
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world)["id"]
+        world.gate.manual(rid)
+        await asyncio.sleep(0.2)
+        again = world.gate.extend(rid)
+        armed = rid in world.gate._timers
+        await world.gate.cancel()
+        return again, armed
+
+    again, armed = asyncio.run(run())
+    assert "hold" not in again and again["status"] == "pending"
+    assert armed is True, "the countdown is running again"
+    assert datetime.fromisoformat(again["deadline"]) > datetime.now(timezone.utc)
+
+
+def test_approve_after_manual_creates_as_asked(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    record = asyncio.run(world.gate.approve(rid))
+    assert record["status"] == "approved" and record["setup"] == "approved"
+    assert record["created"] == "new1" and world.created[0][2] == rid
+    assert "hold" not in record
+
+
+def test_reject_and_withdraw_end_a_held_request(home, tmp_path):
+    world = _World(tmp_path)
+    one = _spawn(world)["id"]
+    world.gate.manual(one)
+    assert world.gate.reject(one)["status"] == "rejected"
+    two = _spawn(world)["id"]
+    world.gate.manual(two)
+    assert world.gate.withdraw(two, session="op")["status"] == "withdrawn"
+    assert world.created == []
+
+
+def test_a_held_request_still_counts_against_the_asker(home, tmp_path):
+    world = _World(tmp_path)
+    for _ in range(spawn_gate.MAX_PENDING_PER_ASKER):
+        world.gate.manual(_spawn(world)["id"])
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        _spawn(world)
+    assert err.value.status == 409
+
+
+def test_link_refuses_a_request_nobody_took_over(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    with pytest.raises(spawn_gate.GateRefused):
+        world.gate.link(rid, "hand-made")
 
 
 def test_the_deadline_counts_as_approval(home, tmp_path):
@@ -323,6 +412,25 @@ def test_a_pending_request_outlives_the_daemon_and_gets_a_grace(home, tmp_path):
     assert again.created == []
 
 
+def test_a_held_request_outlives_the_daemon_without_a_clock(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    held_deadline = world.gate.get(rid)["deadline"]
+    again = _World(tmp_path)
+    assert again.gate.get(rid)["hold"] == "manual"
+
+    async def run():
+        await again.gate.start()
+        armed = rid in again.gate._timers
+        await again.gate.cancel()
+        return armed
+
+    assert asyncio.run(run()) is False, "the paused clock is not re-armed"
+    assert again.gate.get(rid)["deadline"] == held_deadline
+    assert again.created == []
+
+
 # --------------------------------------------------------------------------- #
 # the HTTP surface
 # --------------------------------------------------------------------------- #
@@ -375,10 +483,19 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
             assert any(f"spawn-request {one}" in m for m in op.delivered)
 
             resp = await client.post(f"/api/spawn-requests/{two}/manual", headers=AUTH)
-            assert (await resp.json())["request"]["spec"] == SPEC
+            held = (await resp.json())["request"]
+            assert held["spec"] == SPEC
+            # Manual is not an answer: the card stays, the clock is paused
+            # (claunch-uzo40) and the routes still settle it.
+            assert held["status"] == "pending" and held["hold"] == "manual"
+            rows = (await (await client.get("/api/spawn-requests", headers=AUTH)).json())["requests"]
+            assert two in {r["id"] for r in rows if r["status"] == "pending"}
             resp = await client.post(f"/api/spawn-requests/{two}/created",
                                      json={"session": "by-hand"}, headers=AUTH)
-            assert (await resp.json())["request"]["created"] == "by-hand"
+            linked = (await resp.json())["request"]
+            assert linked["created"] == "by-hand"
+            assert linked["status"] == "approved" and linked["setup"] == "custom"
+            assert "hold" not in linked
 
             assert (await client.post(f"/api/spawn-requests/{one}/reject",
                                       headers=AUTH)).status == 409
