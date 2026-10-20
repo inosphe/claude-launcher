@@ -48705,6 +48705,9 @@ function noticeTabsOpen() {
     if (typeof BroadcastChannel !== "function") return;
     noticeTabs.chan = new BroadcastChannel(NOTICE_TAB_CHANNEL);
     noticeTabs.chan.onmessage = (ev) => noticeTabsApply(ev && ev.data);
+    // Node's channel (the page's checks under tests/web load this code)
+    // holds the process open unless unref'd; a browser has no unref.
+    if (typeof noticeTabs.chan.unref === "function") noticeTabs.chan.unref();
   } catch {
     noticeTabs.chan = null;
   }
