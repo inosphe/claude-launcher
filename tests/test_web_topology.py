@@ -670,6 +670,7 @@ BROWSER_CHECKS = [
         "sysperf_browser.cjs",
         "ptyhostsetting_browser.cjs",
         "spawngate_browser.cjs",
+        "filldefault_browser.cjs",
 ]
 
 

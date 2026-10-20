@@ -11437,6 +11437,27 @@ function projectSelectOptions(select, withAll) {
   select.value = [...select.options].some((o) => o.value === kept) ? kept : "";
 }
 
+/* The form's Project row when it holds no answer: the rail's project, else
+   the first the list offers. The row is the rail's own (`PROJECT_KEY`;
+   NEW_FORM_DRAFT_FIELDS leaves it out for that reason), but the modal's
+   close puts the values from before the box was opened back, and the row is
+   rebuilt only when the project list moves — so an opening read had to take
+   the rail's project again or the form stood with no project at all. That is
+   what the fill default button beside it compares against, so an empty row
+   left it off however far Directory and Mesh had drifted (claunch-3b3vt).
+   A child's row is not this one's: its empty answer is "(the parent's)", and
+   syncSpawnProjectRow owns that entry. */
+function pickProjectWhenEmpty(select) {
+  const options = select && select.options ? [...select.options] : [];
+  if (!options.length || select.value) return false;
+  const rail = currentProject
+    ? options.find((o) => o.value === currentProject) : null;
+  const want = rail || options.find((o) => o.value);
+  if (!want) return false;
+  select.value = want.value;
+  return true;
+}
+
 async function refreshProjects(opts) {
   const form = !(opts && opts.form === false);
   let list;
@@ -11466,20 +11487,23 @@ async function refreshProjects(opts) {
   }
   // The form's row: only on an opening's read, never the poll's
   // (claunch-p3i0n.1).
-  if (!form || signature === projectsFormRendered) return;
-  projectsFormRendered = signature;
+  if (!form) return;
   const row = document.querySelector("#new-session select[name=project]");
-  if (row) {
+  if (row && signature !== projectsFormRendered) {
+    projectsFormRendered = signature;
     projectSelectOptions(row, false);
-    if (currentProject && [...row.options].some((o) => o.value === currentProject)) {
-      row.value = currentProject;
-    }
-    row._lastProject = row.value;
     // The rebuild just dropped the child's inherit entry and put a project
     // name in its place, which is the one state that makes an untouched row
     // move the child. Asked back here rather than left to the next sync:
     // between the two the form would submit a project nobody chose.
     if (spawnParent()) syncSpawnMode();
+  }
+  if (row) {
+    // Every opening read, not only the rebuild (claunch-3b3vt): an empty row
+    // takes the rail's project back, because the close put the pre-open
+    // values there and nothing else refills the row while the list stands.
+    if (!spawnParent()) pickProjectWhenEmpty(row);
+    row._lastProject = row.value;
   }
   if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
 }
@@ -14266,12 +14290,7 @@ function syncSpawnProjectRow(f, parent) {
     sel._lastProject = "";
   } else if (at >= 0) {
     sel.remove(at);
-    if (!sel.value) {
-      const rail = [...sel.options].find((o) => o.value === currentProject);
-      sel.value = rail ? rail.value
-        : (sel.options[0] ? sel.options[0].value : "");
-      sel._lastProject = sel.value;
-    }
+    if (pickProjectWhenEmpty(sel)) sel._lastProject = sel.value;
   }
 }
 
@@ -51100,6 +51119,16 @@ function urgentAskOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
 }
 
+/* The card's way into the session, under the nudge card's rule
+   (claunch-yjm0v): the card goes exactly as its Hide press would put it away,
+   and then the session opens. The ask is not answered by this -- it stays
+   pending, listed in the panel with Show card and counted by the bell. */
+function urgentAskGo(rec, key) {
+  gateHide("ask", String(rec.id));
+  dismissNotice(key);
+  urgentAskOpen(rec);
+}
+
 function urgentAskButtons(rec, after) {
   const out = [];
   for (const name of urgentAskPresses(rec.answer) || []) {
@@ -51175,7 +51204,7 @@ function urgentAskSync(rows) {
       "bell keeps it in the notification history"));
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
-    node.addEventListener("click", () => urgentAskOpen(rec));
+    node.addEventListener("click", () => urgentAskGo(rec, key));
     host.appendChild(node);
     notices.set(key, { node, timer: null });
   }
@@ -51204,6 +51233,18 @@ function nudgeWhat(rec) {
 
 function nudgeOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
+}
+
+/* Open means "I am going in there": the card goes the way Hide puts it away,
+   then the session opens. Left up, it sat over the terminal of the session it
+   had just opened, saying the same thing twice and needing a second press to
+   leave (claunch-yjm0v). The request itself stays pending -- the panel lists
+   it with Show card and the bell keeps counting -- because nothing was
+   answered. */
+function nudgeGo(rec, key) {
+  gateHide("nudge", String(rec.id));
+  dismissNotice(key);
+  nudgeOpen(rec);
 }
 
 async function refreshNudgeGate() {
@@ -51254,7 +51295,7 @@ async function refreshNudgeGate() {
     open.title = `open ${rec.session}, where its run's strip answers this`;
     open.addEventListener("click", (ev) => {
       if (ev && ev.stopPropagation) ev.stopPropagation();
-      nudgeOpen(rec);
+      nudgeGo(rec, key);
     });
     actions.appendChild(open);
     actions.appendChild(gateHideButton("nudge", rec.id, key,
@@ -51262,7 +51303,7 @@ async function refreshNudgeGate() {
       "bell keeps it in the notification history"));
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
-    node.addEventListener("click", () => nudgeOpen(rec));
+    node.addEventListener("click", () => nudgeGo(rec, key));
     host.appendChild(node);
     notices.set(key, { node, timer: null });
   }

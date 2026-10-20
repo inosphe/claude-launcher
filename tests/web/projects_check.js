@@ -255,13 +255,15 @@ const code = [
   slice("selectProjectGroupTab"),
   // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
   "function enableTabDragScroll() {}", slice("renderProjectTabs"),
-  slice("projectSelectOptions"), slice("refreshProjects"),
+  slice("projectSelectOptions"), slice("pickProjectWhenEmpty"),
+  slice("refreshProjects"),
   "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
   "hashWithProject, syncRouteProject, followSessionProject, " +
   "sessionTabOtherProject, setSessions: (l) => { sessionsCache = l; }, " +
   "setMeshes: (l) => { meshCache = l; }, " +
   "pending: () => projectFollowPending, " +
-  "projectSelectOptions, refreshProjects, current: () => currentProject, " +
+  "projectSelectOptions, pickProjectWhenEmpty, refreshProjects, " +
+  "current: () => currentProject, " +
   "cache: () => projectsCache, " +
   "setGroupOrder: (o) => { sessionGroupOrder = o; }, " +
   "setGroupTab: (t) => { sessionGroupTab = t; }, " +
@@ -319,6 +321,27 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
         ["All projects", "3 projects"]);
   check("the form offers every project and no 'all'",
         form.options.map((o) => o.value), ["default", "hq", "solo"]);
+
+  /* claunch-3b3vt: the form's Project row is the rail's pick, but closing
+     the modal puts the values from before the box was opened back and the
+     row is rebuilt only when the project list moves — so a later opening
+     found the row empty and the fill default button had no project to
+     compare against. Every opening read takes the rail's project again.
+     A row that still holds an answer is left alone: an operator's pick on
+     the form is not overwritten by the rail behind it. */
+  fns.setCurrentProject("hq");
+  const emptyRow = () => ({ options: [{ value: "default" }, { value: "hq" }], value: "" });
+  const row = emptyRow();
+  check("an empty Project row takes the rail's project again",
+        [fns.pickProjectWhenEmpty(row), row.value], [true, "hq"]);
+  const noRail = { options: [{ value: "default" }, { value: "solo" }], value: "" };
+  check("...and the first project offered when the rail is on 'all'",
+        [fns.pickProjectWhenEmpty(noRail), noRail.value], [true, "default"]);
+  const held = { options: [{ value: "default" }, { value: "hq" }], value: "default" };
+  check("a row holding a pick is left alone",
+        [fns.pickProjectWhenEmpty(held), held.value], [false, "default"]);
+  const bare = { options: [], value: "" };
+  check("a form with no projects yet is not forced", fns.pickProjectWhenEmpty(bare), false);
 
   /* picking on the rail redraws both lists from the cache */
   fns.setCurrentProject("");
