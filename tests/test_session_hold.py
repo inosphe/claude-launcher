@@ -712,6 +712,27 @@ def test_deferred_messages_keep_order_during_actual_restore_staging(
                 received.append(text)
             return result
 
+        def state():
+            # What a failing wait reports. Read-only: nothing here changes the run.
+            rows = []
+            for label, s in (("original", original), ("current", mgr.get("sleepy"))):
+                rows.append(
+                    f"{label}: exited={getattr(s, 'exited', None)} "
+                    f"exit_code={getattr(s, 'exit_code', None)} "
+                    f"input_ready={getattr(s, '_input_ready', None)} "
+                    f"deferred={len(getattr(s, '_deferred_deliveries', ()))}"
+                )
+            rows.append(f"received={received} wake_tasks={len(mgr._wake_tasks)}")
+            return "; ".join(rows)
+
+        async def waited(label, awaitable, timeout):
+            try:
+                return await asyncio.wait_for(awaitable, timeout)
+            except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                raise AssertionError(
+                    f"{label}: {type(exc).__name__} within {timeout}s; {state()}"
+                ) from exc
+
         monkeypatch.setattr(mgr, "launch_async", launch)
         monkeypatch.setattr(Session, "_deliver", deliver)
         try:
@@ -720,17 +741,19 @@ def test_deferred_messages_keep_order_during_actual_restore_staging(
             mgr.hold("sleepy")
             await original.wait_for("exited", timeout=10, threshold=0.5)
             assert original.queue_delivery("first")
-            await asyncio.wait_for(entered.wait(), 15)
+            await waited("restore entered", entered.wait(), 15)
             current = mgr.get("sleepy")
-            assert current is not original and not current.exited
+            assert current is not original and not current.exited, state()
             if sender == "wake":
                 assert mgr.wake_soon("sleepy", deliver="second")
             else:
                 assert (original if sender == "old" else current).queue_delivery("second")
             release.set()
-            await asyncio.wait_for(asyncio.gather(*list(mgr._wake_tasks)), 15)
-            await asyncio.wait_for(asyncio.gather(*list(current._deferred_deliveries)), 15)
-            assert received == ["first", "second"]
+            await waited("wake tasks", asyncio.gather(*list(mgr._wake_tasks)), 15)
+            await waited(
+                "deferred deliveries", asyncio.gather(*list(current._deferred_deliveries)), 15
+            )
+            assert received == ["first", "second"], state()
         finally:
             release.set()
             await mgr.shutdown_all()
