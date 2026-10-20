@@ -11,7 +11,12 @@
         (the address's ?project=);
      4. "archived 포함" fetches the archived records and adds their rows;
      5. grouping by workspace draws a heading per group, and picking one
-        group leaves only its rows. */
+        group leaves only its rows;
+     6. every row names a role (its own, else "free-role");
+     7. clicking a row highlights it and fills the detail column on the
+        right, and clicking it again clears both;
+     8. dragging the divider resizes the two columns, and the new split
+        survives a reload. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -110,6 +115,58 @@ const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) 
     await selects[1].selectOption(options.find((v) => v.endsWith("repo1")));
     assert.deepEqual(await rowNames(page), ["alpha", "gamma"]);
     assert.equal(await page.$$eval("#chart-view .chart-group-head", (hs) => hs.length), 0);
+
+    // 6. Every row names a role.
+    await (await page.$$("#chart-view .chart-select select"))[1].selectOption("");
+    const roles = await page.$$eval("#chart-view .chart-row:not(.chart-axis)", (rows) =>
+      Object.fromEntries(rows.map((r) => [r.querySelector(".chart-name-text").textContent,
+                                          r.querySelector(".chart-role").textContent])));
+    assert.equal(roles.alpha, "worker");
+    assert.equal(roles.beta, "free-role");
+
+    // 7. A click highlights the row and shows its detail on the right.
+    const detailText = () => page.$eval("#chart-view .chart-detail", (d) => d.textContent);
+    assert.match(await detailText(), /클릭하면/);
+    await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
+    await page.waitForSelector("#chart-view .chart-row.selected[data-name='alpha']");
+    assert.equal(await page.$$eval("#chart-view .chart-row.selected", (rs) => rs.length), 1);
+    const side = await page.$eval("#chart-view .chart-detail", (d) => ({
+      name: d.querySelector(".chart-detail-name").textContent,
+      text: d.textContent,
+      href: d.querySelector(".chart-detail-open").getAttribute("href"),
+      right: d.getBoundingClientRect().left,
+      mainRight: document.querySelector("#chart-view .chart-main").getBoundingClientRect().right,
+    }));
+    assert.equal(side.name, "alpha");
+    assert.match(side.text, /worker/);
+    assert.match(side.text, /F:\/w\/repo1/);
+    assert.equal(side.href, "#/s/alpha");
+    assert.ok(side.right >= side.mainRight, "detail sits right of the timeline");
+    // The pick survives the page's own redraw.
+    await page.waitForTimeout(5600);
+    assert.equal(await page.$eval("#chart-view .chart-row.selected", (r) => r.dataset.name), "alpha");
+    await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
+    assert.equal(await page.$$eval("#chart-view .chart-row.selected", (rs) => rs.length), 0);
+    assert.match(await detailText(), /클릭하면/);
+
+    // 8. Dragging the divider resizes the columns, and the split is kept.
+    const width = () => page.$eval("#chart-view .chart-main", (m) => m.getBoundingClientRect().width);
+    const before = await width();
+    const d = await page.$eval("#chart-view .chart-divider", (e) => {
+      const b = e.getBoundingClientRect();
+      const s = document.querySelector("#chart-view .chart-split").getBoundingClientRect();
+      return { x: b.left + b.width / 2, y: b.top + 40, left: s.left, w: s.width };
+    });
+    await page.mouse.move(d.x, d.y);
+    await page.mouse.down();
+    await page.mouse.move(d.left + d.w * 0.45, d.y, { steps: 5 });
+    await page.mouse.up();
+    const after = await width();
+    assert.ok(Math.abs(after - d.w * 0.45) < 12, `main is ${after}px of ${d.w}px`);
+    assert.ok(after < before - 50);
+    await page.reload();
+    await page.waitForSelector("#chart-view .chart-main");
+    assert.ok(Math.abs((await width()) - after) < 12, "split kept across a reload");
 
     assert.deepEqual(errors, []);
     console.log("ok");

@@ -123,4 +123,26 @@ g = C.barGeometry({ start: -50, end: 10 }, 0, 100);
 assert.deepStrictEqual([g.left, g.width, g.clipped], [0, 10, true]);
 g = C.barGeometry({ start: 100, end: 100 }, 0, 100);
 assert.ok(g.width > 0 && g.left + g.width <= 100);
+
+// Role: the session's own field, then the role it holds in the grouped mesh,
+// then its first membership, else "free-role" (the rail's spelling).
+const mems = [{ mesh: 'm1', handle: 'h1', label: 'worker' },
+              { mesh: 'm2', handle: 'h2', label: 'leader+merger' }];
+assert.strictEqual(C.roleOf({ role: 'reviewer' }, mems, 'm2'), 'reviewer');
+assert.strictEqual(C.roleOf({}, mems, 'm2'), 'leader+merger');
+assert.strictEqual(C.roleOf({}, mems, ''), 'worker');
+assert.strictEqual(C.roleOf({}, mems, 'gone'), 'worker');
+assert.strictEqual(C.roleOf({}, [], ''), 'free-role');
+m = C.buildModel([{ name: 'r1', status: 'running', created_at: iso(now - H) }],
+  { now, range: 'all', meshesOf: (n) => (n === 'r1' ? mems : []) });
+assert.strictEqual(m.rows[0].role, 'worker');
+assert.strictEqual(m.rows[0].meshes.length, 2);
+m = C.buildModel([{ name: 'r1', status: 'running', created_at: iso(now - H) }], { now, range: 'all' });
+assert.strictEqual(m.rows[0].role, 'free-role');
+
+// The split's share is clamped; junk falls back to the default.
+assert.strictEqual(C.clampSplit(10), 30);
+assert.strictEqual(C.clampSplit(95), 82);
+assert.strictEqual(C.clampSplit(50), 50);
+assert.strictEqual(C.clampSplit('x'), 64);
 console.log('ok');
