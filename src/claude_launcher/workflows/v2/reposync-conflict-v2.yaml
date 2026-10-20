@@ -5,6 +5,7 @@ filter_roles: {type: whitelist, roles: [worker]}
 inputs:
   assignment: {type: text, required: true, label: 원래 동기화 계획(JSON)}
   execution_error: {type: text, default: '', label: 실패 출력}
+  integration: {type: text, default: 'rebase', label: 통합 방식(rebase 또는 merge)}
 nodes:
   inspect:
     title: 실패와 현재 ref 확인
@@ -19,8 +20,10 @@ nodes:
     title: 격리된 후보 준비
     prompt: |
       원래 local SHA와 remote SHA를 보존한다. 자신의 격리 worktree에서만
-      충돌을 재현하고 양쪽 변경 의도를 확인해 해결한다. rebase는 --rebase-merges를
-      사용한다. 비충돌 오류는 원인을 해결하거나 구체적 차단 사유를 보고한다.
+      충돌을 재현하고 양쪽 변경 의도를 확인해 해결한다. 통합 방식은
+      ${data.inputs.integration}을 따른다: rebase이면 --rebase-merges로 재현하고,
+      merge이면 `git merge`로 재현해 통합 커밋에서 해결한다. 비충돌 오류는 원인을
+      해결하거나 구체적 차단 사유를 보고한다.
       PR-only target은 보호 브랜치를 재작성하지 않고 recovery PR용 후보만 준비한다.
       reset --hard, 원래 ref 변경, push, PR merge, 다른 소유자 restack은 금지한다.
       변경된 커밋의 old/new 대응표와 영향받는 브랜치를 기록한다.
@@ -42,15 +45,24 @@ nodes:
         Sync 실패 복구 후보의 diff, old/new SHA, 테스트 근거를 직접 확인한다.
         양쪽 변경 보존 및 원래 ref 불변이 확인되었는가? 모호하면 거절한다.
         이 승인은 후보 반환만 허용하며 merge/push 승인이 아니다.
+        leader도 이 질문의 응답자다: 후보 tree가 기대한 tree와 같은지를
+        `git rev-parse <후보>^{tree}` 같은 읽기 명령으로 직접 확인했다면 별도
+        reviewer를 기다리지 않고 flow_answer로 답할 수 있다.
       from: [{role: reviewer, scope: sibling}, {role: leader, scope: ancestor}]
       otherwise: human
-    prompt: 독립 검토 결과를 기록한다. 게시나 원래 ref 변경은 하지 않는다.
+    prompt: |
+      독립 검토 결과를 기록한다. 게시나 원래 ref 변경은 하지 않는다.
+      from 대상(reviewer, leader)이 답하지 않아 otherwise: human으로 사용자에게
+      넘어갔다면, 저널의 `fallback` 이벤트 cause와 `waiting`의 candidates를 읽어 어느
+      role에 질문이 갔고 왜 답이 없었는지(대상 세션 없음, scope 불일치, deadline 경과)를
+      보고에 적는다.
     effects: [fs.read]
   receipt:
     title: 복구 결과 반환
     prompt: |
-      이슈에 후보 전체 SHA·tree·보존 SHA·테스트·rewrite 대응표·남은 문제를 기록하고
-      부모에게 포인터를 보낸다. sync 완료 또는 push 완료라고 보고하지 않는다.
+      이슈에 후보 전체 SHA·후보 tree SHA·통합 방식·보존 SHA·테스트·rewrite 대응표·
+      남은 문제를 기록하고 부모에게 포인터를 보낸다. 부모에게 보내는 보고에도 후보
+      tree SHA와 통합 방식을 싣는다. sync 완료 또는 push 완료라고 보고하지 않는다.
       부모는 reposync-merge-push-v2에서 새 후보를 재검증하고 별도 승인을 받아야 한다.
     done_when: 부모가 검증 가능한 복구 후보와 완료/차단 결과를 받았다
     effects: [board.write, mesh.send]
