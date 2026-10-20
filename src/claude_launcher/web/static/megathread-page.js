@@ -113,6 +113,13 @@ globalThis.MegaThreadPage = (() => {
     }).join(" · ");
   }
 
+  // The routing log write can fail after the message went out. Saying so
+  // keeps the empty log entry from reading as "nothing was sent".
+  function ledgerLine(res) {
+    const err = (res || {}).ledger_error;
+    return err ? ` · 라우팅 기록 실패 (${err})` : "";
+  }
+
   function esc(text) {
     return String(text === undefined || text === null ? "" : text)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -206,13 +213,18 @@ globalThis.MegaThreadPage = (() => {
     state.error = "";
     try {
       state.judgment = await apiSend(`/api/megathreads/${encodeURIComponent(state.mega.id)}/route`, routeBody(text));
+      // A member whose call failed is not scored, and a "choose" may be the
+      // router holding back for exactly that reason. Its error is shown for
+      // every verdict, not only when every call failed.
+      const failed = (state.judgment.errors || [])
+        .map((e) => `${e.thread}: ${e.error}`).join(" · ");
       if (state.judgment.delivered && state.judgment.delivered.length) {
-        state.notice = deliveryLine(state.judgment.delivered);
+        state.notice = deliveryLine(state.judgment.delivered) + ledgerLine(state.judgment);
         state.draft = "";
       } else if (state.judgment.verdict === "choose" || state.judgment.verdict === "none") {
-        state.notice = "";
+        state.notice = failed;
       } else if (state.judgment.verdict === "error") {
-        state.notice = (state.judgment.errors || []).map((e) => `${e.thread}: ${e.error}`).join(" · ");
+        state.notice = failed;
       }
       await loadOne(state.mega.id);
     } catch (err) {
@@ -234,7 +246,7 @@ globalThis.MegaThreadPage = (() => {
       // Keep the scores so the ring still shows why these were the offers;
       // only the panel closes.
       state.judgment = { ...(state.judgment || {}), verdict: "manual", options: [] };
-      state.notice = deliveryLine(res.delivered);
+      state.notice = deliveryLine(res.delivered) + ledgerLine(res);
       state.draft = "";
       state.picks.clear();
       await loadOne(state.mega.id);

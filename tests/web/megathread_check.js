@@ -26,7 +26,8 @@ function slice(name) {
 }
 
 const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
-  "shortTitle", "verdictLine", "deliveryLine", "pct", "logitText", "esc", "ring"];
+  "shortTitle", "verdictLine", "deliveryLine", "ledgerLine", "pct", "logitText",
+  "esc", "ring"];
 const ctx = {};
 vm.createContext(ctx);
 // ringLayout's defaults read the page's own stage constants; take them from
@@ -116,6 +117,12 @@ assert.equal(ctx.deliveryLine([{ session: "s1", delivered: true }]), "s1: 전달
 assert.ok(ctx.deliveryLine([{ session: "s1", delivered: true, hold: "draft" }]).includes("draft"));
 assert.ok(ctx.deliveryLine([{ session: "s1", delivered: false }]).includes("대기"));
 assert.ok(ctx.deliveryLine([{ thread: "th-a", error: "boom" }]).includes("boom"));
+
+// A message that went out but whose log row did not is reported as such, so
+// the empty history does not read as "nothing was sent".
+assert.equal(ctx.ledgerLine({}), "");
+assert.equal(ctx.ledgerLine(null), "");
+assert.ok(ctx.ledgerLine({ ledger_error: "disk full" }).includes("disk full"));
 
 /* ---- number and text formatting ---------------------------------------- */
 assert.equal(ctx.pct(0.97), "97.0%");
