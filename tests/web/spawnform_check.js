@@ -215,8 +215,8 @@ new Function(
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
    slice("spawnParent"), slice("syncSpawnMode"),
-   slice("syncSpawnProfileRow"), slice("syncSpawnProjectRow"),
-   slice("syncSpawnCwdRow"),
+   slice("syncSpawnProfileRow"), slice("pickProjectWhenEmpty"),
+   slice("syncSpawnProjectRow"), slice("syncSpawnCwdRow"),
    slice("syncSpawnOverRow"), slice("spawnChildFields")].join("\n") + `
 exports.refresh = refreshParentChoices;
 exports.sync = syncSpawnMode;
