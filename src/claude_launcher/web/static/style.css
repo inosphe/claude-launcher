@@ -2833,6 +2833,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   #term-input:has(#term-input-note:not(.hidden)) { flex-wrap: wrap; }
   #term-input-note { order: 3; flex-basis: 100%; max-width: none; }
 }
+/* The bar's width budget was measured on a phone for six buttons
+   (claunch-hmz62); the attach-file button (claunch-5gpcf) is a seventh and
+   took the field to 22px at 380px. Four pixels of gap across the row's
+   separators gives the field back what that button took, so it keeps the
+   minimum this bar promises (terminputlayout_browser.cjs). */
+@media (max-width: 700px) {
+  #term-input { gap: 4px; }
+}
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
    its end there rather than chaining out to the document. */
 #terminal .xterm-viewport {
