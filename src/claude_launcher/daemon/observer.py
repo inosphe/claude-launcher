@@ -664,7 +664,12 @@ def install(app):
         # dicts (usage meters, event details) with the loop's own writers, so
         # encoding them on a thread could read one mid-update.
         ended = request.query.get("ended", "") in ("1", "true", "yes")
-        return web.json_response(observer.snapshot(ended=ended))
+        # api.json_response: UTF-8 rather than \uXXXX escapes (Korean text was
+        # six bytes a character) and gzip past 16 KiB, which this route's
+        # multi-megabyte answer never had. Imported here as api imports this
+        # module.
+        from .api import json_response
+        return json_response(observer.snapshot(ended=ended))
 
     async def settings(request):
         body = await request.json()

@@ -40,3 +40,12 @@ def test_explicit_questions_and_attachments_stay_visible():
     assert visible({"text": "확인했습니다.", "question": True})
     assert visible({"text": "결과를 공유했습니다.", "attachments": [{"id": "image"}]})
     assert not visible({"text": "확인했습니다.", "needs_action": True})
+
+
+def test_a_repeated_text_is_judged_once():
+    from claude_launcher.daemon import observer_filter
+    observer_filter._communication_only.cache_clear()
+    for _ in range(3):
+        assert communication_only("확인했습니다.")
+    info = observer_filter._communication_only.cache_info()
+    assert (info.misses, info.hits) == (1, 2)
