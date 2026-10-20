@@ -173,7 +173,9 @@ def _dir_label(path: str) -> str:
     return f"{owner.name}/{sub}" if sub else owner.name
 
 
-def card_facts(spec: Optional[dict], asker: Optional[dict] = None) -> Dict[str, dict]:
+def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
+               top_level: bool = False, asked: Optional[dict] = None,
+               project_home: bool = True) -> Dict[str, dict]:
     """What the session a request would create runs as, one row per
     :data:`CARD_FIELDS` -- ``{"value": str, "inherited": bool}``.
 
@@ -181,33 +183,53 @@ def card_facts(spec: Optional[dict], asker: Optional[dict] = None) -> Dict[str, 
     definition (``SessionDef.to_dict()``), or ``None`` when it is gone. A
     field the spec leaves out is filled the way the spawn path fills it
     (:func:`claude_launcher.spawn.validate`): profile, directory and project
-    from the asker, a named project with no directory to its default
-    workspace. Those rows say ``inherited`` so the card can tell the person
-    which values the agent chose and which it merely did not touch. An
-    empty ``value`` means there is none (no role, no workflow)."""
+    from the asker, a ``:HARNESS`` profile onto the asker's profile, a named
+    project with no directory to its default workspace when
+    ``project_home`` (``spawn.allow_workspace``) lets it. Those rows say
+    ``inherited`` so the card can tell the person which values the agent
+    chose and which it merely did not touch. An empty ``value`` means there
+    is none (no role, no workflow).
+
+    ``top_level`` reads ``spec`` as a ``POST /api/sessions`` body (a root
+    request, a resume's fallback), where a ``worktree`` key that is present
+    but empty means a new worktree with the generated name. ``asked`` is
+    what the agent itself sent when ``spec`` is the daemon's completion of
+    it (a root request's ``child_spec``): a row it did not name is
+    inherited even though ``spec`` spells the value out."""
     spec = spec or {}
     asker = asker or {}
 
     def row(value, inherited=False):
         return {"value": str(value or ""), "inherited": bool(inherited and value)}
 
+    def named(*keys):
+        source = spec if asked is None else asked
+        return any(str(source.get(k) or "").strip() for k in keys)
+
     def pick(key):
         own = str(spec.get(key) or "").strip()
-        return row(own) if own else row(str(asker.get(key) or "").strip(), True)
+        return row(own, not named(key)) if own else row(str(asker.get(key) or "").strip(), True)
 
     facts = {"project": pick("project"), "profile": pick("profile")}
     if not facts["project"]["value"]:
         facts["project"] = row(projects.DEFAULT)
-    home = projects.default_cwd(str(spec["project"])) if spec.get("project") else None
+    chosen = facts["profile"]["value"]
+    base = str(asker.get("profile") or "").split(":")[0]
+    if chosen.startswith(":") and base:
+        facts["profile"]["value"] = base + chosen
+    home = (projects.default_cwd(str(spec["project"]))
+            if spec.get("project") and project_home else None)
+    moved = named("workspace", "cwd", "project")
     if spec.get("workspace"):
-        where = row(str(spec["workspace"]))
+        where = row(str(spec["workspace"]), not moved)
     elif spec.get("cwd"):
-        where = row(_dir_label(str(spec["cwd"])))
+        where = row(_dir_label(str(spec["cwd"])), not moved)
     elif home:
-        where = row(_dir_label(home))
+        where = row(_dir_label(home), not moved)
     else:
         where = row(_dir_label(str(asker.get("cwd") or "")) if asker.get("cwd") else "", True)
-    if spec.get("worktree") and where["value"]:
+    fresh = ("worktree" in spec) if top_level else bool(spec.get("worktree"))
+    if fresh and where["value"]:
         where["value"] += " (new worktree)"
     facts["workspace"] = where
     facts["role"] = row(str(spec.get("role") or "").strip())

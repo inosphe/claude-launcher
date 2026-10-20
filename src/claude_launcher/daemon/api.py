@@ -7941,12 +7941,20 @@ def _with_card_facts(manager: SessionManager, record: dict) -> dict:
     workflow its session would run as, inherited values resolved against
     the asker (claunch-mgope). Read-time only -- the stored record keeps
     the spec as the agent sent it."""
-    spec = record.get("fallback") if record.get("kind") == spawn_gate.RESUME else record.get("spec")
+    resume = record.get("kind") == spawn_gate.RESUME
+    spec = record.get("fallback") if resume else record.get("spec")
+    child = not resume and record.get("scope") == spawn_gate.CHILD
     try:
         asker = manager.get(str(record.get("session") or "")).sdef.to_dict()
     except Exception:  # the asker is gone: show the spec alone
         asker = None
-    return {**record, "facts": spawn_gate.card_facts(spec, asker)}
+    facts = spawn_gate.card_facts(
+        spec, asker, top_level=not child,
+        # a root spec is _root_spec's completion; the agent's own words are
+        # its child_spec, and what they leave out was copied from the asker
+        asked=record.get("child_spec") if record.get("scope") == spawn_gate.ROOT else None,
+        project_home=spawn_mod.SpawnPolicy.load().allow_workspace if child else True)
+    return {**record, "facts": facts}
 
 
 async def h_spawn_requests_list(request: web.Request) -> web.Response:

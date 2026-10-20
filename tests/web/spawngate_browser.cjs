@@ -94,7 +94,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.match(spawnText, /issue alpha-7 — Fix the login bug/);
     // No `facts` on the record (an older daemon): the spec's own values.
     assert.deepEqual(await factRows(spawnCard), [['project', 'alpha'], ['profile', 'p'],
-      ['workspace', '/repo/alpha'], ['role', '—'], ['workflow', 'improv-worker-v2']]);
+      ['workspace', '/repo/alpha (new worktree)'], ['role', '—'], ['workflow', 'improv-worker-v2']]);
     assert.match(spawnText, /no answer in 4:3\d: no top-level session — created as op1's child instead/);
     const buttons = async card => (await card.locator('.gate-actions button').allInnerTexts()).map(t => t.trim());
     assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);

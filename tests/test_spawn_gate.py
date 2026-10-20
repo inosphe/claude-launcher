@@ -358,7 +358,9 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
             assert {r["id"] for r in rows} == {one, two}
             # the card's rows ride on the listing, resolved against the asker
             assert rows[0]["facts"]["profile"] == {"value": "p", "inherited": False}
-            assert rows[0]["facts"]["workspace"] == {"value": "/w/op", "inherited": True}
+            # a root body's empty worktree is a new checkout (claunch-mgope review)
+            assert rows[0]["facts"]["workspace"] == {"value": "/w/op (new worktree)",
+                                                     "inherited": True}
             got = await (await client.get(f"/api/spawn-requests/{one}", headers=AUTH)).json()
             assert got["request"]["facts"]["workflow"]["value"] == "improv-worker-v2"
             assert "facts" not in gate.get(one), "the stored record keeps the spec only"
@@ -639,3 +641,37 @@ def test_card_facts_without_an_asker_show_the_spec_alone(home):
     assert facts["project"] == {"value": "default", "inherited": False}
     assert facts["profile"] == {"value": "", "inherited": False}
     assert facts["workspace"] == {"value": "/not/registered", "inherited": False}
+
+
+def test_card_facts_read_a_top_level_body(home, tmp_path):
+    asker = {"profile": "work", "cwd": "/w/op", "project": "alpha"}
+    # _root_spec's completion: profile, project and directory copied from the
+    # asker, and worktree "" -- a new checkout with the generated name
+    spec = {"profile": "work", "project": "alpha", "cwd": "/w/op", "worktree": "",
+            "task": "t"}
+    facts = spawn_gate.card_facts(spec, asker, top_level=True, asked={"task": "t"})
+    assert facts["workspace"] == {"value": "/w/op (new worktree)", "inherited": True}
+    assert facts["profile"] == {"value": "work", "inherited": True}
+    assert facts["project"] == {"value": "alpha", "inherited": True}
+    # what the agent named stays its own
+    named = spawn_gate.card_facts(spec, asker, top_level=True,
+                                  asked={"task": "t", "project": "alpha"})
+    assert named["project"] == {"value": "alpha", "inherited": False}
+    assert named["workspace"]["inherited"] is False
+    # a child body's empty worktree is no worktree
+    child = spawn_gate.card_facts({"worktree": ""}, asker)
+    assert child["workspace"] == {"value": "/w/op", "inherited": True}
+
+
+def test_card_facts_resolve_a_harness_selector_and_a_shut_workspace_gate(home, tmp_path):
+    from claude_launcher import projects, workspaces
+
+    (tmp_path / "hq").mkdir()
+    workspaces.add(str(tmp_path / "hq"), "hq")
+    projects.add("beta", default_workspace="hq")
+    asker = {"profile": "work:claude", "cwd": "/w/op"}
+    facts = spawn_gate.card_facts({"profile": ":codex", "project": "beta"}, asker,
+                                  project_home=False)
+    assert facts["profile"] == {"value": "work:codex", "inherited": False}
+    # spawn.allow_workspace off: the child stays in the asker's directory
+    assert facts["workspace"] == {"value": "/w/op", "inherited": True}

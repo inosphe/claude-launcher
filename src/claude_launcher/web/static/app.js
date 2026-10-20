@@ -50413,7 +50413,10 @@ function spawnGateFacts(rec, spec) {
   const facts = rec.facts || {};
   const box = el("div", "notice-sub gate-facts");
   for (const key of SPAWN_GATE_FACTS) {
-    const own = String(spec[key] || (key === "workspace" ? spec.cwd || "" : ""));
+    let own = String(spec[key] || (key === "workspace" ? spec.cwd || "" : ""));
+    // A top-level body's present-but-empty worktree is a new checkout.
+    const fresh = rec.scope === "child" ? !!spec.worktree : "worktree" in spec;
+    if (key === "workspace" && own && fresh) own += " (new worktree)";
     const fact = facts[key] || { value: own === "-" ? "" : own, inherited: false };
     box.appendChild(el("span", "gate-fact-key", key));
     const val = el("span", "gate-fact-val", fact.value || "—");
