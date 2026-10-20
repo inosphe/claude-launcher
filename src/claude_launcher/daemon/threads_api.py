@@ -9,8 +9,18 @@ user and a session, held in the session's threads pane.
   POST /api/threads/{id}/close                   close   {session?}
   POST /api/threads/{id}/reopen                  reopen  {session?}
   POST /api/threads/{id}/title                   rename  {session?, title}
+  POST /api/threads/{id}/guests                  invite  {session?, guest}
+  POST /api/threads/{id}/guests/{guest}/remove   uninvite (or leave) {session?}
   POST /api/threads/images                       stage one image (raw body)
   GET  /api/threads/{id}/images/{name}           an image a message carries
+  GET  /api/threads/{id}/files/{fid}/{name}      a file a message carries
+
+Files (claunch-5gpcf). A message may also carry files of any kind (a
+profiling capture): each is staged with ``POST /api/uploads`` and the post
+names the ids in ``files``. They are kept in ``<daemon dir>/thread-files``
+for 30 days (daemon/uploads.py); every message returns its ``files`` with
+each one's ``path``, or ``expired: true`` once it is gone, and the block
+typed into the session lists them as ``[claunch attachment]`` lines.
 
 Images (claunch-shl2r). The user may attach images to a message: each is
 staged first (``POST /api/threads/images``, the opening-image upload) and
@@ -54,6 +64,16 @@ Opened without ``qa``, a thread whose title (or first message) names
 exactly one of the session's question ids is linked to that question, and a
 user message naming other questions of the session lists them in its
 delivered block (claunch-236ei, talk_links.subject_in / mentioned).
+
+Guests (claunch-p9wes). The user or the owner may invite another session
+into a thread as a guest; the guest is told with a block that names its
+role -- reviewer and advisor only: it reads the thread and writes advice in
+it, and it does not do the thread's work or use the QA tools for it. A user
+message is typed into the owner and into every guest; a guest's message is
+typed into the owner (it is advice, the owner decides). The owner's own
+replies are not typed into the guests -- they read them with thread_read --
+so two agents never answer each other in a loop. The guest's session lists
+the thread apart from its own (``guest_threads`` of the list route).
 """
 
 from __future__ import annotations
@@ -62,11 +82,12 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from aiohttp import web
 
 from ..threads import store as thread_store
-from . import paths, talk_links, thread_images
+from . import paths, talk_links, thread_images, uploads
 
 log = logging.getLogger(__name__)
 
@@ -92,12 +113,21 @@ def _mention_lines(mentions: list[dict]) -> list[str]:
             for q in mentions]
 
 
-def _image_lines(message: dict) -> list[str]:
+def _file_lines(message: dict, who: str = "The user") -> list[str]:
+    files = [f for f in message.get("files") or [] if f.get("path")]
+    if not files:
+        return []
+    return [f"{who} attached {len(files)} file(s) to this message; each line ends with its path "
+            "on this machine (read it from there):",
+            *(uploads.line(f["name"], f["bytes"], f["path"]) for f in files)]
+
+
+def _image_lines(message: dict, who: str = "The user") -> list[str]:
     images = message.get("images") or []
     if not images:
         return []
-    return [f"The user attached {len(images)} image(s) to this message (the files are on this machine; "
-            "open them to see what the user means):",
+    return [f"{who} attached {len(images)} image(s) to this message (the files are on this machine; "
+            "open them to see what is meant):",
             *(f"  - {img['path']}" for img in images)]
 
 
@@ -111,8 +141,8 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
     else:
         head = "The user wrote in this thread:"
     lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}",
-             _quote(message["body"]) if message["body"] or not message.get("images") else "  > (images only)",
-             *_image_lines(message), *_subject_line(thread),
+             _body_lines(message),
+             *_image_lines(message), *_file_lines(message), *_subject_line(thread),
              *_mention_lines(mentions or [])]
     if ask_qa:
         lines.append(
@@ -125,6 +155,63 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
         f"thread_read(thread_id=\"{tid}\") has the whole conversation; thread_list shows all your threads. "
         "Keep this sub-topic's discussion in this thread.")
     return "\n".join(lines)
+
+
+def _body_lines(message: dict) -> str:
+    if message["body"] or not (message.get("images") or message.get("files")):
+        return _quote(message["body"])
+    return "  > (images only)" if not message.get("files") else "  > (attachments only)"
+
+
+def _guest_role(tid: str, owner: str) -> str:
+    return (f"Your role here is reviewer and advisor only: read the conversation (thread_read(thread_id=\"{tid}\")) "
+            f"and give review comments and advice with thread_reply(thread_id=\"{tid}\", text=...). "
+            f"Do not carry out the thread's work yourself -- no edits, commits, commands or child sessions "
+            f"for it; {owner} does the work. Do not use the QA tools (qa_*) for this thread: a question for "
+            "the user goes into your reply here.")
+
+
+def guest_invited_text(thread: dict, by: str) -> str:
+    tid, owner = thread["id"], thread["session"]
+    inviter = "the user" if by == thread_store.USER else f"session {by}"
+    return "\n".join([
+        f"{PREFIX} {tid} \"{thread['title']}\"] You are invited by {inviter} as a guest to this thread of "
+        f"session {owner}.",
+        _guest_role(tid, owner),
+        f"The user's messages in this thread are typed in here too; {owner}'s replies are not -- read them with "
+        "thread_read. thread_list lists this thread under guest_threads. You cannot close or rename it; "
+        f"thread_uninvite(thread_id=\"{tid}\") leaves it."])
+
+
+def guest_removed_text(thread: dict) -> str:
+    return (f"{PREFIX} {thread['id']} \"{thread['title']}\"] You are no longer a guest of this thread of session "
+            f"{thread['session']}: nothing more from it is typed in here, and you cannot write in it.")
+
+
+def owner_invited_text(thread: dict, guest: str) -> str:
+    tid = thread["id"]
+    return (f"{PREFIX} {tid} \"{thread['title']}\"] The user invited session {guest} into this thread as a guest "
+            f"reviewer and advisor. Its messages are typed in here as advice: you decide what to act on, and "
+            f"the work stays yours. Your replies here are not typed into {guest} (it reads the thread).")
+
+
+def guest_user_wrote_text(thread: dict, message: dict, *, reopened: bool = False) -> str:
+    tid = thread["id"]
+    head = "The user reopened this thread and wrote:" if reopened else "The user wrote in this thread:"
+    return "\n".join([
+        f"{PREFIX} {tid} \"{thread['title']}\"] (you are a guest of session {thread['session']} here) {head}",
+        _body_lines(message), *_image_lines(message), *_file_lines(message),
+        _guest_role(tid, thread["session"])])
+
+
+def guest_wrote_text(thread: dict, message: dict, guest: str) -> str:
+    tid = thread["id"]
+    who = f"Guest {guest}"
+    return "\n".join([
+        f"{PREFIX} {tid} \"{thread['title']}\"] Guest session {guest} (reviewer and advisor) wrote in this thread:",
+        _body_lines(message), *_image_lines(message, who), *_file_lines(message, who),
+        f"It is advice: you decide what to act on. If it needs an answer, thread_reply(thread_id=\"{tid}\", "
+        f"text=...); that reply is not typed into {guest}."])
 
 
 def install(app, store: Optional[thread_store.ThreadStore] = None):
@@ -219,6 +306,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         res["delivered"] = deliver(name, text, (res.get("message") or {}).get("images"))
         res["hold"] = hold_of(name) if res["delivered"] else None
 
+    def tell_guests(res: dict, text: str) -> None:
+        """Type ``text`` into every guest of the thread; ``guests_delivered``
+        says per guest whether it was accepted."""
+        images = (res.get("message") or {}).get("images")
+        res["guests_delivered"] = {g["session"]: deliver(g["session"], text, images)
+                                   for g in res["thread"].get("guests") or []}
+
     def known(name: str) -> bool:
         try:
             manager.get(name)
@@ -250,6 +344,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             for m in [res.get("message"), *(res.get("messages") or [])]:
                 if m:
                     thread_images.attach(m)
+                    uploads.attach(m)
         return res, None
 
     def operator_thread(tid: str):
@@ -277,6 +372,33 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return await asyncio.to_thread(thread_images.keep, ids), None
         except thread_images.ThreadImageError as exc:
             return None, web.json_response({"error": str(exc)}, status=400)
+
+    async def keep_files(body: dict):
+        """``body["files"]`` (staged ids) moved into the thread folder, as
+        the store's records; or an error response."""
+        raw = body.get("files")
+        if raw in (None, []):
+            return [], None
+        try:
+            ids = uploads.check_ids(raw, field="files", what="a thread message")
+            return await asyncio.to_thread(uploads.keep_for_thread, ids), None
+        except uploads.UploadError as exc:
+            return None, web.json_response({"error": str(exc)}, status=400)
+
+    async def keep_attachments(body: dict):
+        """Images and files of a post, kept; ``(images, files, error)``."""
+        images, err = await keep_images(body)
+        if err:
+            return None, None, err
+        files, err = await keep_files(body)
+        if err:
+            await asyncio.to_thread(thread_images.unkeep, images)
+            return None, None, err
+        return images, files, None
+
+    async def unkeep_attachments(images, files):
+        await asyncio.to_thread(thread_images.unkeep, images)
+        await asyncio.to_thread(uploads.unkeep_thread, files)
 
     async def h_list(request):
         session = request.query.get("session") or ""
@@ -328,13 +450,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             # questions (claunch-236ei).
             rows = await asyncio.to_thread(qa_rows, target)
             qid = talk_links.subject_in(body.get("title"), body.get("text"), rows)
-        images, err = await keep_images(body)
+        images, files, err = await keep_attachments(body)
         if err:
             return err
         res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid,
-                              images=images)
+                              images=images, files=files)
         if err:
-            await asyncio.to_thread(thread_images.unkeep, images)
+            await unkeep_attachments(images, files)
             return err
         await asyncio.to_thread(link, [res["thread"]], target)
         if actor == thread_store.USER and res["message"]:
@@ -358,12 +480,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         err = await asyncio.to_thread(operator_thread, request.match_info["id"])
         if err:
             return err
-        images, err = await keep_images(body)
+        images, files, err = await keep_attachments(body)
         if err:
             return err
-        res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"), images=images)
+        res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"), images=images,
+                              files=files)
         if err:
-            await asyncio.to_thread(thread_images.unkeep, images)
+            await unkeep_attachments(images, files)
             return err
         t = res["thread"]
         await asyncio.to_thread(link, [t], t["session"])
@@ -371,6 +494,9 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             mentions = await asyncio.to_thread(mentions_in, t, res["message"])
             tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
                                                     ask_qa=body.get("ask_qa") is True, mentions=mentions))
+            tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]))
+        elif res.get("as") == thread_store.GUEST:
+            tell(res, t["session"], guest_wrote_text(t, res["message"], actor))
         return web.json_response(res)
 
     def status_route(status: str):
@@ -397,6 +523,43 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
         return web.json_response(res)
 
+    async def h_invite(request):
+        body = await body_of(request)
+        actor = actor_of(body)
+        tid = request.match_info["id"]
+        err = await asyncio.to_thread(operator_thread, tid)
+        if err:
+            return err
+        guest = str(body.get("guest") or "").strip()
+        if guest and not known(guest):
+            return web.json_response({"error": f"no session {guest!r} on this daemon"}, status=404)
+        res, err = await call(threads.invite, actor, tid, guest)
+        if err:
+            return err
+        t = res["thread"]
+        await asyncio.to_thread(link, [t], t["session"])
+        if res["added"]:
+            tell(res, guest, guest_invited_text(t, actor))
+            if actor == thread_store.USER:
+                res["owner_delivered"] = deliver(t["session"], owner_invited_text(t, guest))
+        return web.json_response(res)
+
+    async def h_uninvite(request):
+        body = await body_of(request)
+        actor = actor_of(body)
+        tid, guest = request.match_info["id"], request.match_info["guest"]
+        err = await asyncio.to_thread(operator_thread, tid)
+        if err:
+            return err
+        res, err = await call(threads.uninvite, actor, tid, guest)
+        if err:
+            return err
+        t = res["thread"]
+        await asyncio.to_thread(link, [t], t["session"])
+        if actor != guest:
+            tell(res, guest, guest_removed_text(t))
+        return web.json_response(res)
+
     async def h_image(request):
         tid, name = request.match_info["id"], request.match_info["name"]
         try:
@@ -411,6 +574,20 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             "Cache-Control": "private, max-age=31536000, immutable",
         })
 
+    async def h_file(request):
+        tid, fid, name = request.match_info["id"], request.match_info["fid"], request.match_info["name"]
+        if not await asyncio.to_thread(threads.has_file, tid, fid, name):
+            return web.json_response({"error": f"thread {tid} has no file {fid}/{name}"}, status=404)
+        path = await asyncio.to_thread(uploads.thread_file, fid, name)
+        if path is None:
+            return web.json_response(
+                {"error": f"{name} has expired: thread files are kept {uploads.THREAD_TTL_SECONDS // 86400} days",
+                 "expired": True}, status=410)
+        return web.FileResponse(path, headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(name),
+        })
+
     r = app.router
     r.add_get("/api/threads", h_list)
     r.add_get("/api/threads/rail", h_rail)
@@ -422,5 +599,8 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_post("/api/threads/{id}/close", status_route("closed"))
     r.add_post("/api/threads/{id}/reopen", status_route("open"))
     r.add_post("/api/threads/{id}/title", h_title)
+    r.add_post("/api/threads/{id}/guests", h_invite)
+    r.add_post("/api/threads/{id}/guests/{guest}/remove", h_uninvite)
     r.add_get("/api/threads/{id}/images/{name}", h_image)
+    r.add_get("/api/threads/{id}/files/{fid}/{name}", h_file)
     return threads

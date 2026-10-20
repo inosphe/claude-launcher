@@ -6113,6 +6113,17 @@ body.embed #main { width: 100%; }
   background: rgba(0, 0, 0, .7); color: #fff; font-size: 12px; cursor: pointer;
 }
 .new-task-images-note { margin: 4px 0 0; color: #d29922; font-size: 11.5px; }
+/* Opening files (claunch-5gpcf): one row per attached file, name and size. */
+.new-task-files-list { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12px; }
+.new-task-files-list:empty { display: none; }
+.new-task-files-list li {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0; color: #c9d1d9;
+}
+.new-task-files-list .file-size { color: #8b949e; }
+.new-task-files-list button {
+  padding: 0 6px; border: 0; border-radius: 4px; background: #21262d;
+  color: #c9d1d9; cursor: pointer;
+}
 /* A harness panel is one runtime decision with several controls, not more
    unrelated rows in the generic spawn grid.  Codex gets its own heading and
    accent; panels for other harnesses can define their own class alongside it. */
@@ -7662,6 +7673,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .thh-msg { max-width: 85%; padding: 6px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
 .thh-msg.thh-user { align-self: flex-end; background: #10203a; border: 1px solid #1f6feb; }
 .thh-msg.thh-agent { align-self: flex-start; background: #161b22; border: 1px solid #30363d; }
+.thh-msg.thh-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477; }
 .thh-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; font-size: 11px; color: #7d8590; }
 .thh-who { font-weight: 600; }
 /* View modes (claunch-zny1o): tree / newest share a list panel | detail split. */
@@ -7986,6 +7998,13 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   border-radius: 50%; border: 1px solid #30363d; background: #21262d; color: #e6edf3; font-size: 12px;
   line-height: 16px; cursor: pointer; }
 .th-attach-drop:hover { background: #da3633; border-color: #da3633; }
+/* Files (claunch-5gpcf): a chip in the composer strip, a link in a message. */
+.th-attach-file .th-attach-name { display: inline-block; padding: 4px 22px 4px 8px; border: 1px solid #30363d;
+  border-radius: 6px; background: #161b22; color: #c9d1d9; font-size: 12px; white-space: nowrap; }
+.th-files { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; font-size: 12.5px; }
+.th-file { color: #58a6ff; text-decoration: none; overflow-wrap: anywhere; }
+a.th-file:hover { text-decoration: underline; }
+.th-file-expired { color: #8b949e; text-decoration: line-through; }
 .th-pick { padding: 2px 8px; }
 .th-compose.dragover, .th-newform.dragover { border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950; }
 /* The same composer under the thread shown on the all-threads page
@@ -8014,10 +8033,30 @@ body.split-max #term-wf { flex: 1 1 0; }
 .talk-body { flex: 1 1 0; min-height: 0; display: flex; gap: 14px; }
 .talk-col { flex: 1 1 0; min-width: 0; min-height: 0; }
 .talk-col.talk-qa { overflow-y: auto; overscroll-behavior: contain; }
-.talk-body[data-mode="both"] .talk-threads { border-right: 1px solid #21262d; padding-right: 14px; }
+/* The bar between the two columns in "both" (claunch-816mz): .th-split's
+   skin, in the 14px gap the columns kept apart, with the rule the threads
+   column used to draw on its right edge. Dragging it writes --talk-qa-w;
+   with a width set (.talk-sized) the QA column holds it and the threads
+   column takes the rest. Hidden in a one-column mode and on a phone. */
+.talk-body[data-mode="both"] { gap: 0; }
+.talk-split {
+  flex: none; width: 14px; cursor: col-resize; touch-action: none;
+  display: none; align-items: center; justify-content: center;
+  background: linear-gradient(#21262d, #21262d) no-repeat center / 1px 100%;
+}
+.talk-split::after {
+  content: ""; height: 44px; width: 2px; border-radius: 2px; background: #4d5566;
+}
+.talk-split:hover::after, .talk-split.dragging::after { background: #58a6ff; }
+.talk-body[data-mode="both"] .talk-split { display: flex; }
+.talk-body.talk-sized[data-mode="both"] .talk-qa { flex: 0 0 var(--talk-qa-w); max-width: max(220px, calc(100% - 414px)); }
 .talk-body[data-mode="both"] .th-side { flex-basis: var(--th-side-w, 170px); }
 .talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
 @media (max-width: 820px) {
+  .talk-body[data-mode="both"] { gap: 14px; }
+  .talk-body[data-mode="both"] .talk-split { display: none; }
+  .talk-body.talk-sized[data-mode="both"] .talk-qa { flex: 1 1 0; max-width: none; }
+  .talk-body[data-mode="both"] .talk-threads { border-right: 1px solid #21262d; padding-right: 14px; }
   .talk-body[data-mode="both"] .th-side { flex-basis: 170px; }
   .talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
 }
@@ -8030,6 +8069,22 @@ body.split-max #term-wf { flex: 1 1 0; }
 .qa-link-chip:hover:not(:disabled), .th-link-chip:hover:not(:disabled) { border-color: #58a6ff; }
 .qa-link-chip:disabled, .th-link-chip:disabled { color: #7d8590; background: transparent; border-color: #30363d;
   cursor: default; }
+/* Thread guests (claunch-p9wes, threads-pane.js). */
+.th-guests { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 4px 0; align-items: center; }
+.th-guest-role { font-size: 11px; color: #d29922; }
+.th-guest-chip { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: #d2a8ff;
+  background: #1e1530; border: 1px solid #4b3477; border-radius: 9px; padding: 1px 4px 1px 8px; }
+.th-guest-x { font: inherit; color: #7d8590; background: none; border: 0; padding: 0 3px; cursor: pointer; }
+.th-guest-x:hover { color: #f85149; }
+.th-invite-input { font: inherit; font-size: 12px; min-width: 0; width: 160px; padding: 2px 6px; color: inherit;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 4px; }
+.th-guest-sec { margin-top: 10px; border-top: 1px solid #30363d; padding-top: 6px; }
+.th-guest-head { margin: 0 0 2px; font-size: 12px; color: #d2a8ff; }
+.th-guest-note { margin: 0 0 4px; font-size: 11px; color: #7d8590; }
+.th-chip-owner, .th-chip-guests { color: #d2a8ff; border-color: #4b3477; }
+.th-msg.th-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477;
+  border-bottom-left-radius: 3px; }
+.th-msg.th-guest .th-msg-who { color: #d2a8ff; }
 .qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
 .qa-discuss { font-size: 11px; }
 .th-chip-qa { color: #58a6ff; border-color: #1f3b63; }
@@ -8154,3 +8209,33 @@ a.category-ref:hover { text-decoration: underline; }
   .category-node-tools { visibility: visible; }
   .category-scope { flex-basis: 100%; }
 }
+
+/* ---- Briefing and prompt packs pane (packs-pane.js, ↻ rebrief, claunch-6esft.1) ---- */
+.packs-host {
+  --packs-border: #303843; --packs-muted: #a4afbd; --packs-panel: #1b2028;
+  height: 100%; overflow: auto; padding: 12px 16px; box-sizing: border-box;
+}
+.packs-pane { font-size: 13px; line-height: 1.5; }
+.packs-section { margin-bottom: 16px; }
+.packs-section h4 { margin: 0 0 2px; font-size: 13px; }
+.packs-muted { color: var(--packs-muted); font-size: 12px; margin: 0 0 6px; }
+.packs-error { color: #ff7b72; }
+.packs-notice { color: #7ee787; }
+.packs-list { list-style: none; margin: 0; padding: 0; }
+.packs-row { border-bottom: 1px solid var(--packs-border); padding: 5px 0; }
+.packs-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.packs-name { display: inline-flex; gap: 8px; align-items: baseline; min-width: 0; }
+.packs-title { color: var(--packs-muted); }
+.packs-meta { color: var(--packs-muted); font-size: 12px; flex: 1 1 auto; }
+.packs-actions { display: inline-flex; gap: 4px; }
+.packs-actions .wf-btn { margin: 0; padding: 2px 9px; border: 1px solid var(--packs-border); background: #242d38; border-radius: 5px; }
+.packs-actions .wf-btn:hover:not(:disabled) { background: #354153; }
+.packs-actions .wf-btn:disabled { opacity: .45; cursor: default; }
+.packs-actions .packs-send { background: #2a4a7a; border-color: #427fdf; }
+.packs-preview {
+  margin: 6px 0 2px; padding: 8px 10px; max-height: 320px; overflow: auto;
+  background: var(--packs-panel); border: 1px solid var(--packs-border); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word; font-size: 12px;
+}
+.packs-sent li { padding: 2px 0; font-size: 12px; }
+.packs-actions .packs-drop { color: #ff8b84; }

@@ -14,6 +14,9 @@ T8 history: every session's threads, newest activity first, paged, filtered
    by session and status, each with its last messages (claunch-8k02k)
 T9 images on a message, from the user (claunch-shl2r) or the agent
    (claunch-euaz6); an images-only reply still has a notice line
+T10 guests (claunch-p9wes): the user or the owner invites a session into a
+   thread; the guest writes there (author guest) and nothing more; it is
+   listed apart in the guest's list; a v5 database is rebuilt to v6
 """
 
 import pytest
@@ -298,3 +301,116 @@ def test_t9_a_v2_database_is_rebuilt_with_its_rows(tmp_path):
     assert m["seq"] == 8                                  # the sequence goes on past the old rows
     S.ThreadStore(path)                                   # a second open is a no-op
     assert len(st.read("th-aaaaaa")["messages"]) == 3
+
+
+def test_t10_the_user_or_the_owner_invites_and_a_guest_only_writes(st):
+    tid = st.open(S.USER, "s1", "Review", "look at this")["thread"]["id"]
+    res = st.invite(S.USER, tid, "s2")
+    assert res["added"] is True and [g["session"] for g in res["thread"]["guests"]] == ["s2"]
+    assert res["thread"]["guests"][0]["invited_by"] == "user"
+    assert st.invite(S.USER, tid, "s2")["added"] is False          # twice is one guest
+    assert st.invite("s1", tid, "s3")["thread"]["guests"][1]["invited_by"] == "s1"
+    with pytest.raises(S.Forbidden):
+        st.invite("s2", tid, "s4")                                # a guest does not invite
+    with pytest.raises(S.Forbidden):
+        st.invite("s9", tid, "s4")                                # nor does a stranger
+    with pytest.raises(S.ThreadError):
+        st.invite(S.USER, tid, "s1")                              # the owner is no guest
+    with pytest.raises(S.ThreadError):
+        st.invite(S.USER, tid, "")
+    m = st.post("s2", tid, "consider X")
+    assert m["as"] == S.GUEST
+    assert (m["message"]["author"], m["message"]["guest"]) == ("guest", "s2")
+    assert m["thread"]["agent_unread"] == 2                       # the user's and the guest's
+    with pytest.raises(S.Forbidden):
+        st.set_status("s2", tid, "closed")
+    with pytest.raises(S.Forbidden):
+        st.rename("s2", tid, "mine now")
+    with pytest.raises(S.Forbidden):
+        st.post("s9", tid, "hi")                                  # not a guest
+    assert st.post("s1", tid, "ok")["message"]["author"] == "agent"
+    assert "guest" not in st.read(tid)["messages"][0]
+
+
+def test_t10_guest_threads_are_listed_apart_with_their_unread(st):
+    tid = st.open(S.USER, "s1", "Review", "one")["thread"]["id"]
+    st.open(S.USER, "s2", "own")
+    st.invite("s1", tid, "s2")
+    st.post("s1", tid, "two")
+    doc = st.list("s2")
+    assert [t["title"] for t in doc["threads"]] == ["own"]
+    [g] = doc["guest_threads"]
+    assert (g["id"], g["session"], g["guest"]["invited_by"], g["guest"]["unread"]) == (tid, "s1", "s1", 2)
+    st.read(tid, reader="s2")
+    assert st.list("s2")["guest_threads"][0]["guest"]["unread"] == 0
+    st.post("s2", tid, "advice")                                  # its own message is not unread
+    st.post(S.USER, tid, "thanks")
+    assert st.list("s2")["guest_threads"][0]["guest"]["unread"] == 1
+    assert st.read(tid, reader="s2")["thread"]["agent_read"] == 2  # still the owner's last reply
+    assert st.list("s1")["guest_threads"] == []
+    st.set_status(S.USER, tid, "closed")
+    assert st.list("s2", closed=False)["guest_threads"] == []
+
+
+def test_t10_uninvite_and_leave(st):
+    tid = st.open(S.USER, "s1", "Review")["thread"]["id"]
+    for g in ("s2", "s3", "s4"):
+        st.invite(S.USER, tid, g)
+    with pytest.raises(S.Forbidden):
+        st.uninvite("s3", tid, "s2")                              # one guest does not remove another
+    assert st.uninvite("s2", tid, "s2")["removed"] is True        # leaving
+    assert st.uninvite("s1", tid, "s3")["thread"]["guests"][0]["session"] == "s4"
+    assert st.uninvite(S.USER, tid, "s4")["thread"]["guests"] == []
+    with pytest.raises(S.NotFound):
+        st.uninvite(S.USER, tid, "s4")
+    with pytest.raises(S.Forbidden):
+        st.post("s2", tid, "still here?")
+    assert st.list("s2")["guest_threads"] == []
+    assert st.guests_of(tid) == []
+
+
+def test_t10_guest_limits(st):
+    tid = st.open(S.USER, "s1", "Review")["thread"]["id"]
+    for i in range(S.MAX_GUESTS):
+        st.invite(S.USER, tid, f"g{i}")
+    with pytest.raises(S.Conflict):
+        st.invite(S.USER, tid, "one-more")
+    with pytest.raises(S.ThreadError):
+        st.invite(S.USER, tid, S.operator_owner("op1"))
+    op = st.import_thread(S.operator_owner("op1"), "conv", [{"author": "user", "body": "hi"}])
+    with pytest.raises(S.ThreadError):
+        st.invite(S.USER, op, "s2")
+    st.delete_owner(S.operator_owner("op1"))
+
+
+def test_t10_a_v5_database_is_rebuilt_to_v6_with_its_rows(tmp_path):
+    import sqlite3
+    path = tmp_path / "threads.sqlite3"
+    db = sqlite3.connect(str(path))
+    db.executescript("""
+    CREATE TABLE threads (id TEXT PRIMARY KEY, session TEXT NOT NULL, title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open', opened_by TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0,
+        agent_read INTEGER NOT NULL DEFAULT 0, qa TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL REFERENCES threads (id),
+        session TEXT NOT NULL, author TEXT NOT NULL CHECK (author IN ('user', 'agent', 'system')),
+        body TEXT NOT NULL, at TEXT NOT NULL, images TEXT,
+        kind TEXT NOT NULL DEFAULT 'message' CHECK (kind IN ('message', 'ask', 'dispatch', 'system')),
+        ref TEXT, data TEXT, files TEXT,
+        CHECK (length(body) > 0 OR images IS NOT NULL OR files IS NOT NULL));
+    INSERT INTO threads VALUES ('th-aaaaaa', 's1', 'Old', 'open', 'user', 7, 0, NULL, 't', 't');
+    INSERT INTO messages (seq, thread, session, author, body, at, files)
+        VALUES (5, 'th-aaaaaa', 's1', 'user', '', 't', '[{"id": "0123456789abcdef0123", "name": "a.bin", "bytes": 3}]');
+    INSERT INTO messages (seq, thread, session, author, body, at) VALUES (7, 'th-aaaaaa', 's1', 'agent', 'hi', 't');
+    PRAGMA user_version = 5;
+    """)
+    db.close()
+    st = S.ThreadStore(path)
+    got = st.read("th-aaaaaa")["messages"]
+    assert [(m["seq"], m["author"], m.get("files")) for m in got] == [
+        (5, "user", [{"id": "0123456789abcdef0123", "name": "a.bin", "bytes": 3}]), (7, "agent", None)]
+    st.invite(S.USER, "th-aaaaaa", "s2")
+    assert st.post("s2", "th-aaaaaa", "advice")["message"]["seq"] == 8
+    S.ThreadStore(path)                                           # a second open is a no-op
+    assert len(st.read("th-aaaaaa")["messages"]) == 3
+    with sqlite3.connect(str(path)) as raw:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == S.SCHEMA_VERSION == 6

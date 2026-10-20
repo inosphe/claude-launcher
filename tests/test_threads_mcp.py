@@ -192,3 +192,26 @@ def test_an_image_goes_through_the_real_upload_route(monkeypatch, tmp_path):
         loop.call_soon_threadsafe(loop.stop)
         t.join(10)
         loop.close()
+
+
+def test_invite_and_uninvite_carry_the_session(monkeypatch):
+    """claunch-p9wes: thread_invite names the guest; thread_uninvite removes
+    one, or without a session leaves the thread as this session."""
+    client = Client()
+    monkeypatch.setattr(threads_mcp, "_client", lambda: client)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    names = {t["name"] for t in mcp_server.TOOLS}
+    assert {"thread_invite", "thread_uninvite"} <= names
+    threads_mcp.call_tool("thread_invite", {"thread_id": "th-1", "session": " s8 "})
+    assert client.calls[-1] == ("POST", "/api/threads/th-1/guests", {"session": "s7", "guest": "s8"})
+    threads_mcp.call_tool("thread_uninvite", {"thread_id": "th-1", "session": "s8"})
+    assert client.calls[-1] == ("POST", "/api/threads/th-1/guests/s8/remove", {"session": "s7"})
+    threads_mcp.call_tool("thread_uninvite", {"thread_id": "th-1"})
+    assert client.calls[-1] == ("POST", "/api/threads/th-1/guests/s7/remove", {"session": "s7"})
+    with pytest.raises(threads_mcp.ThreadMcpError, match="session is required"):
+        threads_mcp.call_tool("thread_invite", {"thread_id": "th-1"})
+    tools = {t["name"]: t for t in threads_mcp.TOOLS}
+    assert "guest_threads" in tools["thread_list"]["description"]
+    assert "QA tools" in tools["thread_invite"]["description"]
+    body = prompt_packs.shipped("mcp-threads").body
+    assert "thread_invite" in body and "guest_threads" in body and "reviewer and advisor" in body

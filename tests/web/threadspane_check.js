@@ -30,6 +30,11 @@
                   and a blank or unchanged title post nothing, a failed
                   rename keeps the box and its text, and a poll keeps
                   what is typed (claunch-6st9p).
+     guests    -- the threads this session is a guest in are listed apart
+                  under 초대된 쓰레드 with their owner; a guest's message
+                  shows under its name; 게스트 초대 posts {guest} to
+                  /guests and a chip's × posts to /guests/<name>/remove
+                  (claunch-p9wes).
      rail      -- 🗪 threads lights while the session has an open thread, and
                   carries has-news when the session wrote past what this
                   browser saw; a session never seen here starts caught up.
@@ -137,6 +142,12 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(P.pick(ts, "th-c"), "th-c");
   assert.equal(P.pick(ts, "th-gone"), "th-b");
   assert.equal(P.pick([], ""), "");
+  assert.equal(P.speaker({author: "agent"}, "s1"), "s1");
+  assert.equal(P.speaker({author: "guest", guest: "s2"}, "s1"), "s2 (게스트)");
+  assert.equal(P.speaker({author: "user"}, "s1"), "나");
+  assert.deepEqual(P.allThreads({threads: [{id: "a"}], guest_threads: [{id: "b"}]}).map((t) => t.id), ["a", "b"]);
+  assert.deepEqual([...P.unseen([{id: "g", last_seq: 3, last: {author: "guest"}}], {})], ["g"],
+                   "a guest's message is news too");
 
   /* the pane against a fake daemon */
   const threads = [
@@ -558,9 +569,12 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   let staged = 0;
   const api3 = async (p, opts = {}) => {
     const isStage = p === "/api/threads/images";
-    calls3.push([opts.method || "GET", p, isStage ? opts.headers["Content-Type"] : (opts.body ? JSON.parse(opts.body) : undefined)]);
+    const isUpload = p.startsWith("/api/uploads?");
+    calls3.push([opts.method || "GET", p, isStage || isUpload ? opts.headers["Content-Type"]
+                 : (opts.body ? JSON.parse(opts.body) : undefined)]);
     let doc = {};
-    if (isStage) {
+    if (isUpload) doc = {id: "f".repeat(20)};
+    else if (isStage) {
       if (failStage) return {ok: false, status: 413, json: async () => ({error: "too big"})};
       doc = {id: `img${++staged}.png`};
     } else if (p.startsWith("/api/threads?session=")) doc = {session: "s3", threads: [imgThread], open: 1, agent_seq: 0};
@@ -620,12 +634,15 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const nform = host3.querySelector(".th-newform");
   nform.fire("drop", {dataTransfer: {files: [{type: "image/png", name: "d.png"}, {type: "text/plain", name: "x.txt"}]}});
   await settle();
-  assert.equal(nform.querySelectorAll(".th-attach-item").length, 1, "only the image is attached");
+  // claunch-5gpcf: the file that is not an image is attached as a file
+  assert.equal(nform.querySelectorAll(".th-attach-item").length, 2, "the image and the file are attached");
+  assert.equal(nform.querySelectorAll(".th-attach-file").length, 1, "the text file waits as a file chip");
   calls3.length = 0;
   host3.querySelector(".th-newform .th-send").fire("click");
   await settle();
   assert.deepEqual(calls3.filter((c) => c[0] === "POST").map((c) => [c[1], c[2]]),
-                   [["/api/threads/images", "image/png"], ["/api/threads", {to: "s3", title: "", images: ["img2.png"]}]]);
+                   [["/api/threads/images", "image/png"], ["/api/uploads?name=x.txt", "application/octet-stream"],
+                    ["/api/threads", {to: "s3", title: "", images: ["img2.png"], files: ["f".repeat(20)]}]]);
   P.unmount();
 
   /* the header button's rail (app.js) */
@@ -668,6 +685,55 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   rail.sessions = {s1: {open: 0, agent_seq: 8}};
   await actx.refreshThreadsRail();
   assert.ok(!btn.classList.contains("has-resource"), "all closed: dark");
+
+  /* guests (claunch-p9wes) */
+  {
+    const own = {id: "th-o", session: "s2", title: "Own", status: "open", last_seq: 1, guests: [],
+                 last: {author: "user", body: "mine"}};
+    const guestT = {id: "th-g", session: "s1", title: "Review me", status: "open", last_seq: 3,
+                    guests: [{session: "s2", invited_by: "user"}], guest: {invited_by: "user", unread: 1},
+                    last: {author: "guest", guest: "s2", body: "try B"}};
+    const gcalls = [];
+    const gapi = async (p, opts = {}) => {
+      gcalls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+      let doc = {};
+      if (p.startsWith("/api/threads?session=")) doc = {session: "s2", threads: [own], guest_threads: [guestT], open: 1, agent_seq: 0};
+      else if (p.startsWith("/api/threads/th-g?after=")) doc = {thread: guestT, messages: [
+        {seq: 2, author: "agent", body: "plan A", at: "2026-10-20T00:00:00+00:00"},
+        {seq: 3, author: "guest", guest: "s2", body: "try B", at: "2026-10-20T00:00:01+00:00"}]};
+      else if (p.startsWith("/api/threads/th-o?after=")) doc = {thread: own, messages: []};
+      else if (p.endsWith("/guests")) doc = {thread: guestT, guest: "s3", added: true, delivered: true};
+      else if (p.endsWith("/remove")) doc = {thread: guestT, guest: "s2", removed: true};
+      return {ok: true, status: 200, json: async () => doc};
+    };
+    const gh = document.createElement("div");
+    P.mount(gh, "s2", {api: gapi, storageKey: "gk"});
+    await settle();
+    const sec = gh.querySelector(".th-guest-sec");
+    assert.ok(sec, "the guest threads have their own section");
+    assert.ok(sec.text().includes("초대된 쓰레드 1"));
+    assert.deepEqual(sec.querySelectorAll(".th-item").map((i) => i.dataset.id), ["th-g"]);
+    assert.ok(sec.querySelector(".th-chip-owner").textContent === "s1", "a guest thread names its owner");
+    assert.deepEqual(gh.querySelectorAll(".th-list").length, 2);
+    sec.querySelector(".th-item").fire("click");
+    await settle();
+    const whos = gh.querySelectorAll(".th-msg-who").map((n) => n.textContent);
+    assert.deepEqual(whos, ["s1", "s2 (게스트)"], "the owner and the guest under their own names");
+    assert.ok(gh.querySelector(".th-guest"), "a guest bubble has its own class");
+    assert.ok(gh.querySelector(".th-guest-role").textContent.includes("s1의 쓰레드"));
+    gh.querySelector(".th-invite").fire("click");
+    const ibox = gh.querySelector(".th-invite-input");
+    assert.ok(ibox, "게스트 초대 opens a box");
+    ibox.value = " s3 ";
+    ibox.fire("input");
+    ibox.fire("keydown", {key: "Enter"});
+    await settle();
+    assert.deepEqual(gcalls.find((c) => c[1].endsWith("/guests")), ["POST", "/api/threads/th-g/guests", {guest: "s3"}]);
+    gh.querySelector(".th-guest-x").fire("click");
+    await settle();
+    assert.deepEqual(gcalls.find((c) => c[1].endsWith("/remove")), ["POST", "/api/threads/th-g/guests/s2/remove", {}]);
+    P.unmount();
+  }
 
   /* wiring */
   assert.ok(html.includes('id="term-threadsbtn"'));

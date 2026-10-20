@@ -19,7 +19,7 @@ from . import daemon_client, mcp_rpc
 INSTRUCTIONS = """\
 Session QA (qa_* tools): ask the user through records in your dashboard QA
 pane, not in the terminal; their answer arrives as a "[claunch qa]" block.
-Full guidance: prompt pack 'mcp-qa'.
+Full guidance: prompt pack 'mcp-qa' (load it on demand, see Prompt packs).
 """
 
 _ID = {"id": {"type": "string", "description": "question id (qa-xxxxxxxx)"}}

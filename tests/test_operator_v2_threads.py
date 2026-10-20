@@ -91,7 +91,7 @@ def test_a_v3_database_is_rebuilt_to_v4_with_its_rows(tmp_path):
     S.ThreadStore(path)  # a second open is a no-op
     assert len(st.read("th-aaaaaa")["messages"]) == 3
     with sqlite3.connect(str(path)) as raw:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == S.SCHEMA_VERSION == 4
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == S.SCHEMA_VERSION == 6
 
 
 def test_a_ref_is_unique_per_owner(tmp_path):

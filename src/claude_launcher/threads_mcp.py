@@ -12,6 +12,12 @@ raw body (``POST /api/threads/images``, the upload the threads pane uses for
 the user's pictures), and the message names the staged ids; the daemon keeps
 them with the thread and the pane shows them on the agent's message. Every
 file is checked before the first upload, so a bad path posts nothing.
+
+Guests (claunch-p9wes). thread_invite asks another session into one of this
+session's threads as a guest reviewer and advisor; thread_uninvite removes
+it, or -- called by the guest on itself -- leaves. A guest reads and replies
+in the thread with the same thread_read / thread_reply, and thread_list
+returns the threads it is a guest in apart from its own (guest_threads).
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ INSTRUCTIONS = """\
 Session threads (thread_* tools): answer a "[claunch thread th-... ]" block
 with thread_reply on that thread, in markdown. When the user must act now,
 alert them in a thread (every message there is a dashboard notice). Full
-guidance: prompt pack 'mcp-threads'.
+guidance: prompt pack 'mcp-threads' (load it on demand, see Prompt packs).
 """
 
 _TID = {"thread_id": {"type": "string", "description": "thread id (th-xxxxxx)"}}
@@ -53,7 +59,10 @@ _IMAGES = {"images": {"type": "array", "items": {"type": "string"},
 TOOLS = [
     {"name": "thread_list",
      "description": "Your threads with the user: id, title, status, the last message, how many user "
-                    "messages you have not read (agent_unread) and the QA questions each touches (links).",
+                    "and guest messages you have not read (agent_unread), the QA questions each touches "
+                    "(links) and its guests. 'guest_threads' lists apart the other sessions' threads you "
+                    "were invited into as a guest (reviewer and advisor only), each with 'guest' (who "
+                    "invited you, how many messages you have not read).",
      "inputSchema": {"type": "object", "properties": {
          "closed": {"type": "boolean", "description": "include closed threads (default false)"}}}},
     {"name": "thread_read",
@@ -85,6 +94,20 @@ TOOLS = [
                                                  "it is linked both ways and shown on its QA card. Omitted, "
                                                  "a single qa-id of yours in the title links it"}},
          "required": ["title"]}},
+    {"name": "thread_invite",
+     "description": "Invite another session into one of your threads as a guest: a reviewer and advisor "
+                    "that reads the conversation and writes advice in it, and does not do the work or use "
+                    "the QA tools for it. It is told so; the user's messages there are typed into it too, "
+                    "and its messages are typed into you.",
+     "inputSchema": {"type": "object", "properties": {
+         **_TID, "session": {"type": "string", "description": "the session to invite"}},
+         "required": ["thread_id", "session"]}},
+    {"name": "thread_uninvite",
+     "description": "Remove a guest from one of your threads; without 'session', leave a thread you are a "
+                    "guest in.",
+     "inputSchema": {"type": "object", "properties": {
+         **_TID, "session": {"type": "string", "description": "the guest to remove (default: you, leaving)"}},
+         "required": ["thread_id"]}},
     {"name": "thread_close",
      "description": "Close one of your threads once its topic is settled (kept for the record; a new "
                     "message from either side reopens it).",
@@ -190,6 +213,15 @@ def call_tool(name: str, args: dict) -> dict:
         if images:
             body["images"] = _stage_images(c, images)
         return c.post("/api/threads", body)
+    if name == "thread_invite":
+        guest = str(args.get("session") or "").strip()
+        if not guest:
+            raise ThreadMcpError("session is required: the session to invite")
+        return c.post(f"/api/threads/{_tid(args)}/guests", {"session": me, "guest": guest})
+    if name == "thread_uninvite":
+        guest = str(args.get("session") or "").strip() or me
+        return c.post(f"/api/threads/{_tid(args)}/guests/{urllib.parse.quote(guest, safe='')}/remove",
+                      {"session": me})
     if name == "thread_close":
         return c.post(f"/api/threads/{_tid(args)}/close", {"session": me})
     raise ThreadMcpError(f"unknown tool {name!r}")

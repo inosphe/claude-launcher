@@ -46,6 +46,13 @@
    A message may be images alone. Messages show their images from
    GET /api/threads/<id>/images/<name>, so the conversation keeps them.
 
+   Files (claunch-5gpcf): a file of any other kind (a profiling capture)
+   dropped, pasted or picked (📎 button) waits under the composer as a chip
+   with its name and size; it is uploaded with POST /api/uploads and the post
+   names the ids in `files`. The daemon keeps it 30 days; a message lists its
+   files as download links (GET /api/threads/<id>/files/<fid>/<name>), and
+   as "만료됨" once the daemon reports one `expired`.
+
    Space (claunch-1n081): "◂ 목록" in the head folds the thread list away
    while a conversation is open, so the bubbles take the pane's whole
    width; the fold is kept in localStorage (FOLD_KEY) for every session.
@@ -56,7 +63,15 @@
    written down once at release (SIDE_W_KEY, every session); a double click
    forgets it. With nothing stored the stylesheet's width holds (220px, 170px
    beside the QA column). The bar is hidden while the pane has one half
-   (.th-solo, .th-folded) and on a phone. */
+   (.th-solo, .th-folded) and on a phone.
+
+   Guests (claunch-p9wes): "게스트 초대" in the conversation head opens a box
+   for a session name; 초대 posts {guest} to /api/threads/<id>/guests, and
+   each guest is a chip whose × posts to .../guests/<name>/remove. A guest
+   reviews and advises only; its messages show under its own name. The
+   threads another session invited this one into (`guest_threads` of the
+   list) are listed apart, under 「초대된 쓰레드」, each with the session it
+   belongs to; choosing one opens it like any other thread. */
 globalThis.ThreadsPane = (() => {
   "use strict";
   const POLL_MS = 3000;
@@ -68,6 +83,7 @@ globalThis.ThreadsPane = (() => {
   let composing = false;     // the new-thread form is open
   let composeQa = null;      // {id, title}: the question the new thread is about
   let renaming = "";         // the thread whose title is being edited
+  let inviting = "";         // the thread whose guest box is open
   let notice = "";
   let wanted = null;         // {session, tid}: the thread to show at the next mount there
   let focusCompose = false;  // a thread was just opened: its composer takes the focus
@@ -75,7 +91,7 @@ globalThis.ThreadsPane = (() => {
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
   const composers = new WeakMap(); // composer textarea -> its draft key
-  const attached = new Map(); // thread id ("" = new thread) -> [{file, src}]: images waiting to be sent
+  const attached = new Map(); // thread id ("" = new thread) -> [{file, src, isFile?}]: attachments waiting to be sent
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
   const SIDE_W_KEY = "claunch_threadsidew"; // localStorage: the list column's width in px
@@ -124,12 +140,31 @@ globalThis.ThreadsPane = (() => {
     return typeof globalThis.url === "function" ? globalThis.url(path) : path;
   }
 
-  /* What the list says of a message: its first line, or that it is images. */
+  /* Where the daemon serves file `f` ({id, name}) of thread `tid`. */
+  function fileSrc(tid, f) {
+    const path = `api/threads/${encodeURIComponent(tid)}/files/${encodeURIComponent(f.id)}/${encodeURIComponent(f.name)}`;
+    return typeof globalThis.url === "function" ? globalThis.url(path) : path;
+  }
+
+  /* A byte count for people (daemon/uploads.human_size). */
+  function sizeOf(n) {
+    let size = Number(n) || 0;
+    for (const unit of ["B", "KiB", "MiB", "GiB"]) {
+      if (size < 1024 || unit === "GiB") return unit === "B" ? `${size} B` : `${size.toFixed(1)} ${unit}`;
+      size /= 1024;
+    }
+    return `${n} B`;
+  }
+
+  /* What the list says of a message: its first line, or that it is images
+     or files (the same wording as the daemon's rail excerpt). */
   function lastLine(m) {
-    const text = excerpt(m && m.body);
+    let text = excerpt(m && m.body);
     const n = ((m && m.images) || []).length;
-    if (!n) return text;
-    return text ? `${text} 🖼${n}` : `🖼 이미지 ${n}장`;
+    const k = ((m && m.files) || []).length;
+    if (n) text = text ? `${text} 🖼${n}` : `🖼 이미지 ${n}장`;
+    if (k) text = text ? `${text} 📎${k}` : `📎 파일 ${k}개`;
+    return text;
   }
 
   /* The first line of a message, shortened for the list. */
@@ -143,9 +178,25 @@ globalThis.ThreadsPane = (() => {
   function unseen(threads, read) {
     const out = new Set();
     for (const t of threads || []) {
-      if (t.last && t.last.author === "agent" && t.last_seq > (read[t.id] || 0)) out.add(t.id);
+      if (t.last && (t.last.author === "agent" || t.last.author === "guest") && t.last_seq > (read[t.id] || 0)) {
+        out.add(t.id);
+      }
     }
     return out;
+  }
+
+  /* Who wrote message `m` of a thread of session `owner`: the owner, a
+     guest by its name (claunch-p9wes), or the user ("나"). */
+  function speaker(m, owner) {
+    if (m && m.author === "agent") return owner;
+    if (m && m.author === "guest") return `${m.guest || "게스트"} (게스트)`;
+    return "나";
+  }
+
+  /* Every thread the pane can show: the session's own, then the ones it
+     is a guest in. */
+  function allThreads(doc) {
+    return ((doc && doc.threads) || []).concat((doc && doc.guest_threads) || []);
   }
 
   /* Enter sends, Shift+Enter is a new line; an IME composition is never
@@ -347,11 +398,28 @@ globalThis.ThreadsPane = (() => {
     return doc.id;
   }
 
-  /* The ids of the images waiting for `key`, uploaded in order. */
-  async function stageAll(key) {
-    const ids = [];
-    for (const a of attached.get(key) || []) ids.push(await stage(a.file));
-    return ids;
+  /* Upload one file of any kind to the staging area (POST /api/uploads). */
+  async function stageFile(file) {
+    const path = `/api/uploads?name=${encodeURIComponent(file.name || "upload")}`;
+    const resp = await api(path, {
+      method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: file,
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.id) throw Error(doc.error || `파일 업로드 실패: ${file.name} (HTTP ${resp.status})`);
+    return doc.id;
+  }
+
+  /* The ids of the attachments waiting for `key`, uploaded in order, put on
+     the post `body` as `images` and `files`. */
+  async function stageAll(key, body) {
+    const images = [], files = [];
+    for (const a of attached.get(key) || []) {
+      if (a.isFile) files.push(await stageFile(a.file));
+      else images.push(await stage(a.file));
+    }
+    if (images.length) body.images = images;
+    if (files.length) body.files = files;
+    return body;
   }
 
   function dropAttached(key) {
@@ -361,15 +429,14 @@ globalThis.ThreadsPane = (() => {
     attached.delete(key);
   }
 
-  /* Add image files to what `key`'s composer will send; files that are not
-     images are left out and counted in the notice. */
-  function attach(key, files) {
+  /* Add files to what `key`'s composer will send: images as pictures,
+     anything else (or everything, `asFiles`, from the 📎 button) as files. */
+  function attach(key, files, asFiles = false) {
     const list = Array.from(files || []);
-    const pics = list.filter((f) => imageKind(f));
-    if (list.length > pics.length) notice = `이미지가 아닌 파일 ${list.length - pics.length}개는 첨부하지 않았습니다.`;
-    if (!pics.length) { render(); return; }
+    if (!list.length) { render(); return; }
     const have = attached.get(key) || [];
-    for (const file of pics) {
+    for (const file of list) {
+      if (asFiles || !imageKind(file)) { have.push({file, src: "", isFile: true}); continue; }
       let src = "";
       try { src = URL.createObjectURL(file); } catch { /* no object URLs here */ }
       have.push({file, src});
@@ -393,7 +460,7 @@ globalThis.ThreadsPane = (() => {
       if (mine !== seq || want !== name) return;
       error = "";
       list = doc;
-      current = pick(list.threads, current);
+      current = pick(allThreads(list), current);
       remember(current);
       await loadThread(early);
     } catch (e) {
@@ -414,7 +481,7 @@ globalThis.ThreadsPane = (() => {
     if (!tid) { convo = null; return; }
     const have = convo && convo.id === tid ? convo : null;
     const after = have && have.messages.length ? have.messages[have.messages.length - 1].seq : 0;
-    const row = (list.threads || []).find((t) => t.id === tid);
+    const row = allThreads(list).find((t) => t.id === tid);
     if (have && row && row.last_seq <= after) { have.thread = row; return; }
     const read = early && early.tid === tid && early.after === after ? early : readThread(tid, after);
     const doc = await read.promise;
@@ -468,18 +535,18 @@ globalThis.ThreadsPane = (() => {
     // Attached images stay attached until the post is in: a failure keeps
     // them for the next try.
     drafts.delete(tid);
-    const pics = (attached.get(tid) || []).map((a) => a.src);
-    pending.set(tid, {text, images: pics});
+    const pics = (attached.get(tid) || []).filter((a) => !a.isFile).map((a) => a.src);
+    const docs = (attached.get(tid) || []).filter((a) => a.isFile).map((a) => ({name: a.file.name, bytes: a.file.size}));
+    pending.set(tid, {text, images: pics, files: docs});
     return once(tid, () => act(async () => {
       const body = {text};
       if (askQa) body.ask_qa = true;
       let res;
       try {
-        const ids = await stageAll(tid);
-        if (ids.length) body.images = ids;
+        await stageAll(tid, body);
         res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, body);
       } catch (e) {
-        pending.set(tid, {text, images: pics, failed: (e && e.message) || String(e)});
+        pending.set(tid, {text, images: pics, files: docs, failed: (e && e.message) || String(e)});
         if (!(drafts.get(tid) || "").trim()) drafts.set(tid, text);
         throw e;
       }
@@ -494,8 +561,7 @@ globalThis.ThreadsPane = (() => {
       const body = {to: name, title};
       if (text) body.text = text;
       if (composeQa) body.qa = composeQa.id;
-      const ids = await stageAll("");
-      if (ids.length) body.images = ids;
+      await stageAll("", body);
       const res = await request("/api/threads", body);
       dropAttached("");
       drafts.delete("");
@@ -513,6 +579,23 @@ globalThis.ThreadsPane = (() => {
   }
 
   const RENAME = "\u0000rename";   // drafts key of the title being edited
+  const INVITE = "\u0000invite";   // drafts key of the guest being invited
+
+  function invite(tid, guest) {
+    if (!guest) { inviting = ""; drafts.delete(INVITE); render(); return undefined; }
+    // The box lets go of the focus, so the redraw after the answer is not
+    // held back for a box that is still being typed in.
+    if (typeof document !== "undefined" && document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    return once(INVITE, () => act(async () => {
+      const res = await request(`/api/threads/${encodeURIComponent(tid)}/guests`, {guest});
+      if (inviting === tid) { inviting = ""; drafts.delete(INVITE); }
+      notice = res.added === false ? `${guest}는 이미 이 쓰레드의 게스트입니다.` : deliveryNotice(res, guest);
+    }));
+  }
+
+  function uninvite(tid, guest) {
+    return act(() => request(`/api/threads/${encodeURIComponent(tid)}/guests/${encodeURIComponent(guest)}/remove`, {}));
+  }
 
   function startRename(tid) {
     if (renaming !== tid) drafts.delete(RENAME);
@@ -577,10 +660,15 @@ globalThis.ThreadsPane = (() => {
     strip.replaceChildren();
     strip.hidden = !list.length;
     list.forEach((a, i) => {
-      const item = node("span", "th-attach-item");
-      const pic = node("img");
-      pic.src = a.src;
-      pic.alt = a.file.name || "첨부 이미지";
+      const item = node("span", a.isFile ? "th-attach-item th-attach-file" : "th-attach-item");
+      let pic;
+      if (a.isFile) {
+        pic = node("span", "th-attach-name", `📎 ${a.file.name || "파일"} · ${sizeOf(a.file.size)}`);
+      } else {
+        pic = node("img");
+        pic.src = a.src;
+        pic.alt = a.file.name || "첨부 이미지";
+      }
       const drop = node("button", "th-attach-drop", "×");
       drop.type = "button";
       drop.title = "첨부 취소";
@@ -622,7 +710,16 @@ globalThis.ThreadsPane = (() => {
     pick.type = "button";
     pick.title = "이미지 첨부 — 입력창에 붙여넣거나(Ctrl+V) 끌어다 놓아도 됩니다";
     pick.addEventListener("click", () => input.click());
-    return [pick, input];
+    const fileInput = node("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.hidden = true;
+    fileInput.addEventListener("change", () => { attach(key, fileInput.files, true); fileInput.value = ""; });
+    const filePick = node("button", "term-btn th-pick", "📎");
+    filePick.type = "button";
+    filePick.title = "파일 첨부(종류 무관, 예: 프로파일링 파일) — 데몬에 30일 보관됩니다";
+    filePick.addEventListener("click", () => fileInput.click());
+    return [pick, input, filePick, fileInput];
   }
 
   /* Images dropped anywhere on `area` go to composer `key`. */
@@ -635,7 +732,7 @@ globalThis.ThreadsPane = (() => {
     area.addEventListener("dragleave", () => area.classList.remove("dragover"));
     area.addEventListener("drop", (e) => {
       area.classList.remove("dragover");
-      const files = imageFiles(e.dataTransfer);
+      const files = Array.from((e.dataTransfer || {}).files || []);
       if (!files.length) return;
       e.preventDefault();
       attach(key, files);
@@ -674,17 +771,35 @@ globalThis.ThreadsPane = (() => {
     return box;
   }
 
-  function bubble(author, text, when, state, images = []) {
+  /* A message's files as download links; an expired one is named only. */
+  function filesOf(tid, files) {
+    const box = node("div", "th-files");
+    for (const f of files) {
+      const label = `📎 ${f.name} · ${sizeOf(f.bytes)}`;
+      if (f.expired || !tid || !f.id) {
+        box.append(node("span", "th-file th-file-expired", f.expired ? `${label} · 만료됨` : label));
+        continue;
+      }
+      const link = node("a", "th-file", label);
+      link.href = fileSrc(tid, f);
+      link.download = f.name;
+      box.append(link);
+    }
+    return box;
+  }
+
+  function bubble(author, text, when, state, images = [], files = [], tid = "", who = "") {
     const row = node("div", `th-msg th-${author}`);
     if (state) row.classList.add(`th-${state}`);
     const meta = node("div", "th-msg-meta");
-    meta.append(node("span", "th-msg-who", author === "agent" ? name : "나"));
+    meta.append(node("span", "th-msg-who", who || (author === "agent" ? name : "나")));
     if (when) meta.append(node("span", "th-msg-at", when));
     if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
     if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
     row.append(meta);
-    if (text || !images.length) row.append(bodyOf(text));
+    if (text || !(images.length || files.length)) row.append(bodyOf(text));
     if (images.length) row.append(picturesOf(images));
+    if (files.length) row.append(filesOf(tid, files));
     return row;
   }
 
@@ -726,11 +841,23 @@ globalThis.ThreadsPane = (() => {
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
+    const guestOf = (list && list.guest_threads) || [];
     if (!threads.length) {
       side.append(node("p", "wf-note", "쓰레드가 없습니다. 주제별로 쓰레드를 열면 세션과 따로 대화할 수 있습니다. 주제와 첫 메시지는 비워 두어도 됩니다."));
-      return;
+    } else {
+      side.append(listOf(threads, fresh));
     }
-    const ul = node("ul", "th-list");
+    if (guestOf.length) {
+      const sec = node("div", "th-guest-sec");
+      sec.append(node("h4", "th-guest-head", `초대된 쓰레드 ${guestOf.length}`));
+      sec.append(node("p", "th-guest-note", "다른 세션이 이 세션을 게스트(리뷰·조언)로 초대한 쓰레드입니다."));
+      sec.append(listOf(guestOf, fresh, true));
+      side.append(sec);
+    }
+  }
+
+  function listOf(threads, fresh, guest = false) {
+    const ul = node("ul", guest ? "th-list th-list-guest" : "th-list");
     for (const t of threads) {
       const li = node("li", "th-item");
       li.classList.toggle("on", t.id === current);
@@ -740,6 +867,12 @@ globalThis.ThreadsPane = (() => {
       const top = node("div", "th-item-top");
       top.append(node("span", "th-item-title", t.title));
       if (t.status === "closed") top.append(node("span", "th-chip", "닫힘"));
+      if (guest) top.append(node("span", "th-chip th-chip-owner", t.session));
+      else if ((t.guests || []).length) {
+        const g = node("span", "th-chip th-chip-guests", `게스트 ${t.guests.length}`);
+        g.title = t.guests.map((x) => x.session).join("\n");
+        top.append(g);
+      }
       if ((t.links || []).length) {
         const q = node("span", "th-chip th-chip-qa", `QA ${t.links.length}`);
         q.title = t.links.map(linkLabel).join("\n");
@@ -748,10 +881,11 @@ globalThis.ThreadsPane = (() => {
       if (fresh.has(t.id)) top.append(node("span", "th-dot", "●"));
       li.append(top);
       if (t.last) {
-        const who = t.last.author === "agent" ? `${name}: ` : "나: ";
-        li.append(node("div", "th-item-last", who + lastLine(t.last)));
+        li.append(node("div", "th-item-last", `${speaker(t.last, t.session)}: ` + lastLine(t.last)));
       }
-      li.title = `${t.id} · ${t.opened_by === "agent" ? "세션이 연 쓰레드" : "내가 연 쓰레드"}`;
+      li.title = guest
+        ? `${t.id} · ${t.session}의 쓰레드 · 게스트로 초대됨` + (t.guest && t.guest.invited_by ? ` (${t.guest.invited_by === "user" ? "사용자" : t.guest.invited_by})` : "")
+        : `${t.id} · ${t.opened_by === "agent" ? "세션이 연 쓰레드" : "내가 연 쓰레드"}`;
       li.addEventListener("click", () => {
         if (current === t.id) return;
         if (renaming) { renaming = ""; drafts.delete(RENAME); }
@@ -765,7 +899,7 @@ globalThis.ThreadsPane = (() => {
       });
       ul.append(li);
     }
-    side.append(ul);
+    return ul;
   }
 
   function renderConvo(main) {
@@ -821,7 +955,45 @@ globalThis.ThreadsPane = (() => {
       const v = ((box && box.value) || "").trim();
       send(t.id, v || ASK_QA_TEXT, true);
     });
-    head.append(toggle, askQa);
+    const inv = node("button", "term-btn th-invite", "게스트 초대");
+    inv.type = "button";
+    inv.title = "다른 세션을 이 쓰레드에 게스트로 초대합니다. 게스트는 리뷰와 조언만 하고 작업을 직접 하거나 QA 도구를 쓰지 않습니다.";
+    inv.addEventListener("click", () => { inviting = inviting === t.id ? "" : t.id; drafts.delete(INVITE); render(); });
+    head.append(toggle, askQa, inv);
+
+    let guests = null;
+    if ((t.guests || []).length || inviting === t.id || t.session !== name) {
+      guests = node("div", "th-guests");
+      if (t.session !== name) guests.append(node("span", "th-guest-role", `${t.session}의 쓰레드 · ${name}는 게스트(리뷰·조언)`));
+      for (const g of t.guests || []) {
+        const chip = node("span", "th-guest-chip", g.session);
+        chip.title = `게스트 · ${g.invited_by === "user" ? "사용자가" : g.invited_by + "가"} 초대`;
+        const x = node("button", "th-guest-x", "×");
+        x.type = "button";
+        x.title = `${g.session}를 게스트에서 뺍니다`;
+        x.setAttribute("aria-label", x.title);
+        x.addEventListener("click", () => uninvite(t.id, g.session));
+        chip.append(x);
+        guests.append(chip);
+      }
+      if (inviting === t.id) {
+        const box = node("input", "th-invite-input");
+        box.placeholder = "초대할 세션 이름";
+        box.value = drafts.get(INVITE) || "";
+        box.addEventListener("input", () => drafts.set(INVITE, box.value));
+        const go = () => invite(t.id, box.value.trim());
+        box.addEventListener("keydown", (e) => {
+          if (sendKey(e)) { e.preventDefault(); go(); }
+          else if (e.key === "Escape") { e.preventDefault(); inviting = ""; drafts.delete(INVITE); render(); }
+        });
+        const ok = node("button", "term-btn th-invite-go", inflight.has(INVITE) ? "초대 중…" : "초대");
+        ok.type = "button";
+        ok.disabled = inflight.has(INVITE);
+        ok.addEventListener("click", go);
+        guests.append(box, ok);
+        setTimeout(() => box.focus(), 0);
+      }
+    }
 
     let links = null;
     if ((t.links || []).length) {
@@ -838,10 +1010,11 @@ globalThis.ThreadsPane = (() => {
 
     const msgs = node("div", "th-messages");
     for (const m of convo.messages) {
-      msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name))));
+      msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
+                         m.files || [], t.id, speaker(m, t.session)));
     }
     const out = pending.get(t.id);
-    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || []));
+    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || [], out.files || []));
     if (!convo.messages.length && !out) {
       msgs.append(node("p", "th-empty", "아직 메시지가 없습니다. 아래 입력창에 첫 메시지를 쓰세요."));
     }
@@ -852,9 +1025,11 @@ globalThis.ThreadsPane = (() => {
       const v = box.value.trim();
       if (v || (attached.get(t.id) || []).length) send(t.id, v);
     };
-    const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 1);
+    const nGuests = (t.guests || []).length;
+    const box = textBox("th-text", t.id, nGuests ? `${t.session}와 게스트 ${nGuests}명에게 보내기` : `${t.session || name}에게 보내기`,
+                        submit, 1);
     const foot = node("div", "th-compose-foot");
-    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter/Ctrl+J 줄바꿈 · markdown 지원 · 이미지 붙여넣기"));
+    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter/Ctrl+J 줄바꿈 · markdown 지원 · 이미지 붙여넣기 · 📎 파일 첨부"));
     const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
     go.type = "button";
     go.disabled = sending;
@@ -863,7 +1038,7 @@ globalThis.ThreadsPane = (() => {
     dropTarget(compose, t.id);
     compose.append(strip(t.id), box, foot);
 
-    main.replaceChildren(head, ...(links ? [links] : []), msgs, compose);
+    main.replaceChildren(head, ...(guests ? [guests] : []), ...(links ? [links] : []), msgs, compose);
     msgs.scrollTop = msgs.scrollHeight;
     const last = convo.messages[convo.messages.length - 1];
     if (last) markRead(t.id, last.seq);
@@ -909,7 +1084,7 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
+    const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
                                     (attached.get("") || []).length]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
@@ -917,11 +1092,13 @@ globalThis.ThreadsPane = (() => {
     }
     const t = convo && convo.thread;
     const editing = !!convo && renaming === convo.id;
-    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length,
+    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], t.guests || [],
+                                            inviting === convo.id, inflight.has(INVITE), convo.messages.length,
                                             inflight.has(convo.id), pending.get(convo.id) || null,
                                             (attached.get(convo.id) || []).length,
                                             editing, inflight.has(RENAME)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
+    if (typingIn(main.querySelector(".th-guests"))) return;
     const oldTitleBox = main.querySelector(".th-rename-input");
     const titleFocused = !!oldTitleBox && document.activeElement === oldTitleBox;
     drawn.main = mainSig;
@@ -972,6 +1149,7 @@ globalThis.ThreadsPane = (() => {
     current = "";
     composing = false;
     composeQa = null;
+    inviting = "";
     focusCompose = false;
     inflight.clear();
     pending.clear();
@@ -1007,6 +1185,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, newlineKey, pick, linkLabel, stamp,
-          imageKind, imageFiles, imageSrc, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, stamp,
+          imageKind, imageFiles, imageSrc, fileSrc, sizeOf, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
 })();

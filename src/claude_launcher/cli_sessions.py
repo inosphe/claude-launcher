@@ -981,6 +981,28 @@ def _report_hook_conversation(client, name: str) -> None:
         pass
 
 
+def _rebrief_pack(name: str, pack: str) -> int:
+    """``claunch rebrief --pack``: load an mcp- prompt pack (claunch-6esft).
+
+    Unlike the hook form, an unreachable daemon is an ordinary error here:
+    the agent asked for one pack on purpose and is reading the exit code.
+    """
+    try:
+        found = daemon_client.ensure_running().get(
+            f"/api/sessions/{name}/rebrief?pack={quote(pack, safe='')}"
+        )
+    except DaemonClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if found.get("status") != "loaded":
+        loadable = ", ".join(found.get("loadable") or ()) or "none"
+        print(f"{found.get('note') or 'no such pack'} (loadable: {loadable})",
+              file=sys.stderr)
+        return 1
+    print(found.get("text") or "")
+    return 0
+
+
 def _cmd_rebrief(args: argparse.Namespace) -> int:
     """Print a session's re-briefing — the SessionStart hook's whole job.
 
@@ -1009,6 +1031,9 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
     # of the two calls it is answering -- computed inside, it would be unbound
     # exactly when ensure_running() is what raised.
     ident = (getattr(args, "id", "") or "").strip()
+    pack = (getattr(args, "pack", "") or "").strip()
+    if pack:
+        return _rebrief_pack(name, pack)
     try:
         client = daemon_client.ensure_running()
         # First duty of the hook form: tell the daemon which conversation
@@ -1031,6 +1056,10 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
             )
             if found.get("status") == "recalled":
                 print(f"# claunch rebrief: {found.get('kind')} [text id: {ident}]")
+                print(found.get("text") or "")
+                return 0
+            if found.get("status") == "loaded":
+                # an mcp- pack's id: the text arrives with its own header
                 print(found.get("text") or "")
                 return 0
             # The daemon answered and has no such id -- a different fact from
@@ -3565,6 +3594,11 @@ def register(sub) -> None:
         "--id",
         help="print only the block with this content id (as printed next to "
              "the text when it was given), instead of the whole briefing",
+    )
+    p_rebrief.add_argument(
+        "--pack",
+        help="print an mcp-* prompt pack (e.g. mcp-qa) for this session, "
+             "whether or not it was ticked at creation",
     )
     p_rebrief.set_defaults(func=_cmd_rebrief)
 

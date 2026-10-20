@@ -12569,10 +12569,12 @@ function renderPromptPackRow() {
       onChange: (on) => { newPackTicks.set(p.id, on); renderPromptPackRow(); },
     });
   };
-  const group = (name, chips, more) => {
+  const group = (name, chips, more, hint) => {
     if (!chips.length && !more) return;
     const g = el("div", "pack-group");
-    g.appendChild(el("span", "pack-group-name", name));
+    const label = el("span", "pack-group-name", name);
+    if (hint) label.title = hint;
+    g.appendChild(label);
     const list = el("span", "new-check-list pack-chips");
     for (const c of chips) list.appendChild(c);
     if (more) list.appendChild(more);
@@ -12599,8 +12601,12 @@ function renderPromptPackRow() {
   group("General", general, null);
 
   // MCP: the guidance for claunch's tool families (threads, QA, sims), which
-  // the MCP server instructions only point at (claunch-8do04).
-  group("MCP", every.filter(([p]) => isMcp(p)).map(([p, packaged]) => packChip(p, packaged)), null);
+  // the MCP server instructions only point at (claunch-8do04). Optional at
+  // creation: a running session loads an unticked one through the rebrief
+  // tool when it first uses that family (claunch-6esft).
+  group("MCP", every.filter(([p]) => isMcp(p)).map(([p, packaged]) => packChip(p, packaged)), null,
+    "Optional: a session without one of these loads it on demand through " +
+    "the rebrief MCP tool (pack: <id>) when it first uses that tool family.");
 
   // Roles: the ones in play (required or ticked) are shown; the rest of the
   // role packs fold behind one button so the row stays short. A chip once
@@ -13712,11 +13718,14 @@ function syncOpeningImages() {
 
 function addOpeningImages(files) {
   const f = $("new-session");
-  if (!newFormTakesImages(f).ok) { syncOpeningImages(); return; }
   const list = Array.from(files || []);
   const images = list.filter((file) => Object.values(PASTE_IMAGE_KINDS).includes(imageKindOf(file)));
+  // A file that is not an image goes with the opening as a file
+  // (claunch-5gpcf) rather than being left out.
+  if (images.length < list.length) addOpeningFiles(list.filter((file) => !images.includes(file)));
+  if (!images.length) return;
+  if (!newFormTakesImages(f).ok) { syncOpeningImages(); return; }
   const notes = [];
-  if (images.length < list.length) notes.push(`${list.length - images.length} file(s) not a PNG, JPEG, GIF or WebP image, left out`);
   for (const file of images) {
     if (openingImages.length >= OPENING_IMAGES_MAX) {
       notes.push(`an opening takes at most ${OPENING_IMAGES_MAX} images`);
@@ -13752,6 +13761,129 @@ async function uploadOpeningImages() {
   }
   return ids;
 }
+
+/* ---- opening files (claunch-5gpcf) ----------------------------------------
+   Files of any kind that go out with the opening: held here until the form is
+   submitted, then uploaded one by one to /api/uploads and named by id in the
+   create request (`opening_files`). The daemon moves them into the session's
+   state directory and ends the opening with a "[claunch attachment]" line per
+   file, so any harness can read them; no image transport is needed. Cleared
+   when a launch goes through, like the images. */
+const OPENING_FILES_MAX = 10;    // uploads.MAX_FILES in the daemon
+const openingFiles = [];         // [File]
+
+function humanSize(n) {
+  let size = Number(n) || 0;
+  for (const unit of ["B", "KiB", "MiB", "GiB"]) {
+    if (size < 1024 || unit === "GiB") return unit === "B" ? `${size} B` : `${size.toFixed(1)} ${unit}`;
+    size /= 1024;
+  }
+  return `${n} B`;
+}
+
+function openingFilesNote(text) {
+  const note = $("new-task-files-note");
+  if (!note) return;
+  note.textContent = text || "";
+  note.classList.toggle("hidden", !text);
+}
+
+function renderOpeningFiles() {
+  const list = $("new-task-files-list");
+  if (!list) return;
+  list.innerHTML = "";
+  openingFiles.forEach((file, i) => {
+    const li = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = file.name || `file ${i + 1}`;
+    const size = document.createElement("span");
+    size.className = "file-size";
+    size.textContent = humanSize(file.size);
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.textContent = "×";
+    drop.title = "Remove this file";
+    drop.addEventListener("click", () => {
+      openingFiles.splice(i, 1);
+      openingFilesNote("");
+      renderOpeningFiles();
+    });
+    li.append(name, size, drop);
+    list.appendChild(li);
+  });
+}
+
+function addOpeningFiles(files) {
+  const notes = [];
+  for (const file of Array.from(files || [])) {
+    if (openingFiles.length >= OPENING_FILES_MAX) {
+      notes.push(`an opening takes at most ${OPENING_FILES_MAX} files`);
+      break;
+    }
+    openingFiles.push(file);
+  }
+  openingFilesNote(notes.join("; "));
+  renderOpeningFiles();
+}
+
+function clearOpeningFiles() {
+  openingFiles.splice(0);
+  openingFilesNote("");
+  renderOpeningFiles();
+}
+
+/* One file to an upload route, its name in ?name=; answers the daemon's
+   record or throws with its reason. The body is the file as it is, streamed
+   by the browser, so a capture of a few GiB is never read into the page. */
+async function uploadAnyFile(path, file) {
+  const sep = path.includes("?") ? "&" : "?";
+  const resp = await api(`${path}${sep}name=${encodeURIComponent(file.name || "upload")}`, {
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+  });
+  const doc = await resp.json().catch(() => ({}));
+  if (!resp.ok || !doc.id) throw new Error(doc.error || `HTTP ${resp.status}`);
+  return doc;
+}
+
+/* Upload every attached file, in order; answers the ids. */
+async function uploadOpeningFiles(onStep) {
+  const ids = [];
+  for (let i = 0; i < openingFiles.length; i++) {
+    const file = openingFiles[i];
+    if (onStep) onStep(`uploading ${file.name} (${humanSize(file.size)}, ${i + 1} of ${openingFiles.length})…`);
+    try {
+      ids.push((await uploadAnyFile("/api/uploads", file)).id);
+    } catch (err) {
+      throw new Error(`file ${i + 1} (${file.name || "unnamed"}): ${err.message || err}`);
+    }
+  }
+  return ids;
+}
+
+(() => {
+  const area = $("new-task-files-drop");
+  const picker = $("new-task-files-file");
+  const pick = $("new-task-files-pick");
+  if (!area || !picker || !pick) return;
+  pick.addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => {
+    addOpeningFiles(picker.files);
+    picker.value = "";
+  });
+  area.addEventListener("dragover", (ev) => {
+    if (!Array.from((ev.dataTransfer || {}).types || []).includes("Files")) return;
+    ev.preventDefault();
+    area.classList.add("dragover");
+  });
+  area.addEventListener("dragleave", () => area.classList.remove("dragover"));
+  area.addEventListener("drop", (ev) => {
+    area.classList.remove("dragover");
+    const files = Array.from((ev.dataTransfer || {}).files || []);
+    if (!files.length) return;
+    ev.preventDefault();
+    addOpeningFiles(files);
+  });
+})();
 
 (() => {
   const f = $("new-session");
@@ -14654,6 +14786,19 @@ $("new-session").addEventListener("submit", async (e) => {
       Object.assign(payload, sessionFormPayload(sessionFormView().mode,
         { opening_images: body.opening_images }));
     }
+    if (openingFiles.length) {
+      try {
+        body.opening_files = await uploadOpeningFiles(openingFilesNote);
+      } catch (upload) {
+        err.textContent = `Opening files were not uploaded: ${upload.message || upload}`;
+        err.classList.remove("hidden");
+        return;
+      } finally {
+        openingFilesNote("");
+      }
+      Object.assign(payload, sessionFormPayload(sessionFormView().mode,
+        { opening_files: body.opening_files }));
+    }
     const resp = await api(
       parent
         ? `/api/sessions/${encodeURIComponent(parent.name)}/children`
@@ -14692,8 +14837,9 @@ $("new-session").addEventListener("submit", async (e) => {
     // issue body, which is the one row of the board record nobody re-reads
     // before pressing Create (claunch-ke7ke).
     f.issue_text.value = "";
-    // The opening's images went out with this launch, like its task.
+    // The opening's images and files went out with this launch, like its task.
     clearOpeningImages();
+    clearOpeningFiles();
     // Say which rows the launch just spent, so the restore in
     // sessionModalClose steps over them. Without this the five clears above
     // are undone four lines later — the modal puts back whatever the form
@@ -15298,34 +15444,14 @@ document.querySelectorAll('input[name="term-view"]').forEach((input) =>
     location.hash = input.value === "html" ? `#/log/${name}` : `#/s/${name}`;
   }));
 
-/* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
-   owed replies, cflow position, parent/children, opening task) and type it
-   into the terminal — the operator's push for an agent whose context was
-   cleared or compacted and does not know what it lost. The automatic path is
-   the SessionStart hook every managed claude session carries; this button is
-   for the cases the hook cannot cover (another harness, a hook that was
-   stripped, or "I can see it flailing right now"). */
-$("term-rebrief").addEventListener("click", async () => {
-  if (!currentName) return;
-  const btn = $("term-rebrief");
-  btn.disabled = true;
-  try {
-    const resp = await api(
-      `/api/sessions/${encodeURIComponent(currentName)}/rebrief`,
-      { method: "POST" }
-    );
-    const info = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      alert(info.error || `HTTP ${resp.status}`);
-      return;
-    }
-    if (info.empty) {
-      alert("nothing to re-brief: this session has no mesh membership, " +
-            "no cflow run, no parent or children, and no recorded task");
-    }
-  } catch { /* auth overlay is up */ }
-  finally { btn.disabled = false; }
-});
+/* Rebrief: the ↻ button opens the briefing and prompt packs pane
+   (SPLIT_PANES.packs, packs-pane.js) — the briefing the daemon re-derives
+   (mesh roster, owed replies, cflow position, parent/children, opening task)
+   is sent from there, for an agent whose context was cleared or compacted and
+   does not know what it lost, beside the session's prompt packs. The
+   automatic path is the SessionStart hook every managed claude session
+   carries; the pane is for the cases the hook cannot cover (another harness,
+   a hook that was stripped, or "I can see it flailing right now"). */
 
 /* Send the retrospective prompt pack (an on-demand pack, never part of an
    opening) into the terminal: the agent reviews its own session and the cflow
@@ -17939,6 +18065,45 @@ function onImagePickerChange(ev) {
   sendImageFiles(files, $("term-input-note"));
 }
 
+/* The 📎 button (claunch-5gpcf): files of any kind, uploaded one after
+   another into the session's uploads. Each answer's line ("[claunch
+   attachment] <name> (<size>) <path>") is added to the session line rather
+   than sent: the reader says what to do with the file and sends both. */
+function openFilePicker() {
+  const input = $("term-file-file");
+  if (!input || !currentName) return;
+  input.value = "";
+  input.click();
+}
+
+async function onFilePickerChange(ev) {
+  const input = ev.currentTarget || ev.target;
+  const field = $("term-input-field");
+  const note = $("term-input-note");
+  if (!input || !field) return;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  const target = currentName;
+  if (!files.length || !target) return;
+  const lines = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (note) termInputNote(note, `uploading ${file.name} (${humanSize(file.size)}, ${i + 1} of ${files.length})…`);
+    try {
+      lines.push((await uploadAnyFile(`/api/sessions/${encodeURIComponent(target)}/uploads`, file)).line);
+    } catch (err) {
+      if (note) termInputNote(note, `${file.name}: ${err.message || err}`, true);
+      break;
+    }
+  }
+  if (!lines.length) return;
+  const head = field.value.replace(/\s+$/, "");
+  field.value = (head ? head + "\n" : "") + lines.join("\n");
+  // The line's own listeners (auto-grow, remote sync) follow an input event.
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  field.focus();
+}
+
 // Wired at load, like every other listener this page mounts — guarded like
 // every OTHER element access the whole-block harnesses (reconnect/wheel) boot
 // without: those eval this block against a stub DOM that only carries what the
@@ -17949,6 +18114,10 @@ if ($("term-image-pick"))
   $("term-image-pick").addEventListener("click", openImagePicker);
 if ($("term-image-file"))
   $("term-image-file").addEventListener("change", onImagePickerChange);
+if ($("term-file-pick"))
+  $("term-file-pick").addEventListener("click", openFilePicker);
+if ($("term-file-file"))
+  $("term-file-file").addEventListener("change", onFilePickerChange);
 if ($("term-input-field")) {
   $("term-input-field").addEventListener("keydown", onTermInputKeydown);
   // Capture phase, on the window: the browser's own Ctrl+J wins against a
@@ -19438,6 +19607,14 @@ const SPLIT_PANES = {
     on: "close the chart pane — the terminal takes the column back",
     off: "this pi-durable session's run as a flow chart, updated as it logs",
   },
+  // The ↻ rebrief button (claunch-6esft.1): the briefing it used to type at
+  // once, and the session's prompt packs, each previewed and sent from here
+  // (packs-pane.js, daemon/session_packs.py).
+  packs: {
+    btn: "term-rebrief", title: "↻ rebrief",
+    on: "close the briefing and prompt packs pane — the terminal takes the column back",
+    off: "this session's briefing and prompt packs — view them, and send one into the terminal (for an agent whose context was cleared or compacted)",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -19450,7 +19627,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), or the conversation pane
     // (talk-pane.js) on the session's questions (?), its threads (🗪) or
     // both side by side.
-    pane: ["sims", "category", "chart", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -22009,7 +22186,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "chart", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -22076,6 +22253,8 @@ function openSplit(name, kind = "run") {
   if (kind === "sims") { globalThis.SimPane?.mount(splitBody, name); return; }
   // So does the category pane (category-page.js).
   if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
+  // And the briefing and prompt packs pane (packs-pane.js).
+  if (kind === "packs") { globalThis.PacksPane?.mount(splitBody, name); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -22105,6 +22284,7 @@ function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
+  if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -22196,6 +22376,7 @@ async function refreshSplit() {
 $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
+$("term-rebrief").addEventListener("click", () => toggleSplitPane("packs"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
@@ -41847,7 +42028,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "opening_files", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
@@ -41855,7 +42036,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "opening_files", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],

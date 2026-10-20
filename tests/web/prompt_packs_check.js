@@ -400,6 +400,10 @@ check("the mcp- packs are their own MCP group between General and Roles (claunch
   assert.deepEqual(groups().map(([name]) => name), ["General", "MCP", "Roles"]);
   assert.deepEqual(groups()[0][1], GENERAL);
   assert.deepEqual(groups()[1], ["MCP", ["prompt_pack_mcp-threads"]]);
+  // Optional at creation: the label says how a session loads one later
+  // (claunch-6esft).
+  const mcpGroup = all(row, (n) => n.className === "pack-group")[1];
+  assert.match(mcpGroup.children[0].title, /on demand through the rebrief MCP tool/);
   // A default like any other: ticked untouched, and it goes in.
   assert.deepEqual(env.packs(form), ["common", "mcp-threads"]);
   env.offer = OFFER;

@@ -62,3 +62,13 @@ def test_prompt_pack_reads_a_pack_and_lists_them(tmp_path, monkeypatch):
     assert set(MCP_PACKS) <= listed
     with pytest.raises(prompt_packs_mcp.PromptPackMcpError):
         mcp_server.SERVER.dispatch("prompt_pack", {"id": "no-such-pack"})
+
+
+def test_the_instructions_say_to_load_a_missing_pack_through_rebrief():
+    """A pack unticked at creation is loaded on demand, like a skill
+    (claunch-6esft): the instructions name the rebrief tool's 'pack'."""
+    text = mcp_server.SERVER.instructions
+    assert "call rebrief with\npack=<id>" in text
+    assert "whether or not it was ticked at creation" in text
+    names = {t["name"]: t for t in mcp_server.TOOLS}
+    assert "pack" in names["rebrief"]["inputSchema"]["properties"]

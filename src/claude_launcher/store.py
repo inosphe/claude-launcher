@@ -396,6 +396,11 @@ DAEMON_DEFAULTS = {
     "auto_archive_killed_days": 7.0,
     "auto_archive_interval_s": 600.0,
     "auto_archive_batch": 20,
+    # Bytes one file uploaded from the web UI may weigh (daemon/uploads.py,
+    # claunch-5gpcf): a create form's or a thread message's attachment, or a
+    # file sent from the session line. Streamed to disk, so this bounds disk
+    # use, not memory. Read on every upload.
+    "upload_max_bytes": 2 * 1024 ** 3,
     # Run session PTYs in a separate PTY host process (claunch-xnnct, stage
     # 1: POSIX only; a daemon exit still ends its sessions). Read at start.
     "pty_host": False,

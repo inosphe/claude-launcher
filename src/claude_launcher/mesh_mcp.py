@@ -644,7 +644,10 @@ TOOLS = [
             "id it was given with (your opening task, your binding stance): a "
             "session reminders name those ids, and an id you cannot find attached "
             "to its text anywhere in this conversation is the signal that your "
-            "context no longer holds it."
+            "context no longer holds it. Pass 'pack' to load the guidance of a "
+            "claunch tool family (an mcp-* prompt pack: mcp-threads, mcp-qa, "
+            "mcp-sim) before you first use it, when your opening does not "
+            "carry it -- whether or not it was ticked at creation."
         ),
         "inputSchema": {
             "type": "object",
@@ -656,7 +659,14 @@ TOOLS = [
                         "to the text when you were given it. Omit for the "
                         "whole briefing."
                     ),
-                }
+                },
+                "pack": {
+                    "type": "string",
+                    "description": (
+                        "an mcp-* prompt pack id to load, e.g. mcp-qa. "
+                        "Returns its text with the text id it is known by"
+                    ),
+                },
             },
             "required": [],
         },
@@ -1235,8 +1245,11 @@ def call_tool(name: str, args: dict) -> dict:
         )
     if name == "rebrief":
         ident = str(args.get("id") or "").strip()
+        pack = str(args.get("pack") or "").strip()
         path = f"/api/sessions/{_session()}/rebrief"
-        if ident:
+        if pack:
+            path += f"?pack={quote(pack, safe='')}"
+        elif ident:
             path += f"?id={quote(ident, safe='')}"
         return _client().get(path)
     if name == "spawn":

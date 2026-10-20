@@ -63,6 +63,23 @@ of the action the thread asked for. When the user raises a new subject in a
 thread, answer that message in the thread, and carry any further work on it
 in a new thread named in that answer.
 
+### Guests: another session in a thread
+
+The user, or you as the owner, may invite another session into one thread
+as a guest (`thread_invite`; `thread_uninvite` removes it). A guest is a
+reviewer and advisor in that thread and nothing more.
+
+- As the owner: a guest's message is typed into your terminal as a thread
+  block. It is advice: you decide what to act on, and the work stays
+  yours. Your replies are not typed into the guest; it reads the thread.
+- As a guest: `thread_list` shows the thread under `guest_threads`, apart
+  from your own. Read it with `thread_read` and answer with `thread_reply`
+  on that thread. Do not carry out the thread's work yourself (no edits,
+  commits, commands or child sessions for it), and do not use the QA tools
+  (`qa_*`) for it: a question for the user goes into your reply. You cannot
+  close or rename the thread; `thread_uninvite` with only the thread id
+  leaves it.
+
 ### Threads and QA questions
 
 Threads and QA questions link to each other: a thread opened about a question

@@ -4,6 +4,11 @@
    What has to hold:
      helpers  -- three modes; "both" shows both panes; following a link to a
                  pane not on screen moves to "both", one on screen stays.
+     width    -- in "both" a bar stands between the columns; dragging it
+                 sets the QA column's width (clamped both ways), kept at
+                 release and forgotten on a double click; the stylesheet
+                 shows it only in "both" and hides it on a phone
+                 (claunch-816mz).
      tabs     -- mounting in a mode places only that mode's panes; a tab
                  press asks the page (onMode) and the page's setMode places
                  the panes without reloading the one that stays.
@@ -34,7 +39,10 @@ class N {
     this.dataset = {};
     this.handlers = {};
     this.attrs = {};
-    this.style = {setProperty() {}, removeProperty() {}};   // threads-pane.js sets --th-side-w
+    // threads-pane.js sets --th-side-w, talk-pane.js --talk-qa-w
+    const props = {};
+    this.style = {props, setProperty(k, v) { props[k] = v; }, removeProperty(k) { delete props[k]; }};
+    this.rect = {left: 0, right: 0, width: 0};
     this.value = "";
     this.disabled = false;
     this.open = false;
@@ -76,6 +84,7 @@ class N {
   contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
   closest(sel) { for (let x = this; x; x = x.parentNode) if (x._match(sel)) return x; return null; }
   scrollIntoView() { this.scrolled = true; }
+  getBoundingClientRect() { return this.rect; }
   focus() {}
   get firstChild() { return this.children[0] || null; }
   get lastChild() { return this.children[this.children.length - 1] || null; }
@@ -135,13 +144,18 @@ function harness() {
     else if (/\/messages$/.test(p)) doc = {message: {seq: 2}, delivered: true};
     return {ok: true, status: 200, json: async () => doc};
   };
+  const store = new Map();
   const ctx = vm.createContext({
     document, console, JSON, Date,
     setInterval: () => 1, clearInterval() {}, setTimeout: () => 0,
-    localStorage: {getItem: () => null, setItem() {}},
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    },
   });
   for (const f of ["threads-pane.js", "qa-pane.js", "talk-pane.js", "split-frame.js"]) vm.runInContext(read(f), ctx);
-  return {ctx, api, calls};
+  return {ctx, api, calls, store};
 }
 
 (async () => {
@@ -189,6 +203,67 @@ function harness() {
     assert.equal(qcol.children.length, 0, "threads mode unmounts the QA pane");
     T.unmount();
     assert.equal(host.children.length, 0);
+  }
+
+  /* --- width: the bar between the columns (claunch-816mz) ------------------ */
+  {
+    const {ctx, api, store} = harness();
+    const T = ctx.TalkPane;
+    assert.equal(T.clampQaW(NaN), NaN, "nothing stored: the even split");
+    assert.equal(T.clampQaW(50), 220, "the QA column keeps a floor");
+    assert.equal(T.clampQaW(900, 1000), 600, "the threads column keeps 400px of the body");
+    assert.equal(T.clampQaW(300.4, 1000), 300);
+
+    const host = new N("div");
+    T.mount(host, "s1", {mode: "both", api});
+    await settle();
+    const body = host.querySelector(".talk-body");
+    assert.deepEqual(body.children.map((c) => c.className.split(" ").pop()),
+                     ["talk-threads", "talk-split", "talk-qa"], "threads | bar | QA");
+    const bar = body.querySelector(".talk-split");
+    assert.equal(body.style.props["--talk-qa-w"], undefined, "no width until someone moves it");
+    assert.ok(!body.classList.contains("talk-sized"));
+    body.rect = {left: 0, right: 1014, width: 1014};
+    bar.rect = {left: 500, right: 514, width: 14};
+    body.querySelector(".talk-qa").rect = {left: 514, right: 1014, width: 500};
+    bar.fire("pointerdown", {pointerId: 1, clientX: 507});
+    assert.ok(bar.classList.contains("dragging"));
+    bar.fire("pointermove", {clientX: 714});
+    assert.equal(body.style.props["--talk-qa-w"], "300px", "the width follows the hand from the right edge");
+    assert.ok(body.classList.contains("talk-sized"));
+    assert.equal(store.get("claunch_talkqaw"), undefined, "nothing is written mid-drag");
+    bar.fire("pointermove", {clientX: 0});
+    assert.equal(body.style.props["--talk-qa-w"], "600px", "the threads column keeps its floor");
+    bar.fire("pointermove", {clientX: 1010});
+    assert.equal(body.style.props["--talk-qa-w"], "220px", "the QA column keeps its floor");
+    bar.fire("pointermove", {clientX: 664});
+    bar.fire("pointerup", {});
+    assert.ok(!bar.classList.contains("dragging"));
+    assert.equal(store.get("claunch_talkqaw"), "350", "the width is kept at release");
+    bar.fire("pointermove", {clientX: 800});
+    assert.equal(body.style.props["--talk-qa-w"], "350px", "a move without a press does nothing");
+
+    T.setMode("threads");
+    T.setMode("both");
+    assert.equal(body.style.props["--talk-qa-w"], "350px", "a redraw keeps the width");
+    bar.fire("dblclick", {});
+    assert.equal(store.get("claunch_talkqaw"), undefined, "a double click forgets the width");
+    assert.equal(body.style.props["--talk-qa-w"], undefined, "...and the even split is back");
+    assert.ok(!body.classList.contains("talk-sized"));
+    T.unmount();
+
+    const css = read("style.css");
+    assert.ok(/\.talk-split \{[^}]*cursor: col-resize[^}]*display: none;/.test(css), "hidden by default");
+    assert.ok(/\.talk-body\[data-mode="both"\] \.talk-split \{ display: flex; \}/.test(css), "shown in both");
+    assert.ok(/\.talk-body\.talk-sized\[data-mode="both"\] \.talk-qa \{ flex: 0 0 var\(--talk-qa-w\)/.test(css),
+              "a set width fixes the QA column");
+    // The same floors as clampQaW: the threads column keeps 400px (+14px bar)
+    // until the QA column would drop under its 220px floor, which wins.
+    assert.ok(/\.talk-qa \{ flex: 0 0 var\(--talk-qa-w\); max-width: max\(220px, calc\(100% - 414px\)\); \}/.test(css),
+              "the stylesheet's ceiling keeps the QA floor, as clampQaW does");
+    const phone = css.slice(css.indexOf('.talk-body[data-mode="both"] .talk-split { display: flex; }'));
+    assert.ok(/@media \(max-width: 820px\) \{[^}]*\}\s*\.talk-body\[data-mode="both"\] \.talk-split \{ display: none; \}/.test(phone),
+              "the phone hides the bar, after the rule that shows it");
   }
 
   /* --- links: from a QA card --------------------------------------------- */
