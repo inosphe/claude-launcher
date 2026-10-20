@@ -52,11 +52,20 @@ function node(dataset, cls, parentElement) {
   n.scrollIntoView = (opts) => n.scrolls.push(opts);
   return n;
 }
-const list = { id: "session-list", parentElement: null,
-               querySelectorAll: (sel) => {
-                 if (sel !== "li[data-name]") throw new Error("unexpected list selector " + sel);
-                 return rail;
-               } };
+/* The rail box itself: rows live in it, and the reveal lays it out for real
+   by putting a class on it (layRailOut, claunch-ayaig). `offsetHeight` is the
+   read that forces that layout in a browser; here it only has to exist. */
+const list = { id: "session-list", parentElement: null, offsetHeight: 0 };
+list.classList = {
+  _set: new Set(),
+  add(c) { list.classList._set.add(c); },
+  remove(c) { list.classList._set.delete(c); },
+  contains(c) { return list.classList._set.has(c); },
+};
+list.querySelectorAll = (sel) => {
+  if (sel !== "li[data-name]") throw new Error("unexpected list selector " + sel);
+  return rail;
+};
 const row = (name, cls, parent = list) => node({ name }, cls, parent);
 let rail = [];
 /* The tab strip as renderSessionGroupTabs builds it: one tab per group, each
@@ -134,7 +143,19 @@ let nextTimer = 1;
 const setTimeout_ = (fn, ms) => { timers.set(nextTimer, { fn, ms }); return nextTimer++; };
 const clearTimeout_ = (id) => { timers.delete(id); };
 const fire = (id) => { const t = timers.get(id); timers.delete(id); t.fn(); };
-const only = () => [...timers.keys()][0];
+/* A press leaves two timers: the mark's and the one that hands the rail back
+   to the layout skip (claunch-ayaig). They are told apart by their delay, the
+   way the page does. */
+const ofMs = (ms) => [...timers.keys()].filter((id) => timers.get(id).ms === ms);
+const only = () => ofMs(FLASH_MS)[0];
+const laidOnly = () => ofMs(LAID_MS)[0];
+const flashTimers = () => ofMs(FLASH_MS);
+const laidTimers = () => ofMs(LAID_MS);
+let FLASH_MS = 0;
+let LAID_MS = 0;
+/* Ends whatever a press left pending, so the next block starts from a rail
+   that is neither marked nor laid out. */
+const settle = () => { for (const id of [...timers.keys()]) fire(id); };
 
 const ctx = {};
 const stubs = {
@@ -148,8 +169,11 @@ new Function(
   // the window this checks is the shipped one.
   `let currentName = "s193";\n` +
   /const GOTO_FLASH_MS = \d+;/.exec(src)[0] + "\n" +
+  /const RAIL_LAID_OUT_MS = \d+;/.exec(src)[0] + "\n" +
   "let gotoFlashName = null;\nlet gotoFlashTimer = null;\n" +
-  [slice("applyGotoFlash"), slice("revealSessionListRow"), slice("revealSessionGridCell"),
+  "let railLaidOutTimer = null;\n" +
+  [slice("applyGotoFlash"), slice("layRailOut"), slice("revealSessionListRow"),
+   slice("revealSessionGridCell"),
    slice("revealSessionCard"), slice("gotoSessionCard"),
    /const BOOT_GOTO_POLLS = \d+;/.exec(src)[0],
    "let bootGotoName = null;\nlet bootGotoTries = 0;",
@@ -161,9 +185,12 @@ Object.assign(exports, {
   armBootGoto, revealBootSessionCard, bootPending: () => bootGotoName,
   bootPolls: () => BOOT_GOTO_POLLS,
   flashMs: () => ${/const GOTO_FLASH_MS = (\d+);/.exec(src)[1]},
+  laidMs: () => ${/const RAIL_LAID_OUT_MS = (\d+);/.exec(src)[1]},
   setCur: (n) => { currentName = n; },
 });`
 )(ctx, document, setTimeout_, clearTimeout_, () => sessionView, ...Object.values(stubs));
+FLASH_MS = ctx.flashMs();
+LAID_MS = ctx.laidMs();
 
 const flashed = () => rail.filter((r) => r.classes.has("goto-flash")).map((r) => r.dataset.name);
 const scrolledTo = () => rail.filter((r) => r.scrolls.length).map((r) => r.dataset.name);
@@ -179,6 +206,23 @@ check("and the mark lands on that same row",
       JSON.stringify(flashed()) === JSON.stringify(["s193"]), flashed());
 check("the row the rail had lit is left alone",
       rail[1].classes.has("active") && !rail[1].classes.has("goto-flash"));
+
+/* ---- the rail is laid out for real before it is scrolled (claunch-ayaig) ----
+   A row below the fold is not laid out: it answers with the
+   contain-intrinsic-size fallback until it renders, and a smooth scroll
+   commits to the position it measured. On a 200-row rail of 136px rows that
+   put the row 5,928px below the top -- out of view -- while the same press
+   with the rows laid out landed exactly. */
+check("the press lays the rail out before it measures it",
+      list.classList.contains("rail-laid-out"));
+check("...on a timer of its own, so the skip comes back",
+      laidTimers().length === 1 && LAID_MS > 0 && LAID_MS <= 2000,
+      laidTimers().map((id) => timers.get(id).ms));
+check("...and the mark's timer is a separate one",
+      flashTimers().length === 1 && FLASH_MS !== LAID_MS, [FLASH_MS, LAID_MS]);
+if (laidOnly()) fire(laidOnly());
+check("...the skip is back once that timer fires",
+      !list.classList.contains("rail-laid-out"));
 
 /* ---- the mark survives a changed poll that rebuilds the rail ----
    A class written only onto the old node could be gone before a smooth
@@ -208,11 +252,12 @@ ctx.gotoSessionCard();
 check("the mark moved to the newly attached session",
       JSON.stringify(flashed()) === JSON.stringify(["s127"]), flashed());
 check("the first press's expiry was cancelled, not left pending",
-      timers.size === 1 && !timers.has(first), [...timers.keys()]);
+      flashTimers().length === 1 && !timers.has(first), [...timers.keys()]);
 fire(only());
 check("the surviving timer clears the mark it belongs to", flashed().length === 0);
 
 /* ---- the two nothing-to-do cases are no-ops, not throws ---- */
+settle();
 rail = [row("s127"), row("s191")];
 ctx.setCur("s193");                       // attached, but the rail is a poll behind
 check("no row for this session yet: says so", ctx.gotoSessionCard() === false);
@@ -221,6 +266,8 @@ check("...and marks nothing", flashed().length === 0, flashed());
 ctx.setCur(null);                         // no terminal up at all
 check("no attached session: says so", ctx.gotoSessionCard() === false);
 check("...and still no timer is left running", timers.size === 0, [...timers.keys()]);
+check("...and the rail was not laid out for a scroll that never happens",
+      !list.classList.contains("rail-laid-out"));
 
 /* ---- a row that predates scrollIntoView (jsdom, an old view) ---- */
 rail = [Object.assign(row("s193"), { scrollIntoView: undefined })];
@@ -261,6 +308,7 @@ check("a row that cannot scroll is still marked rather than throwing",
 
 /* ---- grid view: the cell is scrolled to and marked, not the hidden list ---- */
 {
+  settle();
   sessionView = "grid";
   rail = [row("s193")];                     // the list is still built behind the grid
   layout.place = { s193: { row: 0, col: 2 }, s050: { row: 1, col: 5 } };
@@ -304,6 +352,7 @@ check("a row that cannot scroll is still marked rather than throwing",
    the card is not drawn yet, a bounded number of times, and only for the
    session the address named. */
 {
+  settle();
   sessionView = "list";
   tabs = [];
   rail = [row("s127"), row("s193")];
@@ -340,7 +389,8 @@ check("a row that cannot scroll is still marked rather than throwing",
   check("arrival: gives up on a card that never comes", ctx.bootPending() === null);
   check("arrival: the limit is a few polls", ctx.bootPolls() >= 2 && ctx.bootPolls() <= 10,
         ctx.bootPolls());
-  check("arrival: and leaves no mark or timer", timers.size === 0 && flashed().length === 0);
+  check("arrival: and leaves no mark or timer",
+        flashTimers().length === 0 && flashed().length === 0);
 
   // The reader walks to another session before the card arrives: not chased.
   rail = [row("s127")];
@@ -403,6 +453,12 @@ check("every full poll gives the arrival reveal its retry, a cached redraw does 
       /if \(!cached && typeof revealBootSessionCard === "function"\) revealBootSessionCard\(\);/
         .test(slice("refreshSessions")));
 check("the chip has a rest and a hover state", /\.goto-chip:hover\s*\{/.test(css));
+check("the stylesheet lets a revealed rail render every row for real",
+      /#session-list\.rail-laid-out li\[data-name\]\s*\{[^}]*content-visibility:\s*visible/
+        .test(css));
+check("the reveal is what lays the rail out, and only in the list view",
+      /function layRailOut\(\)/.test(src)
+      && /const laidOut = sessionView === "grid" \? null : layRailOut\(\);/.test(src));
 
 if (failures) {
   console.log(`${failures} failure(s)`);
