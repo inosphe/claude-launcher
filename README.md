@@ -3181,7 +3181,17 @@ work-branch push; the line under the picker says what the chosen mode does:
   after execution fails. Pending or refused approval and stale plans do not
   trigger recovery.
 
-For A or B, choose a live **parent session**. The child inherits its settings,
+For A or B, choose a live or held **parent session**. When a mesh leader works
+in this repository, only its leaders are offered: while the child's
+`reposync-merge-push-v2` run stands in `prepare` through `execute`, ordinary
+merges into the repository pause (`tools/delayed_sweep.py admit` refuses every
+candidate but the sync's own issue, naming the sync session and its base local
+commit). The pause ends at `receipt`, when the run ends or is aborted, or when
+the child session ends; it lasts at most until the approval card's deadline
+plus 10 minutes, and before any card until the run's last report plus
+`daemon.reposync_pause_precard_s` (default 1800 seconds). With no leader for
+the repository, only sessions in no mesh are offered, marked "no merge pause".
+The child inherits its settings,
 uses the normal spawn policy and board onboarding, and gets a new worktree
 based on the selected local commit. Its task includes the repository, remote,
 source and destination, recorded tips, and the original error for B. The panel
