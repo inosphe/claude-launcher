@@ -184,6 +184,41 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert any(o.startswith("loop_limit: ") for o in r["owed"])
 
 
+def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):
+    """``started``/``updated``/``entered_at`` (claunch-c2emv): the Chart page
+    reads them to tell a run that is still moving from one that has sat in
+    the same task, which ``current`` alone cannot show."""
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+    r = _rail(cwd, "s1")["s1"]
+    state = runtime.RunStore(cwd, "s1").load_state()
+    (active,) = state["active"]
+    assert r["started"] == state["started"]
+    assert r["updated"] == state["updated"]
+    assert r["entered_at"] == pytest.approx(state["inst"][active]["entered_at"])
+    first = r["entered_at"]
+
+    # Moving the run into a task replaces the active instance, so the stamp
+    # moves with it -- that is what "still moving" means to the chart.
+    runtime.select(None, "left", cwd=cwd, scope="s1", caller=runtime.CALLER_USER)
+    r = _rail(cwd, "s1")["s1"]
+    assert r["current"] == ["Step A"]
+    assert r["entered_at"] > first
+    moved = runtime.RunStore(cwd, "s1").load_state()
+    assert r["updated"] == moved["updated"]
+    assert r["updated"] >= state["updated"]  # the clock is second-resolution
+
+    # A run that cannot be read still answers with the clock keys, as None,
+    # so a client never has to tell "absent" from "no clock".
+    def boom(self):
+        raise RuntimeError("damaged slot")
+
+    monkeypatch.setattr(cflow2_web.store2.RunStore, "load_state", boom)
+    err = cflow2_web.rail_entry(cwd, "s1")
+    assert err["status"] == "error"
+    assert err["started"] is None and err["updated"] is None and err["entered_at"] is None
+
+
 def test_rail_answers_carry_what_the_terminal_strip_posts(proj):
     """``answers`` (claunch-bpziz): each owed item with the instance and
     options the run page posts, so the terminal strip's press -- the same

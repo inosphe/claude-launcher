@@ -879,7 +879,13 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     person reading the rail -- and answers it with ``gated`` and ``owed``.
     ``owed`` names what only a person releases: the holds that put the run
     in ``waiting_approval`` (a loop or visit limit, a halt, an ask that fell
-    to a human) and every open choice whose chooser is ``user``."""
+    to a human) and every open choice whose chooser is ``user``.
+
+    ``started``/``updated``/``entered_at`` are the run's own clocks
+    (claunch-c2emv): the dashboard's Chart page reads them to tell a run that
+    is still moving from one that has sat in the same task, which ``current``
+    alone cannot show -- the same title reads the same at one minute and at
+    one hour."""
     from ..cflow2 import runtime
 
     try:
@@ -891,12 +897,20 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001 - shown, not raised
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
                 "workflow": None, "current": [], "owed": [], "gated": False,
-                "answers": [], "urgent_asks": []}
+                "answers": [], "urgent_asks": [], "started": None, "updated": None,
+                "entered_at": None}
     inst = state.get("inst") or {}
     current = []
     owed = []
+    # The oldest active instance: how long the run has been in the tasks it
+    # is in now. A run that advances replaces this instance, so the stamp
+    # moves with it.
+    entered_at = None
     for iid in state.get("active") or []:
         rec = inst.get(iid) or {}
+        at = rec.get("entered_at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            entered_at = at if entered_at is None else min(entered_at, at)
         try:
             node = chart.node(rec.get("node"))
         except Exception:  # noqa: BLE001
@@ -936,6 +950,12 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "status": status,
         "reason": state.get("reason"),
         "round": state.get("round"),
+        # The run's clocks: when it started, when it last moved (any write to
+        # the state moves this), and when the oldest task it is in now was
+        # entered (epoch seconds, the stamp the state carries per instance).
+        "started": state.get("started"),
+        "updated": state.get("updated"),
+        "entered_at": entered_at,
         "current": current,
         "owed": owed,
         "gated": bool(owed),
