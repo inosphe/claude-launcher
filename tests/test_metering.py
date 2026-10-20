@@ -1251,6 +1251,30 @@ def test_streamed_characters_become_a_short_window_rate_and_a_series(home):
     assert live["series"][-3:-1] == [40.0, 40.0]  # full bins, tokens/s
 
 
+def test_the_live_window_is_the_window_it_names(home):
+    """claunch-v4jgh: a steady stream must read its own rate, not 1.25x.
+
+    Bins are half a second wide and the rate is taken over
+    ``LIVE_RATE_WINDOW_S``. A bin that only touched the window at its tail
+    was summed in full, so the reading covered up to one slot more than the
+    window it named: a steady 200 tok/s stream read 250 at a mid-slot ``now``.
+    """
+    now = 1004.3
+    bins = []
+    t = 998.0
+    while t <= 1004.0:
+        bins.append([round(t, 3), 100.0])   # 0.5s of a 200 tok/s stream
+        t += 0.5
+    bins[-1][1] = 60.0                      # the slot still filling holds 0.3s
+    doc = {"session": "s1", "fingerprint": "fp", "updated": now, "inflight": 1,
+           "waiting": 0, "since": now - 3, "model": "m",
+           "bin_s": metering.LIVE_BIN_S, "bins": bins, "tokens_per_char": 0.25}
+    live = metering.live_summary("s1", now=now, docs=[doc])
+    assert live["rate"] == 200.0
+    # The shared-shim figures come from the same window, not a second copy of it.
+    assert round(metering._doc_activity(doc, now)[1], 1) == 200.0
+
+
 def test_nothing_in_flight_is_idle_and_the_rate_drains_with_the_window(home):
     clock = _Clock()
     board = metering.LiveBoard("fp", clock=clock)

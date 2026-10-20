@@ -1192,9 +1192,9 @@ def live_summary(
         t = round(last - (n - 1 - i) * LIVE_BIN_S, 3)
         series.append(round(bins.get(t, 0.0) / LIVE_BIN_S, 1))
     # The bin holding ``now`` is still filling, so the window ends at ``now``
-    # and starts LIVE_RATE_WINDOW_S before it; the partial bin counts in full.
-    floor = now - LIVE_RATE_WINDOW_S
-    recent_tokens = sum(v for t, v in bins.items() if t + LIVE_BIN_S > floor and t <= now)
+    # and starts LIVE_RATE_WINDOW_S before it; a bin that only partly overlaps
+    # the window contributes its overlapping share.
+    recent_tokens = _window_tokens(bins.items(), now)
     rate = round(recent_tokens / LIVE_RATE_WINDOW_S, 1)
     if not inflight:
         state = "idle"
@@ -1222,6 +1222,36 @@ def live_summary(
     return out
 
 
+def _window_tokens(bins, now: float, window: float = LIVE_RATE_WINDOW_S) -> float:
+    """Estimated tokens whose bin overlaps ``[now - window, now]``.
+
+    A bin holds the output seen from its start to the end of its slot (for the
+    bin still filling, to ``now``), so a bin that only partly overlaps the
+    window contributes the overlapping share of its count. Summing whole bins
+    that merely touch the window reads up to one slot more than the window it
+    names -- a steady 200 tok/s stream read at a mid-slot ``now`` came out at
+    250 (claunch-v4jgh).
+    """
+    floor = now - window
+    total = 0.0
+    for pair in bins:
+        try:
+            t, v = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        end = min(t + LIVE_BIN_S, now)
+        covered = end - t
+        if covered <= 0:
+            # A bin stamped at ``now``: what it holds arrived this instant,
+            # inside the window. A bin stamped later says nothing about now.
+            total += v if t <= now else 0.0
+            continue
+        overlap = end - max(t, floor)
+        if overlap > 0:
+            total += v * (overlap / covered)
+    return total
+
+
 def _doc_activity(doc: dict, now: float) -> tuple:
     """``(in flight, estimated tokens/s over the rate window)`` of one live file.
 
@@ -1231,15 +1261,7 @@ def _doc_activity(doc: dict, now: float) -> tuple:
     """
     fresh = now - float(doc.get("updated") or 0) <= LIVE_STALE_S
     inflight = int(doc.get("inflight") or 0) if fresh else 0
-    floor = now - LIVE_RATE_WINDOW_S
-    tokens = 0.0
-    for pair in doc.get("bins") or []:
-        try:
-            t, v = float(pair[0]), float(pair[1])
-        except (TypeError, ValueError, IndexError):
-            continue
-        if t + LIVE_BIN_S > floor and t <= now:
-            tokens += v
+    tokens = _window_tokens(doc.get("bins") or [], now)
     return inflight, tokens / LIVE_RATE_WINDOW_S
 
 
