@@ -50391,17 +50391,41 @@ function spawnGateClock(rec) {
   return `auto-approves in ${left}${more}`;
 }
 
-/* What the session would be: project, issue, the first line of its task. */
+/* What the session would be beyond the facts rows: issue, name, the first
+   line of its task. */
 function spawnGateSpecText(spec) {
   if (!spec) return "";
   const task = String(spec.task || "").trim().split("\n")[0];
-  return [
-    spec.project ? `project ${spec.project}` : "",
-    spec.role ? `role ${spec.role}` : "",
+  const head = [
     spec.issue ? `issue ${spec.issue}` : "",
-    spec.workflow && spec.workflow !== "-" ? spec.workflow : "",
     spec.name ? `name ${spec.name}` : "",
-  ].filter(Boolean).join(" · ") + (task ? ` — ${task}` : "");
+  ].filter(Boolean).join(" · ");
+  return head && task ? `${head} — ${task}` : head || task;
+}
+
+const SPAWN_GATE_FACTS = ["project", "profile", "workspace", "role", "workflow"];
+
+/* The five things the session would run as, one labelled row each
+   (claunch-mgope). The daemon's `facts` resolve what the spec leaves to
+   the asker and mark those rows inherited; a record without them (an
+   older daemon) shows the spec's own values. */
+function spawnGateFacts(rec, spec) {
+  const facts = rec.facts || {};
+  const box = el("div", "notice-sub gate-facts");
+  for (const key of SPAWN_GATE_FACTS) {
+    let own = String(spec[key] || (key === "workspace" ? spec.cwd || "" : ""));
+    // A top-level body's present-but-empty worktree is a new checkout.
+    const fresh = rec.scope === "child" ? !!spec.worktree : "worktree" in spec;
+    if (key === "workspace" && own && fresh) own += " (new worktree)";
+    const fact = facts[key] || { value: own === "-" ? "" : own, inherited: false };
+    box.appendChild(el("span", "gate-fact-key", key));
+    const val = el("span", "gate-fact-val", fact.value || "—");
+    if (fact.inherited) {
+      val.appendChild(el("span", "gate-fact-from", ` (inherited from ${rec.session || "the asker"})`));
+    }
+    box.appendChild(val);
+  }
+  return box;
 }
 
 /* The rows a card and a panel row share: title, who asked on whose word,
@@ -50423,8 +50447,12 @@ function spawnGateBody(node, rec, head) {
   node.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`));
   const spec = rec.kind === "resume" ? rec.fallback : rec.spec;
   if (spec) {
-    node.appendChild(el("div", "notice-sub gate-spec",
-      (rec.kind === "resume" ? "otherwise a new session: " : "") + spawnGateSpecText(spec)));
+    const text = spawnGateSpecText(spec);
+    if (text || rec.kind === "resume") {
+      node.appendChild(el("div", "notice-sub gate-spec",
+        (rec.kind === "resume" ? "otherwise a new session: " : "") + text));
+    }
+    node.appendChild(spawnGateFacts(rec, spec));
   }
   node.appendChild(el("div", "notice-sub gate-clock", spawnGateClock(rec)));
 }

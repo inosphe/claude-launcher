@@ -29,9 +29,21 @@ const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status:
   basis: { operator_name: 'Alpha' }, requested_at: new Date().toISOString() });
 const CHILD = { task: 'Write the parser tests\nall of them', role: 'worker', name: 'kid',
   workflow: 'improv-worker-v2', project: 'alpha' };
+// The daemon's resolution of what the child spec leaves to its asker
+// (claunch-mgope): profile and directory come from w1.
+const CHILD_FACTS = { project: { value: 'alpha', inherited: false }, profile: { value: 'p', inherited: true },
+  workspace: { value: 'alpha', inherited: true }, role: { value: 'worker', inherited: false },
+  workflow: { value: 'improv-worker-v2', inherited: false } };
 const childRec = () => ({ id: 'ccc333', kind: 'spawn', scope: 'child', session: 'w1', status: 'pending',
-  reason: 'Write the parser tests', deadline: soon(), extensions: 0, spec: CHILD, basis: {},
-  requested_at: new Date().toISOString() });
+  reason: 'Write the parser tests', deadline: soon(), extensions: 0, spec: CHILD, facts: CHILD_FACTS,
+  basis: {}, requested_at: new Date().toISOString() });
+// The card's labelled rows, as [label, value] pairs.
+const factRows = card => card.locator('.gate-facts').evaluate(box => {
+  const cells = [...box.children].map(n => n.textContent);
+  const out = [];
+  for (let i = 0; i < cells.length; i += 2) out.push([cells[i], cells[i + 1]]);
+  return out;
+});
 
 (async () => {
   const browser = await chromium.launch({ headless: true,
@@ -79,19 +91,25 @@ const childRec = () => ({ id: 'ccc333', kind: 'spawn', scope: 'child', session: 
     const spawnText = await spawnCard.innerText();
     assert.match(spawnText, /op1 \(operator Alpha\) on your message: “fix login”/);
     assert.match(spawnText, /reason: no running session does it/);
-    assert.match(spawnText, /project alpha · issue alpha-7 · improv-worker-v2 — Fix the login bug/);
+    assert.match(spawnText, /issue alpha-7 — Fix the login bug/);
+    // No `facts` on the record (an older daemon): the spec's own values.
+    assert.deepEqual(await factRows(spawnCard), [['project', 'alpha'], ['profile', 'p'],
+      ['workspace', '/repo/alpha (new worktree)'], ['role', '—'], ['workflow', 'improv-worker-v2']]);
     assert.match(spawnText, /no answer in 4:3\d: no top-level session — created as op1's child instead/);
     const buttons = async card => (await card.locator('.gate-actions button').allInnerTexts()).map(t => t.trim());
     assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
 
     const resumeText = await resumeCard.innerText();
     assert.match(resumeText, /old1/);
-    assert.match(resumeText, /otherwise a new session: project alpha/);
+    assert.match(resumeText, /otherwise a new session: issue alpha-7/);
+    assert.equal((await factRows(resumeCard))[0][1], 'alpha', 'the fallback spec fills the rows');
     assert.match(resumeText, /not resumed — a new session is asked for instead — in 4:3\d \(extended 1×\)/);
     assert.deepEqual(await buttons(resumeCard), ['Resume', 'New session', 'Reject', '+5 min', 'Hide']);
     const childText = await childCard.innerText();
     assert.match(childText, /child session requested under w1/);
-    assert.match(childText, /project alpha · role worker · improv-worker-v2 · name kid — Write the parser tests/);
+    assert.match(childText, /name kid — Write the parser tests/);
+    assert.deepEqual(await factRows(childCard), [['project', 'alpha'], ['profile', 'p (inherited from w1)'],
+      ['workspace', 'alpha (inherited from w1)'], ['role', 'worker'], ['workflow', 'improv-worker-v2']]);
     assert.match(childText, /auto-approves in 4:3\d — created as asked/);
     assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
     assert.equal(await page.evaluate(() => gatePending.spawn.length), 3, 'the bell counts all three');
