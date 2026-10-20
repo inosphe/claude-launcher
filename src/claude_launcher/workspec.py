@@ -15,7 +15,10 @@ front half of that importer and has no side effects:
 * :func:`plan` resolves the import-time choice of leader (``own`` — spawn a
   new leader session for this spec's mesh — or ``shared:<session>`` — join an
   existing leader into it, so that session leads several meshes at once) and
-  returns the ordered list of actions an executor would perform.
+  returns the ordered list of actions an executor would perform;
+* :func:`locate` maps each :func:`validate` line back to the YAML line it is
+  about, and :func:`preview` lays out the sessions and the work a valid spec
+  describes — what the ``#/spec`` page shows before any leader is chosen.
 
 The format, the mapping onto claunch's mesh/spawn/beads/cflow, and the
 conflicts a shared leader accepts are documented in ``docs/work-spec.md``.
@@ -514,6 +517,252 @@ def resolve_leader(doc: dict, choice: str = "") -> dict:
         return {"mode": "shared", "session": session,
                 "handle": shared.get("handle") or "leader"}
     raise SpecError(f"unknown leader choice {raw!r}")
+
+
+#: The smallest spec worth starting from: one sub-lead holding an epic, two
+#: workers under it, a reviewer, a contract and a decision. ``validate`` passes
+#: it (tests/test_workspec.py); the ``#/spec`` page inserts it and the
+#: ``work-spec`` skill quotes it.
+TEMPLATE = """\
+spec: 1
+name: my-feature                 # slug: mesh spec-<name>, refs spec:<name>:<key>
+title: one line saying what the whole job delivers
+workspace: my-workspace          # registered workspace: board and session cwd
+
+mesh:
+  mode: new                      # new | attach (attach needs name:)
+
+leader:
+  mode: ask                      # ask | own | shared -- the importer decides
+  shared:
+    candidates: []               # sessions allowed to lead; [] = any
+
+agents:
+  - id: lead-api                 # a sub-lead collects its children on a stack
+    kind: sub-lead
+  - id: api-1
+    kind: worker
+    parent: lead-api
+  - id: api-2
+    kind: worker
+    parent: lead-api
+  - id: rev
+    kind: reviewer
+
+contracts:
+  - id: api-shape
+    kind: interface              # seam | event | store | interface | policy
+    title: request/response shape
+    text: |
+      The handler returns {ok, data}; errors carry {ok: false, error}.
+    parties: [api-1, api-2]
+
+issues:
+  - key: api
+    type: epic
+    title: the API slice
+    assignee: lead-api           # an epic is held only by a sub-lead
+  - key: handler
+    title: add the handler
+    parent: api
+    assignee: api-1
+    review: rev
+    goal: what is true when this is done
+    done_when: the handler test passes
+    contracts: [api-shape]
+  - key: client
+    title: call the handler from the client
+    parent: api
+    assignee: api-2
+    blocked_by: [handler]
+
+decisions:
+  - key: auth
+    question: does the handler need auth?
+    options: [none, token]
+    recommended: token
+    gates: [client]
+"""
+
+
+def _compose(text: str):
+    """The YAML node tree of ``text``, or None when it does not parse."""
+    try:
+        return yaml.compose(text)
+    except yaml.YAMLError:
+        return None
+
+
+def _get(node, key: str):
+    """The value node under ``key`` of a mapping node, and its key node."""
+    if isinstance(node, yaml.MappingNode):
+        for k, v in node.value:
+            if isinstance(k, yaml.ScalarNode) and k.value == key:
+                return k, v
+    return None, None
+
+
+_ID_KEY = {"agents": "id", "references": "id", "contracts": "id",
+           "issues": "key", "decisions": "key"}
+_STEP = re.compile(r"\[(\d+)\]")
+
+
+def locate(text: str, errors: List[str]) -> List[Optional[int]]:
+    """The 1-based YAML line each of ``errors`` is about (None: unknown).
+
+    An error line starts with its path, the way :func:`validate` writes it:
+    ``agents[1].kind``, ``issues.W2.blocked_by`` (an item named by its id or
+    key), ``subroles.shader``. The path is walked down the YAML node tree as
+    far as it goes, and the deepest node reached gives the line — a path
+    that names a missing key stops at its parent, which is where the key
+    belongs. ``unknown key(s)`` points at the first unknown key itself.
+    """
+    root = _compose(text)
+    out: List[Optional[int]] = []
+    for err in errors:
+        found = re.search(r"\bline (\d+)", err)
+        if root is None or err.startswith("not valid YAML"):
+            out.append(int(found.group(1)) if found else None)
+            continue
+        out.append(_locate_one(root, err))
+    return out
+
+
+def _locate_one(root, err: str) -> Optional[int]:
+    path, _, message = err.partition(": ")
+    path = path.strip()
+    node, block = root, ""
+    if path != "spec" or "unknown key" not in message:
+        parts = [p for p in _STEP.sub(r".[\1]", path).split(".") if p]
+        i = 0
+        while i < len(parts):
+            part = parts[i]
+            if isinstance(node, yaml.SequenceNode):
+                index = _STEP.fullmatch(part)
+                nxt = None
+                if index:
+                    k = int(index.group(1))
+                    nxt = node.value[k] if k < len(node.value) else None
+                    i += 1
+                else:
+                    # An id may itself hold dots (``_KEY`` allows them):
+                    # take the longest run of parts that names an item.
+                    for j in range(len(parts), i, -1):
+                        name = ".".join(parts[i:j])
+                        for item in node.value:
+                            _, v = _get(item, _ID_KEY.get(block, "id"))
+                            if isinstance(v, yaml.ScalarNode) and v.value == name:
+                                nxt = item
+                                break
+                        if nxt is not None:
+                            i = j
+                            break
+                if nxt is None:
+                    break
+                node = nxt
+                continue
+            _, value = _get(node, part)
+            if value is None:
+                break
+            if node is root:
+                block = part
+            node = value
+            i += 1
+    unknown = re.search(r"unknown key\(s\) (.+)$", message)
+    if unknown and isinstance(node, yaml.MappingNode):
+        names = {n.strip() for n in unknown.group(1).split(",")}
+        for k, _ in node.value:
+            if isinstance(k, yaml.ScalarNode) and k.value in names:
+                return k.start_mark.line + 1
+    return node.start_mark.line + 1
+
+
+def preview(doc: dict) -> dict:
+    """The sessions and the work a valid ``doc`` describes, before any
+    leader is chosen: what the import would start, and in what order the
+    work can begin.
+
+    ``sessions`` is the agent tree depth-first under the leader, each with
+    the queue :func:`plan` gives it (priority order; the first is the spawn's
+    issue). ``tasks`` is every issue with the wave it can start in: 0 when
+    nothing blocks it, else one past its latest ``blocked_by`` — and the
+    decisions that gate it, which hold it whatever its wave.
+    """
+    leader = doc.get("leader") or {}
+    agents = _list(doc, "agents")
+    issues = _list(doc, "issues")
+    owned: Dict[str, List[dict]] = {}
+    reviews: Dict[str, List[str]] = {}
+    for it in issues:
+        if it.get("assignee") not in (None, "", "human"):
+            owned.setdefault(it["assignee"], []).append(it)
+        if it.get("review"):
+            reviews.setdefault(it["review"], []).append(it["key"])
+    children: Dict[str, List[dict]] = {}
+    for a in agents:
+        children.setdefault(a.get("parent") or LEADER_ID, []).append(a)
+
+    own = leader.get("own") or {}
+    sessions: List[dict] = [{
+        "id": LEADER_ID, "kind": "leader", "depth": 0, "parent": None,
+        "role": "leader", "subroles": [],
+        "workflow": own.get("workflow") or "improv-leader",
+        "mode": "existing" if (doc.get("mesh") or {}).get("mode") == "attach"
+        else leader.get("mode", "ask"),
+        "queue": [], "reviews": [], "connect": [],
+    }]
+
+    def walk(parent: str, depth: int) -> None:
+        for a in children.get(parent, []):
+            kind = a.get("kind", "worker")
+            queue = sorted(owned.get(a["id"], []),
+                           key=lambda i: i.get("priority", 2))
+            sessions.append({
+                "id": a["id"], "kind": kind, "depth": depth, "parent": parent,
+                "handle": a.get("handle") or a["id"],
+                "role": a.get("role") or KINDS[kind][0],
+                "subroles": list(a.get("subroles") or []),
+                "workflow": a.get("workflow") or KINDS[kind][1],
+                "queue": [i["key"] for i in queue],
+                "reviews": reviews.get(a["id"], []),
+                "connect": list(a.get("connect") or []),
+            })
+            walk(a["id"], depth + 1)
+
+    walk(LEADER_ID, 1)
+
+    gates: Dict[str, List[str]] = {}
+    for d in _list(doc, "decisions"):
+        for g in d.get("gates") or []:
+            gates.setdefault(g, []).append(d["key"])
+    blocked = {it["key"]: list(it.get("blocked_by") or []) for it in issues}
+    wave: Dict[str, int] = {}
+
+    def wave_of(key: str) -> int:
+        if key not in wave:
+            wave[key] = 1 + max((wave_of(b) for b in blocked[key]), default=-1)
+        return wave[key]
+
+    tasks = [{
+        "key": it["key"], "type": it.get("type", "task"),
+        "title": it.get("title") or "", "priority": it.get("priority", 2),
+        "parent": it.get("parent"), "blocked_by": blocked[it["key"]],
+        "assignee": it.get("assignee") or "", "review": it.get("review") or "",
+        "size": it.get("size") or "", "wave": wave_of(it["key"]),
+        "gated_by": gates.get(it["key"], []),
+    } for it in issues]
+    return {
+        "sessions": sessions,
+        "tasks": tasks,
+        "contracts": [{"id": c["id"], "kind": c.get("kind"),
+                       "title": c.get("title") or "",
+                       "parties": list(c.get("parties") or [])}
+                      for c in _list(doc, "contracts")],
+        "decisions": [{"key": d["key"], "question": d.get("question") or "",
+                       "recommended": d.get("recommended") or "",
+                       "gates": list(d.get("gates") or [])}
+                      for d in _list(doc, "decisions")],
+    }
 
 
 def mesh_name(doc: dict) -> str:

@@ -3574,7 +3574,7 @@ supported, for example `claunch install --profile work:kimi`.
 
 | Command | Description |
 | ------- | ----------- |
-| `install [--project [DIR] \| --global \| --profile P \| --all-profile]` | Register the MCP server and write the `/cflow`, `/cflow-author`, `/mesh`, `commit-stamp` and `claunch-artifact` skills into one scope: a project (the default), the user globally, or a profile. `--all-profile` (alias `--all`) is a profile install into every profile that exists — profiles are isolated config dirs, so a global install never reaches them; it does not touch the user's global setup. `--global`, `--profile` and `--all-profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
+| `install [--project [DIR] \| --global \| --profile P \| --all-profile]` | Register the MCP server and write the `/cflow`, `/cflow-author`, `/mesh`, `commit-stamp`, `claunch-artifact` and `work-spec` skills into one scope: a project (the default), the user globally, or a profile. `--all-profile` (alias `--all`) is a profile install into every profile that exists — profiles are isolated config dirs, so a global install never reaches them; it does not touch the user's global setup. `--global`, `--profile` and `--all-profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
 | `mcp` | The stdio MCP server itself (spawned by claude, not by hand): `start`/`report`/`next`/`select`/`status` from cflow, `send`/`members`/`history` plus `spawn`/`children`/`connect`/`disconnect` from mesh. |
 
 | Skill | Triggers on | Teaches |
@@ -3584,6 +3584,7 @@ supported, for example `claunch install --profile work:kimi`.
 | `/mesh` | joining a mesh, or needing another agent | the member protocol, and the only correct way to create a session from inside one |
 | `commit-stamp` | being about to `git commit` inside a managed session | ending every commit message with `Claunch-Session:` / `Claunch-Worktree:` trailers, so `git log` says which agent made each commit and in which checkout |
 | `claunch-artifact` | being asked for an HTML page (an artifact, a write-up) for a person, at any point of a round | filing it with `claunch report path --name <purpose> [--issue <id>]` in the session's report store beside the round report, where the daemon indexes and serves it; with no beads board the page is filed as `no-issue` and found through the session rail and the Reports page, and `claunch report check` without `--name` still counts only the round report |
+| `work-spec` | being asked to draft or fix a work spec (the YAML that sets up a mesh, its agents and its issues in one import) | the loop `claunch spec check` (each error as `<file>:<line>:`) → `claunch spec preview` (the sessions and the work in start order) → `claunch spec plan`, the rules the validator enforces, and a template that passes; the import itself stays the person's |
 
 **One server, several skills** — the asymmetry is deliberate. A skill's body is
 loaded whole when it triggers, so merging them would make every session

@@ -15,6 +15,12 @@ and an import with neither is refused before anything is written. check and
 plan answer the directory the name resolves to, so the page can show where
 the import will land before it is pressed.
 
+check also answers what the page shows while the text is edited: the YAML
+line of each error (``lines``, parallel to ``errors``; null where no line is
+known) and, for a valid spec, the sessions and work it describes
+(``preview``, :func:`claude_launcher.workspec.preview`). ``GET
+/api/spec/template`` hands out :data:`claude_launcher.workspec.TEMPLATE`.
+
 An import runs off the event loop: its board writes are ``claunch beads``
 subprocesses and its mesh/session writes go back through this daemon's own
 API (the executor's :class:`~claude_launcher.workspec_import.DaemonBackend`),
@@ -105,11 +111,13 @@ def install(app, backend: Optional[
         try:
             doc = workspec.load(text)
         except workspec.SpecError as exc:
-            return None, fail(400, str(exc), errors=[str(exc)])
+            errs = [str(exc)]
+            return None, fail(400, str(exc), errors=errs,
+                              lines=workspec.locate(text, errs))
         errs = workspec.validate(doc)
         if errs:
             return None, fail(400, f"{len(errs)} problem(s) in the spec",
-                              errors=errs)
+                              errors=errs, lines=workspec.locate(text, errs))
         chosen = body.get("workspace") or ""
         if not isinstance(chosen, str):
             return None, fail(400, "'workspace' must be a registered "
@@ -129,7 +137,8 @@ def install(app, backend: Optional[
         doc, bad = parse(await body_of(request))
         if bad:
             return bad
-        return web.json_response({"errors": [], "spec": _summary(doc)})
+        return web.json_response({"errors": [], "spec": _summary(doc),
+                                  "preview": workspec.preview(doc)})
 
     def planned(doc: dict, body: dict):
         leader = body.get("leader") or ""
@@ -186,6 +195,10 @@ def install(app, backend: Optional[
         return web.json_response({"ok": True, "log": log,
                                   "spec": _summary(doc)})
 
+    async def template(_request):
+        return web.json_response({"yaml": workspec.TEMPLATE})
+
+    app.router.add_get("/api/spec/template", template)
     app.router.add_post("/api/spec/check", check)
     app.router.add_post("/api/spec/plan", plan)
     app.router.add_post("/api/spec/import", run_import)

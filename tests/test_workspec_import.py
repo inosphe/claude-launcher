@@ -296,3 +296,27 @@ def test_rerun_after_a_stop_mid_deps_completes_them():
     assert by_ref["spec:night-sense:W2"]["deps"] == [w1]  # not written twice
     assert by_ref["spec:night-sense:human"]["deps"] == [w1]
     assert len(by_ref["spec:night-sense:W2"]["comments"]) == 1
+
+
+def test_cli_check_names_the_line_and_preview_shows_the_tree(tmp_path, capsys):
+    import argparse
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(EXAMPLE.read_text(encoding="utf-8").replace(
+        "    kind: reviewer", "    kind: reviewr"), encoding="utf-8")
+    assert cli_spec._cmd_check(argparse.Namespace(file=str(bad))) == 1
+    out = capsys.readouterr().out.splitlines()[0]  # rv1's issue errs too
+    assert out.startswith(f"{bad}:") and out.endswith(
+        ": agents.rv1.kind: one of sub-lead, worker, reviewer")
+    line = int(out[len(str(bad)) + 1:].split(":", 1)[0])
+    assert "kind: reviewr" in bad.read_text(encoding="utf-8").splitlines()[line - 1]
+
+    ns = argparse.Namespace(file=str(EXAMPLE), json=False)
+    assert cli_spec._cmd_preview(ns) == 0
+    out = capsys.readouterr().out
+    assert "sessions:" in out and "tasks (wave" in out
+    assert "      ue1" in out  # depth 2 under lead2
+    ns.json = True
+    assert cli_spec._cmd_preview(ns) == 0
+    import json
+    assert json.loads(capsys.readouterr().out)["sessions"][0]["id"] == "leader"
+    assert cli_spec._cmd_preview(argparse.Namespace(file=str(bad), json=False)) == 2
