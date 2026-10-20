@@ -504,8 +504,22 @@ globalThis.ChartPage = (() => {
     if (model.scale === "log") {
       const span = model.t1 - model.axisStart;
       const ages = LOG_TICKS_MS.filter((a) => a < span);
-      const step = Math.max(1, Math.ceil(ages.length / 8));
-      return ages.filter((_, i) => i % step === 0).map((a) => model.t1 - a);
+      const step = Math.max(1, Math.ceil(ages.length / 10));
+      const out = [];
+      let last = -Infinity;
+      // Oldest first, so the positions ascend and "too close" compares
+      // against the label already placed to the left.
+      for (let i = ages.length - 1; i >= 0; i -= step) {
+        const at = model.t1 - ages[i];
+        const pos = positionOf(at, model);
+        // Drop a label that would land on top of the previous one: the log
+        // positions bunch up near now, and the timeline column is only part
+        // of the page's width (the detail pane takes the rest).
+        if (pos - last < 8) continue;
+        out.push(at);
+        last = pos;
+      }
+      return out;
     }
     const count = Math.min(24, Math.max(6, Math.round(6 * model.axisWidthPct / 100)));
     return ticks(model.axisStart, model.t1, count);
