@@ -46,7 +46,11 @@
      in the column of its depth: the longest ``after`` chain behind it, fixed
      at its start. Its only edges are its ``after`` edges -- no chain edge
      runs into or out of a unit, and a node drawn after a unit is not chained
-     to the node drawn before that unit.
+     to the node drawn before that unit. Of the ``after`` edges only the
+     transitive reduction is drawn (claunch-nn4fx): a unit it also waits for
+     through another unit on the list (the root a card's feature already
+     waited for) draws no edge, and the tip keeps the whole list. An edge
+     that skips columns runs through the gap between rows, not across boxes.
    - A planned unit is drawn before it starts, as a faint dashed node in
      the column of its depth along the plan's ``after`` chain, with its
      ``after`` edges. Its start (or its first question) turns the same node
@@ -554,10 +558,27 @@
     // its ``after`` units only, and the chain does not run across units.
     const edges = [];
     const entry = new Map(); // column -> the node its first node hangs off
+    // A unit draws the transitive reduction of its ``after``: a unit it also
+    // waits for through another unit it waits for gets no edge of its own
+    // (its tip keeps the whole list). ``after`` is fixed at placement, so
+    // the reduction of a drawn unit never changes.
+    const reach = new Map(); // unit node -> the unit ids behind it
+    function behind(node) {
+      let set = reach.get(node);
+      if (set) return set;
+      set = new Set();
+      reach.set(node, set);
+      for (const a of node.after) {
+        set.add(a);
+        for (const x of behind(units.get(a))) set.add(x);
+      }
+      return set;
+    }
     let prev = null, crossed = false;
     for (const to of nodes) {
       if (to.unit !== undefined) {
         for (const a of to.after) {
+          if (to.after.some((b) => b !== a && behind(units.get(b)).has(a))) continue;
           const from = units.get(a);
           const plan = from.state === "plan" || to.state === "plan";
           const gone = from.state === "gone" || to.state === "gone";
@@ -590,7 +611,11 @@
   // Same column: straight down. Next column: out of the right side, in at
   // the left side of the target, with an elbow halfway. Edges into a unit
   // turn at an x set by the source's row, so the buses of two sources that
-  // feed the same column do not meet and read as one.
+  // feed the same column do not meet and read as one. An edge that skips
+  // columns does not run across the boxes between: it turns into the gap
+  // between the rows beside its target (above it, or below a first-row
+  // target), runs along that gap, and turns in through the gap before the
+  // target's column.
   function edgePath(a, b) {
     const p = pos(a), q = pos(b);
     if (a.col === b.col) {
@@ -599,6 +624,10 @@
     }
     const lane = b.unit !== undefined ? ((a.row % 5) - 2) * 5 : 0;
     const x1 = p.x + W, y1 = p.y + H / 2, x2 = q.x, y2 = q.y + H / 2, mx = x1 + GAP_X / 2 + lane;
+    if (b.col > a.col + 1) {
+      const gy = b.row ? q.y - GAP_Y / 2 : q.y + H + GAP_Y / 2, nx = x2 - GAP_X / 2 + lane;
+      return `M${x1},${y1} L${mx},${y1} L${mx},${gy} L${nx},${gy} L${nx},${y2} L${x2},${y2}`;
+    }
     return `M${x1},${y1} L${mx},${y1} L${mx},${y2} L${x2},${y2}`;
   }
 
