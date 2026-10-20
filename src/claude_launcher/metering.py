@@ -1192,9 +1192,9 @@ def live_summary(
         t = round(last - (n - 1 - i) * LIVE_BIN_S, 3)
         series.append(round(bins.get(t, 0.0) / LIVE_BIN_S, 1))
     # The bin holding ``now`` is still filling, so the window ends at ``now``
-    # and starts LIVE_RATE_WINDOW_S before it; the partial bin counts in full.
-    floor = now - LIVE_RATE_WINDOW_S
-    recent_tokens = sum(v for t, v in bins.items() if t + LIVE_BIN_S > floor and t <= now)
+    # and starts LIVE_RATE_WINDOW_S before it; a bin that only partly overlaps
+    # the window contributes its overlapping share.
+    recent_tokens = _window_tokens(bins.items(), now)
     rate = round(recent_tokens / LIVE_RATE_WINDOW_S, 1)
     if not inflight:
         state = "idle"
@@ -1222,6 +1222,36 @@ def live_summary(
     return out
 
 
+def _window_tokens(bins, now: float, window: float = LIVE_RATE_WINDOW_S) -> float:
+    """Estimated tokens whose bin overlaps ``[now - window, now]``.
+
+    A bin holds the output seen from its start to the end of its slot (for the
+    bin still filling, to ``now``), so a bin that only partly overlaps the
+    window contributes the overlapping share of its count. Summing whole bins
+    that merely touch the window reads up to one slot more than the window it
+    names -- a steady 200 tok/s stream read at a mid-slot ``now`` came out at
+    250 (claunch-v4jgh).
+    """
+    floor = now - window
+    total = 0.0
+    for pair in bins:
+        try:
+            t, v = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        end = min(t + LIVE_BIN_S, now)
+        covered = end - t
+        if covered <= 0:
+            # A bin stamped at ``now``: what it holds arrived this instant,
+            # inside the window. A bin stamped later says nothing about now.
+            total += v if t <= now else 0.0
+            continue
+        overlap = end - max(t, floor)
+        if overlap > 0:
+            total += v * (overlap / covered)
+    return total
+
+
 def _doc_activity(doc: dict, now: float) -> tuple:
     """``(in flight, estimated tokens/s over the rate window)`` of one live file.
 
@@ -1231,15 +1261,7 @@ def _doc_activity(doc: dict, now: float) -> tuple:
     """
     fresh = now - float(doc.get("updated") or 0) <= LIVE_STALE_S
     inflight = int(doc.get("inflight") or 0) if fresh else 0
-    floor = now - LIVE_RATE_WINDOW_S
-    tokens = 0.0
-    for pair in doc.get("bins") or []:
-        try:
-            t, v = float(pair[0]), float(pair[1])
-        except (TypeError, ValueError, IndexError):
-            continue
-        if t + LIVE_BIN_S > floor and t <= now:
-            tokens += v
+    tokens = _window_tokens(doc.get("bins") or [], now)
     return inflight, tokens / LIVE_RATE_WINDOW_S
 
 
@@ -1250,8 +1272,11 @@ def live_groups(live: Dict[str, List[dict]], now: Optional[float] = None) -> Dic
     at once share its throughput. A session counts on a shim while it has a
     call in flight there or produced output inside the rate window -- the
     same window :func:`live_summary` takes its ``rate`` over. Each group is
-    ``{"rates": {session: tokens/s}, "total": tokens/s}``; a shim with no
-    active session has no group.
+    ``{"rates": {session: tokens/s}, "calls": {session: in flight},
+    "total": tokens/s}``; a shim with no active session has no group. The
+    call counts are what tells a shim's total apart from one session's share
+    of it: two sessions at 40 and 80 tok/s can be two calls and five
+    (claunch-v4jgh).
 
     One pass over ``live`` (a :func:`live_index`): a session-list build takes
     it once and hands it to every row, rather than walking every file per row.
@@ -1266,19 +1291,38 @@ def live_groups(live: Dict[str, List[dict]], now: Optional[float] = None) -> Dic
             inflight, rate = _doc_activity(doc, now)
             if not inflight and rate <= 0:
                 continue
-            group = out.setdefault(str(fp), {"rates": {}, "total": 0.0})
+            group = out.setdefault(str(fp), {"rates": {}, "calls": {}, "total": 0.0})
             group["rates"][session] = group["rates"].get(session, 0.0) + rate
+            group["calls"][session] = group["calls"].get(session, 0) + inflight
             group["total"] += rate
     return out
 
 
-def _parallel_brief(group: dict) -> dict:
-    n = len(group["rates"])
+def _parallel_brief(group: dict, session: str) -> dict:
+    """The shared shim's figures, with ``session``'s own share first.
+
+    ``counts`` is each active session's in-flight calls, the reader's own
+    first and the rest by rate -- "1+5" says at a glance that the shim's
+    total is not split evenly. ``by_session`` is the same list with names and
+    rates for the tooltip, and ``calls`` their sum.
+    """
+    rates = group["rates"]
+    calls = group.get("calls") or {}
+    n = len(rates)
     total = group["total"]
+    order = sorted(rates, key=lambda name: (name != session, -rates[name], name))
+    counts = [int(calls.get(name, 0)) for name in order]
     return {
         "sessions": n,
         "total": round(total, 1),
         "mean": round(total / n, 1) if n else 0.0,
+        "calls": sum(counts),
+        "counts": counts,
+        "by_session": [
+            {"session": name, "calls": int(calls.get(name, 0)),
+             "rate": round(rates[name], 1), "self": name == session}
+            for name in order
+        ],
         "estimated": True,
         "window_s": LIVE_RATE_WINDOW_S,
     }
@@ -1289,7 +1333,9 @@ def parallel_for(session: str, groups: Dict[str, dict]) -> Optional[dict]:
 
     ``sessions`` is how many sessions are active on that shim now (this one
     included), ``total`` their summed estimated tokens/s and ``mean`` the
-    total over ``sessions``. ``None`` unless the session itself is active on
+    total over ``sessions``. ``counts`` is their in-flight calls,
+    ``session``'s own first, and ``by_session`` the same per session with its
+    name and rate (claunch-v4jgh). ``None`` unless the session itself is active on
     a shim with at least one other active session: a session running alone
     has nothing to share, and its own rate already is the shim's total.
     When a session is active on more than one shared shim, the one with the
@@ -1302,7 +1348,7 @@ def parallel_for(session: str, groups: Dict[str, dict]) -> Optional[dict]:
         key = (len(group["rates"]), group["total"])
         if best is None or key > best[0]:
             best = (key, group)
-    return _parallel_brief(best[1]) if best else None
+    return _parallel_brief(best[1], session) if best else None
 
 
 _live_cache: Dict[str, tuple] = {}

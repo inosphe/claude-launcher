@@ -985,19 +985,26 @@ def _tps_live_lines(groups: dict) -> List[str]:
     """The shims with sessions active now: total, mean per session, count.
 
     Live rates are estimates from the characters streamed over the last
-    ``LIVE_RATE_WINDOW_S`` seconds (claunch-b28pp).
+    ``LIVE_RATE_WINDOW_S`` seconds (claunch-b28pp); each session's line also
+    carries its in-flight calls, so an uneven split of the shim's total is
+    visible here too (claunch-v4jgh).
     """
     if not groups:
         return []
     out = [f"live now (estimated tok/s over the last {metering.LIVE_RATE_WINDOW_S:g}s, by proxy):"]
     for fp, group in sorted(groups.items()):
         rates = group["rates"]
+        calls = group.get("calls") or {}
         n = len(rates)
         total = group["total"]
         out.append(
-            f"  {fp}  sessions {n}  total {total:.1f}  mean {total / n:.1f}"
+            f"  {fp}  sessions {n}  calls {sum(int(c) for c in calls.values())}"
+            f"  total {total:.1f}  mean {total / n:.1f}"
         )
-        out.append("    " + "  ".join(f"{name} {rate:.1f}" for name, rate in sorted(rates.items())))
+        out.append("    " + "  ".join(
+            f"{name} {rate:.1f}"
+            + (f" ({int(calls[name])} calls)" if name in calls else "")
+            for name, rate in sorted(rates.items())))
     return out
 
 

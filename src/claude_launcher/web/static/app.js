@@ -7489,12 +7489,40 @@ function tpsLiveText(l) {
    session on the same upstream, so sessions running at once share its
    throughput; `live.parallel` is there only when this session and at least
    one other are active on it now: `sessions` (this one included), `total`
-   (their summed estimated tokens/s) and `mean` (total over sessions).
-   `compact` is the rail and badge form: "×3 Σ≈120 avg≈40". */
+   (their summed estimated tokens/s), `mean` (total over sessions) and, from
+   a daemon that carries it, `counts` (each session's in-flight calls, this
+   one first). The counts are what makes an uneven share readable: "1+5"
+   says the total is one call here and five in the other session, which the
+   mean alone hides (claunch-v4jgh).
+   `compact` is the rail and badge form: "×3 (1+2) Σ≈120 avg≈40". A payload
+   without `counts` (a daemon that predates it) reads as before. */
 function tpsParallelText(p, compact) {
   if (!p || !(p.sessions > 1)) return "";
-  if (compact) return `×${p.sessions} Σ≈${tpsFmt(p.total)} avg≈${tpsFmt(p.mean)}`;
-  return `${p.sessions} sessions · total ≈${tpsFmt(p.total)} tok/s · avg ≈${tpsFmt(p.mean)} tok/s`;
+  const counts = Array.isArray(p.counts) && p.counts.length ? p.counts.join("+") : "";
+  if (compact) {
+    return `×${p.sessions}${counts ? ` (${counts})` : ""} Σ≈${tpsFmt(p.total)} avg≈${tpsFmt(p.mean)}`;
+  }
+  return `${p.sessions} sessions` + (counts ? ` · calls ${counts}` : "") +
+    ` · total ≈${tpsFmt(p.total)} tok/s · avg ≈${tpsFmt(p.mean)} tok/s`;
+}
+
+/* The same figures spelled out per session for the tooltip: who holds how
+   many of the shim's calls, and what each of them reads, then the total and
+   the mean. A payload without `by_session` keeps the one-line form. */
+function tpsParallelTooltip(p) {
+  const shares = Array.isArray(p.by_session) ? p.by_session : [];
+  if (!shares.length) {
+    return [`shared proxy: ${p.sessions} sessions active now, total ≈${tpsFmt(p.total)}` +
+            ` tokens/s, avg ≈${tpsFmt(p.mean)} tokens/s per session (last ${p.window_s}s)`];
+  }
+  const calls = Number.isFinite(p.calls) ? p.calls
+    : shares.reduce((n, s) => n + (s.calls || 0), 0);
+  const each = shares.map((s) =>
+    `${s.self ? "this" : s.session} ${s.calls} call${s.calls === 1 ? "" : "s"} ≈${tpsFmt(s.rate)} tok/s`);
+  return [
+    `shared proxy: ${p.sessions} sessions, ${calls} call${calls === 1 ? "" : "s"} — ${each.join(", ")}`,
+    `total ≈${tpsFmt(p.total)} tok/s, avg ≈${tpsFmt(p.mean)} tok/s per session (last ${p.window_s}s)`,
+  ];
 }
 
 function tpsSecs(v) {
@@ -7512,8 +7540,7 @@ function tpsTooltip(t) {
       : `streaming: ≈${tpsFmt(l.rate)} tokens/s over the last ${l.window_s}s` +
         ` (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight; estimated from the characters streamed)`);
     if (l.parallel && l.parallel.sessions > 1) {
-      lines.push(`shared proxy: ${l.parallel.sessions} sessions active now, total ≈${tpsFmt(l.parallel.total)}` +
-                 ` tokens/s, avg ≈${tpsFmt(l.parallel.mean)} tokens/s per session (last ${l.parallel.window_s}s)`);
+      lines.push(...tpsParallelTooltip(l.parallel));
     }
   }
   const age = tpsAgeSecs(t);

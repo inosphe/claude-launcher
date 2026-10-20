@@ -1251,6 +1251,30 @@ def test_streamed_characters_become_a_short_window_rate_and_a_series(home):
     assert live["series"][-3:-1] == [40.0, 40.0]  # full bins, tokens/s
 
 
+def test_the_live_window_is_the_window_it_names(home):
+    """claunch-v4jgh: a steady stream must read its own rate, not 1.25x.
+
+    Bins are half a second wide and the rate is taken over
+    ``LIVE_RATE_WINDOW_S``. A bin that only touched the window at its tail
+    was summed in full, so the reading covered up to one slot more than the
+    window it named: a steady 200 tok/s stream read 250 at a mid-slot ``now``.
+    """
+    now = 1004.3
+    bins = []
+    t = 998.0
+    while t <= 1004.0:
+        bins.append([round(t, 3), 100.0])   # 0.5s of a 200 tok/s stream
+        t += 0.5
+    bins[-1][1] = 60.0                      # the slot still filling holds 0.3s
+    doc = {"session": "s1", "fingerprint": "fp", "updated": now, "inflight": 1,
+           "waiting": 0, "since": now - 3, "model": "m",
+           "bin_s": metering.LIVE_BIN_S, "bins": bins, "tokens_per_char": 0.25}
+    live = metering.live_summary("s1", now=now, docs=[doc])
+    assert live["rate"] == 200.0
+    # The shared-shim figures come from the same window, not a second copy of it.
+    assert round(metering._doc_activity(doc, now)[1], 1) == 200.0
+
+
 def test_nothing_in_flight_is_idle_and_the_rate_drains_with_the_window(home):
     clock = _Clock()
     board = metering.LiveBoard("fp", clock=clock)
@@ -1483,11 +1507,58 @@ def test_sessions_sharing_a_shim_carry_its_total_mean_and_count(home):
     assert one["rate"] == 40.0
     assert one["parallel"] == {
         "sessions": 2, "total": 120.0, "mean": 60.0,
+        "calls": 2, "counts": [1, 1],
+        "by_session": [
+            {"session": "s1", "calls": 1, "rate": 40.0, "self": True},
+            {"session": "s2", "calls": 1, "rate": 80.0, "self": False},
+        ],
         "estimated": True, "window_s": metering.LIVE_RATE_WINDOW_S,
     }
     assert metering.live_summary("s2", now=clock.t, peers=peers)["parallel"]["total"] == 120.0
     # Without the other sessions' files the summary cannot say, and does not.
     assert "parallel" not in metering.live_summary("s1", now=clock.t)
+
+
+def test_an_uneven_split_names_each_sessions_calls_and_rate(home):
+    """claunch-v4jgh: two sessions on one shim read "1+5", not an even mean.
+
+    The card showed total ≈1249 and avg ≈624 while this session was one call
+    at ≈152 and the other five at ≈1.1k; the mean alone looked like a
+    contradiction. The counts are what says whose share is whose.
+    """
+    clock = _Clock()
+    a = metering.LiveBoard("fp", clock=clock)
+    b = metering.LiveBoard("fp", clock=clock)
+    one = _streaming_meter("s1")
+    a.begin(one)
+    others = []
+    for i in range(5):
+        m = _streaming_meter("s2")
+        b.begin(m)
+        others.append(m)
+    for _ in range(8):
+        clock.t += 0.25
+        one.chunk(_delta("x" * 40))
+        for m in others:
+            m.chunk(_delta("x" * 80))
+        a.flush()
+        b.flush()
+    peers = metering.live_index()
+    live = metering.live_summary("s1", now=clock.t, peers=peers)
+    par = live["parallel"]
+    assert par["sessions"] == 2
+    assert par["counts"] == [1, 5]           # this session's calls first
+    assert par["calls"] == 6
+    assert par["by_session"][0]["self"] is True
+    assert par["by_session"][0]["session"] == "s1"
+    assert par["by_session"][0]["calls"] == 1
+    assert par["by_session"][1]["calls"] == 5
+    assert par["total"] == round(live["rate"] + par["by_session"][1]["rate"], 1)
+    assert par["mean"] == round(par["total"] / 2, 1)
+    # The other session reads the same structure with itself first.
+    other = metering.live_summary("s2", now=clock.t, peers=peers)["parallel"]
+    assert other["counts"] == [5, 1]
+    assert other["by_session"][0]["self"] is True
 
 
 def test_a_session_alone_on_its_shim_has_no_parallel_figure(home):
@@ -1531,8 +1602,8 @@ def test_claunch_tps_prints_live_totals_by_proxy(home, capsys):
     clock = _Clock()
     _two_sessions_streaming(clock)
     lines = cli._tps_live_lines(metering.live_groups(metering.live_index(), now=clock.t))
-    assert lines[1].split() == ["fp", "sessions", "2", "total", "120.0", "mean", "60.0"]
-    assert lines[2].split() == ["s1", "40.0", "s2", "80.0"]
+    assert lines[1].split() == ["fp", "sessions", "2", "calls", "2", "total", "120.0", "mean", "60.0"]
+    assert lines[2].split() == ["s1", "40.0", "(1", "calls)", "s2", "80.0", "(1", "calls)"]
     assert cli._tps_live_lines({}) == []
 
 

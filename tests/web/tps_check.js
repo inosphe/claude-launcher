@@ -79,9 +79,11 @@ const ctx = {};
 new Function(
   "exports", "el", "$", "sessionsCache", "currentName", "railOpen",
   ["fmtAge", "modelShort", "terminalOnScreen", "tpsFmt", "tpsAgeSecs", "ttftFmt",
-   "tpsLatencyText", "tpsSecs", "tpsLiveText", "tpsParallelText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
+   "tpsLatencyText", "tpsSecs", "tpsLiveText", "tpsParallelText", "tpsParallelTooltip", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
    "tpsChip", "renderTermTps"].map(slice).join("\n") + `
 exports.text = tpsText;
+exports.parallel = tpsParallelText;
+exports.parallelTip = tpsParallelTooltip;
 exports.tooltip = tpsTooltip;
 exports.rail = tpsRailLine;
 exports.chip = tpsChip;
@@ -322,13 +324,37 @@ check("a session whose first call is still in flight has only the live part",
 /* Parallel sessions on one shim (claunch-b28pp): the shim's total, the mean
    per session and the session count ride on the live glance and spell out in
    the tooltip; a session alone on its shim carries no `parallel` and shows
-   only its own rate. */
-const PAR = { sessions: 3, total: 120.4, mean: 40.13, estimated: true, window_s: 2 };
-check("a session sharing its shim appends the total, the mean and the count",
+   only its own rate. The in-flight calls per session (claunch-v4jgh) say how
+   the total is split -- "1+2+5" -- because the mean alone reads as an even
+   split that one session running five calls does not have. */
+const PAR = {
+  sessions: 3, total: 120.4, mean: 40.13, calls: 8, counts: [1, 2, 5],
+  by_session: [
+    { session: "me", calls: 1, rate: 42, self: true },
+    { session: "other-a", calls: 2, rate: 40, self: false },
+    { session: "other-b", calls: 5, rate: 38.4, self: false },
+  ],
+  estimated: true, window_s: 2,
+};
+check("a session sharing its shim appends its calls, the total and the mean",
       ctx.text(LIVE({ state: "streaming", rate: 42, inflight: 1, parallel: PAR })),
+      "≈42.0 tok/s · ×3 (1+2+5) Σ≈120 avg≈40.1");
+check("the tooltip lists each session's calls and rate",
+      ctx.tooltip(LIVE({ state: "streaming", rate: 42, parallel: PAR })).split("\n").slice(1, 3),
+      ["shared proxy: 3 sessions, 8 calls — this 1 call ≈42.0 tok/s, other-a 2 calls ≈40.0 tok/s, other-b 5 calls ≈38.4 tok/s",
+       "total ≈120 tok/s, avg ≈40.1 tok/s per session (last 2s)"]);
+check("the overlay form spells the split out before the total",
+      ctx.parallel(PAR, false),
+      "3 sessions · calls 1+2+5 · total ≈120 tok/s · avg ≈40.1 tok/s");
+check("the compact form carries the same counts",
+      ctx.parallel(PAR, true), "×3 (1+2+5) Σ≈120 avg≈40.1");
+/* A payload from a daemon that predates the call counts keeps the old text. */
+const OLD_PAR = { sessions: 3, total: 120.4, mean: 40.13, estimated: true, window_s: 2 };
+check("a payload without counts reads as before",
+      ctx.text(LIVE({ state: "streaming", rate: 42, inflight: 1, parallel: OLD_PAR })),
       "≈42.0 tok/s · ×3 Σ≈120 avg≈40.1");
-check("the tooltip spells the shared proxy out",
-      ctx.tooltip(LIVE({ state: "streaming", rate: 42, parallel: PAR })).split("\n")[1],
+check("...and its tooltip keeps the one-line form",
+      ctx.tooltip(LIVE({ state: "streaming", rate: 42, parallel: OLD_PAR })).split("\n")[1],
       "shared proxy: 3 sessions active now, total ≈120 tokens/s, avg ≈40.1 tokens/s per session (last 2s)");
 check("a session alone on its shim shows only its own rate",
       ctx.text(LIVE({ state: "streaming", rate: 42 })), "≈42.0 tok/s");
