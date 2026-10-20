@@ -362,6 +362,95 @@ assert.deepStrictEqual([late.running, late.nodes[1].count, late.nodes[1].running
 stable([...dead, { event: "unit", unit: "a", state: "done" }, { event: "run_end", state: "done" }], "dead");
 console.log("durableflow_check: units ok");
 
+// (e) plan (claunch-ry446): the units a run means to do, drawn faint before
+// they start. The live run gds6 rules-v2 20261020-105625: [01,02] -> _system -> [03,04,05].
+const PL = [
+  { unit: "items/03-c", label: "03-c", phase: "기능", after: ["items/_system"] },   // before its after
+  { unit: "items/01-a", label: "01-a", phase: "문서" },
+  { unit: "items/02-b", label: "02-b", phase: "문서" },
+  { unit: "items/_system", label: "_system", phase: "시스템", after: ["items/01-a", "items/02-b"] },
+  { unit: "items/04-d", label: "04-d", after: ["items/_system"] },
+  { unit: "items/05-e", label: "05-e", after: ["items/_system", "ghost"] },
+];
+const P = [
+  { at: a2("40:00"), event: "session_start", reason: "startup" },
+  { at: a2("40:01"), event: "plan", units: PL },
+  { at: a2("40:02"), event: "unit", unit: "items/01-a", state: "start", label: "01-a", phase: "문서" },
+  { at: a2("40:02"), event: "ask_start", key: "B:b", askRole: "B", unit: "items/02-b" },   // a question wakes its unit
+  { at: a2("40:03"), event: "ask", askRole: "B", key: "B:b", unit: "items/02-b", usage: u(5), stop: "stop" },
+  { at: a2("40:04"), event: "unit", unit: "items/01-a", state: "done" },
+  { at: a2("40:05"), event: "unit", unit: "items/02-b", state: "done" },
+  { at: a2("40:06"), event: "unit", unit: "items/_system", state: "start", after: ["items/01-a", "items/02-b"] },
+  { at: a2("40:07"), event: "unit", unit: "late", state: "start", label: "late" },   // not in the plan: drawn as before
+];
+const byOf = (mm) => Object.fromEntries(mm.nodes.map((n) => [n.id, n]));
+// Right after the plan: six faint nodes at their plan depth, the plan's edges, done 0/6.
+const p0 = DF.model(P.slice(0, 2), true), b0 = byOf(p0);
+assert.deepStrictEqual(plain(["01-a", "02-b", "_system", "03-c", "04-d", "05-e"].map((x) => [b0["unit:items/" + x].col, b0["unit:items/" + x].status])),
+  [[1, "plan"], [1, "plan"], [2, "plan"], [3, "plan"], [3, "plan"], [3, "plan"]]);
+assert.deepStrictEqual(plain(p0.cols.map((c) => c.title)), ["시작", "문서", "시스템", "기능"]);
+assert.deepStrictEqual(ids(p0).sort(), ["unit:items/01-a>unit:items/_system", "unit:items/02-b>unit:items/_system",
+  "unit:items/_system>unit:items/03-c", "unit:items/_system>unit:items/04-d", "unit:items/_system>unit:items/05-e"]);
+assert.ok(p0.edges.filter((e) => e.id !== "live-edge").every((e) => e.plan && !e.gone), "edges into a planned unit are faint");
+assert.deepStrictEqual([b0["unit:items/03-c"].label, b0["unit:items/03-c"].sub], ["03-c", "대기"]);
+assert.deepStrictEqual(plain(p0.plan), { total: 6, done: 0 });
+assert.strictEqual(p0.units, 6);
+// The run: the same nodes turn real, in place; an unplanned unit lands as before.
+const pf = DF.model(P, true), bf = byOf(pf);
+assert.deepStrictEqual(plain(["01-a", "02-b", "_system", "03-c"].map((x) => bf["unit:items/" + x].status)), ["ok", "ok", "run", "plan"]);
+assert.deepStrictEqual([bf["unit:items/02-b"].count, bf["unit:items/02-b"].sub], [1, "물음 1 · 5 tok"]);
+assert.ok(bf["unit:items/_system"].tip[0].includes(" 계획 items/_system"), "the plan stays in the tip");
+assert.deepStrictEqual(plain([bf["unit:late"].col, bf["unit:late"].row, bf["unit:late"].status]), [1, 2, "run"]);
+assert.deepStrictEqual(plain(pf.plan), { total: 6, done: 2 });
+assert.ok(!pf.edges.find((e) => e.id === "unit:items/01-a>unit:items/_system").plan, "both ends real: a plain edge");
+assert.ok(pf.edges.find((e) => e.id === "unit:items/_system>unit:items/04-d").plan);
+stable(P, "plan");
+// A later plan wins: a planned unit it leaves out is hidden in place (it never
+// started), one it adds is placed, a started unit it leaves out stays.
+const P2 = [...P.slice(0, 3), { at: a2("40:03"), event: "plan", units: [...PL.slice(0, 4), { unit: "items/06-f", after: ["items/_system"] }] }];
+const p2 = DF.model(P2, true), b2 = byOf(p2);
+assert.deepStrictEqual(plain(["04-d", "05-e", "06-f", "01-a"].map((x) => b2["unit:items/" + x].status)), ["gone", "gone", "plan", "run"]);
+assert.deepStrictEqual(plain([b2["unit:items/06-f"].col, b2["unit:items/06-f"].row, b2["unit:items/06-f"].label]), [3, 3, "items/06-f"]);
+assert.ok(p2.edges.find((e) => e.id === "unit:items/_system>unit:items/04-d").gone);
+assert.deepStrictEqual(plain(p2.plan), { total: 5, done: 0 });
+stable(P2, "replan");
+// A third plan that names the dropped unit again brings it back; a hidden one that starts anyway is real.
+const p3 = byOf(DF.model([...P2, { event: "plan", units: PL }, { event: "unit", unit: "items/06-f", state: "start" }], true));
+assert.deepStrictEqual(plain(["04-d", "06-f"].map((x) => p3["unit:items/" + x].status)), ["plan", "run"]);
+// A cycle or a malformed plan does not stop the drawing.
+const cyc = DF.model([{ event: "plan", units: [{ unit: "x", after: ["y"] }, { unit: "y", after: ["x"] }, null, { label: "no id" }] }], true);
+assert.deepStrictEqual(plain(cyc.nodes.map((n) => [n.id, n.col])), [["unit:x", 0], ["unit:y", 1]]);
+assert.strictEqual(DF.model([{ event: "plan", units: "nope" }], true).nodes.length, 0);
+// The view: faint and hidden by class, edges restyled when the unit starts.
+{
+  const host = new El("div"), vw = DF.makeView(doc, host);
+  vw.draw(DF.model(P2.slice(0, 2), true));
+  assert.match(vw.nodes.get("unit:items/04-d").g.getAttribute("class"), /st-plan/);
+  const e = vw.edges.get("unit:items/01-a>unit:items/_system");
+  assert.match(e.getAttribute("class"), /dfl-edge plan/);
+  const g = vw.nodes.get("unit:items/04-d").g;
+  vw.draw(p2);
+  assert.strictEqual(vw.nodes.get("unit:items/04-d").g, g, "a hidden node keeps its element");
+  assert.match(g.getAttribute("class"), /st-gone/);
+  assert.match(vw.edges.get("unit:items/_system>unit:items/04-d").getAttribute("class"), /gone/);
+  vw.draw(pf);
+  assert.strictEqual(e.getAttribute("class"), "dfl-edge");
+}
+// The headline counts the plan's units done; without a plan it says nothing of units.
+(async () => {
+  const headline = async (log) => {
+    const host = new El("div");
+    const api = async () => ({ ok: true, json: async () => ({ live: true, total: log.length, since: 0, events: log }) });
+    DF.mount(host, "plan-run", { doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 0 });
+    await new Promise((r) => setTimeout(r, 0));
+    return host.children[0].children[1].textContent;
+  };
+  assert.match(await headline(P), /단위 2\/6/);
+  assert.doesNotMatch(await headline(U), /단위/);
+  console.log("durableflow_check: plan headline ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+console.log("durableflow_check: plan ok");
+
 // (d) mount: the pending edge goes once a unit is the last node, and the
 // headline counts the questions in flight.
 (async () => {

@@ -38,12 +38,22 @@
      hint for the column's name) and ``after``: the units it actually waited
      for. A later event may carry the state alone. Units not linked through
      ``after`` may have run at the same time.
+   - ``{"event":"plan","at","units":[{"unit","label"?,"phase"?,"after"?:[...]}...]}``
+     (claunch-ry446) -- the units the run means to do, logged before it
+     starts them. It may come more than once; the latest one wins.
    Drawing rules:
    - A unit is one node (its questions, tokens, questions in flight, state)
      in the column of its depth: the longest ``after`` chain behind it, fixed
      at its start. Its only edges are its ``after`` edges -- no chain edge
      runs into or out of a unit, and a node drawn after a unit is not chained
      to the node drawn before that unit.
+   - A planned unit is drawn before it starts, as a faint dashed node in
+     the column of its depth along the plan's ``after`` chain, with its
+     ``after`` edges. Its start (or its first question) turns the same node
+     into the unit -- same place, same edges. A unit a later plan leaves out
+     and that never started is hidden (``status: "gone"``); its row stays
+     empty, because nothing that was drawn ever moves. A log without a plan
+     draws as before, and the headline counts the plan's units done.
    - A question without a unit draws as before. A grouped (sim2) stage node
      is not chained to the stage above it in its column -- they ran side by
      side -- but hangs off the node its column was entered from.
@@ -168,6 +178,7 @@
     const open = new Map();  // ask key -> [unit id | null] of starts not yet answered
     const keyUnit = new Map(); // ask key -> the unit its last ask_start named
     let running = 0, peak = 0, starts = 0;
+    let plan = null;         // unit ids of the latest plan event
 
     // A phase entered again gets a new column -- except a grouped (sim2)
     // stage, whose questions interleave: it keeps the column it opened.
@@ -221,6 +232,55 @@
       units.set(id, node);
       return node;
     }
+    // A planned unit that has not started yet becomes the unit itself.
+    function wake(node) {
+      if (node.state !== "plan" && node.state !== "gone") return;
+      node.state = "start";
+      node.status = "run";
+    }
+    // Place the plan's units not drawn yet, each after the units it waits
+    // for (the list may name a unit before its ``after``), and hide the
+    // planned units the newest plan drops.
+    function addPlan(list, when) {
+      const want = new Map();
+      for (const p of list) {
+        if (p && typeof p === "object" && p.unit != null && !want.has(String(p.unit))) want.set(String(p.unit), p);
+      }
+      plan = [...want.keys()];
+      for (const node of units.values()) {
+        if (node.state === "plan" && !want.has(node.unit)) node.state = node.status = "gone";
+        else if (node.state === "gone" && want.has(node.unit)) { node.state = "plan"; node.status = "plan"; }
+      }
+      let todo = [...want.values()];
+      while (todo.length) {
+        const ready = todo.filter((p) => !(Array.isArray(p.after) ? p.after : [])
+          .some((a) => want.has(String(a)) && !units.has(String(a)) && String(a) !== String(p.unit)));
+        const take = ready.length ? ready : [todo[0]];   // a cycle: place the first, drop what is not there
+        for (const p of take) {
+          const id = String(p.unit);
+          if (!units.has(id)) {
+            const node = unitNode(id, p);
+            node.state = node.status = "plan";
+            node.tip = [when + " 계획 " + id + (node.after.length ? " ← " + node.after.join(", ") : "")];
+          }
+          const node = units.get(id);
+          if (node.state === "plan") {
+            if (p.label) node.label = String(p.label);
+            if (p.phase) hint(node, p.phase);
+            node.sub = "대기";
+          }
+        }
+        todo = todo.filter((p) => !take.includes(p));
+      }
+    }
+    function hint(node, phase) {
+      const c = cols[node.col];
+      c.hints = c.hints || [];
+      if (!c.hints.includes(String(phase))) {
+        c.hints.push(String(phase));
+        c.title = c.hints.join(" · ");
+      }
+    }
     // Close the starts left without their ask (all, or one unit's).
     function closeOpen(unit) {
       for (const [key, pend] of open) {
@@ -269,22 +329,16 @@
           if (ev.unit == null) break;
           const id = String(ev.unit);
           const node = unitNode(id, ev);
+          wake(node);
           const state = UNIT_STATUS[ev.state] ? ev.state : "start";
           node.state = state;
           node.status = node.cut && state === "done" ? "warn" : UNIT_STATUS[state];
           if (state !== "start") closeOpen(id);
           if (ev.label) node.label = String(ev.label);
           if (ev.note) node.note = String(ev.note);
-          if (state === "start" && ev.phase) {
-            const c = cols[node.col];
-            c.hints = c.hints || [];
-            if (!c.hints.includes(String(ev.phase))) {
-              c.hints.push(String(ev.phase));
-              c.title = c.hints.join(" · ");
-            }
-          }
+          if (state === "start" && ev.phase) hint(node, ev.phase);
           if (state === "start") {
-            node.tip = [when + " " + id + (node.after.length ? " ← " + node.after.join(", ") : "")];
+            node.tip = [...node.tip.filter((t) => / 계획 /.test(t)),when + " " + id + (node.after.length ? " ← " + node.after.join(", ") : "")];
           } else {
             node.tip.push(when + " " + state);
           }
@@ -303,6 +357,7 @@
           peak = Math.max(peak, running);
           if (unit !== null) {
             const node = unitNode(unit, null);
+            wake(node);
             node.running += 1;
             unitSub(node);
           }
@@ -326,6 +381,7 @@
           }
           if (unit !== null) {
             const node = unitNode(unit, null);
+            wake(node);
             const u = ev.usage || {};
             tokensTotal += Number(u.totalTokens) || 0;
             asks += 1;
@@ -374,6 +430,9 @@
           });
           break;
         }
+        case "plan":
+          if (Array.isArray(ev.units)) addPlan(ev.units, when);
+          break;
         case "formalize":
           settle(find((k) => k === "formalize:" + ev.attempt), !!ev.ok,
                  ev.rejected ? "거절 " + ev.rejected : "", "formalize", "형식화 #" + ev.attempt);
@@ -500,7 +559,9 @@
       if (to.unit !== undefined) {
         for (const a of to.after) {
           const from = units.get(a);
-          edges.push({ id: from.id + ">" + to.id, from, to });
+          const plan = from.state === "plan" || to.state === "plan";
+          const gone = from.state === "gone" || to.state === "gone";
+          edges.push({ id: from.id + ">" + to.id, from, to, plan, gone });
         }
         crossed = true;
         continue;
@@ -516,8 +577,10 @@
     if (pending && nodes.length && nodes[nodes.length - 1].unit === undefined) {
       edges.push({ id: "live-edge", from: nodes[nodes.length - 1], to: pending });
     }
+    // done/total over the latest plan's units.
+    const planned = plan && { total: plan.length, done: plan.filter((id) => units.get(id).state === "done").length };
     return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt,
-             count: (events || []).length, running, peak, starts, units: units.size };
+             count: (events || []).length, running, peak, starts, units: units.size, plan: planned };
   }
 
   function pos(n) {
@@ -604,9 +667,11 @@
       for (const e of m.edges) {
         let path = edges.get(e.id);
         if (!path) {
-          path = mk("path", gEdges, { class: "dfl-edge" + (e.id === "live-edge" ? " live" : "") });
+          path = mk("path", gEdges, {});
           edges.set(e.id, path);
         }
+        set(path, "class", "dfl-edge" + (e.id === "live-edge" ? " live" : "") +
+                           (e.gone ? " gone" : e.plan ? " plan" : ""));
         set(path, "d", edgePath(e.from, e.to));
       }
       for (const n of m.nodes) drawNode(n);
@@ -641,6 +706,7 @@
 
   function summary(m, data) {
     const parts = [data.sim || "", data.live ? (m.ended ? "끝남" : "실행 중") : "세션 종료"];
+    if (m.plan) parts.push("단위 " + m.plan.done + "/" + m.plan.total);
     parts.push("사건 " + m.count, "질문 " + m.asks, "토큰 " + tokens(m.tokens));
     if (m.starts) {
       if (data.live && !m.ended) parts.push("진행 중 " + m.running);
