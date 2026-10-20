@@ -194,7 +194,9 @@ nodes:
          머지·스윕은 모두 이 저장소에서 한다. 한 배치는 한 저장소다 — 다른
          저장소의 후보는 deferred로 두고 note에 저장소를 적는다.
       1. 목록: flow_status의 collections.landing에서 status가 requested인 항목,
-         그리고 `claunch beads list --status in_review --json`. 둘이 어긋나면
+         그리고 `claunch beads list --status in_review --json`(출력은 배열이 아니라
+         `{"issues":[...],"total":N,"has_more":bool}` 객체다 — 배열로 파싱하면 실패하므로
+         `.issues`를 읽고, `has_more`가 true이면 `--limit`을 올려 다시 조회한다). 둘이 어긋나면
          (보드에는 있는데 큐에 없음 등) 이유를 적는다. 원격 워커의 요청은
          직접 넣었는지 확인한다.
       2. 각 후보를 넣기 전에 `uv run --no-sync python tools/delayed_sweep.py
@@ -253,7 +255,8 @@ nodes:
       나누어 적지 않는다(검증 작업의 issue는 하나이고 다른 이슈로 다시 등록되지 않는다 —
       checkpoint-check가 막는다). 서로 다른 브랜치를 한 머지 단계로 합치지 않는다.
       결과를 보고하기 전에 `tools/delayed_sweep.py check-merges --json '<merges 보고>'`로
-      형태를 확인한다(조언용·읽기 전용).
+      형태를 확인한다(조언용·읽기 전용). 입력 형태 예:
+      `{"repo":"F:/path/repo","merges":[{"issue":"claunch-x","tip":"<sha>","merge_sha":"<sha>"}]}`
       enqueue 실패 시 다음 후보를 머지하지 않고 fail로 보고한다. 재실행은
       같은 SHA를 중복 생성하지 않는다. 테스트 작업은 여기서 기다리지 않는다.
       실행은 subagent 하나가 한다(머지 하나 = subagent 하나, 또는 배치 전체를
@@ -387,9 +390,14 @@ nodes:
       사실은 판정이 아니다), 새 머지 커밋의 기능이 실제로 서빙되는지 하나
       이상 확인한다. 반영 판정 자체는 다음 대기(deployed-wait)의 checks가 한다.
       restart 결과가 failed(exit≠0, 예: 데몬 WEDGED 판정 exit 1) · interrupted ·
-      unsupported이면 ok를 보고하지 않는다. restart_failed를 보고하고 reason에
+      unsupported이면 아래 연결 끊김 예외를 제외하고 ok를 보고하지 않는다.
+      restart_failed를 보고하고 reason에
       exit 코드와 출력의 판정문을 적는다 — deployed-wait의 600초를 기다리지 않고
-      바로 reflect-pregate로 간다. 거기서 retry를 고르면 reflect에 새 방문으로
+      바로 reflect-pregate로 간다. 단, restart 명령이 데몬 종료로 결과 대기 연결을 잃어
+      exit 1이 되었어도 새 데몬이 정상 기동했다면(재기동 통지 블록 또는 전후 pid가 다름,
+      새 머지 커밋의 기능이 서빙됨) 재기동은 된 것이다: ok를 보고하고 보고에 연결 끊김,
+      exit 1, 새 데몬 판정 근거, 서빙 확인 방법을 적는다(round 13 사례). 새 데몬이 서지 않았거나 서빙을
+      확인하지 못하면 restart_failed다. 거기서 retry를 고르면 reflect에 새 방문으로
       다시 들어가 restart가 다시 실행되고(웹 UI 승인 게이트를 다시 거친다), 리더가
       재기동 명령을 직접 실행하는 일은 없다. 시도는 deployed-wait 만료와 합쳐
       5회이고, 소진하거나 close를 고르면 reflect-closed(반영 실패/미확인)다.
@@ -436,6 +444,8 @@ nodes:
       실패 SHA, 영수증, 실패 테스트와 로그, 현재 master SHA를 확인한다.
       실패 원인이 미확인이면 「원인 미상」으로 기록한다. 이미 repair_issue가
       있으면 기존 자식의 진행 상태를 확인하고 중복으로 만들지 않는다.
+      `delayed_sweep.py requeue`는 stuck 또는 cancelled 상태의 job만 받는다. 그 밖의
+      상태에는 쓰지 않는다.
       미위임 실패마다 원래 머지 이슈 아래에 수정 이슈를 만든다(중복 검색 먼저).
       이미 같은 실패의 수정 이슈를 맡은 살아 있는 자식이 있으면 새로 spawn하지
       않고 그 이슈와 자식을 복구해 repair로 등록한다.

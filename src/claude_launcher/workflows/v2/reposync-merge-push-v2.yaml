@@ -17,19 +17,31 @@ nodes:
       local-sync 정책을 조회한다. PR-only 대상이면 직접 push/local merge/rebase로
       통합하지 않는다. 정책과 권한자를 확인할 수 없으면 blocked로 보고한다.
       다른 요청이 이미 완료했는지 먼저 확인한다. 요청 재전송으로 다시 merge하지 않는다.
-    done_when: 현재 ref와 정책, 대상 및 실제 수행할 작업이 기록되었다
+      로컬과 원격이 양쪽으로 갈라졌으면(양쪽 ahead, `git rev-list --left-right --count`)
+      통합 방식을 rebase(`--rebase-merges`)와 merge commit 중에서 판정하고 계획에
+      `integration: rebase|merge`와 근거를 기록한다. 근거는 세 가지를 모두 확인한다:
+      (1) 로컬 커밋 SHA를 보존해야 하는가(다른 ref·이슈·큐가 그 SHA를 가리키면 merge),
+      (2) 착지 큐에 고정된 SHA가 있는가(있으면 rewrite하지 않으므로 merge),
+      (3) local-sync 정책이 선형 이력을 요구하는가(요구하면 rebase). 근거가 서로 충돌하면
+      보존이 우선이며 merge commit을 고른다. 한쪽만 ahead이면 이 판정은 필요 없다.
+    done_when: 현재 ref와 정책, 대상 및 실제 수행할 작업이 기록되었다(양쪽 ahead이면 통합 방식과 근거 포함)
     effects: [fs.read]
   prepare:
     title: 통합 후보 준비
     prompt: |
       자신에게 배정된 격리 worktree에서 후보를 준비한다. 다른 소유자의 ref는
-      건드리지 않는다. rebase는 --rebase-merges를 사용하며 old/new 대응표를 남긴다.
+      건드리지 않는다. inspect가 기록한 통합 방식을 따른다: rebase이면 --rebase-merges를
+      사용하며 old/new 대응표를 남기고, merge이면 `git merge`로 통합 커밋을 만든다.
       충돌 또는 실패가 있으면 children 확인 후 별도 worktree의 worker 세션을
-      workflow reposync-conflict-v2와 cflow_inputs assignment/execution_error로
-      spawn한다. 생성과 동시에 그 workflow를 실행한다. 반환된 후보를 직접 검증한다.
+      workflow reposync-conflict-v2와 cflow_inputs assignment/execution_error/integration으로
+      spawn한다(integration은 inspect가 기록한 값이다). 생성과 동시에 그 workflow를
+      실행한다. 반환된 후보를 직접 검증한다.
       그 spawn은 사람의 승인을 기다리고 응답은 `pending`과 요청 id다(claunch-iw5i8.16).
       세션 이름은 `[claunch spawn-request <id>]` 블록에서 읽고, 거절이면 충돌을 직접
       해결하거나 사용자에게 올린다.
+      충돌 해결 후보가 생기면 보고할 plan을 그 후보 SHA 기준으로 다시 쓴다(old/new/head
+      SHA, tree, 통합 방식). execute 승인 카드의 후보와 tip은 이 plan(`prepared`)에서
+      나오므로, 후보가 바뀌었는데 plan을 갱신하지 않으면 카드가 옛 SHA를 보여 준다.
       PR-only 대상에는 검증된 후보로 PR을 준비하고 지정 authority에게 통합을 요청한다.
       관리자 또는 복구 세션 생성은 merge/push 승인에 해당하지 않는다.
     done_when: 후보 SHA·테스트 tree·정확한 게시 대상과 독립 검토 자료가 준비되었다
@@ -38,8 +50,15 @@ nodes:
     effects: [fs.write, git.commit, session.spawn]
   checks:
     title: 후보 검사
-    prompt: 관련 테스트를 실행하고 현재 tree의 결과, 미실행 검사를 기록한다.
+    prompt: |
+      관련 테스트를 실행하고 현재 tree의 결과, 미실행 검사를 기록한다.
+      verify가 「배정 스냅샷의 로컬 SHA와 현재 로컬 SHA가 다르다」는 이유로 막히면
+      테스트 실패가 아니다. 후보를 고쳐 다시 시도하지 않고 replan으로 보고하여
+      inspect로 돌아가 현재 ref로 계획을 새로 세운다.
     verify: [claunch, reposync, verify, candidate]
+    returns:
+      ok: {}
+      replan: {reason: str}
     effects: [test.run]
   review:
     title: 통합 후보 독립 검토
@@ -63,7 +82,9 @@ nodes:
         이 작업의 승인이 아니다. PR-only 대상의 직접 push는 승인할 수 없다.
       otherwise: human
     prompt: |
-      실행 직전 `git fetch <remote>`를 다시 실행하고 ref와 정책·승인 범위를 재확인한다. 하나라도 달라지면 쓰지 않고
+      실행 직전 `git fetch <remote>`를 다시 실행하고 ref와 정책·승인 범위를 재확인한다.
+      승인 카드의 후보와 tip이 prepare가 마지막으로 확정한 후보 SHA와 같은지도 확인한다.
+      하나라도 달라지면 쓰지 않고
       fail로 보고하여 새 계획/검토/승인을 요청한다. PR-only는 지정 authority가
       provider PR merge를 수행한다. head 검사만으로 base race가 해결됐다고
       주장하지 않는다. provider 보장을 확인하지 못하면 자동 merge를 보류한다.
@@ -71,6 +92,13 @@ nodes:
       승인이 reposync gate를 우회하지 않는다. 로컬 원본 ref 갱신은 소유자와
       조정하고 old SHA를 확인한 CAS 또는 깨끗한 checkout의 reset --keep만 사용한다.
       reset --hard/무조건 force push는 금지한다. 응답 유실 시 원격을 조회한다.
+      push 승인 카드는 `repo_sync`의 첫 호출이 돌려준 요청 id(`waiting_approval`)로
+      식별한다. 그 id와 deadline을 부모에게 보내는 mesh 보고에 포함한다. 부모는 이 id로
+      카드를 찾는다: `repo_sync` 도구에는 요청 목록을 보는 action이 없고, 요청은 데몬
+      메모리에만 있어 deadline(1800초) 뒤에는 expired가 되며 데몬이 재기동되면
+      사라진다(daemon/reposync_gate.py). 리더가 카드를 찾지 못한 사례(claunch-2ekz1)의
+      원인은 미상이다. 카드가 보이지 않는다는 회신을 받으면 요청 id·제출 시각·그 사이
+      데몬 재기동 여부를 이슈 코멘트에 기록하고, 만료·소실이면 새 요청을 올린다.
     done_when: 실제 원격 결과 SHA 또는 결과 미확인/거절 근거가 기록되었다
     effects: [git.merge, git.push]
   receipt:
@@ -85,9 +113,18 @@ nodes:
     effects: [fs.read, board.write, mesh.send]
 body:
   seq:
-    - inspect
-    - {seq: [prepare], bind: prepared}
-    - checks
+    - id: plan-loop
+      loop:
+        while: "true"
+        max: 3
+        do:
+          seq:
+            - inspect
+            - {seq: [prepare], bind: prepared}
+            - seq: [checks]
+              on:
+                replan: {continue: null}   # 스냅샷 불일치: inspect부터 현재 ref로 다시 계획한다
+            - {break: null}
     - review
     - execute
     - receipt
