@@ -7013,8 +7013,11 @@ function paintTermTimer() {
     return;
   }
   const hold = termTimerHold();
-  box.className = `term-btn timer-chip ${line.state}`;
-  if (hold) box.classList.toggle("timer-paused", !hold.on);
+  // One write of the whole class: setting it without `timer-paused` and
+  // toggling that back on was two class mutations a second on a paused
+  // hold, which the toolbar answers with a full re-fit (claunch-i3es6).
+  box.className = `term-btn timer-chip ${line.state}` +
+    (hold && !hold.on ? " timer-paused" : "");
   box.title = termTimerTitle(read.pick, line, hold);
   // The two spans are kept and only their text moves: this repaints every
   // second, and rebuilding them each time was two mutations a second for

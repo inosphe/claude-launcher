@@ -36,6 +36,9 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       window.clicks = 0;
       document.getElementById("term-splitbtn").addEventListener("click", () => window.clicks++);
     });
+    // The page loads quietdom.js before every other script (index.html); its
+    // same-value guards are part of what the toolbar sees on each repaint.
+    await page.addScriptTag({ path: path.join(root, "quietdom.js") });
     await page.addScriptTag({ path: path.join(root, "toolbar.js") });
     async function check(width) {
       // Desktop columns can be narrow even while the viewport stays wide;
@@ -100,7 +103,12 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     const refits = async (text) => {
       await page.evaluate(text => {
         window.fits = 0;
-        document.querySelector("#term-timer").textContent = text;
+        // As paintTermTimer repaints each second: the class and the title
+        // are written again with what they already read, then the text.
+        const box = document.querySelector("#term-timer");
+        box.className = box.className;
+        box.title = box.title;
+        box.textContent = text;
       }, text);
       await settle();
       return page.evaluate(() => window.fits);
