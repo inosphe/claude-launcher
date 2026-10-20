@@ -1009,31 +1009,37 @@ globalThis.ThreadsPane = (() => {
     }
 
     // Closed questions stay folded behind a toggle until it is pressed
-    // (claunch-cedjc); the box scrolls inside a capped height in the stylesheet.
+    // (claunch-cedjc); the box scrolls inside a capped height in the
+    // stylesheet. The toggle redraws only this box, so the conversation
+    // keeps its scroll position.
     let links = null;
     if ((t.links || []).length) {
       links = node("div", "th-links");
-      const {shown, folded} = splitLinks(t.links, unfolded.has(t.id));
-      for (const link of shown) {
-        const chip = node("button", `th-link-chip qa-st-${link.status}`, linkLabel(link));
-        chip.type = "button";
-        chip.disabled = link.status === "deleted" || !onQuestion;
-        chip.title = link.status === "deleted" ? "삭제된 질문" : "QA 카드로 이동";
-        chip.addEventListener("click", () => onQuestion && onQuestion(link.id));
-        links.append(chip);
-      }
-      if (folded) {
+      const drawLinks = () => {
         const open = unfolded.has(t.id);
-        const more = node("button", "th-links-fold", open ? `닫힌 질문 ${folded}개 접기 ▴` : `닫힌 질문 ${folded}개 펼치기 ▾`);
-        more.type = "button";
-        more.setAttribute("aria-expanded", open ? "true" : "false");
-        more.addEventListener("click", () => {
-          if (open) unfolded.delete(t.id);
-          else unfolded.add(t.id);
-          render();
+        const {shown, folded} = splitLinks(t.links, open);
+        const chips = shown.map((link) => {
+          const chip = node("button", `th-link-chip qa-st-${link.status}`, linkLabel(link));
+          chip.type = "button";
+          chip.disabled = link.status === "deleted" || !onQuestion;
+          chip.title = link.status === "deleted" ? "삭제된 질문" : "QA 카드로 이동";
+          chip.addEventListener("click", () => onQuestion && onQuestion(link.id));
+          return chip;
         });
-        links.append(more);
-      }
+        if (folded) {
+          const more = node("button", "th-links-fold", open ? `닫힌 질문 ${folded}개 접기 ▴` : `닫힌 질문 ${folded}개 펼치기 ▾`);
+          more.type = "button";
+          more.setAttribute("aria-expanded", open ? "true" : "false");
+          more.addEventListener("click", () => {
+            if (open) unfolded.delete(t.id);
+            else unfolded.add(t.id);
+            drawLinks();
+          });
+          chips.push(more);
+        }
+        links.replaceChildren(...chips);
+      };
+      drawLinks();
     }
 
     const msgs = node("div", "th-messages");
@@ -1124,7 +1130,7 @@ globalThis.ThreadsPane = (() => {
                                             inviting === convo.id, inflight.has(INVITE), convo.messages.length,
                                             inflight.has(convo.id), pending.get(convo.id) || null,
                                             (attached.get(convo.id) || []).length,
-                                            editing, inflight.has(RENAME), unfolded.has(convo.id)] : null);
+                                            editing, inflight.has(RENAME)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
     if (typingIn(main.querySelector(".th-guests"))) return;
     const oldTitleBox = main.querySelector(".th-rename-input");
