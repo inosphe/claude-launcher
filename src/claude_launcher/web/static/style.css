@@ -7920,7 +7920,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-title-input, .th-text { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
   background: #0d1117; color: inherit; border: 1px solid #30363d; border-radius: 4px; padding: 5px 6px; }
 .th-text { resize: vertical; }
-.th-newform .term-btn { align-self: flex-end; }
+/* The form's buttons share one row (claunch-o1wg6): the two attach buttons
+   on the left, 시작 pushed to the right end. */
+.th-newform-foot { display: flex; align-items: center; gap: 6px; }
+.th-newform-foot .th-send { margin-left: auto; }
 .th-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .th-item { padding: 6px 8px 6px 9px; border-radius: 6px; cursor: pointer; border-left: 3px solid transparent;
   transition: background 0.12s; }

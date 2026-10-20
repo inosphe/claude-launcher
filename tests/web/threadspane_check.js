@@ -467,6 +467,18 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   failCreate = false;
   calls.length = 0;
   const form = host.querySelector(".th-newform");
+  // its three buttons are one row, two on the left and 시작 on the right
+  // (claunch-o1wg6)
+  const row = form.querySelector(".th-newform-foot");
+  assert.ok(row, "the form has a button row");
+  assert.deepEqual(row.querySelectorAll(".th-pick").map((b) => b.textContent), ["🖼", "📎"],
+    "the two attach buttons lead the row, images first");
+  assert.equal(row.querySelectorAll(".th-send").length, 1, "시작 closes the row");
+  assert.equal(form.children[form.children.length - 1], row, "the row is the form's last block");
+  assert.ok(!form.children.some((c) => c.classList.contains("term-btn")),
+            "no button is a loose block of the column");
+  assert.match(css, /\.th-newform-foot \{[^}]*display: flex/, "the row lays its buttons out inline");
+  assert.match(css, /\.th-newform-foot \.th-send \{[^}]*margin-left: auto/, "시작 is pushed right");
   form.querySelector(".th-title-input").value = "Deploy";
   form.querySelector(".th-text").value = "when?";
   const startBtn = form.querySelector(".th-send");
