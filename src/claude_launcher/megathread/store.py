@@ -312,7 +312,13 @@ class MegaThreadStore:
             return out
 
     def drop_session(self, session: str) -> int:
-        """Exit hook: a session that ended leaves every cluster."""
+        """Remove every seat a session holds.
+
+        Not an exit hook: the api keeps a seat when its session ends, because
+        a resumed session with the same name and thread should find its place
+        again. This is the explicit cleanup for when the seat itself is no
+        longer wanted.
+        """
         with self._write() as db:
             return db.execute("DELETE FROM members WHERE session = ?", (session,)).rowcount
 

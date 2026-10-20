@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Optional
 
 from aiohttp import web
@@ -207,6 +208,12 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                 value = float(body[field])
             except (TypeError, ValueError):
                 return web.json_response({"error": f"'{field}' must be a number"}, status=400)
+            # NaN compares false against every bound, so it would slip past the
+            # span check and then sit in the config: a budget that is NaN
+            # raises on every routing, and a NaN threshold would make no
+            # member clear it.
+            if not math.isfinite(value):
+                return web.json_response({"error": f"'{field}' must be a finite number"}, status=400)
             if value < low or (high is not None and value > high):
                 span = f"{low:g}..{high:g}" if high is not None else f">= {low:g}"
                 return web.json_response({"error": f"'{field}' must be {span}"}, status=400)
@@ -225,6 +232,37 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
         return await h_settings(request)
 
     # -- routing -----------------------------------------------------------
+    #: One lock per cluster, for the budget check -> Jev calls -> log window.
+    locks: dict = {}
+
+    def cluster_lock(mid: str) -> asyncio.Lock:
+        """One routing at a time per cluster.
+
+        The budget is read, the calls are made, and the spend is written in
+        that order. Two routings of the same cluster at once would each read
+        the same usage and each pass a ceiling that only one of them fits
+        under. The lock is per cluster, so a ten-member routing does not hold
+        up a one-member routing somewhere else. The window also covers
+        delivery, because the log row is what the next routing checks.
+        """
+        lock = locks.get(mid)
+        if lock is None:
+            lock = locks[mid] = asyncio.Lock()
+        return lock
+
+    async def ledger(mid: str, text: str, **fields):
+        """Write one routing to the log; return ``(row, error)``.
+
+        A failure here must not turn a message the user already received into
+        a 500: the answer still says what was delivered, and ``ledger_error``
+        says the accounting for it did not land.
+        """
+        try:
+            return await asyncio.to_thread(megas.record_route, mid, text, **fields), None
+        except Exception as exc:  # noqa: BLE001 -- the delivery already happened
+            log.exception("megathread: could not log the routing of %s", mid)
+            return None, str(exc)
+
     def deliver(chosen: list[dict], text: str) -> list[dict]:
         """Post the message into each chosen thread; nothing else is written."""
         post = app.get("threads_post_user")
@@ -257,6 +295,10 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
             cluster = await asyncio.to_thread(megas.get, mid)
         except mega_store.MegaError as exc:
             return fail(exc)
+        if cluster["status"] != "open":
+            return web.json_response(
+                {"error": f"mega thread {mid} is {cluster['status']}; only an open one routes"},
+                status=409)
         members = cluster["members"]
         if not members:
             return web.json_response({"error": "this mega thread has no members"}, status=400)
@@ -271,70 +313,81 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
             if not isinstance(choose, list) or not choose:
                 return web.json_response({"error": "'choose' is a list of thread ids"}, status=400)
             by_thread = {m["thread"]: m for m in members}
-            unknown = [str(t) for t in choose if str(t) not in by_thread]
+            # A repeated id is the same thread, and posting twice would put the
+            # message in it twice.
+            picked_ids: list[str] = []
+            for entry in choose:
+                tid = str(entry)
+                if tid not in picked_ids:
+                    picked_ids.append(tid)
+            unknown = [tid for tid in picked_ids if tid not in by_thread]
             if unknown:
                 return web.json_response(
                     {"error": f"not members of {mid}: {', '.join(unknown)}"}, status=400)
-            picked = [by_thread[str(t)] for t in choose]
+            picked = [by_thread[tid] for tid in picked_ids]
             sent = await asyncio.to_thread(deliver, picked, text)
-            row = await asyncio.to_thread(
-                megas.record_route, mid, text, verdict="manual", threshold=pol["threshold"],
-                candidates=[], chosen=[m["thread"] for m in picked], tokens=0,
+            row, ledger_error = await ledger(
+                mid, text, verdict="manual", threshold=pol["threshold"],
+                candidates=[], chosen=picked_ids, tokens=0,
                 model=pol["model"], delivered=any(s.get("delivered") for s in sent))
             return web.json_response({
                 "verdict": "manual", "delivered": sent, "route": row,
+                "ledger_error": ledger_error,
                 "budget_used_tokens": await asyncio.to_thread(megas.usage_tokens),
             })
 
-        # Budget: refuse before spending, not after. The estimate is rough on
-        # purpose (a state is assembled per member), and over-counting only
-        # means the ceiling bites slightly early.
-        if pol["budget_tokens"]:
-            used = await asyncio.to_thread(megas.usage_tokens)
-            estimate = len(members) * (pol["max_chars"] // route_mod.CHARS_PER_TOKEN + 200) \
-                + len(text) // route_mod.CHARS_PER_TOKEN
-            if used + estimate > pol["budget_tokens"]:
-                exc = route_mod.BudgetExceeded(used, pol["budget_tokens"], estimate)
-                return web.json_response(
-                    {"error": str(exc), "used_tokens": used, "limit_tokens": pol["budget_tokens"],
-                     "estimated_tokens": estimate}, status=429)
+        async with cluster_lock(mid):
+            # Budget: refuse before spending, not after. The estimate is rough
+            # on purpose (a state is assembled per member), and over-counting
+            # only means the ceiling bites slightly early.
+            if pol["budget_tokens"]:
+                used = await asyncio.to_thread(megas.usage_tokens)
+                estimate = len(members) * (pol["max_chars"] // route_mod.CHARS_PER_TOKEN + 200) \
+                    + len(text) // route_mod.CHARS_PER_TOKEN
+                if used + estimate > pol["budget_tokens"]:
+                    exc = route_mod.BudgetExceeded(used, pol["budget_tokens"], estimate)
+                    return web.json_response(
+                        {"error": str(exc), "used_tokens": used,
+                         "limit_tokens": pol["budget_tokens"],
+                         "estimated_tokens": estimate}, status=429)
 
-        judgment = await route_mod.evaluate(manager, threads, members, text, cfg=cfg)
-        delivered = []
-        if judgment["verdict"] == "auto":
-            delivered = await asyncio.to_thread(deliver, judgment["options"], text)
-        row = await asyncio.to_thread(
-            megas.record_route, mid, text,
-            verdict=judgment["verdict"], threshold=judgment["threshold"],
-            candidates=[{k: r.get(k) for k in ("session", "thread", "p_mine", "p_not_mine",
-                                               "logit", "choice", "confidence", "error")}
-                        for r in judgment["candidates"]],
-            chosen=[m["thread"] for m in judgment["options"]] if judgment["verdict"] == "auto" else [],
-            tokens=judgment.get("tokens") or 0, model=judgment.get("model") or pol["model"],
-            delivered=bool(delivered),
-            error="; ".join(f"{e['thread']}: {e['error']}" for e in judgment.get("errors") or [])[:500])
-        used = await asyncio.to_thread(megas.usage_tokens)
+            judgment = await route_mod.evaluate(manager, threads, members, text, cfg=cfg)
+            delivered = []
+            if judgment["verdict"] == "auto":
+                delivered = await asyncio.to_thread(deliver, judgment["options"], text)
+            row, ledger_error = await ledger(
+                mid, text,
+                verdict=judgment["verdict"], threshold=judgment["threshold"],
+                candidates=[{k: r.get(k) for k in ("session", "thread", "p_mine", "p_not_mine",
+                                                   "logit", "choice", "confidence", "error")}
+                            for r in judgment["candidates"]],
+                chosen=[m["thread"] for m in judgment["options"]]
+                if judgment["verdict"] == "auto" else [],
+                tokens=judgment.get("tokens") or 0, model=judgment.get("model") or pol["model"],
+                # The list itself only says a delivery was attempted. The flag
+                # is whether any thread actually accepted the message; an
+                # exited session leaves a row but types nothing.
+                delivered=any(d.get("delivered") for d in delivered),
+                error="; ".join(f"{e['thread']}: {e['error']}"
+                                for e in judgment.get("errors") or [])[:500])
+            used = await asyncio.to_thread(megas.usage_tokens)
         return web.json_response({
             **judgment,
             "delivered": delivered,
             "route": row,
+            "ledger_error": ledger_error,
             "budget_used_tokens": used,
             "budget_remaining_tokens": (max(0, pol["budget_tokens"] - used)
                                         if pol["budget_tokens"] else None),
         })
 
     # -- wiring ------------------------------------------------------------
-    def session_ended(session) -> None:
-        try:
-            megas.drop_session(session.sdef.name)
-        except Exception:  # noqa: BLE001 -- never break the exit fan-out
-            log.exception("megathread: could not drop the ended session %s",
-                          getattr(session, "sdef", session))
-
-    hooks = getattr(manager, "exit_hooks", None)
-    if hooks is not None:
-        hooks.append(session_ended)
-
+    # No exit hook: a session that ends keeps its seat. Membership is the
+    # user's arrangement, not a liveness fact, and a resumed session with the
+    # same name and thread would otherwise find itself outside the cluster it
+    # was put in. A member whose session is down shows as ``gone`` instead
+    # (``member_view``), and delivery to its thread still goes through the
+    # threads path.
     r = app.router
     r.add_get("/api/megathreads", h_list)
     r.add_post("/api/megathreads", h_create)

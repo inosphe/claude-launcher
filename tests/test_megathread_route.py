@@ -3,12 +3,17 @@
 T1 scores: log-odds from the distribution; a response without it falls back
    to choice + confidence; zero and one are clamped so the log is finite
 T2 judge: one member over the threshold routes alone; two or more are offered
-   to the user; none offers the best-ranked; every call failing is "error"
+   to the user; none offers the best-ranked; every call failing is "error";
+   one hit beside a failed call is offered rather than taken; the threshold
+   comparison is inclusive
 T3 the state carries the session record, its briefing and the thread tail;
    the thread keeps its last messages in order
 T4 evaluate asks once per member with the feature's model and sums tokens
-T5 a member whose call fails does not sink the others
-T6 policy reads the odds-ratio threshold and the budget
+T5 a member whose call fails does not sink the others, and its call is still
+   charged to the routing
+T6 policy reads the odds-ratio threshold and the budget, and falls back on a
+   value that is not a finite number
+T7 a member whose thread is gone is that member's error, not the routing's
 """
 
 import asyncio
@@ -58,6 +63,20 @@ def test_t2_judge_branches():
     dead = P.judge([{"thread": "a", "error": "jev: no key"},
                     {"thread": "b", "error": "jev: timeout"}], threshold)
     assert dead["verdict"] == "error" and len(dead["errors"]) == 2
+
+    # One hit beside a failed call is offered, not taken: the member that was
+    # not scored may have been the intended one, and delivering quietly would
+    # leave the user unaware of where the message went.
+    partial = P.judge([{"thread": "a", "logit": 3.0},
+                       {"thread": "b", "error": "jev: timeout"}], threshold)
+    assert partial["verdict"] == "choose"
+    assert [r["thread"] for r in partial["options"]] == ["a"]
+    assert [e["thread"] for e in partial["errors"]] == ["b"]
+
+    # The comparison is ">=": a member exactly on the threshold takes it.
+    edge = P.judge([{"thread": "a", "logit": threshold},
+                    {"thread": "b", "logit": threshold - 1e-9}], threshold)
+    assert edge["verdict"] == "auto" and edge["options"][0]["thread"] == "a"
 
 
 class FakeSession:
@@ -131,7 +150,22 @@ def test_t4_evaluate_asks_once_per_member():
     assert all(model == "jev-test" for _, model, _ in seen)
 
 
-def test_t5_one_failure_does_not_sink_the_rest():
+class StoreStub:
+    """The thread store as ``build_state`` uses it: title and tail only."""
+
+    def __init__(self, missing=()):
+        self.missing = set(missing)
+
+    def get(self, tid):
+        if tid in self.missing:
+            raise KeyError(tid)
+        return {"title": tid, "status": "open"}
+
+    def tail(self, tid, limit=12):
+        return []
+
+
+def test_t5_one_failure_does_not_sink_the_rest_and_is_still_charged():
     async def ask(cfg, state, questions, model):
         if state["session"]["name"] == "s1":
             raise jev.JevError("HTTP 500")
@@ -140,18 +174,37 @@ def test_t5_one_failure_does_not_sink_the_rest():
                                             "confidence": 0.95,
                                             "probabilities": {"mine": 0.95, "not_mine": 0.05}}}}
 
-    class StoreStub:
-        def get(self, tid):
-            return {"title": tid, "status": "open"}
-
-        def tail(self, tid, limit=12):
-            return []
-
     members = [{"session": "s1", "thread": "th-a"}, {"session": "s2", "thread": "th-b"}]
     out = asyncio.run(P.evaluate(FakeManager([FakeSession("s1"), FakeSession("s2")]),
                                  StoreStub(), members, "where should this go?", cfg={}, ask=ask))
-    assert out["verdict"] == "auto" and out["options"][0]["session"] == "s2"
+    # s2 cleared the threshold, but s1's call failed: the hit is offered, and
+    # nothing is delivered while the user has not answered.
+    assert out["verdict"] == "choose"
+    assert [r["session"] for r in out["options"]] == ["s2"]
     assert out["errors"] and out["errors"][0]["thread"] == "th-a"
+    # The failed call was still made and billed; it carries the estimate so
+    # the budget window sees the whole spend.
+    assert out["tokens"] > 10
+
+
+def test_t7_a_missing_thread_is_that_members_error_only():
+    async def ask(cfg, state, questions, model):
+        return {"model": model, "usage": {"input_tokens": 7},
+                "answers": {P.QUESTION_ID: {"type": "choice", "choice": "mine",
+                                            "confidence": 0.95,
+                                            "probabilities": {"mine": 0.95, "not_mine": 0.05}}}}
+
+    members = [{"session": "s1", "thread": "th-gone"}, {"session": "s2", "thread": "th-b"}]
+    # A thread deleted under the cluster used to escape the member's try and
+    # fail the whole request after the other members' calls were paid for.
+    out = asyncio.run(P.evaluate(FakeManager([FakeSession("s1"), FakeSession("s2")]),
+                                 StoreStub(missing={"th-gone"}), members,
+                                 "where should this go?", cfg={}, ask=ask))
+    assert out["verdict"] == "choose" and [r["session"] for r in out["options"]] == ["s2"]
+    assert out["errors"][0]["thread"] == "th-gone"
+    assert "KeyError" in out["errors"][0]["error"]
+    # No state, no call, no spend for that member; the other call's 7 stand.
+    assert out["tokens"] == 7
 
 
 def test_t6_policy_reads_the_threshold_and_budget():
@@ -165,3 +218,11 @@ def test_t6_policy_reads_the_threshold_and_budget():
     assert default["threshold"] == pytest.approx(math.log(9.0))
     assert default["budget_tokens"] == 10_000_000
     assert default["model"] == jev.DEFAULT_MODEL
+
+    # A value that is not finite cannot define a threshold or a ceiling: ln of
+    # NaN is NaN and every comparison against it is false; int(inf) raises.
+    broken = P.policy({"megathread_threshold_ratio": float("nan"),
+                       "megathread_jev_budget_tokens": float("inf"),
+                       "megathread_max_chars": float("nan")})
+    assert broken["threshold"] == pytest.approx(math.log(9.0))
+    assert broken["budget_tokens"] == 10_000_000 and broken["max_chars"] == 12000

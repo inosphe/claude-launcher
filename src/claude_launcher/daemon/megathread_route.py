@@ -272,9 +272,13 @@ def scores(answer: Dict[str, Any]) -> Dict[str, Any]:
 def judge(results: List[Dict[str, Any]], threshold: float, *, top_n: int = TOP_N) -> Dict[str, Any]:
     """The verdict over every member's score.
 
-    ``auto``  exactly one member cleared the threshold -- that member.
-    ``choose`` two or more did -- the user picks among them (several may be
-              picked at once).
+    ``auto``  exactly one member cleared the threshold and every call answered
+              -- that member.
+    ``choose`` one cleared it while some call failed, or two or more did -- the
+              user picks among the offered members (several may be picked at
+              once). A failed call keeps the answer away from ``auto``: the
+              member that could not be scored may have been the intended one,
+              and delivering behind the user's back would hide that.
     ``none``  nobody cleared it -- the best ``top_n`` are offered, so the user
               still has a way to route without typing into a terminal.
     ``error`` every call failed -- nothing can be routed or offered.
@@ -286,9 +290,9 @@ def judge(results: List[Dict[str, Any]], threshold: float, *, top_n: int = TOP_N
                 "errors": [{"thread": r["thread"], "error": r.get("error")} for r in failed]}
     ranked = sorted(scored, key=lambda r: r["logit"], reverse=True)
     hits = [r for r in ranked if r["logit"] >= threshold]
-    if len(hits) == 1:
+    if len(hits) == 1 and not failed:
         verdict, options = "auto", hits
-    elif len(hits) > 1:
+    elif hits:
         verdict, options = "choose", hits
     else:
         verdict, options = "none", ranked[:top_n]
@@ -308,6 +312,11 @@ def ratio_of(cfg: Dict[str, Any]) -> float:
         ratio = float(cfg.get("megathread_threshold_ratio"))
     except (TypeError, ValueError):
         ratio = 9.0
+    # A config file can hold NaN (written by an older build, or by hand); the
+    # default is a working router, and ln(NaN) would make every comparison
+    # false instead of raising anywhere an operator would see it.
+    if not math.isfinite(ratio):
+        ratio = 9.0
     return max(1.000001, ratio)
 
 
@@ -319,9 +328,10 @@ def threshold_of(cfg: Dict[str, Any]) -> float:
 def policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
     def num(key: str, default: float) -> float:
         try:
-            return float(cfg.get(key))
+            value = float(cfg.get(key))
         except (TypeError, ValueError):
             return default
+        return value if math.isfinite(value) else default
 
     return {
         "threshold": threshold_of(cfg),
@@ -356,16 +366,28 @@ async def evaluate(
     semaphore = asyncio.Semaphore(pol["concurrency"])
 
     async def one(member: Dict[str, Any]) -> Dict[str, Any]:
-        state = build_state(manager, threads, member, text, max_chars=pol["max_chars"])
+        """One member's answer. Every failure is that member's own: a thread
+        that was deleted under the cluster, a call that failed, a response
+        without usage. Each row carries ``tokens`` -- the estimate when the
+        call had no usage or never answered -- so the routing's token sum is
+        the whole spend even when part of it failed, and the budget is not
+        charged for calls the log cannot see.
+        """
         qs = questions()
+        try:
+            state = build_state(manager, threads, member, text, max_chars=pol["max_chars"])
+            estimate = estimate_tokens(state, qs)
+        except Exception as exc:  # noqa: BLE001 -- no state, no call, no spend
+            log.info("megathread: member %s has no state: %s", member.get("thread"), exc)
+            return {**member, "error": f"{type(exc).__name__}: {exc}", "tokens": 0}
         async with semaphore:
             try:
                 response = await call(cfg, state, qs, model)
             except jev.JevError as exc:
-                return {**member, "error": f"jev: {exc}", "estimate": estimate_tokens(state, qs)}
+                return {**member, "error": f"jev: {exc}", "tokens": estimate}
             except Exception as exc:  # noqa: BLE001 -- one member must not sink the rest
                 log.info("megathread: member %s failed: %s", member.get("thread"), exc)
-                return {**member, "error": f"{type(exc).__name__}", "estimate": estimate_tokens(state, qs)}
+                return {**member, "error": f"{type(exc).__name__}", "tokens": estimate}
         answer = (response.get("answers") or {}).get(QUESTION_ID) or {}
         usage = response.get("usage") or {}
         try:
@@ -376,7 +398,7 @@ async def evaluate(
             **member,
             **scores(answer),
             "response_model": response.get("model") or model,
-            "tokens": tokens or estimate_tokens(state, qs),
+            "tokens": tokens or estimate,
         }
 
     results = await asyncio.gather(*(one(m) for m in members))
