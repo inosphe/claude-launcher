@@ -1455,6 +1455,10 @@ html[data-theme="light"] #term-tps-overlay {
    remembered per browser (app.js, RAIL_NAV_PIN_KEY). */
 @media (min-width: 821px) and (hover: hover) {
   #rail-nav-dock {
+    /* Must be at least the number of links in #rail-nav, or the rows past it
+       are unreachable while the dock is hovered (the pin shows them all).
+       21 links as of claunch-v5nhp.1; keep this ahead of that count. */
+    --rail-nav-rows: 24;
     --rail-nav-row: 46px; --rail-nav-pin: 22px;
     position: relative; height: calc(var(--rail-nav-row) + 1px);
     padding-right: var(--rail-nav-pin); background: #1b1e24;
@@ -1472,7 +1476,7 @@ html[data-theme="light"] #term-tps-overlay {
   /* :focus-visible and not :focus-within -- a click focuses the link too,
      and the nav would stay open after the pointer has left it. */
   #rail-nav-dock:hover #rail-nav, #rail-nav:has(a:focus-visible) {
-    max-height: calc(var(--rail-nav-row) * 17);
+    max-height: calc(var(--rail-nav-row) * var(--rail-nav-rows));
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.45);
   }
   #rail-nav-pin {
@@ -8409,3 +8413,71 @@ a.category-ref:hover { text-decoration: underline; }
 }
 .packs-sent li { padding: 2px 0; font-size: 12px; }
 .packs-actions .packs-drop { color: #ff8b84; }
+
+/* Mega threads (#/megathreads, megathread-page.js, claunch-v5nhp): one input
+   box over several (session, thread) pairs. Three columns — the clusters, the
+   round table with its composer, the routing log — and the ring is drawn by
+   the page as inline SVG, so every colour is here. */
+#megathreads-view { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+.mt-page { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 12px 16px; gap: 8px; }
+.mt-inner { flex: 1; display: grid; grid-template-columns: 240px minmax(0, 1fr) 300px; gap: 14px; min-height: 0; }
+.mt-list, .mt-log { overflow-y: auto; min-height: 0; padding-right: 8px; }
+.mt-list { border-right: 1px solid #2a2e36; }
+.mt-log { border-left: 1px solid #2a2e36; padding-left: 10px; }
+.mt-list h2, .mt-log h2 { font-size: 13px; margin: 4px 0 10px; color: #d8dbe0; font-weight: 600; }
+.mt-cluster { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%;
+  padding: 7px 9px; margin-bottom: 6px; background: #1b1e24; color: #c6cdd5;
+  border: 1px solid #2a2e36; border-radius: 6px; cursor: pointer; text-align: left; }
+.mt-cluster:hover { background: #22262d; }
+.mt-cluster.on { border-color: #58a6ff; color: #d8dbe0; }
+.mt-cluster-title { font-size: 13px; }
+.mt-cluster-sub { font-size: 11px; color: #8b949e; }
+.mt-new { margin-top: 12px; padding-top: 10px; border-top: 1px solid #2a2e36; display: flex; flex-direction: column; gap: 6px; }
+.mt-new input[type="text"] { background: #0d1117; color: #d8dbe0; border: 1px solid #30363d; border-radius: 5px; padding: 5px 7px; }
+.mt-new-sessions { max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #c6cdd5; }
+.mt-new-session-row { display: flex; align-items: center; gap: 5px; }
+.mt-stage { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; padding: 4px 6px; }
+.mt-head { display: flex; align-items: baseline; gap: 10px; }
+.mt-head h2 { font-size: 15px; margin: 0; color: #d8dbe0; }
+.mt-ring-wrap { flex: 1; min-height: 260px; display: flex; align-items: center; justify-content: center; }
+.mt-ring { width: 100%; max-height: 420px; }
+.mt-me { fill: #1f6feb; stroke: #58a6ff; stroke-width: 1.5; }
+.mt-me-label { fill: #f0f6fc; font-size: 13px; font-weight: 600; }
+.mt-edge { stroke: #30363d; opacity: 0.65; }
+.mt-edge.hit { stroke: #3fb950; opacity: 0.95; }
+.mt-edge.warm { stroke: #d29922; }
+.mt-edge.cold { stroke: #30363d; opacity: 0.4; }
+.mt-node circle { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; cursor: pointer; }
+.mt-node.hit circle { stroke: #3fb950; fill: #12261a; }
+.mt-node.warm circle { stroke: #d29922; }
+.mt-node.gone { opacity: 0.45; }
+.mt-node-name { fill: #d8dbe0; font-size: 12px; pointer-events: none; }
+.mt-node-sub { fill: #8b949e; font-size: 10px; pointer-events: none; }
+.mt-node-score { fill: #c6cdd5; font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
+.mt-empty { fill: #8b949e; font-size: 12px; }
+.mt-options { border: 1px solid #30363d; border-radius: 8px; padding: 8px 10px; background: #161b22; }
+.mt-options h3 { font-size: 12px; margin: 0 0 6px; color: #d8dbe0; font-weight: 600; }
+.mt-option { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; color: #c6cdd5; cursor: pointer; }
+.mt-option-name { flex: 1; }
+.mt-option-score { color: #8b949e; font-variant-numeric: tabular-nums; }
+.mt-compose { display: flex; gap: 8px; align-items: stretch; }
+.mt-compose textarea { flex: 1; background: #0d1117; color: #d8dbe0; border: 1px solid #30363d;
+  border-radius: 6px; padding: 7px 9px; font: inherit; resize: vertical; min-height: 44px; }
+.mt-verdict { font-size: 12px; color: #c6cdd5; margin: 0; }
+.mt-notice { font-size: 12px; color: #3fb950; margin: 0; }
+.mt-log-row { border-bottom: 1px solid #21262d; padding: 6px 0; font-size: 11px; color: #8b949e; }
+.mt-log-at { color: #8b949e; }
+.mt-log-body { color: #d8dbe0; font-size: 12px; margin: 2px 0; word-break: break-word; }
+.mt-log-scores { color: #c6cdd5; font-variant-numeric: tabular-nums; }
+.mt-log-sent { color: #3fb950; }
+@media (max-width: 900px) {
+  .mt-inner { grid-template-columns: 1fr; grid-auto-rows: min-content; }
+  .mt-list, .mt-log { border: none; }
+}
+.mt-members { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mt-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px;
+  border: 1px solid #30363d; border-radius: 12px; background: #161b22; font-size: 11px; color: #c6cdd5; }
+.mt-chip-dead { color: #8b949e; }
+.mt-chip-x { background: none; border: none; color: #8b949e; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; }
+.mt-chip-x:hover { color: #ff7b72; }
+.mt-add-session { background: #0d1117; color: #c6cdd5; border: 1px solid #30363d; border-radius: 5px; font-size: 11px; padding: 2px 4px; }

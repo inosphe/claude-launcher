@@ -277,6 +277,7 @@
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
       <a href="#/chat" data-page="chat"><span>✉</span>Chat<span id="chat-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
+      <a href="#/megathreads" data-page="megathreads"><span>◍</span>Mega</a>
       <a href="#/flows" data-page="flows"><span>⇶</span>Flows</a>
       <a href="#/sims" data-page="sims"><span>◬</span>Sims</a>
       <a href="#/window" data-page="window"><span>▦</span>Window</a>
@@ -1496,6 +1497,9 @@
     <!-- System performance: CPU, memory and disk I/O history (sysperf-page.js). -->
     <div id="sysperf-view" class="hidden"></div>
     <div id="threads-view" class="hidden"></div>
+    <!-- One input box over several (session, thread) pairs; the daemon asks
+         Jev which one a message is for (megathread-page.js, claunch-v5nhp). -->
+    <div id="megathreads-view" class="hidden"></div>
     <!-- The board: every beads issue the fleet's repositories hold, each
          tagged with the sessions it belongs to. Data only — the writes stay
          with `claunch beads`, except the one the rail offers. -->
@@ -1583,6 +1587,7 @@
 <script src="static/qa-pane.js"></script>
 <script src="static/threads-pane.js"></script>
 <script src="static/threads-history.js"></script>
+<script src="static/megathread-page.js"></script>
 <script src="static/split-frame.js"></script>
 <script src="static/talk-pane.js"></script>
 <script src="static/glossary-composer.js"></script>

@@ -604,6 +604,7 @@ CHECKS = [
         "qapane_check.js",
         "threadspane_check.js",
         "threadshistory_check.js",
+        "megathread_check.js",
         "talkpane_check.js",
         "splitframe_check.js",
         "specpage_check.js",
@@ -627,6 +628,7 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "chart_browser.cjs",
+    "megathread_browser.cjs",
     "sessionprs_browser.cjs",
     "commandcopy_browser.cjs",
     "termcflow_browser.cjs",

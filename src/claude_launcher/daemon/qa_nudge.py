@@ -260,6 +260,14 @@ def settings_view() -> Dict[str, Any]:
     return {
         **policy(cfg),
         "jev_model": jev.model_of(cfg),
+        # Every feature that may pin a model of its own, resolved: an empty
+        # per-feature setting shows the global model it falls back to.
+        "jev_models": {feature: jev.model_for(cfg, feature) for feature in jev.FEATURES},
+        # The pin itself ("" when the feature follows jev_model), so the
+        # settings card can edit it without turning a fallback into a pin.
+        "jev_model_pins": {
+            feature: str(cfg.get("jev_model_" + feature) or "") for feature in jev.FEATURES
+        },
         "jev_base_url": str(cfg.get("jev_base_url") or jev.DEFAULT_BASE_URL),
         "jev_api_key_env": str(cfg.get("jev_api_key_env") or jev.DEFAULT_KEY_ENV),
         "key_set": bool(key),
@@ -476,7 +484,9 @@ class QaNudgeClock:
             return None
         state, questions = build_request(turn.text, pol["max_chars"], self.actions)
         try:
-            response = await jev.system_one(cfg, state, questions, key=api_key)
+            response = await jev.system_one(
+                cfg, state, questions, key=api_key, model=jev.model_for(cfg, "qa_nudge")
+            )
         except jev.JevError as exc:
             skip(f"jev_error: {exc}")
             return None
@@ -523,6 +533,9 @@ _TEXTS = {
     "jev_model": "jev_model",
     "jev_base_url": "jev_base_url",
     "jev_api_key_env": "jev_api_key_env",
+    # Per-feature pins (claunch-v5nhp): empty means "use jev_model".
+    "jev_model_qa_nudge": "jev_model_qa_nudge",
+    "jev_model_megathread": "jev_model_megathread",
 }
 
 

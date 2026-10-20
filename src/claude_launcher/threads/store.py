@@ -628,6 +628,25 @@ class ThreadStore:
             more = bool(rows) and len(rows) == limit and rows[-1]["seq"] < row["last_seq"]
             return {"thread": self._view(db, row), "messages": messages, "more": more}
 
+    def tail(self, tid: str, *, limit: int = 12) -> list[dict]:
+        """The thread's last ``limit`` messages, oldest first.
+
+        :meth:`read` pages from the start, which is what a reader working
+        through the conversation wants; a reader that has to judge what the
+        conversation is about now wants its end (claunch-v5nhp). No read
+        cursor moves: this is a look, not a read.
+        """
+        try:
+            limit = max(1, min(PAGE, int(limit or 12)))
+        except (TypeError, ValueError):
+            raise ThreadError("limit is an integer") from None
+        with self._connect() as db:
+            self._row(db, tid)
+            rows = db.execute(
+                "SELECT * FROM messages WHERE thread = ? ORDER BY seq DESC LIMIT ?", (tid, limit)
+            ).fetchall()
+        return [_message(r) for r in reversed(rows)]
+
     def list(self, session: str, *, closed: bool = True) -> dict:
         with self._connect() as db:
             sql = "SELECT * FROM threads WHERE session = ?"

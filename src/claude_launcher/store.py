@@ -490,8 +490,28 @@ DAEMON_DEFAULTS = {
     "qa_nudge_cooldown": 300.0,
     "qa_nudge_max_chars": 8000,
     "jev_model": "jev-latest",
+    # A feature may pin its own model (daemon/jev.model_for): an empty value
+    # falls back to jev_model. Mega threads pin jev-latest explicitly so a
+    # future global move does not drag routing along unmeasured
+    # (claunch-v5nhp).
+    "jev_model_qa_nudge": "",
+    "jev_model_megathread": "jev-latest",
     "jev_base_url": "https://api.typesafe.ai",
     "jev_api_key_env": "TYPESAFE_API_KEY",
+    # Mega threads (daemon/megathread_route.py, claunch-v5nhp): one Jev call
+    # per member per user message. The budget is a rolling spend ceiling in
+    # input tokens over the last 24 hours -- 10M tokens is about $0.42 at
+    # $0.042/MTok, roughly 330 routings among ten members a day, so normal
+    # use never reaches it and a runaway loop does. A routing whose projected
+    # cost would cross it is refused before any call is made.
+    # megathread_max_chars caps each member's state prompt.
+    # megathread_threshold_ratio: how many times likelier "mine" than
+    # "not_mine" must be for a member to take the message alone (9 = 90/10).
+    # The router compares ln(p_mine) - ln(p_not_mine) against ln(ratio).
+    "megathread_threshold_ratio": 9.0,
+    "megathread_jev_budget_tokens": 10_000_000,
+    "megathread_max_chars": 12_000,
+    "megathread_concurrency": 8,
     # The measurement window (daemon/window.py): how many test runs of each
     # class may hold the window at once. "sweep" (a full suite) is exclusive
     # against everything regardless of this number; "targeted" (a

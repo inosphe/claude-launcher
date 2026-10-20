@@ -118,6 +118,19 @@ def model_of(cfg: Dict[str, Any]) -> str:
     return str(cfg.get("jev_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
 
+#: The features that may pin a model of their own (claunch-v5nhp). Each one
+#: reads ``jev_model_<feature>`` and falls back to the global ``jev_model``,
+#: so an operator can move one caller to a new release before the alias does.
+FEATURES = ("qa_nudge", "megathread")
+
+
+def model_for(cfg: Dict[str, Any], feature: str) -> str:
+    """The model this feature asks, from ``jev_model_<feature>`` when set."""
+    key = "jev_model_" + str(feature or "").strip()
+    value = str(cfg.get(key) or "").strip() if feature else ""
+    return value or model_of(cfg)
+
+
 async def _post(url: str, key: str, body: dict) -> Tuple[int, Any]:
     connector = (
         aiohttp.TCPConnector(ssl=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
@@ -136,16 +149,20 @@ async def _post(url: str, key: str, body: dict) -> Tuple[int, Any]:
 
 async def system_one(
     cfg: Dict[str, Any], state: Any, questions: Dict[str, dict], *,
-    key: Optional[str] = None,
+    key: Optional[str] = None, model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One evaluation. Returns the response document (``model``, ``answers``,
     ``usage``). Raises :class:`JevError` on no key, a non-200 after the
-    retries, a transport failure or a body without ``answers``."""
+    retries, a transport failure or a body without ``answers``.
+
+    ``model`` overrides the global ``jev_model`` for one caller; features
+    that may pin their own pass ``model_for(cfg, <feature>)``.
+    """
     if key is None:
         key, _ = resolve_key(cfg)
     if not key:
         raise JevError("no Jev API key (key file or environment variable)")
-    body = {"model": model_of(cfg), "state": state, "questions": questions}
+    body = {"model": model or model_of(cfg), "state": state, "questions": questions}
     url = endpoint(cfg)
     status = 0
     for attempt in range(RETRIES + 1):

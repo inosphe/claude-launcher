@@ -22036,6 +22036,7 @@ const VIEWS = {
   worktrees: "worktrees-view",
   commit: "commit-view",
   threads: "threads-view",
+  megathreads: "megathreads-view",
   glossary: "glossary-view",
   sims: "sims-view",
   spec: "spec-view",
@@ -22843,6 +22844,8 @@ function parseHash(h) {
       cwd: q.get("cwd") || "" };
   }
   if (parts[0] === "threads") return { page: "threads", view: parts[1] || "", id: parts[2] || "" };
+  // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
+  if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
   // #/category is the tree of the last workspace; #/category/<workspace> names one.
   if (parts[0] === "category") {
@@ -22916,6 +22919,7 @@ function route() {
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
   if (r.page !== "commit") globalThis.CommitPage?.stop();
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
+  if (r.page !== "megathreads") globalThis.MegaThreadPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
@@ -23004,6 +23008,7 @@ function route() {
     case "commit": showView("commit");
       globalThis.CommitPage.open(r.sha, { session: r.session, cwd: r.cwd }); break;
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
+    case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
@@ -24712,6 +24717,7 @@ function openSettings(section) {
   refreshLlmSettings();
   refreshSimDefaults();
   refreshQaNudge();
+  refreshMegaThread();
   refreshFaq();
   refreshPromptPresets();
   refreshPrompterSettings();
@@ -30146,6 +30152,7 @@ function renderWorkspaces() {
   view.appendChild(llmSettingsCard());
   view.appendChild(simDefaultsCard());
   view.appendChild(qaNudgeCard());
+  view.appendChild(megaThreadCard());
 
   view.appendChild(faqCard());
 
@@ -31090,6 +31097,7 @@ function qaNudgeCard() {
     jev_model: s.jev_model || "",
     jev_base_url: s.jev_base_url || "",
     jev_api_key_env: s.jev_api_key_env || "",
+    jev_model_qa_nudge: (s.jev_model_pins && s.jev_model_pins.qa_nudge) || "",
     api_key: "",
   });
   const form = el("form", "llm-settings-form");
@@ -31122,6 +31130,8 @@ function qaNudgeCard() {
   field("qa-nudge-max-chars", "Characters of the reply sent", "max_chars", "number",
     { min: "200", max: "30000", step: "100" });
   field("qa-nudge-model", "Jev model", "jev_model", "text", { placeholder: "jev-latest" });
+  field("qa-nudge-model-own", `Jev model for QA nudges (empty = the model above: ${(s.jev_models && s.jev_models.qa_nudge) || "jev-latest"})`,
+    "jev_model_qa_nudge", "text", { placeholder: "uses the model above" });
   field("qa-nudge-base-url", "Jev base URL", "jev_base_url", "text",
     { placeholder: "https://api.typesafe.ai" });
   field("qa-nudge-key-env", "API key environment variable", "jev_api_key_env", "text",
@@ -31155,6 +31165,7 @@ function qaNudgeCard() {
       jev_model: draft.jev_model,
       jev_base_url: draft.jev_base_url,
       jev_api_key_env: draft.jev_api_key_env,
+      jev_model_qa_nudge: draft.jev_model_qa_nudge,
     };
     // An empty box keeps the saved key; "Remove saved key" is the way to drop it.
     if (draft.api_key.trim()) body.api_key = draft.api_key.trim();
@@ -31162,6 +31173,127 @@ function qaNudgeCard() {
   });
   card.appendChild(form);
   if (qaNudgeNotice) card.appendChild(el("p", "wf-note", qaNudgeNotice));
+  return card;
+}
+
+/* Mega threads (General) — claunch-v5nhp. One input box that reaches several
+   session threads; Jev decides which (session, thread) a message is for. The
+   router's keys are megathread_* and the model it asks is
+   jev_model_megathread, read and written with GET/PUT
+   /api/megathreads/settings. The same response reports the rolling 24-hour
+   token spend the budget caps, so the card can show what is left. */
+let megaThreadSettings = null;
+let megaThreadDraft = null;
+let megaThreadError = "";
+let megaThreadNotice = "";
+let megaThreadBusy = false;
+
+async function refreshMegaThread() {
+  try {
+    const resp = await api("/api/megathreads/settings");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    megaThreadSettings = data.settings;
+    megaThreadError = "";
+  } catch (err) {
+    megaThreadError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveMegaThread(body, notice) {
+  megaThreadBusy = true;
+  megaThreadNotice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/megathreads/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    megaThreadSettings = data.settings;
+    megaThreadDraft = null;
+    megaThreadError = "";
+    megaThreadNotice = notice || "Saved. The router reads these on the next message.";
+  } catch (err) {
+    megaThreadError = String(err);
+  }
+  megaThreadBusy = false;
+  renderWorkspaces();
+}
+
+function megaThreadCard() {
+  const card = el("section", "ws-add mega-thread-settings");
+  card.appendChild(el("h3", null, "Mega threads (Jev)"));
+  card.appendChild(el("p", "wf-note",
+    "A mega thread is one input box over several (session, thread) pairs. For " +
+    "each message Jev is asked whether it is for that thread (mine / " +
+    "not_mine); a single member above the threshold takes it alone, two or " +
+    "more go to the user to pick. Each member costs one Jev call."));
+  if (megaThreadError) card.appendChild(el("p", "error", megaThreadError));
+  if (!megaThreadSettings) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const s = megaThreadSettings;
+  const draft = megaThreadDraft || (megaThreadDraft = {
+    model: s.model_pin || "",
+    budget_tokens: String(s.budget_tokens),
+    threshold_ratio: String(s.threshold_ratio),
+    max_chars: String(s.max_chars),
+    concurrency: String(s.concurrency),
+  });
+  const form = el("form", "llm-settings-form");
+  const field = (id, labelText, key, type, attrs) => {
+    const label = el("label", null, labelText);
+    const input = document.createElement("input");
+    input.id = id;
+    input.type = type;
+    for (const [k, v] of Object.entries(attrs || {})) input.setAttribute(k, v);
+    input.value = draft[key];
+    input.disabled = megaThreadBusy;
+    input.addEventListener("input", () => { draft[key] = input.value; });
+    label.appendChild(input);
+    form.appendChild(label);
+    return input;
+  };
+  field("mega-thread-model", "Jev model for mega threads", "model", "text",
+    { placeholder: "jev-latest" });
+  field("mega-thread-budget", "Budget: input tokens per rolling 24h (0 = no cap)",
+    "budget_tokens", "number", { min: "0", step: "100000" });
+  field("mega-thread-ratio", "A member takes the message alone when p(mine) is this many times p(not_mine)",
+    "threshold_ratio", "number", { min: "1", step: "0.5" });
+  field("mega-thread-maxchars", "Characters of one member's prompt", "max_chars", "number",
+    { min: "200", max: "60000", step: "1000" });
+  field("mega-thread-concurrency", "Jev calls at once", "concurrency", "number",
+    { min: "1", max: "32", step: "1" });
+  const used = s.budget_used_tokens || 0;
+  const left = s.budget_remaining_tokens;
+  form.appendChild(el("p", "wf-note",
+    `Used in the last 24h: ${used.toLocaleString()} tokens` +
+    (left === null || left === undefined ? " (no cap)" : `, ${left.toLocaleString()} left`)));
+  form.appendChild(el("p", "wf-note",
+    s.key_set
+      ? `Jev key: ${s.key_source === "file" ? "the saved key file" : s.key_source}.`
+      : "No Jev key: mega thread routing is refused until one is saved in the QA nudges card above."));
+  const save = el("button", "wf-btn", megaThreadBusy ? "Saving…" : "Save mega thread settings");
+  save.type = "submit";
+  save.disabled = megaThreadBusy;
+  form.appendChild(save);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveMegaThread({
+      model: draft.model.trim(),
+      budget_tokens: Number(draft.budget_tokens),
+      threshold_ratio: Number(draft.threshold_ratio),
+      max_chars: Number(draft.max_chars),
+      concurrency: Number(draft.concurrency),
+    });
+  });
+  card.appendChild(form);
+  if (megaThreadNotice) card.appendChild(el("p", "wf-note", megaThreadNotice));
   return card;
 }
 

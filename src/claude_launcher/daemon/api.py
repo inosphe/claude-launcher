@@ -714,6 +714,12 @@ def build_app(
     # conversations beside the terminal, typed into the session by id.
     from . import threads_api
     threads_api.install(app)
+    # Mega threads (daemon/megathread_api.py, claunch-v5nhp): one input box
+    # that reaches several session threads, with Jev deciding which of them a
+    # message is for. After threads_api: delivery posts a user message into
+    # the chosen thread through its path.
+    from . import megathread_api
+    megathread_api.install(app)
     # Notice sync (daemon/notice_sync.py, claunch-mfzlv): a card read or put
     # away in one browser goes down in the others on their next poll.
     from . import notice_sync
