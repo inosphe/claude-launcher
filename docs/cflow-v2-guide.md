@@ -335,6 +335,11 @@ nodes:
   엔진이 실행하고(0 = 충족), 없으면 모든 작업의 규칙 절에 실려 마지막 작업에서
   에이전트가 대조한다.
 - probe는 적힌 그대로 셸에서 실행된다. 값을 끼워 넣는 문법은 없다.
+- profile·harness·모델처럼 이 머신의 설정에서 고르는 값은 `string` 입력에
+  `options: {from: profiles|harnesses|models, of: <상위 profile 입력>}`을 단다(규격
+  2.6 「목록에서 고르는 입력」). 폼은 combobox를 그리고, 목록 밖의 값은 시작과 런
+  도중 변경에서 거절된다. 예: `reviewer_harness: {type: string, options: {from:
+  harnesses, of: reviewer_profile}}`.
 - PM이 자식을 spawn할 때: MCP `spawn`의 `cflow_inputs`에
   `{"goal": "...", "invariants": [{"text": "...", "probe": "..."}]}`처럼 준다.
   CLI는 `--input goal=... --input scope=src/a --input scope=src/b` 또는
