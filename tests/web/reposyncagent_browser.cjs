@@ -26,7 +26,10 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
         if (url.pathname.endsWith('/agent-preview')) {
           return route.fulfill({ json: { prompt: previewText(route.request().postDataJSON()), plan } });
         }
-        if (url.pathname.endsWith('/sync')) {
+        // Only the repo-sync delegate route: /api/notices/sync also ends in
+        // /sync and its body carries no agent_mode, so a bare suffix match
+        // put that request in `posts` ahead of the delegate one.
+        if (url.pathname.endsWith('/sync') && url.pathname.includes('/reposync/workspaces/')) {
           const body = route.request().postDataJSON();
           posts.push(body);
           return route.fulfill({ status: 202, json: { status: 'delegated', plan,

@@ -42,6 +42,12 @@ const box = (page, sel) => page.locator(sel).evaluate(n => {
     const page = await browser.newPage({viewport: {width: 1440, height: 900}});
     const errors = []; page.on("pageerror", e => errors.push(String(e)));
     await page.addInitScript(() => localStorage.setItem("claunch_token:/", "fixture"));
+    // The rail's default filter holds running, hold, delayed and paused, so an
+    // ended session is drawn and then filtered out. Both fixture sessions are
+    // exited; ask for the category they land in (killed) or the row is never
+    // visible to click.
+    await page.addInitScript(() => localStorage.setItem("claunch_session_filter:/",
+      JSON.stringify(["running", "hold", "delayed", "paused", "killed"])));
     await page.goto(`http://127.0.0.1:${server.address().port}/#/s/s1`);
     await page.locator('#session-list li.sess-card[data-name="s1"]').waitFor();
 
