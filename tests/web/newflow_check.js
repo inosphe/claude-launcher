@@ -104,9 +104,13 @@ const api = async (p) => {
 };
 
 let sessions = [];
+/* The mesh poll and the roster index read off it: which rooms each session
+   holds. Mutable, so the child's mesh entry can be asked about each case. */
+const meshes = [{ name: "m0" }];
+let rooms = {};
 const ctx = {};
 new Function(
-  "exports", "$", "Option", "api", "meshCache", "sessionsCache",
+  "exports", "$", "Option", "api", "meshCache", "sessionsCache", "sessMeshes",
   [sliceLet("workflowsCache"), sliceLet("roleWorkflowsCache"), sliceLet("workflowsFor"), sliceLet("newWfPicked"),
    // the mesh a "#/new/<mesh>" link asks for; syncOnboardPickers reads it
    sliceLet("pendingNewMesh"),
@@ -125,9 +129,10 @@ exports.cwdOf = newSessionCwd;
    (id) => (id === "new-session" ? form : box_[id] || null),
    function Option(label, value) { return option(label, value); },
    api,
-   [{ name: "m0" }],
+   meshes,
    { get length() { return sessions.length; },
-     find: (fn) => sessions.find(fn) });
+     find: (fn) => sessions.find(fn) },
+   (name) => (rooms[name] || []).map((mesh) => ({ mesh })));
 
 let failures = 0;
 function check(what, got, want) {
@@ -247,6 +252,32 @@ async function main() {
   form.cwd.value = "F:/elsewhere";
   check("a child moved to a workspace takes that one",
         ctx.cwdOf(), "F:/elsewhere");
+
+  /* The child's mesh entry names the room it inherits, settled the way the
+     daemon settles it (onboard.inherit_mesh): one team mesh is the answer, a
+     parent channel is not a team mesh, none opens one for the pair, and
+     several is a refusal the operator answers by picking. */
+  const inheritEntry = () => form.mesh.options[0].label;
+  meshes.push({ name: "team" }, { name: "lead-ch", parent_channel: ["lead", "kid"] });
+  rooms = { lead: ["lead-ch", "team"] };
+  ctx.sync();
+  check("a child's mesh entry names the parent's team mesh",
+        inheritEntry(), "(inherit the parent's mesh: team)");
+  rooms = { lead: ["lead-ch"] };
+  ctx.sync();
+  check("...and with no team mesh, says one is opened for the pair",
+        inheritEntry(), "(inherit the parent's mesh: none — one is opened for the pair)");
+  rooms = { lead: ["m0", "team"] };
+  ctx.sync();
+  check("...and with several, says a pick is needed",
+        inheritEntry(), "(inherit the parent's mesh: several — m0, team; pick one)");
+  form.parent.value = "";
+  ctx.sync();
+  check("a session of its own keeps the plain none entry",
+        inheritEntry(), "(none)");
+  meshes.length = 1;
+  rooms = {};
+  form.parent.value = "lead";
 
   /* A fetch that did not answer is not an answer. The list is memoised by
      directory, and the memo used to be claimed before the fetch and kept

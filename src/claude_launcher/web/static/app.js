@@ -11023,7 +11023,8 @@ async function refreshProfiles() {
       profile, profile,
       options.every((item) => item.harness_available === false),
     ]);
-    const child = !!spawnParent();
+    const parentSess = spawnParent();
+    const child = !!parentSess;
     let wantedProfile = child && !previousProfile
       ? "" : baseProfileName(previousSelector);
     if (!wantedProfile && !child) {
@@ -11032,7 +11033,8 @@ async function refreshProfiles() {
     }
     fillSpawnSelect(
       select, pairs,
-      child ? "(inherit the parent's profile)" : null,
+      child ? `(inherit the parent's profile${
+        parentSess.profile ? `: ${parentSess.profile}` : ""})` : null,
       wantedProfile
     );
     markCompactProblems(select);
@@ -14100,12 +14102,12 @@ function syncSpawnMode() {
   const policyShut = new Set(
     SPAWN_INHERITS.filter((k) => f[k] && !!parent && !open[k])
   );
-  syncSpawnProfileRow(f, !!parent);
+  syncSpawnProfileRow(f, parent);
   refillNewHarnessOptions(
     f, parent && !f.profile.value ? "" : undefined
   );
   syncSpawnProjectRow(f, parent);
-  syncSpawnCwdRow(f, !!parent);
+  syncSpawnCwdRow(f, parent);
   syncNewBorrowOptions();
   if (parent) {
     // Auth is claude's token machinery: on a child running anything else
@@ -14214,16 +14216,22 @@ function syncSpawnMode() {
    own always runs SOME profile, while a child runs its parent's unless it is
    told otherwise. So the inherit entry exists only while a parent is named,
    and is what the row starts on — without it every unlocked child would be
-   spawned onto whichever profile happens to sort first. */
-function syncSpawnProfileRow(f, child) {
+   spawned onto whichever profile happens to sort first. The entry names the
+   profile it inherits, so the greyed row says what the child will run on;
+   a change of parent relabels it, the way the project row does. */
+function syncSpawnProfileRow(f, parent) {
   const sel = f.profile;
   if (!sel || !sel.options) return;
   const at = [...sel.options].findIndex((o) => o.value === "");
-  if (child && at < 0) {
-    sel.insertBefore(new Option("(inherit the parent's profile)", ""),
-                     sel.options[0] || null);
+  const label = parent
+    ? `(inherit the parent's profile${parent.profile ? `: ${parent.profile}` : ""})`
+    : "";
+  if (parent && at >= 0) {
+    sel.options[at].textContent = label;
+  } else if (parent) {
+    sel.insertBefore(new Option(label, ""), sel.options[0] || null);
     sel.value = "";
-  } else if (!child && at >= 0) {
+  } else if (at >= 0) {
     sel.remove(at);
     if (!sel.value) {
       const first = [...sel.options].find((o) => !o.disabled);
@@ -14278,12 +14286,15 @@ function syncSpawnProjectRow(f, parent) {
 
 /* Same shape for the directory row: "" is the daemon's own directory when
    the session is its own, and the parent's when it is a child. One option,
-   two truths — said in words rather than left for the operator to guess. */
-function syncSpawnCwdRow(f, child) {
+   two truths — said in words rather than left for the operator to guess,
+   and for a child with the directory it inherits. */
+function syncSpawnCwdRow(f, parent) {
   const sel = f.cwd;
   const first = sel && sel.options && sel.options[0];
   if (!first || first.value !== "") return;
-  first.textContent = child ? "(inherit the parent's directory)" : "(daemon cwd)";
+  first.textContent = parent
+    ? `(inherit the parent's directory${parent.cwd ? `: ${parent.cwd}` : ""})`
+    : "(daemon cwd)";
 }
 
 /* The child cap is SOFT (spawn.py: it warns and lets the spawn through), so
@@ -22966,12 +22977,31 @@ function syncOnboardPickers() {
   const form = $("new-session");
   const mesh = form.mesh;
   const keptMesh = mesh.value;
-  const child = !!spawnParent();
+  const parentSess = spawnParent();
+  const child = !!parentSess;
   mesh.innerHTML = "";
   // The empty answer is two different facts, said in words rather than left
   // for the operator to guess: no mesh at all for a session of its own, the
   // parent's room for a child.
-  mesh.appendChild(new Option(child ? "(inherit the parent's mesh)" : "(none)", ""));
+  let inheritMesh = "(inherit the parent's mesh)";
+  // ...and for a child, which room that is. The daemon settles it the same
+  // way (onboard.inherit_mesh): the parent's one team mesh, a new one opened
+  // for the pair when it has none, a refusal when it has several. Parent
+  // channels are not team meshes there, so they are not counted here. An
+  // empty mesh poll has not answered yet, and says nothing about the parent.
+  // Guarded: harnesses that slice this function alone do not carry it.
+  if (child && typeof sessMeshes === "function" && (meshCache || []).length) {
+    const rooms = sessMeshes(parentSess.name)
+      .map((m) => m.mesh)
+      .filter((name) => !((meshCache || []).find((m) => m.name === name) || {})
+        .parent_channel);
+    inheritMesh = rooms.length === 1
+      ? `(inherit the parent's mesh: ${rooms[0]})`
+      : rooms.length
+        ? `(inherit the parent's mesh: several — ${rooms.join(", ")}; pick one)`
+        : "(inherit the parent's mesh: none — one is opened for the pair)";
+  }
+  mesh.appendChild(new Option(child ? inheritMesh : "(none)", ""));
   for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
   // Meshes other daemons publish or offer to this one (daemon attach). An
   // offered one attaches this daemon first and joins by the bare name; one
@@ -41430,7 +41460,8 @@ function refillSpawnHarnesses(ui, want) {
   fillSpawnSelect(
     ui.harness,
     pairs,
-    inherited ? "(inherit the parent's harness)" :
+    inherited ? `(inherit the parent's harness${
+      ui.parentSess.harness ? `: ${ui.parentSess.harness}` : ""})` :
       (pairs.length ? null : "(no allowed harness)"),
     chosen
   );
