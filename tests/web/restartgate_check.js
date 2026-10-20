@@ -204,6 +204,9 @@ function build(opts) {
     // A steady poll (same boot, no restart) runs the whole batch; the
     // retirement checks below reach it (claunch-hdp4j).
     "refreshTermProcs", "refreshShadows",
+    // Left without an argument: Node's real BroadcastChannel would hold the
+    // process open (claunch-j6lg0).
+    "BroadcastChannel",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
