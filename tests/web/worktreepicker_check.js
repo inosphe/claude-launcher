@@ -56,6 +56,12 @@ function sliceConst(name) {
   return src.slice(start, src.indexOf("};", start) + 2);
 }
 
+function sliceLine(name) {
+  const start = src.indexOf(`const ${name} =`);
+  if (start < 0) throw new Error(`cannot locate const ${name} in app.js`);
+  return src.slice(start, src.indexOf(";", start) + 1);
+}
+
 /* ---- stub DOM ---- */
 function control(value = "") {
   return { value, checked: false, disabled: false, options: [] };
@@ -110,6 +116,7 @@ const form = {
   worktree_session: picker(),
   worktree_rebase: control(""),
   worktree_from: picker(),
+  worktree_from_filter: control(""),
 };
 
 let sessions = [];
@@ -141,7 +148,8 @@ new Function(
   "refreshWorkflowChoices", "beadsMode", "refreshIssueChoices",
   [`let newSpawnReport = null, newSpawnReportFor = null;`,
    sliceLet("newWorktreeFor"), sliceLet("newWorktreeGit"),
-   sliceLet("newWorktreeFilter"), sliceLet("pendingWorktreeMode"),
+   sliceLet("newWorktreeFilter"), sliceLet("newWorktreeFromFilter"),
+   sliceLine("WORKTREE_FROM_BRANCH_LIMIT"), sliceLet("pendingWorktreeMode"),
    slice("cwdSplit"), slice("shortenPath"), slice("cwdShort"),
    slice("spawnParent"), slice("newSessionCwd"), slice("newWorktreeMode"),
    slice("worktreeTrunkBranch"), slice("syncWorktreeTrunkButton"),
@@ -174,6 +182,9 @@ new Function(
     exports.trunkSync = syncWorktreeTrunkButton;
     exports.setSessions = (s) => { sessionsCache = s; };
     exports.filter = (q) => { newWorktreeFilter = q; };
+    exports.fromFilter = (q) => { newWorktreeFromFilter = q; };
+    exports.fromLimit = WORKTREE_FROM_BRANCH_LIMIT;
+    exports.renderFrom = renderWorktreeFromOptions;
     // The daemon's answer, applied the way refreshSpawnPolicy applies it —
     // the row is only usable once THIS parent's report says so.
     exports.policy = (name, report) => {
@@ -649,6 +660,72 @@ async function main() {
   await ctx.refresh();
   check("unrelated session updates retain option nodes",
         pickers.every((sel, i) => sel.options.every((o, j) => o === afterExit[i][j])), true);
+
+  /* -- Branch from in a repository with many branches (claunch-mu5ex) ---- */
+  // Every branch used to be an <option>; with over a thousand of them each
+  // rebuild held the page for about a second. Newest first is the daemon's
+  // order, so the empty box lists the head of it and says how many are left.
+  const LIMIT = ctx.fromLimit;
+  const many = Array.from({ length: LIMIT + 10 },
+    (_, i) => `b${String(i).padStart(2, "0")}`);
+  REPOS["F:/many"] = { repo: true, root: "F:/many", branch: "master",
+    root_branch: "master", branches: many, worktrees: ["w-one"],
+    worktree_branches: { "w-one": "b00" } };
+  form.parent.value = "";
+  ctx.policy("", null);
+  form.cwd.value = "F:/many";
+  await ctx.refresh();
+  form.worktree_mode.value = "new";
+  ctx.sync();
+  const branchRows = () => form.worktree_from.options
+    .filter((o) => o.value.startsWith("refs/heads/")).map((o) => o.value);
+  const lastRow = () =>
+    form.worktree_from.options[form.worktree_from.options.length - 1];
+  check("an empty box lists only the newest branches",
+        branchRows(), many.slice(1, LIMIT + 1).map((b) => `refs/heads/${b}`));
+  check("...and a greyed last row says how many more the box can find",
+        [lastRow().label, lastRow().disabled],
+        ["… 9 more branches — type in the box above to find one", true]);
+  check("...while HEAD and the worktree rows stay",
+        form.worktree_from.options.slice(0, 2).map((o) => o.value),
+        ["", "w-one"]);
+  check("the filter box is usable with the row",
+        form.worktree_from_filter.disabled, false);
+
+  ctx.fromFilter("b3");
+  ctx.renderFrom();
+  check("the box narrows the branch rows by name, with no more-row",
+        [branchRows(), lastRow().disabled],
+        [many.filter((b) => b.includes("b3")).map((b) => `refs/heads/${b}`),
+         false]);
+  check("...and the worktree rows by name or branch",
+        form.worktree_from.options.some((o) => o.value === "w-one"), false);
+  ctx.fromFilter("b0");
+  ctx.renderFrom();
+  check("a worktree whose branch matches stays",
+        form.worktree_from.options.some((o) => o.value === "w-one"), true);
+
+  const late = `refs/heads/${many[many.length - 1]}`;
+  ctx.fromFilter(many[many.length - 1]);
+  ctx.renderFrom();
+  form.worktree_from.value = late;
+  ctx.fromFilter("");
+  ctx.renderFrom();
+  check("a pick past the cut stays offered and picked when the box empties",
+        [form.worktree_from.value, branchRows().includes(late),
+         lastRow().label],
+        [late, true, "… 8 more branches — type in the box above to find one"]);
+
+  form.worktree_from_filter.value = "b3";
+  ctx.fromFilter("b3");
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  check("moving the directory empties the Branch from box",
+        form.worktree_from_filter.value, "");
+  form.worktree_mode.value = "existing";
+  ctx.sync();
+  check("the box is greyed with its picker", form.worktree_from_filter.disabled,
+        true);
 
   if (failures) process.exit(1);
   console.log("worktreepicker_check: ok");
