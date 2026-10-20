@@ -174,13 +174,17 @@ globalThis.ThreadsPane = (() => {
   }
 
   /* Threads whose last message is the agent's and newer than what this
-     browser has seen in them. */
+     browser has seen in them. A thread this session is a guest in (it
+     carries `guest`, claunch-v8plo) counts when the guest has messages of
+     the others it has not read and the last one is not the user's own. */
   function unseen(threads, read) {
     const out = new Set();
     for (const t of threads || []) {
-      if (t.last && (t.last.author === "agent" || t.last.author === "guest") && t.last_seq > (read[t.id] || 0)) {
-        out.add(t.id);
-      }
+      if (!t.last || t.last_seq <= (read[t.id] || 0)) continue;
+      const fresh = t.guest
+        ? t.guest.unread > 0 && t.last.author !== "user"
+        : t.last.author === "agent" || t.last.author === "guest";
+      if (fresh) out.add(t.id);
     }
     return out;
   }
@@ -804,7 +808,8 @@ globalThis.ThreadsPane = (() => {
   }
 
   function renderList(side, threads, read) {
-    const fresh = unseen(threads, read);
+    const guestOf = (list && list.guest_threads) || [];
+    const fresh = unseen(threads.concat(guestOf), read);
     side.replaceChildren();
     const add = node("button", "term-btn th-new", composing ? "취소" : "+ 새 쓰레드");
     add.type = "button";
@@ -841,7 +846,6 @@ globalThis.ThreadsPane = (() => {
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
-    const guestOf = (list && list.guest_threads) || [];
     if (!threads.length) {
       side.append(node("p", "wf-note", "쓰레드가 없습니다. 주제별로 쓰레드를 열면 세션과 따로 대화할 수 있습니다. 주제와 첫 메시지는 비워 두어도 됩니다."));
     } else {
@@ -1084,7 +1088,7 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
+    const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(allThreads(list), read)], inflight.has(""),
                                     (attached.get("") || []).length]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;

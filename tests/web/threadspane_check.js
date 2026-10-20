@@ -148,6 +148,15 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.deepEqual(P.allThreads({threads: [{id: "a"}], guest_threads: [{id: "b"}]}).map((t) => t.id), ["a", "b"]);
   assert.deepEqual([...P.unseen([{id: "g", last_seq: 3, last: {author: "guest"}}], {})], ["g"],
                    "a guest's message is news too");
+  // claunch-v8plo: a thread this session is a guest in, by its guest.unread.
+  const gts = [
+    {id: "g1", last_seq: 4, last: {author: "agent"}, guest: {unread: 2}},
+    {id: "g2", last_seq: 4, last: {author: "agent"}, guest: {unread: 0}},
+    {id: "g3", last_seq: 4, last: {author: "user"}, guest: {unread: 1}},
+    {id: "g4", last_seq: 4, last: {author: "agent"}, guest: {unread: 1}},
+  ];
+  assert.deepEqual([...P.unseen(gts, {g4: 4})], ["g1"],
+                   "unread by the guest, not the user's own, not yet seen here");
 
   /* the pane against a fake daemon */
   const threads = [
@@ -715,6 +724,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     assert.deepEqual(sec.querySelectorAll(".th-item").map((i) => i.dataset.id), ["th-g"]);
     assert.ok(sec.querySelector(".th-chip-owner").textContent === "s1", "a guest thread names its owner");
     assert.deepEqual(gh.querySelectorAll(".th-list").length, 2);
+    assert.ok(sec.querySelector(".th-dot"), "an unread guest thread carries the new-message dot");
     sec.querySelector(".th-item").fire("click");
     await settle();
     const whos = gh.querySelectorAll(".th-msg-who").map((n) => n.textContent);
