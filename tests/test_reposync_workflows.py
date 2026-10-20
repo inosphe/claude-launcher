@@ -104,3 +104,40 @@ def test_approval_candidate_binding_rejects_changed_head(world, tmp_path, monkey
     assert reposync_verify.main() == 0
     _commit(wt, "new.txt")
     assert reposync_verify.main() == 1
+
+
+def test_snapshot_mismatch_replans_from_inspect(tmp_path, monkeypatch):
+    """checks reports replan when verify is blocked by a moved local SHA;
+    the run goes back to inspect and plans again (claunch-2ekz1)."""
+    from claude_launcher.cflow2 import layers
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setattr(runtime, "_launch", lambda fn, *args: fn(*args))
+    kw = {"cwd": str(tmp_path), "scope": "replan-test"}
+    st = runtime.start(layers.load("reposync-merge-push-v2"), caps={},
+                       inputs={"assignment": json.dumps({"branch": "master"})}, **kw)
+    for _ in range(2):
+        assert st["tasks"][0]["label"] == "inspect"
+        st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+        assert st["tasks"][0]["label"] == "prepare"
+        st = runtime.report(st["tasks"][0]["instance"], "ok",
+                            {"plan": "p", "candidate": "c" * 40, "tree": "t" * 40}, **kw)
+        assert st["tasks"][0]["label"] == "checks"
+        st = runtime.report(st["tasks"][0]["instance"], "replan",
+                            {"reason": "assignment local != current local"}, **kw)
+    assert st["status"] == "running"
+
+
+@pytest.mark.parametrize("given,shown", [(None, "rebase"), ("merge", "merge")])
+def test_conflict_repair_follows_the_integration_input(tmp_path, monkeypatch, given, shown):
+    from claude_launcher.cflow2 import layers
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "conflict-test"}
+    inputs = {"assignment": "{}"}
+    if given:
+        inputs["integration"] = given
+    st = runtime.start(layers.load("reposync-conflict-v2"), caps={}, inputs=inputs, **kw)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    repair = st["tasks"][0]
+    assert repair["label"] == "repair"
+    assert f"통합 방식은\n{shown}을 따른다" in repair["prompt"] or f"{shown}을 따른다" in repair["prompt"]
+    assert "--rebase-merges로 재현" in repair["prompt"] and "`git merge`로 재현" in repair["prompt"]
