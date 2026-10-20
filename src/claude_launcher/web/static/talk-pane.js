@@ -16,7 +16,17 @@
    chip on a QA card selects that thread, a question chip in a thread
    scrolls to that card, and "쓰레드로 논의" opens the new-thread form about
    the question. From a single-mode view the pane moves to "both" first, so
-   the place the link was followed from stays on screen. */
+   the place the link was followed from stays on screen.
+
+   Width (claunch-816mz): in "both" a bar (.talk-split) stands between the
+   two columns, the same skin and hand as the threads pane's own list bar
+   (.th-split, claunch-46lbf), so with that one the pane is three resizable
+   columns: list | conversation | QA. Dragging it sets the QA column's width
+   (--talk-qa-w on .talk-body; the QA column's right edge stays put, the
+   threads column takes the rest), applied live while the hand moves and
+   written down once at release (QA_W_KEY, every session); a double click
+   forgets it. With nothing stored the two columns split the width evenly.
+   The bar is shown only in "both" and not on a phone. */
 globalThis.TalkPane = (() => {
   "use strict";
   const MODES = [
@@ -25,6 +35,9 @@ globalThis.TalkPane = (() => {
     ["both", "둘 다"],
   ];
   let host = null, name = "", mode = "threads", opts = {}, tabs = null;
+  const QA_W_KEY = "claunch_talkqaw";  // localStorage: the QA column's width in px
+  const QA_W_MIN = 220;      // a QA card's buttons still fit on one row
+  const THREADS_W_MIN = 400; // the threads column keeps its list and a conversation
 
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -50,6 +63,63 @@ globalThis.TalkPane = (() => {
     return shows(m)[target] ? m : "both";
   }
 
+  /* The QA column's width, held between QA_W_MIN and what leaves the
+     threads column THREADS_W_MIN of a `room`px body (no ceiling while the
+     body's width is unknown). NaN in, NaN out: nothing stored means the
+     stylesheet's even split. */
+  function clampQaW(px, room = 0) {
+    if (!Number.isFinite(px) || px <= 0) return NaN;
+    const max = room > 0 ? Math.max(QA_W_MIN, room - THREADS_W_MIN) : Infinity;
+    return Math.min(max, Math.max(QA_W_MIN, Math.round(px)));
+  }
+
+  function loadQaW() {
+    try { return clampQaW(Number(localStorage.getItem(QA_W_KEY))); } catch { return NaN; }
+  }
+
+  function saveQaW(px) {
+    try {
+      if (Number.isFinite(px)) localStorage.setItem(QA_W_KEY, String(px));
+      else localStorage.removeItem(QA_W_KEY);
+    } catch { /* private mode */ }
+  }
+
+  /* A width on the body fixes the QA column (.talk-sized); none leaves the
+     even split. */
+  function applyQaW(body, px) {
+    if (Number.isFinite(px)) body.style.setProperty("--talk-qa-w", `${px}px`);
+    else body.style.removeProperty("--talk-qa-w");
+    body.classList.toggle("talk-sized", Number.isFinite(px));
+  }
+
+  /* The bar's drag: the QA column's right edge stays put, the bar follows
+     the hand. */
+  function wireSplit(body, bar) {
+    let dragW = null;   // non-null only mid-drag
+    bar.addEventListener("pointerdown", (e) => {
+      e.preventDefault();   // a drag must not start selecting text
+      bar.setPointerCapture?.(e.pointerId);
+      bar.classList.add("dragging");
+      dragW = body.querySelector(".talk-qa").getBoundingClientRect().width;
+    });
+    bar.addEventListener("pointermove", (e) => {
+      if (dragW === null) return;
+      const qa = body.querySelector(".talk-qa").getBoundingClientRect();
+      const room = body.getBoundingClientRect().width - bar.getBoundingClientRect().width;
+      dragW = clampQaW(qa.right - e.clientX, room);
+      applyQaW(body, dragW);
+    });
+    const end = () => {
+      if (dragW === null) return;
+      bar.classList.remove("dragging");
+      saveQaW(dragW);
+      dragW = null;
+    };
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", end);
+    bar.addEventListener("dblclick", () => { saveQaW(NaN); applyQaW(body, NaN); });
+  }
+
   /* ---- drawing ---- */
 
   function root() {
@@ -72,7 +142,10 @@ globalThis.TalkPane = (() => {
     if (opts.lead) opts.lead.replaceChildren(tabs);
     else r.append(tabs);
     const body = node("div", "talk-body");
-    body.append(node("div", "talk-col talk-threads"), node("div", "talk-col talk-qa"));
+    const bar = node("div", "talk-split");
+    bar.title = "끌어서 QA 폭을 바꿉니다 · 두 번 누르면 기본 폭";
+    body.append(node("div", "talk-col talk-threads"), bar, node("div", "talk-col talk-qa"));
+    wireSplit(body, bar);
     r.append(body);
     host.replaceChildren(r);
     return r;
@@ -87,6 +160,7 @@ globalThis.TalkPane = (() => {
     }
     const body = r.querySelector(".talk-body");
     body.dataset.mode = mode;
+    applyQaW(body, loadQaW());
     const see = shows(mode);
     const tcol = body.querySelector(".talk-threads");
     const qcol = body.querySelector(".talk-qa");
@@ -157,7 +231,7 @@ globalThis.TalkPane = (() => {
   }
 
   return {
-    mount, unmount, setMode, isMode, shows, modeFor,
+    mount, unmount, setMode, isMode, shows, modeFor, clampQaW,
     mode: () => mode,
     refreshQa: () => { if (host && shows(mode).qa) globalThis.QaPane?.refresh(); },
   };
