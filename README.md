@@ -1133,12 +1133,20 @@ One shim serves every session on the same upstream, so sessions that run at
 the same time share its throughput. When a session and at least one other
 session are active on the same shim (a call in flight, or output in the last
 two seconds), the live reading also carries `parallel`: how many sessions are
-active on that shim (`sessions`), their summed estimated rate (`total`) and
-that total divided by the session count (`mean`). The rail line and the
-header badge append it as `×3 Σ≈120 avg≈40`, the terminal overlay and the
-tooltip spell it out, and `claunch tps` prints a `live now` section with the
-same three numbers per shim. A session running alone on its shim shows no
-`parallel` figure, since its own rate is already the shim's total.
+active on that shim (`sessions`), their summed estimated rate (`total`),
+that total divided by the session count (`mean`), and each session's calls in
+flight (`counts`, this session first; `calls` their sum; `by_session` with
+each session's name, calls and rate). The counts say how uneven the split is
+— one call here and five in the other session reads `1+5`, which the mean
+alone hides. The rail line and the header badge append it as
+`×3 (1+2) Σ≈120 avg≈40`, the terminal overlay reads
+`3 sessions · calls 1+2 · total ≈120 tok/s · avg ≈40 tok/s`, the tooltip
+lists each session's calls and rate, and `claunch tps` prints a `live now`
+section with the call counts per shim and per session. A session running
+alone on its shim shows no `parallel` figure, since its own rate is already
+the shim's total. The live rate is taken over the two-second window it
+names: a bin that only partly overlaps the window contributes its
+overlapping share.
 
 ## Migrating skills & MCP servers
 
