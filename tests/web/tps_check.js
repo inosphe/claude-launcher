@@ -264,6 +264,28 @@ check("a whole-body answer reaches the badge and the overlay, with its first byt
       ["2.4 tok/s · first byte 3.2s",
        ["2.4 tok/s", "first byte 3.2s · deepseek flash · 45s ago"]]);
 
+/* The live poll repaints twice a second, and most of those answers read the
+   same (claunch-i3es6): an unchanged overlay keeps its nodes, and one that
+   reads differently is rebuilt. */
+{
+  const overlay = dom["term-tps-overlay"];
+  const kept = overlay.kids;
+  let rebuilt = 0;
+  const replace = overlay.replaceChildren;
+  overlay.replaceChildren = (...cs) => { rebuilt++; replace(...cs); };
+  ctx.render();
+  ctx.render();
+  check("an overlay that reads the same is not rebuilt",
+        [rebuilt, overlay.kids === kept], [0, true]);
+  ctx.setCurrent("ds4");
+  ctx.render();
+  check("and one that reads differently is",
+        [rebuilt, overlay.kids[0].textContent], [1, "249 tok/s"]);
+  ctx.setCurrent("whole");
+  ctx.render();
+  overlay.replaceChildren = replace;
+}
+
 ctx.setCurrent("nc");
 ctx.render();
 check("a session with no record hides both — nothing is drawn as zero",

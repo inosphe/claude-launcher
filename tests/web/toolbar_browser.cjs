@@ -82,6 +82,35 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       return { shown: g.width > 0, timer: inside("term-timer"), skip: inside("term-timer-skip") };
     });
     assert.deepEqual(group, { shown: true, timer: true, skip: true }, "reminder group frames both controls");
+    // The countdown rewrites its text every second (claunch-i3es6): a rewrite
+    // that leaves the chip as wide as it was re-describes the controls
+    // without the measuring pass, and one that widens it still re-fits.
+    // `fits` counts the pass by its first query of the overflowed items. The
+    // skip holds only on a row that is neither compact nor overflowing (a
+    // compact button is a fixed-width glyph), so the column is made wide
+    // enough for every control first.
+    await page.locator("#layout").evaluate(el => { el.style.width = "4000px"; });
+    await settle();
+    await page.evaluate(() => {
+      const h = document.getElementById("term-header");
+      const query = h.querySelectorAll.bind(h);
+      window.fits = 0;
+      h.querySelectorAll = (sel) => { if (sel === ".toolbar-overflow") window.fits++; return query(sel); };
+    });
+    const refits = async (text) => {
+      await page.evaluate(text => {
+        window.fits = 0;
+        document.querySelector("#term-timer").textContent = text;
+      }, text);
+      await settle();
+      return page.evaluate(() => window.fits);
+    };
+    assert.equal(await page.locator("#term-header").evaluate(el => el.classList.contains("term-compact")), false);
+    assert.equal(await refits("Ⅱ role reminder in 7:12"), 0, "a same-width countdown text does not re-fit the row");
+    assert.equal(await refits("Ⅱ role reminder in 7:12 and a good deal longer than it was"), 1,
+      "a countdown text that widens the chip re-fits the row");
+    await refits("Ⅱ role reminder in 7:12");
+    await check(1920);
     // Only the frame draws a border (claunch-0jjv3.2): the chip has none on
     // any side, the skip keeps just the divider on its left, and a due
     // state colours the frame rather than the controls.

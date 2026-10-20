@@ -7028,8 +7028,11 @@ function paintTermTimer() {
     textBox = el("span", "tt-text", line.text);
     box.append(glyphBox, textBox);
   } else {
-    glyphBox.textContent = glyph;
-    textBox.textContent = line.text;
+    // Only the countdown moves from one second to the next; a write of the
+    // same text is still a mutation for every observer of the header
+    // (toolbar.js re-fits on it, claunch-i3es6).
+    if (glyphBox.textContent !== glyph) glyphBox.textContent = glyph;
+    if (textBox.textContent !== line.text) textBox.textContent = line.text;
   }
   box.disabled = termTimerBusy;
   // Wired once: textContent above wipes the children, not the box, so a
@@ -7149,7 +7152,8 @@ function paintTermTimerSkip(skip) {
   // the button somebody is reaching for, and it should be visible from the
   // same glance that made them reach.
   box.className = `term-btn timer-skip ${skip.state}`;
-  box.textContent = "⏭";
+  // Repainted every second with the clock beside it; the glyph never moves.
+  if (box.textContent !== "⏭") box.textContent = "⏭";
   box.title = termTimerSkipTitle(skip);
   box.disabled = termTimerSkipBusy;
   if (!box.dataset.wired) {
@@ -7334,7 +7338,17 @@ function ctxSentence(s) {
       ? "context not known yet — no reading recorded"
       : "";
   }
-  const parts = [`context ${c.tokens.toLocaleString()} tokens`];
+  // The count is formatted once per reading: the rail asks for this sentence
+  // on every row of every poll (refreshRailSeen), and toLocaleString was a
+  // measurable share of that pass (claunch-i3es6). Readings arrive as fresh
+  // objects and are never edited, so the reading itself is the key.
+  const memo = ctxSentence._tokens || (ctxSentence._tokens = new WeakMap());
+  let count = memo.get(c);
+  if (count === undefined) {
+    count = c.tokens.toLocaleString();
+    if (typeof c === "object") memo.set(c, count);
+  }
+  const parts = [`context ${count} tokens`];
   if (c.model) parts.push(c.model);
   const age = ctxAgeOf(c.at);
   parts.push(age ? `as of ${age} ago` : "as of its last turn");
@@ -7347,9 +7361,15 @@ function ctxSentence(s) {
    "input 2". */
 function ctxBreakdown(c) {
   if (!c) return "";
+  // Built once per reading, for the same reason as ctxSentence's count: the
+  // text reads nothing but the reading, and the rail rebuilt it per row per
+  // poll -- the largest single item of the poll's redraw (claunch-i3es6).
+  const memo = ctxBreakdown._memo || (ctxBreakdown._memo = new WeakMap());
+  const kept = memo.get(c);
+  if (kept !== undefined) return kept;
   const modelWindow = Number.isFinite(c.model_context_window)
     && c.model_context_window > 0 ? c.model_context_window : 0;
-  return [
+  const text = [
     `fresh input ${c.input.toLocaleString()}`,
     `replayed from cache ${c.cache_read.toLocaleString()}`,
     `written to cache ${c.cache_write.toLocaleString()}`,
@@ -7365,6 +7385,8 @@ function ctxBreakdown(c) {
       : "no percentage: the context limit is not recorded anywhere and " +
         "differs by model",
   ].join("\n");
+  if (typeof c === "object") memo.set(c, text);
+  return text;
 }
 
 /* What the rail row adds to its tooltip — the full story behind the glance
@@ -7775,7 +7797,8 @@ function renderTermTps() {
   if (badge) {
     badge.classList.toggle("hidden", !t);
     if (t) {
-      badge.textContent = tpsText(t);
+      const text = tpsText(t);
+      if (badge.textContent !== text) badge.textContent = text;
       badge.className = "badge tps" + tpsStaleClass(t);
       badge.title = tpsTooltip(t);
     }
@@ -7783,34 +7806,59 @@ function renderTermTps() {
   if (overlay) {
     const show = !!t && terminalOnScreen();
     overlay.classList.toggle("hidden", !show);
+    // What the overlay will read, worked out before any node is built: the
+    // live poll asks twice a second, and an idle or waiting session answers
+    // the same thing most of those times. Rebuilding the children for an
+    // unchanged answer was a style, layout and paint of the terminal pane on
+    // every tick for nobody (claunch-i3es6), so it is rebuilt only when this
+    // reads differently from what is there.
+    let parts = null;
     if (show && t.live && typeof tpsSparkline === "function") {
       /* Live: the state big, the line under it, the last finished call small. */
       const l = t.live;
       const model = l.model || t.model;
-      overlay.className = "term-tps-overlay" + tpsStaleClass(t);
-      const par = typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "";
-      overlay.replaceChildren(
-        el("span", "term-tps-big", tpsLiveText(l)),
-        tpsSparkline(l.series),
-        ...(par ? [el("span", "term-tps-small term-tps-parallel", par)] : []),
-        el("span", "term-tps-small",
-          [model ? modelShort(model) : "",
-           t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
-           tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
-            .filter(Boolean).join(" · "))
-      );
+      parts = {
+        live: true,
+        cls: "term-tps-overlay" + tpsStaleClass(t),
+        big: tpsLiveText(l),
+        series: Array.isArray(l.series) ? l.series : [],
+        par: typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "",
+        small: [model ? modelShort(model) : "",
+          t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
+          tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
+          .filter(Boolean).join(" · "),
+      };
     } else if (show) {
-      overlay.className = "term-tps-overlay" + tpsStaleClass(t);
-      overlay.replaceChildren(
-        el("span", "term-tps-big", !t.idle && t.counted && Number.isFinite(t.tps)
-          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
-        el("span", "term-tps-small",
-          [!t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
-           t.model ? modelShort(t.model) : "",
-           tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
-            .filter(Boolean).join(" · "))
-      );
-      overlay.title = tpsTooltip(t);
+      parts = {
+        live: false,
+        cls: "term-tps-overlay" + tpsStaleClass(t),
+        big: !t.idle && t.counted && Number.isFinite(t.tps)
+          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
+        small: [!t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
+          t.model ? modelShort(t.model) : "",
+          tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
+          .filter(Boolean).join(" · "),
+        title: tpsTooltip(t),
+      };
+    }
+    const key = parts ? JSON.stringify(parts) : null;
+    if (parts && overlay._tpsKey !== key) {
+      overlay._tpsKey = key;
+      overlay.className = parts.cls;
+      if (parts.live) {
+        overlay.replaceChildren(
+          el("span", "term-tps-big", parts.big),
+          tpsSparkline(parts.series),
+          ...(parts.par ? [el("span", "term-tps-small term-tps-parallel", parts.par)] : []),
+          el("span", "term-tps-small", parts.small)
+        );
+      } else {
+        overlay.replaceChildren(
+          el("span", "term-tps-big", parts.big),
+          el("span", "term-tps-small", parts.small)
+        );
+        overlay.title = parts.title;
+      }
     }
   }
 }
