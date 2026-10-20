@@ -370,7 +370,13 @@ def test_service_indexes_incrementally_and_ranks(tmp_path, repo):
             svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
             view = await svc.search("beads", "pytest permission", root=repo, limit=2)
             assert view["index"]["total"] == 3 and view["index"]["indexed"] == 3
-            assert view["index"]["pending"] == 0 and not view["index"]["syncing"]
+            # The search does not wait on the sync it started: ``pending`` hits 0
+            # when the last document is embedded, but the task may still be
+            # winding down (``syncing``) when the view is taken -- under load it
+            # is. So the view says nothing about ``syncing``; settle, then ask.
+            assert view["index"]["pending"] == 0
+            await svc.drain(5)
+            assert not svc.status()["indexes"][0]["syncing"]
             assert [r["id"] for r in view["results"]] == ["x-2", "x-1"] or \
                 [r["id"] for r in view["results"]][0] == "x-2"
             top = view["results"][0]
