@@ -381,8 +381,8 @@ async function main() {
           "profile, harness, model, effort, borrow, null_token, cwd, args, skip_permissions " +
           "stay its parent's"),
         true);
-  check("the blank directory entry now means the parent's",
-        form.cwd.options[0].textContent, "(inherit the parent's directory)");
+  check("the blank directory entry now means the parent's, and names it",
+        form.cwd.options[0].textContent, "(inherit the parent's directory: F:/repo)");
   check("the Claude child shows its own inherited runtime panel",
         [box_["new-claude-runtime"].classList.contains("hidden"),
          form.skip_permissions.disabled], [false, true]);
@@ -451,7 +451,19 @@ async function main() {
         ["(inherit the parent's profile)", ""]);
   check("Harness gains its own inherit entry under the same profile unlock",
         [form.harness.options[0].textContent, form.harness.value],
-        ["(inherit the parent's harness)", ""]);
+        ["(inherit the parent's harness: claude)", ""]);
+  /* The profile entry names the profile it inherits, and a parent whose
+     record carries none keeps the bare words. A changed answer relabels the
+     entry in place rather than re-selecting it. */
+  SESSIONS[0].profile = "work";
+  ctx.sync();
+  check("the profile inherit entry names the parent's profile",
+        [form.profile.options[0].textContent, form.profile.value],
+        ["(inherit the parent's profile: work)", ""]);
+  delete SESSIONS[0].profile;
+  ctx.sync();
+  check("...and a parent with no recorded profile keeps the bare entry",
+        form.profile.options[0].textContent, "(inherit the parent's profile)");
 
   /* Asking twice for the same parent does not ask the daemon twice. */
   await ctx.policy();
