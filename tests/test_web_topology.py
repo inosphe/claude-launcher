@@ -374,6 +374,20 @@ def _run_node(argv, **kwargs):
     return subprocess.run(argv, **kwargs)
 
 
+def _node_failure(script, proc, started):
+    """The assert message for a harness that exited non-zero.
+
+    A sweep once failed specpage_tools_check.js with exit 1 and nothing to
+    read in the message; so say what ran, for how long, how much it printed,
+    and the output itself.
+    """
+    return (
+        f"{script}: node exit {proc.returncode} after {time.monotonic() - started:.1f}s, "
+        f"stdout {len(proc.stdout or '')} chars, stderr {len(proc.stderr or '')} chars, "
+        f"argv {proc.args}\n--- stdout\n{proc.stdout}\n--- stderr\n{proc.stderr}"
+    )
+
+
 # Every harness in tests/web is named here, and `test_every_harness_is_registered`
 # below holds that list to the directory: a file nobody listed is a file nobody
 # runs, and it stays green in the only way that means nothing. Two files sat that
@@ -661,11 +675,12 @@ def test_topology_diagram_logic(script):
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
+    started = time.monotonic()
     proc = _run_node(
         [node, str(WEB / script)],
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 0, _node_failure(script, proc, started)
 
 
 def test_every_harness_is_registered():

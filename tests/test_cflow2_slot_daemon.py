@@ -13,6 +13,8 @@ import os
 import shutil
 import sqlite3
 import textwrap
+import threading
+import time
 import types
 
 import pytest
@@ -259,7 +261,8 @@ def test_migrate_moves_own_slots_once_and_leaves_a_link(tmp_path, monkeypatch):
     if os.name != "nt" or (runs / "s15").is_symlink():  # move() only warns when Windows withholds the privilege
         assert (runs / "s15").is_symlink() and os.readlink(runs / "s15") == "s15@main"
     st = RunStore(str(tmp_path), "s15")
-    assert not st.legacy and st.dir == runs / "s15@main"
+    assert not st.legacy and st.dir == runs / "s15@main", (
+        [(e.slot, e.action, e.why) for e in done.entries], st.dir)
     state = st.load_state()
     assert state["run_id"] == a["run"] and state["scope"] == "s15@main"
     assert state[cstore.DAEMON_KEY] == "main"
@@ -271,10 +274,32 @@ def test_migrate_moves_own_slots_once_and_leaves_a_link(tmp_path, monkeypatch):
     again = slot_migration.migrate([str(tmp_path)], "main", sessions, apply=True)
     assert [(e.slot, e.action) for e in again.entries] == [("s16", "other"), ("s17", "leave")]
     # the other daemon moves its own
-    slot_migration.migrate([str(tmp_path)], "kimyori", sessions, apply=True)
+    theirs = slot_migration.migrate([str(tmp_path)], "kimyori", sessions, apply=True)
     monkeypatch.setenv("CLAUNCH_DAEMON", "kimyori")
     assert RunStore(str(tmp_path), "s16").load_state()["run_id"] == b["run"]
-    assert not RunStore(str(tmp_path), "s16").legacy
+    # a slot left unmoved says why in its entry ("move failed: [WinError 5] ...")
+    assert not RunStore(str(tmp_path), "s16").legacy, (
+        [(e.slot, e.action, e.why) for e in theirs.entries],
+        sorted(p.name for p in runs.iterdir()))
+
+
+def test_migrate_moves_a_slot_a_scanner_holds_for_a_moment(tmp_path, monkeypatch):
+    # Renaming a directory fails with WinError 5 while anything holds a file in
+    # it; the slot was left unmoved in a sweep (claunch-xqk1w).
+    _start(tmp_path, "s15", monkeypatch)
+    _legacy(tmp_path, "s15@main")
+    runs = tmp_path / ".cflow2" / "runs"
+
+    def release_soon(handle):
+        time.sleep(0.1)
+        handle.close()
+
+    with open(runs / "s15" / cstore.STATE_FILE, "rb") as handle:
+        threading.Thread(target=release_soon, args=(handle,)).start()
+        done = slot_migration.migrate([str(tmp_path)], "main", _sessions(main={"s15": (None, None)}),
+                                      apply=True)
+    assert [(e.slot, e.action) for e in done.entries] == [("s15", "move")], done.entries
+    assert (runs / "s15@main").is_dir()
 
 
 def test_migrate_leaves_a_slot_whose_target_exists(tmp_path, monkeypatch):
