@@ -56,7 +56,22 @@ const has = n => n.classList.contains("has-resource");
   assert.ok(chart.classList.contains("hidden"), "a plain session has no chart button");
   ctx.currentName = "b"; ctx.syncSessionResourceButtons();
   assert.ok(!chart.classList.contains("hidden") && has(chart), "a pi-durable session shows it");
+  // The header sits over the session's own conversation page as well as its
+  // terminal (syncTermHeader), so the lights follow it there too
+  // (claunch-iaddm): ◇ chart stays on b's HTML view, and a transcript of
+  // another session — sessionLineOnPage says so — lights nothing.
+  ctx.sessionLineOnPage = (page) => page === "terminal" || page === "log";
+  ctx.currentPage = "log"; ctx.syncSessionResourceButtons();
+  assert.ok(!chart.classList.contains("hidden") && has(chart),
+    "a pi-durable session keeps ◇ chart on its HTML view");
   ctx.currentName = "a"; ctx.syncSessionResourceButtons();
+  assert.ok(chart.classList.contains("hidden"), "a plain session's HTML view has no chart");
+  ctx.sessionLineOnPage = () => false;   // another session's / a shadow's transcript
+  ctx.currentName = "b"; ctx.syncSessionResourceButtons();
+  assert.ok(chart.classList.contains("hidden") && !has(chart),
+    "another session's transcript lights nothing");
+  delete ctx.sessionLineOnPage;
+  ctx.currentPage = "terminal"; ctx.currentName = "a"; ctx.syncSessionResourceButtons();
   const stable = a.children[0].children[0];
   await ctx.refreshSessionSims();
   assert.equal(a.children[0].children[0], stable, "unchanged polls preserve links");

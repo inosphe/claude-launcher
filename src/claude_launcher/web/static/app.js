@@ -6109,16 +6109,20 @@ function isOperatorSession(name) {
 }
 
 function syncSessionResourceButtons() {
-  const name = currentPage === "terminal" ? currentName : null;
+  // The header also sits over the session's own conversation page, not only
+  // its terminal (syncTermHeader, sessionLineOnPage), and the split pane
+  // already opens under both (syncSplitPane, claunch-br7qh). So the lights
+  // follow the attached session on either view: the ◇ chart appears on a
+  // pi-durable session's HTML view as well, running or exited. A transcript
+  // of another session is a page of its own and lights nothing.
+  // The shipped page always has sessionLineOnPage; a sliced harness may not.
+  const name = typeof sessionLineOnPage === "function"
+    ? (sessionLineOnPage(currentPage) ? currentName : null)
+    : (currentPage === "terminal" ? currentName : null);
   const chart = $("term-chartbtn");
   if (chart && chart.classList.contains("hidden") === isPiDurable(name))
     chart.classList.toggle("hidden", !isPiDurable(name));
-  // The header also sits over the session's log page (sessionLineOnPage);
-  // the shipped page always has it, a sliced harness may not.
-  const lineName = typeof sessionLineOnPage === "function"
-    ? (sessionLineOnPage(currentPage) ? currentName : null)
-    : name;
-  const operator = isOperatorSession(lineName);
+  const operator = isOperatorSession(name);
   for (const id of ["term-qabtn", "term-threadsbtn"]) {
     const btn = $(id);
     if (btn && btn.classList.contains("hidden") !== operator)
