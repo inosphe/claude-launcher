@@ -271,7 +271,9 @@
     const msg = node("div", `thh-msg thh-${m.author}`);
     msg.dataset.seq = m.seq;
     const meta = node("div", "thh-meta");
-    meta.append(node("span", "thh-who", m.author === "user" ? "user" : session),
+    // A guest writes under its own name (claunch-p9wes).
+    const who = m.author === "user" ? "user" : m.author === "guest" ? `${m.guest || "guest"} (guest)` : session;
+    meta.append(node("span", "thh-who", who),
       node("span", "thh-at", when(m.at)));
     if (m.body) msg.append(meta, body(node("div", "thh-body"), m.body));
     else msg.append(meta);

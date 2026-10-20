@@ -7673,6 +7673,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .thh-msg { max-width: 85%; padding: 6px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
 .thh-msg.thh-user { align-self: flex-end; background: #10203a; border: 1px solid #1f6feb; }
 .thh-msg.thh-agent { align-self: flex-start; background: #161b22; border: 1px solid #30363d; }
+.thh-msg.thh-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477; }
 .thh-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; font-size: 11px; color: #7d8590; }
 .thh-who { font-weight: 600; }
 /* View modes (claunch-zny1o): tree / newest share a list panel | detail split. */
@@ -8068,6 +8069,22 @@ body.split-max #term-wf { flex: 1 1 0; }
 .qa-link-chip:hover:not(:disabled), .th-link-chip:hover:not(:disabled) { border-color: #58a6ff; }
 .qa-link-chip:disabled, .th-link-chip:disabled { color: #7d8590; background: transparent; border-color: #30363d;
   cursor: default; }
+/* Thread guests (claunch-p9wes, threads-pane.js). */
+.th-guests { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 4px 0; align-items: center; }
+.th-guest-role { font-size: 11px; color: #d29922; }
+.th-guest-chip { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: #d2a8ff;
+  background: #1e1530; border: 1px solid #4b3477; border-radius: 9px; padding: 1px 4px 1px 8px; }
+.th-guest-x { font: inherit; color: #7d8590; background: none; border: 0; padding: 0 3px; cursor: pointer; }
+.th-guest-x:hover { color: #f85149; }
+.th-invite-input { font: inherit; font-size: 12px; min-width: 0; width: 160px; padding: 2px 6px; color: inherit;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 4px; }
+.th-guest-sec { margin-top: 10px; border-top: 1px solid #30363d; padding-top: 6px; }
+.th-guest-head { margin: 0 0 2px; font-size: 12px; color: #d2a8ff; }
+.th-guest-note { margin: 0 0 4px; font-size: 11px; color: #7d8590; }
+.th-chip-owner, .th-chip-guests { color: #d2a8ff; border-color: #4b3477; }
+.th-msg.th-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477;
+  border-bottom-left-radius: 3px; }
+.th-msg.th-guest .th-msg-who { color: #d2a8ff; }
 .qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
 .qa-discuss { font-size: 11px; }
 .th-chip-qa { color: #58a6ff; border-color: #1f3b63; }

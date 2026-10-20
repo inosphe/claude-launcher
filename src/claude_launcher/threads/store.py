@@ -39,6 +39,16 @@ route's check (daemon/threads_api.py), which can see the QA store. The other
 direction -- a question filed out of a thread -- lives on the question
 (qa/store.py ``thread``).
 
+Guests (claunch-p9wes). The user or the owning session may invite other
+sessions into one thread as guests (table ``guests``, at most
+``MAX_GUESTS`` per thread). A guest reviews and advises: it reads the
+thread and writes in it (``author`` ``guest``, the guest's name in
+``guest``), and that is all -- it may not close, rename or invite, and the
+work stays the owner's. A guest may leave (uninvite itself). ``read_seq``
+is how far the guest has read, the way ``agent_read`` is the owner's.
+:meth:`ThreadStore.list` reports the threads a session is a guest in apart
+from its own (``guest_threads``).
+
 Operator conversations (claunch-iw5i8.12.1). An operator v2 keeps its
 conversation with the user here too, in threads whose owner is
 ``operator:<id>`` (:func:`operator_owner`) rather than a session: the operator
@@ -66,7 +76,8 @@ from typing import Iterator, Optional
 
 USER = "user"
 AGENT = "agent"
-SCHEMA_VERSION = 5
+GUEST = "guest"
+SCHEMA_VERSION = 6
 
 MAX_TITLE = 200
 MAX_BODY = 20_000
@@ -76,6 +87,8 @@ MAX_IMAGES = 10
 #: Other files one message may carry (daemon/uploads.MAX_FILES).
 MAX_FILES = 10
 MAX_OPEN_PER_SESSION = 50
+#: Sessions one thread may have as guests (claunch-p9wes).
+MAX_GUESTS = 5
 PAGE = 500
 HISTORY_PAGE = 20
 HISTORY_MAX_PAGE = 100
@@ -127,7 +140,7 @@ CREATE TABLE IF NOT EXISTS messages (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     thread TEXT NOT NULL REFERENCES threads (id),
     session TEXT NOT NULL,
-    author TEXT NOT NULL CHECK (author IN ('user', 'agent', 'system')),
+    author TEXT NOT NULL CHECK (author IN ('user', 'agent', 'system', 'guest')),
     body TEXT NOT NULL,
     at TEXT NOT NULL,
     images TEXT,
@@ -135,11 +148,21 @@ CREATE TABLE IF NOT EXISTS messages (
     ref TEXT,
     data TEXT,
     files TEXT,
+    guest TEXT,
     CHECK (length(body) > 0 OR images IS NOT NULL OR files IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread, seq);
 CREATE INDEX IF NOT EXISTS messages_session ON messages (session, author, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS messages_ref ON messages (session, ref) WHERE ref IS NOT NULL;
+CREATE TABLE IF NOT EXISTS guests (
+    thread TEXT NOT NULL REFERENCES threads (id),
+    session TEXT NOT NULL CHECK (length(session) > 0),
+    invited_by TEXT NOT NULL,
+    invited_at TEXT NOT NULL,
+    read_seq INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (thread, session)
+);
+CREATE INDEX IF NOT EXISTS guests_session ON guests (session);
 """
 
 
@@ -246,8 +269,9 @@ def _author(actor: str) -> str:
     return USER if actor == USER else AGENT
 
 
-def _thread(r: sqlite3.Row, unread: int = 0, last: Optional[dict] = None) -> dict:
-    return {
+def _thread(r: sqlite3.Row, unread: int = 0, last: Optional[dict] = None,
+            guests: Optional[list] = None) -> dict:
+    out = {
         "id": r["id"],
         "session": r["session"],
         "title": r["title"],
@@ -261,6 +285,9 @@ def _thread(r: sqlite3.Row, unread: int = 0, last: Optional[dict] = None) -> dic
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
     }
+    if guests is not None:
+        out["guests"] = guests
+    return out
 
 
 def _message(r: sqlite3.Row) -> dict:
@@ -273,6 +300,8 @@ def _message(r: sqlite3.Row) -> dict:
         out["ref"] = r["ref"]
     if r["data"] is not None:
         out["data"] = json.loads(r["data"])
+    if r["guest"] is not None:
+        out["guest"] = r["guest"]
     return out
 
 
@@ -294,7 +323,8 @@ def _data(value) -> Optional[str]:
 #: v3 (claunch-shl2r): ``messages`` gains ``images`` and a body may be empty
 #: when a picture is the message. v4 (claunch-iw5i8.12.1): it gains ``kind``,
 #: ``ref`` and ``data``, and ``author`` may be ``system``. v5 (claunch-5gpcf):
-#: it gains ``files``, and a body may be empty when files are the message. SQLite cannot change
+#: it gains ``files``, and a body may be empty when files are the message. v6 (claunch-p9wes):
+#: it gains ``guest`` and ``author`` may be ``guest``. SQLite cannot change
 #: a CHECK, so an older table is rebuilt under the new definition with every
 #: row and seq kept; ``{cols}`` is the columns the old table has.
 _REBUILD_MESSAGES = """
@@ -305,7 +335,7 @@ CREATE TABLE messages (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     thread TEXT NOT NULL REFERENCES threads (id),
     session TEXT NOT NULL,
-    author TEXT NOT NULL CHECK (author IN ('user', 'agent', 'system')),
+    author TEXT NOT NULL CHECK (author IN ('user', 'agent', 'system', 'guest')),
     body TEXT NOT NULL,
     at TEXT NOT NULL,
     images TEXT,
@@ -313,6 +343,7 @@ CREATE TABLE messages (
     ref TEXT,
     data TEXT,
     files TEXT,
+    guest TEXT,
     CHECK (length(body) > 0 OR images IS NOT NULL OR files IS NOT NULL)
 );
 INSERT INTO messages ({cols}) SELECT {cols} FROM messages_old ORDER BY seq;
@@ -335,9 +366,9 @@ class ThreadStore:
                 # v2 (claunch-78dpm): the QA question a thread is about.
                 db.execute("ALTER TABLE threads ADD COLUMN qa TEXT")
             mcols = {r[1] for r in db.execute("PRAGMA table_info(messages)")}
-            if mcols and "files" not in mcols:
+            if mcols and "guest" not in mcols:
                 cols = ", ".join(c for c in ("seq", "thread", "session", "author", "body", "at", "images",
-                                             "kind", "ref", "data") if c in mcols)
+                                             "kind", "ref", "data", "files") if c in mcols)
                 db.executescript("BEGIN IMMEDIATE;" + _REBUILD_MESSAGES.format(cols=cols) + "COMMIT;")
             db.executescript(_SCHEMA)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -380,9 +411,38 @@ class ThreadStore:
             raise Forbidden(f"thread {row['id']} belongs to session {row['session']}; only it (or the user) may write there")
 
     @staticmethod
+    def _guest_row(db, tid: str, session: str) -> Optional[sqlite3.Row]:
+        return db.execute("SELECT * FROM guests WHERE thread = ? AND session = ?", (tid, session)).fetchone()
+
+    def _writer(self, db, row, actor: str) -> str:
+        """Who ``actor`` writes as in thread ``row``: the user, the owner
+        (``agent``) or one of its guests; anyone else is refused."""
+        if actor == USER:
+            return USER
+        if row["session"] == actor:
+            return AGENT
+        if self._guest_row(db, row["id"], actor) is not None:
+            return GUEST
+        raise Forbidden(f"thread {row['id']} belongs to session {row['session']}; only it, its guests "
+                        "(or the user) may write there")
+
+    @staticmethod
+    def _guests(db, tid: str) -> list[dict]:
+        return [{"session": r["session"], "invited_by": r["invited_by"], "invited_at": r["invited_at"]}
+                for r in db.execute("SELECT * FROM guests WHERE thread = ? ORDER BY invited_at, session", (tid,))]
+
+    def _view(self, db, row, last: Optional[dict] = None, *, find_last: bool = True) -> dict:
+        """The thread as every write and read returns it: with its unread
+        count, its last message and its guests."""
+        if last is None and find_last:
+            last = self._last(db, row["id"])
+        return _thread(row, self._unread(db, row), last, self._guests(db, row["id"]))
+
+    @staticmethod
     def _unread(db, row) -> int:
+        # A guest's message is input to the owner the way the user's is.
         return int(db.execute(
-            "SELECT COUNT(*) FROM messages WHERE thread = ? AND author = 'user' AND seq > ?",
+            "SELECT COUNT(*) FROM messages WHERE thread = ? AND author IN ('user', 'guest') AND seq > ?",
             (row["id"], row["agent_read"]),
         ).fetchone()[0])
 
@@ -394,16 +454,16 @@ class ThreadStore:
     def _append(self, db, row, actor: str, body: str, images: Optional[list] = None, *,
                 kind: str = "message", ref: Optional[str] = None, data: Optional[str] = None,
                 author: Optional[str] = None, at: Optional[str] = None,
-                files: Optional[list] = None) -> dict:
+                files: Optional[list] = None, guest: Optional[str] = None) -> dict:
         now = at or _now()
         author = author or _author(actor)
         images = images or []
         try:
             cur = db.execute(
-                "INSERT INTO messages (thread, session, author, body, at, images, kind, ref, data, files)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages (thread, session, author, body, at, images, kind, ref, data, files, guest)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (row["id"], row["session"], author, body, now, json.dumps(images) if images else None,
-                 kind, ref, data, json.dumps(files, ensure_ascii=False) if files else None),
+                 kind, ref, data, json.dumps(files, ensure_ascii=False) if files else None, guest),
             )
         except sqlite3.IntegrityError as exc:
             if ref is not None and "messages" in str(exc) and "ref" in str(exc):
@@ -416,6 +476,9 @@ class ThreadStore:
             + (", agent_read = ?" if author == AGENT else "") + " WHERE id = ?",
             (seq, now, seq, row["id"]) if author == AGENT else (seq, now, row["id"]),
         )
+        if author == GUEST and guest:
+            # So has a guest writing in it.
+            db.execute("UPDATE guests SET read_seq = ? WHERE thread = ? AND session = ?", (seq, row["id"], guest))
         return _message(db.execute("SELECT * FROM messages WHERE seq = ?", (seq,)).fetchone())
 
     # -- writes ------------------------------------------------------------
@@ -455,7 +518,7 @@ class ThreadStore:
             message = (self._append(db, self._row(db, tid), actor, body, images, files=files)
                        if body or images or files else None)
             row = self._row(db, tid)
-            return {"thread": _thread(row, self._unread(db, row), message), "message": message}
+            return {"thread": self._view(db, row, message, find_last=False), "message": message}
 
     def post(self, actor: str, tid: str, text, *, images=None, kind=None, ref=None, data=None,
              system: bool = False, files=None) -> dict:
@@ -469,13 +532,14 @@ class ThreadStore:
         kind, data = _kind(kind), _data(data)
         with self._write() as db:
             row = self._row(db, tid)
-            self._may(row, actor)
+            who = self._writer(db, row, actor)
             reopened = row["status"] == "closed"
             message = self._append(db, row, actor, body, images, kind=kind, ref=ref or None, data=data,
-                                   author=SYSTEM if system else None, files=files)
+                                   author=SYSTEM if system else who, files=files,
+                                   guest=actor if who == GUEST and not system else None)
             row = self._row(db, tid)
-            return {"thread": _thread(row, self._unread(db, row), message), "message": message,
-                    "reopened": reopened}
+            return {"thread": self._view(db, row, message), "message": message,
+                    "reopened": reopened, "as": who}
 
     def set_status(self, actor: str, tid: str, status: str) -> dict:
         if status not in ("open", "closed"):
@@ -486,7 +550,7 @@ class ThreadStore:
             if row["status"] != status:
                 db.execute("UPDATE threads SET status = ?, updated_at = ? WHERE id = ?", (status, _now(), tid))
                 row = self._row(db, tid)
-            return {"thread": _thread(row, self._unread(db, row), self._last(db, tid))}
+            return {"thread": self._view(db, row)}
 
     def rename(self, actor: str, tid: str, title) -> dict:
         title = _text(title, "title", MAX_TITLE)
@@ -495,7 +559,44 @@ class ThreadStore:
             self._may(row, actor)
             db.execute("UPDATE threads SET title = ?, updated_at = ? WHERE id = ?", (title, _now(), tid))
             row = self._row(db, tid)
-            return {"thread": _thread(row, self._unread(db, row), self._last(db, tid))}
+            return {"thread": self._view(db, row)}
+
+    def invite(self, actor: str, tid: str, guest) -> dict:
+        """Make session ``guest`` a guest of thread ``tid``: the user or the
+        owner may. ``added`` is false when it already was one."""
+        guest = str(guest or "").strip()
+        if not guest:
+            raise ThreadError("guest is required: the session to invite")
+        if guest.startswith(OPERATOR_PREFIX):
+            raise ThreadError("an operator cannot be a thread's guest")
+        with self._write() as db:
+            row = self._row(db, tid)
+            if str(row["session"]).startswith(OPERATOR_PREFIX):
+                raise ThreadError(f"thread {tid} is an operator's conversation; it takes no guests")
+            self._may(row, actor)
+            if guest == row["session"]:
+                raise ThreadError(f"{guest} owns thread {tid}; it cannot be its guest")
+            added = self._guest_row(db, tid, guest) is None
+            if added:
+                n = db.execute("SELECT COUNT(*) FROM guests WHERE thread = ?", (tid,)).fetchone()[0]
+                if n >= MAX_GUESTS:
+                    raise Conflict(f"thread {tid} already has {n} guests; remove one first")
+                db.execute("INSERT INTO guests (thread, session, invited_by, invited_at) VALUES (?,?,?,?)",
+                           (tid, guest, _author(actor) if actor == USER else actor, _now()))
+            return {"thread": self._view(db, row), "guest": guest, "added": added}
+
+    def uninvite(self, actor: str, tid: str, guest) -> dict:
+        """Remove guest ``guest`` from thread ``tid``: the user, the owner,
+        or the guest itself (leaving) may."""
+        guest = str(guest or "").strip()
+        with self._write() as db:
+            row = self._row(db, tid)
+            if actor != guest:
+                self._may(row, actor)
+            if self._guest_row(db, tid, guest) is None:
+                raise NotFound(f"{guest or '(nobody)'} is not a guest of thread {tid}")
+            db.execute("DELETE FROM guests WHERE thread = ? AND session = ?", (tid, guest))
+            return {"thread": self._view(db, row), "guest": guest, "removed": True}
 
     # -- reads -------------------------------------------------------------
 
@@ -516,9 +617,12 @@ class ThreadStore:
             if reader == row["session"] and messages and messages[-1]["seq"] > row["agent_read"]:
                 db.execute("UPDATE threads SET agent_read = ? WHERE id = ?", (messages[-1]["seq"], tid))
                 row = self._row(db, tid)
+            elif reader != USER and messages:
+                # A guest's read position (no-op for a session that is none).
+                db.execute("UPDATE guests SET read_seq = MAX(read_seq, ?) WHERE thread = ? AND session = ?",
+                           (messages[-1]["seq"], tid, reader))
             more = bool(rows) and len(rows) == limit and rows[-1]["seq"] < row["last_seq"]
-            return {"thread": _thread(row, self._unread(db, row), self._last(db, tid)),
-                    "messages": messages, "more": more}
+            return {"thread": self._view(db, row), "messages": messages, "more": more}
 
     def list(self, session: str, *, closed: bool = True) -> dict:
         with self._connect() as db:
@@ -526,22 +630,48 @@ class ThreadStore:
             if not closed:
                 sql += " AND status = 'open'"
             rows = db.execute(sql + " ORDER BY status = 'closed', updated_at DESC, id", (session,)).fetchall()
-            threads = [_thread(r, self._unread(db, r), self._last(db, r["id"])) for r in rows]
+            threads = [self._view(db, r) for r in rows]
             agent_seq = db.execute(
                 "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session = ? AND author = 'agent'", (session,)
             ).fetchone()[0]
+            guest_threads = self._guest_threads(db, session, closed=closed)
         return {
             "session": session,
             "threads": threads,
+            "guest_threads": guest_threads,
             "open": sum(1 for t in threads if t["status"] == "open"),
             "agent_seq": int(agent_seq),
         }
+
+    def _guest_threads(self, db, session: str, *, closed: bool = True) -> list[dict]:
+        """The threads ``session`` is a guest in, each with ``guest``: who
+        invited it, when, how far it has read and how many messages of the
+        others it has not (``unread``)."""
+        sql = ("SELECT t.*, g.invited_by AS g_by, g.invited_at AS g_at, g.read_seq AS g_read"
+               " FROM guests g JOIN threads t ON t.id = g.thread WHERE g.session = ?")
+        if not closed:
+            sql += " AND t.status = 'open'"
+        out = []
+        for r in db.execute(sql + " ORDER BY t.status = 'closed', t.updated_at DESC, t.id", (session,)).fetchall():
+            t = self._view(db, r)
+            unread = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE thread = ? AND seq > ? AND author != 'system'"
+                " AND NOT (author = 'guest' AND guest = ?)", (r["id"], r["g_read"], session)).fetchone()[0]
+            t["guest"] = {"invited_by": r["g_by"], "invited_at": r["g_at"], "read_seq": r["g_read"],
+                          "unread": int(unread)}
+            out.append(t)
+        return out
+
+    def guests_of(self, tid: str) -> list[str]:
+        """The names of thread ``tid``'s guests."""
+        with self._connect() as db:
+            return [g["session"] for g in self._guests(db, str(tid or ""))]
 
     def get(self, tid: str) -> dict:
         """One thread's row (no messages, read position untouched)."""
         with self._connect() as db:
             row = self._row(db, tid)
-            return _thread(row, self._unread(db, row), self._last(db, tid))
+            return self._view(db, row)
 
     def has_image(self, tid: str, name: str) -> bool:
         """Whether a message of thread ``tid`` carries the image ``name``."""
@@ -646,7 +776,7 @@ class ThreadStore:
             rows = db.execute(
                 "SELECT t.*,"
                 " (SELECT COUNT(*) FROM messages m WHERE m.thread = t.id) AS n,"
-                " (SELECT COUNT(*) FROM messages m WHERE m.thread = t.id AND m.author = 'user'"
+                " (SELECT COUNT(*) FROM messages m WHERE m.thread = t.id AND m.author IN ('user', 'guest')"
                 "  AND m.seq > t.agent_read) AS unread,"
                 " (SELECT body FROM messages m WHERE m.thread = t.id ORDER BY m.seq DESC LIMIT 1) AS last_body"
                 " FROM threads t" + cond + " ORDER BY t.updated_at DESC, t.id LIMIT ?",
@@ -811,4 +941,5 @@ class ThreadStore:
         deleted); returns how many threads went."""
         with self._write() as db:
             db.execute("DELETE FROM messages WHERE session = ?", (owner,))
+            db.execute("DELETE FROM guests WHERE thread IN (SELECT id FROM threads WHERE session = ?)", (owner,))
             return db.execute("DELETE FROM threads WHERE session = ?", (owner,)).rowcount
