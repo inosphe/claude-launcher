@@ -15404,34 +15404,14 @@ document.querySelectorAll('input[name="term-view"]').forEach((input) =>
     location.hash = input.value === "html" ? `#/log/${name}` : `#/s/${name}`;
   }));
 
-/* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
-   owed replies, cflow position, parent/children, opening task) and type it
-   into the terminal — the operator's push for an agent whose context was
-   cleared or compacted and does not know what it lost. The automatic path is
-   the SessionStart hook every managed claude session carries; this button is
-   for the cases the hook cannot cover (another harness, a hook that was
-   stripped, or "I can see it flailing right now"). */
-$("term-rebrief").addEventListener("click", async () => {
-  if (!currentName) return;
-  const btn = $("term-rebrief");
-  btn.disabled = true;
-  try {
-    const resp = await api(
-      `/api/sessions/${encodeURIComponent(currentName)}/rebrief`,
-      { method: "POST" }
-    );
-    const info = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      alert(info.error || `HTTP ${resp.status}`);
-      return;
-    }
-    if (info.empty) {
-      alert("nothing to re-brief: this session has no mesh membership, " +
-            "no cflow run, no parent or children, and no recorded task");
-    }
-  } catch { /* auth overlay is up */ }
-  finally { btn.disabled = false; }
-});
+/* Rebrief: the ↻ button opens the briefing and prompt packs pane
+   (SPLIT_PANES.packs, packs-pane.js) — the briefing the daemon re-derives
+   (mesh roster, owed replies, cflow position, parent/children, opening task)
+   is sent from there, for an agent whose context was cleared or compacted and
+   does not know what it lost, beside the session's prompt packs. The
+   automatic path is the SessionStart hook every managed claude session
+   carries; the pane is for the cases the hook cannot cover (another harness,
+   a hook that was stripped, or "I can see it flailing right now"). */
 
 /* Send the retrospective prompt pack (an on-demand pack, never part of an
    opening) into the terminal: the agent reviews its own session and the cflow
@@ -19587,6 +19567,14 @@ const SPLIT_PANES = {
     on: "close the chart pane — the terminal takes the column back",
     off: "this pi-durable session's run as a flow chart, updated as it logs",
   },
+  // The ↻ rebrief button (claunch-6esft.1): the briefing it used to type at
+  // once, and the session's prompt packs, each previewed and sent from here
+  // (packs-pane.js, daemon/session_packs.py).
+  packs: {
+    btn: "term-rebrief", title: "↻ rebrief",
+    on: "close the briefing and prompt packs pane — the terminal takes the column back",
+    off: "this session's briefing and prompt packs — view them, and send one into the terminal (for an agent whose context was cleared or compacted)",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -19599,7 +19587,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), or the conversation pane
     // (talk-pane.js) on the session's questions (?), its threads (🗪) or
     // both side by side.
-    pane: ["sims", "category", "chart", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -22158,7 +22146,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "chart", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -22225,6 +22213,8 @@ function openSplit(name, kind = "run") {
   if (kind === "sims") { globalThis.SimPane?.mount(splitBody, name); return; }
   // So does the category pane (category-page.js).
   if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
+  // And the briefing and prompt packs pane (packs-pane.js).
+  if (kind === "packs") { globalThis.PacksPane?.mount(splitBody, name); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -22254,6 +22244,7 @@ function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
+  if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -22345,6 +22336,7 @@ async function refreshSplit() {
 $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
+$("term-rebrief").addEventListener("click", () => toggleSplitPane("packs"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));

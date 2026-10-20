@@ -8192,3 +8192,33 @@ a.category-ref:hover { text-decoration: underline; }
   .category-node-tools { visibility: visible; }
   .category-scope { flex-basis: 100%; }
 }
+
+/* ---- Briefing and prompt packs pane (packs-pane.js, ↻ rebrief, claunch-6esft.1) ---- */
+.packs-host {
+  --packs-border: #303843; --packs-muted: #a4afbd; --packs-panel: #1b2028;
+  height: 100%; overflow: auto; padding: 12px 16px; box-sizing: border-box;
+}
+.packs-pane { font-size: 13px; line-height: 1.5; }
+.packs-section { margin-bottom: 16px; }
+.packs-section h4 { margin: 0 0 2px; font-size: 13px; }
+.packs-muted { color: var(--packs-muted); font-size: 12px; margin: 0 0 6px; }
+.packs-error { color: #ff7b72; }
+.packs-notice { color: #7ee787; }
+.packs-list { list-style: none; margin: 0; padding: 0; }
+.packs-row { border-bottom: 1px solid var(--packs-border); padding: 5px 0; }
+.packs-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.packs-name { display: inline-flex; gap: 8px; align-items: baseline; min-width: 0; }
+.packs-title { color: var(--packs-muted); }
+.packs-meta { color: var(--packs-muted); font-size: 12px; flex: 1 1 auto; }
+.packs-actions { display: inline-flex; gap: 4px; }
+.packs-actions .wf-btn { margin: 0; padding: 2px 9px; border: 1px solid var(--packs-border); background: #242d38; border-radius: 5px; }
+.packs-actions .wf-btn:hover:not(:disabled) { background: #354153; }
+.packs-actions .wf-btn:disabled { opacity: .45; cursor: default; }
+.packs-actions .packs-send { background: #2a4a7a; border-color: #427fdf; }
+.packs-preview {
+  margin: 6px 0 2px; padding: 8px 10px; max-height: 320px; overflow: auto;
+  background: var(--packs-panel); border: 1px solid var(--packs-border); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word; font-size: 12px;
+}
+.packs-sent li { padding: 2px 0; font-size: 12px; }
+.packs-actions .packs-drop { color: #ff8b84; }

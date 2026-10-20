@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .. import digests, prompt_packs, store, workspaces
 from ..cflow import engine as cflow_engine, state as cflow_state
-from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal, wallclock
+from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal, session_packs, wallclock
 from .session import STATUS_BUSY
 
 log = logging.getLogger("claunch.daemon.session-reminder")
@@ -65,7 +65,10 @@ def pack_entries(sdef) -> List[dict]:
     """The prompt packs one session holds, as the reminder names them.
 
     Read from the definition's records, the same text ``rebrief`` serves
-    back, so an id named here is always one that tool can answer.
+    back, so an id named here is always one that tool can answer. After them
+    come the packs a person sent from the packs pane and that are held for
+    recovery (:func:`session_packs.held_entries`, source ``sent``) --
+    ``rebrief`` answers for those too.
     """
     out: List[dict] = []
     for rec in getattr(sdef, "prompt_packs", ()) or ():
@@ -80,6 +83,12 @@ def pack_entries(sdef) -> List[dict]:
                 "required_by": list(rec.get("required_by") or ()),
             }
         )
+    name = getattr(sdef, "name", "")
+    if name:
+        try:
+            out.extend(session_packs.held_entries(name))
+        except Exception:  # noqa: BLE001 - decoration never sinks a reminder
+            log.warning("held prompt packs unreadable for %r", name, exc_info=True)
     return out
 
 
