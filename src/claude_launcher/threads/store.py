@@ -16,8 +16,10 @@ Rows:
   messages  the conversation, globally sequenced (``seq``); ``author`` is
             ``user`` or ``agent``; ``images`` lists the pictures attached to
             it -- by the user (claunch-shl2r) or the agent (claunch-euaz6),
-            NULL when there are none; ``kind``, ``ref`` and ``data`` carry
-            an operator conversation's structure (below)
+            NULL when there are none; ``files`` lists the other files the
+            user attached (claunch-5gpcf, daemon/uploads.py), NULL when there
+            are none; ``kind``, ``ref`` and ``data`` carry an operator
+            conversation's structure (below)
 
 Who may write. The user (the dashboard) may open, post, close and reopen in
 any session's threads; a session may do the same only in its own. Posting to
@@ -64,13 +66,15 @@ from typing import Iterator, Optional
 
 USER = "user"
 AGENT = "agent"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MAX_TITLE = 200
 MAX_BODY = 20_000
 #: Pictures one message may carry; the same bound an opening task has
 #: (daemon/opening_images.MAX_IMAGES).
 MAX_IMAGES = 10
+#: Other files one message may carry (daemon/uploads.MAX_FILES).
+MAX_FILES = 10
 MAX_OPEN_PER_SESSION = 50
 PAGE = 500
 HISTORY_PAGE = 20
@@ -130,7 +134,8 @@ CREATE TABLE IF NOT EXISTS messages (
     kind TEXT NOT NULL DEFAULT 'message' CHECK (kind IN ('message', 'ask', 'dispatch', 'system')),
     ref TEXT,
     data TEXT,
-    CHECK (length(body) > 0 OR images IS NOT NULL)
+    files TEXT,
+    CHECK (length(body) > 0 OR images IS NOT NULL OR files IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread, seq);
 CREATE INDEX IF NOT EXISTS messages_session ON messages (session, author, seq);
@@ -186,21 +191,45 @@ def _images(value) -> list[dict]:
     return out
 
 
+_FILE_ID = re.compile(r"[0-9a-f]{20}")
+
+
+def _files(value) -> list[dict]:
+    """``files`` of a write: ``[{id, name, bytes}]`` as the route kept them
+    (daemon/uploads.py). Only the shape is checked here."""
+    if value in (None, []):
+        return []
+    if not isinstance(value, list):
+        raise ThreadError("files must be a list")
+    if len(value) > MAX_FILES:
+        raise ThreadError(f"a message carries at most {MAX_FILES} files ({len(value)} given)")
+    out = []
+    for item in value:
+        if not (isinstance(item, dict) and isinstance(item.get("id"), str) and _FILE_ID.fullmatch(item["id"])
+                and isinstance(item.get("name"), str) and item["name"]):
+            raise ThreadError(f"{item!r} is not a kept thread file")
+        out.append({"id": item["id"], "name": item["name"], "bytes": int(item.get("bytes") or 0)})
+    return out
+
+
 def _excerpt(body: str) -> str:
     """The first non-blank line of a message, cut to RAIL_EXCERPT."""
     line = next((ln.strip() for ln in (body or "").splitlines() if ln.strip()), "")
     return line if len(line) <= RAIL_EXCERPT else line[:RAIL_EXCERPT - 1] + "…"
 
 
-def _reply_excerpt(body: str, images) -> str:
+def _reply_excerpt(body: str, images, files=None) -> str:
     """A reply's notice line: its excerpt, with the pictures it carries
     counted (claunch-euaz6) so an images-only reply is not a blank card --
     the same wording as the threads pane's list (threads-pane.js lastLine)."""
     text = _excerpt(body)
     n = len(json.loads(images)) if images else 0
-    if not n:
-        return text
-    return f"{text} 🖼{n}" if text else f"🖼 이미지 {n}장"
+    k = len(json.loads(files)) if files else 0
+    if n:
+        text = f"{text} 🖼{n}" if text else f"🖼 이미지 {n}장"
+    if k:
+        text = f"{text} 📎{k}" if text else f"📎 파일 {k}개"
+    return text
 
 
 def _default_title(db, session: str) -> str:
@@ -238,6 +267,8 @@ def _message(r: sqlite3.Row) -> dict:
     raw = r["images"]
     out = {"seq": r["seq"], "thread": r["thread"], "author": r["author"], "body": r["body"], "at": r["at"],
            "images": json.loads(raw) if raw else [], "kind": r["kind"]}
+    if r["files"]:
+        out["files"] = json.loads(r["files"])
     if r["ref"] is not None:
         out["ref"] = r["ref"]
     if r["data"] is not None:
@@ -262,7 +293,8 @@ def _data(value) -> Optional[str]:
 
 #: v3 (claunch-shl2r): ``messages`` gains ``images`` and a body may be empty
 #: when a picture is the message. v4 (claunch-iw5i8.12.1): it gains ``kind``,
-#: ``ref`` and ``data``, and ``author`` may be ``system``. SQLite cannot change
+#: ``ref`` and ``data``, and ``author`` may be ``system``. v5 (claunch-5gpcf):
+#: it gains ``files``, and a body may be empty when files are the message. SQLite cannot change
 #: a CHECK, so an older table is rebuilt under the new definition with every
 #: row and seq kept; ``{cols}`` is the columns the old table has.
 _REBUILD_MESSAGES = """
@@ -280,7 +312,8 @@ CREATE TABLE messages (
     kind TEXT NOT NULL DEFAULT 'message' CHECK (kind IN ('message', 'ask', 'dispatch', 'system')),
     ref TEXT,
     data TEXT,
-    CHECK (length(body) > 0 OR images IS NOT NULL)
+    files TEXT,
+    CHECK (length(body) > 0 OR images IS NOT NULL OR files IS NOT NULL)
 );
 INSERT INTO messages ({cols}) SELECT {cols} FROM messages_old ORDER BY seq;
 DROP TABLE messages_old;
@@ -302,9 +335,9 @@ class ThreadStore:
                 # v2 (claunch-78dpm): the QA question a thread is about.
                 db.execute("ALTER TABLE threads ADD COLUMN qa TEXT")
             mcols = {r[1] for r in db.execute("PRAGMA table_info(messages)")}
-            if mcols and "kind" not in mcols:
-                cols = ", ".join(c for c in ("seq", "thread", "session", "author", "body", "at", "images")
-                                 if c in mcols)
+            if mcols and "files" not in mcols:
+                cols = ", ".join(c for c in ("seq", "thread", "session", "author", "body", "at", "images",
+                                             "kind", "ref", "data") if c in mcols)
                 db.executescript("BEGIN IMMEDIATE;" + _REBUILD_MESSAGES.format(cols=cols) + "COMMIT;")
             db.executescript(_SCHEMA)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -360,16 +393,17 @@ class ThreadStore:
 
     def _append(self, db, row, actor: str, body: str, images: Optional[list] = None, *,
                 kind: str = "message", ref: Optional[str] = None, data: Optional[str] = None,
-                author: Optional[str] = None, at: Optional[str] = None) -> dict:
+                author: Optional[str] = None, at: Optional[str] = None,
+                files: Optional[list] = None) -> dict:
         now = at or _now()
         author = author or _author(actor)
         images = images or []
         try:
             cur = db.execute(
-                "INSERT INTO messages (thread, session, author, body, at, images, kind, ref, data)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages (thread, session, author, body, at, images, kind, ref, data, files)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (row["id"], row["session"], author, body, now, json.dumps(images) if images else None,
-                 kind, ref, data),
+                 kind, ref, data, json.dumps(files, ensure_ascii=False) if files else None),
             )
         except sqlite3.IntegrityError as exc:
             if ref is not None and "messages" in str(exc) and "ref" in str(exc):
@@ -386,9 +420,9 @@ class ThreadStore:
 
     # -- writes ------------------------------------------------------------
 
-    def open(self, actor: str, session: str, title, text=None, *, qa=None, images=None) -> dict:
+    def open(self, actor: str, session: str, title, text=None, *, qa=None, images=None, files=None) -> dict:
         """A new thread in ``session``, optionally with its first message
-        (text, attached ``images``, or both) and the QA question it is about
+        (text, attached ``images`` and ``files``, any of them) and the QA question it is about
         (``qa``). A blank title is given the session's next default name
         (``Thread #N``)."""
         session = str(session or "").strip()
@@ -399,6 +433,7 @@ class ThreadStore:
         title = _text(title, "title", MAX_TITLE, required=False)
         body = _text(text, "text", MAX_BODY, required=False)
         images = _images(images)
+        files = _files(files)
         qa = _qa_id(qa)
         with self._write() as db:
             if not title:
@@ -417,25 +452,27 @@ class ThreadStore:
                 "VALUES (?,?,?,?,?,?,?)",
                 (tid, session, title, _author(actor), qa, now, now),
             )
-            message = self._append(db, self._row(db, tid), actor, body, images) if body or images else None
+            message = (self._append(db, self._row(db, tid), actor, body, images, files=files)
+                       if body or images or files else None)
             row = self._row(db, tid)
             return {"thread": _thread(row, self._unread(db, row), message), "message": message}
 
     def post(self, actor: str, tid: str, text, *, images=None, kind=None, ref=None, data=None,
-             system: bool = False) -> dict:
+             system: bool = False, files=None) -> dict:
         """A message: text, attached ``images``, or both. ``kind``, ``ref``
         and ``data`` give it an operator conversation's structure; ``system``
         writes it as the daemon (``author`` ``system``) on ``actor``'s
         authority."""
         images = _images(images)
-        body = _text(text, "text", MAX_BODY, required=not images)
+        files = _files(files)
+        body = _text(text, "text", MAX_BODY, required=not (images or files))
         kind, data = _kind(kind), _data(data)
         with self._write() as db:
             row = self._row(db, tid)
             self._may(row, actor)
             reopened = row["status"] == "closed"
             message = self._append(db, row, actor, body, images, kind=kind, ref=ref or None, data=data,
-                                   author=SYSTEM if system else None)
+                                   author=SYSTEM if system else None, files=files)
             row = self._row(db, tid)
             return {"thread": _thread(row, self._unread(db, row), message), "message": message,
                     "reopened": reopened}
@@ -513,6 +550,16 @@ class ThreadStore:
         with self._connect() as db:
             for r in db.execute("SELECT images FROM messages WHERE thread = ? AND images IS NOT NULL", (str(tid),)):
                 if any(i.get("name") == name for i in json.loads(r["images"])):
+                    return True
+        return False
+
+    def has_file(self, tid: str, file_id: str, name: str) -> bool:
+        """Whether a message of thread ``tid`` carries the file ``file_id``/``name``."""
+        if not _FILE_ID.fullmatch(str(file_id or "")):
+            return False
+        with self._connect() as db:
+            for r in db.execute("SELECT files FROM messages WHERE thread = ? AND files IS NOT NULL", (str(tid),)):
+                if any(f.get("id") == file_id and f.get("name") == name for f in json.loads(r["files"])):
                     return True
         return False
 
@@ -652,8 +699,8 @@ class ThreadStore:
             ):
                 row(r["session"])["agent_seq"] = int(r["seq"] or 0)
             for r in db.execute(
-                "SELECT m.seq, m.session, m.thread, m.body, m.images, m.at, t.title FROM ("
-                " SELECT seq, session, thread, body, images, at,"
+                "SELECT m.seq, m.session, m.thread, m.body, m.images, m.files, m.at, t.title FROM ("
+                " SELECT seq, session, thread, body, images, files, at,"
                 " ROW_NUMBER() OVER (PARTITION BY session ORDER BY seq DESC) AS n"
                 " FROM messages WHERE author = 'agent' AND session NOT LIKE ?) AS m"
                 " JOIN threads t ON t.id = m.thread WHERE m.n <= ? ORDER BY m.seq",
@@ -661,7 +708,7 @@ class ThreadStore:
             ):
                 row(r["session"])["replies"].append({
                     "seq": r["seq"], "thread": r["thread"], "title": r["title"],
-                    "excerpt": _reply_excerpt(r["body"], r["images"]), "at": r["at"],
+                    "excerpt": _reply_excerpt(r["body"], r["images"], r["files"]), "at": r["at"],
                 })
         return out
 

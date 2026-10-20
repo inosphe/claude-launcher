@@ -52,6 +52,18 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 
 이미지 파일은 세션 디렉터리가 아닌 데몬 디렉터리에 둔다. 쓰레드 기록은 세션이 끝난 뒤에도 남기 때문이다.
 
+## 파일 첨부 (claunch-5gpcf)
+
+사용자 메시지에 종류와 관계없이 파일(프로파일링 파일, 로그 등)을 붙일 수 있다. 텍스트 없이 파일만 보내도 된다.
+
+| 단계 | 위치 | 내용 |
+|---|---|---|
+| 첨부 | `threads-pane.js` | `📎` 버튼(여러 개 선택). 이미지가 아닌 파일을 끌어다 놓거나 붙여 넣어도 파일로 첨부된다. 보내기 전까지 입력창 위에 이름·크기 칩으로 남고 `×`로 뺀다 |
+| 업로드 | `POST /api/uploads?name=<파일 이름>` | 파일 한 개를 원본 바디로 올린다. 디스크에 바로 기록하며 상한은 `daemon.upload_max_bytes`(기본 2 GiB)다. `daemon/uploads.py`의 스테이징(`daemon_dir()/uploads/<id>/<이름>`, 24시간 뒤 정리)이고 id를 돌려준다 |
+| 게시 | `POST /api/threads`, `POST /api/threads/{id}/messages`의 `files` | 스테이징 id 목록(최대 10개). 데몬이 파일을 `daemon_dir()/thread-files/<id>/`로 옮기고 `messages.files`(스키마 v5)에 `{id, name, bytes}`로 기록한다. 게시가 거절되면 파일을 스테이징으로 되돌린다 |
+| 전달 | `daemon/threads_api.py` | 세션에 보내는 블록에 파일마다 `[claunch attachment] <이름> (<크기>) <경로>` 줄을 적는다. 클립보드는 쓰지 않는다 |
+| 기록 | `GET /api/threads/{id}/files/{fid}/{name}` | 그 쓰레드 메시지가 가진 파일만 내려받기로 내준다. 게시 후 30일이 지나면 데몬이 파일을 지우고(시작 시와 1시간마다 정리), 메시지의 `files`에 `expired: true`가 붙으며 이 경로는 410을 돌려준다. 패널은 만료된 파일을 「만료됨」으로 표시한다 |
+
 ## QA와 연결 (claunch-78dpm)
 
 쓰레드와 세션 QA(`qa_*` 도구, `src/claude_launcher/qa/store.py`)는 별개의 기능이고 저장소도 따로다.

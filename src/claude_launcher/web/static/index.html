@@ -771,6 +771,14 @@
               aria-label="attach image files to this session">🖼</button>
       <input id="term-image-file" type="file" hidden multiple
              accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp">
+      <!-- Files of any kind (claunch-5gpcf): each is uploaded into the
+           session's state directory (POST .../uploads) and its
+           "[claunch attachment] <name> (<size>) <path>" line is put in this
+           line, so it goes out with what the reader types about it. -->
+      <button id="term-file-pick" class="term-btn" type="button"
+              title="attach files of any kind (a profiling capture, a log): uploaded to the daemon's machine, and a line naming each file's path is added to this line"
+              aria-label="attach files to this session">📎</button>
+      <input id="term-file-file" type="file" hidden multiple>
       <span id="term-input-note" class="wf-note hidden"></span>
       <span id="term-score-goal" class="hidden">
         <span class="term-score-label">Feedback</span>
@@ -1170,6 +1178,21 @@
             </div>
             <ul class="new-task-images-list" id="new-task-images-list"></ul>
             <p class="new-task-images-note hidden" id="new-task-images-note"></p>
+          </div>
+          <!-- Files of any kind that go out with the opening (claunch-5gpcf):
+               a profiling capture, a log. Uploaded when the form is submitted
+               (POST /api/uploads); the daemon moves them into the session's
+               state directory and ends the opening with one
+               "[claunch attachment] <name> (<size>) <path>" line per file.
+               A dropped file that is not an image lands here too. -->
+          <div id="new-task-files" class="new-task-images">
+            <div class="new-task-images-drop" id="new-task-files-drop">
+              <span class="new-task-images-hint">Files (any kind, e.g. a profiling capture): drop here, or</span>
+              <button type="button" class="wf-btn" id="new-task-files-pick">Attach files</button>
+              <input type="file" id="new-task-files-file" hidden multiple>
+            </div>
+            <ul class="new-task-files-list" id="new-task-files-list"></ul>
+            <p class="new-task-images-note hidden" id="new-task-files-note"></p>
           </div>
         </fieldset>
 

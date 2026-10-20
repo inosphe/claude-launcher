@@ -558,9 +558,12 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   let staged = 0;
   const api3 = async (p, opts = {}) => {
     const isStage = p === "/api/threads/images";
-    calls3.push([opts.method || "GET", p, isStage ? opts.headers["Content-Type"] : (opts.body ? JSON.parse(opts.body) : undefined)]);
+    const isUpload = p.startsWith("/api/uploads?");
+    calls3.push([opts.method || "GET", p, isStage || isUpload ? opts.headers["Content-Type"]
+                 : (opts.body ? JSON.parse(opts.body) : undefined)]);
     let doc = {};
-    if (isStage) {
+    if (isUpload) doc = {id: "f".repeat(20)};
+    else if (isStage) {
       if (failStage) return {ok: false, status: 413, json: async () => ({error: "too big"})};
       doc = {id: `img${++staged}.png`};
     } else if (p.startsWith("/api/threads?session=")) doc = {session: "s3", threads: [imgThread], open: 1, agent_seq: 0};
@@ -620,12 +623,15 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const nform = host3.querySelector(".th-newform");
   nform.fire("drop", {dataTransfer: {files: [{type: "image/png", name: "d.png"}, {type: "text/plain", name: "x.txt"}]}});
   await settle();
-  assert.equal(nform.querySelectorAll(".th-attach-item").length, 1, "only the image is attached");
+  // claunch-5gpcf: the file that is not an image is attached as a file
+  assert.equal(nform.querySelectorAll(".th-attach-item").length, 2, "the image and the file are attached");
+  assert.equal(nform.querySelectorAll(".th-attach-file").length, 1, "the text file waits as a file chip");
   calls3.length = 0;
   host3.querySelector(".th-newform .th-send").fire("click");
   await settle();
   assert.deepEqual(calls3.filter((c) => c[0] === "POST").map((c) => [c[1], c[2]]),
-                   [["/api/threads/images", "image/png"], ["/api/threads", {to: "s3", title: "", images: ["img2.png"]}]]);
+                   [["/api/threads/images", "image/png"], ["/api/uploads?name=x.txt", "application/octet-stream"],
+                    ["/api/threads", {to: "s3", title: "", images: ["img2.png"], files: ["f".repeat(20)]}]]);
   P.unmount();
 
   /* the header button's rail (app.js) */

@@ -11,6 +11,14 @@ user and a session, held in the session's threads pane.
   POST /api/threads/{id}/title                   rename  {session?, title}
   POST /api/threads/images                       stage one image (raw body)
   GET  /api/threads/{id}/images/{name}           an image a message carries
+  GET  /api/threads/{id}/files/{fid}/{name}      a file a message carries
+
+Files (claunch-5gpcf). A message may also carry files of any kind (a
+profiling capture): each is staged with ``POST /api/uploads`` and the post
+names the ids in ``files``. They are kept in ``<daemon dir>/thread-files``
+for 30 days (daemon/uploads.py); every message returns its ``files`` with
+each one's ``path``, or ``expired: true`` once it is gone, and the block
+typed into the session lists them as ``[claunch attachment]`` lines.
 
 Images (claunch-shl2r). The user may attach images to a message: each is
 staged first (``POST /api/threads/images``, the opening-image upload) and
@@ -62,11 +70,12 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from aiohttp import web
 
 from ..threads import store as thread_store
-from . import paths, talk_links, thread_images
+from . import paths, talk_links, thread_images, uploads
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +101,15 @@ def _mention_lines(mentions: list[dict]) -> list[str]:
             for q in mentions]
 
 
+def _file_lines(message: dict) -> list[str]:
+    files = [f for f in message.get("files") or [] if f.get("path")]
+    if not files:
+        return []
+    return [f"The user attached {len(files)} file(s) to this message; each line ends with its path "
+            "on this machine (read it from there):",
+            *(uploads.line(f["name"], f["bytes"], f["path"]) for f in files)]
+
+
 def _image_lines(message: dict) -> list[str]:
     images = message.get("images") or []
     if not images:
@@ -111,8 +129,9 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
     else:
         head = "The user wrote in this thread:"
     lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}",
-             _quote(message["body"]) if message["body"] or not message.get("images") else "  > (images only)",
-             *_image_lines(message), *_subject_line(thread),
+             (_quote(message["body"]) if message["body"] or not (message.get("images") or message.get("files"))
+              else "  > (images only)" if not message.get("files") else "  > (attachments only)"),
+             *_image_lines(message), *_file_lines(message), *_subject_line(thread),
              *_mention_lines(mentions or [])]
     if ask_qa:
         lines.append(
@@ -250,6 +269,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             for m in [res.get("message"), *(res.get("messages") or [])]:
                 if m:
                     thread_images.attach(m)
+                    uploads.attach(m)
         return res, None
 
     def operator_thread(tid: str):
@@ -277,6 +297,33 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return await asyncio.to_thread(thread_images.keep, ids), None
         except thread_images.ThreadImageError as exc:
             return None, web.json_response({"error": str(exc)}, status=400)
+
+    async def keep_files(body: dict):
+        """``body["files"]`` (staged ids) moved into the thread folder, as
+        the store's records; or an error response."""
+        raw = body.get("files")
+        if raw in (None, []):
+            return [], None
+        try:
+            ids = uploads.check_ids(raw, field="files", what="a thread message")
+            return await asyncio.to_thread(uploads.keep_for_thread, ids), None
+        except uploads.UploadError as exc:
+            return None, web.json_response({"error": str(exc)}, status=400)
+
+    async def keep_attachments(body: dict):
+        """Images and files of a post, kept; ``(images, files, error)``."""
+        images, err = await keep_images(body)
+        if err:
+            return None, None, err
+        files, err = await keep_files(body)
+        if err:
+            await asyncio.to_thread(thread_images.unkeep, images)
+            return None, None, err
+        return images, files, None
+
+    async def unkeep_attachments(images, files):
+        await asyncio.to_thread(thread_images.unkeep, images)
+        await asyncio.to_thread(uploads.unkeep_thread, files)
 
     async def h_list(request):
         session = request.query.get("session") or ""
@@ -328,13 +375,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             # questions (claunch-236ei).
             rows = await asyncio.to_thread(qa_rows, target)
             qid = talk_links.subject_in(body.get("title"), body.get("text"), rows)
-        images, err = await keep_images(body)
+        images, files, err = await keep_attachments(body)
         if err:
             return err
         res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid,
-                              images=images)
+                              images=images, files=files)
         if err:
-            await asyncio.to_thread(thread_images.unkeep, images)
+            await unkeep_attachments(images, files)
             return err
         await asyncio.to_thread(link, [res["thread"]], target)
         if actor == thread_store.USER and res["message"]:
@@ -358,12 +405,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         err = await asyncio.to_thread(operator_thread, request.match_info["id"])
         if err:
             return err
-        images, err = await keep_images(body)
+        images, files, err = await keep_attachments(body)
         if err:
             return err
-        res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"), images=images)
+        res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"), images=images,
+                              files=files)
         if err:
-            await asyncio.to_thread(thread_images.unkeep, images)
+            await unkeep_attachments(images, files)
             return err
         t = res["thread"]
         await asyncio.to_thread(link, [t], t["session"])
@@ -411,6 +459,20 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             "Cache-Control": "private, max-age=31536000, immutable",
         })
 
+    async def h_file(request):
+        tid, fid, name = request.match_info["id"], request.match_info["fid"], request.match_info["name"]
+        if not await asyncio.to_thread(threads.has_file, tid, fid, name):
+            return web.json_response({"error": f"thread {tid} has no file {fid}/{name}"}, status=404)
+        path = await asyncio.to_thread(uploads.thread_file, fid, name)
+        if path is None:
+            return web.json_response(
+                {"error": f"{name} has expired: thread files are kept {uploads.THREAD_TTL_SECONDS // 86400} days",
+                 "expired": True}, status=410)
+        return web.FileResponse(path, headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(name),
+        })
+
     r = app.router
     r.add_get("/api/threads", h_list)
     r.add_get("/api/threads/rail", h_rail)
@@ -423,4 +485,5 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_post("/api/threads/{id}/reopen", status_route("open"))
     r.add_post("/api/threads/{id}/title", h_title)
     r.add_get("/api/threads/{id}/images/{name}", h_image)
+    r.add_get("/api/threads/{id}/files/{fid}/{name}", h_file)
     return threads

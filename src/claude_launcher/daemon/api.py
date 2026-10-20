@@ -59,6 +59,7 @@ from .. import wsl_reg_stub
 from . import actors, beads as beads_mod, channel, clipboard, connections
 from . import p2p
 from . import opening_images
+from . import uploads
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
 from . import line_sync
@@ -759,6 +760,8 @@ def build_app(
     # tick (daemon/auto_archive.py, claunch-wz6a5).
     from . import auto_archive
     auto_archive.install(app, manager)
+    # Thread files past their 30 days (daemon/uploads.py, claunch-5gpcf).
+    uploads.install(app)
     # The Stats page reads transcripts in a child process, off this loop's
     # GIL (claunch-3r94d); started on first use.
     app["stats_worker"] = statsworker.StatsWorker()
@@ -1176,6 +1179,10 @@ def build_app(
     r.add_post("/api/sessions/{name}/runtime-mode", h_session_runtime_mode)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
+    # Files of any kind (claunch-5gpcf): staged for a create form or a
+    # thread post, or stored straight into a running session's uploads.
+    r.add_post("/api/uploads", h_upload)
+    r.add_post("/api/sessions/{name}/uploads", h_session_upload)
     r.add_post("/api/opening-images", h_opening_image_upload)
     # A thread message stages its images the same way (claunch-shl2r).
     r.add_post("/api/threads/images", h_opening_image_upload)
@@ -9394,6 +9401,7 @@ async def _onboard_and_launch(
         except beads_mod.BoardRequestError as exc:
             raise onboard.OnboardError(str(exc)) from None
         image_ids = _opening_image_ids(body, session.sdef.harness)
+        file_ids = _opening_file_ids(body)
         # The operator's explicit "no workflow" on a session they create
         # (claunch-val3l.1): the CLI's --no-workflow, the form's cleared
         # role default. Taken out before preflight, which reads '-' as a
@@ -9644,6 +9652,12 @@ async def _onboard_and_launch(
         opening = score_goal.prompt(session.sdef) + (
             "\n\n" + opening if opening else ""
         )
+    files = uploads.claim(file_ids, name)
+    if files:
+        # The paths ride at the end of the opening, after the task they
+        # belong to; the files are the session's from here on.
+        opening = (opening + "\n\n" if opening else "") + uploads.block(files)
+        report["opening_files"] = [str(f.path) for f in files]
     images = opening_images.claim(image_ids, name)
     try:
         # An opening with images is typed in, never put on the command line:
@@ -12092,6 +12106,82 @@ async def h_opening_image_upload(request: web.Request) -> web.Response:
         return json_error(400, "the body carried no image bytes")
     image_id = await asyncio.to_thread(opening_images.stage, chunks, kind)
     return json_response({"id": image_id, "bytes": total, "type": kind}, status=201)
+
+
+async def _receive_upload(request: web.Request, writer) -> "uploads.Stored":
+    """Stream ``request``'s body into ``writer`` (uploads.Writer).
+
+    Gathered into buffers of :data:`UPLOAD_BUFFER` bytes and written off the
+    loop: a 2 GiB capture written 64 KiB at a time on the loop would stall
+    every other route for as long as the disk takes.
+    """
+    buf = bytearray()
+    try:
+        async for chunk in request.content.iter_chunked(64 * 1024):
+            buf += chunk
+            if len(buf) >= UPLOAD_BUFFER:
+                await asyncio.to_thread(writer.write, bytes(buf))
+                buf.clear()
+        if buf:
+            await asyncio.to_thread(writer.write, bytes(buf))
+        return await asyncio.to_thread(writer.finish)
+    except BaseException:
+        await asyncio.to_thread(writer.abort)
+        raise
+
+
+#: How much of an upload is held before it is written (_receive_upload).
+UPLOAD_BUFFER = 4 * 1024 * 1024
+
+
+def _upload_name(request: web.Request) -> str:
+    """The file's own name: ``?name=`` (the browser's File.name)."""
+    return request.query.get("name") or ""
+
+
+async def h_upload(request: web.Request) -> web.Response:
+    """Stage one file of any kind for a request that names it later
+    (claunch-5gpcf): a create form's ``opening_files``, a thread post's
+    ``files``. The body is the file itself, its name in ``?name=``; it is
+    streamed to disk against ``daemon.upload_max_bytes``. Staging and
+    claiming are :mod:`claude_launcher.daemon.uploads`.
+    """
+    try:
+        writer = await asyncio.to_thread(uploads.stage_writer, _upload_name(request))
+        stored = await _receive_upload(request, writer)
+    except uploads.UploadError as exc:
+        return json_error(413 if "larger than" in str(exc) else 400, str(exc))
+    return json_response({**stored.record(), "max_bytes": uploads.max_bytes()}, status=201)
+
+
+async def h_session_upload(request: web.Request) -> web.Response:
+    """Store one file for a running session (the session line's 📎).
+
+    Written straight into the session's uploads (no staging: the session
+    exists), and answered with the ``line`` that tells the agent where it
+    is. Nothing is typed into the session here: the page puts the line in
+    the session line, so the person sends it with what they want done
+    with the file.
+    """
+    session = _session(request)
+    try:
+        writer = await asyncio.to_thread(uploads.session_writer, session.sdef.name, _upload_name(request))
+        stored = await _receive_upload(request, writer)
+    except uploads.UploadError as exc:
+        return json_error(413 if "larger than" in str(exc) else 400, str(exc))
+    return json_response({
+        **stored.record(),
+        "path": str(stored.path),
+        "line": uploads.line(stored.name, stored.bytes, stored.path),
+    }, status=201)
+
+
+def _opening_file_ids(body: dict) -> List[str]:
+    """``body["opening_files"]`` checked, as staged ids."""
+    try:
+        return uploads.check_ids(body.get("opening_files"))
+    except uploads.UploadError as exc:
+        raise onboard.OnboardError(str(exc)) from None
 
 
 def _opening_image_ids(body: dict, harness: str) -> List[str]:
