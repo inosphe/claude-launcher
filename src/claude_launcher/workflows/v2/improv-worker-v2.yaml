@@ -202,6 +202,8 @@ inputs:
   # 둘 다 비우면 지금처럼 리뷰어가 이 세션의 profile과 harness를 물려받는다.
   # spawn의 profile selector(PROFILE[:HARNESS], harness만이면 :HARNESS)로
   # 합쳐 넘기므로 데몬의 spawn.allow_profile 게이트가 그대로 적용된다.
+  # options:는 값을 데몬이 채우는 목록에서 고르게 한다(claunch-iq1xc, docs 2.6):
+  # 폼은 combobox로 그리고, 목록 밖의 값은 시작에서도 런 도중 변경에서도 거절된다.
   reviewer_profile:
     type: string
     label: 리뷰어 profile
@@ -211,6 +213,7 @@ inputs:
       켜져 있어야 한다
     placeholder: 예) work
     default: ""
+    options: {from: profiles, empty: session}
     # reviewer-ensure가 회차마다 읽으므로, 사람이 런 도중에 바꾸면 그 뒤에 세우는
     # 리뷰어부터 적용된다(claunch-gqgcz.1). 이미 살아 있는 리뷰어는 그대로 쓴다.
     set_by: [user]
@@ -220,9 +223,13 @@ inputs:
     help: >-
       자식 리뷰어의 harness(claunch harnesses의 이름). 비우면 리뷰어 profile의 기본
       harness다. profile만 비우고 이것만 주면 이 세션의 profile에서 harness만 바꾼다.
-      그 profile이 허용하는 harness여야 한다
+      그 profile이 허용하는 harness여야 한다(목록은 리뷰어 profile, 비었으면 이 세션의
+      profile에서 harness 정책이 허용하는 것이다)
     placeholder: 예) codex
     default: ""
+    # 리뷰어 profile을 바꿔 이 값이 그 profile에서 허용되지 않게 되면 그 변경은
+    # 거절된다 — 이 값을 먼저 바꾸거나 비운다.
+    options: {from: harnesses, of: reviewer_profile}
     set_by: [user]
   # 난이도 기반 세션 라우팅(claunch-yl0to). 켜면 coding-plan이 일감마다 난이도와
   # 위임 권장을 내고, 쉬운 일감은 이 세션의 대화를 fork한 자식이 하위 설정으로
@@ -250,16 +257,40 @@ inputs:
       ~/.claunch.yaml의 spawn.allow_profile이 켜져 있어야 한다
     placeholder: 예) ds4
     default: ""
+    options: {from: profiles, empty: delegate}
     set_by: [user]
   delegate_model:
     type: string
     label: 위임 자식 model preset
     help: >-
-      위임 자식의 모델. preset 이름(default, small, large, xlarge, subagent)이면 자식
-      profile에서 그 자리의 모델로 바뀐다. 비우면 데몬 설정 delegate_model(웹 Settings)을
-      쓴다. 다른 값은 harness가 받는 모델 이름 그대로 넘어간다(spawn.allow_args 필요)
+      위임 자식의 모델. 위임 자식 profile(비었으면 데몬 설정 delegate_profile)의 harness가
+      받는 값만 고를 수 있다. preset 이름(default, small, large, xlarge, subagent)이면 자식
+      profile에서 그 자리의 모델로 바뀐다 — claude는 preset 다섯이 모두 되고, codex와 그 밖의
+      harness는 profile의 provider가 그 role의 모델을 선언한 preset만 된다. 그 harness의 모델
+      선택지(claude의 haiku·sonnet·opus·fable, codex의 luna·sol 등)도 고를 수 있다(preset이
+      아닌 값은 spawn.allow_args 필요). 비우면 데몬 설정 delegate_model(웹 Settings)을 쓴다
     placeholder: 예) small
     default: ""
+    options: {from: models, of: delegate_profile}
+    set_by: [user]
+  # 회차의 시뮬레이션 강도(claunch-qrh0a). off가 아니면 full 회차마다 한 번,
+  # 착지 매체를 정한 뒤·코딩 전에 sim-check가 sim-run을 동적 호출로 부른다.
+  # required면 착지 절차 앞의 sim-gate가 미결 0이 될 때까지 착지를 막는다.
+  # 모델·프로필은 정하지 않는다 — Settings의 Simulation models 기본값이다.
+  # off는 YAML 1.1에서 불리언이므로 따옴표로 쓴다.
+  simulation:
+    type: enum
+    choices: ["off", advisory, required]
+    default: "off"
+    label: 시뮬레이션
+    help: >-
+      off — 시뮬레이션을 돌리지 않는다. advisory — 회차마다 코딩 전에 이슈 본문과 지금
+      코드를 원천으로 시뮬레이션을 한 번 돌리고, 결과(gap·불변식 위반 수)를 착지 요청
+      증거에 싣는다(착지를 막지 않는다). required — advisory와 같이 돌리고, 미결(열린
+      발견·미결 질문·편집 제안)이 0일 때만 착지 요청으로 넘어간다. 실행 세션·판정
+      모델은 Settings의 Simulation models 기본값이다
+    # sim-check는 full 회차마다, sim-gate는 착지 절차마다 읽으므로 사람이 런 도중에
+    # 바꾸면 다음 회차·다음 착지부터 적용된다.
     set_by: [user]
 
 collections:
@@ -324,6 +355,10 @@ data:
   # 이 회차의 선행 맥락 검색 결과(prior-context, 그것이 실패하면
   # prior-context-fallback). intake-issue가 읽는다. 회차마다 덮어쓴다.
   prior: {}
+  # 이 회차의 시뮬레이션 결과(claunch-qrh0a). sim-check가 full 회차마다, sim-recheck가
+  # 미결을 해소할 때마다 덮어쓴다. findings가 clear가 아니면(gaps, unavailable, null)
+  # simulation=required의 sim-gate가 착지를 막는다.
+  sim: {sim_id: null, run_seq: null, assessment: null, findings: null, open: null, limits: []}
 
 rules:
   no-master-merge:
@@ -1017,6 +1052,108 @@ nodes:
     effects: [fs.write, git.push, board.write]
 
   # ── 일감 하나 (item) ─────────────────────────────────────────────────
+  # ── 시뮬레이션(claunch-qrh0a) ─────────────────────────────────────────
+  # 시작 입력 simulation이 off가 아닐 때만 선다. 시뮬레이션 한 번의 절차는
+  # sim-run 프로시저가 정하고(범위 → 모델 → 실행 → 보강 → 정리), 이 두 작업은
+  # 그것을 부르고 결과를 회차 데이터 data.sim과 이슈에 남긴다.
+  sim-check:
+    title: 코딩 전 시뮬레이션
+    calls: [sim-run]
+    prompt: |
+      시작 입력 simulation=${data.inputs.simulation}이다. 코딩 전에 이 회차 목표의
+      규칙을 시뮬레이션으로 한 번 확인한다. 원천은 이슈 본문과 지금 코드다 — 구현은
+      아직 없으므로 여기서 잡는 것은 요구사항과 기존 코드의 빈칸, 규칙 충돌, 불변식
+      위반이다.
+      - 목표: ${result['intake'].value.goal}
+      - 범위: ${result['intake'].value.scope}
+      - 이슈: ${data.claim.issue}
+
+      1. `flow_call`로 sim-run을 부른다(procedure `sim-run`). with:
+         - question: 위 목표를 확인 질문 한 문장으로 쓴 것
+         - purpose: spec
+         - sources: 목표가 닿는 기존 코드·문서 경로(범위에서 고른다). 이슈 규칙은
+           파일이 아니므로 모델에서 `issue:<이슈 id>` 참조로 인용한다
+         실행 세션·판정 프로필과 모델은 넘기지 않는다 — Settings의 Simulation
+         models 기본값이 들어간다. callee 런은 `flow_status`의 `calls[].scope`를
+         scope로 주고 flow_* 도구로 진행한다.
+      2. 호출이 끝나면 이 작업에 `call_result`가 실린다. ok면 시뮬레이션을 이 회차
+         이슈에 잇는다: `sim_configure`(<sim_id>, issue: <이슈 id>).
+      3. 이슈에 한 줄을 남긴다: `claunch beads comments add <이슈 id> "SIMULATION @
+         <sim_id> run <run_seq>: <assessment> (findings <findings>, adequacy
+         <adequacy>, open q<questions>/p<proposals>/a<ambiguous>)"`.
+      4. 찾은 gap은 이 회차 구현의 재료다. 구현으로 메울 수 있는 빈칸은 work가 다루고,
+         사용자가 정해야 할 질문은 시뮬레이션 페이지에 열린 채로 둔다.
+
+      `call_result`가 fail이면(프로필 없음, 런타임 없음 등) 이 작업을 fail로
+      보고하지 않는다. ok로 보고하되 assessment·findings를 `unavailable`로 두고
+      reason을 limits에 적으며, 이슈에도 `SIMULATION unavailable: <reason>`을
+      남긴다. advisory면 회차는 그대로 진행하고, required면 착지 전 sim-gate가
+      다시 세운다.
+    done_when: |
+      sim-run을 한 번 불렀고, 그 결과(또는 실행할 수 없었던 사유)가 보고와 이슈
+      코멘트에 있다.
+    returns:
+      ok:
+        sim_id: "str?"
+        run_seq: "int?"
+        assessment: str
+        findings: str
+        open: "dict?"
+        limits: list
+    effects: [sim.write, board.write]
+  sim-recheck:
+    title: 착지 전 시뮬레이션 미결 해소
+    calls: [sim-run]
+    prompt: |
+      시작 입력 simulation=required다. 착지 요청은 시뮬레이션의 미결(열린 발견·미결
+      질문·편집 제안·ambiguous 판정)이 0일 때만 나간다. 지금 값: ${data.sim}
+
+      1. 미결을 읽는다: `sim_show`, `sim_findings`, `sim_proposals`(시뮬레이션
+         ${data.sim.sim_id}; null이면 아직 실행된 적이 없다 — 3으로 간다).
+      2. 미결마다 처리한다.
+         - 구현이 규칙을 빠뜨렸거나 어겼다: 코드를 여기서 고치지 않는다. outcome
+           `rework`로 보고한다(reason에 고칠 것). 착지 절차가 일감을 작업부터 다시
+           돌리고, 고친 뒤 이 게이트가 다시 선다. rework 값은 data.sim에 그대로
+           묶이므로 reason과 함께 지금 시뮬레이션의 sim_id·run_seq·assessment·
+           findings·open·limits를 위 값(마지막 실행 결과)대로 싣는다 — 빠뜨리면
+           다시 선 이 작업이 sim_id를 잃고 모델과 답한 질문을 버린 채 새로 만든다.
+         - 원천이 정하지 않아 사용자가 정할 질문이다: 사용자가 시뮬레이션 페이지에서
+           답할 때까지 이 작업을 보고하지 않고 기다린다(답이 오면 터미널에
+           `[claunch simulation]` 줄이 온다). 기다리는 동안 이슈에 `BLOCKED:
+           sim-gate (<sim_id>: 미결 <수>)`를 남기고, 해소되면 같은 세션이 지운다는
+           코멘트를 남긴다.
+         - 모델이 원천을 잘못 읽었다: `sim_patch`로 모델을 고친다.
+      3. 다시 실행한다: `flow_call`로 sim-run(sim: ${data.sim.sim_id}, purpose: spec,
+         question은 sim-check와 같은 질문, sources는 지금 코드를 포함). 시뮬레이션이
+         없었으면 sim-check의 1과 같이 새로 부른다.
+      4. `call_result`의 findings가 clear일 때만 ok로 보고한다. 이슈에 `SIMULATION @
+         <sim_id> run <run_seq>: <assessment> (sim-gate)` 한 줄을 남긴다. clear가 아니면
+         ok로 보고하지 않고 2로 돌아간다.
+      시뮬레이션을 실행할 수 없으면(Settings에 모델이 없는 등) 사람의 설정이
+      필요하다 — 이슈에 `BLOCKED: sim-gate (unavailable: <reason>)`을 남기고 기다린다.
+      simulation을 off나 advisory로 바꾸는 것은 사람이다(런 입력 변경).
+    done_when: |
+      다시 실행한 시뮬레이션의 findings가 clear이고(ok), 아니면 구현을 다시 할
+      이유가 reason에 있다(rework).
+    returns:
+      ok:
+        sim_id: str
+        run_seq: int
+        assessment: str
+        findings: str
+        open: "dict?"
+        limits: list
+      # bind는 outcome과 무관하게 값을 대입한다(runtime._complete) — rework도
+      # 같은 모양을 실어야 sim-gate가 다시 돌 때 data.sim.sim_id가 남는다.
+      rework:
+        reason: str
+        sim_id: "str?"
+        run_seq: "int?"
+        assessment: str
+        findings: str
+        open: "dict?"
+        limits: list
+    effects: [sim.write, board.write]
   coding-plan:
     title: 코딩 승인 요청 준비
     prompt: |
@@ -1246,6 +1383,11 @@ nodes:
     title: 작업 실행
     prompt: |
       피처 브랜치에서 목표를 구현한다. 커밋은 작고 초점 있게 만든다.
+
+      시작 입력 simulation이 off가 아니면(지금 ${data.inputs.simulation}) 코딩 전
+      시뮬레이션 결과가 ${data.sim}에 있다. 찾은 gap 가운데 구현으로 메울 수 있는
+      것은 이 작업에서 다룬다. required면 착지 전에 같은 시뮬레이션을 다시 돌려
+      미결이 0이어야 한다(sim-gate).
 
       작업 중
       정본 규칙과 어긋나는 선택지가 나타나면 혼자 정하지 말고 리더에게
@@ -2585,6 +2727,11 @@ nodes:
         함께 실리는 작업이 무엇인지 명시 — 하위 워커 브랜치를 --no-ff로
         모은 회차면 어느 자식의 어떤 브랜치가 어떤 머지 커밋으로
         실렸는지 트리 구조를 그대로 적는다
+      - 시뮬레이션(시작 입력 simulation=${data.inputs.simulation}이 off가 아니면,
+        claunch-qrh0a): `시뮬레이션: <sim_id> run <run_seq> — <assessment>
+        (findings <findings>, open <미결 수>)` 한 줄. 값은 ${data.sim}이다.
+        advisory면 미결이 있어도 착지를 막지 않으므로 미결 수를 그대로 적는다.
+        실행할 수 없었으면 「시뮬레이션: unavailable — <사유>」라고 적는다
       - 스택 위치(부모가 스택을 둔 워커면): 기준 브랜치와 요청 시점의 그 tip
         해시(내 분기점과 같아야 한다 — 다르면 restack이 덜 된 것이다),
         스택 순서, 그리고 `git merge-tree $(git merge-base <기준> <branch>)
@@ -3417,6 +3564,16 @@ nodes:
     effects: [board.write, mesh.send]
 
 procedures:
+  sim-idle:
+    description: >-
+      이 회차에 sim-check가 돌지 않았을 때 data.sim을 초기값으로 되돌린다(claunch-qrh0a).
+    returns:
+      ok: {sim_id: "str?", run_seq: "int?", assessment: "str?", findings: "str?",
+           open: "dict?", limits: list}
+    body:
+      - return: ok
+        value: {sim_id: null, run_seq: null, assessment: null, findings: null,
+                open: null, limits: []}
   local-landing:
     params:
       reason: {type: str, required: true}
@@ -4533,6 +4690,17 @@ procedures:
               - id: medium
                 call: landing-medium
                 bind: landing
+              # 코딩 전 시뮬레이션(claunch-qrh0a, qa-d0605072): 시작 입력
+              # simulation이 off가 아니면 회차마다 한 번 sim-run을 부른다. 값을
+              # 둘 다 적는 것은 이 입력이 없는 런(값 null)을 off로 읽기 위해서다.
+              - id: sim-precheck
+                cond:
+                  - if: "$data.inputs.simulation == 'advisory' or $data.inputs.simulation == 'required'"
+                    then: {seq: [sim-check], bind: sim}
+                  # data.sim은 회차 사이에 남는다. 이 회차에 돌지 않았으면 초기값으로
+                  # 되돌려, 착지 전에 required로 바뀌었을 때 sim-gate가 앞 회차의
+                  # findings=clear로 통과하지 않게 한다.
+                  - else: {call: sim-idle, bind: sim}
       - id: batch
         loop:
           while: "true"
@@ -4604,6 +4772,16 @@ procedures:
                                   description: 큐가 비었거나 배치 상한·무관 일감으로 여기서 끊는다 — 배치 전체를 착지 절차로 넘긴다
                                   then: {break: items}
                   - else: []
+              # 시뮬레이션 게이트(claunch-qrh0a, qa-008521b4): simulation=required면
+              # 착지 절차 전에 미결이 0이어야 한다. 구현을 고쳐야 하면 sim-recheck가
+              # rework로 끝나고 아래 catch가 일감을 작업부터 다시 돌린다(full 회차만 —
+              # stack-only 회차에는 이 세션의 구현이 없다). 상한에 닿으면 사람이
+              # 연장하거나 simulation을 바꾼다.
+              - id: sim-gate
+                loop:
+                  while: "$params.mode == 'full' and $data.inputs.simulation == 'required' and $data.sim.findings != 'clear'"
+                  max: 5
+                  do: {seq: [sim-recheck], bind: sim}
               # 사람의 강제 이동 대상(docs 2.11): 착지 절차를 처음부터 다시 한다
               - id: land
                 call: land

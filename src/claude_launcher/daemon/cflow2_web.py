@@ -354,11 +354,21 @@ def check_params(chart: ir.Chart, params: Optional[dict]) -> dict:
         raise ChoiceError(f"{chart.name}: {exc}") from None
 
 
-def check_inputs(chart: ir.Chart, raw: Any) -> Optional[dict]:
+def input_catalog(profile: Optional[str]) -> Any:
+    """The catalog the inputs with ``options:`` are checked against
+    (``claude_launcher.input_options``, claunch-iq1xc): ``profile`` is the
+    profile of the session the run belongs to, ``None`` when not known."""
+    from .. import input_options
+
+    return input_options.Catalog(session_profile=profile or None)
+
+
+def check_inputs(chart: ir.Chart, raw: Any, profile: Optional[str] = None) -> Optional[dict]:
     """The start inputs a request carries (``cflow_inputs``), normalised
     against the chart's ``inputs`` schema (``cflow2/inputs.py``); ``None``
     when the chart declares none and the request sent none. Raises
-    :class:`InputsInvalid` with per-field errors."""
+    :class:`InputsInvalid` with per-field errors. ``profile`` is the run's
+    session's (:func:`input_catalog`)."""
     from ..cflow2 import inputs as inputs_mod
 
     schema = (chart.meta or {}).get("inputs") or {}
@@ -368,7 +378,8 @@ def check_inputs(chart: ir.Chart, raw: Any) -> Optional[dict]:
     if not schema and not raw:
         return None
     values, errors = inputs_mod.normalize(schema, raw or {},
-                                          (chart.meta or {}).get("input_constraints"))
+                                          (chart.meta or {}).get("input_constraints"),
+                                          input_catalog(profile))
     if errors:
         raise InputsInvalid(
             f"{chart.name}: invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()),
@@ -664,9 +675,11 @@ def run_history(st: store2.RunStore, state: dict) -> dict:
             "truncated": len(paths) > len(selected), "unavailable": unavailable}
 
 
-def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
+def run_detail(cwd: str, scope: str, prompts: bool = False,
+               profile: Optional[str] = None) -> dict:
     """``GET /api/cflow2/run``: the run, its chart, the journal tail and the
-    delegation rows."""
+    delegation rows. ``profile`` is the run's session's (the input editors'
+    lists, :func:`input_catalog`)."""
     from ..cflow2 import runtime
     from . import cflow2_metrics
 
@@ -688,6 +701,8 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
         # The start inputs' declarations: the run page offers a person an
         # editor for each one whose set_by names user (claunch-umq1f).
         "input_decls": _inputs_view(chart),
+        # What the editors of inputs with options: offer now (claunch-iq1xc).
+        "input_options": _run_input_options(chart, state, profile),
         "history": run_history(st, state),
         "throughput": cflow2_metrics.observations(st),
         # Which nodes have a live instance (the active configuration and its
@@ -1279,15 +1294,35 @@ def _constraints_view(chart: ir.Chart) -> List[dict]:
     return _copy.deepcopy((chart.meta or {}).get("input_constraints") or [])
 
 
-def inputs_check(chart: ir.Chart, raw: Any) -> dict:
+def inputs_check(chart: ir.Chart, raw: Any, profile: Optional[str] = None) -> dict:
     """What the start form asks while the user types: ``{ok, values,
-    errors}`` -- the same :func:`check_inputs` a start runs, answered
-    instead of raised."""
+    errors, options}`` -- the same :func:`check_inputs` a start runs,
+    answered instead of raised. ``options`` is what the form's comboboxes
+    hold for the values typed so far (``inputs.option_lists``)."""
+    from ..cflow2 import inputs as inputs_mod
+
+    catalog = input_catalog(profile)
+    schema = (chart.meta or {}).get("inputs") or {}
+    typed = dict(raw) if isinstance(raw, dict) else {}
+    options = inputs_mod.option_lists(schema, typed, catalog)
     try:
-        values = check_inputs(chart, raw)
+        values = check_inputs(chart, raw, profile)
     except InputsInvalid as exc:
-        return {"ok": False, "values": None, "errors": exc.errors}
-    return {"ok": True, "values": values, "errors": {}}
+        return {"ok": False, "values": None, "errors": exc.errors, "options": options}
+    return {"ok": True, "values": values, "errors": {}, "options": options}
+
+
+
+def _run_input_options(chart: ir.Chart, state: dict, profile: Optional[str]) -> dict:
+    """name -> ``{from, profile, items}`` for a started run's inputs with
+    ``options:``, at the values the run holds (``inputs.option_lists``)."""
+    from ..cflow2 import inputs as inputs_mod
+
+    schema = (chart.meta or {}).get("inputs") or {}
+    if not any(d.get("options") for d in schema.values()):
+        return {}
+    values = ((state.get("data") or {}).get("inputs")) or {}
+    return inputs_mod.option_lists(schema, values, input_catalog(profile))
 
 
 def _inputs_view(chart: ir.Chart) -> List[dict]:

@@ -376,7 +376,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
                             params=_parse_params(args.param),
                             inputs=_parse_inputs(args.input, args.inputs_file),
                             caps=runtime.resolve_caps(args.profile), force=args.force,
-                            mesh=mesh)
+                            mesh=mesh, catalog=_input_catalog(args.profile))
     _print_status(payload, args.json)
     return 0
 
@@ -415,6 +415,17 @@ NUDGE_EXTENDED = ("[cflow2] a person answered your run's limit hold. Call flow_s
                   "and continue.")
 NUDGE_INPUT_SET = ("[cflow2] a person changed your run's start input {name} to {value}. "
                    "Steps read it from now on; call flow_status and continue.")
+
+
+def _input_catalog(profile: Optional[str], from_env: bool = True) -> Any:
+    """The catalog that checks inputs with ``options:`` (claunch-iq1xc):
+    ``profile`` is the run's session's (an empty ``options.empty: session``
+    input); else this session's own, read from its environment."""
+    from . import input_options
+
+    if not profile and from_env:
+        profile = input_options.profile_from_env()
+    return input_options.Catalog(session_profile=profile)
 
 
 def _nudge_driver(scope: Optional[str], message: str) -> None:
@@ -777,13 +788,15 @@ def _cmd_input(args: argparse.Namespace) -> int:
             raise SystemExit(f"error: VALUE is not JSON: {exc}")
     if args.user:
         _refuse_own_session(args.scope, "input --user")
+        # a person's shell is not the driver: its profile is not the run's
         payload = runtime.set_input(args.name, value, caller=runtime.CALLER_USER,
-                                    cwd=os.getcwd(), scope=args.scope)
+                                    cwd=os.getcwd(), scope=args.scope,
+                                    catalog=_input_catalog(None, from_env=False))
     else:
         session = os.environ.get(store.SESSION_ENV, "").strip()
         runtime.authorize(cwd=os.getcwd(), scope=args.scope, session=session)
         payload = runtime.set_input(args.name, value, session=session, cwd=os.getcwd(),
-                                    scope=args.scope)
+                                    scope=args.scope, catalog=_input_catalog(None))
     got = json.dumps((payload.get("inputs") or {}).get(args.name), ensure_ascii=False)
     print(f"input {args.name} = {got}")
     if args.user:

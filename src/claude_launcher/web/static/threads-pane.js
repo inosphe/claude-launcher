@@ -92,6 +92,7 @@ globalThis.ThreadsPane = (() => {
   const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
   const composers = new WeakMap(); // composer textarea -> its draft key
   const attached = new Map(); // thread id ("" = new thread) -> [{file, src, isFile?}]: attachments waiting to be sent
+  const unfolded = new Set(); // thread ids whose closed question chips are shown
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
   const SIDE_W_KEY = "claunch_threadsidew"; // localStorage: the list column's width in px
@@ -174,13 +175,17 @@ globalThis.ThreadsPane = (() => {
   }
 
   /* Threads whose last message is the agent's and newer than what this
-     browser has seen in them. */
+     browser has seen in them. A thread this session is a guest in (it
+     carries `guest`, claunch-v8plo) counts when the guest has messages of
+     the others it has not read and the last one is not the user's own. */
   function unseen(threads, read) {
     const out = new Set();
     for (const t of threads || []) {
-      if (t.last && (t.last.author === "agent" || t.last.author === "guest") && t.last_seq > (read[t.id] || 0)) {
-        out.add(t.id);
-      }
+      if (!t.last || t.last_seq <= (read[t.id] || 0)) continue;
+      const fresh = t.guest
+        ? t.guest.unread > 0 && t.last.author !== "user"
+        : t.last.author === "agent" || t.last.author === "guest";
+      if (fresh) out.add(t.id);
     }
     return out;
   }
@@ -263,6 +268,14 @@ globalThis.ThreadsPane = (() => {
     const rel = link.rel === "subject" ? "다루는 질문" : "여기서 만든 질문";
     const title = link.status === "deleted" ? "(삭제됨)" : excerpt(link.title, 40);
     return `${rel} · ${link.id} ${title}`;
+  }
+
+  /* A thread's link chips to draw: the closed questions' only when `open`,
+     and how many closed ones there are (0: no fold toggle). */
+  function splitLinks(links, open) {
+    const all = links || [];
+    const folded = all.filter((l) => l.status === "closed").length;
+    return {shown: open ? all : all.filter((l) => l.status !== "closed"), folded};
   }
 
   /* The default text of a "QA로 정리 요청" post when the composer is empty. */
@@ -804,7 +817,8 @@ globalThis.ThreadsPane = (() => {
   }
 
   function renderList(side, threads, read) {
-    const fresh = unseen(threads, read);
+    const guestOf = (list && list.guest_threads) || [];
+    const fresh = unseen(threads.concat(guestOf), read);
     side.replaceChildren();
     const add = node("button", "term-btn th-new", composing ? "취소" : "+ 새 쓰레드");
     add.type = "button";
@@ -837,11 +851,14 @@ globalThis.ThreadsPane = (() => {
       go.addEventListener("click", submit);
       title.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); first.focus(); } });
       dropTarget(form, "");
-      form.append(title, ...(about ? [about] : []), first, strip(""), ...pickButton(""), go);
+      // One row for the form's buttons (claunch-o1wg6): the two attach
+      // buttons lead it, 시작 sits at the right end.
+      const foot = node("div", "th-newform-foot");
+      foot.append(...pickButton(""), go);
+      form.append(title, ...(about ? [about] : []), first, strip(""), foot);
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
-    const guestOf = (list && list.guest_threads) || [];
     if (!threads.length) {
       side.append(node("p", "wf-note", "쓰레드가 없습니다. 주제별로 쓰레드를 열면 세션과 따로 대화할 수 있습니다. 주제와 첫 메시지는 비워 두어도 됩니다."));
     } else {
@@ -995,17 +1012,38 @@ globalThis.ThreadsPane = (() => {
       }
     }
 
+    // Closed questions stay folded behind a toggle until it is pressed
+    // (claunch-cedjc); the box scrolls inside a capped height in the
+    // stylesheet. The toggle redraws only this box, so the conversation
+    // keeps its scroll position.
     let links = null;
     if ((t.links || []).length) {
       links = node("div", "th-links");
-      for (const link of t.links) {
-        const chip = node("button", `th-link-chip qa-st-${link.status}`, linkLabel(link));
-        chip.type = "button";
-        chip.disabled = link.status === "deleted" || !onQuestion;
-        chip.title = link.status === "deleted" ? "삭제된 질문" : "QA 카드로 이동";
-        chip.addEventListener("click", () => onQuestion && onQuestion(link.id));
-        links.append(chip);
-      }
+      const drawLinks = () => {
+        const open = unfolded.has(t.id);
+        const {shown, folded} = splitLinks(t.links, open);
+        const chips = shown.map((link) => {
+          const chip = node("button", `th-link-chip qa-st-${link.status}`, linkLabel(link));
+          chip.type = "button";
+          chip.disabled = link.status === "deleted" || !onQuestion;
+          chip.title = link.status === "deleted" ? "삭제된 질문" : "QA 카드로 이동";
+          chip.addEventListener("click", () => onQuestion && onQuestion(link.id));
+          return chip;
+        });
+        if (folded) {
+          const more = node("button", "th-links-fold", open ? `닫힌 질문 ${folded}개 접기 ▴` : `닫힌 질문 ${folded}개 펼치기 ▾`);
+          more.type = "button";
+          more.setAttribute("aria-expanded", open ? "true" : "false");
+          more.addEventListener("click", () => {
+            if (open) unfolded.delete(t.id);
+            else unfolded.add(t.id);
+            drawLinks();
+          });
+          chips.push(more);
+        }
+        links.replaceChildren(...chips);
+      };
+      drawLinks();
     }
 
     // A redraw of the thread already on screen keeps its message list in
@@ -1113,7 +1151,7 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
+    const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(allThreads(list), read)], inflight.has(""),
                                     (attached.get("") || []).length]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
@@ -1214,6 +1252,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, stamp,
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, splitLinks, stamp,
           imageKind, imageFiles, imageSrc, fileSrc, sizeOf, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
 })();

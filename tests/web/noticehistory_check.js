@@ -198,11 +198,11 @@ function build(opts) {
     "refreshTermQueued", "reconnectNow", "route", "refreshNewWorktree",
     "refreshProjects", "ensureControlSocket", "refreshCflow2Rail",
     "refreshTermWindow", "refreshTermTimers",
-    "sessLayoutFor", "setSessLayout", "talkShows",
+    "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
-    " noticeSyncTick, noticeSync, noticeMarkRead," +
+    " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -214,6 +214,9 @@ function build(opts) {
     (name) => layouts[name] || { split: false, pane: "run" },
     (name, patch) => { layouts[name] = { ...(layouts[name] || { split: false, pane: "run" }), ...patch }; },
     (pane, what) => pane === what || pane === "both",
+    // Node has a real BroadcastChannel; a world joins a tab hub only when
+    // the test gives it one, so worlds never hear each other by accident.
+    o.hub ? o.hub.Channel : undefined,
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
@@ -258,6 +261,29 @@ function fakeNoticeDaemon() {
     return { epoch: d.epoch, seq: d.seq, changes, conflicts };
   };
   return d;
+}
+
+/* The tabs of one browser (claunch-j6lg0): a BroadcastChannel stand-in that
+   hands a message to every other channel of the same name, the way the real
+   one does (later, so a tab never hears itself). `sent` keeps every post. */
+function tabHub() {
+  const hub = { members: [], sent: [], queue: [] };
+  hub.Channel = class {
+    constructor(name) { this.name = name; this.onmessage = null; hub.members.push(this); }
+    postMessage(data) {
+      const copy = JSON.parse(JSON.stringify(data));
+      hub.sent.push(copy);
+      for (const m of hub.members) {
+        if (m !== this && m.name === this.name) hub.queue.push(() => m.onmessage && m.onmessage({ data: copy }));
+      }
+    }
+  };
+  hub.flush = async () => {
+    while (hub.queue.length) hub.queue.shift()();
+    await new Promise((r) => setImmediate(r));
+    while (hub.queue.length) hub.queue.shift()();
+  };
+  return hub;
 }
 
 function restartRec(rec) {
@@ -1089,6 +1115,107 @@ function gotoRec(rec) {
     check("and it is not asked again", lone.apiCalls.length === n, lone.apiCalls);
     delete globalThis.QaPane;
     delete globalThis.ThreadsPane;
+  }
+
+  /* --- this browser's other tabs learn at once (claunch-j6lg0) ---------- */
+  {
+    const hub = tabHub();
+    const tabs = () => [build({ hub }), build({ hub })];
+    const rowOf = (w, title) => w.api.noticeHistory.find((e) => e.title === title);
+
+    // A card with no sync id, up in both tabs: × in one puts both away.
+    let [a, b] = tabs();
+    check("every tab joins the channel", hub.members.length === 2 &&
+            a.api.noticeTabs.chan && b.api.noticeTabs.chan, hub.members.length);
+    for (const w of [a, b]) w.api.notify("daemon restarted", "pid 41 → 42", { key: "daemon-boot", sticky: true });
+    a.press(a.nodes.notices, "×").click();
+    await hub.flush();
+    check("× in one tab takes the card down in the other", b.strip().length === 0, b.said());
+    check("× is not a read, there either", rowOf(b, "daemon restarted").read === false,
+          rowOf(b, "daemon restarted"));
+    check("the other tab does not echo it back", hub.sent.length === 1, hub.sent);
+
+    // A click is a read: the card goes and the row reads in the other tab.
+    for (const w of [a, b]) w.api.notify("copy failed", "select it by hand", { sticky: true });
+    a.strip()[0].click();
+    await hub.flush();
+    check("a click in one tab takes the card down in the other", b.strip().length === 0, b.said());
+    check("and reads its row there", rowOf(b, "copy failed").read === true, rowOf(b, "copy failed"));
+
+    // A row with a sync id is found by it, whatever its words.
+    [a, b] = tabs();
+    a.api.notify("s1 asks you", "which base?", { key: "qa-q1", sticky: true, sync: "qa:q1:open" });
+    b.api.notify("s1 asks you", "which base? (edited)", { key: "qa-q1", sticky: true, sync: "qa:q1:open" });
+    a.api.noticeMarkRead([rowOf(a, "s1 asks you").id], true);
+    await hub.flush();
+    check("Mark read in one tab reads the row in the other by its sync id",
+          rowOf(b, "s1 asks you").read === true, rowOf(b, "s1 asks you"));
+    check("and takes its card down", b.strip().length === 0, b.said());
+    check("the bell there counts it no more", b.badge() === "", b.badge());
+    a.api.noticeMarkRead([rowOf(a, "s1 asks you").id], false);
+    await hub.flush();
+    check("Mark unread goes across too", rowOf(b, "s1 asks you").read === false, rowOf(b, "s1 asks you"));
+    check("and the other tab stores what it was told",
+          /"read":false/.test(b.storage.getItem("claunch.noticeHistory") || ""));
+
+    // Words alone match only a row written about the same time.
+    [a, b] = tabs();
+    a.api.notify("daemon back", "the same daemon answered again", {});
+    b.clock.at = BASE + 120000;
+    b.api.notify("daemon back", "the same daemon answered again", {});
+    a.api.noticeMarkRead([rowOf(a, "daemon back").id], true);
+    await hub.flush();
+    check("a row with the same words from minutes later is another notice",
+          rowOf(b, "daemon back").read === false, rowOf(b, "daemon back"));
+
+    // Mark all read in the panel.
+    [a, b] = tabs();
+    for (const w of [a, b]) {
+      w.api.notify("one", "1", { sync: "thread:t1:3" });
+      w.api.notify("two", "2", {});
+    }
+    a.api.noticePanelToggle(true);
+    a.press(a.nodes["notice-panel-body"], "Mark all read").click();
+    await hub.flush();
+    check("Mark all read in one tab reads every row in the other",
+          b.api.noticeHistory.every((e) => e.read === true), b.api.noticeHistory);
+    check("opening the panel put the other tab's cards away too", b.strip().length === 0, b.said());
+
+    // A gate card hidden in one tab, then shown again.
+    [a, b] = tabs();
+    for (const w of [a, b]) { w.gate.goto = [gotoRec()]; await w.api.refreshGotoGate(); }
+    check("the request is up in both tabs", a.strip().length === 1 && b.strip().length === 1,
+          [a.said(), b.said()]);
+    a.press(a.nodes.notices, "Hide").click();
+    await hub.flush();
+    check("Hide in one tab hides the card in the other", b.strip().length === 0, b.said());
+    check("as hidden, not answered: still counted there",
+          b.api.gateIsHidden("goto", "g1") && b.badge() === "1", b.badge());
+    await b.api.refreshGotoGate();
+    check("and the other tab's next poll keeps it hidden", b.strip().length === 0, b.said());
+    a.api.noticePanelToggle(true);
+    a.press(a.panelRows().find((r) => /run move requested/.test(r.text())), "Show card").click();
+    await hub.flush();
+    check("Show card in one tab puts the card back in the other",
+          !b.api.gateIsHidden("goto", "g1") && b.strip().length === 1, b.said());
+
+    // A gate answered in one tab: the other polls the gates now.
+    [a, b] = tabs();
+    for (const w of [a, b]) { w.gate.goto = [gotoRec()]; await w.api.refreshGotoGate(); }
+    const before = b.apiCalls.filter((p) => p === "/api/cflow/goto-requests").length;
+    b.gate.goto = [gotoRec({ status: "approved" })];
+    a.press(a.nodes.notices, "Approve").click();
+    await new Promise((r) => setImmediate(r));
+    await hub.flush();
+    check("an answer in one tab makes the other poll the gates",
+          b.apiCalls.filter((p) => p === "/api/cflow/goto-requests").length === before + 1,
+          b.apiCalls);
+    check("and its card goes", b.strip().length === 0, b.said());
+
+    // Applying what another tab said never goes back out.
+    const n = hub.sent.length;
+    b.api.noticeTabs.chan.onmessage({ data: { t: "gate-hide", type: "goto", rid: "g9" } });
+    check("a tab applying a message posts nothing", hub.sent.length === n, hub.sent.slice(n));
   }
 
   /* --- the markup and the stylesheet the code reaches for --------------- */

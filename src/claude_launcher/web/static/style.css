@@ -4320,6 +4320,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-node.st-ok rect { stroke: #2f6f43; }
 .dfl-node.st-fail rect { stroke: #b0413e; fill: #2a1617; }
 .dfl-node.st-warn rect { stroke: #d29922; }
+.dfl-node.st-run rect { stroke: #58a6ff; }
+.dfl-node.st-skip { opacity: 0.55; }
+.dfl-node.st-plan { opacity: 0.45; }
+.dfl-node.st-plan rect { fill: none; stroke: #4d5566; stroke-dasharray: 5 4; }
+.dfl-node.st-gone, .dfl-edge.gone { display: none; }
+.dfl-edge.plan { stroke-dasharray: 4 4; opacity: 0.45; }
 .dfl-node.round rect { fill: #14233a; stroke: #3b6ea8; }
 .dfl-node.st-live rect { fill: none; stroke: #58a6ff; stroke-dasharray: 6 4; animation: dfl-march 1s linear infinite; }
 .dfl-node { transition: transform 0.3s ease-out; }
@@ -6271,6 +6277,12 @@ body.embed #main { width: 100%; }
    just be swatted away, and a stray click on a decision is a restart. */
 .notice.gate { cursor: default; }
 .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
+/* A spawn card's project / profile / workspace / role / workflow rows
+   (claunch-mgope): label column, value column. */
+.gate-facts { display: grid; grid-template-columns: max-content 1fr; gap: 1px 8px; margin-top: 4px; }
+.gate-fact-key { color: #6e7681; }
+.gate-fact-val { color: #c9d1d9; overflow-wrap: anywhere; }
+.gate-fact-from { color: #6e7681; }
 .gate-actions { display: flex; gap: 8px; margin-top: 8px; }
 .gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
 /* A session named on a gate card opens that session. Marked as a press the
@@ -7955,7 +7967,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-title-input, .th-text { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
   background: #0d1117; color: inherit; border: 1px solid #30363d; border-radius: 4px; padding: 5px 6px; }
 .th-text { resize: vertical; }
-.th-newform .term-btn { align-self: flex-end; }
+/* The form's buttons share one row (claunch-o1wg6): the two attach buttons
+   on the left, 시작 pushed to the right end. */
+.th-newform-foot { display: flex; align-items: center; gap: 6px; }
+.th-newform-foot .th-send { margin-left: auto; }
 .th-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .th-item { padding: 6px 8px 6px 9px; border-radius: 6px; cursor: pointer; border-left: 3px solid transparent;
   transition: background 0.12s; }
@@ -8133,6 +8148,15 @@ body.split-max #term-wf { flex: 1 1 0; }
   border-bottom-left-radius: 3px; }
 .th-msg.th-guest .th-msg-who { color: #d2a8ff; }
 .qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
+/* A thread's chips never push the conversation off screen: the box holds
+   at most a few rows and scrolls inside, and it gives way first when the
+   pane is short (claunch-cedjc). */
+.th-links { flex: 0 1 auto; min-height: 22px; max-height: min(30vh, 132px); overflow-y: auto;
+  align-content: flex-start; }
+.th-links .th-link-chip { flex: 0 1 auto; min-width: 0; }
+.th-links-fold { font: inherit; font-size: 11px; color: #7d8590; background: transparent; border: 1px dashed #30363d;
+  border-radius: 9px; padding: 1px 8px; cursor: pointer; white-space: nowrap; }
+.th-links-fold:hover { color: #c9d1d9; border-color: #7d8590; }
 .qa-discuss { font-size: 11px; }
 .th-chip-qa { color: #58a6ff; border-color: #1f3b63; }
 .th-about { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }

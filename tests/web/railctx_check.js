@@ -368,6 +368,29 @@ served = { sessions: [FULL, QUIET, CODEX, PI, OTHER] };
         rows.concat(rows.flatMap((r) => descendants(r)))
           .some((n) => /%/.test(n.title)), false);
 
+  // The rail asks for every row's note on every poll (refreshRailSeen); the
+  // numbers in it are formatted once per reading, and a new reading is
+  // formatted afresh (claunch-i3es6).
+  {
+    const format = Number.prototype.toLocaleString;
+    let formatted = 0;
+    Number.prototype.toLocaleString = function (...a) { formatted++; return format.apply(this, a); };
+    try {
+      const first = ctx.tooltip(FULL);
+      const before = formatted;
+      const again = ctx.tooltip(FULL);
+      check("a reading already formatted reads the same without formatting again",
+            [again === first, formatted - before], [true, 0]);
+      const next = { ...FULL, context: { ...FULL.context, tokens: 160000, output: 999 } };
+      const fresh = ctx.tooltip(next);
+      check("...and a new reading is formatted from its own numbers",
+            [/160,000|160000/.test(fresh), /answer 999/.test(fresh), formatted - before > 0],
+            [true, true, true]);
+    } finally {
+      Number.prototype.toLocaleString = format;
+    }
+  }
+
   if (failures) {
     console.error(`${failures} check(s) failed`);
     process.exit(1);

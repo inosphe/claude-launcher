@@ -16,7 +16,9 @@
                  that thread (from "qa" through "both"); "쓰레드로 논의"
                  opens the new-thread form about the question and the
                  thread is created with {qa}; a thread's question chip
-                 brings the card in; "QA로 정리 요청" posts ask_qa.
+                 brings the card in; a closed question's chip stays folded
+                 behind a toggle until it is pressed (claunch-cedjc);
+                 "QA로 정리 요청" posts ask_qa.
      wired    -- talk-pane.js loads after both panes and before app.js;
                  openSplit/closeSplit go through TalkPane; the header
                  buttons read "both" as on, and pressing one there hides
@@ -116,7 +118,8 @@ function harness() {
   const threads = [
     {id: "th-1", title: "Q: Which base?", status: "open", opened_by: "user", last_seq: 1, qa: "qa-1",
      last: {author: "user", body: "why?"},
-     links: [{id: "qa-1", title: "Which base?", status: "open", rel: "subject"}]},
+     links: [{id: "qa-1", title: "Which base?", status: "open", rel: "subject"},
+             {id: "qa-3", title: "Settled?", status: "closed", rel: "filed"}]},
     {id: "th-2", title: "Ports", status: "open", opened_by: "agent", last_seq: 0, qa: null, last: null,
      links: [{id: "qa-2", title: "Which port?", status: "answered", rel: "filed"}]},
   ];
@@ -316,6 +319,33 @@ function harness() {
     assert.ok(item.querySelector(".th-chip-qa"), "a thread with links carries a QA chip in the list");
     const chip = host.querySelector(".th-links .th-link-chip");
     assert.ok(chip.textContent.includes("다루는 질문") && chip.textContent.includes("qa-1"));
+    // Closed questions are folded until the toggle is pressed (claunch-cedjc).
+    const chipIds = () => host.querySelectorAll(".th-links .th-link-chip").map((c) => (/qa-\d+/.exec(c.textContent) || [""])[0]);
+    assert.deepEqual(chipIds(), ["qa-1"], "a closed question's chip is hidden by default");
+    const more = host.querySelector(".th-links .th-links-fold");
+    assert.ok(more && more.textContent.includes("1개 펼치기"), "the fold toggle counts the hidden chips");
+    assert.equal(more.attrs["aria-expanded"], "false");
+    // The toggle redraws only the chip box: the conversation keeps its node
+    // and its scroll position (claunch-cedjc.1).
+    const msgs = host.querySelector(".th-messages");
+    msgs.scrollTop = 37;
+    more.fire("click");
+    await settle();
+    assert.deepEqual(chipIds(), ["qa-1", "qa-3"], "pressing the toggle shows the closed question");
+    assert.equal(host.querySelector(".th-messages"), msgs, "the toggle does not rebuild the conversation");
+    assert.equal(msgs.scrollTop, 37, "the conversation keeps its scroll position");
+    const less = host.querySelector(".th-links .th-links-fold");
+    assert.ok(less.textContent.includes("접기") && less.attrs["aria-expanded"] === "true");
+    less.fire("click");
+    await settle();
+    assert.deepEqual(chipIds(), ["qa-1"], "pressing it again folds them away");
+    assert.equal(host.querySelector(".th-messages"), msgs, "folding again keeps the conversation too");
+    const sp = ctx.ThreadsPane.splitLinks;
+    assert.equal(sp([{status: "open"}, {status: "answered"}], false).folded, 0, "no closed link: no toggle");
+    assert.equal(sp([{status: "closed"}], false).shown.length, 0);
+    assert.equal(sp([{status: "closed"}], true).shown.length, 1);
+    assert.ok(/\.th-links \{[^}]*max-height:[^}]*overflow-y: auto/.test(read("style.css")),
+              "the chip box is capped and scrolls inside");
     chip.fire("click");
     await settle();
     assert.deepEqual(asked, ["both"], "following a question link from threads moves to both");

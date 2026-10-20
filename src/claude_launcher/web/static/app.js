@@ -7013,8 +7013,11 @@ function paintTermTimer() {
     return;
   }
   const hold = termTimerHold();
-  box.className = `term-btn timer-chip ${line.state}`;
-  if (hold) box.classList.toggle("timer-paused", !hold.on);
+  // One write of the whole class: setting it without `timer-paused` and
+  // toggling that back on was two class mutations a second on a paused
+  // hold, which the toolbar answers with a full re-fit (claunch-i3es6).
+  box.className = `term-btn timer-chip ${line.state}` +
+    (hold && !hold.on ? " timer-paused" : "");
   box.title = termTimerTitle(read.pick, line, hold);
   // The two spans are kept and only their text moves: this repaints every
   // second, and rebuilding them each time was two mutations a second for
@@ -7028,8 +7031,11 @@ function paintTermTimer() {
     textBox = el("span", "tt-text", line.text);
     box.append(glyphBox, textBox);
   } else {
-    glyphBox.textContent = glyph;
-    textBox.textContent = line.text;
+    // Only the countdown moves from one second to the next; a write of the
+    // same text is still a mutation for every observer of the header
+    // (toolbar.js re-fits on it, claunch-i3es6).
+    if (glyphBox.textContent !== glyph) glyphBox.textContent = glyph;
+    if (textBox.textContent !== line.text) textBox.textContent = line.text;
   }
   box.disabled = termTimerBusy;
   // Wired once: textContent above wipes the children, not the box, so a
@@ -7149,7 +7155,8 @@ function paintTermTimerSkip(skip) {
   // the button somebody is reaching for, and it should be visible from the
   // same glance that made them reach.
   box.className = `term-btn timer-skip ${skip.state}`;
-  box.textContent = "⏭";
+  // Repainted every second with the clock beside it; the glyph never moves.
+  if (box.textContent !== "⏭") box.textContent = "⏭";
   box.title = termTimerSkipTitle(skip);
   box.disabled = termTimerSkipBusy;
   if (!box.dataset.wired) {
@@ -7334,7 +7341,17 @@ function ctxSentence(s) {
       ? "context not known yet — no reading recorded"
       : "";
   }
-  const parts = [`context ${c.tokens.toLocaleString()} tokens`];
+  // The count is formatted once per reading: the rail asks for this sentence
+  // on every row of every poll (refreshRailSeen), and toLocaleString was a
+  // measurable share of that pass (claunch-i3es6). Readings arrive as fresh
+  // objects and are never edited, so the reading itself is the key.
+  const memo = ctxSentence._tokens || (ctxSentence._tokens = new WeakMap());
+  let count = memo.get(c);
+  if (count === undefined) {
+    count = c.tokens.toLocaleString();
+    if (typeof c === "object") memo.set(c, count);
+  }
+  const parts = [`context ${count} tokens`];
   if (c.model) parts.push(c.model);
   const age = ctxAgeOf(c.at);
   parts.push(age ? `as of ${age} ago` : "as of its last turn");
@@ -7347,9 +7364,15 @@ function ctxSentence(s) {
    "input 2". */
 function ctxBreakdown(c) {
   if (!c) return "";
+  // Built once per reading, for the same reason as ctxSentence's count: the
+  // text reads nothing but the reading, and the rail rebuilt it per row per
+  // poll -- the largest single item of the poll's redraw (claunch-i3es6).
+  const memo = ctxBreakdown._memo || (ctxBreakdown._memo = new WeakMap());
+  const kept = memo.get(c);
+  if (kept !== undefined) return kept;
   const modelWindow = Number.isFinite(c.model_context_window)
     && c.model_context_window > 0 ? c.model_context_window : 0;
-  return [
+  const text = [
     `fresh input ${c.input.toLocaleString()}`,
     `replayed from cache ${c.cache_read.toLocaleString()}`,
     `written to cache ${c.cache_write.toLocaleString()}`,
@@ -7365,6 +7388,8 @@ function ctxBreakdown(c) {
       : "no percentage: the context limit is not recorded anywhere and " +
         "differs by model",
   ].join("\n");
+  if (typeof c === "object") memo.set(c, text);
+  return text;
 }
 
 /* What the rail row adds to its tooltip — the full story behind the glance
@@ -7775,7 +7800,8 @@ function renderTermTps() {
   if (badge) {
     badge.classList.toggle("hidden", !t);
     if (t) {
-      badge.textContent = tpsText(t);
+      const text = tpsText(t);
+      if (badge.textContent !== text) badge.textContent = text;
       badge.className = "badge tps" + tpsStaleClass(t);
       badge.title = tpsTooltip(t);
     }
@@ -7783,34 +7809,59 @@ function renderTermTps() {
   if (overlay) {
     const show = !!t && terminalOnScreen();
     overlay.classList.toggle("hidden", !show);
+    // What the overlay will read, worked out before any node is built: the
+    // live poll asks twice a second, and an idle or waiting session answers
+    // the same thing most of those times. Rebuilding the children for an
+    // unchanged answer was a style, layout and paint of the terminal pane on
+    // every tick for nobody (claunch-i3es6), so it is rebuilt only when this
+    // reads differently from what is there.
+    let parts = null;
     if (show && t.live && typeof tpsSparkline === "function") {
       /* Live: the state big, the line under it, the last finished call small. */
       const l = t.live;
       const model = l.model || t.model;
-      overlay.className = "term-tps-overlay" + tpsStaleClass(t);
-      const par = typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "";
-      overlay.replaceChildren(
-        el("span", "term-tps-big", tpsLiveText(l)),
-        tpsSparkline(l.series),
-        ...(par ? [el("span", "term-tps-small term-tps-parallel", par)] : []),
-        el("span", "term-tps-small",
-          [model ? modelShort(model) : "",
-           t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
-           tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
-            .filter(Boolean).join(" · "))
-      );
+      parts = {
+        live: true,
+        cls: "term-tps-overlay" + tpsStaleClass(t),
+        big: tpsLiveText(l),
+        series: Array.isArray(l.series) ? l.series : [],
+        par: typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "",
+        small: [model ? modelShort(model) : "",
+          t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
+          tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
+          .filter(Boolean).join(" · "),
+      };
     } else if (show) {
-      overlay.className = "term-tps-overlay" + tpsStaleClass(t);
-      overlay.replaceChildren(
-        el("span", "term-tps-big", !t.idle && t.counted && Number.isFinite(t.tps)
-          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
-        el("span", "term-tps-small",
-          [!t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
-           t.model ? modelShort(t.model) : "",
-           tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
-            .filter(Boolean).join(" · "))
-      );
-      overlay.title = tpsTooltip(t);
+      parts = {
+        live: false,
+        cls: "term-tps-overlay" + tpsStaleClass(t),
+        big: !t.idle && t.counted && Number.isFinite(t.tps)
+          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
+        small: [!t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
+          t.model ? modelShort(t.model) : "",
+          tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
+          .filter(Boolean).join(" · "),
+        title: tpsTooltip(t),
+      };
+    }
+    const key = parts ? JSON.stringify(parts) : null;
+    if (parts && overlay._tpsKey !== key) {
+      overlay._tpsKey = key;
+      overlay.className = parts.cls;
+      if (parts.live) {
+        overlay.replaceChildren(
+          el("span", "term-tps-big", parts.big),
+          tpsSparkline(parts.series),
+          ...(parts.par ? [el("span", "term-tps-small term-tps-parallel", parts.par)] : []),
+          el("span", "term-tps-small", parts.small)
+        );
+      } else {
+        overlay.replaceChildren(
+          el("span", "term-tps-big", parts.big),
+          el("span", "term-tps-small", parts.small)
+        );
+        overlay.title = parts.title;
+      }
     }
   }
 }
@@ -11023,7 +11074,8 @@ async function refreshProfiles() {
       profile, profile,
       options.every((item) => item.harness_available === false),
     ]);
-    const child = !!spawnParent();
+    const parentSess = spawnParent();
+    const child = !!parentSess;
     let wantedProfile = child && !previousProfile
       ? "" : baseProfileName(previousSelector);
     if (!wantedProfile && !child) {
@@ -11032,7 +11084,8 @@ async function refreshProfiles() {
     }
     fillSpawnSelect(
       select, pairs,
-      child ? "(inherit the parent's profile)" : null,
+      child ? `(inherit the parent's profile${
+        parentSess.profile ? `: ${parentSess.profile}` : ""})` : null,
       wantedProfile
     );
     markCompactProblems(select);
@@ -14140,12 +14193,12 @@ function syncSpawnMode() {
   const policyShut = new Set(
     SPAWN_INHERITS.filter((k) => f[k] && !!parent && !open[k])
   );
-  syncSpawnProfileRow(f, !!parent);
+  syncSpawnProfileRow(f, parent);
   refillNewHarnessOptions(
     f, parent && !f.profile.value ? "" : undefined
   );
   syncSpawnProjectRow(f, parent);
-  syncSpawnCwdRow(f, !!parent);
+  syncSpawnCwdRow(f, parent);
   syncNewBorrowOptions();
   if (parent) {
     // Auth is claude's token machinery: on a child running anything else
@@ -14254,16 +14307,22 @@ function syncSpawnMode() {
    own always runs SOME profile, while a child runs its parent's unless it is
    told otherwise. So the inherit entry exists only while a parent is named,
    and is what the row starts on — without it every unlocked child would be
-   spawned onto whichever profile happens to sort first. */
-function syncSpawnProfileRow(f, child) {
+   spawned onto whichever profile happens to sort first. The entry names the
+   profile it inherits, so the greyed row says what the child will run on;
+   a change of parent relabels it, the way the project row does. */
+function syncSpawnProfileRow(f, parent) {
   const sel = f.profile;
   if (!sel || !sel.options) return;
   const at = [...sel.options].findIndex((o) => o.value === "");
-  if (child && at < 0) {
-    sel.insertBefore(new Option("(inherit the parent's profile)", ""),
-                     sel.options[0] || null);
+  const label = parent
+    ? `(inherit the parent's profile${parent.profile ? `: ${parent.profile}` : ""})`
+    : "";
+  if (parent && at >= 0) {
+    sel.options[at].textContent = label;
+  } else if (parent) {
+    sel.insertBefore(new Option(label, ""), sel.options[0] || null);
     sel.value = "";
-  } else if (!child && at >= 0) {
+  } else if (at >= 0) {
     sel.remove(at);
     if (!sel.value) {
       const first = [...sel.options].find((o) => !o.disabled);
@@ -14318,12 +14377,15 @@ function syncSpawnProjectRow(f, parent) {
 
 /* Same shape for the directory row: "" is the daemon's own directory when
    the session is its own, and the parent's when it is a child. One option,
-   two truths — said in words rather than left for the operator to guess. */
-function syncSpawnCwdRow(f, child) {
+   two truths — said in words rather than left for the operator to guess,
+   and for a child with the directory it inherits. */
+function syncSpawnCwdRow(f, parent) {
   const sel = f.cwd;
   const first = sel && sel.options && sel.options[0];
   if (!first || first.value !== "") return;
-  first.textContent = child ? "(inherit the parent's directory)" : "(daemon cwd)";
+  first.textContent = parent
+    ? `(inherit the parent's directory${parent.cwd ? `: ${parent.cwd}` : ""})`
+    : "(daemon cwd)";
 }
 
 /* The child cap is SOFT (spawn.py: it warns and lets the spawn through), so
@@ -23063,12 +23125,31 @@ function syncOnboardPickers() {
   const form = $("new-session");
   const mesh = form.mesh;
   const keptMesh = mesh.value;
-  const child = !!spawnParent();
+  const parentSess = spawnParent();
+  const child = !!parentSess;
   mesh.innerHTML = "";
   // The empty answer is two different facts, said in words rather than left
   // for the operator to guess: no mesh at all for a session of its own, the
   // parent's room for a child.
-  mesh.appendChild(new Option(child ? "(inherit the parent's mesh)" : "(none)", ""));
+  let inheritMesh = "(inherit the parent's mesh)";
+  // ...and for a child, which room that is. The daemon settles it the same
+  // way (onboard.inherit_mesh): the parent's one team mesh, a new one opened
+  // for the pair when it has none, a refusal when it has several. Parent
+  // channels are not team meshes there, so they are not counted here. An
+  // empty mesh poll has not answered yet, and says nothing about the parent.
+  // Guarded: harnesses that slice this function alone do not carry it.
+  if (child && typeof sessMeshes === "function" && (meshCache || []).length) {
+    const rooms = sessMeshes(parentSess.name)
+      .map((m) => m.mesh)
+      .filter((name) => !((meshCache || []).find((m) => m.name === name) || {})
+        .parent_channel);
+    inheritMesh = rooms.length === 1
+      ? `(inherit the parent's mesh: ${rooms[0]})`
+      : rooms.length
+        ? `(inherit the parent's mesh: several — ${rooms.join(", ")}; pick one)`
+        : "(inherit the parent's mesh: none — one is opened for the pair)";
+  }
+  mesh.appendChild(new Option(child ? inheritMesh : "(none)", ""));
   for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
   // Meshes other daemons publish or offer to this one (daemon attach). An
   // offered one attaches this daemon first and joins by the bare name; one
@@ -23176,7 +23257,7 @@ function syncCflowInputs() {
     const seeded = pendingSeedInputs;
     if (seeded) pendingSeedInputs = null;
     cflowInputsForm(box, fields, entry.input_constraints || [], seeded);
-    cflowInputsLive(box, f.workflow.value, newSessionCwd);
+    cflowInputsLive(box, f.workflow.value, newSessionCwd, f.profile);
     // TEMPORARY (claunch-z7b0n, v1 -> v2 migration): the daemon writes the
     // issue the Board answer settles into the run's `issue` input. The field
     // stays; it says so. Remove with api.py's overwrite once no v2 workflow
@@ -23200,12 +23281,16 @@ function syncCflowInputs() {
    checkbox may be turned on. The start still re-checks; this only says it
    earlier. */
 let cflowInputsCheckSeq = 0;
-function cflowInputsLive(box, picked, cwdOf) {
+/* The live check of the box drawn last, for the Profile picker's one
+   listener (an `options` list may hang on the new session's profile). */
+let cflowInputsRecheck = null;
+function cflowInputsLive(box, picked, cwdOf, profileEl) {
   let timer = null;
   const run = async () => {
     const seq = ++cflowInputsCheckSeq;
     const body = Object.assign(cflowPickBody(picked, workflowsCache), {
       cwd: cwdOf() || undefined, cflow_inputs: cflowInputsValues(box),
+      profile: (profileEl && profileEl.value) || undefined,
     });
     try {
       const resp = await api("/api/cflow2/inputs/check", {
@@ -23215,6 +23300,7 @@ function cflowInputsLive(box, picked, cwdOf) {
       const doc = await resp.json().catch(() => ({}));
       if (seq !== cflowInputsCheckSeq || !resp.ok) return;
       cflowInputsErrors(box, doc.errors || {});
+      cflowInputsOptions(box, doc.options || {});
       const general = box.querySelector(".cf2-constraint-error");
       if (general) {
         const msg = (doc.errors || {})._constraints || "";
@@ -23228,6 +23314,14 @@ function cflowInputsLive(box, picked, cwdOf) {
   box.addEventListener("change", schedule);
   for (const row of box.querySelectorAll('.cf2-input[data-precheck="gh"]')) {
     cflowGhPrecheck(row, cwdOf, schedule);
+  }
+  if (box.querySelector("datalist")) {
+    cflowInputsRecheck = schedule;
+    if (profileEl && !profileEl.dataset.cf2Recheck) {
+      profileEl.dataset.cf2Recheck = "1";
+      profileEl.addEventListener("change", () => cflowInputsRecheck && cflowInputsRecheck());
+    }
+    schedule();  // fill the lists before anything is typed
   }
 }
 
@@ -23365,10 +23459,62 @@ function cflowInputControl(field) {
     add.type = "button";
     add.addEventListener("click", () => addRow(null));
     wrap.append(rows, add);
+  } else if (field.options) {
+    // A combobox (claunch-iq1xc): the list is the daemon's, refilled from
+    // each POST /api/cflow2/inputs/check answer (cflowInputsOptions), so a
+    // dependent list follows the profile picked above it. Typing stays
+    // possible; the check refuses a value off the list.
+    const i = text("cf2-input-value", field.default, field.placeholder);
+    const list = document.createElement("datalist");
+    list.id = `cf2-opt-${field.name}-${++cflowOptionSeq}`;
+    i.setAttribute("list", list.id);
+    wrap.append(i, list);
   } else {
     wrap.appendChild(text("cf2-input-value", field.default, field.placeholder));
   }
   return wrap;
+}
+
+let cflowOptionSeq = 0;
+
+/* An `options` input's datalist set to `items`; false when it already
+   held them (a redraw would close an open suggestion list). */
+function cflowOptionsFill(list, items) {
+  const want = (items || []).map(String);
+  const have = [...list.children].map((c) => c.value);
+  if (want.join("\n") === have.join("\n")) return false;
+  while (list.firstChild) list.removeChild(list.firstChild);
+  for (const v of want) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    list.appendChild(opt);
+  }
+  return true;
+}
+
+/* The line under an `options` input: which list it offers and of which
+   profile (`{from, profile, items}` from the daemon; items null = the
+   daemon cannot say, so nothing is checked). */
+function cflowOptionsNote(o) {
+  if (!o) return "";
+  const of = o.profile ? ` of profile ${o.profile}` : "";
+  if (o.items == null) {
+    return o.profile ? `no ${o.from} list${of}; the value is not checked`
+      : `${o.from}: depends on a profile the form does not know; the value is not checked`;
+  }
+  return `${o.from}${of}: ${o.items.join(", ") || "none"}`;
+}
+
+/* Every `options` row of a box refilled from an answer's `options`. */
+function cflowInputsOptions(box, options) {
+  for (const row of box.querySelectorAll(".cf2-input")) {
+    const o = (options || {})[row.dataset.input];
+    const list = row.querySelector("datalist");
+    if (!o || !list) continue;
+    cflowOptionsFill(list, o.items);
+    const note = row.querySelector(".cf2-input-options");
+    if (note) note.textContent = cflowOptionsNote(o);
+  }
 }
 
 function cflowInputsForm(box, fields, constraints, seeded) {
@@ -23396,6 +23542,7 @@ function cflowInputsForm(box, fields, constraints, seeded) {
       row.appendChild(control);
     }
     if (field_.help) row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
+    if (field_.options) row.appendChild(el("p", "wf-note mono cf2-input-options", ""));
     row.appendChild(el("p", "cf2-input-error hidden"));
     box.appendChild(row);
   }
@@ -35957,7 +36104,8 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   const runInputs = run.inputs || ((run.data || {}).inputs);
   if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
-    root.appendChild(cflow2InputsBlock(runInputs, data.input_decls, live ? post : null));
+    root.appendChild(cflow2InputsBlock(runInputs, data.input_decls, live ? post : null,
+                                       data.input_options));
   }
 
   const cols = el("div", "cf2-cols");
@@ -36518,7 +36666,7 @@ function cflow2CollectionTable(name, col, post) {
 /* The run's start inputs (data.inputs), folded shut. An input whose
    declaration (data.input_decls) has set_by: [user] gets an editor while the
    run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
-function cflow2InputsBlock(values, decls, post) {
+function cflow2InputsBlock(values, decls, post, options) {
   const declOf = {};
   for (const d of decls || []) declOf[d.name] = d;
   const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
@@ -36539,16 +36687,20 @@ function cflow2InputsBlock(values, decls, post) {
     row.appendChild(text.length > 80 || text.includes("\n")
       ? mdInto(el("div", "md cf2-run-input-value"), text)
       : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
-    if (editable(k)) row.appendChild(cflow2InputEditor(k, v, declOf[k], post));
+    if (editable(k)) {
+      row.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
+    }
     box.appendChild(row);
   }
   return box;
 }
 
 /* A person's editor for one set_by: [user] input: a checkbox for a bool, a
-   picker for an enum, a text field otherwise (a list as one item per line).
-   The press confirms, then posts; the run page redraws from the answer. */
-function cflow2InputEditor(name, value, decl, post) {
+   picker for an enum, a combobox for an input with `options` (the daemon's
+   list for the run's current values, run detail's input_options), a text
+   field otherwise (a list as one item per line). The press confirms, then
+   posts; the run page redraws from the answer. */
+function cflow2InputEditor(name, value, decl, post, opts) {
   const wrap = el("div", "cf2-run-input-edit");
   const label = decl.label || name;
   const send = async (next, shown) => {
@@ -36587,6 +36739,14 @@ function cflow2InputEditor(name, value, decl, post) {
     field = el("input");
     field.type = decl.type === "int" ? "number" : "text";
     field.value = value == null ? "" : String(value);
+  }
+  if (decl.options && opts) {
+    const list = el("datalist");
+    list.id = `cf2-run-opt-${name}-${++cflowOptionSeq}`;
+    cflowOptionsFill(list, opts.items);
+    field.setAttribute("list", list.id);
+    field.title = cflowOptionsNote(opts);
+    wrap.appendChild(list);
   }
   const btn = el("button", "wf-btn sm", "Set");
   btn.addEventListener("click", async () => {
@@ -41535,7 +41695,8 @@ function refillSpawnHarnesses(ui, want) {
   fillSpawnSelect(
     ui.harness,
     pairs,
-    inherited ? "(inherit the parent's harness)" :
+    inherited ? `(inherit the parent's harness${
+      ui.parentSess.harness ? `: ${ui.parentSess.harness}` : ""})` :
       (pairs.length ? null : "(no allowed harness)"),
     chosen
   );
@@ -48459,7 +48620,7 @@ function notify(title, sub, opts) {
   const timer = o.sticky
     ? null
     : setTimeout(() => dismissNotice(key), o.ms || NOTICE_MS);
-  notices.set(key, { node, timer, sync: o.sync || "" });
+  notices.set(key, { node, timer, sync: o.sync || "", title, sub: sub || "", at: rec.at });
   return node;
 }
 
@@ -48622,15 +48783,16 @@ function noticeUnread(e) {
 /* Sets `read` on the rows with these ids; repaints only when one changed. */
 function noticeMarkRead(ids, read) {
   const want = new Set(ids);
-  let changed = false;
+  const refs = [];
   for (const e of noticeHistory) {
     if (want.has(e.id) && e.read !== read) {
       e.read = read;
-      changed = true;
+      refs.push(noticeTabsRef(e.sync, e.title, e.sub, e.at));
       if (e.sync) noticeSyncQueue(e.sync, { read });
     }
   }
-  if (!changed) return;
+  if (!refs.length) return;
+  noticeTabsPost({ t: "read", read, refs });
   noticeHistorySave();
   noticeBellPaint();
   noticePanelPaint();
@@ -48708,6 +48870,11 @@ function noticeSyncOf(key) {
 function noticeSyncDismiss(key) {
   const sync = noticeSyncOf(key);
   if (sync) noticeSyncQueue(sync, { dismissed: true });
+  // This browser's other tabs hear of every card, sync id or not (claunch-j6lg0).
+  const card = notices.get(key);
+  if (card && (card.sync || card.title !== undefined)) {
+    noticeTabsPost({ t: "dismiss", ref: noticeTabsRef(card.sync, card.title, card.sub, card.at) });
+  }
 }
 
 /* The daemon's word on one record: its card goes when dismissed, its rows
@@ -48776,6 +48943,120 @@ async function noticeSyncTick() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* notice tabs — this browser's other tabs on the same daemon (claunch-j6lg0) */
+/* ------------------------------------------------------------------ */
+/* Every tab open on this daemon polls the same gates and puts up the same
+   cards, so the same request stood in every tab's corner, and a card
+   clicked, put away or hidden in one tab stayed up in the others: the
+   notice sync above reaches them only through the daemon at its loose pace,
+   and only for the notices that carry `sync`. Tabs of one browser share an
+   origin, so what a person does with a card here is also told to the other
+   tabs at once over a BroadcastChannel; each applies it to its own cards
+   and rows and does not pass it on (the daemon hears it from this tab).
+
+   Told: a card put away (×, a click, the panel opened, the threads pane
+   shown), rows read or unread, a gate card hidden or shown again, and a gate
+   answered (the other tabs re-poll the gates instead of waiting their turn).
+   Each tab keeps its own history rows under its own ids, so a row is found
+   by its sync id, and a row without one by its title and text within
+   NOTICE_TAB_MATCH_MS of when it was written here. A browser without
+   BroadcastChannel keeps each tab on its own, as before. */
+const NOTICE_TAB_CHANNEL = "claunch.notices";
+const NOTICE_TAB_MATCH_MS = 60000;
+const noticeTabs = { chan: null, applying: false };
+
+function noticeTabsOpen() {
+  try {
+    if (typeof BroadcastChannel !== "function") return;
+    noticeTabs.chan = new BroadcastChannel(NOTICE_TAB_CHANNEL);
+    noticeTabs.chan.onmessage = (ev) => noticeTabsApply(ev && ev.data);
+    // Node's channel (the page's checks under tests/web load this code)
+    // holds the process open unless unref'd; a browser has no unref.
+    if (typeof noticeTabs.chan.unref === "function") noticeTabs.chan.unref();
+  } catch {
+    noticeTabs.chan = null;
+  }
+}
+
+/* What this tab did, for the others. Nothing goes out while a message from
+   another tab is being applied: that would echo it back. */
+function noticeTabsPost(msg) {
+  if (!noticeTabs.chan || noticeTabs.applying) return;
+  try {
+    noticeTabs.chan.postMessage(msg);
+  } catch {
+    /* closed or refused: this tab still did it */
+  }
+}
+
+/* How another tab names a card or a row: its sync id, or its words. */
+function noticeTabsRef(sync, title, sub, at) {
+  return sync ? { sync } : { title: title || "", sub: sub || "", at: at || 0 };
+}
+
+function noticeTabsRowMatch(e, ref) {
+  if (ref.sync) return e.sync === ref.sync;
+  return !e.sync && !e.gate && e.title === ref.title && (e.sub || "") === ref.sub &&
+    Math.abs((e.at || 0) - ref.at) <= NOTICE_TAB_MATCH_MS;
+}
+
+function noticeTabsCardMatch(card, ref) {
+  if (ref.sync) return card.sync === ref.sync;
+  return !card.sync && card.title === ref.title && card.sub === ref.sub;
+}
+
+function noticeTabsDismissed(ref) {
+  for (const [key, card] of [...notices]) {
+    if (noticeTabsCardMatch(card, ref)) dismissNotice(key);
+  }
+}
+
+function noticeTabsApply(msg) {
+  if (!msg || typeof msg !== "object") return;
+  noticeTabs.applying = true;
+  try {
+    if (msg.t === "dismiss" && msg.ref) {
+      noticeTabsDismissed(msg.ref);
+    } else if (msg.t === "read" && Array.isArray(msg.refs)) {
+      const read = msg.read === true;
+      let changed = false;
+      for (const ref of msg.refs) {
+        if (!ref) continue;
+        for (const e of noticeHistory) {
+          if (e.read !== read && noticeTabsRowMatch(e, ref)) { e.read = read; changed = true; }
+        }
+        // A read row's card goes, as when the daemon says it was read.
+        if (read) noticeTabsDismissed(ref);
+      }
+      if (changed) {
+        noticeHistorySave();
+        noticeBellPaint();
+        noticePanelPaint();
+      }
+    } else if (msg.t === "gate-hide" && msg.type) {
+      if (!gateIsHidden(msg.type, msg.rid)) {
+        gateHide(msg.type, String(msg.rid));
+        noticeGateRefresh(msg.type);
+      }
+    } else if (msg.t === "gate-unhide" && msg.type) {
+      if (gateIsHidden(msg.type, msg.rid)) gateUnhide(msg.type, String(msg.rid));
+    } else if (msg.t === "gates") {
+      for (const type of Object.keys(gatePending)) noticeGateRefresh(type);
+    }
+  } finally {
+    noticeTabs.applying = false;
+  }
+}
+
+/* A gate answered here: the other tabs re-poll rather than show it pending
+   until their next tick. */
+function noticeTabsGates() {
+  noticeTabsPost({ t: "gates" });
+}
+
+noticeTabsOpen();
+
 function gateHistoryEntry(type, rid) {
   return noticeHistory.find(
     (e) => e.gate && e.gate.type === type && e.gate.rid === rid
@@ -48836,6 +49117,7 @@ function gateIsHidden(type, rid) {
 
 function gateHide(type, rid) {
   gateHiddenIds.add(`${type}:${rid}`);
+  noticeTabsPost({ t: "gate-hide", type, rid: String(rid) });
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
   if (entry) {
@@ -48848,6 +49130,7 @@ function gateHide(type, rid) {
 
 function gateUnhide(type, rid) {
   gateHiddenIds.delete(`${type}:${rid}`);
+  noticeTabsPost({ t: "gate-unhide", type, rid: String(rid) });
   if (noticePanelOpen()) gateShownInPanel.add(`${type}:${rid}`);
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
@@ -49558,6 +49841,7 @@ async function gatePost(path, btn) {
     btn.disabled = false;
     return false;
   }
+  noticeTabsGates();
   return true;
 }
 
@@ -49581,7 +49865,10 @@ async function restartGateApprove(btn, body) {
     btn.disabled = false;
     return "failed";
   }
-  if (resp.ok) return "ok";
+  if (resp.ok) {
+    noticeTabsGates();
+    return "ok";
+  }
   btn.disabled = false;
   if (resp.status === 409) {
     const refused = await resp.json().catch(() => ({}));
@@ -50214,17 +50501,41 @@ function spawnGateClock(rec) {
   return `auto-approves in ${left}${more}`;
 }
 
-/* What the session would be: project, issue, the first line of its task. */
+/* What the session would be beyond the facts rows: issue, name, the first
+   line of its task. */
 function spawnGateSpecText(spec) {
   if (!spec) return "";
   const task = String(spec.task || "").trim().split("\n")[0];
-  return [
-    spec.project ? `project ${spec.project}` : "",
-    spec.role ? `role ${spec.role}` : "",
+  const head = [
     spec.issue ? `issue ${spec.issue}` : "",
-    spec.workflow && spec.workflow !== "-" ? spec.workflow : "",
     spec.name ? `name ${spec.name}` : "",
-  ].filter(Boolean).join(" · ") + (task ? ` — ${task}` : "");
+  ].filter(Boolean).join(" · ");
+  return head && task ? `${head} — ${task}` : head || task;
+}
+
+const SPAWN_GATE_FACTS = ["project", "profile", "workspace", "role", "workflow"];
+
+/* The five things the session would run as, one labelled row each
+   (claunch-mgope). The daemon's `facts` resolve what the spec leaves to
+   the asker and mark those rows inherited; a record without them (an
+   older daemon) shows the spec's own values. */
+function spawnGateFacts(rec, spec) {
+  const facts = rec.facts || {};
+  const box = el("div", "notice-sub gate-facts");
+  for (const key of SPAWN_GATE_FACTS) {
+    let own = String(spec[key] || (key === "workspace" ? spec.cwd || "" : ""));
+    // A top-level body's present-but-empty worktree is a new checkout.
+    const fresh = rec.scope === "child" ? !!spec.worktree : "worktree" in spec;
+    if (key === "workspace" && own && fresh) own += " (new worktree)";
+    const fact = facts[key] || { value: own === "-" ? "" : own, inherited: false };
+    box.appendChild(el("span", "gate-fact-key", key));
+    const val = el("span", "gate-fact-val", fact.value || "—");
+    if (fact.inherited) {
+      val.appendChild(el("span", "gate-fact-from", ` (inherited from ${rec.session || "the asker"})`));
+    }
+    box.appendChild(val);
+  }
+  return box;
 }
 
 /* The rows a card and a panel row share: title, who asked on whose word,
@@ -50246,8 +50557,12 @@ function spawnGateBody(node, rec, head) {
   node.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`));
   const spec = rec.kind === "resume" ? rec.fallback : rec.spec;
   if (spec) {
-    node.appendChild(el("div", "notice-sub gate-spec",
-      (rec.kind === "resume" ? "otherwise a new session: " : "") + spawnGateSpecText(spec)));
+    const text = spawnGateSpecText(spec);
+    if (text || rec.kind === "resume") {
+      node.appendChild(el("div", "notice-sub gate-spec",
+        (rec.kind === "resume" ? "otherwise a new session: " : "") + text));
+    }
+    node.appendChild(spawnGateFacts(rec, spec));
   }
   node.appendChild(el("div", "notice-sub gate-clock", spawnGateClock(rec)));
 }
@@ -50274,6 +50589,7 @@ async function spawnGatePost(rec, verb, btn, body) {
     return null;
   }
   const settled = doc.request || {};
+  noticeTabsGates();
   if (settled.status === "failed") {
     notify(rec.kind === "resume" ? `resume of ${rec.target} failed` : "session create failed",
       settled.error || "unknown error", { kind: "warn", sticky: true });
@@ -50638,6 +50954,7 @@ async function urgentAskPost(rec, decision, btn) {
     btn.disabled = false;
     return false;
   }
+  noticeTabsGates();
   return true;
 }
 

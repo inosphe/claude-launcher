@@ -23,7 +23,9 @@ Rows:
 
 Who may write. The user (the dashboard) may open, post, close and reopen in
 any session's threads; a session may do the same only in its own. Posting to
-a closed thread reopens it: a reply is a reason to talk again.
+a closed thread reopens it: a reply is a reason to talk again. A guest's post
+is the exception (claunch-mgh8x): a guest may not reopen a thread any more
+than close it, so its message is kept and the thread stays closed.
 
 ``agent_read`` is the seq of the last message the owning session has seen
 (it read the thread, or replied in it); user messages past it are what the
@@ -471,8 +473,10 @@ class ThreadStore:
             raise
         seq = int(cur.lastrowid)
         # The agent writing in a thread has seen everything in it so far.
+        # A guest's message does not reopen it (claunch-mgh8x).
         db.execute(
-            "UPDATE threads SET last_seq = ?, updated_at = ?, status = 'open'"
+            "UPDATE threads SET last_seq = ?, updated_at = ?"
+            + (", status = 'open'" if author != GUEST else "")
             + (", agent_read = ?" if author == AGENT else "") + " WHERE id = ?",
             (seq, now, seq, row["id"]) if author == AGENT else (seq, now, row["id"]),
         )
@@ -533,7 +537,7 @@ class ThreadStore:
         with self._write() as db:
             row = self._row(db, tid)
             who = self._writer(db, row, actor)
-            reopened = row["status"] == "closed"
+            reopened = row["status"] == "closed" and (system or who != GUEST)
             message = self._append(db, row, actor, body, images, kind=kind, ref=ref or None, data=data,
                                    author=SYSTEM if system else who, files=files,
                                    guest=actor if who == GUEST and not system else None)
@@ -935,6 +939,13 @@ class ThreadStore:
         with self._connect() as db:
             return {r["thread"]: int(r["n"]) for r in db.execute(
                 "SELECT thread, COUNT(*) AS n FROM messages WHERE session = ? GROUP BY thread", (owner,))}
+
+    def drop_guest(self, session: str) -> int:
+        """Remove ``session`` from every thread it is a guest in (it ended,
+        claunch-tee5g); returns how many threads it left. Its messages stay
+        in those threads."""
+        with self._write() as db:
+            return db.execute("DELETE FROM guests WHERE session = ?", (str(session or ""),)).rowcount
 
     def delete_owner(self, owner: str) -> int:
         """Remove every thread and message of ``owner`` (an operator that was
