@@ -118,7 +118,7 @@ const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) 
     const alpha = flowRows.find((r) => r.name === "alpha");
     const gamma = flowRows.find((r) => r.name === "gamma");
     assert.match(alpha.text, /improv-worker-v2 · running · round 2 · 작업 실행/);
-    assert.equal(alpha.age, "45m");
+    assert.equal(alpha.age, "⚠ 45m", "a stalled row carries the mark with its age");
     assert.equal(alpha.stalled, true, "a run in one task for 45m is marked");
     assert.equal(gamma.age, "1m");
     assert.equal(gamma.stalled, false, "a run that moved a minute ago is not marked");

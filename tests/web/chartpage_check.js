@@ -163,8 +163,25 @@ let ax = build({ range: 'all' });
 assert.deepStrictEqual([ax.scale, ax.axisStart, ax.axisWidthPct], ['log', now - 40 * 24 * H, 100]);
 assert.strictEqual(ax.t0, now - 40 * 24 * H, 'the window itself does not shrink');
 ax = build({ range: 'all', scale: 'linear' });
-assert.deepStrictEqual([ax.scale, ax.axisStart], ['linear', now - C.AXIS_CAP_MS]);
+assert.deepStrictEqual([ax.scale, ax.axisStart], ['linear', now - 40 * 24 * H]);
 assert.ok(Math.abs(ax.axisWidthPct - (40 * 24 * H / C.AXIS_CAP_MS) * 100) < 1e-9);
+
+// The widened grid keeps bars AND ticks in the window's coordinate system:
+// the cap sets the scale (one screen = AXIS_CAP_MS), not a new axis start.
+// claunch-c2emv review: an axisStart of `now - CAP` put every session older
+// than the cap on the left edge under a "7일 전" tick.
+assert.ok(Math.abs(C.positionOf(now - 40 * 24 * H, ax) - 0) < 1e-9, 'the oldest start is at the left edge');
+assert.ok(Math.abs(C.positionOf(now - 20 * 24 * H, ax) - 50) < 1e-9, 'half the window is half the grid');
+assert.ok(Math.abs(C.positionOf(now, ax) - 100) < 1e-9);
+assert.ok(C.axisTicks(ax).length > C.axisTicks(build({ range: '7d', scale: 'linear' })).length,
+  'a wider grid carries more ticks');
+// The same bar inside the widened grid: a 20-day session spans half of it,
+// and both its ends are on the axis rather than pinned to the left edge.
+const mid = C.barGeometry({ start: now - 20 * 24 * H, end: now }, ax);
+assert.ok(Math.abs(mid.left - 50) < 1e-9 && Math.abs(mid.width - 50) < 1e-9, JSON.stringify(mid));
+assert.strictEqual(mid.clipped, false);
+const oldest = C.barGeometry({ start: now - 40 * 24 * H, end: now }, ax);
+assert.deepStrictEqual([oldest.left, Math.round(oldest.width), oldest.clipped], [0, 100, false]);
 ax = build({ range: '7d', scale: 'linear' });
 assert.deepStrictEqual([ax.axisStart, ax.axisWidthPct], [ax.t0, 100]);
 ax = build({ range: '24h' });

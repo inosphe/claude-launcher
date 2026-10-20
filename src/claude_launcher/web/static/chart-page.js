@@ -222,16 +222,19 @@ globalThis.ChartPage = (() => {
       else flow.other++;
       if (cflowAge(r.cflow, now).stalled) flow.stalled++;
     }
-    /* What one screen width holds, per scale (claunch-c2emv):
+    /* What one screen width holds, per scale (claunch-c2emv). Both scales
+       place every time against the same window t0..t1 -- that is what the
+       range picker means, and it is what keeps the bars and the ticks in one
+       coordinate system:
        - "log" compresses the distance from now, so a session made minutes
          ago and one a month old are both visible in one screen;
        - "linear" keeps distances proportional and draws at most AXIS_CAP_MS
-         per screen, widening the grid (a scroll to the left) for the rest.
-       The rows keep the window t0..t1 either way -- that is what the range
-       picker means. */
+         per screen: the grid is widened by span/CAP and the viewer scrolls
+         left for the older sessions, which stay at their real positions. */
     const scale = opts.scale === "linear" ? "linear" : "log";
-    const axisStart = scale === "log" || (now - t0) <= AXIS_CAP_MS ? t0 : now - AXIS_CAP_MS;
-    const axisWidthPct = ((now - axisStart) > 0 ? (now - t0) / (now - axisStart) : 1) * 100;
+    const axisStart = t0;
+    const axisWidthPct = scale === "log" ? 100
+      : Math.max(100, ((now - t0) / AXIS_CAP_MS) * 100);
     return {
       now, t0, t1: now, axisStart, axisWidthPct, scale, rows, groups, groupPick: pick,
       summary: {
