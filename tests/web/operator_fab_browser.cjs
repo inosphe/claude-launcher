@@ -311,6 +311,21 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
         grips: [...document.querySelectorAll(".opfab-grip")].filter(g => g.getBoundingClientRect().width > 0).length };
     });
     assert.deepEqual(fit, { width: 390, height: 844, scrollers: ["op-area"], atEnd: true, sideways: false, barShown: true, grips: 0 });
+    // The thread's head holds to the top of that one scroller however far the
+    // conversation has scrolled (claunch-1ruqi).
+    const pinnedHead = await page.evaluate(() => {
+      const area = document.querySelector("#opfab-view .op-area");
+      area.scrollTop = area.scrollHeight;
+      const box = area.getBoundingClientRect();
+      const headBox = document.querySelector("#opfab-view .op-thread-head");
+      const head = headBox.getBoundingClientRect();
+      const back = document.querySelector("#opfab-view .op-thread-back").getBoundingClientRect();
+      // The row covers the scroller's top padding too: a point just under the
+      // scroller's own top edge lands in the head, not in an entry.
+      const probe = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
+      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
+    });
+    assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the thread head covers the top of the scroller, padding included, and keeps 「← 목록」");
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT });
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector(".opfab-modal").open);

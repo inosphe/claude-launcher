@@ -286,6 +286,21 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     const visible = sel => page.locator(`#observer-operators ${sel}`).first().isVisible();
     assert.equal(await visible(".op-thread-list"), false);
     assert.equal(await page.locator("#observer-operators .op-thread-title").innerText(), "이전 대화");
+    // The thread's head holds to the top of the conversation as it scrolls
+    // (claunch-1ruqi): 「← 목록」 stays where the reader needs it.
+    const pinnedHead = await page.evaluate(() => {
+      const area = document.querySelector("#observer-operators .op-area");
+      area.scrollTop = area.scrollHeight;
+      const box = area.getBoundingClientRect();
+      const headBox = document.querySelector("#observer-operators .op-thread-head");
+      const head = headBox.getBoundingClientRect();
+      const back = document.querySelector("#observer-operators .op-thread-back").getBoundingClientRect();
+      // The row covers the scroller's top padding too: a point just under the
+      // scroller's own top edge lands in the head, not in an entry.
+      const probe = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
+      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
+    });
+    assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the head covers the top of the scroller, padding included, and keeps 「← 목록」");
     await page.click("#observer-operators .op-thread-back");
     assert.equal(await visible(".op-thread-list"), true);
     assert.equal(await visible(".op-thread-view"), false);
@@ -472,6 +487,34 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.isVisible("#observer-mobile-operator"), true);
     assert.equal(await page.getAttribute("#observer-mobile-operator", "aria-pressed"), "true");
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
+    // The thread's head holds to the top of the page once the conversation
+    // reaches it — on a phone the page is the one scroller (claunch-1ruqi).
+    // The long thread of ops-a first: a short one scrolls away with the section.
+    await tab("ops-a").click();
+    await page.waitForSelector('#observer-operators .op-thread-row[data-thread="th-a"]', { state: "attached" });
+    await page.click("#observer-operators .op-thread-back");
+    await page.click('#observer-operators .op-thread-row[data-thread="th-a"]');
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "이전 대화"
+      && document.querySelector("#observer-operators .op-entry"));
+    const pageHead = await page.evaluate(() => {
+      const view = document.getElementById("observer-view");
+      const head = () => document.querySelector("#observer-operators .op-thread-head").getBoundingClientRect();
+      const bar = document.querySelector("#observer-operators > .op-sessionbar");
+      const box = view.getBoundingClientRect();
+      const natural = view.scrollTop + (head().top - box.top);
+      view.scrollTop = natural + 60;
+      const h = head(), b = bar.getBoundingClientRect();
+      // The session line keeps the top band and the head holds right under it:
+      // neither covers the other (claunch-1ruqi rework — head z 2 over bar z 1
+      // hid the session line whenever a long thread was scrolled).
+      const probeBar = document.elementFromPoint(b.left + 8, b.top + b.height / 2);
+      const back = document.querySelector("#observer-operators .op-thread-back").getBoundingClientRect();
+      return { scrolled: view.scrollTop > 0, barPinned: Math.round(b.top - box.top) === 0,
+        headUnderBar: Math.abs(h.top - b.bottom) <= 1, barOwnsItsRow: !!probeBar && bar.contains(probeBar),
+        back: back.width > 0 && back.top >= h.top - 1 && back.bottom <= h.bottom + 1 };
+    });
+    assert.deepEqual(pageHead, { scrolled: true, barPinned: true, headUnderBar: true, barOwnsItsRow: true, back: true }, "the head holds under the pinned session line on the stepped page, both rows on screen");
+    await page.evaluate(() => { document.getElementById("observer-view").scrollTop = 0; });
     // On the phone the list and the conversation take turns as well.
     await page.click("#observer-operators .op-thread-back");
     assert.equal(await page.locator("#observer-operators .op-thread-list").isVisible(), true);
