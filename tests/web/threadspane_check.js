@@ -69,6 +69,15 @@ function makeDoc() {
       get lastChild() { return n.children[n.children.length - 1] || null; },
       append(...kids) { for (const k of kids) { k.parent = n; n.children.push(k); } },
       replaceChildren(...kids) { n.children = []; n.append(...kids); },
+      get childNodes() { return n.children; },
+      removeChild(k) { n.children.splice(n.children.indexOf(k), 1); k.parent = null; return k; },
+      insertBefore(k, ref) {
+        if (k.parent) k.parent.removeChild(k);
+        const at = ref ? n.children.indexOf(ref) : -1;
+        k.parent = n;
+        n.children.splice(at < 0 ? n.children.length : at, 0, k);
+        return k;
+      },
       attrs: {}, rect: {left: 0, width: 0},
       style: {props: {}, setProperty(k, v) { n.style.props[k] = v; }, removeProperty(k) { delete n.style.props[k]; }},
       getBoundingClientRect() { return n.rect; },
@@ -375,10 +384,22 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   rbox = host.querySelector(".th-rename-input");
   rbox.value = "Log format v2";
   rbox.fire("input");
+  const listBefore = host.querySelector(".th-messages");
+  const bubblesBefore = host.querySelectorAll(".th-msg");
+  const renderedBefore = rendered.length;
   messages["th-1"].push({seq: 3, author: "agent", body: "more", at: "2026-10-13T00:00:02+00:00"});
   threads[0].last_seq = 3;
   timers.filter(Boolean).forEach((fn) => fn());
   await settle();
+  // a new message is appended to the list on screen (claunch-a69sl)
+  // identity by ===: a failed assert.equal would print the whole node graph
+  assert.ok(host.querySelector(".th-messages") === listBefore, "the message list stays in the page");
+  const bubblesAfter = host.querySelectorAll(".th-msg");
+  assert.equal(bubblesAfter.length, bubblesBefore.length + 1);
+  assert.ok(bubblesBefore.every((b, i) => bubblesAfter[i] === b), "the drawn bubbles are kept, not rebuilt");
+  assert.deepEqual(rendered.slice(renderedBefore), ["more"], "only the new message goes through the markdown renderer");
+  assert.deepEqual(host.querySelector(".th-main").children.map((c) => c.className),
+                   ["th-convo-head", "th-guests", "th-messages", "th-compose"], "head, guest row, list, composer in order");
   rbox = host.querySelector(".th-rename-input");
   assert.equal(rbox.value, "Log format v2", "a poll keeps what is typed");
   assert.equal(document.activeElement, rbox, "and the focus");
