@@ -2742,6 +2742,7 @@ def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
         store_mod.SESSION_ENV: (str(r.state.get("driver") or "").strip()
                                 or scope_driver(r.state.get("scope"))),
     })
+    env.update(_input_env(r))
     params: Dict[str, Any] = dict(r.state.get("params") or {})
     params.update((r.env(iid) if iid in r.inst else {}).get("params") or {})
     for name, value in params.items():
@@ -4690,12 +4691,30 @@ def _takes_env(fn: Callable[..., Any]) -> bool:
     return "env" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
 
 
+def _input_env(r: Run) -> Dict[str, str]:
+    """The run's start inputs (``data.inputs``) as ``CFLOW_IN_<NAME>``.
+
+    A command reads a run value from the environment only, and a start input
+    is what a spawner fills (the daemon's ``cflow_inputs``), so without this
+    an argv such as sweep-job-v2's ``$CFLOW_IN_TOOL`` expanded to nothing
+    (claunch-b847d). A param of the same name overrides it, and an input too
+    large for the environment is left out like a top-level ``data`` value."""
+    env: Dict[str, str] = {}
+    for name, value in ((r.state.get("data") or {}).get("inputs") or {}).items():
+        text = _env_text(value)
+        if len(text) <= 64 * 1024:
+            env[_env_name(name)] = text
+    return env
+
+
 def _value_env(r: Run, iid: Optional[str]) -> Dict[str, str]:
-    """``CFLOW2_*``, ``CFLOW_IN_*`` and ``CFLOW_DATA_*`` (top-level data,
-    scalars as text, the rest as JSON) for a probe."""
+    """``CFLOW2_*``, ``CFLOW_IN_*`` (the start inputs, overlaid by the params)
+    and ``CFLOW_DATA_*`` (top-level data, scalars as text, the rest as JSON)
+    for a probe."""
     env = {"CFLOW2_RUN": str(r.state.get("run_id") or ""),
            "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
            store_mod.SESSION_ENV: _probe_session(r)}
+    env.update(_input_env(r))
     params: Dict[str, Any] = dict(r.state.get("params") or {})
     if iid and iid in r.inst:
         params.update(r.env(iid).get("params") or {})

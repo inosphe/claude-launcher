@@ -163,8 +163,8 @@ nodes:
   이 형태도 거절하므로 정의 파일에서는 `$HOME`으로 쓴다).
 - 실행 시점: 작업이 `ok`로 보고될 때. 다른 결과(`fail` 등)는 verify를 거치지 않는다.
 - 실행 위치와 환경: 런의 cwd. 프로세스 환경에 `CFLOW2_RUN`, `CFLOW2_NODE`,
-  `CFLOW2_INSTANCE`, `CFLOW2_SCOPE`, param마다 `CFLOW_IN_<NAME>`(런의 params 위에
-  작업이 속한 프로시저의 params를 덮은 값), 최상위 `data`마다
+  `CFLOW2_INSTANCE`, `CFLOW2_SCOPE`, param마다 `CFLOW_IN_<NAME>`(시작 입력 위에 런의 params,
+  그 위에 작업이 속한 프로시저의 params를 덮은 값), 최상위 `data`마다
   `CFLOW_DATA_<NAME>`을 더한다. 스칼라는 텍스트로, 스칼라가 아닌 값(`bind`로
   묶인 결과 등)은 JSON 텍스트로 싣는다. JSON이 64KB를 넘는 값은 빠진다(wait·
   모니터의 probe와 같은 규칙, `runtime.verify_env`). 예: improv-leader-v2의
@@ -632,7 +632,7 @@ v1 `checklist:`의 대응:
 
 엔진이 실행하는 명령(작업의 `verify`, wait의 `probe`, 모니터의 `probe`)은
 템플릿이 아니다. 이 문자열 안의 `${...}`는 컴파일 오류다. 명령이 런의 값을 읽어야
-하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
+하면 환경 변수로 읽는다: param과 시작 입력은 `CFLOW_IN_<NAME>`(같은 이름이면 param이 우선, claunch-b847d), 최상위 `data`의 스칼라 값은
 `CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). 작업의 `verify`와 wait·
 모니터의 `probe`는 스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하,
 `runtime.verify_env`·`runtime._value_env`). verify가 스칼라만 받던 때는 `bind`로 묶인
