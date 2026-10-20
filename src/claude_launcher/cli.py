@@ -19,6 +19,7 @@ from . import (
     __version__,
     bootstrap,
     borrowing,
+    cli_basetemp,
     cli_beads,
     cli_commits,
     cli_cflow,
@@ -1848,6 +1849,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mcp.set_defaults(func=_cmd_mcp)
 
     cli_sessions.register(sub)
+    cli_basetemp.register(sub)
     cli_mesh.register(sub)
     cli_cflow.register(sub)
     cli_cflow2.register(sub)

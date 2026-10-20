@@ -35,6 +35,19 @@ A daemon shutdown is not an ending: the manager does not run exit hooks for
 it, and :meth:`reap_ended` skips every session that is still running or held,
 so a restart deletes nothing a live session is using.
 
+Two kinds of tree outlive every exit hook, and :meth:`reap_ended` sweeps them
+at boot: those of sessions whose records ended while no daemon was up (they
+reach :meth:`BasetempReaper.reap` through the registry) and those whose session
+is in no registry at all -- an instance that was cleared, a record that never
+came back from a restart. The second kind is attributed by the name alone:
+only a directory shaped like a session's basetemp, claimed by no registry and
+without a write for :data:`ORPHAN_AGE` days, is removed. ``claunch basetemp
+prune`` is the same selection on demand, adding ended sessions and defaulting
+to a dry run.
+
+Held sessions are kept by both: ``held_at`` reads as running, in this
+instance's registry and in every other one (claunch-2hnyf).
+
 Names are only unique within one daemon instance -- each named instance
 (``<base home>/daemons/<name>``) hands out its own ``sN`` -- while the
 Windows root is one ``C:/t`` for the whole machine. So before anything goes,
@@ -92,6 +105,14 @@ HISTORY_NAME = "basetemp-history.jsonl"
 HISTORY_RETENTION_DAYS = 30
 HISTORY_RETENTION = HISTORY_RETENTION_DAYS * 86400.0
 
+#: How old a basetemp whose owner no registry lists must be before the boot
+#: sweep (and ``claunch basetemp prune`` with its default) removes it. The
+#: gate tools write into a tree for as long as a run lasts, so a name with no
+#: live owner and no write for days is not a run anything is using. It is the
+#: age :func:`newest_mtime` measures, one level deep.
+ORPHAN_AGE_DAYS = 3
+ORPHAN_AGE = ORPHAN_AGE_DAYS * 86400.0
+
 #: The summary ``tools/changed_tests.py`` leaves in a basetemp it ran in.
 RUN_SUMMARY = "claunch-run.json"
 
@@ -127,6 +148,10 @@ _SWEEP = re.compile(r"(?:-.+)?w\d*")
 _STAMPED_SWEEP = re.compile(r"-.+t\d{10}")
 #: ``popen-gw<N>``: the directory xdist puts under a basetemp for each worker.
 _XDIST_WORKER = "popen-gw"
+_TRAILING_STAMP = re.compile(r"c\d{10}$")
+#: A session name, in the shapes the loop hands out (``s995``) and the
+#: suffixes a reused session adds (``s995-rev2``).
+SESSION_NAME = re.compile(r"s\d+(?:-[A-Za-z0-9._-]+)?")
 
 
 def default_root() -> Path:
@@ -258,6 +283,63 @@ def owner(name: str, sessions: Iterable[str]) -> Optional[str]:
     return None
 
 
+def looks_like_session(name: str) -> bool:
+    """Whether ``name`` has the shape of a session name.
+
+    Only such names are attributed to a session no registry lists: a
+    directory called ``logs-2026`` also matches a hand-pinned basetemp shape
+    (``logs``), and sweeping that from a root the tests share would be
+    guessing about somebody else's data.
+    """
+    return bool(SESSION_NAME.fullmatch(name))
+
+
+def derived_owner(name: str) -> Optional[str]:
+    """The longest session-shaped prefix a basetemp directory name carries.
+
+    The three shapes nest: ``s995-rev2w`` is ``s995-rev2``'s sweep tree, and
+    ``s995`` matches it too as a hand-pinned one. The longest prefix is the
+    owner, so a tree shaped like ``s995-rev2``'s is not attributed to
+    ``s995`` -- the same rule :func:`owner` applies over registry names.
+    """
+    candidates = []
+    if len(name) > 1 and name.endswith("w"):
+        candidates.append(name[:-1])
+    stamp = _TRAILING_STAMP.search(name)
+    if stamp and stamp.start() > 0:
+        candidates.append(name[:stamp.start()])
+    dash = name.find("-")
+    if dash > 0:
+        candidates.append(name[:dash])
+    found = [c for c in candidates if matches(name, c)]
+    return max(found, key=len) if found else None
+
+
+def newest_mtime(path: Path) -> Optional[float]:
+    """The newest mtime one level into ``path``, or ``None`` when unreadable.
+
+    One level answers the age question for these trees: the tools create the
+    ``popen-gw*`` trees while a run is going and pytest creates test
+    directories under them, and creating an entry moves its parent's mtime.
+    Walking all 25,000 files of every tree just to decide it is old would
+    defeat the sweep's purpose.
+    """
+    try:
+        newest = path.stat().st_mtime
+    except OSError:
+        return None
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                try:
+                    newest = max(newest, entry.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return newest
+
+
 def live_name(entry: dict) -> Optional[str]:
     """The name of a registry record that is running or held, else ``None``.
 
@@ -337,6 +419,26 @@ def foreign_live() -> set:
             continue
         names.update(n for n in map(_live, registry(directory)) if n)
     return names
+
+
+def registry_snapshot(directory: Optional[Path] = None) -> List[tuple]:
+    """``(name, ended)`` for this daemon instance's registry, read-only.
+
+    The same judgement :func:`registry_view` makes from live ``Session``
+    objects, for callers that have no manager: ``was_running`` is what
+    :meth:`SessionManager.persist` writes for a session whose program is up,
+    and a held session (``held_at``) reads as running so its basetemps stay.
+    """
+    base = Path(directory) if directory is not None else paths.daemon_dir()
+    out: List[tuple] = []
+    for entry in registry(base):
+        sdef = entry.get("def") if isinstance(entry.get("def"), dict) else {}
+        name = sdef.get("name")
+        if not name:
+            continue
+        live = bool(entry.get("was_running") or entry.get("held_at"))
+        out.append((str(name), not live))
+    return out
 
 
 def describe(path: Path) -> dict:
@@ -559,14 +661,18 @@ class BasetempReaper:
         self._submit([session.sdef.name])
 
     def reap_ended(self) -> None:
-        """At boot: reap every session the registry holds as ended.
+        """At boot: reap ended sessions and old session-shaped orphans.
 
         The pass starts ``boot_delay`` seconds after the call (``BOOT_DELAY``
         in the daemon) and reads the registry then, so a session that ended
-        in between is part of it.
+        in between is part of it. The ended and orphan selections share one
+        root scan.
         """
         def run() -> None:
-            self._submit([name for name, ended in self._sessions() if ended])
+            self._submit(
+                [name for name, ended in self._sessions() if ended],
+                orphans=True,
+            )
 
         if self._boot_delay > 0:
             timer = threading.Timer(self._boot_delay, run)
@@ -685,13 +791,163 @@ class BasetempReaper:
             rows.append(row)
         return rows
 
-    def _submit(self, names: List[str]) -> None:
-        if not names:
+    def _submit(self, names: List[str], *, orphans: bool = False) -> None:
+        if not names and not orphans:
             return
         if not self._background:
-            self.reap(names)
+            self._boot(names, orphans)
             return
-        pools.submit_background(self.reap, names)
+        pools.submit_background(self._boot, names, orphans)
+
+    def _boot(self, names: List[str], orphans: bool) -> None:
+        if orphans:
+            self.reap_boot(names)
+        else:
+            self.reap(names)
+
+    def reap_boot(self, names: List[str]) -> List[dict]:
+        """Delete ended sessions and old session-shaped orphans in one scan."""
+        rows: List[dict] = []
+        ended_rows: List[dict] = []
+        wanted = set(names)
+        with self._lock:
+            known = {name for name, _ended in self._sessions()} | wanted
+            elsewhere = self._foreign()
+            cutoff = time.time() - ORPHAN_AGE
+            try:
+                entries = sorted(self.root.iterdir())
+            except OSError:
+                return rows
+
+            for name in wanted & elsewhere:
+                log.info(
+                    "basetemp: %r is live in another daemon instance; kept",
+                    name,
+                )
+
+            for path in entries:
+                try:
+                    if not path.is_dir():
+                        continue
+                except OSError:
+                    continue
+
+                who = owner(path.name, known)
+                if who in wanted:
+                    if who in elsewhere:
+                        continue
+                    row = self._reap_one(who, path)
+                    ended_rows.append(row)
+                    rows.append(row)
+                elif who is None:
+                    if owner(path.name, elsewhere) is not None:
+                        continue
+                    session = derived_owner(path.name)
+                    if not session or not looks_like_session(session):
+                        continue
+                    newest = newest_mtime(path)
+                    if newest is None or newest > cutoff:
+                        continue
+                    rows.append(
+                        self._reap_one(session, path, record_before=True)
+                    )
+                else:
+                    continue
+
+                if self._pause > 0:
+                    time.sleep(self._pause)
+
+            if ended_rows:
+                self._append(ended_rows)
+        return rows
+
+    # ---- what no live owner claims ---------------------------------------- #
+
+    def candidates(
+        self, *, older_than: float = ORPHAN_AGE, orphans_only: bool = False
+    ) -> List[tuple]:
+        """``(session, path)`` for the basetemps no live owner claims.
+
+        A directory belongs to the longest registry name that matches it
+        (:func:`owner`). The owners that keep one are this instance's running
+        and held sessions -- a held session's trees stay on purpose (user
+        decision, claunch-2hnyf) -- and every name another instance holds
+        live. Everything else is a candidate: an ended session's tree, or,
+        when ``orphans_only`` is false, a tree whose owner is in no registry
+        at all and whose name has a session's shape (``s42c1011...``).
+
+        ``older_than`` is in seconds and is measured by :func:`newest_mtime`,
+        so a run writing into its tree right now keeps it out of the list.
+        """
+        sessions = list(self._sessions())
+        live = {name for name, ended in sessions if not ended}
+        known = [name for name, _ended in sessions]
+        foreign = self._foreign()
+        cutoff = time.time() - older_than
+        out: List[tuple] = []
+        try:
+            entries = sorted(self.root.iterdir())
+        except OSError:
+            return out
+        for path in entries:
+            try:
+                if not path.is_dir():
+                    continue
+            except OSError:
+                continue
+            name = path.name
+            if owner(name, foreign) is not None:
+                continue
+            own = owner(name, known)
+            if own is not None:
+                if own in live or orphans_only:
+                    continue
+                session = own
+            else:
+                session = derived_owner(name)
+                if not session or not looks_like_session(session):
+                    continue
+            newest = newest_mtime(path)
+            if newest is None or newest > cutoff:
+                continue
+            out.append((session, path))
+        return out
+
+    def prune(
+        self, *, older_than: float = ORPHAN_AGE, apply: bool = False
+    ) -> List[dict]:
+        """Rows for the removable basetemps; deletes them only with ``apply``.
+
+        The rows are the reaper's history lines. With ``apply`` each one is
+        appended *before* its tree is touched, so a run that dies in the
+        middle of a big ``rmtree`` has still left the record of what it was
+        removing; a tree that could not be removed gets a second row
+        (``outcome: locked``) naming what stayed behind.
+        """
+        rows: List[dict] = []
+        with self._lock:
+            for session, path in self.candidates(older_than=older_than):
+                if not apply:
+                    row = self._describe_row(session, path)
+                    row["outcome"] = "dry-run"
+                    rows.append(row)
+                    continue
+                rows.append(self._reap_one(session, path, record_before=True))
+        return rows
+
+    def reap_orphans(self, *, older_than: float = ORPHAN_AGE) -> List[dict]:
+        """At boot: remove old basetemps no registry lists at all.
+
+        Ended sessions reach :meth:`reap` through their registry records;
+        this takes the ones with no record left to read.
+        """
+        rows: List[dict] = []
+        with self._lock:
+            for session, path in self.candidates(
+                older_than=older_than, orphans_only=True
+            ):
+                rows.append(self._reap_one(session, path, record_before=True))
+        return rows
 
     # ---- the work --------------------------------------------------------- #
 
@@ -714,9 +970,25 @@ class BasetempReaper:
                 self._append(rows)
         return rows
 
-    def _reap_one(self, session: Optional[str], path: Path) -> dict:
+    def _describe_row(self, session: Optional[str], path: Path) -> dict:
         row = {"session": session, "path": path.as_posix(), **describe(path)}
         row["reaped_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return row
+
+    def _reap_one(
+        self,
+        session: Optional[str],
+        path: Path,
+        *,
+        record_before: bool = False,
+    ) -> dict:
+        row = self._describe_row(session, path)
+        if record_before:
+            # The record goes down before the tree is touched: a process that
+            # dies mid-rmtree still names what it was removing. Deletion is
+            # what the row predicts; a failure below corrects it with a
+            # second row naming what stayed.
+            self._append([dict(row, outcome="removed")])
         failed: List[str] = []
         handler = _retry_writable(failed)
         _rmtree(path, handler)
@@ -734,6 +1006,8 @@ class BasetempReaper:
             row["outcome"] = "locked"
             row["locked"] = [Path(p).as_posix() for p in failed[:5]]
             log.warning("basetemp %s: %d entries could not be removed", path, len(failed))
+            if record_before:
+                self._append([dict(row)])
         else:
             row["outcome"] = "removed"
         return row
