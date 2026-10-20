@@ -556,6 +556,14 @@ html[data-theme="light"] #term-tps-overlay {
   content-visibility: auto;
   contain-intrinsic-size: auto 64px;
 }
+/* While the rail is being revealed to a row, every row is laid out for real
+   (claunch-ayaig). A scroll to a row below the fold is otherwise aimed with
+   the fallback height above -- 64px against rows that measure 136px -- and
+   lands thousands of pixels short, because the smooth scroll commits to the
+   position it measured before the rows it passes have rendered. The class is
+   put on by revealSessionCard (app.js, layRailOut) for one turn; the poll's
+   redraw never adds it, so the skip the rule above bought is kept. */
+#session-list.rail-laid-out li[data-name] { content-visibility: visible; }
 #session-list li:hover { background: #22262d; }
 #session-list li.active { background: #2b313b; }
 /* Where the header's `⇱ card` just landed. The scroll alone puts the row

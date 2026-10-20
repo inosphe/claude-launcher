@@ -21777,6 +21777,15 @@ const GOTO_FLASH_MS = 1600;
    state above, because the grid's first draw at load reads it. */
 let gotoFlashTimer = null;
 
+/* How long the rail stays laid out after a reveal (layRailOut). The scroll
+   below is smooth and measures its target when it starts, so what this has to
+   outlast is that first measurement, not the animation: rows keep the sizes
+   they were just rendered at, so dropping the class mid-scroll moves
+   nothing. Short because a laid-out rail makes the next poll's redraw pay
+   what the skip exists to save. */
+const RAIL_LAID_OUT_MS = 400;
+let railLaidOutTimer = null;
+
 /* Paint the mark onto the rows and grid cells that exist now. Idempotent, and
    safe on a rail that has since lost the row (the session exited and was
    cleared). Both views are painted: the list is built on every poll even
@@ -21837,6 +21846,33 @@ function revealSessionGridCell(name) {
   return find();
 }
 
+/* Lay the rail's rows out for real for the rest of this turn, so that a scroll
+   started now measures rows and not estimates (claunch-ayaig).
+
+   A row scrolled out of the rail is not laid out -- it answers with the
+   contain-intrinsic-size fallback (style.css, claunch-oo8au.1) until it
+   renders -- so the rail's total height and every row's position under the
+   fold are guesses. `scrollIntoView` aims with those guesses, a smooth scroll
+   is committed once to the position it computed, and the rows it passes
+   render on the way without moving the target it is heading for. Measured on
+   the shipped page (200 sessions, 136px rows, 64px fallback): the press put
+   the row 5,928px below the rail's top, ten rail-heights out of view, and a
+   second press was still 2,142px off. With the rows laid out the same press
+   landed exactly.
+
+   The class goes back off afterwards (RAIL_LAID_OUT_MS): the skip is worth
+   keeping for the poll's redraw, and the rows keep the sizes they were just
+   rendered at, so the rail does not move when the class comes off. */
+function layRailOut() {
+  const list = $("session-list");
+  if (!list || !list.classList) return null;
+  list.classList.add("rail-laid-out");
+  // Read a size back: the class alone only schedules style, and the scroll
+  // below has to measure the laid-out rail, not the skipped one.
+  void list.offsetHeight;
+  return list;
+}
+
 /* Scroll the rail to `name`'s card in the view on screen -- a row in the
    list, a cell in the grid -- and mark it. Answers whether there was a card
    at all: the rail is a poll behind the terminal, so a session attached a
@@ -21846,6 +21882,16 @@ function revealSessionCard(name) {
   const card = sessionView === "grid"
     ? revealSessionGridCell(name) : revealSessionListRow(name);
   if (!card) return false;
+  // The list view's rows are the ones that skip their layout; a grid cell is
+  // always laid out.
+  const laidOut = sessionView === "grid" ? null : layRailOut();
+  if (laidOut) {
+    if (railLaidOutTimer) clearTimeout(railLaidOutTimer);
+    railLaidOutTimer = setTimeout(() => {
+      railLaidOutTimer = null;
+      laidOut.classList.remove("rail-laid-out");
+    }, RAIL_LAID_OUT_MS);
+  }
   // Centred, not merely "into view": a row brought to the very edge of the
   // rail is on screen and still reads as not found.
   if (card.scrollIntoView) card.scrollIntoView({ block: "center", behavior: "smooth" });
