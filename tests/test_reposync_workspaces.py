@@ -60,7 +60,14 @@ def world(home, tmp_path):
     _git(seed, "config", "commit.gpgsign", "false")
     _commit(seed, "base.txt")
     remote = tmp_path / "shared.git"
-    subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(remote)], check=True)
+    cloned = subprocess.run(
+        ["git", "clone", "-q", "--bare", str(seed), str(remote)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    assert cloned.returncode == 0, (
+        f"git clone --bare {seed} {remote}: exit {cloned.returncode}\n"
+        f"stdout: {cloned.stdout}\nstderr: {cloned.stderr}"
+    )
     a = _clone(remote, tmp_path / "a", "origin")
     b = _clone(remote, tmp_path / "b", "origin")
     workspaces.add(str(a), "proj")
