@@ -325,6 +325,25 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         res["guests_delivered"] = {g["session"]: deliver(g["session"], text, images)
                                    for g in res["thread"].get("guests") or []}
 
+    def owner_message(tid: str, text: str) -> dict:
+        """Post a user message into one thread and type it into its owner and
+        guests: the text-only half of :func:`h_post`, for callers inside the
+        daemon that already hold a thread id (mega threads, claunch-v5nhp).
+        Exposed as ``app["threads_post_user"]``."""
+        res = threads.post(thread_store.USER, tid, text)
+        t = res["thread"]
+        link([t], t["session"])
+        mentions = mentions_in(t, res["message"])
+        tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
+                                                mentions=mentions))
+        tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]))
+        return res
+
+    # Handed to daemon/megathread_api.py: a mega thread delivers by posting a
+    # user message into one thread, and that path (store row, owner and guest
+    # typing, QA links) belongs here (claunch-v5nhp).
+    app["threads_post_user"] = owner_message
+
     def known(name: str) -> bool:
         try:
             manager.get(name)

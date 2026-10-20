@@ -2646,6 +2646,10 @@ _LIVE_KEYS = (
     "cflow_events", "prompter_url",
     "qa_nudge", "qa_nudge_min_confidence", "qa_nudge_cooldown",
     "qa_nudge_max_chars", "jev_model", "jev_base_url", "jev_api_key_env",
+    # read by the mega-thread router on every routing (claunch-v5nhp)
+    "jev_model_megathread", "jev_model_qa_nudge",
+    "megathread_threshold_ratio", "megathread_jev_budget_tokens",
+    "megathread_max_chars", "megathread_concurrency",
     # read at each session spawn
     "wsl_hide_reg_exe",
     # read by the auto-archive clock on every tick

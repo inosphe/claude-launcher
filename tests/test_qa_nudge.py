@@ -120,7 +120,7 @@ def on(home, monkeypatch):
     def page(name, sdef, *, before=None, limit=40):
         return {"records": state["records"], "source": f"/t/{name}.jsonl"}
 
-    async def system_one(cfg, st, questions, *, key=None):
+    async def system_one(cfg, st, questions, *, key=None, model=None):
         state["calls"].append((st, questions, key))
         choice, conf = state["answer"]
         return {"model": "jev-1.13.0", "usage": {"input_tokens": 300, "output_tokens": 20},
@@ -376,7 +376,7 @@ def test_no_nudge_into_a_session_that_moved_on(on, monkeypatch):
     clock = _clock(s)
     _turn(clock, s)
 
-    async def busy_meanwhile(cfg, st, questions, *, key=None):
+    async def busy_meanwhile(cfg, st, questions, *, key=None, model=None):
         s.status_value = "busy"
         return {"answers": {"action": {"choice": "use_qa", "confidence": 0.9}}}
 
@@ -387,7 +387,7 @@ def test_no_nudge_into_a_session_that_moved_on(on, monkeypatch):
 
 
 def test_jev_error_is_journaled_not_raised(on, monkeypatch):
-    async def boom(cfg, st, questions, *, key=None):
+    async def boom(cfg, st, questions, *, key=None, model=None):
         raise jev.JevError("Jev HTTP 422")
     monkeypatch.setattr(jev, "system_one", boom)
     s = _FakeSession("s1")

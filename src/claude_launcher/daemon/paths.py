@@ -238,6 +238,12 @@ def threads_db() -> Path:
     return daemon_dir() / "threads.sqlite3"
 
 
+def megathread_db() -> Path:
+    """Clusters of session threads a user writes into once, and the routing
+    log behind them (megathread/store.py, claunch-v5nhp)."""
+    return daemon_dir() / "megathread.sqlite3"
+
+
 def notice_sync_json() -> Path:
     """What the dashboard's browsers did with each notice, shared between
     them (daemon/notice_sync.py, claunch-mfzlv)."""
