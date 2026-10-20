@@ -280,6 +280,24 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => /operator ops-a:/.test(document.querySelector("#observer-operators .op-composer-status")?.textContent || ""));
     assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "dock에서 묻습니다", thread: "th-a" });
     assert.equal(await page.inputValue("#observer-operators .op-composer textarea"), "");
+    // Ctrl+J breaks the line at the caret and does not send (claunch-aos8w),
+    // the chord the page's own composer takes; Enter still sends.
+    await page.fill("#observer-operators .op-composer textarea", "한줄");
+    await page.evaluate(() => {
+      const t = document.querySelector("#observer-operators .op-composer textarea");
+      t.focus();
+      t.selectionStart = t.selectionEnd = 1;
+    });
+    const postsBefore = sent.filter(r => r.url.endsWith("/api/operators/op1/message")).length;
+    await page.press("#observer-operators .op-composer textarea", "Control+J");
+    assert.equal(await page.inputValue("#observer-operators .op-composer textarea"), "한\n줄", "Ctrl+J breaks the line at the caret");
+    assert.equal(sent.filter(r => r.url.endsWith("/api/operators/op1/message")).length, postsBefore, "Ctrl+J does not send");
+    await page.press("#observer-operators .op-composer textarea", "Enter");
+    // The field clears only after sendTo resolves, so an empty field means
+    // the POST the stub logged is this message.
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-composer textarea").value === "");
+    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "한\n줄", thread: "th-a" });
+    assert.equal(await page.inputValue("#observer-operators .op-composer textarea"), "");
 
     // Threads: the dock's column is narrow, so the selected thread shows and
     // the list waits behind 「← 목록」.
@@ -522,6 +540,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     if (process.env.CLAUNCH_SCREENSHOT_PHONE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_PHONE, fullPage: true });
 
     assert.deepEqual(errors, []);
-    console.log("PASS: threads list and conversation taking turns in the dock and on a phone, a row press, a message into the thread on screen, a new thread with a title and a staged image, operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, session line outside the scroller with the session's state and link, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
+    console.log("PASS: threads list and conversation taking turns in the dock and on a phone, a row press, a message into the thread on screen, a new thread with a title and a staged image, operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, session line outside the scroller with the session's state and link, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, Ctrl+J newline and Enter send in the dock composer, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });
