@@ -83,7 +83,8 @@ Rules:
 
 INSTRUCTIONS = """\
 Simulations (sim_* tools): world models the daemon walks for gaps; call
-sim_guide before writing one. Full guidance: prompt pack 'mcp-sim'.
+sim_guide before writing one. Full guidance: prompt pack 'mcp-sim' (load it
+on demand, see Prompt packs).
 """
 
 TOOLS = [

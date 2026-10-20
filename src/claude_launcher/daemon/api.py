@@ -12792,11 +12792,25 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
     by its content id (:func:`rebrief.recall`), for an agent that a reminder
     told the id of and that cannot find the text in its own context. It is
     deliberately not a POST — a pull is the agent's own turn, and nothing
-    about it belongs in someone else's terminal.
+    about it belongs in someone else's terminal. ``GET ?pack=`` is the same
+    kind of pull for an mcp- prompt pack the session was not given at
+    creation (:func:`rebrief.load_pack`).
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
     ident = (request.query.get("id") or "").strip()
+    pack = (request.query.get("pack") or "").strip()
+    if request.method == "GET" and pack:
+        # An mcp- prompt pack, loaded on demand whether or not it was ticked
+        # at creation (rebrief.load_pack, claunch-6esft).
+        return json_response(
+            {
+                "session": name,
+                **await asyncio.to_thread(
+                    rebrief.load_pack, name, pack, manager=manager
+                ),
+            }
+        )
     if request.method == "GET" and ident:
         manager.get(name)  # unknown session refused here, as compose does
         return json_response(

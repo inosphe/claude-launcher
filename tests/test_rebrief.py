@@ -646,3 +646,195 @@ def test_the_hook_survives_a_missing_or_foreign_stdin(home, monkeypatch, capsys)
         rc = cli_sessions._cmd_rebrief(argparse.Namespace(session=None, id=""))
         assert rc == 0
     assert calls == []  # nothing here was a SessionStart report
+
+
+# --------------------------------------------------------------------------- #
+# mcp- prompt packs, loaded on demand (claunch-6esft)
+# --------------------------------------------------------------------------- #
+def test_an_unticked_mcp_pack_loads_with_the_id_an_opening_would_carry(
+    home, tmp_path
+):
+    """A session created without mcp-qa loads it when it first uses qa_*,
+    under the same text id a ticked opening would have printed beside it."""
+    from claude_launcher import prompt_packs
+
+    _register_py_harness()
+    mgr = _manager()
+
+    async def scenario():
+        mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+        return rebrief.load_pack("w1", "mcp-qa", manager=mgr)
+
+    found = asyncio.run(scenario())
+    body = prompt_packs.shipped("mcp-qa").body
+    assert found["status"] == "loaded"
+    assert found["pack"] == "mcp-qa"
+    assert found["given"] is False
+    assert found["source"] == prompt_packs.PACKAGE
+    assert found["id"] == prompt_packs.text_id(body)
+    assert "loaded on demand through rebrief" in found["text"]
+    assert f"text id: {found['id']}" in found["text"]
+    assert body in found["text"]
+
+
+def test_a_ticked_mcp_pack_loads_too_and_says_it_was_given(home, tmp_path):
+    from claude_launcher import prompt_packs
+
+    _register_py_harness()
+    mgr = _manager()
+    body = prompt_packs.shipped("mcp-threads").body
+
+    async def scenario():
+        mgr.stage(SessionDef(
+            name="w1", harness="py", cwd=str(tmp_path),
+            prompt_packs=[{"id": "mcp-threads", "text": body, "source": "package"}],
+        ))
+        return rebrief.load_pack("w1", "mcp-threads", manager=mgr)
+
+    found = asyncio.run(scenario())
+    assert found["status"] == "loaded" and found["given"] is True
+
+
+def test_the_workspace_copy_of_an_mcp_pack_is_the_one_loaded(home, tmp_path):
+    from claude_launcher import prompt_packs, workspaces
+
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompt_packs.install(ws, "mcp-sim")
+    path = prompt_packs.install_dir(ws) / "mcp-sim.md"
+    path.write_text(path.read_text(encoding="utf-8") + "\nlocal rule\n", encoding="utf-8")
+    _register_py_harness()
+    mgr = _manager()
+
+    async def scenario():
+        mgr.stage(SessionDef(name="w1", harness="py", cwd=str(ws)))
+        return rebrief.load_pack("w1", "mcp-sim", manager=mgr)
+
+    found = asyncio.run(scenario())
+    assert found["source"] == prompt_packs.WORKSPACE
+    assert "local rule" in found["text"]
+    assert "file: .claunch/prompts/mcp-sim.md" in found["text"]
+
+
+def test_only_mcp_packs_load_through_rebrief(home, tmp_path):
+    """Other packs are an opening's (the agent has them) or a person's to
+    send (retrospective); rebrief names what does load instead."""
+    _register_py_harness()
+    mgr = _manager()
+
+    async def scenario():
+        mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+        return [
+            rebrief.load_pack("w1", pid, manager=mgr)
+            for pid in ("beads", "retrospective", "mcp-nope", "../x")
+        ]
+
+    for found in asyncio.run(scenario()):
+        assert found["status"] == "unknown_pack"
+        assert "text" not in found
+        assert {"mcp-qa", "mcp-sim", "mcp-threads"} <= set(found["loadable"])
+
+
+def test_a_loaded_pack_is_recalled_by_its_id_or_its_name(home, tmp_path):
+    """After a compaction the agent holds the id printed beside the pack (or
+    just its name): either one brings the text back through 'id'."""
+    from claude_launcher import prompt_packs
+
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    ident = prompt_packs.text_id(prompt_packs.shipped("mcp-qa").body)
+
+    async def scenario():
+        mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path), task="dig"))
+        return (
+            rebrief.recall("w1", ident, manager=mgr, mesh_mgr=mm),
+            rebrief.recall("w1", "mcp-qa", manager=mgr, mesh_mgr=mm),
+        )
+
+    by_id, by_name = asyncio.run(scenario())
+    for found in (by_id, by_name):
+        assert found["status"] == "loaded"
+        assert found["pack"] == "mcp-qa" and found["id"] == ident
+
+
+def test_the_api_and_the_mcp_tool_load_a_pack(home, tmp_path, monkeypatch):
+    from claude_launcher import mesh_mcp
+
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr, settle=0.05)
+
+    async def scenario():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/sessions", headers=BEARER,
+                json={"name": "root", "profile": "py", "cwd": str(tmp_path),
+                      "prompt_packs": []},
+            )
+            assert resp.status == 201, await resp.text()
+            resp = await client.get(
+                "/api/sessions/root/rebrief?pack=mcp-threads", headers=BEARER
+            )
+            body = await resp.json()
+            assert body["status"] == "loaded" and body["pack"] == "mcp-threads"
+            resp = await client.get(
+                "/api/sessions/root/rebrief?pack=beads", headers=BEARER
+            )
+            assert (await resp.json())["status"] == "unknown_pack"
+            resp = await client.get(
+                "/api/sessions/ghost/rebrief?pack=mcp-qa", headers=BEARER
+            )
+            assert resp.status == 400
+        finally:
+            try:
+                mgr.kill("root", force=True)
+            except Exception:
+                pass
+            await client.close()
+
+    asyncio.run(scenario())
+
+    # The MCP tool sends 'pack' to that door.
+    asked = []
+
+    class FakeClient:
+        def get(self, path):
+            asked.append(path)
+            return {"status": "loaded"}
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    monkeypatch.setattr(mesh_mcp, "_client", lambda: FakeClient())
+    mesh_mcp.call_tool("rebrief", {"pack": "mcp-qa"})
+    assert asked == ["/api/sessions/s9/rebrief?pack=mcp-qa"]
+    tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "rebrief")
+    assert "pack" in tool["inputSchema"]["properties"]
+
+
+def test_the_cli_prints_a_loaded_pack_and_refuses_an_unknown_one(
+    home, monkeypatch, capsys
+):
+    from claude_launcher import cli_sessions
+
+    replies = {
+        "mcp-qa": {"status": "loaded", "text": "# claunch prompt pack: mcp-qa"},
+        "beads": {"status": "unknown_pack", "note": "beads is not", "loadable": ["mcp-qa"]},
+    }
+
+    class FakeClient:
+        def get(self, path):
+            return replies[path.rsplit("=", 1)[1]]
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    monkeypatch.setattr(cli_sessions.daemon_client, "ensure_running", lambda: FakeClient())
+    assert cli_sessions._cmd_rebrief(argparse.Namespace(session=None, pack="mcp-qa")) == 0
+    assert "# claunch prompt pack: mcp-qa" in capsys.readouterr().out
+    assert cli_sessions._cmd_rebrief(argparse.Namespace(session=None, pack="beads")) == 1
+    err = capsys.readouterr().err
+    assert "beads is not" in err and "mcp-qa" in err

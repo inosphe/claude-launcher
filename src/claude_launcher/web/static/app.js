@@ -12529,10 +12529,12 @@ function renderPromptPackRow() {
       onChange: (on) => { newPackTicks.set(p.id, on); renderPromptPackRow(); },
     });
   };
-  const group = (name, chips, more) => {
+  const group = (name, chips, more, hint) => {
     if (!chips.length && !more) return;
     const g = el("div", "pack-group");
-    g.appendChild(el("span", "pack-group-name", name));
+    const label = el("span", "pack-group-name", name);
+    if (hint) label.title = hint;
+    g.appendChild(label);
     const list = el("span", "new-check-list pack-chips");
     for (const c of chips) list.appendChild(c);
     if (more) list.appendChild(more);
@@ -12559,8 +12561,12 @@ function renderPromptPackRow() {
   group("General", general, null);
 
   // MCP: the guidance for claunch's tool families (threads, QA, sims), which
-  // the MCP server instructions only point at (claunch-8do04).
-  group("MCP", every.filter(([p]) => isMcp(p)).map(([p, packaged]) => packChip(p, packaged)), null);
+  // the MCP server instructions only point at (claunch-8do04). Optional at
+  // creation: a running session loads an unticked one through the rebrief
+  // tool when it first uses that family (claunch-6esft).
+  group("MCP", every.filter(([p]) => isMcp(p)).map(([p, packaged]) => packChip(p, packaged)), null,
+    "Optional: a session without one of these loads it on demand through " +
+    "the rebrief MCP tool (pack: <id>) when it first uses that tool family.");
 
   // Roles: the ones in play (required or ticked) are shown; the rest of the
   // role packs fold behind one button so the row stays short. A chip once
