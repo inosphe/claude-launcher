@@ -131,6 +131,9 @@ const OPTIONS = {
           height: rect(box).h,
           issue: rect(row('issue')),
           forcePr: rect(row('force_pr')),
+          forcePrLabel: rect(row('force_pr').querySelector('.cf2-input-label')),
+          relationLabel: rect(row('relation').querySelector('.cf2-input-label')),
+          relationControl: rect(row('relation').querySelector('.cf2-input-control')),
           profileRow: rect(row('reviewer_profile')),
           harnessRow: rect(row('reviewer_harness')),
           profileLabel: rect(row('reviewer_profile').querySelector('.cf2-input-label')),
@@ -174,8 +177,15 @@ const OPTIONS = {
       'a one-line input keeps its caption beside the control');
     assert.ok(wide.profileControl.x > wide.profileLabel.right,
       'the control starts after its caption');
-    assert.ok(Math.abs(wide.checkbox.x - wide.forcePr.x) < 2,
-      'the checkbox aligns with the left edge of its row');
+    // A checkbox keeps the same rule as the combobox rows: caption in the
+    // caption column, box in the control column (claunch-ngfo3). Both rows
+    // measured here sit in the same box column, so their columns must align.
+    assert.ok(Math.abs(wide.forcePrLabel.x - wide.relationLabel.x) < 2,
+      'a checkbox row keeps its caption in the caption column');
+    assert.ok(wide.checkbox.x > wide.forcePrLabel.right,
+      'the checkbox sits to the right of its caption');
+    assert.ok(Math.abs(wide.checkbox.x - wide.relationControl.x) < 2,
+      'the checkbox aligns with the controls of the neighbouring rows');
 
     // ---- help is folded until asked for ---------------------------------
     assert.equal(wide.helpDisplay, 'none', 'help is folded on arrival');
@@ -241,6 +251,8 @@ const OPTIONS = {
         `${width}: the next input starts below the previous one`);
       assert.ok(narrow.profileControl.y >= narrow.profileLabel.bottom - 1,
         `${width}: the control sits below its caption`);
+      assert.ok(narrow.checkbox.y >= narrow.forcePrLabel.bottom - 1,
+        `${width}: the checkbox sits below its caption`);
       assert.ok(Math.abs(narrow.checkbox.x - narrow.forcePr.x) < 2,
         `${width}: the checkbox aligns with the left edge of its row`);
       assert.equal(narrow.helpDisplay, 'none', `${width}: help stays folded`);

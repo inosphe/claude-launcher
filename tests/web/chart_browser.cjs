@@ -10,6 +10,7 @@
      3. the project picker narrows the rows and moves the shared project
         (the address's ?project=);
      4. "archived 포함" fetches the archived records and adds their rows;
+     4b. "killed 제외" drops the killed rows and the state survives a reload;
      5. grouping by workspace draws a heading per group, and picking one
         group leaves only its rows;
      6. every row names a role (its own, else "free-role");
@@ -176,6 +177,31 @@ function assertTicksApart(ticks, where) {
     await page.waitForFunction(() => Array.from(
       document.querySelectorAll("#chart-view .chart-name-text")).some((e) => e.textContent === "delta"));
     assert.equal(archivedAsked, 1);
+
+    // 4b. "killed 제외" folds the killed rows away and remembers the pick.
+    // beta is the fixture's killed session (exited, not held/paused/archived).
+    const killedRow = () => page.$$eval("#chart-view .chart-name-text",
+      (es) => es.map((e) => e.textContent));
+    const killedBoxes = await page.$$("#chart-view .chart-check input");
+    assert.equal(killedBoxes.length, 2, "archived 포함 and killed 제외 sit side by side");
+    await page.check("#chart-view .chart-check:has-text('killed 제외') input");
+    await page.waitForFunction(() => !Array.from(
+      document.querySelectorAll("#chart-view .chart-name-text")).some((e) => e.textContent === "beta"));
+    assert.deepEqual(await killedRow(), ["alpha", "gamma", "delta"]);
+    await page.reload();
+    await page.waitForSelector("#chart-view .chart-main");
+    assert.ok(await page.$eval("#chart-view .chart-check:has-text('killed 제외') input",
+      (b) => b.checked), "killed 제외 is still checked after a reload");
+    await page.waitForFunction(() => !Array.from(
+      document.querySelectorAll("#chart-view .chart-name-text")).some((e) => e.textContent === "beta"));
+    await page.waitForFunction(() => Array.from(
+      document.querySelectorAll("#chart-view .chart-name-text")).some((e) => e.textContent === "delta"));
+    assert.deepEqual(await killedRow(), ["alpha", "gamma", "delta"],
+      "killed 제외 survives a reload");
+    await page.uncheck("#chart-view .chart-check:has-text('killed 제외') input");
+    await page.waitForFunction(() => Array.from(
+      document.querySelectorAll("#chart-view .chart-name-text")).some((e) => e.textContent === "beta"));
+    assert.deepEqual(await killedRow(), ["alpha", "gamma", "delta", "beta"]);
 
     // 5. Group by workspace: headings, then one group's rows.
     await page.click("#chart-view .chart-seg-btn:text-is('Workspace')");

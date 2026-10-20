@@ -77,6 +77,13 @@ assert.deepStrictEqual(names(build({ range: '24h' })), ['a', 'e']);
 assert.deepStrictEqual(names(build({ range: '7d' })), ['a', 'b', 'e']);
 assert.deepStrictEqual(names(build({ range: '7d', archived: true })), ['a', 'd', 'b', 'e']);
 assert.deepStrictEqual(names(build({ range: 'all' })), ['a', 'b', 'c', 'e']);
+// Killed exclusion (claunch-xu9ti): the option drops killed records from the
+// model and zeroes their summary count, like the archived switch beside it.
+assert.deepStrictEqual(names(build({ range: 'all', excludeKilled: true })), ['a', 'c', 'e']);
+const noKilled = build({ range: 'all', excludeKilled: true });
+assert.strictEqual(noKilled.summary.total, 3);
+assert.deepStrictEqual(Object.assign({}, noKilled.summary.counts),
+  { running: 2, hold: 0, paused: 1, killed: 0, archived: 0 });
 assert.strictEqual(build({ range: 'all' }).t0, now - 40 * 24 * H, 'the "all" axis starts at the earliest creation');
 assert.strictEqual(build({ range: '24h' }).t0, now - 24 * H);
 // An unknown range falls back to 7 days.

@@ -163,7 +163,8 @@ globalThis.ChartPage = (() => {
      opts: now (ms), project ("" = all), group ("" | "mesh" | "workspace"),
      groupValue(group, s) -> the group a record is filed under, groupPick
      ("" = every group), range (a RANGES key), archived (include archived
-     records), sort ("created" | "lifetime"), cflowOf(name) -> {state,
+     records), excludeKilled (drop killed records), sort ("created" |
+     "lifetime"), cflowOf(name) -> {state,
      label, version} or null, meshesOf(name) -> the session's mesh
      memberships (for its role).
 
@@ -185,6 +186,7 @@ globalThis.ChartPage = (() => {
       if (opts.project && projectOf(s) !== opts.project) continue;
       const cat = category(s);
       if (cat === "archived" && !opts.archived) continue;
+      if (cat === "killed" && opts.excludeKilled) continue;
       const span = spanOf(s, now);
       if (!span || span.end < from) continue;
       const g = group ? groupValue(group, s) : "";
@@ -285,7 +287,7 @@ globalThis.ChartPage = (() => {
   let archivedError = "";
   const state = (() => {
     const fallback = { group: "", groupPick: "", range: "7d",
-                       archived: false, sort: "created",
+                       archived: false, excludeKilled: false, sort: "created",
                        split: SPLIT_DEFAULT, selected: "", scale: "log" };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
@@ -480,6 +482,16 @@ globalThis.ChartPage = (() => {
     arch.appendChild(node("span", null,
       archivedLoading ? "archived 포함 (읽는 중…)" : "archived 포함"));
     bar.appendChild(arch);
+    // Killed sessions can outnumber the live fleet on a busy machine and
+    // flatten the chart, so the reader may fold them away (claunch-xu9ti).
+    // The same chart-check shape as the archived row beside it.
+    const killed = node("label", "chart-check");
+    const killedBox = node("input");
+    killedBox.type = "checkbox"; killedBox.checked = !!state.excludeKilled;
+    killedBox.onchange = () => set({ excludeKilled: killedBox.checked });
+    killed.appendChild(killedBox);
+    killed.appendChild(node("span", null, "killed 제외"));
+    bar.appendChild(killed);
     return bar;
   }
 
@@ -495,6 +507,7 @@ globalThis.ChartPage = (() => {
     stat("세션", s.total);
     for (const c of CATEGORIES) {
       if (c === "archived" && !state.archived) continue;
+      if (c === "killed" && state.excludeKilled) continue;
       stat(CATEGORY_LABEL[c], s.counts[c], `cat-${c}`);
     }
     stat("생존 시간 중앙값", s.medianLifetime === null ? "—" : formatDuration(s.medianLifetime));
@@ -822,7 +835,8 @@ globalThis.ChartPage = (() => {
     const model = buildModel(sessions, {
       now: Date.now(), project: currentProjectPick(), group: state.group,
       groupValue: appGroupValue, groupPick: state.groupPick, range: state.range,
-      archived: state.archived, sort: state.sort, cflowOf: appCflowOf,
+      archived: state.archived, excludeKilled: state.excludeKilled,
+      sort: state.sort, cflowOf: appCflowOf,
       meshesOf: appMeshesOf, scale: state.scale,
     });
     root.innerHTML = "";
