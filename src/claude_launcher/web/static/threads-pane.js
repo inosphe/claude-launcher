@@ -46,6 +46,13 @@
    A message may be images alone. Messages show their images from
    GET /api/threads/<id>/images/<name>, so the conversation keeps them.
 
+   Files (claunch-5gpcf): a file of any other kind (a profiling capture)
+   dropped, pasted or picked (📎 button) waits under the composer as a chip
+   with its name and size; it is uploaded with POST /api/uploads and the post
+   names the ids in `files`. The daemon keeps it 30 days; a message lists its
+   files as download links (GET /api/threads/<id>/files/<fid>/<name>), and
+   as "만료됨" once the daemon reports one `expired`.
+
    Space (claunch-1n081): "◂ 목록" in the head folds the thread list away
    while a conversation is open, so the bubbles take the pane's whole
    width; the fold is kept in localStorage (FOLD_KEY) for every session.
@@ -75,7 +82,7 @@ globalThis.ThreadsPane = (() => {
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
   const composers = new WeakMap(); // composer textarea -> its draft key
-  const attached = new Map(); // thread id ("" = new thread) -> [{file, src}]: images waiting to be sent
+  const attached = new Map(); // thread id ("" = new thread) -> [{file, src, isFile?}]: attachments waiting to be sent
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
   const SIDE_W_KEY = "claunch_threadsidew"; // localStorage: the list column's width in px
@@ -124,12 +131,31 @@ globalThis.ThreadsPane = (() => {
     return typeof globalThis.url === "function" ? globalThis.url(path) : path;
   }
 
-  /* What the list says of a message: its first line, or that it is images. */
+  /* Where the daemon serves file `f` ({id, name}) of thread `tid`. */
+  function fileSrc(tid, f) {
+    const path = `api/threads/${encodeURIComponent(tid)}/files/${encodeURIComponent(f.id)}/${encodeURIComponent(f.name)}`;
+    return typeof globalThis.url === "function" ? globalThis.url(path) : path;
+  }
+
+  /* A byte count for people (daemon/uploads.human_size). */
+  function sizeOf(n) {
+    let size = Number(n) || 0;
+    for (const unit of ["B", "KiB", "MiB", "GiB"]) {
+      if (size < 1024 || unit === "GiB") return unit === "B" ? `${size} B` : `${size.toFixed(1)} ${unit}`;
+      size /= 1024;
+    }
+    return `${n} B`;
+  }
+
+  /* What the list says of a message: its first line, or that it is images
+     or files (the same wording as the daemon's rail excerpt). */
   function lastLine(m) {
-    const text = excerpt(m && m.body);
+    let text = excerpt(m && m.body);
     const n = ((m && m.images) || []).length;
-    if (!n) return text;
-    return text ? `${text} 🖼${n}` : `🖼 이미지 ${n}장`;
+    const k = ((m && m.files) || []).length;
+    if (n) text = text ? `${text} 🖼${n}` : `🖼 이미지 ${n}장`;
+    if (k) text = text ? `${text} 📎${k}` : `📎 파일 ${k}개`;
+    return text;
   }
 
   /* The first line of a message, shortened for the list. */
@@ -347,11 +373,28 @@ globalThis.ThreadsPane = (() => {
     return doc.id;
   }
 
-  /* The ids of the images waiting for `key`, uploaded in order. */
-  async function stageAll(key) {
-    const ids = [];
-    for (const a of attached.get(key) || []) ids.push(await stage(a.file));
-    return ids;
+  /* Upload one file of any kind to the staging area (POST /api/uploads). */
+  async function stageFile(file) {
+    const path = `/api/uploads?name=${encodeURIComponent(file.name || "upload")}`;
+    const resp = await api(path, {
+      method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: file,
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.id) throw Error(doc.error || `파일 업로드 실패: ${file.name} (HTTP ${resp.status})`);
+    return doc.id;
+  }
+
+  /* The ids of the attachments waiting for `key`, uploaded in order, put on
+     the post `body` as `images` and `files`. */
+  async function stageAll(key, body) {
+    const images = [], files = [];
+    for (const a of attached.get(key) || []) {
+      if (a.isFile) files.push(await stageFile(a.file));
+      else images.push(await stage(a.file));
+    }
+    if (images.length) body.images = images;
+    if (files.length) body.files = files;
+    return body;
   }
 
   function dropAttached(key) {
@@ -361,15 +404,14 @@ globalThis.ThreadsPane = (() => {
     attached.delete(key);
   }
 
-  /* Add image files to what `key`'s composer will send; files that are not
-     images are left out and counted in the notice. */
-  function attach(key, files) {
+  /* Add files to what `key`'s composer will send: images as pictures,
+     anything else (or everything, `asFiles`, from the 📎 button) as files. */
+  function attach(key, files, asFiles = false) {
     const list = Array.from(files || []);
-    const pics = list.filter((f) => imageKind(f));
-    if (list.length > pics.length) notice = `이미지가 아닌 파일 ${list.length - pics.length}개는 첨부하지 않았습니다.`;
-    if (!pics.length) { render(); return; }
+    if (!list.length) { render(); return; }
     const have = attached.get(key) || [];
-    for (const file of pics) {
+    for (const file of list) {
+      if (asFiles || !imageKind(file)) { have.push({file, src: "", isFile: true}); continue; }
       let src = "";
       try { src = URL.createObjectURL(file); } catch { /* no object URLs here */ }
       have.push({file, src});
@@ -468,18 +510,18 @@ globalThis.ThreadsPane = (() => {
     // Attached images stay attached until the post is in: a failure keeps
     // them for the next try.
     drafts.delete(tid);
-    const pics = (attached.get(tid) || []).map((a) => a.src);
-    pending.set(tid, {text, images: pics});
+    const pics = (attached.get(tid) || []).filter((a) => !a.isFile).map((a) => a.src);
+    const docs = (attached.get(tid) || []).filter((a) => a.isFile).map((a) => ({name: a.file.name, bytes: a.file.size}));
+    pending.set(tid, {text, images: pics, files: docs});
     return once(tid, () => act(async () => {
       const body = {text};
       if (askQa) body.ask_qa = true;
       let res;
       try {
-        const ids = await stageAll(tid);
-        if (ids.length) body.images = ids;
+        await stageAll(tid, body);
         res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, body);
       } catch (e) {
-        pending.set(tid, {text, images: pics, failed: (e && e.message) || String(e)});
+        pending.set(tid, {text, images: pics, files: docs, failed: (e && e.message) || String(e)});
         if (!(drafts.get(tid) || "").trim()) drafts.set(tid, text);
         throw e;
       }
@@ -494,8 +536,7 @@ globalThis.ThreadsPane = (() => {
       const body = {to: name, title};
       if (text) body.text = text;
       if (composeQa) body.qa = composeQa.id;
-      const ids = await stageAll("");
-      if (ids.length) body.images = ids;
+      await stageAll("", body);
       const res = await request("/api/threads", body);
       dropAttached("");
       drafts.delete("");
@@ -577,10 +618,15 @@ globalThis.ThreadsPane = (() => {
     strip.replaceChildren();
     strip.hidden = !list.length;
     list.forEach((a, i) => {
-      const item = node("span", "th-attach-item");
-      const pic = node("img");
-      pic.src = a.src;
-      pic.alt = a.file.name || "첨부 이미지";
+      const item = node("span", a.isFile ? "th-attach-item th-attach-file" : "th-attach-item");
+      let pic;
+      if (a.isFile) {
+        pic = node("span", "th-attach-name", `📎 ${a.file.name || "파일"} · ${sizeOf(a.file.size)}`);
+      } else {
+        pic = node("img");
+        pic.src = a.src;
+        pic.alt = a.file.name || "첨부 이미지";
+      }
       const drop = node("button", "th-attach-drop", "×");
       drop.type = "button";
       drop.title = "첨부 취소";
@@ -622,7 +668,16 @@ globalThis.ThreadsPane = (() => {
     pick.type = "button";
     pick.title = "이미지 첨부 — 입력창에 붙여넣거나(Ctrl+V) 끌어다 놓아도 됩니다";
     pick.addEventListener("click", () => input.click());
-    return [pick, input];
+    const fileInput = node("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.hidden = true;
+    fileInput.addEventListener("change", () => { attach(key, fileInput.files, true); fileInput.value = ""; });
+    const filePick = node("button", "term-btn th-pick", "📎");
+    filePick.type = "button";
+    filePick.title = "파일 첨부(종류 무관, 예: 프로파일링 파일) — 데몬에 30일 보관됩니다";
+    filePick.addEventListener("click", () => fileInput.click());
+    return [pick, input, filePick, fileInput];
   }
 
   /* Images dropped anywhere on `area` go to composer `key`. */
@@ -635,7 +690,7 @@ globalThis.ThreadsPane = (() => {
     area.addEventListener("dragleave", () => area.classList.remove("dragover"));
     area.addEventListener("drop", (e) => {
       area.classList.remove("dragover");
-      const files = imageFiles(e.dataTransfer);
+      const files = Array.from((e.dataTransfer || {}).files || []);
       if (!files.length) return;
       e.preventDefault();
       attach(key, files);
@@ -674,7 +729,24 @@ globalThis.ThreadsPane = (() => {
     return box;
   }
 
-  function bubble(author, text, when, state, images = []) {
+  /* A message's files as download links; an expired one is named only. */
+  function filesOf(tid, files) {
+    const box = node("div", "th-files");
+    for (const f of files) {
+      const label = `📎 ${f.name} · ${sizeOf(f.bytes)}`;
+      if (f.expired || !tid || !f.id) {
+        box.append(node("span", "th-file th-file-expired", f.expired ? `${label} · 만료됨` : label));
+        continue;
+      }
+      const link = node("a", "th-file", label);
+      link.href = fileSrc(tid, f);
+      link.download = f.name;
+      box.append(link);
+    }
+    return box;
+  }
+
+  function bubble(author, text, when, state, images = [], files = [], tid = "") {
     const row = node("div", `th-msg th-${author}`);
     if (state) row.classList.add(`th-${state}`);
     const meta = node("div", "th-msg-meta");
@@ -683,8 +755,9 @@ globalThis.ThreadsPane = (() => {
     if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
     if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
     row.append(meta);
-    if (text || !images.length) row.append(bodyOf(text));
+    if (text || !(images.length || files.length)) row.append(bodyOf(text));
     if (images.length) row.append(picturesOf(images));
+    if (files.length) row.append(filesOf(tid, files));
     return row;
   }
 
@@ -838,10 +911,11 @@ globalThis.ThreadsPane = (() => {
 
     const msgs = node("div", "th-messages");
     for (const m of convo.messages) {
-      msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name))));
+      msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
+                         m.files || [], t.id));
     }
     const out = pending.get(t.id);
-    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || []));
+    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || [], out.files || []));
     if (!convo.messages.length && !out) {
       msgs.append(node("p", "th-empty", "아직 메시지가 없습니다. 아래 입력창에 첫 메시지를 쓰세요."));
     }
@@ -854,7 +928,7 @@ globalThis.ThreadsPane = (() => {
     };
     const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 1);
     const foot = node("div", "th-compose-foot");
-    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter/Ctrl+J 줄바꿈 · markdown 지원 · 이미지 붙여넣기"));
+    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter/Ctrl+J 줄바꿈 · markdown 지원 · 이미지 붙여넣기 · 📎 파일 첨부"));
     const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
     go.type = "button";
     go.disabled = sending;
@@ -1008,5 +1082,5 @@ globalThis.ThreadsPane = (() => {
   }
 
   return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, newlineKey, pick, linkLabel, stamp,
-          imageKind, imageFiles, imageSrc, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
+          imageKind, imageFiles, imageSrc, fileSrc, sizeOf, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
 })();

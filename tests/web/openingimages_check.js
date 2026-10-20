@@ -58,9 +58,10 @@ const kindsBlock = (() => {
 /* ---- what an attach keeps ---------------------------------------------- */
 {
   const notes = [];
+  const asFiles = [];
   let renders = 0;
   const env = new Function("$", "URL", "renderOpeningImages", "openingImagesNote",
-    "syncOpeningImages", "newFormTakesImages",
+    "syncOpeningImages", "newFormTakesImages", "addOpeningFiles",
     `${kindsBlock}
      ${slice("imageKindOf")}
      ${constLine("OPENING_IMAGES_MAX")}
@@ -68,13 +69,15 @@ const kindsBlock = (() => {
      ${slice("addOpeningImages")}
      return { addOpeningImages, openingImages };`)(
     () => ({}), { createObjectURL: (f) => `blob:${f.name}` },
-    () => { renders++; }, (t) => notes.push(t), () => {}, () => ({ ok: true }));
+    () => { renders++; }, (t) => notes.push(t), () => {}, () => ({ ok: true }),
+    (files) => asFiles.push(...files.map((f) => f.name)));
   const file = (name, type) => ({ name, type });
   env.addOpeningImages([file("a.png", "image/png"), file("notes.txt", "text/plain"),
     file("b.JPG", "")]);
   assert.deepStrictEqual(env.openingImages.map((i) => i.file.name), ["a.png", "b.JPG"],
     "images are kept in order, the type read off the extension when empty");
-  assert.ok(/1 file\(s\) not a PNG/.test(notes.at(-1)), notes.at(-1));
+  assert.deepStrictEqual(asFiles, ["notes.txt"],
+    "a file that is not an image goes with the opening as a file (claunch-5gpcf)");
   env.addOpeningImages(Array.from({ length: 12 }, (_, i) => file(`s${i}.webp`, "image/webp")));
   assert.strictEqual(env.openingImages.length, 10, "an opening takes at most ten images");
   assert.ok(/at most 10/.test(notes.at(-1)), notes.at(-1));
@@ -85,7 +88,7 @@ const kindsBlock = (() => {
 {
   let synced = 0;
   const env = new Function("$", "URL", "renderOpeningImages", "openingImagesNote",
-    "syncOpeningImages", "newFormTakesImages",
+    "syncOpeningImages", "newFormTakesImages", "addOpeningFiles",
     `${kindsBlock}
      ${slice("imageKindOf")}
      ${constLine("OPENING_IMAGES_MAX")}
@@ -105,6 +108,8 @@ const kindsBlock = (() => {
   for (const mode of ["new", "spawn"]) {
     assert.ok(config(mode).payload.includes("opening_images"),
       `${mode}: opening_images must reach the daemon`);
+    assert.ok(config(mode).payload.includes("opening_files"),
+      `${mode}: opening_files must reach the daemon (claunch-5gpcf)`);
   }
 }
 
