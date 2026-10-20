@@ -346,6 +346,8 @@
 :is(#observer-operators, #opfab-view) .op-new { color: #96a6b8; border-style: dashed; }
 :is(#observer-operators, #opfab-view) .op-dot { width: 8px; height: 8px; border-radius: 50%; background: #6e7681; }
 :is(#observer-operators, #opfab-view) .op-dot.on { background: #3fb950; }
+:is(#observer-operators, #opfab-view) .op-dot.on.busy { background: #d29922; }
+:is(#observer-operators, #opfab-view) .op-dot.on.starting { background: #58a6ff; }
 :is(#observer-operators, #opfab-view) .op-badge { min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #30343b; color: #c9d1d9; }
 :is(#observer-operators, #opfab-view) .op-badge.unseen { background: #9e6a03; color: #fff; }
 /* The session line above the conversation (claunch-iw5i8.13): one row that
@@ -370,6 +372,45 @@
 :is(#observer-operators, #opfab-view) .op-reply { margin-left: 16px; }
 :is(#observer-operators, #opfab-view) .level-attention { border-left: 3px solid #d29922; }
 :is(#observer-operators, #opfab-view) .level-urgent { border-left: 3px solid #f85149; }
+/* Threads (claunch-iw5i8.12.1): the list and the selected thread side by side
+   where the view is 640px wide or more; narrower, one at a time, and the
+   list shows only when the reader asked for it (.op-show-list). */
+:is(#observer-operators, #opfab-view) .op-threads { container-type: inline-size; margin-top: 8px; }
+:is(#observer-operators, #opfab-view) .op-threads-grid { display: block; }
+:is(#observer-operators, #opfab-view) .op-threads-grid > .op-thread-list { display: none; }
+:is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-list { display: flex; }
+:is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-view { display: none; }
+@container (min-width: 640px) {
+  :is(#observer-operators, #opfab-view) .op-threads-grid { display: grid; grid-template-columns: minmax(180px, 32%) minmax(0, 1fr); gap: 12px; align-items: start; }
+  :is(#observer-operators, #opfab-view) .op-threads-grid > .op-thread-list,
+  :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-list { display: flex; }
+  :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-view { display: block; }
+  :is(#observer-operators, #opfab-view) .op-thread-back { display: none; }
+}
+:is(#observer-operators, #opfab-view) .op-thread-list { flex-direction: column; gap: 6px; min-width: 0; }
+:is(#observer-operators, #opfab-view) .op-thread-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+:is(#observer-operators, #opfab-view) .op-thread-row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 100%; min-height: 44px; padding: 6px 10px; text-align: left; border-radius: 8px; box-sizing: border-box; }
+:is(#observer-operators, #opfab-view) .op-thread-row[aria-current="true"] { background: #1c2d42; border-color: #3b7cb0; }
+:is(#observer-operators, #opfab-view) .op-thread-row.closed { opacity: .7; }
+:is(#observer-operators, #opfab-view) .op-thread-row-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+:is(#observer-operators, #opfab-view) .op-thread-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(#observer-operators, #opfab-view) .op-thread-closed { font-size: 11px; color: #8b949e; }
+:is(#observer-operators, #opfab-view) .op-thread-pending { flex: none; min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #9e6a03; color: #fff; }
+:is(#observer-operators, #opfab-view) .op-thread-time { flex: none; color: #8b949e; }
+:is(#observer-operators, #opfab-view) .op-thread-last { color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(#observer-operators, #opfab-view) .op-thread-view { min-width: 0; }
+:is(#observer-operators, #opfab-view) .op-thread-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding-bottom: 6px; border-bottom: 1px solid #2a2e36; }
+:is(#observer-operators, #opfab-view) .op-thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(#observer-operators, #opfab-view) .op-thread-title-input { flex: 1; min-width: 0; font: inherit; color: #d8dbe0; background: #1b1e24; border: 1px solid #3b424e; border-radius: 6px; padding: 6px 10px; min-height: 32px; }
+:is(#observer-operators, #opfab-view) :is(.op-thread-back, .op-thread-close, .op-thread-new) { flex: none; min-height: 32px; }
+:is(#observer-operators, #opfab-view) .op-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+:is(#observer-operators, #opfab-view) .op-image img { display: block; max-width: 160px; max-height: 120px; border-radius: 6px; border: 1px solid #2a2e36; }
+:is(#observer-operators, #opfab-view) .op-attach-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+:is(#observer-operators, #opfab-view) .op-attach-strip[hidden] { display: none; }
+:is(#observer-operators, #opfab-view) .op-attach { position: relative; }
+:is(#observer-operators, #opfab-view) .op-attach img { display: block; width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid #3b424e; }
+:is(#observer-operators, #opfab-view) .op-attach-remove { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; min-height: 0; padding: 0; border-radius: 50%; line-height: 1; }
+:is(#observer-operators, #opfab-view) .op-attach-button { flex: none; align-self: flex-end; }
 /* Message bodies are markdown (style.css .md-*). The column is narrow and the
    page keeps a single scrollbar, so code blocks and tables wrap here instead
    of growing a horizontal scroller of their own. */

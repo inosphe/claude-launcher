@@ -675,23 +675,25 @@ def _known_caps() -> Optional[Set[str]]:
 
 def _input_checks(chart: ir.Chart) -> List[Finding]:
     """``set-by-default`` / ``set-by-required`` (claunch-7d4nt.1): an input
-    declared ``set_by`` whose default is not empty, or that is required,
-    holds a value from the start, and the runtime writes an input only while
-    it is empty (docs 2.6) -- so its ``set_by`` can never take effect."""
+    declared ``set_by: [agent]`` whose default is not empty, or that is
+    required, holds a value from the start, and the agent writes an input
+    only while it is empty (docs 2.6) -- so that ``set_by`` can never take
+    effect. ``set_by: [user]`` overwrites, so neither applies to it."""
     from . import inputs as inputs_mod
 
     out: List[Finding] = []
     for name, decl in ((chart.meta or {}).get("inputs") or {}).items():
-        if decl.get("set_by") and not inputs_mod._is_empty(decl.get("default")):
+        agent = inputs_mod.SETTER_AGENT in (decl.get("set_by") or [])
+        if agent and not inputs_mod._is_empty(decl.get("default")):
             out.append(Finding(WARNING, "set-by-default",
-                               f"input {name!r} declares set_by but has the default "
-                               f"{decl['default']!r}: it is never empty, so nothing can "
-                               f"write it after start -- drop the default or the set_by"))
-        elif decl.get("set_by") and decl.get("required"):
+                               f"input {name!r} declares set_by agent but has the default "
+                               f"{decl['default']!r}: it is never empty, so the agent can "
+                               f"never write it after start -- drop the default or the set_by"))
+        elif agent and decl.get("required"):
             out.append(Finding(WARNING, "set-by-required",
-                               f"input {name!r} declares set_by but is required: a start "
-                               f"refuses it empty, so nothing can write it after start -- "
-                               f"drop required or the set_by"))
+                               f"input {name!r} declares set_by agent but is required: a "
+                               f"start refuses it empty, so the agent can never write it "
+                               f"after start -- drop required or the set_by"))
     return out
 
 

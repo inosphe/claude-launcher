@@ -685,3 +685,108 @@ def kept_rail(
     if fresh is None:
         return record, False
     return fresh, True
+
+
+# ---- a rebased-away commit, marked superseded (claunch-rqtpe) ---------------
+#
+# A rebase leaves the old hash on the pushed branch, so the card showed it as
+# pushed-not-merged although master has the same change under the new hash
+# (s623's b48ce17, landed as 7ab01a5). Such a commit is marked ``superseded``
+# by the merged commit that carries its change. The candidates are only the
+# same session's merged commits with the same subject -- a rebase and a
+# cherry-pick keep both -- so no walk of master is needed. "The same change"
+# is a diff with its context left out: ``git patch-id`` hashes the hunk
+# headers' context too, so a function renamed on master changes it although
+# the commit did not change (claunch-patchid-context-drift-68mu).
+#
+# Both facts are fixed once found: a commit's diff never changes, and a
+# commit superseded by a merged one stays so. The caller keeps the record
+# :func:`supersede` returns (the daemon writes it beside the session's
+# meta.json), so each commit's diff is read at most once.
+
+#: The record's shape; a record of another version is started again.
+SUPERSEDED_VERSION = 1
+
+
+def _fingerprint(cwd: str, sha: str) -> Optional[str]:
+    """A hash of what ``sha`` changes, its context left out; ``""`` when it
+    changes nothing a diff shows (a merge commit, an empty commit) and
+    ``None`` when git failed."""
+    out = _git(cwd, "diff-tree", "-p", "--unified=0", "--no-color",
+               "--no-ext-diff", "--no-renames", "--root", "--format=", sha)
+    if out is None:
+        return None
+    lines = [line for line in out.splitlines()
+             if not line.startswith(("@@", "index "))]
+    if not lines:
+        return ""
+    return hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def supersede(
+    cwd: Optional[str],
+    rows: List[Dict[str, object]],
+    pool: List[Dict[str, object]],
+    record: Optional[dict],
+    refs: Optional[Dict[str, str]] = None,
+) -> Tuple[dict, bool]:
+    """Mark each unmerged row of ``rows`` that a merged row of ``pool`` (the
+    same session's commits) supersedes: ``(record, changed)``.
+
+    A superseded row gets ``superseded: {sha, short}``, the merged commit
+    that carries its change. ``record`` is what an earlier call returned
+    (or ``None``); ``changed`` says the caller should keep the new one.
+    ``refs`` lets a pool row with no ``state`` yet be marked; without it
+    such a row is not a candidate.
+    """
+    if not (isinstance(record, dict) and record.get("v") == SUPERSEDED_VERSION):
+        record = {"v": SUPERSEDED_VERSION, "fp": {}, "by": {}}
+    fp: Dict[str, str] = dict(record.get("fp") or {})
+    by: Dict[str, Dict[str, str]] = dict(record.get("by") or {})
+    changed = False
+    for row in rows:
+        sha = str(row.get("sha") or "")
+        if not sha or row.get("state") == "merged":
+            continue
+        if sha not in by and cwd:
+            cands = [p for p in pool
+                     if p.get("subject") == row.get("subject") and p.get("sha") != sha]
+            unstated = [p for p in cands if "state" not in p]
+            if unstated and refs is not None:
+                _mark_states(cwd, refs, unstated)
+            cands = [p for p in cands if p.get("state") == "merged"]
+            # No merged commit of the same subject: nothing to read.
+            for one in ([sha] + [str(p["sha"]) for p in cands]) if cands else []:
+                if one not in fp:
+                    got = _fingerprint(cwd, one)
+                    if got is not None:
+                        fp[one] = got
+                        changed = True
+            mine = fp.get(sha)
+            for p in cands:
+                if mine and fp.get(str(p["sha"])) == mine:
+                    by[sha] = {"sha": str(p["sha"]), "short": str(p.get("short") or "")}
+                    changed = True
+                    break
+        if sha in by:
+            row["superseded"] = dict(by[sha])
+    if changed:
+        record = {"v": SUPERSEDED_VERSION, "fp": fp, "by": by}
+    return record, changed
+
+
+def rail_superseded(
+    cwd: Optional[str], session: str, chips: Optional[Dict[str, object]],
+    record: Optional[dict],
+) -> Tuple[Optional[dict], bool]:
+    """:func:`supersede` for the chips :func:`rail` just returned, its pool
+    the session's commits off the same walk."""
+    if not chips or not cwd:
+        return record, False
+    common = _common_dir(str(cwd))
+    with _rail_lock:
+        snap = _rail_snaps.get(common) if common else None
+    if not snap:
+        return record, False
+    pool = snap["sessions"].get((session or "").strip()) or []
+    return supersede(str(cwd), chips["commits"], pool, record, snap["refs"])

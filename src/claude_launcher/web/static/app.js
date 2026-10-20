@@ -1961,12 +1961,30 @@ function railEndedText(s) {
 
 function railCreatedText(s) {
   const a = s.created_by;
-  return a && a.kind ? `spawned by ${actorWho(a)}` : "";
+  if (!a || !a.kind) return "";
+  const setup = spawnGateSetup(a);
+  return `spawned by ${actorWho(a)}` + (setup === "agent" ? " · agent setup" : "");
+}
+
+/* Who set up a session the spawn gate created (claunch-iw5i8.16): "agent"
+   when nobody answered and the agent's own spec was used, "approved" when
+   the person approved it. A session the person made in the form is
+   created_by the user, so it needs no word here. */
+function spawnGateSetup(a) {
+  if (!a || a.via !== "spawn-gate") return "";
+  const m = /^setup:(\w+)$/.exec(a.reason || "");
+  return m ? m[1] : "";
 }
 
 /* The long form for a title: "agent s12", "user (web)", "cflow s3 [kill-on-end]". */
 function actorLabel(a) {
   if (!a || !a.kind) return "unknown";
+  const setup = spawnGateSetup(a);
+  if (setup) {
+    return `agent ${a.name || "?"} — ` + (setup === "agent"
+      ? "agent setup: no answer on the approval card, created from the agent's spec"
+      : "approved by the person on the approval card");
+  }
   let text = a.kind;
   if (a.name) text += ` ${a.name}`;
   if (a.via) text += ` (${a.via})`;
@@ -5591,6 +5609,10 @@ async function refreshSessions(options) {
     // scanning for "which of these has nobody touched" finds it in one
     // column rather than hunting a different offset on every row.
     const railSeen = railSeenLine(s);
+    // And when it was made and how long it has lived, under the attention
+    // line (claunch-y8ibz). Guarded like the tps line: the node harnesses
+    // slice this builder without it.
+    const railLife = typeof railLifeLine === "function" ? railLifeLine(s) : null;
     // The role again, on a line of its own under the name. Drawn only on the
     // selected card (CSS, li.active), where the name line's copy is hidden:
     // squeezed beside the name, the handle and the rooms, the role is the
@@ -5607,7 +5629,8 @@ async function refreshSessions(options) {
     li.append(dot, head, meta, roleLine, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
-              railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []),
+              railSeen, ...(railLife ? [railLife] : []),
+              ...(plus ? [plus] : []), ...(pin ? [pin] : []),
               ...(observePin ? [observePin] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
@@ -7538,7 +7561,10 @@ function tpsLatencyText(t) {
 function tpsText(t) {
   if (!t) return "";
   const live = typeof tpsLiveText === "function" ? tpsLiveText(t.live) : "";
-  if (live) return live;
+  if (live) {
+    const par = typeof tpsParallelText === "function" ? tpsParallelText(t.live.parallel, true) : "";
+    return par ? `${live} · ${par}` : live;
+  }
   if (t.idle) return "idle";
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
@@ -7561,6 +7587,18 @@ function tpsLiveText(l) {
   return "";
 }
 
+/* Parallel sessions on one shim (claunch-b28pp). One shim serves every
+   session on the same upstream, so sessions running at once share its
+   throughput; `live.parallel` is there only when this session and at least
+   one other are active on it now: `sessions` (this one included), `total`
+   (their summed estimated tokens/s) and `mean` (total over sessions).
+   `compact` is the rail and badge form: "×3 Σ≈120 avg≈40". */
+function tpsParallelText(p, compact) {
+  if (!p || !(p.sessions > 1)) return "";
+  if (compact) return `×${p.sessions} Σ≈${tpsFmt(p.total)} avg≈${tpsFmt(p.mean)}`;
+  return `${p.sessions} sessions · total ≈${tpsFmt(p.total)} tok/s · avg ≈${tpsFmt(p.mean)} tok/s`;
+}
+
 function tpsSecs(v) {
   return v < 10 ? `${v.toFixed(1)}s` : `${Math.round(v)}s`;
 }
@@ -7575,6 +7613,10 @@ function tpsTooltip(t) {
       : l.state === "waiting" ? `waiting for the first token (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight)`
       : `streaming: ≈${tpsFmt(l.rate)} tokens/s over the last ${l.window_s}s` +
         ` (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight; estimated from the characters streamed)`);
+    if (l.parallel && l.parallel.sessions > 1) {
+      lines.push(`shared proxy: ${l.parallel.sessions} sessions active now, total ≈${tpsFmt(l.parallel.total)}` +
+                 ` tokens/s, avg ≈${tpsFmt(l.parallel.mean)} tokens/s per session (last ${l.parallel.window_s}s)`);
+    }
   }
   const age = tpsAgeSecs(t);
   if (t.ts) {
@@ -7746,9 +7788,11 @@ function renderTermTps() {
       const l = t.live;
       const model = l.model || t.model;
       overlay.className = "term-tps-overlay" + tpsStaleClass(t);
+      const par = typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "";
       overlay.replaceChildren(
         el("span", "term-tps-big", tpsLiveText(l)),
         tpsSparkline(l.series),
+        ...(par ? [el("span", "term-tps-small term-tps-parallel", par)] : []),
         el("span", "term-tps-small",
           [model ? modelShort(model) : "",
            t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
@@ -8041,7 +8085,15 @@ function railCwdLine(s) {
    payload, which carries the listing's rows in full -- no second fetch.
    The card is an issue pill's ONLY hover affordance: a native `title` would
    draw the browser's own tooltip a second late, on top of the card that is
-   already open (see claunch-1qa8e). */
+   already open (see claunch-1qa8e).
+
+   The line opens with the work count (claunch-9f8ag): how many assigned
+   issues are left, split by where they stand, and how many are done -- the
+   pills stop at four, so the count is what says how much is still queued.
+   Follow-ups the session filed for others are not its work left and stay
+   out of it. A session whose assigned work is all closed keeps the line for
+   the count alone ("0 left · 3 done"), so a finished queue reads as finished
+   rather than as a row with nothing on it. */
 let railBeads = new Map();   // session name -> lane (issues, created, summary)
 let railBeadsAt = 0;         // when the queues were last asked for
 let railBeadsBusy = false;
@@ -8075,14 +8127,17 @@ function railBeadsIndex(data) {
     for (const lane of b.lanes || []) {
       if (!lane.session || !lane.known) continue;
       const cur = out.get(lane.session);
+      const done = (lane.summary && lane.summary.done) || 0;
       if (cur) {
         cur.issues = cur.issues.concat(lane.issues || []);
         cur.created = cur.created.concat(lane.created || []);
+        cur.done += done;
       } else {
         out.set(lane.session, {
           issues: [...(lane.issues || [])],
           created: [...(lane.created || [])],
           summary: lane.summary || {},
+          done,
           root: b.root,
         });
       }
@@ -8097,7 +8152,7 @@ function applyRailBeads() {
   for (const li of list.querySelectorAll("li[data-name]")) {
     const lane = railBeads.get(li.dataset.name);
     let line = li.querySelector(".rail-beads");
-    if (!lane || (!(lane.issues || []).length && !(lane.created || []).length)) {
+    if (!lane || (!(lane.issues || []).length && !(lane.created || []).length && !lane.done)) {
       if (line) line.remove();
       continue;
     }
@@ -8130,7 +8185,8 @@ function railBeadsLine(name, lane) {
   const all = (lane.issues || []).map((i) => ({ i, created: false }))
     .concat((lane.created || []).map((i) => ({ i, created: true })));
   const shown = all.slice(0, RAIL_BEADS_MAX);
-  line._railSig = JSON.stringify([name, next || null, all]);
+  line._railSig = JSON.stringify([name, next || null, all, lane.done || 0]);
+  line.appendChild(railBeadsCount(lane));
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
@@ -8155,6 +8211,38 @@ function railBeadsLine(name, lane) {
     line.appendChild(more);
   }
   return line;
+}
+
+/* The rail's work-count rows, in the order they are drawn: the Queues
+   page's own words (beadsQueueSummaryText) for the same statuses. */
+const RAIL_BEADS_COUNTS = [
+  ["waiting", (s) => s === "open" || s === "in_ready"],
+  ["working", (s) => s === "in_progress"],
+  ["landing", (s) => s === "in_review"],
+  ["blocked", (s) => s === "blocked"],
+];
+
+/* The count at the head of a row's beads line: "N left" over the assigned
+   issues, then one count per status that has any, then "N done". Counted
+   from the issues themselves rather than the lane summary, because a
+   session on two boards carries both boards' issues but only the first
+   board's summary (railBeadsIndex). The native `title` spells it out in
+   full, zeros included. */
+function railBeadsCount(lane) {
+  const issues = lane.issues || [];
+  const done = lane.done || 0;
+  const box = el("span", "rail-beads-count");
+  box.appendChild(el("span", `rail-beads-left${issues.length ? "" : " none"}`, `${issues.length} left`));
+  const full = [`${issues.length} left`];
+  for (const [word, has] of RAIL_BEADS_COUNTS) {
+    const n = issues.filter((i) => has(i.status)).length;
+    full.push(`${n} ${word}`);
+    if (n) box.appendChild(el("span", `rail-beads-n ${word}`, `${n} ${word}`));
+  }
+  full.push(`${done} done`);
+  if (done) box.appendChild(el("span", "rail-beads-n done", `${done} done`));
+  box.title = `assigned issues: ${full.join(" · ")}`;
+  return box;
 }
 
 /* The hover card: one element for the whole rail, filled per pill. Fixed
@@ -8493,6 +8581,87 @@ function railSeenLine(s) {
   return line;
 }
 
+/* ------------------------------------------------------------------ */
+/* when it was made and how long it has lived: the rail row's age line */
+/* ------------------------------------------------------------------ */
+/* Two readings off the record's own stamps (claunch-y8ibz): `created`, the
+   moment the session was made, in the READER's clock -- the daemon stamps
+   UTC, and a rail read in Seoul that said 09:07 for a session made at 18:07
+   would be a number the reader has to convert -- and `lifetime`, how long it
+   has existed: up to now while it runs, up to `exited_at` once it ended, so
+   an exited row stops counting instead of ageing forever.
+
+   `created_at` survives a restore, a respawn and a redefine (the session
+   continuing, see daemon/session.py), so the lifetime spans daemon
+   restarts; that is the age of the session, not of its current process. */
+
+/* A daemon stamp as epoch ms. The daemon writes an offset (+00:00); one
+   without a zone is UTC too, as localStamp reads it -- Date.parse alone
+   would take it as the browser's local time. */
+function lifeParse(iso) {
+  const s = String(iso || "");
+  return Date.parse(/[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(s) ? `${s.replace(" ", "T")}Z` : s);
+}
+
+/* The creation stamp, as short as the day allows: the clock alone today,
+   the month and day this year, the date alone before that. */
+function lifeCreatedText(iso, now = Date.now()) {
+  const t = lifeParse(iso);
+  if (!Number.isFinite(t)) return "";
+  const d = new Date(t);
+  const n = new Date(now);
+  const p2 = (v) => String(v).padStart(2, "0");
+  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  if (d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth()
+      && d.getDate() === n.getDate()) return hm;
+  if (d.getFullYear() === n.getFullYear()) return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${hm}`;
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+
+/* Seconds the session has existed, or null without a creation stamp. */
+function lifeSecs(s, now = Date.now()) {
+  const born = lifeParse(s && s.created_at);
+  if (!Number.isFinite(born)) return null;
+  const died = s.status === "exited" ? lifeParse(s.exited_at) : NaN;
+  const end = Number.isFinite(died) ? died : now;
+  return Math.max(0, Math.floor((end - born) / 1000));
+}
+
+/* fmtAge, carried on to days: a lifetime runs to days routinely, and
+   "51h00m" is arithmetic for the reader. */
+function lifeSpanText(secs) {
+  if (secs === null || secs === undefined) return "";
+  if (secs < 86400) return fmtAge(secs);
+  const days = Math.floor(secs / 86400);
+  return `${days}d${String(Math.floor((secs % 86400) / 3600)).padStart(2, "0")}h`;
+}
+
+function railLifeLine(s, now = Date.now()) {
+  const line = el("span", "rail-life");
+  const created = lifeCreatedText(s && s.created_at, now);
+  if (!created) return line;
+  const ended = s.status === "exited" && Number.isFinite(lifeParse(s.exited_at));
+  const pair = (key, val, title) => {
+    const p = el("span", "rail-seen-pair");
+    p.append(el("span", "rail-seen-key", key), el("span", "rail-seen-val", val));
+    p.title = title;
+    return p;
+  };
+  const zone = (() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; }
+  })();
+  line.append(
+    pair("created", created,
+         `when this session was created, in this browser's time` +
+         `${zone ? ` (${zone})` : ""}\n${localStamp(s.created_at)}`),
+    pair("lifetime", lifeSpanText(lifeSecs(s, now)),
+         ended
+           ? `how long it existed: created to exit\nexited ${localStamp(s.exited_at)}`
+           : "how long it has existed so far: created to now")
+  );
+  return line;
+}
+
 /* The seen line again, redrawn on the rows a poll kept.
 
    The stamps it reads are the one part of a row that changes on most polls
@@ -8539,6 +8708,15 @@ function refreshRailSeen(list) {
     // and a swap on every tick was a mutation per row per poll (claunch-v87).
     const sk = seenKey(s);
     if (old._railKey !== sk) swap(old, railSeenLine(s))._railKey = sk;
+    // The lifetime counts up on a running row the same way the ages above
+    // do, and `created` turns from a clock into a date at midnight; keyed on
+    // what the line prints, so it swaps once a minute at most.
+    const life = li.querySelector(".rail-life");
+    if (life && typeof life.replaceWith === "function" && typeof railLifeLine === "function") {
+      const lk = JSON.stringify([s.created_at || null, s.status, s.exited_at || null,
+        lifeCreatedText(s.created_at), lifeSpanText(lifeSecs(s))]);
+      if (life._railKey !== lk) swap(life, railLifeLine(s))._railKey = lk;
+    }
     // The dot's grade is read off the same moving stamps (plus moved_rows),
     // so it is re-shaded on the same tick.
     // The status dot is the row's first child (see the li.append in
@@ -14454,6 +14632,8 @@ $("new-session").addEventListener("submit", async (e) => {
       if (doc.errors && $("new-inputs")) cflowInputsErrors($("new-inputs"), doc.errors);
       return;
     }
+    // A launch is a use: its workflow moves to the front of the recent row.
+    workflowRecentRecord(f.workflow.value);
     f.name.value = "";
     // A resume choice is spent: leaving it selected would point the next
     // Create at the same conversation and quietly open it twice. The role is
@@ -14502,10 +14682,11 @@ $("new-session").addEventListener("submit", async (e) => {
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
     const made = info.session || info;
-    // A Manual answer to an operator's spawn request (claunch-iw5i8.15): the
-    // request learns which session the person made from it.
+    // A Manual answer to an agent's spawn request (claunch-iw5i8.15/.16):
+    // the request learns which session the person made from it, top-level
+    // or child.
     const spawnRid = sessionModal && sessionModal.spawnRequest;
-    if (spawnRid && !parent && made.name) spawnGateLink(spawnRid, made.name);
+    if (spawnRid && made.name) spawnGateLink(spawnRid, made.name);
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
     // on the next line and the page leaves for the new terminal.
@@ -19751,11 +19932,21 @@ function attachGpuRenderer(t) {
   }
 }
 
+/* The terminal background is the dashboard dark page background, kept in
+   one place as the --term-page custom property (style.css); the canvas and
+   the card around it read the same value and cannot drift apart. */
+function terminalPageBackground() {
+  const doc = typeof document === "undefined" ? null : document;
+  const probe = doc && typeof doc.getElementById === "function" ? doc.getElementById("terminal") : null;
+  const fromCss = probe && getComputedStyle(probe).getPropertyValue("--term-page").trim();
+  return fromCss || "#14161a";
+}
+
 function buildCliTerm() {
   cliTerm = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
-    theme: { background: "#14161a" },
+    theme: { background: terminalPageBackground() },
     // The session terminal runs scrollback: 0 because the daemon serves the
     // wheel from its own history. A raw shell has no daemon-side screen —
     // the ring the daemon keeps is only catch-up on attach — so this
@@ -20018,7 +20209,7 @@ function freshAttach(name) {
   term = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
-    theme: { background: "#14161a" },
+    theme: { background: terminalPageBackground() },
     // A real scrollback, like the CLI tab's. It used to be 0, on the reading
     // that the daemon's history served the wheel instead — but that history
     // is one or two lines deep for a session running claude (it repaints the
@@ -22667,6 +22858,7 @@ function syncOnboardPickers() {
                               o.value || o.name));
   }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
+  if (typeof renderWorkflowRecent === "function") renderWorkflowRecent();
   $("new-context-row").classList.toggle("hidden", !wf.value);
   renderSubroles();
   // One line under the row when the pick is a v1 workflow: the format is
@@ -22998,6 +23190,60 @@ let workflowsFor = null;
 /* Whether the Workflow row has been touched by hand. Until it has, the
    picked role decides it (see syncOnboardPickers). */
 let newWfPicked = false;
+
+/* The Workflow row's recent picks (claunch-pmw8u): the workflows this browser
+   launched a session or child with, least recently used dropped first, kept
+   in localStorage and drawn as buttons under the row. A value is the
+   select's own (a name, or "v2:<name>"), so a click is an assignment. */
+const WORKFLOW_RECENT_KEY = `claunch_workflow_recent:${BASE}`;
+const WORKFLOW_RECENT_MAX = 5;
+function workflowRecentPush(list, value, max) {
+  const kept = (Array.isArray(list) ? list : [])
+    .filter((v) => typeof v === "string" && v && v !== value);
+  return value ? [value, ...kept].slice(0, max) : kept.slice(0, max);
+}
+function workflowRecentLoad() {
+  try {
+    const list = JSON.parse(localStorage.getItem(WORKFLOW_RECENT_KEY) || "[]");
+    return workflowRecentPush(list, "", WORKFLOW_RECENT_MAX);
+  } catch { return []; }
+}
+function workflowRecentRecord(value) {
+  if (!value || value === "-") return;
+  const list = workflowRecentPush(workflowRecentLoad(), value, WORKFLOW_RECENT_MAX);
+  try { localStorage.setItem(WORKFLOW_RECENT_KEY, JSON.stringify(list)); } catch {}
+}
+/* Only the recent picks the row offers right now get a button: one the
+   picked role's filter_roles refuses, or one not declared in this
+   directory, would set a value the select cannot hold. */
+function renderWorkflowRecent() {
+  const row = $("new-workflow-recent");
+  const form = $("new-session");
+  if (!row || !form) return;
+  const wf = form.workflow;
+  const offered = new Map([...wf.options].filter((o) => o.value)
+    .map((o) => [o.value, o]));
+  const recent = workflowRecentLoad().filter((v) => offered.has(v));
+  row.innerHTML = "";
+  row.classList.toggle("hidden", !recent.length);
+  if (!recent.length) return;
+  row.appendChild(el("span", "new-check-label", "Recent"));
+  const list = el("div", "new-check-list wf-recent-list");
+  for (const value of recent) {
+    // The option's label without its " — detail" tail.
+    const label = String(offered.get(value).textContent || value).split(" — ")[0];
+    const btn = el("button", "wf-recent", label);
+    btn.type = "button";
+    btn.title = `set Workflow to ${label}`;
+    btn.setAttribute("aria-pressed", String(wf.value === value));
+    btn.addEventListener("click", () => {
+      wf.value = value;
+      wf.dispatchEvent(new Event("change"));
+    });
+    list.appendChild(btn);
+  }
+  row.appendChild(list);
+}
 
 /* Where the session being created will actually stand: its own directory, or
    its parent's when it is a child that may not be moved. Asking for the
@@ -24052,6 +24298,7 @@ function openSettings(section) {
   refreshRelaySettings();
   refreshWslRegStub();
   refreshPtyHostSetting();
+  refreshDelegateSetting();
 }
 
 let relaySettingsRows = [];
@@ -29491,6 +29738,7 @@ function renderWorkspaces() {
   view.appendChild(relaySettingsCard());
   view.appendChild(wslRegStubCard());
   view.appendChild(ptyHostSettingCard());
+  view.appendChild(delegateSettingCard());
 
   refocusSettingsField(focused);
 }
@@ -31109,6 +31357,94 @@ function ptyHostSettingCard() {
   card.appendChild(el("p", "wf-note", ptyHostNowLine(st.host)));
   const pending = ptyHostPendingLine(st);
   if (pending) card.appendChild(el("p", "wf-note", pending));
+  return card;
+}
+
+/* Delegated child session (claunch-yl0to) -- daemon.delegate_profile and
+   daemon.delegate_model, read and written with GET/PUT /api/delegate-setting.
+   improv-worker-v2 with session_routing on hands an easy task to a forked
+   child on this profile and model preset; a run's start inputs of the same
+   names take precedence. Empty selection restores the built-in default. */
+let delegateSetting = {
+  profile: "", model: "", defaults: {}, profiles: [], presets: [],
+  loaded: false, error: "", busy: false,
+};
+
+function takeDelegateSetting(data) {
+  Object.assign(delegateSetting, {
+    profile: data.profile || "", model: data.model || "",
+    defaults: data.defaults || {}, profiles: data.profiles || [],
+    presets: data.presets || [], loaded: true, error: "",
+  });
+}
+
+async function refreshDelegateSetting() {
+  try {
+    const resp = await api("/api/delegate-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeDelegateSetting(data);
+  } catch (err) {
+    delegateSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveDelegateSetting(field, value) {
+  delegateSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/delegate-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [field]: value || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeDelegateSetting(data);
+  } catch (err) {
+    delegateSetting.error = String(err);
+  }
+  delegateSetting.busy = false;
+  renderWorkspaces();
+}
+
+function delegateSelect(id, field, current, choices, fallback) {
+  const select = document.createElement("select");
+  select.id = id;
+  select.disabled = delegateSetting.busy;
+  const options = [["", `default (${fallback || "none"})`], ...choices.map((c) => [c, c])];
+  if (current && !choices.includes(current)) options.push([current, `${current} (missing)`]);
+  for (const [value, label] of options) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  }
+  select.value = current === fallback ? "" : current;
+  select.addEventListener("change", () => saveDelegateSetting(field, select.value));
+  return select;
+}
+
+function delegateSettingCard() {
+  const st = delegateSetting;
+  const card = el("section", "ws-add delegate-settings");
+  card.appendChild(el("h3", null, "Delegated child session (session routing)"));
+  card.appendChild(el("p", "wf-note",
+    "improv-worker-v2 with session_routing on hands an easy task to a forked " +
+    "child session on this profile and model preset. A run's delegate_profile " +
+    "and delegate_model inputs take precedence. Same settings as claunch daemon " +
+    "config delegate_profile / delegate_model."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const profile = el("label", "delegate-field", "Profile ");
+  profile.appendChild(delegateSelect("delegate-profile", "profile", st.profile, st.profiles, st.defaults.profile));
+  const model = el("label", "delegate-field", " Model preset ");
+  model.appendChild(delegateSelect("delegate-model", "model", st.model, st.presets, st.defaults.model));
+  card.append(profile, model);
   return card;
 }
 
@@ -35335,7 +35671,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   const runInputs = run.inputs || ((run.data || {}).inputs);
   if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
-    root.appendChild(cflow2InputsBlock(runInputs));
+    root.appendChild(cflow2InputsBlock(runInputs, data.input_decls, live ? post : null));
   }
 
   const cols = el("div", "cf2-cols");
@@ -35893,11 +36229,18 @@ function cflow2CollectionTable(name, col, post) {
   return wrap;
 }
 
-/* The run's start inputs (data.inputs), folded shut. */
-function cflow2InputsBlock(values) {
+/* The run's start inputs (data.inputs), folded shut. An input whose
+   declaration (data.input_decls) has set_by: [user] gets an editor while the
+   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
+function cflow2InputsBlock(values, decls, post) {
+  const declOf = {};
+  for (const d of decls || []) declOf[d.name] = d;
+  const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
+  const nEdit = Object.keys(values).filter(editable).length;
   const box = document.createElement("details");
   box.className = "cf2-run-inputs";
-  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})`));
+  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})` +
+    (nEdit ? ` · ${nEdit} editable` : "")));
   for (const [k, v] of Object.entries(values)) {
     const row = el("div", "cf2-run-input");
     row.appendChild(el("span", "mono cf2-fact-k", k));
@@ -35910,9 +36253,64 @@ function cflow2InputsBlock(values) {
     row.appendChild(text.length > 80 || text.includes("\n")
       ? mdInto(el("div", "md cf2-run-input-value"), text)
       : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
+    if (editable(k)) row.appendChild(cflow2InputEditor(k, v, declOf[k], post));
     box.appendChild(row);
   }
   return box;
+}
+
+/* A person's editor for one set_by: [user] input: a checkbox for a bool, a
+   picker for an enum, a text field otherwise (a list as one item per line).
+   The press confirms, then posts; the run page redraws from the answer. */
+function cflow2InputEditor(name, value, decl, post) {
+  const wrap = el("div", "cf2-run-input-edit");
+  const label = decl.label || name;
+  const send = async (next, shown) => {
+    if (!confirm(`Change the run's start input '${label}' to ${shown}?\n\n` +
+                 "Steps read the new value from now on; the agent driving the run is told.")) {
+      return false;
+    }
+    await post("/api/cflow2/input", { name, value: next });
+    return true;
+  };
+  if (decl.type === "bool") {
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = !!value;
+    box.addEventListener("change", async () => {
+      box.disabled = true;
+      if (!await send(box.checked, String(box.checked))) box.checked = !box.checked;
+      box.disabled = false;
+    });
+    const lab = el("label", "cf2-run-input-toggle");
+    lab.append(box, document.createTextNode(" on"));
+    wrap.appendChild(lab);
+    return wrap;
+  }
+  let field;
+  if (decl.type === "enum") {
+    field = el("select");
+    if (!decl.required) field.appendChild(el("option", null, "—")).value = "";
+    for (const c of decl.choices || []) field.appendChild(el("option", null, c)).value = c;
+    field.value = value == null ? "" : String(value);
+  } else if (decl.type === "text" || decl.type === "list") {
+    field = el("textarea");
+    field.rows = 2;
+    field.value = Array.isArray(value) ? value.join("\n") : (value == null ? "" : String(value));
+  } else {
+    field = el("input");
+    field.type = decl.type === "int" ? "number" : "text";
+    field.value = value == null ? "" : String(value);
+  }
+  const btn = el("button", "wf-btn sm", "Set");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const raw = field.value;
+    await send(raw, raw.trim() ? JSON.stringify(raw) : "empty (clear it)");
+    btn.disabled = false;
+  });
+  wrap.append(field, btn);
+  return wrap;
 }
 
 /* Consecutive undecided probe results per live wait instance, from the
@@ -37527,6 +37925,9 @@ function sessionPrRows(s) {
      ✓  master has it (merged)
      ↑  a remote has it, master does not (pushed)
      ○  only this machine has it (local)
+   -- a commit whose change master already has under another hash (a
+   rebase left the old one on the pushed branch) struck through, its tooltip
+   naming that hash (`superseded`, session_commits.supersede, claunch-rqtpe)
    -- and every recorded PR as a bordered frame, its number on the frame,
    around the chips of the commits that PR carries. A PR whose commits the
    daemon could not tell apart (a deleted head branch, a squash merge) is a
@@ -37543,10 +37944,13 @@ const RAIL_COMMIT_MARKS = {
    card's own click, which attaches the session, is stopped there. */
 function railCommitChip(c, session) {
   const [mark, what] = RAIL_COMMIT_MARKS[c.state] || ["?", "state unknown"];
-  const chip = el("a", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown"));
+  const by = c.superseded && c.state !== "merged" ? c.superseded : null;
+  const chip = el("a", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown") +
+    (by ? " rail-commit-superseded" : ""));
   chip.appendChild(el("span", "rail-commit-mark", mark));
   chip.appendChild(el("span", "rail-commit-sha", String(c.short || "").slice(0, 7)));
   chip.title = `${c.short || ""} ${c.subject || ""}\n${mark} ${what}` +
+    (by ? `\nsuperseded: master has the same change as ${String(by.short || by.sha || "").slice(0, 7)} (rebased); nothing left to merge` : "") +
     (session ? "\nclick: open the commit and its diff" : "");
   if (session && globalThis.CommitPage) globalThis.CommitPage.link(chip, c.sha || c.short, { session });
   return chip;
@@ -47904,7 +48308,8 @@ function noticeFilterOf(value) {
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], spawn: [], ask: [] };
+const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], spawn: [], ask: [],
+  nudge: [] };
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -48190,13 +48595,14 @@ function noticeGateRefresh(type) {
   if (type === "kill") return refreshKillGate();
   if (type === "spawn") return refreshSpawnGate();
   if (type === "ask") return urgentAskSync(urgentAskRows);
+  if (type === "nudge") return refreshNudgeGate();
   return null;
 }
 
 function gatePendingCount() {
   return gatePending.restart.length + gatePending.goto.length +
     gatePending.reposync.length + gatePending.resume.length + gatePending.kill.length +
-    gatePending.spawn.length + gatePending.ask.length;
+    gatePending.spawn.length + gatePending.ask.length + gatePending.nudge.length;
 }
 
 /* The rail's bell (and its phone twin): the number is the requests waiting
@@ -48471,6 +48877,15 @@ function noticePanelGateRow(type, rec) {
       "Open", "", `open ${rec.session}, where its run's strip answers this`,
       () => { noticePanelToggle(false); urgentAskOpen(rec); }
     ));
+  } else if (type === "nudge") {
+    head.appendChild(gateSessionLink(rec.session));
+    head.appendChild(el("span", "notice-title", ` needs you: ${nudgeWhat(rec)}`));
+    row.appendChild(head);
+    if (rec.message) row.appendChild(el("div", "notice-sub gate-reason", rec.message));
+    actions.appendChild(noticePanelButton(
+      "Open", "", `open ${rec.session}, where its run's strip answers this`,
+      () => { noticePanelToggle(false); nudgeOpen(rec); }
+    ));
   } else {
     const plan = rec.plan || {};
     head.appendChild(el(
@@ -48586,7 +49001,7 @@ function noticePanelPaint() {
   if (!body) return;
   body.innerHTML = "";
   const waiting = [];
-  for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask"]) {
+  for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask", "nudge"]) {
     for (const rec of gatePending[type]) waiting.push([type, rec]);
   }
   body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
@@ -49474,26 +49889,38 @@ async function refreshResumeGate() {
 /* ------------------------------------------------------------------ */
 /* the spawn gate: an operator asks for a session                      */
 /* ------------------------------------------------------------------ */
-/* An operator v2 files a request with daemon/spawn_gate.py
-   (claunch-iw5i8.15) when no running session does the work the user gave
-   it: a new session (opv2_spawn), or an exited one back (opv2_resume). The
-   card counts down five minutes. A new-session request is approved by the
-   clock; a resume request is not resumed by it -- its fallback is filed as
-   a new-session request instead. Manual settles the request and opens the
-   New session form filled with what was asked; the form's create tells the
-   request which session it made. */
+/* An agent files a request with daemon/spawn_gate.py when it asks for a
+   session (claunch-iw5i8.15, widened by claunch-iw5i8.16): a child of its
+   own (MCP spawn; a reviewer child is not gated), a top-level session
+   (spawn with root, or an operator's opv2_spawn), or an exited session back
+   (opv2_resume). The card counts down five minutes. With no answer a child
+   request is created as asked, a top-level request is created as the
+   asker's CHILD instead, and a resume request is not resumed -- its
+   fallback is filed as a new-session request. Manual settles the request
+   and opens the form filled with what was asked -- the New session tab for
+   a top-level request, the spawn child tab under the asker for a child
+   one; the form's create tells the request which session it made. */
 const SPAWN_GATE_PREFIX = "spawn-gate-";
 
 function spawnGateTitle(rec) {
-  return rec.kind === "resume" ? "session resume requested: " : "new session requested";
+  if (rec.kind === "resume") return "session resume requested: ";
+  if (rec.scope === "child") return "child session requested under ";
+  if (rec.scope === "root") return "new top-level session requested";
+  return "new session requested";
 }
 
 function spawnGateClock(rec) {
   const left = gateCountdown(rec.deadline);
   const more = (rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "";
-  return rec.kind === "resume"
-    ? `not resumed — a new session is asked for instead — in ${left}${more}`
-    : `auto-approves in ${left}${more}`;
+  if (rec.kind === "resume") {
+    return `not resumed — a new session is asked for instead — in ${left}${more}`;
+  }
+  if (rec.scope === "child") return `auto-approves in ${left} — created as asked${more}`;
+  if (rec.scope === "root") {
+    return `no answer in ${left}: no top-level session — created as ` +
+      `${rec.session || "the asker"}'s child instead${more}`;
+  }
+  return `auto-approves in ${left}${more}`;
 }
 
 /* What the session would be: project, issue, the first line of its task. */
@@ -49502,8 +49929,9 @@ function spawnGateSpecText(spec) {
   const task = String(spec.task || "").trim().split("\n")[0];
   return [
     spec.project ? `project ${spec.project}` : "",
+    spec.role ? `role ${spec.role}` : "",
     spec.issue ? `issue ${spec.issue}` : "",
-    spec.workflow ? spec.workflow : "",
+    spec.workflow && spec.workflow !== "-" ? spec.workflow : "",
     spec.name ? `name ${spec.name}` : "",
   ].filter(Boolean).join(" · ") + (task ? ` — ${task}` : "");
 }
@@ -49514,6 +49942,7 @@ function spawnGateBody(node, rec, head) {
   const title = head || el("div", "notice-title");
   title.appendChild(el("span", head ? "notice-title" : null, spawnGateTitle(rec)));
   if (rec.kind === "resume") title.appendChild(gateSessionLink(rec.target));
+  else if (rec.scope === "child") title.appendChild(gateSessionLink(rec.session));
   if (!head) node.appendChild(title);
   else node.appendChild(head);
   const basis = rec.basis || {};
@@ -49561,17 +49990,36 @@ async function spawnGatePost(rec, verb, btn, body) {
   return settled;
 }
 
-/* Manual: the New session form, filled with the request's spec. The
-   session is top-level, so it is the New session tab, never a child. */
+/* Manual: the form, filled with the request's spec. A top-level request
+   opens the New session tab; a child request opens the spawn child tab
+   with the asker as the parent, where the person edits name, role,
+   project, workspace, workflow and profile before creating it. */
 async function spawnGateManual(rec) {
   const spec = rec.spec || {};
   const seed = { name: spec.name || "", task: spec.task || "" };
   if (spec.project) seed.project = spec.project;
   if (spec.profile) seed.profile = spec.profile;
-  if (spec.workflow) Object.assign(seed, { workflow: spec.workflow, workflow_version: 2 });
+  if (spec.workflow) {
+    seed.workflow = spec.workflow === "-" ? "" : spec.workflow;
+    if (/-v2$/.test(spec.workflow)) seed.workflow_version = 2;
+  }
+  if (spec.cflow_inputs) seed.cflow_inputs = spec.cflow_inputs;
+  if (spec.issue) seed.issue = spec.issue;
+  if (rec.scope === "child") {
+    if (spec.mesh !== undefined) seed.mesh = spec.mesh === "-" ? "" : spec.mesh;
+    if (spec.role) seed.role = spec.role;
+    if (spec.subroles) seed.subroles = spec.subroles;
+    if (spec.worktree) seed.worktree = "new";
+    if (spec.workspace) seed.workspace = spec.workspace;
+    if (spec.cwd) seed.cwd = spec.cwd;
+    if (spec.prompt_packs) seed.prompt_packs = spec.prompt_packs;
+    await openSessionModal({
+      tab: "spawn", parent: rec.session, seed, spawnRequest: rec.id,
+    });
+    return;
+  }
   if (spec.worktree !== undefined) seed.worktree = "new";
   if (spec.cwd) seed.cwd = spec.cwd;
-  if (spec.issue) seed.issue = spec.issue;
   await openSessionModal({
     tab: "new", seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
     spawnRequest: rec.id,
@@ -49611,13 +50059,22 @@ function spawnGateButtons(rec, done) {
     add("New session", "", "leave it exited and ask for a new session from the fallback instead",
       (btn) => spawnGatePost(rec, "spawn", btn));
   } else {
-    add("Approve", "approve", "create the session now, as asked",
+    add("Approve", "approve",
+      rec.scope === "child" ? `create the child of ${rec.session} now, as asked`
+        : "create the top-level session now, as asked",
       (btn) => spawnGatePost(rec, "approve", btn));
-    add("Manual", "", "open the New session form filled with this request, and create it yourself",
+    add("Manual", "",
+      rec.scope === "child"
+        ? `open the spawn child form under ${rec.session} filled with this request, ` +
+          "edit it and create it yourself"
+        : "open the New session form filled with this request, edit it and create it yourself",
       async (btn) => {
         const settled = await spawnGatePost(rec, "manual", btn);
         if (settled) {
-          noticePanelToggle(false);
+          // Out of the form's way when pressed from the panel. Only then:
+          // closing the panel puts every waiting card away, and a press on a
+          // corner card must not hide the other requests' cards.
+          if (noticePanelOpen()) noticePanelToggle(false);
           await spawnGateManual(settled);
         }
         return settled;
@@ -49978,6 +50435,93 @@ function urgentAskSync(rows) {
   }
   for (const key of [...notices.keys()]) {
     if (key.startsWith(URGENT_ASK_PREFIX) && !seen.has(key)) dismissNotice(key);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* nudges: a driver asking its person to act on its cflow run          */
+/* ------------------------------------------------------------------ */
+/* An agent whose run stops on something only a person releases -- a
+   `chooser: user` choice such as the worker's end decision, an ask that fell
+   to a person, its move request, a loop or visit limit, a halt, a v1 run's
+   waiting_selection/approval -- calls the flow_nudge MCP tool
+   (claunch-g08xz). The daemon keeps one request per run slot and settles it
+   itself once none of what it names is owed any more
+   (GET /api/flow-nudges, daemon/flow_nudge.py). The card answers nothing:
+   the session's terminal strip and its run page carry the presses, so a
+   click opens the session. */
+const NUDGE_PREFIX = "nudge-";
+
+function nudgeWhat(rec) {
+  return (rec.items || []).join(", ") || "its run";
+}
+
+function nudgeOpen(rec) {
+  location.hash = "#/s/" + encodeURIComponent(rec.session);
+}
+
+async function refreshNudgeGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/flow-nudges")).json();
+  } catch {
+    return;
+  }
+  const all = (body && body.requests ? body.requests : []).map((r) => (
+    r.status === "pending" ? r : { ...r, status: r.status || "settled" }
+  ));
+  const pending = all.filter((r) => r.status === "pending");
+  gateHistorySync("nudge", pending, all);
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = NUDGE_PREFIX + rec.id;
+    gateHistoryOpen(
+      "nudge", String(rec.id),
+      `${rec.session} needs you: ${nudgeWhat(rec)}`,
+      rec.message || "", { session: rec.session }
+    );
+    if (gateIsHidden("nudge", rec.id)) continue;
+    seen.add(key);
+    const card = notices.get(key);
+    if (card && card.node.isConnected) {
+      // asking again within the window updates the message, not the card
+      const why = card.node.querySelector(".gate-reason");
+      if (why && rec.message && why.textContent !== rec.message) why.textContent = rec.message;
+      continue;
+    }
+    dismissNotice(key);
+    const node = el("div", "notice warn gate nudge");
+    const title = el("div", "notice-title");
+    title.appendChild(gateSessionLink(rec.session));
+    title.appendChild(el("span", null, ` needs you: ${nudgeWhat(rec)}`));
+    node.appendChild(title);
+    if (rec.message) node.appendChild(el("div", "notice-sub gate-reason", rec.message));
+    if (rec.workflow) {
+      node.appendChild(el("div", "notice-sub",
+        `workflow ${rec.workflow}` + (rec.version === 1 ? " (cflow v1)" : "")));
+    }
+    const actions = el("div", "gate-actions");
+    const open = el("button", "wf-btn approve", "Open");
+    open.type = "button";
+    open.title = `open ${rec.session}, where its run's strip answers this`;
+    open.addEventListener("click", (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      nudgeOpen(rec);
+    });
+    actions.appendChild(open);
+    actions.appendChild(gateHideButton("nudge", rec.id, key,
+      "close this card only — nothing is answered, the run keeps waiting; the " +
+      "bell keeps it in the notification history"));
+    node.appendChild(actions);
+    node.title = `open ${rec.session}`;
+    node.addEventListener("click", () => nudgeOpen(rec));
+    host.appendChild(node);
+    notices.set(key, { node, timer: null });
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(NUDGE_PREFIX) && !seen.has(key)) dismissNotice(key);
   }
 }
 
@@ -50792,7 +51336,7 @@ async function pollOnce() {
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
   refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate(),
-    refreshKillGate(), refreshSpawnGate());
+    refreshKillGate(), refreshSpawnGate(), refreshNudgeGate());
   await Promise.all(refreshes);
 }
 

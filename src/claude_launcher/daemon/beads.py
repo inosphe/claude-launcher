@@ -421,6 +421,20 @@ def queue_summary(queue: Sequence[dict]) -> dict:
     }
 
 
+def done_count(issues: Sequence[dict], name: str) -> int:
+    """How many issues the board assigns to session ``name`` are closed.
+
+    The other half of the rail card's work count: ``queue_summary`` says what
+    is left, this says what the session has already finished, so "1 left · 3
+    done" reads as progress rather than as a bare backlog. Pure -- the
+    listing it reads already carries the closed rows (:meth:`Board.issues`).
+    """
+    return sum(
+        1 for i in issues
+        if i.get("assignee") == name and i.get("status") == "closed"
+    )
+
+
 def preview_row(row: dict) -> dict:
     """``row`` with its description cut to :data:`PREVIEW_CHARS`.
 
@@ -2328,7 +2342,8 @@ class Board:
                     # the response 2.3 MB on this machine's own board.
                     "issues": preview_rows(queue),
                     "created": preview_rows(created),
-                    "summary": queue_summary(queue),
+                    "summary": {**queue_summary(queue),
+                                "done": done_count(rows, name)},
                 }
                 if s is not None and cflow_for is not None:
                     try:

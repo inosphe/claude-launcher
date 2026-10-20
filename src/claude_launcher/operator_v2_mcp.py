@@ -21,6 +21,9 @@ LEVEL = {"type": "string", "enum": ["info", "attention", "urgent"],
 REPLY_TO = {"type": "string", "description": "Feed id of your earlier post or ask this one follows up."}
 REQUEST_ID = {"type": "string", "description": "Stable unique id. Reuse it on retry to avoid a duplicate."}
 SESSION = {"type": "string", "description": "a session in your scope"}
+THREAD = {"type": "string", "description": "Thread id (th-...) of your conversation with the user to write in: the "
+                                          "`thread` of the inbox item you answer. Omit to use the most recently "
+                                          "active thread."}
 NONE = {"type": "object", "properties": {}}
 
 TOOLS = [
@@ -32,39 +35,60 @@ TOOLS = [
                     "changes once; `ended` names sessions that left your watch since the last poll.",
      "inputSchema": {"type": "object", "properties": {"since": {"type": "string", "description": "cursor from the previous poll; omit on the first"}}}},
     {"name": "opv2_post",
-     "description": "Post one item to your feed in the Observer page. This is your only output channel — terminal "
-                    "text is never shown to the user.",
+     "description": "Post one item to your conversation with the user in the Operator view. The conversation is a "
+                    "set of threads: answer in the thread the user wrote in (`thread` from opv2_inbox); a reply_to "
+                    "follows its entry's thread; with neither, the most recently active thread. This is your only "
+                    "output channel — terminal text is never shown to the user.",
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "description": "Markdown, <=4000 chars. Lead with the point; cite session names, ids, hashes."},
-         "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID}, "required": ["text", "request_id"]}},
+         "thread": THREAD, "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID},
+         "required": ["text", "request_id"]}},
     {"name": "opv2_ask",
-     "description": "Ask the user for a decision in your feed. type=approve shows approve/deny, type=choice shows "
-                    "`choices`, type=text a text box. Returns at once; the answer arrives through opv2_inbox. A "
-                    "missing answer never means yes.",
+     "description": "Ask the user for a decision in one of your threads (`thread`, as in opv2_post). type=approve "
+                    "shows approve/deny, type=choice shows `choices`, type=text a text box. Returns at once; the "
+                    "answer arrives through opv2_inbox. A missing answer never means yes.",
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "description": "The question with the facts needed to answer it, <=4000 chars."},
          "type": {"type": "string", "enum": ["approve", "choice", "text"]},
          "choices": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 10},
-         "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID}, "required": ["text", "type", "request_id"]}},
+         "thread": THREAD, "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID},
+         "required": ["text", "type", "request_id"]}},
     {"name": "opv2_inbox",
      "description": "Read the user's new input: messages typed to you and answers to your asks. Each item is "
-                    "returned once; call it whenever you are nudged.",
+                    "returned once and names its `thread` (id and `thread_title`); answer in that thread. A message "
+                    "may carry `images` with a `path` on this machine you can open. Call it whenever you are nudged.",
+     "inputSchema": NONE},
+    {"name": "opv2_thread_open",
+     "description": "Open a new thread in your conversation with the user, for a topic that should not run on in "
+                    "an existing one (a new incident, a separate piece of work), with its first post. Returns the "
+                    "thread id; write there later with `thread`.",
+     "inputSchema": {"type": "object", "properties": {
+         "title": {"type": "string", "description": "the topic, <=200 chars"},
+         "text": {"type": "string", "description": "the first post, markdown, <=4000 chars"},
+         "level": LEVEL, "refs": REFS, "request_id": REQUEST_ID}, "required": ["title", "text", "request_id"]}},
+    {"name": "opv2_threads",
+     "description": "Your threads with the user, most recently active first: id, title, status, entry count, "
+                    "unanswered asks and the last entry.",
      "inputSchema": NONE},
     {"name": "opv2_dispatch",
      "description": "Type an instruction into a running session of your scope on the user's behalf. `on_behalf_of` "
-                    "must be the id of the user message (or answered, not denied, ask) that instructs it.",
+                    "must be the id of the user message (or answered, not denied, ask) that instructs it. The "
+                    "dispatch report is shown in that message's thread unless `thread` names another.",
      "inputSchema": {"type": "object", "properties": {
          "target": SESSION,
          "text": {"type": "string", "description": "the instruction, faithful to what the user said"},
-         "on_behalf_of": {"type": "string", "description": "id from opv2_inbox"}},
+         "on_behalf_of": {"type": "string", "description": "id from opv2_inbox"},
+         "thread": THREAD},
          "required": ["target", "text", "on_behalf_of"]}},
     {"name": "opv2_spawn",
      "description": "Ask the user for a NEW session to do work that no running session in your scope is doing "
                     "(check opv2_sessions first; a running session doing it gets opv2_dispatch instead). The "
                     "request waits on a notification card for 5 minutes: the user approves, rejects, extends it or "
-                    "creates the session by hand; no answer counts as approval. The new session is top-level, in "
-                    "the project's default workspace on a fresh worktree, running improv-worker-v2. Returns at "
-                    "once; the outcome is typed into your terminal and posted to your feed.",
+                    "creates the session by hand. Approved, the new session is top-level, in the project's "
+                    "default workspace on a fresh worktree, running improv-worker-v2. With no answer no top-level "
+                    "session is made: the same session is created as YOUR child instead (project, task, issue, "
+                    "name and workflow kept). Returns at once; the outcome is typed into your terminal and posted "
+                    "to your feed.",
      "inputSchema": {"type": "object", "properties": {
          "project": {"type": "string", "description": "a project in your scope (omit when your scope is one project)"},
          "task": {"type": "string", "description": "the new session's opening task, faithful to what the user said"},
@@ -94,11 +118,22 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "kind": {"type": "string", "description": "comma list of post, ask, dispatch, user, system, update"},
          "session": {"type": "string", "description": "only entries naming this session"},
+         "thread": {"type": "string", "description": "only entries of this thread"},
          "q": {"type": "string", "description": "substring to find in the text"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
     {"name": "opv2_sessions",
      "description": "The sessions in your scope with project, state, board issue and status-check answers. "
                     "`state`: live (default: running, paused, hold, delayed, failed), ended, or all.",
+     "inputSchema": {"type": "object", "properties": {
+         "state": {"type": "string", "enum": ["live", "ended", "all"]},
+         "project": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
+    {"name": "opv2_landing",
+     "description": "Where the work of the sessions in your scope stands, in one call: board issue and its status, "
+                    "branch, recorded PRs and `landed` (merged, open, closed, no-pr, unknown). Judge landing by "
+                    "`landed`: a squash merge leaves a branch's commits off master, so ancestry calls it unlanded. "
+                    "PR states are the recorded ones (no network read); `unknown` means a PR with no state on record. "
+                    "Same `state`/`project`/`limit` as opv2_sessions.",
      "inputSchema": {"type": "object", "properties": {
          "state": {"type": "string", "enum": ["live", "ended", "all"]},
          "project": {"type": "string"},
@@ -156,21 +191,28 @@ def call_tool(name, args):
     if name == "opv2_poll":
         return client.get(base + "/poll" + _query(args, ("since",)))
     if name == "opv2_post":
-        return client.post(base + "/post", pick("text", "level", "refs", "reply_to", "request_id"))
+        return client.post(base + "/post", pick("text", "thread", "level", "refs", "reply_to", "request_id"))
     if name == "opv2_ask":
-        return client.post(base + "/ask", pick("text", "type", "choices", "level", "refs", "reply_to", "request_id"))
+        return client.post(base + "/ask", pick("text", "type", "choices", "thread", "level", "refs", "reply_to",
+                                               "request_id"))
     if name == "opv2_inbox":
         return client.get(base + "/inbox")
+    if name == "opv2_thread_open":
+        return client.post(base + "/threads", pick("title", "text", "level", "refs", "request_id"))
+    if name == "opv2_threads":
+        return client.get(base + "/threads")
     if name == "opv2_dispatch":
-        return client.post(base + "/dispatch", pick("target", "text", "on_behalf_of"))
+        return client.post(base + "/dispatch", pick("target", "text", "on_behalf_of", "thread"))
     if name == "opv2_spawn":
         return client.post(base + "/spawn", pick("project", "task", "issue", "name", "reason", "on_behalf_of"))
     if name == "opv2_resume":
         return client.post(base + "/resume", pick("target", "reason", "on_behalf_of", "fallback"))
     if name == "opv2_history":
-        return client.get(base + "/history" + _query(args, ("kind", "session", "q", "limit")))
+        return client.get(base + "/history" + _query(args, ("kind", "session", "thread", "q", "limit")))
     if name == "opv2_sessions":
         return client.get(base + "/sessions" + _query(args, ("state", "project", "limit")))
+    if name == "opv2_landing":
+        return client.get(base + "/landing" + _query(args, ("state", "project", "limit")))
     if name in ("opv2_session", "opv2_commits") and not args.get("session"):
         raise OperatorV2McpError("session is required")
     target = quote(str(args.get("session") or ""), safe="")

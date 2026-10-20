@@ -208,6 +208,24 @@ def test_a_constraint_without_fields_reports_under_the_general_key():
     assert inputs.normalize({}, {}, cons)[1] == {inputs.CONSTRAINT_ERROR_KEY: "never"}
 
 
+def test_worker_v2_declares_the_reviewers_profile_and_harness():
+    """claunch-gqgcz: reviewer-ensure spawns its reviewer with these; empty
+    means the reviewer inherits the worker's profile and harness."""
+    chart = layers.load("improv-worker-v2")
+    sch = chart.meta["inputs"]
+    for name in ("reviewer_profile", "reviewer_harness"):
+        assert sch[name]["type"] == "string" and sch[name]["default"] == ""
+        assert sch[name]["set_by"] == ["user"]  # claunch-gqgcz.1
+    values, errors = inputs.normalize(sch, {"reviewer_harness": "codex"},
+                                      chart.meta["input_constraints"])
+    assert errors == {} and values["reviewer_profile"] == ""
+    [prompt] = [n.get("prompt") for nid, n in chart.nodes.items()
+                if nid.rsplit("/", 1)[-1] == "reviewer-ensure"]
+    assert "${data.inputs.reviewer_profile}" in prompt
+    assert "${data.inputs.reviewer_harness}" in prompt
+    assert "`:<harness>`" in prompt
+
+
 def test_worker_v2_refuses_force_pr_with_force_no_pr():
     chart = layers.load("improv-worker-v2")
     sch, cons = chart.meta["inputs"], chart.meta["input_constraints"]

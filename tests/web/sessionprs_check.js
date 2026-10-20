@@ -73,6 +73,16 @@ for (const [state, mark] of [["merged", "✓"], ["pushed", "↑"], ["local", "�
 assert.equal(chip("weird").className, "rail-commit rail-commit-unknown");
 assert.equal(chip("weird").children[0].textContent, "?");
 
+// A rebased-away commit (claunch-rqtpe): struck, its tooltip naming the
+// landed copy; a merged row is never struck whatever it carries.
+const gone = api.railCommitChip({short: "b48ce177", subject: "s", state: "pushed",
+  superseded: {sha: "7ab01a58ffff", short: "7ab01a58"}});
+assert.equal(gone.className, "rail-commit rail-commit-pushed rail-commit-superseded");
+assert(gone.title.includes("superseded: master has the same change as 7ab01a5"));
+const kept = api.railCommitChip({short: "7ab01a58", subject: "s", state: "merged",
+  superseded: {sha: "x", short: "x"}});
+assert.equal(kept.className, "rail-commit rail-commit-merged");
+
 // Nothing to draw: no line, and a line drawn earlier goes.
 let li = card();
 api.decorateCommitsRow(li, {});

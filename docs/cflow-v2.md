@@ -762,48 +762,70 @@ inputs:
     `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
     `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
 
-#### 시작 뒤에 채우는 입력(set_by)
+#### 시작 뒤에 쓰는 입력(set_by)
 
-시작 입력은 런이 만들어질 때 한 번 기록된다. 선언에 `set_by: [agent]`가 있는
-입력만 예외로, 런이 시작된 뒤에 그 런의 드라이버가 한 번 채울 수 있다
-(claunch-7d4nt). 시작 입력은 런을 시작한 요청의 값이므로, 이 쓰기는 시작 때
-비워 둔 값을 나중에 사용자나 부모가 정해 주었을 때를 위한 것이다.
-improv-worker-v2의 `inputs.issue`가 그 예다: 이슈를 비워 두고 시작한 런에 뒤늦게
-시작 이슈가 지정되면 에이전트가 그 id를 채운다. 런이 진행 중에 스스로 정한
-값(예: 회차가 확정한 이슈)은 시작 입력이 아니며, 워크플로가 `bind`로 다른
-`$data` 이름에 기록한다. 그 값을 `inputs`로 옮겨 적는 경로는 두지 않는다.
+시작 입력은 런이 만들어질 때 한 번 기록된다. 선언의 `set_by`가 시작 뒤에 그
+입력을 쓸 수 있는 쪽을 정한다. 값은 둘이고 함께 둘 수 있다.
+
+- `agent`: 런의 드라이버가 비어 있는 입력을 한 번 채운다(claunch-7d4nt). 시작 때
+  비워 둔 값을 나중에 사용자나 부모가 정해 주었을 때를 위한 것이다.
+  improv-worker-v2의 `inputs.issue`가 그 예다: 이슈를 비워 두고 시작한 런에 뒤늦게
+  시작 이슈가 지정되면 에이전트가 그 id를 채운다. 런이 진행 중에 스스로 정한
+  값(예: 회차가 확정한 이슈)은 시작 입력이 아니며, 워크플로가 `bind`로 다른
+  `$data` 이름에 기록한다. 그 값을 `inputs`로 옮겨 적는 경로는 두지 않는다.
+- `user`: 사람이 런 도중에 값을 바꾼다(claunch-umq1f). 현재 값이 있어도 덮어쓴다.
+  improv-worker-v2의 `require_coding_approval`과 `max_rounds`가 그 예다: 일감마다
+  `coding-approval-check`가, 회차마다 회차 루프의 `while`이 그 값을 다시 읽으므로,
+  사람이 런 도중에 승인 게이트를 켜면 다음 일감부터 승인을 기다린다.
+  `reviewer_profile`·`reviewer_harness`도 같다(10b). required 입력은 빈 값으로
+  비울 수 없다 — `' , '`처럼 빈 항목만 준 list도 비우는 값으로 본다.
 
 ```yaml
 inputs:
   issue: {type: string, default: "", set_by: [agent]}
+  require_coding_approval: {type: bool, default: false, set_by: [user]}
 ```
 
-- `set_by`의 값은 `agent` 하나다. `set_by`가 없는 입력은 시작 뒤에 바꿀 수 없다.
-  `set_by`를 둘 수 있는 type은 `string`, `text`, `int`, `enum`, `list`다. `bool`은
-  빈 값이 없고(채우지 않은 값이 `false`다), `invariants`·`acceptance`는 시작할 때
-  규칙과 모니터로 접히므로 시작 뒤 쓰기가 그것을 다시 만들지 못한다. 그 밖의
+- `set_by`가 없는 입력은 시작 뒤에 바꿀 수 없다. `agent`를 둘 수 있는 type은
+  `string`, `text`, `int`, `enum`, `list`다. `bool`은 빈 값이 없으므로(채우지 않은
+  값이 `false`다) 「비어 있을 때 한 번」 규칙이 성립하지 않는다. `user`는 그 다섯에
+  `bool`을 더한다. `invariants`·`acceptance`는 시작할 때 규칙과 모니터로 접히므로
+  시작 뒤 쓰기가 그것을 다시 만들지 못하고, 어느 쪽도 둘 수 없다. 허용되지 않는
   type에 `set_by`를 쓰면 컴파일 오류다.
-- 쓰기 도구: MCP `flow_input`(`name`, `value`, `scope`/`cwd`/`side`는 다른 `flow_*`
-  도구와 같다)과 CLI `claunch cflow2 input <이름> <값> [--json-value] [-t 슬롯]`.
-  둘 다 엔진 함수 `runtime.set_input` 하나를 부른다. 호출자는 런의 드라이버여야
-  한다(`runtime.may_drive`, 다른 `flow_*` 도구와 같은 판정). 멈춘(halt) 런과 끝난
-  런은 거절한다.
-- 덮어쓰기 금지: 현재 값이 비어 있을 때(`null`, 빈 문자열, 빈 목록)만 쓴다. 값이
-  있으면 거절하고 오류에 현재 값을 싣는다. 시작할 때 데몬이 넣은 Board 이슈도
-  이 규칙으로 보호된다. `default`가 비어 있지 않은 입력은 시작 때 그 값을 가지므로
-  쓸 수 없다(검사 경고 `set-by-default`). `required: true`인 입력도 시작 때
-  반드시 채워지므로 같다(검사 경고 `set-by-required`). 사람이 값을 덮어쓰는 경로는 없다.
+- 쓰기 도구와 호출자:
+  - `agent`: MCP `flow_input`(`name`, `value`, `scope`/`cwd`/`side`는 다른 `flow_*`
+    도구와 같다)과 CLI `claunch cflow2 input <이름> <값> [--json-value] [-t 슬롯]`.
+    호출자는 런의 드라이버여야 한다(`runtime.may_drive`, 다른 `flow_*` 도구와 같은
+    판정). 멈춘(halt) 런과 끝난 런은 거절한다.
+  - `user`: CLI `claunch cflow2 input <이름> <값> --user`, 웹 런 페이지의 inputs
+    블록(`set_by`에 `user`가 있는 입력마다 편집기가 붙는다: `bool`은 체크박스,
+    `enum`은 목록, 그 밖은 입력란), 데몬 `POST /api/cflow2/input`(본문 `cwd`,
+    `scope`, `name`, `value`). CLI는 다른 사람용 명령처럼 그 런을 운전하는 세션의
+    셸에서 실행하면 거절한다. 멈춘 런에도 쓸 수 있고(아무것도 진행시키지 않는다),
+    끝난 런은 거절한다. 쓰고 나면 드라이버 세션에 새 값을 알리는 한 줄이 타이핑된다.
+    MCP에는 이 경로가 없다 — 에이전트가 사람이 켠 승인 게이트를 끌 수 없게 한다.
+  - 셋 모두 엔진 함수 `runtime.set_input` 하나를 부른다(`caller` agent/user).
+- `agent`의 덮어쓰기 금지: 현재 값이 비어 있을 때(`null`, 빈 문자열, 빈 목록)만
+  쓴다. 값이 있으면 거절하고 오류에 현재 값을 싣는다. 시작할 때 데몬이 넣은 Board
+  이슈도 이 규칙으로 보호된다. `default`가 비어 있지 않은 입력은 시작 때 그 값을
+  가지므로 `agent`가 쓸 수 없다(검사 경고 `set-by-default`). `required: true`인
+  입력도 시작 때 반드시 채워지므로 같다(검사 경고 `set-by-required`). 두 경고는
+  `user`에는 해당하지 않는다.
+- `user`의 빈 값: 빈 값은 그 입력을 비운다(type의 빈 값 — `null`, 빈 목록; `bool`의
+  빈 표기는 `false`). `required: true`인 입력은 비울 수 없다.
 - 값 검사는 시작 입력과 같다(`inputs.settle`이 `inputs.normalize`와 같은 형식
-  변환과 `enum` 검사를 쓴다). 빈 값은 쓰지 않는다. 그 입력을 읽는
+  변환과 `enum` 검사를 쓴다). `agent`는 빈 값을 쓰지 않는다. 그 입력을 읽는
   `input_constraints`는 새 값을 넣은 전체 입력으로 다시 평가해 어기면 거절한다.
 - 쓰는 자리는 `data.inputs.<선언된 이름>` 하나다. 도구는 그 밖의 `$data` 경로를
   쓰지 않는다. 반대로 노드는 `data.inputs`를 쓰지 않는다: `bind: inputs`와 최상위
   `data:`의 `inputs` 키는 컴파일 오류다.
-- 저널: `input_set {name, value, by, was}`(`by`는 쓴 세션, `was`는 이전 값).
+- 저널: `input_set {name, value, by, was}`(`by`는 쓴 세션, 사람이 쓰면 `user`;
+  `was`는 이전 값).
 - 쓴 값은 `data.inputs.<이름>`에 들어간다. 그 뒤에 렌더링되는 프롬프트의
-  `${data.inputs.<이름>}`, `flow_status`·`claunch cflow2 status`·웹의 `inputs`가 새
-  값을 보인다. `chart.json` 스냅샷은 시작 때 값 그대로다. 다음 회차(2.1 recur)는
-  런 상태의 `data.inputs`를 이어받는다.
+  `${data.inputs.<이름>}`, 그 뒤에 평가되는 가드, `flow_status`·`claunch cflow2
+  status`·웹의 `inputs`가 새 값을 보인다. 이미 지난 가드는 다시 평가되지 않는다.
+  `chart.json` 스냅샷은 시작 때 값 그대로다. 다음 회차(2.1 recur)는 런 상태의
+  `data.inputs`를 이어받는다.
 
 #### 입력 사이의 제약(input_constraints)
 
@@ -1234,8 +1256,8 @@ status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 
 | `unknown-side` | `sides:`를 선언한 차트에서 `side:<이름>:` 주소나 `side('<이름>')`이 선언에 없는 이름을 씀. side 런 정의 쪽의 `main:`·형제 주소는 실행 시점에 해석한다 |
 | `peer-write` | `do:`의 `push`·`set`·`remove`가 `main:`·`side:` 주소를 씀 |
 | `unbounded-visits` (경고) | `max_visits: 0` |
-| `set-by-default` (경고) | `set_by`를 선언한 입력에 비어 있지 않은 `default`가 있다. 시작 때부터 그 값을 가지므로 시작 뒤에 쓸 수 없다(2.6) |
-| `set-by-required` (경고) | `set_by`를 선언한 입력이 `required: true`다. 시작 검사가 빈 값을 거절하므로 시작 뒤에 쓸 수 없다(2.6) |
+| `set-by-default` (경고) | `set_by: [agent]`를 선언한 입력에 비어 있지 않은 `default`가 있다. 시작 때부터 그 값을 가지므로 에이전트가 시작 뒤에 쓸 수 없다(2.6). `user`에는 해당하지 않는다 |
+| `set-by-required` (경고) | `set_by: [agent]`를 선언한 입력이 `required: true`다. 시작 검사가 빈 값을 거절하므로 에이전트가 시작 뒤에 쓸 수 없다(2.6). `user`에는 해당하지 않는다 |
 
 **v1과의 차이.** v1 하위 런(`runs/<세션>/sub/<이름>/`)은 `publishes`/`awaits`의
 게시 횟수로 만났다. v2는 log 컬렉션과 이름별 cursor로 만난다. v1 하위 런 도구의
@@ -1699,6 +1721,7 @@ body:
 | 중단 | `claunch cflow2 abort --reason R` | `POST /api/cflow2/abort {cwd, scope, reason}` | 없음 |
 | 보관 | `claunch cflow2 archive` | `POST /api/cflow2/archive {cwd, scope}` | 없음 |
 | 재촉 | 없음 | `POST /api/cflow2/nudge {cwd, scope}` | 없음 |
+| 시작 입력 변경(`set_by: [user]`, 2.6) | `claunch cflow2 input <이름> <값> --user` | `POST /api/cflow2/input {cwd, scope, name, value}` | 없음(`flow_input`은 `set_by: [agent]`만) |
 
 - CLI의 `move`·`report`는 런을 드라이브하는 세션의 셸에서 실행하면 거절한다
   (`_refuse_own_session`, `select`·`approve`와 같다).
@@ -2204,8 +2227,9 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
-| `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
+| `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6). `set_by: [user]` 입력은 쓰지 못한다 |
 | `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
+| `flow_nudge` | 자기 런(본 런 또는 `side`)이 사람을 기다릴 때(`chooser: user` 선택, 사람에게 넘어간 ask, 이동 요청, 루프·방문 한도, halt, v1 런의 waiting_selection·approval) 대시보드 알림 채널(코너 카드·알림 기록·벨 대기 수)에 올림(`message`). 사람을 기다리는 것이 없으면 거절하고, 런당 카드는 하나이며 기다리던 것이 풀리면 데몬이 스스로 정산한다(`daemon/flow_nudge.py`, claunch-g08xz). 아무것도 옮기지 않는다 |
 
 상태를 돌려주는 `flow_*` 툴은 상태를 요약판으로 돌려준다(`mcp.brief`, claunch-ejvoy.1).
 `runtime.status`는 바뀌지 않으므로 웹 UI·CLI·데몬은 전체 payload를 읽는다.
@@ -2607,8 +2631,10 @@ spec:
     (컴파일 트리, 검사 결과, 시작 입력 선언, 읽기 전용. `name`은 정의 이름만 받고
     경로면 400), `POST /api/cflow2/select`(사용자 선택, `caller=user`),
     `POST /api/cflow2/extend`(`loop_limit` 응답: `by`·`reset`·`stop`, 본문에
-    `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/nudge | abort | archive | report | move`
-    (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
+    `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/input`
+    (사람의 시작 입력 변경, `set_by: [user]`, 2.6), `POST /api/cflow2/nudge | abort | archive | report | move`
+    (사람의 조작, 2.11). 런 상세의 `input_decls`는 시작 입력 선언 목록이다(런 화면의
+    입력 편집기가 읽는다). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
     싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
   - 런 상세의 `calls`(`daemon/cflow2_web.calls`)는 동적 호출 목록이다(2.12):
     호출한 작업, 프로시저, 상태, 결과, callee 런의 `scope`·`cwd`. 런 화면의 Calls
@@ -2866,6 +2892,81 @@ PR은 닫고 브랜치는 지웠다.
 남기고 판정의 정본을 보드 코멘트로 둔다. leader-v2의 실제 첫 사용에서 확인해 이
 표에 행을 더한다.
 
+## 10b. 리뷰어의 profile·harness (improv-worker-v2, claunch-gqgcz)
+
+`reviewer-ensure`가 세우는 자식 리뷰어는 기본으로 워커 세션의 profile과 harness를
+물려받는다. 시작 입력 두 개가 그것을 바꾼다.
+
+| 입력 | 값 | 비었을 때 |
+|---|---|---|
+| `reviewer_profile` | profile 이름(`claunch ls`) | 워커의 profile |
+| `reviewer_harness` | harness 이름(`claunch harnesses`) | 리뷰어 profile의 기본 harness |
+
+- 전달: 워커는 두 값을 spawn의 `profile` selector 하나로 합친다 — 둘 다 있으면
+  `PROFILE:HARNESS`, profile만 있으면 `PROFILE`, harness만 있으면 `:HARNESS`, 둘 다
+  비었으면 `profile`을 보내지 않는다. `:HARNESS`는 데몬(`spawn.check`)이 부모
+  세션의 profile 이름에 붙여 푼다. 부모에게 profile이 없으면 거절한다.
+- 게이트: selector는 모두 `spawn.allow_profile`의 몫이다(`:HARNESS` 포함). 꺼져
+  있으면 spawn이 403으로 거절하고, 워커는 profile 없이 다시 세우지 않는다 —
+  이슈에 `REVIEWER PROFILE REFUSED: <selector> — <거절 문구>`를 남기고 넘어가며
+  peer-review는 형제·조상 리뷰어나 리더에게 간다. `harness` 필드는 spawn이 항상
+  거절하므로 쓰지 않는다.
+- 기존 리뷰어: 응답자 판정이 0이어도 자식 리뷰어 그룹이 비었고 두 입력 중 하나가
+  있으면 자식 리뷰어를 세운다. 형제·조상 리뷰어는 사람이 고른 profile로 서 있지
+  않고, peer-review는 자식 리뷰어를 먼저 묻는다.
+- 시작 뒤 변경: 두 입력은 `set_by: [user]`다(claunch-gqgcz.1). 사람이 런 도중에
+  `claunch cflow2 input --user` 또는 웹 런 페이지의 inputs 편집기로 바꾼다(2.6).
+  에이전트는 쓰지 못한다. `reviewer-ensure`가 회차마다 `${data.inputs.reviewer_*}`를
+  읽으므로 새 값은 그 뒤에 세우는 리뷰어부터 적용된다. 이미 살아 있는 자식
+  리뷰어는 응답자 판정이 0으로 닿아 그대로 다시 쓰이고, 다른 profile로 바꿔
+  세우지 않는다.
+
+## 10c. 난이도에 따른 세션 라우팅 (improv-worker-v2, claunch-yl0to)
+
+시작 입력 `session_routing`(bool, 기본 false, `set_by: [user]`)이 켜지면 각 일감의
+구현을 이 세션이 직접 할지, fork한 자식 세션에 맡길지를 정한다. 꺼져 있으면 흐름은
+이전과 같고, 추가된 동작은 하나다 — `coding-approval`의 거절(reject)이 `coding-plan`으로
+돌아가 계획을 다시 쓴다.
+
+| 입력 | 값 | 비었을 때 |
+|---|---|---|
+| `session_routing` | true/false | false |
+| `delegate_profile` | profile 이름 | 데몬 설정 `delegate_profile`, 그다음 내장값 `ds4` |
+| `delegate_model` | 모델 프리셋(`default`/`small`/`large`/`xlarge`/`subagent`) 또는 모델 이름 | 데몬 설정 `delegate_model`, 그다음 내장값 `small` |
+
+- 판정: `session_routing`이 켜지면 `coding-plan`은 `require_coding_approval`과 무관하게
+  돌고 `difficulty`(easy/hard), `recommend`(direct/delegate), `why`를 반환한다.
+- 게이트: `require_coding_approval`도 켜져 있으면 `coding-approval-routing`이
+  `approve-as-planned`/`approve-no-delegate`/`approve-down-delegate`/`reject`를 묻는다.
+  `approve`는 질문 옵션의 예약어(`cflow2/question.RESERVED_NAMES`)라서
+  `approve-as-planned`로 쓴다. 게이트가 꺼져 있으면 계획의 `recommend`대로 간다.
+- 기록: 경로가 정해질 때마다 이슈에 `ROUTED: <easy|hard> → <direct|PROFILE:model> — <근거>`
+  코멘트를 남긴다.
+- 위임(`delegate-work`): 부모의 대화를 fork한 자식을 부모의 워크트리에 세운다
+  (`fork: true`, `worktree`·`cwd` 없음, `workflow: oneshot-job-v2`). 자식은 구현, 표적
+  테스트, 부모의 회차 브랜치에 직접 커밋까지 하고 mesh로 `DELEGATE DONE` 또는
+  `DELEGATE ESCALATE`를 보낸다. 부모는 그동안 파일을 고치지 않고 기다리며, 리뷰와
+  착지는 부모가 한다. 살아 있는 stack side 런이 있으면 기존 stacked 경로를 쓴다.
+- `delegated-rework-approval`: 입력 변수 없이 항상 사용자 게이트다. 자식이
+  escalate하거나 실패했을 때, 부모의 표적 테스트가 실패했을 때, 리뷰가 위임 작업에
+  재작업을 요구했을 때 열리고 `rework-direct`/`rework-delegate`/`reject`를 묻는다.
+  `reject`는 `coding-plan`으로 돌아간다. `rework-direct` 뒤에는 경로가 direct가 되어
+  같은 일감에서 이 게이트가 다시 열리지 않는다.
+- 데몬 설정: `claunch daemon config delegate_profile|delegate_model`, 또는 웹
+  Settings의 "Delegated child session" 카드(`GET/PUT /api/delegate-setting`). 카드는
+  존재하는 profile과 모델 프리셋만 받는다.
+- 모델 프리셋 해석(`spawn._resolve_model_preset`, 자식 profile 기준):
+  - claude: `default`는 `--model`을 붙이지 않는다(profile의 `ANTHROPIC_MODEL`).
+    `small`/`large`/`xlarge`는 `haiku`/`opus`/`fable` 별칭이 되어 profile 환경변수로
+    풀린다. `subagent`는 profile이 선언한 id, 없으면 `haiku`.
+  - codex: codex는 `spec.models`를 읽지 않으므로 profile 공급자가 선언한
+    `models.<role>` id를 넣는다. 선언이 없으면 `-c model=small`로 띄우는 대신 거절한다.
+- 다른 profile로의 fork: 자식의 config dir에는 부모의 대화가 없으므로 데몬이 spawn
+  직전(`manager`의 `make_worktree` 다음)에 `spawn.carry_forked_conversation`으로
+  복사한다. claude는 `projects/<cwd>/<id>.jsonl`, codex는 `<CODEX_HOME>/sessions/**`의
+  rollout이다. 원본은 그대로 둔다. MCP `spawn` 툴은 이제 `model`·`effort`를
+  전달한다(`spawn.allow_args` 게이트).
+
 ## 11. 단계
 
 | 단계 | 내용 |
@@ -2925,6 +3026,35 @@ scratch 경로에 둔다. 실행 중인 PID가 살아 있으면 재시작한 데
 오래 대기할 수 있다. 음수 우선순위 작업은 데몬이 없거나 연결이 끊겼을 때
 OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 우선순위를
 낮출 수 있으며 양수 우선순위·force는 운영자 권한을 유지한다.
+
+#### 배치 스윕과 감시 자식 세션 (claunch-yfkt2)
+
+리더의 머지 관문은 워커의 표적 단위 테스트와 `merge_ready` 심사까지다. 전체 스윕은 머지 뒤
+큐가 맡고 리더는 기다리지 않는다. 머지마다 enqueue하는 규칙은 그대로이고, 큐가 스윕 횟수를
+줄인다.
+
+- 묶기(`Queue.dispatch`): 같은 git common directory의 대기 중 일반 작업(priority<0,
+  `queued`)을 `delayed_sweep_batch_size`(기본 5)건 또는 가장 오래된 작업이
+  `delayed_sweep_batch_settle`(기본 600초) 대기했을 때 한 묶음으로 만든다. 체크포인트는
+  누적(A, A+B, A+B+C)이므로 묶음의 가장 새 작업이 tip이고, tip이 포함하는 앞선 작업은
+  `covered`(`covered_by`=tip)가 된다. 스윕은 tip 스냅샷(detached 워크트리) 하나만 돈다.
+  수정 머지(priority 0)와 재시도는 묶지 않는다. size 0이면 묶지 않는다(머지마다 따로).
+- 판정 전파: tip이 `passed`면 covered 작업은 같은 영수증으로 `passed`(통지 없음)가 된다.
+  tip이 실패하면 covered 작업은 그대로 두고, `unbatch --job <tip>`이 그것들을 개별
+  `queued` 작업으로 풀어(`bisect_of`=tip, 저장소 pause 중에도 실행) 개별 스윕으로 원인 머지를
+  좁힌다. tip을 `cancel`하면 covered 작업은 묶기 풀로 돌아간다.
+- 감시 자식: 데몬 Clock이 tip마다 `sweep-job-v2` 런을 도는 자식 세션을 리더의 자식으로
+  spawn한다(동시에 3개까지, 실패하면 300초 뒤 재시도, 실패해도 스윕은 돈다). 스윕 프로세스는
+  전과 같이 데몬이 시작하고 테스트 창에서 priority -1로 대기한다. 자식은 직접 테스트를
+  돌리지 않는다.
+- 주기 알림: 자식의 `wait`(probe `job-state`, 60초 poll)는 900초마다 timeout으로 런을 옮기고,
+  데몬 clock이 드라이버에 「the run moved」 블록을 보내 idle hold된 자식도 깨운다(6.5).
+  깨어난 자식은 `tools/delayed_sweep.py nudge --job <id>`의 문구를 읽는다: 창을 쥐고 돌 때는
+  TEST WINDOW HELD(건드리지 않는다), 창 순번을 기다릴 때는 WAITING FOR WINDOW 또는 QUEUED
+  (할 일 없음). 판정이 나면 `result` 단계가 passed는 보고만, failed는 `unbatch`와 원인 머지
+  좁히기 후 리더에게 한 줄을 보낸다.
+- 우선순위: 스윕은 priority -1이라 대기 중 단위 테스트(0)를 막지 않는다. 실행 중인 스윕은
+  완료까지 독점한다.
 
 회귀 실패가 기록되면 큐는 해당 git common directory의 일반 머지를 중단한다.
 리더는 `handle-regression`에서 원래 머지 이슈의 자식 수정 이슈를 만들고
@@ -2988,6 +3118,9 @@ uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sh
 uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
 uv run --no-sync python tools/delayed_sweep.py remeasure --repo <repo> --job <failed-job> --reason <why>
 uv run --no-sync python tools/delayed_sweep.py release --repo <repo> --job <failed-job> --reason <사유>
+uv run --no-sync python tools/delayed_sweep.py unbatch --job <failed-tip>
+uv run --no-sync python tools/delayed_sweep.py job-state --job <job>   # 0 판정 있음, 1 대기
+uv run --no-sync python tools/delayed_sweep.py nudge --job <job>
 ```
 
 다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.

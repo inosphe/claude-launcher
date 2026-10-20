@@ -866,6 +866,11 @@ steps:
       생성 이슈 정산이 self/spawn/pool로 가른다. 위임을 일찍 정하는 이유는
       병렬 시간이고, 직접 처리를 늦게 정하는 이유는 그것이 다음 회차의
       일이기 때문이다.
+      spawn은 role reviewer가 아니면 사람의 승인을 기다리고 응답은 `pending`과
+      요청 id다(claunch-iw5i8.16). 자식의 세션 이름은 터미널에 오는
+      `[claunch spawn-request <id>]` 블록에서 읽는다 — 그 전에는 자식에게
+      보내거나 보고에 이름을 적지 않고, 같은 일로 다시 spawn하지 않는다.
+      거절이면 자식 없이 진행한다.
 
       ── 자식을 두면: stack 서브 런 ──
       자식(하위 워커)의 브랜치는 내 회차 브랜치에 직접 모으지 않고, 세션
@@ -2979,6 +2984,11 @@ steps:
           자식에게는 넘기지 않는다: 그 자식은 큐를 다시 읽지 않는다. 맞는 자식이 없어도 work 스텝의 위임
           조건(겹치지 않음·규격·컨텍스트 불필요·크기)을 지금 만족하면 새
           자식을 spawn `--issue <id>`로 세운다.
+          spawn은 role reviewer가 아니면 사람의 승인을 기다리고 응답은 `pending`과
+          요청 id다(claunch-iw5i8.16). 자식의 세션 이름은 터미널에 오는
+          `[claunch spawn-request <id>]` 블록에서 읽는다 — 그 전에는 자식에게
+          보내거나 보고에 이름을 적지 않고, 같은 일로 다시 spawn하지 않는다.
+          거절이면 자식 없이 진행한다.
         - **self** — spawn이 아닌 것 중 이 저장소에서 이 세션이 착수할 수
           있는 것은 전부 자기에게: `claunch beads update <id> --assignee
           $CLAUNCH_SESSION` + `claunch beads comments add <id> "SELF-QUEUED:

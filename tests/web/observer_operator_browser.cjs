@@ -3,7 +3,11 @@
    edits, the conversation (send from the page composer, answers to asks,
    older entries opened in place), 「operator에게 묻기」 on a session card, the
    composer's height cap, an empty target the reader picked staying empty,
-   and the page staying the one scroller.
+   and the page staying the one scroller. The conversation is threads
+   (claunch-iw5i8.12.1): the list and the selected thread, one at a time in
+   the dock's narrow column, a row press and 「← 목록」 moving between them, a
+   message going to the thread on screen, 「+ 새 thread」 opening one with a
+   title and an attached image, and the dispatch card kept in its thread.
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/observer_operator_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -34,16 +38,31 @@ feed.push({ id: "d1", at: at(21), kind: "dispatch", role: "bot", target: "s1", t
 feed.push({ id: "y1", at: at(22), kind: "system", role: "system", text: "설정 변경 — 감시: 켜짐" });
 feed.push({ id: "a1", at: at(23), kind: "ask", role: "bot", type: "approve", text: "s1에 재시작을 지시할까요?", choices: [], level: "urgent", refs: ["s1"], answer: null });
 feed.push({ id: "a2", at: at(24), kind: "ask", role: "bot", type: "choice", text: "어느 브랜치를 볼까요?", choices: ["main", "dev"], level: "attention", refs: [], answer: null });
+for (const e of feed) e.thread = "th-a";
+// A second, older thread with one report in it.
+feed.unshift({ id: "b1", at: at(0), kind: "post", role: "bot", text: "배포 thread 보고", level: "info", refs: [], thread: "th-b" });
+const threadTitles = { "th-a": "이전 대화", "th-b": "배포" };
+const staged = [];
 const ops = {
   op1: { id: "op1", name: "ops-a", all: false, projects: ["alpha"], profile: null, model: null, effort: null,
-         watch: true, created_at: at(0), session: null, feed, seen: [] },
+         watch: true, created_at: at(0), session: null, feed, seen: [], titles: threadTitles },
 };
+function threadsOf(o) {
+  const ids = Object.keys(o.titles || {});
+  const rows = ids.map(id => {
+    const own = o.feed.filter(e => e.thread === id);
+    const last = own.at(-1) || null;
+    return { id, title: o.titles[id], status: "open", updated_at: last?.at || at(0), messages: own.length,
+      pending: own.filter(e => e.kind === "ask" && !e.answer).length, last };
+  });
+  return rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
 let serial = 1;
 function summary(o) {
   const open = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id);
   return { id: o.id, name: o.name, all: o.all, projects: o.projects, profile: o.profile, model: o.model,
     effort: o.effort, watch: o.watch, created_at: o.created_at,
-    operator: o.session ? { name: o.session, running: true, status: "idle" } : null,
+    operator: o.session ? { name: o.session, running: true, status: o.status || "idle" } : null,
     pending: open.length, unseen: open.filter(id => !o.seen.includes(id)).length };
 }
 function operatorsApi(req, res, body) {
@@ -64,7 +83,13 @@ function operatorsApi(req, res, body) {
   const o = ops[parts[0]];
   if (!o) return json({ error: "no such operator" }, 404);
   const rest = parts.slice(1).join("/");
-  if (!rest && req.method === "GET") return json({ ...summary(o), feed: o.feed.slice(-200), sessions: [], gates: [] });
+  if (!rest && req.method === "GET") {
+    const threads = threadsOf(o);
+    const asked = new URL(req.url, "http://x").searchParams.get("thread");
+    if (asked && !threads.some(t => t.id === asked)) return json({ error: "no such thread" }, 404);
+    const thread = asked || threads[0]?.id || null;
+    return json({ ...summary(o), threads, thread, feed: o.feed.filter(e => e.thread === thread).slice(-200), sessions: [], gates: [] });
+  }
   if (!rest && req.method === "PATCH") {
     for (const key of ["name", "all", "projects", "profile", "watch"]) if (key in data) o[key] = data[key];
     if (o.all) o.projects = [];
@@ -73,9 +98,21 @@ function operatorsApi(req, res, body) {
   if (!rest && req.method === "DELETE") { delete ops[o.id]; return json({ deleted: o.id }); }
   if (rest === "seen") { o.seen = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id); return json(summary(o)); }
   if (rest === "message") {
-    const entry = { id: `m${o.feed.length}`, at: new Date().toISOString(), kind: "user", role: "user", text: data.text };
+    const thread = data.thread || threadsOf(o)[0]?.id || "th-new";
+    o.titles = o.titles || {}; if (!o.titles[thread]) o.titles[thread] = "Thread #1";
+    const entry = { id: `m${o.feed.length}`, at: new Date().toISOString(), kind: "user", role: "user", text: data.text, thread,
+      images: (data.images || []).map(name => ({ name, type: "image/png", bytes: 3 })) };
     o.feed.push(entry);
     return json({ ...entry, nudge: o.session ? "sent" : "no-operator" });
+  }
+  if (rest === "threads") {
+    const id = `th-n${Object.keys(o.titles || {}).length}`;
+    o.titles = o.titles || {}; o.titles[id] = data.title || "Thread #9";
+    if (!data.text && !(data.images || []).length) return json({ thread: { id, title: o.titles[id] } });
+    const entry = { id: `m${o.feed.length}`, at: new Date().toISOString(), kind: "user", role: "user", text: data.text, thread: id,
+      images: (data.images || []).map(name => ({ name, type: "image/png", bytes: 3 })) };
+    o.feed.push(entry);
+    return json({ thread: { id, title: o.titles[id] }, entry, nudge: "no-operator" });
   }
   const answer = rest.match(/^asks\/([^/]+)\/answer$/);
   if (answer) {
@@ -96,6 +133,15 @@ const server = http.createServer((req, res) => {
       if (req.url === "/api/batch") { res.statusCode = 404; return res.end("{}"); }
       if (req.url.split("?")[0] === "/api/observer") return res.end(JSON.stringify(observer));
       if (req.url.startsWith("/api/operators")) return operatorsApi(req, res, body);
+      if (req.url === "/api/threads/images" && req.method === "POST") {
+        const id = `${String(staged.length).padStart(20, "0")}.png`;
+        staged.push({ id, type: req.headers["content-type"], bytes: body.length });
+        return res.end(JSON.stringify({ id }));
+      }
+      if (req.url.startsWith("/api/threads/") && req.url.includes("/images/")) {
+        res.setHeader("Content-Type", "image/png");
+        return res.end(Buffer.from("89504e470d0a1a0a", "hex"));
+      }
       if (req.url === "/api/projects") return res.end(JSON.stringify({ projects: [{ name: "alpha" }, { name: "beta" }] }));
       if (req.url === "/api/profiles") return res.end(JSON.stringify({ profile_options: [{ value: "p1:claude", label: "p1 · claude" }] }));
       if (req.url === "/api/sessions" || req.url.startsWith("/api/sessions?")) {
@@ -224,7 +270,7 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.fill("#observer-prompt", "지금 막힌 세션이 있습니까?");
     await page.click("#observer-send");
     await page.waitForFunction(() => /operator ops-a: 메시지 저장됨/.test(document.getElementById("observer-input-status").textContent));
-    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "지금 막힌 세션이 있습니까?" });
+    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "지금 막힌 세션이 있습니까?", thread: "th-a" });
     assert.equal(await page.inputValue("#observer-prompt"), "");
     await page.waitForFunction(() => [...document.querySelectorAll("#observer-operators .op-user")].some(e => e.textContent.includes("지금 막힌 세션이 있습니까?")));
     assert.equal(sent.filter(r => r.url.endsWith("/keys")).length, 0, "no keys went to any session");
@@ -232,8 +278,49 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.fill("#observer-operators .op-composer textarea", "dock에서 묻습니다");
     await page.press("#observer-operators .op-composer textarea", "Enter");
     await page.waitForFunction(() => /operator ops-a:/.test(document.querySelector("#observer-operators .op-composer-status")?.textContent || ""));
-    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "dock에서 묻습니다" });
+    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "dock에서 묻습니다", thread: "th-a" });
     assert.equal(await page.inputValue("#observer-operators .op-composer textarea"), "");
+
+    // Threads: the dock's column is narrow, so the selected thread shows and
+    // the list waits behind 「← 목록」.
+    const visible = sel => page.locator(`#observer-operators ${sel}`).first().isVisible();
+    assert.equal(await visible(".op-thread-list"), false);
+    assert.equal(await page.locator("#observer-operators .op-thread-title").innerText(), "이전 대화");
+    await page.click("#observer-operators .op-thread-back");
+    assert.equal(await visible(".op-thread-list"), true);
+    assert.equal(await visible(".op-thread-view"), false);
+    assert.deepEqual(await page.locator("#observer-operators .op-thread-row .op-thread-name").allInnerTexts(), ["이전 대화", "배포"]);
+    assert.equal(await page.locator('#observer-operators .op-thread-row[data-thread="th-a"] .op-thread-pending').count(), 0, "th-a's asks were answered above");
+    assert.equal(await page.getAttribute('#observer-operators .op-thread-row[data-thread="th-a"]', "aria-current"), "true");
+    await page.click('#observer-operators .op-thread-row[data-thread="th-b"]');
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "배포"
+      && document.querySelector('#observer-operators .op-entry[data-entry="b1"]'));
+    assert.equal(await page.locator("#observer-operators .op-entry").count(), 1);
+    assert.equal(await visible(".op-thread-list"), false, "a row press shows its thread");
+    await page.fill("#observer-operators .op-composer textarea", "배포 thread에 묻습니다");
+    await page.press("#observer-operators .op-composer textarea", "Enter");
+    await page.waitForFunction(() => [...document.querySelectorAll("#observer-operators .op-user")].some(e => e.textContent.includes("배포 thread에 묻습니다")));
+    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "배포 thread에 묻습니다", thread: "th-b" });
+    // A new thread: a title, a message and an image; the image is staged
+    // first and the thread opens with both.
+    await page.click("#observer-operators .op-thread-back");
+    await page.click("#observer-operators .op-thread-new");
+    assert.equal(await visible(".op-thread-title-input"), true);
+    await page.fill("#observer-operators .op-thread-title-input", "새 장애");
+    await page.setInputFiles("#observer-operators .op-attach-input", { name: "shot.png", mimeType: "image/png", buffer: Buffer.from("89504e470d0a1a0a", "hex") });
+    assert.equal(await page.locator("#observer-operators .op-attach img").count(), 1, "the image waits under the input row");
+    await page.fill("#observer-operators .op-composer textarea", "이 화면을 보십시오");
+    await page.press("#observer-operators .op-composer textarea", "Enter");
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "새 장애");
+    assert.deepEqual(staged.map(x => x.type), ["image/png"]);
+    assert.deepEqual(lastSent("POST", "/api/operators/op1/threads").body, { title: "새 장애", text: "이 화면을 보십시오", images: [staged[0].id] });
+    await page.waitForSelector("#observer-operators .op-user .op-image img");
+    assert.match(await page.getAttribute("#observer-operators .op-user .op-image img", "src"), /api\/threads\/th-n2\/images\/0+\.png$/);
+    assert.equal(await page.locator("#observer-operators .op-attach img").count(), 0, "sent, the strip is empty");
+    // Back to the first thread for the rest.
+    await page.click("#observer-operators .op-thread-back");
+    await page.click('#observer-operators .op-thread-row[data-thread="th-a"]');
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "이전 대화");
     // Kept per browser: a reload comes back with the dock open.
     await page.reload();
     await tab("ops-a").waitFor();
@@ -338,6 +425,18 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     // Started, the session line names its session and links to its page.
     assert.deepEqual(await sessionLine(), { hidden: false, who: "two", session: "s900 · 실행 중 (idle)", href: "#/s/s900", outside: true });
     assert.equal(await page.locator("#observer-operators .op-actions button:has-text('삭제')").isDisabled(), true);
+    // The dot draws the session's state the way the rail's dot does
+    // (claunch-zko8f): green idle, amber busy, on the tab and the session line.
+    const dots = () => page.evaluate(() => [
+      document.querySelector('#observer-operators .op-tab[aria-selected="true"] .op-dot'),
+      document.querySelector("#observer-operators > .op-sessionbar .op-dot"),
+    ].map(d => d && { cls: d.className, bg: getComputedStyle(d).backgroundColor }));
+    assert.deepEqual(await dots(), Array(2).fill({ cls: "op-dot on idle", bg: "rgb(63, 185, 80)" }));
+    ops.op3.status = "busy";
+    await tab("two").click();
+    await page.waitForFunction(() => /실행 중 \(busy\)/.test(document.querySelector("#observer-operators > .op-sessionbar")?.textContent || ""));
+    assert.deepEqual(await dots(), Array(2).fill({ cls: "op-dot on busy", bg: "rgb(210, 153, 34)" }));
+    delete ops.op3.status;
     await page.click("#observer-operators .op-actions button:has-text('정지')");
     await page.waitForFunction(() => /정지됨/.test(document.querySelector("#observer-operators .op-scope")?.textContent || ""));
     assert.equal((await sessionLine()).session, "세션 없음");
@@ -373,8 +472,13 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.isVisible("#observer-mobile-operator"), true);
     assert.equal(await page.getAttribute("#observer-mobile-operator", "aria-pressed"), "true");
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
+    // On the phone the list and the conversation take turns as well.
+    await page.click("#observer-operators .op-thread-back");
+    assert.equal(await page.locator("#observer-operators .op-thread-list").isVisible(), true);
+    assert.deepEqual(await innerScrollers(page), []);
+    if (process.env.CLAUNCH_SCREENSHOT_PHONE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_PHONE, fullPage: true });
 
     assert.deepEqual(errors, []);
-    console.log("PASS: operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, session line outside the scroller with the session's state and link, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
+    console.log("PASS: threads list and conversation taking turns in the dock and on a phone, a row press, a message into the thread on screen, a new thread with a title and a staged image, operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, session line outside the scroller with the session's state and link, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

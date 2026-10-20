@@ -291,6 +291,11 @@ steps:
       - `task`: 한 줄 — 목표와 완료 증거. 절차는 파일에 있으니 task에 절차를
         다시 쓰지 않는다.
       - `role`: worker.
+      spawn은 role reviewer가 아니면 사람의 승인을 기다리고 응답은 `pending`과
+      요청 id다(claunch-iw5i8.16). 자식의 세션 이름은 터미널에 오는
+      `[claunch spawn-request <id>]` 블록에서 읽는다 — 그 전에는 자식에게
+      보내거나 보고에 이름을 적지 않고, 같은 일로 다시 spawn하지 않는다.
+      거절이면 자식 없이 진행한다.
       spawn 정책이 거절하면(`spawn.<키>`) 재시도하지 말고 보고에 적는다 —
       한도는 사용자의 설정이다. 만든 자식마다 세션 이름·이슈·overlay 경로를
       보고에 남기고, 부모 이슈 코멘트에 `PLANNED: <세션> <이슈> <overlay>`

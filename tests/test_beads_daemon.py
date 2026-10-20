@@ -2825,6 +2825,22 @@ def test_created_of_is_a_sessions_own_follow_ups_it_does_not_hold():
     assert [i["id"] for i in created] == ["given-away", "urgent-handoff", "handed-off"]
 
 
+def test_done_count_is_the_closed_issues_the_board_assigns_to_the_session():
+    """The rail card's "N done" (claunch-9f8ag): closed issues whose assignee
+    is the session -- not active ones, not another session's, and not a
+    closed issue it only filed for someone else."""
+    rows = [
+        {"id": "a", "assignee": "s1", "status": "closed"},
+        {"id": "b", "assignee": "s1", "status": "closed"},
+        {"id": "c", "assignee": "s1", "status": "in_progress"},
+        {"id": "d", "assignee": "s2", "status": "closed"},
+        {"id": "e", "created_by": "s1", "status": "closed"},
+    ]
+    assert beads_mod.done_count(rows, "s1") == 2
+    assert beads_mod.done_count(rows, "s2") == 1
+    assert beads_mod.done_count(rows, "nobody") == 0
+
+
 def test_the_assignment_comment_names_both_ends_of_the_move():
     assert beads_mod.assign_note("a", "s2", "s1") == "QUEUED by dashboard: assigned to s2 (was s1)"
     assert beads_mod.assign_note("a", "s2", "") == "QUEUED by dashboard: assigned to s2"
@@ -2889,6 +2905,10 @@ def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
         assert [i["id"] for i in lanes["s1"]["issues"]] == ["a", "b"]
         assert [i["id"] for i in lanes["s1"]["created"]] == ["h"]
         assert lanes["s1"]["summary"]["next"] == "b"
+        # the rail's work count: what is left beside what is done ("g")
+        assert lanes["s1"]["summary"]["total"] == 2
+        assert lanes["s1"]["summary"]["done"] == 1
+        assert lanes["s2"]["summary"]["done"] == 0
         assert lanes["s1"]["status"] == "busy" and lanes["s1"]["issue"] == "a"
         assert lanes["s1"]["cflow"] == {"workflow": "improv-worker", "step": "work"}
         assert lanes["s2"]["issues"] == [] and lanes["s2"]["created"] == [] and lanes["s2"]["known"] is True

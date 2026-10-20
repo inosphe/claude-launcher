@@ -28,6 +28,12 @@ RETRY_MAX_DELAY = 3600.0
 #: Same-SHA remeasures a failed pause job gets: a pass clears the pause as an
 #: intermittent failure, a second failure is a real regression for the repair path.
 REMEASURE_LIMIT = 1
+#: Merges one sweep covers, and how long the oldest queued merge waits for company
+#: before it is swept alone. Checkpoints are cumulative (A, A+B, A+B+C), so the
+#: newest one in a batch is the tree that contains all of them: one sweep answers
+#: for the batch, and a failure is narrowed afterwards with ``unbatch``.
+BATCH_SIZE = 5
+BATCH_SETTLE = 600.0
 #: Results the originating session is told about.
 NOTIFIED = ("passed", "failed", "stuck")
 
@@ -82,6 +88,14 @@ class Queue:
                 db.execute("ALTER TABLE jobs ADD COLUMN remeasures INTEGER NOT NULL DEFAULT 0")
             if "history" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN history TEXT NOT NULL DEFAULT '[]'")
+            # Batching: ``covered_by`` names the tip job whose sweep answers for this
+            # merge; ``formed`` marks a job that left the batching pool (a batch tip,
+            # or a job swept alone); ``child`` is the session watching the tip;
+            # ``bisect_of`` is the failed tip a member is swept alone to narrow.
+            for name, ddl in (("covered_by", "TEXT"), ("formed", "INTEGER NOT NULL DEFAULT 0"),
+                              ("child", "TEXT NOT NULL DEFAULT ''"), ("bisect_of", "TEXT")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
 
     @contextmanager
     def connect(self):
@@ -151,7 +165,7 @@ class Queue:
     def status(self, repo=None):
         common = self.common(repo) if repo else None
         with self.connect() as db:
-            jobs = [dict(r) for r in db.execute("SELECT * FROM jobs ORDER BY created,id")
+            jobs = [dict(r) for r in db.execute("SELECT * FROM jobs ORDER BY created,rowid")
                     if common is None or r["common"] == common]
             pauses = [dict(r) for r in db.execute("SELECT * FROM pauses")
                       if common is None or r["common"] == common]
@@ -175,8 +189,80 @@ class Queue:
                 raise ValueError("a repair issue is already assigned")
             db.execute("UPDATE pauses SET repair_issue=? WHERE common=?", (issue, common))
 
-    def claim(self, *, background=True):
+    def dispatch(self, size=BATCH_SIZE, settle=BATCH_SETTLE, now=None):
+        """Group queued background merges of one repository into batches.
+
+        A group is ripe when it holds ``size`` merges or its oldest has waited
+        ``settle`` seconds. The newest merge of a group becomes the batch tip
+        (``formed``); the older merges it contains become ``covered`` by it and
+        are not swept unless ``unbatch`` releases them. A merge the tip does not
+        contain stays in the pool for a later batch. Repairs (priority >= 0)
+        and retries are never batched. Returns the tips formed by this call."""
+        now = time.time() if now is None else now
+        tips = []
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("SELECT * FROM jobs WHERE status='queued' AND formed=0 AND priority<0 "
+                              "AND covered_by IS NULL ORDER BY created,rowid").fetchall()
+            groups = {}
+            for row in rows:
+                groups.setdefault(row["common"], []).append(row)
+            for common, group in groups.items():
+                while group:
+                    chunk = group[:size]
+                    if len(chunk) < size and now - chunk[0]["created"] < settle:
+                        break
+                    tip = chunk[-1]
+                    members = [r for r in chunk[:-1] if self.contains(tip["repo"], r["sha"], tip["sha"])]
+                    for member in members:
+                        db.execute("UPDATE jobs SET status='covered',covered_by=?,formed=1 WHERE id=?",
+                                   (tip["id"], member["id"]))
+                    db.execute("UPDATE jobs SET formed=1 WHERE id=?", (tip["id"],))
+                    tips.append(tip["id"])
+                    taken = {r["id"] for r in members} | {tip["id"]}
+                    group = [r for r in group if r["id"] not in taken]
+        return [self.get(t) for t in tips]
+
+    def members(self, ident):
+        """Jobs a batch tip answers for."""
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM jobs WHERE covered_by=? ORDER BY created,rowid", (ident,))]
+
+    def unattended(self):
+        """Batch tips that still wait for a verdict and have no watching session."""
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM jobs WHERE formed=1 AND priority<0 AND child='' AND covered_by IS NULL "
+                "AND status IN ('queued','retry','running') ORDER BY created,rowid")]
+
+    def attach_child(self, ident, child):
+        with self.connect() as db:
+            db.execute("UPDATE jobs SET child=? WHERE id=?", (child, ident))
+
+    def unbatch(self, job):
+        """Release the merges a failed, stuck or cancelled tip covered.
+
+        Each becomes a queued job swept alone (``bisect_of`` lets it run while
+        the repository is paused by the tip), so the first one that fails is the
+        merge that broke the batch."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                raise ValueError("unknown verification job")
+            if row["status"] not in ("failed", "stuck", "cancelled"):
+                raise ValueError(f"only a failed, stuck or cancelled tip is unbatched, not {row['status']}")
+            freed = db.execute("UPDATE jobs SET status='queued',covered_by=NULL,bisect_of=?,available=0 "
+                               "WHERE covered_by=? AND status='covered'", (job, job)).rowcount
+        return {"job": job, "released": freed}
+
+    def claim(self, *, background=True, batch=None):
+        """Take the next job to run. ``batch`` is ``(size, settle)`` or None: with it,
+        background jobs are grouped first and only formed batch tips run."""
         from .daemon.window import pid_alive
+        if batch:
+            self.dispatch(*batch)
         for row in self.status()["jobs"]:
             if row["status"] == "pending":
                 try:
@@ -200,9 +286,11 @@ class Queue:
             row = db.execute("""SELECT j.* FROM jobs j LEFT JOIN pauses p ON p.common=j.common
                 WHERE j.status IN ('queued','retry') AND j.available<=?
                 AND (j.priority>=0 OR ?)
-                AND (p.job IS NULL OR p.job='' OR p.repair_issue=j.issue OR p.job=j.id)
-                ORDER BY j.priority DESC,j.created,j.id LIMIT 1""",
-                (time.time(), background and not background_running)).fetchone()
+                AND (j.formed=1 OR j.priority>=0 OR ?)
+                AND (p.job IS NULL OR p.job='' OR p.repair_issue=j.issue OR p.job=j.id
+                     OR p.job=j.bisect_of)
+                ORDER BY j.priority DESC,j.created,j.rowid LIMIT 1""",
+                (time.time(), background and not background_running, not batch)).fetchone()
             if row is None:
                 return None
             db.execute("UPDATE jobs SET status='running',pid=0,available=?,attempts=attempts+1 WHERE id=?",
@@ -233,6 +321,11 @@ class Queue:
             db.execute("UPDATE jobs SET status=?,receipt=?,detail=?,pid=0,available=?,notified=0,"
                        "failures=? WHERE id=?",
                        (status, receipt, detail, available, failures, ident))
+            if status == "passed":
+                # The tip contains every merge it covers: their verdict is its verdict.
+                db.execute("UPDATE jobs SET status='passed',receipt=?,detail=?,notified=1 "
+                           "WHERE covered_by=? AND status='covered'",
+                           (receipt, f"covered by {ident}", ident))
             pause = db.execute("SELECT * FROM pauses WHERE common=?", (row["common"],)).fetchone()
             if status == "failed":
                 # A late verdict about pre-repair history must not pause it again.
@@ -277,6 +370,9 @@ class Queue:
                 raise ValueError(f"job already has a verdict: {row['status']}")
             db.execute("UPDATE jobs SET status='cancelled',detail=?,available=0 WHERE id=?",
                        (f"cancelled: {reason.strip()}", job))
+            # The merges it covered still need a verdict: back to the batching pool.
+            db.execute("UPDATE jobs SET status='queued',covered_by=NULL,formed=0 "
+                       "WHERE covered_by=? AND status='covered'", (job,))
 
     def requeue(self, job):
         """Give a stuck or cancelled job a fresh set of attempts."""

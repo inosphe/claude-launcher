@@ -685,6 +685,9 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
         "status": state.get("status"),
         "run": payload,
         "chart": chart_view(chart, prompts),
+        # The start inputs' declarations: the run page offers a person an
+        # editor for each one whose set_by names user (claunch-umq1f).
+        "input_decls": _inputs_view(chart),
         "history": run_history(st, state),
         "throughput": cflow2_metrics.observations(st),
         # Which nodes have a live instance (the active configuration and its

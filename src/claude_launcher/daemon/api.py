@@ -69,7 +69,7 @@ from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
-from . import session_timers, session_prs, session_procs
+from . import rail_superseded, session_timers, session_prs, session_procs
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -96,6 +96,7 @@ from . import mesh_roles
 from . import reposync_gate
 from . import resume_gate
 from . import kill_gate
+from . import flow_nudge
 from . import spawn_gate
 from . import reposync_agent
 from . import host_code, restart_gate
@@ -576,6 +577,9 @@ def build_app(
         notify=functools.partial(_deliver_to_session, manager),
         end=functools.partial(_kill_gate_end, app),
     )
+    #: A driver's request that its person act on its cflow run
+    #: (claunch-g08xz); see flow_nudge. In memory, settled from the run files.
+    app["flow_nudge"] = flow_nudge.NudgeBoard(alive=functools.partial(_nudge_alive, manager))
     #: The approval gate an operator's request for a session waits behind
     #: (claunch-iw5i8.15); see spawn_gate. Five minutes, unanswered counts
     #: as approved (a resume expires into a new session); kept on disk.
@@ -857,6 +861,8 @@ def build_app(
     r.add_put("/api/wsl-reg-stub", h_wsl_reg_stub_set)
     r.add_get("/api/pty-host-setting", h_pty_host_setting_get)
     r.add_put("/api/pty-host-setting", h_pty_host_setting_set)
+    r.add_get("/api/delegate-setting", h_delegate_setting_get)
+    r.add_put("/api/delegate-setting", h_delegate_setting_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
     r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
@@ -916,6 +922,7 @@ def build_app(
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
+    r.add_post("/api/cflow2/input", h_cflow2_input)
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
     r.add_post("/api/cflow2/nudge", h_cflow2_nudge)
     r.add_post("/api/cflow2/abort", h_cflow2_abort)
@@ -958,6 +965,8 @@ def build_app(
     r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
     r.add_patch("/api/mesh/{mesh}/members/{a}/links/{b}", h_mesh_member_link_set)
     r.add_get("/api/mesh/{mesh}/wire-requests", h_mesh_wire_requests)
+    r.add_post("/api/mesh/{mesh}/wire-requests", h_mesh_wire_file)
+    r.add_get("/api/mesh/{mesh}/connect-status", h_mesh_connect_status)
     r.add_post("/api/mesh/{mesh}/wire-requests/decline", h_mesh_wire_decline)
     r.add_post("/api/mesh/{mesh}/rewire", h_mesh_rewire)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
@@ -1011,6 +1020,11 @@ def build_app(
     r.add_post("/api/kill-requests/{rid}/approve", h_kill_request_approve)
     r.add_post("/api/kill-requests/{rid}/reject", h_kill_request_reject)
     r.add_post("/api/kill-requests/{rid}/withdraw", h_kill_request_withdraw)
+    # A driver asking its person to act on its cflow run (claunch-g08xz,
+    # :mod:`flow_nudge`): filed by the flow_nudge MCP tool, read by the web
+    # UI's notification card; settles itself when the run stops waiting.
+    r.add_post("/api/flow-nudges", h_flow_nudge_file)
+    r.add_get("/api/flow-nudges", h_flow_nudges_list)
     # Requests for a session (claunch-iw5i8.15, :mod:`spawn_gate`): filed by
     # the operator v2 agent routes, read and answered from the web UI's
     # notification card -- approve, reject, +5 min, manual (spawn) or a new
@@ -3002,7 +3016,12 @@ async def h_metering_live(request: web.Request) -> web.Response:
     session = str(request.query.get("session") or "").strip()
     if not session:
         return json_error(400, "session is required")
-    live = await asyncio.to_thread(metering.live_summary, session)
+    # Every session's live files, not only this one's: ``parallel`` needs the
+    # other sessions on the same shim (claunch-b28pp). The listing re-reads
+    # only the files that changed since the last poll.
+    live = await asyncio.to_thread(
+        lambda: metering.live_summary(session, peers=metering.live_index())
+    )
     return json_response({"session": session, "live": live})
 
 
@@ -4052,6 +4071,71 @@ async def h_pty_host_setting_set(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
 
 
+#: The model names the Settings page offers for a delegated child: the
+#: claunch model presets, resolved per harness by spawn (claunch-yl0to).
+_DELEGATE_FIELDS = ("profile", "model")
+
+
+def _delegate_setting_state() -> dict:
+    from .. import provider_spec
+
+    cfg = store.daemon_config()
+    return {
+        "profile": str(cfg.get("delegate_profile") or ""),
+        "model": str(cfg.get("delegate_model") or ""),
+        "defaults": {
+            "profile": store.DAEMON_DEFAULTS["delegate_profile"],
+            "model": store.DAEMON_DEFAULTS["delegate_model"],
+        },
+        "profiles": [p.name for p in profile_mod.list_all()],
+        "presets": list(provider_spec.MODEL_ROLES),
+    }
+
+
+async def h_delegate_setting_get(request: web.Request) -> web.Response:
+    """``daemon.delegate_profile`` / ``delegate_model``: the profile and model
+    preset improv-worker-v2 hands an easy task's child (claunch-yl0to), with
+    the profiles and presets to choose from. A run's start inputs of the same
+    names take precedence over these."""
+    try:
+        return json_response(_delegate_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_delegate_setting_set(request: web.Request) -> web.Response:
+    """Set either field (``{"profile": str, "model": str}``); ``null``
+    restores the built-in default. A profile must exist, and a model must be
+    one of the claunch model presets."""
+    from .. import provider_spec
+
+    body = await _json_body(request)
+    writes = {}
+    for field in _DELEGATE_FIELDS:
+        if field not in body:
+            continue
+        value = body[field]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            return json_error(400, f"'{field}' must be a non-empty string or null")
+        writes[field] = value.strip() if isinstance(value, str) else None
+    if not writes:
+        return json_error(400, "give 'profile' and/or 'model'")
+    if writes.get("profile") and writes["profile"] not in {
+        p.name for p in profile_mod.list_all()
+    }:
+        return json_error(400, f"no profile named {writes['profile']!r}")
+    if writes.get("model") and writes["model"] not in provider_spec.MODEL_ROLES:
+        return json_error(
+            400, f"'model' must be one of {', '.join(provider_spec.MODEL_ROLES)}"
+        )
+    try:
+        for field, value in writes.items():
+            store.set_daemon_field(f"delegate_{field}", value)
+        return json_response(_delegate_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
 async def h_prompter_prompts(request: web.Request) -> web.Response:
     """The prompter server's prompt snippets for the footer.
 
@@ -4246,31 +4330,10 @@ _CFLOW_LIST_DROP = (
 )
 
 
-def _operator_gate_kind(entry: dict) -> str:
-    """Which press settles this run position, or '' when no person's does.
-
-    The same reading as the dashboard's rail (app.js ``sessCflowGated``): an
-    approval, a user-chosen branch, a goto request, or an agent question that
-    reached nobody. A timer, a checklist, a window and a question still with
-    another agent wait on no one here, so the operator does not raise them.
-    """
-    status = str(entry.get("status") or "")
-    if status == "waiting_approval":
-        return "approval"
-    if status == "waiting_selection":
-        return "selection"
-    if status == "waiting_goto":
-        return "goto"
-    if status == "waiting_answer" and not ((entry.get("ask") or {}).get("asked") or []):
-        return "selection" if _operator_gate_options(entry) else "approval"
-    return ""
-
-
-def _operator_gate_options(entry: dict) -> list:
-    ask = entry.get("ask") or {}
-    raw = ask.get("options") if ask.get("kind") == "branch" else entry.get("options")
-    return [{"name": str(o.get("name")), "description": o.get("description") or ""}
-            for o in raw or [] if isinstance(o, dict) and o.get("name")]
+#: Which press settles a v1 run position, and its options -- shared with the
+#: nudge requests (:mod:`flow_nudge`), which ask the same question.
+_operator_gate_kind = flow_nudge.v1_gate_kind
+_operator_gate_options = flow_nudge.v1_gate_options
 
 
 def _operator_gates(sessions) -> list:
@@ -4318,13 +4381,28 @@ async def _operator_work(app, sessions) -> dict:
     closed one: a session that closed its opening issue and took the next
     keeps the old link, so the link alone would report a finished round. The
     board read is the rail's own (cached, one listing per board), so an
-    operator poll costs no more than a rail refresh."""
+    operator poll costs no more than a rail refresh.
+
+    The answers come from the status-check store, not ``session.info()``:
+    the info carries none, the session-list handler attaches them to its own
+    rows, so reading the info answered every operator with no checks at all
+    (claunch-iw5i8.11). Each entry also carries the branch and the recorded
+    PRs (``session_prs``, no network) — what the operator's landing lookup
+    reads, since a squash merge leaves a branch's commits off master."""
     board = app.get("beads")
+    names = [session.sdef.name for session in sessions]
+
+    def recorded():
+        return (status_checks.digests(names),
+                {s.sdef.name: session_prs.for_session(_session_cwd(s), s.sdef.name) for s in sessions})
+
+    digests, prs = await asyncio.to_thread(recorded)
     out = {}
     for session in sessions:
         name = session.sdef.name
-        checks = session.info().get("status_checks") or []
-        out[name] = {"checks": [c for c in checks if isinstance(c, dict)], "issue": None}
+        checkout = session.info().get(work_checkout.FIELD) or _session_cwd(session)
+        out[name] = {"checks": [c for c in digests.get(name) or [] if isinstance(c, dict)], "issue": None,
+                     "branch": _branch_of(checkout), "prs": prs.get(name) or []}
         if board is None or not board.available() or not session.sdef.cwd:
             continue
         try:
@@ -5452,6 +5530,11 @@ NUDGE_CFLOW2_REPORTED = (
     "cflow2: the user reported your run's task from the dashboard - stop working "
     "on it; call the flow_status tool and continue"
 )
+#: A start input the user changed from the dashboard (claunch-umq1f).
+NUDGE_CFLOW2_INPUT_SET = (
+    "cflow2: the user changed your run's start input {name} to {value} from the "
+    "dashboard - steps read it from now on; call the flow_status tool and continue"
+)
 NUDGE_CFLOW2_ABORTED = (
     "cflow2: the user aborted your v2 workflow run from the dashboard - stop "
     "working on it; flow_status shows it aborted"
@@ -5720,6 +5803,30 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope,
         NUDGE_CFLOW2_PICKED.format(option=option, **words),
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_input(request: web.Request) -> web.Response:
+    """Change a start input of a v2 run from the dashboard, as the user
+    (claunch-umq1f): the input's ``set_by`` names ``user``; the value
+    overwrites what it holds (an empty one clears it). Body: cwd, scope,
+    name, value. The run's driver is told the new value."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return json_error(400, "'name' required in the JSON body")
+    payload = await asyncio.to_thread(
+        cflow2_runtime.set_input, name, body.get("value"),
+        caller=cflow2_runtime.CALLER_USER, cwd=cwd, scope=scope,
+    )
+    got = json.dumps((payload.get("inputs") or {}).get(name), ensure_ascii=False)
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope,
+        NUDGE_CFLOW2_INPUT_SET.format(name=name, value=got),
     )
     return json_response(payload)
 
@@ -7628,6 +7735,12 @@ async def _gated_kill(request: web.Request, target, by: dict, *,
         return None
     if target.exited and not getattr(target, "held_at", None):
         return None
+    if not force:
+        # A forced kill skips the end decision as it skips the wind-down
+        # (claunch-g08xz.2): the caller has already decided the session ends now.
+        ended = await _end_instead_of_kill(request, target, by, reason)
+        if ended is not None:
+            return ended
     try:
         record = request.app["kill_gate"].submit(
             session=str(by.get("name") or ""), target=name, reason=reason,
@@ -7636,6 +7749,94 @@ async def _gated_kill(request: web.Request, target, by: dict, *,
     except kill_gate.GateRefused as exc:
         return json_error(exc.status, str(exc))
     return json_response({**target.info(), **kill_gate.pending_reply(record)},
+                         status=202)
+
+
+def _nudge_alive(manager, name: str) -> bool:
+    try:
+        return not manager.get(name).exited
+    except ManagerError:
+        return False
+
+
+async def h_flow_nudge_file(request: web.Request) -> web.Response:
+    """``POST /api/flow-nudges`` ``{session, message, scope?, cwd?}``: raise
+    ``session``'s run on the dashboard's notification channel
+    (:mod:`flow_nudge`). The run is the session's own -- its directory, and
+    its own slot or one of its side runs -- so a session nudges for nothing
+    but the run it drives. 409 when that run waits on no person."""
+    body = await _json_body(request)
+    if not isinstance(body, dict):
+        return json_error(400, "body must be a JSON object")
+    name = str(body.get("session") or "").strip()
+    manager: SessionManager = request.app["manager"]
+    try:
+        session = manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    actor = actors.from_request(request)
+    if actor.get("kind") == actors.AGENT and actor.get("name") not in (None, "", name):
+        return json_error(403, f"{actor.get('name')} cannot nudge for {name}'s run")
+    cwd = _session_cwd(session)
+    if body.get("cwd"):
+        cwd = cflow_state.resolve_cwd(str(body["cwd"]))
+    if not cwd:
+        return json_error(409, f"session {name!r} has no directory, so no run")
+    scope = str(body.get("scope") or "").strip() or name
+    if scope.split("@")[0].split("+")[0] != name:
+        return json_error(403, f"scope {scope!r} is not {name}'s own run")
+    try:
+        result = await asyncio.to_thread(
+            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=scope,
+            message=str(body.get("message") or ""))
+    except flow_nudge.NudgeRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response(result)
+
+
+async def h_flow_nudges_list(request: web.Request) -> web.Response:
+    rows = await asyncio.to_thread(request.app["flow_nudge"].list)
+    return json_response({"requests": rows})
+
+
+async def _end_instead_of_kill(request: web.Request, target, by: dict,
+                               reason: str) -> Optional[web.Response]:
+    """An agent's kill of a session whose run stands on its end decision
+    (claunch-g08xz.1): the person is asked to answer that decision's 'end'
+    through a nudge card instead of a kill request -- the run then ends the
+    session through its own ending. None (file the kill request as before)
+    when the target is not standing there, the caller asked to skip it
+    (``skip_end_decision``), or no card could be raised. A forced kill never
+    gets here (:func:`_gated_kill`)."""
+    if target.exited:
+        return None
+    body = await _json_body(request)
+    if body.get("skip_end_decision") in (True, "1", "true", 1):
+        return None
+    name = target.sdef.name
+    cwd = _session_cwd(target)
+    if not cwd:
+        return None
+    try:
+        decision = await asyncio.to_thread(flow_nudge.end_decision, cwd, name)
+    except Exception:  # noqa: BLE001 - an unreadable run gets the kill request
+        log.exception("end decision of %s could not be read", name)
+        return None
+    if decision is None:
+        return None
+    asker = str(by.get("name") or "an agent")
+    message = (f"{asker} asks to end {name}: its run stands on {decision.get('label')} -- "
+               f"answer '{flow_nudge.END_OPTION}' there to end it. Reason: "
+               f"{reason.strip() or '(no reason given)'}")
+    try:
+        result = await asyncio.to_thread(
+            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=name,
+            message=message, by=asker)
+    except flow_nudge.NudgeRefused as exc:
+        log.info("end decision of %s not raised (%s); filing the kill request", name, exc)
+        return None
+    return json_response({**target.info(),
+                          **flow_nudge.end_request_reply(name, decision, result)},
                          status=202)
 
 
@@ -7692,14 +7893,16 @@ def spawn_gate_verbs() -> Tuple[str, ...]:
 
 
 class _GateRequest:
-    """What :func:`_create_session` reads off a request, for a create the
-    spawn gate makes with no HTTP request in hand (an approval by the clock,
-    or by a person's press on a different route): the app, and the actor --
-    the asking agent, which is who the session was created for."""
+    """What :func:`_create_session` and :func:`_spawn_child` read off a
+    request, for a create the spawn gate makes with no HTTP request in hand
+    (an approval by the clock, or by a person's press on a different route):
+    the app, and the actor -- the asking agent, which is who the session was
+    created for, with ``via: spawn-gate`` and who set it up."""
 
-    def __init__(self, app, asker: str) -> None:
+    def __init__(self, app, asker: str, actor: Optional[dict] = None) -> None:
         self.app = app
         self.headers = {actors.HEADER: actors.header_value(actors.AGENT, asker)}
+        self.gate_actor = actor
         self.match_info: dict = {}
 
     def get(self, key, default=None):
@@ -7707,9 +7910,15 @@ class _GateRequest:
 
 
 async def _spawn_gate_create(app, spec: dict, asker: str, record: dict) -> Tuple[int, dict]:
-    """Create the session an approved spawn request asks for, through the
-    same path as the dashboard's New session form."""
-    return await _create_session(_GateRequest(app, asker), dict(spec))
+    """Create the session a settled spawn request asks for: top-level through
+    the same path as the dashboard's New session form, or as the asker's
+    child through the same path as an agent's spawn."""
+    actor = actors.make(actors.AGENT, asker, via="spawn-gate",
+                        reason=f"setup:{record.get('setup') or spawn_gate.SETUP_APPROVED}")
+    request = _GateRequest(app, asker, actor)
+    if record.get("created_as") == spawn_gate.CHILD:
+        return await _spawn_child(request, asker, dict(spec), created_by=actor)
+    return await _create_session(request, dict(spec))
 
 
 async def h_spawn_requests_list(request: web.Request) -> web.Response:
@@ -7887,6 +8096,33 @@ async def h_mesh_wire_requests(request: web.Request) -> web.Response:
         request.match_info["mesh"], state=request.query.get("state") or ""
     )
     return json_response({"requests": rows})
+
+
+async def h_mesh_wire_file(request: web.Request) -> web.Response:
+    """Ask for an edge on purpose: ``requester`` wants ``target``.
+
+    The explicit form of the request a refused send files by itself. Answered
+    with the pair's standing, so the asker sees at once whether it is already
+    connected or was declined before.
+    """
+    body = await _json_body(request)
+    result = _mesh_mgr(request).request_connect(
+        request.match_info["mesh"],
+        str(body.get("requester") or ""),
+        str(body.get("target") or ""),
+    )
+    return json_response(result, status=201)
+
+
+async def h_mesh_connect_status(request: web.Request) -> web.Response:
+    """Whether the pair ``a``/``b`` may message each other, and the request
+    between them: what a waiting asker polls."""
+    result = _mesh_mgr(request).connect_status(
+        request.match_info["mesh"],
+        str(request.query.get("a") or ""),
+        str(request.query.get("b") or ""),
+    )
+    return json_response(result)
 
 
 async def h_mesh_wire_decline(request: web.Request) -> web.Response:
@@ -8640,6 +8876,8 @@ async def _sessions_list(request: web.Request) -> web.Response:
         meter = metering.snapshot()
         # And one listing of the live files: whether a call is in flight now.
         meter_live = metering.live_index()
+        # Which sessions share a shim right now, once for every row.
+        meter_groups = metering.live_groups(meter_live)
         # What the daemon's restart commands left running for each session
         # (claunch-ihwel): the tracker's memory, kept current by its own
         # clock, so a list poll reads no process table.
@@ -8670,13 +8908,13 @@ async def _sessions_list(request: web.Request) -> web.Response:
                 info = s.info()
             elif kept:
                 info = exited_rows.attach(s, usage_budget, _session_cwd(s))
-                metering.attach(info, meter, meter_age, meter_live)
+                metering.attach(info, meter, meter_age, meter_live, meter_groups)
             else:
                 info = ctxsize.attach(s)
                 # The session's latest throughput through the metering shim
                 # (``tps``), read off the record file tails; absent when the
                 # session never went through a shim (the OAuth routes).
-                metering.attach(info, meter, meter_age, meter_live)
+                metering.attach(info, meter, meter_age, meter_live, meter_groups)
                 # What the conversation has spent so far (``token_usage``),
                 # read incrementally off the same transcript; absent where the
                 # harness has no reader.
@@ -8707,10 +8945,13 @@ async def _sessions_list(request: web.Request) -> web.Response:
             # unmerged, since the list carries hundreds of those
             # (claunch-0gysk, claunch-ork3b).
             if not s.exited:
-                chips = session_commits.rail(
-                    info.get(work_checkout.FIELD) or _session_cwd(s),
-                    info["name"], info.get("prs"),
-                )
+                rail_cwd = info.get(work_checkout.FIELD) or _session_cwd(s)
+                chips = session_commits.rail(rail_cwd, info["name"], info.get("prs"))
+                # A rebased-away commit is struck through: its change landed
+                # under another hash. Judged once per commit and kept in the
+                # session's directory (rail_superseded, claunch-rqtpe).
+                rail_superseded.mark(info["name"], functools.partial(
+                    session_commits.rail_superseded, rail_cwd, info["name"], chips))
                 if chips:
                     info["rail_commits"] = chips
             # A kill that is still a wind-down (see beads.Board): the row says
@@ -9017,8 +9258,10 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     definition.pop("prompt_packs", None)
     # v2 start inputs belong to the run (chart.json), not to the session.
     definition.pop("cflow_inputs", None)
-    # Who created it is the request's, never the body's (claunch-o6xws).
-    definition["created_by"] = actors.from_request(request)
+    # Who created it is the request's, never the body's (claunch-o6xws). A
+    # create the spawn gate makes carries its own actor (who set it up).
+    definition["created_by"] = (getattr(request, "gate_actor", None)
+                                or actors.from_request(request))
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
@@ -9558,34 +9801,123 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         manager.get(parent)
     except ManagerError as exc:
         return json_error(404, str(exc))
+    actor = actors.from_request(request)
+    root = bool(body.pop("root", False))
+    reason = body.pop("reason", None)
+    if root and actor.get("kind") != actors.AGENT:
+        return json_error(400, "'root' is an agent's request for a top-level session; "
+                          "a person creates one with the New session form")
+    # An agent's spawn waits behind the person's approval (claunch-iw5i8.16)
+    # -- except a reviewer, which a workflow stands up at every landing and
+    # the user chose to keep off the card.
+    if actor.get("kind") == actors.AGENT and (root or not spawn_gate_exempt(body)):
+        return await _file_spawn_request(request, parent, body, root=root, reason=reason)
+    status, payload = await _spawn_child(request, parent, body, created_by=actor)
+    return json_response(payload, status=status)
+
+
+def spawn_gate_exempt(body: dict) -> bool:
+    """Whether an agent's child spawn skips the spawn-request gate: a
+    ``reviewer`` child (the user's decision, th-17c48c)."""
+    return str(body.get("role") or "").strip().lower() == "reviewer"
+
+
+#: The children-body keys a top-level ask carries over to its
+#: ``POST /api/sessions`` spec; profile, project, cwd and worktree are set
+#: from the asker (:func:`_root_spec`).
+ROOT_SPEC_KEYS = (
+    "name", "task", "workflow", "workflow_version", "workflow_params", "cflow_inputs",
+    "context", "issue", "issue_text", "beads", "prompt_packs", "daemon_prompt",
+    "workspace_prompt",
+)
+
+
+def _root_spec(manager, parent: str, body: dict) -> dict:
+    """The top-level session an agent's ``root`` spawn asks for: the
+    asker's profile and project, the project's default workspace (else the
+    asker's directory), on a fresh worktree."""
+    sdef = manager.get(parent).sdef
+    project = projects.normalize(str(body.get("project") or getattr(sdef, "project", "") or ""))
+    if project == projects.DEFAULT:
+        project = ""
+    spec = {k: body[k] for k in ROOT_SPEC_KEYS if body.get(k) not in (None, "")}
+    if body.get("beads") is False:
+        spec["beads"] = False
+    cwd = projects.default_cwd(project) if project else ""
+    spec.update({"profile": sdef.profile, "cwd": cwd or sdef.cwd, "worktree": ""})
+    if project:
+        spec["project"] = project
+    return spec
+
+
+async def _file_spawn_request(request: web.Request, parent: str, body: dict, *,
+                              root: bool, reason) -> web.Response:
+    gate: spawn_gate.SpawnGate = request.app["spawn_gate"]
+    manager: SessionManager = request.app["manager"]
+    reason = spawn_gate.clean_reason(reason) or _first_line(body.get("task")) or (
+        f"{parent} asks for a {'top-level session' if root else 'child session'}")
+    try:
+        if root:
+            record = gate.submit_spawn(session=parent, spec=_root_spec(manager, parent, body),
+                                       child_spec=dict(body), reason=reason,
+                                       scope=spawn_gate.ROOT)
+        else:
+            record = gate.submit_spawn(session=parent, spec=dict(body), reason=reason,
+                                       scope=spawn_gate.CHILD)
+    except spawn_gate.GateRefused as exc:
+        return json_error(exc.status, str(exc))
+    unanswered = ("created as your child from this spec" if root
+                  else "created as asked")
+    return json_response({
+        "pending": True,
+        "request": record,
+        "note": (f"spawn request {record['id']} is waiting for the person (deadline "
+                 f"{record['deadline']}); unanswered, it is {unanswered}. The outcome is "
+                 "typed into your terminal as a [claunch spawn-request] block -- do not "
+                 "spawn again for the same work."),
+    }, status=202)
+
+
+def _first_line(text) -> str:
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return spawn_gate.clean_reason(line.strip()[:300])
+    return ""
+
+
+async def _spawn_child(request, parent: str, body: dict, *,
+                       created_by: Optional[dict]) -> Tuple[int, dict]:
+    """Stage, enrol and launch a child of ``parent`` -- the agent's spawn,
+    and the spawn gate's create of a child it approved."""
+    manager: SessionManager = request.app["manager"]
     warnings: list = []
     try:
-        session = manager.stage_child(parent, body, warnings=warnings,
-                                      created_by=actors.from_request(request))
+        session = manager.stage_child(parent, body, warnings=warnings, created_by=created_by)
     except spawn_mod.SpawnDenied as exc:
-        return json_error(403, str(exc))
+        return 403, {"error": str(exc)}
     except worktree_mod.WorktreeError as exc:
         # A checkout that was asked for and could not be cut (or could not be
         # brought up to date) fails the spawn, exactly as it fails a launch:
         # an agent started in a directory that is not the one it was promised
         # is worse than one that was never started.
-        return json_error(400, str(exc))
+        return 400, {"error": str(exc)}
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad spawn request: {exc}")
+        return 400, {"error": f"bad spawn request: {exc}"}
     except ManagerError as exc:
-        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+        return (409 if "already exists" in str(exc) else 400), {"error": str(exc)}
     try:
         result = await _onboard_and_launch(request, session, body, parent=parent)
     except onboard.OnboardError as exc:
-        return json_response(onboard.error_body(exc), status=400)
+        return 400, onboard.error_body(exc)
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad spawn request: {exc}")
-    body_out = {"session": session.info(), "parent": parent, **result}
+        return 400, {"error": f"bad spawn request: {exc}"}
+    body_out = {"session": session.info(), "parent": parent, "name": session.sdef.name,
+                **result}
     # Only when there is one: an always-present empty list would read, to a
     # client eyeballing the response, as a field that never says anything.
     if warnings:
         body_out["warnings"] = warnings
-    return json_response(body_out, status=201)
+    return 201, body_out
 
 
 async def h_session_reparent(request: web.Request) -> web.Response:
@@ -10395,8 +10727,11 @@ async def h_session_rail_commits(request: web.Request) -> web.Response:
         # it moved into, else that same directory.
         home = _session_cwd(session)
         cwd = work_checkout.of(session.sdef) or home
-        return session_commits.rail(
+        found = session_commits.rail(
             cwd, name, session_prs.for_session(home, name), everything=True)
+        rail_superseded.mark(name, functools.partial(
+            session_commits.rail_superseded, cwd, name, found))
+        return found
 
     chips = await asyncio.to_thread(read)
     return json_response({"session": name, "rail_commits": chips})

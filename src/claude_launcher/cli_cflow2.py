@@ -413,6 +413,8 @@ NUDGE_ABORTED = ("[cflow2] a person aborted your v2 workflow run - stop working 
                  "flow_status shows it aborted.")
 NUDGE_EXTENDED = ("[cflow2] a person answered your run's limit hold. Call flow_status "
                   "and continue.")
+NUDGE_INPUT_SET = ("[cflow2] a person changed your run's start input {name} to {value}. "
+                   "Steps read it from now on; call flow_status and continue.")
 
 
 def _nudge_driver(scope: Optional[str], message: str) -> None:
@@ -760,22 +762,32 @@ def _cmd_collection(args: argparse.Namespace) -> int:
 
 
 def _cmd_input(args: argparse.Namespace) -> int:
-    """Write an empty start input of the run here (``flow_input``'s CLI
-    door): the run's driver only, under the same checks."""
+    """Write a start input of the run here. Without ``--user``,
+    ``flow_input``'s CLI door: an empty ``set_by: [agent]`` input, the run's
+    driver only. With ``--user``, a person's change of a ``set_by: [user]``
+    input, whatever it holds (claunch-umq1f) -- refused from the driver's
+    own shell, like every person's command."""
     from .cflow2 import runtime, store
 
-    session = os.environ.get(store.SESSION_ENV, "").strip()
-    runtime.authorize(cwd=os.getcwd(), scope=args.scope, session=session)
     value: Any = args.value
     if args.json_value:
         try:
             value = json.loads(args.value)
         except ValueError as exc:
             raise SystemExit(f"error: VALUE is not JSON: {exc}")
-    payload = runtime.set_input(args.name, value, session=session, cwd=os.getcwd(),
-                                scope=args.scope)
-    got = (payload.get("inputs") or {}).get(args.name)
-    print(f"input {args.name} = {json.dumps(got, ensure_ascii=False)}")
+    if args.user:
+        _refuse_own_session(args.scope, "input --user")
+        payload = runtime.set_input(args.name, value, caller=runtime.CALLER_USER,
+                                    cwd=os.getcwd(), scope=args.scope)
+    else:
+        session = os.environ.get(store.SESSION_ENV, "").strip()
+        runtime.authorize(cwd=os.getcwd(), scope=args.scope, session=session)
+        payload = runtime.set_input(args.name, value, session=session, cwd=os.getcwd(),
+                                    scope=args.scope)
+    got = json.dumps((payload.get("inputs") or {}).get(args.name), ensure_ascii=False)
+    print(f"input {args.name} = {got}")
+    if args.user:
+        _nudge_driver(args.scope, NUDGE_INPUT_SET.format(name=args.name, value=got))
     return 0
 
 
@@ -1037,10 +1049,14 @@ def register(sub) -> None:
     r.add_argument("key")
     r.set_defaults(func=_guarded(_cmd_collection))
 
-    q = scoped(csub.add_parser("input", help="write an empty start input of the run here "
-                               "(declared with set_by: [agent]; the run's driver only)"))
+    q = scoped(csub.add_parser("input", help="write a start input of the run here: an empty "
+                               "set_by: [agent] input (the run's driver only), or with --user "
+                               "a person's change of a set_by: [user] input"))
     q.add_argument("name")
     q.add_argument("value")
+    q.add_argument("--user", action="store_true",
+                   help="a person's change: the input's set_by names user; overwrites what "
+                        "it holds (an empty VALUE clears it). Not from the driver's own shell")
     q.add_argument("--json-value", action="store_true",
                    help="read VALUE as JSON (a list, a number) instead of text")
     q.set_defaults(func=_guarded(_cmd_input))

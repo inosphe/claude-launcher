@@ -743,6 +743,13 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     except daemon_client.DaemonClientError as exc:
         print(exc)
         return 1
+    if result.get("pending"):
+        # An agent's spawn waits for the person (claunch-iw5i8.16).
+        request = result.get("request") or {}
+        print(f"spawn request {request.get('id')} is waiting for the person "
+              f"(deadline {request.get('deadline')})")
+        print(f"  {result.get('note') or ''}".rstrip())
+        return 0
     child = result.get("session") or {}
     # Before the success line, not after: a warning that scrolls past the
     # thing it is about reads as being about whatever came next.
@@ -1678,8 +1685,21 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
     remove button), never this one."""
     client = daemon_client.ensure_running()
     suffix = "?force=1" if args.force else ""
-    info = client.post(f"/api/sessions/{args.session}/kill{suffix}",
-                       {"reason": getattr(args, "reason", "") or ""})
+    body = {"reason": getattr(args, "reason", "") or ""}
+    if getattr(args, "skip_end_decision", False):
+        body["skip_end_decision"] = True
+    info = client.post(f"/api/sessions/{args.session}/kill{suffix}", body)
+    if info.get("end_requested"):
+        # The target's run stands on its end decision: the person is asked to
+        # answer 'end' there instead of a kill request (claunch-g08xz.1).
+        print(
+            f"session {args.session!r} was not killed: its run stands on its "
+            f"end decision ({info.get('decision')}), so the user is asked on the "
+            f"web UI (nudge {info.get('nudge')}) to answer 'end' there, which "
+            "ends it through its workflow. Its exit is the answer; do not run "
+            "this again. --skip-end-decision files a plain kill request instead."
+        )
+        return 0
     if info.get("pending"):
         # Run from a managed session's shell: an agent's kill of another
         # session waits for a person (claunch-5aysr).
@@ -2603,12 +2623,16 @@ _LIVE_KEYS = (
     "auto_archive_killed_days", "auto_archive_interval_s", "auto_archive_batch",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
+    # read by improv-worker-v2 at each delegation (claunch-yl0to)
+    "delegate_profile", "delegate_model",
 )
 
 
 #: Keys that set whether a person approves what an agent does. A managed
 #: session (CLAUNCH_SESSION set) may read them but not write them.
-_PERSON_ONLY_KEYS = ("reposync_push",)
+#: delegate_*: which profile (and so whose account and bill) an agent's
+#: delegated work runs on is the person's choice (claunch-yl0to).
+_PERSON_ONLY_KEYS = ("reposync_push", "delegate_profile", "delegate_model")
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:
@@ -3673,6 +3697,12 @@ def register(sub) -> None:
         "--reason", default="",
         help="from inside a managed session: why the target should end, shown "
              "on the approval card an agent's kill waits behind",
+    )
+    p_kill.add_argument(
+        "--skip-end-decision", action="store_true",
+        help="from inside a managed session: file the kill request even when "
+             "the target's run stands on its end decision (by default the user "
+             "is asked to answer 'end' there instead)",
     )
     p_kill.set_defaults(func=_cmd_kill_session_dispatch)
 

@@ -37,8 +37,11 @@ What :func:`apply` does with the values:
 
 An input declared ``set_by: [agent]`` may be written once more after the
 run started, while it is still empty, by the run's driver
-(``runtime.set_input`` through ``flow_input`` / ``claunch cflow2 input``);
-:func:`settle` checks that write the way :func:`normalize` checks a start.
+(``runtime.set_input`` through ``flow_input`` / ``claunch cflow2 input``).
+An input declared ``set_by: [user]`` may be changed by a person at any time
+(``claunch cflow2 input --user``, the run page, ``POST /api/cflow2/input``);
+it may be a ``bool``. :func:`settle` checks either write the way
+:func:`normalize` checks a start.
 
 Probes are shell commands a person typed. They run as written; no run value
 is ever substituted into them (the same rule as ``verify``).
@@ -85,12 +88,22 @@ KEYS = ("type", "label", "help", "required", "default", "choices", "placeholder"
 PRECHECKS = ("gh",)
 #: Who ``set_by:`` may let write an input after the run started
 #: (:func:`settle`): ``agent`` is the run's driver, through ``flow_input`` or
-#: ``claunch cflow2 input``.
-SETTERS = ("agent",)
-#: Types an input written after start may have. ``bool`` has no empty value
-#: (an unset one is false), and the check lists are folded into rules and
-#: monitors at start (:func:`apply`), which a later write would not redo.
+#: ``claunch cflow2 input``, and fills an empty input once; ``user`` is a
+#: person, through ``claunch cflow2 input --user``, the dashboard's run page
+#: or ``POST /api/cflow2/input``, and may change the value at any time
+#: (claunch-umq1f).
+SETTER_AGENT = "agent"
+SETTER_USER = "user"
+SETTERS = (SETTER_AGENT, SETTER_USER)
+#: Types an input the agent fills after start may have. ``bool`` has no
+#: empty value (an unset one is false), and the check lists are folded into
+#: rules and monitors at start (:func:`apply`), which a later write would not
+#: redo.
 SETTABLE_TYPES = (T_STRING, T_TEXT, T_INT, T_ENUM, T_LIST)
+#: Types a person may change after start: the agent's, and ``bool`` -- a
+#: person overwrites, so a value that is never empty is no obstacle. The
+#: check lists stay out for the reason above.
+USER_SETTABLE_TYPES = SETTABLE_TYPES + (T_BOOL,)
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 RULE_INVARIANT = "input-invariant-{n}"
@@ -175,9 +188,12 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
             if bad:
                 raise InputsError(f"input {name!r}: unknown set_by {bad[0]!r} "
                                   f"(allowed: {', '.join(SETTERS)})")
-            if set_by and typ not in SETTABLE_TYPES:
-                raise InputsError(f"input {name!r}: set_by applies to types "
+            if SETTER_AGENT in set_by and typ not in SETTABLE_TYPES:
+                raise InputsError(f"input {name!r}: set_by {SETTER_AGENT} applies to types "
                                   f"{', '.join(SETTABLE_TYPES)}, not {typ}")
+            if SETTER_USER in set_by and typ not in USER_SETTABLE_TYPES:
+                raise InputsError(f"input {name!r}: set_by {SETTER_USER} applies to types "
+                                  f"{', '.join(USER_SETTABLE_TYPES)}, not {typ}")
         entry = {
             "type": typ,
             "label": decl.get("label") or name,
@@ -469,10 +485,13 @@ def settle(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str
     """The value ``setter`` may write into the started run's input ``name``
     (docs/cflow-v2.md 2.6), checked the way a start checks it. ``values`` is
     the run's current ``data.inputs``. Raises :class:`InputsError` when the
-    input is undeclared, its ``set_by`` does not name ``setter``, it already
-    holds a value (only an empty input is written; the message carries the
-    value it holds), the value is empty or of the wrong type, or a
-    constraint does not hold with it."""
+    input is undeclared, its ``set_by`` does not name ``setter``, the value
+    is of the wrong type, or a constraint does not hold with it.
+
+    ``agent`` fills an empty input once: refused when the input already
+    holds a value (the message carries it) or the value is empty. ``user``
+    overwrites whatever the input holds; an empty value clears it unless the
+    input is required."""
     decl = (schema_ or {}).get(name)
     if decl is None:
         raise InputsError(f"unknown input {name!r} (declared: {', '.join(schema_ or {}) or 'none'})")
@@ -480,18 +499,32 @@ def settle(schema_: Dict[str, Dict[str, Any]], values: Dict[str, Any], name: str
         raise InputsError(f"input {name!r} is fixed when the run starts; its declaration has "
                           f"no set_by: [{setter}]")
     current = (values or {}).get(name)
-    if not _is_empty(current):
-        exc = InputsError(f"input {name!r} already holds {json.dumps(current, ensure_ascii=False)}; "
-                          f"it is written only while empty")
-        exc.current = current  # type: ignore[attr-defined]
-        raise exc
-    if _is_empty(raw):
-        raise InputsError(f"input {name!r}: an empty value writes nothing")
-    value, err = _coerce(decl, raw)
-    if err:
-        raise InputsError(f"{decl['label']} {err}")
-    if _is_empty(value):
-        raise InputsError(f"input {name!r}: an empty value writes nothing")
+    if setter == SETTER_USER:
+        if _is_empty(raw) and decl["type"] != T_BOOL:
+            if decl.get("required"):
+                raise InputsError(f"{decl['label']} is required")
+            value = _empty(decl)
+        else:
+            value, err = _coerce(decl, raw)
+            if err:
+                raise InputsError(f"{decl['label']} {err}")
+            # ' , ' coerces to [] for a list: still a clear, so required holds
+            if decl.get("required") and decl["type"] != T_BOOL and _is_empty(value):
+                raise InputsError(f"{decl['label']} is required")
+    else:
+        if not _is_empty(current):
+            exc = InputsError(f"input {name!r} already holds "
+                              f"{json.dumps(current, ensure_ascii=False)}; "
+                              f"it is written only while empty")
+            exc.current = current  # type: ignore[attr-defined]
+            raise exc
+        if _is_empty(raw):
+            raise InputsError(f"input {name!r}: an empty value writes nothing")
+        value, err = _coerce(decl, raw)
+        if err:
+            raise InputsError(f"{decl['label']} {err}")
+        if _is_empty(value):
+            raise InputsError(f"input {name!r}: an empty value writes nothing")
     merged = {**(values or {}), name: value}
     ready = [c for c in constraints_ or []
              if name in _input_refs(c["assert"])
