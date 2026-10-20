@@ -131,11 +131,17 @@ class Queue:
                              "base": str(paths.base_home().resolve()),
                              "scratch": str(paths.session_scratch_dir(owner).resolve())})
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            # Every ordering here is by ``created``. The wall clock can step back
+            # (VM time sync), which would put a later enqueue ahead of earlier ones
+            # and change which merge a batch ends on; never stamp below the newest.
+            newest = db.execute("SELECT MAX(created) FROM jobs").fetchone()[0] or 0
             db.execute("INSERT OR IGNORE INTO jobs "
                        "(id,repo,common,sha,ref,issue,owner,tool,python,command,origin,status,created) "
                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
                        (ident, repo, common, sha, ref, issue, owner,
-                        str(Path(tool).resolve()), sys.executable, command, origin, time.time()))
+                        str(Path(tool).resolve()), sys.executable, command, origin,
+                        max(time.time(), newest)))
             row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone())
             if row["issue"] != issue:
                 raise ValueError("the merge already belongs to a different verification issue")

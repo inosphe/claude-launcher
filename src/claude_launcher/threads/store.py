@@ -168,8 +168,17 @@ CREATE INDEX IF NOT EXISTS guests_session ON guests (session);
 """
 
 
+_last_now = ""
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    """The current time to the second, never earlier than one this process
+    already stamped: the wall clock can step back (VM time sync), and threads
+    sort by these stamps."""
+    global _last_now
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _last_now = stamp = max(stamp, _last_now)
+    return stamp
 
 
 def _text(value, name: str, cap: int, *, required: bool = True) -> str:

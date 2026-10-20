@@ -935,6 +935,16 @@ def test_a_batch_takes_at_most_its_size_and_the_rest_form_the_next(repo, tmp_pat
     assert q.get(jobs[5]["id"])["formed"] == 0
 
 
+def test_a_clock_stepping_back_does_not_reorder_the_pool(repo, tmp_path, monkeypatch):
+    # The wall clock can step back (VM time sync) while merges are enqueued; the
+    # batch must still end on the fifth enqueued merge, not on a later one stamped early.
+    ticks = iter([100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 90.0])
+    monkeypatch.setattr(mod.time, "time", lambda: next(ticks, 200.0))
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcdefg"))
+    assert q.claim(batch=(5, 3600))["id"] == jobs[4]["id"]
+
+
 def test_a_failed_batch_is_narrowed_by_unbatch_even_while_paused(repo, tmp_path):
     q = queue(tmp_path)
     jobs = merges(q, repo, list("abc"))

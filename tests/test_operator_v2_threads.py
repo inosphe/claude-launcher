@@ -259,6 +259,24 @@ def test_the_operator_opens_threads_of_its_own(world):
     assert run(ops.message(world.alpha["id"], {"text": "확인"}))["thread"] == tid
 
 
+def test_a_clock_stepping_back_does_not_demote_a_newer_thread(world, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    ops = world.ops
+    base = datetime.now(timezone.utc) + timedelta(hours=1)  # after the fixture's own writes
+    stamps = iter([base] * 3)  # the first thread's open and post, then the clock steps back
+
+    class Clock:
+        @staticmethod
+        def now(tz=None):
+            return next(stamps, base - timedelta(seconds=5))
+
+    monkeypatch.setattr(S, "datetime", Clock)
+    first = ops.open_thread("opa", {"title": "A", "text": "a"})["thread"]["id"]
+    second = ops.open_thread("opa", {"title": "B", "text": "b"})["thread"]["id"]
+    assert [t["id"] for t in ops.agent_threads("opa")["threads"]][:2] == [second, first]
+
+
 def test_retrying_a_thread_open_returns_the_same_thread(world):
     ops = world.ops
     first = ops.open_thread("opa", {"title": "배포", "text": "시작", "request_id": "t-1"})
