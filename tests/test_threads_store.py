@@ -369,6 +369,19 @@ def test_t10_uninvite_and_leave(st):
     assert st.guests_of(tid) == []
 
 
+def test_t10_a_guest_post_does_not_reopen_a_closed_thread(st):
+    # claunch-mgh8x: a guest may not reopen a thread any more than close it.
+    tid = st.open(S.USER, "s1", "Review")["thread"]["id"]
+    st.invite(S.USER, tid, "s2")
+    st.set_status(S.USER, tid, "closed")
+    res = st.post("s2", tid, "one more thought")
+    assert res["reopened"] is False and res["as"] == S.GUEST
+    assert res["thread"]["status"] == "closed" and res["message"]["guest"] == "s2"
+    assert st.get(tid)["status"] == "closed"
+    assert st.post(S.USER, tid, "back to it")["reopened"] is True     # the user still reopens
+    assert st.get(tid)["status"] == "open"
+
+
 def test_t10_guest_limits(st):
     tid = st.open(S.USER, "s1", "Review")["thread"]["id"]
     for i in range(S.MAX_GUESTS):
