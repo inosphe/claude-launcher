@@ -258,6 +258,23 @@ def test_a_non_python_asset_with_a_cross_language_guard_is_reached(repo):
     assert "tests/test_web_topology.py" in _select(repo)
 
 
+def test_pytest_basetemp_selects_the_stdlib_only_gate_loader_test(repo):
+    """claunch-8x0xw: the gate tools import ``pytest_basetemp``, and the test
+    that loads them under ``python -S`` names neither it nor imports it, so
+    rules 2 and 3a miss it; rule 3b names the pair."""
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_gates_run_this_checkout.py": "loads the gates\n",
+            "src/claude_launcher/pytest_basetemp.py": "# v1\n",
+        },
+    )
+    _write(repo, "src/claude_launcher/pytest_basetemp.py", "# v2\n")
+    _git(repo, "commit", "-qam", "edit pytest_basetemp")
+
+    assert "tests/test_gates_run_this_checkout.py" in _select(repo)
+
+
 def test_a_path_no_rule_can_map_is_reported_not_silently_skipped(repo, capsys):
     """The distinction the whole gate rests on: empty is not the same as fine.
 

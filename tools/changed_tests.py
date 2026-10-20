@@ -327,6 +327,15 @@ EXPLICIT_GUARDS = (
         ("src/claude_launcher/web/static/", "tests/web/"),
         ("tests/test_web_topology.py",),
     ),
+    (
+        # The gate tools import this module, and test_gates_run_this_checkout
+        # loads them in a subprocess (`python -S`), so no python import or
+        # name links the two. PR #308 added a yaml-pulling import here, the
+        # preview selection omitted that test, and three gates failed to load
+        # in the deferred sweep (claunch-8x0xw).
+        ("src/claude_launcher/pytest_basetemp.py",),
+        ("tests/test_gates_run_this_checkout.py",),
+    ),
 )
 
 #: ``uv run`` is how every gate in this repository is invoked, and while it
@@ -652,7 +661,6 @@ def map_one(repo: Path, rel: str) -> List[str]:
         mod = module_name(rel)                            # 2b
         if mod:
             picked.update(importers(repo, mod))
-        return sorted(picked)
     posix = p.as_posix()
     for prefixes, guards in EXPLICIT_GUARDS:              # 3b
         if posix.startswith(prefixes):
