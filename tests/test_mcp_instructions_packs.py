@@ -7,7 +7,7 @@ guidance never reached the agent."""
 
 import pytest
 
-from claude_launcher import mcp_server, prompt_packs, prompt_packs_mcp, threads_mcp
+from claude_launcher import cflow_watch, mcp_server, prompt_packs, prompt_packs_mcp, threads_mcp
 
 #: What a client is measured to keep (Claude Code: 4096); the budget leaves
 #: room under it so one more pointer does not tip the tail off again.
@@ -62,6 +62,47 @@ def test_prompt_pack_reads_a_pack_and_lists_them(tmp_path, monkeypatch):
     assert set(MCP_PACKS) <= listed
     with pytest.raises(prompt_packs_mcp.PromptPackMcpError):
         mcp_server.SERVER.dispatch("prompt_pack", {"id": "no-such-pack"})
+
+
+def test_the_cflow_watch_pack_ships_loadable_but_not_in_the_opening():
+    """Watching another session's run is a supervisor's job, not every
+    session's: the pack ships and is named by the instructions, and a session
+    loads it through rebrief when it first uses the family -- so it is not a
+    default pack (claunch-ijg51.1.1)."""
+    pack = prompt_packs.shipped("mcp-cflow-watch")
+    assert pack.title.startswith("MCP")
+    assert "'mcp-cflow-watch'" in mcp_server.SERVER.instructions
+    assert "mcp-cflow-watch" not in prompt_packs.DEFAULT_PACKS
+    assert "mcp-cflow-watch" in prompt_packs.mcp_ids()
+    # loadable_copy is the on-demand path; it refuses anything but mcp- packs
+    assert prompt_packs.loadable_copy(None, "mcp-cflow-watch").body == pack.body
+    body = pack.body
+    for tool in ("runs", "subscribe", "unsubscribe", "subscriptions"):
+        assert tool in body
+    names = {t["name"] for t in mcp_server.TOOLS}
+    assert {"runs", "subscribe", "unsubscribe", "subscriptions"} <= names
+
+
+def test_the_cflow_watch_pack_quotes_the_frame_the_daemon_composes():
+    """The pack tells the agent which block to trust; a frame change on the
+    daemon side must not leave the pack describing a block that never comes."""
+    block = cflow_watch.compose_block("s1", ["kid [1] reported node=a outcome=ok"])
+    body = prompt_packs.shipped("mcp-cflow-watch").body
+    for line in ("# claunch cflow: watch -- machine-generated, not typed by the user",
+                 "watcher:", "events:"):
+        assert line in block
+        assert line in body
+
+
+def test_the_cflow_watch_pack_does_not_promise_a_gates_only_delivery():
+    """A subscription's row names its kinds explicitly, and the gate filter
+    runs only when kinds is None (``cflow_watch.reading``), so the default
+    delivery can carry a pacing ``waiting``. The pack says so instead of
+    telling the agent pacing is filtered out (claunch-ijg51.1.2)."""
+    body = prompt_packs.shipped("mcp-cflow-watch").body
+    assert "filtered out" not in body
+    assert "kind=pause" in body
+    assert "claunch-ijg51.1.2" in body
 
 
 def test_the_instructions_say_to_load_a_missing_pack_through_rebrief():
