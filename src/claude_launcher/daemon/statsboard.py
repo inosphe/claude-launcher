@@ -294,10 +294,28 @@ class Ledger:
 
     def _refresh(self, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
+        # A rebuild clears every file's offset, not just the one that was
+        # truncated: the files this loop had already passed would otherwise
+        # stay missing until the next poll -- one answer short, for no reason
+        # a reader could see. So a rebuild re-runs the scan from the start.
+        for _ in range(2):
+            if not self._scan():
+                break
+        self._prune(now)
+
+    def _scan(self) -> bool:
+        """Read every unread byte; True when a rebuild forced the scan to stop."""
         try:
             paths = sorted(self.directory.glob("*.jsonl"))
         except OSError:
             paths = []
+        # A deleted record file (`claunch tps clear`) and one that shrank are
+        # the same fact: the sums this reader holds no longer describe the
+        # directory. A file that is gone cannot be found by the per-file check
+        # below, so the name set is compared first.
+        if set(self._files) - {path.name for path in paths}:
+            self.reset()
+            return True
         for path in paths:
             try:
                 stat = path.stat()
@@ -307,7 +325,7 @@ class Ledger:
             if before is not None and (stat.st_ino != before[0]
                                        or stat.st_size < before[1]):
                 self.reset()
-                before = None
+                return True
             offset = before[1] if before else 0
             tail = before[2] if before else ""
             if stat.st_size == offset and not tail:
@@ -324,7 +342,7 @@ class Ledger:
             for line in lines:
                 self._add(line)
             self._files[path.name] = (stat.st_ino, offset + len(chunk), tail)
-        self._prune(now)
+        return False
 
     def reset(self) -> None:
         self._files.clear()

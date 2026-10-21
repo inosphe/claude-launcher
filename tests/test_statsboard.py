@@ -208,13 +208,31 @@ def test_a_half_written_line_waits_for_its_rest(tmp_path, ledger):
 
 def test_a_truncated_file_rebuilds_rather_than_keeping_dead_sums(tmp_path, ledger):
     directory = tmp_path / "metering"
-    path = write_ledger(directory, [record("s1", hour=9), record("s2", hour=10)])
+    # Two files, so the rebuild is asked a second question: the file the scan
+    # had already passed must not drop out of the same answer. Rebuilding
+    # only from the truncated file onward returned {s3} here, not {s1, s3}.
+    write_ledger(directory, [record("s1", hour=9)], name="a.jsonl")
+    path = write_ledger(directory, [record("s2", hour=10), record("s2", hour=11)],
+                        name="b.jsonl")
     ledger.refresh(NOW)
     assert set(ledger.window("2026-10-21", 0)) == {"s1", "s2"}
     path.write_text(json.dumps(record("s3", hour=11)) + "\n", encoding="utf-8")
     ledger.refresh(NOW)
-    assert set(ledger.window("2026-10-21", 0)) == {"s3"}
+    assert set(ledger.window("2026-10-21", 0)) == {"s1", "s3"}
     assert ledger.rebuilds == 1
+
+
+def test_a_deleted_record_file_takes_its_sums_with_it(tmp_path, ledger):
+    directory = tmp_path / "metering"
+    kept = write_ledger(directory, [record("s1", hour=9)], name="a.jsonl")
+    dropped = write_ledger(directory, [record("s2", hour=10)], name="b.jsonl")
+    ledger.refresh(NOW)
+    assert set(ledger.window("2026-10-21", 0)) == {"s1", "s2"}
+    dropped.unlink()
+    ledger.refresh(NOW)
+    assert set(ledger.window("2026-10-21", 0)) == {"s1"}
+    assert ledger.rebuilds == 1
+    assert kept.exists()
 
 
 def test_a_provider_change_inside_the_window_is_a_switch(tmp_path, ledger):
