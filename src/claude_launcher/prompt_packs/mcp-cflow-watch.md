@@ -77,7 +77,7 @@ several watches stays attributable. Forms you will see, and what each means:
 
 ### Choosing the kinds
 
-By default you hear reports, gates, asks, and ends — not node transitions
+Default delivery carries reports, gates, asks, and ends — not node transitions
 (`entered`/`left`), because a long run would fill your terminal with turns;
 those are a pull question (`runs` returns `current`). The default set is
 `reported`, `done`, `aborted`, `select_held`, `waiting`, the `ask_*` family
@@ -87,11 +87,22 @@ and the v1 names `gate_wait`, `select_presented`, `checklist_presented`,
 `timer_presented`, `ask_escalated`, `ask_declined`, `ask_deferred`,
 `sub_ended`, `published`.
 
-"Gates" means the `waiting` event whose `kind` is `choose` or `ask`; pacing
-waits (`pause`, `loop_limit`, a held visit) are filtered out. Name
-`kinds=[...]` when subscribing to widen or narrow that set — naming `waiting`
-explicitly delivers every pacing pause too. `subscribe` records the set on the
-row, so widening later means subscribing to that target again.
+A `waiting` line needs its `kind=` read. `kind=choose` and `kind=ask` are
+gates: a person or a peer owes a decision. `kind=wait`, `kind=pause`,
+`kind=loop_limit` and a held visit are pacing, and nobody owes anything.
+**A subscription's default delivery can carry the pacing ones too** — the row
+it stores names `waiting` explicitly, and that is a different filter from
+reading with no `kinds` at all, which `runs(since=...)` does and which keeps
+gates only (`claunch-ijg51.1.2` tracks the delivery path). So do not take a
+`waiting` line for a gate unless its `kind` says so.
+
+`kinds=[...]` sets the delivery set for that subscription. Naming `waiting`
+yourself behaves the same as the default for it; omitting `waiting` is how you
+narrow past it, and gates still reach you as the `gate:` state line, which is
+reported from the run's owed set rather than from an event. `subscribe` records
+the set on the row, so changing it later means subscribing to that target
+again — and a new row starts at the run's current position, so read the stretch
+you skipped with `runs(since=<the old cursor>)` first.
 
 ### Cursors and loss
 

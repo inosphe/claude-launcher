@@ -94,6 +94,17 @@ def test_the_cflow_watch_pack_quotes_the_frame_the_daemon_composes():
         assert line in body
 
 
+def test_the_cflow_watch_pack_does_not_promise_a_gates_only_delivery():
+    """A subscription's row names its kinds explicitly, and the gate filter
+    runs only when kinds is None (``cflow_watch.reading``), so the default
+    delivery can carry a pacing ``waiting``. The pack says so instead of
+    telling the agent pacing is filtered out (claunch-ijg51.1.2)."""
+    body = prompt_packs.shipped("mcp-cflow-watch").body
+    assert "filtered out" not in body
+    assert "kind=pause" in body
+    assert "claunch-ijg51.1.2" in body
+
+
 def test_the_instructions_say_to_load_a_missing_pack_through_rebrief():
     """A pack unticked at creation is loaded on demand, like a skill
     (claunch-6esft): the instructions name the rebrief tool's 'pack'."""
