@@ -1729,6 +1729,34 @@ def test_attach_hangs_parallel_on_the_rows_live_brief(home):
     assert info["tps"]["live"]["parallel"]["mean"] == 60.0
 
 
+def test_claunch_tps_summary_line_names_the_cache_share():
+    """``claunch tps`` prints the cache share and the write count on one line.
+
+    The share rides in parentheses right after the cache reads it describes,
+    so the percentage and the total under it are about the same calls
+    (summarize's ratio is summed over the records it counted). The wording is
+    pinned here because a summary line is what a person reads first and it
+    has no renderer to test in (claunch-k196e.3).
+    """
+    from claude_launcher import cli
+
+    s = metering.summarize([_rec(input_tokens=1000, cache_read=3000, cache_write=50)])
+    lines = cli._tps_summary_lines("all", s)
+    assert lines[0] == "  all"
+    # 3,000 of (1,000 + 3,000 + 50) prompt tokens.
+    assert lines[1] == (
+        "    requests 1 (counted 1)  out 100 tok  in 1000 tok  "
+        "cache-read 3000 tok (74.1% of prompt)  cache-write 50 tok"
+    )
+    # A record that cannot give a share prints none, and the parenthesis does
+    # not appear even though the reads and writes are still counted.
+    plain = metering.summarize([_rec(input_tokens=None, cache_read=None,
+                                     cache_write=None)])
+    assert plain["cache_hit_ratio"] is None
+    assert "cache-read 0 tok  cache-write 0 tok" in cli._tps_summary_lines("all", plain)[1]
+    assert "% of prompt" not in cli._tps_summary_lines("all", plain)[1]
+
+
 def test_claunch_tps_prints_live_totals_by_proxy(home, capsys):
     from claude_launcher import cli
 

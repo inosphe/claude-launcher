@@ -7953,12 +7953,20 @@ function renderTermTps() {
          call went. They answer different questions and are read at different
          moments, so they are two blocks rather than one run-on line -- and
          the divider between them is drawn only when both have something to
-         say (a session with nothing in flight keeps the second area alone). */
-      const lastBox = el("div", "term-tps-last");
-      if (!parts.live) lastBox.appendChild(el("span", "term-tps-big", parts.big));
-      if (parts.when) lastBox.appendChild(el("span", "term-tps-small term-tps-when", parts.when));
-      if (parts.metrics) {
-        lastBox.appendChild(el("span", "term-tps-small term-tps-metrics", parts.metrics));
+         say (a session with nothing in flight keeps the second area alone).
+         A session whose live file exists but has no finished call yet has
+         nothing for the second area either: it would be a divider with no
+         line under it, so the area is not built at all (claunch-k196e.3).
+         The non-live branch always has `big` for it, so only the live one
+         can come up empty. */
+      const lastHas = !parts.live || !!(parts.when || parts.metrics);
+      const lastBox = lastHas ? el("div", "term-tps-last") : null;
+      if (lastBox) {
+        if (!parts.live) lastBox.appendChild(el("span", "term-tps-big", parts.big));
+        if (parts.when) lastBox.appendChild(el("span", "term-tps-small term-tps-when", parts.when));
+        if (parts.metrics) {
+          lastBox.appendChild(el("span", "term-tps-small term-tps-metrics", parts.metrics));
+        }
       }
       if (parts.live) {
         const liveBox = el("div", "term-tps-live");
@@ -7967,7 +7975,8 @@ function renderTermTps() {
         if (parts.par) {
           liveBox.appendChild(el("span", "term-tps-small term-tps-parallel", parts.par));
         }
-        overlay.replaceChildren(liveBox, lastBox);
+        if (lastBox) overlay.replaceChildren(liveBox, lastBox);
+        else overlay.replaceChildren(liveBox);
       } else {
         overlay.replaceChildren(lastBox);
         overlay.title = parts.title;
