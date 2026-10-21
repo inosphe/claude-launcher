@@ -9771,6 +9771,15 @@ async def _onboard_and_launch(
     # task or context is not refused: prose like "Known issue: flaky tests"
     # matches the same pattern (s88 P1). A board that cannot be read is
     # still no reason to refuse; that is reported in `unsettled` below.
+    #
+    # A workflow with no terminal for the board (gds-job, the one-shot
+    # analysis session an application starts) answers the board question the
+    # same way a caller does when it wants no issue, and it is answered here
+    # so the mint, the opening and the report read one answer
+    # (beads.default_board_answer). Every board answer the request carried
+    # itself -- the v2 input folded in just above included -- has had its say
+    # by now and wins.
+    beads_mod.default_board_answer(body)
     unsettled: dict = {}
     try:
         linked = await request.app["beads"].ensure_issue(

@@ -637,6 +637,114 @@ def test_the_two_no_issue_answers_are_read_from_one_key():
     assert mode({"task": "go", "issue": "x-1"}) is None
 
 
+def test_a_terminal_less_workflow_answers_no_issue_by_itself():
+    """What the caller's silence means for a one-shot analysis session.
+
+    gds6 stopped sending the answer on 2026-10-12 (0748d3ca) and the daemon
+    kept minting an issue from the task until it did: the session then carried
+    "keep its status current" into an opening that forbids terminal commands,
+    and a wind-down block for a turn it had already spent. The answer now
+    comes from the workflow, so a caller that forgets costs nothing.
+    """
+    fill = beads_mod.default_board_answer
+
+    body = {"task": "extract this", "workflow": "gds-job"}
+    assert fill(body) == beads_mod.NONE_WAIT
+    assert beads_mod.none_mode(body) == beads_mod.NONE_WAIT
+
+    # The request's own answer wins on either side.
+    kept = {"task": "go", "workflow": "gds-job", "beads": True}
+    assert fill(kept) is None and "beads" in kept and kept["beads"] is True
+    no_issue = {"task": "go", "workflow": "gds-job", "beads": False}
+    assert fill(no_issue) is None
+    named = {"task": "go", "workflow": "gds-job", "issue": "claunch-9"}
+    assert fill(named) is None and "beads" not in named
+    written = {"task": "go", "workflow": "gds-job", "issue_text": "spec"}
+    assert fill(written) is None and "beads" not in written
+
+    # Every other workflow is left exactly as it was.
+    other = {"task": "go", "workflow": "improv-worker-v2"}
+    assert fill(other) is None and "beads" not in other
+    assert fill({"task": "go"}) is None
+
+
+def test_a_job_session_mints_nothing_even_with_no_answer_from_the_caller(repo):
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        body = {"task": "extract this", "workflow": "gds-job"}
+        beads_mod.default_board_answer(body)
+        assert await board.ensure_issue(
+            _Sess(_sdef("job-abc", repo)), body=body, parent=None,
+        ) is None
+        assert br.calls == []                  # nothing minted, nothing read
+
+        # The same task without the workflow still gets its issue: the rule is
+        # about who runs the session, not about what the task says.
+        plain = {"task": "extract this"}
+        made = await board.ensure_issue(
+            _Sess(_sdef("w1", repo)), body=plain, parent=None,
+        )
+        assert made and made["mode"] == beads_mod.MINTED
+
+    asyncio.run(run())
+
+
+def test_a_gds_job_session_starts_with_the_no_issue_answer(home, tmp_path, repo):
+    """The same rule through the real route: the answer reaches the opening.
+
+    The caller sends only the task and the workflow, which is what gds6's
+    job-runner used to send before 0748d3ca -- and the opening that came back
+    carried an issue it could not settle.
+    """
+    from claude_launcher.cflow import state as sstate
+
+    _register_py_harness()
+    layers = repo / ".claunch" / "workflows"
+    layers.mkdir(parents=True)
+    (layers / "gds-job.yaml").write_text(
+        dict(sstate.bundled_workflows())["gds-job"].read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    br = FakeBr()
+    board = _board(br, repo)
+    seen = {}
+
+    from claude_launcher.daemon import onboard
+
+    real = onboard.arrange
+
+    async def spy(plan, **kw):
+        seen[kw["name"]] = plan.task
+        return await real(plan, **kw)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        onboard.arrange = spy
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "job-a", "profile": "py", "cwd": str(repo),
+                      "task": "extract this document", "workflow": "gds-job"},
+                headers=BEARER,
+            )
+            assert resp.status == 201, await resp.text()
+            assert br.calls == []                       # nothing minted
+            opening = seen["job-a"]
+            assert opening.startswith("extract this document\n\nno issue:")
+            assert "wait for instructions" in opening
+            assert "keep its status current" not in opening
+            await mgr.shutdown_all()
+        finally:
+            onboard.arrange = real
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_each_no_issue_note_forbids_what_the_other_one_asks_for():
     """A block saying only "no issue was created" leaves the session free to
     decide that finding one is helpful, which is the behaviour this splits."""
