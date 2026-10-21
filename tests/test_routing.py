@@ -117,6 +117,52 @@ def test_routing_without_a_base_url_is_refused(home):
 
 
 # --------------------------------------------------------------------------- #
+# sticky session affinity
+# --------------------------------------------------------------------------- #
+def test_affinity_is_off_by_default_and_reads_the_provider_block(home):
+    _write_provider()
+    assert routing.session_affinity("openrouter") is False
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"session_affinity": True}))
+    assert routing.session_affinity("openrouter") is True
+    assert routing.session_affinity("nonexistent") is False
+
+
+@pytest.mark.parametrize("bad", ["true", 1, [], {}])
+def test_a_malformed_affinity_flag_is_rejected(home, bad):
+    _write_provider()
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"session_affinity": bad}))
+    with pytest.raises(routing.RoutingError):
+        routing.session_affinity("openrouter")
+
+
+def test_affinity_default_keeps_existing_fingerprints():
+    # shims started before the flag existed keep their identity
+    assert routing.fingerprint("https://u/", SPEC) == routing.fingerprint(
+        "https://u/", SPEC, affinity=False)
+    assert routing.fingerprint("https://u/", SPEC) != routing.fingerprint(
+        "https://u/", SPEC, affinity=True)
+
+
+def test_front_passes_affinity_to_the_shim(home, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_METERING", "1")  # conftest switches it off
+    store.update(lambda doc: doc.setdefault("providers", {}).update({
+        "fw": {"env": {"ANTHROPIC_BASE_URL": "https://api.fireworks.ai/inference"},
+               "session_affinity": True}}))
+    seen = {}
+
+    def _fake_ensure(upstream, block, affinity=False):
+        seen["args"] = (upstream, block, affinity)
+        return "http://127.0.0.1:1/"
+
+    monkeypatch.setattr(routing, "ensure_shim", _fake_ensure)
+    assert routing.front("https://api.fireworks.ai/inference", "fw") == \
+        "http://127.0.0.1:1/"
+    assert seen["args"] == ("https://api.fireworks.ai/inference", {}, True)
+
+
+# --------------------------------------------------------------------------- #
 # a real shim in front of a real (throwaway) upstream
 # --------------------------------------------------------------------------- #
 class _Upstream:
@@ -227,6 +273,60 @@ def test_shim_merges_the_spec_into_what_the_upstream_receives(upstream, shims):
     assert json.loads(seen["body"])["provider"] == SPEC
 
 
+def _post_with_headers(url: str, payload: dict, headers: dict, timeout=20):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json", **headers},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status, resp.read()
+
+
+def _header(headers: dict, name: str):
+    """Case-insensitive lookup — the upstream sees whatever case aiohttp sent."""
+    for key, value in headers.items():
+        if key.lower() == name:
+            return value
+    return None
+
+
+@pytest.mark.slow_shim
+def test_shim_forwards_the_session_as_affinity_when_enabled(upstream, shims):
+    base = routing.ensure_shim(upstream.url, {}, affinity=True)
+    _post_with_headers(
+        base + "v1/chat/completions", {"model": "m"},
+        {"X-Claunch-Session": "s1221"},
+    )
+    seen = upstream.requests[-1]
+    # the private header is still stripped; the affinity name carries it on
+    assert _header(seen["headers"], "x-claunch-session") is None
+    assert _header(seen["headers"], "x-session-affinity") == "s1221"
+
+
+@pytest.mark.slow_shim
+def test_shim_without_affinity_adds_no_header(upstream, shims):
+    base = routing.ensure_shim(upstream.url, {})
+    _post_with_headers(
+        base + "v1/chat/completions", {"model": "m"},
+        {"X-Claunch-Session": "s1221"},
+    )
+    seen = upstream.requests[-1]
+    assert _header(seen["headers"], "x-session-affinity") is None
+
+
+@pytest.mark.slow_shim
+def test_shim_respects_a_caller_supplied_affinity_header(upstream, shims):
+    base = routing.ensure_shim(upstream.url, {}, affinity=True)
+    _post_with_headers(
+        base + "v1/chat/completions", {"model": "m"},
+        {"X-Claunch-Session": "s1221", "X-Session-Affinity": "caller-own"},
+    )
+    seen = upstream.requests[-1]
+    assert _header(seen["headers"], "x-session-affinity") == "caller-own"
+
+
 @pytest.mark.slow_shim
 def test_shim_leaves_non_json_and_reads_headers_through(upstream, shims):
     base = routing.ensure_shim(upstream.url, SPEC)
@@ -308,7 +408,7 @@ def test_stop_reaches_a_second_shim_serving_the_same_pair(upstream, shims):
     routing.ensure_shim(upstream.url, SPEC)
     fp = routing.fingerprint(upstream.url, SPEC)
     stray = routing.candidate_ports(fp)[3]
-    routing._spawn(upstream.url, SPEC, stray, fp)
+    routing._spawn(upstream.url, SPEC, stray, fp, False)
     for _ in range(150):
         info = routing.health(stray, timeout=0.5)
         if info is not None:

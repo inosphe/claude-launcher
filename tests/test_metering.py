@@ -373,7 +373,7 @@ def metering_on(monkeypatch):
 def test_apply_fronts_an_api_key_provider_with_a_metering_shim(monkeypatch, metering_on):
     seen = []
     monkeypatch.setattr(
-        routing, "ensure_shim", lambda upstream, block: seen.append((upstream, block)) or "http://127.0.0.1:31600/"
+        routing, "ensure_shim", lambda upstream, block, affinity=False: seen.append((upstream, block)) or "http://127.0.0.1:31600/"
     )
     env = {"ANTHROPIC_BASE_URL": "https://d/anthropic"}
     routing.apply(env, "deepseek", _doc())
@@ -438,7 +438,7 @@ def _pi_profile(home, base="https://omlx.example/"):
 def test_pi_projection_goes_through_the_metering_shim_and_asks_for_stream_usage(home, monkeypatch, metering_on):
     seen = []
     shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example", {}))[0])
-    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: seen.append((upstream, block)) or shim_url)
+    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block, affinity=False: seen.append((upstream, block)) or shim_url)
     p = _pi_profile(home)
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
     # the upstream the shim fronts is the declared OpenAI root; Pi gets
@@ -713,7 +713,7 @@ def test_daemon_launch_carries_the_session_header_only_behind_a_shim(home, tmp_p
     # injects.
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://d/anthropic", {}))[0])
-    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: shim_url)
+    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block, affinity=False: shim_url)
 
     def _mutate(doc):
         doc["providers"] = {
@@ -749,7 +749,7 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
     # assertion hermetic rather than to repair a live failure.
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example", {}))[0])
-    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: shim_url)
+    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block, affinity=False: shim_url)
     # a declared pi-adapter harness pointed at an executable that exists
     store.update(
         lambda doc: doc.setdefault("harnesses", {}).update(
