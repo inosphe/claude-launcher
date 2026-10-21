@@ -1768,11 +1768,21 @@ def test_claunch_tps_prints_live_totals_by_proxy(home, capsys):
     assert cli._tps_live_lines({}) == []
 
 
-def test_web_page_draws_parallel_sessions_on_the_live_reading():
+def test_web_page_draws_only_the_sessions_own_live_reading():
+    """claunch-waakh: the dashboard no longer draws the shim's other sessions.
+
+    The rail line, card chip, header badge, overlay and tooltip carry the
+    session's own reading only. The daemon still computes and sends
+    `live.parallel` (and `claunch tps` prints it), so those payload tests
+    above stay; what must not come back is any dashboard code that renders
+    it -- its totals made the rail line as wide as the number of peers. The
+    session's own subagent calls are already inside its figures: they run
+    under the same session name.
+    """
     from pathlib import Path
 
     static = Path(metering.__file__).with_name("web") / "static"
     js = (static / "app.js").read_text(encoding="utf-8")
-    assert "function tpsParallelText(" in js
-    assert "tpsParallelText(t.live.parallel, true)" in js
-    assert "tpsParallelText(l.parallel, false)" in js
+    assert "tpsParallelText(" not in js
+    assert "tpsParallelTooltip(" not in js
+    assert "term-tps-parallel" not in js

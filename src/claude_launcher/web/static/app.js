@@ -7740,10 +7740,13 @@ function tpsCacheText(t, compact) {
 function tpsText(t, compact) {
   if (!t) return "";
   const live = typeof tpsLiveText === "function" ? tpsLiveText(t.live) : "";
-  if (live) {
-    const par = typeof tpsParallelText === "function" ? tpsParallelText(t.live.parallel, true) : "";
-    return par ? `${live} · ${par}` : live;
-  }
+  /* Only this session's own reading (claunch-waakh): the shim's other
+     sessions are not drawn here. Their totals made this line -- the rail's
+     and the card chip's -- as wide as the number of peers on the shim
+     ("≈0.0 tok/s · ×8 (1+1+1+1+1+1+1+1) Σ≈530 avg≈66.2"). The session's own
+     subagent calls are already in these figures: they run under this
+     session's name on the shim. */
+  if (live) return live;
   if (t.idle) return "idle";
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
@@ -7769,45 +7772,12 @@ function tpsLiveText(l) {
   return "";
 }
 
-/* Parallel sessions on one shim (claunch-b28pp). One shim serves every
-   session on the same upstream, so sessions running at once share its
-   throughput; `live.parallel` is there only when this session and at least
-   one other are active on it now: `sessions` (this one included), `total`
-   (their summed estimated tokens/s), `mean` (total over sessions) and, from
-   a daemon that carries it, `counts` (each session's in-flight calls, this
-   one first). The counts are what makes an uneven share readable: "1+5"
-   says the total is one call here and five in the other session, which the
-   mean alone hides (claunch-v4jgh).
-   `compact` is the rail and badge form: "×3 (1+2) Σ≈120 avg≈40". A payload
-   without `counts` (a daemon that predates it) reads as before. */
-function tpsParallelText(p, compact) {
-  if (!p || !(p.sessions > 1)) return "";
-  const counts = Array.isArray(p.counts) && p.counts.length ? p.counts.join("+") : "";
-  if (compact) {
-    return `×${p.sessions}${counts ? ` (${counts})` : ""} Σ≈${tpsFmt(p.total)} avg≈${tpsFmt(p.mean)}`;
-  }
-  return `${p.sessions} sessions` + (counts ? ` · calls ${counts}` : "") +
-    ` · total ≈${tpsFmt(p.total)} tok/s · avg ≈${tpsFmt(p.mean)} tok/s`;
-}
-
-/* The same figures spelled out per session for the tooltip: who holds how
-   many of the shim's calls, and what each of them reads, then the total and
-   the mean. A payload without `by_session` keeps the one-line form. */
-function tpsParallelTooltip(p) {
-  const shares = Array.isArray(p.by_session) ? p.by_session : [];
-  if (!shares.length) {
-    return [`shared proxy: ${p.sessions} sessions active now, total ≈${tpsFmt(p.total)}` +
-            ` tokens/s, avg ≈${tpsFmt(p.mean)} tokens/s per session (last ${p.window_s}s)`];
-  }
-  const calls = Number.isFinite(p.calls) ? p.calls
-    : shares.reduce((n, s) => n + (s.calls || 0), 0);
-  const each = shares.map((s) =>
-    `${s.self ? "this" : s.session} ${s.calls} call${s.calls === 1 ? "" : "s"} ≈${tpsFmt(s.rate)} tok/s`);
-  return [
-    `shared proxy: ${p.sessions} sessions, ${calls} call${calls === 1 ? "" : "s"} — ${each.join(", ")}`,
-    `total ≈${tpsFmt(p.total)} tok/s, avg ≈${tpsFmt(p.mean)} tok/s per session (last ${p.window_s}s)`,
-  ];
-}
+/* `live.parallel` (the shim's other sessions, claunch-b28pp) is not drawn
+   anywhere on the dashboard any more (claunch-waakh): what a session's row,
+   chip and overlay show is that session's own reading, which already
+   includes its subagent calls because they run under the same session name.
+   The daemon still carries the block -- `claunch tps` prints it -- so this
+   file leaves it alone rather than parsing fields it no longer shows. */
 
 function tpsSecs(v) {
   return v < 10 ? `${v.toFixed(1)}s` : `${Math.round(v)}s`;
@@ -7823,9 +7793,6 @@ function tpsTooltip(t) {
       : l.state === "waiting" ? `waiting for the first token (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight)`
       : `streaming: ≈${tpsFmt(l.rate)} tokens/s over the last ${l.window_s}s` +
         ` (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight; estimated from the characters streamed)`);
-    if (l.parallel && l.parallel.sessions > 1) {
-      lines.push(...tpsParallelTooltip(l.parallel));
-    }
   }
   const age = tpsAgeSecs(t);
   if (t.ts) {
@@ -8042,7 +8009,6 @@ function renderTermTps() {
         cls: "term-tps-overlay" + tpsStaleClass(t),
         big: tpsLiveText(l),
         series: Array.isArray(l.series) ? l.series : [],
-        par: typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "",
         when: [model ? modelShort(model) : "",
           t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
           age].filter(Boolean).join(" · "),
@@ -8086,9 +8052,6 @@ function renderTermTps() {
         const liveBox = el("div", "term-tps-live");
         liveBox.appendChild(el("span", "term-tps-big", parts.big));
         liveBox.appendChild(tpsSparkline(parts.series));
-        if (parts.par) {
-          liveBox.appendChild(el("span", "term-tps-small term-tps-parallel", parts.par));
-        }
         if (lastBox) overlay.replaceChildren(liveBox, lastBox);
         else overlay.replaceChildren(liveBox);
       } else {
