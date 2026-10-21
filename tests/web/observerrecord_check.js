@@ -67,6 +67,14 @@ function compactBlock(source) {
   if (start < 0 || end < start) throw new Error("cannot locate the compact-line block");
   return source.slice(start, end);
 }
+// The three weights (claunch-kuopi) sit together just above sessionEvents;
+// eventItem reads them for its badge.
+function weightsBlock(source) {
+  const start = source.indexOf("const eventPriority = ");
+  const end = source.indexOf("function sessionEvents(s) {");
+  if (start < 0 || end < start) throw new Error("cannot locate the priority block");
+  return source.slice(start, end);
+}
 // A stub node's textContent is only what was assigned to it; the text a
 // reader sees is that plus every child's, in order.
 function text(n) {
@@ -137,6 +145,7 @@ new Function(
   "exports", "document", "briefingStateClass", "statusCheckIcon", "statusCheckText",
   "statusCheckName", "api",
   [sliceConst(observerSrc, "node"), slice(observerSrc, "request"), compactBlock(observerSrc),
+   weightsBlock(observerSrc),
    slice(observerSrc, "recordPayload"), slice(observerSrc, "briefingSnapshot"),
    slice(observerSrc, "checksSnapshot"), slice(observerSrc, "eventItem")].join("\n") + `
 exports.eventItem = eventItem;
@@ -251,9 +260,12 @@ const kv = (box) => {
                at: iso, text: "커밋 a1b2가 목표를 만족한다" };
   const item5 = ctx.eventItem(s, e5);
   const head5 = item5.querySelector(".obs-head");
-  check("a plain observation reads as a kind badge then its one text line",
-        [head5.children[0].textContent, text(head5.querySelector(".obs-line"))],
-        ["cflow", "커밋 a1b2가 목표를 만족한다"]);
+  // The weight leads (claunch-kuopi): an event stored without one reads as
+  // 보통, and the kind badge follows it.
+  check("a plain observation reads as its weight, a kind badge, then its text",
+        [head5.children[0].textContent, head5.children[1].textContent,
+         text(head5.querySelector(".obs-line"))],
+        ["보통", "cflow", "커밋 a1b2가 목표를 만족한다"]);
   check("no .sess-brief box grows for it", item5.querySelector(".sess-brief"), null);
   const summary5 = item5.children.find((c) => c.tag === "details");
   check("its fallback keeps the original source label",

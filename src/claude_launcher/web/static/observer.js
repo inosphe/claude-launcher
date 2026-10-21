@@ -26,6 +26,11 @@ let targetPicked = false;
 // it for as long as the page is loaded; a reload comes back folded.
 let composerFolded = true;
 let layout = "board", gridLimit = 5;
+/* Which notification weights the page draws. "all" is the default so a
+   reader never loses an event to a setting they did not make; the daemon's
+   priority still decides how loudly each one is drawn, and the fold and the
+   filter are what take the routine lifecycle noise away once asked. */
+let priorityFilter = "all";
 /* The timeline draws its newest posts and grows on request: drawn whole it
    was one card per event of every visible session (3,217 for the 57 running
    sessions on 2026-10-15), rebuilt on each redraw. */
@@ -36,11 +41,14 @@ try {
   if(["board","grid","timeline"].includes(savedLayout)) layout = savedLayout;
   const saved = Number(localStorage.getItem("claunch-observer-grid-limit"));
   if(Number.isInteger(saved) && saved >= 1 && saved <= 10) gridLimit = saved;
+  const savedPriority = localStorage.getItem("claunch-observer-priority");
+  if(["all","normal","urgent"].includes(savedPriority)) priorityFilter = savedPriority;
 } catch { /* Storage may be unavailable; controls still work for this visit. */ }
 function saveView() {
   try {
     localStorage.setItem("claunch-observer-layout",layout);
     localStorage.setItem("claunch-observer-grid-limit",String(gridLimit));
+    localStorage.setItem("claunch-observer-priority",priorityFilter);
   } catch { /* Keep the in-memory preference. */ }
 }
 /* The Operator dock (claunch-iw5i8.8): the operators' column to the right of
@@ -110,10 +118,14 @@ function sessionRuns(s) {
 function activity(s) {
   const own=sessionRuns(s), pending=own.some(r=>String(r.status).startsWith("waiting"));
   const question=(s.events||[]).some(e=>e.question&&!e.answer)||qaWaiting(s).length>0||!!run2Of(s)?.gated;
+  const waiting=gateWaits(s).length;
   const stamp=s.last_activity_at, age=stamp?Math.max(0,Date.now()-Date.parse(stamp)):null;
   const duration=Number.isFinite(age)?`${Math.floor(age/60000)}분 전 마지막 활동`:"활동 시각 미확인";
   if(!s.running)return {label:"종료됨",kind:"ended",duration};
   if(s.status==="busy" || s.status==="working")return {label:"동작 중",kind:"working",duration};
+  // A gate request is the one waiting state the reader can end from this
+  // page, so it says so rather than joining 「응답·작업 대기」.
+  if(waiting) return {label:"승인 대기",kind:"waiting",duration};
   if(pending||question||s.state==="blocked"||s.state==="waiting")
     return {label:age>=30*60000?"장기 대기":"응답·작업 대기",kind:"waiting",duration};
   if(s.status==="idle" && (own.some(r=>r.status==="done")||s.state==="done"))
@@ -217,12 +229,15 @@ function visibleSessions() {
     && (!$("actions-only").checked||actionCount(s)>0));
 }
 /* What the reader owes one session: unacknowledged events, v1 runs waiting
-   on a person, a v2 run gated on a person, and QA questions waiting. */
+   on a person, a v2 run gated on a person, QA questions waiting, and any
+   daemon gate request naming this session (its own or one whose answer moves
+   it). */
 function actionCount(s) {
   return (s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length
     +sessionRuns(s).filter(sessCflowGated).length
     +(run2Of(s)?.gated?1:0)
-    +qaWaiting(s).length;
+    +qaWaiting(s).length
+    +gateWaits(s).length;
 }
 /* Sessions first, as before, then the operators in their own group. With no
    target picked yet the selected operator is the default: the composer is
@@ -390,10 +405,77 @@ function runBlock(s) {
   box.append(...lines);
   return box;
 }
+/* Requests waiting on a person, per session. The daemon's gates (restart,
+   goto, reposync, resume, kill, spawn, cflow ask, nudge) already file cards
+   into the dashboard's notification panel, and app.js keeps the last poll of
+   each in `gatePending` — the same object the bell counts. Reading it here
+   rather than polling those routes again means the observer card and the
+   bell cannot disagree about whether a request is still open. A session is
+   named either as the asker (`session`) or as what the answer moves
+   (`target`, `target_session`); both cards show that it saw the request. */
+const GATE_LABELS = {restart:"daemon 재시작", goto:"런 이동", reposync:"저장소 동기화",
+  resume:"세션 재개", kill:"세션 종료", spawn:"세션 생성", ask:"cflow 답변", nudge:"런 확인"};
+function gateWaits(s) {
+  if(typeof gatePending !== "object" || !gatePending) return [];
+  const out=[];
+  for(const [type, rows] of Object.entries(gatePending)) {
+    for(const rec of Array.isArray(rows)?rows:[]) {
+      if(!rec) continue;
+      const asked=rec.session===s.name, targeted=rec.target===s.name||rec.target_session===s.name;
+      if(!asked&&!targeted) continue;
+      out.push({type, id:String(rec.id||type), role:asked?"요청":"대상", record:rec});
+    }
+  }
+  return out;
+}
+function gateLine(w) {
+  const rec=w.record||{};
+  if(w.type==="goto") return `${rec.session||"?"} → ${rec.target_session||"?"}`;
+  if(w.type==="resume"||w.type==="kill") return `${rec.session||"?"} → ${rec.target||"?"}`;
+  if(w.type==="spawn") return `${rec.session||"?"}${rec.target?` → ${rec.target}`:""}`;
+  if(w.type==="ask") return `${rec.session||"?"} · ${rec.label||"?"}`;
+  if(w.type==="nudge") return `${rec.session||"?"} · ${(rec.items||[]).join(", ")||"런"}`;
+  if(w.type==="reposync") return `${rec.session||"?"} · ${(rec.plan||{}).workspace||(rec.plan||{}).repo||"저장소"}`;
+  return rec.session||"?";
+}
+const GATE_WAITS_SHOWN = 4;
+/* The card's 「사용자 승인 대기」 block: what this session is waiting on a
+   person for, or what is waiting on them about it. The answer buttons stay in
+   the notification panel — an approve drawn here would be a second copy of a
+   control whose deadline, settle path and cross-browser sync the panel
+   already owns. */
+function gatesBlock(s) {
+  const waits=gateWaits(s);
+  if(!waits.length) return null;
+  const box=node("div","","observer-gates");
+  const head=node("div","","observer-gates-head");
+  head.append(node("span",`사용자 승인 대기 ${waits.length}건`,"observer-gates-title"));
+  const open=node("button","알림 패널","observer-gates-open");
+  open.type="button";open.title="승인·거절은 대시보드의 알림 패널에서 답합니다";
+  open.onclick=()=>openGates(s);
+  head.append(open);
+  box.append(head);
+  for(const w of waits.slice(0,GATE_WAITS_SHOWN)) {
+    const row=node("button","","observer-gate-row");
+    row.type="button";
+    row.append(node("span",GATE_LABELS[w.type]||w.type,"obs-gate-kind"),
+               node("span",w.role,"obs-gate-role"),
+               node("span",gateLine(w),"obs-gate-text"));
+    row.title=`${GATE_LABELS[w.type]||w.type} 요청이 사람의 답을 기다립니다 · 알림 패널에서 답합니다`;
+    row.onclick=()=>openGates(s);
+    box.append(row);
+  }
+  if(waits.length>GATE_WAITS_SHOWN)box.append(node("small",`외 ${waits.length-GATE_WAITS_SHOWN}건`,"observer-gate-more"));
+  return box;
+}
+function openGates(s) {
+  if(typeof noticePanelToggle==="function") {noticePanelToggle(true);return;}
+  location.hash="#/s/"+encodeURIComponent(s.name);
+}
 /* Run state and notices once per session: a board column carries them at
    its top, and the grid and timeline on the session's newest post only. */
 function sessionStatus(s) {
-  return [runBlock(s),noticesBlock(s)].filter(Boolean);
+  return [gatesBlock(s),runBlock(s),noticesBlock(s)].filter(Boolean);
 }
 /* One observation pass for one session, now. The button is a request, not a
    mode: the daemon runs one pass and answers what it did, and it is served
@@ -488,11 +570,16 @@ function richLine(text,cls="obs-line",session="") {
   return line;
 }
 /* Runs of the same routine daemon event — a restore after every daemon
-   restart is the common one: s697 carried 20 of them among 31 events — are
-   drawn as one entry with a count and a time span. Only events next to each
-   other in one session's own order are merged, so nothing is moved across
-   an event that happened in between. */
-const ROUTINE = new Set(["resume"]);
+   restart is the common one: s697 carried 20 of them among 31 events, and the
+   operator's own complaint (2026-10-21) was an `adopt` line repeated under
+   every session card — are drawn as one entry with a count and a time span.
+   Only events next to each other in one session's own order are merged, so
+   nothing is moved across an event that happened in between. `exit` is left
+   out on purpose: two identical exits mean the session stopped twice, which
+   is a fact a reader needs; `fail` is not routine at all. */
+const ROUTINE = new Set(["resume", "adopt", "create", "wake", "restore", "delayed",
+  "respawn", "borrow", "worktree", "detach", "archive", "hold", "kill", "pause",
+  "restart-settings"]);
 function collapseRoutine(events) {
   const out=[];
   for(const e of events) {
@@ -577,8 +664,10 @@ function checksSnapshot(payload) {
   return box;
 }
 function eventItem(s,e) {
-  const item=node("div","",`event kind-${e.kind}${e.needs_action&&!e.acknowledged?" action":""}${e.pivot?" pivot":""}${e.origin==="daemon"?" routine":""}`);
+  const priority=eventPriority(e);
+  const item=node("div","",`event kind-${e.kind} prio-${priority}${e.needs_action&&!e.acknowledged?" action":""}${e.pivot?" pivot":""}${e.origin==="daemon"?" routine":""}`);
   item.dataset.event=e.id;
+  item.dataset.priority=priority;
   const origin=e.origin==="record"?"저장된 기록":e.origin==="daemon"?"세션 이벤트":e.origin==="agent"?"에이전트 직접 보고":"자동 관찰";
   const when=e.run?`${clock(e.run.first)} ~ ${clock(e.run.last)}`:clock(e.at);
   const meta=node("small",`${s.name} · ${origin} · ${when}${e.acknowledged?" · 확인됨":""}`);
@@ -587,9 +676,13 @@ function eventItem(s,e) {
   const isRecord=e.origin==="record"&&(e.kind==="briefing"||e.kind==="checks");
   const snapshot=isRecord?recordPayload(e):null;
   const head=node("div","","obs-head");
+  /* The weight first, because it is what the reader decides to read by; the
+     kind says what the event is once it is worth reading. 긴급 is the one a
+     person owes an answer to, so its own badge also carries the old
+     「확인 필요」 meaning rather than a second badge saying it again. */
+  head.append(node("span",PRIORITY_LABELS[priority],`obs-prio obs-prio-${priority}`));
   head.append(node("span",KIND_LABELS[e.kind]||e.kind,`obs-kind obs-kind-${e.kind}`));
   if(e.pivot) head.append(node("span","판단 변경","obs-pivot"));
-  if(e.needs_action&&!e.acknowledged) head.append(node("span","확인 필요","obs-needs"));
   item.append(head);
   if(e.kind==="briefing"&&isRecord) item.append(briefingSnapshot(snapshot));
   else if(e.kind==="checks"&&isRecord) item.append(checksSnapshot(snapshot));
@@ -728,6 +821,18 @@ function usageBlock(s) {
   more.append(node("summary",`관찰 API 사용량${s.usage_totals?" (누적)":" (마지막 관찰)"}`),node("pre",lines.join("\n")));
   return more;
 }
+/* The three weights the daemon decided (observer.py:priority): 통지 is the
+   routine lifecycle noise a restart leaves behind, 보통 an ordinary result,
+   긴급 something a person must answer. Reading the field here rather than
+   recomputing it keeps one weight per event across the card, the timeline and
+   the detail panel, and lets the filter and the fold below use the same word
+   the badge shows. */
+const eventPriority = e => e.priority==="urgent"||e.priority==="notice"?e.priority:"normal";
+const PRIORITY_LABELS = {notice:"통지", normal:"보통", urgent:"긴급"};
+function priorityShown(e) {
+  if(priorityFilter==="all")return true;
+  return priorityFilter==="urgent"?eventPriority(e)==="urgent":eventPriority(e)!=="notice";
+}
 /* One session's events, oldest first, with routine runs folded. */
 function sessionEvents(s) {
   return collapseRoutine([...(s.events||[])].sort((a,b)=>timestamp(a.at)-timestamp(b.at)));
@@ -744,7 +849,7 @@ function fillSession(body,s,actionsOnly=false) {
   for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
   body.append(s.summary?richLine(s.summary,"obs-summary",s.name):node("p","아직 관찰 결과가 없습니다."));
   if(s.error)body.append(node("p",s.error));
-  const events=sessionEvents(s).reverse().filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged));
+  const events=sessionEvents(s).reverse().filter(e=>priorityShown(e)&&(!actionsOnly||(e.needs_action&&!e.acknowledged)));
   const limit=expandedColumns.has(s.name)?events.length:gridLimit;
   for(const e of events.slice(0,limit))body.append(eventItem(s,e));
   if(events.length>limit) {
@@ -858,6 +963,7 @@ function render() {
   for(const mode of ["board","grid","timeline"]) $("layout-"+mode).checked=view===mode;
   $("limit-control").hidden=timeline;
   $("limit").value=String(gridLimit);$("limit-value").value=`${gridLimit}개`;
+  $("priority").value=priorityFilter;
   syncTargets(visible);
   composerState();
   const replies=visible.reduce((n,s)=>n+newReplies(s).length,0);
@@ -884,7 +990,7 @@ function render() {
   if(timeline||grid) {
     const entries=[];
     for(const s of visible) {
-      const events=sessionEvents(s).filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged));
+      const events=sessionEvents(s).filter(e=>priorityShown(e)&&(!$("actions-only").checked||(e.needs_action&&!e.acknowledged)));
       for(const e of events) entries.push({s,e,at:timestamp(e.at),key:s.name+":"+e.id});
       for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))
         entries.push({s,r,at:timestamp(r.updated_at||r.started_at)||latestActivity(s),key:s.name+":gate:"+(r.run||r.step_id)});
@@ -937,6 +1043,12 @@ function render() {
 }
 for(const mode of ["board","grid","timeline"]) $("layout-"+mode).onchange=()=>{layout=mode;saveView();render();};
 $("limit").oninput=()=>{gridLimit=Number($("limit").value);saveView();render();};
+/* The priority filter narrows what the list draws; it never changes what the
+   daemon stored, and the card still says it has more behind the select. */
+$("priority").onchange=()=>{
+  priorityFilter=["normal","urgent"].includes($("priority").value)?$("priority").value:"all";
+  saveView();render();
+};
 $("sort").onclick=()=>{boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);render();};
 mobileView.addEventListener("change",()=>{if(document.body.classList.contains("observer-active"))render();});
 function selections() {
@@ -960,10 +1072,16 @@ function wantEnded() {
   return names.some(n=>n&&snapshot.sessions.some(s=>s.name===n&&!s.running));
 }
 /* The rail caches' own signatures, so a QA question, a thread reply or a run
-   moving redraws the cards even when the observer's answer did not change. */
+   moving redraws the cards even when the observer's answer did not change.
+   The gate poll is in there too: a request filed or answered changes nothing
+   in the observer's answer, and without its ids here the card would keep the
+   stale 「승인 대기」 line until the next real event. */
+const gateSignature = () => typeof gatePending !== "object" || !gatePending ? "" :
+  Object.entries(gatePending).map(([type, rows]) =>
+    type + ":" + (Array.isArray(rows) ? rows.map(r => r && r.id).join(",") : "")).join("|");
 const railSignature = () => [typeof cflowCache!=="undefined"?JSON.stringify(cflowCache):"",
   typeof cflow2RailSig!=="undefined"?cflow2RailSig:"",typeof qaRailSig!=="undefined"?qaRailSig:"",
-  typeof threadsRailSig!=="undefined"?threadsRailSig:""].join("\u0000");
+  typeof threadsRailSig!=="undefined"?threadsRailSig:"",gateSignature()].join("\u0000");
 function refresh() {
   // Route changes share a pending request so direct-link target selection
   // always runs after that response, including on a slow first load.

@@ -34,7 +34,10 @@ const data = { enabled: true, scope: "all", usage_summary: {since:"2026-09-18T00
       "2026-09-16": { calls: 1, prompt_tokens: 1000, completion_tokens: 70,
                       prompt_cache_hit_tokens: 400, prompt_cache_miss_tokens: 600 } },
     events: [{ id: "e1", kind: "action", text: "배포 환경을 선택하십시오.",
-      needs_action: true, source: "transcript:1", at: new Date().toISOString(), acknowledged: false }] },
+      needs_action: true, source: "transcript:1", at: new Date().toISOString(), acknowledged: false,
+      // The daemon's weight (observer.py:priority); the page draws it as the
+      // 긴급 badge rather than deciding for itself.
+      priority: "urgent" }] },
   // A row written before the meter exists carries only the last call, and this
   // one's provider never reported a cache at all: the panel shows it as a
   // last-call figure and folds the cache into the input rather than printing
@@ -826,7 +829,37 @@ async function fadeCost(page, selector, fade) {
     await railGlyph.click();
     await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin')?.getAttribute('aria-pressed')==='false');
     }
+    // ------------------------------------------------------------------
+    // The two weights and the waiting gate (claunch-kuopi)
+    // ------------------------------------------------------------------
+    // The badge is the daemon's field read back, not a page guess: e1 asks
+    // for an answer, so the fixture stores it as 긴급.
+    assert.equal(await page.locator('.observer-card[data-session="s1"] .obs-prio-urgent').innerText(), "긴급");
+    assert.equal(await page.locator("#observer-priority").isVisible(), true,
+      "the priority filter sits with the other filters");
+    // A request waiting on a person is already in the dashboard's gate poll
+    // (app.js `gatePending`); the card reads that object instead of asking
+    // the gate routes again. Written here and redrawn through a control the
+    // page owns, because the fixture serves no gate routes.
+    await page.evaluate(() => {
+      gatePending.restart = [{ id: "rq1", session: "s1", reason: "apply the new code" }];
+      document.getElementById("observer-activity").dispatchEvent(new Event("change"));
+    });
+    const gateBox = page.locator('.observer-card[data-session="s1"] .observer-gates');
+    await gateBox.waitFor();
+    assert.match(await gateBox.innerText(), /사용자 승인 대기 1건/);
+    assert.match(await gateBox.innerText(), /daemon 재시작/);
+    assert.equal(await gateBox.locator(".obs-gate-role").innerText(), "요청");
+    assert.equal(await page.locator('.observer-card[data-session="s1"] .state.waiting').innerText(), "승인 대기",
+      "the session's own state names the gate rather than 「응답·작업 대기」");
+    // Answered elsewhere: the block goes with the request, and the state
+    // stops claiming a gate.
+    await page.evaluate(() => {
+      gatePending.restart = [];
+      document.getElementById("observer-activity").dispatchEvent(new Event("change"));
+    });
+    await page.waitForFunction(() => !document.querySelector('.observer-card[data-session="s1"] .observer-gates'));
     assert.deepEqual(errors, []);
-    console.log("PASS: mobile layout, composer fold, usage as input/cache/output over calls and days, fleet total split from last-call rows, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, per-session latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");
+    console.log("PASS: mobile layout, composer fold, usage as input/cache/output over calls and days, fleet total split from last-call rows, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, per-session latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching, priority badge and waiting gate on the card");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

@@ -810,3 +810,53 @@ def test_the_route_sends_utf8_and_compresses_a_large_answer(setup, monkeypatch):
     import gzip
     body = gzip.decompress(raw).decode("utf-8")
     assert "관찰 결과" in body and "\\ud" not in body.lower()
+
+
+# --------------------------------------------------------------------------- #
+# the three weights a notification is drawn with (claunch-kuopi)
+# --------------------------------------------------------------------------- #
+def test_priority_separates_lifecycle_noise_results_and_requests():
+    """통지 is the routine lifecycle line, 보통 an ordinary result, 긴급 a
+    request a person must answer. The operator's report was an ``adopt`` line
+    repeated under every card after each daemon restart; that is the level
+    this separates out, and ``fail`` deliberately is not part of it."""
+    assert observer.PRIORITIES == ("notice", "normal", "urgent")
+    routine = lambda kind: {"id": "x", "origin": "daemon", "kind": kind, "text": "t",
+                            "needs_action": False}
+    for kind in ("adopt", "resume", "create", "exit", "kill", "hold", "worktree", "borrow"):
+        assert observer.priority(routine(kind)) == "notice", kind
+    # An unexpected death is a fact about the session, not routine noise.
+    assert observer.priority(routine("fail")) == "normal"
+    # Ordinary observed results and direct reports that ask nothing.
+    assert observer.priority({"id": "e", "kind": "commit", "text": "t",
+                              "needs_action": False}) == "normal"
+    assert observer.priority({"id": "r", "origin": "agent", "kind": "result", "text": "t",
+                              "needs_action": False}) == "normal"
+
+
+def test_priority_is_urgent_exactly_while_a_person_owes_an_answer():
+    """An acknowledgement or an answer settles the weight back on the next
+    read, which is why the field is computed at snapshot time and not stored:
+    an answer written while a pass is in flight changes the answer without
+    rewriting the event."""
+    requested = {"id": "q", "kind": "action", "text": "t", "needs_action": True}
+    assert observer.priority(requested | {"acknowledged": False}) == "urgent"
+    assert observer.priority(requested | {"acknowledged": True}) == "normal"
+    question = {"id": "r", "origin": "agent", "kind": "action", "text": "t", "question": True}
+    assert observer.priority(question) == "urgent"
+    assert observer.priority(question | {"answer": {"text": "네"}}) == "normal"
+    # needs_action alone, without a question, is the observer's own request.
+    assert observer.priority({"id": "o", "origin": "observer", "kind": "action", "text": "t",
+                              "needs_action": True}) == "urgent"
+
+
+def test_every_snapshot_event_carries_its_priority(setup, monkeypatch):
+    """The weight is added on the way out, so events stored before this field
+    existed read with one too, and the payload still carries no evidence."""
+    service, _ = exited_and_running(setup, monkeypatch)
+    rows = {row["name"]: row for row in service.snapshot()["sessions"]}
+    events = rows["s1"]["events"]
+    assert events
+    assert all(event["priority"] in observer.PRIORITIES for event in events)
+    assert [event["priority"] for event in events if event["origin"] == "daemon"] == ["notice"]
+    assert all("evidence" not in event for event in events)

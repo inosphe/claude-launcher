@@ -248,7 +248,39 @@
 :is(#observer-view, .sess-observer) .obs-kind-test { background: #1c3326; color: #7ee2a0; }
 :is(#observer-view, .sess-observer) .obs-kind-action { background: #3a2e14; color: #f0c05a; }
 :is(#observer-view, .sess-observer) .obs-pivot { flex: none; font-size: 11px; padding: 0 6px; border-radius: 4px; background: #d29922; color: #111; font-weight: 600; }
-:is(#observer-view, .sess-observer) .obs-needs { flex: none; font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid #d29922; color: #f0c05a; }
+/* The three weights the daemon assigns each event (observer.py:priority).
+   The badge comes before the kind so the reader decides what to read by it;
+   통지 is deliberately the quietest — the routine lifecycle line the operator
+   asked to stop reading as loudly as a result (claunch-kuopi) — and 긴급 is
+   the one a person owes an answer to, so it carries the weight that used to
+   be the separate 「확인 필요」 badge. */
+:is(#observer-view, .sess-observer) .obs-prio { flex: none; font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid #3b424e; color: #9fb0c3; background: #1b1f26; }
+:is(#observer-view, .sess-observer) .obs-prio-notice { border-style: dashed; color: #7d8794; }
+:is(#observer-view, .sess-observer) .obs-prio-normal { color: #a9bdd6; border-color: #39506b; }
+:is(#observer-view, .sess-observer) .obs-prio-urgent { background: #b62324; border-color: #e5534b; color: #fff; font-weight: 600; }
+:is(#observer-view, .sess-observer) .event.prio-urgent { border-left: 3px solid #e5534b; padding-left: 12px; background: rgba(229,83,75,.06); }
+:is(#observer-view, .sess-observer) .event.prio-notice { color: #8b96a5; font-size: 12px; }
+/* A request waiting on the person, on the card of the session it names —
+   the asker's (요청) or the one whose answer moves it (대상). The buttons stay
+   in the notification panel, which owns the deadlines; this block says what
+   is blocked here and opens that panel. */
+:is(#observer-view, .sess-observer) .observer-gates {
+  display: flex; flex-direction: column; gap: 4px; margin: 10px 0; padding: 8px 10px;
+  border: 1px solid #8b6b20; border-radius: 6px; background: rgba(210,153,34,.06);
+}
+:is(#observer-view, .sess-observer) .observer-gates-head { display: flex; align-items: center; gap: 8px; }
+:is(#observer-view, .sess-observer) .observer-gates-title { flex: 1; font-size: 12px; font-weight: 600; color: #e3b341; }
+:is(#observer-view, .sess-observer) .observer-gates-open { flex: none; min-height: 28px; padding: 2px 10px; font-size: 11px; }
+:is(#observer-view, .sess-observer) .observer-gate-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; text-align: left;
+  min-height: 28px; padding: 3px 8px; font-size: 12px;
+  background: #1b1f26; border: 1px solid #3a414c; border-radius: 4px;
+}
+:is(#observer-view, .sess-observer) .observer-gate-row:hover { border-color: #8b6b20; background: #232026; }
+:is(#observer-view, .sess-observer) .obs-gate-kind { flex: none; font-weight: 600; color: #f0c05a; }
+:is(#observer-view, .sess-observer) .obs-gate-role { flex: none; font-size: 11px; color: #8b949e; }
+:is(#observer-view, .sess-observer) .obs-gate-text { min-width: 0; overflow-wrap: anywhere; color: #c9d1d9; }
+:is(#observer-view, .sess-observer) .observer-gate-more { color: #8b949e; font-size: 11px; }
 :is(#observer-view, .sess-observer) .event.pivot { border-left: 3px solid #d29922; padding-left: 12px; background: rgba(210,153,34,.06); }
 :is(#observer-view, .sess-observer) .event.routine { color: #8b96a5; font-size: 12px; padding: 6px 0; }
 :is(#observer-view, .sess-observer) .obs-count { font-size: 11px; color: #8b96a5; }

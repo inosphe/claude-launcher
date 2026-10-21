@@ -98,6 +98,45 @@ MAX_CONTEXT = 12_000
 SCOPE_ALL = "all"
 SCOPE_PINNED = "pinned"
 KINDS = {"cflow", "commit", "merge", "test", "action", "result"}
+#: The three weights the page draws a notification with, decided here so every
+#: reader of one stored event reads the same weight — the page filters by it,
+#: colours it and folds runs of routine ones by it, and a classifier in the
+#: browser would disagree with the next one written there. ``notice`` is the
+#: routine daemon lifecycle noise (a restart, the PTY host adopting a session,
+#: an exit); ``normal`` is an ordinary observed result; ``urgent`` is something
+#: a person must act on (an unanswered question, an unacknowledged request).
+PRIORITIES = ("notice", "normal", "urgent")
+#: Daemon lifecycle kinds that repeat on every restart and need no person: an
+#: ``adopt`` after each daemon start is the event the operator asked to stop
+#: reading as loudly as a result (2026-10-21). ``fail`` is deliberately absent
+#: — an unexpected death is a fact about the session, not routine noise.
+NOTICE_KINDS = frozenset({
+    "create", "resume", "wake", "adopt", "restore", "delayed", "respawn",
+    "exit", "hold", "kill", "pause", "detach", "archive", "worktree",
+    "borrow", "restart-settings",
+})
+
+
+def priority(event):
+    """Which of :data:`PRIORITIES` this stored event is drawn with.
+
+    A question waiting on a person outranks everything: a direct agent report
+    carries ``question``, and both that and an observed event carry
+    ``needs_action``. Answering or acknowledging it settles the weight back to
+    ``normal`` on the next read, so the field is computed at snapshot time and
+    not stored on the event: an acknowledgement written mid-flight changes the
+    answer without rewriting history. Daemon lifecycle events are ``notice``
+    unless they say something went wrong.
+    """
+    if event.get("question") and not event.get("answer"):
+        return "urgent"
+    if event.get("needs_action") and not event.get("acknowledged"):
+        return "urgent"
+    if event.get("origin") == "daemon":
+        return "notice" if event.get("kind") in NOTICE_KINDS else "normal"
+    return "normal"
+
+
 #: Counters a provider reports per call. The meter sums exactly these, so a
 #: provider that adds one changes what the dashboard shows in one place.
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
@@ -621,7 +660,8 @@ class Observer:
                            "last_activity_at": info.get("last_activity_at"),
                            "last_output_at": info.get("last_output_at"),
                            "meshes": [m["mesh"] for m in self.mesh.meshes_for_session(name)],
-                           "events": [{k: v for k, v in e.items() if k != "evidence"} for e in events],
+                           "events": [{k: v for k, v in e.items() if k != "evidence"}
+                                      | {"priority": priority(e)} for e in events],
                            **{k: row.get(k) for k in ("generated_at", "usage", "usage_totals", "usage_daily",
                                                      "error", "rotations")}, "summary":summary, "state":state,
                            # The card draws the same pin the rail does, and
