@@ -120,21 +120,30 @@ def test_manual_refresh_bypasses_the_interval(home):
     assert "kimi" in {item["name"] for item in refreshed["options"]}
 
 
-def test_the_session_detail_verdict_comes_from_the_row(home, monkeypatch):
-    """The detail rail asks for one pair; it is answered, not recomputed."""
+def test_the_session_detail_verdict_is_live(home, monkeypatch):
+    """The rail's verdict is computed for that pair, not read from a row.
+
+    Deleting a lender's credential has to turn the detail rail red on its next
+    two-second poll (tests/test_reborrow.py pins the endpoint side of this),
+    so this path stays live. What it no longer does is re-parse the config:
+    the document comes from the facts (claunch-89eom).
+    """
     profile.create("work")
     lender = profile.create("ds4")
     credentials.save_token(lender, "secret-never-serialize-me")
-    calls = _count_validate(monkeypatch)
-    facts = profile_facts.ProfileFacts(interval=0)
+    facts = profile_facts.ProfileFacts(interval=3600.0)
 
-    first = facts.borrow_validation("work", "ds4")
-    second = facts.borrow_validation("work", "ds4")
+    assert facts.borrow_validation("work", "ds4")["status"] == "ready"
 
-    assert first["status"] == "ready"
-    assert second == first
-    assert first["name"] == "ds4"
-    assert len(calls) == 2  # the row's two lenders, once for both reads
+    loads = []
+    real_load = store.load
+    monkeypatch.setattr(store, "load", lambda: loads.append(1) or real_load())
+
+    (lender.config_dir / credentials.TOKEN_FILENAME).unlink()
+    verdict = facts.borrow_validation("work", "ds4")
+
+    assert verdict["status"] == "missing-token"
+    assert loads == []  # the facts already hold the document
 
 
 def test_a_lender_that_is_gone_is_still_answered_for_its_pair(home):

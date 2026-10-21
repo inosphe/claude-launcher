@@ -121,11 +121,15 @@ class ProfileFacts:
     ) -> Optional[dict]:
         """One lender's verdict for one runtime, for the session detail rail.
 
+        Deliberately **not** read from the rows above. The rail documents a
+        live verdict -- deleting or expiring the lender's credential has to
+        turn it red on the next poll -- and one pair costs a fraction of a
+        row: what made it expensive was re-parsing the config through the
+        policy, provider and lineage layers, and those now take the document
+        this snapshot already read.
+
         ``harness_name`` is the harness the *session* runs under, which can
-        differ from the profile's own effective harness; a row built for the
-        effective harness does not answer for it. The row is used only when the
-        two agree, and the fallback validates the pair directly -- rare, and
-        correctness outranks the saved read.
+        differ from the profile's own effective harness.
         """
         facts = self.facts()
         try:
@@ -134,20 +138,10 @@ class ProfileFacts:
         except (profile_mod.ProfileError, lineage.LineageError):
             return None
         recorded = str(harness_name or "").strip() or effective
-        if recorded == effective:
-            try:
-                row = self.borrow_options(runtime.selector)
-            except (profile_mod.ProfileError, lineage.LineageError):
-                row = None
-            if row is not None:
-                for item in row.get("options") or []:
-                    if item.get("name") == lender:
-                        return dict(item)
-        # Either the session's harness is not the profile's, or the lender is
-        # no longer in the profile list (removed, renamed). The question is
-        # about this exact pair, so ask it rather than report nothing.
         entry = facts.harness(recorded)
-        return borrowing.validate(runtime, lender, entry=entry, doc=facts.doc).to_dict()
+        return borrowing.validate(
+            runtime, lender, entry=entry, doc=facts.doc
+        ).to_dict()
 
     # -- writers ---------------------------------------------------------
 

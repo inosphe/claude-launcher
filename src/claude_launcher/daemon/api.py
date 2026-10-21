@@ -10801,10 +10801,11 @@ async def h_session_meta(request: web.Request) -> web.Response:
         harness = facts.harness(info.get("harness") or "")
         borrowed_auth = None
         if info.get("borrow") and info.get("profile"):
-            # The verdict comes from the daemon's profile facts, so the
-            # two-second poll is a lookup instead of a policy evaluation per
-            # lender (claunch-89eom). Its staleness is bounded by that
-            # snapshot's interval, which is why the interval is short.
+            # Live for this one pair -- the rail must go red on the next poll
+            # when a lender's credential is replaced or expires -- but the
+            # config document behind the verdict comes from the daemon's
+            # profile facts instead of being re-parsed per poll
+            # (claunch-89eom).
             borrowed_auth = facts.borrow_validation(
                 info["profile"], info["borrow"],
                 harness_name=info.get("harness") or "",
