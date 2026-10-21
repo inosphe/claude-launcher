@@ -1255,7 +1255,16 @@ class WindowManager:
         instance = self._instance if instance is None else instance
         if cls == SWEEP:
             if self._holders:
-                return "the window is held and a sweep is exclusive"
+                # Name what is holding it: an artifact cleanup asks as SWEEP and
+                # was told "a sweep is exclusive" while a targeted run held the
+                # window, which sent four sessions hunting for a sweep that was
+                # not there (claunch-q4cqy.2).
+                who = ", ".join(
+                    f"{h['cls']}:{h.get('session') or h.get('label') or 'daemon'}"
+                    for h in self._holders[:4]
+                )
+                more = "" if len(self._holders) <= 4 else f" (+{len(self._holders) - 4})"
+                return f"the window is held by {who}{more}; a sweep needs it empty"
             return None
         if any(h["cls"] == SWEEP for h in self._holders):
             return "a sweep holds the window"

@@ -389,6 +389,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     reminder_clock.start()
     window_reminder_clock = window_mod.WindowReminderClock(manager, app["window"])
     window_reminder_clock.start()
+    # A cleanup refused for a busy window is retried here instead of by the
+    # session that asked: its turn is over by then (claunch-q4cqy.2).
+    from . import artifact_cleanup_api
+
+    app["artifact_cleanup_clock"] = asyncio.ensure_future(
+        artifact_cleanup_api.scheduled_clock(app, app["artifact_cleanup"]))
     from .delayed_sweep import Clock as DelayedSweepClock
     delayed_sweep_clock = DelayedSweepClock(manager, window=app["window"], batch=True)
     delayed_sweep_clock.start()
@@ -578,6 +584,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             await teardown.step("cflow2_clock", cflow2_clock.shutdown())
         await teardown.step("ping_clock", ping_clock.shutdown())
         await teardown.step("window_reminder_clock", window_reminder_clock.shutdown())
+        await teardown.step("artifact_cleanup_clock", _stop_clock(app["artifact_cleanup_clock"]))
         await teardown.step("delayed_sweep_clock", delayed_sweep_clock.shutdown())
         await teardown.step("reminder_clock", reminder_clock.shutdown())
         await teardown.step("ask_clock", ask_clock.shutdown())
@@ -603,6 +610,20 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("http runner", runner.cleanup())
         teardown.report()
     return RESTART_CODE if app["restart_requested"] else 0
+
+
+async def _stop_clock(task) -> None:
+    """Cancel a bare clock task and wait for it to finish.
+
+    The task's own handler drains work it already started before releasing a
+    measurement window grant, so awaiting the task is what keeps the grant held
+    for the deletion (artifact_cleanup_api.scheduled_clock).
+    """
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 class _Teardown:

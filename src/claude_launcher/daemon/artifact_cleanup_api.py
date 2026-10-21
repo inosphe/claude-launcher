@@ -3,15 +3,26 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import sqlite3
 from aiohttp import web
 
 from .artifact_cleanup import Cleanup, CleanupError
 
+log = logging.getLogger(__name__)
+
+
+#: How often a scheduled cleanup looks for a free measurement window. One
+#: minute is far shorter than the useful life of a basetemp and long enough
+#: that a queue of schedules does not spin against the window.
+SCHEDULED_POLL = 60.0
+
 
 def install(app):
     service = Cleanup(app["manager"])
+    # The daemon's clock drives scheduled applies from here (__main__ starts it).
+    app["artifact_cleanup"] = service
     # Per session, not one for the daemon: a plan walks every file its session
     # owns, and one session's long walk must not hold every other session's
     # request past the client's timeout (claunch-30rkn).
@@ -68,8 +79,20 @@ def install(app):
                                              bound=True, label=f"artifact cleanup: {session}",
                                              workers=1, wait=0)
                 if not grant.get("granted"):
-                    return web.json_response({"status": "cleanup_pending", "plan_id": token,
-                                              "reason": grant.get("reason", "measurement window unavailable")})
+                    # Nobody will ask again: the caller's turn ends here, and
+                    # auto-release is exactly the step that runs with no person
+                    # at the terminal (claunch-q4cqy.2). Keep the request and
+                    # let scheduled_clock() run it when the window frees up.
+                    reason = grant.get("reason", "measurement window unavailable")
+                    already = service.scheduled_record(session) is not None
+                    try:
+                        service.schedule(session, reason)
+                        status = "scheduled"
+                    except (CleanupError, OSError) as exc:
+                        reason = f"{reason} (could not schedule: {exc})"
+                        status = "cleanup_pending"
+                    return web.json_response({"status": status, "plan_id": token,
+                                              "reason": reason, "already": already})
                 try:
                     job = asyncio.create_task(asyncio.to_thread(service.apply, session, token))
                     try:
@@ -86,3 +109,46 @@ def install(app):
             return web.json_response({"error": str(exc), "status": "cleanup_pending"}, status=400)
 
     app.router.add_post("/api/artifact-cleanup", handle)
+
+
+async def scheduled_clock(app, service, interval=SCHEDULED_POLL):
+    """Run each session's scheduled cleanup once the window frees up.
+
+    The failure this exists for is silent: an apply refused for a busy window
+    leaves the caller's turn with nothing to retry, and the basetemps stay on
+    disk until the session ends (claunch-q4cqy.2 measured four sessions that
+    way). A schedule is replanned at run time -- plans expire after ten minutes
+    -- and both the ownership check and the fingerprint check still run before
+    anything is deleted.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sessions = await asyncio.to_thread(service.scheduled)
+        except Exception:  # noqa: BLE001 -- a bad pass must not end the clock
+            log.warning("cleanup: could not list scheduled sessions", exc_info=True)
+            continue
+        for session in sessions:
+            window = app["window"]
+            grant = await window.acquire("sweep", session=None, pid=os.getpid(),
+                                         bound=True, label=f"scheduled cleanup: {session}",
+                                         workers=1, wait=0)
+            if not grant.get("granted"):
+                continue  # still busy; the next pass asks again
+            job = asyncio.create_task(asyncio.to_thread(service.run_scheduled, session))
+            try:
+                try:
+                    await asyncio.shield(job)
+                except asyncio.CancelledError:
+                    # Shutdown cancels the clock. to_thread keeps running after
+                    # that, so wait for the deletion before the exclusive grant
+                    # goes back -- a test must not start on half-deleted files
+                    # (claunch-q4cqy.2 review, finding 4).
+                    while not job.done():
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.wait([job])
+                    raise
+            except Exception:  # noqa: BLE001 -- one session must not stop the others
+                log.warning("cleanup: scheduled pass failed for %s", session, exc_info=True)
+            finally:
+                window.release(grant["grant_id"])

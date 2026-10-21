@@ -16,8 +16,13 @@ TOOLS = [{
         "deletion are accepted. Unknown, changed or incomplete artifacts, and "
         "artifacts that are links themselves, are kept as cleanup_pending; a link "
         "inside an artifact is unlinked, never followed. Execution requires an idle measurement "
-        "window and writes a durable receipt. A denial must be reported, not "
-        "retried through shell commands or another tool."
+        "window and writes a durable receipt. When that window is busy the apply is "
+        "scheduled instead and the daemon runs it once the window frees up -- report "
+        "status 'scheduled' as the outcome and do not re-plan; 'already': true there means "
+        "a schedule was standing before this call. A plan whose response carries "
+        "'scheduled' means this session already has a cleanup waiting, so do not submit "
+        "that plan_id. Any other denial must "
+        "be reported, not retried through shell commands or another tool."
     ),
     "inputSchema": {"type": "object", "additionalProperties": False,
                     "properties": {"plan_id": {"type": "string"}}},
