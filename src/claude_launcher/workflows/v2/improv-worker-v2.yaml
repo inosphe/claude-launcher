@@ -179,14 +179,18 @@ inputs:
     # item의 coding-approval-check가 일감마다 읽으므로, 사람이 런 도중에 켜면
     # 다음 일감부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]
+  # PR 착지 매체를 정하는 두 스위치(claunch-qke6g). 폼에서 한 블록으로 묶여
+  # gh 준비 상태 줄과 함께 놓인다.
   force_pr:
     type: bool
     label: PR 강제(force to make PR)
     precheck: gh
+    group: PR
     help: 착지를 PR로만 한다. PR을 만들 수 없으면(gh 미설치·미로그인·원격 없음) 로컬 착지로 바꾸지 않고 BLOCKED로 멈춘다
   force_no_pr:
     type: bool
     label: PR 금지(force not to make PR)
+    group: PR
     help: PR을 만들지 않고 기존의 로컬 착지(리더의 --no-ff 머지)만 쓴다. 둘 다 끄면 PR을 먼저 시도하고, 만들 수 없으면 사유를 남기고 로컬 착지로 대체한다
   relation:
     type: enum
@@ -207,6 +211,7 @@ inputs:
   reviewer_profile:
     type: string
     label: 리뷰어 profile
+    group: 리뷰어
     help: >-
       reviewer-ensure가 세우는 자식 리뷰어의 profile(claunch ls의 이름). 비우면 이 세션의
       profile을 물려받는다. 다른 profile로 세우려면 ~/.claunch.yaml의 spawn.allow_profile이
@@ -220,6 +225,7 @@ inputs:
   reviewer_harness:
     type: string
     label: 리뷰어 harness
+    group: 리뷰어
     help: >-
       자식 리뷰어의 harness(claunch harnesses의 이름). 비우면 리뷰어 profile의 기본
       harness다. profile만 비우고 이것만 주면 이 세션의 profile에서 harness만 바꾼다.
@@ -238,6 +244,9 @@ inputs:
     type: bool
     default: false
     label: 난이도 기반 세션 라우팅
+    # 위임 자식 둘을 여는 스위치다 — 폼에서 그 두 칸 위의 한 줄을 다 쓴다.
+    group: 라우팅
+    wide: true
     help: >-
       켜면 일감마다 변경 계획(coding-plan)이 난이도(easy/hard)와 위임 권장을 내고, 쉬운
       일감은 이 세션의 대화를 fork한 자식 세션이 하위 profile·모델로 구현한다(이 세션의
@@ -251,6 +260,7 @@ inputs:
   delegate_profile:
     type: string
     label: 위임 자식 profile
+    group: 라우팅
     help: >-
       session_routing으로 위임할 때 자식 세션의 profile(claunch ls의 이름). 비우면 데몬
       설정 delegate_profile(웹 Settings)을 쓴다. 이 세션과 다른 profile이면
@@ -262,6 +272,7 @@ inputs:
   delegate_model:
     type: string
     label: 위임 자식 model preset
+    group: 라우팅
     help: >-
       위임 자식의 모델. 위임 자식 profile(비었으면 데몬 설정 delegate_profile)의 harness가
       받는 값만 고를 수 있다. preset 이름(default, small, large, xlarge, subagent)이면 자식

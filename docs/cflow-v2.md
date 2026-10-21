@@ -728,10 +728,28 @@ inputs:
 
 - 선언 키: `type`(기본 `string`), `label`, `help`, `required`(기본 false),
   `default`, `choices`(`enum`만), `placeholder`, `precheck`, `set_by`(아래
-  「시작 뒤에 채우는 입력」), `options`(`string`만, 아래 「목록에서 고르는 입력」).
-  이름은 식별자 규칙을 따른다.
+  「시작 뒤에 채우는 입력」), `options`(`string`만, 아래 「목록에서 고르는 입력」),
+  `group`, `wide`(아래 「폼의 묶음」). 이름은 식별자 규칙을 따른다.
   모르는 type, type과 맞지 않는 `default`, `enum`이 아닌 입력의 `choices`는
   컴파일 오류다.
+
+#### 폼의 묶음(`group`·`wide`)
+
+두 키는 폼을 그리는 방식만 정한다. 값 검사와 런의 동작에는 닿지 않는다.
+
+- `group`: 같은 값을 가진 입력들이 그 값을 제목으로 하는 한 블록에 모인다.
+  블록은 폼 전체의 두 열 격자와 별개인 자기 격자를 쓰므로, 한 블록의 행들은
+  서로 같은 줄에 서고 다른 블록의 행과 짝지어지지 않는다. 그룹의 입력은 그
+  그룹이 처음 선언된 자리에 함께 놓인다. 값은 비어 있지 않은 문자열이어야
+  하고, 아니면 컴파일 오류다.
+- `wide: true`: 그 행이 블록의 두 열을 다 쓴다. `text`·`list`·`invariants`·
+  `acceptance`는 선언과 무관하게 이미 그렇다. 그룹의 스위치처럼 블록의 다른
+  칸 전체에 걸리는 입력에 쓴다.
+
+improv-worker-v2는 `리뷰어`(reviewer_profile·reviewer_harness), `라우팅`
+(session_routing·delegate_profile·delegate_model), `PR`(force_pr·force_no_pr)
+세 블록을 두고, `session_routing`이 `wide`다.
+
 - 값 검사(`inputs.normalize`): 폼·CLI에서 온 문자열을 type으로 바꾼다(`int`,
   `bool`의 `true/false/yes/no/1/0`, `list`는 줄바꿈 또는 쉼표로 나눔,
   `invariants`·`acceptance`는 JSON 목록 또는 한 줄에 문장 하나). 비었거나 없는

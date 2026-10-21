@@ -23617,45 +23617,97 @@ function cflowInputHelpToggle(row, label) {
   return b;
 }
 
+/* The fields as blocks: inputs that declare the same `group` share one block,
+   drawn where the group's first input is declared, and each run of inputs
+   without a group is a block of its own. A box drawn from a declaration that
+   interleaves groups therefore still draws each group once (docs 2.6). */
+function cflowInputBlocks(fields) {
+  const blocks = [];
+  const byGroup = new Map();
+  for (const field of fields) {
+    const group = field.group || "";
+    if (group) {
+      let block = byGroup.get(group);
+      if (!block) {
+        block = { group, fields: [] };
+        byGroup.set(group, block);
+        blocks.push(block);
+      }
+      block.fields.push(field);
+      continue;
+    }
+    const last = blocks[blocks.length - 1];
+    if (last && !last.group) last.fields.push(field);
+    else blocks.push({ group: "", fields: [field] });
+  }
+  return blocks;
+}
+
+/* A `group` block: a heading and its own two-column grid. The grid is what
+   puts the rows of one group in the same line block -- a row of the next
+   group starts a new grid instead of sharing one (style.css, .cf2-input-group). */
+function cflowInputGroup(box, group) {
+  const section = el("section", "cf2-input-group");
+  section.setAttribute("aria-label", group);
+  section.appendChild(el("h5", "cf2-input-group-title", group));
+  const grid = el("div", "cf2-input-group-fields");
+  section.appendChild(grid);
+  box.appendChild(section);
+  return grid;
+}
+
+/* One input's row: caption, "?" for its help, control, then whatever hangs
+   under it (help, the `options` list, its error line). */
+function cflowInputRow(field, seeded) {
+  // A seeded value (Spawn same setup) stands in for the schema default:
+  // what the parent's run was launched with, for the operator to edit.
+  const field_ = seeded && Object.prototype.hasOwnProperty.call(seeded, field.name)
+    ? Object.assign({}, field, { default: seeded[field.name] })
+    : field;
+  const type = field_.type || "string";
+  const row = el("div", "cf2-input");
+  row.dataset.input = field_.name;
+  row.dataset.type = type;
+  if (field_.precheck) row.dataset.precheck = field_.precheck;
+  // A control that needs the width -- a textarea, a row list -- takes the
+  // whole grid row and puts its caption on the line above (style.css,
+  // .cf2-input-wide). An input declared `wide` wants only the width: a
+  // switch that governs the rest of its group spans the row and keeps its
+  // caption beside the box, so it reads as one line (`.cf2-input-full`).
+  if (type === "text" || type === "list" || CFLOW_INPUT_CHECK_TYPES.includes(type)) {
+    row.classList.add("cf2-input-wide");
+  } else if (field_.wide) {
+    row.classList.add("cf2-input-full");
+  }
+  const labelText = field_.label || field_.name;
+  const label = el("label", "cf2-input-label",
+                   labelText + (field_.required ? " *" : ""));
+  const control = cflowInputControl(field_);
+  // A checkbox takes the control column like every other input: every row
+  // reads "name, then control" whichever shape the control is. Nesting the
+  // box inside the caption put it ahead of the name and broke the one rule
+  // the combobox rows keep (claunch-ngfo3).
+  row.appendChild(label);
+  row.appendChild(control);
+  // The paragraph stays in the row whether or not it is shown: the toggle
+  // only flips the class the stylesheet reads.
+  if (field_.help) {
+    row.appendChild(cflowInputHelpToggle(row, labelText));
+    row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
+  }
+  if (field_.options) row.appendChild(el("p", "wf-note mono cf2-input-options", ""));
+  row.appendChild(el("p", "cf2-input-error hidden"));
+  return row;
+}
+
 function cflowInputsForm(box, fields, constraints, seeded) {
   box.appendChild(el("h4", "cf2-inputs-title", "Workflow variables"));
   box.appendChild(el("p", "wf-note", "Start inputs of this workflow (* = required)"));
-  for (const field of fields) {
-    // A seeded value (Spawn same setup) stands in for the schema default:
-    // what the parent's run was launched with, for the operator to edit.
-    const field_ = seeded && Object.prototype.hasOwnProperty.call(seeded, field.name)
-      ? Object.assign({}, field, { default: seeded[field.name] })
-      : field;
-    const type = field_.type || "string";
-    const row = el("div", "cf2-input");
-    row.dataset.input = field_.name;
-    row.dataset.type = type;
-    if (field_.precheck) row.dataset.precheck = field_.precheck;
-    // A control that needs the width -- a textarea, a row list -- takes the
-    // whole box and puts its caption on the line above (style.css,
-    // .cf2-input-wide).
-    if (type === "text" || type === "list" || CFLOW_INPUT_CHECK_TYPES.includes(type)) {
-      row.classList.add("cf2-input-wide");
-    }
-    const labelText = field_.label || field_.name;
-    const label = el("label", "cf2-input-label",
-                     labelText + (field_.required ? " *" : ""));
-    const control = cflowInputControl(field_);
-    // A checkbox takes the control column like every other input: every row
-    // reads "name, then control" whichever shape the control is. Nesting the
-    // box inside the caption put it ahead of the name and broke the one rule
-    // the combobox rows keep (claunch-ngfo3).
-    row.appendChild(label);
-    row.appendChild(control);
-    // The paragraph stays in the row whether or not it is shown: the toggle
-    // only flips the class the stylesheet reads.
-    if (field_.help) {
-      row.appendChild(cflowInputHelpToggle(row, labelText));
-      row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
-    }
-    if (field_.options) row.appendChild(el("p", "wf-note mono cf2-input-options", ""));
-    row.appendChild(el("p", "cf2-input-error hidden"));
-    box.appendChild(row);
+  for (const block of cflowInputBlocks(fields)) {
+    // A group's rows go into its own grid; ungrouped rows stay direct
+    // children of the box and pair with each other as before.
+    const target = block.group ? cflowInputGroup(box, block.group) : box;
+    for (const field of block.fields) target.appendChild(cflowInputRow(field, seeded));
   }
   if ((constraints || []).length) {
     const list = el("div", "cf2-constraints");

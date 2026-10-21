@@ -7801,7 +7801,8 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    tallest part of the create form (claunch-npfyd). So the fields sit two to a
    row, each row is one line -- caption, control, and a "?" that unfolds that
    input's help where it stands -- and a control that needs the width (a
-   textarea, a row list) takes the whole box with its caption above. */
+   textarea, a row list) takes the whole box with its caption above. Inputs
+   that declare a `group` are gathered into a block of their own. */
 .cf2-inputs {
   border: 1px solid #58677c; border-radius: 6px; padding: 10px 12px 12px;
   margin: 6px 0; min-width: 0;
@@ -7810,6 +7811,23 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 }
 .cf2-inputs-title { margin: 0 0 2px; font-size: 14px; color: #d8dbe0; }
 .cf2-inputs > :is(.cf2-inputs-title, .wf-note, .cf2-constraints) { grid-column: 1 / -1; }
+/* An input declared `group:` (docs/cflow-v2.md 2.6) is drawn in a block of
+   its own: a heading, then the group's own two-column grid. The grid is what
+   aligns a group's rows with each other -- before it, every row was a loose
+   cell of the box's grid, so a field paired with whichever unrelated field
+   happened to come next, and the pairs drifted apart as soon as one of them
+   carried an `options` line. */
+.cf2-inputs > .cf2-input-group { grid-column: 1 / -1; min-width: 0; }
+.cf2-input-group {
+  margin: 4px 0 1px; padding-top: 6px; border-top: 1px solid #30363d;
+}
+.cf2-input-group-title {
+  margin: 0 0 2px; font-size: 12px; font-weight: 600; color: #9da5b0;
+}
+.cf2-input-group-fields {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px; row-gap: 3px; align-items: start; min-width: 0;
+}
 /* Every row is its own grid, so the caption and the "?" get fixed tracks:
    that is what lines the controls up from row to row, whether or not a row
    has help to unfold. A caption longer than its track wraps rather than
@@ -7839,6 +7857,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 /* A textarea or a row list takes the whole box; its caption stays above. */
 .cf2-input-wide { grid-column: 1 / -1; }
 .cf2-input-wide > .cf2-input-control { grid-column: 1 / -1; grid-row: 2; }
+/* `wide: true` on a one-line control (docs 2.6): the row takes both columns
+   of its block, the caption stays beside the control. A switch that governs
+   the rest of its group reads this way, above the pair it applies to. */
+.cf2-input-full { grid-column: 1 / -1; }
 /* The "?" that unfolds one input's help. It is a plain round button, not the
    form's green action button (#new-session button). */
 #new-session .cf2-input-help-toggle {
@@ -7879,6 +7901,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    use. Every row then puts its caption on the line above. */
 @container session-form (max-width: 640px) {
   .cf2-inputs { grid-template-columns: minmax(0, 1fr); }
+  .cf2-input-group-fields { grid-template-columns: minmax(0, 1fr); }
   .cf2-input { grid-template-columns: minmax(0, 1fr) 18px; }
   .cf2-input > .cf2-input-label { grid-column: 1; grid-row: 1; }
   .cf2-input > .cf2-input-help-toggle { grid-column: 2; grid-row: 1; justify-self: end; }
