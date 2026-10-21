@@ -49952,13 +49952,19 @@ function dismissNotice(key) {
    look at one of them; until now the name was plain text and the row had to
    be hunted for in the rail. `stopPropagation` because a card may carry its
    own click, and opening a session is not deciding anything. A record with
-   no name to open keeps plain text rather than a dead press. */
-function gateSessionLink(name) {
+   no name to open keeps plain text rather than a dead press.
+
+   `onOpen` is for a link inside a history row: the click moves the reader
+   the same way the row's own click does, so the row is read too (claunch-49fvl).
+   Gate cards pass none — their rows are recorded read from the start and
+   opening a session answers nothing. */
+function gateSessionLink(name, onOpen) {
   if (!name) return el("span", null, "?");
   const node = el("span", "linkish gate-session", name);
   node.title = `open ${name}`;
   node.addEventListener("click", (ev) => {
     ev.stopPropagation();
+    if (onOpen) onOpen();
     location.hash = "#/s/" + encodeURIComponent(name);
   });
   return node;
@@ -50871,7 +50877,9 @@ function noticePanelHistoryRow(entry) {
   if (entry.session) {
     const who = el("div", "notice-sub");
     who.appendChild(el("span", null, "session "));
-    who.appendChild(gateSessionLink(entry.session));
+    // The link moves the reader out of this row, so it is a read like the
+    // row's own click (claunch-49fvl); it stops the click, so it must say so.
+    who.appendChild(gateSessionLink(entry.session, () => noticeMarkRead([entry.id], true)));
     row.appendChild(who);
   }
   row.appendChild(el(
