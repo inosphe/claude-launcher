@@ -7449,13 +7449,21 @@ function ctxSentence(s) {
   }
   // The count is formatted once per reading: the rail asks for this sentence
   // on every row of every poll (refreshRailSeen), and toLocaleString was a
-  // measurable share of that pass (claunch-i3es6). Readings arrive as fresh
-  // objects and are never edited, so the reading itself is the key.
-  const memo = ctxSentence._tokens || (ctxSentence._tokens = new WeakMap());
-  let count = memo.get(c);
+  // measurable share of that pass (claunch-i3es6). An object-keyed memo only
+  // held within one pass, though: the poll re-parses a row it was told is
+  // unchanged from the text it kept (sessionRowsTake), so the same reading
+  // arrives as a new object every five seconds and every count was formatted
+  // again. The count is keyed on the number, which survives that re-parse —
+  // and two rows on the same count share one formatting, which is right for
+  // the same reason. Bounded, because a tab is open for days and this
+  // outlives the rows it was built for: past the cap the whole map goes,
+  // which costs one re-format pass and never grows without bound.
+  const cache = ctxSentence._byTokens || (ctxSentence._byTokens = new Map());
+  let count = cache.get(c.tokens);
   if (count === undefined) {
     count = c.tokens.toLocaleString();
-    if (typeof c === "object") memo.set(c, count);
+    if (cache.size >= 512) cache.clear();
+    cache.set(c.tokens, count);
   }
   const parts = [`context ${count} tokens`];
   if (c.model) parts.push(c.model);
@@ -7474,11 +7482,16 @@ function ctxBreakdown(c) {
   // Built once per reading, for the same reason as ctxSentence's count: the
   // text reads nothing but the reading, and the rail rebuilt it per row per
   // poll -- the largest single item of the poll's redraw (claunch-i3es6).
-  const memo = ctxBreakdown._memo || (ctxBreakdown._memo = new WeakMap());
-  const kept = memo.get(c);
-  if (kept !== undefined) return kept;
+  // Keyed on the numbers it prints, not on the object: the poll hands back a
+  // re-parsed copy of an unchanged row every five seconds, and an
+  // object-keyed memo missed on every one of those (claunch-hwbuc). Same
+  // bound and same reason as the sentence's count above.
   const modelWindow = Number.isFinite(c.model_context_window)
     && c.model_context_window > 0 ? c.model_context_window : 0;
+  const key = [c.input, c.cache_read, c.cache_write, c.output, modelWindow].join("|");
+  const cache = ctxBreakdown._byValue || (ctxBreakdown._byValue = new Map());
+  const kept = cache.get(key);
+  if (kept !== undefined) return kept;
   const text = [
     `fresh input ${c.input.toLocaleString()}`,
     `replayed from cache ${c.cache_read.toLocaleString()}`,
@@ -7495,7 +7508,8 @@ function ctxBreakdown(c) {
       : "no percentage: the context limit is not recorded anywhere and " +
         "differs by model",
   ].join("\n");
-  if (typeof c === "object") memo.set(c, text);
+  if (cache.size >= 512) cache.clear();
+  cache.set(key, text);
   return text;
 }
 
@@ -7628,12 +7642,16 @@ function ctxRailLine(s) {
       : `reasoning effort ${c.effort} (recorded on its last request)`;
   }
   line.append(...(model ? [model] : []), ...(effort ? [effort] : []), bar, num);
-  const note = ctxTooltip(s);
   const scale = c
     ? "bar spans 0–1M tokens" +
       (win ? `; the tick is the ${winKind} at ${ctxShort(win)}` : "")
     : "";
-  line.title = [note, scale].filter(Boolean).join("\n");
+  // The tooltip is a function of the reading, and the part of it that moves on
+  // its own is the reading's age: refreshRailSeen rewrites the title in place
+  // while the line it hangs on stays put, so the line carries the half that
+  // does not move (claunch-hwbuc).
+  line._railScale = scale;
+  line.title = [ctxTooltip(s), scale].filter(Boolean).join("\n");
   return line;
 }
 
@@ -9035,16 +9053,22 @@ function refreshRailSeen(list) {
         else tps.remove();
       }
     }
-    // The gauge reads the reading, the harness that sets its tick, and the
-    // tooltip that carries the reading's age.
+    // The gauge reads the reading and the harness that sets its tick — and
+    // NOT the tooltip, whose age moves every poll. Keyed on the tooltip too,
+    // every row's line was rebuilt on every poll to move one sentence in its
+    // title (claunch-hwbuc); the age is written into that title in place
+    // below, and the line itself is rebuilt only when what it draws moved.
     const note = typeof ctxTooltip === "function" ? ctxTooltip(s) : "";
     const ctx = li.querySelector(".rail-ctx-line");
     if (ctx && typeof ctxRailLine === "function") {
-      const ck = JSON.stringify([s.context || null, s.harness || null, note]);
+      const ck = JSON.stringify([s.context || null, s.harness || null]);
       if (ctx._railKey !== ck) {
         const fresh = ctxRailLine(s);
         if (fresh) swap(ctx, fresh)._railKey = ck;
         else ctx.remove();
+      } else if (typeof ctx._railScale === "string") {
+        const title = [note, ctx._railScale].filter(Boolean).join("\n");
+        if (ctx.title !== title) ctx.title = title;
       }
     }
     // The titles are written once, at what they end up reading (the same
