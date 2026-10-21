@@ -23,9 +23,11 @@
 
    Opening from the history (claunch-x76l8): a row about a thread reply or a
    QA request keeps its target, and clicking the row opens that session on
-   that thread or that question, as the card did, and closes the panel. A
-   row written before rows kept a target opens nothing. Every card carries ×,
-   which puts it away without following it.
+   that thread or that question, as the card did, and leaves the panel open
+   (claunch-0fdx7) so the next row can be opened from it too — the same for
+   a waiting request's Open press. A row written before rows kept a target
+   opens nothing. Every card carries ×, which puts it away without following
+   it.
 
    An open panel hides the corner strip (claunch-k2khb): a notice that
    arrives while it is open is written to the history only and puts up no
@@ -757,9 +759,15 @@ function gotoRec(rec) {
           w.loc.hash === "#/s/s1" && JSON.stringify(revealed) === JSON.stringify([["s1", "qa-new"]]),
           { hash: w.loc.hash, revealed });
     check("over an open threads view the QA pane joins it", w.layouts.s1.pane === "both", w.layouts.s1);
-    check("and closes the panel", w.nodes["notice-panel"].classList.contains("hidden"),
+    check("and leaves the panel open (claunch-0fdx7)",
+          !w.nodes["notice-panel"].classList.contains("hidden"),
           w.nodes["notice-panel"].className);
 
+    // The rest of this block reads the corner, where no card is drawn while
+    // the panel is open: close it the way a person would.
+    w.api.noticePanelToggle(false);
+    check("the panel's × closes it", w.nodes["notice-panel"].classList.contains("hidden"),
+          w.nodes["notice-panel"].className);
     w.api.qaNoticeSync({ s2: { unresolved: 1, waiting: [ask("qa-b", "pick one")] } });
     check("a card per request", w.strip().length === 1, w.said());
     w.api.qaNoticeSync({ s2: { unresolved: 0, waiting: [] } });
@@ -840,7 +848,8 @@ function gotoRec(rec) {
     check("clicking it opens the session on that thread",
           w.loc.hash === "#/s/s1" && JSON.stringify(focused) === JSON.stringify([["s1", "th-b"]]),
           { hash: w.loc.hash, focused });
-    check("and closes the panel", w.nodes["notice-panel"].classList.contains("hidden"),
+    check("and leaves the panel open (claunch-0fdx7)",
+          !w.nodes["notice-panel"].classList.contains("hidden"),
           w.nodes["notice-panel"].className);
 
     const tab = build({ storage });
@@ -941,8 +950,9 @@ function gotoRec(rec) {
           /Waiting on you \(1\)/.test(w.panel()) && !!w.press(w.nodes["notice-panel-body"], "Open"),
           w.panel());
     w.press(w.nodes["notice-panel-body"], "Open").click();
-    check("Open goes to the session and closes the panel",
-          w.loc.hash === "#/s/s6" && w.nodes["notice-panel"].classList.contains("hidden"), w.loc.hash);
+    check("Open goes to the session and leaves the panel open (claunch-0fdx7)",
+          w.loc.hash === "#/s/s6" && !w.nodes["notice-panel"].classList.contains("hidden"),
+          [w.loc.hash, w.nodes["notice-panel"].className]);
     w.api.urgentAskSync({ s6: { cwd: "/w/s6", scope: "s6", urgent_asks: [{ id: "ask2-cc",
       instance: "i1", label: "plan", status: "open", resolution: "human" }], answers: [] } });
     check("opening the panel hid it: off the corner and in the count (claunch-paqfs)",

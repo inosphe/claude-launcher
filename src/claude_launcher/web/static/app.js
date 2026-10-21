@@ -50672,8 +50672,9 @@ function noticePanelGateRow(type, rec) {
       actions.appendChild(btn);
     }
     actions.appendChild(noticePanelButton(
-      "Open", "", `open ${rec.session}, where its run's strip answers this`,
-      () => { noticePanelToggle(false); urgentAskOpen(rec); }
+      "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
+        "the panel stays open beside it",
+      () => urgentAskOpen(rec)
     ));
   } else if (type === "nudge") {
     head.appendChild(gateSessionLink(rec.session));
@@ -50681,8 +50682,9 @@ function noticePanelGateRow(type, rec) {
     row.appendChild(head);
     if (rec.message) row.appendChild(el("div", "notice-sub gate-reason", rec.message));
     actions.appendChild(noticePanelButton(
-      "Open", "", `open ${rec.session}, where its run's strip answers this`,
-      () => { noticePanelToggle(false); nudgeOpen(rec); }
+      "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
+        "the panel stays open beside it",
+      () => nudgeOpen(rec)
     ));
   } else {
     const plan = rec.plan || {};
@@ -50729,14 +50731,14 @@ function noticePanelGateRow(type, rec) {
 }
 
 /* A history row about one thread reply or one QA request opens it, the way
-   its card did; the panel closes so the session is what is on screen. A row
+   its card did. The panel stays open (claunch-0fdx7): it is a column of the
+   layout on a desktop, so the session opens beside it and the reader can go
+   on to the next row instead of reopening the bell for each one. A row
    written before rows kept their target has only the session link. */
 function noticeTargetOpen(entry) {
   const t = entry.target || {};
   if (t.thread) threadNoticeOpen(entry.session, t.thread);
   else if (t.qa) qaNoticeOpen(entry.session, t.qa);
-  else return;
-  noticePanelToggle(false);
 }
 
 function noticePanelHistoryRow(entry) {
