@@ -26,6 +26,11 @@ class El {
   get firstChild() { return this.children[0] || null; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  addEventListener(type, fn) { (this.handlers || (this.handlers = {}))[type] = fn; }
+  click() {
+    const fn = this.handlers && this.handlers.click;
+    if (fn) fn({ preventDefault() {} });
+  }
   get textContent() { return this._text; }
   set textContent(v) { this._text = String(v); this.writes = (this.writes || 0) + 1; }
   get scrollWidth() { return 0; }
@@ -632,4 +637,148 @@ console.log("durableflow_check: edges ok");
   assert.ok(asked.some((x) => x.startsWith("/api/cflow/run?")), asked.join(" "));
   assert.ok(sandbox.rendered, "the workflow run is drawn");
   console.log("durableflow_check: chart pane ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+
+// (g) sequence (claunch-qmwog): the same log on a time axis ----------------
+const SAT = (s) => "2026-10-21T01:00:" + s + ".000Z";
+const SLOG = [
+  { at: SAT("00"), event: "session_start", reason: "startup" },
+  { at: SAT("01"), event: "unit", unit: "a", state: "start", label: "A 문서", phase: "docs" },
+  { at: SAT("01"), event: "unit", unit: "b", state: "start", label: "B 문서" },
+  { at: SAT("02"), event: "ask_start", key: "a:1", unit: "a" },
+  { at: SAT("02"), event: "ask_start", key: "b:1", unit: "b" },
+  { at: SAT("05"), event: "ask", key: "a:1", unit: "a", usage: u(10), stop: "stop" },
+  { at: SAT("07"), event: "ask", key: "b:1", unit: "b", usage: u(10), error: "boom" },
+  { at: SAT("08"), event: "unit", unit: "a", state: "done" },
+  { at: SAT("09"), event: "unit", unit: "b", state: "failed" },
+  { at: SAT("10"), event: "ask", role: "B", key: "C:free" },
+];
+const SNOW = Date.parse(SAT("20"));
+const SQ = DF.sequence(SLOG, true, SNOW);
+{
+  const ms = (s) => Date.parse(SAT(s));
+  assert.deepStrictEqual(Array.from(SQ.lanes, (l) => l.id), ["u:a", "u:b", "a:C:free#1"]);
+  const [a, b, free] = SQ.lanes;
+  // A unit's interval is its own events; its ask hangs inside it.
+  assert.deepStrictEqual([a.start, a.end, a.state], [ms("01"), ms("08"), "ok"]);
+  assert.deepStrictEqual([b.end, b.state], [ms("09"), "fail"]);
+  assert.deepStrictEqual(Array.from(a.asks, (x) => [x.start, x.end, x.status]),
+    [[ms("02"), ms("05"), "ok"]]);
+  assert.deepStrictEqual(Array.from(b.asks, (x) => x.status), ["fail"]);
+  // A question outside any unit is a lane of its own, labelled as the tree labels it.
+  assert.strictEqual(free.label, "C:free");
+  assert.deepStrictEqual([free.start, free.end], [ms("10"), ms("10")]);
+  // Two questions in flight at once: the parallelism is in the model.
+  assert.strictEqual(SQ.peak, 2);
+  assert.strictEqual(SQ.hidden, 0);
+  // A sim2 run's questions group into one lane per stage, as the tree groups
+  // them, with every question a mark inside it.
+  const sim2 = DF.sequence([
+    { at: SAT("01"), event: "ask_start", key: "B:effects|h1:0" },
+    { at: SAT("02"), event: "ask_start", key: "B:effects|h2:0" },
+    { at: SAT("03"), event: "ask", askRole: "B", key: "B:effects|h1:0", stop: "stop" },
+    { at: SAT("04"), event: "ask", askRole: "B", key: "B:effects|h2:0", error: "cap" },
+  ], false, SNOW);
+  assert.deepStrictEqual(Array.from(sim2.lanes, (l) => [l.id, l.label, l.state]), [["g:B:effects", "효과", "fail"]]);
+  assert.deepStrictEqual(Array.from(sim2.lanes[0].asks, (x) => [x.start, x.end, x.status]),
+    [[Date.parse(SAT("01")), Date.parse(SAT("03")), "ok"],
+     [Date.parse(SAT("02")), Date.parse(SAT("04")), "fail"]]);
+  assert.strictEqual(sim2.peak, 2);
+  // Live: the axis ends at now, not at the last event.
+  assert.strictEqual(SQ.t1, SNOW);
+  // A run that ended closes what stayed open at its end.
+  const ended = DF.sequence([...SLOG, { at: SAT("12"), event: "run_end", state: "done" }], false, SNOW);
+  assert.deepStrictEqual(Array.from(ended.lanes, (l) => l.end), [ms("08"), ms("09"), ms("10")]);
+  assert.strictEqual(ended.t1, ms("12"));
+  // Too many lanes: the newest are drawn, the rest are counted.
+  const many = DF.sequence(Array.from({ length: DF.SEQ_MAX + 7 }, (_, i) => ({
+    at: new Date(Date.parse(SAT("00")) + i * 1000).toISOString(),
+    event: "ask", role: "B", key: "k" + i })), false, SNOW);
+  assert.deepStrictEqual([many.lanes.length, many.hidden, many.total],
+    [DF.SEQ_MAX, 7, DF.SEQ_MAX + 7]);
+}
+
+// The sequence view: a row a lane, the open one drawn out to the axis's end.
+{
+  const svq = DF.makeSequenceView(doc);
+  svq.draw(SQ);
+  assert.strictEqual(svq.svg.getAttribute("width"), "960");
+  assert.strictEqual(svq.rows.size, 3);
+  const a = svq.rows.get("u:a");
+  assert.match(a.bar.getAttribute("class"), /dfl-seq-bar st-ok/);
+  assert.ok(!/live/.test(a.bar.getAttribute("class")), "an ended unit is not live");
+  assert.ok(Number(a.bar.getAttribute("x")) >= 210, "bars start right of the label column");
+  assert.ok(Number(a.bar.getAttribute("width")) > 0);
+  assert.strictEqual(a.asks.length, 1);
+  assert.strictEqual(a.asks[0].getAttribute("class"), "dfl-seq-ask");
+  assert.strictEqual(svq.rows.get("u:b").asks[0].getAttribute("class"), "dfl-seq-ask fail");
+  // The marks sit under the unit's bar.
+  assert.ok(Number(a.asks[0].getAttribute("y")) > Number(a.bar.getAttribute("y")));
+  // The axis labels clock time.
+  const axis = svq.svg.children[0];
+  assert.ok(axis.children.some((n) => n.tag === "text" && /^\d\d:\d\d:\d\d$/.test(n.textContent)));
+  // A unit still open runs to now, and is marked live; a lane the model no
+  // longer has is dropped from the drawing.
+  svq.draw(DF.sequence(SLOG.slice(0, 3), true, SNOW));
+  assert.match(svq.rows.get("u:a").bar.getAttribute("class"), /st-run live/);
+  assert.strictEqual(svq.rows.size, 2);
+}
+
+// Both views export: a standalone SVG (rules inline) and its PNG size.
+{
+  const tv = DF.makeView(doc, new El("div"));
+  tv.draw(DF.model(LOG, false));
+  const svq = DF.makeSequenceView(doc);
+  svq.draw(SQ);
+  for (const [name, v, mark] of [
+    ["tree", tv, 'data-id="ask:formalize:1"'],
+    ["sequence", svq, 'data-id="u:a"'],
+  ]) {
+    const src = DF.svgSource(v.svg);
+    assert.match(src, /^<svg/);
+    assert.match(src, /<style>/, `${name}: the rules travel with the file`);
+    assert.match(src, /class="dfl-paper"/);
+    assert.ok(src.includes(mark), `${name}: the drawing is in the file`);
+    const size = DF.pngSize(v.svg, 2);
+    assert.strictEqual(size.width, Number(v.svg.getAttribute("width")) * 2);
+    assert.strictEqual(size.height, Number(v.svg.getAttribute("height")) * 2);
+  }
+  // The walker escapes text, so a report's prose cannot break the file.
+  assert.strictEqual(DF.serializeNode({ tag: "text", attrs: {}, _text: "<a & b>" }),
+    "<text>&lt;a &amp; b&gt;</text>");
+  console.log("durableflow_check: export ok");
+}
+
+// The pane's switch: the same two elements, one shown at a time.
+(async () => {
+  const host = new El("div");
+  const api = async () => ({ ok: true, json: async () => ({
+    sim: "seq-run", live: true, total: SLOG.length, since: 0, events: SLOG }) });
+  const mnt = DF.mount(host, "seq-run", {
+    doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 0 });
+  await new Promise((r) => setTimeout(r, 0));
+  const tools = host.children[0].children[2];
+  const scroller = host.children[2];
+  assert.deepStrictEqual(Array.from(tools.children, (b) => b.textContent),
+    ["트리", "시퀀스", "SVG", "PNG"]);
+  assert.strictEqual(tools.children[0].getAttribute("aria-pressed"), "true");
+  assert.strictEqual(scroller.children.length, 1);
+  const treeSvg = mnt.view.svg;
+  assert.strictEqual(scroller.children[0], treeSvg, "the tree is on screen first");
+  // Switching shows the sequence view; the tree keeps its own element.
+  tools.children[1].click();
+  assert.strictEqual(mnt.mode, "sequence");
+  assert.strictEqual(tools.children[1].getAttribute("aria-pressed"), "true");
+  assert.strictEqual(scroller.children.length, 1);
+  assert.strictEqual(scroller.children[0], mnt.sequence.svg);
+  assert.match(scroller.className, /dfl-seq/);
+  assert.strictEqual(mnt.view.svg, treeSvg, "the tree view is not rebuilt");
+  assert.strictEqual(mnt.sequence.rows.size, 3, "the sequence drew the poll's lanes");
+  // Back: the same tree element returns.
+  tools.children[0].click();
+  assert.strictEqual(mnt.mode, "tree");
+  assert.strictEqual(scroller.children[0], treeSvg);
+  assert.ok(!/dfl-seq/.test(scroller.className));
+  mnt.unmount();
+  console.log("durableflow_check: sequence ok");
 })().catch((e) => { console.error(e); process.exit(1); });

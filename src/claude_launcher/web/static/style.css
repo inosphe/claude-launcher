@@ -4372,6 +4372,36 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .dfl-node, .dfl-node rect, .dfl-node.st-live rect { animation: none; transition: none; }
 }
 
+/* The pane's own controls: the view switch and the two exports
+   (claunch-qmwog). They sit after the meta line in the head, so the head's
+   existing title and counts keep their places. */
+.dfl-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+.dfl-tools .wf-btn { padding: 2px 8px; font-size: 12px; }
+.dfl-tools [aria-pressed="true"] { background: #172947; color: #a5d6ff; outline: 1px solid #388bfd; }
+
+/* The sequence view: the same log on a time axis. A lane is a unit's
+   interval -- or a question asked outside any unit -- and the thin marks
+   inside it are the questions it asked, so an open one is visible as an
+   interval still running. Colours are the tree's, so a unit reads the same
+   in both views. */
+.dfl-scroll.dfl-seq { max-height: 70vh; overflow: auto; }
+.dfl-seq-lane { cursor: default; }
+.dfl-seq-label { fill: #d8dbe0; font-size: 11px; }
+.dfl-seq-rule { stroke: #21262d; stroke-width: 1; }
+.dfl-seq-tick { stroke: #30363d; stroke-width: 1; }
+.dfl-seq-axis { fill: #7d8590; font-size: 10px; }
+.dfl-seq-bar { fill: #1b1e24; stroke: #30363d; }
+.dfl-seq-bar.st-run { fill: #12304f; stroke: #58a6ff; }
+.dfl-seq-bar.st-ok { fill: #12301f; stroke: #2f6f43; }
+.dfl-seq-bar.st-fail { fill: #2a1617; stroke: #b0413e; }
+.dfl-seq-bar.st-warn { fill: #2b2413; stroke: #d29922; }
+.dfl-seq-bar.st-skip { opacity: 0.55; }
+.dfl-seq-bar.st-plan { fill: none; stroke: #4d5566; stroke-dasharray: 4 4; }
+.dfl-seq-bar.live { stroke-dasharray: 6 4; }
+.dfl-seq-ask { fill: #58a6ff; opacity: 0.75; }
+.dfl-seq-ask.warn { fill: #d29922; }
+.dfl-seq-ask.fail { fill: #b0413e; }
+
 /* The same steps on a clock — the run's journal in the time domain, under the
    graph it belongs to. One lane per step, one bar per visit; the bar's fill
    is time the run was WORKING, and the bands laid over it are the doors it
