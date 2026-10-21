@@ -214,6 +214,11 @@ def _claude_alias_vars() -> Dict[str, str]:
 #: :func:`claude_launcher.runner.model_ids`.
 CLAUDE_ALIAS_VARS: Dict[str, str] = _claude_alias_vars()
 
+#: Every key a ``models:`` map may carry: the role names plus the claude alias
+#: words. The routing shim resolves both vocabularies against this table when
+#: a provider runs in dynamic mode (see :mod:`claude_launcher.routing`).
+MODEL_KEYS: Tuple[str, ...] = MODEL_ROLES + tuple(CLAUDE_ALIAS_VARS)
+
 #: Empty pins the runner enforces itself; a legacy ``env`` carried them by
 #: convention and the migration drops them.
 CLAUDE_REDUNDANT_PINS: Dict[str, str] = {
@@ -438,7 +443,7 @@ def from_entry(entry: dict, what: str, *, profile: bool = False) -> ProviderSpec
         endpoints=_str_map(entry.get("endpoints"), f"{what}.endpoints", PROTOCOLS)
         if "endpoints" in allowed
         else {},
-        models=_str_map(entry.get("models"), f"{what}.models", MODEL_ROLES),
+        models=_str_map(entry.get("models"), f"{what}.models", MODEL_KEYS),
         context_window=_int_or_none(
             entry.get("context_window"), f"{what}.context_window"
         ),

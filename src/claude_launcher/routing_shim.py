@@ -26,6 +26,17 @@ replica holding its prompt cache. The read is live — toggling the flag
 in both directions. A shim started with the legacy ``--session-affinity``
 flag and no ``--provider`` keeps that static choice for its whole life.
 
+``--route <name>`` starts the shim for a *dynamic* provider. The shim then
+re-reads ``providers.<name>`` on every request — the anthropic endpoint to
+forward to, the api key to authenticate with (the session's profile
+``set-token`` secret is the fallback below the declared ``api_key``), and
+the ``models:`` table that resolves Claude's wire vocabulary (role words
+``small``/``large``..., alias words ``haiku``/``opus``..., and Claude's own
+``claude-*`` ids) to the backend's model ids. Editing the config — a model
+in the table, the endpoint, or the profile's provider selection via
+``claunch set-provider`` — reaches running sessions without a relaunch.
+Values the table has no answer for pass through unchanged.
+
 Exit codes: ``3`` the port was taken (the caller re-probes and reuses whoever
 won it), ``2`` bad arguments.
 """
@@ -140,17 +151,65 @@ def _metered_path(path: str) -> bool:
     return path.endswith("/messages") or path.endswith("/chat/completions")
 
 
+def _inject_auth(headers: CIMultiDict, key: str) -> None:
+    """Swap the caller's credential for the route's current one.
+
+    The header the harness used is kept (its scheme included) so a backend
+    that expects ``x-api-key`` keeps getting ``x-api-key``; only when no
+    auth header arrived at all is a bearer added.
+    """
+    auth = headers.get("Authorization")
+    if auth:
+        scheme = auth.split(" ", 1)[0] if " " in auth else "Bearer"
+        headers["Authorization"] = f"{scheme} {key}"
+    elif headers.get("x-api-key") is not None:
+        headers["x-api-key"] = key
+    else:
+        headers["Authorization"] = f"Bearer {key}"
+
+
+def _resolve_route(cfg: dict, session_name):
+    """``(upstream, auth_key, models_table)`` for a dynamic route, live.
+
+    Raises :class:`routing.RoutingError` when the config has no usable
+    answer — the caller turns that into a 502.
+    """
+    route = cfg["route"]
+    upstream = routing.route_upstream(route)
+    table = routing.route_models(route)
+    auth = routing.route_auth(route, session_name)
+    return upstream, auth, table
+
+
 async def _proxy(request: web.Request) -> web.StreamResponse:
     cfg = request.app["cfg"]
     body = await request.read()
-    if request.method in ("POST", "PUT", "PATCH") and _is_json(
-        request.headers.get("content-type", "")
-    ):
-        body = routing.merge_body(body, cfg["spec"])
     headers = _forwarded(request.headers)
     # The session name rides in on a private header the daemon added for us;
     # it is ours to read and must not reach the upstream.
     session_name = headers.popall(metering.SESSION_HEADER, [None])[-1]
+    upstream = cfg["upstream"]
+    table: dict = {}
+    if cfg.get("route"):
+        try:
+            upstream, auth, table = _resolve_route(cfg, session_name)
+        except routing.RoutingError as exc:
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": f"claunch routing shim: {exc}",
+                    },
+                },
+                status=502,
+            )
+        if auth:
+            _inject_auth(headers, auth)
+    if request.method in ("POST", "PUT", "PATCH") and _is_json(
+        request.headers.get("content-type", "")
+    ):
+        body = routing.merge_body_model(body, cfg["spec"], table)
     if session_name and _affinity_on(request.app):
         # Sticky routing for prompt-cached backends: the session keeps one
         # affinity key for its whole life, so the replica that holds its cache
@@ -169,7 +228,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     if meter is not None:
         live.begin(meter)
     try:
-        return await _forward(request, cfg, body, headers, meter)
+        return await _forward(request, cfg, upstream, body, headers, meter)
     finally:
         # Every way out -- an answer, an upstream error, a client that hung up
         # and cancelled this handler -- ends the call in the live view, or the
@@ -178,12 +237,12 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             live.end(meter)
 
 
-async def _forward(request, cfg, body, headers, meter) -> web.StreamResponse:
+async def _forward(request, cfg, upstream, body, headers, meter) -> web.StreamResponse:
     session: aiohttp.ClientSession = request.app["session"]
     try:
-        upstream = await session.request(
+        upstream_resp = await session.request(
             request.method,
-            _target(cfg["upstream"], request),
+            _target(upstream, request),
             headers=headers,
             data=body,
             allow_redirects=False,
@@ -191,45 +250,45 @@ async def _forward(request, cfg, body, headers, meter) -> web.StreamResponse:
     except aiohttp.ClientError as exc:
         if meter is not None:
             meter.status = 502
-            _record(request.app, meter)
+            _record(request.app, meter, upstream)
         return web.json_response(
             {
                 "type": "error",
                 "error": {
                     "type": "api_error",
                     "message": f"claunch routing shim could not reach "
-                    f"{cfg['upstream']}: {exc}",
+                    f"{upstream}: {exc}",
                 },
             },
             status=502,
         )
-    async with upstream:
+    async with upstream_resp:
         if meter is not None:
-            meter.headers(upstream.status, upstream.headers)
+            meter.headers(upstream_resp.status, upstream_resp.headers)
         # Streaming, not buffering: an SSE completion must reach the client
         # token by token, exactly as it arrives.
         response = web.StreamResponse(
-            status=upstream.status, headers=_forwarded(upstream.headers)
+            status=upstream_resp.status, headers=_forwarded(upstream_resp.headers)
         )
         await response.prepare(request)
         try:
-            async for chunk in upstream.content.iter_any():
+            async for chunk in upstream_resp.content.iter_any():
                 if meter is not None:
                     meter.chunk(chunk)
                 await response.write(chunk)
         except (aiohttp.ClientError, ConnectionResetError):
             pass  # either end hung up mid-stream; nothing left to say
         if meter is not None:
-            _record(request.app, meter)
+            _record(request.app, meter, upstream)
         await response.write_eof()
         return response
 
 
-def _record(app: web.Application, meter: "metering.Meter") -> None:
+def _record(app: web.Application, meter: "metering.Meter", upstream: str) -> None:
     cfg = app["cfg"]
     try:
         record = meter.finish()
-        metering.append(cfg["fingerprint"], record, upstream=cfg["upstream"])
+        metering.append(cfg["fingerprint"], record, upstream=upstream)
         app["live"].end(meter, record)
     except Exception as exc:  # noqa: BLE001 - a record must never break a request
         print(f"metering record failed: {exc}", file=sys.stderr)
@@ -266,6 +325,7 @@ async def _health(request: web.Request) -> web.Response:
             "fingerprint": cfg["fingerprint"],
             "upstream": cfg["upstream"],
             "spec": cfg["spec"],
+            "route": cfg.get("route"),
             "pid": os.getpid(),
         }
     )
@@ -308,10 +368,12 @@ async def _client_session(app: web.Application):
 
 def build_app(upstream: str, spec: dict, fingerprint: str,
               provider: "str | None" = None,
-              session_affinity: bool = False) -> web.Application:
+              session_affinity: bool = False,
+              route: "str | None" = None) -> web.Application:
     app = web.Application(client_max_size=1024 * 1024 * 256)
     app["cfg"] = {"upstream": upstream, "spec": spec, "fingerprint": fingerprint,
-                  "provider": provider, "session_affinity": session_affinity}
+                  "provider": provider, "session_affinity": session_affinity,
+                  "route": route}
     app["live"] = metering.LiveBoard(fingerprint)
     app.cleanup_ctx.append(_client_session)
     app.cleanup_ctx.append(_live_flusher)
@@ -357,6 +419,10 @@ def main(argv=None) -> int:
     parser.add_argument("--provider", default=None,
                         help="config name of the provider this shim fronts; "
                              "the shim reads its session_affinity flag live")
+    parser.add_argument("--route", default=None,
+                        help="config name of a dynamic provider; the shim "
+                             "resolves upstream, credentials and the model "
+                             "alias table from the live config per request")
     parser.add_argument("--session-affinity", action="store_true",
                         help="legacy static switch for shims started without "
                              "--provider (kept for running old shims)")
@@ -370,7 +436,8 @@ def main(argv=None) -> int:
         print("--spec must be a JSON object ({} for metering only)", file=sys.stderr)
         return 2
     app = build_app(args.upstream, spec, args.fingerprint,
-                    provider=args.provider, session_affinity=args.session_affinity)
+                    provider=args.provider, session_affinity=args.session_affinity,
+                    route=args.route)
     return asyncio.run(serve(app, args.port))
 
 

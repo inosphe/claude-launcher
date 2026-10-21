@@ -88,8 +88,8 @@ def test_spec_reads_schema_fields_and_role_fallbacks(home):
 
 
 def test_spec_rejects_unknown_role_channel_and_bad_numbers(home):
-    _provider("bad-role", {"models": {"sonnet": "x"}})
-    with pytest.raises(providers.ProviderError, match="models.sonnet"):
+    _provider("bad-role", {"models": {"tiny": "x"}})
+    with pytest.raises(providers.ProviderError, match="models.tiny"):
         providers.spec("bad-role")
     _provider("bad-channel", {"harness_options": {"claude": {"config": {}}}})
     with pytest.raises(providers.ProviderError, match="claude.config"):

@@ -271,14 +271,15 @@ def apply_env(
         env[ENV_STREAM_USAGE] = "1"
 
 
-def fronted_base_url(base_url: str, provider_name: str) -> str:
+def fronted_base_url(base_url: str, provider_name: str,
+                     profile: "Optional[str]" = None) -> str:
     """``base_url`` swung to the shim when the provider goes through one.
 
     The shim's URL comes back without a trailing slash: Pi hands it to the
     OpenAI client as ``baseURL``, which appends ``/chat/completions`` itself,
     and the shim forwards that path onto the backend's declared API base.
     """
-    fronted = routing.front(base_url, provider_name)
+    fronted = routing.front(base_url, provider_name, profile=profile)
     return fronted.rstrip("/") if fronted != base_url else base_url
 
 
