@@ -701,11 +701,17 @@ html[data-theme="light"] #term-tps-overlay {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 4em;
 }
-/* Long names lose their tail rather than the row losing its shape — the full
-   name is one hover away on the label's own title. */
+/* The name is the one label on this rail that is never cut. Everything else
+   on the row can give way — pills shrink to their floors, the meta line
+   ellipses — but a clipped name reads as a DIFFERENT session, which is the
+   one loss a row of near-identical names cannot afford. It wraps instead,
+   with overflow-wrap so an unbroken worktree-style name still breaks, and
+   takes the extra lines it needs; the pills beside it keep their floors and
+   their own ellipses. The label's hover no longer has to carry the name —
+   it still does, as the first line, because the context note joins it. */
 #session-list .rail-name {
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  flex: 0 1 auto; min-width: 2.5em;
+  white-space: normal; overflow: visible; overflow-wrap: anywhere;
+  flex: 0 1 auto; min-width: 0;
 }
 /* The rooms a session is in, beside the name that is in them.
    Same pill as .mesh-role so role and membership read as one set, but
@@ -1535,7 +1541,11 @@ html[data-theme="light"] #term-tps-overlay {
     order: -1; flex: 1 1 calc(100% - 15px);
   }
   #session-list li.child > .rail-head { flex-basis: calc(100% - 29px); }
-  #session-list .rail-name { flex-shrink: 0; max-width: 50%; }
+  /* The name never caps at half the row any more — it wraps whole (see
+     .rail-name), and capping it here would clip the second line. The meta
+     beside it keeps its basis-0 ellipsis further down this block, so the
+     buttons and the ▸ still land on the line. */
+  #session-list .rail-name { flex-shrink: 1; max-width: none; }
   /* The meta line shares its line with the row's buttons and the ▸, and a
      line is broken on base sizes before anything shrinks: based on its text,
      the meta pushed the ▸ onto a line of its own once a child row's indent

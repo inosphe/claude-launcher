@@ -5229,8 +5229,9 @@ async function refreshSessions(options) {
     const label = document.createElement("span");
     label.className = "rail-name";
     label.textContent = s.name;
-    // A name too long for the rail is cut with an ellipsis rather than
-    // wrapping the row; this is where the rest of it went.
+    // The name is never cut on this rail — it wraps whole (style.css,
+    // .rail-name) — so the hover only has to carry the context note that
+    // joins it, not the rest of the name.
     label.title = s.name;
     // The session's role, next to the name it is part of — same tag the mesh
     // roster draws, so "worker" reads as the same fact in both places. A
