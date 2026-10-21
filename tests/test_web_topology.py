@@ -439,6 +439,7 @@ CHECKS = [
         "sesslayout_check.js",
         "sessview_check.js",
         "sessionresources_check.js",
+        "railtalk_check.js",
         "rolepanel_check.js",
         "sessionmodal_check.js",
         "newformdraft_check.js",
