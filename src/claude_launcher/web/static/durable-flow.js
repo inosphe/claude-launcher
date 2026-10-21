@@ -1414,6 +1414,9 @@
     const api = opts.api || globalThis.api;
     const interval = opts.interval ?? POLL_MS;
     const timers = opts.timers || globalThis;
+    // Read before the head is built: the key must know, from its first frame,
+    // whether the view under it is the one it explains.
+    let mode = savedMode();
     while (host.firstChild) host.removeChild(host.firstChild);
     const head = doc.createElement("div");
     head.className = "wf-head dfl-headline";
@@ -1468,6 +1471,9 @@
     hint.className = "dfl-legend-item dfl-legend-hint";
     hint.textContent = "겹친 막대 = 동시 진행";
     legend.appendChild(hint);
+    // Hidden from the first frame, not from the first poll: in the tree the
+    // key explains nothing, and waiting for refresh() shows it for a moment.
+    legend.hidden = mode !== "sequence";
     head.appendChild(legend);
 
     const note = doc.createElement("p");
@@ -1478,7 +1484,7 @@
     host.appendChild(head); host.appendChild(note); host.appendChild(scroller);
 
     let view = null, seqView = null, events = [], gone = false, busy = false, timer = null;
-    let lastTree = null, lastSeq = null, mode = savedMode();
+    let lastTree = null, lastSeq = null;
     // The runs this one continued from, and their layer (built once: the
     // first poll carries them, later polls carry the tail alone).
     let ancestors = [], ancLayer = null, ancFor = null;
