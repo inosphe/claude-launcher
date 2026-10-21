@@ -794,6 +794,11 @@ def build_app(
     # of every transcript (daemon/statsboard.py). One reader per daemon,
     # so each poll parses only the lines appended since the last one.
     app["stats_ledger"] = statsboard.Ledger()
+    # Sessions on an OAuth route write no ledger line (Anthropic's
+    # subscription, a Codex login). Their window figures come from their own
+    # transcript, read through the same call the detail panel makes and kept
+    # for a short while so a poll pays only for the append since the last one.
+    app["stats_transcripts"] = statsboard.Transcripts()
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -11086,7 +11091,7 @@ async def h_session_stats(request: web.Request) -> web.Response:
 
 
 def _stats_overview(manager: "SessionManager", window: str,
-                    include_ended: bool, ledger) -> dict:
+                    include_ended: bool, ledger, transcripts=None) -> dict:
     """The overview payload, built off the event loop.
 
     ``Session.info()`` would carry a definition, a briefing and an environment
@@ -11094,11 +11099,13 @@ def _stats_overview(manager: "SessionManager", window: str,
     keeps only what a row draws. Both this and the ledger read run in a
     thread: the first ledger read parses the whole metering directory, and a
     parse on the loop is the cost claunch-3r94d took the transcript reading off
-    the loop for.
+    the loop for. The transcript reading for OAuth sessions runs in this same
+    thread for that reason.
     """
     metas = [statsboard.session_meta(s) for s in manager.list()]
     return statsboard.overview(window=window, include_ended=include_ended,
-                               sessions=metas, ledger=ledger)
+                               sessions=metas, ledger=ledger,
+                               transcripts=transcripts)
 
 
 async def h_stats_overview(request: web.Request) -> web.Response:
@@ -11109,8 +11116,10 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     The figures come from the metering ledger, one line per forwarded API
     request -- not from reading every transcript, which is what the
     single-session route does and what a fleet-wide table cannot afford. A
-    session on an OAuth route writes no ledger line and is reported with
-    ``source: "none"`` and no figure rather than a zero; see
+    session on an OAuth route writes no ledger line; its window figures are
+    read from its own transcript (the call the detail panel makes) and marked
+    ``source: "transcript"``, or reported as ``source: "none"`` with no figure
+    rather than a zero when there is no transcript to read. See
     :mod:`statsboard` for what each field means."""
     manager: SessionManager = request.app["manager"]
     window = request.query.get("window", "today")
@@ -11121,9 +11130,12 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     ledger = request.app.get("stats_ledger")
     if ledger is None:
         ledger = statsboard.Ledger()
+    transcripts = request.app.get("stats_transcripts")
+    if transcripts is None:
+        transcripts = statsboard.Transcripts()
     try:
         payload = await asyncio.to_thread(
-            _stats_overview, manager, window, include_ended, ledger)
+            _stats_overview, manager, window, include_ended, ledger, transcripts)
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats overview: %s", exc, exc_info=True)
         return json_error(500, f"reading the usage ledger failed: {exc}")

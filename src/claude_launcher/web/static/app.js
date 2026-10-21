@@ -29582,6 +29582,14 @@ function statsOverviewTable(d) {
         (changed.length ? "provider" : "model") + " inside this window";
       name.appendChild(badge);
     }
+    if (r.source === "transcript") {
+      const badge = el("span", "stats-badge",
+        r.harness ? `${r.harness} · transcript` : "transcript");
+      badge.title = "this session never reached the routing shim, so the " +
+        "figure is read from its own transcript (the same reading its " +
+        "detail panel shows)";
+      name.appendChild(badge);
+    }
     row.appendChild(name);
 
     const provider = el("td", "stats-provider-cell");
@@ -29607,8 +29615,8 @@ function statsOverviewTable(d) {
       tokens.append(bar, el("span", "stats-rowvalue", usageShort(value)));
     } else if (r.source === "none") {
       const dash = el("span", "stats-unmetered", "—");
-      dash.title = "no metering record for this session (an OAuth route " +
-        "writes none); its detail panel reads the transcript instead";
+      dash.title = "no figure for this session: the ledger has no record " +
+        "(an OAuth route writes none) and its transcript could not be read";
       tokens.appendChild(dash);
     } else {
       tokens.appendChild(el("span", "stats-rowvalue", "0"));
@@ -29859,8 +29867,9 @@ const STATS_WINDOW_METHOD = [
     "the routing shim forwarded. total = fresh input + cache read + cache " +
     "write + output; the cache share is the cache-read part of that total.",
   "not measured here: an OAuth route (Anthropic's subscription, a Codex " +
-    "login) writes no ledger line. Those rows show — rather than 0, and their " +
-    "detail panel reads the transcript.",
+    "login) writes no ledger line. Those rows are read from the session's own " +
+    "transcript and marked with its harness; a session whose transcript " +
+    "cannot be read shows — rather than 0.",
   "frames: today is the local day, 7 days and 30 days end at local midnight " +
     "and include today.",
   "provider changes: read from the upstream that answered each request. A " +
