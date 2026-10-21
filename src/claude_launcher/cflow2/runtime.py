@@ -5441,7 +5441,7 @@ def describe(r: Run) -> Dict[str, Any]:
         if aw == AW_TASK:
             tasks.append({
                 "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
-                "title": node.get("title"), "prompt": render(node.get("prompt"), env),
+                "title": node.get("title"), "prompt": _task_prompt(r, iid, node, env),
                 "done_when": node.get("done_when"), "verify": node.get("verify"),
                 "returns": returns_of(node), "effects": node.get("effects") or [],
                 "rules": [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")}
@@ -5797,7 +5797,9 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
     """Resolve a brief ask (docs 2.10) when it opens: the brief, its question
     type, the fixed choices and a ``from`` given as a param. Returns the
     record fields, or None after finishing the task ``fail`` (the reasons are
-    in the value and the journal's ``ask_brief_invalid``)."""
+    in the value and the journal's ``ask_brief_invalid``) -- or after sending
+    the frame task back once when the brief's options do not match the fixed
+    choices (:func:`_ask_reframe`)."""
     env = r.env(iid)
     params = env.get("params") or {}
     errors: List[str] = []
@@ -5824,6 +5826,7 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
         norm, errs = q_mod.validate(brief, decl)
         errors.extend(errs)
     choices = param(spec.get("choices"))
+    mismatch: Optional[str] = None
     if choices is not None and not errors:
         if not isinstance(choices, list) or not all(isinstance(c, str) for c in choices):
             errors.append(f"choices must be a list of option names, got {choices!r}")
@@ -5831,8 +5834,9 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
             got = sorted(n.lower() for n in q_mod.option_names(norm, decl))
             want = sorted(c.lower() for c in choices)
             if got != want:
-                errors.append(f"the brief's options ({', '.join(q_mod.option_names(norm, decl))}) "
-                              f"must be exactly the fixed choices ({', '.join(choices)})")
+                mismatch = (f"the brief's options ({', '.join(q_mod.option_names(norm, decl))}) "
+                            f"must be exactly the fixed choices ({', '.join(choices)})")
+                errors.append(mismatch)
             else:
                 # the definition branches on these names (cases): the answer
                 # must come back spelled as the definition wrote them
@@ -5852,6 +5856,12 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
         else:
             cands = []
     if errors:
+        # A brief whose options do not match the fixed choices is a framing
+        # slip the frame task can repair: it is asked again once, with the
+        # engine's own error in its prompt (claunch-q4cqy.3). Every other
+        # error finishes the task as before.
+        if mismatch is not None and _ask_reframe(r, iid, node, mismatch):
+            return None
         r.emit("ask_brief_invalid", node=node.id, instance=iid, format=fmt, errors=errors)
         _complete(r, iid, ir.OUTCOME_FAIL,
                   {"reason": "the question brief is not usable: " + "; ".join(errors),
@@ -5876,6 +5886,80 @@ def _respell_choices(brief: Dict[str, Any], decl: Dict[str, Any],
     if rec and isinstance(out.get(rec), str) and out[rec].casefold() in spell:
         out[rec] = spell[out[rec].casefold()]
     return out
+
+
+#: How many times one ask may send its frame task back before the mismatch
+#: finishes the run (claunch-q4cqy.3). The engine's own state, not a workflow
+#: key: the fix must not change what a definition may declare.
+ASK_REFRAME_LIMIT = 1
+
+
+def _ask_reframe(r: Run, iid: str, node: ir.Node, error: str) -> bool:
+    """Re-run the task that framed this ask, once, with ``error`` in its
+    prompt. Returns False (the caller finishes the ask task ``fail``) when
+    there is no frame task to go back to or the budget is spent.
+
+    The ask task itself is usually a plain task in a ``waterfall``
+    (``[ask-frame, ask-pose]`` in ask-common's ask-user): its parent is that
+    seq, the child just before it is the task whose report carried the brief,
+    and the seq's ``idx`` says which child is running. Rewinding that index
+    by one makes the seq enter the frame task again; when it reports, the seq
+    advances back to this ask with the new brief. The count is kept on the
+    seq instance, so it is per visit -- a loop that asks again later starts
+    with a fresh budget -- and the ask instance that never opened is dropped.
+    """
+    inst = r.inst.get(iid)
+    if inst is None:
+        return False
+    parent = inst.get("parent")
+    if not parent or parent not in r.inst:
+        return False
+    pinst = r.inst[parent]
+    pnode = r.chart.node(pinst["node"])
+    if pnode.type != ir.T_SEQ:
+        return False
+    frame = pinst["frame"]
+    idx = int(frame.get("idx") or 0)
+    children = pnode.get("children") or []
+    if idx <= 0 or idx > len(children):
+        return False
+    prev_node = r.chart.node(children[idx - 1])
+    if prev_node.type != ir.T_TASK:
+        return False
+    used = int((frame.get("ask_reframe") or {}).get(str(idx)) or 0)
+    if used >= ASK_REFRAME_LIMIT:
+        return False
+    prev_value = ((r.state.get("result") or {}).get(node_key(prev_node)) or {}).get("value")
+    _forget(r, iid)
+    frame["idx"] = idx - 1
+    frame.setdefault("ask_reframe", {})[str(idx)] = used + 1
+    r.emit("ask_reframe", node=node.id, instance=iid, reframe=prev_node.id,
+           attempt=used + 1, limit=ASK_REFRAME_LIMIT, error=error)
+    new_iid = _enter_child(r, parent, children[idx - 1], "seq",
+                           {"prev": prev_value if prev_value is not None else {}})
+    if new_iid and new_iid in r.inst:
+        r.inst[new_iid]["frame"]["ask_retry"] = {"error": error, "attempt": used + 1,
+                                                 "limit": ASK_REFRAME_LIMIT}
+    return True
+
+
+def _task_prompt(r: Run, iid: str, node: ir.Node, env: Dict[str, Any]) -> str:
+    """The task's rendered prompt, plus the engine's note when this visit is
+    a re-ask (:func:`_ask_reframe`)."""
+    text = render(node.get("prompt"), env)
+    retry = (r.inst.get(iid) or {}).get("frame", {}).get("ask_retry")
+    return text + "\n\n" + _retry_note(retry) if retry else text
+
+
+def _retry_note(retry: Dict[str, Any]) -> str:
+    return (
+        f"── 엔진이 앞 보고를 되돌렸다 (재질문 {retry.get('attempt')}/{retry.get('limit')}) ──\n"
+        "앞 보고의 brief가 이 ask의 고정 선택지와 맞지 않았다:\n\n"
+        f"  {retry.get('error')}\n\n"
+        "options의 name을 위 고정 목록과 정확히 같게 맞춰 다시 보고한다. 빠진 이름은 "
+        "options에 더하고, 고정 목록에 없는 이름은 지운다. 이번에도 맞지 않으면 이 런은 "
+        "실패로 끝난다.\n"
+    )
 
 
 def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
