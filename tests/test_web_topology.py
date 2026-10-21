@@ -517,6 +517,7 @@ CHECKS = [
         "tps_check.js",
         "usage_check.js",
         "railctx_check.js",
+        "ctxpoll_check.js",
         "railmodel_check.js",
         "railcwd_check.js",
         "wfscroll_check.js",
