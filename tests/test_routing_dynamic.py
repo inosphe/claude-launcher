@@ -238,12 +238,22 @@ def test_child_env_of_a_static_provider_keeps_launch_time_model_ids(home):
 
 import urllib.error  # noqa: E402
 
-from tests.test_routing import (  # noqa: E402
-    _Upstream,
-    _header,
-    _post,
-    _post_with_headers,
+# The helpers live in the sibling routing suite. Import them by file
+# location, not as ``tests.test_routing``: the gate runs the ``pytest``
+# console script, which does not put the rootdir on sys.path, so the
+# package-style import only works under ``python -m pytest``.
+import importlib.util  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location(
+    "_routing_test_helpers", _Path(__file__).with_name("test_routing.py")
 )
+_helpers = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_helpers)
+_Upstream = _helpers._Upstream
+_header = _helpers._header
+_post = _helpers._post
+_post_with_headers = _helpers._post_with_headers
 
 
 @pytest.fixture
