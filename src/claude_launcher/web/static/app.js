@@ -7583,13 +7583,47 @@ function tpsLatencyText(t) {
   return "";
 }
 
-/* The one-line glance: "38.1 tok/s · ttft 0.7s". A last call that was not
-   counted (an error answer, a compressed body) shows its status instead of
-   a number, so the row still says that the session called out. An idle
+/* The window's mean time to first token, beside the last call's own: the
+   current number alone cannot say whether 715ms is this session's normal or
+   a slow moment. One call is not an average of itself (ttft_ms_n), and a
+   window of whole-body calls has no first token to average -- both read as
+   nothing rather than a number with no denominator. */
+function tpsAvgLatencyText(t) {
+  /* Only beside a first-token latency: the average is the same measurement
+     over the window, and pairing it with a first-byte wait would put two
+     different clocks in one glance. */
+  if (!Number.isFinite(t.ttft_ms)) return "";
+  if (!Number.isFinite(t.ttft_ms_mean) || !(t.ttft_ms_n > 1)) return "";
+  return `avg ${ttftFmt(t.ttft_ms_mean)}`;
+}
+
+/* The cache's share of the last call's prompt: "97%" in the rail and on the
+   card chip, "cache 97%" where the line has room for a word. Empty -- drawn
+   as nothing -- for a record that cannot say (an old one without a path, or
+   one whose usage carried no input counts), because 0% is a measurement and
+   "cannot measure this" is not. A cache the call did not touch reads "0%". */
+function tpsCacheText(t, compact) {
+  const r = t && t.cache_hit_ratio;
+  if (!Number.isFinite(r)) return "";
+  const pct = Math.round(Math.min(1, Math.max(0, r)) * 100);
+  return compact ? `${pct}%` : `cache ${pct}%`;
+}
+
+/* The one-line glance: "38.1 tok/s · ttft 0.7s · 97%". A last call that was
+   not counted (an error answer, a compressed body) shows its status instead
+   of a number, so the row still says that the session called out. An idle
    session shows "idle": it has been quiet past the measuring window, so
    there is no current rate to give and the last one would be a stale
-   number wearing the same font as a live one. */
-function tpsText(t) {
+   number wearing the same font as a live one.
+
+   The cache share rides with the rate it belongs to -- same call, one line.
+   `compact` shortens it to the bare percentage for the places that have no
+   room for a word (the 260px rail, the card chip); the tooltip spells out
+   both counts. The live branch carries none: the tokens a call in flight
+   read from the cache arrive with its usage at the end, so the only share
+   known then is the previous call's, and on the line that says "≈42 tok/s"
+   it would read as this call's. */
+function tpsText(t, compact) {
   if (!t) return "";
   const live = typeof tpsLiveText === "function" ? tpsLiveText(t.live) : "";
   if (live) {
@@ -7601,7 +7635,10 @@ function tpsText(t) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
   }
   const lat = tpsLatencyText(t);
-  return `${tpsFmt(t.tps)} tok/s` + (lat ? ` · ${lat}` : "");
+  const avg = typeof tpsAvgLatencyText === "function" ? tpsAvgLatencyText(t) : "";
+  const cache = typeof tpsCacheText === "function" ? tpsCacheText(t, compact) : "";
+  return `${tpsFmt(t.tps)} tok/s` + (lat ? ` · ${lat}` : "") + (avg ? ` · ${avg}` : "") +
+    (cache ? ` · ${cache}` : "");
 }
 
 /* The live glance: "≈42 tok/s" while content arrives, "waiting 3.2s" while
@@ -7689,10 +7726,32 @@ function tpsTooltip(t) {
     lines.push(`${tpsFmt(t.tps)} tokens/s over the whole call` +
                (Number.isFinite(t.output_tokens) ? `, ${t.output_tokens} out` : "") +
                (Number.isFinite(t.input_tokens) ? `, ${t.input_tokens} in` : "") +
-               (Number.isFinite(t.cache_read) && t.cache_read ? ` (${t.cache_read} cached)` : ""));
+               (Number.isFinite(t.cache_write) && t.cache_write ? `, ${t.cache_write} written to cache` : ""));
+    /* The percentage and the two counts behind it. The counts are what make
+       it checkable: `prompt_tokens` is the denominator the daemon divided by,
+       which already accounts for the two protocols counting the cached part
+       differently (metering.prompt_tokens). */
+    if (Number.isFinite(t.cache_hit_ratio)) {
+      const pct = (Math.min(1, Math.max(0, t.cache_hit_ratio)) * 100).toFixed(1);
+      lines.push(`cache hit ${pct}%` +
+        (Number.isFinite(t.cache_read) && Number.isFinite(t.prompt_tokens)
+          ? `: ${t.cache_read} of ${t.prompt_tokens} prompt tokens` : ""));
+    }
     lines.push(Number.isFinite(t.ttft_ms)
       ? `time to first token ${ttftFmt(t.ttft_ms)}`
       : `first byte ${ttftFmt(t.ttfb_ms)}`);
+  }
+  if (Number.isFinite(t.ttft_ms_mean) && t.ttft_ms_n > 1) {
+    lines.push(`mean time to first token ${ttftFmt(t.ttft_ms_mean)}` +
+      ` over the last ${t.ttft_ms_n} calls`);
+  }
+  /* The same share over the window the median is taken over: one cold call
+     is a fact about that call, and the window says whether the session as a
+     whole is warm. Named with both bounds like the median above it. */
+  if (Number.isFinite(t.cache_hit_ratio_window) && t.cache_hit_n > 1) {
+    lines.push(`cache hit ${(t.cache_hit_ratio_window * 100).toFixed(1)}%` +
+      ` over the last ${t.cache_hit_n} calls` +
+      (Number.isFinite(t.max_age_s) ? ` in ${fmtAge(t.max_age_s)}` : ""));
   }
   if (Number.isFinite(t.tps_median) && t.tps_median_n > 1) {
     /* Both bounds named: the count is what the reader sees, the time is what
@@ -7729,7 +7788,9 @@ function tpsRailLine(s) {
   const t = s && s.tps;
   if (!t) return null;
   const line = el("span", "rail-tps-line" + tpsStaleClass(t));
-  const num = el("span", "rail-tps", tpsText(t));
+  /* Compact: the row is 260px by default, and a spelled-out "cache 97%"
+     beside the rate, the latency and the age does not fit (see tpsText). */
+  const num = el("span", "rail-tps", tpsText(t, true));
   const age = tpsAgeSecs(t);
   line.append(el("span", "rail-tps-bolt", "⚡"), num);
   if (age !== null) line.appendChild(el("span", "rail-tps-age", fmtAge(age) + " ago"));
@@ -7742,7 +7803,7 @@ function tpsChip(name) {
   const s = sessionsCache.find((x) => x.name === name);
   const t = s && s.tps;
   if (!t) return null;
-  const chip = el("span", "sess-brief-tps" + tpsStaleClass(t), tpsText(t));
+  const chip = el("span", "sess-brief-tps" + tpsStaleClass(t), tpsText(t, true));
   chip.title = tpsTooltip(t);
   return chip;
 }
@@ -7848,9 +7909,18 @@ function renderTermTps() {
     // unchanged answer was a style, layout and paint of the terminal pane on
     // every tick for nobody (claunch-i3es6), so it is rebuilt only when this
     // reads differently from what is there.
+    /* The finished call's own reading, worked out once for both layouts: the
+       latency and the cache share describe the last call whether or not
+       another is in flight now (the live area above says what is running,
+       this one says how the last one went). */
+    const lastLat = t && !t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "";
+    const avgLat = t && !t.idle && typeof tpsAvgLatencyText === "function" ? tpsAvgLatencyText(t) : "";
+    const cache = t && !t.idle && typeof tpsCacheText === "function" ? tpsCacheText(t, false) : "";
+    const age = t && tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : "";
     let parts = null;
     if (show && t.live && typeof tpsSparkline === "function") {
-      /* Live: the state big, the line under it, the last finished call small. */
+      /* Live: the state and its chart on top, the last finished call under
+         them in its own area. */
       const l = t.live;
       const model = l.model || t.model;
       parts = {
@@ -7859,10 +7929,10 @@ function renderTermTps() {
         big: tpsLiveText(l),
         series: Array.isArray(l.series) ? l.series : [],
         par: typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "",
-        small: [model ? modelShort(model) : "",
+        when: [model ? modelShort(model) : "",
           t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
-          tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
-          .filter(Boolean).join(" · "),
+          age].filter(Boolean).join(" · "),
+        metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
       };
     } else if (show) {
       parts = {
@@ -7870,10 +7940,8 @@ function renderTermTps() {
         cls: "term-tps-overlay" + tpsStaleClass(t),
         big: !t.idle && t.counted && Number.isFinite(t.tps)
           ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
-        small: [!t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
-          t.model ? modelShort(t.model) : "",
-          tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
-          .filter(Boolean).join(" · "),
+        when: [t.model ? modelShort(t.model) : "", age].filter(Boolean).join(" · "),
+        metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
         title: tpsTooltip(t),
       };
     }
@@ -7881,18 +7949,27 @@ function renderTermTps() {
     if (parts && overlay._tpsKey !== key) {
       overlay._tpsKey = key;
       overlay.className = parts.cls;
+      /* Two stacked areas: what is running now, and how the last finished
+         call went. They answer different questions and are read at different
+         moments, so they are two blocks rather than one run-on line -- and
+         the divider between them is drawn only when both have something to
+         say (a session with nothing in flight keeps the second area alone). */
+      const lastBox = el("div", "term-tps-last");
+      if (!parts.live) lastBox.appendChild(el("span", "term-tps-big", parts.big));
+      if (parts.when) lastBox.appendChild(el("span", "term-tps-small term-tps-when", parts.when));
+      if (parts.metrics) {
+        lastBox.appendChild(el("span", "term-tps-small term-tps-metrics", parts.metrics));
+      }
       if (parts.live) {
-        overlay.replaceChildren(
-          el("span", "term-tps-big", parts.big),
-          tpsSparkline(parts.series),
-          ...(parts.par ? [el("span", "term-tps-small term-tps-parallel", parts.par)] : []),
-          el("span", "term-tps-small", parts.small)
-        );
+        const liveBox = el("div", "term-tps-live");
+        liveBox.appendChild(el("span", "term-tps-big", parts.big));
+        liveBox.appendChild(tpsSparkline(parts.series));
+        if (parts.par) {
+          liveBox.appendChild(el("span", "term-tps-small term-tps-parallel", parts.par));
+        }
+        overlay.replaceChildren(liveBox, lastBox);
       } else {
-        overlay.replaceChildren(
-          el("span", "term-tps-big", parts.big),
-          el("span", "term-tps-small", parts.small)
-        );
+        overlay.replaceChildren(lastBox);
         overlay.title = parts.title;
       }
     }

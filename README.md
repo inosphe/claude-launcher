@@ -1129,12 +1129,38 @@ the shim claunch lets Pi send `stream_options.include_usage` (a backend that
 rejects that field can opt out with `providers.<name>.metering: false`).
 
 The web UI shows the same records: each session's rail row carries a
-throughput line (`⚡ 38.1 tok/s · ttft 715ms · 45s ago`), an open briefing
-card a chip with the same figure, and the attached session's header a badge
-with a twin overlay drawn over the top-right corner of its terminal. All of
-them read the `tps` block the daemon hangs on the session (`GET /api/sessions`
-and `/api/sessions/<name>/meta`); `GET /api/metering?session=<name>` returns
-the records behind it.
+throughput line (`⚡ 38.1 tok/s · ttft 715ms · avg 900ms · 97% · 45s ago`), an
+open briefing card a chip with the same figure, and the attached session's
+header a badge with a twin overlay drawn over the top-right corner of its
+terminal. All of them read the `tps` block the daemon hangs on the session
+(`GET /api/sessions` and `/api/sessions/<name>/meta`); `GET /api/metering?session=<name>`
+returns the records behind it.
+
+After the rate comes the time to first token: the last call's own, then the
+window's mean (`avg 900ms`, drawn only when at least two calls have one -- a
+single call is not an average of itself, and a whole-body answer has no first
+token to average at all). Both are in the tooltip spelled out.
+
+The trailing percentage is the **cache's share of the last call's prompt**:
+`cache_read / prompt tokens`, the same call the rate beside it describes. The
+denominator follows the protocol the record came from, because the two wire
+formats count it differently (`metering.prompt_tokens`): Anthropic reports
+fresh input, cache read and cache write separately, so the prompt is their sum
+(3,823 + 124,570 + 0 = 128,393 reads 97.0%), while OpenAI's `prompt_tokens`
+already *includes* the cached part, so it is the denominator on its own
+(34,688 of 36,486 reads 95.1%). A record that cannot say -- no path, or no
+input counts -- carries no ratio and the line draws nothing there; a call that
+read nothing from the cache is a measured `0%`. The rail and the card chip
+show the bare percentage to fit the column, the header badge and the PTY
+overlay show `cache 97%`, and the tooltip gives the share beside both token
+counts and the share over the whole window.
+
+The overlay over the terminal is two stacked areas now: what is running right
+now on top (the live state, its thirty-second chart, and how the shim's calls
+are split across sessions), and how the last finished call went underneath
+(model, its rate and age, then that call's latency with the window's mean and
+the cache share). The divider between them is drawn only when both are on
+screen.
 
 That block is computed over a window bounded on two axes: the last ten calls,
 and only those made in the last ten minutes. The count on its own was not a
@@ -1147,7 +1173,7 @@ different facts:
 | --- | --- |
 | never went through the shim (the OAuth routes) | nothing — no line, no chip, no badge |
 | quiet longer than the window | `tps none` and how long ago the last call was |
-| called within the window | the rate, the latency and the rolling median |
+| called within the window | the rate, the latency with its mean, the cache share and the rolling medians |
 
 Change the bound with `metering.summary_max_age` (seconds); `0` switches it
 off and restores the count-only window, where the last reading stands however

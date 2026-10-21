@@ -499,6 +499,60 @@ def _call_tps(record: dict) -> Optional[float]:
     return float(total) if total else None
 
 
+def prompt_tokens(record: dict) -> Optional[int]:
+    """How many prompt tokens ``record``'s call sent, cache included.
+
+    The two wire formats disagree about what the input count means, and the
+    record keeps the number each protocol gave (:func:`_usage_fields`), so the
+    protocol is read back off the call's ``path``:
+
+    * Anthropic Messages (``/v1/messages``) counts the three input-side
+      quantities separately -- fresh ``input_tokens``, ``cache_read`` and
+      ``cache_write`` -- so the prompt is their sum.
+    * OpenAI Chat Completions (``/v1/chat/completions``) counts
+      ``prompt_tokens`` whole: the cached part is *inside* ``input_tokens``.
+      Adding ``cache_read`` there would count it twice and halve the ratio
+      measured on a real record (34,688 cached of 36,486 prompt reads 95.1%
+      here, 48.7% if summed).
+
+    ``None`` when the record does not say which protocol it came from, or
+    carries no input counts at all: a ratio needs a denominator, and guessing
+    one would invent a number the caller cannot check.
+    """
+    path = str(record.get("path") or "")
+    fresh = record.get("input_tokens")
+    if fresh is None:
+        # Without the fresh count neither format gives a denominator: the
+        # Anthropic sum would silently treat the unknown part as zero.
+        return None
+    if path.endswith("/messages"):
+        # ``cache_write`` is missing rather than zero on records written
+        # before the field existed; both are "nothing written".
+        total = int(fresh) + int(record.get("cache_read") or 0) \
+            + int(record.get("cache_write") or 0)
+        return total or None
+    if path.endswith("/chat/completions"):
+        return int(fresh) or None
+    return None
+
+
+def cache_hit_ratio(record: dict) -> Optional[float]:
+    """The share of ``record``'s prompt tokens that came from the cache.
+
+    ``cache_read / prompt_tokens``, or ``None`` when either half is unknown.
+    A call that read nothing from the cache is ``0.0``, which is a measurement
+    -- "this call paid full price for its prompt" -- and not the same fact as
+    a record that cannot say.
+    """
+    cached = record.get("cache_read")
+    if cached is None:
+        return None
+    total = prompt_tokens(record)
+    if not total:
+        return None
+    return round(int(cached) / total, 4)
+
+
 def _timed_generation(record: dict) -> bool:
     """Whether the window behind ``record``'s generation rate was worth dividing by.
 
@@ -609,12 +663,15 @@ def summarize(records: Iterable[dict]) -> dict:
     out_tokens = sum(int(r.get("output_tokens") or 0) for r in recs)
     in_tokens = sum(int(r.get("input_tokens") or 0) for r in recs)
     cache_read = sum(int(r.get("cache_read") or 0) for r in recs)
+    cache_write = sum(int(r.get("cache_write") or 0) for r in recs)
     return {
         "requests": len(recs),
         "counted": len(tps),
         "output_tokens": out_tokens,
         "input_tokens": in_tokens,
         "cache_read": cache_read,
+        "cache_write": cache_write,
+        "cache_hit_ratio": _ratio_over(recs),
         "tps_median": round(statistics.median(tps), 2) if tps else None,
         "tps_mean": round(statistics.fmean(tps), 2) if tps else None,
         "tps_min": round(min(tps), 2) if tps else None,
@@ -623,6 +680,28 @@ def summarize(records: Iterable[dict]) -> dict:
         "generation_median": round(statistics.median(generation), 2) if generation else None,
         "ttft_ms_median": int(statistics.median(ttft)) if ttft else None,
     }
+
+
+def _ratio_over(records: Iterable[dict]) -> Optional[float]:
+    """One cache-hit ratio over several calls: total cached / total prompt.
+
+    Summed rather than averaged: a mean of per-call ratios gives a 5-token
+    call and a 200,000-token call the same weight, so one cold call among ten
+    would move it as much as a whole conversation. Only records that can say
+    both halves enter -- a ratio over a denominator padded with zeros would
+    read as a colder cache than the calls themselves show.
+    """
+    cached = total = 0
+    n = 0
+    for rec in records:
+        got = rec.get("cache_read")
+        prompt = prompt_tokens(rec)
+        if got is None or not prompt:
+            continue
+        cached += int(got)
+        total += prompt
+        n += 1
+    return round(cached / total, 4) if n and total else None
 
 
 def by_key(records: Iterable[dict], key: str) -> Dict[str, dict]:
@@ -842,6 +921,11 @@ def session_summary(
     or not it was counted (an error answer still says when the session last
     called out); the medians are over the counted ones in the window.
 
+    ``cache_hit_ratio`` is that same last call's :func:`cache_hit_ratio`, and
+    ``cache_hit_ratio_window`` the summed share over the window
+    (:func:`_ratio_over`); ``prompt_tokens`` is the denominator the first one
+    was taken over, so a reader can show the two counts behind the percentage.
+
     ``now`` and ``max_age`` are injection points for tests and for a caller
     that already knows both; left out, the clock and the config file answer.
     ``index`` is a :func:`snapshot` the caller already took.
@@ -872,7 +956,10 @@ def session_summary(
         out.update(
             tps=None, ttft_ms=None, ttfb_ms=None,
             output_tokens=None, input_tokens=None, cache_read=None,
+            cache_write=None, prompt_tokens=None, cache_hit_ratio=None,
+            cache_hit_ratio_window=None, cache_hit_n=0,
             tps_median=None, tps_median_n=0, ttft_ms_median=None,
+            ttft_ms_mean=None, ttft_ms_n=0,
         )
         return out
     tps = [v for v in (reported_tps(r) for r in window) if v is not None]
@@ -884,9 +971,26 @@ def session_summary(
         output_tokens=last.get("output_tokens"),
         input_tokens=last.get("input_tokens"),
         cache_read=last.get("cache_read"),
+        # The same call the rate above describes, plus what that rate costs to
+        # keep: how much of this call's prompt came from the backend's cache.
+        # `cache_hit_ratio_window` is the same share over the whole window,
+        # which is the number a reader wants when one cold call would
+        # otherwise stand for the session.
+        cache_write=last.get("cache_write"),
+        prompt_tokens=prompt_tokens(last),
+        cache_hit_ratio=cache_hit_ratio(last),
+        cache_hit_ratio_window=_ratio_over(window),
+        cache_hit_n=sum(1 for r in window
+                        if r.get("cache_read") is not None and prompt_tokens(r)),
         tps_median=round(statistics.median(tps), 2) if tps else None,
         tps_median_n=len(tps),
         ttft_ms_median=int(statistics.median(ttft)) if ttft else None,
+        # Time to first token, current and mean: the row shows the last call's
+        # (`ttft_ms` above) beside the window's mean, the way it shows a rate
+        # beside a median. `ttft_ms_n` is how many calls the mean is over, so
+        # a single call is not painted with an "average" of itself.
+        ttft_ms_mean=round(statistics.fmean(ttft)) if ttft else None,
+        ttft_ms_n=len(ttft),
     )
     return out
 
