@@ -149,6 +149,14 @@ assert.strictEqual(link.from.id, "anc0:run_end", "from the ancestor's last node"
 assert.strictEqual(link.to.id, cur.nodes[0].id, "into the live run's first node");
 assert.match(comp.cols[prevM.cols.length].title, /rev 26에서 이어받음/,
              "the column the connector lands in names the round");
+// The live edge still ends on the pending node, after the ancestor's columns
+// -- a live run is drawn out to now, not back over the shadowed run
+// (claunch-0n5jr review).
+const liveEdge = comp.edges.find((e) => e.id === "live-edge");
+assert.ok(liveEdge && comp.pending, "a live run keeps its pending node under ancestors");
+assert.strictEqual(liveEdge.to, comp.pending, "the live edge points at the composed pending node");
+assert.strictEqual(comp.pending.col, cur.pending.col + prevM.cols.length);
+assert.ok(liveEdge.from.col >= prevM.cols.length, "and starts in the live run's own columns");
 // A run whose own log says it continued something keeps its layout: an
 // ancestor's `continued` is not drawn either, only followed by the daemon.
 const deeper = DF.withAncestors(cur, [{ runId: "older", round: 1, events: [

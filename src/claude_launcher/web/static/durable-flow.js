@@ -913,14 +913,16 @@
       nodes.push(node);
       map.set(n.id, node);
     }
-    for (const e of m.edges) {
-      const from = map.get(e.from.id), to = map.get(e.to.id);
-      edges.push(from && to ? { ...e, from, to } : e);
-    }
+    // Before the edges: the pending node's id is not in ``m.nodes``, and the
+    // live edge ends on it -- remap after it is known (claunch-0n5jr review).
     let pending = null;
     if (m.pending) {
       pending = { ...m.pending, col: m.pending.col + shift };
-      map.set("live", pending);
+      map.set(m.pending.id, pending);
+    }
+    for (const e of m.edges) {
+      const from = map.get(e.from.id), to = map.get(e.to.id);
+      edges.push(from && to ? { ...e, from, to } : e);
     }
     const head = m.nodes.length ? map.get(m.nodes[0].id) : null;
     if (layer.tail && head) {
