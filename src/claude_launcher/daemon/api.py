@@ -8819,6 +8819,54 @@ def _with_member(head: dict, key: str, text: str) -> str:
     return encoded[:-1] + (", " if head else "") + _dumps(key) + ": " + text + "}"
 
 
+#: The session keys a rail row carries. The dashboard reads this resource
+#: repeatedly, so the detail panel's own /meta request keeps an opening task
+#: and environment out of every rail response. This lives at module scope so a
+#: test can hold the page that reads a row (`megathread-page.js`: the member
+#: picker draws each session from these keys) to what the poll really sends —
+#: the picker's second line was written against a `task` key the rail had
+#: already dropped, and every live row came out blank (claunch-cn8v6).
+#:
+#: ``delayed_at``/``failed_at``/``restore_queue`` are the two partitions the
+#: rail draws apart from hold and killed (claunch-0j6gb): without them every
+#: delayed row reached the page as a plain hold, and a boot's queue read as
+#: sessions that failed to come back (claunch-v4uyt).
+RAIL_FIELDS = {
+    "name", "harness", "profile", "cwd", "args", "model", "effort",
+    "tools", "restore", "conversation_id", "role", "parent", "borrow",
+    "null_token", "issue", "keep_alive", "reminder_paused", "note",
+    "reminder_note",
+    "status",
+    "score_goal", "user_reward", "user_penalty",
+    "pid", "exit_code", "created_at", "last_output_at",
+    "last_visited_at", "last_input_at", "last_activity_at", "viewers",
+    "moved_rows", "tool_calls",
+    "exited_at", "archived_at", "paused_at", "held_at", "delivery_hold",
+    "delayed_at", "failed_at", "restore_queue",
+    "pending_deliveries", "compacting",
+    "context", "branch", "briefing", "winddown", "session_reminder",
+    # Whose conversation this session is a copy of, and the merge or
+    # handoff the operator has already asked for. The header's
+    # fork/merge pair reads both off this list and nothing else
+    # (``forkControlState``/``handoffControlState`` in app.js), so
+    # leaving them out is not a saving: it hid ``↩ merge`` on every
+    # quick-fork there has ever been, and left ``⑂ fork`` offered on
+    # the copy — the fork button's guard is the same absent field.
+    "quick_fork_of", "handoff", "self_merge_allowed",
+    "status_checks", "tps",
+    # The project a session is filed under. The page polls every
+    # project and narrows the rail itself (``railSessions`` in
+    # app.js), so a row without this key reads as the default
+    # project's: with it left out, picking any other project drew an
+    # empty rail while "All projects" still listed them.
+    "project",
+    # What the session declared itself to be at creation, and the
+    # progress it publishes while it runs (daemon/progress.py): the
+    # rail's meta line and progress line read both off this poll.
+    "kind", "progress", "prs", "rail_commits",
+}
+
+
 @shared_reads.shared("sessions")
 async def _sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
@@ -9073,40 +9121,7 @@ async def _sessions_list(request: web.Request) -> web.Response:
         # them every delayed row reached the page as a plain hold, and a
         # boot's queue read as sessions that failed to come back
         # (claunch-v4uyt).
-        rail_fields = {
-            "name", "harness", "profile", "cwd", "args", "model", "effort",
-            "tools", "restore", "conversation_id", "role", "parent", "borrow",
-            "null_token", "issue", "keep_alive", "reminder_paused", "note",
-            "reminder_note",
-            "status",
-            "score_goal", "user_reward", "user_penalty",
-            "pid", "exit_code", "created_at", "last_output_at",
-            "last_visited_at", "last_input_at", "last_activity_at", "viewers",
-            "moved_rows", "tool_calls",
-            "exited_at", "archived_at", "paused_at", "held_at", "delivery_hold",
-            "delayed_at", "failed_at", "restore_queue",
-            "pending_deliveries", "compacting",
-            "context", "branch", "briefing", "winddown", "session_reminder",
-            # Whose conversation this session is a copy of, and the merge or
-            # handoff the operator has already asked for. The header's
-            # fork/merge pair reads both off this list and nothing else
-            # (``forkControlState``/``handoffControlState`` in app.js), so
-            # leaving them out is not a saving: it hid ``↩ merge`` on every
-            # quick-fork there has ever been, and left ``⑂ fork`` offered on
-            # the copy — the fork button's guard is the same absent field.
-            "quick_fork_of", "handoff", "self_merge_allowed",
-            "status_checks", "tps",
-            # The project a session is filed under. The page polls every
-            # project and narrows the rail itself (``railSessions`` in
-            # app.js), so a row without this key reads as the default
-            # project's: with it left out, picking any other project drew an
-            # empty rail while "All projects" still listed them.
-            "project",
-            # What the session declared itself to be at creation, and the
-            # progress it publishes while it runs (daemon/progress.py): the
-            # rail's meta line and progress line read both off this poll.
-            "kind", "progress", "prs", "rail_commits",
-        }
+        rail_fields = RAIL_FIELDS
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}
             for info in attached

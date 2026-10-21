@@ -404,31 +404,38 @@ globalThis.MegaThreadPage = (() => {
   /* ---- the member picker (no DOM) --------------------------------------- */
 
   /* A live session reads differently from one that has exited, and the rail
-     already carries the status; the picker only has to show it. */
+     already carries the status; the picker only has to show it. Every
+     status the rail can send is one of these four (daemon/session.py). */
   function statusTone(status) {
-    if (status === "idle" || status === "busy") return "live";
+    if (status === "starting" || status === "busy" || status === "idle") return "live";
     if (!status) return "";
     return "gone";
   }
 
-  /* The second line of a row: what this session is working on. An empty
-     line is dropped rather than drawn as a separator with nothing after it. */
+  /* The second line of a row: what this session is working on. Only fields
+     the rail poll actually sends are read here — `task` and `role` are in
+     the session record but the rail leaves them out on purpose (api.py
+     RAIL_FIELDS), so a line built from them is empty on every live row.
+     `branch` is set on every live session and names the work; `issue` names
+     the board item when there is one. An empty line is dropped rather than
+     drawn as a separator with nothing after it. */
   function sessionLine(session) {
     const s = session || {};
-    const parts = [];
-    if (s.role) parts.push(String(s.role));
-    const task = String(s.task || s.issue || "").trim();
-    if (task) parts.push(task);
-    return parts.join(" · ");
+    const progress = s.progress && s.progress.text ? String(s.progress.text) : "";
+    return [s.role, progress, s.issue, s.branch, s.note]
+      .map((bit) => String(bit || "").trim())
+      .filter(Boolean)
+      .join(" · ");
   }
 
   /* The filter matches any field a reader might remember the session by.
-     Case is folded because names and tasks are typed in mixed case. */
+     Case is folded because names and branches are typed in mixed case. */
   function matchesFilter(session, query) {
     const needle = String(query || "").trim().toLowerCase();
     if (!needle) return true;
     const s = session || {};
-    return [s.name, s.role, s.identity, s.task, s.issue, s.branch]
+    const progress = s.progress && s.progress.text ? s.progress.text : "";
+    return [s.name, s.role, s.identity, s.issue, s.branch, s.note, s.kind, progress]
       .filter(Boolean).join(" ").toLowerCase().includes(needle);
   }
 

@@ -132,34 +132,40 @@ assert.equal(ctx.isOpen({ status: "closed" }), false);
 assert.equal(ctx.isOpen({ status: "open" }), true);
 
 /* ---- the member picker -------------------------------------------------- */
-// The rail rows carry role, task and status; the picker has to show them,
-// or a list of `dfv2-2026…` names is a list of identical names.
+// The rail poll carries status, issue, branch and progress; it does NOT carry
+// `task` or a filled `role` (api.py RAIL_FIELDS), so the picker must read the
+// fields the daemon really sends. tests/test_megathread_api.py::test_t19 holds
+// this list to that constant.
 const roster = [
-  { name: "s2", status: "exited", task: "deploy" },
-  { name: "s1", status: "idle", role: "worker", task: "log format" },
-  { name: "s3", status: "busy", issue: "claunch-abc" },
+  { name: "s2", status: "exited", issue: "claunch-abc" },
+  { name: "s1", status: "idle", role: "worker", branch: "s1-log-format" },
+  { name: "s3", status: "starting", issue: "claunch-xyz", branch: "s3-deploy", note: "deploy watch" },
 ];
 assert.equal(ctx.statusTone("idle"), "live");
 assert.equal(ctx.statusTone("busy"), "live");
+assert.equal(ctx.statusTone("starting"), "live", "a booting session is not gone");
 assert.equal(ctx.statusTone("exited"), "gone");
 assert.equal(ctx.statusTone(""), "");
-assert.equal(ctx.sessionLine(roster[1]), "worker · log format");
-assert.equal(ctx.sessionLine(roster[2]), "claunch-abc", "an issue stands in for a missing task");
+assert.equal(ctx.sessionLine(roster[1]), "worker · s1-log-format");
+assert.equal(ctx.sessionLine(roster[0]), "claunch-abc", "an issue stands in for a missing branch");
+assert.equal(ctx.sessionLine({ progress: { text: "step 3/7" } }), "step 3/7",
+  "what the session publishes about itself comes first");
 assert.equal(ctx.sessionLine({}), "");
 
 assert.equal(ctx.matchesFilter(roster[1], ""), true);
-assert.equal(ctx.matchesFilter(roster[1], "LOG"), true, "the filter folds case");
+assert.equal(ctx.matchesFilter(roster[1], "LOG"), true, "the filter folds case and reads the branch");
 assert.equal(ctx.matchesFilter(roster[1], "  worker "), true, "spaces around the query are dropped");
-assert.equal(ctx.matchesFilter(roster[0], "deploy"), true, "a task match finds the session");
-assert.equal(ctx.matchesFilter(roster[2], "claunch-abc"), true);
+assert.equal(ctx.matchesFilter(roster[2], "deploy"), true, "a note or branch match finds the session");
+assert.equal(ctx.matchesFilter(roster[2], "claunch-xyz"), true);
 assert.equal(ctx.matchesFilter(roster[0], "s1"), false);
 
 const picked = plain(ctx.pickerRows(roster, "", ["s2"]));
 assert.deepEqual(picked.map((r) => r.name), ["s1", "s2", "s3"], "rows are sorted by name");
 assert.deepEqual(picked.map((r) => r.checked), [false, true, false], "a tick survives the next repaint");
-assert.equal(picked[0].line, "worker · log format");
+assert.equal(picked[0].line, "worker · s1-log-format");
 assert.equal(picked[1].tone, "gone");
-assert.deepEqual(plain(ctx.pickerRows(roster, "deploy", [])).map((r) => r.name), ["s2"]);
+assert.equal(picked[2].tone, "live");
+assert.deepEqual(plain(ctx.pickerRows(roster, "deploy", [])).map((r) => r.name), ["s3"]);
 assert.deepEqual(plain(ctx.pickerRows(roster, "nothing here", [])), []);
 assert.deepEqual(plain(ctx.pickerRows(null, "", null)), []);
 
