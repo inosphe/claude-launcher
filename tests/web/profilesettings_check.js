@@ -192,48 +192,116 @@ vm.runInContext(
   // One row per profile: the per-harness selector row is not a profile.
   assert.equal(rows.length, 3);
   assert.deepEqual(all(table).filter((n) => n.tag === "th").map((n) => n.text), [
-    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Pi TUI mode",
-    "Directory",
+    "Profile", "Harness", "Provider", "Effort", "Permission mode", "Rules",
+    "Pi TUI mode", "Directory",
   ]);
   assert.equal(rows[0].children[0].text, "work");
   assert.equal(rows[0].children[2].text, "deepseek");
   // `auto` in the file, `plan` being converged: shown as the move, not as a
   // value -- this is the state `claunch apply` closes.
-  assert.equal(rows[0].children[3].text, "auto → plan");
-  assert.equal(rows[0].children[3].cls.includes("profile-pending"), true);
+  assert.equal(rows[0].children[4].text, "auto → plan");
+  assert.equal(rows[0].children[4].cls.includes("profile-pending"), true);
   // ...and the rules column sits between it and the path, settled.
-  assert.equal(rows[0].children[4].text, "guard ok");
-  assert.equal(rows[0].children[4].cls.includes("profile-ok"), true);
+  assert.equal(rows[0].children[5].text, "guard ok");
+  assert.equal(rows[0].children[5].cls.includes("profile-ok"), true);
   // Not a pi profile: the pi TUI mode column is a dash, then the path.
-  assert.equal(rows[0].children[5].text, "—");
-  assert.equal(rows[0].children[5].cls.includes("profile-muted"), true);
-  assert.equal(rows[0].children[6].text, "C:\\profiles\\work");
+  assert.equal(rows[0].children[6].text, "—");
+  assert.equal(rows[0].children[6].cls.includes("profile-muted"), true);
+  assert.equal(rows[0].children[7].text, "C:\\profiles\\work");
 
   // Another harness gets a dash in both Claude Code columns: these are keys
   // it never reads, so an empty cell is the honest answer, not a zero.
-  assert.equal(rows[1].children[3].text, "—");
-  assert.equal(rows[1].children[3].cls.includes("profile-muted"), true);
   assert.equal(rows[1].children[4].text, "—");
   assert.equal(rows[1].children[4].cls.includes("profile-muted"), true);
+  assert.equal(rows[1].children[5].text, "—");
+  assert.equal(rows[1].children[5].cls.includes("profile-muted"), true);
 
   // A profile the daemon could not describe is reported, not dropped.
   assert.equal(rows[2].children[0].text, "broken");
   assert.match(rows[2].children[1].text, /unknown harness/);
+
+  // --- the effort column --------------------------------------------------
+  // No layer sets one in this fixture: the cell names the harness default
+  // rather than showing a blank that reads like zero.
+  assert.equal(rows[0].children[3].text, "harness default");
+  assert.equal(rows[0].children[3].cls.includes("profile-muted"), true);
+  assert.equal(rows[1].children[3].text, "harness default");
+
+  // Three states told apart: inherited (resolved but not declared), declared,
+  // and a launch the harness will refuse.
+  const effortRow = { ...details()[0], reasoning_effort: "medium",
+    reasoning_effort_declared: null, reasoning_effort_problem: null };
+  assert.equal(context.reasoningEffortLabel(effortRow).text, "medium (inherited)");
+  effortRow.reasoning_effort_declared = "medium";
+  assert.equal(context.reasoningEffortLabel(effortRow).text, "medium");
+  effortRow.reasoning_effort = null;
+  assert.equal(context.reasoningEffortLabel(effortRow).text, "harness default");
+  effortRow.reasoning_effort = "high";
+  effortRow.reasoning_effort_problem =
+    "harness 'kimi' cannot translate configured provider field(s): reasoning_effort";
+  const refused = context.reasoningEffortLabel(effortRow);
+  assert.match(refused.text, /launch refused/);
+  assert.equal(refused.cls, "profile-pending");
+  assert.match(refused.title, /cannot translate/);
+
+  // The selector edits the profile's own key: the levels are the ones the
+  // daemon published, and "harness default" is the undeclaration.
+  response = { profiles: [], profile_details: details(),
+    reasoning_effort_choices: ["low", "medium", "high"] };
+  await context.refreshProfileSettings();
+  const editorRow = { ...details()[0], reasoning_effort: null,
+    reasoning_effort_declared: null, reasoning_effort_problem: null };
+  let effortEditor = context.reasoningEffortEditor(editorRow);
+  let effortSelect = find(effortEditor, (n) => n.tag === "select");
+  assert.deepEqual(effortSelect.children.map((o) => o.value),
+                   ["", "low", "medium", "high"]);
+  assert.equal(effortSelect.children[0].text, "(harness default)");
+  assert.equal(effortSelect.value, "");
+  assert.match(textOf(effortEditor), /Applies to new sessions/);
+
+  requests.length = 0;
+  writeResponse = { profile: "work", declared: "medium",
+    reasoning_effort: "medium", reasoning_effort_problem: null };
+  effortSelect.value = "medium";
+  await find(effortEditor, (n) => n.tag === "form").handlers.submit({ preventDefault() {} });
+  assert.equal(requests[0][0], "/api/profiles/reasoning-effort");
+  assert.equal(requests[0][1].method, "POST");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { profile: "work", effort: "medium" });
+  assert.match(textOf(context.reasoningEffortEditor(editorRow)),
+               /launch at medium effort/);
+
+  // Undeclaring sends null, which removes the key instead of writing "none".
+  requests.length = 0;
+  writeResponse = { profile: "work", declared: null,
+    reasoning_effort: null, reasoning_effort_problem: null };
+  await context.reasoningEffortApply("work", "");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { profile: "work", effort: null });
+  assert.match(textOf(context.reasoningEffortEditor(editorRow)),
+               /use the harness default/);
+
+  // A value written by hand outside the published levels stays selectable,
+  // so the next Save cannot silently rewrite it.
+  const handWritten = { ...details()[0], reasoning_effort: "xhigh",
+    reasoning_effort_declared: "xhigh", reasoning_effort_problem: null };
+  effortEditor = context.reasoningEffortEditor(handWritten);
+  effortSelect = find(effortEditor, (n) => n.tag === "select");
+  assert.equal(effortSelect.value, "xhigh");
+  assert.equal(effortSelect.children.at(-1).value, "xhigh");
 
   // --- converged reads as settled ----------------------------------------
   response = { profiles: [], profile_details: details({ declared: "auto", target: "auto", first: "auto" }) };
   await context.refreshProfileSettings();
   const settled = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr")[1];
-  assert.equal(settled.children[3].text, "auto");
-  assert.equal(settled.children[3].cls.includes("profile-ok"), true);
+  assert.equal(settled.children[4].text, "auto");
+  assert.equal(settled.children[4].cls.includes("profile-ok"), true);
 
   // --- a profile with no value at all ------------------------------------
   response = { profiles: [], profile_details: details({ declared: null, target: "auto", first: null }) };
   await context.refreshProfileSettings();
   const asking = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr")[1];
-  assert.equal(asking.children[3].text, "asks (no value)");
+  assert.equal(asking.children[4].text, "asks (no value)");
 
   // A profile override does not become the shared card's selected value.
   const scoped = details({ declared: "plan", target: "plan", first: "plan" });
@@ -300,9 +368,9 @@ vm.runInContext(
   // is for.
   const shortRows = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr").slice(1);
-  assert.equal(shortRows[0].children[4].text, "deny: 4 missing");
-  assert.equal(shortRows[0].children[4].cls.includes("profile-pending"), true);
-  assert.equal(shortRows[1].children[4].text, "allow: 1 missing · deny: 4 missing");
+  assert.equal(shortRows[0].children[5].text, "deny: 4 missing");
+  assert.equal(shortRows[0].children[5].cls.includes("profile-pending"), true);
+  assert.equal(shortRows[1].children[5].text, "allow: 1 missing · deny: 4 missing");
 
   // --- no Claude profile at all ------------------------------------------
   response = { profiles: [], profile_details: [details()[2], details()[3]] };
@@ -323,8 +391,8 @@ vm.runInContext(
   await context.refreshProfileSettings();
   let piCells = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr")[1].children;
-  assert.equal(piCells[3].text, "—");
-  assert.match(piCells[5].text, /^fullscreen \(pi's default\)$/);
+  assert.equal(piCells[4].text, "—");
+  assert.match(piCells[6].text, /^fullscreen \(pi's default\)$/);
   let tuiEditor = context.piTuiModeEditor(piRow);
   const tuiSelect = find(tuiEditor, (n) => n.tag === "select");
   assert.deepEqual(tuiSelect.children.map((o) => o.value), ["", "regular", "fullscreen"]);
@@ -360,7 +428,7 @@ vm.runInContext(
   await context.refreshProfileSettings();
   piCells = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr")[1].children;
-  assert.equal(piCells[5].text, "regular (hand-written in settings.json)");
+  assert.equal(piCells[6].text, "regular (hand-written in settings.json)");
 
   ok = false;
   writeResponse = { error: "TUI mode is only available for profiles that can run pi" };

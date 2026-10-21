@@ -30344,6 +30344,13 @@ let profileModeScope = null;
 let piTuiBusy = "";
 let piTuiNotice = { profile: "", text: "" };
 let piTuiError = { profile: "", text: "" };
+/* The default reasoning effort editor, same shape: the levels the daemon
+   accepts (published with the listing, so the two cannot drift apart), the
+   profile being written, and what came back. */
+let effortChoices = [];
+let effortBusy = "";
+let effortNotice = { profile: "", text: "" };
+let effortError = { profile: "", text: "" };
 
 function settingsTabs() {
   const tabs = el("div", "seq-tabs settings-tabs");
@@ -30370,6 +30377,10 @@ async function refreshProfileSettings() {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     profilesCache = data.profile_details || [];
+    // Spelled by the daemon: the neutral spec is the list of values every
+    // harness translates, so a level added there is offered without an edit
+    // here.
+    effortChoices = (data.reasoning_effort_choices || []).map(String);
     profilesError = "";
   } catch (err) {
     profilesError = String(err);
@@ -30688,6 +30699,96 @@ function piTuiModeEditor(row) {
   return box;
 }
 
+/* The default reasoning effort a launch of this profile applies. Three states
+   the cell has to tell apart, because they answer different questions: nothing
+   configured (the harness's own default decides), declared on this profile, and
+   inherited from the provider/template/profile env. `reasoning_effort_problem`
+   is the fourth: the profile's harness has no translation for the field, so the
+   launch is refused rather than run on a default nobody read. */
+function reasoningEffortLabel(row) {
+  const value = row.reasoning_effort;
+  if (row.reasoning_effort_problem) {
+    return { text: `${value || "?"} — launch refused`, cls: "profile-pending",
+             title: row.reasoning_effort_problem };
+  }
+  if (!value) {
+    return { text: "harness default", cls: "profile-muted",
+             title: "no layer sets an effort; the harness decides" };
+  }
+  if (row.reasoning_effort_declared) {
+    return { text: value, cls: "", title: "declared on this profile" };
+  }
+  return { text: `${value} (inherited)`, cls: "",
+           title: "from the provider, the template or the profile's env — not declared on this profile" };
+}
+
+async function reasoningEffortApply(profile, effort) {
+  effortBusy = profile;
+  effortNotice = { profile: "", text: "" };
+  effortError = { profile: "", text: "" };
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/profiles/reasoning-effort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile, effort: effort || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    effortNotice = { profile, text: data.reasoning_effort
+      ? `Saved — new ${profile} sessions launch at ${data.reasoning_effort} effort.`
+      : `Saved — new ${profile} sessions use the harness default.` };
+  } catch (err) {
+    effortError = { profile, text: String(err) };
+  }
+  effortBusy = "";
+  await refreshProfileSettings();
+}
+
+function reasoningEffortEditor(row) {
+  const box = el("div", "profile-mode-editor");
+  const form = el("form", "profile-mode-form");
+  const select = el("select", "ws-input");
+  select.setAttribute("aria-label", `Reasoning effort for ${row.profile}`);
+  const fallback = el("option", null, "(harness default)");
+  fallback.value = "";
+  select.appendChild(fallback);
+  const choices = effortChoices.slice();
+  // A value written by hand in ~/.claunch.yaml stays visible and selectable:
+  // dropping it from the list would show the select on an option that is not
+  // the value on disk, and the next Save would silently rewrite the config.
+  const declared = row.reasoning_effort_declared || "";
+  if (declared && !choices.includes(declared)) choices.push(declared);
+  for (const name of choices) {
+    const option = el("option", null, name);
+    option.value = name;
+    select.appendChild(option);
+  }
+  select.value = declared;
+  select.disabled = !!effortBusy;
+  form.appendChild(select);
+  const apply = el("button", "wf-btn", effortBusy === row.profile ? "Saving…" : "Save");
+  apply.type = "submit";
+  apply.disabled = !!effortBusy;
+  form.appendChild(apply);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return reasoningEffortApply(row.profile, select.value);
+  });
+  box.appendChild(form);
+  box.appendChild(el("p", "wf-note",
+    "Applies to new sessions; an effort chosen when a session is created wins."));
+  if (row.reasoning_effort_problem) {
+    box.appendChild(el("p", "wf-error", row.reasoning_effort_problem));
+  }
+  if (effortError.profile === row.profile) {
+    box.appendChild(el("p", "wf-error", effortError.text));
+  } else if (effortNotice.profile === row.profile) {
+    box.appendChild(el("p", "wf-note", effortNotice.text));
+  }
+  return box;
+}
+
 function profilesPanel() {
   const panel = el("div", "profiles-panel");
   panel.appendChild(el(
@@ -30721,8 +30822,8 @@ function profilesPanel() {
   const thead = el("thead", null);
   const hrow = el("tr", null);
   for (const label of [
-    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Pi TUI mode",
-    "Directory",
+    "Profile", "Harness", "Provider", "Effort", "Permission mode", "Rules",
+    "Pi TUI mode", "Directory",
   ]) {
     hrow.appendChild(el("th", null, label));
   }
@@ -30735,13 +30836,21 @@ function profilesPanel() {
     tr.appendChild(el("td", null, row.profile || row.name || "?"));
     if (row.error) {
       const cell = el("td", "profile-error", row.error);
-      cell.colSpan = 6;
+      cell.colSpan = 7;
       tr.appendChild(cell);
       body.appendChild(tr);
       continue;
     }
     tr.appendChild(el("td", null, row.harness || "?"));
     tr.appendChild(el("td", null, (row.harness_policy || {}).provider || "—"));
+    // Effort sits beside the provider because it is read against the model
+    // that provider serves: two sessions on one profile are not the same
+    // session when one is told to think harder.
+    const effortView = reasoningEffortLabel(row);
+    const effortCell = el("td", effortView.cls || null, effortView.text);
+    effortCell.title = effortView.title;
+    effortCell.appendChild(reasoningEffortEditor(row));
+    tr.appendChild(effortCell);
     const mode = row.permission_mode;
     if (!mode) {
       // Another harness: this is a Claude Code key and that harness never
