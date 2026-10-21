@@ -1070,3 +1070,22 @@ const SQ = DF.sequence(SLOG, true, SNOW);
   mnt.unmount();
   console.log("durableflow_check: legend ok");
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// (k) the head's key is hidden from the first frame, not the first poll
+// (claunch-qmwog.2.1): a mount whose poll has not answered yet must not show
+// the sequence key over a tree.
+{
+  const host = new El("div");
+  const api = () => new Promise(() => {});        // never answers
+  const mnt = DF.mount(host, "idle-run", {
+    doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 0 });
+  const key = host.children[0].children[3];
+  assert.strictEqual(key.className, "dfl-legend");
+  assert.strictEqual(key.hidden, true, "no poll yet: the tree shows no key");
+  mnt.setMode("sequence");
+  assert.strictEqual(key.hidden, false, "the switch shows it before any data");
+  mnt.setMode("tree");
+  assert.strictEqual(key.hidden, true);
+  mnt.unmount();
+  console.log("durableflow_check: legend from the first frame ok");
+}
