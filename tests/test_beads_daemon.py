@@ -691,6 +691,31 @@ def test_a_job_session_mints_nothing_even_with_no_answer_from_the_caller(repo):
     asyncio.run(run())
 
 
+def test_a_prose_issue_reference_is_not_an_answer_for_a_job_session(repo):
+    """A task that names an id in prose does not opt the job session back in.
+
+    gds-job tasks carry ``issue: <id>`` to say what the analysis is about, and
+    ``adopt_input_issue`` reads exactly that line as a board answer. Here it
+    must not: only the body's fields answer, because an adopted issue puts
+    "keep its status current" back into an opening that forbids terminal
+    commands and the wind-down block back into the exit.
+    """
+    br = FakeBr()
+    br.add(id="claunch-9", title="the analysis this job serves")
+    board = _board(br, repo)
+
+    async def run():
+        body = {"task": "extract this\nissue: claunch-9", "workflow": "gds-job"}
+        assert beads_mod.default_board_answer(body) == beads_mod.NONE_WAIT
+        assert body["beads"] is False
+        assert await board.ensure_issue(
+            _Sess(_sdef("job-abc", repo)), body=body, parent=None,
+        ) is None
+        assert br.calls == []
+
+    asyncio.run(run())
+
+
 def test_a_gds_job_session_starts_with_the_no_issue_answer(home, tmp_path, repo):
     """The same rule through the real route: the answer reaches the opening.
 
