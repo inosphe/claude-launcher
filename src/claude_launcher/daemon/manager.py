@@ -154,6 +154,21 @@ class _PendingClaim:
     cwd: str
 
 
+def _brings_back(entry) -> bool:
+    """Whether a registry record is one a boot actually brings back.
+
+    The registry keeps every session it has ever known -- on this machine
+    1551 records for ~48 live ones -- so a boot's progress and its total
+    have to be counted over *this* population, not over the file. One
+    predicate for both, or the banner runs past its own total
+    (claunch-9akgh review).
+    """
+    return bool(
+        isinstance(entry, dict)
+        and (entry.get("was_running") or entry.get("delayed_at"))
+    )
+
+
 class SessionManager:
     #: Filesystem discovery for a rollout that Codex has not written yet is
     #: retried from ordinary manager reads.  One dashboard request can perform
@@ -3182,11 +3197,7 @@ class SessionManager:
         try:
             # Said up front: this is how many records the pass brings back,
             # which is also the total the boot status reports (claunch-9akgh).
-            relaunching = sum(
-                1 for e in entries
-                if isinstance(e, dict)
-                and (e.get("was_running") or e.get("delayed_at"))
-            )
+            relaunching = sum(1 for e in entries if _brings_back(e))
             if relaunching:
                 log.info(
                     "restoring %d session(s) (about a second each)",
@@ -3197,9 +3208,18 @@ class SessionManager:
             done = 0
             for entry in entries:
                 self._restore_entry(entry, kept, host, stranded, failed)
-                done += 1
-                if progress is not None:
-                    progress(done, relaunching)
+                # `done` counts the same population `total` does. The
+                # registry holds far more records than this boot brings
+                # back -- exited ones kept for respawn -- and counting every
+                # record made the boot banner run past its own total
+                # ("restoring 1551/48" against this machine's 1551-record
+                # registry, claunch-9akgh review). It lands exactly on
+                # `total` because every counted record passes through here
+                # once, processed or skipped.
+                if _brings_back(entry):
+                    done += 1
+                    if progress is not None:
+                        progress(done, relaunching)
                 yield
             for row in kept.values():
                 # Running in the host with no record here that owns it: a

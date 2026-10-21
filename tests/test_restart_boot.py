@@ -156,6 +156,42 @@ def test_restore_all_async_yields_between_records(home, monkeypatch):
     assert progress[-1] == (4, 4)
 
 
+def test_progress_counts_only_the_records_a_boot_brings_back(home, monkeypatch):
+    """A registry full of exited records must not run the total over.
+
+    Found in review (claunch-9akgh): `done` counted every record while
+    `total` counted the ones being brought back. On this machine that is
+    1551 records against 48, so the dashboard would have shown "restoring
+    ... 1551/48". The only fixture in this file used `was_running` for every
+    entry, which hid it.
+    """
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+    entries = (
+        [{"name": f"dead{i}"} for i in range(9)]
+        + [{"name": f"live{i}", "was_running": True} for i in range(3)]
+        + [{"name": "delayed0", "delayed_at": "2026-10-21T00:00:00Z"}]
+    )
+    monkeypatch.setattr(mgr._store, "load_all", lambda: entries)
+    monkeypatch.setattr(mgr, "_restore_entry", lambda *a: None)
+    monkeypatch.setattr(mgr, "persist", lambda: None)
+
+    progress = []
+
+    async def run():
+        await mgr.restore_all_async(
+            progress=lambda done, total: progress.append((done, total))
+        )
+
+    asyncio.run(run())
+    totals = {total for _, total in progress}
+    assert totals == {4}, progress  # was_running 3 + delayed 1
+    assert progress[0] == (0, 4)
+    assert progress[-1] == (4, 4)
+    # Never past the total, never backwards.
+    assert all(done <= total for done, total in progress)
+    assert [done for done, _ in progress] == sorted(d for d, _ in progress)
+
+
 def test_restore_all_still_runs_synchronously(home, monkeypatch):
     mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
     monkeypatch.setattr(mgr._store, "load_all", lambda: [])
