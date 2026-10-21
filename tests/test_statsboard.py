@@ -305,6 +305,28 @@ def test_file_name_order_does_not_decide_the_switch_order(tmp_path, ledger):
     assert row["model"] == "m1"
 
 
+def test_a_model_change_survives_a_long_run_before_it(tmp_path, ledger):
+    # What is kept per provider is where the answer *changed*, not one entry
+    # per call: a hundred calls on m1 followed by a hundred on m2 is one
+    # mark, and stays one however long those runs grow (a call-count tail
+    # would have forgotten the change once it fell off the end).
+    directory = tmp_path / "metering"
+    write_ledger(directory, [
+        record("s1", hour=9, minute=i % 60, upstream=FIREWORKS, model="m1")
+        for i in range(100)
+    ] + [
+        record("s1", hour=10, minute=i % 60, upstream=FIREWORKS, model="m2")
+        for i in range(100)
+    ])
+    ledger.refresh(NOW)
+    row = ledger.window("2026-10-21",
+                        statsboard.window_start_epoch("2026-10-21", KST))["s1"]
+    assert [(s["kind"], s["from_model"], s["to_model"]) for s in row["switches"]] == [
+        ("model", "m1", "m2"),
+    ]
+    assert row["model"] == "m2"
+
+
 def test_a_switch_before_the_window_does_not_mark_the_row(tmp_path, ledger):
     write_ledger(tmp_path / "metering", [
         record("s1", day=19, hour=9, upstream=FIREWORKS),

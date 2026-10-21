@@ -68,16 +68,17 @@ RETENTION_DAYS = 31
 #: the ones a reader came for.
 MAX_SWITCHES = 40
 
-#: How many of each provider's own calls one session keeps for ordering.
-#: The ledger's files are per fingerprint -- that is, per provider -- so the
-#: order records were *read* in is not the order they happened in: a session
-#: whose provider changed mid-window has its history split across files, and
-#: the change has to be derived from each record's ``ts``. Keeping a short,
-#: per-provider tail of (time, model) is what makes that possible without
-#: holding every record of a month (471 sessions x ~16k calls in this
-#: fleet). Two providers that alternate more often than the tail remembers
-#: lose their middle alternations; the first change and the last state, which
-#: are what the mark is for, survive.
+#: How many *changes* of one provider's answer a session keeps, plus the
+#: provider's last call. The ledger's files are per fingerprint -- that is,
+#: per provider -- so the order records were *read* in is not the order they
+#: happened in: a session whose provider changed mid-window has its history
+#: split across files, and the change has to be derived from each record's
+#: ``ts``. What the page marks is where the answer changed, so the marks are
+#: kept, not every call: a hundred calls on one model followed by a hundred on
+#: another is one mark, and stays one however long those runs get. The last
+#: call is kept beside them, because the same provider coming back after
+#: another one answered is a change too, and only a later timestamp can say
+#: it did.
 TAIL_MAX = 64
 
 UNIT = "day"
@@ -403,10 +404,18 @@ class Ledger:
         bucket["last"] = max(bucket["last"], at)
         row["first"] = min(row["first"], at)
         row["last"] = max(row["last"], at)
-        # One provider's calls are one deque: the order inside it is the
+        # One provider's changes are one deque: the order inside it is the
         # order they happened in (a file is append-only), while the order
-        # *between* deques is not known until the times are sorted.
-        row["tail"].setdefault(provider, deque(maxlen=TAIL_MAX)).append((at, model))
+        # *between* deques is not known until the times are sorted. Only a
+        # change is appended -- a run of calls on one model is one mark --
+        # and the last call is kept beside the deque so a provider that
+        # answers again after another one did is seen to have done so.
+        tail = row["tail"].setdefault(provider, {"changes": deque(maxlen=TAIL_MAX),
+                                                 "model": None, "last": (at, model)})
+        if tail["model"] != model:
+            tail["changes"].append((at, model))
+            tail["model"] = model
+        tail["last"] = (at, model)
 
     def _prune(self, now: float) -> None:
         if now - self._pruned_at < 3600 and self._pruned_at:
@@ -419,12 +428,18 @@ class Ledger:
             days = row["days"]
             for day in [d for d in days if d < oldest]:
                 del days[day]
-            for provider, entries in list((row.get("tail") or {}).items()):
-                kept = [e for e in entries if e[0] >= cutoff]
+            for provider, tail in list((row.get("tail") or {}).items()):
+                kept = [e for e in (tail.get("changes") or []) if e[0] >= cutoff]
+                last = tail.get("last")
                 if kept:
-                    row["tail"][provider] = deque(kept, maxlen=TAIL_MAX)
+                    tail["changes"] = deque(kept, maxlen=TAIL_MAX)
+                elif last and last[0] >= cutoff:
+                    tail["changes"] = deque([last], maxlen=TAIL_MAX)
                 else:
                     del row["tail"][provider]
+                    continue
+                if last and last[0] < cutoff:
+                    tail["last"] = tail["changes"][-1] if tail["changes"] else None
 
     def earliest_day(self) -> Optional[str]:
         """The oldest local date any kept record falls on, for the page's note.
@@ -450,10 +465,19 @@ class Ledger:
         other provider's in that merged order.
         """
         events = []
-        for provider, entries in (row.get("tail") or {}).items():
-            for at, model in entries:
-                if at >= since_epoch:
-                    events.append((at, provider, model))
+        seen = set()
+        for provider, tail in (row.get("tail") or {}).items():
+            points = list(tail.get("changes") or [])
+            # The provider's newest call is a change point too when it is not
+            # already the last mark: without it, "answered, handed over, came
+            # back" collapses to one mark at the hand-over.
+            if tail.get("last"):
+                points.append(tail["last"])
+            for at, model in points:
+                if at < since_epoch or (at, provider, model) in seen:
+                    continue
+                seen.add((at, provider, model))
+                events.append((at, provider, model))
         events.sort(key=lambda e: (e[0], e[1]))
         switches = []
         current = None
