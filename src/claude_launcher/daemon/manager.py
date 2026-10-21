@@ -3132,7 +3132,6 @@ class SessionManager:
         and no opening task, which a restore does not replay — so "carry on"
         is not what they need and not what they are sent.
         """
-        self._restore_failed = []
         for _ in self._restore_steps():
             pass
         return self._restore_failed
@@ -3167,7 +3166,14 @@ class SessionManager:
         daemon's boot runs with its port already bound. Everything else --
         the loading guard, the kept-record reconciliation, the persist and
         the timing -- is one implementation.
+
+        The failure list is cleared here rather than in either caller: the
+        boot only ever calls the asynchronous variant, but a process that
+        restores twice must not carry the first pass's names into the second,
+        and one reset in the shared body is the only place both entry points
+        pass through (claunch-9akgh.1).
         """
+        self._restore_failed = []
         try:
             entries = self._store.load_all()
         except sqlite3.Error:
