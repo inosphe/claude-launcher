@@ -260,6 +260,51 @@ def test_a_model_change_inside_one_provider_is_a_model_switch(tmp_path, ledger):
             for s in sums["s1"]["switches"]] == [("model", "a", "b")]
 
 
+def test_one_session_split_across_two_files_switches_by_time(tmp_path, ledger):
+    # The ledger's files are per fingerprint, and a fingerprint is the
+    # upstream: a provider change splits one session's records across files.
+    # Reading the files in name order is not reading them in time order, so
+    # the switch has to be derived from each record's ts.
+    directory = tmp_path / "metering"
+    write_ledger(directory, [
+        record("s1", hour=9, upstream=FIREWORKS, model="m1"),
+        record("s1", hour=11, upstream=FIREWORKS, model="m1"),
+    ], name="1111.jsonl")
+    write_ledger(directory, [
+        record("s1", hour=10, upstream=KIMI, model="k3"),
+    ], name="2222.jsonl")
+    ledger.refresh(NOW)
+    row = ledger.window("2026-10-21",
+                        statsboard.window_start_epoch("2026-10-21", KST))["s1"]
+    assert [(s["kind"], s["from"], s["to"], s["at"][11:16])
+            for s in row["switches"]] == [
+        ("provider", "fireworks", "kimi", "10:00"),
+        ("provider", "kimi", "fireworks", "11:00"),
+    ]
+    # The model column is the last call by time, not the last file read.
+    assert row["model"] == "m1"
+
+
+def test_file_name_order_does_not_decide_the_switch_order(tmp_path, ledger):
+    # Same records, the kimi file sorts first: the answer must not change.
+    directory = tmp_path / "metering"
+    write_ledger(directory, [
+        record("s1", hour=10, upstream=KIMI, model="k3"),
+    ], name="0001.jsonl")
+    write_ledger(directory, [
+        record("s1", hour=9, upstream=FIREWORKS, model="m1"),
+        record("s1", hour=11, upstream=FIREWORKS, model="m1"),
+    ], name="9999.jsonl")
+    ledger.refresh(NOW)
+    row = ledger.window("2026-10-21",
+                        statsboard.window_start_epoch("2026-10-21", KST))["s1"]
+    assert [(s["from"], s["to"], s["at"][11:16]) for s in row["switches"]] == [
+        ("fireworks", "kimi", "10:00"),
+        ("kimi", "fireworks", "11:00"),
+    ]
+    assert row["model"] == "m1"
+
+
 def test_a_switch_before_the_window_does_not_mark_the_row(tmp_path, ledger):
     write_ledger(tmp_path / "metering", [
         record("s1", day=19, hour=9, upstream=FIREWORKS),

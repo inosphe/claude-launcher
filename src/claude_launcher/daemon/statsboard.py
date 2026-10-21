@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -62,10 +63,22 @@ WINDOWS: Dict[str, int] = {"today": 1, "week": 7, "month": 30}
 #: so a "month" request is answered from state already accumulated.
 RETENTION_DAYS = 31
 
-#: How many switches one session may keep. A session that alternates models
-#: on every call would otherwise grow without bound; the newest are the ones
-#: a reader came for.
+#: How many switches one session may report. A session that alternates
+#: models on every call would otherwise grow without bound; the newest are
+#: the ones a reader came for.
 MAX_SWITCHES = 40
+
+#: How many of each provider's own calls one session keeps for ordering.
+#: The ledger's files are per fingerprint -- that is, per provider -- so the
+#: order records were *read* in is not the order they happened in: a session
+#: whose provider changed mid-window has its history split across files, and
+#: the change has to be derived from each record's ``ts``. Keeping a short,
+#: per-provider tail of (time, model) is what makes that possible without
+#: holding every record of a month (471 sessions x ~16k calls in this
+#: fleet). Two providers that alternate more often than the tail remembers
+#: lose their middle alternations; the first change and the last state, which
+#: are what the mark is for, survive.
+TAIL_MAX = 64
 
 UNIT = "day"
 
@@ -298,7 +311,10 @@ class Ledger:
         # truncated: the files this loop had already passed would otherwise
         # stay missing until the next poll -- one answer short, for no reason
         # a reader could see. So a rebuild re-runs the scan from the start.
-        for _ in range(2):
+        # Three passes, not two: a rebuild during a rebuild (two files
+        # rewritten between polls) would otherwise end with an empty state
+        # and one blank table for a reader to wonder about.
+        for _ in range(3):
             if not self._scan():
                 break
         self._prune(now)
@@ -374,8 +390,7 @@ class Ledger:
         provider = provider_of(record, self.labels)
         model = str(record.get("model") or "")
         row = self.sessions.setdefault(name, {
-            "days": {}, "first": at, "last": at,
-            "model": model, "last_key": (provider, model), "switches": [],
+            "days": {}, "first": at, "last": at, "tail": {},
         })
         bucket = row["days"].setdefault(day, {}).setdefault(provider, {
             "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
@@ -388,31 +403,28 @@ class Ledger:
         bucket["last"] = max(bucket["last"], at)
         row["first"] = min(row["first"], at)
         row["last"] = max(row["last"], at)
-        row["model"] = model or row["model"]
-        key = (provider, model)
-        previous = row["last_key"]
-        if previous != key and previous[0] is not None:
-            kind = "provider" if previous[0] != provider else "model"
-            row["switches"].append({
-                "at": _iso(at, zone),
-                "at_epoch": at,
-                "kind": kind,
-                "from": previous[0], "to": provider,
-                "from_model": previous[1], "to_model": model,
-            })
-            if len(row["switches"]) > MAX_SWITCHES:
-                del row["switches"][:-MAX_SWITCHES]
-        row["last_key"] = key
+        # One provider's calls are one deque: the order inside it is the
+        # order they happened in (a file is append-only), while the order
+        # *between* deques is not known until the times are sorted.
+        row["tail"].setdefault(provider, deque(maxlen=TAIL_MAX)).append((at, model))
 
     def _prune(self, now: float) -> None:
         if now - self._pruned_at < 3600 and self._pruned_at:
             return
         self._pruned_at = now
         oldest = day_key(now - RETENTION_DAYS * 86400, self.zone)
+        cutoff = (datetime.strptime(oldest, "%Y-%m-%d")
+                  .replace(tzinfo=self.zone).timestamp())
         for row in self.sessions.values():
             days = row["days"]
             for day in [d for d in days if d < oldest]:
                 del days[day]
+            for provider, entries in list((row.get("tail") or {}).items()):
+                kept = [e for e in entries if e[0] >= cutoff]
+                if kept:
+                    row["tail"][provider] = deque(kept, maxlen=TAIL_MAX)
+                else:
+                    del row["tail"][provider]
 
     def earliest_day(self) -> Optional[str]:
         """The oldest local date any kept record falls on, for the page's note.
@@ -424,6 +436,43 @@ class Ledger:
         """
         days = [day for row in self.sessions.values() for day in row["days"]]
         return min(days) if days else None
+
+    # -- reading the sequence ---------------------------------------------
+    def _switch_series(self, row: dict, since_epoch: float):
+        """``(switches, last_model)`` for one session, ordered by record time.
+
+        The ledger's files are per fingerprint, so a provider change splits a
+        session's records across files and the read order is not the order
+        they happened in. Each provider's tail is already in time order; the
+        merge of the tails, sorted by ``ts``, is the sequence a reader wants.
+        A provider that answered, then lost the session, then answered again
+        shows as two switches because its calls sit on both sides of the
+        other provider's in that merged order.
+        """
+        events = []
+        for provider, entries in (row.get("tail") or {}).items():
+            for at, model in entries:
+                if at >= since_epoch:
+                    events.append((at, provider, model))
+        events.sort(key=lambda e: (e[0], e[1]))
+        switches = []
+        current = None
+        model = ""
+        for at, provider, called in events:
+            key = (provider, called)
+            if current is not None and key != current:
+                switches.append({
+                    "at": _iso(at, self.zone),
+                    "at_epoch": at,
+                    "kind": "provider" if current[0] != provider else "model",
+                    "from": current[0], "to": provider,
+                    "from_model": current[1], "to_model": called,
+                })
+            current = key
+            model = called or model
+        if len(switches) > MAX_SWITCHES:
+            switches = switches[-MAX_SWITCHES:]
+        return switches, model
 
     # -- reading the sums -------------------------------------------------
     def window(self, since_day: str, since_epoch: float) -> Dict[str, dict]:
@@ -472,6 +521,7 @@ class Ledger:
                     "requests": sums["requests"],
                 })
             providers_out.sort(key=lambda p: (-p["total"], p["provider"]))
+            switches, model = self._switch_series(row, since_epoch)
             out[name] = {
                 "input": sum(p["input"] for p in providers_out),
                 "cache_read": sum(p["cache_read"] for p in providers_out),
@@ -483,9 +533,8 @@ class Ledger:
                 "days": day_totals,
                 "first": first,
                 "last": last,
-                "model": row.get("model") or "",
-                "switches": [s for s in row.get("switches") or []
-                             if s["at_epoch"] >= since_epoch],
+                "model": model,
+                "switches": switches,
             }
         return out
 
@@ -506,7 +555,7 @@ def _activity(meta: dict) -> Optional[float]:
     """The newest moment this session can have been doing something."""
     stamps = [_stamp(meta.get(k)) for k in
               ("last_activity_at", "exited_at", "paused_at", "held_at",
-               "delayed_at", "failed_at", "created_at")]
+               "delayed_at", "failed_at", "archived_at", "created_at")]
     present = [s for s in stamps if s is not None]
     return max(present) if present else None
 
