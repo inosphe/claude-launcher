@@ -697,6 +697,17 @@ html[data-theme="light"] #term-tps-overlay {
 .sess-pr { padding: 8px 0; border-bottom: 1px solid #2a2e36; overflow-wrap: anywhere; }
 .sess-pr-link { font-weight: 600; }
 .sess-pr-repo, .sess-pr-facts { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+/* The cflow runs this session watches (app.js, sessWatchPanel). Shaped like
+   the PR section beside it: a heading, one line per row. */
+.sess-watch { margin: 10px 0; }
+.sess-watch h3 { margin: 0 0 6px; font-size: 13px; }
+.sess-watch-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  padding: 5px 0; border-bottom: 1px solid #2a2e36; overflow-wrap: anywhere;
+}
+.sess-watch-row:last-of-type { border-bottom: none; }
+.sess-watch-target { font-weight: 600; color: #39c5cf; }
+.sess-watch-kinds, .sess-watch-since { font-size: 11px; color: #9ca3af; }
 /* Role and rooms share the squeeze rather than one of them absorbing all of
    it. Left rigid, the role pill ("specialist" is 55px of a 114px budget)
    pushed the whole shortfall onto the rooms beside it, which then shrank past
@@ -765,6 +776,17 @@ html[data-theme="light"] #term-tps-overlay {
 /* The `+N` counter is the one pill that must not be shortened: "+2" clipped
    to "+" is a lie about how many rooms are hiding behind it. */
 #session-list .rail-mesh-more { flex: none; }
+/* The cflow runs this session watches, one pill with a count over the list
+   (app.js, railWatchTag). Cyan, because every other rail colour is spoken
+   for — blue says what a session IS, green what the mesh calls it, grey
+   where it belongs, amber that its run wants the reader's keyboard, purple
+   that it is compacting. Rigid like the compacting pill: "watch 3" clipped
+   to "wa…" is worse than no pill at all, and the count is the whole point. */
+#session-list .rail-watch {
+  flex: none; font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  background: #0c2a2e; color: #39c5cf; border: 1px solid #1c4a50;
+  white-space: nowrap;
+}
 /* Where the keyboard is, on the card that answers for it. Two states, and
    the pill is absent for every other arrangement of focus (see syncRailKeys)
    rather than picking one of the two.

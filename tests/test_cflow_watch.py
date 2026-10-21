@@ -431,3 +431,105 @@ def test_the_routes(tmp_path):
     assert runs["runs"][0]["version"] == 2
     assert "events" in runs["runs"][0]
     assert refused == 403 and unauth == 401
+
+
+#: A harness whose command exists on this machine, so ``stage`` accepts the
+#: definition without a profile and without launching anything.
+def _register_py_harness():
+    import sys
+
+    from claude_launcher import store
+
+    store.update(lambda doc: doc.update({
+        "harnesses": {"py": {"command": [sys.executable, "-u", "-c",
+                                         "import time; time.sleep(60)"]}}
+    }))
+
+
+def test_the_card_and_the_panel_read_the_same_subscriptions(home, tmp_path):
+    """The rail row and the detail panel both say what a session watches.
+
+    The record is the watcher's own ledger; what differs is the read — the
+    card rides the /api/sessions poll every rail load makes, the panel has
+    its own /meta request. Both have to carry the same rows, or the two
+    places disagree about a fact one of them is believed for (the bug the
+    context reading had, tests/test_ctxsize.py). The cursor stays out: it is
+    the next delivery's bookkeeping, not something a reader acts on.
+    """
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon import api as api_mod
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    since = "2026-10-21T11:02:39+00:00"
+    loops.save_watch("boss", [{
+        "target": "kid",
+        "kinds": ["reported", "done"],
+        "cursor": "20261021-110239-58e6b1:7",
+        "since": since,
+    }])
+
+    async def run():
+        _register_py_harness()
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
+        app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic(),
+                                mesh=MeshManager(mgr))
+        mgr.stage(SessionDef(name="boss", harness="py", cwd=str(tmp_path)))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            rail = await (await client.get(
+                "/api/sessions?view=rail", headers=bearer)).json()
+            meta = await (await client.get(
+                "/api/sessions/boss/meta", headers=bearer)).json()
+            return rail["sessions"][0], meta
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    row, meta = asyncio.run(run())
+    assert row["watch"] == [{"target": "kid", "kinds": ["reported", "done"],
+                             "since": since}]
+    assert "cursor" not in row["watch"][0]
+    assert meta["watch"] == row["watch"], "the panel and the card agree"
+
+
+def test_a_session_with_no_subscriptions_carries_an_empty_list(home, tmp_path):
+    """Empty, not absent: the page has to tell "watches nothing" from "this
+    daemon does not send the field at all" — the second is what a page older
+    than the field draws a stale card from."""
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon import api as api_mod
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    async def run():
+        _register_py_harness()
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
+        app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic(),
+                                mesh=MeshManager(mgr))
+        mgr.stage(SessionDef(name="quiet", harness="py", cwd=str(tmp_path)))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            rail = await (await client.get(
+                "/api/sessions?view=rail", headers=bearer)).json()
+            meta = await (await client.get(
+                "/api/sessions/quiet/meta", headers=bearer)).json()
+            return rail["sessions"][0], meta
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    row, meta = asyncio.run(run())
+    assert row["watch"] == [] and meta["watch"] == []

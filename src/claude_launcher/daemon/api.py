@@ -9051,6 +9051,34 @@ def _with_member(head: dict, key: str, text: str) -> str:
     return encoded[:-1] + (", " if head else "") + _dumps(key) + ": " + text + "}"
 
 
+def _watch_rows(session: str) -> List[dict]:
+    """The session's cflow-watch subscriptions, as the card and panel draw them.
+
+    The record is the watcher's own ``loops.json`` (``"watch"`` beside
+    ``"loops"``, `daemon/cflow_watch.py`). This only drops the cursor — it is
+    bookkeeping for the next delivery, not something a reader acts on — and
+    normalises ``kinds`` so the page does not have to tell "every event" from
+    a list it cannot parse. A read that fails is an empty list: one
+    unreadable ledger must not cost the caller the session list.
+    """
+    try:
+        rows = loops.watch_rows(session)
+    except Exception:  # noqa: BLE001 - one unreadable row is not a 500
+        return []
+    out = []
+    for row in rows:
+        target = str(row.get("target") or "").strip()
+        if not target:
+            continue
+        kinds = row.get("kinds")
+        out.append({
+            "target": target,
+            "kinds": [str(k) for k in kinds] if isinstance(kinds, list) else None,
+            "since": row.get("since"),
+        })
+    return out
+
+
 #: The session keys a rail row carries. The dashboard reads this resource
 #: repeatedly, so the detail panel's own /meta request keeps an opening task
 #: and environment out of every rail response. This lives at module scope so a
@@ -9096,6 +9124,10 @@ RAIL_FIELDS = {
     # progress it publishes while it runs (daemon/progress.py): the
     # rail's meta line and progress line read both off this poll.
     "kind", "progress", "prs", "rail_commits",
+    # The cflow runs this session watches (cflow-watch subscriptions): the
+    # card draws a count and the targets in its hover, and the detail panel
+    # draws the whole list from its own /meta request.
+    "watch",
 }
 
 
@@ -9295,6 +9327,12 @@ async def _sessions_list(request: web.Request) -> web.Response:
                 info["session_reminder"] = reminder_service.status(
                     info.get("name") or "", cfg=reminder_cfg, session=s,
                 )
+            # Which runs this session watches. Read here, in the worker, for
+            # the same reason as the row's other per-session files; an
+            # archived record skips it like its other numbers, since a
+            # subscription belongs to a watcher that is still running.
+            if not archived:
+                info["watch"] = _watch_rows(info.get("name") or "")
             out.append(info)
         return out
 
@@ -10906,6 +10944,9 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # The pending merge/handoff on this session, if any — the detail
         # panel's Hand off box reads it to show the request and its cancel.
         "handoff": request.app["handoff"].state(name),
+        # The cflow runs this session watches. The card draws the same rows
+        # off the rail poll; the panel draws them whole here.
+        "watch": _watch_rows(name),
     })
     return json_response(body)
 
