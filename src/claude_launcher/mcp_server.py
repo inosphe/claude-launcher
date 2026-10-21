@@ -27,6 +27,7 @@ import os
 from . import (
     category_mcp, glossary_mcp, observer_mcp, qa_mcp, sim_mcp, operator_v2_mcp, mcp_rpc, mesh_mcp, reposync_mcp, search_mcp, status_checks_mcp, wait_mcp,
     window_mcp, artifact_cleanup_mcp, threads_mcp, prompt_packs_mcp, webdebug_mcp, session_env,
+    cflow_watch_mcp,
 )
 from .cflow import mcp as cflow_mcp
 from .cflow2 import mcp as cflow2_mcp
@@ -62,6 +63,7 @@ SERVERS = (
     category_mcp.SERVER,
     sim_mcp.SERVER,
     cflow2_mcp.SERVER,
+    cflow_watch_mcp.SERVER,
     reposync_mcp.SERVER,
     artifact_cleanup_mcp.SERVER,
     qa_mcp.SERVER,

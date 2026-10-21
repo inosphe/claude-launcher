@@ -3,6 +3,7 @@
 - 이슈: `claunch-ijg51`
 - 작성: 세션 `s1236`, 2026-10-21
 - 상태: 설계안. 구현 전이며, 사용자가 방향을 고른 뒤 별도 회차에서 구현한다.
+- 구현(`claunch-ijg51.1`): A+B를 이 문서의 1단계 계약대로 구현했다 — MCP 도구 `runs`·`subscribe`·`unsubscribe`·`subscriptions`(`src/claude_launcher/cflow_watch_mcp.py`), 읽기와 커서(`src/claude_launcher/cflow_watch.py`), 구독 기록과 배달(`src/claude_launcher/daemon/cflow_watch.py`). 구독 기록은 세션의 `loops.json`에 `"watch"` 키로 산다. 구현이 정한 세부는 8절에 있다.
 - 근거 표기: 「사실」은 코드·문서·명령 출력으로 확인한 것이다. 「추정」은 확인하지 못한 판단이다. 원인을 확인하지 못한 것은 「원인 미상」으로 적는다.
 
 ## 0. 요약
@@ -182,3 +183,21 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 - `src/claude_launcher/workflows/v2/improv-worker-v2.yaml:1304-1352` — `delegate-work`의 보고 규약
 - `src/claude_launcher/workflows/v2/improv-coordinator-v2.yaml:92-113` — `coordinate`의 자식 보고 처리
 - `src/claude_launcher/workflows/poll.yaml:1-40` — 폴링 런
+
+## 8. 구현이 정한 것 (`claunch-ijg51.1`)
+
+설계의 미확정 결정과 1단계 계약을 코드로 옮기면서 확정한 값이다.
+
+| 항목 | 확정값 | 근거 |
+|---|---|---|
+| 읽기 도구 | `runs(targets?, since?)` — `since`를 주면 각 런에 그 커서 이후 이벤트와 다음 커서가 함께 온다 | 1단계 계약 1·4항 |
+| 백필 | `subscriptions`가 행마다 `events`(다음 배달이 실을 것)와 `cursor`를 함께 돌려준다. 저장된 커서는 움직이지 않는다 | 2단계 B의 "커서 이후 요약" |
+| 커서 | `"<run id>:<저널 위치>"`. 런 id가 울타리이고, 배치가 `BATCH_LIMIT`(40)을 넘으면 **보낸 데까지만** 전진한다 | 1단계 계약 4항, 유실 방지 |
+| 커서 저장 시점 | `queue_delivery`의 **접수가 아니라 `on_done(True)`** 뒤에 저장한다. 접수는 배달이 아니므로, 실패·취소된 블록은 커서를 남기고 다음 tick이 재시도한다 | `daemon/session.py` `queue_delivery` docstring |
+| 기본 이벤트 집합 | v2: `reported`·`done`·`aborted`·`select_held`·`waiting`(choose/ask만)·`ask_*`·`round_requested`·`delegate_failed`·`verify_failed`·`started`. v1: `step_report`·`step_completed`·`gate_wait`·`select_presented`·`checklist_presented`·`timer_presented`·`ask_*`·`done`·`aborted`·`sub_ended`·`published` | 두 런타임이 실제로 방출하는 이름(`cflow2/runtime.py` `emit`, `cflow/engine.py` `state_mod.journal`) |
+| 게이트 | v2는 `waiting` 이벤트의 `kind`가 `choose`/`ask`인 것. v1은 게이트 진입을 저널에 남기지 않으므로 **`owed` 서명 변화**로 알린다(상태 diff) | 설계 §3 B의 "저널 + 상태 diff" |
+| 런 종료 | 상태가 `done`/`aborted`/`failed`로 바뀌면 한 번 알린다(`run ended`). 보고 없이 끝난 런이 관제 세션이 놓치던 자리다 | P6·P11 |
+| 세션 소멸 | 대상 세션이 사라지면 한 번 알린다(`is gone`). 구독은 남겨 두어 세션이 돌아오면 다시 붙는다 | P11 |
+| 읽기 비용 | 파일 변경 토큰(`cflow_watch.token`)이 같으면 그 tick은 슬롯을 읽지 않는다. 걸러진 tick도 커서를 저장하므로 조용한 런이 매 tick 체크포인트를 다시 읽지 않는다 | 관측: 커서가 `:3`에 머물던 결함 |
+| 상한 | 구독자당 구독 16, tick당 대상 8, 배달당 이벤트 40 | `MAX_SUBSCRIPTIONS`·`MAX_TARGETS_PER_TICK`·`BATCH_LIMIT` |
+| 배달 경로 | `Session.queue_delivery`(터미널이 빌 때까지 대기). held·복원 중인 세션은 durability 있는 wake 큐가 받으므로 접수로 확정한다 | mesh `owed` 회계를 우회하지 않기 위해 |
