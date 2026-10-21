@@ -1,6 +1,6 @@
 # shim 모델 해석, provider 중간 교체, tiered model preset 설계
 
-상태: 설계 (구현 미착수). 이슈 `claunch-cvife`.
+상태: 단계 1·2 구현 완료 (f4d9f6e1, f3899576). 단계 3(improv-worker-v2 연결)은 후속. 이슈 `claunch-cvife`.
 
 ## 1. 배경
 
@@ -29,40 +29,46 @@
 
 세 요청의 공통 분모는 하나다. 지금은 런칭 시점에 env와 shim upstream으로 구워지는 값들(provider, 모델)을, 요청 시점에 live config로 읽는 값으로 옮기는 것. `session_affinity`가 이미 이 방식으로 동작하므로 선례는 저장소 안에 있다.
 
+구현에서 정해진 것:
+
+- provider 설정의 `dynamic: true`가 이 메커니즘의 스위치다. 커스텀 provider가 이 플래그를 켜면 그 프로파일으로 런칭되는 세션의 shim은 동적 라우트가 된다.
+- route 토큰은 둘이다. `profile:<이름>`은 프로파일의 *현재* provider를 따라간다 — `claunch set-provider <프로파일> <provider>`가 살아있는 세션에 store TTL(100ms) 안에 적용되는 경로다. `provider:<이름>`은 프로바이더 하나의 설정에 고정된다(pi 경로처럼 프로파일 맥락이 없는 호출자).
+- 지문(fingerprint) 입력이 route 토큰이 되어 provider 교체 전후 shim 프로세스가 하나로 유지된다.
+
 ### 2.1 route 키와 지문 기준의 변경
 
-- profile이 고정 upstream을 갖는 대신, **route 키**를 갖는다. 최소 변경으로 route 키는 profile의 provider 이름 그대로 쓴다.
-- shim은 스폰 시 해석된 upstream 대신 route 키를 입력받고, 요청 시점에 `store.load`로 `providers.<route>`를 읽어 upstream endpoint와 api key를 결정한다.
-- 지문(fingerprint) 입력이 (해석된 upstream, spec)에서 (route 키, spec)로 바뀐다(`routing.py:207-218`). provider 교체는 config 파일 쓰기 하나이며, 살아있는 세션에 TTL(100ms) 안에 적용된다.
-- metering 기록 파일도 지문 단위로 묶이므로 route 단위로 묶인다. 기록의 `model` 필드는 upstream 응답의 model 값이므로(`metering.py:351-354`) 해석 후 id가 남는다.
+- shim은 스폰 시 해석된 upstream 대신 route 토큰을 입력받고, 요청 시점에 `store.load`로 설정을 읽는다.
+- metering 기록은 지문 단위로 묶이므로 route 단위로 묶인다. 기록의 `model` 필드는 upstream 응답의 model 값이므로 해석 후 id가 남는다.
 
 ### 2.2 자격증명 주입
 
-- 현재 shim은 인증 헤더를 그대로 통과시킨다(`routing_shim.py`의 `_forward`). provider 교체가 생기면 대상 provider의 현재 api key를 shim이 주입해야 한다. 루프백 전용 리스너(`routing.py:324-348`)이므로 도달 가능한 프로세스는 이 머신 안의 세션 뿐이다.
-- incoming `Authorization`/`x-api-key`는 폐기하고, live config에서 읽은 route의 키로 교체한다. 헤더 형식 차이(Authorization 대 x-api-key)는 provider 설정에서 결정한다.
+- 기존 shim은 인증 헤더를 그대로 통과시켰다. 동적 라우트는 대상의 현재 키를 주입한다. 루프백 전용 리스너라 도달 가능한 프로세스는 이 머신 안의 세션 뿐이다.
+- 선행순위: 프로파일의 set-token 비밀(러너와 같은 규칙) → provider의 `api_key`. 둘 다 없으면 호출자의 자격을 그대로 넘긴다 — 새 upstream에서 실패하는 형태로 드러난다.
+- 헤더 형식은 도착한 헤더를 유지한다(Authorization이면 scheme 포함 값 교체, x-api-key면 값 교체). 헤더가 없으면 Bearer를 추가한다.
 
 ### 2.3 모델 alias 해석
 
-- shim이 body의 `model` 필드를 검사해 alias 어휘에 속하면 `providers.<route>.models` 표로 해석한다. 해석 단계는 `merge_body`(`routing.py:221-238`) 옆에 둔다.
-- alias 어휘는 둘로 정한다.
+- shim이 body의 `model` 필드를 검사해 alias 어휘에 속하면 `models:` 표로 해석한다. 해석 단계는 `merge_body` 옆의 `merge_body_model` 하나에서 spec 병합과 같이 처리한다.
+- alias 어휘는 둘이다.
   - 역할 이름: `MODEL_ROLES` 5단어.
   - claude 별칭: `CLAUDE_ALIAS_VARS`에서 파생되는 `haiku`/`sonnet`/`opus`/`fable`.
-- 표 키로 역할 이름만 허용하던 `models:`에 claude 별칭도 키로 허용한다. 예:
+- 표 키로 역할 이름만 허용하던 `models:`에 claude 별칭도 키로 허용한다(`provider_spec.MODEL_KEYS` 검증). 예:
 
   ```yaml
   providers:
     ds4:
+      dynamic: true
       models: {default: ds4, small: glm-flash, large: ds4, opus: ds4, haiku: glm-flash}
   ```
 
-- 해석 규칙: 표에 있는 alias면 표 값으로 교체, 없는 값은 그대로 통과. 이 규칙은 `merge_body`의 "body가 이미 값을 가지면 건드리지 않음" 원칙과 같은 계열이다. 통과 기준을 택하면 기존 동작과의 호환성이 유지된다. 표에도 없는 alias 단어가 왔을 때 거절(400)할지 통과할지는 미결정이며, 권고는 통과와 로그 한 줄이다(7절).
+- 해석 순서(구현 기준): 표 정확 일치 → `claude-<별칭>` id를 별칭 단어로 정규화 후 표 조회 → 역할 단어는 `ROLE_FALLBACKS`를 따라 default까지 폰백 → 그래도 없으면 원래 값 통과. 표에 없는 일반 값은 처음부터 통과한다.
 
 ### 2.4 하네스 쪽 변경 (dynamic 모드)
 
-- claude 하네스의 `ANTHROPIC_*_MODEL` env 값이 구체 id 대신 alias 단어를 담는 모드를 둔다. route 설정의 `dynamic: true` 같은 플래그로 선택한다.
-- 이 모드는 shim 경유 route에만 적용한다. shim 경유가 아닌 경로(OAuth 경로, metering 꺼진 provider)는 기존처럼 런칭 시점에 구체 id를 구운다.
-- 이 동작이 성립하려면 Claude Code가 `ANTHROPIC_DEFAULT_OPUS_MODEL=opus`처럼 env 값을 요청의 model 필드에 그대로 실어 본다는 전제가 필요하다. 확인되지 않았으므로 7절의 미검증 항목에 두고, 통제 시험으로 확인한다. 성립하지 않으면 shim 표의 키에 claude 기본 id(`claude-opus-5` 등)도 포함하는 대체안을 쓴다.
-- 프로파일 오버레이 `profiles.<name>.models`의 라이브 해석: shim이 이미 받는 `X-Claunch-Session` 헤더(`metering.py:59`)로 세션 → 프로파일을 찾아 오버레이를 적용할 수 있다. 다단계 해석(route 표 → 프로파일 오버레이)의 규칙은 구현 단계에서 확정한다.
+- dynamic provider로 런칭되면 러너가 provider 번역이 실은 `ANTHROPIC_*_MODEL` env를 빼고, wire가 claude 어휘(별칭 단어나 `claude-*` id)를 그대로 싣도록 한다. shim이 이를 표로 해석한다.
+- 설계 초안의 `ANTHROPIC_DEFAULT_OPUS_MODEL=opus` 같은 env 재배치 방안은 버렸다. 이유: Claude Code가 env 값을 wire에 그대로 실어 본다는 전제가 필요했고, 그 전제 없이도 wire에 claude의 기본 id가 실리는 경로(env 미설정)가 이미 있어서다. 설계 문서의 미검증 항목 하나가 핵심 경로에서 빠졌다.
+- 프로파일의 명시적 env 핀은 그대로 살아남는다(명시 선택 우선).
+- 프로파일 오버레이 `profiles.<name>.models`는 `profile:` 라우트에서 라이브로 적용된다.
 
 ### 2.5 지원 범위
 
@@ -112,37 +118,38 @@ model_tiers:
 
 ### 5.2 validation (가능한 경우의 수)
 
-| 필드 | 규칙 | 재사용 대상 |
+| 필드 | 규칙 | 구현 근거 |
 | --- | --- | --- |
-| `profile` | `profile_mod.list_all()`에 존재해야 함 | delegate-setting 핸들러의 프로파일 검증(`api.py:4255-4296`) |
-| `harness` | 해당 프로파일이 허용하는 하네스(`harness_policy`)여야 함 | `input_options.Catalog`(`input_options.py:93-153`) |
-| `model` | `Catalog.models(profile, harness)` — MODEL_ROLES 단어 + 프로바이더 선언 모델 + 하네스 선택지 | claunch-iq1xc의 거절 규칙 |
-| entry 전체 | 동일 티어 안 (profile, harness, model) 조합의 중복 금지 | 새 규칙 |
-| `id` | 소문자 영숫자와 하이픈, 보드 전체에서 고유 | relay id 정규식(`daemon/relay_settings.py`)과 같은 형태 |
+| `profile` | 존재하는 프로파일이어야 함 | `profile_mod.require` — 거절 메시지에 entry 위치와 사유 |
+| `harness` | 프로파일이 허용하는 하네스여야 함 | `harness_policy.allowed_names` |
+| `model` | 그 하네스가 프로파일에 대해 받는 모델 집합 | spawn 게이트와 같은 규칙(`input_options._MODEL_RULES`): claude는 모든 프리셋 + 하네스 선택지, 그 밖은 선언 모델 + 선택지 |
+| entry 전체 | 동일 티어 안 (profile, harness, model) 조합의 중복 금지 | 하네스·모델은 폰백 적용 후 값으로 비교 |
+| `id` | 소문자 영숫자와 하이픈, 고유 | `TIER_ID_RE` |
+| 티어 수 | 1~5개 | `MAX_TIERS` |
 
 검증을 통과하지 못하는 조합은 400으로 거절하고, 어느 필드가 무엇 때문에 거절되는지 메시지에 적는다. 조용히 버리는 방식은 쓰지 않는다.
 
 ### 5.3 기본값 규칙
 
 - `model` 생략 → `default` 역할 → 그 프로파일의 default 모델.
-- `harness` 생략 → 프로파일의 기본 하네스(`profiles.<name>.harness`, 없으면 하네스 정의 기본).
+- `harness` 생략 → 프로파일의 기본 하네스(`lineage.effective_harness`).
 
 ### 5.4 저장과 편집
 
-- 저장은 `~/.claunch.yaml`의 최상위 `model_tiers:` 블록. `store.update(mutator)`로 원자적 갱신.
-- 정제(sanitize)는 `daemon/status_checks.py`의 `_clean_presets` 패턴을 따른다: 읽기와 쓰기 양쪽에서 같은 정제 함수를 지나게 하고, uuid id를 부여하고, 파일 쓰기는 `atomic.replace`로 한다.
-- API: `GET /api/model-tiers`(정제 후 상태), `PUT /api/model-tiers`(전체 교체, 본문 검증 후 저장, 저장된 상태 반환). 행 단위 엔드포인트는 두지 않는다. 목록 전체가 작고 편집 빈도가 낮기 때문이다.
-- 설정 페이지: General 탭에 카드 하나 추가(`app.js:31003-31030`의 카드 목록). UI 패턴은 delegate 카드(`app.js:32795-32863`, select + 즉시 저장)와 status-checks 카드(`app.js:31549-31611`, 행 추가·편집·삭제)를 조합한다.
+- 저장은 `~/.claude.yaml`의 최상위 `model_tiers:` 블록. `store.update(mutator)`로 원자적 갱신.
+- 정제(sanitize)는 읽기와 쓰기 양쪽에서 같은 정제 함수(`_clean`)를 지나게 하는 `daemon/status_checks.py` `_clean_presets` 패턴을 따른다.
+- API: `GET /api/model-tiers`(정제 후 상태 + 편집기 select용 카탈로그), `PUT /api/model-tiers`(전체 교체, 검증 후 저장, 저장된 상태 반환). 행 단위 엔드포인트는 없다.
+- 설정 페이지: General 탭에 카드 하나(`modelTiersCard`). delegate 카드의 즉시 저장 + status-checks 카드의 행 편집 패턴 조합.
 
-### 5.5 해석 함수 (개념만 정의)
+### 5.5 해석 함수
 
 ```python
-def resolve_tier_entry(tier_id: str) -> Optional[TierEntry]:
+def resolve(tier_id: str) -> Optional[Tuple[str, str, str]]:
     """티어 id -> 활성 entry -> 기본값 규칙 적용 -> (profile, harness, model)."""
 ```
 
-- 입력은 `store.load()`의 결과만 쓴다. 호출자가 부를 때마다 최신값이므로, 3.2의 "같은 티어 안 실시간 변경" 기반은 이 함수를 shim의 요청 처리와 워크플로의 위임 단계에서 부르는 데서 나온다.
-- 사용처 연결(improv-worker-v2의 `route-delegate` 단계, spawn 인자, 활성 entry 전환 UI)은 후속 작업. 이 문서의 범위 밖.
+- 입력은 `store.load()`의 결과만 쓴다. 호출할 때마다 최신값이므로, 3.2의 "같은 티어 안 실시간 변경" 기반은 이 함수를 shim의 요청 처리와 워크플로의 위임 단계에서 부르는 데서 나온다.
+- 사용처 연결(improv-worker-v2의 `route-delegate` 단계, spawn 인자, 활성 entry 전환 UI)은 후속 작업(단계 3).
 
 ### 5.6 MODEL_ROLES와의 관계와 명칭
 
@@ -166,12 +173,11 @@ def resolve_tier_entry(tier_id: str) -> Optional[TierEntry]:
 
 ## 7. 미검증 항목
 
-- Claude Code가 `ANTHROPIC_DEFAULT_OPUS_MODEL` 같은 env 값을 요청의 model 필드에 그대로 실어 본다는 전제(2.4). 통제 시험 필요. 성립하지 않으면 shim 표 키에 claude 기본 id를 포함하는 대체안.
-- shim 자격 주입 시 provider별 인증 헤더 형식 차이(Authorization 대 x-api-key)의 요청마다 전환. OpenAI 어댑터 경유(pi 하네스)와의 조합.
-- dynamic 모드와 routing 핀(`providers.<name>.routing`, OpenRouter 병합)의 조합 규칙. 동적 upstream 아래서도 spec 병합을 유지할지.
-- 프로파일 오버레이 `profiles.<name>.models`의 라이브 해석에서 세션 헤더 → 프로파일 대응이 실패하는 경우의 동작(세션 삭제 후의 요청 등).
-- 티어 수 상한(5 권고)과 행 단위 API 필요 여부. 구현 단계 확정.
-- alias 어휘가 표에도 없을 때 거절 대 통과의 최종 선택(2.3).
+- shim 자격 주입이 provider별 인증 헤더 형식(x-api-key 환경 등)을 만나는 경우. Authorization scheme 보존으로 처리했으나 x-api-key 전용 백엔드와의 실층 조합은 라이브에서 확인이 필요하다.
+- dynamic 모드와 routing 핀(`providers.<name>.routing`, OpenRouter 병합)의 조합. 구현은 spec 병합을 유지하지만 실 백엔드 조합 시험은 없다.
+- `profile:` 라우트에서 프로파일의 provider가 dynamic이 아닌(static) provider로 옮겨졌을 때의 모델 동작(static provider의 표로 해석, wire의 claude id가 그 provider의 표에 없으면 통과).
+- pi 하네스 경로(`provider:` 라우트)의 모델 해석 — pi의 wire 모델 id가 표에 없으면 통과한다.
+- 수동 확인 7·8(라이브 데몬): 자동 시험의 throwaway upstream으로는 대체 검증했다(단위 시험의 라이브 교체 케이스).
 
 ## 8. 검증 방법 (구현 시)
 
@@ -191,8 +197,8 @@ def resolve_tier_entry(tier_id: str) -> Optional[TierEntry]:
 
 ## 9. 작업 분할
 
-| 단계 | 내용 | 비고 |
+| 단계 | 내용 | 상태 |
 | --- | --- | --- |
-| 1 | shim 동적 라우트 + alias 해석 (기능 1·2 코어) | 이 문서 2~4절 |
-| 2 | `model_tiers` 저장·검증·API·설정 카드 (기능 3 기반) | 이 문서 5절, 사용처 연결 없음 |
+| 1 | shim 동적 라우트 + alias 해석 (기능 1·2 코어) | 완료 (f4d9f6e1) |
+| 2 | `model_tiers` 저장·검증·API·설정 카드 (기능 3 기반) | 백엔드 완료 (f3899576), 설정 카드 동반 커밋 예정 |
 | 3 | improv-worker-v2 연결과 티어 내 실시간 전환 | 후속 논의 대상(3.2) |

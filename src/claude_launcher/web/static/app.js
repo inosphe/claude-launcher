@@ -25549,6 +25549,7 @@ function openSettings(section) {
   refreshPtyHostSetting();
   refreshTestOutputDir();
   refreshDelegateSetting();
+  refreshModelTiers();
   refreshProviderAffinity();
 }
 
@@ -31536,6 +31537,7 @@ function renderWorkspaces() {
   view.appendChild(ptyHostSettingCard());
   view.appendChild(testOutputDirCard());
   view.appendChild(delegateSettingCard());
+  view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
 
   refocusSettingsField(focused);
@@ -33413,6 +33415,240 @@ function delegateSettingCard() {
   const model = el("label", "delegate-field", " Model preset ");
   model.appendChild(delegateSelect("delegate-model", "model", st.model, st.presets, st.defaults.model));
   card.append(profile, model);
+  return card;
+}
+
+/* Model tiers (claunch-cvife) -- the model_tiers: block of ~/.claunch.yaml,
+   read and written with GET/PUT /api/model-tiers. A tier is a named routing
+   slot (economy / standard / heavy...); its entries are ordered
+   (profile, model, harness) tuples and the active pointer picks the entry
+   the tier resolves to. An entry without model/harness takes the "default"
+   role model / the profile's effective harness. The PUT replaces the whole
+   block, so every mutation below rewrites it from the local copy; a refused
+   PUT shows the server's reason and re-GETs to restore stored state. */
+let modelTiers = {
+  block: { version: 1, tiers: [], active: {} },
+  profiles: [], harnesses: {}, models: {}, presets: [], max_tiers: 5,
+  loaded: false, error: "", busy: false,
+};
+let modelTiersTierDraft = "";
+let modelTiersAddError = "";
+
+const MODEL_TIER_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+function takeModelTiers(data) {
+  Object.assign(modelTiers, {
+    block: data.block || { version: 1, tiers: [], active: {} },
+    profiles: data.profiles || [],
+    harnesses: data.harnesses || {},
+    models: data.models || {},
+    presets: data.presets || [],
+    max_tiers: data.max_tiers || 5,
+    loaded: true, error: "",
+  });
+}
+
+async function refreshModelTiers() {
+  try {
+    const resp = await api("/api/model-tiers");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeModelTiers(data);
+  } catch (err) {
+    modelTiers.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveModelTiers() {
+  modelTiers.busy = true;
+  renderWorkspaces();
+  let failed = "";
+  try {
+    const resp = await api("/api/model-tiers", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tiers: modelTiers.block.tiers, active: modelTiers.block.active,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeModelTiers(data);
+  } catch (err) {
+    failed = String(err);
+    await refreshModelTiers();  // the PUT did not land; go back to stored state
+    modelTiers.error = failed;
+  }
+  modelTiers.busy = false;
+  renderWorkspaces();
+}
+
+function modelTierEntrySelect(current, choices, emptyLabel, onChange) {
+  const select = document.createElement("select");
+  select.disabled = modelTiers.busy;
+  const options = [["", emptyLabel], ...choices.map((c) => [c, c])];
+  if (current && !choices.includes(current)) options.push([current, `${current} (missing)`]);
+  for (const [value, label] of options) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  }
+  select.value = current || "";
+  select.addEventListener("change", () => onChange(select.value));
+  return select;
+}
+
+function modelTiersEntryModelChoices(profile) {
+  return [...new Set([...modelTiers.presets, ...(modelTiers.models[profile] || [])])];
+}
+
+function modelTiersEntryHarnessChoices(profile) {
+  const allowed = modelTiers.harnesses[profile];
+  return allowed && allowed.length ? allowed : ["claude"];
+}
+
+function modelTiersSetActive(tierId, index) {
+  modelTiers.block.active[tierId] = index;
+  saveModelTiers();
+}
+
+function modelTiersSetEntry(tier, index, field, value) {
+  const entry = tier.entries[index];
+  if (!entry) return;
+  if (value) entry[field] = value;
+  else delete entry[field];
+  saveModelTiers();
+}
+
+function modelTiersRemoveEntry(tier, index) {
+  const entry = tier.entries[index];
+  if (!confirm(`Delete entry '${entry ? entry.profile : "#" + (index + 1)}' from tier '${tier.id}'?`)) return;
+  if (tier.entries.length <= 1) {
+    modelTiers.error = `tier '${tier.id}' needs at least one entry`;
+    renderWorkspaces();
+    return;
+  }
+  tier.entries.splice(index, 1);
+  const active = modelTiers.block.active[tier.id] || 0;
+  if (active > index) modelTiers.block.active[tier.id] = active - 1;
+  else if (active === index || active >= tier.entries.length) modelTiers.block.active[tier.id] = 0;
+  saveModelTiers();
+}
+
+function modelTiersAddEntry(tier, profile) {
+  if (!profile) return;
+  tier.entries.push({ profile });
+  saveModelTiers();
+}
+
+function modelTiersAddTier() {
+  const id = modelTiersTierDraft.trim();
+  modelTiersAddError = "";
+  if (!MODEL_TIER_ID_RE.test(id)) {
+    modelTiersAddError = `tier id '${id}' must match ${MODEL_TIER_ID_RE}`;
+    renderWorkspaces();
+    return;
+  }
+  if (modelTiers.block.tiers.some((t) => t.id === id)) {
+    modelTiersAddError = `tier '${id}' already exists`;
+    renderWorkspaces();
+    return;
+  }
+  if (!modelTiers.profiles.length) {
+    modelTiersAddError = "no profiles available for the first entry";
+    renderWorkspaces();
+    return;
+  }
+  modelTiersTierDraft = "";
+  modelTiers.block.tiers.push({ id, entries: [{ profile: modelTiers.profiles[0] }] });
+  saveModelTiers();
+}
+
+function modelTierSection(tier) {
+  const wrap = el("div", "model-tier");
+  wrap.appendChild(el("h4", null, tier.id));
+  if (!tier.entries.length) wrap.appendChild(el("p", "wf-note", "No entries -- add one below."));
+  const active = modelTiers.block.active[tier.id] || 0;
+  tier.entries.forEach((entry, index) => {
+    const row = el("div", "model-tier-entry");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = `model-tier-active-${tier.id}`;
+    radio.checked = index === active;
+    radio.disabled = modelTiers.busy;
+    radio.title = "Active entry for this tier";
+    radio.addEventListener("change", () => modelTiersSetActive(tier.id, index));
+    row.appendChild(radio);
+    const profile = el("label", "delegate-field", " Profile ");
+    profile.appendChild(modelTierEntrySelect(
+      entry.profile, modelTiers.profiles, "(profile)",
+      (v) => { if (v) modelTiersSetEntry(tier, index, "profile", v); }
+    ));
+    const harness = el("label", "delegate-field", " Harness ");
+    harness.appendChild(modelTierEntrySelect(
+      entry.harness || "", modelTiersEntryHarnessChoices(entry.profile), "(profile default)",
+      (v) => modelTiersSetEntry(tier, index, "harness", v)
+    ));
+    const model = el("label", "delegate-field", " Model ");
+    model.appendChild(modelTierEntrySelect(
+      entry.model || "", modelTiersEntryModelChoices(entry.profile), "(default)",
+      (v) => modelTiersSetEntry(tier, index, "model", v)
+    ));
+    const remove = el("button", "wf-btn danger", "Delete");
+    remove.type = "button";
+    remove.disabled = modelTiers.busy;
+    remove.addEventListener("click", () => modelTiersRemoveEntry(tier, index));
+    row.append(profile, harness, model, remove);
+    wrap.appendChild(row);
+  });
+  const addRow = el("div", "model-tier-add");
+  const addProfile = document.createElement("select");
+  addProfile.disabled = modelTiers.busy || !modelTiers.profiles.length;
+  for (const p of modelTiers.profiles) addProfile.appendChild(new Option(p, p));
+  const add = el("button", "wf-btn approve", "Add entry");
+  add.type = "button";
+  add.disabled = modelTiers.busy || !modelTiers.profiles.length;
+  add.addEventListener("click", () => modelTiersAddEntry(tier, addProfile.value));
+  addRow.append(addProfile, add);
+  wrap.appendChild(addRow);
+  return wrap;
+}
+
+function modelTiersCard() {
+  const st = modelTiers;
+  const card = el("section", "ws-add model-tiers-settings");
+  card.appendChild(el("h3", null, "Model tiers"));
+  card.appendChild(el("p", "wf-note",
+    "Named routing slots of ordered (profile, model, harness) entries; the " +
+    "marked entry is what the tier resolves to. An empty harness/model means " +
+    "the profile default / the default role model. Edits save immediately. " +
+    "Same settings as the model_tiers: block of ~/.claunch.yaml."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  if (!st.block.tiers.length) card.appendChild(el("p", "wf-note", "No tiers defined."));
+  for (const tier of st.block.tiers) card.appendChild(modelTierSection(tier));
+  const form = el("form", "model-tier-add-tier");
+  const idInput = document.createElement("input");
+  idInput.placeholder = "Tier id, for example: economy";
+  idInput.value = modelTiersTierDraft;
+  idInput.disabled = st.busy;
+  idInput.addEventListener("input", () => { modelTiersTierDraft = idInput.value; });
+  const addTier = el("button", "wf-btn approve", "Add tier");
+  addTier.disabled = st.busy;
+  form.append(idInput, addTier);
+  form.addEventListener("submit", (e) => { e.preventDefault(); modelTiersAddTier(); });
+  card.appendChild(form);
+  if (modelTiersAddError) card.appendChild(el("p", "error", modelTiersAddError));
+  if (st.block.tiers.length >= st.max_tiers) {
+    idInput.disabled = true;
+    addTier.disabled = true;
+    card.appendChild(el("p", "wf-note", `At most ${st.max_tiers} tiers.`));
+  }
   return card;
 }
 
