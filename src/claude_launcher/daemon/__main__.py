@@ -23,7 +23,7 @@ from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
 from . import hold as hold_mod, instance_manifest, operator_keepalive, restore_queue, session_procs, session_reminder
-from .api import build_app, notify_shutdown
+from .api import build_app, close_websockets, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
 
@@ -229,28 +229,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         background_render_budget=float(cfg["background_render_budget_kib"]) * 1024,
         restore_stagger=float(cfg.get("restore_stagger_seconds") or 0.0),
     )
-    failed = manager.restore_all()
-    if failed:
-        # The cause of each one is already in the log — restore_all logs the
-        # traceback where it catches. What belongs here is the set, said once,
-        # which is the thing boot output is read for; a warning per name said
-        # the same sentence a second time and no more than that.
-        log.warning(
-            "failed to restore %d session(s): %s",
-            len(failed), ", ".join(failed),
-        )
-    restored = [s.sdef.name for s in manager.list() if not s.exited]
-    retired = [s.sdef.name for s in manager.list()
-               if s.exited and s.sdef.name not in manager.restore_queue]
-    if restored:
-        log.info("restored sessions: %s", ", ".join(restored))
-    if retired:
-        log.info(
-            "kept %d exited session record(s), respawnable: %s",
-            len(retired),
-            ", ".join(retired),
-        )
-
+    # The fleet is restored *after* the port is bound (see below). Until
+    # claunch-9akgh it ran here, and every client spent its whole duration
+    # looking at a daemon that answered nothing -- measured on 2026-10-21 as
+    # 11.7s of a 19.6s keep restart, all of it before the first byte of the
+    # successor's HTTP surface existed.
     mesh_manager = MeshManager(manager)
     mesh_manager.load_all()
 
@@ -285,6 +268,16 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # than the restart flow's patience (stop waits 10s, the successor's lock
     # grace is 15s). Keep teardown well inside that budget.
     site = web.TCPSite(runner, host, port, shutdown_timeout=3.0)
+    # What this boot still has to do, readable from the first request that
+    # lands (GET /api/health and /api/daemon both carry it; claunch-9akgh).
+    # Set before the socket accepts so no reader can see a bound port with
+    # no answer to "is it done".
+    app["boot"] = {
+        "phase": "restoring",
+        "done": 0,
+        "total": 0,
+        "started": time.monotonic(),
+    }
     try:
         await site.start()
     except OSError as exc:
@@ -306,6 +299,45 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     if bound is not None:
         bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)
+    # Bring the fleet back now that the port answers. This is the boot's
+    # longest stretch (11.7s for 33 adopted sessions on 2026-10-21,
+    # claunch-9akgh); the async variant yields between records, so a page
+    # that connects during it reads `boot: {phase: restoring, done, total}`
+    # and can say what is happening instead of showing the previous daemon's
+    # last frame. The restore stays before the clocks below on purpose:
+    # every one of them drives sessions that must exist by then.
+    def _boot_progress(done: int, total: int) -> None:
+        app["boot"]["done"] = done
+        app["boot"]["total"] = total
+
+    failed = await manager.restore_all_async(progress=_boot_progress)
+    app["boot"]["done"] = app["boot"]["total"]
+    app["boot"]["phase"] = "ready"
+    # build_app swept the retired records it could see, and it saw none: the
+    # registry had not been read yet. The records restore_all just retired
+    # owe the board the same sweep, or their in_progress issues keep
+    # claiming a session that is not running (see the call in build_app).
+    app["beads"].sessions_exited(manager.take_retired_for_sweep())
+    if failed:
+        # The cause of each one is already in the log — restore_all logs the
+        # traceback where it catches. What belongs here is the set, said once,
+        # which is the thing boot output is read for; a warning per name said
+        # the same sentence a second time and no more than that.
+        log.warning(
+            "failed to restore %d session(s): %s",
+            len(failed), ", ".join(failed),
+        )
+    restored = [s.sdef.name for s in manager.list() if not s.exited]
+    retired = [s.sdef.name for s in manager.list()
+               if s.exited and s.sdef.name not in manager.restore_queue]
+    if restored:
+        log.info("restored sessions: %s", ", ".join(restored))
+    if retired:
+        log.info(
+            "kept %d exited session record(s), respawnable: %s",
+            len(retired),
+            ", ".join(retired),
+        )
     # The same check `claunch daemon start/restart` prints: this daemon keeps
     # serving, and refuses sessions on these profiles with the same message.
     try:
@@ -561,6 +593,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             mode=mode, reason="restart" if app["restart_requested"] else "stop"))
         if pty_host is not None:
             await teardown.step("pty_host", asyncio.to_thread(_close_pty_host, pty_host, mode))
+        # Sockets before the runner: aiohttp's server shutdown waits up to
+        # its shutdown_timeout for open connections, and a terminal socket
+        # is never idle-closed on its own. Closing them first (concurrently
+        # and bounded -- see api.close_websockets) takes that wait out of
+        # the restart; the shutdown hook closes them again, which is a no-op.
+        await teardown.step("websockets", close_websockets(app))
         # The app's own on_shutdown/on_cleanup hooks run in here.
         await teardown.step("http runner", runner.cleanup())
         teardown.report()

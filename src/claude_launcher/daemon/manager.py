@@ -154,6 +154,21 @@ class _PendingClaim:
     cwd: str
 
 
+def _brings_back(entry) -> bool:
+    """Whether a registry record is one a boot actually brings back.
+
+    The registry keeps every session it has ever known -- on this machine
+    1551 records for ~48 live ones -- so a boot's progress and its total
+    have to be counted over *this* population, not over the file. One
+    predicate for both, or the banner runs past its own total
+    (claunch-9akgh review).
+    """
+    return bool(
+        isinstance(entry, dict)
+        and (entry.get("was_running") or entry.get("delayed_at"))
+    )
+
+
 class SessionManager:
     #: Filesystem discovery for a rollout that Codex has not written yet is
     #: retried from ordinary manager reads.  One dashboard request can perform
@@ -232,7 +247,13 @@ class SessionManager:
         #: delete every record not loaded yet; relaunches skip theirs.
         self._loading = False
         #: Seconds the current :meth:`restore_all` spent per launch step.
-        self._restore_clock = {"prepare": 0.0, "spawn": 0.0}
+        self._restore_clock = {
+            "prepare": 0.0, "spawn": 0.0, "attach": 0.0, "adopt": 0.0,
+        }
+        #: Names whose relaunch failed in the current :meth:`restore_all`.
+        #: The pass is a generator now, so the return value cannot carry
+        #: them out of it; the two callers read this instead.
+        self._restore_failed: List[str] = []
         #: Set by :meth:`clear` and :meth:`remove` for the one persist that
         #: follows, so a *deliberate* empty write is allowed to prune the store
         #: to empty — the one case the empty-snapshot guard must let through.
@@ -3111,12 +3132,48 @@ class SessionManager:
         and no opening task, which a restore does not replay — so "carry on"
         is not what they need and not what they are sent.
         """
+        self._restore_failed = []
+        for _ in self._restore_steps():
+            pass
+        return self._restore_failed
+
+    async def restore_all_async(self, progress=None) -> List[str]:
+        """:meth:`restore_all`, with the loop still answering while it runs.
+
+        The boot used to restore the whole fleet before binding its port, so
+        every client spent the restore looking at a dead daemon -- on this
+        machine 11.7s for 33 sessions, entirely inside the restart's black
+        out (claunch-9akgh). The port is bound first now, and this variant
+        yields to the event loop between registry entries so the API, the
+        dashboards and the terminals of sessions already back can be
+        answered while the rest are still being brought up.
+
+        ``progress(done, total)`` is called once before the first entry (0,
+        total) and after each one, for the boot status a restart reader
+        polls (``api.boot_status``). total counts the records this boot
+        tries to bring back; the rest are kept as exited records, which is
+        cheap and happens in the same pass.
+        """
+        for _ in self._restore_steps(progress=progress):
+            await asyncio.sleep(0)
+        return self._restore_failed
+
+    def _restore_steps(self, progress=None):
+        """The body of :meth:`restore_all`, yielding after every entry.
+
+        A generator rather than a plain loop because the two callers differ
+        in exactly one place: the synchronous restore used by tests and by
+        anything that is not serving HTTP, and the asynchronous one the
+        daemon's boot runs with its port already bound. Everything else --
+        the loading guard, the kept-record reconciliation, the persist and
+        the timing -- is one implementation.
+        """
         try:
             entries = self._store.load_all()
         except sqlite3.Error:
             log.exception("failed to read the session registry")
-            return []
-        failed: List[str] = []
+            return
+        failed: List[str] = self._restore_failed
         host = pty_backend.current_host()
         stranded = pty_backend.stranded_host() if host is None else None
         kept: Dict[str, dict] = {}
@@ -3133,117 +3190,37 @@ class SessionManager:
         # guards anything else that persists meanwhile. Hold it for the whole
         # loop, drop it before the one steady-state persist at the end.
         self._loading = True
-        self._restore_clock = {"prepare": 0.0, "spawn": 0.0}
+        self._restore_clock = {
+            "prepare": 0.0, "spawn": 0.0, "attach": 0.0, "adopt": 0.0,
+        }
         started = _perf_counter()
         try:
-            # Said up front: the relaunches below run before the port is bound,
-            # so this line is what the log shows for the seconds a CLI spends
-            # waiting on a daemon that has not announced itself yet.
-            relaunching = sum(
-                1 for e in entries
-                if isinstance(e, dict)
-                and (e.get("was_running") or e.get("delayed_at"))
-            )
+            # Said up front: this is how many records the pass brings back,
+            # which is also the total the boot status reports (claunch-9akgh).
+            relaunching = sum(1 for e in entries if _brings_back(e))
             if relaunching:
                 log.info(
-                    "restoring %d session(s) before listening "
-                    "(about a second each)",
+                    "restoring %d session(s) (about a second each)",
                     relaunching,
                 )
+            if progress is not None:
+                progress(0, relaunching)
+            done = 0
             for entry in entries:
-                try:
-                    sdef = SessionDef.from_dict(entry.get("def") or {})
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if sdef.name in self._sessions:
-                    continue  # a duplicated record must not clobber a live one
-                row = self._kept_row(kept, sdef, entry)
-                if row is not None:
-                    # Still running in the PTY host (claunch-xnnct.1): taken
-                    # over as it is, before the restore queue and the
-                    # relaunch below, which are for programs that ended.
-                    try:
-                        self._adopt(host, sdef, entry, row)
-                        continue
-                    except Exception:
-                        log.exception(
-                            "failed to adopt session %r from the PTY host; "
-                            "ending it there and restoring it", sdef.name,
-                        )
-                        self._sessions.pop(sdef.name, None)
-                        self._end_kept(host, row)
-                if stranded is not None and entry.get("pty") and entry.get("was_running"):
-                    # Still running in a PTY host this daemon could neither
-                    # use nor end (claunch-xnnct.1): a relaunch would run
-                    # the same conversation a second time.
-                    dead = self._retire(sdef, entry)
-                    # Nor has it ended, so it owes the board no sweep
-                    # (SESSION ENDED) either.
-                    if dead in self._retired_for_sweep:
-                        self._retired_for_sweep.remove(dead)
-                    log.warning(
-                        "session %r still runs in PTY host pid %s, which this daemon "
-                        "cannot reach; not relaunching it", sdef.name, stranded,
-                    )
-                    self.events.record(
-                        dead, "restore", "연결할 수 없는 PTY 호스트에서 실행 중이라 재실행하지 않음",
-                        host_pid=stranded,
-                    )
-                    continue
-                # A record still delayed when the previous daemon went down
-                # was never started by it: it is owed the restore it did not
-                # get, not left a plain hold.
-                if sdef.restore and (entry.get("was_running") or entry.get("delayed_at")):
-                    if self.restore_stagger > 0 and self._resumable_def(sdef):
-                        self._defer_restore(sdef, entry)
-                        continue
-                    # Asked before the relaunch, not after: the answer is about
-                    # the transcript the *previous* daemon left behind, and the
-                    # session we are about to start writes one of its own.
-                    blank = harness_mod.restores_blank(sdef)
-                    try:
-                        # Its own creation time, not this restart's: the
-                        # listings are ordered by it, and a restart that
-                        # restamped every relaunched session would flatten the
-                        # whole fleet into one moment and lose the order.
-                        restored = self.create(
-                            sdef,
-                            restoring=True,
-                            created_at=entry.get("created_at"),
-                            last_visited_at=entry.get("last_visited_at"),
-                            last_input_at=entry.get("last_input_at"),
-                            delivery_hold=bool(entry.get("delivery_hold")),
-                        )
-                        self.events.record(restored, "resume", "데몬 재시작 후 세션 복원")
-                        if entry.get("was_busy"):
-                            self.resumed_busy.append(sdef.name)
-                        else:
-                            self.resumed_idle[sdef.name] = entry.get("last_output_at")
-                        if not blank:
-                            # Codex's blank restore is decided by the launch
-                            # that just ran, not by the transcript the previous
-                            # daemon left, so it is read here off the live
-                            # definition -- `launch` resolves the conversation
-                            # in place (see harness.codex_restores_blank).
-                            launched = self._sessions.get(sdef.name)
-                            blank = launched is not None and (
-                                harness_mod.codex_restores_blank(launched.sdef)
-                            )
-                        if blank:
-                            self.resumed_blank.append(sdef.name)
-                        continue
-                    except Exception:
-                        # The traceback is the only record this failure will
-                        # ever have: the record is retired on the next line
-                        # and nothing retries a relaunch, so the next boot
-                        # starts from a session that is simply not there
-                        # any more. Without it the log names the session and
-                        # says nothing about why — `failed to restore session
-                        # 's560'` and `'s571'` (2026-09-18 11:35:57) are
-                        # unrecoverable for exactly this reason.
-                        log.exception("failed to restore session %r", sdef.name)
-                        failed.append(sdef.name)
-                self._retire(sdef, entry)
+                self._restore_entry(entry, kept, host, stranded, failed)
+                # `done` counts the same population `total` does. The
+                # registry holds far more records than this boot brings
+                # back -- exited ones kept for respawn -- and counting every
+                # record made the boot banner run past its own total
+                # ("restoring 1551/48" against this machine's 1551-record
+                # registry, claunch-9akgh review). It lands exactly on
+                # `total` because every counted record passes through here
+                # once, processed or skipped.
+                if _brings_back(entry):
+                    done += 1
+                    if progress is not None:
+                        progress(done, relaunching)
+                yield
             for row in kept.values():
                 # Running in the host with no record here that owns it: a
                 # session this registry ended or forgot, or one whose record
@@ -3269,15 +3246,123 @@ class SessionManager:
             now = _perf_counter()
             log.info(
                 "restore took %.1fs for %d session(s): prepare/replay %.1fs, "
-                "spawn %.1fs, persist %.1fs, other %.1fs",
+                "spawn %.1fs, attach %.1fs, adopt/replay %.1fs, persist %.1fs, "
+                "other %.1fs",
                 now - started,
                 relaunching,
                 clock["prepare"],
                 clock["spawn"],
+                clock["attach"],
+                clock["adopt"],
                 now - persist_started,
-                (persist_started - started) - clock["prepare"] - clock["spawn"],
+                (persist_started - started)
+                - clock["prepare"] - clock["spawn"]
+                - clock["attach"] - clock["adopt"],
             )
-        return failed
+
+    def _restore_entry(
+        self, entry: dict, kept: Dict[str, dict], host, stranded, failed: List[str]
+    ) -> None:
+        """One registry record, as :meth:`_restore_steps` walks them.
+
+        Split out so the generator can yield between records: this is where
+        a boot's seconds go (an adopt replays up to ``REPLAY_TAIL_BYTES`` of
+        pyte work per session), and holding the event loop for all of it is
+        what kept the port from answering during a restart.
+        """
+        try:
+            sdef = SessionDef.from_dict(entry.get("def") or {})
+        except (KeyError, ValueError, TypeError):
+            return
+        if sdef.name in self._sessions:
+            return  # a duplicated record must not clobber a live one
+        row = self._kept_row(kept, sdef, entry)
+        if row is not None:
+            # Still running in the PTY host (claunch-xnnct.1): taken
+            # over as it is, before the restore queue and the
+            # relaunch below, which are for programs that ended.
+            try:
+                self._adopt(host, sdef, entry, row)
+                return
+            except Exception:
+                log.exception(
+                    "failed to adopt session %r from the PTY host; "
+                    "ending it there and restoring it", sdef.name,
+                )
+                self._sessions.pop(sdef.name, None)
+                self._end_kept(host, row)
+        if stranded is not None and entry.get("pty") and entry.get("was_running"):
+            # Still running in a PTY host this daemon could neither
+            # use nor end (claunch-xnnct.1): a relaunch would run
+            # the same conversation a second time.
+            dead = self._retire(sdef, entry)
+            # Nor has it ended, so it owes the board no sweep
+            # (SESSION ENDED) either.
+            if dead in self._retired_for_sweep:
+                self._retired_for_sweep.remove(dead)
+            log.warning(
+                "session %r still runs in PTY host pid %s, which this daemon "
+                "cannot reach; not relaunching it", sdef.name, stranded,
+            )
+            self.events.record(
+                dead, "restore", "연결할 수 없는 PTY 호스트에서 실행 중이라 재실행하지 않음",
+                host_pid=stranded,
+            )
+            return
+        # A record still delayed when the previous daemon went down
+        # was never started by it: it is owed the restore it did not
+        # get, not left a plain hold.
+        if sdef.restore and (entry.get("was_running") or entry.get("delayed_at")):
+            if self.restore_stagger > 0 and self._resumable_def(sdef):
+                self._defer_restore(sdef, entry)
+                return
+            # Asked before the relaunch, not after: the answer is about
+            # the transcript the *previous* daemon left behind, and the
+            # session we are about to start writes one of its own.
+            blank = harness_mod.restores_blank(sdef)
+            try:
+                # Its own creation time, not this restart's: the
+                # listings are ordered by it, and a restart that
+                # restamped every relaunched session would flatten the
+                # whole fleet into one moment and lose the order.
+                restored = self.create(
+                    sdef,
+                    restoring=True,
+                    created_at=entry.get("created_at"),
+                    last_visited_at=entry.get("last_visited_at"),
+                    last_input_at=entry.get("last_input_at"),
+                    delivery_hold=bool(entry.get("delivery_hold")),
+                )
+                self.events.record(restored, "resume", "데몬 재시작 후 세션 복원")
+                if entry.get("was_busy"):
+                    self.resumed_busy.append(sdef.name)
+                else:
+                    self.resumed_idle[sdef.name] = entry.get("last_output_at")
+                if not blank:
+                    # Codex's blank restore is decided by the launch
+                    # that just ran, not by the transcript the previous
+                    # daemon left, so it is read here off the live
+                    # definition -- `launch` resolves the conversation
+                    # in place (see harness.codex_restores_blank).
+                    launched = self._sessions.get(sdef.name)
+                    blank = launched is not None and (
+                        harness_mod.codex_restores_blank(launched.sdef)
+                    )
+                if blank:
+                    self.resumed_blank.append(sdef.name)
+                return
+            except Exception:
+                # The traceback is the only record this failure will
+                # ever have: the record is retired on the next line
+                # and nothing retries a relaunch, so the next boot
+                # starts from a session that is simply not there
+                # any more. Without it the log names the session and
+                # says nothing about why — `failed to restore session
+                # 's560'` and `'s571'` (2026-09-18 11:35:57) are
+                # unrecoverable for exactly this reason.
+                log.exception("failed to restore session %r", sdef.name)
+                failed.append(sdef.name)
+        self._retire(sdef, entry)
 
     @staticmethod
     def _kept_row(kept: Dict[str, dict], sdef: SessionDef, entry: dict) -> Optional[dict]:
@@ -3347,12 +3432,25 @@ class SessionManager:
             last_input_at=entry.get("last_input_at"),
             delivery_hold=bool(entry.get("delivery_hold")),
         )
+        # What an adoption costs, in its two parts: the host round trip that
+        # hands back the output since the previous daemon detached, and the
+        # pyte replay of the log tail that rebuilds the screen. The restore
+        # log used to call all of it "other" (11.4s of 11.7s on 2026-10-21,
+        # claunch-9akgh), which named no cause at all.
+        clock = self._restore_clock if self._loading else None
+        t0 = _perf_counter()
         handle, replay, reply = host.attach(sid, name=sdef.name, from_seq=from_seq)
+        if clock is not None:
+            clock["attach"] += _perf_counter() - t0
+        t1 = _perf_counter()
         try:
             session.adopt(handle, replay, reply, rec)
         except Exception:
             handle.detach()
             raise
+        finally:
+            if clock is not None:
+                clock["adopt"] += _perf_counter() - t1
         self.adopted.append(sdef.name)
         self.events.record(session, "adopt", "데몬 재시작 후 PTY 호스트의 세션 인수",
                            pid=session.pid, replayed=len(replay),

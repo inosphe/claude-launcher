@@ -408,6 +408,7 @@ CHECKS = [
         "railancestors_check.js",
         "sessionfilters_check.js",
         "restorequeue_check.js",
+        "restartboot_check.js",
         "sessiongrouptabs_check.js",
         "projectsearchline_check.js",
         "railbadge_check.js",

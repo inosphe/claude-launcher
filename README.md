@@ -3368,6 +3368,18 @@ and its sessions with SIGTERM before it relaunches them, so no conversation
 runs twice; if the host cannot be ended, the sessions it runs are left there,
 are not relaunched, and the daemon log says so.
 
+**The port answers while the fleet is restored.** A new daemon binds its port
+before it takes sessions over, and reports what it is doing on `GET
+/api/health` and `GET /api/daemon` as `boot: {"phase": "restoring", "done":
+N, "total": M}` (`"ready"` afterwards). Restoring 30-odd sessions is mostly
+the pyte replay that rebuilds each one's screen, about a quarter of a second
+apiece; the alternative was holding the port until it finished, which left
+every client looking at a dead daemon for the whole stretch. The dashboard
+shows the progress as "Restarting the daemon -- restoring sessions N/M", and
+a terminal whose socket drops because of a restart is told so by the
+`shutdown` frame (`{"type": "shutdown", "restart": true}`) rather than left
+to infer it from silence.
+
 **A PTY host on older code.** A kept host goes on running the code it read at
 its start, so the host reports a code id in its hello -- `p<protocol>-<16 hex>`,
 a hash over `daemon/ptyhost/*.py` and `daemon/pty_backend.py` -- and the
