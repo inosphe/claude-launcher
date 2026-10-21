@@ -129,7 +129,10 @@ REASONING_EFFORTS: Tuple[str, ...] = ("low", "medium", "high")
 #: This is explicit backend metadata; it is never inferred from a URL or model
 #: name.  Additional formats can be added when their request contract is
 #: implemented and covered by a wire-level test.
-OPENAI_REASONING_FORMATS: Tuple[str, ...] = ("deepseek",)
+#:
+#: ``deepseek`` sends ``thinking: {type: enabled}`` plus ``reasoning_effort``;
+#: ``openai`` sends ``reasoning_effort`` alone, Openai's own request shape.
+OPENAI_REASONING_FORMATS: Tuple[str, ...] = ("deepseek", "openai")
 
 #: Which ``harness_options.<harness>`` keys each packaged translator accepts.
 HARNESS_OPTION_CHANNELS: Dict[str, Tuple[str, ...]] = {

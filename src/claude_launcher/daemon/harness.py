@@ -1208,7 +1208,14 @@ def build_command(
         model_args = selection_args(entry.model_args, sdef.model)
         if not model_args and sdef.model:
             model_args = [f"--model={model_id}"]
-        effort_args = selection_args(entry.effort_args, sdef.effort)
+        # ``off`` on a Pi session says the caller supplies reasoning itself:
+        # the declaration's ``--thinking``/``-c`` template would be claunch
+        # imposing an effort the caller explicitly took over.
+        effort_args = (
+            []
+            if pi_provider.caller_manages_effort(entry, sdef.effort)
+            else selection_args(entry.effort_args, sdef.effort)
+        )
         session_args = list(sdef.args)
         if restoring and sdef.harness == "codex":
             # A fork is only the initial launch. Restore the copy's pinned
@@ -1225,7 +1232,7 @@ def build_command(
         if prof is not None:
             try:
                 runtime_args = runner.harness_launch_args(
-                    prof, entry, runtime_args, tools=sdef.tools
+                    prof, entry, runtime_args, tools=sdef.tools, effort=sdef.effort
                 )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
@@ -1270,7 +1277,11 @@ def build_command(
         else:
             try:
                 env = runner.harness_child_env(
-                    prof, entry, base_env=base, borrow=borrow_prof
+                    prof,
+                    entry,
+                    base_env=base,
+                    borrow=borrow_prof,
+                    effort=sdef.effort,
                 )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
@@ -1330,7 +1341,12 @@ def build_command(
     if prof is not None and entry is not None:
         try:
             runner.finalize_harness_env(
-                prof, entry, env, borrow=borrow_prof, tools=sdef.tools
+                prof,
+                entry,
+                env,
+                borrow=borrow_prof,
+                tools=sdef.tools,
+                effort=sdef.effort,
             )
         except runner.RunnerError as exc:
             raise HarnessError(str(exc)) from exc

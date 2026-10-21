@@ -135,3 +135,49 @@ test("incomplete and unsupported declarations are rejected", async () => {
     /CLAUNCH_PI_REASONING_FORMAT/,
   );
 });
+
+test("OpenAI format sends reasoning_effort alone", async () => {
+  const { registered, hooks } = await extension({
+    effort: "medium",
+    format: "openai",
+  });
+  const model = registered.models[0];
+  assert.equal(model.reasoning, true);
+  assert.equal(model.compat.supportsReasoningEffort, true);
+  assert.equal(model.compat.thinkingFormat, "openai");
+  // The DeepSeek decorations are not part of the OpenAI shape.
+  assert.equal("thinkingLevelMap" in model, false);
+  assert.equal("requiresReasoningContentOnAssistantMessages" in model.compat, false);
+
+  const hook = hooks.get("before_provider_request");
+  const ctx = {
+    model: { provider: "claunch-profile", api: "openai-completions" },
+  };
+  const event = {
+    payload: { model: "deepseek-flash", messages: [], stream: true },
+  };
+  assert.deepEqual(hook(event, ctx), {
+    ...event.payload,
+    reasoning_effort: "medium",
+  });
+  assert.equal("thinking" in event.payload, false);
+  assert.equal("reasoning_content" in event.payload, false);
+});
+
+test("the OpenAI hook leaves a payload that already carries reasoning alone", async () => {
+  const { hooks } = await extension({ effort: "high", format: "openai" });
+  const hook = hooks.get("before_provider_request");
+  const ctx = {
+    model: { provider: "claunch-profile", api: "openai-completions" },
+  };
+  for (const carried of [
+    { reasoning_effort: "low" },
+    { thinking: { type: "disabled" } },
+    { reasoning_content: [] },
+  ]) {
+    assert.equal(
+      hook({ payload: { model: "deepseek-flash", ...carried } }, ctx),
+      undefined,
+    );
+  }
+});

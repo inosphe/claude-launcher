@@ -248,6 +248,11 @@ def pi(spec: ProviderSpec) -> Translation:
         # session argument remains the final override.
         out.args += ["--thinking", spec.reasoning_effort]
         settings["defaultThinkingLevel"] = spec.reasoning_effort
+    else:
+        # No effort is projected this launch. Drop any value an earlier
+        # launch left behind, or Pi keeps running at it -- the caller that
+        # took reasoning over would then still get a launcher-imposed level.
+        settings["defaultThinkingLevel"] = REMOVE
     reserve = pi_reserve_tokens(spec)
     if reserve is not None:
         settings["compaction.reserveTokens"] = reserve
@@ -281,3 +286,31 @@ def set_dotted(doc: dict, key: str, value) -> None:
             node[part] = child
         node = child
     node[parts[-1]] = value
+
+
+#: Translation value meaning "drop this key from the file". Merging alone
+#: cannot express an absence, and a key a previous launch wrote would
+#: otherwise outlive the setting that produced it (Pi's
+#: ``defaultThinkingLevel`` after a session that leaves effort to its
+#: caller, for example).
+REMOVE = object()
+
+
+def drop_dotted(doc: dict, key: str) -> bool:
+    """The inverse of :func:`set_dotted`; ``True`` when it removed a key."""
+    parts = [p for p in str(key).split(".") if p]
+    if not parts:
+        return False
+    node = doc
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            return False
+        node = child
+    if parts[-1] not in node:
+        return False
+    del node[parts[-1]]
+    if len(parts) > 1 and not node:
+        # Do not leave an empty section behind (``"compaction": {}``).
+        drop_dotted(doc, ".".join(parts[:-1]))
+    return True

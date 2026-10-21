@@ -11,7 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
 import json
@@ -428,6 +428,7 @@ def harness_child_env(
     base_env: Optional[dict] = None,
     borrow: Optional[Profile] = None,
     tools: Optional[Sequence[str]] = None,
+    effort: Optional[str] = None,
 ) -> dict:
     """Environment for a non-Claude profile harness.
 
@@ -456,7 +457,9 @@ def harness_child_env(
     env.update(harness.env)
     env.update(lineage.effective_env(profile))
 
-    finalize_harness_env(profile, harness, env, borrow=borrow, tools=tools)
+    finalize_harness_env(
+        profile, harness, env, borrow=borrow, tools=tools, effort=effort
+    )
     return env
 
 
@@ -465,8 +468,16 @@ def harness_translation(
     harness: harnesses.Harness,
     *,
     borrow: Optional[Profile] = None,
+    effort: Optional[str] = None,
 ) -> translators.Translation:
-    """The harness's translation of the backend this launch talks to."""
+    """The harness's translation of the backend this launch talks to.
+
+    ``effort`` is the session's own reasoning choice. For Pi it decides
+    which effort the translation carries (``--thinking`` and
+    ``settings.json``): the caller's choice wins over the profile's, and a
+    profile effort the provider cannot encode is dropped here exactly as in
+    the env projection, so both surfaces stay in step.
+    """
     auth_source = borrow if borrow is not None else profile
     try:
         own = providers.resolve_name(profile)
@@ -476,6 +487,14 @@ def harness_translation(
         )
     except providers.ProviderError as exc:
         raise RunnerError(str(exc)) from exc
+    if harness.provider_adapter == pi_provider.ADAPTER:
+        try:
+            projected, _warning = pi_provider.projected_effort(
+                spec, effort, provider=provider
+            )
+        except pi_provider.PiProviderError as exc:
+            raise RunnerError(str(exc)) from exc
+        spec = replace(spec, reasoning_effort=projected)
     translation = translators.for_harness(harness.name, spec)
     if translation.missing:
         raise RunnerError(
@@ -491,6 +510,7 @@ def harness_launch_args(
     args: Sequence[str],
     *,
     tools: Optional[Sequence[str]] = None,
+    effort: Optional[str] = None,
 ) -> list[str]:
     """Prepend the harness's translated launch arguments, then its adapter.
 
@@ -501,10 +521,10 @@ def harness_launch_args(
     """
     if harness.builtin:
         return list(args)
-    translated = harness_translation(profile, harness).args
+    translated = harness_translation(profile, harness, effort=effort).args
     try:
         return pi_provider.launch_args(
-            profile, harness, [*translated, *args], tools=tools
+            profile, harness, [*translated, *args], tools=tools, effort=effort
         )
     except pi_provider.PiProviderError as exc:
         raise RunnerError(str(exc)) from exc
@@ -517,6 +537,7 @@ def finalize_harness_env(
     *,
     borrow: Optional[Profile] = None,
     tools: Optional[Sequence[str]] = None,
+    effort: Optional[str] = None,
 ) -> None:
     """Enforce profile auth/storage boundaries after all environment layers.
 
@@ -550,7 +571,9 @@ def finalize_harness_env(
             # A Pi profile has one explicit token route. Do not let whatever
             # API keys happened to start claunch choose Pi's backend.
             env.pop(key, None)
-    translation = harness_translation(profile, harness, borrow=borrow)
+    translation = harness_translation(
+        profile, harness, borrow=borrow, effort=effort
+    )
     # harness_options.<harness>.env is the declared raw channel for this
     # harness: applied after the Claude-namespace filter above (so it is the
     # one way to hand such a key to another harness on purpose) and before
@@ -565,7 +588,7 @@ def finalize_harness_env(
         env[token_env] = managed_token
     _finalize_declared_auth(harness, env)
     try:
-        pi_provider.apply_env(profile, harness, env, borrow=borrow)
+        pi_provider.apply_env(profile, harness, env, borrow=borrow, effort=effort)
         pi_provider.apply_tools_env(profile, harness, env, tools=tools)
     except pi_provider.PiProviderError as exc:
         raise RunnerError(str(exc)) from exc
@@ -594,7 +617,10 @@ def _write_translated_files(home, translation: translators.Translation) -> None:
                 doc = {}
         before = json.dumps(doc, sort_keys=True)
         for key, value in values.items():
-            translators.set_dotted(doc, key, value)
+            if value is translators.REMOVE:
+                translators.drop_dotted(doc, key)
+            else:
+                translators.set_dotted(doc, key, value)
         if json.dumps(doc, sort_keys=True) == before:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
