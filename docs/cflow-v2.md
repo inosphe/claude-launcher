@@ -746,9 +746,12 @@ inputs:
   `acceptance`는 선언과 무관하게 이미 그렇다. 그룹의 스위치처럼 블록의 다른
   칸 전체에 걸리는 입력에 쓴다.
 
-improv-worker-v2는 `리뷰어`(reviewer_profile·reviewer_harness), `라우팅`
-(session_routing·delegate_profile·delegate_model), `PR`(force_pr·force_no_pr)
-세 블록을 두고, `session_routing`이 `wide`다.
+improv-worker-v2는 `코딩 승인`(require_coding_approval), `리뷰어`
+(reviewer_profile·reviewer_harness), `라우팅`(session_routing·delegate_profile·
+delegate_model), `PR`(force_pr·force_no_pr) 네 블록을 두고, `session_routing`이
+`wide`다. 블록의 입력이 하나여도 그 입력은 자기 블록을 갖는다 — 종전에는
+무그룹이던 `require_coding_approval`이 회차 상한(`max_rounds`)과 한 블록에
+짝지어 섰다(claunch-kzun2).
 
 - 값 검사(`inputs.normalize`): 폼·CLI에서 온 문자열을 type으로 바꾼다(`int`,
   `bool`의 `true/false/yes/no/1/0`, `list`는 줄바꿈 또는 쉼표로 나눔,

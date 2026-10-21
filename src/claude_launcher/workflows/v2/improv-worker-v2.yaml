@@ -179,6 +179,10 @@ inputs:
     default: false
     label: 코딩 시작 전 사용자 승인
     help: 켜면 일감별 구현·재작업 전에 변경 계획을 제시하고 사용자 승인을 기다린다. 끄면 기존처럼 자동 진행한다
+    # 회차 상한과 다른 결정이라 폼에서 자기 블록을 쓴다(claunch-kzun2).
+    # 무그룹으로 두면 max_rounds와 한 블록에 짝지어 서서 무엇에 대한
+    # 스위치인지가 블록 제목으로 드러나지 않았다.
+    group: 코딩 승인
     # item의 coding-approval-check가 일감마다 읽으므로, 사람이 런 도중에 켜면
     # 다음 일감부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]

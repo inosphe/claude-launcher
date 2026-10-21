@@ -15,13 +15,17 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
    textarea, a one-line string, a checkbox, an enum, and the combobox rows
    whose `options` list arrives from the daemon. `group`/`wide` are the
    workflow's own (claunch-qke6g): the reviewer, routing and PR inputs are
-   blocks, and the routing switch spans its block. */
+   blocks, and the routing switch spans its block. The coding approval switch
+   is a block of one (claunch-kzun2). */
 const FIELDS = [
   { name: 'goal', type: 'text', label: 'Goal', required: true,
     help: 'This round\u2019s goal.' },
   { name: 'issue', type: 'string', label: 'Issue', default: '' },
   { name: 'max_rounds', type: 'int', label: 'Max rounds',
     help: 'How many rounds this run may take.' },
+  { name: 'require_coding_approval', type: 'bool', label: 'Coding approval',
+    group: 'Coding approval',
+    help: 'Ask the operator to approve the plan before each implementation.' },
   { name: 'force_pr', type: 'bool', label: 'PR only', group: 'PR',
     help: 'Land only as a pull request.' },
   { name: 'force_no_pr', type: 'bool', label: 'No pull request', group: 'PR',
@@ -137,6 +141,7 @@ const OPTIONS = {
           boxWidth: rect(box).w,
           issue: rect(row('issue')),
           maxRounds: rect(row('max_rounds')),
+          codingApproval: rect(row('require_coding_approval')),
           forcePr: rect(row('force_pr')),
           forceNoPr: rect(row('force_no_pr')),
           forcePrLabel: rect(row('force_pr').querySelector('.cf2-input-label')),
@@ -189,13 +194,22 @@ const OPTIONS = {
       'neighbouring inputs without a group share a row');
     assert.equal(wide.overflow, false, 'the box does not overflow its container');
 
-    // ---- groups: reviewer, routing and PR are blocks of their own -------
-    assert.deepEqual(wide.groups.map((g) => g.title), ['PR', 'Reviewer', 'Routing'],
+    // ---- groups: coding approval, reviewer, routing and PR are blocks ---
+    assert.deepEqual(wide.groups.map((g) => g.title),
+      ['Coding approval', 'PR', 'Reviewer', 'Routing'],
       'each declared group gets one block, in declaration order');
     assert.deepEqual(wide.groups.map((g) => g.fields),
-      [['force_pr', 'force_no_pr'], ['reviewer_profile', 'reviewer_harness'],
+      [['require_coding_approval'], ['force_pr', 'force_no_pr'],
+       ['reviewer_profile', 'reviewer_harness'],
        ['session_routing', 'delegate_profile', 'delegate_model']],
       'every member of a group is drawn inside that group');
+    // A block of one is still a block: the switch is drawn under its own
+    // heading, on a line of its own, instead of pairing with the round limit
+    // declared above it (claunch-kzun2).
+    assert.ok(wide.codingApproval.y >= wide.maxRounds.bottom - 1,
+      'the approval block starts below the round limit instead of sharing its row');
+    assert.ok(wide.codingApproval.x < wide.issue.x + 2,
+      'the approval row starts on the box column, like the rows above it');
     // The block starts at the box's own content edge and spans it, so its
     // caption/control columns sit on the same x as the rows above it.
     assert.ok(Math.abs(wide.groups[0].x - wide.issue.x) < 2,
@@ -214,7 +228,7 @@ const OPTIONS = {
       'the delegate rows line up with each other');
     assert.ok(wide.routing.bottom <= wide.delegateProfile.y + 1,
       'a `wide` row takes the line above the pair it governs');
-    assert.ok(Math.abs(wide.routingControl.right - wide.groups[2].right) < 2
+    assert.ok(Math.abs(wide.routingControl.right - wide.groups[3].right) < 2
               && wide.routingControl.w > wide.delegateProfile.w,
       'a `wide` row spans both columns of its block');
 
@@ -293,7 +307,7 @@ const OPTIONS = {
       await page.setViewportSize({ width, height: 900 });
       const narrow = await measure();
       assert.equal(narrow.columns, 1, `${width}: one input to a row`);
-      assert.deepEqual(narrow.groups.map((g) => g.columns), [1, 1, 1],
+      assert.deepEqual(narrow.groups.map((g) => g.columns), [1, 1, 1, 1],
         `${width}: a group block is one column too`);
       assert.ok(narrow.delegateModel.y > narrow.delegateProfile.bottom - 1,
         `${width}: the rows of a group stack`);

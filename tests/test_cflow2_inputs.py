@@ -165,14 +165,20 @@ def test_bundled_definitions_declare_inputs():
     assert layers.load("sample-v2").meta["inputs"]
 
 
-def test_worker_v2_groups_the_reviewer_routing_and_pr_inputs():
+def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
     """claunch-qke6g: the fields of one concern share a block, so the operator
-    reads them together and their rows line up."""
+    reads them together and their rows line up. claunch-kzun2: the coding
+    approval switch is a concern of its own, so it gets a block to itself."""
     sch = layers.load("improv-worker-v2").meta["inputs"]
     assert {n: d["group"] for n, d in sch.items() if d["group"]} == {
+        "require_coding_approval": "코딩 승인",
         "reviewer_profile": "리뷰어", "reviewer_harness": "리뷰어",
         "session_routing": "라우팅", "delegate_profile": "라우팅", "delegate_model": "라우팅",
         "force_pr": "PR", "force_no_pr": "PR"}
+    # A block of one: it does not share a grid with the inputs declared around
+    # it, so the switch no longer pairs with the round limit above it.
+    assert [n for n, d in sch.items() if d["group"] == "코딩 승인"] == [
+        "require_coding_approval"]
     assert [n for n, d in sch.items() if d["wide"]] == ["session_routing"]
 
 
