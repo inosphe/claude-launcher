@@ -108,7 +108,7 @@ from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow2 import runtime as cflow2_runtime
 from ..harnesses import CLAUDE_HARNESS
 from . import cflow2_clock, cflow_clock, rebrief
-from .session import INPUT_SETTLE, STATUS_BUSY, STATUS_IDLE, STATUS_STARTING
+from .session import INPUT_SETTLE, STATUS_BUSY, STATUS_IDLE, STATUS_STARTING, delivery_wake
 
 log = logging.getLogger("claunch.daemon.resume")
 
@@ -453,7 +453,9 @@ class ResumeNudge:
                 return True
             block = idle_block(name) if recent else nudge_block(name)
 
-        if not await session.deliver(block):
+        with delivery_wake("notice"):
+            delivered = await session.deliver(block)
+        if not delivered:
             # readiness/keyboard holds refused it; try again. Worth its own
             # reason: this one means the session *is* settled by this module's
             # test and still would not take the paste, which points at the

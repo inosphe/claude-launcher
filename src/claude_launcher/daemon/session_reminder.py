@@ -28,7 +28,7 @@ from pathlib import Path
 from .. import digests, prompt_packs, store, workspaces
 from ..cflow import engine as cflow_engine, state as cflow_state
 from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal, session_packs, wallclock
-from .session import STATUS_BUSY
+from .session import STATUS_BUSY, delivery_wake
 
 log = logging.getLogger("claunch.daemon.session-reminder")
 
@@ -1100,7 +1100,8 @@ class SessionReminderService:
             if session is None:
                 return
             try:
-                delivered = await session.deliver(block)
+                with delivery_wake("notice"):
+                    delivered = await session.deliver(block)
             except Exception:
                 log.exception("cflow signal delivery to %r failed", scope)
                 return
@@ -1235,7 +1236,8 @@ class SessionReminderService:
         if not block:
             return
         try:
-            delivered = await session.deliver(block)
+            with delivery_wake("notice"):
+                delivered = await session.deliver(block)
         except Exception:
             log.exception("session reminder delivery to %r failed", name)
             return

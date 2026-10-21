@@ -40,6 +40,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 from ..cflow import engine as cflow_engine, landing as cflow_landing, state as cflow_state
 from ..cflow2 import expr as cflow2_expr, runtime
+from .session import delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow2.triggers")
 
@@ -608,7 +609,8 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
         if do == DO_CHECKS:
             async def deliver(block: str) -> bool:
                 try:
-                    return bool(session.queue_delivery(block))
+                    with delivery_wake("cflow2"):
+                        return bool(session.queue_delivery(block))
                 except Exception:
                     log.exception("cflow2 trigger delivery to %r failed", driver)
                     return False

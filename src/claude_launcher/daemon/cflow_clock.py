@@ -65,7 +65,7 @@ from ..cflow import engine as cflow_engine, landing as cflow_landing, model as c
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from . import actors, briefing, instance_manifest, landing_route, session_procs, status_checks
 from . import paths as daemon_paths
-from .session import STATUS_BUSY, STATUS_IDLE
+from .session import STATUS_BUSY, STATUS_IDLE, delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow")
 
@@ -1455,7 +1455,8 @@ class StallPingClock:
         if session is None:
             return
         try:
-            delivered = await session.deliver(block)
+            with delivery_wake("cflow"):
+                delivered = await session.deliver(block)
         except Exception:
             log.exception("cflow stall ping delivery to %r failed", scope)
             return
@@ -1619,7 +1620,8 @@ class WindowClock:
             # regardless, and whoever picks it up reads the new position.
             return
         try:
-            delivered = session.queue_delivery(block)
+            with delivery_wake("cflow"):
+                delivered = session.queue_delivery(block)
         except Exception:
             log.exception("cflow window notice delivery to %r failed", scope)
             return
@@ -1740,7 +1742,8 @@ class TimerClock:
             # regardless, and whoever picks it up reads the new position.
             return
         try:
-            delivered = session.queue_delivery(block)
+            with delivery_wake("cflow"):
+                delivered = session.queue_delivery(block)
         except Exception:
             log.exception("cflow timer notice delivery to %r failed", scope)
             return
@@ -1904,7 +1907,8 @@ class ChecklistClock:
             # regardless, and whoever picks it up reads the new position.
             return
         try:
-            delivered = session.queue_delivery(frame)
+            with delivery_wake("cflow"):
+                delivered = session.queue_delivery(frame)
         except Exception:
             log.exception("cflow checklist notice delivery to %r failed", scope)
             return
@@ -2161,7 +2165,8 @@ class RestartClock:
         if session is None:
             return
         try:
-            session.queue_delivery(block)
+            with delivery_wake("cflow"):
+                session.queue_delivery(block)
         except Exception:
             log.exception("cflow restart notice delivery to %r failed", scope)
 
@@ -2593,7 +2598,8 @@ class TriggerClock:
         if session is None:
             return False
         try:
-            return bool(session.queue_delivery(block))
+            with delivery_wake("cflow"):
+                return bool(session.queue_delivery(block))
         except Exception:
             log.exception("cflow trigger delivery to %r failed", scope)
             return False
@@ -2743,7 +2749,8 @@ class RoundStartClock:
             # running regardless, and whoever picks it up reads its position.
             return
         try:
-            delivered = session.queue_delivery(block)
+            with delivery_wake("cflow"):
+                delivered = session.queue_delivery(block)
         except Exception:
             log.exception("cflow round notice delivery to %r failed", scope)
             return
@@ -3646,7 +3653,8 @@ class RunEventClock:
             )
             return True
         try:
-            delivered = await target.deliver(event["block"])
+            with delivery_wake("cflow"):
+                delivered = await target.deliver(event["block"])
         except Exception:
             log.exception(
                 "cflow run event delivery to %r failed", target.sdef.name

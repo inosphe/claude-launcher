@@ -54,7 +54,7 @@ import copy
 import logging
 import time
 
-from .session import STATUS_IDLE
+from .session import STATUS_IDLE, delivery_wake
 
 log = logging.getLogger("claunch.daemon.mesh")
 
@@ -490,7 +490,9 @@ async def dispatch(
 
 async def _inject(mm, session, mesh, kind: str, handle: str, body: str) -> bool:
     block = format_nudge(mesh.name, kind, handle, body)
-    if not await session.deliver(block):
+    with delivery_wake("mesh"):
+        delivered = await session.deliver(block)
+    if not delivered:
         return False  # logged by deliver(); the next tick re-fires the nudge
     log.info("mesh %r: %s nudge -> %r", mesh.name, kind, handle)
     return True

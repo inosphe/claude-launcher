@@ -11,6 +11,7 @@ route is pressed by hand.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -902,9 +903,9 @@ def test_a_needle_cut_by_a_row_wrap_is_still_on_the_screen():
 @pytest.mark.parametrize("by, by_human", [
     ("mesh", False), ("cflow", False), ("cflow2", False),
     ("status-checks", False), ("deliver", False), ("restore-queue", False),
-    ("cflow-checks", False), ("cflow2-checks", False),
+    ("cflow-checks", False), ("cflow2-checks", False), ("notice", False),
     ("attach", True), ("input", True), ("peer-input", True), ("api", True),
-    ("message", True),         # Session.deliver to a held one: person or not
+    ("message", True),         # a delivery that does not name itself the daemon's
     ("qa", True), ("thread", True), ("", True),
 ])
 def test_only_a_person_s_wake_marks_the_session_resumed_by_human(
@@ -927,5 +928,69 @@ def test_only_a_person_s_wake_marks_the_session_resumed_by_human(
         monkeypatch.setattr(mgr, "respawn_async", AsyncMock(side_effect=respawn))
         assert await mgr.wake_async("sleepy", by=by) is live
         assert live.resumed_by_human is by_human
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("word", [None, "notice", "mesh"])
+def test_a_held_delivery_wakes_with_the_word_its_caller_gives(home, word):
+    """claunch-2ri1b: every Session.deliver and queue_delivery that reaches a
+    held session woke it ``by="message"`` -- a person's -- so a reminder or a
+    cflow notice that woke a done session called its kill-on-end off. A
+    caller that is the daemon's own names itself with delivery_wake; one that
+    says nothing stays a person's."""
+    from claude_launcher.daemon.session import delivery_wake
+
+    async def run():
+        mgr = _manager()
+        held = mgr._retire(SessionDef(name="sleepy", harness="py"), {"held_at": HELD_AT})
+        woken, queued = [], []
+        gone = SimpleNamespace(exited=True)
+
+        async def wake(name, *, by=""):
+            woken.append(by)
+            return gone
+
+        held.wake_on_message = wake
+        held.queue_on_message = lambda name, text, *, by: queued.append(by) or True
+        with delivery_wake(word) if word else contextlib.nullcontext():
+            await held.deliver("[claunch session: reminder]")
+            assert held.queue_delivery("[claunch cflow2: the run moved]")
+        assert woken == [word or "message"]
+        assert queued == [word or "message"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("joined, by_human", [(None, False), ("message", True), ("mesh", False)])
+def test_a_person_s_message_joining_a_notice_s_wake_keeps_the_session(
+        home, monkeypatch, joined, by_human):
+    """Messages that reach one held session share one wake, started by the
+    first: a notice's wake that a person's message joins before the relaunch
+    is still that person's incarnation (claunch-2ri1b)."""
+    from unittest.mock import AsyncMock
+
+    async def run():
+        mgr = _manager()
+        mgr._sessions["sleepy"] = SimpleNamespace(exited=True, held_at=HELD_AT)
+        live = SimpleNamespace(exited=False, held_at=None, resumed_by_human=True,
+                               queue_delivery=lambda text: True)
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def respawn(name):
+            started.set()
+            await release.wait()
+            mgr._sessions[name] = live
+            return live                      # as _respawned leaves it
+
+        monkeypatch.setattr(mgr, "respawn_async", AsyncMock(side_effect=respawn))
+        assert mgr.queue_message("sleepy", "[claunch session: reminder]", by="notice")
+        await started.wait()
+        if joined:
+            assert mgr.queue_message("sleepy", "typed by a person", by=joined)
+        release.set()
+        await asyncio.gather(*list(mgr._wake_tasks))
+        assert live.resumed_by_human is by_human
+        assert "sleepy" not in mgr._wake_message_people
 
     asyncio.run(run())

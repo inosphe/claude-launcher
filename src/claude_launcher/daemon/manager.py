@@ -42,7 +42,9 @@ from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
-from .session import STATUS_BUSY, DeadSession, Session, _utcnow, lost_output_note
+from .session import (
+    STATUS_BUSY, DeadSession, Session, _utcnow, delivery_wake, lost_output_note,
+)
 
 #: Either a live session or the record left behind by one that ended.
 AnySession = Union[Session, DeadSession]
@@ -72,20 +74,25 @@ RESTORE_QUEUE = "restore-queue"
 #: incarnation: the restore queue running late, a mesh delivery, a cflow
 #: notice or reminder, a status-check refresh (and the cflow and cflow2
 #: clocks' ``-checks`` requests to a held driver), the CLI's cflow nudge
-#: (``/deliver``). A session woken by one of these does not get
+#: (``/deliver``), and ``notice`` -- a delivery the daemon makes on its own
+#: (a session reminder, a window or QA nudge, a beads wind-down, a restart
+#: notice) that names itself with :func:`~.session.delivery_wake`. A
+#: session woken by one of these does not get
 #: :attr:`Session.resumed_by_human`, so a finished one-shot run's kill-on-end
 #: still ends it (claunch-u9m6z: s122 was woken by a mesh delivery and the
 #: kill was called off as if a person had respawned it). Any other ``by`` --
 #: an attach, typed input, a peer's typed line, the API's wake, a QA
 #: answer, a thread message -- is a person and keeps the deference; a
 #: ``by`` missing from this set is read as a person, so a new wake source
-#: errs toward keeping a session. ``message`` (any :meth:`Session.deliver`
-#: that reaches a held session) stays out: that one path carries the
-#: daemon's own notices and a person's doors alike (a forced QA answer, a
-#: rebrief, a retrospective), and it cannot tell them apart.
+#: errs toward keeping a session. ``message`` -- what a
+#: :meth:`Session.deliver` that reaches a held session wakes it with when
+#: its caller does not say otherwise -- stays out: that caller may be a
+#: person's door (a forced QA answer, a rebrief, a retrospective), so only
+#: a delivery made inside ``delivery_wake(...)`` is read as the daemon's
+#: (claunch-2ri1b).
 AUTOMATIC_WAKES = frozenset({
     RESTORE_QUEUE, "mesh", "cflow", "cflow2", "status-checks", "deliver",
-    "cflow-checks", "cflow2-checks",
+    "cflow-checks", "cflow2-checks", "notice",
 })
 
 
@@ -350,6 +357,9 @@ class SessionManager:
         # A staged Session is registered before launch_async finishes.
         self._wake_messages: Dict[str, List[str]] = {}
         self._wake_message_tasks: Dict[str, asyncio.Task] = {}
+        #: Names whose pending message wake a person's message joined after
+        #: a notice started it (:meth:`queue_message`).
+        self._wake_message_people: Set[str] = set()
         #: Names mid-wake. The respawn takes the record out of the registry
         #: while the new child spawns, and a reader in that gap must not
         #: take the session for removed (:meth:`is_waking`).
@@ -1954,18 +1964,30 @@ class SessionManager:
         """Keep notifications in arrival order across replacement staging."""
         session = self.get(name)
         if not getattr(session, "held_at", None) and not self.message_restore_pending(name):
-            return session.queue_delivery(text) if not session.exited else False
+            if session.exited:
+                return False
+            with delivery_wake(by):
+                return session.queue_delivery(text)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return False
         self._wake_messages.setdefault(name, []).append(text)
         if name in self._wake_message_tasks:
+            if by not in AUTOMATIC_WAKES:
+                # A notice started the wake under way; a person's message
+                # joining it still makes this a person's incarnation.
+                self._wake_message_people.add(name)
             return True
 
         async def run() -> None:
             try:
+                held = self.get(name)
                 current = await self.wake_async(name, by=by)
+                # Only a relaunch is anyone's incarnation: a record that was
+                # merely restoring comes back as the same object.
+                if name in self._wake_message_people and current is not held:
+                    current.resumed_by_human = True
                 if current.exited:
                     return
                 # No await between removing the restore FIFO and transferring
@@ -1977,6 +1999,7 @@ class SessionManager:
             finally:
                 self._wake_messages.pop(name, None)
                 self._wake_message_tasks.pop(name, None)
+                self._wake_message_people.discard(name)
 
         task = loop.create_task(run())
         self._wake_message_tasks[name] = task

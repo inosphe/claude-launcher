@@ -88,7 +88,7 @@ from . import actors
 from .session import (
     CATEGORY_DELAYED, CATEGORY_FAILED, CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING,
     STATUS_BUSY, STATUS_IDLE, Session,
-    session_category,
+    delivery_wake, session_category,
 )
 
 log = logging.getLogger("claude_launcher.daemon.beads")
@@ -2893,7 +2893,8 @@ class Board:
         started = self._clock()
         try:
             try:
-                delivered = await asyncio.wait_for(session.deliver(text), grace)
+                with delivery_wake("notice"):
+                    delivered = await asyncio.wait_for(session.deliver(text), grace)
             except (asyncio.TimeoutError, Exception) as exc:
                 log.info("beads: wind-down block not delivered to %r: %s", name, exc)
                 delivered = False

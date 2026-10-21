@@ -39,6 +39,7 @@ from aiohttp import web
 from .. import cflow_watch as watch_core
 from ..cflow2 import store as v2_store
 from . import loops
+from .session import delivery_wake
 
 log = logging.getLogger(__name__)
 
@@ -354,7 +355,8 @@ class WatchBoard:
             settled = sent
             if held:
                 try:
-                    accepted = session.queue_delivery(block)
+                    with delivery_wake("cflow"):
+                        accepted = session.queue_delivery(block)
                 except Exception:  # noqa: BLE001
                     log.exception("cflow watch delivery to %r failed", watcher)
                     accepted = False
@@ -374,12 +376,14 @@ class WatchBoard:
 
             try:
                 self._inflight.setdefault(watcher, set()).update(sent)
-                accepted = session.queue_delivery(block, on_done=done)
+                with delivery_wake("cflow"):
+                    accepted = session.queue_delivery(block, on_done=done)
             except TypeError:
                 # A double (tests) or an older session object without the
                 # callback: the return value is all we get.
                 self._inflight.get(watcher, set()).difference_update(sent)
-                accepted = session.queue_delivery(block)
+                with delivery_wake("cflow"):
+                    accepted = session.queue_delivery(block)
                 done(bool(accepted))
             except Exception:  # noqa: BLE001 - a failed delivery is a debt
                 log.exception("cflow watch delivery to %r failed", watcher)

@@ -45,7 +45,7 @@ import yaml
 from .. import atomic, digests, projects, prompt_packs
 from . import loops, mesh_ops, mesh_policy, mesh_roles, paths, wire
 from .manager import AnySession, ManagerError, SessionManager
-from .session import STATUS_IDLE, session_category
+from .session import STATUS_IDLE, delivery_wake, session_category
 
 log = logging.getLogger("claunch.daemon.mesh")
 
@@ -3241,7 +3241,9 @@ class MeshManager:
             if member.handle not in mesh.members or session.exited:
                 return
             if session.status() == STATUS_IDLE and not session.keyboard_busy():
-                if await session.deliver(block):
+                with delivery_wake("mesh"):
+                    delivered = await session.deliver(block)
+                if delivered:
                     return
             await asyncio.sleep(0.5)
 
@@ -3542,7 +3544,9 @@ class MeshManager:
         # member who never learns it joined anything.
         block = self.briefing_block(mesh, member)
         while time.monotonic() < deadline:
-            if await session.deliver(block):
+            with delivery_wake("mesh"):
+                delivered = await session.deliver(block)
+            if delivered:
                 return
             if session.exited or member.handle not in mesh.members:
                 return
@@ -5071,9 +5075,10 @@ class MeshManager:
             asyncio.get_running_loop()
         except RuntimeError:
             return
-        session.queue_delivery(self.role_change_block(
-            mesh, member, before_role, before_subs, opened
-        ))
+        with delivery_wake("mesh"):
+            session.queue_delivery(self.role_change_block(
+                mesh, member, before_role, before_subs, opened
+            ))
 
     def _live_holder(self, mesh: Mesh, role_name: str) -> Optional[Member]:
         """The member holding ``role_name`` whose session is still alive.
@@ -8341,7 +8346,9 @@ class MeshManager:
             handle,
             str(nudge.get("body") or ""),
         )
-        if not await session.deliver(block):
+        with delivery_wake("mesh"):
+            delivered = await session.deliver(block)
+        if not delivered:
             return
         log.info("mesh %r: applied %s nudge -> %r",
                  mesh.name, nudge.get("kind"), handle)
@@ -9632,7 +9639,10 @@ class MeshManager:
             mesh.name, member.handle, pending,
             origins=self._delivery_origins(mesh, pending),
         )
-        if not await session.deliver(block, force=force):
+        # "deliver now" (force) is the operator's own press, a person's wake.
+        with delivery_wake("message" if force else "mesh"):
+            delivered = await session.deliver(block, force=force)
+        if not delivered:
             return  # undelivered: hold the cursor, the next tick retries
         mesh.cursors[member.handle] = len(mesh.messages)
         # Fast-path arrivals are not in the log yet, so the cursor cannot

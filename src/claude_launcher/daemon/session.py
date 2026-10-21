@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import functools
 import json
@@ -427,13 +428,39 @@ def delivery_stamp() -> str:
     )
 
 
+#: The ``by`` a delivery that finds its session held wakes it with
+#: (:func:`_deliver_after_hold`, :meth:`Session.queue_delivery`). The
+#: default, ``message``, is not in
+#: :data:`~claude_launcher.daemon.manager.AUTOMATIC_WAKES`: a caller that
+#: says nothing may be a person's door (a forced QA answer, a rebrief), and
+#: the session it wakes keeps :attr:`Session.resumed_by_human`. The daemon's
+#: own notices name themselves with :func:`delivery_wake` so a finished run's
+#: kill-on-end still ends what they woke (claunch-2ri1b). A context variable
+#: and not a parameter of :meth:`Session.deliver`: a queued send runs in a
+#: task created inside the caller's context, so the word travels with it,
+#: and the many stand-ins for ``deliver``/``queue_delivery`` keep their shape.
+_DELIVERY_WAKE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "claunch_delivery_wake", default="message"
+)
+
+
+@contextlib.contextmanager
+def delivery_wake(by: str):
+    """Deliveries made inside this block wake a held session with ``by``."""
+    token = _DELIVERY_WAKE.set(by)
+    try:
+        yield
+    finally:
+        _DELIVERY_WAKE.reset(token)
+
+
 async def _deliver_after_hold(session, text, **kwargs) -> bool:
     """Resolve the new incarnation before using its readiness and input locks."""
     wake = getattr(session, "wake_on_message", None)
     if not getattr(session, "held_at", None) or wake is None:
         return False
     try:
-        current = await wake(session.sdef.name, by="message")
+        current = await wake(session.sdef.name, by=_DELIVERY_WAKE.get())
     except Exception:
         log.exception("message wake of %r failed", session.sdef.name)
         return False
@@ -1542,7 +1569,7 @@ class Session:
             if callable(text) and enqueue:
                 text = text()
             return bool(enqueue and text and (getattr(self, "held_at", None) or restoring)
-                        and enqueue(self.sdef.name, text))
+                        and enqueue(self.sdef.name, text, by=_DELIVERY_WAKE.get()))
         preview = text() if callable(text) else text
 
         # Lazily, and inline rather than through the helper, because this
@@ -2664,7 +2691,7 @@ class DeadSession:
             return False
         if callable(text):
             text = text()
-        return bool(text and enqueue(self.sdef.name, text))
+        return bool(text and enqueue(self.sdef.name, text, by=_DELIVERY_WAKE.get()))
 
     async def write_bytes(self, data: bytes, writer: object = None) -> None:
         raise self._gone()
