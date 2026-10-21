@@ -32475,20 +32475,22 @@ function providerAffinityCard() {
   }
   const list = el("div", "provider-affinity-list");
   for (const row of st.rows) {
-    const item = el("label", "provider-affinity-row");
+    const item = el("div", "provider-affinity-row");
+    const label = el("label", "provider-affinity-name");
     const toggle = document.createElement("input");
     toggle.type = "checkbox";
     toggle.checked = !!row.session_affinity;
     toggle.disabled = st.busy !== "";
     toggle.addEventListener("change", () =>
       saveProviderAffinity(row.name, toggle.checked));
-    item.appendChild(toggle);
-    item.appendChild(document.createTextNode(` ${row.name}`));
+    label.appendChild(toggle);
+    label.appendChild(document.createTextNode(row.name));
+    item.appendChild(label);
     if (!row.fronted) {
-      item.appendChild(el("span", "wf-note",
-        " (not fronted by a routing/metering shim — the flag has no effect)"));
+      item.appendChild(el("span", "provider-affinity-note",
+        "not fronted by a routing/metering shim — the flag has no effect"));
     }
-    if (row.error) item.appendChild(el("span", "error", ` (${row.error})`));
+    if (row.error) item.appendChild(el("span", "provider-affinity-note error", row.error));
     list.appendChild(item);
   }
   card.appendChild(list);
