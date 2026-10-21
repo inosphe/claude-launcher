@@ -313,6 +313,12 @@ class SessionManager:
         #: the endings a daemon shutdown causes, which are not endings at
         #: all — those sessions come back with the next daemon.
         self.exit_hooks: List[Callable[[Session], None]] = []
+        #: Called with a session as it comes up again — a launch (respawn,
+        #: restore, resume) and the adopt of a surviving PTY. Registered by
+        #: whoever has something queued for a session that was ended and has
+        #: no terminal to type into (:mod:`claude_launcher.daemon.thread_notices`
+        #: is typed in from here).
+        self.launch_hooks: List[Callable[[Session], None]] = []
         # Old process objects, not names: the replacement must still report
         # its own exit normally. Values record an exit received during restart.
         self._restarting: Dict[int, bool] = {}
@@ -954,6 +960,7 @@ class SessionManager:
                     functools.partial(self._codex_launch_finished, session.sdef.name)
                 )
         self.flush_queued_input(session)
+        self._run_launch_hooks(session)
         if restoring and not self._loading:
             # A respawn or a wake: after a restart the restore queue and
             # every use-wake (a mesh message, a viewer) land here in bursts,
@@ -987,6 +994,15 @@ class SessionManager:
         self._input_flush_tasks.add(task)
         task.add_done_callback(self._input_flush_tasks.discard)
         return True
+
+    def _run_launch_hooks(self, session: Session) -> None:
+        """Tell :attr:`launch_hooks` a session is up: whatever was queued
+        while it had no terminal is delivered from here."""
+        for hook in list(self.launch_hooks):
+            try:
+                hook(session)
+            except Exception:  # noqa: BLE001 -- one hook must not silence the next
+                log.exception("launch hook %r failed for %r", hook, session.sdef.name)
 
     async def _claim_in_thread(self, session: Session, *, timeout: float) -> None:
         """Wait off-loop, up to ``timeout``, for a pending claim to settle.
@@ -3462,6 +3478,7 @@ class SessionManager:
                            pid=session.pid, replayed=len(replay),
                            gap=int(reply.get("gap") or 0))
         self.flush_queued_input(session)
+        self._run_launch_hooks(session)
 
     @staticmethod
     def _end_kept(host, row: dict) -> None:
