@@ -23822,6 +23822,9 @@ async function openNewSession(mesh) {
   if (sessionModal) sessionModalClose({ route: false });
   if (sessionModal) return; // A pending creation still owns the form.
   $("new-session")._sessionView = createSessionFormView("new", "page");
+  // A new opening: answers given before it are not this form's (see the
+  // tracking listeners' comment).
+  $("new-session")._answeredRows = new Set();
   // As in openSessionModal: the rows the poll leaves alone are read here.
   refreshResumeChoices();
   refreshParentChoices();
@@ -24799,7 +24802,36 @@ if (sessionSearchBox) {
   syncSessionSearchOpen();
 }
 
+/* The rows an operator has answered since this form opened (claunch-xlqwq).
+   openSessionModal applies a seed twice — once as the box opens and once
+   after the daemon's option fills — and the second pass must put back only
+   what a picker rebuild dropped, never a row the operator has since
+   answered. The seed redoes the rows that follow a project or profile pick
+   by dispatching its own change events; those run with `f._seeding` set and
+   are the form's writes, not a person's answer. The set is per opening
+   (openSessionModal / openNewSession clear it), so an answer given in one
+   opening does not block the next seed. */
+for (const kind of ["change", "input"]) {
+  document.querySelector("#new-session").addEventListener(kind, (e) => {
+    const form = $("new-session");
+    const control = e.target;
+    if (form._seeding || !control) return;
+    // The v2 start inputs carry no name; an answer inside their box counts
+    // by where it stands (applySessionModalSeed reads it the same way).
+    const inputs = $("new-inputs");
+    if (!control.name && !(inputs && inputs.contains(control))) return;
+    (form._answeredRows ||= new Set()).add(control);
+  });
+}
+
 $("new-session").mesh.addEventListener("change", async () => {
+  // A change of this row is an answer to the one question the seed also
+  // answers: a mesh still held for the picker (#/new/<mesh>, a seed whose
+  // option had not arrived) is spent by this pick, not after it — otherwise
+  // the next fill puts the held value back over the value just picked. The
+  // seed's own row writes run with `_seeding` set and are exempt: what it
+  // holds there is for the picker fill it is about to trigger.
+  if (!$("new-session")._seeding) pendingNewMesh = "";
   // A dispatched change does not bubble to the form's listener.
   syncProjectDefaultsButton();
   // The peers on offer are the picked mesh's, not the parent's: moving the
@@ -43556,27 +43588,66 @@ function ensureOption(select, value, label) {
    precedence the wizard had. */
 function applySessionModalSeed(f, seed) {
   if (!seed) return;
-  if (seed.name !== undefined) f.name.value = seed.name || "";
-  if (seed.task !== undefined) f.task.value = seed.task || "";
+  // openSessionModal applies the seed TWICE: once as the form opens, and
+  // once after the daemon's option fills, which is what puts back a value a
+  // picker rebuild dropped. The second pass is the one that used to run
+  // after the operator had already answered a row, and it wrote the seed's
+  // value over that answer (claunch-xlqwq: a mesh picked on the New tab
+  // became the seed's again, and the create request carried it). A row the
+  // operator has answered is not the seed's to write.
+  // A row is either one control or a radio group (the beads answer and the
+  // worktree mode arrive as a RadioNodeList), so a name is accepted too.
+  const answered = (row) => {
+    const rows = f._answeredRows;
+    if (!rows || !row) return false;
+    if (typeof row === "string") {
+      const prefix = row.endsWith("*");
+      for (const hit of rows) {
+        const name = String(hit.name || "");
+        if (prefix ? name.startsWith(row.slice(0, -1)) : name === row) return true;
+      }
+      return false;
+    }
+    return rows.has(row);
+  };
+  // The v2 start inputs carry no name attribute; they are known by the box
+  // they stand in.
+  const answeredIn = (id) => {
+    const rows = f._answeredRows;
+    const box = typeof $ === "function" ? $(id) : null;
+    if (!rows || !box) return false;
+    for (const hit of rows) if (box.contains(hit)) return true;
+    return false;
+  };
+  if (seed.name !== undefined && !answered(f.name)) {
+    f.name.value = seed.name || "";
+  }
+  if (seed.task !== undefined && !answered(f.task)) {
+    f.task.value = seed.task || "";
+  }
   // The mesh before the role: the role list is the mesh's. Held the way a
   // #/new/<mesh> link is, for a picker the mesh poll has not filled yet
-  // (syncOnboardPickers spends it).
-  if (seed.mesh !== undefined && f.mesh) {
+  // (syncOnboardPickers spends it). Spent here the same way when the picker
+  // already offers it — a value left armed is spent by the row's own change
+  // handler on the next pick, which put the seed's mesh back over the one
+  // the operator chose (claunch-xlqwq).
+  if (seed.mesh !== undefined && f.mesh && !answered(f.mesh)) {
     pendingNewMesh = seed.mesh || "";
     if ([...(f.mesh.options || [])].some((o) => o.value === pendingNewMesh)) {
       f.mesh.value = pendingNewMesh;
+      pendingNewMesh = "";
     }
   }
-  if (seed.role !== undefined) {
+  if (seed.role !== undefined && !answered(f.role)) {
     ensureOption(f.role, seed.role);
     f.role.value = seed.role || "";
     renderRoleStance();
   }
-  if (seed.subroles !== undefined) {
+  if (seed.subroles !== undefined && !answered("subrole_*")) {
     newSubroleTicks = new Set(seed.subroles || []);
     renderSubroles();
   }
-  if (seed.workflow !== undefined) {
+  if (seed.workflow !== undefined && !answered(f.workflow)) {
     // A v2 run whose name a v1 workflow also declares is offered as
     // "v2:<name>" (cflowPickValue); the bare name would start the v1 one.
     const v2 = seed.workflow && seed.workflow_version === 2
@@ -43593,13 +43664,13 @@ function applySessionModalSeed(f, seed) {
   // The rebuild is forced — a box still standing from an earlier opening of
   // this form would early-return syncCflowInputs and the seed would never
   // land; at seed time nothing is typed in the box to lose.
-  if (seed.cflow_inputs !== undefined) {
+  if (seed.cflow_inputs !== undefined && !answeredIn("new-inputs")) {
     pendingSeedInputs = seed.cflow_inputs && Object.keys(seed.cflow_inputs).length
       ? seed.cflow_inputs : null;
     newInputsFor = null;
     if (typeof syncCflowInputs === "function") syncCflowInputs();
   }
-  if (seed.worktree !== undefined && f.worktree_mode) {
+  if (seed.worktree !== undefined && f.worktree_mode && !answered("worktree_mode")) {
     f.worktree_mode.value = seed.worktree ? "new" : "";
     syncNewWorktree();
   }
@@ -43610,15 +43681,26 @@ function applySessionModalSeed(f, seed) {
   for (const key of ["project", "profile"]) {
     const select = f[key];
     if (seed[key] === undefined || !select || select.value === seed[key]) continue;
+    if (answered(select)) continue;
     if (![...(select.options || [])].some((o) => o.value === seed[key])) continue;
     select.value = seed[key];
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+    // The form's own write: the change below runs the rows that follow this
+    // pick, and it must not be read as the operator answering that row (see
+    // the tracking listeners) or spending the mesh this seed is still
+    // holding for a picker that has not been filled yet.
+    const wasSeeding = !!f._seeding;
+    f._seeding = true;
+    try {
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    } finally {
+      f._seeding = wasSeeding;
+    }
   }
   // Where it works, from either spelling: a registry NAME (what an issue
   // records) or the path the picker's values actually are. The name is
   // resolved against the workspace list, so a seed that arrives before that
   // list does is applied on the second pass (see openSessionModal).
-  if (seed.workspace !== undefined || seed.cwd !== undefined) {
+  if ((seed.workspace !== undefined || seed.cwd !== undefined) && !answered(f.cwd)) {
     const hit = (workspacesCache || []).find((w) => w.name === seed.workspace);
     const path = seed.cwd || (hit ? hit.path : "");
     if (path && [...(f.cwd.options || [])].some((o) => o.value === path) &&
@@ -43632,16 +43714,20 @@ function applySessionModalSeed(f, seed) {
   // An issue that already exists, picked rather than minted. The radio is
   // set first, because the picker's row is folded under any other answer
   // and the board read is only paid for by this one.
-  if (seed.issue !== undefined && f.beads) {
+  if (seed.issue !== undefined && f.beads && !answered("beads")) {
     f.beads.value = "existing";
     pendingSeedIssue = seed.issue || "";
     syncBeadsRow();
     refreshIssueChoices();
   }
-  if (seed.args !== undefined) f.args.value = (seed.args || []).join(" ");
-  if (seed.null_token !== undefined) f.null_token.checked = !!seed.null_token;
+  if (seed.args !== undefined && !answered(f.args)) {
+    f.args.value = (seed.args || []).join(" ");
+  }
+  if (seed.null_token !== undefined && !answered(f.null_token)) {
+    f.null_token.checked = !!seed.null_token;
+  }
   if (seed.model !== undefined) f._modelPreset = seed.model;
-  if (seed.prompt_packs !== undefined) {
+  if (seed.prompt_packs !== undefined && !answered("prompt_pack_*")) {
     pendingSeedPacks = [...(seed.prompt_packs || [])];
     applyPendingPackSeed();
   }
@@ -43955,6 +44041,10 @@ async function openSessionModal(opts = {}) {
     parent, source: opts.source, newSeed: opts.newSeed,
     modes: tab === "fork" ? null : opts.modes,
   });
+  // Every answer in an earlier opening belongs to that opening: the seed
+  // below must land on every row this box starts with (see the tracking
+  // listeners' comment).
+  f._answeredRows = new Set();
   sessionModal = st;
   // The page head says "New session" above a form that is now inside a box
   // with a title of its own, so it is the one part of the page the modal

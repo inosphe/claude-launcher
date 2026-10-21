@@ -682,6 +682,7 @@ BROWSER_CHECKS = [
         "ptyhostsetting_browser.cjs",
         "spawngate_browser.cjs",
         "filldefault_browser.cjs",
+        "seedmesh_browser.cjs",
 ]
 
 

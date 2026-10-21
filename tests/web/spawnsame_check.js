@@ -279,7 +279,11 @@ actx.apply(f, {
 });
 let st = actx.state();
 check("the mesh row takes the seeded mesh", f.mesh.value === "mesh-1", f.mesh.value);
-check("...and it is held for the next picker fill", st.pendingNewMesh === "mesh-1");
+// Spent, the way syncOnboardPickers spends it: a value left armed is spent
+// by the row's own change handler on the NEXT pick, putting the seed's mesh
+// back over the one the operator chose (claunch-xlqwq).
+check("...and the held value is spent by that write", st.pendingNewMesh === "",
+      st.pendingNewMesh);
 check("the role row takes the seeded role", f.role.value === "worker");
 check("the subroles are the seeded ones, and the row is redrawn",
       eq([...st.newSubroleTicks], ["reviewer"]) && actx.renders === 1);
