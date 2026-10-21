@@ -712,11 +712,17 @@ async function fadeCost(page, selector, fade) {
     const history=section.locator('details.obs-history');
     await history.waitFor();
     assert.equal(await history.evaluate(d=>d.open),false,"the record log starts folded");
-    assert.match(await history.locator('summary').innerText(),/세션 기록 3건/);
+    assert.match(await history.locator('summary').innerText(),/세션 기록 2건/);
     assert.doesNotMatch(await section.innerText(),/데몬 재시작 후 PTY 호스트의 세션 인수/,"folded records are not read out");
-    assert.equal(await history.locator('[data-event="h1"], [data-event="h2"]').count(),2,"both adopt records are inside the fold");
+    // Identical adopt lines from one restart are one run, not one line each
+    // (claunch-kuopi): the fold keeps the first record's id and counts the
+    // rest, so two restarts read as ×2 inside the log rather than as two
+    // entries the reader has to tell apart.
+    assert.equal(await history.locator('[data-event="h1"], [data-event="h2"]').count(),1,"the identical adopts fold into one entry");
+    assert.equal(await history.locator('[data-event="h2"]').count(),0,"the later duplicate is inside the fold, not beside it");
+    assert.match(await history.locator('[data-event="h1"] .obs-count').textContent(),/×2/,"the run count carries what folded");
     assert.equal(await history.locator('[data-event="e1"]').count(),0,"the request that needs an answer stays outside it");
-    assert.equal(await history.locator('.event.routine').count(),2,"daemon records keep their compact routine line");
+    assert.equal(await history.locator('.event.routine').count(),1,"daemon records keep their compact routine line");
     // Opening it is one click, and the log stays open across the redraw that
     // the section's own ten-second poll performs.
     await history.locator('summary').click();

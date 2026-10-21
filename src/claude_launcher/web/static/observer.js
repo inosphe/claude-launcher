@@ -575,8 +575,11 @@ function richLine(text,cls="obs-line",session="") {
    every session card — are drawn as one entry with a count and a time span.
    Only events next to each other in one session's own order are merged, so
    nothing is moved across an event that happened in between. `exit` is left
-   out on purpose: two identical exits mean the session stopped twice, which
-   is a fact a reader needs; `fail` is not routine at all. */
+   out on purpose: two identical exits are not one event repeated — the
+   session stopped twice — and folding them would hide the second stop. That
+   is about the fold, not the weight: `exit` still carries `notice`
+   (observer.py), so the 알림 filter can drop it when the reader asks. `fail`
+   is neither routine nor folded. */
 const ROUTINE = new Set(["resume", "adopt", "create", "wake", "restore", "delayed",
   "respawn", "borrow", "worktree", "detach", "archive", "hold", "kill", "pause",
   "restart-settings"]);
