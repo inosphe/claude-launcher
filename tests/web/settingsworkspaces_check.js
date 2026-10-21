@@ -56,6 +56,7 @@ const CARDS = [
   "llmSettingsCard", "simDefaultsCard", "qaNudgeCard", "megaThreadCard", "faqCard",
   "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard", "ptyHostSettingCard",
+  "testOutputDirCard",
   "delegateSettingCard", "providerAffinityCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
@@ -158,6 +159,7 @@ const REFRESHERS = [
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
   "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
   "refreshRoleWorkflowSettings", "refreshWslRegStub", "refreshPtyHostSetting",
+  "refreshTestOutputDir",
   "refreshDelegateSetting", "refreshProviderAffinity",
 ];
 const octx = {
@@ -195,5 +197,7 @@ assert.equal(called.includes("refreshRoleWorkflowSettings"), true,
              "General fetches the Role workflows card's data");
 assert.equal(called.includes("refreshPtyHostSetting"), true,
              "General fetches the PTY host card's data (claunch-xnnct.5)");
+assert.equal(called.includes("refreshTestOutputDir"), true,
+             "General fetches the test output dir card's data (claunch-pyv3d.1)");
 
 console.log("settingsworkspaces_check ok");
