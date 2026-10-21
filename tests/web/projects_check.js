@@ -91,7 +91,9 @@ check("the session poll asks for every project",
       slice("refreshSessions").includes(
         "`/api/sessions?view=rail&state=${encodeURIComponent(state)}`"), true);
 check("...and so does the mesh poll",
-      slice("refreshMeshList").includes('api("/api/mesh?view=rail")'), true);
+      // The call may carry read options now (the first boot sends `noBatch`,
+      // claunch-e303z); what this holds is that the path names no project.
+      slice("refreshMeshList").includes('api("/api/mesh?view=rail"'), true);
 check("neither poll spells a project filter any more",
       [/project=/.test(slice("refreshSessions")),
        /project=/.test(slice("refreshMeshList"))], [false, false]);
