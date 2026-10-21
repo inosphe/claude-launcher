@@ -6717,12 +6717,13 @@ async def h_model_prices(request: web.Request) -> web.Response:
 async def h_model_prices_set(request: web.Request) -> web.Response:
     """Set the per-model price table the dashboard's cost estimates use.
 
-    Written to the config file (``daemon.model_prices`` /
-    ``daemon.model_price_currency``) — readable and editable with
-    ``claunch daemon config`` like the reminder/ping defaults. The whole
-    table is replaced, so the UI reads it back after the write; an empty
-    table clears it, which turns the estimated-price display back off.
-    Partial on purpose: only the keys sent change.
+    Written to the config file (``daemon.model_prices``) and read live, so
+    a PUT is what the next dashboard poll prices against; the currency
+    symbol (``daemon.model_price_currency``) also answers to ``claunch
+    daemon config model_price_currency``. The table itself is replaced
+    whole — the UI reads it back after the write; an empty table clears
+    it, which turns the estimated-price display back off. Partial on
+    purpose: only the keys sent change.
     """
     body = await _json_body(request)
     prices_out = None
