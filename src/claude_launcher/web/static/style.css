@@ -2743,10 +2743,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-tps-overlay .term-tps-big { font-size: 15px; font-weight: 600; line-height: 18px; }
 #term-tps-overlay .term-tps-small { font-size: 10px; color: #8b949e; line-height: 12px; }
-/* Two stacked areas (claunch-k196e.2): what is running now -- state, chart,
-   the shim's other sessions -- above, and how the last finished call went
-   below. The divider is drawn only when both are on screen: one area plus an
-   empty sliver would read as a second thing that has nothing to say. */
+/* Two stacked areas (claunch-k196e.2): what is running now -- state and
+   chart -- above, and how the last finished call went below (the shim's
+   other sessions are not drawn, claunch-waakh). The divider is drawn only
+   when both are on screen: one area plus an empty sliver would read as a
+   second thing that has nothing to say. */
 #term-tps-overlay .term-tps-live,
 #term-tps-overlay .term-tps-last {
   display: flex; flex-direction: column; align-items: flex-end; gap: 1px;

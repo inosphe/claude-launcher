@@ -1156,11 +1156,10 @@ overlay show `cache 97%`, and the tooltip gives the share beside both token
 counts and the share over the whole window.
 
 The overlay over the terminal is two stacked areas now: what is running right
-now on top (the live state, its thirty-second chart, and how the shim's calls
-are split across sessions), and how the last finished call went underneath
-(model, its rate and age, then that call's latency with the window's mean and
-the cache share). The divider between them is drawn only when both are on
-screen.
+now on top (the live state and its thirty-second chart), and how the last
+finished call went underneath (model, its rate and age, then that call's
+latency with the window's mean and the cache share). The divider between them
+is drawn only when both are on screen.
 
 That block is computed over a window bounded on two axes: the last ten calls,
 and only those made in the last ten minutes. The count on its own was not a
@@ -1194,14 +1193,18 @@ that total divided by the session count (`mean`), and each session's calls in
 flight (`counts`, this session first; `calls` their sum; `by_session` with
 each session's name, calls and rate). The counts say how uneven the split is
 — one call here and five in the other session reads `1+5`, which the mean
-alone hides. The rail line and the header badge append it as
-`×3 (1+2) Σ≈120 avg≈40`, the terminal overlay reads
-`3 sessions · calls 1+2 · total ≈120 tok/s · avg ≈40 tok/s`, the tooltip
-lists each session's calls and rate, and `claunch tps` prints a `live now`
-section with the call counts per shim and per session. A session running
-alone on its shim shows no `parallel` figure, since its own rate is already
-the shim's total. The live rate is taken over the two-second window it
-names: a bin that only partly overlaps the window contributes its
+alone hides. `claunch tps` prints a `live now` section with the call counts
+per shim and per session.
+
+The dashboard does not draw those other sessions (claunch-waakh). A session's
+rail line, card chip, header badge, terminal overlay and tooltip carry that
+session's own reading only — the rail and badge used to append the shim's
+`×3 (1+2) Σ≈120 avg≈40`, which grew as wide as the number of peers on the
+shim. Its subagent calls are already inside those figures: they run under the
+same session name, so the shim records them against the session. A session
+running alone on its shim shows no `parallel` figure, since its own rate is
+already the shim's total. The live rate is taken over the two-second window
+it names: a bin that only partly overlaps the window contributes its
 overlapping share.
 
 ## Migrating skills & MCP servers
