@@ -13,6 +13,13 @@ from urllib.parse import quote, urlencode
 
 from . import daemon_client, mcp_rpc
 
+INSTRUCTIONS = """\
+Watching other sessions' runs (runs/subscribe family): follow another
+session's cflow run by cursor instead of asking it for a status report, and
+recover what a missed delivery carried. Full guidance: prompt pack
+'mcp-cflow-watch' (load it on demand, see Prompt packs).
+"""
+
 
 TARGETS = {
     "type": "array",
@@ -153,4 +160,5 @@ SERVER = mcp_rpc.Server(
     tools=tuple(TOOLS),
     dispatch=call_tool,
     errors=(CflowWatchMcpError, daemon_client.DaemonClientError, OSError, ValueError),
+    instructions=INSTRUCTIONS,
 )
