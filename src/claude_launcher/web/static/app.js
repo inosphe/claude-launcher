@@ -29348,12 +29348,6 @@ function statsEndedToggle() {
   return label;
 }
 
-function statsProviderLabel(row) {
-  const providers = row.providers || [];
-  if (providers.length > 1) return providers.map((p) => p.provider).join(" + ");
-  return (providers[0] && providers[0].provider) || row.provider || "—";
-}
-
 function setStatsProvider(name) {
   statsProvider = name || "";
   renderStats();

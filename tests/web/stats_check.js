@@ -145,7 +145,7 @@ new Function(
      "statsPct", "statsBucketLabel", "statsStamp", "statsCard", "statsChart",
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
      "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
-     "statsProviderLabel", "setStatsProvider", "statsProviderStrip",
+     "setStatsProvider", "statsProviderStrip",
      "statsRowTotal", "statsRowRequests", "statsOverviewRows",
      "statsOverviewTable", "statsOverviewRow", "statsSwitchList",
      "statsDetailWindow", "statsReadingSections", "statsDetailPanel",
