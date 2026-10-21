@@ -100,7 +100,34 @@ log = logging.getLogger("claunch.daemon.cflow2")
 
 DEFAULT_POLL = 10.0
 
+#: Who the journal names when a session's own ending finished its run: the
+#: last question of a round was answered by ending the session, not by
+#: picking an option, and the record has to say which.
+EXIT_BY = "session-exit"
+
 Notice = Tuple[str, str, str]  # (cwd, session name, text)
+
+
+def exit_block(session: str, run_id: str, ask: str) -> str:
+    """The record left in a session that was ended at an end gate.
+
+    Its counterpart is the v1 clock's ``end_block``: an ending a future reader
+    can find in the transcript itself, whichever viewer or restart looks at
+    it. This one is written after the process is gone, so it says so.
+    """
+    return "\n".join([
+        "---",
+        "# claunch: session ended at an end gate -- machine-generated, not typed by the user",
+        f"session: {session}",
+        f"run: {run_id}",
+        f"ask: {ask} (closed cancelled)",
+        f"outcome: the session was ended while its run asked whether to end; the run "
+        f"is finished ({EXIT_BY}) and its branch and issues are left for the leader "
+        f"to integrate",
+        f"resume: `claunch respawn {session}`",
+        "---",
+        "",
+    ])
 
 
 def _resolve(cwd: str) -> str:
@@ -398,8 +425,12 @@ class Cflow2Clock:
                 loop.call_soon_threadsafe(wake.set)
 
     def end_sides(self, now: Optional[float] = None) -> List[Tuple[str, str]]:
-        """Abort the live side runs of the sessions :meth:`session_exited`
-        recorded, unless the session is live again. ``(cwd, slot)`` aborted."""
+        """End what a session's exit leaves behind: its live side runs are
+        aborted, and a run still standing at an end gate is finished.
+
+        ``(cwd, slot)`` aborted. A session that is back (redefine, respawn)
+        keeps its runs and sides both.
+        """
         out: List[Tuple[str, str]] = []
         while self._exits:
             name, cwd = self._exits.popleft()
@@ -412,7 +443,88 @@ class Cflow2Clock:
                     out.append((resolved, scope))
             except Exception:
                 log.exception("cflow2 clock could not end the side runs of %r", name)
+            self._end_run_at_gate(name, cwd, now=now)
         return out
+
+    def _end_run_at_gate(self, name: str, cwd: str, *, now: Optional[float] = None) -> None:
+        """A person's ending answers the round's last question too.
+
+        The end gates (``end-decision`` / ``release-decision``) ask whether to
+        end. A person who kills the session instead of answering has answered
+        the same thing, only by another route: the run finishes done, the
+        session's transcript gets the ending block, and the parent hears of
+        it. Without this the run stayed ``waiting_approval`` forever with no
+        terminal left to answer it (:func:`..cflow2.runtime.end_on_session_exit`
+        holds the rule and its bounds).
+
+        Runs in the scan's thread -- it takes the run lock and writes the
+        transcript file -- and only for sessions that really are gone.
+        """
+        try:
+            resolved = _resolve(cwd)
+            # The slot is qualified (``s15@main``) once it has been moved; a
+            # slot written before the qualifier is the bare session name.
+            scope = ""
+            for candidate in (cstore.normalize_scope(name), cstore.main_scope(name)):
+                if runtime.RunStore(resolved, candidate).exists():
+                    scope = candidate
+                    break
+            # Most sessions drive no v2 run at all, so an ordinary ending
+            # costs one exists() here and no exception.
+            if not scope:
+                return
+            done = runtime.end_on_session_exit(cwd=resolved, scope=scope,
+                                               by=EXIT_BY, now=now)
+        except Exception:
+            log.exception("cflow2 clock could not finish the run of %r", name)
+            return
+        if not done.get("finished"):
+            log.info("cflow2 clock: %r ended; its run was left as it was (%s)",
+                     name, done.get("why"))
+            return
+        run_id = str(done.get("run") or "")
+        ask = str(done.get("ask") or "")
+        log.info("cflow2 clock: %r ended at %s; run %s finished", name, ask, run_id)
+        self._append_transcript(name, exit_block(name, run_id, ask))
+        self._tell_overseer(name)
+
+    def _append_transcript(self, name: str, block: str) -> None:
+        """Append the ending block to a session that has already exited.
+
+        :meth:`Session.append_wal` refuses an exited session (it is the
+        record-before-ending act of a session still running); this one lands
+        after, so it opens the same log path itself, append-only and flushed.
+        A failure is logged: nothing downstream depends on the block, but a
+        record that did not land is worth seeing in the daemon log.
+        """
+        path = paths.session_log(name)
+        try:
+            with path.open("ab") as log_file:
+                log_file.write(block.encode("utf-8"))
+                log_file.flush()
+        except OSError:
+            log.exception("cflow2 clock: could not write the ending of %r", name)
+
+    def _tell_overseer(self, name: str) -> None:
+        """Tell the session's parent (the overseer) that it ended.
+
+        The daemon's other ending notice (kill-on-end) goes through the v1
+        clock's event queue; this one is typed into the parent's terminal,
+        which is the channel a live sibling is reached on. No parent, or one
+        that is gone, means nobody to tell -- the transcript keeps the record.
+        """
+        try:
+            session = self.manager.get(name)
+        except Exception:
+            return
+        parent = str(getattr(getattr(session, "sdef", None), "parent", "") or "")
+        if not parent:
+            return
+        text = (f"# claunch cflow2: session ended -- machine-generated\n"
+                f"child: {name} — ended while at an end gate; its run finished "
+                f"(the ending record is in its transcript)\n")
+        cwd = str(getattr(getattr(session, "sdef", None), "cwd", "") or "")
+        self._deliver(cwd, parent, text)
 
     # -- what to scan ----------------------------------------------------
     def _live_sessions(self) -> List[Any]:
