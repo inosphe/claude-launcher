@@ -840,6 +840,7 @@ def build_app(
     r.add_get("/api/profiles", h_profiles)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
+    r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
     r.add_get("/api/install", h_install_overview)
     r.add_get("/api/install/plan", h_install_plan)
     r.add_post("/api/install/apply", h_install_apply)
@@ -2824,6 +2825,12 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "tools": _profile_default_tools(p, registry.get(name)),
                     "model_ids": model_ids.get(name, {}),
                     **effort.row(name),
+                    # The profile's own declaration under the resolved value
+                    # above: the page's editor writes this one, and needs it
+                    # apart from the resolved value to tell "declared here"
+                    # from "inherited from the provider" (``None`` = nothing
+                    # declared, which is not the same as "runs at none").
+                    "reasoning_effort_declared": _declared_effort(p.name, doc),
                     # Where the profile actually lives. The management page
                     # shows it because a profile IS a directory, and the one
                     # question that needs it ("which of these is the one I am
@@ -2935,12 +2942,33 @@ async def h_profiles(request: web.Request) -> web.Response:
             "profile_selectors": selectors,
             "profile_options": profile_options,
             "profile_details": items,
+            # The levels ``profiles.<name>.reasoning_effort`` accepts, in the
+            # neutral spec every harness translates. Published rather than
+            # spelled in the page so a level added to the spec (or removed
+            # from it) is offered without a second edit here.
+            "reasoning_effort_choices": list(provider_spec.REASONING_EFFORTS),
             # Profiles whose auto_compact_at exceeds their context_window:
             # a session on one is refused (harness.normalize), and the form
             # says so next to the profile picker before Create is pressed.
             "compact_problems": _compact_problems(doc),
         }
     )
+
+
+def _declared_effort(name: str, doc: dict) -> Optional[str]:
+    """This profile's own ``reasoning_effort``, as the config spells it.
+
+    ``reasoning_effort`` resolves through four layers (template, provider,
+    profile chain, and Claude's own env channel); this is only the profile's
+    own entry. The page edits exactly this one, and needs it apart from the
+    resolved value to tell "declared here" from "inherited" -- a select whose
+    value is the resolved number would claim a declaration nobody made.
+    """
+    raw = store.profile_entry(name, doc).get("reasoning_effort")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
 
 
 def _compact_problems(doc: dict) -> dict:
@@ -3093,6 +3121,64 @@ async def h_profiles_permission_mode(request: web.Request) -> web.Response:
             "converged": [r.profile for r in results if r.changed],
             "unchanged": [r.profile for r in results if not r.changed and r.ok],
             "failed": failed,
+        }
+    )
+
+
+async def h_profiles_reasoning_effort(request: web.Request) -> web.Response:
+    """Declare (or, with ``effort: null``, undeclare) one profile's default effort.
+
+    Writes ``profiles.<profile>.reasoning_effort`` and nothing else. Every
+    harness that translates the field applies it at its next launch (Claude
+    reads ``CLAUDE_CODE_EFFORT_LEVEL``, Codex ``-c model_reasoning_effort``,
+    Pi ``--thinking`` plus ``defaultThinkingLevel``); a session already
+    running keeps the effort it started with, and an effort chosen when a
+    session was created wins over this default for that session. Undeclaring
+    removes the key, so the provider's value -- or the harness's own default
+    when no layer sets one -- decides again.
+
+    Only the neutral spec's levels are accepted: they are the ones every
+    translator carries without lossy mapping, so a value written here can
+    never make a launch of any harness invalid.
+    """
+    body = await _json_body(request)
+    name = body.get("profile")
+    if not isinstance(name, str) or not name.strip():
+        return json_error(400, "profile must be a non-empty profile name")
+    doc = store.load()
+    try:
+        target = profile_mod.require(name)
+        if target.name not in {p.name for p in profile_mod.list_all()}:
+            return json_error(400, "profile must name an existing profile")
+        # Resolved before the write: a profile whose chain selects no harness
+        # cannot report what the value would apply to, and writing a key into
+        # it would leave the page claiming a change it cannot describe.
+        harness_name = lineage.effective_harness(target, doc)
+    except (profile_mod.ProfileError, lineage.LineageError) as exc:
+        return json_error(400, str(exc))
+    if "effort" not in body:
+        return json_error(400, "effort is required; use null to restore the default")
+    raw = body.get("effort")
+    declared = str(raw).strip() if raw is not None else ""
+    if declared and declared not in provider_spec.REASONING_EFFORTS:
+        return json_error(
+            400,
+            f"unknown reasoning effort {declared!r} (known: "
+            f"{', '.join(provider_spec.REASONING_EFFORTS)})",
+        )
+    store.set_profile_field(target.name, "reasoning_effort", declared or None)
+    # The listing the form reads is answered from the daemon's profile facts;
+    # a write here is a person waiting to see the new value.
+    request.app["profile_facts"].invalidate()
+    doc = store.load()
+    row = _EffortSource(target, doc).row(harness_name)
+    return json_response(
+        {
+            "profile": target.name,
+            # What the profile's own entry reads now; null means the
+            # declaration is gone, not that launches apply no effort.
+            "declared": declared or None,
+            **row,
         }
     )
 

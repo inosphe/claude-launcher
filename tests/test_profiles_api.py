@@ -588,6 +588,124 @@ def test_an_unreadable_provider_reports_null_and_why(home):
 
 
 # --------------------------------------------------------------------------- #
+# reasoning_effort, written from the page: profiles.<name>.reasoning_effort
+# --------------------------------------------------------------------------- #
+def post_effort(payload):
+    return asyncio.run(api.h_profiles_reasoning_effort(_Request(payload)))
+
+
+def test_the_listing_publishes_the_levels_and_the_profile_own_declaration(home):
+    """The editor needs both halves: what it may offer, and what is declared.
+
+    ``reasoning_effort`` alone is the resolved value (it may come from the
+    provider), so a select driven by it would claim a declaration the profile
+    never made.
+    """
+    profile.create("work")
+    profile.create("provider-fed")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"ds": {"reasoning_effort": "medium"}}
+        )
+    )
+    store.set_profile_field("provider-fed", "provider", "ds")
+    store.set_profile_field("provider-fed", "reasoning_effort", "low")
+    body = listing()
+    assert body["reasoning_effort_choices"] == ["low", "medium", "high"]
+    assert _default_row(body, "work")["reasoning_effort_declared"] is None
+    assert _default_row(body, "provider-fed")["reasoning_effort_declared"] == "low"
+    # The inherited half is told apart by the resolved value being non-null
+    # while nothing is declared.
+    store.update(lambda doc: doc["profiles"]["work"].update({"provider": "ds"}))
+    row = _default_row(listing(), "work")
+    assert row["reasoning_effort"] == "medium"
+    assert row["reasoning_effort_declared"] is None
+
+
+def test_declaring_an_effort_writes_the_profile_field(home):
+    profile.create("work")
+    resp = post_effort({"profile": "work", "effort": "medium"})
+    assert resp.status == 200
+    body = json.loads(resp.text)
+    assert body["profile"] == "work"
+    assert body["declared"] == "medium"
+    assert body["reasoning_effort"] == "medium"
+    assert body["reasoning_effort_problem"] is None
+    assert store.profile_entry("work")["reasoning_effort"] == "medium"
+    # The listing the page re-reads says the same thing.
+    row = _default_row(listing(), "work")
+    assert row["reasoning_effort"] == "medium"
+    assert row["reasoning_effort_declared"] == "medium"
+
+
+def test_clearing_the_effort_removes_the_key(home):
+    profile.create("work")
+    store.set_profile_field("work", "reasoning_effort", "high")
+    resp = post_effort({"profile": "work", "effort": None})
+    assert resp.status == 200
+    body = json.loads(resp.text)
+    assert body["declared"] is None
+    # Null means "no declaration" -- the launch is not told to run at "none".
+    assert body["reasoning_effort"] is None
+    assert "reasoning_effort" not in store.profile_entry("work")
+    assert _default_row(listing(), "work")["reasoning_effort"] is None
+
+
+def test_clearing_returns_to_the_provider_value(home):
+    """Undeclaring a profile that overrode its provider shows the provider's."""
+    profile.create("work")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"ds": {"reasoning_effort": "medium"}}
+        )
+    )
+    store.set_profile_field("work", "provider", "ds")
+    store.set_profile_field("work", "reasoning_effort", "low")
+    body = json.loads(post_effort({"profile": "work", "effort": ""}).text)
+    assert body["declared"] is None
+    assert body["reasoning_effort"] == "medium"
+    assert _default_row(listing(), "work")["reasoning_effort_declared"] is None
+
+
+def test_an_unknown_level_is_refused_and_nothing_is_written(home):
+    """``xhigh`` is a Claude harness level, not a neutral-spec value.
+
+    The spec is what every translator carries without lossy mapping, so a
+    value outside it would make launches of some harnesses invalid.
+    """
+    profile.create("work")
+    before = store.load()
+    resp = post_effort({"profile": "work", "effort": "xhigh"})
+    assert resp.status == 400
+    assert "unknown reasoning effort" in json.loads(resp.text)["error"]
+    assert "low, medium, high" in json.loads(resp.text)["error"]
+    assert store.load() == before
+
+
+def test_an_unknown_profile_is_refused(home):
+    profile.create("work")
+    before = store.load()
+    resp = post_effort({"profile": "nowhere", "effort": "low"})
+    assert resp.status == 400
+    assert store.load() == before
+
+
+def test_a_missing_effort_field_is_refused(home):
+    profile.create("work")
+    before = store.load()
+    resp = post_effort({"profile": "work"})
+    assert resp.status == 400
+    assert "effort is required" in json.loads(resp.text)["error"]
+    assert store.load() == before
+
+
+def test_a_missing_profile_field_is_refused(home):
+    resp = post_effort({"effort": "low"})
+    assert resp.status == 400
+    assert "profile must be" in json.loads(resp.text)["error"]
+
+
+# --------------------------------------------------------------------------- #
 # pi's TUI mode: harness_options.pi.settings.tuiMode, read and written
 # --------------------------------------------------------------------------- #
 def post_tui(payload):
