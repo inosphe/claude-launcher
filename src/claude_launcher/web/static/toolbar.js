@@ -40,6 +40,10 @@
   // for that was a forced style and layout of the header once a second
   // (claunch-i3es6).
   let widths = new Map();
+  // The text each item held at that fit, for the same reason and read the
+  // same way: a settled row's item width is its share of the space, so a
+  // text change can only be shown not to matter by comparing texts.
+  let texts = new Map();
   function populateMenu() {
     menu.replaceChildren();
     for (const item of overflow) {
@@ -191,7 +195,48 @@
     // stop on the row.
     syncLifeTabstop();
     widths = new Map(items.map(el => [el, el.getBoundingClientRect().width]));
+    texts = new Map(items.map(el => [el, el.textContent]));
     watch();
+  }
+  // A text change that only swapped digits inside a `tabular-nums` run cannot
+  // move a width: every digit in such a run is the same width, so the same
+  // number of characters at the same positions lays out the same. That is the
+  // one text change this row gets once a second — the reminder chip's
+  // countdown — so without this the measuring pass below ran at 1 Hz for as
+  // long as a session was on screen (claunch-hwbuc). The app writes the
+  // countdown with `textContent` (paintTermTimer), which a MutationObserver
+  // reports as a childList swap rather than a characterData edit, so the
+  // comparison is made against the text each item had at the last fit.
+  //
+  // It is a claim about the tabular run only, so it is checked twice: every
+  // character that moved must be a digit on both sides, and the element the
+  // text sits in must actually resolve to `font-variant-numeric: tabular-nums`
+  // (computed, not assumed — the chip gets it from the stylesheet, and a
+  // harness that lifts this function out alone still has to answer the same
+  // way). The style answer is cached per element: it cannot change without a
+  // class or an attribute, and both are records this observer sees.
+  const tabular = new WeakMap();
+  function tabularUnder(node) {
+    // A characterData record's target is the text node; the style belongs to
+    // the element it sits in.
+    const start = node && node.nodeType === Node.ELEMENT_NODE ? node : node && node.parentElement;
+    if (!start) return false;
+    const known = tabular.get(start);
+    if (known !== undefined) return known;
+    let answer = false;
+    for (let el = start; el && el !== header; el = el.parentElement) {
+      if (getComputedStyle(el).fontVariantNumeric.includes("tabular-nums")) { answer = true; break; }
+    }
+    tabular.set(start, answer);
+    return answer;
+  }
+  function digitsOnly(before, after) {
+    if (typeof before !== "string" || before.length !== after.length) return false;
+    for (let i = 0; i < after.length; i++) {
+      if (before[i] === after[i]) continue;
+      if (!(before[i] >= "0" && before[i] <= "9") || !(after[i] >= "0" && after[i] <= "9")) return false;
+    }
+    return true;
   }
   // True when every text change in `records` sits inside an item the last
   // fit measured, on the row, at the width it was measured at. A change to
@@ -199,15 +244,20 @@
   // not, and neither is anything the last fit did not see. Only a row that
   // is neither compact nor overflowing is the state fit measures in, so only
   // there does an unchanged width mean an unchanged answer: a compact button
-  // is a fixed-width glyph whatever its label says.
+  // is a fixed-width glyph whatever its label says, and a settled row's item
+  // width is its share of the space rather than its content's. In those
+  // states a text change therefore has to be provably width-neutral — digits
+  // swapped inside a tabular run, at the same length — before the same answer
+  // can be assumed.
   function sameWidths(records) {
-    if (header.classList.contains("term-compact") || overflow.length) return false;
+    const settled = header.classList.contains("term-compact") || overflow.length > 0;
     const touched = new Set();
     for (const r of records) {
       let node = r.target.nodeType === Node.ELEMENT_NODE ? r.target : r.target.parentElement;
       while (node && node !== header && !widths.has(node)) node = node.parentElement;
       if (!node || node === header) return false;
       touched.add(node);
+      if (settled && !(digitsOnly(texts.get(node), node.textContent) && tabularUnder(r.target))) return false;
     }
     for (const el of touched) {
       if (el.classList.contains("toolbar-overflow")) return false;

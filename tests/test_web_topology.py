@@ -650,6 +650,7 @@ BROWSER_CHECKS = [
         "scoregoal_browser.cjs",
         "sessiontabs_browser.cjs",
         "toolbar_browser.cjs",
+        "toolbarrefit_browser.cjs",
         "observer_browser.cjs",
         "observer_operator_browser.cjs",
         "operator_fab_browser.cjs",
