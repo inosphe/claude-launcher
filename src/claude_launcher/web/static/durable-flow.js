@@ -82,9 +82,25 @@
    it, because a downloaded SVG carries no page CSS, and PNG is that same
    file drawn onto a canvas.
 
+   A run can continue one that came before it (claunch-0n5jr). The producer
+   logs ``{"event":"continued","from":{"runId","runDir","round",...}}`` when
+   it forks from an earlier conversation (gds6's designframe v2 write runs).
+   ``/durable`` answers the first poll (``since=0``) with ``ancestors``,
+   oldest first, each ``{runId, round, events}``; the pane draws each as its
+   own set of columns to the left of the live run, dimmed, and joins the
+   newest ancestor's last node to the live run's first node with one dashed
+   edge. The header of the column that edge lands in reads ``rev N에서
+   이어받음`` -- the head is the one place that label cannot cover a node.
+   The live run's own drawing is unchanged -- it starts at its first column
+   whatever precedes it. The sequence view and the exports taken from it
+   leave the ancestors out: its axis is the live run's clock, and an old
+   run's intervals would squeeze the part being watched. The tree's export
+   carries what the tree shows.
+
    ``model(events, live, progress)`` and ``sequence(events, live, now)`` are
-   the pure halves (tests/web/durableflow_check.js); ``mount(host, session)``
-   owns the poll, the view switch and the SVG. */
+   the pure halves (tests/web/durableflow_check.js); ``withAncestors`` is the
+   pure half of the shadowed run; ``mount(host, session)`` owns the poll, the
+   view switch and the SVG. */
 (function () {
   "use strict";
 
@@ -549,6 +565,14 @@
           }
           break;
         }
+        // A fork from an earlier run (claunch-0n5jr). The connector the pane
+        // draws from `ancestors` carries it, so the run's own columns gain no
+        // node; the start node keeps the round in its tip.
+        case "continued": {
+          const host = [...nodes].reverse().find((x) => x.id.startsWith("start"));
+          if (host) host.tip.push(when + " continued rev " + ((ev.from && ev.from.round) ?? "?"));
+          break;
+        }
         default: {
           const last = cols.length ? cols[cols.length - 1].phase : "other";
           add(last.startsWith("unit:") ? "other" : last, "ev:" + ev.event,
@@ -832,6 +856,87 @@
     return { x: PAD + n.col * (W + GAP_X), y: PAD + HEAD + n.row * (H + GAP_Y) };
   }
 
+  /* The runs a run continued from, laid out to sit left of the live run's
+     columns (claunch-0n5jr). Each ancestor is its own ``model`` -- its own
+     phases, its own rows -- pushed right by the columns already placed. A
+     layer carries the newest ancestor's last node (``tail``) and the round
+     the live run continued from (``round``), which the connector uses. An
+     ancestor with no drawable node is skipped. */
+  function ancestorLayer(ancestors) {
+    const cols = [], nodes = [], edges = [];
+    let shift = 0, tail = null, round = null, count = 0;
+    for (const a of (Array.isArray(ancestors) ? ancestors : [])) {
+      if (!a || !Array.isArray(a.events)) continue;
+      const am = model(a.events, false, null);
+      if (!am.nodes.length) continue;
+      const tag = "anc" + count + ":";
+      const map = new Map();
+      for (const c of am.cols) cols.push({ phase: c.phase, title: c.title, cls: "anc", nodes: [] });
+      for (const n of am.nodes) {
+        const node = { ...n, id: tag + n.id, col: n.col + shift,
+                       cls: (n.cls ? n.cls + " " : "") + "anc" };
+        cols[node.col].nodes.push(node.id);
+        nodes.push(node);
+        map.set(n.id, node);
+      }
+      for (const e of am.edges) {
+        const from = map.get(e.from.id), to = map.get(e.to.id);
+        if (from && to) edges.push({ ...e, id: tag + e.id, from, to, anc: true });
+      }
+      shift += am.cols.length;
+      const deep = am.nodes[am.nodes.length - 1];
+      tail = map.get(deep.id) || null;
+      round = a.round;
+      count += 1;
+    }
+    return nodes.length ? { cols, nodes, edges, shift, tail, round, count } : null;
+  }
+
+  /* The live run's model with an ancestor layer to its left (claunch-0n5jr).
+     Ancestor nodes and edges are dimmed (``anc``); the layer's tail joins the
+     live run's first node with ``anc-link``, and the column the link lands in
+     says which round it continued from -- the head of that column is the one
+     place the label cannot cover a node. Without a layer the model is
+     returned as is, so a run that continued nothing draws exactly what it
+     drew before. */
+  function compose(m, layer) {
+    if (!layer) return m;
+    const shift = layer.shift;
+    const cols = layer.cols.slice();
+    const nodes = layer.nodes.slice();
+    const edges = layer.edges.slice();
+    const map = new Map();
+    for (const c of m.cols) cols.push({ phase: c.phase, title: c.title, nodes: [] });
+    for (const n of m.nodes) {
+      const node = { ...n, col: n.col + shift };
+      cols[node.col].nodes.push(node.id);
+      nodes.push(node);
+      map.set(n.id, node);
+    }
+    // Before the edges: the pending node's id is not in ``m.nodes``, and the
+    // live edge ends on it -- remap after it is known (claunch-0n5jr review).
+    let pending = null;
+    if (m.pending) {
+      pending = { ...m.pending, col: m.pending.col + shift };
+      map.set(m.pending.id, pending);
+    }
+    for (const e of m.edges) {
+      const from = map.get(e.from.id), to = map.get(e.to.id);
+      edges.push(from && to ? { ...e, from, to } : e);
+    }
+    const head = m.nodes.length ? map.get(m.nodes[0].id) : null;
+    if (layer.tail && head) {
+      edges.push({ id: "anc-link", from: layer.tail, to: head, link: true });
+      const c = cols[head.col];
+      c.title = c.title + " · rev " + (layer.round ?? "?") + "에서 이어받음";
+    }
+    return { ...m, cols, nodes, edges, pending };
+  }
+
+  function withAncestors(m, ancestors) {
+    return compose(m, ancestorLayer(ancestors));
+  }
+
   // Same column: straight down. Next column: out of the right side, in at
   // the left side of the target, with an elbow halfway. Edges into a unit
   // turn at an x set by the source's row, so the buses of two sources that
@@ -915,6 +1020,7 @@
           t = mk("text", gHeads, { class: "dfl-head", x: PAD + i * (W + GAP_X), y: PAD + 12 });
           heads.set(i, t);
         }
+        set(t, "class", "dfl-head" + (c.cls ? " " + c.cls : ""));
         text(t, c.title);
       });
       for (const e of m.edges) {
@@ -924,7 +1030,8 @@
           edges.set(e.id, path);
         }
         set(path, "class", "dfl-edge" + (e.id === "live-edge" ? " live" : "") +
-                           (e.gone || e.reduced ? " gone" : e.plan ? " plan" : ""));
+                           (e.gone || e.reduced ? " gone" : e.plan ? " plan" : "") +
+                           (e.link ? " anc-link" : e.anc ? " anc" : ""));
         set(path, "d", edgePath(e.from, e.to));
       }
       for (const n of m.nodes) drawNode(n);
@@ -1128,6 +1235,11 @@
     ".dfl-edge{fill:none;stroke:#4d5566;stroke-width:1.4}",
     ".dfl-edge.live{stroke:#58a6ff;stroke-dasharray:4 4}",
     ".dfl-edge.plan{stroke-dasharray:4 4;opacity:.45}",
+    ".dfl-node.anc{opacity:.45}",
+    ".dfl-node.anc rect{fill:none;stroke-dasharray:3 3}",
+    ".dfl-head.anc{opacity:.5}",
+    ".dfl-edge.anc{stroke-dasharray:3 3;opacity:.4}",
+    ".dfl-edge.anc-link{stroke:#58a6ff;stroke-dasharray:5 3;opacity:.6}",
     ".dfl-seq-label{fill:#d8dbe0;font-size:11px}",
     ".dfl-seq-rule{stroke:#21262d;stroke-width:1}",
     ".dfl-seq-tick{stroke:#30363d;stroke-width:1}",
@@ -1367,6 +1479,9 @@
 
     let view = null, seqView = null, events = [], gone = false, busy = false, timer = null;
     let lastTree = null, lastSeq = null, mode = savedMode();
+    // The runs this one continued from, and their layer (built once: the
+    // first poll carries them, later polls carry the tail alone).
+    let ancestors = [], ancLayer = null, ancFor = null;
     // Both views are made here and attach to the scroller when it is their
     // turn; a view whose turn it is not keeps its element in this holder.
     const holder = doc.createElement("div");
@@ -1426,17 +1541,22 @@
         if (data.total < events.length) {
           // The log shrank (a new simulation under the same name): start over.
           events = [];
+          ancestors = []; ancLayer = null; ancFor = null;
           if (view) { view.svg.remove(); view = null; }
           if (seqView) { seqView.svg.remove(); seqView = null; }
           busy = false;
           return refresh();
         }
         if (data.since === events.length) events = events.concat(data.events || []);
+        // Ancestors ride the first answer only; keep the ones already read.
+        if (Array.isArray(data.ancestors) && data.ancestors !== ancestors) ancestors = data.ancestors;
+        if (ancFor !== ancestors) { ancLayer = ancestorLayer(ancestors); ancFor = ancestors; }
         const m = model(events, !!data.live, data.progress);
+        const tree = compose(m, ancLayer);
         // A run that ended does not grow with its session: only a run still
         // going is drawn out to now.
         const s = sequence(events, !!data.live && !m.ended, Date.now());
-        lastTree = m; lastSeq = s;
+        lastTree = tree; lastSeq = s;
         if (!events.length) {
           note.textContent = data.live ? "아직 기록된 사건이 없다 — 실행 세션이 시작하는 중" : "기록된 사건이 없다";
         } else {
@@ -1449,13 +1569,14 @@
         paintMode();
         const before = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
         const atEnd = scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 8;
-        if (mode === "sequence") seqView.draw(s); else view.draw(m);
+        if (mode === "sequence") seqView.draw(s); else view.draw(tree);
         // Follow the run while the reader is at its end.
         const after = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
         if (atEnd && before !== after && (mode !== "sequence" || before !== "")) {
           scroller.scrollLeft = scroller.scrollWidth;
         }
         meta.textContent = summary(m, data) +
+          (ancLayer ? ` · 이전 run ${ancLayer.count}` : "") +
           (mode === "sequence" && s.lanes.length
             ? ` · 레인 ${s.lanes.length}` + (s.hidden ? ` (+${s.hidden} 이전)` : "")
             : "");
@@ -1482,5 +1603,5 @@
 
   globalThis.DurableFlow = { model, mount, makeView, keyPhase, askLabel, sim2Group,
                              sequence, makeSequenceView, svgSource, pngSize,
-                             serializeNode, EXPORT_CSS, SEQ_MAX };
+                             withAncestors, ancestorLayer, serializeNode, EXPORT_CSS, SEQ_MAX };
 })();

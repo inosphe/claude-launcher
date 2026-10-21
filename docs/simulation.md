@@ -142,6 +142,10 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
   - 그것이 없고 세션 정의에 `SIM_RUN_DIR`이 있으면(gds6의 sim2 실행기) 그 디렉터리의 `<디렉터리 이름>.events.jsonl`을
     돌려준다. 응답의 `sim`은 디렉터리 이름, `run_dir`은 그 경로다. 둘 다 없으면 404다.
   `since`는 이미 받은 사건 수이고 응답은 그 뒤의 사건만 싣는다. `live`, `progress`가 함께 온다.
+  첫 응답(`since=0`)에는 `ancestors`가 함께 온다(claunch-0n5jr): 이 실행이 이어받은 이전 실행들, 오래된 것부터,
+  각 `{runId, round, events}`. 로그의 `continued` 사건(`from.runDir`)을 따라가되 같은 `runs/` 폴더의 디렉터리만
+  읽고, 최대 5개에서 멈춘다. 차트는 그것들을 현재 실행의 왼쪽에 흐리게 그리고 이어받은 회차를 열 머리에 적는다.
+  증분 응답(`since>0`)에는 싣지 않는다 — 이전 실행은 자라지 않는다.
   시뮬레이션 전체의 기록은 `GET /api/sims/<id>/events?session=&since=`이다.
   - 열은 고리가 들어간 단계 순서다: 시작, 형식화, 재인용, 판정, 답 반영, 라운드 N, 편집 제안, 끝. 앞서 지난 단계에 다시
     들어가면 새 열이 생긴다. 열 안의 노드는 시간 순서다.

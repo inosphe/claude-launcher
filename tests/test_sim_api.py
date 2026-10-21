@@ -60,7 +60,6 @@ def run(tmp_path, scenario):
     app = web.Application()
     app["manager"] = mgr
     sim_api.install(app, S.SimStore(tmp_path / "sims", live=lambda n: sim_api._live(mgr, n)))
-
     async def go():
         async with TestClient(TestServer(app)) as client:
             async def req(method, path, body=None, status=200):
@@ -71,6 +70,24 @@ def run(tmp_path, scenario):
             await scenario(req, mgr, s1, s2)
 
     asyncio.run(go())
+
+
+def write_run_log(d, rows):
+    """A run directory holding its ``<run>.events.jsonl`` (the layout a
+    session's ``SIM_RUN_DIR`` names, e.g. gds6's sim2 runner)."""
+    import json as _json
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (d.name + ".events.jsonl")).write_text(
+        "".join(_json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    return d
+
+
+def run_dir_session(mgr, tmp_path, run_dir, name="sim-run-dir"):
+    """A live session whose chart pane reads ``run_dir``."""
+    sess = FakeSession(name, str(tmp_path))
+    sess.sdef.env = {"SIM_RUN_DIR": str(run_dir)}
+    mgr.sessions[name] = sess
+    return name
 
 
 def test_session_creates_owns_and_is_told_when_it_ends(tmp_path):
@@ -254,6 +271,88 @@ def test_run_dir_session_events_are_read_from_its_run_directory(tmp_path):
         await req("GET", "/api/sessions/empty/durable", status=404)
         miss = await req("GET", "/api/sessions/s1/durable", status=404)
         assert "SIM_RUN_DIR" in miss["error"]
+    run(tmp_path, scenario)
+
+
+def test_run_dir_session_reports_the_run_it_continued_from(tmp_path):
+    """A run that forked from an earlier one logs ``continued`` (gds6-j936.8);
+    the chart is answered with that run on the first poll only -- a tail poll
+    asks for the live run alone (claunch-0n5jr)."""
+    async def scenario(req, mgr, s1, s2):
+        runs = tmp_path / "runs"
+        prev = write_run_log(runs / "r1", [
+            {"event": "run_start", "rounds": 1},
+            {"event": "run_end", "state": "done"},
+        ])
+        cur = write_run_log(runs / "r2", [
+            {"event": "continued", "from": {"runId": "r1", "runDir": str(prev), "round": 26}},
+            {"event": "run_start", "rounds": 1},
+        ])
+        name = run_dir_session(mgr, tmp_path, cur)
+        got = await req("GET", f"/api/sessions/{name}/durable")
+        assert [e["event"] for e in got["events"]] == ["continued", "run_start"]
+        assert [a["runId"] for a in got["ancestors"]] == ["r1"]
+        assert got["ancestors"][0]["round"] == 26
+        assert [e["event"] for e in got["ancestors"][0]["events"]] == ["run_start", "run_end"]
+        tail = await req("GET", f"/api/sessions/{name}/durable?since=1")
+        assert [e["event"] for e in tail["events"]] == ["run_start"]
+        assert "ancestors" not in tail
+    run(tmp_path, scenario)
+
+
+def test_continued_chain_is_capped_and_returned_oldest_first(tmp_path):
+    """A chain of forks is followed from the newest run back, up to five
+    ancestors, and reported oldest first (claunch-0n5jr)."""
+    async def scenario(req, mgr, s1, s2):
+        runs = tmp_path / "runs"
+        prev = write_run_log(runs / "r0", [{"event": "run_start"}])
+        for i in range(1, 7):
+            rows = [{"event": "run_start"}] if i == 0 else [
+                {"event": "continued", "from": {"runId": f"r{i - 1}", "runDir": str(prev), "round": i - 1}},
+                {"event": "run_start"},
+            ]
+            prev = write_run_log(runs / f"r{i}", rows)
+        name = run_dir_session(mgr, tmp_path, prev)
+        got = await req("GET", f"/api/sessions/{name}/durable")
+        assert [a["runId"] for a in got["ancestors"]] == ["r1", "r2", "r3", "r4", "r5"]
+        assert [a["round"] for a in got["ancestors"]] == [1, 2, 3, 4, 5]
+        assert all(a["events"] for a in got["ancestors"])
+    run(tmp_path, scenario)
+
+
+def test_continued_dir_outside_the_runs_folder_is_ignored(tmp_path):
+    """``runDir`` comes from a log file: only a directory beside this run's
+    own -- the same ``runs/`` folder -- is read, and a missing one is skipped
+    quietly (claunch-0n5jr)."""
+    async def scenario(req, mgr, s1, s2):
+        outside = write_run_log(tmp_path / "elsewhere" / "r9", [{"event": "run_start"}])
+        missing = tmp_path / "runs" / "gone"
+        cur = write_run_log(tmp_path / "runs" / "r2", [
+            {"event": "continued", "from": {"runId": "r9", "runDir": str(outside), "round": 9}},
+        ])
+        name = run_dir_session(mgr, tmp_path, cur)
+        assert (await req("GET", f"/api/sessions/{name}/durable"))["ancestors"] == []
+        cur = write_run_log(tmp_path / "runs" / "r2", [
+            {"event": "continued", "from": {"runId": "gone", "runDir": str(missing), "round": 8}},
+        ])
+        assert (await req("GET", f"/api/sessions/{name}/durable"))["ancestors"] == []
+        # A log that continued itself is not its own ancestor either.
+        cur = write_run_log(tmp_path / "runs" / "r2", [
+            {"event": "continued", "from": {"runId": "r2", "runDir": str(cur), "round": 7}},
+        ])
+        assert (await req("GET", f"/api/sessions/{name}/durable"))["ancestors"] == []
+    run(tmp_path, scenario)
+
+
+def test_a_run_without_continued_has_no_ancestors(tmp_path):
+    """A run that continued nothing is answered exactly as before, plus an
+    empty ``ancestors`` on the first poll (claunch-0n5jr)."""
+    async def scenario(req, mgr, s1, s2):
+        cur = write_run_log(tmp_path / "runs" / "r2", [{"event": "run_start"}])
+        name = run_dir_session(mgr, tmp_path, cur)
+        got = await req("GET", f"/api/sessions/{name}/durable")
+        assert got["ancestors"] == []
+        assert [e["event"] for e in got["events"]] == ["run_start"]
     run(tmp_path, scenario)
 
 

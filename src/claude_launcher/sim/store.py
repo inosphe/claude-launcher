@@ -214,19 +214,94 @@ def read_event_log(path: Path, session: str = "", since: int = 0) -> dict:
     return {"sessions": sessions, "total": len(rows), "since": since, "events": rows[since:]}
 
 
+def run_dir_log_path(d: Path) -> Optional[Path]:
+    """The event log inside run directory ``d``: ``<run>.events.jsonl`` named
+    after the directory, or the one ``*.events.jsonl`` it holds. None when
+    there is no such log."""
+    path = d / (d.name + ".events.jsonl")
+    if path.is_file():
+        return path
+    found = sorted(d.glob("*.events.jsonl")) if d.is_dir() else []
+    return found[0] if len(found) == 1 else None
+
+
 def run_dir_events(run_dir: str, since: int = 0) -> dict:
     """The event log of a run kept outside the simulation store: a run
     directory (a session's ``SIM_RUN_DIR``, e.g. gds6's sim2 runner) holds one
     ``<run>.events.jsonl`` named after the directory. Its rows carry no
     ``session``, so the whole log is the run's."""
     d = Path(run_dir)
-    path = d / (d.name + ".events.jsonl")
-    if not path.is_file():
-        found = sorted(d.glob("*.events.jsonl")) if d.is_dir() else []
-        if len(found) != 1:
-            raise NotFound(f"no event log in run directory {run_dir}")
-        path = found[0]
+    path = run_dir_log_path(d)
+    if path is None:
+        raise NotFound(f"no event log in run directory {run_dir}")
     return {"sim": d.name, "session": None, "run_dir": str(d), **read_event_log(path, "", since)}
+
+
+# Runs a run may have continued from, oldest first. The cap bounds a chain
+# whose ``continued`` events never stop.
+ANCESTOR_CAP = 5
+
+
+def run_dir_ancestors(run_dir: str, cap: int = ANCESTOR_CAP) -> List[dict]:
+    """The runs this one continued from, oldest first (claunch-0n5jr):
+    ``[{runId, round, events}]``.
+
+    A run announces a fork with ``{"event": "continued", "from": {"runId",
+    "runDir", "round", ...}}`` (gds6's designframe v2 write runs log it when
+    they start from the previous round's conversation). The chain is followed
+    through each ancestor's own ``continued`` event.
+
+    Only a directory whose parent is this run directory's parent -- the same
+    ``runs/`` folder -- is read: the ``runDir`` comes from a log file, and the
+    event log is not a way to reach an arbitrary path. A missing or unreadable
+    log, a reference outside that folder and a repeat of a directory already
+    walked all end the chain quietly; the run still draws on its own."""
+    start = Path(run_dir)
+    try:
+        folder = start.parent.resolve()
+    except OSError:
+        return []
+    out: List[dict] = []
+    seen = set()
+    cur = start
+    try:
+        # A log that says it continued itself would otherwise come back as its
+        # own ancestor (claunch-0n5jr review).
+        seen.add(str(start.resolve()))
+    except OSError:
+        return []
+    for _ in range(max(0, int(cap))):
+        log = run_dir_log_path(cur)
+        if log is None:
+            break
+        ref = None
+        for row in reversed(read_event_log(log, "")["events"]):
+            frm = row.get("from") if row.get("event") == "continued" else None
+            if isinstance(frm, dict):
+                ref = frm
+                break
+        if ref is None:
+            break
+        raw = str(ref.get("runDir") or "")
+        if not raw:
+            break
+        try:
+            prev = Path(raw)
+            if not prev.is_absolute() or prev.resolve().parent != folder:
+                break
+            key = str(prev.resolve())
+        except OSError:
+            break
+        prev_log = run_dir_log_path(prev)
+        if prev_log is None or key in seen:
+            break
+        events = read_event_log(prev_log, "")["events"]
+        out.append({"runId": str(ref.get("runId") or prev.name),
+                    "round": ref.get("round"), "events": events})
+        seen.add(key)
+        cur = prev
+    out.reverse()
+    return out
 
 
 def model_hash(m: dict) -> str:

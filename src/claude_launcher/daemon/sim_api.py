@@ -831,6 +831,13 @@ def install(app, store: Optional[sim_store.SimStore] = None):
                           "(neither CLAUNCH_SIM_ID nor SIM_RUN_DIR is set for it)"}, status=404)
         if err:
             return err
+        # The runs this one continued from ride only the first answer: they
+        # never change while the run grows, and an incremental poll asks for
+        # the tail alone (claunch-0n5jr).
+        if run_dir and since == 0:
+            ancestors, aerr = await call(sim_store.run_dir_ancestors, run_dir)
+            if not aerr:
+                res["ancestors"] = ancestors
         live = session is not None and not session.exited
         res["live"] = live
         res["progress"] = manager.progress.get(name) if live and hasattr(manager, "progress") else None
