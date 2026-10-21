@@ -4303,6 +4303,11 @@ def _provider_affinity_state() -> dict:
     routing/metering shim at all — the flag only means something when it does.
     A malformed flag (or spec) reads back as off with the error surfaced, so
     the page shows *why* the toggle looks wrong instead of hiding it.
+
+    ``prompt_cache_ttl``/``prompt_cache_ttl_source`` carry the cache lifetime
+    the claude harness resolves for that provider (see
+    :func:`providers.prompt_cache_ttl`). The launcher sets neither, so the
+    row answers "what will a session on this provider actually get".
     """
     from .. import metering as metering_mod
     from .. import routing as routing_mod
@@ -4315,11 +4320,20 @@ def _provider_affinity_state() -> dict:
             if not isinstance(section[name], dict):
                 continue
             row = {"name": name, "session_affinity": False, "error": "",
-                   "fronted": False}
+                   "fronted": False, "prompt_cache_ttl": "",
+                   "prompt_cache_ttl_source": ""}
             try:
                 row["session_affinity"] = routing_mod.session_affinity(name, doc)
             except routing_mod.RoutingError as exc:
                 row["error"] = str(exc)
+            # Reading the TTL needs only the service identity, which a
+            # malformed entry can still fail on; leave the row readable.
+            try:
+                ttl = providers.prompt_cache_ttl(name, doc)
+                row["prompt_cache_ttl"] = ttl["ttl"]
+                row["prompt_cache_ttl_source"] = ttl["source"]
+            except providers.ProviderError:
+                pass
             try:
                 row["fronted"] = bool(routing_mod.spec(name, doc)) or (
                     metering_mod.provider_enabled(name, doc)

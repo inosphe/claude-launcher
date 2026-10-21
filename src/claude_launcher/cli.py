@@ -789,6 +789,13 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
         allowed = harness_policy.provider_constraint(name, doc)
         if allowed is not None:
             suffix += f"  [harnesses: {', '.join(allowed) or '(none)'}]"
+        # The claude harness's cache lifetime, which the launcher does not set:
+        # printing it here saves a trip to the harness's own settings.
+        try:
+            ttl = providers.prompt_cache_ttl(name, doc)
+            suffix += f"  [prompt cache: {ttl['ttl']}, {ttl['source']}]"
+        except ProviderError:
+            pass
         print(f"  {name}{suffix}")
         for line in _spec_lines(name, doc):
             print(f"      {line}")

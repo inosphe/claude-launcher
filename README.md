@@ -1074,6 +1074,25 @@ shim's identity: one shim serves a provider in both states. A malformed
 (non-boolean) flag is a config error the shim logs and treats as off, so a
 typo degrades to no header instead of breaking traffic.
 
+### Prompt-cache TTL
+
+Claude Code decides how long a prompt-cache entry lives: the setting
+`promptCacheTtl` or the `CLAUDE_CODE_PROMPT_CACHE_TTL` environment variable
+(`5m` or `1h`; the environment variable wins). With neither set the harness
+picks 1 hour on a Claude subscription and 5 minutes on an API key (Bedrock,
+Vertex and Foundry included); a subscription in overage falls back to 5
+minutes. Subagents and background helpers read their own
+`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`.
+
+claunch sets neither value; it reports the one sessions inherit.
+`claunch providers` prints it beside each provider, and the Settings page
+shows it on each row of the sticky-affinity card. The value comes from the
+launching process's environment (the base layer every session inherits),
+otherwise the harness's automatic choice for the provider's service. Two
+layers sit above that base and are not read here: a profile's own `env`, and
+the harness's settings file (`promptCacheTtl`), so a profile that sets either
+can still run on a different TTL than the reported one.
+
 ### Throughput records for API-key providers (`claunch tps`)
 
 Sessions on the Anthropic OAuth route (a subscription profile, `provider:
