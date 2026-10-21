@@ -52,15 +52,43 @@ def turn(*, read=0, write=0, fresh=0, out=0, model="claude-opus-5",
     })
 
 
-def codex_context(model="gpt-5.6-sol", at="2026-08-27T08:27:13.265Z") -> str:
-    """One Codex turn context, which precedes that turn's token events."""
+def codex_context(model="gpt-5.6-sol", at="2026-08-27T08:27:13.265Z",
+                  effort=None) -> str:
+    """One Codex turn context, which precedes that turn's token events.
+
+    ``effort`` is what codex records inside the turn's collaboration-mode
+    settings; the installed CLI writes ``null`` there even when the launch
+    passed ``-c model_reasoning_effort``, so ``None`` is the common shape.
+    """
     return json.dumps(
         {
             "timestamp": at,
             "type": "turn_context",
-            "payload": {"turn_id": "turn-1", "model": model},
+            "payload": {
+                "turn_id": "turn-1",
+                "model": model,
+                "collaboration_mode": {
+                    "mode": "default",
+                    "settings": {"model": model, "reasoning_effort": effort},
+                },
+            },
         }
     )
+
+
+def api_request(effort=None, at="2026-08-20T11:00:00.000Z") -> str:
+    """One Claude ``api-request`` entry: the request a turn ran at."""
+    return json.dumps({
+        "type": "api-request",
+        "timestamp": at,
+        "params": {"model": "claude-opus-5", "output_config": {"effort": effort}},
+    })
+
+
+def thinking_level(level, at="2026-09-11T12:46:00.000Z") -> str:
+    """One pi header entry recording the session's thinking level."""
+    return json.dumps({"type": "thinking_level_change", "thinkingLevel": level,
+                       "timestamp": at})
 
 
 def codex_count(
@@ -351,6 +379,77 @@ def test_pi_newest_turn_wins(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# the effort: what the turn ran at, where the harness records it
+# --------------------------------------------------------------------------- #
+def _claude_reading(path):
+    return ctxsize.read_tail(path, ctxsize.usage_of, ctxsize.claude_effort_of,
+                             ctxsize.claude_effort_stop)
+
+
+def test_claude_effort_comes_from_the_request_that_produced_the_reading(tmp_path):
+    """The api-request line precedes its turn; the reading names the effort
+    that turn ran at, not the launcher's configuration."""
+    path = write_jsonl(tmp_path, api_request("high"), turn(read=9_000))
+    got = _claude_reading(path)
+    assert (got["tokens"], got["effort"]) == (9_000, "high")
+
+
+def test_a_newer_request_does_not_lend_its_effort_to_the_last_completed_turn(tmp_path):
+    """The reverse scan meets the *next* turn's request before the reading.
+    Pairing it with the completed reading would report an effort that turn
+    has not used yet -- the same mistake the model name guards against."""
+    path = write_jsonl(tmp_path, api_request("high"), turn(read=9_000),
+                       api_request("low"))
+    assert _claude_reading(path)["effort"] == "high"
+
+
+def test_a_request_before_the_user_entry_is_an_earlier_turns(tmp_path):
+    """If this turn's request line is not in the tail, the older one belongs
+    to somebody else's turn: no effort rather than the wrong one."""
+    user = json.dumps({"type": "user", "message": {"role": "user",
+                                                   "content": "next"}})
+    path = write_jsonl(tmp_path, api_request("max"), user, turn(read=5_000))
+    assert "effort" not in _claude_reading(path)
+
+
+def test_a_transcript_with_no_request_line_reports_no_effort(tmp_path):
+    """Older claude versions write no api-request lines; absence is absence."""
+    path = write_jsonl(tmp_path, turn(read=7_000))
+    assert "effort" not in _claude_reading(path)
+
+
+def test_an_effortless_request_reports_no_effort(tmp_path):
+    path = write_jsonl(tmp_path, api_request(None), turn(read=7_000))
+    assert "effort" not in _claude_reading(path)
+
+
+def test_pi_effort_is_the_level_recorded_in_the_session_header(tmp_path):
+    """pi writes the level once, in the header entries at the top of the
+    file, and ``off`` is a level of its own (thinking disabled)."""
+    path = write_jsonl(tmp_path, thinking_level("off"),
+                       pi_turn(fresh=1_988, read=12_160, out=128))
+    got = ctxsize.read_pi_tail(path)
+    assert (got["tokens"], got["effort"]) == (14_148, "off")
+
+
+def test_a_pi_session_file_without_a_level_reports_no_effort(tmp_path):
+    path = write_jsonl(tmp_path, pi_turn(fresh=100, read=6_000))
+    assert "effort" not in ctxsize.read_pi_tail(path)
+
+
+def test_codex_effort_comes_from_the_same_turn_context_as_the_model(tmp_path):
+    path = write_jsonl(tmp_path, codex_context(effort="high"), codex_count())
+    got = ctxsize.read_codex_tail(path)
+    assert (got["model"], got["effort"]) == ("gpt-5.6-sol", "high")
+
+
+def test_codex_recording_no_effort_reports_none(tmp_path):
+    """What the installed codex writes: the field is there and ``null``."""
+    path = write_jsonl(tmp_path, codex_context(), codex_count())
+    assert "effort" not in ctxsize.read_codex_tail(path)
+
+
+# --------------------------------------------------------------------------- #
 # the file: which turn is read
 # --------------------------------------------------------------------------- #
 def test_the_newest_turn_wins(tmp_path):
@@ -627,6 +726,14 @@ def test_attach_hangs_the_reading_on_the_session(home, tmp_path):
     assert info["name"] == "s1" and info["status"] == "busy"
     assert info["context"]["tokens"] == 42_000
     assert info["context"]["output"] == 300
+
+
+def test_attach_carries_the_recorded_effort(home, tmp_path):
+    """The card draws it beside the model, so it has to reach ``context``
+    through the same attach the rail reads -- not just the unit reader."""
+    sdef = _claude_session(tmp_path, api_request("high"), turn(read=9_000))
+    info = ctxsize.attach(_Stub(sdef))
+    assert info["context"]["effort"] == "high"
 
 
 def test_attach_hangs_a_codex_window_on_the_session(home, tmp_path):

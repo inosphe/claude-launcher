@@ -186,7 +186,7 @@ const AT = new Date(Date.now() - 185_000).toISOString();   // 3m ago
 const READING = {
   tokens: 154706, input: 2, cache_read: 154073, cache_write: 631,
   output: 210, model: "claude-haiku-4-5-20251001", at: AT,
-  compact_window: 200_000,
+  compact_window: 200_000, effort: "high",
 };
 const FULL = { name: "full", status: "busy", harness: "claude", profile: "nc:claude",
                cwd: "/w", cols: 80, rows: 24, context: READING };
@@ -206,6 +206,7 @@ const PI_READING = {
   tokens: 14148, input: 1988, cache_read: 12160, cache_write: 0,
   output: 128, model: "deepseek-flash", at: AT,
   compact_window: 600_000, model_context_window: 1_000_000,
+  effort: "off",
 };
 const PI = { name: "pi", status: "idle", harness: "pi",
              profile: "ds4-official:pi", cwd: "/w", cols: 80, rows: 24,
@@ -218,14 +219,16 @@ const OTHER = { name: "kimi", status: "idle", harness: "kimi", profile: "nc",
    travels with it for the same reason it travels with the count — it is the
    last COMPLETED turn's model, so a /model switch mid-answer is not here
    yet, and a sentence in the bare present tense would say otherwise. */
-check("the panel says the full id and how old the reading is",
-      ctx.sentence(FULL), "claude-haiku-4-5-20251001 (as of its turn 3m ago)");
+check("the panel says the full id, the effort it ran at, and the reading's age",
+      ctx.sentence(FULL),
+      "claude-haiku-4-5-20251001 at high effort (as of its turn 3m ago)");
 check("a session that has not answered yet says so, and does not say a model",
       ctx.sentence(QUIET), "not known yet — no context reading recorded");
 check("a Codex rollout names its model with the reading's age",
       ctx.sentence(CODEX), "gpt-5.6-sol (as of its turn 3m ago)");
-check("a pi session file names its model with the reading's age",
-      ctx.sentence(PI), "deepseek-flash (as of its turn 3m ago)");
+check("a pi session file names its model, thinking level and reading age",
+      ctx.sentence(PI),
+      "deepseek-flash at off effort (as of its turn 3m ago)");
 check("a harness that keeps no transcript is not asked",
       ctx.sentence(OTHER), "");
 /* A reading with the model missing is a reading, not a model: it must fall
@@ -246,10 +249,39 @@ check("...with the full id one hover away", chip && chip.title,
       "claude-haiku-4-5-20251001");
 /* Before the gauge, because the bar's fill only means anything against the
    window the model has — reading the fill first and the label after is
-   reading it against nothing. */
+   reading it against nothing. The effort rides with the model, between it
+   and the bar: two sessions on one model are not the same session when one
+   is at "high" and the other at "low". */
 const line = ctx.railLine(FULL);
-check("it leads the line, ahead of the bar",
-      line.kids.map((k) => k.className), ["rail-model", "rail-ctx-bar", "rail-ctx"]);
+check("model and effort lead the line, ahead of the bar",
+      line.kids.map((k) => k.className),
+      ["rail-model", "rail-effort", "rail-ctx-bar", "rail-ctx"]);
+const effortOf = (s) => {
+  const l = ctx.railLine(s);
+  return l && descendants(l).find((k) => k.classes.has("rail-effort"));
+};
+const effort = effortOf(FULL);
+check("the rail row shows the effort the turn ran at",
+      effort && effort.text, "· high");
+check("...and says where the harness recorded it",
+      effort && effort.title,
+      "reasoning effort high (recorded on its last request)");
+/* Absence is absence. Codex records ``null`` in every rollout measured here,
+   and older claude versions write no api-request line at all; neither may
+   come out as a guessed default or as an empty separator after the model. */
+const NO_EFFORT = { name: "cx", status: "idle", harness: "claude", profile: "nc",
+                    cwd: "/w", cols: 80, rows: 24,
+                    context: { ...READING, effort: undefined } };
+check("a reading with no recorded effort gets no effort span",
+      effortOf(NO_EFFORT), undefined);
+check("...and its line is exactly the one it had before",
+      ctx.railLine(NO_EFFORT).kids.map((k) => k.className),
+      ["rail-model", "rail-ctx-bar", "rail-ctx"]);
+check("a Codex row, whose rollout records no effort, has none",
+      effortOf(CODEX), undefined);
+check("a pi row names its thinking level",
+      [effortOf(PI).text, effortOf(PI).title],
+      ["· off", "thinking level off (recorded in its session file)"]);
 /* No turn, no model. The empty track and its greyed "?" already say the
    session has not spoken; a second placeholder beside them would read as a
    model called "?" rather than as the same silence said twice. */
@@ -284,8 +316,8 @@ check("the panel displays a canonical profile and harness once",
 check("the panel has no duplicate profile or harness rows",
       ["profile" in full, "harness" in full], [false, false]);
 check("the panel has a model row", !!full.model, true);
-check("...saying the full id", full.model && full.model.text,
-      "claude-haiku-4-5-20251001 (as of its turn 3m ago)");
+check("...saying the full id and the effort", full.model && full.model.text,
+      "claude-haiku-4-5-20251001 at high effort (as of its turn 3m ago)");
 check("...and explaining which turn it is from on hover",
       !!(full.model && full.model.title.includes("latest context reading")), true);
 /* Above the count, which is the reason it is a row of its own: the count is
@@ -303,10 +335,10 @@ check("a Codex detail panel has the full model id",
 check("a Codex detail panel has its context reading",
       codex.context && codex.context.text.includes("187,281 tokens"), true);
 const pi = rowsOf(PI);
-check("a pi detail panel has the full model id and its context reading",
+check("a pi detail panel has the full model id, thinking level and context",
       [pi.model && pi.model.text,
        pi.context && pi.context.text.includes("14,148 tokens")],
-      ["deepseek-flash (as of its turn 3m ago)", true]);
+      ["deepseek-flash at off effort (as of its turn 3m ago)", true]);
 /* metaRow drops an empty value, so the other harness gets no row rather than
    an empty one — the same silence the gauge line keeps. */
 check("another harness gets no model row at all",

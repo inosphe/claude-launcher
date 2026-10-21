@@ -1177,6 +1177,16 @@ html[data-theme="light"] #term-tps-overlay {
   white-space: nowrap; font-size: 11px; font-weight: 600; color: #56d4dd;
   line-height: 16px;
 }
+/* The effort the reading ran at, hanging off the model name: "· high". In
+   the same teal as the model so the pair reads as one label, but lighter and
+   not bold — it qualifies the model, and a second emphasised word on the row
+   would compete with the name the eye is scanning for. `flex: none` for the
+   same reason as the model's: the bar gives up its width first. */
+#session-list .rail-effort {
+  flex: none; max-width: 25%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 11px; font-weight: 400; color: #56d4dd;
+  opacity: 0.75; line-height: 16px;
+}
 #session-list .rail-ctx {
   flex: none; font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px; color: #7d8590; line-height: 16px;
