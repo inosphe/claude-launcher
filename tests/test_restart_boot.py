@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -197,6 +198,49 @@ def test_restore_all_still_runs_synchronously(home, monkeypatch):
     monkeypatch.setattr(mgr._store, "load_all", lambda: [])
     monkeypatch.setattr(mgr, "persist", lambda: None)
     assert mgr.restore_all() == []
+
+
+def test_both_restore_entry_points_start_from_a_clean_failure_list(home, monkeypatch):
+    """A second pass must not inherit the first pass's failures.
+
+    The boot only ever restores once, so this never showed in the daemon --
+    but only ``restore_all`` reset ``_restore_failed``, and the asynchronous
+    variant the boot actually runs did not. A process that restores twice
+    returned the first pass's names from the second call (review of
+    claunch-9akgh, claunch-9akgh.1).
+    """
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+    monkeypatch.setattr(mgr._store, "load_all", lambda: [])
+    monkeypatch.setattr(mgr, "persist", lambda: None)
+
+    mgr._restore_failed = ["stale-from-an-earlier-sync-pass"]
+    assert mgr.restore_all() == []
+
+    mgr._restore_failed = ["stale-from-an-earlier-async-pass"]
+    assert asyncio.run(mgr.restore_all_async()) == []
+
+
+def test_the_port_is_bound_before_the_fleet_is_restored():
+    """The boot's central claim, pinned by source order.
+
+    Nothing else in this file fails if ``_serve`` moves the restore back
+    above ``site.start()``: the health test fills ``app["boot"]`` by hand
+    and the restore tests call the manager directly. Until this test the
+    order rested on a hand-measured timeline alone (raised in review of
+    claunch-9akgh, claunch-9akgh.1). A static check is what fits -- the
+    claim is about the order of two statements in one function, and
+    standing up a real daemon to observe it would test aiohttp more than
+    this code (same shape as tests/test_web_app_declarations.py).
+    """
+    import claude_launcher.daemon.__main__ as daemon_main
+
+    source = Path(daemon_main.__file__).read_text(encoding="utf-8")
+    bound = source.index("await site.start()")
+    restored = source.index("await manager.restore_all_async(")
+    assert bound < restored, (
+        "the port must answer before the fleet is restored: site.start() is "
+        f"at offset {bound}, restore_all_async at {restored}"
+    )
 
 
 def test_boot_status_defaults_to_ready():
