@@ -137,10 +137,9 @@ def test_the_rail_poll_carries_it():
     fleet at once rather than per session."""
     from claude_launcher.daemon import api as api_mod
 
-    source = (api_mod.__file__)
-    with open(source, encoding="utf-8") as fh:
-        text = fh.read()
     # The rail response is filtered to a field list; a field the rail draws
-    # and the filter drops is a pill that never appears.
-    start = text.index("rail_fields = {")
-    assert '"pending_deliveries"' in text[start:start + 900]
+    # and the filter drops is a pill that never appears. The list is a module
+    # constant now, so this reads it instead of scraping the source for the
+    # literal (a test that greps for text passes even when the filter is
+    # built somewhere else).
+    assert "pending_deliveries" in api_mod.RAIL_FIELDS

@@ -5,10 +5,12 @@
      1. the rail has the entry right after Threads;
      2. the page draws one node per member around the user and opens it from
         the address;
-     3. a message that the daemon answers "choose" opens the selection panel
+     3. the member picker filters the session list, counts the ticks and says
+        what the create button will do;
+     4. a message that the daemon answers "choose" opens the selection panel
         with both offers and their scores;
-     4. ticking both sends the message plus exactly those thread ids;
-     5. the delivery result is shown, not swallowed.
+     5. ticking both sends the message plus exactly those thread ids;
+     6. the delivery result is shown, not swallowed.
 
    No live daemon is involved: /api/megathreads* answers from the fixture. */
 const assert = require("node:assert/strict");
@@ -47,7 +49,11 @@ const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
     if (url.pathname === "/api/batch") { res.statusCode = 404; return res.end("{}"); }
     if (url.pathname === "/api/sessions") {
-      return res.end(JSON.stringify({ sessions: [{ name: "s1" }, { name: "s2" }] }));
+      // The fields the rail poll really sends: branch and issue, no `task`.
+      return res.end(JSON.stringify({ sessions: [
+        { name: "s1", status: "idle", branch: "s1-log-format" },
+        { name: "s2", status: "busy", issue: "claunch-cn8v6", branch: "s2-deploy" },
+      ] }));
     }
     if (url.pathname === "/api/megathreads") {
       return res.end(JSON.stringify({ megathreads: [MEGA], total: 1 }));
@@ -117,6 +123,39 @@ const server = http.createServer((req, res) => {
     assert.equal(chips.length, 2);
     const joinable = await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.map((e) => e.value));
     assert.deepEqual(joinable.sort(), ["s1", "s2"]);
+
+    // 2b. The member picker filters, counts the ticks, and says what the
+    //     create button will do instead of going quiet.
+    const pickerNames = () => page.$$eval("#megathreads-view .mt-new-session-row .mt-new-name",
+      (els) => els.map((e) => e.textContent));
+    assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"], "every session is offered");
+    // The row's second line comes from fields the daemon really sends
+    // (branch, issue): `task` is not in the rail poll, so a fixture that
+    // hands it over would pass while every live row stayed blank.
+    const pickerLines = await page.$$eval("#megathreads-view .mt-new-session-row .mt-new-line",
+      (els) => els.map((e) => e.textContent));
+    assert.deepEqual(pickerLines, ["s1-log-format", "claunch-cn8v6 · s2-deploy"],
+      `each row says what the session is on: ${JSON.stringify(pickerLines)}`);
+    await page.fill("#megathreads-view .mt-new-filter", "s2-deploy");
+    assert.deepEqual(await pickerNames(), ["s2"], "the branch is searchable");
+    await page.fill("#megathreads-view .mt-new-filter", "s2");
+    assert.deepEqual(await pickerNames(), ["s2"], "the filter narrows the list");
+    await page.fill("#megathreads-view .mt-new-filter", "no such session");
+    assert.equal((await pickerNames()).length, 0);
+    assert.ok((await page.textContent("#megathreads-view .mt-new-sessions")).includes("거른 결과가 없습니다"));
+    await page.fill("#megathreads-view .mt-new-filter", "");
+    assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"]);
+    await page.check('#megathreads-view .mt-new-session[value="s2"]');
+    assert.equal(await page.textContent("#megathreads-view .mt-new-count"), "1개 선택");
+    assert.equal(await page.isDisabled("#megathreads-view .mt-new-clear"), false, "clear is live once a row is ticked");
+    await page.fill("#megathreads-view .mt-new input[type=text]", "two of you");
+    assert.equal(await page.textContent("#megathreads-view .mt-new-hint"), "1명으로 만듭니다");
+    assert.equal(await page.isDisabled("#megathreads-view .mt-new-create"), false);
+    await page.click("#megathreads-view .mt-new-clear");
+    assert.equal(await page.textContent("#megathreads-view .mt-new-count"), "0개 선택");
+    assert.ok((await page.textContent("#megathreads-view .mt-new-hint")).includes("빈"),
+      "an empty pick is warned about");
+    assert.equal(await page.isDisabled("#megathreads-view .mt-new-clear"), true);
 
     // 3. An ambiguous answer offers both members with their scores.
     await page.fill("#megathreads-view .mt-compose textarea", "both of you, the log line and the deploy");

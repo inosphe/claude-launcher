@@ -525,3 +525,21 @@ def test_t18_close_and_reopen(tmp_path, monkeypatch):
         assert [d["thread"] for d in res["delivered"]] == [a["id"]]
 
     run(tmp_path, scenario)
+
+
+def test_t19_the_rail_rows_carry_every_field_the_member_picker_reads():
+    """The member picker (megathread-page.js) draws each session row from the
+    rail poll, not from a per-session detail call.
+
+    It was written against `task`, which the rail leaves out on purpose, and
+    against `role`, which the session record keeps but no live row fills — so
+    every live row's second line came out empty while both page checks stayed
+    green, because their fixtures hand-wrote the fields the daemon does not
+    send (claunch-cn8v6, REVIEWED: changes). Reading the constant here is what
+    keeps a future trim of the poll from doing that again: these are exactly
+    the keys `sessionLine`, `matchesFilter` and `statusTone` read.
+    """
+    from claude_launcher.daemon.api import RAIL_FIELDS
+
+    picker_reads = {"name", "status", "progress", "issue", "branch", "note", "role", "kind"}
+    assert picker_reads <= RAIL_FIELDS, sorted(picker_reads - RAIL_FIELDS)

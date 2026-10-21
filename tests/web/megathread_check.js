@@ -27,6 +27,7 @@ function slice(name) {
 
 const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
   "shortTitle", "verdictLine", "deliveryLine", "ledgerLine", "isOpen", "statusLabel",
+  "statusTone", "sessionLine", "matchesFilter", "pickerRows", "createHint",
   "pct", "logitText", "esc", "ring"];
 const ctx = {};
 vm.createContext(ctx);
@@ -130,6 +131,49 @@ assert.equal(ctx.statusLabel({ status: "closed" }), "다시 열기");
 assert.equal(ctx.isOpen({ status: "closed" }), false);
 assert.equal(ctx.isOpen({ status: "open" }), true);
 
+/* ---- the member picker -------------------------------------------------- */
+// The rail poll carries status, issue, branch and progress; it does NOT carry
+// `task` or a filled `role` (api.py RAIL_FIELDS), so the picker must read the
+// fields the daemon really sends. tests/test_megathread_api.py::test_t19 holds
+// this list to that constant.
+const roster = [
+  { name: "s2", status: "exited", issue: "claunch-abc" },
+  { name: "s1", status: "idle", role: "worker", branch: "s1-log-format" },
+  { name: "s3", status: "starting", issue: "claunch-xyz", branch: "s3-deploy", note: "deploy watch" },
+];
+assert.equal(ctx.statusTone("idle"), "live");
+assert.equal(ctx.statusTone("busy"), "live");
+assert.equal(ctx.statusTone("starting"), "live", "a booting session is not gone");
+assert.equal(ctx.statusTone("exited"), "gone");
+assert.equal(ctx.statusTone(""), "");
+assert.equal(ctx.sessionLine(roster[1]), "worker · s1-log-format");
+assert.equal(ctx.sessionLine(roster[0]), "claunch-abc", "an issue stands in for a missing branch");
+assert.equal(ctx.sessionLine({ progress: { text: "step 3/7" } }), "step 3/7",
+  "what the session publishes about itself comes first");
+assert.equal(ctx.sessionLine({}), "");
+
+assert.equal(ctx.matchesFilter(roster[1], ""), true);
+assert.equal(ctx.matchesFilter(roster[1], "LOG"), true, "the filter folds case and reads the branch");
+assert.equal(ctx.matchesFilter(roster[1], "  worker "), true, "spaces around the query are dropped");
+assert.equal(ctx.matchesFilter(roster[2], "deploy"), true, "a note or branch match finds the session");
+assert.equal(ctx.matchesFilter(roster[2], "claunch-xyz"), true);
+assert.equal(ctx.matchesFilter(roster[0], "s1"), false);
+
+const picked = plain(ctx.pickerRows(roster, "", ["s2"]));
+assert.deepEqual(picked.map((r) => r.name), ["s1", "s2", "s3"], "rows are sorted by name");
+assert.deepEqual(picked.map((r) => r.checked), [false, true, false], "a tick survives the next repaint");
+assert.equal(picked[0].line, "worker · s1-log-format");
+assert.equal(picked[1].tone, "gone");
+assert.equal(picked[2].tone, "live");
+assert.deepEqual(plain(ctx.pickerRows(roster, "deploy", [])).map((r) => r.name), ["s3"]);
+assert.deepEqual(plain(ctx.pickerRows(roster, "nothing here", [])), []);
+assert.deepEqual(plain(ctx.pickerRows(null, "", null)), []);
+
+// The line above the button says why it is off instead of staying silent.
+assert.equal(ctx.createHint("", 2), "제목을 입력하세요");
+assert.ok(ctx.createHint("cluster", 0).includes("빈"), "no member is warned about, not blocked");
+assert.equal(ctx.createHint("cluster", 2), "2명으로 만듭니다");
+
 /* ---- number and text formatting ---------------------------------------- */
 assert.equal(ctx.pct(0.97), "97.0%");
 assert.equal(ctx.pct(0.995), "100%");
@@ -153,5 +197,10 @@ assert.ok(/if \(parts\[0\] === "megathreads"\)/.test(app), "the address names th
 const styles = fs.readFileSync(path.join(WEB, "style.css"), "utf8");
 assert.ok(styles.includes("#megathreads-view"), "the page has styles");
 assert.ok(/--rail-nav-rows:\s*\d+/.test(styles), "the rail's hover cap is a named count");
+// The picker's parts have to exist in the stylesheet too, or the class names
+// above name nothing a reader can see.
+for (const cls of [".mt-new-filter", ".mt-new-count", ".mt-new-session-row.on", ".mt-new-dot.live"]) {
+  assert.ok(styles.includes(cls), `the picker draws ${cls}`);
+}
 
 console.log("megathread_check ok");

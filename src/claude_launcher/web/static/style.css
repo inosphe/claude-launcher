@@ -8484,9 +8484,27 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-cluster-title { font-size: 13px; }
 .mt-cluster-sub { font-size: 11px; color: #8b949e; }
 .mt-new { margin-top: 12px; padding-top: 10px; border-top: 1px solid #2a2e36; display: flex; flex-direction: column; gap: 6px; }
-.mt-new input[type="text"] { background: #0d1117; color: #d8dbe0; border: 1px solid #30363d; border-radius: 5px; padding: 5px 7px; }
-.mt-new-sessions { max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #c6cdd5; }
-.mt-new-session-row { display: flex; align-items: center; gap: 5px; }
+.mt-new input[type="text"], .mt-new input[type="search"] { background: #0d1117; color: #d8dbe0; border: 1px solid #30363d; border-radius: 5px; padding: 5px 7px; }
+/* The picker: filter, count and clear above the list; the list scrolls on its
+   own so the create button never moves off the bottom of the aside. */
+.mt-new-tools { display: flex; align-items: center; gap: 6px; }
+.mt-new-filter { flex: 1 1 auto; min-width: 0; }
+.mt-new-count { font-size: 11px; color: #8b949e; white-space: nowrap; }
+.mt-new-clear { background: none; border: 1px solid #30363d; border-radius: 5px; color: #c6cdd5; font-size: 11px; padding: 3px 6px; cursor: pointer; }
+.mt-new-clear:disabled { opacity: 0.4; cursor: default; }
+.mt-new-sessions { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #c6cdd5; }
+.mt-new-session-row { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 2px 6px; border-radius: 5px; cursor: pointer; }
+.mt-new-session-row:hover { background: #22262d; }
+.mt-new-session-row.on { background: #16263a; }
+.mt-new-name { font-size: 12px; color: #d8dbe0; white-space: nowrap; }
+.mt-new-line { flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-new-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #30363d; }
+.mt-new-dot.live { background: #3fb950; }
+.mt-new-dot.gone { background: #6e7681; }
+.mt-new-hint { margin: 0; font-size: 11px; color: #8b949e; }
+.mt-new-hint.warn { color: #d29922; }
+.mt-new-hint.ok { color: #3fb950; }
+.mt-new-create { width: 100%; }
 .mt-stage { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; padding: 4px 6px; }
 .mt-head { display: flex; align-items: baseline; gap: 10px; }
 .mt-head h2 { font-size: 15px; margin: 0; color: #d8dbe0; }
