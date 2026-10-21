@@ -2811,6 +2811,18 @@ const SESSION_GRID_HOLD_MS = 450;
    sessionGridCell repaint it from this instead. Declared this early because
    the grid's first draw runs during load. */
 let gotoFlashName = null;
+/* The ancestor band above the rail list (renderRailAncestors): how many
+   one-line headers it may spend, the session a `⇱ card` press pinned it to,
+   and whether its listeners are armed. Declared this early for the same
+   reason as the mark above — syncSessionView runs during load and paints the
+   band for the view it picks. */
+const RAIL_ANCESTOR_MAX = 3;
+let railAncestorPin = null;
+// While this is in the future the pin wins even with its row off screen: a
+// reveal holds the band on the landed session for the length of the mark, so
+// the band's height does not change under the scroll it just started.
+let railAncestorHoldUntil = 0;
+let railAncestorWired = false;
 
 function setSessionGridPerLine(n) {
   if (!SESSION_GRID_PER_LINE.includes(n)) return;
@@ -2838,6 +2850,9 @@ function syncSessionView() {
   const grid = sessionView === "grid";
   $("session-list")?.classList.toggle("hidden", grid);
   $("session-grid")?.classList.toggle("hidden", !grid);
+  // The ancestor band belongs to the list above the rows it names; the grid
+  // has no rows to anchor it (renderRailAncestors hides it in that view).
+  if (typeof renderRailAncestors === "function") renderRailAncestors();
   // Mesh and workspace grouping split the list into tabs; the grid's rows
   // are its grouping, so the mode and the tabs would do nothing there.
   document.querySelectorAll(".session-group-toggle").forEach((el) =>
@@ -5651,6 +5666,11 @@ async function refreshSessions(options) {
   // refusing to move, and a rail too short to scroll takes the 0 it had.
   if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
   else if (rebuild && tabSwitched) list.scrollTop = 0;
+  // The ancestor band above the list reads the rows this pass just drew (and
+  // the scroll position it was left at), so it is painted after both are in
+  // place. Guarded: the isolated rail harnesses slice this function without
+  // the band.
+  if (rebuild && typeof renderRailAncestors === "function") renderRailAncestors();
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
@@ -21778,6 +21798,208 @@ function markDetailRow() {
     : "this session's metadata and workflow";
 }
 
+/* ---- the ancestor trail above the list ----
+
+   The rail draws a tree as indentation (byLineage): a row says whose child it
+   is only by the width of its indent and the tooltip, which is enough while
+   the parent's row is on screen and useless the moment the reader scrolls
+   past it. On a fleet of a few hundred sessions the row at the top of the
+   rail is often several levels down, with nothing on screen saying which line
+   it belongs to.
+
+   So the list keeps a small band above it: the direct ancestors of the
+   session at the top of the visible rows, root first and the parent last,
+   one line each (railAncestorChain). The band is a sibling of the scroller
+   rather than a sticky row inside it, so it stays put while the rows move
+   under it, it never fights the sticky group headings that already pin at
+   the scroller's top, and it costs nothing -- `.hidden`, no height -- while
+   the anchor row has no ancestors above it. A line is a button: pressing it
+   scrolls the rail to that ancestor's card, the same move the header's
+   `⇱ card` makes for the attached session.
+
+   `#term-goto` sits on the same band (pinRailAncestors). revealSessionCard
+   pins the band to the session it lands on *before* measuring the scroll, so
+   a jump shows whose child the landed card is, and the band's own height is
+   settled when `scrollIntoView` measures -- a smooth scroll commits to the
+   height it measured once (layRailOut). The pin is held for the mark's
+   length (the scroll may still be running), then stays while its row is on
+   screen; a wheel, a touch, a key press or a click on the rail drops it and
+   the band follows the scroll again.
+
+   Its state (RAIL_ANCESTOR_MAX, railAncestorPin, railAncestorHoldUntil,
+   railAncestorWired) is declared with the other rail painting state above,
+   because syncSessionView paints the band during load. */
+
+/* `name`'s direct ancestors, root first: the parent is the last entry and the
+   great-grandparent the first. The walk stops at a parent the list does not
+   hold, and a cycle (a record pointing through itself) ends it rather than
+   repeating a name. */
+function railAncestorChain(name, list = sessionsCache) {
+  const byName = new Map((list || []).filter(Boolean).map((s) => [s.name, s]));
+  const out = [];
+  const seen = new Set([name]);
+  let at = byName.get(name);
+  while (at && at.parent && at.parent !== at.name && !seen.has(at.parent)) {
+    const up = byName.get(at.parent);
+    if (!up) break;
+    seen.add(up.name);
+    out.push(up);
+    at = up;
+  }
+  return out.reverse();
+}
+
+/* The first session row a reader can see in the rail right now. Measured by
+   rect rather than counted: the rows have different heights and the sticky
+   group headings cover the scroller's top edge, so the anchor is the first
+   row whose bottom edge lies below that edge. A row the filter hides answers
+   with no height and is skipped. */
+function railTopVisibleRow() {
+  const list = $("session-list");
+  if (!list || !list.querySelectorAll) return null;
+  const rows = list.querySelectorAll("li[data-name]");
+  if (!rows || !rows.length) return null;
+  // On the phone layout the list is not its own scroller (the page is), so
+  // its box starts above the viewport and the edge a row has to clear is the
+  // viewport's. On the desktop rail both are the same edge.
+  const top = Math.max(list.getBoundingClientRect().top, 0);
+  for (const li of rows) {
+    const r = li.getBoundingClientRect();
+    if (r.height <= 0) continue;
+    if (r.bottom > top + 1) return li.dataset.name || null;
+  }
+  return null;
+}
+
+/* Whether `name`'s row is on screen in the rail: a pin whose row the poll took
+   away (or that scrolled out) must stop being the band's anchor. */
+function railRowOnScreen(name) {
+  const list = $("session-list");
+  if (!list || !name || !list.querySelector) return false;
+  const key = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(name) : name;
+  const li = list.querySelector(`li[data-name="${key}"]`);
+  if (!li) return false;
+  const r = li.getBoundingClientRect();
+  const lr = list.getBoundingClientRect();
+  return r.height > 0 && r.bottom > lr.top && r.top < lr.bottom;
+}
+
+/* Paint the band for its anchor: the pinned session (a `⇱ card` press) while
+   its row is on screen or the press's hold is running, otherwise whatever row
+   sits at the top of the list. Idempotent -- the poll, every scroll frame and
+   every reveal land here. The nearest lines are the ones a reader needs, so a
+   chain longer than RAIL_ANCESTOR_MAX folds its oldest links into one `⋯ +N`
+   line. */
+function renderRailAncestors() {
+  const band = $("rail-ancestors");
+  const list = $("session-list");
+  if (!band || !list) return;
+  wireRailAncestors();
+  const hiddenView = !!(list.classList && list.classList.contains("hidden"));
+  const pinned = railAncestorPin
+    && (Date.now() < railAncestorHoldUntil || railRowOnScreen(railAncestorPin))
+    ? railAncestorPin : null;
+  const anchor = hiddenView ? null : (pinned || railTopVisibleRow());
+  const chain = anchor ? railAncestorChain(anchor) : [];
+  const shown = chain.length > RAIL_ANCESTOR_MAX
+    ? chain.slice(chain.length - (RAIL_ANCESTOR_MAX - 1)) : chain;
+  const more = chain.length - shown.length;
+  // Most scroll frames land on the same chain: the band is rebuilt only when
+  // what it would draw changed, so a drag down the rail is a few DOM writes
+  // and not one per frame.
+  const sig = `${anchor || ""}|${more}|${shown.map((s) => s.name).join(",")}`;
+  if (band.dataset.sig === sig) return;
+  band.dataset.sig = sig;
+  band.textContent = "";
+  band.dataset.anchor = anchor || "";
+  if (!shown.length) {
+    band.classList.add("hidden");
+    return;
+  }
+  if (more > 0) {
+    const li = document.createElement("li");
+    const span = document.createElement("span");
+    span.className = "rail-ancestor-more";
+    span.textContent = `⋯ +${more}`;
+    span.title = chain.slice(0, more).map((s) => s.name).join(" → ");
+    li.appendChild(span);
+    band.appendChild(li);
+  }
+  for (const s of shown) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "rail-ancestor";
+    btn.dataset.name = s.name;
+    btn.title = `go to ${s.name}'s card`;
+    const tick = document.createElement("span");
+    tick.className = "rail-ancestor-tick";
+    tick.textContent = "↰";
+    tick.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "rail-ancestor-name";
+    label.textContent = s.name;
+    btn.append(tick, label);
+    li.appendChild(btn);
+    band.appendChild(li);
+  }
+  band.classList.remove("hidden");
+}
+
+/* The band's one scroll listener and one click delegate, armed by the first
+   render. A scroll frame is coalesced: a drag down a 200-row rail fires the
+   event dozens of times and each paint of the band is a layout read. */
+function wireRailAncestors() {
+  if (railAncestorWired) return;
+  const list = $("session-list");
+  const band = $("rail-ancestors");
+  if (!list || !list.addEventListener) return;
+  railAncestorWired = true;
+  let queued = false;
+  const paint = () => {
+    queued = false;
+    renderRailAncestors();
+  };
+  list.addEventListener("scroll", () => {
+    if (queued) return;
+    queued = true;
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(paint);
+    else setTimeout(paint, 0);
+  }, { passive: true });
+  // A reader who scrolls, types on or clicks in the rail is no longer asking
+  // about the card a `⇱ card` press landed on: the mark stays (it is a
+  // highlight), the band goes back to following the rail. The press's own
+  // smooth scroll fires neither of these, so it does not drop its own pin.
+  const drop = () => clearRailAncestorPin();
+  for (const ev of ["wheel", "touchstart", "keydown", "click"]) {
+    list.addEventListener(ev, drop, { passive: true });
+  }
+  if (band && band.addEventListener) {
+    band.addEventListener("click", (ev) => {
+      const btn = ev.target && ev.target.closest && ev.target.closest(".rail-ancestor");
+      if (!btn || !btn.dataset || !btn.dataset.name) return;
+      revealSessionCard(btn.dataset.name);
+    });
+  }
+}
+
+/* Pin the band to `name` (revealSessionCard). `hold` is how long the pin wins
+   even while its row is off screen -- the length of the goto mark, which is
+   also how long the smooth scroll below can take. After that the pin stays
+   only while its row is on screen, and any reader gesture drops it. */
+function pinRailAncestors(name, hold = 0) {
+  railAncestorPin = name || null;
+  railAncestorHoldUntil = name && hold ? Date.now() + hold : 0;
+  renderRailAncestors();
+}
+
+function clearRailAncestorPin() {
+  if (railAncestorPin === null && !railAncestorHoldUntil) return;
+  railAncestorPin = null;
+  railAncestorHoldUntil = 0;
+  renderRailAncestors();
+}
+
 /* ---- back to the rail's card for the session you are in ----
 
    The rail is a monitor of every session at once, in a 260px column that
@@ -21915,6 +22137,13 @@ function revealSessionCard(name) {
       laidOut.classList.remove("rail-laid-out");
     }, RAIL_LAID_OUT_MS);
   }
+  // The ancestor band above the list first: it is the landed session's chain
+  // the reader wants to see (not whatever row the scroll leaves at the top),
+  // and rendering it here settles the band's height before the scroll below
+  // is measured -- the band changes the list's box and a smooth scroll
+  // commits to the height it measured once. Guarded like the other optional
+  // painters: the isolated rail harnesses slice this function without it.
+  if (typeof pinRailAncestors === "function") pinRailAncestors(name, GOTO_FLASH_MS);
   // Centred, not merely "into view": a row brought to the very edge of the
   // rail is on screen and still reads as not found.
   if (card.scrollIntoView) card.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -21924,6 +22153,10 @@ function revealSessionCard(name) {
     gotoFlashTimer = null;
     gotoFlashName = null;
     applyGotoFlash();
+    // The band keeps the pin it was given above: the row it points at is the
+    // one on screen, and the ancestor chain is what a reader who just jumped
+    // to a card came to see. A gesture on the rail (or the row leaving the
+    // screen) ends it -- see wireRailAncestors.
   }, GOTO_FLASH_MS);
   applyGotoFlash();
   return true;
