@@ -83,6 +83,11 @@ TAIL_MAX = 64
 
 UNIT = "day"
 
+#: The two ways a session can be over. Each has its own box on the page: a
+#: killed session was ended early, an archived one was put away after its
+#: work, and a reader often wants one without the other.
+ENDED_CATEGORIES = ("killed", "archived")
+
 #: Providers whose backend is the vendor's own login rather than a declared
 #: base URL. They never reach the routing shim, so the ledger has nothing for
 #: them; their figures come from the session's own transcript instead
@@ -694,7 +699,22 @@ def _activity(meta: dict) -> Optional[float]:
 
 
 def _ended(category: str) -> bool:
-    return category in ("killed", "archived")
+    return category in ENDED_CATEGORIES
+
+
+def _hidden(category: str, include_killed: bool, include_archived: bool) -> bool:
+    """Whether a session in ``category`` is left out of the table.
+
+    The two endings are separate answers because they mean different things to
+    a reader: a killed session was ended early, an archived one was put away
+    after its work finished. A page that shows one usually wants to see the
+    other too, but not always -- so the caller says which.
+    """
+    if category == "killed":
+        return not include_killed
+    if category == "archived":
+        return not include_archived
+    return False
 
 
 def _empty_row(name: str) -> dict:
@@ -710,6 +730,7 @@ def _empty_row(name: str) -> dict:
 
 
 def overview(*, window: str = "today", include_ended: bool = False,
+             include_killed: bool = False, include_archived: bool = False,
              now: Optional[float] = None, zone: Optional[tzinfo] = None,
              sessions: Iterable[dict] = (), ledger: Optional[Ledger] = None,
              labels: Optional[Dict[str, str]] = None,
@@ -727,9 +748,15 @@ def overview(*, window: str = "today", include_ended: bool = False,
     writes no metering line, so a session on one gets its window figures from
     its own transcript (the same reading the detail panel shows). Omitting it
     leaves those rows at ``source: "none"``.
+
+    ``include_killed`` and ``include_archived`` are the page's two boxes;
+    ``include_ended`` turns both on at once and is what the older ``?ended=1``
+    asked for.
     """
     if window not in WINDOWS:
         raise ValueError(f"window must be one of: {', '.join(WINDOWS)}")
+    include_killed = bool(include_killed or include_ended)
+    include_archived = bool(include_archived or include_ended)
     zone = zone or local_zone()
     now = time.time() if now is None else now
     start, end = window_bounds(window, now, zone)
@@ -745,12 +772,16 @@ def overview(*, window: str = "today", include_ended: bool = False,
 
     rows: List[dict] = []
     ended_excluded = 0
+    killed_excluded = 0
+    archived_excluded = 0
     seen = set()
     for name, usage in sums.items():
         item = meta.get(name, {})
         category = str(item.get("category") or "")
-        if item and _ended(category) and not include_ended:
+        if item and _hidden(category, include_killed, include_archived):
             ended_excluded += 1
+            killed_excluded += 1 if category == "killed" else 0
+            archived_excluded += 1 if category == "archived" else 0
             continue
         seen.add(name)
         row = _empty_row(name)
@@ -792,8 +823,10 @@ def overview(*, window: str = "today", include_ended: bool = False,
         if name in seen or name in sums:
             continue
         category = str(item.get("category") or "")
-        if _ended(category) and not include_ended:
+        if _hidden(category, include_killed, include_archived):
             ended_excluded += 1
+            killed_excluded += 1 if category == "killed" else 0
+            archived_excluded += 1 if category == "archived" else 0
             continue
         last = _activity(item)
         created = _stamp(item.get("created_at"))
@@ -874,7 +907,9 @@ def overview(*, window: str = "today", include_ended: bool = False,
         "since": _iso(start, zone),
         "until": _iso(end, zone),
         "zone": datetime.fromtimestamp(now, zone).strftime("%z"),
-        "include_ended": bool(include_ended),
+        "include_ended": bool(include_killed and include_archived),
+        "include_killed": bool(include_killed),
+        "include_archived": bool(include_archived),
         "totals": totals,
         "cache_share": (totals["cache_read"] / total) if total else None,
         "providers": sorted(by_provider.values(),
@@ -887,6 +922,8 @@ def overview(*, window: str = "today", include_ended: bool = False,
             "unmetered": unmetered,
             "transcript_skipped": transcript_skipped,
             "ended_excluded": ended_excluded,
+            "killed_excluded": killed_excluded,
+            "archived_excluded": archived_excluded,
         },
         # The ledger's own start: a window wider than it cannot be answered
         # from here, and the page says so instead of drawing a short bar.

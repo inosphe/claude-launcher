@@ -11091,7 +11091,8 @@ async def h_session_stats(request: web.Request) -> web.Response:
 
 
 def _stats_overview(manager: "SessionManager", window: str,
-                    include_ended: bool, ledger, transcripts=None) -> dict:
+                    include_ended: bool, ledger, transcripts=None,
+                    include_killed=None, include_archived=None) -> dict:
     """The overview payload, built off the event loop.
 
     ``Session.info()`` would carry a definition, a briefing and an environment
@@ -11103,9 +11104,14 @@ def _stats_overview(manager: "SessionManager", window: str,
     thread for that reason.
     """
     metas = [statsboard.session_meta(s) for s in manager.list()]
+    extra = {}
+    if include_killed is not None:
+        extra["include_killed"] = include_killed
+    if include_archived is not None:
+        extra["include_archived"] = include_archived
     return statsboard.overview(window=window, include_ended=include_ended,
                                sessions=metas, ledger=ledger,
-                               transcripts=transcripts)
+                               transcripts=transcripts, **extra)
 
 
 async def h_stats_overview(request: web.Request) -> web.Response:
@@ -11126,7 +11132,16 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     if window not in statsboard.WINDOWS:
         return json_error(
             400, f"window must be one of: {', '.join(statsboard.WINDOWS)}")
+    # `killed` and `archived` are the page's two boxes; `ended` (the older
+    # spelling) asks for both, and a request that names neither leaves both
+    # out -- what the page showed before the boxes were split.
+    def _flag(name):
+        raw = request.query.get(name)
+        return None if raw is None else raw in ("1", "true", "yes")
+
     include_ended = request.query.get("ended", "0") in ("1", "true", "yes")
+    include_killed = _flag("killed")
+    include_archived = _flag("archived")
     ledger = request.app.get("stats_ledger")
     if ledger is None:
         ledger = statsboard.Ledger()
@@ -11135,7 +11150,8 @@ async def h_stats_overview(request: web.Request) -> web.Response:
         transcripts = statsboard.Transcripts()
     try:
         payload = await asyncio.to_thread(
-            _stats_overview, manager, window, include_ended, ledger, transcripts)
+            _stats_overview, manager, window, include_ended, ledger, transcripts,
+            include_killed, include_archived)
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats overview: %s", exc, exc_info=True)
         return json_error(500, f"reading the usage ledger failed: {exc}")

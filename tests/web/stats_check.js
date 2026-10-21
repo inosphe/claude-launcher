@@ -103,7 +103,8 @@ let statsCompare = null;
 let statsCompareCache = null;
 let statsLogScale = false;
 let statsWindow = "today";
-let statsIncludeEnded = false;
+let statsIncludeKilled = false;
+let statsIncludeArchived = false;
 let statsOverview = null;
 let statsOverviewError = "";
 let statsProvider = "";
@@ -126,7 +127,8 @@ function state() {
   return { cache: statsCache, error: statsError, open: statsPageOpen,
            session: statsSession, unit: statsUnit, hash: location.hash,
            compare: statsCompare, overview: statsOverview,
-           window: statsWindow, ended: statsIncludeEnded,
+           window: statsWindow, killed: statsIncludeKilled,
+           archived: statsIncludeArchived,
            provider: statsProvider, overviewError: statsOverviewError };
 }
 `;
@@ -168,7 +170,14 @@ function check(name, condition, extra) {
   failures++;
   console.error(`FAIL ${name}${extra === undefined ? "" : " — " + JSON.stringify(extra)}`);
 }
-const withClass = (cls) => view.all().filter((n) => n.classes.has(cls));
+/* A node's classes, whether they were set as a property (HTML elements) or
+   through setAttribute (an SVG path's `class` is an attribute, not a
+   settable property in the browser either). */
+const classesOf = (n) => new Set([
+  ...n.classes,
+  ...String(n.attrs.class || "").split(/\s+/).filter(Boolean),
+]);
+const withClass = (cls) => view.all().filter((n) => classesOf(n).has(cls));
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 const zero = { human: 0, daemon: 0, mesh: 0, opening: 0, harness: 0 };
@@ -253,7 +262,8 @@ const overview = {
       profile: "nc:claude", issue: "", declared_provider: "claude",
     }),
   ],
-  counts: { sessions: 3, metered: 2, unmetered: 1, ended_excluded: 5 },
+  counts: { sessions: 3, metered: 2, unmetered: 1, ended_excluded: 5,
+              killed_excluded: 4, archived_excluded: 1 },
   ledger_since: "2026-10-19",
   partial: false,
 };
@@ -280,7 +290,7 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   check("with no session the page opens on the fleet, not on one session",
         ctx.state().session === "" && shown.at(-1) === "stats", ctx.state());
   check("it asks the overview endpoint for today, killed and archived held out",
-        fetched.at(-1) === "/api/stats/overview?window=today&ended=0", fetched);
+        fetched.at(-1) === "/api/stats/overview?window=today&killed=0&archived=0", fetched);
   check("the overview asks nothing per session",
         !fetched.some((u) => u.includes("/stats?unit=")), fetched);
   check("a finished overview polls slowly",
@@ -340,14 +350,21 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   check("picking it again shows every provider",
         ctx.state().provider === "" && withClass("stats-row").length === 3);
 
-  // The ended held-out rows come back when asked for.
-  const ended = withClass("stats-ended")[0].kids[0];
-  ended.checked = true;
-  ended.handlers.change[0]();
+  // The two ways a session ends have a box each, and each asks for its own.
+  const boxes = withClass("stats-ended-box");
+  check("killed and archived have a box each",
+        boxes.length === 2 &&
+        boxes[0].words().includes("include killed") &&
+        boxes[1].words().includes("include archived"),
+        boxes.map((b) => b.words()));
+  const archiveBox = boxes[1].kids[0];
+  archiveBox.checked = true;
+  archiveBox.handlers.change[0]();
   await tick();
   check("ticking the box asks again with killed and archived included",
-        ctx.state().ended === true &&
-        fetched.at(-1) === "/api/stats/overview?window=today&ended=1", fetched.at(-1));
+        ctx.state().killed === false && ctx.state().archived === true &&
+        fetched.at(-1) === "/api/stats/overview?window=today&killed=0&archived=1",
+        fetched.at(-1));
 
   // The window switch.
   const week = withClass("wf-btn").find((b) => b.dataset.window === "week");
@@ -355,7 +372,7 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   await tick();
   check("switching the window asks for that window",
         ctx.state().window === "week" &&
-        fetched.at(-1) === "/api/stats/overview?window=week&ended=1", fetched.at(-1));
+        fetched.at(-1) === "/api/stats/overview?window=week&killed=0&archived=1", fetched.at(-1));
 
   // ---- the detail panel ------------------------------------------------
   ctx.setAnswer((url) => url.includes("/api/stats/overview")
@@ -380,12 +397,20 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         withClass("stats-detail-providers")[0].words().includes("100.0%"),
         withClass("stats-detail-providers")[0].words());
   check("the transcript reading is in the panel, labelled as the conversation",
-        withClass("stats-col").length === 3 &&
+        withClass("stats-area").length >= 4 &&
         panel.words().includes("whole conversation (transcript)"), panel.words());
-  check("the chart's numbers are drawn",
-        withClass("stats-bar").map((b) => b.style.height).join() ===
-          "81.82%,0.00%,100.00%",
-        withClass("stats-bar").map((b) => b.style.height));
+  check("the chart draws one stacked band per usage part",
+        withClass("stats-area").length === 4 &&
+        withClass("stats-area").every((a) =>
+          (a.attrs.class || "").includes("usage-") &&
+          /^M[\d.]+ [\d.]+ L/.test(a.attrs.d || "")),
+        withClass("stats-area").map((a) => a.attrs.class));
+  check("the stacked bands reach the window's own total",
+        withClass("stats-total-line").length === 1 &&
+        (withClass("stats-total-line")[0].attrs.d || "").startsWith("M"),
+        withClass("stats-total-line").map((a) => a.attrs.d));
+  check("each bucket keeps a hover reading of its own",
+        withClass("stats-hit").length === 3, withClass("stats-hit").length);
   check("a partial reading polls again soon",
         timers.length === 1 && timers[0].ms === 2000, timers.map((t) => t.ms));
 
@@ -548,7 +573,7 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   await tick();
   check("a one-session link leaves compare mode",
         ctx.state().compare === null &&
-        fetched.at(-1) === "/api/stats/overview?window=week&ended=1", fetched.at(-1));
+        fetched.at(-1) === "/api/stats/overview?window=week&killed=0&archived=1", fetched.at(-1));
   withClass("wf-btn").find((b) => b.dataset.mode === "compare").handlers.click[0]();
   check("Compare starts from the session on screen (none: an empty set)",
         ctx.state().hash === "#/compare/", ctx.state().hash);

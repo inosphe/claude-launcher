@@ -384,6 +384,54 @@ def test_killed_and_archived_sessions_are_left_out_unless_asked_for(tmp_path, le
     assert everything["counts"]["ended_excluded"] == 0
 
 
+def test_the_two_ended_boxes_are_independent(tmp_path, ledger):
+    """``include_killed`` and ``include_archived`` each admit their own
+    category, and the counts say how many of each the table holds out."""
+    write_ledger(tmp_path / "metering", [
+        record("live", hour=9),
+        record("killed", hour=10),
+        record("archived", hour=11),
+    ])
+    ledger.refresh(NOW)
+    sessions = [
+        meta("live"),
+        meta("killed", category="killed", status="exited",
+             activity="2026-10-21T01:00:00+00:00"),
+        meta("archived", category="archived", status="exited",
+             activity="2026-10-21T01:00:00+00:00"),
+    ]
+
+    def names(**flags):
+        payload = statsboard.overview(window="today", now=NOW, zone=KST,
+                                      sessions=sessions, ledger=ledger,
+                                      labels={}, **flags)
+        return (sorted(r["session"] for r in payload["sessions"]), payload)
+
+    rows, default = names()
+    assert rows == ["live"]
+    assert default["counts"]["killed_excluded"] == 1
+    assert default["counts"]["archived_excluded"] == 1
+    assert default["include_killed"] is False and default["include_archived"] is False
+
+    rows, killed_only = names(include_killed=True)
+    assert rows == ["killed", "live"]
+    assert killed_only["counts"]["killed_excluded"] == 0
+    assert killed_only["counts"]["archived_excluded"] == 1
+    assert killed_only["include_killed"] is True
+    assert killed_only["include_archived"] is False
+
+    rows, archived_only = names(include_archived=True)
+    assert rows == ["archived", "live"]
+    assert archived_only["counts"]["killed_excluded"] == 1
+    assert archived_only["counts"]["archived_excluded"] == 0
+
+    rows, both = names(include_killed=True, include_archived=True)
+    assert rows == ["archived", "killed", "live"]
+    assert both["counts"]["ended_excluded"] == 0
+    # ``include_ended`` stays the "both" spelling the older page reads.
+    assert both["include_ended"] is True
+
+
 def test_a_session_the_ledger_cannot_speak_for_is_listed_with_no_figure(tmp_path, ledger):
     write_ledger(tmp_path / "metering", [record("metered", hour=9)])
     ledger.refresh(NOW)
@@ -683,6 +731,26 @@ def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, t
             # page can say how many it hid.
             assert body["sessions"] == []
             assert body["counts"]["ended_excluded"] == 2
+            assert body["counts"]["killed_excluded"] == 2
+            assert body["counts"]["archived_excluded"] == 0
+            assert body["include_killed"] is False
+            assert body["include_archived"] is False
+
+            # The two boxes are separate flags, so asking for archived alone
+            # does not open the killed partition (both fixture rows are killed).
+            resp = await client.get(
+                "/api/stats/overview?window=today&killed=0&archived=1",
+                headers=bearer)
+            body = await resp.json()
+            assert body["sessions"] == []
+            assert body["include_archived"] is True
+
+            resp = await client.get(
+                "/api/stats/overview?window=today&killed=1&archived=0",
+                headers=bearer)
+            body = await resp.json()
+            assert sorted(r["session"] for r in body["sessions"]) == ["gone", "live"]
+            assert body["counts"]["killed_excluded"] == 0
 
             resp = await client.get("/api/stats/overview?window=today&ended=1",
                                     headers=bearer)
