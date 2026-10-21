@@ -419,6 +419,7 @@ CHECKS = [
         "railsplit_check.js",
         "detailsplit_check.js",
         "bulk_check.js",
+        "cleanup_check.js",
         "killstate_check.js",
         "handoff_check.js",
         "owed_check.js",

@@ -10200,11 +10200,29 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
     signal is not yet ``exited``; a clear issued straight after it would skip
     exactly the sessions it was asked to remove, and look like it had done
     nothing. ``stopped`` names what was shut down on the way through.
+
+    ``?dry_run=1`` answers the plan instead of carrying it out: the same
+    ``removed``/``kept`` lists a plain clear would produce, computed and
+    nothing more — no record dropped, no directory removed, no mesh row
+    released. The dashboard asks for it before it asks a person to confirm,
+    because the page cannot count this itself: its poll leaves archived
+    records out, and a clear takes them too. ``marks`` counts the removed
+    records somebody had filed on purpose (paused, archived), which the
+    confirmation has to say out loud. ``force`` and ``running`` change what a
+    clear would do in ways a plan cannot show, so they are refused with it
+    rather than silently ignored.
     """
     manager: SessionManager = request.app["manager"]
     mesh = request.app["mesh"]
     logs = request.query.get("logs") in ("1", "true")
     force = request.query.get("force") in ("1", "true")
+    dry_run = request.query.get("dry_run") in ("1", "true")
+    if dry_run and (force or request.query.get("running") in ("1", "true")):
+        return json_error(
+            400,
+            "dry_run previews the plain clear only; `force` and `running` "
+            "change what it would do and cannot be combined with it",
+        )
     stopped: List[str] = []
     if request.query.get("running") in ("1", "true"):
         live = [s for s in manager.list() if not s.exited]
@@ -10226,6 +10244,25 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
             held = await _leave_meshes(mesh, held)
         if held:
             kept.append({"name": name, "meshes": held})
+    if dry_run:
+        spared = {k["name"] for k in kept}
+        doomed = [s for s in manager.list() if s.exited and s.sdef.name not in spared]
+        # `archived_at`/`paused_at` are only on the record classes that carry
+        # them; a plain read keeps this from depending on which one it is.
+        marks = {
+            "paused": sum(1 for s in doomed if getattr(s, "paused_at", None)),
+            "archived": sum(1 for s in doomed if getattr(s, "archived_at", None)),
+        }
+        return json_response(
+            {
+                "removed": [s.sdef.name for s in doomed],
+                "kept": kept,
+                "logs": logs,
+                "stopped": [],
+                "marks": marks,
+                "dry_run": True,
+            }
+        )
     removed = manager.clear(logs=logs, keep=[k["name"] for k in kept])
     return json_response(
         {"removed": removed, "kept": kept, "logs": logs, "stopped": stopped}
