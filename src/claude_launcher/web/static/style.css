@@ -674,23 +674,38 @@ html[data-theme="light"] #term-tps-overlay {
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-ctx-tokens, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
+   (.rail-actions, .rail-cwd, .rail-ctx-line, .rail-ctx-tokens, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
    .rail-note, .rail-progress, .rail-procs, .rail-status-checks, .rail-talk,
    .sess-cflow, .sess-cflow2, .sess-brief,
    and the selected card's .rail-role-line) are full-width, and they
-   carry an `order` above the ▸ toggle's so the toggle still lands at the end
-   of the name line. A full-width child at order 0 would break the line
-   before the toggle got there.
+   carry an `order` above the sub-lines' so the name line and the buttons
+   line keep their order whatever a breaker adds. A full-width child at
+   order 0 would break the line before the buttons line got there.
 
    `flex-basis: 0` is the load-bearing part, not tidiness: a flex line is
    wrapped on its items' BASE sizes and only shrunk afterwards, so a box that
-   based itself on its content would still push the ⓘ and the ▸ onto the next
-   line before anyone got the chance to shrink. Basing at 0 and growing into
-   what is left means the fixed things on the row are placed first and the
-   name group takes the remainder. */
+   based itself on its content would still push the profile meta onto the
+   next line before anyone got the chance to shrink. Basing at 0 and growing
+   into what is left means the fixed things on the row are placed first and
+   the name group takes the remainder. */
 #session-list .rail-head {
   display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
   flex: 1 1 0; min-width: 0; overflow: hidden;
+}
+/* The row's action buttons — spawn +, 📌, 👁, note ✎, details ⓘ, the checks
+   and briefing refreshes, the briefing ▸ toggle — on a line of their own
+   under the name line (claunch-ku033). The name line keeps the name, its
+   qualifier pills and the profile meta: the meta is what the reader scans
+   the right end for, and the buttons no longer compete with the name group
+   for the same flex line — a row whose fixed content outgrew the rail used
+   to collapse the name group and stack the name a character per line.
+   Ordered between the name line (order 0) and the full-width sub-lines
+   (order 2+), indented like them so it reads as another line of the card.
+   Its children keep their own order inside the box, so the ▸ toggle's
+   order 1 still lands last. */
+#session-list .rail-actions {
+  flex-basis: 100%; order: 1; display: flex; align-items: center;
+  gap: 2px; min-width: 0; padding-left: 16px;
 }
 .sess-prs { margin: 10px 0; }
 .sess-prs h3 { margin: 0 0 6px; font-size: 13px; }
@@ -751,13 +766,22 @@ html[data-theme="light"] #term-tps-overlay {
    on the row can give way — pills shrink to their floors, the meta line
    ellipses — but a clipped name reads as a DIFFERENT session, which is the
    one loss a row of near-identical names cannot afford. It wraps instead,
-   with overflow-wrap so an unbroken worktree-style name still breaks, and
-   takes the extra lines it needs; the pills beside it keep their floors and
-   their own ellipses. The label's hover no longer has to carry the name —
-   it still does, as the first line, because the context note joins it. */
+   and takes the extra lines it needs; the pills beside it keep their floors
+   and their own ellipses. The label's hover no longer has to carry the name —
+   it still does, as the first line, because the context note joins it.
+
+   `break-word`, not `anywhere`: both let an unbroken worktree-style name
+   wrap, but anywhere also advertises a break between every character as the
+   name's minimum content size, so a squeezed flex line could collapse the
+   name to one character per line (claunch-ku033). break-word keeps the
+   name's floor at its widest word and only breaks inside the word to fill
+   the width it is actually given — never a character-per-line stack. The
+   10em floor is the same guarantee from the other side: the flex shrink
+   may not squeeze the name below a readable line, so a too-narrow name
+   group wraps whole lines instead of clipping. */
 #session-list .rail-name {
-  white-space: normal; overflow: visible; overflow-wrap: anywhere;
-  flex: 0 1 auto; min-width: 0;
+  white-space: normal; overflow: visible; overflow-wrap: break-word;
+  flex: 0 1 auto; min-width: 10em;
 }
 /* The rooms a session is in, beside the name that is in them.
    Same pill as .mesh-role so role and membership read as one set, but
@@ -873,10 +897,12 @@ html[data-theme="light"] #term-tps-overlay {
 
 /* The briefing card a row folds open. Its pieces are appended after the
    row's inline children, so flex `order` (not DOM order) lines them up:
-   toggle at the end of the name line, then the cflow line, then the card —
-   the wrap algorithm runs after ordering, so each still breaks where its
-   flex-basis says. */
+   the name line first, then the buttons line (CSS, .rail-actions), then
+   the cflow line, then the card — the wrap algorithm runs after ordering,
+   so each still breaks where its flex-basis says. */
 #session-list .sess-brief-toggle {
+  /* order 1 inside .rail-actions keeps the toggle the last of the row's
+     buttons; the buttons line itself is ordered after the name line. */
   flex: none; order: 1; background: none; border: none; color: #6e7681;
   font-size: 14px; line-height: 1; padding: 4px 6px; cursor: pointer;
   min-width: 26px; min-height: 26px;
@@ -1150,7 +1176,8 @@ html[data-theme="light"] #term-tps-overlay {
 .sess-status-check-rowref.updated, .sess-brief-check-refresh.updated { color: #3fb950; }
 .sess-status-check-rowref.failed, .sess-brief-check-refresh.failed { color: #f85149; }
 /* The row's ⟳: refresh the summary without opening it. Same glyph family
-   as the card's. Sits at the end of the name line, before the ▸ toggle. */
+   as the card's. Sits on the row's buttons line (.rail-actions), before the
+   ▸ toggle. */
 #session-list .sess-brief-rowref {
   flex: none; order: 0; background: none; border: none; color: #6e7681;
   font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer;
@@ -1655,12 +1682,10 @@ html[data-theme="light"] #term-tps-overlay {
      beside it keeps its basis-0 ellipsis further down this block, so the
      buttons and the ▸ still land on the line. */
   #session-list .rail-name { flex-shrink: 1; max-width: none; }
-  /* The meta line shares its line with the row's buttons and the ▸, and a
-     line is broken on base sizes before anything shrinks: based on its text,
-     the meta pushed the ▸ onto a line of its own once a child row's indent
-     took 10px more (depth 2 and deeper, claunch-gge34.1). Based at 0 it
-     takes only what the buttons leave and ellipses there; the full text
-     is on its title. */
+  /* The meta takes the line after the name group alone; the buttons live on
+     their own full-width line below it (CSS, .rail-actions), so nothing on
+     this line fights the meta for the width. Based at 0 it grows into what
+     is left and ellipses at its 42% cap; the full text is on its title. */
   #session-list .meta {
     margin-left: 0; margin-right: auto; flex: 1 1 0; min-width: 0;
   }

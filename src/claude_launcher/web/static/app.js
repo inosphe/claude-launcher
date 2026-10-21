@@ -5583,13 +5583,22 @@ async function refreshSessions(options) {
     roleWhole.textContent = role.textContent;
     roleWhole.title = role.textContent;
     roleLine.appendChild(roleWhole);
+    // The row's action buttons — spawn, pin, observe, the details ⓘ, and
+    // the decorators' note ✎, checks refresh, briefing ⟳ and ▸ toggle — live
+    // in one box that takes a line of its own under the name line (CSS,
+    // .rail-actions). The name line keeps the name, its qualifier pills and
+    // the profile meta; with the buttons on it, a row whose fixed content
+    // outgrew the rail saw the whole flex shortfall land on the name group
+    // and the name stacked a character per line (claunch-ku033).
+    const actions = document.createElement("span");
+    actions.className = "rail-actions";
+    actions.append(...(plus ? [plus] : []), ...(pin ? [pin] : []),
+                   ...(observePin ? [observePin] : []), info);
     li.append(dot, head, meta, roleLine, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railCtxTokens ? [railCtxTokens] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
-              railSeen, ...(railLife ? [railLife] : []),
-              ...(plus ? [plus] : []), ...(pin ? [pin] : []),
-              ...(observePin ? [observePin] : []), info);
+              railSeen, ...(railLife ? [railLife] : []), actions);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
@@ -9494,7 +9503,7 @@ function applyBriefingCards() {
         e.stopPropagation();   // the row itself attaches; this button does not
         toggleBriefing(name);
       });
-      li.appendChild(btn);
+      (li.querySelector(".rail-actions") || li).appendChild(btn);
     }
     // The toggle is the feature's one always-visible handle, so it is also
     // where "this exists but is off" is said: without a backend the button
@@ -9701,7 +9710,10 @@ function railNoteButton(li, s, text) {
       });
     }
     const info = li.querySelector(".sess-info");
-    if (info) li.insertBefore(btn, info);
+    // The ✎ sits immediately before the ⓘ — inside the actions line's box
+    // when the row has one, loose on the row for the fixtures that hand-build
+    // a bare ⓘ.
+    if (info && info.parentNode) info.parentNode.insertBefore(btn, info);
     else li.appendChild(btn);
   }
   btn.classList.toggle("on", !!text);
@@ -9913,7 +9925,10 @@ function decorateBriefingRow(li, s) {
         e.stopPropagation();
         requestStatusChecksRefresh(s.name, statusRefresh);
       });
-      li.appendChild(statusRefresh);
+      // The buttons line's box when the row was built with one; a bare li
+      // for the harnesses that hand-build their rows.
+      const box = (li.querySelector(".rail-actions") || li);
+      box.appendChild(statusRefresh);
     }
     paintStatusCheckRefresh(statusRefresh, s.name, statusRefresh.dataset.statusCheckBase);
   } else if (checks) {
@@ -9928,7 +9943,7 @@ function decorateBriefingRow(li, s) {
       e.stopPropagation();   // the row navigates; this button only refreshes
       refreshBriefingRow(s.name);
     });
-    li.appendChild(refresh);
+    (li.querySelector(".rail-actions") || li).appendChild(refresh);
   }
   refresh.textContent = "⟳";
   syncRowRefresh(li, s.name);

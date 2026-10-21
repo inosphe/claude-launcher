@@ -278,8 +278,8 @@ const ev = (key, over = {}) => Object.assign({
         rows().map((r) => [pinButton(r.dataset.name).classes.has("on"),
                            pinButton(r.dataset.name).attrs["aria-pressed"]]),
         [[false, "false"], [true, "true"], [false, "false"], [false, "false"]]);
-  check("the pin button sits between the + and the ⓘ",
-        row("s1").kids.map((k) => k.className).filter((c) =>
+  check("the pin button sits between the + and the ⓘ, inside the row's buttons box",
+        (row("s1").querySelector(".rail-actions") || { kids: [] }).kids.map((k) => k.className).filter((c) =>
           /sess-(plus|pin|info)/.test(c)), ["sess-plus", "sess-pin", "sess-info"]);
 
   // The row's pin button is the toggle, and toggling rebuilds the rail at once.

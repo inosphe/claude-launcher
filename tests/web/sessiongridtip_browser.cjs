@@ -65,7 +65,9 @@ const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", 
     await page.locator('#session-grid .sg-cell[data-name="s2"]').waitFor();
     await page.locator('#session-list li.sess-card[data-name="s2"] .sess-status-check-rowref').waitFor({ state: "attached" });
     // The card's buttons, each with the vertical centre of its box, and the
-    // name group's; a button on the name's line shares its centre.
+    // buttons line's; a button travels in the .rail-actions box one line
+    // under the name line (claunch-ku033), so it shares the box's centre
+    // whatever the width.
     const pinned = (width) => page.evaluate(({ width, buttons }) => {
       const cell = document.querySelector('#session-grid .sg-cell[data-name="s2"]');
       cell.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
@@ -73,29 +75,35 @@ const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", 
       if (width) tip.style.width = width;
       const mid = (el) => { const r = el.getBoundingClientRect(); return (r.top + r.bottom) / 2; };
       const card = tip.querySelector("li.sess-card");
-      const head = card && card.querySelector(".rail-head");
+      const actions = card && card.querySelector(".rail-actions");
+      const name = card && card.querySelector(".rail-name");
       return {
         pinned: tip.classList.contains("pinned"),
         width: tip.getBoundingClientRect().width,
-        head: head && mid(head),
+        actions: actions && mid(actions),
+        nameWidth: name && name.getBoundingClientRect().width,
         buttons: Object.fromEntries(buttons.map((sel) => {
           const el = card && card.querySelector(sel);
           return [sel, el ? mid(el) : null];
         })),
       };
     }, { width, buttons: BUTTONS });
-    const offLine = (got) => Object.entries(got.buttons)
-      .filter(([, y]) => y === null || Math.abs(y - got.head) > 4).map(([sel]) => sel);
+    const offActions = (got) => Object.entries(got.buttons)
+      .filter(([, y]) => y === null || Math.abs(y - got.actions) > 4).map(([sel]) => sel);
 
     const got = await pinned(null);
     assert.ok(got.pinned, "a right-click pins the card");
-    assert.ok(got.head !== null, "the pinned card holds the list's row");
-    assert.deepEqual(offLine(got), [], `every button sits on the name's line at ${got.width}px`);
+    assert.ok(got.actions !== null, "the pinned card holds the list's row");
+    assert.deepEqual(offActions(got), [], `every button sits on the buttons line at ${got.width}px`);
 
-    // The same card at the old width wraps; the check above would see it.
+    // The same card at the old width wraps; the buttons still share their
+    // line, and the name keeps a readable width instead of stacking a
+    // character per line.
     await page.keyboard.press("Escape");
     const narrow = await pinned("320px");
-    assert.ok(offLine(narrow).length > 0, "at 320px the buttons leave the name's line");
+    assert.deepEqual(offActions(narrow), [], "at 320px the buttons still share the buttons line");
+    assert.ok(narrow.nameWidth >= 100,
+      `at 320px the name keeps a readable width (${narrow.nameWidth}px)`);
     assert.deepEqual(errors, []);
     console.log("sessiongridtip_browser: ok");
   } finally {
