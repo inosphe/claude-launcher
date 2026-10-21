@@ -179,13 +179,21 @@ def guest_invited_text(thread: dict, by: str) -> str:
         f"session {owner}.",
         _guest_role(tid, owner),
         f"The user's messages in this thread are typed in here too; {owner}'s replies are not -- read them with "
-        "thread_read. thread_list lists this thread under guest_threads. You cannot close or rename it; "
+        "thread_read. thread_list lists this thread under guest_threads, whose guest.owner_unread counts "
+        f"{owner}'s messages since your last read. You cannot close or rename it; "
         f"thread_uninvite(thread_id=\"{tid}\") leaves it."])
 
 
 def guest_removed_text(thread: dict) -> str:
     return (f"{PREFIX} {thread['id']} \"{thread['title']}\"] You are no longer a guest of this thread of session "
             f"{thread['session']}: nothing more from it is typed in here, and you cannot write in it.")
+
+
+def guest_ended_text(thread: dict, guest: str) -> str:
+    tid = thread["id"]
+    return (f"{PREFIX} {tid} \"{thread['title']}\"] Guest session {guest} ended, so it is no longer a guest of "
+            f"this thread (the thread itself now says so). Nothing more is typed in here from it; its review "
+            f"stays in the thread -- thread_read(thread_id=\"{tid}\") has it. The work stays yours.")
 
 
 def owner_invited_text(thread: dict, guest: str) -> str:
@@ -221,15 +229,19 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
 
     def guest_ended(session) -> None:
         """Exit hook: a session that ended is no guest any more
-        (claunch-tee5g) -- off the chips, the delivery list and the cap."""
+        (claunch-tee5g) -- off the chips, the delivery list and the cap --
+        and each thread it was in says so and tells its owner
+        (claunch-p9wes.1)."""
         try:
-            threads.drop_guest(session.sdef.name)
+            left = threads.drop_guest(session.sdef.name)
         except Exception:  # noqa: BLE001 -- never break the exit fan-out
             log.exception("threads: could not drop the ended guest %s", getattr(session, "sdef", session))
-
-    hooks = getattr(manager, "exit_hooks", None)
-    if hooks is not None:
-        hooks.append(guest_ended)
+            return
+        for thread in left:
+            try:
+                deliver(thread["session"], guest_ended_text(thread, thread["guest"]))
+            except Exception:  # noqa: BLE001 -- the notice is not the ending
+                log.exception("threads: could not tell %s its guest ended", thread.get("session"))
 
     def paste_step(session, images: list[dict], text: str):
         """``(before, text)`` for a message carrying images: the images go
@@ -263,6 +275,10 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         except Exception:  # noqa: BLE001
             log.info("threads: could not deliver to %s", name)
             return False
+
+    hooks = getattr(manager, "exit_hooks", None)
+    if hooks is not None:
+        hooks.append(guest_ended)
 
     def hold_of(name: str) -> Optional[str]:
         """Why a message just accepted for ``name`` is not typed in yet, read

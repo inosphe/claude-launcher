@@ -72,10 +72,17 @@ reviewer and advisor in that thread and nothing more.
 - As the owner: a guest's message is typed into your terminal as a thread
   block. It is advice: you decide what to act on, and the work stays
   yours. Your replies are not typed into the guest; it reads the thread.
+- As the owner, when a guest's session ends: each thread it was in gets a
+  system message saying so, and you get one line here. Its messages stay;
+  read them before deciding what to act on.
 - As a guest: `thread_list` shows the thread under `guest_threads`, apart
-  from your own. Read it with `thread_read` and answer with `thread_reply`
-  on that thread. Do not carry out the thread's work yourself (no edits,
-  commits, commands or child sessions for it), and do not use the QA tools
+  from your own. Each row says how many messages you have not read
+  (`unread`) and how many of those the owner wrote after your last read
+  (`owner_unread`): the owner's replies are not typed into your terminal,
+  so a nonzero `owner_unread` means read the thread again. Read it with
+  `thread_read` and answer with `thread_reply` on that thread. Do not carry
+  out the thread's work yourself (no edits, commits, commands or child
+  sessions for it), and do not use the QA tools
   (`qa_*`) for it: a question for the user goes into your reply. You cannot
   close, reopen or rename the thread (a reply in a closed one is kept and
   the thread stays closed); `thread_uninvite` with only the thread id

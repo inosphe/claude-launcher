@@ -341,12 +341,18 @@ def test_t10_guest_threads_are_listed_apart_with_their_unread(st):
     assert [t["title"] for t in doc["threads"]] == ["own"]
     [g] = doc["guest_threads"]
     assert (g["id"], g["session"], g["guest"]["invited_by"], g["guest"]["unread"]) == (tid, "s1", "s1", 2)
+    assert g["guest"]["owner_unread"] == 1                        # the owner's "two"
     st.read(tid, reader="s2")
     assert st.list("s2")["guest_threads"][0]["guest"]["unread"] == 0
+    assert st.list("s2")["guest_threads"][0]["guest"]["owner_unread"] == 0
     st.post("s2", tid, "advice")                                  # its own message is not unread
     st.post(S.USER, tid, "thanks")
     assert st.list("s2")["guest_threads"][0]["guest"]["unread"] == 1
+    assert st.list("s2")["guest_threads"][0]["guest"]["owner_unread"] == 0   # the user's, not the owner's
     assert st.read(tid, reader="s2")["thread"]["agent_read"] == 2  # still the owner's last reply
+    st.post("s1", tid, "my answer")
+    assert st.list("s2")["guest_threads"][0]["guest"]["owner_unread"] == 1   # counted since that read
+    assert st.read(tid, reader="s2")["thread"]["agent_read"] == 5  # its own post moves it
     assert st.list("s1")["guest_threads"] == []
     st.set_status(S.USER, tid, "closed")
     assert st.list("s2", closed=False)["guest_threads"] == []
@@ -390,11 +396,28 @@ def test_t10_an_ended_guest_is_dropped_everywhere(st):
         st.invite(S.USER, tid, "s2")
     st.invite(S.USER, a, "s4")
     st.post("s2", a, "advice")
-    assert st.drop_guest("s2") == 2
+    left = st.drop_guest("s2")
+    # claunch-p9wes.1: the threads it left are returned, with its name.
+    assert sorted((t["id"], t["session"], t["guest"]) for t in left) == sorted(
+        [(a, "s1", "s2"), (b, "s3", "s2")])
     assert st.guests_of(a) == ["s4"] and st.guests_of(b) == []
     assert st.list("s2")["guest_threads"] == []
-    assert [m["guest"] for m in st.read(a)["messages"]] == ["s2"]    # what it wrote stays
-    assert st.drop_guest("s2") == 0
+    msgs = st.read(a)["messages"]
+    assert [m["guest"] for m in msgs if m.get("guest")] == ["s2"]    # what it wrote stays
+    assert msgs[-1]["author"] == S.SYSTEM and msgs[-1]["kind"] == "system" and "s2" in msgs[-1]["body"]
+    assert st.read(b)["messages"][-1]["author"] == S.SYSTEM
+    assert st.drop_guest("s2") == []
+
+
+def test_t10_a_departure_notice_keeps_a_closed_thread_closed(st):
+    # claunch-p9wes.1: the notice is a record, not a reply.
+    tid = st.open(S.USER, "s1", "Review")["thread"]["id"]
+    st.invite(S.USER, tid, "s2")
+    st.set_status(S.USER, tid, "closed")
+    [left] = st.drop_guest("s2")
+    assert (left["id"], left["status"]) == (tid, "closed")
+    assert st.get(tid)["status"] == "closed"
+    assert [m["author"] for m in st.read(tid)["messages"]] == [S.SYSTEM]
 
 
 def test_t10_guest_limits(st):

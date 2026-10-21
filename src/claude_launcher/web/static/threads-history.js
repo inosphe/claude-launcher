@@ -271,8 +271,11 @@
     const msg = node("div", `thh-msg thh-${m.author}`);
     msg.dataset.seq = m.seq;
     const meta = node("div", "thh-meta");
-    // A guest writes under its own name (claunch-p9wes).
-    const who = m.author === "user" ? "user" : m.author === "guest" ? `${m.guest || "guest"} (guest)` : session;
+    // A guest writes under its own name (claunch-p9wes); a daemon notice says
+    // so rather than passing as the session's (claunch-p9wes.1).
+    const who = m.author === "user" ? "user"
+      : m.author === "guest" ? `${m.guest || "guest"} (guest)`
+        : m.author === "system" ? "daemon" : session;
     meta.append(node("span", "thh-who", who),
       node("span", "thh-at", when(m.at)));
     if (m.body) msg.append(meta, body(node("div", "thh-body"), m.body));

@@ -389,6 +389,7 @@ def test_a_guest_is_invited_told_its_role_and_listed_apart(tmp_path):
         doc = await req("GET", "/api/threads?session=s2")
         assert doc["threads"] == [] and [t["id"] for t in doc["guest_threads"]] == [tid]
         assert doc["guest_threads"][0]["guest"]["invited_by"] == "user"
+        assert doc["guest_threads"][0]["guest"]["owner_unread"] == 0      # claunch-p9wes.1
         owner = await req("GET", "/api/threads?session=s1")
         assert [g["session"] for g in owner["threads"][0]["guests"]] == ["s2"]
         await req("POST", f"/api/threads/{tid}/guests", {"guest": "ghost"}, status=404)
@@ -446,14 +447,20 @@ def test_a_guest_is_removed_or_leaves(tmp_path):
 
 def test_an_ended_guest_leaves_its_threads(tmp_path):
     # claunch-tee5g: the exit hook drops the session from every thread it was a guest in.
+    # claunch-p9wes.1: each thread says so, and each owner is told once.
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"to": "s1", "title": "Plan"}))["thread"]["id"]
         await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
         await req("POST", f"/api/threads/{tid}/guests", {"guest": "s3"})
+        before = len(mgr.sessions["s1"].delivered)
         for hook in mgr.exit_hooks:
             hook(mgr.sessions["s2"])
         got = (await req("GET", f"/api/threads/{tid}"))["thread"]["guests"]
         assert [g["session"] for g in got] == ["s3"]
+        read = await req("GET", f"/api/threads/{tid}")
+        assert read["messages"][-1]["author"] == "system" and "s2" in read["messages"][-1]["body"]
+        told = mgr.sessions["s1"].delivered[before:]
+        assert len(told) == 1 and "Guest session s2 ended" in told[0]
         n = len(mgr.sessions["s2"].delivered)
         await req("POST", f"/api/threads/{tid}/messages", {"text": "still there?"})
         assert len(mgr.sessions["s2"].delivered) == n          # no longer typed into

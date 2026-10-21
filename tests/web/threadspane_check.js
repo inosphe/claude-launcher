@@ -33,8 +33,9 @@
      guests    -- the threads this session is a guest in are listed apart
                   under 초대된 쓰레드 with their owner; a guest's message
                   shows under its name; 게스트 초대 posts {guest} to
-                  /guests and a chip's × posts to /guests/<name>/remove
-                  (claunch-p9wes).
+                  /guests and a chip's × posts to /guests/<name>/remove;
+                  답글 N counts the owner's messages the guest has not read
+                  (claunch-p9wes, claunch-p9wes.1).
      rail      -- 🗪 threads lights while the session has an open thread, and
                   carries has-news when the session wrote past what this
                   browser saw; a session never seen here starts caught up.
@@ -154,6 +155,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(P.speaker({author: "agent"}, "s1"), "s1");
   assert.equal(P.speaker({author: "guest", guest: "s2"}, "s1"), "s2 (게스트)");
   assert.equal(P.speaker({author: "user"}, "s1"), "나");
+  assert.equal(P.speaker({author: "system"}, "s1"), "알림", "a daemon notice is not the user's");
   assert.deepEqual(P.allThreads({threads: [{id: "a"}], guest_threads: [{id: "b"}]}).map((t) => t.id), ["a", "b"]);
   assert.deepEqual([...P.unseen([{id: "g", last_seq: 3, last: {author: "guest"}}], {})], ["g"],
                    "a guest's message is news too");
@@ -737,7 +739,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     const own = {id: "th-o", session: "s2", title: "Own", status: "open", last_seq: 1, guests: [],
                  last: {author: "user", body: "mine"}};
     const guestT = {id: "th-g", session: "s1", title: "Review me", status: "open", last_seq: 3,
-                    guests: [{session: "s2", invited_by: "user"}], guest: {invited_by: "user", unread: 1},
+                    guests: [{session: "s2", invited_by: "user"}],
+                    guest: {invited_by: "user", unread: 1, owner_unread: 2},
                     last: {author: "guest", guest: "s2", body: "try B"}};
     const gcalls = [];
     const gapi = async (p, opts = {}) => {
@@ -760,6 +763,9 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     assert.ok(sec.text().includes("초대된 쓰레드 1"));
     assert.deepEqual(sec.querySelectorAll(".th-item").map((i) => i.dataset.id), ["th-g"]);
     assert.ok(sec.querySelector(".th-chip-owner").textContent === "s1", "a guest thread names its owner");
+    // claunch-p9wes.1: how many of the owner's messages the guest has not read.
+    assert.equal(sec.querySelector(".th-chip-unread").textContent, "답글 2");
+    assert.ok(sec.querySelector(".th-chip-unread").title.includes("s1"), "the chip says whose replies");
     assert.deepEqual(gh.querySelectorAll(".th-list").length, 2);
     assert.ok(sec.querySelector(".th-dot"), "an unread guest thread carries the new-message dot");
     sec.querySelector(".th-item").fire("click");

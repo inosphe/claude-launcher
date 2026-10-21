@@ -49,7 +49,14 @@ thread and writes in it (``author`` ``guest``, the guest's name in
 work stays the owner's. A guest may leave (uninvite itself). ``read_seq``
 is how far the guest has read, the way ``agent_read`` is the owner's.
 :meth:`ThreadStore.list` reports the threads a session is a guest in apart
-from its own (``guest_threads``).
+from its own (``guest_threads``), each saying how many messages of the
+others it has not read (``unread``) and how many of the owner's came after
+its read position (``owner_unread``).
+
+When a guest's session ends, :meth:`ThreadStore.drop_guest` takes it out of
+every thread it was in and writes a ``system`` notice in each, so the
+thread itself says the guest is gone rather than its messages simply
+stopping (claunch-p9wes.1).
 
 Operator conversations (claunch-iw5i8.12.1). An operator v2 keeps its
 conversation with the user here too, in threads whose owner is
@@ -465,7 +472,10 @@ class ThreadStore:
     def _append(self, db, row, actor: str, body: str, images: Optional[list] = None, *,
                 kind: str = "message", ref: Optional[str] = None, data: Optional[str] = None,
                 author: Optional[str] = None, at: Optional[str] = None,
-                files: Optional[list] = None, guest: Optional[str] = None) -> dict:
+                files: Optional[list] = None, guest: Optional[str] = None,
+                reopen: bool = True) -> dict:
+        """Append one message to ``row``'s thread. ``reopen`` false keeps a
+        closed thread closed (a daemon notice is a record, not a reply)."""
         now = at or _now()
         author = author or _author(actor)
         images = images or []
@@ -482,10 +492,11 @@ class ThreadStore:
             raise
         seq = int(cur.lastrowid)
         # The agent writing in a thread has seen everything in it so far.
-        # A guest's message does not reopen it (claunch-mgh8x).
+        # A guest's message does not reopen it (claunch-mgh8x), and a notice
+        # that must not count as activity passes ``reopen`` false.
         db.execute(
             "UPDATE threads SET last_seq = ?, updated_at = ?"
-            + (", status = 'open'" if author != GUEST else "")
+            + (", status = 'open'" if author != GUEST and reopen else "")
             + (", agent_read = ?" if author == AGENT else "") + " WHERE id = ?",
             (seq, now, seq, row["id"]) if author == AGENT else (seq, now, row["id"]),
         )
@@ -677,8 +688,9 @@ class ThreadStore:
 
     def _guest_threads(self, db, session: str, *, closed: bool = True) -> list[dict]:
         """The threads ``session`` is a guest in, each with ``guest``: who
-        invited it, when, how far it has read and how many messages of the
-        others it has not (``unread``)."""
+        invited it, when, how far it has read, how many messages of the
+        others it has not (``unread``) and how many of those the owner wrote
+        (``owner_unread``, claunch-p9wes.1)."""
         sql = ("SELECT t.*, g.invited_by AS g_by, g.invited_at AS g_at, g.read_seq AS g_read"
                " FROM guests g JOIN threads t ON t.id = g.thread WHERE g.session = ?")
         if not closed:
@@ -689,8 +701,11 @@ class ThreadStore:
             unread = db.execute(
                 "SELECT COUNT(*) FROM messages WHERE thread = ? AND seq > ? AND author != 'system'"
                 " AND NOT (author = 'guest' AND guest = ?)", (r["id"], r["g_read"], session)).fetchone()[0]
+            owner_unread = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE thread = ? AND seq > ? AND author = 'agent'",
+                (r["id"], r["g_read"])).fetchone()[0]
             t["guest"] = {"invited_by": r["g_by"], "invited_at": r["g_at"], "read_seq": r["g_read"],
-                          "unread": int(unread)}
+                          "unread": int(unread), "owner_unread": int(owner_unread)}
             out.append(t)
         return out
 
@@ -968,12 +983,29 @@ class ThreadStore:
             return {r["thread"]: int(r["n"]) for r in db.execute(
                 "SELECT thread, COUNT(*) AS n FROM messages WHERE session = ? GROUP BY thread", (owner,))}
 
-    def drop_guest(self, session: str) -> int:
+    def drop_guest(self, session: str) -> list[dict]:
         """Remove ``session`` from every thread it is a guest in (it ended,
-        claunch-tee5g); returns how many threads it left. Its messages stay
-        in those threads."""
+        claunch-tee5g); returns the threads it left, each with ``guest`` set
+        to ``session``. Its messages stay in those threads.
+
+        Each thread gets a ``system`` message saying the guest is gone
+        (claunch-p9wes.1) -- written where a reader of the conversation sees
+        it, and kept from reopening a closed thread. The owner's notification
+        is the route's (daemon/threads_api.py)."""
+        session = str(session or "")
+        left = []
         with self._write() as db:
-            return db.execute("DELETE FROM guests WHERE session = ?", (str(session or ""),)).rowcount
+            rows = db.execute(
+                "SELECT t.* FROM guests g JOIN threads t ON t.id = g.thread WHERE g.session = ?"
+                " ORDER BY t.status = 'closed', t.id", (session,)).fetchall()
+            for row in rows:
+                self._append(db, row, session,
+                             f"Guest session {session} ended and is no longer in this thread. "
+                             "Its messages stay above.",
+                             kind="system", author=SYSTEM, reopen=False)
+                db.execute("DELETE FROM guests WHERE thread = ? AND session = ?", (row["id"], session))
+                left.append({**self._view(db, row), "guest": session})
+        return left
 
     def delete_owner(self, owner: str) -> int:
         """Remove every thread and message of ``owner`` (an operator that was
