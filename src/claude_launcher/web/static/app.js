@@ -32863,6 +32863,12 @@ function providerAffinityCard() {
     "holds its cache. Applies per provider, live — running sessions and shims " +
     "pick a change up without a daemon restart. Same key as " +
     "providers.<name>.session_affinity in ~/.claunch.yaml."));
+  card.appendChild(el("p", "wf-note",
+    "Prompt cache TTL is the claude harness's own setting, per provider: it " +
+    "defaults to 1h on a Claude subscription and 5m on an API key, and " +
+    "CLAUDE_CODE_PROMPT_CACHE_TTL (or the harness's promptCacheTtl setting) " +
+    "overrides it. claunch sets neither; each row shows the value a session " +
+    "on that provider resolves."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
     card.appendChild(el("p", "wf-note", "reading…"));
@@ -32885,6 +32891,10 @@ function providerAffinityCard() {
     label.appendChild(toggle);
     label.appendChild(document.createTextNode(row.name));
     item.appendChild(label);
+    if (row.prompt_cache_ttl) {
+      item.appendChild(el("span", "provider-affinity-note",
+        `prompt cache TTL ${row.prompt_cache_ttl} — ${row.prompt_cache_ttl_source}`));
+    }
     if (!row.fronted) {
       item.appendChild(el("span", "provider-affinity-note",
         "not fronted by a routing/metering shim — the flag has no effect"));

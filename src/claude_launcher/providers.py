@@ -40,6 +40,7 @@ inherited, or borrowed) is exported through the Claude harness's packaged
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional, Tuple
 
 from . import lineage, profile as profile_mod, provider_spec, store, template, translators
@@ -296,6 +297,47 @@ def service(name: str, doc: Optional[dict] = None) -> str:
 def uses_anthropic_oauth(name: str, doc: Optional[dict] = None) -> bool:
     """Whether a provider authenticates through the Anthropic OAuth route."""
     return service(name, doc) == ANTHROPIC_SERVICE
+
+
+#: Claude Code's switch for how long a prompt-cache entry lives (its setting
+#: name is ``promptCacheTtl``; the environment variable wins over the setting).
+#: The harness applies it to the main conversation; subagents and background
+#: helpers have ``CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`` of their own. Read
+#: from the installed harness (2.1.306), not from a launcher default.
+PROMPT_CACHE_TTL_ENV = "CLAUDE_CODE_PROMPT_CACHE_TTL"
+
+#: The two values the harness accepts.
+PROMPT_CACHE_TTL_VALUES = ("5m", "1h")
+
+#: What the harness picks when nothing sets the value: a Claude subscription
+#: gets the 1-hour cache, an API key (and Bedrock, Vertex, Foundry) the
+#: 5-minute one. A subscription in overage falls back to 5 minutes.
+PROMPT_CACHE_TTL_SUBSCRIPTION = "1h"
+PROMPT_CACHE_TTL_API_KEY = "5m"
+
+
+def prompt_cache_ttl(
+    name: str, doc: Optional[dict] = None, env: Optional[dict] = None
+) -> Dict[str, str]:
+    """The prompt-cache TTL the claude harness resolves for ``name``, and why.
+
+    The launcher does not set this value; it reports the one the harness will
+    use, so an operator can tell a 5-minute cache from a 1-hour one without
+    reading the harness. Precedence: the environment variable (a profile's
+    ``env`` is part of the child's environment) over the harness's automatic
+    choice for the provider's service. A malformed value is ignored, which is
+    what the harness does with it too.
+    """
+    env = os.environ if env is None else env
+    wanted = str(env.get(PROMPT_CACHE_TTL_ENV) or "").strip().lower()
+    if wanted in PROMPT_CACHE_TTL_VALUES:
+        return {"ttl": wanted, "source": f"environment ({PROMPT_CACHE_TTL_ENV})"}
+    if service(name, doc) == ANTHROPIC_SERVICE:
+        return {
+            "ttl": PROMPT_CACHE_TTL_SUBSCRIPTION,
+            "source": "automatic (Claude subscription)",
+        }
+    return {"ttl": PROMPT_CACHE_TTL_API_KEY, "source": "automatic (API key)"}
 
 
 def provider_env(name: str, doc: Optional[dict] = None) -> Dict[str, str]:

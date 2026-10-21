@@ -69,8 +69,34 @@ def test_get_answers_one_row_per_provider(home):
         # a malformed flag reads back as off with the error surfaced
         assert _row(data, "broken")["session_affinity"] is False
         assert "must be a boolean" in _row(data, "broken")["error"]
+        # claunch does not set the prompt-cache TTL; an API-key provider
+        # reports the harness's own automatic value for that service
+        assert _row(data, "fw")["prompt_cache_ttl"] == "5m"
+        assert _row(data, "fw")["prompt_cache_ttl_source"] == "automatic (API key)"
 
     _with_client(body)
+
+
+def test_prompt_cache_ttl_follows_the_harness_rule(home):
+    from claude_launcher import providers
+
+    _write_providers()
+    doc = store.load()
+    # the named claude provider is the Anthropic subscription route: the
+    # harness's automatic value there is the 1-hour cache
+    assert providers.prompt_cache_ttl("claude", doc, env={}) == {
+        "ttl": "1h", "source": "automatic (Claude subscription)"}
+    assert providers.prompt_cache_ttl("default", doc, env={})["ttl"] == "1h"
+    # a provider that carries its own API key gets the 5-minute cache
+    assert providers.prompt_cache_ttl("fw", doc, env={}) == {
+        "ttl": "5m", "source": "automatic (API key)"}
+    # the environment variable wins, in the harness's own spelling
+    assert providers.prompt_cache_ttl(
+        "claude", doc, env={"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}) == {
+        "ttl": "5m", "source": "environment (CLAUDE_CODE_PROMPT_CACHE_TTL)"}
+    # a malformed value is ignored, as the harness ignores it
+    assert providers.prompt_cache_ttl(
+        "fw", doc, env={"CLAUDE_CODE_PROMPT_CACHE_TTL": "10m"})["ttl"] == "5m"
 
 
 def test_put_writes_and_clears_the_flag(home):
