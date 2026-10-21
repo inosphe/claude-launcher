@@ -798,6 +798,28 @@ html[data-theme="light"] #term-tps-overlay {
 #session-list li.sess-card:focus {
   outline: none; box-shadow: inset 0 0 0 1px #6e2c2c;
 }
+/* A kill pressed on this card and not yet seen through (decorateKillRow,
+   claunch-5g6zp): the kill route can take a second or more to answer, and
+   the card is where `k` was pressed. Inset like the focus ring so the row
+   does not move, red like the kill control, and pulsing because it is a
+   wait, not a state the session will stay in. */
+#session-list li.sess-card.rail-killing {
+  box-shadow: inset 3px 0 0 #f85149, inset 0 0 0 1px #6e2c2c;
+  animation: rail-killing-pulse 1s ease-in-out infinite;
+  cursor: progress;
+}
+#session-list .rail-killing-tag {
+  flex: none; font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  background: #3d1a1a; color: #ff9c9c; border: 1px solid #6e2c2c;
+  white-space: nowrap;
+}
+@keyframes rail-killing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #session-list li.sess-card.rail-killing { animation: none; opacity: 0.7; }
+}
 /* The live compaction state. Purple: not the blue "what it is", not the grey
    "where it belongs" — a transient state that will be gone by the next poll,
    carrying no demand of its own. Rigid: "compacting" must not be half-shown
@@ -2203,7 +2225,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: #341c1e !important; color: #ffb0b0 !important;
   border-color: #8b2e2e !important;
 }
-.kill-pending { opacity: 0.65; cursor: wait !important; }
+.kill-pending {
+  opacity: 0.65; cursor: wait !important;
+  animation: rail-killing-pulse 1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .kill-pending { animation: none; } }
 /* the header's fork/merge pair: the same chip as kill, one of the two on
    screen at a time; a pending merge wears the wind-down red above */
 #term-fork, #term-merge { white-space: nowrap; }
