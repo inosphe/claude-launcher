@@ -264,6 +264,12 @@ def run_dir_ancestors(run_dir: str, cap: int = ANCESTOR_CAP) -> List[dict]:
     out: List[dict] = []
     seen = set()
     cur = start
+    try:
+        # A log that says it continued itself would otherwise come back as its
+        # own ancestor (claunch-0n5jr review).
+        seen.add(str(start.resolve()))
+    except OSError:
+        return []
     for _ in range(max(0, int(cap))):
         log = run_dir_log_path(cur)
         if log is None:

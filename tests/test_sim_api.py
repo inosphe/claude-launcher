@@ -336,6 +336,11 @@ def test_continued_dir_outside_the_runs_folder_is_ignored(tmp_path):
             {"event": "continued", "from": {"runId": "gone", "runDir": str(missing), "round": 8}},
         ])
         assert (await req("GET", f"/api/sessions/{name}/durable"))["ancestors"] == []
+        # A log that continued itself is not its own ancestor either.
+        cur = write_run_log(tmp_path / "runs" / "r2", [
+            {"event": "continued", "from": {"runId": "r2", "runDir": str(cur), "round": 7}},
+        ])
+        assert (await req("GET", f"/api/sessions/{name}/durable"))["ancestors"] == []
     run(tmp_path, scenario)
 
 
