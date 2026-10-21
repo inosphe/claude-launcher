@@ -5,8 +5,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
+// The neutral levels claunch carries across harnesses. Whether a backend
+// accepts a given level is the backend's business and varies by model: some
+// reject a level outright rather than clamping it (measured: fireworks
+// glm-5p3-flash answers 400 for "none"), so a level here is a declaration the
+// model honours, not a value every model takes.
 const reasoningEfforts = new Set(["low", "medium", "high"]);
-const reasoningFormats = new Set(["deepseek"]);
+const reasoningFormats = new Set(["deepseek", "openai"]);
 
 function parseHeaders(raw, name = "CLAUNCH_PI_HEADERS") {
   if (!raw) return undefined;
@@ -111,7 +116,7 @@ export function registerFromEnv(pi, env, prefix) {
     throw new Error(`${prefix}REASONING_EFFORT must be low, medium, or high`);
   }
   if (reasoningFormat !== undefined && !reasoningFormats.has(reasoningFormat)) {
-    throw new Error(`${prefix}REASONING_FORMAT must be deepseek`);
+    throw new Error(`${prefix}REASONING_FORMAT must be deepseek or openai`);
   }
 
   const ids = JSON.parse(rawModels);
@@ -178,6 +183,21 @@ export function registerFromEnv(pi, env, prefix) {
         } else if (
           next.thinking?.type === "enabled" &&
           !Object.hasOwn(next, "reasoning_effort")
+        ) {
+          next = { ...next, reasoning_effort: reasoningEffort };
+          changed = true;
+        }
+      } else if (reasoningFormat === "openai") {
+        // OpenAI's own request shape: one field, `reasoning_effort`. No
+        // `thinking` envelope and no `reasoning_content` -- those belong to
+        // the DeepSeek encoding above. A request that already carries any of
+        // the three is the session's own choice (a caller that encodes
+        // reasoning itself), so it is left untouched; the same rule gds6's
+        // extension applies (extension.mjs:481).
+        if (
+          !Object.hasOwn(next, "reasoning_effort") &&
+          !Object.hasOwn(next, "thinking") &&
+          !Object.hasOwn(next, "reasoning_content")
         ) {
           next = { ...next, reasoning_effort: reasoningEffort };
           changed = true;

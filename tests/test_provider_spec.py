@@ -393,6 +393,21 @@ def test_pi_declares_off_so_a_session_can_take_reasoning_over():
     assert "off" in harnesses.get("pi").efforts
 
 
+def test_pi_carries_the_openai_reasoning_format(home):
+    _provider(
+        "ds",
+        {
+            **DEEPSEEK,
+            "reasoning_effort": "medium",
+            "openai_reasoning_format": "openai",
+        },
+    )
+    p = _profile_on("work", "ds", harness="pi")
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+    assert env[pi_provider.ENV_REASONING_EFFORT] == "medium"
+    assert env[pi_provider.ENV_REASONING_FORMAT] == "openai"
+
+
 def test_harness_without_reasoning_translation_rejects_the_field(home):
     p = profile.create("km")
     lineage.set_harness(p, "kimi")
