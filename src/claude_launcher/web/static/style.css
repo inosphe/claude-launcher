@@ -6815,6 +6815,102 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   .stats-session { flex: 1 1 100%; }
   .stats-chart { height: 120px; }
 }
+/* The window overview: the fleet's sessions over today / 7 / 30 days, the
+   provider strip that narrows them, and the detail panel beside the table. */
+.stats-layout {
+  display: flex; gap: 14px; align-items: flex-start; max-width: 1500px;
+}
+.stats-main { flex: 1 1 auto; min-width: 0; }
+.stats-detail {
+  flex: 0 0 460px; max-width: 460px; position: sticky; top: 8px;
+  border: 1px solid #22262d; border-radius: 8px; background: #14171c;
+  max-height: calc(100vh - 40px); overflow-y: auto;
+}
+.stats-detail-head {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px 4px;
+}
+.stats-detail-head h3 { margin: 0; font-size: 14px; color: #e6edf3; }
+.stats-detail-head .wf-btn { margin-left: auto; }
+.stats-detail-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 0 12px 10px; color: #8b949e; font-size: 11px;
+}
+.stats-detail-meta a { color: #58a6ff; }
+.stats-detail-open { margin-left: auto; }
+.stats-detail-units {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px 0;
+}
+.stats-detail-label { color: #8b949e; font-size: 11px; }
+.stats-detail-window { padding: 10px 12px; }
+.stats-switches { padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.stats-switch {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  font-size: 11px; color: #c6cdd5;
+}
+.stats-switch-at { color: #6e7681; font-variant-numeric: tabular-nums; }
+.stats-switch-kind {
+  padding: 0 5px; color: #d29922; border: 1px solid #3a2f14;
+  border-radius: 8px; font-size: 10px;
+}
+.stats-switch-model { color: #8b949e; }
+.stats-providers { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.stats-provider {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 6px 10px; color: #c6cdd5; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; cursor: pointer;
+  text-align: left;
+}
+.stats-provider.active { color: #e6edf3; background: #2d333b; border-color: #444c56; }
+.stats-provider-name { font-size: 12px; }
+.stats-provider-total { font-size: 13px; font-variant-numeric: tabular-nums; }
+.stats-provider-sessions { color: #6e7681; font-size: 10px; }
+.stats-ended {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #8b949e; font-size: 12px;
+}
+.stats-window-note { max-width: 980px; }
+.stats-overview tr.stats-row { cursor: pointer; }
+.stats-overview tr.stats-row:hover td { background: #1b1e24; }
+.stats-session-cell { white-space: nowrap; }
+.stats-session-cell > * + * { margin-left: 6px; }
+.stats-issue { color: #6e7681; font-size: 10px; }
+.stats-badge {
+  padding: 0 6px; border-radius: 8px; font-size: 10px; color: #8b949e;
+  background: #1b1e24; border: 1px solid #2a2e36;
+}
+.stats-borrow { color: #d2a8ff; border-color: #3a2c4a; }
+.stats-switch-badge { color: #f0883e; border-color: #3a2f14; }
+.stats-provider-cell { white-space: nowrap; }
+.stats-chip {
+  display: inline-block; padding: 0 6px; margin-left: 4px;
+  border-radius: 8px; font-size: 10px; color: #8b949e;
+  background: #1b1e24; border: 1px solid #2a2e36;
+}
+.stats-chip:first-child { margin-left: 0; }
+.stats-status-cell { color: #8b949e; font-size: 11px; }
+.stats-status-cell.ended { color: #f0883e; }
+.stats-tokens-cell { text-align: left; }
+.stats-rowbar {
+  display: inline-block; width: 120px; height: 8px; background: #22262d;
+  border-radius: 3px; overflow: hidden; vertical-align: middle;
+}
+.stats-rowbar-fill { display: block; height: 100%; background: #58a6ff; }
+.stats-rowvalue { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.stats-unmetered { color: #6e7681; }
+.stats-model-cell {
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: #8b949e; font-size: 11px;
+}
+.stats-last-cell { color: #6e7681; font-size: 11px; white-space: nowrap; }
+@media (max-width: 1100px) {
+  .stats-layout { flex-direction: column; }
+  .stats-detail {
+    position: static; flex: 1 1 auto; max-width: 100%; width: 100%;
+    max-height: none;
+  }
+}
+
 /* Compare mode: the session picker, the figures table with z-scores, the
    origin share bars and the shared timeline. */
 .stats-picks { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 100%; }

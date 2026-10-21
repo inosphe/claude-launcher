@@ -64,9 +64,11 @@ the queued-deliveries banner — the backlog the daemon is holding for the
 attached session, and whose keyboard it blames for the hold —
 ``window_check`` on the read-only measurement Window page — holders, FIFO
 positions, capacity, owner attribution and the two-second poll lifecycle —
-``stats_check`` on the per-session Stats page — its route, the unit switch,
-the poll that speeds up while a transcript is still being read, the usage
-columns per bucket and the input shares by origin —
+``stats_check`` on the Stats page — its routes, the fleet overview's window
+switch, the killed/archived box and the provider strip that narrows the
+table, the row that opens the detail panel, the per-session reading's unit
+switch and poll that speeds up while a transcript is still being read, the
+usage columns per bucket and the input shares by origin —
 ``backpressure_check`` on the one state none of those three can show:
 past the mesh's cap the daemon stops ACCEPTING mail for a session, so
 the backlog stops growing and every field the page had before reads as
@@ -683,6 +685,7 @@ BROWSER_CHECKS = [
         "spawngate_browser.cjs",
         "filldefault_browser.cjs",
         "seedmesh_browser.cjs",
+        "stats_browser.cjs",
 ]
 
 
