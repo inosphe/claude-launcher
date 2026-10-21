@@ -36781,13 +36781,23 @@ function cflow2MetricPeriod(data, metric, start, end) {
 }
 
 // Bin widths offered next to Auto. Auto picks the first that keeps the chart
-// at or under 48 bars; a fixed width over the 128-bar limit is disabled.
+// at or under 48 bars and, past 48 days, a whole number of days that does;
+// a fixed width over the 128-bar limit is disabled, and draw() refuses any
+// chart over that limit whichever way its width was chosen.
 const CF2_THROUGHPUT_BINS = [[900000, "15 minutes"], [3600000, "1 hour"], [21600000, "6 hours"], [86400000, "1 day"]];
+const CF2_THROUGHPUT_AUTO_BARS = 48;
 const CF2_THROUGHPUT_MAX_BINS = 128;
 
 function cflow2ThroughputAutoBin(ms) {
-  const fit = CF2_THROUGHPUT_BINS.find(([bin]) => ms / bin <= 48);
-  return (fit || CF2_THROUGHPUT_BINS[CF2_THROUGHPUT_BINS.length - 1])[0];
+  const fit = CF2_THROUGHPUT_BINS.find(([bin]) => ms / bin <= CF2_THROUGHPUT_AUTO_BARS);
+  if (fit) return fit[0];
+  return Math.ceil(ms / (86400000 * CF2_THROUGHPUT_AUTO_BARS)) * 86400000;
+}
+
+function cflow2ThroughputBinName(ms) {
+  const named = CF2_THROUGHPUT_BINS.find(([v]) => v === ms);
+  if (named) return named[1];
+  return ms % 86400000 === 0 ? `${ms / 86400000} days` : `${ms / 60000} minutes`;
 }
 
 function cflow2Duration(seconds) {
@@ -36883,7 +36893,8 @@ function cflow2Throughput(data, state) {
   const valid = ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a;
   const number = value => value == null ? "unconfirmed" : value.toFixed(2);
   const short = value => value == null ? "—" : String(Number(value.toFixed(2)));
-  const pct = r => number(r.hours > 0 ? r.covered / (r.hours * 3600000) * 100 : null);
+  const coverage = r => r.hours > 0 ? r.covered / (r.hours * 3600000) * 100 : null;
+  const pct = r => number(coverage(r));
   const tile = (label, value, note) => {
     const box = el("div", "cf2-throughput-tile");
     box.append(el("div", "cf2-throughput-tile-label", label), el("div", "cf2-throughput-tile-value", value));
@@ -36941,14 +36952,18 @@ function cflow2Throughput(data, state) {
     }
     const bin = state.bin === "auto" ? cflow2ThroughputAutoBin(span) : Number(state.bin);
     const n = Math.ceil(span / bin);
-    const binName = (CF2_THROUGHPUT_BINS.find(([v]) => v === bin) || [0, `${bin / 60000} minutes`])[1];
+    const binName = cflow2ThroughputBinName(bin);
+    if (n > CF2_THROUGHPUT_MAX_BINS) {
+      output.appendChild(el("p", "wf-note", `Chart limit: ${CF2_THROUGHPUT_MAX_BINS} bins. Select a larger bin or a shorter chart period.`));
+      return;
+    }
 
     const total = cflow2MetricPeriod(data, state.metric, ...period);
     const tiles = el("div", "cf2-throughput-tiles");
     tiles.append(
       tile(state.metric === "runs" ? "Completed runs" : "Reported merges", String(total.count), `in ${short(total.hours)} h`),
       tile("Rate / hour", short(total.rate), total.rate == null ? "coverage incomplete" : null),
-      tile("Coverage", `${short(total.hours > 0 ? total.covered / (total.hours * 3600000) * 100 : null)}%`, "of the period has saved runs"));
+      tile("Coverage", `${short(coverage(total))}%`, "of the period has saved runs"));
     if (state.metric === "runs") tiles.appendChild(tile("Mean duration", cflow2Duration(total.duration), `n=${total.durationN}`));
     output.appendChild(tiles);
 
@@ -36973,7 +36988,8 @@ function cflow2Throughput(data, state) {
       const step = Math.pow(10, Math.floor(Math.log10(peak)));
       return [1, 2, 2.5, 5, 10].map(m => m * step).find(v => v >= peak);
     })();
-    for (const v of top === 1 ? [0, 1] : [0, top / 2, top]) {
+    // Counts are whole numbers, so the middle gridline appears only when it is one.
+    for (const v of top % 2 === 0 ? [0, top / 2, top] : [0, top]) {
       const y = T + plotH - v / top * plotH;
       node("line", {x1: L, x2: W - R, y1: y, y2: y, class: "cf2-axis-grid"});
       node("text", {x: L - 4, y: y + 3, "text-anchor": "end", class: "cf2-axis-label"}, short(v));
@@ -36993,16 +37009,18 @@ function cflow2Throughput(data, state) {
       hit.appendChild(title.cloneNode(true));
       if (showCounts && b.count) node("text", {x: L + (i + .5) * slot, y: T + plotH - height - 3, "text-anchor": "middle", class: "cf2-bar-count"}, String(b.count));
     });
-    const multiDay = span > 86400000, daily = bin >= 86400000;
+    const multiDay = span > 86400000, daily = bin >= 86400000, yearly = span > 300 * 86400000;
     const tick = ms => {
       const iso = new Date(ms).toISOString();
-      return daily ? iso.slice(5, 10) : multiDay ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : iso.slice(11, 16);
+      return yearly ? iso.slice(0, 10) : daily ? iso.slice(5, 10) : multiDay ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : iso.slice(11, 16);
     };
-    const every = Math.max(1, Math.ceil(n / (multiDay && !daily ? 4 : 6)));
-    for (let i = 0; i <= n; i += every) {
-      const x = L + Math.min(i, n) * slot;
-      node("text", {x, y: H - 6, "text-anchor": i === 0 ? "start" : i >= n ? "end" : "middle", class: "cf2-axis-label"}, tick(period[0] + i * bin));
+    const every = Math.max(1, Math.ceil(n / (yearly ? 3 : multiDay && !daily ? 4 : 6)));
+    // Interior ticks sit on bin starts; the right edge is labelled with the
+    // period's real end, which a shorter final bin puts before period[0]+n*bin.
+    for (let i = 0; i < n - every / 2; i += every) {
+      node("text", {x: L + i * slot, y: H - 6, "text-anchor": i === 0 ? "start" : "middle", class: "cf2-axis-label"}, tick(period[0] + i * bin));
     }
+    node("text", {x: W - R, y: H - 6, "text-anchor": "end", class: "cf2-axis-label"}, tick(period[1]));
     output.appendChild(svg);
     const legend = el("div", "cf2-throughput-legend");
     legend.append(el("span", "cf2-legend-known", "Full coverage"), el("span", "cf2-legend-unknown", "Incomplete coverage (rate unknown)"),

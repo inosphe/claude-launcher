@@ -148,6 +148,35 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     assert.equal(await section.locator('svg rect.cf2-metric-hit').count(), 28, '7 days in Auto bins of 6 hours');
     assert.match(await section.locator('.cf2-throughput-legend').textContent(), /per 6 hours/);
     assert.equal(await section.locator('.cf2-throughput-custom input:visible').count(), 0, 'preset hides custom fields');
+    // Auto stays inside the bar limit however long the period: past 48 days it
+    // takes whole days, so 365 days is 8-day bins and 1970..now is still <= 48 bars.
+    const bars = () => section.locator('svg rect.cf2-metric-hit').count();
+    const valueLabels = () => section.locator('svg text.cf2-axis-label[x="32"]').allTextContents();
+    await section.locator('[data-metric-field="span"]').selectOption('custom');
+    await set('end', at(16).slice(0, -1));
+    await set('start', new Date(Date.parse(at(16)) - 365 * 86400000).toISOString().slice(0, 16));
+    assert.equal(await bars(), 46, '365 days in Auto bins of 8 days');
+    assert.match(await section.locator('.cf2-throughput-legend').textContent(), /per 8 days/);
+    await set('start', '1970-01-01T00:00');
+    const longest = await bars();
+    assert(longest > 0 && longest <= 48, 'Auto keeps 1970..now at or under 48 bars: ' + longest);
+    assert.match((await section.locator('svg .cf2-axis-label').allTextContents()).join(' '), /1970-01-01/, 'year shown on long axes');
+    // A fixed 1 day over 365 days is disabled and falls back to the same bounded Auto.
+    await set('start', new Date(Date.parse(at(16)) - 365 * 86400000).toISOString().slice(0, 16));
+    await section.locator('[data-metric-field="bin"]').selectOption('86400000');
+    assert.match(await section.textContent(), /1 day bins would exceed 128 bars for this period — switched to Auto/);
+    assert.equal(await bars(), 46);
+    // Value axis shows whole counts only: a peak of 3 is labelled 0 and 3, not 1.5.
+    await set('start', '2026-10-13T11:00'); await set('end', '2026-10-13T17:00');
+    await section.locator('[data-metric-field="bin"]').selectOption('21600000');
+    assert.equal(await bars(), 1);
+    assert.deepEqual(await valueLabels(), ['0', '3']);
+    // The right edge is labelled with the period's real end, not the end of a full last bin.
+    await set('end', '2026-10-13T16:30');
+    await section.locator('[data-metric-field="bin"]').selectOption('3600000');
+    const timeLabels = await section.locator('svg text.cf2-axis-label:not([x="32"])').allTextContents();
+    assert.equal(timeLabels[timeLabels.length - 1], '16:30', 'end tick: ' + timeLabels);
+    await section.locator('[data-metric-field="span"]').selectOption('168');
     if (process.env.CFLOW_METRICS_FIXTURE) {
       detail.throughput = JSON.parse(fs.readFileSync(process.env.CFLOW_METRICS_FIXTURE));
       detail.run.run = 'real-s29-example';
