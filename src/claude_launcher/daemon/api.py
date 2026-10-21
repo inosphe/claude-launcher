@@ -887,6 +887,7 @@ def build_app(
     r.add_put("/api/wsl-reg-stub", h_wsl_reg_stub_set)
     r.add_get("/api/pty-host-setting", h_pty_host_setting_get)
     r.add_put("/api/pty-host-setting", h_pty_host_setting_set)
+    r.add_get("/api/test-output-dir", h_test_output_dir)
     r.add_get("/api/delegate-setting", h_delegate_setting_get)
     r.add_put("/api/delegate-setting", h_delegate_setting_set)
     r.add_get("/api/provider-affinity", h_provider_affinity_get)
@@ -4227,6 +4228,30 @@ async def h_pty_host_setting_set(request: web.Request) -> web.Response:
     try:
         store.set_daemon_field("pty_host", enabled)
         return json_response(_pty_host_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _test_output_dir_state() -> dict:
+    """``daemon.test_output_dir`` as saved and the root it resolves to now."""
+    from .. import pytest_basetemp
+
+    configured = store.daemon_config().get("test_output_dir")
+    return {
+        "configured": configured if isinstance(configured, str) else "",
+        "resolved": str(pytest_basetemp.root()),
+    }
+
+
+async def h_test_output_dir(request: web.Request) -> web.Response:
+    """``daemon.test_output_dir`` (claunch-pyv3d.1), read-only on purpose.
+
+    Answers the saved setting ("" when unset) and the root it resolves to
+    now: the built-in per-platform default when empty, the launcher home
+    plus the value when relative. There is deliberately no PUT — the
+    operator edits ``~/.claunch.yaml``."""
+    try:
+        return json_response(_test_output_dir_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

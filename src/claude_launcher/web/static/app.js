@@ -25552,6 +25552,7 @@ function openSettings(section) {
   refreshRelaySettings();
   refreshWslRegStub();
   refreshPtyHostSetting();
+  refreshTestOutputDir();
   refreshDelegateSetting();
   refreshProviderAffinity();
 }
@@ -30994,6 +30995,7 @@ function renderWorkspaces() {
   view.appendChild(relaySettingsCard());
   view.appendChild(wslRegStubCard());
   view.appendChild(ptyHostSettingCard());
+  view.appendChild(testOutputDirCard());
   view.appendChild(delegateSettingCard());
   view.appendChild(providerAffinityCard());
 
@@ -32739,6 +32741,51 @@ function ptyHostSettingCard() {
   card.appendChild(el("p", "wf-note", ptyHostNowLine(st.host)));
   const pending = ptyHostPendingLine(st);
   if (pending) card.appendChild(el("p", "wf-note", pending));
+  return card;
+}
+
+/* Test output directory (claunch-pyv3d.1) -- daemon.test_output_dir, read
+   with GET /api/test-output-dir. Read-only on purpose: the operator edits
+   ~/.claunch.yaml to change it. The card shows the saved value (or that
+   the default root is in use) and where that root is now -- the directory
+   every session's pytest basetemp and $CLAUNCH_TEST_DIR (<root>/<session>)
+   live under, reaped when the session ends. */
+let testOutputDir = { configured: "", resolved: "", loaded: false, error: "" };
+
+async function refreshTestOutputDir() {
+  try {
+    const resp = await api("/api/test-output-dir");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    Object.assign(testOutputDir, {
+      configured: data.configured || "", resolved: data.resolved || "",
+      loaded: true, error: "",
+    });
+  } catch (err) {
+    testOutputDir.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+function testOutputDirCard() {
+  const st = testOutputDir;
+  const card = el("section", "ws-add test-output-dir-settings");
+  card.appendChild(el("h3", null, "Test output directory"));
+  card.appendChild(el("p", "wf-note",
+    "Root every session's test outputs are written under: pytest's basetemp " +
+    "and $CLAUNCH_TEST_DIR (<root>/<session>, reaped when the session " +
+    "ends). Same setting as daemon.test_output_dir in ~/.claunch.yaml — " +
+    "shown read-only here; edit the file to change it."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  card.appendChild(el("p", "wf-note",
+    st.configured
+      ? `daemon.test_output_dir: ${st.configured}`
+      : "daemon.test_output_dir: (not set — the built-in default root)"));
+  card.appendChild(el("p", "wf-note", `Root now: ${st.resolved}`));
   return card;
 }
 
