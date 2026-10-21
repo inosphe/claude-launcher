@@ -4111,6 +4111,86 @@ def abort(reason: str, *, cwd: Optional[str] = None, scope: Optional[str] = None
     return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
+#: The node ids whose open ask an ending session may close. They are the two
+#: questions improv-worker-v2 asks about ending a round (:mod:`...workflows`):
+#: the first one, and the release question after auto-release. An ask on any
+#: other node is somebody's real question -- closing it here would be the
+#: daemon deciding work that was never decided.
+EXIT_GATE_NODES = ("end-decision", "release-decision")
+
+
+def _exit_gate_name(rec: Dict[str, Any]) -> str:
+    """The end gate an ask record sits on, or ``""``.
+
+    The record's ``node`` is the IR id and ``label`` the display path of the
+    instance that holds the question; both carry the call chain (``settle/
+    end-decision``, ``end-decision.call/ask-pose``). The gate is a component
+    anywhere in that chain -- the ask itself lives in the library's ask-pose,
+    one level below the call that names the gate.
+    """
+    for key in ("label", "node"):
+        value = str(rec.get(key) or "")
+        parts = [piece for chunk in value.split("/") for piece in chunk.split(".")]
+        for name in EXIT_GATE_NODES:
+            if name in parts:
+                return name
+    return ""
+
+
+def end_on_session_exit(*, cwd: Optional[str] = None, scope: Optional[str] = None,
+                        by: str = "session-exit",
+                        now: Optional[float] = None) -> Dict[str, Any]:
+    """Finish a run whose session ended while it asked whether to end.
+
+    The last question of a round is answered either way: the person picks an
+    option in the dashboard, or they end the session with the run still
+    standing at the question. Without this the second answer left the run at
+    ``waiting_approval`` for good -- no terminal left to answer it and no
+    record that anything had ended -- while the first wrote a done run and an
+    ending block. They are the same decision, so they leave the same state:
+    the open ask is closed as cancelled, the run finishes ``ok`` with a value
+    naming the session that ended it, and the journal says who did it.
+
+    Only the asks :data:`EXIT_GATE_NODES` names qualify. A halted run, a run
+    waiting on anything else, or one already finished is left alone; the
+    returned ``why`` says which. ``finished`` is False in every such case, so
+    the caller can tell "nothing to do" from "done".
+
+    The caller is the daemon, on the session's exit (:mod:`.daemon.cflow2_clock`),
+    and it is the one place a run moves without its driver or a person: the
+    driver is gone, and the person's ending is the very act being recorded.
+    """
+    out: Dict[str, Any] = {"finished": False, "why": "", "run": None, "ask": None}
+
+    def op(r: Run) -> None:
+        out["run"] = r.state.get("run_id")
+        if _halted(r):
+            out["why"] = "the run is halted"
+            return
+        open_asks = [rec for rec in (r.state.get("asks") or {}).values()
+                     if rec.get("status") == "open"]
+        if len(open_asks) != 1:
+            out["why"] = f"no single open ask to close ({len(open_asks)} open)"
+            return
+        rec = open_asks[0]
+        gate = _exit_gate_name(rec)
+        if not gate:
+            out["why"] = f"{rec.get('id')} on {rec.get('node')} is not an end gate"
+            return
+        rec["status"] = "cancelled"
+        rec["closed"] = store_mod.utcnow()
+        _withdraw(r, rec, by)
+        out["finished"] = True
+        out["ask"] = rec["id"]
+        out["why"] = f"{rec['id']} closed; run finished by {by}"
+        _finish_run(r, ir.OUTCOME_OK,
+                    {"decision": by, "ask": rec["id"], "node": gate},
+                    how=by)
+
+    _mutate(cwd, scope, now, op)
+    return out
+
+
 def archive(*, cwd: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
     """Move a finished run out of its slot into the archive, leaving the slot
     idle (a start would do the same first). A live run is refused: abort it

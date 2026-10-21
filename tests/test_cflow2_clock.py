@@ -972,3 +972,54 @@ def test_session_workflow_inputs_are_narrowed_to_what_the_chart_declares(tmp_pat
     assert cflow2_exec.session_workflow_inputs("oneshot-job-v2", str(tmp_path), values) == values
     assert cflow2_exec.session_workflow_inputs("sample-v2", str(tmp_path), values) == {}
     assert cflow2_exec.session_workflow_inputs("no-such-v2", str(tmp_path), values) == {}
+
+
+# -- an ending that answers the end gate (claunch-q4cqy) ------------------------
+
+
+def _end_gate_run(tmp_path, scope="own"):
+    _start(tmp_path, """
+        nodes:
+          end-decision:
+            ask:
+              prompt: end?
+              otherwise: human
+        body: [end-decision]
+    """, scope=scope)
+
+
+def test_an_ending_session_finishes_a_run_standing_at_an_end_gate(tmp_path):
+    """A person may answer the round's last question by ending the session.
+    The exit pass then leaves what answering ``end`` would have left: the ask
+    closed and the run done, not a run stranded at waiting_approval."""
+    _end_gate_run(tmp_path)
+    assert runtime.status(cwd=str(tmp_path), scope="own")["status"] == "waiting_approval"
+    session = FakeSession("own", str(tmp_path))
+    session.exited = True
+    clock = _clock(FakeManager(session))
+    clock.session_exited(session)
+    clock.end_sides(now=T0 + 30)
+    st = runtime.status(cwd=str(tmp_path), scope="own")
+    assert st["status"] == "done"
+    state = RunStore(str(tmp_path), "own").load_state()
+    assert [rec["status"] for rec in state["asks"].values()] == ["cancelled"]
+    assert state["value"]["decision"] == cflow2_clock.EXIT_BY
+
+
+def test_an_ending_session_leaves_a_question_that_is_not_an_end_gate(tmp_path):
+    """Only the end gates are answered by an ending; any other question is
+    somebody's real decision and stays open."""
+    _start(tmp_path, """
+        nodes:
+          cost-gate:
+            ask:
+              prompt: spend?
+              otherwise: human
+        body: [cost-gate]
+    """)
+    session = FakeSession("own", str(tmp_path))
+    session.exited = True
+    clock = _clock(FakeManager(session))
+    clock.session_exited(session)
+    clock.end_sides(now=T0 + 30)
+    assert runtime.status(cwd=str(tmp_path), scope="own")["status"] == "waiting_approval"

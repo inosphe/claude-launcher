@@ -624,7 +624,8 @@ USER_QUESTIONS = {
     "landed-unclear-choice": ["confirmed", "held"],
     "rework-decision": ["rework", "hold"],
     "settle-stall": ["proceed", "keep-waiting"],
-    "end-decision": ["end", "hold", "new-task", "self-improve"],
+    "end-decision": ["end", "hold", "new-task", "self-improve", "auto-release"],
+    "release-decision": ["end", "hold", "new-task"],
     "self-improve-align": ["register", "revise", "drop"],
 }
 #: The two PR-medium questions go through the pr-or-local skeleton
@@ -1340,7 +1341,8 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     brief = dict(BRIEF, recommendation="end", options=[
         dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold"),
         dict(BRIEF["options"][1], name="new-task"),
-        dict(BRIEF["options"][1], name="self-improve")])
+        dict(BRIEF["options"][1], name="self-improve"),
+        dict(BRIEF["options"][1], name="auto-release")])
     for scope, answer, then in (("m", "end", "end-notice"), ("n", "new-task", "end-new-task")):
         kw = {"cwd": str(tmp_path), "scope": scope, "now": 1.0}
         st = runtime.start(chart, caps={}, **kw)
@@ -1369,7 +1371,7 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
 
 #: The nodes the end-watch loop runs, stubbed: every one prints its own name.
 #: The self-improve nodes are the library's own (self-improve-common).
-END_NODES = ("end-notice", "end-hold", "end-new-task")
+END_NODES = ("end-notice", "end-hold", "end-new-task", "auto-release")
 #: A value each self-improve node accepts.
 SI_VALUES = {"self-improve-review": {"where": "c", "general": 1, "cflow": 1},
              "self-improve-discuss": {"items": [], "agreed": 0},
@@ -1401,7 +1403,7 @@ def test_self_improve_reviews_aligns_registers_and_asks_again(tmp_path, monkeypa
                                   resolve_include=layers.resolver(str(tmp_path)))
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(chart, caps={}, **kw)
-    end_q = _brief("end", "hold", "new-task", "self-improve")
+    end_q = _brief("end", "hold", "new-task", "self-improve", "auto-release")
     align_q = _brief("register", "revise", "drop")
 
     def labels(st):
@@ -1438,6 +1440,107 @@ def test_self_improve_reviews_aligns_registers_and_asks_again(tmp_path, monkeypa
     assert labels(st) == ["end-new-task"]
     st = report(st, "end-new-task")
     assert st["status"] == "done"
+
+
+def _end_flow(tmp_path):
+    """The end-watch loop compiled alone, with the end nodes stubbed."""
+    from claude_launcher.cflow2 import frontend
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common", "self-improve-common"],
+            "nodes": _end_stubs(), "body": [_find_id(doc["procedures"], "end-watch")]}
+    return frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                 resolve_include=layers.resolver(str(tmp_path)))
+
+
+def _end_labels(st):
+    return [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]]
+
+
+def _pose(st, brief, **kw):
+    from claude_launcher.cflow2 import runtime
+    iid = next(t["instance"] for t in st["tasks"]
+               if t["label"].rsplit("/", 1)[-1] == "ask-frame")
+    return runtime.report(iid, "ok", {"brief": brief}, **kw)
+
+
+def test_the_end_question_times_out_into_auto_release_then_the_release_gate(
+        tmp_path, monkeypatch):
+    """claunch-q4cqy: the end question has a five-minute deadline; past it
+    the run cleans up (auto-release) and asks again at release-decision,
+    which has no deadline of its own. An explicit auto-release answer takes
+    the same road."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _end_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, _brief("end", "hold", "new-task", "self-improve", "auto-release"), **kw)
+    assert st["status"] == "waiting_approval"
+    assert [a["node"] for a in st["asks"]]
+    # the clock's pass five minutes after the question opened
+    st = runtime.status(cwd=kw["cwd"], scope=kw["scope"], now=302.0)
+    assert _end_labels(st) == ["auto-release"], _end_labels(st)
+    iid = st["tasks"][0]["instance"]
+    st = runtime.report(iid, "ok", {}, cwd=kw["cwd"], scope=kw["scope"], now=310.0)
+    assert _end_labels(st) == ["ask-frame"]
+    st = _pose(st, _brief("end", "hold", "new-task"),
+               cwd=kw["cwd"], scope=kw["scope"], now=320.0)
+    assert st["status"] == "waiting_approval"
+    # release-decision has no deadline: an hour later it is still the question
+    st = runtime.status(cwd=kw["cwd"], scope=kw["scope"], now=4000.0)
+    assert _end_labels(st) == [] and st["status"] == "waiting_approval"
+    runtime.approve(None, decision="end", reason="r",
+                    cwd=kw["cwd"], scope=kw["scope"], now=4010.0)
+    st = runtime.status(cwd=kw["cwd"], scope=kw["scope"], now=4011.0)
+    assert _end_labels(st) == ["end-notice"]
+
+
+def test_ending_the_session_at_an_end_gate_finishes_the_run(tmp_path, monkeypatch):
+    """claunch-q4cqy: a person may answer the round's last question by ending
+    the session instead of picking an option. The daemon's exit hook then
+    leaves the state ``end`` would have left: the open ask closed, the run
+    done -- not a run stranded at waiting_approval with no terminal left."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _end_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, _brief("end", "hold", "new-task", "self-improve", "auto-release"), **kw)
+    assert st["status"] == "waiting_approval"
+    ask = st["asks"][0]["ask"]
+    done = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=5.0)
+    assert done["finished"] is True and done["ask"] == ask, done
+    st = runtime.status(cwd=kw["cwd"], scope=kw["scope"], now=6.0)
+    assert st["status"] == "done"
+    state = runtime.RunStore(kw["cwd"], kw["scope"]).load_state()
+    assert state["asks"][ask]["status"] == "cancelled"
+    # and it is not done twice
+    again = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=7.0)
+    assert again["finished"] is False
+
+
+def test_ending_the_session_away_from_an_end_gate_leaves_the_run_alone(
+        tmp_path, monkeypatch):
+    """A question that is not the end gate is somebody's real decision; a
+    session dying does not answer it."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    from claude_launcher.cflow2 import frontend, runtime
+    flow = {"cflow": 2, "name": "ask-flow", "include": ["ask-common"], "nodes": {},
+            "body": [{"id": "cost-gate", "call": "ask-user",
+                      "with": {"topic": "t"},
+                      "cases": {"spend": [], "skip": []}}]}
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    kw = {"cwd": str(tmp_path), "scope": "n", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, dict(BRIEF, recommendation="spend", options=[
+        dict(BRIEF["options"][0], name="spend"),
+        dict(BRIEF["options"][1], name="skip")]), **kw)
+    assert st["status"] == "waiting_approval"
+    done = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=5.0)
+    assert done["finished"] is False and "not an end gate" in done["why"], done
+    assert runtime.status(cwd=kw["cwd"], scope=kw["scope"], now=6.0)["status"] == \
+        "waiting_approval"
 
 
 def test_self_improve_nodes_keep_registration_behind_the_person():

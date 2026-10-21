@@ -88,10 +88,13 @@ sides:
 #   settle-check          -> settle-check           (choose, retry settle-poll)
 #   settle-wait           -> settle-wait            (retry의 between, unsettled interval 600)
 #   settle-stall          -> settle-stall           (ask-user)
-#   end-gate              -> end-decision(ask-user), end-notice
+#   end-gate              -> end-deadline(timeout 300), end-decision(ask-user),
+#                            auto-release(정리), release-decision(ask-user: end|hold|new-task),
+#                            end-notice
 #                            (v1의 게이트는 end-decision이 맡는다. 그 뒤 노드는
-#                            피어에게 종료를 예고하므로 end-notice다 -- claunch-aobd0)
-#   end-hold              -> end-hold
+#                            피어에게 종료를 예고하므로 end-notice다 -- claunch-aobd0.
+#                            5분 기한·정리·재질문은 claunch-q4cqy.)
+#   end-hold              -> end-hold (keep-alive + delivery-hold)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
 #   (v2 전용)              -> end-watch(loop), self-improve(call — self-improve-common의
 #                            프로시저: review, discuss, align(ask-user), register)
@@ -3506,6 +3509,38 @@ nodes:
       않았다.
     effects: [fs.read]
 
+  auto-release:
+    title: 자동 릴리스 (종료 전 정리)
+    prompt: |
+      종료 질문에 5분 안에 답이 없었거나 사용자가 auto-release를 골랐다. 이
+      단계는 회차를 끝낼지 정하기 전에, 끝낼 때 했어야 할 정리를 먼저 한다.
+      범위는 wrapup의 정리와 같다 — 테스트 산출물만이고, `$CLAUNCH_SCRATCH`의
+      나머지 파일은 지우지 않는다(이름 규칙 밖은 그대로 남는다).
+
+      1. MCP `artifact_cleanup {}`로 이 세션의 정리 계획을 조회한다. 경로·완료
+         실행 증거·용량·ready/cleanup_pending·사유를 읽는다.
+      2. 계획의 대상과 증거가 이번 세션의 것임을 확인한 뒤 같은 도구에
+         `plan_id`를 주어 실행한다. 계획은 10분 뒤 만료되고 실행 시 경로·
+         소유권·내용 변경을 다시 확인한다. 테스트 실행 중이면 기다리는 삭제
+         작업을 만들지 않고 cleanup_pending을 반환한다.
+      3. 도구 부재·데몬 버전 불일치·정책 거절·사용 중·권한 오류는
+         cleanup_pending으로 남긴다. 거절 뒤 셸·Python·다른 도구로 삭제를 다시
+         시도하거나 승인 설정을 바꾸지 않는다. 잔여물이 있다는 이유만으로 이
+         단계를 막지 않는다.
+      4. 결과를 이슈에 `AUTO-RELEASE @ <런 id>: <지운 개수·용량>, 남김 <경로·사유>`
+         한 줄로 남긴다. 이슈가 없으면 `$CLAUNCH_SCRATCH/auto-release-<런 id>.md`에
+         같은 내용을 쓰고 그 경로를 보고에 적는다.
+
+      이 단계는 세션을 끝내지 않는다. 정리가 끝나면 release-decision이
+      end|hold|new-task를 묻는다.
+    done_when: |
+      정리 계획을 조회해 실행했거나(지운 개수·용량), 실행하지 못한 사유가
+      cleanup_pending으로 남아 있고, 그 결과가 이슈 코멘트나 scratch 기록으로
+      남았다.
+    returns:
+      ok: {}
+    effects: [fs.read, fs.write, board.write]
+
   end-notice:
     title: 세션 종료 예고 (사용자 승인 뒤)
     prompt: |
@@ -3526,11 +3561,17 @@ nodes:
   end-hold:
     title: 종료 보류 (사용자 보류)
     prompt: |
-      사용자가 종료를 보류했다(end-decision의 hold). 이 세션은
-      살아 있어야 하므로 먼저
+      사용자가 종료를 보류했다(end-decision 또는 release-decision의 hold). 이
+      세션은 살아 있어야 하므로 먼저
       `claunch keep-alive $CLAUNCH_SESSION`을 실행해 플래그를 세운다 — 이
       플래그가 없으면 런이 done이 되는 즉시 데몬이 세션을 끝낸다(플래그는
       킬만 막고 종결 기록은 그대로 남는다).
+      그리고 **같은 턴에서** `claunch delivery-hold $CLAUNCH_SESSION --on`을
+      실행한다 — 보류는 사람이 깨울 때까지 메시지로도 깨어나지 않는다는 뜻이다.
+      keep-alive만 세우면 살아 있는 유휴 세션에 메시지가 idle일 때 그대로
+      타이핑되어 에이전트가 깨어나고 비용이 든다(daemon/mesh.py의 idle 게이트는
+      delivery-hold만 예외로 둔다). 해제는 `claunch delivery-hold
+      $CLAUNCH_SESSION --off`, 플래그를 내리는 것은 사람 또는 상위의 지시다.
       그다음 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
       (`claunch cflow2 journal`); 없으면 터미널 사용자에게 묻는다.
       사유가 추가 작업이면 그것은 이 회차의
@@ -3545,9 +3586,9 @@ nodes:
       기다린다. 플래그를 내리는 것은 사람 또는 상위의 지시다:
       `claunch keep-alive $CLAUNCH_SESSION off`.
     done_when: |
-      keep-alive 플래그가 세워졌고(명령의 출력을 보고에 붙인다), 보류 사유와
-      그에 따라 만든 handoff 이슈 id(있다면), 상위에 보낸 fyi의 메시지 id가
-      보고에 있다.
+      keep-alive와 delivery-hold 플래그가 세워졌고(두 명령의 출력을 보고에
+      붙인다), 보류 사유와 그에 따라 만든 handoff 이슈 id(있다면), 상위에 보낸
+      fyi의 메시지 id가 보고에 있다.
     effects: [board.write, mesh.send]
 
   end-new-task:
@@ -4968,66 +5009,113 @@ procedures:
         catch:
           fail: {seq: []}
       # 종료는 세션과 산출물의 보존 기간에 관한 사용자 결정이다 — 상위 세션이나
-      # 워커가 대신 승인하지 않고(ask-user의 기본 응답자는 사람뿐), timeout도
-      # 없다. 답이 없는 동안 런은 서 있다.
-      # self-improve(claunch-c4e6f)는 종료 대신 고르는 네 번째 답이다: 자기 회고를
-      # 두 갈래(일반·cflow v2)로 보고하고 사용자와 합의한 항목만 이슈로 등록한 뒤
-      # 이 질문으로 돌아온다 — 그래서 질문을 루프로 감싼다. 나머지 세 답은 각자의
+      # 워커가 대신 승인하지 않고 ask-user의 기본 응답자는 사람뿐이다. 다만 그
+      # 결정이 무한정 열려 있으면 끝난 회차가 슬롯을 쥔 채 서고, 사람이 자리를 비운
+      # 동안에는 아무도 그 줄을 회수하지 못한다. 그래서 두 단이다(claunch-q4cqy):
+      #   A end-decision — 5분. 답이 없으면 auto-release로 넘어간다.
+      #   B auto-release — wrapup과 같은 정리(테스트 산출물)를 먼저 한다.
+      #   C release-decision — end|hold|new-task를 사람이 고른다. 기한이 없다.
+      # 끝낼지는 여전히 사람이 정하고, 기다리는 동안의 정리만 자동이 된다. 정리 뒤에
+      # 세션을 그냥 kill해도 C에서 end를 고른 것과 같은 종결 기록이 남는다
+      # (daemon/cflow2_clock의 `end_on_session_exit`).
+      # self-improve(claunch-c4e6f)는 종료 대신 고르는 답이다: 자기 회고를 두
+      # 갈래(일반·cflow v2)로 보고하고 사용자와 합의한 항목만 이슈로 등록한 뒤
+      # 이 질문으로 돌아온다 — 그래서 질문을 루프로 감싼다. 나머지 답은 각자의
       # 노드를 돌고 루프를 끝낸다.
       - id: end-watch
         loop:
           while: "true"
           max: 10
           do:
-            id: end-decision
-            call: ask-user
-            bind: end_decision
-            with:
-              require_reason: true
-              topic: |
-                이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
-                이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤 이 세션을 종료한다.
-                세션 종료를 승인할지 정한다.
+            # A. 종료 질문 (5분). 기한이 지나면 B로 간다. (id를 end-gate로 두지
+            # 않는 것은 v1 단계 end-gate의 자리를 end-decision이 맡고 있어서다.)
+            - id: end-deadline
+              timeout:
+                seconds: 300
+                do:
+                  - id: end-decision
+                    call: ask-user
+                    bind: end_decision
+                    with:
+                      require_reason: true
+                      topic: |
+                        이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
+                        5분 안에 답이 없으면 auto-release로 넘어가 정리한 뒤, 이
+                        세션을 끝낼지 다시 묻는다(그때는 기한이 없다).
 
-                end: pane이 닫히고 슬롯이 반환된다. 브랜치와 beads 이슈는
-                세션과 무관하게 남아 상위 세션이 그대로 통합할 수 있고, 다시 사람
-                손이 필요하면 `claunch respawn <세션>`이 있다.
-                hold: 종료를 보류한다 — 세션을 의도적으로 살려 둘 사유가 있을 때
-                keep-alive로 세션을 살려 둔다.
-                new-task: 이 세션에 새 작업을 맡긴다 — 이 런을 마감하고 같은 세션에서
-                그 작업의 이슈로 새 런(목표 수립부터)을 시작한다. 사용자가 이 질문에
-                답하지 않고 터미널에 새 작업을 주었다면 그 작업은 이 선택지로 들어온다
-                (claunch-kgfr5): 런 밖에서 작업하지 않는다.
-                self-improve: 종료 전에 이 세션이 스스로를 리뷰한다(claunch-c4e6f) —
-                세션 진행 중 나온 일반 개선사항과 cflow(v2) 관련 개선사항을 보고하고,
-                사용자와 논의해 합의한 항목만 beads 이슈로 등록한 뒤 이 질문으로
-                돌아온다. 그때 new-task로 등록한 이슈 하나를 바로 시작할 수 있다.
-                답하지 않는 동안 이 질문은 열린 상태로 유지되고 세션은 살아 있다.
+                        end: 세션을 끝낸다. 이 런이 done이 되면 데몬이 종결 기록을
+                        쓴 뒤 세션을 종료한다(archive는 별도 단계다). 브랜치와 beads
+                        이슈는 세션과 무관하게 남아 리더가 그대로 통합할 수 있고,
+                        다시 사람 손이 필요하면 `claunch respawn <세션>`이 있다.
+                        auto-release: 지금 정리부터 한다 — 테스트 산출물을 회수하고,
+                        그 뒤 release-decision에서 end|hold|new-task를 고른다.
+                        hold: 종료를 보류한다 — keep-alive와 `delivery-hold`를 함께
+                        세워 세션을 살려 두고, 메시지로 깨어나지 않게 한다.
+                        new-task: 이 세션에 새 작업을 맡긴다 — 이 런을 마감하고 같은
+                        세션에서 그 작업의 이슈로 새 런(목표 수립부터)을 시작한다.
+                        사용자가 이 질문에 답하지 않고 터미널에 새 작업을 주었다면 그
+                        작업은 이 선택지로 들어온다(claunch-kgfr5): 런 밖에서 작업하지
+                        않는다.
+                        self-improve: 종료 전에 이 세션이 스스로를 리뷰한다
+                        (claunch-c4e6f) — 일반 개선사항과 cflow(v2) 개선사항을 보고하고,
+                        사용자와 논의해 합의한 항목만 beads 이슈로 등록한 뒤 이 질문으로
+                        돌아온다. 그때 new-task로 등록한 이슈 하나를 바로 시작할 수 있다.
 
-                이 런에서 self-improve를 이미 거쳤으면 brief의 근거에 그 결과를 싣는다:
-                주 이슈의 `SELF-IMPROVE REGISTERED @ <런 id>` 코멘트(등록한 이슈 id, 또는
-                등록 없음)와, new-task로 시작할 후보가 있으면 그 id.
+                        이 런에서 self-improve를 이미 거쳤으면 brief의 근거에 그 결과를
+                        싣는다: 주 이슈의 `SELF-IMPROVE REGISTERED @ <런 id>` 코멘트
+                        (등록한 이슈 id, 또는 등록 없음)와, new-task로 시작할 후보가
+                        있으면 그 id.
 
-                판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
-            # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp): approve로
-            # 두면 어떤 질문 brief도 검증을 통과하지 못해 런이 이 질문을 올리지 못한다.
-            cases:
-              end: [end-notice, {break: end-watch}]
-              hold: [end-hold, {break: end-watch}]
-              new-task: [end-new-task, {break: end-watch}]
-              self-improve:
-                # 리뷰 → 논의 → 합의 게이트(사람만) → 등록은 공용 프로시저다
-                # (self-improve-common, claunch-c4e6f.1). 돌아오면 이 질문을 다시 묻는다.
-                - id: self-improve
-                  call: self-improve
-                  with:
-                    issue: "$data.claim.issue"
-                    workflow: >-
-                      improv-worker-v2 — 정본 src/claude_launcher/workflows/v2/improv-worker-v2.yaml,
-                      include한 improv-common.yaml·ask-common.yaml·self-improve-common.yaml
-                    basis: >-
-                      바로 앞의 회고(retrospective)가 주 이슈에 남긴 `RETRO @ <런 id>` 코멘트의
-                      (A)·(B). 회고가 실패해 그 코멘트가 없으면 기록을 직접 읽는다.
+                        판단 근거: `claunch cflow2 journal -t <세션>`,
+                        `claunch beads show <이슈> --json`.
+                    # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp):
+                    # approve로 두면 어떤 질문 brief도 검증을 통과하지 못해 런이 이
+                    # 질문을 올리지 못한다.
+                    cases:
+                      end: [end-notice, {break: end-watch}]
+                      hold: [end-hold, {break: end-watch}]
+                      new-task: [end-new-task, {break: end-watch}]
+                      self-improve:
+                        # 리뷰 → 논의 → 합의 게이트(사람만) → 등록은 공용
+                        # 프로시저다(self-improve-common, claunch-c4e6f.1).
+                        # 돌아오면 이 질문을 다시 묻는다(5분도 다시 센다).
+                        - id: self-improve
+                          call: self-improve
+                          with:
+                            issue: "$data.claim.issue"
+                            workflow: >-
+                              improv-worker-v2 — 정본 src/claude_launcher/workflows/v2/improv-worker-v2.yaml,
+                              include한 improv-common.yaml·ask-common.yaml·self-improve-common.yaml
+                            basis: >-
+                              바로 앞의 회고(retrospective)가 주 이슈에 남긴 `RETRO @ <런 id>` 코멘트의
+                              (A)·(B). 회고가 실패해 그 코멘트가 없으면 기록을 직접 읽는다.
+                        - {continue: end-watch}
+                      auto-release: {seq: [auto-release]}
+                else:
+                  # 기한 초과: 답이 없는 것이 auto-release를 고른 것과 같다.
+                  - auto-release
+            # C. 정리 뒤의 릴리스 질문 — 기한 없다. 사람이 고를 때까지 선다.
+            - id: release-decision
+              call: ask-user
+              bind: release_decision
+              with:
+                require_reason: true
+                topic: |
+                  회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
+                  이 질문에는 기한이 없다 — 답이 없으면 세션은 살아 있는 채로 선다.
+
+                  end: 세션을 끝낸다. 이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤
+                  세션을 종료한다(archive는 별도 단계다). 브랜치와 beads 이슈는 남는다.
+                  hold: 종료를 보류한다 — keep-alive와 `delivery-hold`를 함께 세워
+                  세션을 살리고, 메시지로 깨어나지 않게 한다.
+                  new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
+
+                  이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
+                  데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.
+              cases:
+                end: [end-notice, {break: end-watch}]
+                hold: [end-hold, {break: end-watch}]
+                new-task: [end-new-task, {break: end-watch}]
 
 body:
   try:
