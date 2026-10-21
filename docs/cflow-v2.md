@@ -1482,7 +1482,12 @@ ask:
   있어야 한다.
 - ask가 열릴 때(`_open_ask`): 참조를 평가하고 형식으로 검증한다. 참조가 null이거나
   검증에 실패하면 ask를 열지 않고 작업이 `fail`로 끝난다(value `{reason, errors}`,
-  저널 `ask_brief_invalid`). 성공하면 레코드에 `format`, `brief`(정규화된 값),
+  저널 `ask_brief_invalid`). 다만 `choices`가 고정된 ask에서 실패 사유가 선택지 목록
+  불일치뿐이면 엔진이 질문을 구성한 앞 작업(같은 seq의 바로 앞 자식)을 한 번 다시
+  열고, 그 프롬프트 끝에 엔진 오류문(`the brief's options (...) must be exactly the
+  fixed choices (...)`)을 덧붙인다(저널 `ask_reframe`). 그 보고도 어긋나면 그때는
+  위와 같이 `fail`로 끝난다. 상한은 seq 인스턴스마다 1회이고, 상한과 오류문은
+  워크플로가 선언하는 키가 아니라 엔진 내부 상태다. 성공하면 레코드에 `format`, `brief`(정규화된 값),
   `options`(brief의 선택지에서 만든 `[{name, outcome: ok, description: summary}]`)를
   저장한다. 레코드의 `kind`는 `decision`이다.
 - 답: 선택지 이름. 작업은 결과 `ok`로 끝나고(옵션별 결과로 갈라지지 않는다 — 이름이

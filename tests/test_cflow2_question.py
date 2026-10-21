@@ -308,6 +308,10 @@ def test_fixed_choices_must_match_the_brief(tmp_path):
     src = ASKB.replace("format: pick,", "format: pick, choices: [narrow, wide],")
     d = Drv(tmp_path, _compile(src))
     d.report("frame", value={"brief": BRIEF})
+    # the frame task is asked again once, carrying the engine's own refusal
+    (t,) = d.status()["tasks"]
+    assert t["label"] == "frame" and "exactly the fixed choices" in t["prompt"]
+    d.report("frame", value={"brief": BRIEF})
     res = d.state()["result"]["pose"]
     assert res["outcome"] == "fail" and "exactly the fixed choices" in res["value"]["reason"]
 
@@ -389,13 +393,45 @@ def test_ask_user_reframes_up_to_three_times(tmp_path):
     assert any((v.get("value") or {}).get("reason") == "last" for v in res)
 
 
-def test_ask_user_rejects_choices_that_do_not_match(tmp_path):
+def _bad_brief():
+    return dict(DECISION, options=[dict(DECISION["options"][0], name="tiny"),
+                                   DECISION["options"][1]], recommendation="tiny")
+
+
+def test_ask_choices_mismatch_reframes_once_and_continues(tmp_path):
+    """claunch-q4cqy.3: a brief whose options miss one of the fixed choices
+    sends the frame task back once with the engine's error, and the run goes
+    on when the second report matches."""
     d = Drv(tmp_path, _caller(tmp_path))
-    bad = dict(DECISION, options=[dict(DECISION["options"][0], name="tiny"),
-                                  DECISION["options"][1]], recommendation="tiny")
-    d.report("ask-frame", value={"brief": bad})
-    assert d.status()["status"] == "failed"
+    d.report("ask-frame", value={"brief": _bad_brief()})
+    st = d.status()
+    assert st["status"] == "running" and not st.get("asks")
+    (t,) = st["tasks"]
+    assert t["label"] == "ask-frame"
+    assert "exactly the fixed choices (narrow, full)" in t["prompt"]
+    assert "재질문 1/1" in t["prompt"]
+    assert d.events("ask_brief_invalid") == []
+    (ev,) = d.events("ask_reframe")
+    assert ev["attempt"] == 1 and ev["limit"] == 1
+    d.report("ask-frame", value={"brief": DECISION})
+    (a,) = d.status()["asks"]
+    assert a["resolution"] == "human"
+    runtime.approve(None, decision="full", reason="ok", **d.kw())
+    assert [x["label"] for x in d.status()["tasks"]] == ["full"]
+
+
+def test_ask_choices_mismatch_twice_fails_and_retries_only_once(tmp_path):
+    """The second mismatch finishes the run as before, and the budget is one
+    re-ask: a third frame report is never asked for."""
+    d = Drv(tmp_path, _caller(tmp_path))
+    d.report("ask-frame", value={"brief": _bad_brief()})
+    d.report("ask-frame", value={"brief": _bad_brief()})
+    st = d.status()
+    assert st["status"] == "failed" and not st.get("tasks")
+    assert len(d.events("ask_reframe")) == 1
     assert "exactly the fixed choices" in d.events("ask_brief_invalid")[0]["errors"][0]
+    failed = [v for v in d.state()["result"].values() if v.get("outcome") == "fail"]
+    assert failed and "exactly the fixed choices" in failed[0]["value"]["reason"]
 
 
 def test_require_reason_refuses_an_agents_bare_answer_but_not_a_persons(tmp_path):
