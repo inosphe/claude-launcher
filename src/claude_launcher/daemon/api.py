@@ -519,6 +519,10 @@ def build_app(
         ]
     )
     app["manager"] = manager
+    # What this boot has left to do (claunch-9akgh). ``_serve`` overwrites
+    # it with the restoring phase before it binds the port; an app built
+    # without a boot -- tests, embedders -- is ready by definition.
+    app["boot"] = {"phase": "ready", "done": 0, "total": 0}
     # One answer per read for the routes every open dashboard polls; off
     # (0) unless the daemon's configuration turns it on -- see
     # daemon/shared_reads.py.
@@ -619,7 +623,7 @@ def build_app(
     connections.install(app)
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
-    app.on_shutdown.append(_close_websockets)
+    app.on_shutdown.append(close_websockets)
     # The CLI tab's raw shell: one per daemon, injected for tests.
     app["shell"] = shell if shell is not None else clipty.ShellPty()
     app.on_shutdown.append(_close_cli_shell)
@@ -1287,17 +1291,90 @@ def build_app(
     r.add_get("/", h_index)
     if _STATIC_DIR.is_dir():
         r.add_static("/static", _STATIC_DIR)
+    _time_shutdown_hooks(app)
     return app
 
 
-async def _close_websockets(app: web.Application) -> None:
+#: A shutdown hook at least this long (seconds) is named in the log.
+#:
+#: ``__main__`` times the teardown steps, but every one of these hooks runs
+#: *inside* the single ``http runner`` step, so a slow one was invisible:
+#: the 2026-10-21 keep restarts showed "http runner 6.1s" with nothing
+#: saying which hook held it (claunch-9akgh).
+SLOW_SHUTDOWN_HOOK = 1.0
+
+
+def _time_shutdown_hooks(app: web.Application) -> None:
+    """Name any shutdown hook that holds the teardown for a second or more.
+
+    aiohttp calls each hook with the app; these wrappers keep that call
+    shape and pass the exception through untouched, so a failing hook still
+    fails the cleanup the way it did.
+    """
+    hooks = list(app.on_shutdown)
+
+    def timed(hook):
+        async def wrapper(application) -> None:
+            began = time.monotonic()
+            try:
+                await hook(application)
+            finally:
+                took = time.monotonic() - began
+                if took >= SLOW_SHUTDOWN_HOOK:
+                    log.info(
+                        "shutdown hook %r took %.1fs",
+                        getattr(hook, "__name__", hook), took,
+                    )
+
+        wrapper.__name__ = getattr(hook, "__name__", "shutdown_hook")
+        return wrapper
+
+    app.on_shutdown[:] = [timed(hook) for hook in hooks]
+
+
+#: How long one socket gets to answer a close before teardown abandons it.
+#:
+#: The closing handshake is a courtesy: the peer is being told why its pipe
+#: went away, and a peer that cannot hear it (a browser tab that was killed,
+#: a relay connection whose far end is gone) is not a reason to hold the
+#: restart. aiohttp's own default for this handshake is 10s **per socket**,
+#: and the closes used to run one after another -- a handful of such peers
+#: made `runner.cleanup()` the slowest step of a keep restart (measured
+#: 6.1s and 8.5s of a 19.6s restart on 2026-10-21, claunch-9akgh).
+WS_CLOSE_TIMEOUT = 1.0
+
+
+async def close_websockets(app: web.Application) -> None:
+    """Close every open socket, concurrently and within a bound.
+
+    Concurrent and bounded on purpose: the shutdown must not cost one
+    unresponsive peer per open terminal, and it must not cost its full close
+    timeout each either (``WS_CLOSE_TIMEOUT``). The sockets are dropped by
+    the transport whatever happens here -- this only decides how long the
+    rest of the teardown waits for the polite half of it.
+    """
     from aiohttp import WSCloseCode
 
-    for ws in set(app["websockets"]):
+    sockets = list(set(app["websockets"]))
+    if not sockets:
+        return
+    began = time.monotonic()
+
+    async def close(ws) -> None:
         try:
-            await ws.close(code=WSCloseCode.GOING_AWAY, message=b"daemon shutdown")
-        except Exception:
+            await asyncio.wait_for(
+                ws.close(code=WSCloseCode.GOING_AWAY, message=b"daemon shutdown"),
+                WS_CLOSE_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 -- a close never fails a shutdown
             pass
+
+    await asyncio.gather(*(close(ws) for ws in sockets))
+    took = time.monotonic() - began
+    if took >= 1.0:
+        # Named where the person reading a slow teardown finds it: the
+        # `http runner` step covers this and every other app hook.
+        log.info("closed %d websocket(s) in %.1fs", len(sockets), took)
 
 
 async def _close_cflow_nudges(app: web.Application) -> None:
@@ -1354,9 +1431,15 @@ async def notify_shutdown(app: web.Application) -> None:
     its own would produce, and an attached CLI would give the wrong advice
     (respawn) for what is really a daemon stop/restart (reattach).
     """
+    # ``restart`` separates "a successor is coming" from "this daemon is
+    # being stopped": the page shows one as an outage that resolves itself
+    # and the other as an outage that will not (claunch-9akgh). The
+    # shutdown event is already set here, so the flag it was set for --
+    # ``restart_requested`` -- is what is left to read.
+    frame = json.dumps({"type": "shutdown", "restart": bool(app["restart_requested"])})
     for ws in set(app["websockets"]):
         try:
-            await ws.send_str(json.dumps({"type": "shutdown"}))
+            await ws.send_str(frame)
         except Exception:
             pass
 
@@ -1385,6 +1468,11 @@ async def h_health(request: web.Request) -> web.Response:
             "version": __version__,
             "boot_id": request.app["boot_id"],
             "started_at": request.app["started_wall"],
+            # A successor answers here the moment its port is bound, while
+            # it is still restoring sessions (claunch-9akgh). "This daemon
+            # is serving" and "this daemon is done booting" are different
+            # sentences, and a client that needs the second reads this.
+            "boot": boot_status(request.app),
         },
         status=503 if stopping else 200,
     )
@@ -2087,6 +2175,28 @@ async def h_window_cancel(request: web.Request) -> web.Response:
     )
 
 
+def boot_status(app: web.Application) -> dict:
+    """What this boot is still doing, for the surfaces a restart reader has.
+
+    ``phase`` is ``restoring`` while ``restore_all`` is bringing the fleet
+    back and ``ready`` afterwards. Before claunch-9akgh the restore ran
+    entirely before the port was bound, so every client saw a dead daemon
+    for its whole duration; now the port answers first and this is how the
+    page can say what is happening instead of showing the previous daemon's
+    last frame as if it were current.
+    """
+    boot = app.get("boot") or {}
+    out = {
+        "phase": str(boot.get("phase") or "ready"),
+        "done": int(boot.get("done") or 0),
+        "total": int(boot.get("total") or 0),
+    }
+    started = boot.get("started")
+    if started is not None:
+        out["elapsed"] = round(time.monotonic() - started, 1)
+    return out
+
+
 async def h_daemon_info(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     sessions = manager.list()
@@ -2104,6 +2214,9 @@ async def h_daemon_info(request: web.Request) -> web.Response:
             # The PTY host and whether it runs the daemon's code
             # (claunch-xnnct.3; daemon/host_code.py).
             "pty_host": host_code.info(),
+            # What this boot has left to do; "ready" on a serving daemon
+            # (claunch-9akgh).
+            "boot": boot_status(request.app),
         }
     )
 
