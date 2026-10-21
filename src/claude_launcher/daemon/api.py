@@ -81,7 +81,7 @@ from . import (
 from . import paths
 from . import daemon_prompt
 from . import profile_facts
-from . import sessionstats, statscompare, statsworker
+from . import sessionstats, statsboard, statscompare, statsworker
 from . import tokenusage
 from . import exited_rows
 from . import transcript_view
@@ -789,6 +789,10 @@ def build_app(
     # GIL (claunch-3r94d); started on first use.
     app["stats_worker"] = statsworker.StatsWorker()
     app.on_shutdown.append(_stop_stats_worker)
+    # The Stats page's window overview reads the metering ledger instead
+    # of every transcript (daemon/statsboard.py). One reader per daemon,
+    # so each poll parses only the lines appended since the last one.
+    app["stats_ledger"] = statsboard.Ledger()
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -1149,6 +1153,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/stats", h_session_stats)
     r.add_get("/api/stats/compare", h_stats_compare)
+    r.add_get("/api/stats/overview", h_stats_overview)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
                  h_session_input_cancel)
@@ -10815,6 +10820,51 @@ async def h_session_stats(request: web.Request) -> web.Response:
     except statsworker.WorkerError as exc:
         return json_error(500, f"reading the transcript failed: {exc}")
     return json_response({**reading, "reader": reader})
+
+
+def _stats_overview(manager: "SessionManager", window: str,
+                    include_ended: bool, ledger) -> dict:
+    """The overview payload, built off the event loop.
+
+    ``Session.info()`` would carry a definition, a briefing and an environment
+    for every session the machine has ever run; :func:`statsboard.session_meta`
+    keeps only what a row draws. Both this and the ledger read run in a
+    thread: the first ledger read parses the whole metering directory, and a
+    parse on the loop is the cost claunch-3r94d took the transcript reading off
+    the loop for.
+    """
+    metas = [statsboard.session_meta(s) for s in manager.list()]
+    return statsboard.overview(window=window, include_ended=include_ended,
+                               sessions=metas, ledger=ledger)
+
+
+async def h_stats_overview(request: web.Request) -> web.Response:
+    """Several sessions' usage over one window, for the Stats page's
+    overview (``?window=today|week|month``, and ``?ended=1`` to include the
+    killed and archived sessions the page leaves out by default).
+
+    The figures come from the metering ledger, one line per forwarded API
+    request -- not from reading every transcript, which is what the
+    single-session route does and what a fleet-wide table cannot afford. A
+    session on an OAuth route writes no ledger line and is reported with
+    ``source: "none"`` and no figure rather than a zero; see
+    :mod:`statsboard` for what each field means."""
+    manager: SessionManager = request.app["manager"]
+    window = request.query.get("window", "today")
+    if window not in statsboard.WINDOWS:
+        return json_error(
+            400, f"window must be one of: {', '.join(statsboard.WINDOWS)}")
+    include_ended = request.query.get("ended", "0") in ("1", "true", "yes")
+    ledger = request.app.get("stats_ledger")
+    if ledger is None:
+        ledger = statsboard.Ledger()
+    try:
+        payload = await asyncio.to_thread(
+            _stats_overview, manager, window, include_ended, ledger)
+    except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
+        log.warning("stats overview: %s", exc, exc_info=True)
+        return json_error(500, f"reading the usage ledger failed: {exc}")
+    return json_response(payload)
 
 
 async def h_stats_compare(request: web.Request) -> web.Response:

@@ -28968,29 +28968,50 @@ function renderWindow() {
 }
 
 /* ------------------------------------------------------------------ */
-/* session statistics (#/stats[/<session>]) — usage over time, and    */
-/* where the session's input came from                                */
+/* session statistics (#/stats[/<session>], #/compare/<a,b,c>) — the  */
+/* fleet's usage over a window, one session's detail, and the compare */
 /* ------------------------------------------------------------------ */
-/* The rail and the detail panel say what a session has spent in total. This
-   page spreads the same transcript over hours, days or weeks, and sorts
-   every input the conversation received by origin: a person, a claunch
-   notice (reminders, cflow nudges, ...), another agent over the mesh, the
-   opening task, or the harness itself. The origin figures are estimates;
-   the page says how each one is made (daemon/sessionstats.py). */
-let statsCache = null;
-let statsError = "";
+/* The default reading is the fleet. Every session that worked inside the
+   chosen window -- today, the last seven local days, the last thirty -- is
+   listed with its usage beside the others', and the rows can be narrowed to
+   one provider. The figures come from /api/stats/overview, which sums the
+   metering ledger (one line per forwarded API request) instead of reading
+   every transcript: a fleet-wide table cannot afford the latter, and the
+   payload says which rows it could not speak for (daemon/statsboard.py).
+
+   Clicking a session opens the detail panel. It carries that session's rows
+   from the same payload -- window usage per provider, and every provider or
+   model change inside the window -- above the transcript reading this page
+   has always drawn: usage by hour, day or week, and every input sorted by
+   origin (daemon/sessionstats.py). The two scopes differ and the panel says
+   so: the table's figures are the window, the chart's are the conversation.
+
+   Killed and archived sessions are left out of the table unless the box is
+   ticked -- they outnumber live ones roughly twenty to one on a busy daemon,
+   and a comparison nobody can read is not a comparison. Compare mode
+   (#/compare/<a,b,c>) is unchanged: a handful of sessions' transcript
+   figures side by side, with the spread across the set. */
+let statsCache = null;        // the opened session's transcript reading
+let statsError = "";          // that reading's failure, if any
 let statsTimer = null;
 let statsPageOpen = false;
-let statsSession = "";
-let statsUnit = "day";
-let statsSeq = 0;
-let statsCompare = null;        // the compared names, or null in one-session mode
+let statsSession = "";        // the session whose detail panel is open
+let statsUnit = "day";        // the transcript reading's bucket
+let statsSeq = 0;             // the window payload's request sequence
+let statsDetailSeq = 0;       // the detail reading's
+let statsCompare = null;      // the compared names, or null outside compare mode
 let statsCompareCache = null;
-let statsLogScale = false;      // the compare timeline's y axis
+let statsLogScale = false;    // the compare timeline's y axis
+let statsWindow = "today";    // today | week | month
+let statsIncludeEnded = false;   // killed + archived rows in the table
+let statsOverview = null;     // the window payload
+let statsOverviewError = "";
+let statsProvider = "";       // "" every provider, else one label
 /* The API's own cap (statscompare.MAX_SESSIONS). */
 const STATS_COMPARE_MAX = 12;
 
 const STATS_UNITS = [["hour", "Hourly"], ["day", "Daily"], ["week", "Weekly"]];
+const STATS_WINDOWS = [["today", "Today"], ["week", "7 days"], ["month", "30 days"]];
 const STATS_CATEGORIES = [
   ["human", "human", "typed at the terminal"],
   ["daemon", "claunch notices", "reminders, cflow nudges, status checks, ..."],
@@ -29008,12 +29029,17 @@ function openStatsPage(name, compare) {
       statsCompareCache = null;
       statsError = "";
     }
+    statsSession = "";
   } else {
     if (statsCompare) statsError = "";
     statsCompare = null;
-    if (name && name !== statsSession) { statsSession = name; statsCache = null; }
+    const next = name || "";
+    if (next !== statsSession) {
+      statsSession = next;
+      statsCache = null;
+      statsError = "";
+    }
   }
-  if (!statsSession) statsSession = statsDefaultSession();
   showView("stats");
   renderStats();
   refreshStats();
@@ -29029,15 +29055,8 @@ function stopStatsPoll() {
   statsPageOpen = false;
 }
 
-/* The session to show when the link names none: the one on screen last,
-   else the first live one. */
-function statsDefaultSession() {
-  const names = (sessionsCache || []).map((s) => s.name);
-  if (currentName && names.includes(currentName)) return currentName;
-  return names[0] || "";
-}
-
-/* Fast while the transcript is still being read, slow after. */
+/* Fast while a transcript is still being read, slow after. The window
+   payload itself has no partial state: it is one ledger read. */
 function statsSchedule(partial) {
   if (statsTimer) clearTimeout(statsTimer);
   statsTimer = statsPageOpen
@@ -29047,13 +29066,41 @@ function statsSchedule(partial) {
 async function refreshStats() {
   if (!statsPageOpen) return;
   if (statsCompare) return refreshStatsCompare();
-  if (!statsSession) { statsSchedule(false); renderStats(); return; }
+  await refreshStatsOverview();
+  if (statsSession) await refreshStatsDetail();
+  statsSchedule(!!(statsCache && statsCache.partial));
+  if (statsPageOpen) renderStats();
+}
+
+async function refreshStatsOverview() {
   const seq = ++statsSeq;
+  const win = statsWindow;
+  const ended = statsIncludeEnded ? 1 : 0;
+  try {
+    const resp = await api(`/api/stats/overview?window=${win}&ended=${ended}`);
+    if (seq !== statsSeq) return;   // the window or the filter changed meanwhile
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404 && !data.error) {
+      statsOverviewError = "this daemon predates the window overview — ask the " +
+        "operator to restart the daemon to pick up this version";
+      statsOverview = null;
+    } else if (!resp.ok) {
+      statsOverviewError = data.error || `HTTP ${resp.status}`;
+      statsOverview = null;
+    } else {
+      statsOverview = data;
+      statsOverviewError = "";
+    }
+  } catch { /* api() owns auth and recovery */ }
+}
+
+async function refreshStatsDetail() {
+  const seq = ++statsDetailSeq;
   const name = statsSession, unit = statsUnit;
   try {
     const resp = await api(
       `/api/sessions/${encodeURIComponent(name)}/stats?unit=${unit}`);
-    if (seq !== statsSeq) return;   // the session or unit changed meanwhile
+    if (seq !== statsDetailSeq) return;   // the session or unit changed meanwhile
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 404 && !data.error) {
       statsError = "this daemon predates the Stats page — ask the operator " +
@@ -29063,9 +29110,7 @@ async function refreshStats() {
       statsError = data.error || `HTTP ${resp.status}`;
       statsCache = null;
     } else { statsCache = data; statsError = ""; }
-  } catch { statsSchedule(false); return; }   // api() owns auth and recovery
-  statsSchedule(!!(statsCache && statsCache.partial));
-  if (statsPageOpen) renderStats();
+  } catch { /* api() owns auth and recovery */ }
 }
 
 async function refreshStatsCompare() {
@@ -29101,6 +29146,17 @@ function statsBucketLabel(start, unit) {
   if (unit === "hour") return s.slice(5, 13).replace("T", " ") + "h";
   if (unit === "week") return "wk " + s.slice(5, 10);
   return s.slice(5, 10);
+}
+
+/* A timestamp as a row or a switch line can spare: the local clock time for
+   today, the date and the clock otherwise. */
+function statsStamp(value, today) {
+  const s = String(value || "");
+  if (!s) return "";
+  const day = s.slice(0, 10);
+  const clock = s.slice(11, 16);
+  if (today && day === today) return clock;
+  return `${day.slice(5)} ${clock}`.trim();
 }
 
 function statsCard(title, value, detail) {
@@ -29252,44 +29308,393 @@ function statsSection(title, count, body) {
   return box;
 }
 
-function statsControls() {
-  const bar = el("div", "stats-controls");
-  const modes = el("div", "stats-units stats-modes");
-  for (const [mode, label] of [["one", "One session"], ["compare", "Compare"]]) {
-    const on = (mode === "compare") === !!statsCompare;
+/* ---- the window controls ------------------------------------------- */
+function statsWindowTabs() {
+  const tabs = el("div", "stats-units stats-window");
+  for (const [key, label] of STATS_WINDOWS) {
+    const on = key === statsWindow;
     const b = el("button", "wf-btn clear" + (on ? " active" : ""), label);
     b.type = "button";
-    b.dataset.mode = mode;
+    b.dataset.window = key;
     b.addEventListener("click", () => {
-      if (on) return;
-      location.hash = mode === "compare"
-        ? statsCompareHash(statsSession ? [statsSession] : [])
-        : `#/stats/${encodeURIComponent((statsCompare || [])[0] || statsSession)}`;
+      if (statsWindow === key) return;
+      statsWindow = key;
+      statsOverview = null;
+      renderStats();
+      refreshStats();
     });
-    modes.appendChild(b);
+    tabs.appendChild(b);
   }
-  bar.appendChild(modes);
-  if (statsCompare) {
-    bar.appendChild(statsUnitTabs());
-    bar.appendChild(statsComparePicker());
-    return bar;
-  }
-  const pick = el("select", "stats-session");
-  const names = (sessionsCache || []).map((s) => s.name).sort();
-  if (statsSession && !names.includes(statsSession)) names.unshift(statsSession);
-  if (!names.length) pick.appendChild(el("option", null, "no sessions"));
-  for (const n of names) {
-    const opt = el("option", null, n);
-    opt.value = n;
-    if (n === statsSession) opt.selected = true;
-    pick.appendChild(opt);
-  }
-  pick.addEventListener("change", () => {
-    location.hash = `#/stats/${encodeURIComponent(pick.value)}`;
+  return tabs;
+}
+
+/* Killed and archived rows are held out by default; the box is the whole
+   answer to "show me everything that ever ran". */
+function statsEndedToggle() {
+  const label = el("label", "stats-ended");
+  label.title = "killed and archived sessions are left out of the table " +
+    "unless this is ticked";
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = statsIncludeEnded;
+  box.dataset.ended = "1";
+  box.addEventListener("change", () => {
+    statsIncludeEnded = !!box.checked;
+    statsOverview = null;
+    renderStats();
+    refreshStats();
   });
-  bar.appendChild(pick);
-  bar.appendChild(statsUnitTabs());
-  return bar;
+  label.append(box, el("span", null, "include killed + archived"));
+  return label;
+}
+
+function statsProviderLabel(row) {
+  const providers = row.providers || [];
+  if (providers.length > 1) return providers.map((p) => p.provider).join(" + ");
+  return (providers[0] && providers[0].provider) || row.provider || "—";
+}
+
+function setStatsProvider(name) {
+  statsProvider = name || "";
+  renderStats();
+}
+
+/* One card per provider: its window total and how many sessions used it.
+   Clicking one narrows the table to the rows that used it, and the numbers
+   in those rows become that provider's share of them. */
+function statsProviderStrip(d) {
+  const box = el("div", "stats-providers");
+  const providers = (d && d.providers) || [];
+  const total = (d && d.totals && d.totals.total) || 0;
+  const all = el("button",
+    "stats-provider" + (statsProvider ? "" : " active"));
+  all.type = "button";
+  all.dataset.provider = "";
+  all.append(el("span", "stats-provider-name", "All providers"),
+             el("span", "stats-provider-total", usageShort(total)),
+             el("span", "stats-provider-sessions",
+               `${(d && d.counts && d.counts.sessions) || 0} sessions`));
+  all.addEventListener("click", () => setStatsProvider(""));
+  box.appendChild(all);
+  for (const p of providers) {
+    const on = statsProvider === p.provider;
+    const b = el("button", "stats-provider" + (on ? " active" : ""));
+    b.type = "button";
+    b.dataset.provider = p.provider;
+    b.append(el("span", "stats-provider-name", p.provider),
+             el("span", "stats-provider-total", usageShort(p.total || 0)),
+             el("span", "stats-provider-sessions", `${p.sessions} sessions`));
+    b.title = `${p.provider}: ${(p.requests || 0).toLocaleString()} requests ` +
+      `over ${p.sessions} session(s) in this window`;
+    b.addEventListener("click", () => setStatsProvider(on ? "" : p.provider));
+    box.appendChild(b);
+  }
+  return box;
+}
+
+/* A row's figure for the table: the whole window, or one provider's part of
+   it when the strip is narrowed. */
+function statsRowTotal(row) {
+  if (!statsProvider) return row.total || 0;
+  const hit = (row.providers || []).find((p) => p.provider === statsProvider);
+  return (hit && hit.total) || 0;
+}
+
+function statsRowRequests(row) {
+  if (!statsProvider) return row.requests || 0;
+  const hit = (row.providers || []).find((p) => p.provider === statsProvider);
+  return (hit && hit.requests) || 0;
+}
+
+function statsOverviewRows(d) {
+  const rows = (d.sessions || []).filter((r) => {
+    if (!statsProvider) return true;
+    return (r.providers || []).some(
+      (p) => p.provider === statsProvider && (p.total || 0) > 0);
+  });
+  return rows.slice().sort((a, b) =>
+    (statsRowTotal(b) - statsRowTotal(a)) || a.session.localeCompare(b.session));
+}
+
+/* The table: one row per session, longest bar first. A row with no figure
+   (an OAuth route writes no ledger line) says so instead of drawing zero,
+   because "not measured here" and "spent nothing" are different answers. */
+function statsOverviewTable(d) {
+  const rows = statsOverviewRows(d);
+  const peak = Math.max(1, ...rows.map(statsRowTotal));
+  const total = rows.reduce((n, r) => n + statsRowTotal(r), 0);
+  const today = (d.until || "").slice(0, 10);
+  const table = el("table", "stats-table stats-overview");
+  const head = el("tr");
+  for (const h of ["session", "provider", "status", "tokens", "",
+                   "requests", "share", "last call"]) {
+    head.appendChild(el("th", null, h));
+  }
+  table.appendChild(head);
+  for (const r of rows) {
+    const value = statsRowTotal(r);
+    const row = el("tr", "stats-row");
+    row.dataset.session = r.session;
+    row.title = `open ${r.session}'s detail panel`;
+
+    const name = el("td", "stats-session-cell");
+    const link = el("a", null, r.session);
+    link.href = `#/stats/${encodeURIComponent(r.session)}`;
+    name.appendChild(link);
+    if (r.issue) {
+      const issue = el("span", "stats-issue", r.issue);
+      issue.title = "the issue this session is working";
+      name.appendChild(issue);
+    }
+    if (r.borrow) {
+      const badge = el("span", "stats-badge stats-borrow", `borrow ${r.borrow}`);
+      badge.title = "this session runs on another profile's credentials; a " +
+        "borrow can move it onto another provider mid-session";
+      name.appendChild(badge);
+    }
+    if ((r.switches || []).length) {
+      const changed = r.switches.filter((s) => s.kind === "provider");
+      const badge = el("span", "stats-badge stats-switch-badge",
+        changed.length ? "⇄ provider" : "⇄ model");
+      badge.title = "answered by more than one " +
+        (changed.length ? "provider" : "model") + " inside this window";
+      name.appendChild(badge);
+    }
+    row.appendChild(name);
+
+    const provider = el("td", "stats-provider-cell");
+    const parts = (r.providers || []).length
+      ? r.providers : (r.provider ? [{ provider: r.provider, total: 0 }] : []);
+    for (const p of parts) {
+      const chip = el("span", "stats-chip", p.provider);
+      if (p.total) chip.title = `${p.provider}: ${usageShort(p.total)} tokens`;
+      provider.appendChild(chip);
+    }
+    row.appendChild(provider);
+
+    const ended = r.ended || ["killed", "archived"].includes(r.category);
+    row.appendChild(el("td", "stats-status-cell" + (ended ? " ended" : ""),
+      r.category || r.status || ""));
+
+    const tokens = el("td", "num stats-tokens-cell");
+    if (value) {
+      const bar = el("span", "stats-rowbar");
+      const fill = el("span", "stats-rowbar-fill");
+      fill.style.width = ((value / peak) * 100).toFixed(2) + "%";
+      bar.appendChild(fill);
+      tokens.append(bar, el("span", "stats-rowvalue", usageShort(value)));
+    } else if (r.source === "none") {
+      const dash = el("span", "stats-unmetered", "—");
+      dash.title = "no metering record for this session (an OAuth route " +
+        "writes none); its detail panel reads the transcript instead";
+      tokens.appendChild(dash);
+    } else {
+      tokens.appendChild(el("span", "stats-rowvalue", "0"));
+    }
+    row.appendChild(tokens);
+    row.appendChild(el("td", "stats-model-cell", r.model || ""));
+    row.appendChild(el("td", "num", statsRowRequests(r).toLocaleString()));
+    row.appendChild(el("td", "num",
+      total && value ? statsPct(value / total) : ""));
+    row.appendChild(el("td", "stats-last-cell", statsStamp(r.last_at, today)));
+
+    row.addEventListener("click", (event) => {
+      if (event && event.preventDefault) event.preventDefault();
+      location.hash = `#/stats/${encodeURIComponent(r.session)}`;
+    });
+    table.appendChild(row);
+  }
+  return table;
+}
+
+/* ---- the session detail panel -------------------------------------- */
+function statsOverviewRow(name) {
+  return ((statsOverview && statsOverview.sessions) || [])
+    .find((r) => r.session === name) || null;
+}
+
+/* Where the provider (or the model) that answered changed, from the ledger's
+   own record of each request. A session's *current* borrow rides its row;
+   its history does not exist anywhere the daemon keeps, so what is drawn
+   here is what the upstreams prove, and the line says so. */
+function statsSwitchList(row) {
+  const box = el("div", "stats-switches");
+  const switches = row.switches || [];
+  if (!switches.length) {
+    box.appendChild(el("p", "wf-note",
+      "no provider or model change recorded inside this window"));
+    return box;
+  }
+  for (const s of switches) {
+    const line = el("div", "stats-switch");
+    line.appendChild(el("span", "stats-switch-at",
+      String(s.at || "").slice(5, 16).replace("T", " ")));
+    line.appendChild(el("span", "stats-switch-kind", s.kind));
+    if (s.kind === "provider") {
+      line.appendChild(el("span", null, `${s.from} → ${s.to}`));
+      if (s.to_model) line.appendChild(el("span", "stats-switch-model", s.to_model));
+      line.title = "the backend that answered changed; a reborrow onto " +
+        "another profile's credentials does this";
+    } else {
+      line.appendChild(el("span", null, `${s.from_model} → ${s.to_model}`));
+      line.title = "the model that answered changed within one provider";
+    }
+    box.appendChild(line);
+  }
+  return box;
+}
+
+/* The opened session's window figures, per provider. */
+function statsDetailWindow(row) {
+  const box = el("div", "stats-detail-window");
+  const table = el("table", "stats-table stats-detail-providers");
+  const head = el("tr");
+  for (const h of ["provider", "tokens", "requests", "share"]) {
+    head.appendChild(el("th", null, h));
+  }
+  table.appendChild(head);
+  const parts = row.providers || [];
+  const sum = parts.reduce((n, p) => n + (p.total || 0), 0);
+  for (const p of parts) {
+    const line = el("tr");
+    line.appendChild(el("td", null, p.provider));
+    line.appendChild(el("td", "num", usageShort(p.total || 0)));
+    line.appendChild(el("td", "num", (p.requests || 0).toLocaleString()));
+    line.appendChild(el("td", "num",
+      sum ? statsPct((p.total || 0) / sum) : ""));
+    table.appendChild(line);
+  }
+  if (!parts.length) {
+    box.appendChild(el("p", "wf-note",
+      "the ledger has no record for this session in the window"));
+  } else {
+    box.appendChild(statsScroll(table));
+  }
+  return box;
+}
+
+/* The transcript reading: the conversation as a whole, not the window. */
+function statsReadingSections(d) {
+  const out = [];
+  if (!d.available) {
+    out.push(el("p", "wf-note",
+      `no statistics for ${d.session || statsSession}: ${d.reason || "unavailable"}`));
+    return out;
+  }
+  if (d.partial) {
+    out.push(el("p", "wf-note stats-partial",
+      "still reading: the transcript is being read in the background, and " +
+      "the figures will grow"));
+  }
+  const t = d.totals || {};
+  const sources = d.sources || [];
+  const machine = { messages: 0, triggered: 0, carry: 0 };
+  for (const s of sources) {
+    if (s.category !== "daemon" && s.category !== "mesh") continue;
+    for (const k of Object.keys(machine)) machine[k] += (s.share || {})[k] || 0;
+  }
+  const summary = el("div", "window-summary");
+  summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
+    `${(t.requests || 0).toLocaleString()} requests` +
+    (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
+  summary.appendChild(statsCard("Output", usageShort(t.output || 0),
+    `cache read ${usageShort(t.cache_read || 0)}`));
+  summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
+    "of inputs, by count"));
+  summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
+    "of tokens, by the input that started the turn"));
+  summary.appendChild(statsCard("Their carried text", statsPct(machine.carry),
+    "of all input text re-sent as context"));
+  summary.appendChild(statsCard("Compactions", d.compactions || 0,
+    d.since ? `since ${String(d.since).slice(0, 16).replace("T", " ")} UTC` : ""));
+  out.push(summary);
+
+  const buckets = d.buckets || [];
+  const unit = d.unit || statsUnit;
+  const usage = el("div", "stats-usage");
+  if (buckets.length) {
+    usage.appendChild(statsChart(buckets, unit));
+    const legend = el("div", "usage-legend");
+    for (const [, label, short] of USAGE_PARTS) {
+      const item = el("span", "usage-legend-item");
+      item.append(el("span", `usage-swatch usage-${short}`), el("span", null, label));
+      legend.appendChild(item);
+    }
+    usage.appendChild(legend);
+    usage.appendChild(statsScroll(statsBucketTable(buckets, unit)));
+  } else usage.appendChild(el("p", "wf-note", "no requests recorded yet"));
+  out.push(statsSection(
+    `Usage by ${unit} (UTC${d.utc_offset || ""})`, buckets.length, usage));
+
+  out.push(statsSection("Input by origin", null,
+    statsScroll(statsSourceTable(sources))));
+  if ((d.senders || []).length) {
+    out.push(statsSection("Mesh senders", d.senders.length,
+      statsScroll(statsSenderTable(d.senders))));
+  }
+  const notes = el("ul", "stats-method");
+  for (const line of STATS_METHOD) notes.appendChild(el("li", null, line));
+  out.push(statsSection("Method", null, notes));
+  return out;
+}
+
+function statsDetailPanel() {
+  const panel = el("aside", "stats-detail");
+  const head = el("div", "stats-detail-head");
+  head.appendChild(el("h3", null, statsSession || "session"));
+  const close = el("button", "wf-btn clear", "close");
+  close.type = "button";
+  close.dataset.close = "1";
+  close.addEventListener("click", () => { location.hash = "#/stats"; });
+  head.appendChild(close);
+  panel.appendChild(head);
+
+  const row = statsOverviewRow(statsSession);
+  const meta = el("div", "stats-detail-meta");
+  if (row) {
+    if (row.provider) meta.appendChild(el("span", "stats-chip", row.provider));
+    if (row.profile) {
+      meta.appendChild(el("span", null,
+        profileHarnessLabel(row.profile, row.harness)));
+    }
+    if (row.borrow) {
+      meta.appendChild(el("span", "stats-badge stats-borrow", `borrow ${row.borrow}`));
+    }
+    meta.appendChild(el("span", "stats-badge", row.category || row.status || ""));
+    if (row.issue) {
+      const issue = el("a", null, row.issue);
+      issue.href = `#/beads/${encodeURIComponent(row.issue)}`;
+      meta.appendChild(issue);
+    }
+    const open = el("a", "stats-detail-open", "open session");
+    open.href = `#/s/${encodeURIComponent(statsSession)}`;
+    meta.appendChild(open);
+  } else {
+    meta.appendChild(el("span", "wf-note",
+      "not in the selected window — the figures below are still this " +
+      "conversation's"));
+  }
+  panel.appendChild(meta);
+
+  if (row) {
+    panel.appendChild(statsSection("This window", null, statsDetailWindow(row)));
+    panel.appendChild(statsSection("Provider / model changes", null,
+      statsSwitchList(row)));
+  }
+
+  const readingHead = el("div", "stats-detail-units");
+  readingHead.appendChild(el("span", "stats-detail-label",
+    "whole conversation (transcript)"));
+  readingHead.appendChild(statsUnitTabs());
+  panel.appendChild(readingHead);
+
+  if (statsError) panel.appendChild(el("p", "wf-warning", statsError));
+  if (!statsCache) {
+    if (!statsError) panel.appendChild(el("p", "wf-note", "loading…"));
+    return panel;
+  }
+  for (const part of statsReadingSections(statsCache)) panel.appendChild(part);
+  return panel;
 }
 
 function statsUnitTabs() {
@@ -29325,6 +29730,20 @@ const STATS_METHOD = [
     "context, mostly as cache reads.",
   "Tool results are not inputs and are not counted. Subagent requests are in " +
     "the totals and are credited like the parent's.",
+];
+
+const STATS_WINDOW_METHOD = [
+  "window figures: summed from the metering ledger, one line per API request " +
+    "the routing shim forwarded. total = fresh input + cache read + cache " +
+    "write + output; the cache share is the cache-read part of that total.",
+  "not measured here: an OAuth route (Anthropic's subscription, a Codex " +
+    "login) writes no ledger line. Those rows show — rather than 0, and their " +
+    "detail panel reads the transcript.",
+  "frames: today is the local day, 7 days and 30 days end at local midnight " +
+    "and include today.",
+  "provider changes: read from the upstream that answered each request. A " +
+    "reborrow onto another profile's credentials shows here; the daemon keeps " +
+    "only the borrow in force now, not its history.",
 ];
 
 /* Compare mode (#/compare/<a,b,c>): several sessions side by side. One
@@ -29575,6 +29994,94 @@ function renderStatsCompare(view) {
     statsTimelineChart(d.timeline || {}, unit)));
 }
 
+/* ---- the page ------------------------------------------------------ */
+function statsControls() {
+  const bar = el("div", "stats-controls");
+  const modes = el("div", "stats-units stats-modes");
+  for (const [mode, label] of [["one", "Fleet"], ["compare", "Compare"]]) {
+    const on = (mode === "compare") === !!statsCompare;
+    const b = el("button", "wf-btn clear" + (on ? " active" : ""), label);
+    b.type = "button";
+    b.dataset.mode = mode;
+    b.addEventListener("click", () => {
+      if (on) return;
+      if (mode === "compare") {
+        location.hash = statsCompareHash(statsSession ? [statsSession] : []);
+      } else {
+        location.hash = statsSession
+          ? `#/stats/${encodeURIComponent(statsSession)}` : "#/stats";
+      }
+    });
+    modes.appendChild(b);
+  }
+  bar.appendChild(modes);
+  if (statsCompare) {
+    bar.appendChild(statsUnitTabs());
+    bar.appendChild(statsComparePicker());
+    return bar;
+  }
+  bar.appendChild(statsWindowTabs());
+  bar.appendChild(statsEndedToggle());
+  return bar;
+}
+
+function renderStatsOverview(main) {
+  if (statsOverviewError) {
+    main.appendChild(el("p", "wf-warning", statsOverviewError));
+  }
+  const d = statsOverview;
+  if (!d) {
+    if (!statsOverviewError) main.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+  const totals = d.totals || {};
+  const counts = d.counts || {};
+  const summary = el("div", "window-summary");
+  summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
+    `${(totals.requests || 0).toLocaleString()} requests`));
+  summary.appendChild(statsCard("Fresh input", usageShort(totals.input || 0),
+    `cache read ${usageShort(totals.cache_read || 0)}`));
+  summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
+    `cache write ${usageShort(totals.cache_write || 0)}`));
+  summary.appendChild(statsCard("Cache share", statsPct(d.cache_share),
+    "of every token sent as prompt, read from the cache"));
+  summary.appendChild(statsCard("Sessions", counts.sessions || 0,
+    `${counts.metered || 0} metered, ${counts.unmetered || 0} unmetered`));
+  summary.appendChild(statsCard("Held out", counts.ended_excluded || 0,
+    statsIncludeEnded ? "killed + archived (now included)"
+      : "killed + archived sessions"));
+  main.appendChild(summary);
+
+  main.appendChild(statsProviderStrip(d));
+
+  const note = el("p", "wf-note stats-window-note",
+    `${statsStamp(d.since)} → ${statsStamp(d.until)} (local ${d.zone || ""}). ` +
+    "Figures come from the metering ledger, per API request; " +
+    "click a session for its detail panel.");
+  main.appendChild(note);
+
+  if (d.ledger_since && d.ledger_since > (d.days || [])[0]) {
+    main.appendChild(el("p", "wf-note stats-partial",
+      `the metering ledger starts ${d.ledger_since}, so this window covers ` +
+      `less than its dates suggest`));
+  }
+  if ((d.counts || {}).unmetered) {
+    main.appendChild(el("p", "wf-note",
+      `${d.counts.unmetered} session(s) have no ledger record (an OAuth ` +
+      "route writes none): their rows show — and their detail panels read " +
+      "the transcript instead."));
+  }
+
+  const rows = statsOverviewRows(d);
+  main.appendChild(statsSection(`Sessions by usage`, rows.length,
+    rows.length ? statsScroll(statsOverviewTable(d))
+      : el("p", "wf-note", "no session worked in this window")));
+
+  const notes = el("ul", "stats-method");
+  for (const line of STATS_WINDOW_METHOD) notes.appendChild(el("li", null, line));
+  main.appendChild(statsSection("Method", null, notes));
+}
+
 function renderStats() {
   const view = $("stats-view");
   if (!view) return;
@@ -29590,78 +30097,12 @@ function renderStats() {
   view.appendChild(head);
   view.appendChild(statsControls());
   if (statsCompare) { renderStatsCompare(view); return; }
-  view.appendChild(el("p", "wf-note",
-    "Token usage of one session's current conversation over time, read from " +
-    "its transcript, and the origin of every input it received. Buckets use " +
-    "the daemon's local time."));
-  if (statsError) view.appendChild(el("p", "wf-warning", statsError));
-  const d = statsCache;
-  if (!d) {
-    if (!statsError) {
-      view.appendChild(el("p", "wf-note",
-        statsSession ? "loading…" : "no session to show"));
-    }
-    return;
-  }
-  if (!d.available) {
-    view.appendChild(el("p", "wf-note",
-      `no statistics for ${d.session || statsSession}: ${d.reason || "unavailable"}`));
-    return;
-  }
-  if (d.partial) {
-    view.appendChild(el("p", "wf-note stats-partial",
-      "still reading: the transcript is being read in the background, and " +
-      "the figures will grow"));
-  }
-  const t = d.totals || {};
-  const sources = d.sources || [];
-  const machine = { messages: 0, triggered: 0, carry: 0 };
-  for (const s of sources) {
-    if (s.category !== "daemon" && s.category !== "mesh") continue;
-    for (const k of Object.keys(machine)) machine[k] += (s.share || {})[k] || 0;
-  }
-  const summary = el("div", "window-summary");
-  summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
-    `${(t.requests || 0).toLocaleString()} requests` +
-    (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
-  summary.appendChild(statsCard("Output", usageShort(t.output || 0),
-    `cache read ${usageShort(t.cache_read || 0)}`));
-  summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
-    "of inputs, by count"));
-  summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
-    "of tokens, by the input that started the turn"));
-  summary.appendChild(statsCard("Their carried text", statsPct(machine.carry),
-    "of all input text re-sent as context"));
-  summary.appendChild(statsCard("Compactions", d.compactions || 0,
-    d.since ? `since ${String(d.since).slice(0, 16).replace("T", " ")} UTC` : ""));
-  view.appendChild(summary);
-
-  const buckets = d.buckets || [];
-  const unit = d.unit || statsUnit;
-  const usage = el("div", "stats-usage");
-  if (buckets.length) {
-    usage.appendChild(statsChart(buckets, unit));
-    const legend = el("div", "usage-legend");
-    for (const [, label, short] of USAGE_PARTS) {
-      const item = el("span", "usage-legend-item");
-      item.append(el("span", `usage-swatch usage-${short}`), el("span", null, label));
-      legend.appendChild(item);
-    }
-    usage.appendChild(legend);
-    usage.appendChild(statsScroll(statsBucketTable(buckets, unit)));
-  } else usage.appendChild(el("p", "wf-note", "no requests recorded yet"));
-  view.appendChild(statsSection(
-    `Usage by ${unit} (UTC${d.utc_offset || ""})`, buckets.length, usage));
-
-  view.appendChild(statsSection("Input by origin", null,
-    statsScroll(statsSourceTable(sources))));
-  if ((d.senders || []).length) {
-    view.appendChild(statsSection("Mesh senders", d.senders.length,
-      statsScroll(statsSenderTable(d.senders))));
-  }
-  const notes = el("ul", "stats-method");
-  for (const line of STATS_METHOD) notes.appendChild(el("li", null, line));
-  view.appendChild(statsSection("Method", null, notes));
+  const layout = el("div", "stats-layout");
+  const main = el("div", "stats-main");
+  renderStatsOverview(main);
+  layout.appendChild(main);
+  if (statsSession) layout.appendChild(statsDetailPanel());
+  view.appendChild(layout);
 }
 
 /* ------------------------------------------------------------------ */

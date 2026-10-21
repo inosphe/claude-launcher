@@ -1,11 +1,18 @@
-/* The Stats page (#/stats[/<session>]): one session's usage over hour, day
-   or week buckets and its input sorted by origin. Slice the shipped
-   functions out of app.js so this check covers the page the browser runs:
-   the route, the endpoint it asks, the unit switch, the poll that speeds up
-   while the transcript is still being read, and what the page draws. Then
-   compare mode (#/compare/<a,b,c>): the set it asks for, the figures table
-   with z-scores and ranks, the origin share bars, the shared timeline, and
-   the picker and mode switch that move between the two. */
+/* The Stats page. Three readings share it:
+
+   * the fleet overview (#/stats) — every session that worked in the chosen
+     window (today / 7 days / 30 days), its usage beside the others', killed
+     and archived rows held out until the box is ticked, and a provider strip
+     that narrows the table;
+   * the detail panel (#/stats/<session>) — that session's window rows
+     (per-provider figures and the provider/model changes the ledger proves)
+     above the transcript reading the page has always drawn;
+   * compare mode (#/compare/<a,b,c>) — several sessions' transcript figures
+     side by side, with the spread across the set.
+
+   Slice the shipped functions out of app.js so these checks cover what the
+   browser runs: the routes, the endpoints each mode asks, the controls, the
+   rows, the detail panel, and what the page draws. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -47,7 +54,7 @@ function constant(name) {
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
-    href: "", title: "", type: "", value: "", selected: false,
+    href: "", title: "", type: "", value: "", selected: false, checked: false,
     style: {}, dataset: {}, attrs: {},
     setAttribute(k, v) { this.attrs[k] = String(v); },
     appendChild(c) { this.kids.push(c); return c; },
@@ -91,9 +98,15 @@ let statsPageOpen = false;
 let statsSession = "";
 let statsUnit = "day";
 let statsSeq = 0;
+let statsDetailSeq = 0;
 let statsCompare = null;
 let statsCompareCache = null;
 let statsLogScale = false;
+let statsWindow = "today";
+let statsIncludeEnded = false;
+let statsOverview = null;
+let statsOverviewError = "";
+let statsProvider = "";
 const STATS_COMPARE_MAX = 12;
 const document = { createElementNS: (_ns, tag) => el(tag) };
 let currentName = "s1";
@@ -103,7 +116,7 @@ function $() { return view; }
 function showView(name) { shown.push(name); }
 async function api(url) {
   fetched.push(url);
-  const a = answer;
+  const a = (typeof answer === "function") ? answer(url) : answer;
   return { ok: a.ok, status: a.status, json: async () => a.body };
 }
 function setTimeout(fn, ms) { const t = { fn, ms }; timers.push(t); return t; }
@@ -112,7 +125,9 @@ function setAnswer(next) { answer = next; }
 function state() {
   return { cache: statsCache, error: statsError, open: statsPageOpen,
            session: statsSession, unit: statsUnit, hash: location.hash,
-           compare: statsCompare, compareCache: statsCompareCache };
+           compare: statsCompare, overview: statsOverview,
+           window: statsWindow, ended: statsIncludeEnded,
+           provider: statsProvider, overviewError: statsOverviewError };
 }
 `;
 
@@ -121,16 +136,24 @@ new Function(
   "exports", "el", "view", "fetched", "shown", "timers", "answer",
   stubs
   + constant("USAGE_PARTS") + constant("STATS_UNITS")
-  + constant("STATS_CATEGORIES") + constant("STATS_METHOD")
+  + constant("STATS_WINDOWS") + constant("STATS_CATEGORIES")
+  + constant("STATS_METHOD") + constant("STATS_WINDOW_METHOD")
   + constant("STATS_PALETTE")
-  + slice("usageShort")
-  + ["openStatsPage", "stopStatsPoll", "statsDefaultSession", "statsSchedule",
-     "refreshStats", "statsPct", "statsBucketLabel", "statsCard", "statsChart",
+  + slice("usageShort") + slice("profileHarnessLabel")
+  + ["openStatsPage", "stopStatsPoll", "statsSchedule",
+     "refreshStats", "refreshStatsOverview", "refreshStatsDetail",
+     "statsPct", "statsBucketLabel", "statsStamp", "statsCard", "statsChart",
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
-     "statsScroll", "statsSection", "statsControls", "renderStats", "parseHash",
+     "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
+     "statsProviderLabel", "setStatsProvider", "statsProviderStrip",
+     "statsRowTotal", "statsRowRequests", "statsOverviewRows",
+     "statsOverviewTable", "statsOverviewRow", "statsSwitchList",
+     "statsDetailWindow", "statsReadingSections", "statsDetailPanel",
+     "statsControls", "renderStatsOverview", "renderStats", "parseHash",
      "refreshStatsCompare", "statsUnitTabs", "statsCompareHash", "statsValue",
-     "statsZ", "themeColor", "statsColor", "statsCompareChoices", "statsComparePicker", "statsCompareTable",
-     "statsShareBars", "statsTimelineChart", "renderStatsCompare"]
+     "statsZ", "themeColor", "statsColor", "statsCompareChoices",
+     "statsComparePicker", "statsCompareTable", "statsShareBars",
+     "statsTimelineChart", "renderStatsCompare"]
     .map(slice).join("\n")
   + `
 Object.assign(exports, {
@@ -186,6 +209,59 @@ const reading = {
   compactions: 2,
 };
 
+/* The window payload: two metered sessions and one the ledger cannot speak
+   for, one of which changed provider mid-window. */
+function sessionRow(extra) {
+  return {
+    session: "s1", status: "busy", category: "running", harness: "claude",
+    profile: "ds4:claude", borrow: "", issue: "claunch-x", project: "claunch",
+    source: "ledger", provider: "fireworks", model: "m1",
+    providers: [{ provider: "fireworks", input: 100, cache_read: 900,
+                  cache_write: 0, output: 0, total: 1000, requests: 4 }],
+    input: 100, cache_read: 900, cache_write: 0, output: 0, total: 1000,
+    requests: 4, first_at: "2026-10-21T09:00:00+09:00",
+    last_at: "2026-10-21T20:00:00+09:00", days: { "2026-10-21": 1000 },
+    switches: [{ at: "2026-10-21T09:30:00+09:00", kind: "provider",
+                 from: "kimi", to: "fireworks", from_model: "k3",
+                 to_model: "m1" }],
+    declared_provider: "fireworks", ended: false,
+    ...extra,
+  };
+}
+const overview = {
+  window: "today", unit: "day", days: ["2026-10-21"],
+  since: "2026-10-21T00:00:00+09:00", until: "2026-10-21T21:00:00+09:00",
+  zone: "+0900", include_ended: false,
+  totals: { input: 110, cache_read: 990, cache_write: 0, output: 0, total: 1100,
+            requests: 5 },
+  cache_share: 0.9,
+  providers: [
+    { provider: "fireworks", sessions: 1, totals: 0, total: 1000, requests: 4 },
+    { provider: "kimi", sessions: 1, total: 100, requests: 1 },
+  ],
+  sessions: [
+    sessionRow({}),
+    sessionRow({
+      session: "s2", provider: "kimi", borrow: "ds4", switches: [],
+      providers: [{ provider: "kimi", input: 10, cache_read: 90, cache_write: 0,
+                    output: 0, total: 100, requests: 1 }],
+      total: 100, requests: 1, days: { "2026-10-21": 100 },
+    }),
+    sessionRow({
+      session: "oauth", source: "none", provider: "claude", model: "",
+      providers: [], total: 0, requests: 0, days: {}, switches: [],
+      profile: "nc:claude", issue: "", declared_provider: "claude",
+    }),
+  ],
+  counts: { sessions: 3, metered: 2, unmetered: 1, ended_excluded: 5 },
+  ledger_since: "2026-10-19",
+  partial: false,
+};
+
+const byUrl = (over) => (url) => url.includes("/api/stats/overview")
+  ? { ok: true, status: 200, body: { ...overview, ...(over || {}) } }
+  : { ok: true, status: 200, body: reading };
+
 (async () => {
   check("the rail has a Stats tab next to Window",
         html.includes('href="#/stats" data-page="stats"') &&
@@ -197,85 +273,169 @@ const reading = {
   check("#/stats/<name> names the session",
         ctx.parseHash("#/stats/s%202").name === "s 2", ctx.parseHash("#/stats/s%202"));
 
-  ctx.setAnswer({ ok: true, status: 200, body: { ...reading, partial: true } });
+  // ---- the fleet overview ---------------------------------------------
+  ctx.setAnswer(byUrl());
   ctx.open("");
   await tick();
-  check("with no name the page opens on the session on screen",
-        ctx.state().session === "s1" && shown.at(-1) === "stats", ctx.state());
-  check("it asks the session's stats endpoint for the chosen unit",
-        fetched.at(-1) === "/api/sessions/s1/stats?unit=day", fetched);
-  check("a partial reading polls again soon",
-        timers.length === 1 && timers[0].ms === 2000, timers.map((t) => t.ms));
-  check("a partial reading says so",
-        withClass("stats-partial").length === 1, view.words());
-
-  ctx.setAnswer({ ok: true, status: 200, body: reading });
-  await ctx.refresh();
-  check("a finished reading polls slowly",
+  check("with no session the page opens on the fleet, not on one session",
+        ctx.state().session === "" && shown.at(-1) === "stats", ctx.state());
+  check("it asks the overview endpoint for today, killed and archived held out",
+        fetched.at(-1) === "/api/stats/overview?window=today&ended=0", fetched);
+  check("the overview asks nothing per session",
+        !fetched.some((u) => u.includes("/stats?unit=")), fetched);
+  check("a finished overview polls slowly",
         timers.length === 1 && timers[0].ms === 30000, timers.map((t) => t.ms));
-  check("one column per bucket, empty ones included",
-        withClass("stats-col").length === 3, withClass("stats-col").length);
-  check("each column is as tall as its total against the busiest",
+
+  check("a window tab per unit of time, Today pressed",
+        withClass("stats-window").length === 1 &&
+        withClass("wf-btn").filter((b) => b.dataset.window).length === 3 &&
+        withClass("wf-btn").find((b) => b.dataset.window === "today")
+          .classes.has("active"), view.words());
+
+  const rows = withClass("stats-row");
+  check("one row per session in the payload, longest bar first",
+        rows.length === 3 &&
+        rows.map((r) => r.dataset.session).join() === "s1,s2,oauth",
+        rows.map((r) => r.dataset.session));
+  check("a row carries the session's tokens, requests and share",
+        rows[0].words().includes("1.00k") && rows[0].words().includes("4") &&
+        rows[0].words().includes("90.9%"), rows[0].words());
+  check("the bar is as wide as the row's share of the busiest",
+        withClass("stats-rowbar-fill")[0].style.width === "100.00%" &&
+        withClass("stats-rowbar-fill")[1].style.width === "10.00%",
+        withClass("stats-rowbar-fill").map((b) => b.style.width));
+  check("a session the ledger cannot speak for shows a dash, never a zero",
+        rows[2].words().includes("—") &&
+        withClass("stats-unmetered").length === 1, rows[2].words());
+  check("a borrow is marked on its row",
+        rows[1].words().includes("borrow ds4"), rows[1].words());
+  check("a session answered by another provider in the window is marked",
+        rows[0].words().includes("⇄ provider"), rows[0].words());
+  check("the provider strip counts the sessions and their tokens",
+        withClass("stats-provider").length === 3 &&
+        withClass("stats-provider").map((b) => b.dataset.provider).join() ===
+          ",fireworks,kimi", withClass("stats-provider").map((b) => b.dataset.provider));
+  check("the summary holds the window total and the held-out count",
+        view.words().includes("1.10k") && view.words().includes("Held out") &&
+        view.words().includes("5"), view.words());
+  check("an unmetered session is explained",
+        view.words().includes("no ledger record"), view.words());
+  check("the method rows say where the figures come from",
+        withClass("stats-method").length === 1 &&
+        view.words().includes("metering ledger"),
+        withClass("stats-method").length);
+
+  // A provider narrows the table to the rows that used it.
+  withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
+    .handlers.click[0]();
+  check("picking a provider keeps only the sessions that used it",
+        ctx.state().provider === "kimi" &&
+        withClass("stats-row").map((r) => r.dataset.session).join() === "s2",
+        withClass("stats-row").map((r) => r.dataset.session));
+  check("the provider card is the pressed one",
+        withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
+          .classes.has("active"));
+  withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
+    .handlers.click[0]();
+  check("picking it again shows every provider",
+        ctx.state().provider === "" && withClass("stats-row").length === 3);
+
+  // The ended held-out rows come back when asked for.
+  const ended = withClass("stats-ended")[0].kids[0];
+  ended.checked = true;
+  ended.handlers.change[0]();
+  await tick();
+  check("ticking the box asks again with killed and archived included",
+        ctx.state().ended === true &&
+        fetched.at(-1) === "/api/stats/overview?window=today&ended=1", fetched.at(-1));
+
+  // The window switch.
+  const week = withClass("wf-btn").find((b) => b.dataset.window === "week");
+  week.handlers.click[0]();
+  await tick();
+  check("switching the window asks for that window",
+        ctx.state().window === "week" &&
+        fetched.at(-1) === "/api/stats/overview?window=week&ended=1", fetched.at(-1));
+
+  // ---- the detail panel ------------------------------------------------
+  ctx.setAnswer((url) => url.includes("/api/stats/overview")
+    ? { ok: true, status: 200, body: overview }
+    : { ok: true, status: 200, body: { ...reading, partial: true } });
+  ctx.open("s1");
+  await tick();
+  check("a session link opens the detail panel for it",
+        withClass("stats-detail").length === 1 && ctx.state().session === "s1");
+  check("the panel asks that session's transcript reading",
+        fetched.some((u) => u === "/api/sessions/s1/stats?unit=day"), fetched);
+  const panel = withClass("stats-detail")[0];
+  check("the panel names the session and offers its own page",
+        panel.words().includes("s1") && panel.all().some((n) =>
+          n.tag === "a" && n.href === "#/s/s1" && n.text === "open session"),
+        panel.words());
+  check("the panel lists the window's provider change",
+        withClass("stats-switch").length === 1 &&
+        panel.words().includes("kimi → fireworks") &&
+        withClass("stats-switch-kind")[0].text === "provider", panel.words());
+  check("the panel's window table carries the provider's share",
+        withClass("stats-detail-providers")[0].words().includes("100.0%"),
+        withClass("stats-detail-providers")[0].words());
+  check("the transcript reading is in the panel, labelled as the conversation",
+        withClass("stats-col").length === 3 &&
+        panel.words().includes("whole conversation (transcript)"), panel.words());
+  check("the chart's numbers are drawn",
         withClass("stats-bar").map((b) => b.style.height).join() ===
           "81.82%,0.00%,100.00%",
         withClass("stats-bar").map((b) => b.style.height));
-  const words = view.words();
-  check("the notice + mesh share adds both categories",
-        words.includes("Notices + mesh") && words.includes("70.0%") &&
-        words.includes("60.0%") && words.includes("50.0%"), words);
-  check("every origin and each notice kind is listed",
-        ["human", "claunch notices", "mesh messages", "opening task", "harness",
-         "session: reminder", "cflow nudge"].every((w) => words.includes(w)), words);
-  check("a kind row leaves the share columns empty",
-        withClass("stats-kind").every((r) => r.kids.length === 9 &&
-          [2, 4, 6, 8].every((i) => r.kids[i].text === "")),
-        withClass("stats-kind").map((r) => r.kids.map((k) => k.text)));
-  const links = view.all().filter((n) => n.tag === "a");
-  check("a live sender links to its own statistics, a gone one is text",
-        links.some((a) => a.href === "#/stats/s2") &&
-        !links.some((a) => a.href === "#/stats/gone") && words.includes("gone"),
-        links.map((a) => a.href));
-  check("the bucket table leaves out empty periods",
-        view.all().filter((n) => n.tag === "tr" && n.kids[0] &&
-          n.kids[0].text === "09-27").length === 0);
-  check("the method notes are shown",
-        withClass("stats-method")[0].kids.length === 5,
-        withClass("stats-method").map((n) => n.kids.length));
+  check("a partial reading polls again soon",
+        timers.length === 1 && timers[0].ms === 2000, timers.map((t) => t.ms));
 
-  const week = withClass("wf-btn").find((b) => b.dataset.unit === "week");
-  week.handlers.click[0]();
+  // Clicking a row is the other way in.
+  withClass("stats-row")[1].handlers.click[0]({ preventDefault() {} });
+  check("clicking a row moves to that session's panel",
+        ctx.state().hash === "#/stats/s2", ctx.state().hash);
+
+  withClass("stats-detail-head")[0].kids.find((k) => k.tag === "button")
+    .handlers.click[0]();
+  check("closing the panel goes back to the fleet",
+        ctx.state().hash === "#/stats", ctx.state().hash);
+
+  // The unit switch moves the transcript reading, not the window.
+  const day = withClass("wf-btn").find((b) => b.dataset.unit === "week");
+  day.handlers.click[0]();
   await tick();
-  check("switching the unit asks again with that unit",
+  check("switching the unit asks the reading again with that unit",
         ctx.state().unit === "week" &&
         fetched.at(-1) === "/api/sessions/s1/stats?unit=week", fetched.at(-1));
 
-  const pick = withClass("stats-session")[0];
-  pick.value = "s2";
-  pick.handlers.change[0]();
-  check("choosing a session moves to its link", ctx.state().hash === "#/stats/s2",
-        ctx.state().hash);
+  // The detail reading's failures are its own.
+  ctx.setAnswer((url) => url.includes("/api/stats/overview")
+    ? { ok: true, status: 200, body: overview }
+    : { ok: false, status: 400, body: { error: "unit must be one of: hour" } });
+  await ctx.refresh();
+  check("an API error is stated in the panel",
+        ctx.state().error === "unit must be one of: hour", ctx.state());
+  ctx.setAnswer((url) => url.includes("/api/stats/overview")
+    ? { ok: true, status: 200, body: overview }
+    : { ok: false, status: 404, body: {} });
+  await ctx.refresh();
+  check("a daemon without the reading endpoint is named as outdated",
+        ctx.state().error.includes("predates the Stats page"), ctx.state());
+  ctx.setAnswer({ ok: false, status: 404, body: {} });
+  await ctx.refresh();
+  check("a daemon without the overview endpoint is named as outdated",
+        ctx.state().overviewError.includes("predates the window overview"),
+        ctx.state());
+
+  ctx.setAnswer({ ok: true, status: 200, body: { ...reading, available: false,
+    reason: "no transcript found for this session's conversation" } });
+  await ctx.refresh();
+  check("an unavailable reading gives its reason",
+        view.words().includes("no transcript found"), view.words());
 
   check("labels: the hour, the date, the week's Monday",
         ctx.label("2026-09-28T13:00:00+09:00", "hour") === "09-28 13h" &&
         ctx.label("2026-09-28T00:00:00+09:00", "day") === "09-28" &&
         ctx.label("2026-09-28T00:00:00+09:00", "week") === "wk 09-28");
-
-  ctx.setAnswer({ ok: true, status: 200,
-                  body: { session: "s1", available: false,
-                          reason: "no transcript found for this session's conversation" } });
-  await ctx.refresh();
-  check("an unavailable reading gives its reason",
-        view.words().includes("no transcript found"), view.words());
-
-  ctx.setAnswer({ ok: false, status: 400, body: { error: "unit must be one of: hour" } });
-  await ctx.refresh();
-  check("an API error is stated", ctx.state().error === "unit must be one of: hour",
-        ctx.state());
-
-  ctx.setAnswer({ ok: false, status: 404, body: {} });
-  await ctx.refresh();
-  check("a daemon without the endpoint is named as outdated",
-        ctx.state().error.includes("predates the Stats page"), ctx.state());
 
   // ---- compare mode ------------------------------------------------------
   check("#/compare/<a,b> is the Stats page comparing those sessions",
@@ -362,8 +522,8 @@ const reading = {
   check("unpressing a session drops it from the link",
         ctx.state().hash === "#/compare/s2", ctx.state().hash);
   withClass("wf-btn").find((b) => b.dataset.mode === "one").handlers.click[0]();
-  check("One session goes to the first compared session's page",
-        ctx.state().hash === "#/stats/s1", ctx.state().hash);
+  check("Fleet goes back to the overview",
+        ctx.state().hash === "#/stats", ctx.state().hash);
 
   ctx.setAnswer({ ok: true, status: 200, body: { ...compared, partial: true } });
   ctx.open("", ["s1", "s2", "s3"]);
@@ -380,17 +540,18 @@ const reading = {
         fetched.length === asked && view.words().includes("pick sessions above"),
         view.words());
   check("the Compare button is the pressed one in compare mode",
-        withClass("wf-btn").find((b) => b.dataset.mode === "compare").classes.has("active"));
+        withClass("wf-btn").find((b) => b.dataset.mode === "compare")
+          .classes.has("active"));
 
-  ctx.setAnswer({ ok: true, status: 200, body: reading });
-  ctx.open("s1");
+  ctx.setAnswer(byUrl());
+  ctx.open("");
   await tick();
   check("a one-session link leaves compare mode",
         ctx.state().compare === null &&
-        fetched.at(-1) === "/api/sessions/s1/stats?unit=week", fetched.at(-1));
+        fetched.at(-1) === "/api/stats/overview?window=week&ended=1", fetched.at(-1));
   withClass("wf-btn").find((b) => b.dataset.mode === "compare").handlers.click[0]();
-  check("Compare starts from the session on screen",
-        ctx.state().hash === "#/compare/s1", ctx.state().hash);
+  check("Compare starts from the session on screen (none: an empty set)",
+        ctx.state().hash === "#/compare/", ctx.state().hash);
 
   const before = fetched.length;
   ctx.stop();
@@ -399,6 +560,9 @@ const reading = {
         timers.length === 0 && fetched.length === before && !ctx.state().open,
         { timers: timers.length, fetched: fetched.length });
 
-  if (failures) process.exit(1);
-  console.log("stats_check: ok");
+  if (failures) {
+    console.error(`${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log("stats_check: all checks passed");
 })();
