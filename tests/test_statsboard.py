@@ -466,8 +466,10 @@ def test_the_window_is_a_closure_of_local_days_not_a_rolling_span(tmp_path, ledg
 # --------------------------------------------------------------------------- #
 # the endpoint
 # --------------------------------------------------------------------------- #
-def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, tmp_path):
+def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, tmp_path,
+                                                                  monkeypatch):
     import asyncio
+    import functools
     import time
 
     from aiohttp.test_utils import TestClient, TestServer
@@ -478,6 +480,11 @@ def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, t
     from claude_launcher.daemon.manager import SessionManager
     from claude_launcher.daemon.mesh import MeshManager
     from claude_launcher.daemon.session import DeadSession
+
+    # The fixture records sit on 2026-10-21 KST; pin the endpoint's clock and
+    # zone there so the `today` window does not move with the machine's.
+    monkeypatch.setattr(statsboard, "overview",
+                        functools.partial(statsboard.overview, now=NOW, zone=KST))
 
     # The ledger the daemon will read: the isolated home's own metering
     # directory (conftest's `home` fixture moved it here).
@@ -495,6 +502,7 @@ def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, t
         mgr._sessions["gone"] = DeadSession(gone, exit_code=143)
         app = build_app(mgr, "sekrit", started_at=time.monotonic(),
                         mesh=MeshManager(mgr))
+        app["stats_ledger"] = statsboard.Ledger(zone=KST)
         client = TestClient(TestServer(app))
         await client.start_server()
         bearer = {"Authorization": "Bearer sekrit"}
