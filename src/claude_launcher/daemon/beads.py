@@ -803,7 +803,21 @@ def default_board_answer(body: dict) -> Optional[str]:
     An answer the request gave itself always wins, on either side: "no issue"
     is already this answer, and ``beads: true``, ``issue`` or ``issue_text``
     name a record on purpose -- a caller that wants one on purpose still gets
-    one. Returns the mode it filled in, or ``None`` when it changed nothing.
+    one.
+
+    Only the body's own board fields answer for the request: ``beads``,
+    ``issue`` and ``issue_text``. An ``issue: <id>`` line in the task or
+    context prose does not, unlike :func:`adopt_input_issue`, which reads
+    exactly those refs. Adopting the prose here would restore the cost this
+    function removes: the adopted issue puts "keep its status current" back
+    into the opening (:func:`compose_link_note`) and the wind-down block back
+    on the way out -- together 70.5% of a job session's tokens in the measured
+    corpus (claunch-nwnt5). A caller that wants the record on purpose sends
+    ``issue`` or ``issue_text``; a task that names an id only to say what the
+    job is about leaves the session with no issue, which is this workflow's
+    answer anyway.
+
+    Returns the mode it filled in, or ``None`` when it changed nothing.
     """
     if str(body.get("workflow") or "").strip() not in TERMINALLESS_WORKFLOWS:
         return None
