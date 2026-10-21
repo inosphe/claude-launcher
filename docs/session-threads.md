@@ -36,7 +36,12 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 - 닫힌 쓰레드에 사용자나 소유 세션이 메시지를 쓰면 다시 열린다. 게스트의 메시지는 기록되지만 쓰레드는 닫힌 채로
   남는다(claunch-mgh8x): 게스트는 닫기와 마찬가지로 다시 열기도 할 수 없다.
 - 세션 하나당 열린 쓰레드는 50개까지다(`MAX_OPEN_PER_SESSION`).
-- 세션이 종료되어 전달할 수 없으면 메시지는 쓰레드에 남고, 응답의 `delivered`가 `false`다. 패널이 그 사실을 표시한다.
+- 세션이 종료(exited) 상태면 메시지는 쓰레드에 남고, 전달 블록은 세션별 journal
+  `<세션 디렉터리>/thread-notices.jsonl`(`daemon/thread_notices.py`)에 `queued`로 쌓인다. 그 세션이 respawn되거나
+  데몬 restore로 다시 launch되면 launch 훅이 큐를 오래된 순서로 타이핑하고 `sent`(또는 `failed`)로 기록한다.
+  데몬이 재기동돼도 journal이 큐 그대로라 남는다. 응답은 `delivered`가 `true`, `hold`가 `"exited"`이고, 패널이
+  「다시 시작하면 전달된다」고 표시한다. 잠든(held) 세션은 자동으로 깨어나므로 큐에 넣지 않고 `hold`가 `"asleep"`이다.
+  세션을 지우면(`clear-sessions`) 그 디렉터리와 함께 큐도 사라진다.
 - 에이전트의 읽음 위치(`agent_read`)는 소유 세션이 `thread_read`로 읽거나 `thread_reply`로 답할 때 이동한다.
   `thread_list`의 `agent_unread`는 그 뒤의 사용자·게스트 메시지 수다. 사용자의 읽음 위치는 브라우저 localStorage에 있다.
 

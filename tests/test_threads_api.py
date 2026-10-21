@@ -39,6 +39,7 @@ class FakeManager:
         self.sessions = {s.sdef.name: s for s in sessions}
         self.woken = []
         self.exit_hooks = []
+        self.launch_hooks = []
 
     def get(self, name):
         if name not in self.sessions:
@@ -189,7 +190,11 @@ def test_index_lists_threads_without_messages_grouped_by_session(tmp_path, monke
     run(tmp_path, scenario)
 
 
-def test_a_held_session_is_woken_and_an_exited_one_keeps_the_message(tmp_path):
+def test_a_held_session_is_woken_and_an_exited_one_queues_the_block(home, tmp_path):
+    """claunch-sgxfh: an exited session has no terminal, so the block waits
+    in the notice journal until it is launched again — it is not dropped."""
+    from claude_launcher.daemon import thread_notices
+
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"to": "s1", "title": "t"}))["thread"]["id"]
         s1 = mgr.sessions["s1"]
@@ -197,9 +202,13 @@ def test_a_held_session_is_woken_and_an_exited_one_keeps_the_message(tmp_path):
         res = await req("POST", f"/api/threads/{tid}/messages", {"text": "wake up"})
         assert res["delivered"] is True and res["hold"] == "asleep"
         assert mgr.woken[0][:2] == ("s1", "thread") and threads_api.PREFIX in mgr.woken[0][2]
+        assert thread_notices.pending("s1") == []
         s1.held_at = None
         res = await req("POST", f"/api/threads/{tid}/messages", {"text": "anyone?"})
-        assert res["delivered"] is False and res["hold"] is None
+        assert res["delivered"] is True and res["hold"] == "exited"
+        queued = thread_notices.pending("s1")
+        assert len(queued) == 1 and "anyone?" in queued[0]["text"]
+        assert queued[0]["thread"] == tid
         assert [m["body"] for m in (await req("GET", f"/api/threads/{tid}"))["messages"]] == ["wake up", "anyone?"]
     run(tmp_path, scenario)
 

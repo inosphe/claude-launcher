@@ -48,7 +48,11 @@ when it owns the thread.
 A message the user writes is typed into the owning session as a
 ``[claunch thread <id>]`` block carrying the thread's title and the message,
 so the agent can answer into the right thread without a read; a held session
-is woken for it. ``delivered`` says the message was accepted for that
+is woken for it. An exited session has no terminal to type into: the block
+is queued durably (daemon/thread_notices.py) and typed in when the session
+is launched again — a person's respawn or the daemon's restore — so a
+message written while the session was gone still reaches it (claunch-sgxfh).
+``delivered`` says the message was accepted for that
 session, not that it is in the terminal yet: when something at the session
 end is holding it back, ``hold`` names it (claunch-a41i5), so the pane can say
 why nothing appeared instead of looking like a lost message.
@@ -87,11 +91,25 @@ from urllib.parse import quote
 from aiohttp import web
 
 from ..threads import store as thread_store
-from . import paths, talk_links, thread_images, uploads
+from . import paths, talk_links, thread_images, thread_notices, uploads
 
 log = logging.getLogger(__name__)
 
 PREFIX = "[claunch thread"
+
+#: Background flushes of notices queued for an ended session (see
+#: :func:`flush_notices`); held so none is collected mid-flight.
+_flush_tasks: set = set()
+
+
+def notice_id(thread: dict, message: Optional[dict], kind: str = "m") -> str:
+    """The id a queued notice is recorded under for one thread message.
+
+    Derived from the store's own message seq, so a post that is queued
+    twice is one notice (daemon/thread_notices.py).
+    """
+    seq = (message or {}).get("seq")
+    return f"{thread['id']}:{kind}{seq}" if seq else ""
 
 
 def _quote(text: str) -> str:
@@ -257,12 +275,23 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         files = [opening_images.Image(Path(img["path"]), img["type"]) for img in images]
         return api_mod._opening_image_step(session, files, text, what="thread images")
 
-    def deliver(name: str, text: str, images: Optional[list[dict]] = None) -> bool:
+    def deliver(name: str, text: str, images: Optional[list[dict]] = None,
+                notice: str = "", thread: str = "") -> bool:
         """Type ``text`` into session ``name``; a held session is woken for
-        it. False when there is nobody to tell (exited, unknown). With
+        it. An exited session has no terminal to type into, so a block that
+        carries ``notice`` is queued (daemon/thread_notices.py) and typed in
+        when the session is launched again — a person's respawn or the
+        daemon's restore. False when there is nobody to tell (unknown). With
         ``images``, a live session gets them pasted in ahead of the text."""
         try:
             session = manager.get(name)
+        except Exception:  # noqa: BLE001 -- gone or not deliverable
+            return False
+        if (notice and getattr(session, "exited", False)
+                and not getattr(session, "held_at", None)):
+            # A held one is only asleep: the wake queue below types it in.
+            return thread_notices.queue(name, notice, text, thread=thread)
+        try:
             before, body = paste_step(session, images or [], text)
             # ``before`` only when there is one, so a text-only message makes
             # exactly the call it made before images existed.
@@ -276,23 +305,45 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             log.info("threads: could not deliver to %s", name)
             return False
 
+    def flush_notices(session) -> None:
+        """Launch hook: type the notices queued while ``session`` was ended.
+
+        Scheduled, not awaited: the flush waits for the program to take
+        input, which is seconds after launch."""
+        try:
+            if not thread_notices.pending(session.sdef.name):
+                return
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(thread_notices.flush(session))
+        _flush_tasks.add(task)
+        task.add_done_callback(_flush_tasks.discard)
+
     hooks = getattr(manager, "exit_hooks", None)
     if hooks is not None:
         hooks.append(guest_ended)
+    launch_hooks = getattr(manager, "launch_hooks", None)
+    if launch_hooks is not None:
+        launch_hooks.append(flush_notices)
 
     def hold_of(name: str) -> Optional[str]:
         """Why a message just accepted for ``name`` is not typed in yet, read
         from the same signals :meth:`Session.deliver` waits on: ``asleep``
-        (a held session being woken; it goes in once it is back), ``draft``
-        (an unsent line in that terminal's composer; it goes in after the
-        human sends or clears it), ``typing`` (keys in the last few seconds).
-        None when nothing is in the way. A snapshot at accept time only."""
+        (a held session being woken; it goes in once it is back), ``exited``
+        (queued until a respawn or restore; daemon/thread_notices.py),
+        ``draft`` (an unsent line in that terminal's composer; it goes in
+        after the human sends or clears it), ``typing`` (keys in the last few
+        seconds). None when nothing is in the way. A snapshot at accept time
+        only."""
         try:
             s = manager.get(name)
         except Exception:  # noqa: BLE001 -- gone between deliver and here
             return None
         if getattr(s, "held_at", None):
             return "asleep"
+        if getattr(s, "exited", False):
+            return "exited"
         draft = getattr(s, "draft_open", None)
         if callable(draft) and draft():
             return "draft"
@@ -330,15 +381,17 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         return talk_links.mentioned(message["body"], qa_rows(thread["session"]),
                                     skip=[thread["qa"]] if thread.get("qa") else [])
 
-    def tell(res: dict, name: str, text: str) -> None:
-        res["delivered"] = deliver(name, text, (res.get("message") or {}).get("images"))
+    def tell(res: dict, name: str, text: str, notice: str = "", thread: str = "") -> None:
+        res["delivered"] = deliver(name, text, (res.get("message") or {}).get("images"),
+                                   notice=notice, thread=thread)
         res["hold"] = hold_of(name) if res["delivered"] else None
 
-    def tell_guests(res: dict, text: str) -> None:
+    def tell_guests(res: dict, text: str, notice: str = "", thread: str = "") -> None:
         """Type ``text`` into every guest of the thread; ``guests_delivered``
         says per guest whether it was accepted."""
         images = (res.get("message") or {}).get("images")
-        res["guests_delivered"] = {g["session"]: deliver(g["session"], text, images)
+        res["guests_delivered"] = {g["session"]: deliver(g["session"], text, images,
+                                                         notice=notice, thread=thread)
                                    for g in res["thread"].get("guests") or []}
 
     def owner_message(tid: str, text: str) -> dict:
@@ -350,9 +403,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         t = res["thread"]
         link([t], t["session"])
         mentions = mentions_in(t, res["message"])
+        notice = notice_id(t, res["message"])
         tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
-                                                mentions=mentions))
-        tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]))
+                                                mentions=mentions),
+             notice=notice, thread=t["id"])
+        tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]),
+                    notice=notice, thread=t["id"])
         return res
 
     # Handed to daemon/megathread_api.py: a mega thread delivers by posting a
@@ -508,7 +564,8 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         await asyncio.to_thread(link, [res["thread"]], target)
         if actor == thread_store.USER and res["message"]:
             mentions = await asyncio.to_thread(mentions_in, res["thread"], res["message"])
-            tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True, mentions=mentions))
+            tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True, mentions=mentions),
+                 notice=notice_id(res["thread"], res["message"]), thread=res["thread"]["id"])
         return web.json_response(res)
 
     async def h_read(request):
@@ -539,9 +596,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         await asyncio.to_thread(link, [t], t["session"])
         if actor == thread_store.USER:
             mentions = await asyncio.to_thread(mentions_in, t, res["message"])
+            notice = notice_id(t, res["message"])
             tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
-                                                    ask_qa=body.get("ask_qa") is True, mentions=mentions))
-            tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]))
+                                                    ask_qa=body.get("ask_qa") is True, mentions=mentions),
+                 notice=notice, thread=t["id"])
+            tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]),
+                        notice=notice, thread=t["id"])
         elif res.get("as") == thread_store.GUEST:
             tell(res, t["session"], guest_wrote_text(t, res["message"], actor))
         return web.json_response(res)

@@ -478,6 +478,12 @@ def test_t16_a_log_failure_does_not_undo_the_delivery(tmp_path, monkeypatch):
 
 
 def test_t17_a_delivery_nobody_accepted_is_not_logged_as_delivered(tmp_path, monkeypatch):
+    """claunch-sgxfh: a message to an exited session is queued durably (typed
+    in when that session is launched again), and the answer says so
+    (``queued``); the ledger's ``delivered`` still means "typed into a
+    terminal", so it stays false."""
+    from claude_launcher.daemon import thread_notices
+
     async def high(cfg, state, questions, *, key=None, model=None):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
 
@@ -485,14 +491,16 @@ def test_t17_a_delivery_nobody_accepted_is_not_logged_as_delivered(tmp_path, mon
 
     async def scenario(req, manager, threads, megas):
         a, b, mega = await two_member_cluster(req)
-        # The message still becomes a row in the thread; what does not happen
-        # is typing it into the session.
+        # The message still becomes a row in the thread; it is typed in when
+        # the session is launched again, not now.
         manager.sessions["s1"].exited = True
         res = await req("POST", f"/api/megathreads/{mega['id']}/route", {"text": "hello"})
         assert res["verdict"] == "auto"
-        assert [d["delivered"] for d in res["delivered"]] == [False]
+        assert [(d["delivered"], d["queued"], d["hold"]) for d in res["delivered"]] == [
+            (False, True, "exited")]
         assert len(threads.tail(a["id"])) == 1
-        # The log says the message was not delivered, not merely attempted.
+        assert "hello" in thread_notices.pending("s1")[0]["text"]
+        # The log says the message was not typed anywhere, not merely attempted.
         row = megas.routes(mega["id"])["routes"][0]
         assert row["chosen"] == [a["id"]] and row["delivered"] is False
 

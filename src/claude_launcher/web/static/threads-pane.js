@@ -536,7 +536,8 @@ globalThis.ThreadsPane = (() => {
      without saying so a held message looks like a lost one. `who` is the
      session the thread belongs to (the all-threads page posts too). */
   function deliveryNotice(res, who = name) {
-    if (res.delivered === false) return `${who} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
+    if (res.delivered === false) return `${who} 세션에 전달하지 못했습니다. 메시지는 쓰레드에 남았습니다.`;
+    if (res.hold === "exited") return `${who} 세션이 종료 상태라 전달을 보류했습니다. 세션을 다시 시작(respawn/restore)하면 그때 전달됩니다. 메시지는 쓰레드에 남아 있습니다.`;
     if (res.hold === "draft") return `${who} 터미널 입력창에 보내지 않은 입력이 있어 전달 대기 중입니다. 그 입력을 보내거나(Enter) 지우면(Ctrl-C) 이어서 전달됩니다.`;
     if (res.hold === "typing") return `${who} 터미널에 키보드 입력이 이어지고 있어 전달 대기 중입니다. 입력이 멈추면 전달됩니다.`;
     if (res.hold === "asleep") return `${who} 세션을 깨우는 중입니다. 깨어나면 전달됩니다.`;
