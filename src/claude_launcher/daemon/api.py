@@ -15,6 +15,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -944,6 +945,11 @@ def build_app(
     # read live like the reminder's.
     r.add_get("/api/cflow/ping", h_cflow_ping_defaults)
     r.add_put("/api/cflow/ping", h_cflow_ping_defaults_set)
+    # Per-model token prices for the dashboard's cost estimates (the rail
+    # row under the context gauge and the detail panel). Keyed by the model
+    # id the transcript records; read live like the reminder/ping defaults.
+    r.add_get("/api/model-prices", h_model_prices)
+    r.add_put("/api/model-prices", h_model_prices_set)
     r.add_get("/api/quickjob", h_quickjob_get)
     r.add_put("/api/quickjob", h_quickjob_set)
     r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
@@ -6846,6 +6852,86 @@ async def h_cflow_ping_defaults_set(request: web.Request) -> web.Response:
             # pinging with a frame and no words in it.
             store.set_daemon_field("cflow_ping_message", message or None)
         return json_response({"defaults": _ping_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _model_prices() -> dict:
+    """The per-model price table, read live from the config file — the same
+    read the dashboard's cost estimate makes when it draws a rail row or the
+    detail panel, so what this reports is what the next poll will price
+    against. Keyed by the model id as the harness records it on the
+    transcript (``context.model``); each row holds per-1M-token rates."""
+    cfg = store.daemon_config()
+    prices = cfg.get("model_prices")
+    if not isinstance(prices, dict):
+        prices = {}
+    currency = str(cfg.get("model_price_currency") or "$")
+    return {"prices": prices, "currency": currency}
+
+
+async def h_model_prices(request: web.Request) -> web.Response:
+    try:
+        return json_response(_model_prices())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_model_prices_set(request: web.Request) -> web.Response:
+    """Set the per-model price table the dashboard's cost estimates use.
+
+    Written to the config file (``daemon.model_prices``) and read live, so
+    a PUT is what the next dashboard poll prices against; the currency
+    symbol (``daemon.model_price_currency``) also answers to ``claunch
+    daemon config model_price_currency``. The table itself is replaced
+    whole — the UI reads it back after the write; an empty table clears
+    it, which turns the estimated-price display back off. Partial on
+    purpose: only the keys sent change.
+    """
+    body = await _json_body(request)
+    prices_out = None
+    currency_out = None
+    if "prices" in body:
+        prices = body["prices"]
+        if prices is None:
+            prices = {}
+        if not isinstance(prices, dict):
+            return json_error(400, "'prices' must be an object keyed by model id")
+        clean: dict = {}
+        for model, rates in prices.items():
+            if not isinstance(model, str) or not model.strip():
+                return json_error(400, "price rows are keyed by a non-empty model id")
+            if not isinstance(rates, dict):
+                return json_error(400, f"prices for {model!r} must be an object")
+            row: dict = {}
+            for key in ("input", "cache_read", "cache_write", "output"):
+                v = rates.get(key)
+                if v is None:
+                    continue
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    return json_error(400, f"price {key!r} for {model!r} must be a number")
+                if not math.isfinite(v) or v < 0:
+                    return json_error(400, f"price {key!r} for {model!r} must be a " "non-negative finite number")
+                row[key] = v
+            clean[model.strip()] = row
+        prices_out = clean or None
+    if "currency" in body:
+        currency = body["currency"]
+        if currency is not None:
+            if not isinstance(currency, str):
+                return json_error(400, "'currency' must be a string")
+            currency = currency.strip()
+            if len(currency) > 8:
+                return json_error(400, "'currency' must be at most 8 characters")
+        currency_out = currency or None
+    try:
+        if prices_out is not None or "prices" in body:
+            store.set_daemon_field("model_prices", prices_out)
+        if currency_out is not None or "currency" in body:
+            store.set_daemon_field("model_price_currency", currency_out)
+        return json_response(_model_prices())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

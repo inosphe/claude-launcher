@@ -482,6 +482,12 @@ DAEMON_DEFAULTS = {
         "This run has not moved in a long time and nothing is holding it. "
         "Pick it back up, or say what you are waiting for."
     ),
+    # The symbol the dashboard's per-model cost estimates are written in.
+    # The table itself (daemon.model_prices) has no default and is edited on
+    # the Settings page; this key exists so the symbol answers to
+    # ``claunch daemon config model_price_currency`` like the other live
+    # machine settings.
+    "model_price_currency": "$",
     # Turn-end QA nudges (daemon/qa_nudge.py, claunch-165w6): when a session
     # goes busy -> idle and its last reply asked the user something in plain
     # text instead of through qa_ask, Jev (daemon/jev.py) classifies the
