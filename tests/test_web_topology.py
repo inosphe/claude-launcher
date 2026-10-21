@@ -396,6 +396,7 @@ def _node_failure(script, proc, started):
 # way for weeks, both passing when run by hand (claunch-som9.1).
 CHECKS = [
         "layout_check.js",
+        "bootreads_check.js",
         "batchpoll_check.js",
         "controlsocket_check.js",
         "p2p_check.js",

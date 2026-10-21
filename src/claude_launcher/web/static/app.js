@@ -4891,9 +4891,15 @@ async function refreshSessions(options) {
       // Every project, always: the rail narrows what it draws itself
       // (railSessions), so a project pick redraws without a round trip and
       // a session of another project open in a tab keeps a real record.
+      // `direct` (the first boot, see boot()): this read is the one the
+      // first row waits on, so it goes out now rather than after the batch
+      // window, and is not held behind whatever else joined the batch.
+      const readOpts = {};
+      if (rowKeep) readOpts.readArgs = { rows: sessionRowDigests(state) };
+      if (options && options.direct) readOpts.noBatch = true;
       const resp = await api(
         `/api/sessions?view=rail&state=${encodeURIComponent(state)}`,
-        rowKeep ? { readArgs: { rows: sessionRowDigests(state) } } : undefined);
+        Object.keys(readOpts).length ? readOpts : undefined);
       // An error response carries a JSON body of its own, so `resp.json()`
       // succeeds and `data.sessions` is simply absent -- which used to read as
       // "this daemon has no sessions" and empty the rail, drop every parked
@@ -44932,7 +44938,11 @@ async function refreshMeshList(options) {
   if (!data) {
     try {
       // Every project, like the session poll: the list narrows itself below.
-      const resp = await api("/api/mesh?view=rail");
+      // `direct`: out on its own connection now instead of waiting out the
+      // batch window -- the first paint's reads, which have nothing to wait
+      // for company with (see boot()).
+      const resp = await api("/api/mesh?view=rail",
+                             options && options.direct ? { noBatch: true } : undefined);
       data = await resp.json();
     } catch {
       return;
@@ -52400,14 +52410,28 @@ async function boot() {
   if (info.boot_id) daemonBoot = info.boot_id;
   renderRelayBadge(info.relay);
   renderPtyHostBadge(info.pty_host);
+  // The rail's reads first, ahead of the rest of the dashboard's.
+  // `refreshSessions` builds every row itself, so the reader's content is on
+  // the page the moment its answer lands -- and that answer used to wait for
+  // whatever else shared its batch. `/api/cflow2/rail` measures 1.3 s on a
+  // fleet this size where `/api/sessions` measures 0.55 s: the rail's data
+  // was ready in half a second and the reader saw nothing for another
+  // second because a card in another pane was still being read.
+  // `refreshMeshList` goes before it, not with it: the mesh list is what the
+  // rail's group headers are drawn from, and answering both in one batch
+  // would draw the rail ungrouped and rebuild it once the mesh list landed.
+  // Both go `direct`: on their own connection, without waiting out the batch
+  // window for company -- there is nothing before them to gather, and
+  // waiting would put the 100 ms back. Everything else still leaves together
+  // in one request behind them.
+  await refreshMeshList({ direct: true });
+  await refreshSessions({ direct: true });
   await Promise.all([
     refreshProfiles(),
     refreshHarnesses(),
     refreshRoles(),
     refreshWorkspaces(),
     refreshProjects(),
-    refreshSessions(),
-    refreshMeshList(),
     refreshCflow(),
     refreshCflow2Rail(),
     refreshSessionSims(),
