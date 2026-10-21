@@ -21,7 +21,7 @@ import time
 import pytest
 
 from claude_launcher import lineage, profile, spawn as spawn_mod, store
-from claude_launcher.daemon import handoff as handoff_mod
+from claude_launcher.daemon import db, handoff as handoff_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -428,6 +428,105 @@ def test_merge_completion_delivers_to_the_origin_then_ends_the_fork(home, tmp_pa
             await client.close()
 
     asyncio.run(run())
+
+
+def test_merge_moves_the_forks_live_children_under_the_merge_target(
+    home, tmp_path, forkable, typed
+):
+    """claunch-dsqhp: A -> B(quick-fork) -> C. When B merges, A carries the
+    work B did, so it carries the sessions B spawned too. Leaving C under B
+    would send its reports to a terminal that has ended."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            assert (await client.post("/api/sessions/a/quick-fork", headers=BEARER)).status == 201
+            mgr.create(SessionDef(name="c1", harness="py", cwd=str(tmp_path), parent="a-qf1"))
+            mgr.create(SessionDef(name="c2", harness="py", cwd=str(tmp_path), parent="a-qf1"))
+            await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
+            resp = await client.post(
+                "/api/sessions/a-qf1/handoff",
+                json={"text": "## wrap-up\n- did the thing"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["target"] == "a" and doc["ended"] is True
+            assert doc["adopted"] == ["c1", "c2"]
+            assert mgr.get("c1").sdef.parent == "a"
+            assert mgr.get("c2").sdef.parent == "a"
+            assert sorted(mgr.children("a")) == ["a-qf1", "c1", "c2"]
+            # the daemon's next restart reads the same tree
+            saved = {
+                e["def"]["name"]: e["def"]["parent"]
+                for e in db.open_default().load_all()
+            }
+            assert saved["c1"] == "a" and saved["c2"] == "a"
+            report = [t for n, t in typed if n == "a"][-1]
+            assert (
+                "adopted: 2 live session(s) that a-qf1 spawned are now this "
+                "session's children: c1, c2." in report
+            )
+            # the line sits inside the block, before its closing fence
+            assert report.endswith(
+                "(their parent moved with the merge).\n---\n## wrap-up\n- did the thing"
+            )
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "the fork to end")
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_sibling_forks_children_follow_the_work_to_the_origin(
+    home, tmp_path, forkable, typed
+):
+    """A sibling-placed copy's children go to the session the wrap-up went
+    to, which is the origin — not the parent one level up (claunch-dsqhp)."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="g", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path), parent="g"))
+            resp = await client.post(
+                "/api/sessions/a/quick-fork", json={"sibling": True}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["session"]["parent"] == "g"
+            mgr.create(SessionDef(name="c", harness="py", cwd=str(tmp_path), parent="a-qf1"))
+            await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
+            resp = await client.post(
+                "/api/sessions/a-qf1/handoff", json={"text": "wrap"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["target"] == "a" and doc["adopted"] == ["c"]
+            assert mgr.get("c").sdef.parent == "a"
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "the fork to end")
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_marker_says_children_follow_the_merge():
+    text = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-0123abcd",
+        forked_at="2026-09-16T05:00:00+00:00",
+    )
+    assert (
+        "children: a session you spawn before merging becomes a child of "
+        "your merge's target when you merge" in text
+    )
 
 
 def test_a_quick_fork_does_not_merge_without_the_operators_request(home, tmp_path, forkable, typed):
