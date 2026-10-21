@@ -138,6 +138,8 @@ globalThis.MegaThreadPage = (() => {
     error: "",
     title: "",
     sessions: null,
+    filter: "",
+    picked: new Set(),
     busy: false,
   };
   let timer = null;
@@ -283,12 +285,15 @@ globalThis.MegaThreadPage = (() => {
     if (!title || state.busy) return;
     state.busy = true;
     try {
-      const picked = [...(view() || document).querySelectorAll(".mt-new-session:checked")]
-        .map((box) => box.value);
+      // The ticks live in state, so a filter keystroke or the poll cannot
+      // drop a selection the DOM would have lost on the last repaint.
+      const picked = [...state.picked];
       const res = await apiSend("/api/megathreads",
         { title, members: picked.map((session) => ({ session })) });
       wantId = res.mega.id;
       state.title = "";
+      state.filter = "";
+      state.picked.clear();
       state.notice = `mega thread를 만들었습니다: ${res.mega.title}`;
       await load();
     } catch (err) {
@@ -396,6 +401,62 @@ globalThis.MegaThreadPage = (() => {
     return isOpen(mega) ? "닫기" : "다시 열기";
   }
 
+  /* ---- the member picker (no DOM) --------------------------------------- */
+
+  /* A live session reads differently from one that has exited, and the rail
+     already carries the status; the picker only has to show it. */
+  function statusTone(status) {
+    if (status === "idle" || status === "busy") return "live";
+    if (!status) return "";
+    return "gone";
+  }
+
+  /* The second line of a row: what this session is working on. An empty
+     line is dropped rather than drawn as a separator with nothing after it. */
+  function sessionLine(session) {
+    const s = session || {};
+    const parts = [];
+    if (s.role) parts.push(String(s.role));
+    const task = String(s.task || s.issue || "").trim();
+    if (task) parts.push(task);
+    return parts.join(" · ");
+  }
+
+  /* The filter matches any field a reader might remember the session by.
+     Case is folded because names and tasks are typed in mixed case. */
+  function matchesFilter(session, query) {
+    const needle = String(query || "").trim().toLowerCase();
+    if (!needle) return true;
+    const s = session || {};
+    return [s.name, s.role, s.identity, s.task, s.issue, s.branch]
+      .filter(Boolean).join(" ").toLowerCase().includes(needle);
+  }
+
+  /* The rows the picker draws, already filtered, sorted by name, and marked
+     with whether the reader has ticked them. */
+  function pickerRows(sessions, query, picked) {
+    const on = picked instanceof Set ? picked : new Set(picked || []);
+    return (sessions || [])
+      .filter((s) => matchesFilter(s, query))
+      .slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map((s) => ({
+        name: String(s.name || ""),
+        line: sessionLine(s),
+        tone: statusTone(s.status),
+        checked: on.has(String(s.name || "")),
+      }));
+  }
+
+  /* What the line above the button says: why it is off, or what the click
+     will make. Silence here was the old behaviour and it read as a dead
+     button. */
+  function createHint(title, count) {
+    if (!String(title || "").trim()) return "제목을 입력하세요";
+    if (!count) return "멤버를 고르지 않으면 빈 mega thread가 만들어집니다";
+    return `${count}명으로 만듭니다`;
+  }
+
   function sideList(root) {
     const aside = node("aside", "mt-list");
     aside.appendChild(node("h2", null, "Mega threads"));
@@ -417,26 +478,92 @@ globalThis.MegaThreadPage = (() => {
     title.type = "text";
     title.placeholder = "새 mega thread 제목";
     title.value = state.title;
-    title.addEventListener("input", () => { state.title = title.value; });
+    title.addEventListener("input", () => {
+      state.title = title.value;
+      paintCounters(parts);
+    });
     form.appendChild(title);
-    const sessions = node("div", "mt-new-sessions");
-    for (const s of sessionNames()) {
-      const label = node("label", "mt-new-session-row");
+
+    /* The list is long enough that scrolling alone cannot find a session, so
+       the filter, the count and the clear button sit above it. */
+    const tools = node("div", "mt-new-tools");
+    const filter = document.createElement("input");
+    filter.type = "search";
+    filter.className = "mt-new-filter";
+    filter.placeholder = "이름·작업·이슈로 거르기";
+    filter.value = state.filter;
+    filter.addEventListener("input", () => {
+      state.filter = filter.value;
+      paintRows(parts);
+    });
+    tools.appendChild(filter);
+    const count = node("span", "mt-new-count");
+    tools.appendChild(count);
+    const clear = node("button", "mt-new-clear", "전체 해제");
+    clear.type = "button";
+    clear.addEventListener("click", () => {
+      state.picked.clear();
+      paintRows(parts);
+    });
+    tools.appendChild(clear);
+    form.appendChild(tools);
+
+    const list = node("div", "mt-new-sessions");
+    form.appendChild(list);
+    const hint = node("p", "mt-new-hint");
+    form.appendChild(hint);
+    const create = node("button", "wf-btn mt-new-create", "만들기");
+    create.type = "button";
+    create.addEventListener("click", createCluster);
+    form.appendChild(create);
+
+    const parts = { list, count, clear, hint, create };
+    paintRows(parts);
+    aside.appendChild(form);
+    root.appendChild(aside);
+  }
+
+  /* Ticking a row repaints the row and the counters, not the whole list: a
+     full repaint would take focus off the checkbox the reader just used. */
+  function paintRows(parts) {
+    if (!parts || !parts.list) return;
+    parts.list.innerHTML = "";
+    const rows = pickerRows(state.sessions || [], state.filter, state.picked);
+    for (const row of rows) {
+      const label = node("label", `mt-new-session-row${row.checked ? " on" : ""}`);
       const box = document.createElement("input");
       box.type = "checkbox";
       box.className = "mt-new-session";
-      box.value = s;
-      label.append(box, ` ${s}`);
-      sessions.appendChild(label);
+      box.value = row.name;
+      box.checked = row.checked;
+      box.addEventListener("change", () => {
+        if (box.checked) state.picked.add(row.name);
+        else state.picked.delete(row.name);
+        label.classList.toggle("on", box.checked);
+        paintCounters(parts);
+      });
+      label.appendChild(box);
+      label.appendChild(node("span", "mt-new-name", row.name));
+      if (row.line) label.appendChild(node("span", "mt-new-line", row.line));
+      if (row.tone) label.appendChild(node("span", `mt-new-dot ${row.tone}`));
+      parts.list.appendChild(label);
     }
-    form.appendChild(sessions);
-    const create = node("button", "wf-btn", "만들기");
-    create.type = "button";
-    create.disabled = state.busy || !state.title.trim();
-    create.addEventListener("click", createCluster);
-    form.appendChild(create);
-    aside.appendChild(form);
-    root.appendChild(aside);
+    if (!rows.length) {
+      parts.list.appendChild(node("p", "wf-note",
+        state.filter ? "거른 결과가 없습니다" : "고를 세션이 없습니다"));
+    }
+    paintCounters(parts);
+  }
+
+  function paintCounters(parts) {
+    if (!parts || !parts.count) return;
+    const n = state.picked.size;
+    parts.count.textContent = `${n}개 선택`;
+    parts.clear.disabled = n === 0;
+    parts.hint.textContent = createHint(state.title, n);
+    const ready = String(state.title || "").trim();
+    parts.hint.className = `mt-new-hint${ready ? (n ? " ok" : " warn") : ""}`;
+    parts.create.disabled = state.busy || !ready;
   }
 
   function sessionNames() {
