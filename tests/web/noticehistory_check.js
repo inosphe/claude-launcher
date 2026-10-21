@@ -386,6 +386,23 @@ function gotoRec(rec) {
             w.api.noticeHistory.every((e) => e.read), [w.badge(), w.api.noticeHistory]);
     check("and leaves nothing to mark", !w.press(w.nodes["notice-panel-body"], "Mark all read"), w.panel());
   }
+
+  /* --- the session link inside a history row (claunch-49fvl) ----------- */
+  {
+    const w = build();
+    w.api.notify("s2 asks", "why", { key: "k1", sticky: true, session: "s2" });
+    w.api.notify("no session", "a plain notice", { key: "k2", sticky: true });
+    w.api.noticePanelToggle(true);
+    const row = () => w.panelRows().find((r) => r.querySelector(".notice-title").textContent === "s2 asks");
+    const entry = (t) => w.api.noticeHistory.find((e) => e.title === t);
+    check("a row with a session starts unread",
+          entry("s2 asks").read === false && w.badge() === "2", [w.api.noticeHistory, w.badge()]);
+    w.press(row(), "s2").click();
+    check("its session link moves to that session and marks the row read",
+          w.loc.hash === "#/s/s2" && entry("s2 asks").read === true && w.badge() === "1",
+          [w.loc.hash, w.api.noticeHistory, w.badge()]);
+    check("and reads only that row", entry("no session").read === false, w.api.noticeHistory);
+  }
   {
     const storage = memoryStorage();
     storage.setItem("claunch.noticeSeen", JSON.stringify(BASE));
