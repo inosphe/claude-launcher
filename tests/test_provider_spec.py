@@ -310,18 +310,87 @@ def test_pi_reasoning_is_explicit_in_env_args_settings_and_model(home):
     assert written["defaultThinkingLevel"] == "high"
 
 
-@pytest.mark.parametrize(
-    ("entry", "missing"),
-    [
-        ({"reasoning_effort": "high"}, "openai_reasoning_format"),
-        ({"openai_reasoning_format": "deepseek"}, "reasoning_effort"),
-    ],
-)
-def test_pi_rejects_incomplete_reasoning_declaration(home, entry, missing):
-    _provider("ds", {**DEEPSEEK, **entry})
+def test_pi_rejects_a_format_without_an_effort(home):
+    _provider("ds", {**DEEPSEEK, "openai_reasoning_format": "deepseek"})
     p = _profile_on("work", "ds", harness="pi")
-    with pytest.raises(runner.RunnerError, match=missing):
+    with pytest.raises(runner.RunnerError, match="reasoning_effort"):
         runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+
+
+def test_pi_profile_effort_without_a_format_launches_without_reasoning(
+    home, caplog
+):
+    # A provider that cannot encode the profile's effort must not take the
+    # session down with it (gds6, 2026-10-22: fireworks + reasoning_effort).
+    _provider("ds", {**DEEPSEEK, "reasoning_effort": "low"})
+    p = _profile_on("work", "ds", harness="pi")
+    with caplog.at_level("WARNING", logger="claude_launcher.pi_provider"):
+        env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+    assert pi_provider.ENV_REASONING_EFFORT not in env
+    assert pi_provider.ENV_REASONING_FORMAT not in env
+
+    cmd = runner.harness_launch_args(p, harnesses.get("pi"), ["--continue"])
+    assert "--thinking" not in cmd
+    written = json.loads((p.config_dir / "pi" / "settings.json").read_text())
+    assert "defaultThinkingLevel" not in written
+    assert any(
+        "openai_reasoning_format" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_pi_caller_effort_beats_the_profile(home):
+    _provider("ds", {**DEEPSEEK, **EXPLICIT_REASONING})
+    p = _profile_on("work", "ds", harness="pi")
+    env = runner.harness_child_env(
+        p, harnesses.get("pi"), base_env={}, effort="low"
+    )
+    assert env[pi_provider.ENV_REASONING_EFFORT] == "low"
+    assert env[pi_provider.ENV_REASONING_FORMAT] == "deepseek"
+
+    cmd = runner.harness_launch_args(
+        p, harnesses.get("pi"), [], effort="low"
+    )
+    assert cmd[cmd.index("--thinking") + 1] == "low"
+    written = json.loads((p.config_dir / "pi" / "settings.json").read_text())
+    assert written["defaultThinkingLevel"] == "low"
+
+
+def test_pi_caller_effort_the_provider_cannot_encode_is_refused(home):
+    # Only an explicit request is a requirement we may fail; a profile
+    # default is dropped instead (the test above).
+    _provider("ds", DEEPSEEK)
+    p = _profile_on("work", "ds", harness="pi")
+    with pytest.raises(runner.RunnerError, match="openai_reasoning_format"):
+        runner.harness_child_env(
+            p, harnesses.get("pi"), base_env={}, effort="high"
+        )
+
+
+def test_pi_off_leaves_reasoning_to_the_caller(home):
+    _provider("ds", {**DEEPSEEK, **EXPLICIT_REASONING})
+    p = _profile_on("work", "ds", harness="pi")
+    settings = p.config_dir / "pi" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"defaultThinkingLevel": "high"}))
+
+    env = runner.harness_child_env(
+        p, harnesses.get("pi"), base_env={}, effort="off"
+    )
+    assert pi_provider.ENV_REASONING_EFFORT not in env
+    assert pi_provider.ENV_REASONING_FORMAT not in env
+
+    cmd = runner.harness_launch_args(
+        p, harnesses.get("pi"), [], effort="off"
+    )
+    assert "--thinking" not in cmd
+    # The level an earlier launch wrote is not left behind for this session.
+    written = json.loads(settings.read_text())
+    assert "defaultThinkingLevel" not in written
+
+
+def test_pi_declares_off_so_a_session_can_take_reasoning_over():
+    assert "off" in harnesses.get("pi").efforts
 
 
 def test_harness_without_reasoning_translation_rejects_the_field(home):

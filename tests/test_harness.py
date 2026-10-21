@@ -248,13 +248,68 @@ def test_selected_pi_effort_overrides_provider_default(
         if arg == "--thinking"
     ]
 
-    assert thinking_levels == ["high", "low"]
-    with pytest.raises(HarnessError, match="unknown effort 'xhigh'.*low, medium, high"):
+    # The session's own choice wins on both surfaces: the translated
+    # ``--thinking`` (from the profile) and the declaration's effort args.
+    assert thinking_levels == ["low", "low"]
+    with pytest.raises(
+        HarnessError, match="unknown effort 'xhigh'.*off, low, medium, high"
+    ):
         harness.normalize(
             SessionDef(
                 name="bad", profile="work:pi", cwd=str(tmp_path), effort="xhigh"
             )
         )
+
+
+def test_pi_off_session_hands_reasoning_to_its_caller(
+    home, tmp_path, monkeypatch
+):
+    original_which = harness.harness_registry.shutil.which
+    monkeypatch.setattr(
+        harness.harness_registry.shutil,
+        "which",
+        lambda program: sys.executable if program == "pi" else original_which(program),
+    )
+    work = profile.create("work")
+    lineage.set_harness(work, "pi")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "ds": {
+                    "api_key": "test-key",
+                    "endpoints": {
+                        "anthropic": "https://example.invalid/anthropic",
+                        "openai": "https://example.invalid",
+                    },
+                    "models": {"default": "deepseek-flash"},
+                    "reasoning_effort": "high",
+                    "openai_reasoning_format": "deepseek",
+                }
+            }
+        )
+    )
+    store.set_profile_field(work.name, "provider", "ds")
+
+    # Through ``from_dict`` on purpose: this is the path ``POST /api/sessions``
+    # takes, so a body ``{"effort": "off"}`` is what is being proved here.
+    sdef = harness.normalize(
+        SessionDef.from_dict(
+            {
+                "name": "x",
+                "profile": "work:pi",
+                "cwd": str(tmp_path),
+                "effort": "off",
+            }
+        )
+    )
+    argv, env, _ = harness.build_command(sdef)
+
+    assert "--thinking" not in argv
+    assert "CLAUNCH_PI_REASONING_EFFORT" not in env
+    assert "CLAUNCH_PI_REASONING_FORMAT" not in env
+    settings = work.config_dir / "pi" / "settings.json"
+    written = json.loads(settings.read_text()) if settings.is_file() else {}
+    assert "defaultThinkingLevel" not in written
 
 
 @pytest.mark.parametrize("model, model_id", [

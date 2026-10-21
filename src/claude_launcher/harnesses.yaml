@@ -105,7 +105,12 @@ harnesses:
     auth: api-key
     token_env: ANTHROPIC_API_KEY
     provider_adapter: pi
-    efforts: [low, medium, high]
+    # `off` is not a level to pass on: it tells claunch the caller encodes
+    # reasoning itself, so no --thinking, CLAUNCH_PI_REASONING_* or
+    # settings.json default is imposed for that session (pi_provider.
+    # EFFORT_CALLER_MANAGES).
+    # Quoted: YAML would read a bare `off` as boolean false.
+    efforts: ["off", low, medium, high]
     effort_args: [--thinking, "{effort}"]
     # pi's TUI enables DECSET 2004 at startup; wait for it (and a quiet
     # screen) before typing the opening task -- pasted at 'immediate' the

@@ -10,6 +10,7 @@ does not modify the user's Pi settings or ``models.json``.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -70,6 +71,14 @@ PROJECTION_ENV = frozenset(
 
 _SELECTION_FLAGS = ("--provider", "--model", "--models")
 
+#: A session effort of this value says the caller supplies reasoning itself
+#: (per request, from its own extension): claunch then projects none of its
+#: own -- no ``CLAUNCH_PI_*`` reasoning, no ``--thinking`` and no
+#: ``settings.json`` default. It is Pi's own name for "thinking disabled".
+EFFORT_CALLER_MANAGES = "off"
+
+log = logging.getLogger(__name__)
+
 
 class PiProviderError(Exception):
     """Raised when a selected provider cannot be represented for Pi."""
@@ -89,6 +98,9 @@ class Projection:
     max_tokens: Optional[int] = None
     reasoning_effort: Optional[str] = None
     reasoning_format: Optional[str] = None
+    #: Set when a declared effort could not be carried; ``apply_env`` logs it.
+    #: The launch itself proceeds, without reasoning.
+    warning: Optional[str] = None
 
 
 def extension_path() -> Path:
@@ -141,8 +153,59 @@ def profile_default_tools(profile: Profile) -> tuple[str, ...]:
     )
 
 
+def caller_manages_effort(harness, effort) -> bool:
+    """Whether this session hands reasoning to its caller untouched."""
+    return harness.provider_adapter == ADAPTER and (
+        str(effort or "").strip().lower() == EFFORT_CALLER_MANAGES
+    )
+
+
+def projected_effort(
+    spec, effort, *, provider: Optional[str] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """The reasoning effort this launch carries, and a warning when dropped.
+
+    The caller's choice comes first: a session that was launched with an
+    explicit level keeps it, and one launched with ``off`` gets no effort at
+    all because its caller encodes reasoning per request. Without a caller
+    choice the profile's ``reasoning_effort`` applies.
+
+    A provider that cannot encode the profile's effort (it declares no
+    ``openai_reasoning_format``) is not a reason to refuse the session: the
+    effort is dropped and the second value says why, so the launch proceeds
+    without reasoning. A caller who named the level explicitly is refused
+    instead -- that is a requirement we cannot meet, not a default we can
+    leave out.
+    """
+    caller = str(effort or "").strip().lower() or None
+    if caller == EFFORT_CALLER_MANAGES:
+        return None, None
+    if caller:
+        if not spec.openai_reasoning_format:
+            name = provider or "the selected provider"
+            raise PiProviderError(
+                f"provider {name!r} cannot launch Pi with reasoning effort "
+                f"{caller!r}: openai_reasoning_format is not declared"
+            )
+        return caller, None
+    if spec.reasoning_effort and not spec.openai_reasoning_format:
+        name = provider or "the selected provider"
+        return None, (
+            f"provider {name!r} declares reasoning_effort "
+            f"{spec.reasoning_effort!r} but no openai_reasoning_format; "
+            "launching without explicit reasoning rather than refusing the "
+            "session. Add openai_reasoning_format to the provider, or pass "
+            "'--effort off' to run without a launcher-imposed effort."
+        )
+    return spec.reasoning_effort, None
+
+
 def resolve(
-    profile: Profile, harness, *, borrow: Optional[Profile] = None
+    profile: Profile,
+    harness,
+    *,
+    borrow: Optional[Profile] = None,
+    effort: Optional[str] = None,
 ) -> Optional[Projection]:
     """Translate the selected provider's spec into Pi's provider vocabulary.
 
@@ -189,19 +252,23 @@ def resolve(
             f"provider {name!r} cannot launch Pi: no models are declared "
             f"(set providers.{name}.models.default)"
         )
-    reasoning_effort = spec.reasoning_effort
-    reasoning_format = spec.openai_reasoning_format
-    if bool(reasoning_effort) != bool(reasoning_format):
-        missing = (
-            "openai_reasoning_format"
-            if reasoning_effort
-            else "reasoning_effort"
-        )
-        raise PiProviderError(
-            f"provider {name!r} cannot launch Pi with explicit reasoning: "
-            f"{missing} is not declared (reasoning_effort and "
-            "openai_reasoning_format must be set together)"
-        )
+    if caller_manages_effort(harness, effort):
+        # The caller projects reasoning itself; even the profile's format
+        # metadata must not reach the extension, or it would encode a level
+        # the caller never asked for.
+        reasoning_effort, reasoning_format, warning = None, None, None
+    else:
+        reasoning_effort, warning = projected_effort(spec, effort, provider=name)
+        reasoning_format = spec.openai_reasoning_format or None
+        if reasoning_format and not reasoning_effort:
+            # A provider that declares the request encoding but is never
+            # asked for a level is a broken declaration: unlike a missing
+            # format, it cannot be read as "run without reasoning".
+            raise PiProviderError(
+                f"provider {name!r} cannot launch Pi with explicit reasoning: "
+                "reasoning_effort is not declared (reasoning_effort and "
+                "openai_reasoning_format must be set together)"
+            )
     max_tokens = None
     raw_max = spec.option_env("pi").get(ENV_MAX_TOKENS)
     if raw_max is not None:
@@ -223,11 +290,17 @@ def resolve(
         max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
         reasoning_format=reasoning_format,
+        warning=warning,
     )
 
 
 def apply_env(
-    profile: Profile, harness, env: dict, *, borrow: Optional[Profile] = None
+    profile: Profile,
+    harness,
+    env: dict,
+    *,
+    borrow: Optional[Profile] = None,
+    effort: Optional[str] = None,
 ) -> None:
     """Replace inherited adapter state with this profile's projection.
 
@@ -241,9 +314,11 @@ def apply_env(
     """
     for key in PROJECTION_ENV:
         env.pop(key, None)
-    projection = resolve(profile, harness, borrow=borrow)
+    projection = resolve(profile, harness, borrow=borrow, effort=effort)
     if projection is None:
         return
+    if projection.warning:
+        log.warning("%s", projection.warning)
     auth_source = borrow if borrow is not None else profile
     base_url = fronted_base_url(
         projection.base_url, providers.resolve_name(auth_source)
@@ -320,6 +395,7 @@ def launch_args(
     args: Sequence[str],
     *,
     tools: Optional[Sequence[str]] = None,
+    effort: Optional[str] = None,
 ) -> list[str]:
     """Prepend Pi's extensions and default model when required.
 
@@ -337,7 +413,7 @@ def launch_args(
     adapter_args: list[str] = ["--extension", str(activity_extension_path())]
     if enabled_tools(profile, harness, override=tools):
         adapter_args += ["--extension", str(tools_extension_path())]
-    projection = resolve(profile, harness)
+    projection = resolve(profile, harness, effort=effort)
     if projection is None:
         return [*adapter_args, *forwarded]
     adapter_args += ["--extension", str(extension_path())]
