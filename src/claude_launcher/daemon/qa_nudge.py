@@ -61,6 +61,7 @@ from aiohttp import web
 
 from .. import store
 from . import jev, paths, transcript_view
+from .session import delivery_wake
 
 log = logging.getLogger(__name__)
 
@@ -510,7 +511,8 @@ class QaNudgeClock:
             journal({**row, "delivered": False, "why": "no_longer_idle"})
             return action.key
         try:
-            delivered = bool(await session.deliver(action.message))
+            with delivery_wake("notice"):
+                delivered = bool(await session.deliver(action.message))
         except Exception:
             log.exception("qa nudge delivery to %r failed", name)
             delivered = False

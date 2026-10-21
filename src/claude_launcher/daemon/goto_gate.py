@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from ..cflow import engine as cflow_engine, state as cflow_state
+from .session import delivery_wake
 
 #: How long an unanswered request stays open before it counts as approval.
 #: The user's spec: "5분 지나서 fallback 되면 자동 승인". Pinned in a test
@@ -468,9 +469,10 @@ class GotoGate:
             if session.exited:
                 return
             try:
-                await session.deliver(
-                    "goto-gate: " + message
-                )
+                with delivery_wake("notice"):
+                    await session.deliver(
+                        "goto-gate: " + message
+                    )
             except Exception:  # noqa: BLE001
                 pass
 

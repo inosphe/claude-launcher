@@ -73,6 +73,7 @@ from . import cflow2_web
 from . import harness as harness_mod, mcp_ready, mesh_roles
 from .harness import CLAUDE_HARNESS
 from .mesh import LEADER_IMPLIES, LEADER_ROLE, MeshError
+from .session import delivery_wake
 
 log = logging.getLogger(__name__)
 
@@ -1057,7 +1058,9 @@ async def _deliver_until_it_lands(session, block, *, before=None) -> None:
         if session.exited and not getattr(session, "held_at", None):
             return
         kw = {"before": before} if before is not None else {}
-        if await session.deliver(block, **kw):
+        with delivery_wake("notice"):
+            delivered = await session.deliver(block, **kw)
+        if delivered:
             return
         await asyncio.sleep(1.0)
     log.warning(

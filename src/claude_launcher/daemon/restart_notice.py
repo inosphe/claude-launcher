@@ -61,7 +61,7 @@ from typing import Dict, Iterable, List, Optional
 from .. import atomic
 from ..harnesses import CLAUDE_HARNESS
 from . import paths
-from .session import INPUT_SETTLE, STATUS_IDLE, STATUS_STARTING
+from .session import INPUT_SETTLE, STATUS_IDLE, STATUS_STARTING, delivery_wake
 
 log = logging.getLogger("claunch.daemon.restart")
 
@@ -548,7 +548,9 @@ class RestartNotice:
 
         if not self._ready(session, name):
             return False
-        if not await session.deliver(debt.get("text") or ""):
+        with delivery_wake("notice"):
+            delivered = await session.deliver(debt.get("text") or "")
+        if not delivered:
             # Held, not dropped: the composer has an unsent line, or the TUI
             # is not taking the keyboard yet. Both pass.
             return False

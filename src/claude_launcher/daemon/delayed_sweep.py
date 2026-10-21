@@ -13,6 +13,7 @@ from pathlib import Path
 from ..delayed_sweep import BATCH_SETTLE, BATCH_SIZE, NOTIFIED, Queue
 from .. import config, store, test_window
 from . import instance_manifest, paths
+from .session import delivery_wake
 
 log = logging.getLogger("claunch.daemon.delayed_sweep")
 
@@ -110,7 +111,9 @@ class Clock:
                              "--job <id>', or 'cancel --job <id> --reason ...'. "
                              if job["status"] == "stuck" else "")
                           + "Live deployment is separate.\n---")
-                if await session.deliver(notice):
+                with delivery_wake("notice"):
+                    delivered = await session.deliver(notice)
+                if delivered:
                     queue.notified(job["id"])
             except KeyError:
                 pass

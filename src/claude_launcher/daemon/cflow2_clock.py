@@ -95,6 +95,7 @@ from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
 from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths
+from .session import delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -375,7 +376,8 @@ class Cflow2Clock:
                                        deliver=text)
             return
         try:
-            session.queue_delivery(text)
+            with delivery_wake("cflow2"):
+                session.queue_delivery(text)
         except Exception:
             log.exception("cflow2 notice delivery to %r failed", name)
 

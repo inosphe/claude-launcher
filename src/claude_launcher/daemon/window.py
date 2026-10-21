@@ -160,6 +160,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .. import atomic, store
 from . import paths
+from .session import delivery_wake
 
 log = logging.getLogger(__name__)
 
@@ -1996,7 +1997,8 @@ class WindowReminderClock:
         if getattr(session, "exited", False):
             return
         try:
-            delivered = await session.deliver(reminder_block(holder))
+            with delivery_wake("notice"):
+                delivered = await session.deliver(reminder_block(holder))
         except Exception:
             log.exception("window reminder delivery to %r failed", session_name)
             return
