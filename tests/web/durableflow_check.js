@@ -118,6 +118,69 @@ assert.strictEqual(bad.nodes[2].label, "mystery");
 assert.strictEqual(bad.nodes[3].label, "오류");
 assert.strictEqual(bad.pending, null, "an error ends the run");
 
+// -- the run this one continued from, drawn shadowed (claunch-0n5jr) --------
+const PREV = [
+  { at: at("30:00"), event: "session_start", reason: "startup" },
+  { at: at("30:01"), event: "ask", role: "B", key: "formalize:1", usage: u(10), stop: "stop" },
+  { at: at("30:02"), event: "run_end", state: "done", tally: {} },
+];
+const ANC = [{ runId: "prev", round: 26, events: PREV }];
+const cur = DF.model([{ at: at("34:16"), event: "continued",
+                        from: { runId: "prev", runDir: "/runs/prev", round: 26 } },
+                      ...LOG.slice(0, 6)], true);
+// The fork itself is not a node: the connector carries it.
+assert.ok(!cur.nodes.some((n) => n.id === "ev:continued"), "continued draws no box of its own");
+const prevM = DF.model(PREV, false);
+const comp = DF.withAncestors(cur, ANC);
+assert.strictEqual(DF.withAncestors(cur, []), cur, "no ancestors: the model is returned as is");
+assert.strictEqual(comp.cols.length, prevM.cols.length + cur.cols.length);
+assert.strictEqual(comp.nodes.length, prevM.nodes.length + cur.nodes.length);
+assert.strictEqual(comp.cols[0].cls, "anc", "the ancestor's columns are dimmed");
+assert.strictEqual(comp.cols[prevM.cols.length].cls, undefined, "the live run's are not");
+const ancStart = comp.nodes.find((n) => n.id === "anc0:start");
+assert.ok(/anc/.test(ancStart.cls), "an ancestor node carries the dim class");
+assert.strictEqual(ancStart.col, 0);
+const liveHead = comp.nodes.find((n) => n.id === cur.nodes[0].id);
+assert.strictEqual(liveHead.col, prevM.cols.length, "the live run starts after the ancestor's columns");
+assert.strictEqual(comp.edges.filter((e) => e.anc).length, prevM.edges.length);
+const link = comp.edges.find((e) => e.id === "anc-link");
+assert.ok(link && link.link, "one connector joins the runs");
+assert.strictEqual(link.from.id, "anc0:run_end", "from the ancestor's last node");
+assert.strictEqual(link.to.id, cur.nodes[0].id, "into the live run's first node");
+assert.match(comp.cols[prevM.cols.length].title, /rev 26에서 이어받음/,
+             "the column the connector lands in names the round");
+// A run whose own log says it continued something keeps its layout: an
+// ancestor's `continued` is not drawn either, only followed by the daemon.
+const deeper = DF.withAncestors(cur, [{ runId: "older", round: 1, events: [
+  { event: "continued", from: { runId: "root", runDir: "/runs/root", round: 0 } }, ...PREV] }, ...ANC]);
+assert.strictEqual(deeper.cols.filter((c) => c.cls === "anc").length, 2 * prevM.cols.length);
+
+// -- plan and `after` on a SIM_RUN_DIR log (gds6's dfv2 review runs) -------
+// The producer writes no `session` column; the plan names the peers and the
+// 'codex' role that waits for all three.
+const PLAN2 = [
+  { at: at("40:00"), role: "sim-run", event: "session_start" },
+  { at: at("40:00"), role: "sim-run", event: "run_start", rounds: 1 },
+  { at: at("40:01"), role: "sim-run", event: "plan", units: [
+    { unit: "peer:a", phase: "검토" }, { unit: "peer:b", phase: "검토" },
+    { unit: "peer:c", phase: "검토" },
+    { unit: "codex", phase: "검토", after: ["peer:a", "peer:b", "peer:c"] }] },
+  { at: at("40:02"), role: "sim-run", event: "unit", unit: "peer:a", state: "start", phase: "검토" },
+  { at: at("40:03"), role: "sim-run", event: "unit", unit: "peer:b", state: "start", phase: "검토" },
+  { at: at("40:04"), role: "sim-run", event: "unit", unit: "peer:c", state: "start", phase: "검토" },
+  { at: at("40:05"), role: "sim-run", event: "unit", unit: "codex", state: "start" },
+];
+const planned = DF.model(PLAN2, true);
+const pu = Object.fromEntries(planned.nodes.filter((n) => n.unit).map((n) => [n.unit, n]));
+assert.strictEqual(pu["peer:a"].col, pu["peer:b"].col, "the three peers share a column");
+assert.strictEqual(pu["peer:b"].col, pu["peer:c"].col);
+assert.strictEqual(pu["codex"].col, pu["peer:a"].col + 1, "codex draws after the peers");
+assert.deepStrictEqual(pu["codex"].after, ["peer:a", "peer:b", "peer:c"]);
+for (const peer of ["peer:a", "peer:b", "peer:c"]) {
+  assert.ok(planned.edges.some((e) => e.id === `unit:${peer}>unit:codex`), `${peer} feeds codex`);
+}
+assert.strictEqual(planned.plan.total, 4);
+
 // -- mount: tail polls and in-place updates ----------------------------------
 const feeds = [
   { live: true, upto: 4, progress: { stage: "formalize", text: "reading" } },
@@ -176,6 +239,36 @@ const timers = { setInterval: () => 7, clearInterval: () => { cleared++; } };
   assert.strictEqual(cleared, 1, "the poll stops once the session is gone");
   assert.match(host.children[0].children[1].textContent, /sim-998894 · 세션 종료 · 사건 18 · 질문 6/);
   view.unmount();
+
+  // A run that continued an earlier one: the first poll's `ancestors` are
+  // drawn shadowed to the left, the tail polls do not carry them again, and
+  // the live run keeps its own nodes after them (claunch-0n5jr).
+  const aCalls = [];
+  async function apiAnc(url) {
+    aCalls.push(url);
+    const since = Number(new URL(url, "http://x").searchParams.get("since"));
+    const body = { sim: "sim-anc", live: true, total: LOG.length, since, events: LOG.slice(since) };
+    if (since === 0) body.ancestors = ANC;
+    return { ok: true, json: async () => body };
+  }
+  const host2 = new El("div");
+  const view2 = DF.mount(host2, "sim-anc-run1", { doc, api: apiAnc, timers, interval: 1000 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.strictEqual(aCalls[0], "/api/sessions/sim-anc-run1/durable?since=0");
+  const ancStart2 = view2.view.nodes.get("anc0:start");
+  assert.ok(ancStart2, "the ancestor's nodes are drawn");
+  assert.match(ancStart2.g.getAttribute("class"), /dfl-node .*\banc\b/);
+  assert.ok(view2.view.edges.has("anc-link"), "the connector is drawn");
+  assert.match(view2.view.edges.get("anc-link").getAttribute("class"), /anc-link/);
+  assert.ok(view2.view.nodes.get("start"), "the live run's node ids do not change");
+  assert.match(host2.children[0].children[1].textContent, /이전 run 1/);
+  await view2.refresh();
+  assert.strictEqual(aCalls[1], `/api/sessions/sim-anc-run1/durable?since=${LOG.length}`,
+                     "the tail poll asks for the live run alone");
+  assert.strictEqual(view2.view.nodes.get("anc0:start").g, ancStart2.g, "the ancestor is not rebuilt");
+  assert.ok(view2.view.edges.has("anc-link"), "the connector survives a tail poll");
+  view2.unmount();
+
   console.log("durableflow_check: ok");
 })().catch((e) => { console.error(e); process.exit(1); });
 

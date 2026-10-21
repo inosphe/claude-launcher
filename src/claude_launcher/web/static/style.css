@@ -4366,6 +4366,14 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-sub { fill: #8b949e; font-size: 10px; }
 .dfl-edge { fill: none; stroke: #4d5566; stroke-width: 1.4; }
 .dfl-edge.live { stroke: #58a6ff; stroke-dasharray: 4 4; }
+/* The runs this run continued from (claunch-0n5jr): their columns sit left
+   of the live run, dimmed so the live run keeps the picture's weight. The
+   dimming is opacity, not a colour, so it holds in either theme. */
+.dfl-node.anc { opacity: 0.45; }
+.dfl-node.anc rect { fill: none; stroke-dasharray: 3 3; }
+.dfl-head.anc { opacity: 0.5; }
+.dfl-edge.anc { stroke-dasharray: 3 3; opacity: 0.4; }
+.dfl-edge.anc-link { stroke: #58a6ff; stroke-dasharray: 5 3; opacity: 0.6; }
 @keyframes dfl-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes dfl-march { to { stroke-dashoffset: -20; } }
 @media (prefers-reduced-motion: reduce) {
