@@ -1084,10 +1084,14 @@ Vertex and Foundry included); a subscription in overage falls back to 5
 minutes. Subagents and background helpers read their own
 `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`.
 
-claunch sets neither value; it reports the one a session resolves.
+claunch sets neither value; it reports the one sessions inherit.
 `claunch providers` prints it beside each provider, and the Settings page
-shows it on each row of the sticky-affinity card. A profile's `env` can set
-the variable, and the reported value follows it.
+shows it on each row of the sticky-affinity card. The value comes from the
+launching process's environment (the base layer every session inherits),
+otherwise the harness's automatic choice for the provider's service. Two
+layers sit above that base and are not read here: a profile's own `env`, and
+the harness's settings file (`promptCacheTtl`), so a profile that sets either
+can still run on a different TTL than the reported one.
 
 ### Throughput records for API-key providers (`claunch tps`)
 

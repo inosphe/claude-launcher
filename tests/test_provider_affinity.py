@@ -54,7 +54,10 @@ def _row(data, name):
     return next(r for r in data["providers"] if r["name"] == name)
 
 
-def test_get_answers_one_row_per_provider(home):
+def test_get_answers_one_row_per_provider(home, monkeypatch):
+    # The row reports the TTL the launcher's own environment resolves, so pin
+    # it: a session that exports the variable must not change this test.
+    monkeypatch.delenv("CLAUDE_CODE_PROMPT_CACHE_TTL", raising=False)
     _write_providers()
 
     async def body(client):
@@ -73,6 +76,20 @@ def test_get_answers_one_row_per_provider(home):
         # reports the harness's own automatic value for that service
         assert _row(data, "fw")["prompt_cache_ttl"] == "5m"
         assert _row(data, "fw")["prompt_cache_ttl_source"] == "automatic (API key)"
+
+    _with_client(body)
+
+
+def test_get_reports_an_environment_override(home, monkeypatch):
+    _write_providers()
+    monkeypatch.setenv("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h")
+
+    async def body(client):
+        resp = await client.get("/api/provider-affinity", headers=BEARER)
+        assert resp.status == 200
+        row = _row(await resp.json(), "fw")
+        assert row["prompt_cache_ttl"] == "1h"
+        assert row["prompt_cache_ttl_source"].startswith("environment")
 
     _with_client(body)
 

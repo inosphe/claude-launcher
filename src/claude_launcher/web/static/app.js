@@ -32867,8 +32867,9 @@ function providerAffinityCard() {
     "Prompt cache TTL is the claude harness's own setting, per provider: it " +
     "defaults to 1h on a Claude subscription and 5m on an API key, and " +
     "CLAUDE_CODE_PROMPT_CACHE_TTL (or the harness's promptCacheTtl setting) " +
-    "overrides it. claunch sets neither; each row shows the value a session " +
-    "on that provider resolves."));
+    "overrides it. claunch sets neither; each row shows the value sessions " +
+    "inherit from the launcher's environment, otherwise the automatic value. " +
+    "A profile's own env or the harness's settings file can still differ."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
     card.appendChild(el("p", "wf-note", "reading…"));

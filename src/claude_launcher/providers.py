@@ -319,14 +319,19 @@ PROMPT_CACHE_TTL_API_KEY = "5m"
 def prompt_cache_ttl(
     name: str, doc: Optional[dict] = None, env: Optional[dict] = None
 ) -> Dict[str, str]:
-    """The prompt-cache TTL the claude harness resolves for ``name``, and why.
+    """The prompt-cache TTL sessions inherit on ``name``, and why.
 
-    The launcher does not set this value; it reports the one the harness will
-    use, so an operator can tell a 5-minute cache from a 1-hour one without
-    reading the harness. Precedence: the environment variable (a profile's
-    ``env`` is part of the child's environment) over the harness's automatic
-    choice for the provider's service. A malformed value is ignored, which is
-    what the harness does with it too.
+    The launcher does not set this value; it reports the one the harness
+    resolves, so an operator can tell a 5-minute cache from a 1-hour one
+    without reading the harness. Precedence: the environment variable as this
+    process sees it (the launcher hands its own environment to sessions as the
+    base layer) over the harness's automatic choice for the provider's service.
+    A malformed value is ignored, which is what the harness does with it too.
+
+    This reads one environment, not every layer a launch can have: a profile's
+    own ``env`` sits *above* the base environment, and the harness's settings
+    file (``promptCacheTtl``) can set the value as well, so a session on a
+    profile that sets either can still use a different TTL than this answers.
     """
     env = os.environ if env is None else env
     wanted = str(env.get(PROMPT_CACHE_TTL_ENV) or "").strip().lower()
