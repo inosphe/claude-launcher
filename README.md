@@ -1044,6 +1044,29 @@ ends them. If it cannot start, the **launch fails** rather than falling back to
 the direct URL: silently unpinning the request is the exact failure this
 feature exists to prevent.
 
+### Sticky session affinity (prompt-cached backends)
+
+Backends whose prompt cache lives on a single replica only serve a session's
+requests from cache while those requests keep reaching that replica. Fireworks
+serverless is the case this exists for — their prompt-caching guide recommends
+a stable `user`/`x-session-affinity` key per session. A provider can declare:
+
+```yaml
+providers:
+  fireworks:
+    session_affinity: true
+    endpoints: {anthropic: "https://api.fireworks.ai/inference", ...}
+```
+
+The shim then forwards the calling session's name as the `x-session-affinity`
+header on every request — the same header name the backend documents, so both
+the Claude (Anthropic protocol) and Pi (OpenAI protocol) paths carry it. The
+private `X-Claunch-Session` header the launcher uses internally is still
+stripped and never reaches the upstream. A caller that sets
+`x-session-affinity` itself keeps its value. The flag is part of the shim's
+identity: enabling or disabling it never reuses a shim started for the other
+choice, and shims started before the flag existed are untouched.
+
 ### Throughput records for API-key providers (`claunch tps`)
 
 Sessions on the Anthropic OAuth route (a subscription profile, `provider:

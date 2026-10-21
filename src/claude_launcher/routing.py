@@ -35,6 +35,16 @@ enough — between binding and answering there is a window where a shim looks
 like a stranger, and the next caller starts a duplicate beside it.) A changed
 spec is a different fingerprint, so config edits are picked up by the next
 launch instead of being served stale by a running shim.
+
+The same shim carries one more provider-declared behaviour: sticky session
+affinity. Backends whose prompt cache lives on a single replica (Fireworks
+serverless is the case this exists for — see their prompt-caching guide, which
+recommends a stable ``user``/``x-session-affinity`` key) serve a session's
+requests from cache only while those requests keep reaching that replica. A
+provider that declares ``session_affinity: true`` gets a shim that forwards
+the calling session's name as the ``x-session-affinity`` header (see
+:data:`AFFINITY_HEADER`). The header is part of the fingerprint, so enabling
+or disabling it never rides a shim started for the other choice.
 """
 
 from __future__ import annotations
@@ -55,6 +65,18 @@ from . import config, metering, store
 
 #: Per-provider config key holding the body spec (``providers.<name>.routing``).
 SPEC_KEY = "routing"
+
+#: Per-provider config key enabling the sticky session-affinity header
+#: (``providers.<name>.session_affinity``). Backends whose prompt cache lives
+#: on one replica (Fireworks serverless, see their prompt-caching guide)
+#: recommend a stable ``user``/``x-session-affinity`` key so a session's
+#: requests keep reaching the replica that holds its cache.
+AFFINITY_KEY = "session_affinity"
+
+#: Header the shim adds when affinity is enabled. The session name rides in on
+#: the private ``X-Claunch-Session`` header (see :mod:`metering`); the shim
+#: forwards it under this name so the upstream can route stickily.
+AFFINITY_HEADER = "x-session-affinity"
 
 #: Body field the spec is merged into. OpenRouter's name for it.
 BODY_FIELD = "provider"
@@ -122,6 +144,28 @@ def configured(doc: Optional[dict] = None) -> Dict[str, Dict]:
     return out
 
 
+def session_affinity(provider_name: str, doc: Optional[dict] = None) -> bool:
+    """Whether ``provider_name`` declared the sticky session-affinity header.
+
+    Absent key is off. A present non-bool is a config error, not something to
+    guess at — the launch fails so a typo never silently drops the header.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return False
+    entry = section.get(provider_name)
+    if not isinstance(entry, dict):
+        return False
+    value = entry.get(AFFINITY_KEY, False)
+    if not isinstance(value, bool):
+        raise RoutingError(
+            f"providers.{provider_name}.{AFFINITY_KEY} must be a boolean "
+            f"(got {type(value).__name__})"
+        )
+    return value
+
+
 def set_spec(provider_name: str, block: Optional[Dict]) -> None:
     """Write (or, with ``None``, drop) a provider's routing spec."""
     if block is not None and (not isinstance(block, dict) or not block):
@@ -154,14 +198,17 @@ def canonical(block: Dict) -> str:
     return json.dumps(block, sort_keys=True, separators=(",", ":"))
 
 
-def fingerprint(upstream: str, block: Dict) -> str:
+def fingerprint(upstream: str, block: Dict, affinity: bool = False) -> str:
     """Identity of one shim: the upstream it fronts and the spec it merges.
 
     An empty spec is a valid identity — the metering-only shim for that
-    upstream (see :mod:`metering`).
+    upstream (see :mod:`metering`). ``affinity`` is part of the identity too:
+    a shim that adds the session-affinity header must not be shared with, or
+    mistaken for, one that does not. The default keeps every fingerprint that
+    predates the flag unchanged.
     """
     return hashlib.sha256(
-        f"{upstream}\n{canonical(block)}".encode("utf-8")
+        f"{upstream}\n{canonical(block)}\n{int(bool(affinity))}".encode("utf-8")
     ).hexdigest()[:16]
 
 
@@ -283,10 +330,21 @@ def _shim_env() -> dict:
     return env
 
 
-def _spawn(upstream: str, block: Dict, port: int, fp: str) -> "subprocess.Popen":
+def _spawn(upstream: str, block: Dict, port: int, fp: str, affinity: bool) -> "subprocess.Popen":
     """Start a detached shim process; its output goes to the fingerprint's log."""
     state_dir().mkdir(parents=True, exist_ok=True)
     log = open(log_file(fp), "ab")
+    argv = [
+        sys.executable,
+        "-m",
+        "claude_launcher.routing_shim",
+        "--upstream", upstream,
+        "--spec", canonical(block),
+        "--port", str(port),
+        "--fingerprint", fp,
+    ]
+    if affinity:
+        argv.append("--session-affinity")
     kwargs: dict = {}
     if sys.platform == "win32":
         CREATE_NO_WINDOW = 0x08000000
@@ -296,15 +354,7 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str) -> "subprocess.Popen"
         kwargs["start_new_session"] = True
     try:
         return subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "claude_launcher.routing_shim",
-                "--upstream", upstream,
-                "--spec", canonical(block),
-                "--port", str(port),
-                "--fingerprint", fp,
-            ],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
@@ -418,14 +468,16 @@ def _free_port(fp: str) -> Optional[int]:
     return None
 
 
-def ensure_shim(upstream: str, block: Dict) -> str:
+def ensure_shim(upstream: str, block: Dict, affinity: bool = False) -> str:
     """Base URL of a live shim fronting ``upstream`` with ``block`` merged in.
 
     Reuses a running shim for the same pair and starts one otherwise. Callers
     that arrive together converge on a single shim: one of them takes the start
-    claim and the others wait for what it starts.
+    claim and the others wait for what it starts. With ``affinity`` the shim
+    also forwards the calling session's name as ``x-session-affinity`` (see
+    :data:`AFFINITY_KEY`); that need is part of the shim's identity.
     """
-    fp = fingerprint(upstream, block)
+    fp = fingerprint(upstream, block, affinity)
     port = _find(fp)
     if port is not None:
         _record(fp, port, upstream, block, None)
@@ -460,7 +512,7 @@ def ensure_shim(upstream: str, block: Dict) -> str:
                 f"no free loopback port for the routing shim in "
                 f"{candidate_ports(fp)[0]}..{candidate_ports(fp)[-1]}"
             )
-        child = _spawn(upstream, block, start_port, fp)
+        child = _spawn(upstream, block, start_port, fp, affinity)
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             info = health(start_port, timeout=0.5)
@@ -500,12 +552,13 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None) -> str:
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
+    affinity = session_affinity(provider_name, doc)
     if block:
-        return ensure_shim(upstream, block)
+        return ensure_shim(upstream, block, affinity)
     if not metering.provider_enabled(provider_name, doc):
         return upstream
     try:
-        return ensure_shim(upstream, {})
+        return ensure_shim(upstream, {}, affinity)
     except RoutingError as exc:
         print(
             f"claunch: metering shim for provider {provider_name!r} unavailable, "
