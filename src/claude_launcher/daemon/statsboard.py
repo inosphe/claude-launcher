@@ -83,10 +83,28 @@ TAIL_MAX = 64
 
 UNIT = "day"
 
+#: The two ways a session can be over. Each has its own box on the page: a
+#: killed session was ended early, an archived one was put away after its
+#: work, and a reader often wants one without the other.
+ENDED_CATEGORIES = ("killed", "archived")
+
 #: Providers whose backend is the vendor's own login rather than a declared
 #: base URL. They never reach the routing shim, so the ledger has nothing for
-#: them and their rows read ``source: "none"``.
+#: them; their figures come from the session's own transcript instead
+#: (``source: "transcript"``), or not at all (``source: "none"``).
 OAUTH_PROVIDERS = ("default", "claude", "codex", "devin")
+
+#: How many sessions one overview call may read from their transcripts. The
+#: reading is incremental and kept for :data:`TRANSCRIPT_TTL`, but the first
+#: pass over a busy machine's transcripts is the cost claunch-3r94d took off
+#: the event loop; the cap keeps one request from paying it for every session
+#: at once.
+MAX_TRANSCRIPTS = 200
+
+#: How long one session's day-bucketed reading is reused. The reading itself
+#: advances incrementally (``tokenusage`` keeps the file offset); this only
+#: saves re-walking the file list on every poll while the page is open.
+TRANSCRIPT_TTL = 60.0
 
 
 def _number(value) -> int:
@@ -569,6 +587,102 @@ def window_start_epoch(since_day: str, zone: tzinfo) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# the other source: sessions the ledger cannot speak for
+# --------------------------------------------------------------------------- #
+def _read_transcript(sdef, zone: tzinfo) -> Optional[dict]:
+    """One session's transcript reading, or ``None`` when it has none.
+
+    This is the same call the session detail panel makes
+    (``/api/sessions/<name>/stats``), so a window figure taken from here and
+    the panel's all-time figure come from one place and cannot disagree about
+    what a token is.
+    """
+    try:
+        return sessionstats.for_session(sdef, unit=UNIT, zone=zone)
+    except Exception:  # noqa: BLE001 - a missing transcript is not a 500
+        return None
+
+
+class Transcripts:
+    """Window figures for sessions that never reached the routing shim.
+
+    An OAuth route (Anthropic's subscription, a Codex login) writes no metering
+    line. :mod:`sessionstats` reads those sessions' transcripts, and this keeps
+    that reading for a short while so a poll pays only for what was appended.
+    ``reader`` is injectable so a test can answer without a transcript on disk.
+    """
+
+    def __init__(self, *, zone: Optional[tzinfo] = None,
+                 ttl: float = TRANSCRIPT_TTL, reader=None) -> None:
+        self.zone = zone or local_zone()
+        self.ttl = ttl
+        self.reader = reader or (lambda sdef: _read_transcript(sdef, self.zone))
+        self._rows: Dict[str, Tuple[float, Optional[dict]]] = {}
+        self._lock = threading.Lock()
+
+    def reading(self, sdef, now: Optional[float] = None) -> Optional[dict]:
+        name = str(getattr(sdef, "name", "") or "")
+        if not name:
+            return None
+        moment = time.time() if now is None else now
+        with self._lock:
+            hit = self._rows.get(name)
+        if hit is not None and moment - hit[0] < self.ttl:
+            return hit[1]
+        try:
+            reading = self.reader(sdef)
+        except Exception:  # noqa: BLE001 - a broken transcript is not a 500
+            reading = None
+        with self._lock:
+            self._rows[name] = (moment, reading)
+        return reading
+
+    def forget(self, name: str) -> None:
+        with self._lock:
+            self._rows.pop(name, None)
+
+
+def transcript_window(reading: Optional[dict],
+                      days: List[str]) -> Optional[dict]:
+    """The part of one transcript reading that falls inside ``days``.
+
+    The four components and the day keys are the ones the ledger sums use, so
+    a transcript row and a ledger row mean the same thing on the page. A
+    reading that is still being caught up is reported as ``partial``.
+    """
+    if not reading or not reading.get("available"):
+        return None
+    wanted = set(days)
+    out = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+           "total": 0, "requests": 0, "days": {}, "first": None, "last": None,
+           "partial": bool(reading.get("partial"))}
+    for bucket in reading.get("buckets") or ():
+        start = str(bucket.get("start") or "")
+        if start[:10] not in wanted:
+            continue
+        fresh = _number(bucket.get("input"))
+        cache_read = _number(bucket.get("cache_read"))
+        cache_write = _number(bucket.get("cache_write"))
+        output = _number(bucket.get("output"))
+        total = fresh + cache_read + cache_write + output
+        if not total and not _number(bucket.get("requests")):
+            continue
+        out["input"] += fresh
+        out["cache_read"] += cache_read
+        out["cache_write"] += cache_write
+        out["output"] += output
+        out["total"] += total
+        out["requests"] += _number(bucket.get("requests"))
+        out["days"][start[:10]] = out["days"].get(start[:10], 0) + total
+    # ``first``/``last`` stay None on purpose. A transcript reading is bucketed
+    # by day, so ``start`` is the day boundary -- midnight -- and reporting it
+    # as the last activity would put a time on the row that nothing measured.
+    # The ledger sums carry real timestamps; this path has only the day.
+    return out
+
+
+
+# --------------------------------------------------------------------------- #
 # session metadata and the overview payload
 # --------------------------------------------------------------------------- #
 def _stamp(value) -> Optional[float]:
@@ -585,7 +699,22 @@ def _activity(meta: dict) -> Optional[float]:
 
 
 def _ended(category: str) -> bool:
-    return category in ("killed", "archived")
+    return category in ENDED_CATEGORIES
+
+
+def _hidden(category: str, include_killed: bool, include_archived: bool) -> bool:
+    """Whether a session in ``category`` is left out of the table.
+
+    The two endings are separate answers because they mean different things to
+    a reader: a killed session was ended early, an archived one was put away
+    after its work finished. A page that shows one usually wants to see the
+    other too, but not always -- so the caller says which.
+    """
+    if category == "killed":
+        return not include_killed
+    if category == "archived":
+        return not include_archived
+    return False
 
 
 def _empty_row(name: str) -> dict:
@@ -601,10 +730,12 @@ def _empty_row(name: str) -> dict:
 
 
 def overview(*, window: str = "today", include_ended: bool = False,
+             include_killed: bool = False, include_archived: bool = False,
              now: Optional[float] = None, zone: Optional[tzinfo] = None,
              sessions: Iterable[dict] = (), ledger: Optional[Ledger] = None,
              labels: Optional[Dict[str, str]] = None,
-             doc: Optional[dict] = None) -> dict:
+             doc: Optional[dict] = None,
+             transcripts: Optional["Transcripts"] = None) -> dict:
     """The Stats page's overview payload for one window.
 
     ``sessions`` is the daemon's session list reduced to the metadata a row
@@ -612,9 +743,20 @@ def overview(*, window: str = "today", include_ended: bool = False,
     timestamps); :func:`session_meta` builds it from a ``Session``. The
     ledger is read here, so a caller that keeps one :class:`Ledger` across
     polls pays only for what was appended.
+
+    ``transcripts`` answers for the sessions the ledger cannot: an OAuth route
+    writes no metering line, so a session on one gets its window figures from
+    its own transcript (the same reading the detail panel shows). Omitting it
+    leaves those rows at ``source: "none"``.
+
+    ``include_killed`` and ``include_archived`` are the page's two boxes;
+    ``include_ended`` turns both on at once and is what the older ``?ended=1``
+    asked for.
     """
     if window not in WINDOWS:
         raise ValueError(f"window must be one of: {', '.join(WINDOWS)}")
+    include_killed = bool(include_killed or include_ended)
+    include_archived = bool(include_archived or include_ended)
     zone = zone or local_zone()
     now = time.time() if now is None else now
     start, end = window_bounds(window, now, zone)
@@ -630,12 +772,16 @@ def overview(*, window: str = "today", include_ended: bool = False,
 
     rows: List[dict] = []
     ended_excluded = 0
+    killed_excluded = 0
+    archived_excluded = 0
     seen = set()
     for name, usage in sums.items():
         item = meta.get(name, {})
         category = str(item.get("category") or "")
-        if item and _ended(category) and not include_ended:
+        if item and _hidden(category, include_killed, include_archived):
             ended_excluded += 1
+            killed_excluded += 1 if category == "killed" else 0
+            archived_excluded += 1 if category == "archived" else 0
             continue
         seen.add(name)
         row = _empty_row(name)
@@ -666,14 +812,21 @@ def overview(*, window: str = "today", include_ended: bool = False,
 
     # Sessions the ledger cannot speak for. An unmetered row is listed only
     # when the window can have touched it; otherwise every session the machine
-    # ever ran would pad a table about today.
+    # ever ran would pad a table about today. Two ways to fill it: the
+    # session's own transcript (an OAuth route or one the shim never saw), or
+    # nothing at all -- the row is drawn with a dash and never with a zero.
     unmetered = 0
+    transcript_rows = 0
+    transcript_skipped = 0
+    partial = False
     for name, item in meta.items():
         if name in seen or name in sums:
             continue
         category = str(item.get("category") or "")
-        if _ended(category) and not include_ended:
+        if _hidden(category, include_killed, include_archived):
             ended_excluded += 1
+            killed_excluded += 1 if category == "killed" else 0
+            archived_excluded += 1 if category == "archived" else 0
             continue
         last = _activity(item)
         created = _stamp(item.get("created_at"))
@@ -682,6 +835,38 @@ def overview(*, window: str = "today", include_ended: bool = False,
         if last < start:
             continue
         if created is not None and created > end:
+            continue
+        part = None
+        sdef = item.get("sdef")
+        if transcripts is not None and sdef is not None:
+            if transcript_rows + unmetered < MAX_TRANSCRIPTS:
+                part = transcript_window(transcripts.reading(sdef, now), days)
+            else:
+                transcript_skipped += 1
+        if part and part["total"]:
+            partial = partial or part["partial"]
+            row = _empty_row(name)
+            row.update({
+                "source": "transcript",
+                "status": item.get("status") or "", "category": category,
+                "harness": item.get("harness") or "",
+                "profile": item.get("profile") or "",
+                "borrow": item.get("borrow") or "",
+                "issue": item.get("issue") or "",
+                "project": item.get("project") or "",
+                "input": part["input"], "cache_read": part["cache_read"],
+                "cache_write": part["cache_write"], "output": part["output"],
+                "requests": part["requests"], "total": part["total"],
+                "days": part["days"],
+                "first_at": _iso(part["first"], zone) if part["first"] else None,
+                "last_at": _iso(part["last"], zone) if part["last"] else None,
+                "ended": _ended(category),
+                "declared_provider": declared_provider(
+                    item.get("profile") or "", item.get("borrow") or "", doc),
+            })
+            row["provider"] = row["declared_provider"]
+            rows.append(row)
+            transcript_rows += 1
             continue
         row = _empty_row(name)
         row.update({
@@ -722,7 +907,9 @@ def overview(*, window: str = "today", include_ended: bool = False,
         "since": _iso(start, zone),
         "until": _iso(end, zone),
         "zone": datetime.fromtimestamp(now, zone).strftime("%z"),
-        "include_ended": bool(include_ended),
+        "include_ended": bool(include_killed and include_archived),
+        "include_killed": bool(include_killed),
+        "include_archived": bool(include_archived),
         "totals": totals,
         "cache_share": (totals["cache_read"] / total) if total else None,
         "providers": sorted(by_provider.values(),
@@ -731,13 +918,18 @@ def overview(*, window: str = "today", include_ended: bool = False,
         "counts": {
             "sessions": len(rows),
             "metered": sum(1 for r in rows if r["source"] == "ledger"),
+            "transcript": transcript_rows,
             "unmetered": unmetered,
+            "transcript_skipped": transcript_skipped,
             "ended_excluded": ended_excluded,
+            "killed_excluded": killed_excluded,
+            "archived_excluded": archived_excluded,
         },
         # The ledger's own start: a window wider than it cannot be answered
         # from here, and the page says so instead of drawing a short bar.
         "ledger_since": ledger.earliest_day(),
-        "partial": False,
+        # A transcript still being caught up: the row grows on the next poll.
+        "partial": partial,
     }
 
 
@@ -774,6 +966,9 @@ def session_meta(session) -> dict:
         "category": category,
         "created_at": getattr(session, "created_at", None),
         "last_activity_at": activity,
+        # The definition itself, for the transcript reader: an OAuth session's
+        # figures are read from the conversation this points at.
+        "sdef": sdef,
         "exited_at": getattr(session, "exited_at", None),
         "paused_at": getattr(session, "paused_at", None),
         "held_at": getattr(session, "held_at", None),

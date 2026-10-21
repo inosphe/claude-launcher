@@ -11,9 +11,12 @@ the payload's filtering.
 
 from __future__ import annotations
 
+import functools
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -381,6 +384,54 @@ def test_killed_and_archived_sessions_are_left_out_unless_asked_for(tmp_path, le
     assert everything["counts"]["ended_excluded"] == 0
 
 
+def test_the_two_ended_boxes_are_independent(tmp_path, ledger):
+    """``include_killed`` and ``include_archived`` each admit their own
+    category, and the counts say how many of each the table holds out."""
+    write_ledger(tmp_path / "metering", [
+        record("live", hour=9),
+        record("killed", hour=10),
+        record("archived", hour=11),
+    ])
+    ledger.refresh(NOW)
+    sessions = [
+        meta("live"),
+        meta("killed", category="killed", status="exited",
+             activity="2026-10-21T01:00:00+00:00"),
+        meta("archived", category="archived", status="exited",
+             activity="2026-10-21T01:00:00+00:00"),
+    ]
+
+    def names(**flags):
+        payload = statsboard.overview(window="today", now=NOW, zone=KST,
+                                      sessions=sessions, ledger=ledger,
+                                      labels={}, **flags)
+        return (sorted(r["session"] for r in payload["sessions"]), payload)
+
+    rows, default = names()
+    assert rows == ["live"]
+    assert default["counts"]["killed_excluded"] == 1
+    assert default["counts"]["archived_excluded"] == 1
+    assert default["include_killed"] is False and default["include_archived"] is False
+
+    rows, killed_only = names(include_killed=True)
+    assert rows == ["killed", "live"]
+    assert killed_only["counts"]["killed_excluded"] == 0
+    assert killed_only["counts"]["archived_excluded"] == 1
+    assert killed_only["include_killed"] is True
+    assert killed_only["include_archived"] is False
+
+    rows, archived_only = names(include_archived=True)
+    assert rows == ["archived", "live"]
+    assert archived_only["counts"]["killed_excluded"] == 1
+    assert archived_only["counts"]["archived_excluded"] == 0
+
+    rows, both = names(include_killed=True, include_archived=True)
+    assert rows == ["archived", "killed", "live"]
+    assert both["counts"]["ended_excluded"] == 0
+    # ``include_ended`` stays the "both" spelling the older page reads.
+    assert both["include_ended"] is True
+
+
 def test_a_session_the_ledger_cannot_speak_for_is_listed_with_no_figure(tmp_path, ledger):
     write_ledger(tmp_path / "metering", [record("metered", hour=9)])
     ledger.refresh(NOW)
@@ -446,6 +497,190 @@ def test_the_cache_share_names_the_cache_quantity(tmp_path, ledger):
                                   sessions=[meta("a")], ledger=ledger, labels={})
     assert payload["totals"]["total"] == 1000
     assert payload["cache_share"] == 0.9
+
+
+# --------------------------------------------------------------------------- #
+# the sessions the ledger cannot speak for
+# --------------------------------------------------------------------------- #
+def reading(*buckets, harness="claude", partial=False):
+    """A transcript reading shaped like ``sessionstats.summarize``'s."""
+    rows = []
+    for start, fresh, cache_read, output, requests in buckets:
+        rows.append({
+            "start": start, "input": fresh, "cache_read": cache_read,
+            "cache_write": 0, "output": output,
+            "total": fresh + cache_read + output, "requests": requests,
+            "inputs": {},
+        })
+    return {"session": "oauth", "harness": harness, "available": True,
+            "totals": {}, "buckets": rows, "partial": partial}
+
+
+def transcripts(**by_name):
+    """A Transcripts whose reader answers from a dict of name -> reading."""
+    return statsboard.Transcripts(zone=KST,
+                                  reader=lambda sdef: by_name.get(sdef.name))
+
+
+def test_a_session_the_ledger_cannot_speak_for_is_read_from_its_transcript(tmp_path, ledger):
+    # An OAuth route writes no metering line. The row used to say "none";
+    # now its window figure comes from the session's own transcript, marked
+    # with the harness whose reader produced it.
+    ledger.refresh(NOW)
+    reader = transcripts(oauth=reading(
+        ("2026-10-21T09:00:00+09:00", 100, 900, 50, 4)))
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth", harness="claude"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader)
+    row = payload["sessions"][0]
+    assert row["source"] == "transcript"
+    assert row["harness"] == "claude"
+    assert row["total"] == 1050
+    assert (row["input"], row["cache_read"], row["output"]) == (100, 900, 50)
+    assert row["requests"] == 4
+    assert row["days"] == {"2026-10-21": 1050}
+    assert payload["counts"]["transcript"] == 1
+    assert payload["counts"]["unmetered"] == 0
+    # A transcript reading is bucketed by day, so a bucket's `start` is the
+    # day boundary -- midnight for a day bucket. The row leaves the activity
+    # columns empty rather than reporting that boundary as a time something
+    # happened; the ledger rows are the ones that carry real stamps.
+    assert row["first_at"] is None and row["last_at"] is None
+
+
+def test_a_transcript_row_does_not_report_a_day_boundary_as_activity(tmp_path, ledger):
+    """``transcript_window`` returns no activity stamps of its own.
+
+    Its only time is a bucket's ``start``, which for a day bucket is midnight
+    -- a boundary, not a moment at which anything happened. Reporting it
+    would print a time on the row that nothing measured, so the window
+    leaves the columns empty and the ledger rows keep carrying real stamps.
+    """
+    part = statsboard.transcript_window(
+        reading(("2026-10-21T00:00:00+09:00", 10, 0, 0, 1), harness="claude"),
+        ["2026-10-21"])
+    assert part["total"] == 10
+    assert part["first"] is None and part["last"] is None
+
+
+def test_a_transcript_row_counts_only_the_buckets_inside_the_window(tmp_path, ledger):
+    ledger.refresh(NOW)
+    reader = transcripts(oauth=reading(
+        ("2026-10-20T09:00:00+09:00", 100, 0, 0, 1),     # yesterday
+        ("2026-10-21T09:00:00+09:00", 200, 0, 0, 2)))    # today
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    today = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader)
+    assert today["sessions"][0]["total"] == 200
+    week = statsboard.overview(
+        window="week", now=NOW, zone=KST,
+        sessions=[{**meta("oauth"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader)
+    assert week["sessions"][0]["total"] == 300
+
+
+def test_a_transcript_with_nothing_in_the_window_stays_a_dash(tmp_path, ledger):
+    ledger.refresh(NOW)
+    reader = transcripts(oauth=reading(
+        ("2026-10-19T09:00:00+09:00", 100, 0, 0, 1)))
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader)
+    row = payload["sessions"][0]
+    assert row["source"] == "none" and row["total"] == 0
+    assert payload["counts"]["unmetered"] == 1
+
+
+def test_a_metered_session_is_not_read_from_its_transcript(tmp_path, ledger):
+    # The ledger is the better fact for the shim's own traffic; a reading the
+    # two could disagree about is never taken.
+    write_ledger(tmp_path / "metering", [record("a", hour=9)])
+    ledger.refresh(NOW)
+    calls = []
+
+    def reader(sdef):
+        calls.append(sdef.name)
+        return reading(("2026-10-21T09:00:00+09:00", 999, 0, 0, 9))
+
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("a"), "sdef": SimpleNamespace(name="a", harness="claude")}],
+        ledger=ledger, labels={},
+        transcripts=statsboard.Transcripts(zone=KST, reader=reader))
+    assert payload["sessions"][0]["source"] == "ledger"
+    assert payload["sessions"][0]["total"] == 115
+    assert calls == []
+
+
+def test_a_reading_is_reused_for_a_short_while(tmp_path, ledger):
+    # Reading every OAuth session's transcript on every poll would put an
+    # 11 GB read behind a table refresh; the reading is kept, and the refresh
+    # after it costs nothing.
+    ledger.refresh(NOW)
+    seen = []
+
+    def reader(sdef):
+        seen.append(sdef.name)
+        return reading(("2026-10-21T09:00:00+09:00", 100, 0, 0, 1))
+
+    reader_ = statsboard.Transcripts(zone=KST, reader=reader, ttl=60)
+    sessions = [{**meta("oauth"), "sdef": SimpleNamespace(name="oauth", harness="claude")}]
+    for moment in (NOW, NOW + 10):
+        statsboard.overview(window="today", now=moment, zone=KST,
+                            sessions=sessions, ledger=ledger, labels={},
+                            transcripts=reader_)
+    assert seen == ["oauth"]
+    reader_.forget("oauth")
+    statsboard.overview(window="today", now=NOW + 20, zone=KST,
+                        sessions=sessions, ledger=ledger, labels={},
+                        transcripts=reader_)
+    assert seen == ["oauth", "oauth"]
+
+
+def test_a_partial_reading_is_reported_as_partial(tmp_path, ledger):
+    ledger.refresh(NOW)
+    reader = transcripts(oauth=reading(
+        ("2026-10-21T09:00:00+09:00", 100, 0, 0, 1), partial=True))
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth"), "sdef": SimpleNamespace(name="oauth", harness="claude")}],
+        ledger=ledger, labels={}, transcripts=reader)
+    assert payload["partial"] is True
+    assert payload["sessions"][0]["source"] == "transcript"
+
+
+def test_the_transcript_reader_asks_sessionstats_for_the_panel_s_own_reading(monkeypatch):
+    # The detail panel reads /api/sessions/<name>/stats, which is
+    # sessionstats.read_located. The overview goes through the same module
+    # with the same unit and zone, so the two cannot define a token apart.
+    asked = {}
+
+    def fake(sdef, unit="day", zone=None):
+        asked.update({"name": sdef.name, "unit": unit, "zone": zone})
+        return {"session": sdef.name, "available": True, "buckets": []}
+
+    from claude_launcher.daemon import sessionstats as real
+
+    monkeypatch.setattr(real, "for_session", fake)
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    out = statsboard._read_transcript(sdef, KST)
+    assert out["session"] == "oauth"
+    assert asked == {"name": "oauth", "unit": statsboard.UNIT, "zone": KST}
+
+
+def test_the_reading_component_names_are_sessionstats_own():
+    # transcript_window sums what sessionstats writes; a renamed component on
+    # either side would silently report zero for it.
+    from claude_launcher.daemon import sessionstats as mod
+
+    assert set(mod.COMPONENTS) <= set(statsboard.transcript_window(
+        reading(("2026-10-21T09:00:00+09:00", 1, 2, 3, 1)), ["2026-10-21"]))
 
 
 def test_the_window_is_a_closure_of_local_days_not_a_rolling_span(tmp_path, ledger):
@@ -516,6 +751,26 @@ def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, t
             # page can say how many it hid.
             assert body["sessions"] == []
             assert body["counts"]["ended_excluded"] == 2
+            assert body["counts"]["killed_excluded"] == 2
+            assert body["counts"]["archived_excluded"] == 0
+            assert body["include_killed"] is False
+            assert body["include_archived"] is False
+
+            # The two boxes are separate flags, so asking for archived alone
+            # does not open the killed partition (both fixture rows are killed).
+            resp = await client.get(
+                "/api/stats/overview?window=today&killed=0&archived=1",
+                headers=bearer)
+            body = await resp.json()
+            assert body["sessions"] == []
+            assert body["include_archived"] is True
+
+            resp = await client.get(
+                "/api/stats/overview?window=today&killed=1&archived=0",
+                headers=bearer)
+            body = await resp.json()
+            assert sorted(r["session"] for r in body["sessions"]) == ["gone", "live"]
+            assert body["counts"]["killed_excluded"] == 0
 
             resp = await client.get("/api/stats/overview?window=today&ended=1",
                                     headers=bearer)
@@ -536,3 +791,40 @@ def test_the_endpoint_answers_the_overview_and_refuses_an_unknown_window(home, t
             await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+def test_the_endpoint_wiring_hands_the_overview_the_transcript_source(tmp_path, ledger,
+                                                                      monkeypatch):
+    """The route builds the payload through ``_stats_overview``; the
+    transcript reader is one per daemon like the ledger, so the OAuth rows
+    reuse the reading instead of re-reading on every poll."""
+    from claude_launcher.daemon import api
+
+    # _stats_overview does not pin the clock (the daemon wants the real one),
+    # so the fixture records' day is pinned here the way the endpoint test does.
+    monkeypatch.setattr(statsboard, "overview",
+                        functools.partial(statsboard.overview, now=NOW, zone=KST))
+    accessed = "2026-10-21T03:00:00+09:00"
+
+    class Double:
+        exited = False
+        created_at = "2026-10-20T00:00:00+09:00"
+
+        def __init__(self, name):
+            self.sdef = SimpleNamespace(name=name, harness="codex")
+
+        def status(self):
+            return "busy"
+
+        def last_activity_at(self):
+            return accessed
+
+    reader = transcripts(oauth=reading(
+        ("2026-10-21T09:00:00+09:00", 400, 600, 20, 3), harness="codex"))
+    ledger.refresh(NOW)
+    payload = api._stats_overview(
+        SimpleNamespace(list=lambda: [Double("oauth")]),
+        "today", False, ledger, reader)
+    row = payload["sessions"][0]
+    assert row["source"] == "transcript" and row["total"] == 1020
+    assert row["harness"] == "codex"

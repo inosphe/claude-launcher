@@ -8,7 +8,7 @@
    checks:
      1. the default page is the fleet, with one row per metered session;
      2. killed/archived rows appear only when the box is ticked, and the box
-        reaches the request (?ended=1);
+        reaches the request (?killed=1 / ?archived=1);
      3. the window tabs ask for today / week / month;
      4. the provider strip narrows the table to that provider's sessions;
      5. clicking a row opens the detail panel, which asks that session's
@@ -62,17 +62,25 @@ const BETA = row("beta", "kimi", 1000, 2, { borrow: "ds4" });
 const GONE = row("gone", "fireworks", 500, 1, {
   status: "exited", category: "killed", ended: true,
 });
+const OLD = row("old", "kimi", 200, 1, {
+  status: "exited", category: "archived", ended: true,
+});
 
+/* The killed and archived rows answer their own flag, so a page that asks for
+   one of them gets exactly that row. */
 const overview = (url) => {
   const win = url.searchParams.get("window") || "today";
-  const ended = url.searchParams.get("ended") === "1";
+  const killed = url.searchParams.get("killed") === "1";
+  const archived = url.searchParams.get("archived") === "1";
+  const ended = killed || archived;
   const factor = win === "today" ? 1 : win === "week" ? 2 : 3;
   const scale = (r) => ({ ...r, total: r.total * factor,
     requests: r.requests * factor,
     providers: r.providers.map((p) => ({ ...p, total: p.total * factor,
       requests: p.requests * factor })) });
   const rows = [ALPHA, BETA].map(scale);
-  if (ended) rows.push(scale(GONE));
+  if (killed) rows.push(scale(GONE));
+  if (archived) rows.push(scale(OLD));
   const total = rows.reduce((n, r) => n + r.total, 0);
   const byProvider = {};
   for (const r of rows) {
@@ -87,13 +95,14 @@ const overview = (url) => {
     window: win, unit: "day", days: [],
     since: new Date(now).toISOString(), until: new Date(now).toISOString(),
     zone: "+0000", include_ended: ended,
+    include_killed: killed, include_archived: archived,
     totals: { input: 0, cache_read: 0, cache_write: 0, output: 0, total,
               requests: rows.reduce((n, r) => n + r.requests, 0) },
     cache_share: 0.9,
     providers: Object.values(byProvider).sort((a, b) => b.total - a.total),
     sessions: rows,
     counts: { sessions: rows.length, metered: rows.length, unmetered: 0,
-              ended_excluded: ended ? 0 : 1 },
+              killed_excluded: killed ? 0 : 1, archived_excluded: archived ? 0 : 1 },
     ledger_since: null, partial: false,
   };
 };
@@ -166,7 +175,7 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
 
     // 1. The default page is the fleet, not one session.
     assert.deepEqual(await names(page), ["alpha", "beta"]);
-    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=today&ended=0")),
+    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=today&killed=0&archived=0")),
       asked.join(" | "));
     assert.ok(!asked.some((u) => u.includes("/stats?unit=")),
       "no per-session reading is fetched for the fleet view");
@@ -178,17 +187,32 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
       (e) => e.textContent);
     assert.equal(borrow, "borrow ds4");
 
-    // 2. The killed session is held out until the box is ticked.
-    await page.check("#stats-view .stats-ended input");
+    // 2. The killed session is held out until its own box is ticked.
+    await page.check("#stats-view .stats-ended input[data-ended='killed']");
     await page.waitForFunction(() =>
       Array.from(document.querySelectorAll("#stats-view .stats-row"))
         .some((r) => r.dataset.session === "gone"));
     assert.deepEqual(await names(page), ["alpha", "beta", "gone"]);
-    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=today&ended=1")),
+    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=today&killed=1&archived=0")),
       asked.join(" | "));
     const ended = await page.$eval("#stats-view .stats-row[data-session='gone'] .stats-status-cell",
       (e) => ({ text: e.textContent, ended: e.classList.contains("ended") }));
     assert.deepEqual(ended, { text: "killed", ended: true });
+
+    // 2b. Archived sessions have their own box, separate from killed ones.
+    await page.check("#stats-view .stats-ended input[data-ended='archived']");
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll("#stats-view .stats-row"))
+        .some((r) => r.dataset.session === "old"));
+    assert.deepEqual(await names(page), ["alpha", "beta", "gone", "old"]);
+    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=today&killed=1&archived=1")),
+      asked.join(" | "));
+    await page.uncheck("#stats-view .stats-ended input[data-ended='archived']");
+    await page.waitForFunction(() => {
+      const rows = Array.from(document.querySelectorAll("#stats-view .stats-row"));
+      return rows.length === 3 && !rows.some((r) => r.dataset.session === "old");
+    });
+    assert.deepEqual(await names(page), ["alpha", "beta", "gone"]);
 
     // 3. The window tabs ask for the window.
     await page.click("#stats-view .stats-window button[data-window='week']");
@@ -199,7 +223,7 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
       const el = document.querySelector("#stats-view .stats-row[data-session='alpha'] .stats-rowvalue");
       return el && /^6(\.00)?k$/i.test(el.textContent.trim());
     });
-    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=week&ended=1")),
+    assert.ok(asked.some((u) => u.startsWith("/api/stats/overview?window=week&killed=1&archived=0")),
       asked.join(" | "));
 
     // 4. The provider strip narrows the table.
@@ -218,20 +242,20 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
     await page.click("#stats-view .stats-row[data-session='alpha']");
     await page.waitForFunction(() => {
       const panel = document.querySelector("#stats-view .stats-detail");
-      return panel && panel.querySelectorAll(".stats-col").length >= 2;
+      return panel && panel.querySelectorAll(".stats-area").length >= 4;
     }, null, { timeout: 15000 });
     assert.ok(asked.some((u) => u === "/api/sessions/alpha/stats?unit=day"),
       asked.join(" | "));
     const panel = await page.$eval("#stats-view .stats-detail", (e) => ({
       head: e.querySelector("h3").textContent,
       switchText: (e.querySelector(".stats-switch") || {}).textContent || "",
-      showsChart: e.querySelectorAll(".stats-col").length,
+      showsChart: e.querySelectorAll(".stats-area").length,
       open: (e.querySelector(".stats-detail-open") || {}).getAttribute?.("href"),
     }));
     assert.equal(panel.head, "alpha");
     assert.match(panel.switchText, /provider/);
     assert.match(panel.switchText, /kimi → fireworks/);
-    assert.ok(panel.showsChart >= 2, "the transcript reading is drawn in the panel");
+    assert.ok(panel.showsChart >= 4, "the transcript reading is drawn in the panel");
     assert.equal(new URL(panel.open, "http://x").hash, "#/s/alpha");
     assert.match(page.url(), /#\/stats\/alpha$/);
     if (process.env.STATS_DETAIL_SHOT) {

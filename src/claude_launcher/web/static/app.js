@@ -29131,7 +29131,8 @@ let statsCompare = null;      // the compared names, or null outside compare mod
 let statsCompareCache = null;
 let statsLogScale = false;    // the compare timeline's y axis
 let statsWindow = "today";    // today | week | month
-let statsIncludeEnded = false;   // killed + archived rows in the table
+let statsIncludeKilled = false;   // killed rows in the table
+let statsIncludeArchived = false; // archived rows in the table
 let statsOverview = null;     // the window payload
 let statsOverviewError = "";
 let statsProvider = "";       // "" every provider, else one label
@@ -29203,9 +29204,11 @@ async function refreshStats() {
 async function refreshStatsOverview() {
   const seq = ++statsSeq;
   const win = statsWindow;
-  const ended = statsIncludeEnded ? 1 : 0;
+  const killed = statsIncludeKilled ? 1 : 0;
+  const archived = statsIncludeArchived ? 1 : 0;
   try {
-    const resp = await api(`/api/stats/overview?window=${win}&ended=${ended}`);
+    const resp = await api(
+      `/api/stats/overview?window=${win}&killed=${killed}&archived=${archived}`);
     if (seq !== statsSeq) return;   // the window or the filter changed meanwhile
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 404 && !data.error) {
@@ -29298,28 +29301,97 @@ function statsCard(title, value, detail) {
 /* Bars per bucket, each as tall as its total against the busiest bucket,
    split into the four usage components. */
 function statsChart(buckets, unit) {
+  // A stacked area chart: the four usage parts are bands stacked on each
+  // other and running left to right, so a reader sees both how the total
+  // moved and which part moved it. The bands are drawn in USAGE_PARTS order
+  // (fresh input at the bottom), and the total is the line on top.
   const box = el("div", "stats-chart");
+  if (!buckets.length) return box;
+  const SVG = "http://www.w3.org/2000/svg";
+  const width = Math.max(320, buckets.length * 18);
+  const height = 160;
+  const padB = 16;
+  const padT = 6;
   const peak = Math.max(1, ...buckets.map((b) => b.total || 0));
-  for (const b of buckets) {
-    const col = el("div", "stats-col");
-    const bar = el("div", "stats-bar");
-    bar.style.height = (((b.total || 0) / peak) * 100).toFixed(2) + "%";
-    for (const [key, , short] of USAGE_PARTS) {
-      const v = b[key] || 0;
-      if (!v) continue;
-      const seg = el("span", `stats-seg usage-${short}`);
-      seg.style.height = ((v / (b.total || 1)) * 100).toFixed(2) + "%";
-      bar.appendChild(seg);
-    }
-    col.appendChild(bar);
-    col.appendChild(el("span", "stats-col-label", statsBucketLabel(b.start, unit)));
+  // Each bucket owns a column of the chart and its point sits at that column's
+  // centre, so one bucket still spans the whole width. A chart whose buckets
+  // are spread over the full width by count alone collapses to zero-width
+  // bands at n=1 -- and a session that started today has exactly one day
+  // bucket, which is the commonest case the detail panel shows.
+  const dx = width / buckets.length;
+  const x = (i) => (i + 0.5) * dx;
+  // The area runs to both edges: the first and last values extend half a
+  // column past their centre so the filled band reaches the frame.
+  const spans = (values) => [{ x: 0, v: values[0], i: 0 },
+    ...values.map((v, i) => ({ x: x(i), v, i })),
+    { x: width, v: values[values.length - 1], i: values.length - 1 }];
+  const y = (v) => height - padB - ((v / peak) * (height - padB - padT));
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `usage per ${unit}, stacked by part`);
+  svg.style.minWidth = `${width}px`;
+
+  // The bands: each one's floor is the band below it, its ceiling the floor
+  // plus its own value. Offsetting the polygon by both edges in the same
+  // x order is what makes the area read as a filled band rather than a line.
+  const floor = buckets.map(() => 0);
+  for (const [key, label, short] of USAGE_PARTS) {
+    const roof = buckets.map((b, i) => floor[i] + (b[key] || 0));
+    const up = spans(roof).map((p) => `L${p.x.toFixed(1)} ${y(p.v).toFixed(1)}`).join(" ");
+    const down = spans(floor).reverse().map(
+      (p) => `L${p.x.toFixed(1)} ${y(p.v).toFixed(1)}`).join(" ");
+    const path = document.createElementNS(SVG, "path");
+    path.setAttribute("d", `M0.0 ${y(floor[0]).toFixed(1)} ${up} ${down} Z`);
+    path.setAttribute("class", `stats-area usage-${short}`);
+    const total = roof.reduce((n, v, i) => n + (buckets[i][key] || 0), 0);
+    const title = document.createElementNS(SVG, "title");
+    title.textContent = `${label}: ${total.toLocaleString()} tokens in the window`;
+    path.appendChild(title);
+    svg.appendChild(path);
+    roof.forEach((v, i) => { floor[i] = v; });
+  }
+
+  const line = document.createElementNS(SVG, "path");
+  line.setAttribute("d", spans(buckets.map((b) => b.total || 0)).map(
+    (p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)} ${y(p.v).toFixed(1)}`).join(" "));
+  line.setAttribute("class", "stats-total-line");
+  svg.appendChild(line);
+
+  // One hover target per bucket: the chart is dense enough that per-point
+  // titles would fight each other, and the table below has the same numbers.
+  buckets.forEach((b, i) => {
+    const hit = document.createElementNS(SVG, "rect");
+    hit.setAttribute("x", (i * dx).toFixed(1));
+    hit.setAttribute("y", 0);
+    hit.setAttribute("width", dx.toFixed(1));
+    hit.setAttribute("height", String(height - padB));
+    hit.setAttribute("class", "stats-hit");
     const inputs = b.inputs || {};
-    col.title = `${b.start}\n${(b.total || 0).toLocaleString()} tokens over ` +
+    const title = document.createElementNS(SVG, "title");
+    title.textContent = `${b.start}\n${(b.total || 0).toLocaleString()} tokens over ` +
       `${(b.requests || 0).toLocaleString()} requests\n` +
       USAGE_PARTS.map(([k, label]) => `  ${label} ${(b[k] || 0).toLocaleString()}`).join("\n") +
       "\ninputs: " + STATS_CATEGORIES.map(([k, label]) => `${label} ${inputs[k] || 0}`).join(", ");
-    box.appendChild(col);
-  }
+    hit.appendChild(title);
+    svg.appendChild(hit);
+  });
+
+  // Every fourth label, the same rule the column chart used: a long run of
+  // buckets would otherwise overlap its own axis.
+  buckets.forEach((b, i) => {
+    if (i % 4) return;
+    const text = document.createElementNS(SVG, "text");
+    text.setAttribute("x", x(i).toFixed(1));
+    text.setAttribute("y", String(height - 3));
+    text.setAttribute("class", "stats-axis");
+    text.setAttribute("text-anchor", "middle");
+    text.textContent = statsBucketLabel(b.start, unit);
+    svg.appendChild(text);
+  });
+
+  box.appendChild(svg);
   return box;
 }
 
@@ -29456,24 +29528,37 @@ function statsWindowTabs() {
   return tabs;
 }
 
-/* Killed and archived rows are held out by default; the box is the whole
-   answer to "show me everything that ever ran". */
+/* The two ways a session ends have a box each: a killed session was ended
+   early, an archived one was put away after its work, and a reader often
+   wants one of those without the other. Both start off -- the table is about
+   what is running. */
 function statsEndedToggle() {
-  const label = el("label", "stats-ended");
-  label.title = "killed and archived sessions are left out of the table " +
-    "unless this is ticked";
-  const box = el("input");
-  box.type = "checkbox";
-  box.checked = statsIncludeEnded;
-  box.dataset.ended = "1";
-  box.addEventListener("change", () => {
-    statsIncludeEnded = !!box.checked;
-    statsOverview = null;
-    renderStats();
-    refreshStats();
-  });
-  label.append(box, el("span", null, "include killed + archived"));
-  return label;
+  const box = el("div", "stats-ended");
+  const add = (key, label, title, get, set) => {
+    const wrap = el("label", "stats-ended-box");
+    wrap.title = title;
+    const input = el("input");
+    input.type = "checkbox";
+    input.checked = get();
+    input.dataset.ended = key;
+    input.addEventListener("change", () => {
+      set(!!input.checked);
+      statsOverview = null;
+      renderStats();
+      refreshStats();
+    });
+    wrap.append(input, el("span", null, label));
+    box.appendChild(wrap);
+  };
+  add("killed", "include killed",
+      "killed sessions (ended early) are left out of the table unless this is " +
+      "ticked",
+      () => statsIncludeKilled, (v) => { statsIncludeKilled = v; });
+  add("archived", "include archived",
+      "archived sessions (put away after their work) are left out of the " +
+      "table unless this is ticked",
+      () => statsIncludeArchived, (v) => { statsIncludeArchived = v; });
+  return box;
 }
 
 function setStatsProvider(name) {
@@ -29582,6 +29667,14 @@ function statsOverviewTable(d) {
         (changed.length ? "provider" : "model") + " inside this window";
       name.appendChild(badge);
     }
+    if (r.source === "transcript") {
+      const badge = el("span", "stats-badge",
+        r.harness ? `${r.harness} · transcript` : "transcript");
+      badge.title = "this session never reached the routing shim, so the " +
+        "figure is read from its own transcript (the same reading its " +
+        "detail panel shows)";
+      name.appendChild(badge);
+    }
     row.appendChild(name);
 
     const provider = el("td", "stats-provider-cell");
@@ -29607,8 +29700,8 @@ function statsOverviewTable(d) {
       tokens.append(bar, el("span", "stats-rowvalue", usageShort(value)));
     } else if (r.source === "none") {
       const dash = el("span", "stats-unmetered", "—");
-      dash.title = "no metering record for this session (an OAuth route " +
-        "writes none); its detail panel reads the transcript instead";
+      dash.title = "no figure for this session: the ledger has no record " +
+        "(an OAuth route writes none) and its transcript could not be read";
       tokens.appendChild(dash);
     } else {
       tokens.appendChild(el("span", "stats-rowvalue", "0"));
@@ -29859,8 +29952,9 @@ const STATS_WINDOW_METHOD = [
     "the routing shim forwarded. total = fresh input + cache read + cache " +
     "write + output; the cache share is the cache-read part of that total.",
   "not measured here: an OAuth route (Anthropic's subscription, a Codex " +
-    "login) writes no ledger line. Those rows show — rather than 0, and their " +
-    "detail panel reads the transcript.",
+    "login) writes no ledger line. Those rows are read from the session's own " +
+    "transcript and marked with its harness; a session whose transcript " +
+    "cannot be read shows — rather than 0.",
   "frames: today is the local day, 7 days and 30 days end at local midnight " +
     "and include today.",
   "provider changes: read from the upstream that answered each request. A " +
@@ -30169,9 +30263,12 @@ function renderStatsOverview(main) {
     "of every token sent as prompt, read from the cache"));
   summary.appendChild(statsCard("Sessions", counts.sessions || 0,
     `${counts.metered || 0} metered, ${counts.unmetered || 0} unmetered`));
+  const held = [];
+  if (!statsIncludeKilled) held.push(`${counts.killed_excluded || 0} killed`);
+  if (!statsIncludeArchived) held.push(`${counts.archived_excluded || 0} archived`);
   summary.appendChild(statsCard("Held out", counts.ended_excluded || 0,
-    statsIncludeEnded ? "killed + archived (now included)"
-      : "killed + archived sessions"));
+    held.length ? held.join(" · ") + " (not in the table)"
+      : "killed + archived (both included)"));
   main.appendChild(summary);
 
   main.appendChild(statsProviderStrip(d));
