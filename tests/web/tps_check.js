@@ -268,9 +268,17 @@ check("the rail line carries the share in its compact form",
 /* ---- the card chip ---- */
 const CACHED_LIVE = { ...CACHED, live: { window_s: 2, bin_s: 0.5,
                                          inflight: 1, state: "streaming", rate: 41.25 } };
+/* A session whose first call is still in flight: the live file exists, but
+   there is no finished call behind it -- no model, no rate, no latency, no
+   share. Both lines of the lower area come out empty, which is the state
+   claunch-k196e.3 fixed: the area used to be built anyway, leaving a divider
+   with nothing under it. */
+const LIVE_ONLY = { live: { window_s: 2, bin_s: 0.5, inflight: 1,
+                            state: "waiting", rate: 0, since_s: 0.5 } };
 ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, GONE, WHOLEBODY, OAUTH,
                  { name: "cached", harness: "claude", tps: CACHED },
-                 { name: "livec", harness: "claude", tps: CACHED_LIVE }]);
+                 { name: "livec", harness: "claude", tps: CACHED_LIVE },
+                 { name: "liveonly", harness: "claude", tps: LIVE_ONLY }]);
 check("the chip is the glance with the story on hover",
       [ctx.chip("pi").textContent, ctx.chip("pi").className, ctx.chip("pi").title === tip],
       ["38.1 tok/s · ttft 715ms", "sess-brief-tps", true]);
@@ -359,6 +367,16 @@ check("a live call stacks its own area above the finished call's",
          ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]);
 check("the live area carries no rate of its own in the lower one",
       dom["term-tps-overlay"].kids[0].kids[0].textContent, "≈41.3 tok/s");
+
+/* Nothing finished yet: one area, not two. The lower one would hold a divider
+   and no words (claunch-k196e.3). */
+ctx.setCurrent("liveonly");
+ctx.render();
+check("a live call with no finished call behind it keeps the live area alone",
+      overlayAreas(),
+      [["term-tps-live",
+        [["term-tps-big", "waiting 0.5s"],
+         ["term-tps-chart", ""]]]]);
 
 ctx.setCurrent("whole");
 ctx.render();
