@@ -75,8 +75,8 @@ from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
 from . import (
-    briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
-    rebrief, session_input, session_packs, status_checks,
+    briefing, cflow_clock, clipty, ctxsize, loops, model_tiers, onboard,
+    prompt_presets, prompter, rebrief, session_input, session_packs, status_checks,
 )
 from . import paths
 from . import daemon_prompt
@@ -895,6 +895,8 @@ def build_app(
     r.add_get("/api/test-output-dir", h_test_output_dir)
     r.add_get("/api/delegate-setting", h_delegate_setting_get)
     r.add_put("/api/delegate-setting", h_delegate_setting_set)
+    r.add_get("/api/model-tiers", h_model_tiers_get)
+    r.add_put("/api/model-tiers", h_model_tiers_put)
     r.add_get("/api/provider-affinity", h_provider_affinity_get)
     r.add_put("/api/provider-affinity", h_provider_affinity_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
@@ -4408,6 +4410,56 @@ async def h_delegate_setting_set(request: web.Request) -> web.Response:
         for field, value in writes.items():
             store.set_daemon_field(f"delegate_{field}", value)
         return json_response(_delegate_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _model_tiers_state() -> dict:
+    """The stored tiers with the catalogs the editor's selects need."""
+    from ..input_options import Catalog
+    from .. import provider_spec
+
+    catalog = Catalog()
+    profiles = sorted(catalog.profiles())
+    harnesses_by_profile = {
+        name: (catalog.harnesses(name) or []) for name in profiles
+    }
+    models_by_profile = {
+        name: (catalog.models(name) or []) for name in profiles
+    }
+    return {
+        "block": model_tiers.load(),
+        "profiles": profiles,
+        "harnesses": harnesses_by_profile,
+        "models": models_by_profile,
+        "presets": list(provider_spec.MODEL_ROLES),
+        "max_tiers": model_tiers.MAX_TIERS,
+    }
+
+
+async def h_model_tiers_get(request: web.Request) -> web.Response:
+    """``model_tiers:``: the tier table the settings page edits (claunch-cvife)."""
+    try:
+        return json_response(_model_tiers_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_model_tiers_put(request: web.Request) -> web.Response:
+    """Replace the whole ``model_tiers:`` block after validation.
+
+    The body is the block itself (``{"tiers": [...], "active": {...}}``).
+    A combination that cannot launch — unknown profile, denied harness,
+    unknown model, duplicate tuple — is refused with the field and reason.
+    """
+    body = await _json_body(request)
+    if not isinstance(body, dict) or "tiers" not in body:
+        return json_error(400, "the body must be a model_tiers block with 'tiers'")
+    try:
+        model_tiers.save(body)
+        return json_response(_model_tiers_state())
+    except model_tiers.TierError as exc:
+        return json_error(400, str(exc))
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

@@ -223,6 +223,15 @@ def child_env(
         except providers.ProviderError as exc:
             raise RunnerError(str(exc)) from exc
         env.update(provider_env)
+        if routing.dynamic(provider):
+            # A dynamic provider resolves models per request at the shim from
+            # the live route table; launch-time ids would only freeze the
+            # picture the table exists to move. Dropping the provider
+            # translation's model vars lets the wire carry Claude's own
+            # alias/ids, which the shim resolves through the table. Profile
+            # and user env applied below still win (explicit wins).
+            for key in provider_spec.CLAUDE_MODEL_KEYS:
+                env.pop(key, None)
         if borrow is not None:
             # The lender's profile env is one more fill layer: above the
             # provider's defaults (borrowing a profile should behave like that
@@ -293,7 +302,7 @@ def child_env(
         # provider pinning) cannot be reached by environment alone. When the
         # provider declares one, the base URL is swung to a local shim that
         # merges the spec into every request — see :mod:`routing`.
-        routing.apply(env, provider)
+        routing.apply(env, provider, profile=profile.name)
     # Claude gateways authenticate with the declared bearer-token route. When
     # it is active the packaged rule forces ANTHROPIC_API_KEY="", preventing
     # Claude Code from also emitting a competing X-Api-Key header.

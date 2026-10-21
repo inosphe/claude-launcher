@@ -172,6 +172,36 @@ def session_affinity(provider_name: str, doc: Optional[dict] = None) -> bool:
     return value
 
 
+#: Per-provider config key switching the shim to live resolution
+#: (``providers.<name>.dynamic``). A dynamic provider's shim asks the config
+#: file for the upstream URL, the api key and the model alias table on every
+#: request, so changing ``profiles.<name>.provider`` (or the provider's own
+#: endpoints/models) reaches already-running sessions without a relaunch.
+DYNAMIC_KEY = "dynamic"
+
+
+def dynamic(provider_name: str, doc: Optional[dict] = None) -> bool:
+    """Whether ``provider_name`` resolves upstream and models per request.
+
+    Absent key is off (the historical launch-time behaviour). A present
+    non-bool is a config error, same policy as :func:`session_affinity`.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return False
+    entry = section.get(provider_name)
+    if not isinstance(entry, dict):
+        return False
+    value = entry.get(DYNAMIC_KEY, False)
+    if not isinstance(value, bool):
+        raise RoutingError(
+            f"providers.{provider_name}.{DYNAMIC_KEY} must be a boolean "
+            f"(got {type(value).__name__})"
+        )
+    return value
+
+
 def set_spec(provider_name: str, block: Optional[Dict]) -> None:
     """Write (or, with ``None``, drop) a provider's routing spec."""
     if block is not None and (not isinstance(block, dict) or not block):
@@ -204,18 +234,240 @@ def canonical(block: Dict) -> str:
     return json.dumps(block, sort_keys=True, separators=(",", ":"))
 
 
-def fingerprint(upstream: str, block: Dict) -> str:
-    """Identity of one shim: the upstream it fronts and the spec it merges.
+def fingerprint(upstream: str, block: Dict, route: Optional[str] = None) -> str:
+    """Identity of one shim: what it fronts and the spec it merges.
 
     An empty spec is a valid identity — the metering-only shim for that
     upstream (see :mod:`metering`). Provider-declared *behaviour* (the
     session-affinity header) is deliberately not part of the identity: the
     shim reads the live flag per request, so one shim serves a provider in
     both flag states and a toggle reaches running traffic immediately.
+
+    A ``route`` key names a dynamic provider instead of a concrete upstream.
+    The shim then resolves the upstream from the live config per request, so
+    swapping the profile's provider keeps one shim (and one port, one meter)
+    for the route — the fingerprint must not see the upstream it would
+    otherwise hash.
     """
+    if route is not None:
+        subject = f"route:{route}"
+    else:
+        subject = upstream
     return hashlib.sha256(
-        f"{upstream}\n{canonical(block)}".encode("utf-8")
+        f"{subject}\n{canonical(block)}".encode("utf-8")
     ).hexdigest()[:16]
+
+
+# --------------------------------------------------------------------------- #
+# dynamic routes: per-request upstream/auth/model resolution
+# --------------------------------------------------------------------------- #
+#: Route tokens name what a dynamic shim re-resolves per request. A
+#: ``profile:<name>`` route follows the profile's *current* provider, so
+#: ``claunch set-provider <profile> <other>`` reaches already-running
+#: sessions; a ``provider:<name>`` route sticks to one provider's config
+#: (the pi path, or any caller without profile context).
+PROFILE_ROUTE_PREFIX = "profile:"
+PROVIDER_ROUTE_PREFIX = "provider:"
+
+
+def _split_route(route: str, doc: Optional[dict] = None):
+    """``(provider_entry, profile_entry_or_None, profile_or_None)`` for a token."""
+    if route.startswith(PROFILE_ROUTE_PREFIX):
+        from . import profile as profile_mod
+
+        name = route[len(PROFILE_ROUTE_PREFIX):]
+        try:
+            prof = profile_mod.require(name)
+        except profile_mod.ProfileError as exc:
+            raise RoutingError(str(exc)) from None
+        from . import providers  # late: providers pulls translators
+
+        provider_name = providers.resolve_name(prof, doc)
+        section = doc.get("providers") if isinstance(doc, dict) else None
+        entry = section.get(provider_name) if isinstance(section, dict) else None
+        if not isinstance(entry, dict):
+            raise RoutingError(
+                f"profile {name!r} resolves to unknown provider "
+                f"{provider_name!r} (see 'claunch providers')"
+            )
+        profiles = doc.get("profiles") if isinstance(doc, dict) else None
+        profile_entry = profiles.get(name) if isinstance(profiles, dict) else None
+        return entry, (profile_entry if isinstance(profile_entry, dict) else None), prof
+    if route.startswith(PROVIDER_ROUTE_PREFIX):
+        name = route[len(PROVIDER_ROUTE_PREFIX):]
+        section = doc.get("providers") if isinstance(doc, dict) else None
+        entry = section.get(name) if isinstance(section, dict) else None
+        if not isinstance(entry, dict):
+            raise RoutingError(f"unknown provider {name!r} (see 'claunch providers')")
+        return entry, None, None
+    # Bare token: a provider name (route shims started by older builds).
+    section = doc.get("providers") if isinstance(doc, dict) else None
+    entry = section.get(route) if isinstance(section, dict) else None
+    if not isinstance(entry, dict):
+        raise RoutingError(f"unknown provider {route!r} (see 'claunch providers')")
+    return entry, None, None
+
+
+def route_upstream(route: str, doc: Optional[dict] = None) -> str:
+    """The anthropic endpoint a dynamic route points at right now.
+
+    Read from the live config on every request, so editing the provider (or
+    moving a profile onto another provider with ``claunch set-provider``)
+    reaches running sessions without a relaunch.
+    """
+    doc = store.load() if doc is None else doc
+    entry, _, _ = _split_route(route, doc)
+    endpoints = entry.get("endpoints")
+    url = (
+        str(endpoints.get("anthropic") or "").strip()
+        if isinstance(endpoints, dict)
+        else ""
+    )
+    if not url:
+        raise RoutingError(
+            f"the provider behind route {route!r} sets no "
+            "endpoints.anthropic; the dynamic route has nowhere to forward"
+        )
+    return url
+
+
+def route_models(route: str, doc: Optional[dict] = None) -> Dict[str, str]:
+    """The model alias table a dynamic route resolves against right now.
+
+    A ``profile:`` route overlays the profile's own ``models:`` pins on the
+    provider's table, matching the launch-time layering.
+    """
+    doc = store.load() if doc is None else doc
+    entry, profile_entry, _ = _split_route(route, doc)
+    out: Dict[str, str] = {}
+    for raw in (entry.get("models"), (profile_entry or {}).get("models")):
+        if isinstance(raw, dict):
+            out.update(
+                {str(k): str(v) for k, v in raw.items() if str(v).strip()}
+            )
+    return out
+
+
+def resolve_model_alias(model: str, table: Dict[str, str]) -> str:
+    """``model`` as the route's alias table reads it.
+
+    The wire vocabulary is Claude's: role words (``small``...), alias words
+    (``haiku``/``sonnet``/``opus``/``fable``) and Claude's own ids
+    (``claude-opus-5``...). Resolution order:
+
+    1. an exact table key (a table may pin full ids too);
+    2. a ``claude-<alias>`` id normalized to its alias word;
+    3. a role word followed through :data:`ROLE_FALLBACKS`;
+    4. anything else passes through unchanged.
+
+    Passthrough keeps every request a live session was already making valid
+    after a provider swap, and leaves concrete ids (pi, codex) alone.
+    """
+    from . import provider_spec
+
+    name = str(model or "").strip()
+    if not name:
+        return name
+    hit = table.get(name)
+    if hit:
+        return hit
+    for alias in provider_spec.CLAUDE_ALIAS_VARS:
+        if name == f"claude-{alias}" or name.startswith(f"claude-{alias}-"):
+            hit = table.get(alias)
+            if hit:
+                return hit
+            break
+    role = name
+    seen = set()
+    while role in provider_spec.MODEL_ROLES and role not in seen:
+        seen.add(role)
+        hit = table.get(role)
+        if hit:
+            return hit
+        nxt = provider_spec.ROLE_FALLBACKS.get(role)
+        if not nxt:
+            break
+        role = nxt
+    # A role word the table never named lands on the default model — the
+    # same place the role vocabulary points when a profile declares nothing
+    # for it (see :meth:`ProviderSpec.model`'s fallbacks).
+    if role and name in provider_spec.MODEL_ROLES:
+        return table.get("default", name)
+    return name
+
+
+def route_auth(route: str, session: Optional[str], doc: Optional[dict] = None) -> Optional[str]:
+    """The api key a dynamic route injects right now, or ``None``.
+
+    Order: a ``profile:`` route tries the profile's stored ``set-token``
+    secret first (the runner's precedence: a stored token beats a plaintext
+    config key), then the provider's declared ``api_key``; a bare provider
+    route has only the latter. ``None`` means "resolve nothing": the shim
+    forwards the caller's own credentials, which then fail against the new
+    upstream exactly as they would have directly.
+    """
+    doc = store.load() if doc is None else doc
+    entry, _, prof = _split_route(route, doc)
+    if prof is not None:
+        try:
+            from . import lineage
+
+            stored = lineage.stored_auth_token(prof)
+        except Exception:  # noqa: BLE001 - auth fallback must never break traffic
+            stored = None
+        if stored:
+            return stored
+    key = str(entry.get("api_key") or "").strip()
+    if key:
+        return key
+    if prof is not None or not session:
+        return None
+    # A bare provider route with a known session: the session's profile's
+    # stored secret is the same fallback the runner would use at launch.
+    try:
+        from .daemon import db as session_db
+        from . import lineage, profile as profile_mod
+
+        for record in session_db.open_default().load_all():
+            if str(record.get("name") or "") != session:
+                continue
+            selector = str((record.get("def") or {}).get("profile") or "")
+            if not selector:
+                return None
+            try:
+                token_profile = profile_mod.require_selector(selector)
+            except profile_mod.ProfileError:
+                return None
+            return lineage.stored_auth_token(token_profile)
+    except Exception:  # noqa: BLE001 - auth fallback must never break traffic
+        return None
+    return None
+
+
+def merge_body_model(raw: bytes, block: Dict, table: Dict[str, str]) -> bytes:
+    """``raw`` with the routing spec merged in and the model alias resolved.
+
+    One parse serves both rewrites. A body that already carries the routing
+    field is left alone there; the model field is rewritten whenever the
+    alias table has an answer, because the caller cannot know the table.
+    Non-JSON bodies pass through unchanged, same as :func:`merge_body`.
+    """
+    if not raw or (not block and not table):
+        return raw
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return raw
+    if not isinstance(doc, dict):
+        return raw
+    if block and BODY_FIELD not in doc:
+        doc[BODY_FIELD] = json.loads(canonical(block))
+    model = doc.get("model")
+    if isinstance(model, str) and table:
+        resolved = resolve_model_alias(model, table)
+        if resolved != model:
+            doc["model"] = resolved
+    return json.dumps(doc).encode("utf-8")
 
 
 def merge_body(raw: bytes, block: Dict) -> bytes:
@@ -336,7 +588,8 @@ def _shim_env() -> dict:
     return env
 
 
-def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[str]) -> "subprocess.Popen":
+def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[str],
+           route: Optional[str] = None) -> "subprocess.Popen":
     """Start a detached shim process; its output goes to the fingerprint's log."""
     state_dir().mkdir(parents=True, exist_ok=True)
     log = open(log_file(fp), "ab")
@@ -351,6 +604,8 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[st
     ]
     if provider:
         argv.extend(["--provider", provider])
+    if route:
+        argv.extend(["--route", route])
     kwargs: dict = {}
     if sys.platform == "win32":
         CREATE_NO_WINDOW = 0x08000000
@@ -372,7 +627,8 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[st
         log.close()
 
 
-def _record(fp: str, port: int, upstream: str, block: Dict, pid) -> None:
+def _record(fp: str, port: int, upstream: str, block: Dict, pid,
+            route: Optional[str] = None) -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
     _record_file(fp, port).write_text(
         json.dumps(
@@ -383,6 +639,7 @@ def _record(fp: str, port: int, upstream: str, block: Dict, pid) -> None:
                 "spec": block,
                 "pid": pid,
                 "url": local_url(port),
+                "route": route,
             },
             indent=2,
             sort_keys=True,
@@ -474,7 +731,8 @@ def _free_port(fp: str) -> Optional[int]:
     return None
 
 
-def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> str:
+def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
+                route: Optional[str] = None) -> str:
     """Base URL of a live shim fronting ``upstream`` with ``block`` merged in.
 
     Reuses a running shim for the same pair and starts one otherwise. Callers
@@ -483,11 +741,15 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> s
     name of the provider this shim fronts; the shim reads that provider's
     session-affinity flag from the live config per request, so a toggle
     reaches running traffic without a restart (see the module docstring).
+
+    ``route`` names a dynamic provider: the fingerprint keys on the route,
+    not the upstream, and the shim resolves upstream, credentials and the
+    model alias table from the live config on every request.
     """
-    fp = fingerprint(upstream, block)
+    fp = fingerprint(upstream, block, route=route)
     port = _find(fp)
     if port is not None:
-        _record(fp, port, upstream, block, None)
+        _record(fp, port, upstream, block, None, route=route)
         return local_url(port)
     if not _try_claim(fp):
         # Another launch is starting this exact shim right now. Wait for it
@@ -496,7 +758,7 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> s
         while time.monotonic() < deadline:
             port = _find(fp)
             if port is not None:
-                _record(fp, port, upstream, block, None)
+                _record(fp, port, upstream, block, None, route=route)
                 return local_url(port)
             time.sleep(0.1)
         raise RoutingError(
@@ -511,7 +773,7 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> s
         # simultaneous launches).
         port = _find(fp)
         if port is not None:
-            _record(fp, port, upstream, block, None)
+            _record(fp, port, upstream, block, None, route=route)
             return local_url(port)
         start_port = _free_port(fp)
         if start_port is None:
@@ -519,12 +781,12 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> s
                 f"no free loopback port for the routing shim in "
                 f"{candidate_ports(fp)[0]}..{candidate_ports(fp)[-1]}"
             )
-        child = _spawn(upstream, block, start_port, fp, provider)
+        child = _spawn(upstream, block, start_port, fp, provider, route=route)
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             info = health(start_port, timeout=0.5)
             if info is not None and info.get("fingerprint") == fp:
-                _record(fp, start_port, upstream, block, info.get("pid"))
+                _record(fp, start_port, upstream, block, info.get("pid"), route=route)
                 return local_url(start_port)
             time.sleep(0.1)
         tail = _log_tail(fp)
@@ -538,7 +800,8 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> s
         _claim_file(fp).unlink(missing_ok=True)
 
 
-def front(upstream: str, provider_name: str, doc: Optional[dict] = None) -> str:
+def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
+          profile: Optional[str] = None) -> str:
     """The base URL a harness should talk to for ``provider_name``'s ``upstream``.
 
     Two reasons send a provider through the shim, and they differ in what a
@@ -559,6 +822,19 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None) -> str:
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
+    if dynamic(provider_name, doc):
+        # A dynamic provider resolves its upstream, credentials and model
+        # table at the shim per request, so the profile's provider can change
+        # mid-run. With profile context the route is keyed on the profile and
+        # follows its provider selection live; without, it sticks to this
+        # provider's own config. The shim is mandatory — same failure class
+        # as a routing pin, not as metering.
+        route = (
+            f"{PROFILE_ROUTE_PREFIX}{profile}"
+            if profile is not None
+            else f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
+        )
+        return ensure_shim(upstream, block or {}, provider_name, route=route)
     if block:
         return ensure_shim(upstream, block, provider_name)
     if not metering.provider_enabled(provider_name, doc):
@@ -574,17 +850,22 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None) -> str:
         return upstream
 
 
-def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
+def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
+          profile: Optional[str] = None) -> None:
     """Point ``env``'s ``ANTHROPIC_BASE_URL`` at a shim when ``provider_name``
     goes through one (see :func:`front` for the policy).
 
     ``default``/``claude`` (the OAuth route) never come here: their env has
     no ``ANTHROPIC_BASE_URL`` from the config file, and that key is the whole
-    handle this function has.
+    handle this function has. ``profile`` (a profile name) lets a dynamic
+    route follow the profile's provider selection; callers without profile
+    context pass ``None`` and the route sticks to the provider.
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
-    if not block and not metering.provider_enabled(provider_name, doc):
+    if not block and not dynamic(provider_name, doc) and not metering.provider_enabled(
+        provider_name, doc
+    ):
         return
     upstream = env.get("ANTHROPIC_BASE_URL")
     if not upstream:
@@ -593,6 +874,11 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
                 f"provider {provider_name!r} declares {SPEC_KEY} but sets no "
                 "ANTHROPIC_BASE_URL to route to"
             )
+        if dynamic(provider_name, doc):
+            raise RoutingError(
+                f"provider {provider_name!r} is dynamic but sets no "
+                "ANTHROPIC_BASE_URL to front"
+            )
         return  # nothing to front: the harness talks to its built-in default
     # No "is this already a shim?" guard: ``ANTHROPIC_BASE_URL`` is a backend
     # key, stripped from the inherited environment before any layer is applied
@@ -600,7 +886,7 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
     # from the config file. A guard keyed on "looks like loopback" would
     # instead skip the rewrite for a locally hosted upstream — silently
     # dropping the pin, which is the failure this whole module exists to stop.
-    env["ANTHROPIC_BASE_URL"] = front(upstream, provider_name, doc)
+    env["ANTHROPIC_BASE_URL"] = front(upstream, provider_name, doc, profile=profile)
 
 
 # --------------------------------------------------------------------------- #
