@@ -492,6 +492,10 @@ def _ago(secs):
 def _rec(**kw):
     base = {
         "ts": _ago(0), "session": "s1", "model": "m", "status": 200,
+        # The call's own path: the cache ratio reads the input counts'
+        # meaning off it (prompt_tokens), so a record without one has no
+        # ratio at all.
+        "path": "/v1/messages",
         "output_tokens": 100, "input_tokens": 10, "cache_read": 0, "stream": True,
         "ttft_ms": 200, "tps": 50.0, "tps_total": 40.0, "counted": True,
     }
@@ -820,6 +824,112 @@ def test_session_summary_keeps_an_uncounted_last_call_visible(home):
     got = metering.session_summary("s1")
     assert got["counted"] is False and got["status"] == 502 and got["tps"] is None
     assert got["tps_median"] == 40.0  # the median is over the counted calls in the window
+
+
+def test_the_cache_hit_ratio_reads_each_protocols_input_count_its_own_way(home):
+    """The two wire formats disagree about whether the cached part is inside
+    the input count, and the record keeps whichever number the backend sent.
+
+    Values are from a real record on this machine. Anthropic's three counts
+    are separate: 3,823 fresh + 124,570 cached + 0 written = 128,393 prompt
+    tokens, 97.0% of it cached. OpenAI's ``prompt_tokens`` (kept in
+    ``input_tokens``) already counts the cached part: 36,486 prompt tokens of
+    which 34,688 were cached, 95.1%. Adding ``cache_read`` there would count
+    it twice and halve the figure.
+    """
+    anthropic = {"path": "/v1/messages", "input_tokens": 3823,
+                 "cache_read": 124570, "cache_write": 0}
+    openai = {"path": "/v1/chat/completions", "input_tokens": 36486,
+              "cache_read": 34688, "cache_write": None}
+    assert metering.prompt_tokens(anthropic) == 128393
+    assert metering.cache_hit_ratio(anthropic) == 0.9702
+    assert metering.prompt_tokens(openai) == 36486
+    assert metering.cache_hit_ratio(openai) == 0.9507
+
+
+def test_a_cache_the_call_never_touched_is_zero_percent_not_absent():
+    """A measured 0% and "cannot say" are different facts and get different
+    values: the first is drawn, the second is drawn as nothing."""
+    fresh = {"path": "/v1/messages", "input_tokens": 500, "cache_read": 0,
+             "cache_write": 0}
+    assert metering.cache_hit_ratio(fresh) == 0.0
+    for unknown in ({"input_tokens": 500, "cache_read": 0},          # no path
+                    {"path": "/v1/messages", "input_tokens": None,
+                     "cache_read": None, "cache_write": None},        # uncounted
+                    {"path": "/some/other/route", "input_tokens": 5,
+                     "cache_read": 5}):                              # other protocol
+        assert metering.cache_hit_ratio(unknown) is None
+        assert metering.prompt_tokens(unknown) is None
+
+
+def test_the_window_ratio_weights_calls_by_their_prompt_not_by_call_count(home):
+    """One small cold call among big warm ones must not move the window.
+
+    A mean of per-call ratios would give the 100-token call the same weight
+    as the 100,000-token one and read 50%; the share over the summed counts
+    is what the session actually paid for.
+    """
+    metering.append("fp1", _rec(session="s1", ts=_ago(30),
+                                 input_tokens=1000, cache_read=99_000, cache_write=0))
+    metering.append("fp1", _rec(session="s1", ts=_ago(20),
+                                 input_tokens=100, cache_read=0, cache_write=0))
+    got = metering.session_summary("s1")
+    assert got["cache_hit_n"] == 2
+    assert got["cache_hit_ratio"] == 0.0        # the last call paid full price
+    assert got["cache_hit_ratio_window"] == 0.989  # 99,000 of 100,100 prompt tokens
+    assert got["prompt_tokens"] == 100 and got["cache_read"] == 0
+    assert got["cache_write"] == 0
+
+
+def test_an_idle_summary_carries_no_cache_ratio_either(home):
+    """Same rule as the rate: a share from a call outside the window describes
+    no moment, so the idle row keeps the counts empty rather than the number."""
+    metering.append("fp1", _rec(session="s1", input_tokens=10, cache_read=90,
+                                 ts=_ago(metering.SUMMARY_MAX_AGE + 60)))
+    got = metering.session_summary("s1")
+    assert got["idle"] is True
+    assert got["cache_hit_ratio"] is None and got["cache_hit_ratio_window"] is None
+    assert got["cache_hit_n"] == 0 and got["prompt_tokens"] is None
+    assert got["cache_write"] is None
+
+
+def test_the_summary_carries_the_mean_time_to_first_token_and_its_count(home):
+    """The row shows the last call's first-token wait; the window's mean is
+    what says whether that number is this session's normal (claunch-k196e.1).
+    A call that arrived in one piece has no first token and enters no mean."""
+    metering.append("fp1", _rec(session="s1", ttft_ms=100, ts=_ago(30)))
+    metering.append("fp1", _rec(session="s1", ttft_ms=500, ts=_ago(20)))
+    metering.append("fp1", _rec(session="s1", ttft_ms=None, ttfb_ms=250, ts=_ago(10)))
+    got = metering.session_summary("s1")
+    assert got["ttft_ms"] is None and got["ttfb_ms"] == 250  # the last call did not stream
+    assert got["ttft_ms_mean"] == 300 and got["ttft_ms_n"] == 2
+    # One call is still one call: the mean is reported, the UI decides that an
+    # average of one is not worth drawing.
+    metering.append("fp1", _rec(session="s2", ttft_ms=700, ts=_ago(5)))
+    one = metering.session_summary("s2")
+    assert one["ttft_ms_mean"] == 700 and one["ttft_ms_n"] == 1
+
+
+def test_an_idle_summary_carries_no_mean_first_token_time(home):
+    metering.append("fp1", _rec(session="s1", ttft_ms=100,
+                                 ts=_ago(metering.SUMMARY_MAX_AGE + 60)))
+    got = metering.session_summary("s1")
+    assert got["idle"] is True
+    assert got["ttft_ms_mean"] is None and got["ttft_ms_n"] == 0
+
+
+def test_summarize_carries_a_cache_hit_ratio_over_the_records_it_counted(home):
+    metering.append("fp1", _rec(input_tokens=1000, cache_read=3000, cache_write=50))
+    metering.append("fp1", _rec(session="s2", input_tokens=4000, cache_read=1000,
+                                 path="/v1/chat/completions", cache_write=None))
+    # A record that cannot give a denominator is left out of both halves: a
+    # zero counted into the denominator would read as a colder cache.
+    metering.append("fp1", _rec(session="s3", input_tokens=None, cache_read=700,
+                                 cache_write=None))
+    got = metering.summarize(metering.load())
+    assert got["cache_read"] == 4700 and got["cache_write"] == 50
+    # (3,000 + 1,000) cached of (4,050 + 4,000) prompt tokens.
+    assert got["cache_hit_ratio"] == round(4000 / 8050, 4)
 
 
 def test_session_summary_reports_a_whole_body_call_with_its_first_byte(home):
@@ -1173,6 +1283,29 @@ def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
     # this text and must not satisfy the parse
     block = re.search(r"^#term-tps-overlay\s*\{([^}]*)\}", css, re.M)
     assert block and "pointer-events: none" in block.group(1)
+
+
+def test_the_rail_line_folds_and_the_overlay_is_two_stacked_areas():
+    """Both are layout decisions a stylesheet edit can silently undo.
+
+    The rail's reading (rate, latency with its average, cache share) is wider
+    than a 260px row, so its span must be shrinkable rather than `flex: none`
+    -- a clipped tail loses the unit of the number that survives. The overlay
+    draws what is running above and how the last finished call went below,
+    with the divider only where both areas exist (claunch-k196e.2).
+    """
+    from pathlib import Path
+
+    static = Path(metering.__file__).with_name("web") / "static"
+    css = (static / "style.css").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    rail = re.search(r"^#session-list \.rail-tps \{([^}]*)\}", css, re.M)
+    assert rail and "flex: 1 1 auto" in rail.group(1) and "min-width: 0" in rail.group(1)
+    assert "#term-tps-overlay .term-tps-live + .term-tps-last" in css  # divider, both present
+    assert ("#term-tps-overlay .term-tps-live,\n#term-tps-overlay .term-tps-last {"
+            in css)  # the shared column rule
+    assert 'el("div", "term-tps-live")' in js and 'el("div", "term-tps-last")' in js
+    assert "if (!parts.live) lastBox.appendChild" in js  # the big number moves with the mode
 
 
 def test_web_page_draws_an_idle_session_as_none_rather_than_its_last_number():

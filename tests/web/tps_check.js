@@ -27,7 +27,16 @@
      have timed for the latter.
    - The overlay is drawn only while the terminal is on screen, and it is
      pointer-transparent by CSS (railayout_check's sibling in test_metering
-     pins that), so it can never take a click from the PTY. */
+     pins that), so it can never take a click from the PTY.
+   - The cache's share of the prompt rides with the rate of the same call
+     (claunch-k196e), and the window's mean time to first token rides with
+     the last call's (claunch-k196e.1). Both are absent rather than zero when
+     the record cannot say, and neither is claimed for a call in flight: its
+     usage arrives at the end. The rail and the card chip keep the compact
+     forms (a bare percentage) because a 260px row has no room for a word.
+   - The overlay is two stacked areas (claunch-k196e.2): what is running now,
+     and how the last finished call went. The second is drawn either way; the
+     first only while a call is in flight. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -75,11 +84,18 @@ const dom = {
   "terminal": node("div", ""),
 };
 
+/* tpsSparkline builds real SVG through document.createElementNS, which this
+   DOM does not carry; the checks below read the two-area structure around
+   it, so the chart is a marker node here. It is handed to the sandbox as a
+   parameter: `new Function` closes over the global scope, not this module,
+   so a module-scope const would read as undefined inside it. */
+const tpsSparkline = () => node("svg", "term-tps-chart");
+
 const ctx = {};
 new Function(
-  "exports", "el", "$", "sessionsCache", "currentName", "railOpen",
+  "exports", "el", "$", "sessionsCache", "currentName", "railOpen", "tpsSparkline",
   ["fmtAge", "modelShort", "terminalOnScreen", "tpsFmt", "tpsAgeSecs", "ttftFmt",
-   "tpsLatencyText", "tpsSecs", "tpsLiveText", "tpsParallelText", "tpsParallelTooltip", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
+   "tpsLatencyText", "tpsAvgLatencyText", "tpsSecs", "tpsLiveText", "tpsParallelText", "tpsParallelTooltip", "tpsCacheText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
    "tpsChip", "renderTermTps"].map(slice).join("\n") + `
 exports.text = tpsText;
 exports.parallel = tpsParallelText;
@@ -91,7 +107,7 @@ exports.render = renderTermTps;
 exports.setSessions = (s) => { sessionsCache = s; };
 exports.setCurrent = (n) => { currentName = n; };
 exports.setRailOpen = (v) => { railOpen = v; };
-`)(ctx, node, (id) => dom[id], [], null, false);
+`)(ctx, node, (id) => dom[id], [], null, false, tpsSparkline);
 
 let failures = 0;
 function check(what, got, want) {
@@ -137,6 +153,12 @@ const STALE = { ...FAST, ts: OLD, age_s: 3600, max_age_s: undefined,
    divided by the sliver of network time the finished body took to cross,
    read as five digits. */
 const WHOLE = { ...FAST, tps: 2.41, ttft_ms: null, ttfb_ms: 3158 };
+/* The cache's share of the same call (claunch-k196e), from a real record:
+   124,570 of 128,393 prompt tokens read from the cache, and the same share
+   over the window's four calls. */
+const CACHED = { ...FAST, cache_read: 124570, cache_write: 0,
+                 prompt_tokens: 128393, cache_hit_ratio: 0.9702,
+                 cache_hit_ratio_window: 0.9684, cache_hit_n: 4 };
 
 const PI = { name: "pi", harness: "pi", tps: FAST };
 const CLAUDE = { name: "ds4", harness: "claude", tps: BIG };
@@ -157,6 +179,34 @@ check("no block at all is an empty string, never a zero", ctx.text(null), "");
 check("a session that has gone quiet reads none, not its last number",
       ctx.text(IDLE), "idle");
 
+/* ---- the cache's share of that call (claunch-k196e) ---- */
+check("a measured cache share rides on the glance, in words where there is room",
+      ctx.text(CACHED), "38.1 tok/s · ttft 715ms · cache 97%");
+check("...and as the bare percentage in the places it has to fit",
+      ctx.text(CACHED, true), "38.1 tok/s · ttft 715ms · 97%");
+check("a call that read nothing from the cache is a measured 0%, not absence",
+      ctx.text({ ...FAST, prompt_tokens: 36, cache_hit_ratio: 0 }), "38.1 tok/s · ttft 715ms · cache 0%");
+check("a record that cannot give a share draws nothing extra",
+      [ctx.text({ ...FAST, cache_hit_ratio: null }),
+       ctx.text({ ...FAST, cache_hit_ratio: null }, true)],
+      ["38.1 tok/s · ttft 715ms", "38.1 tok/s · ttft 715ms"]);
+
+/* ---- the window's mean time to first token (claunch-k196e.1) ---- */
+const AVG = { ...FAST, ttft_ms_mean: 900, ttft_ms_n: 4 };
+check("the window's mean rides beside the last call's time to first token",
+      ctx.text(AVG), "38.1 tok/s · ttft 715ms · avg 900ms");
+check("...and in the compact rail form too", ctx.text(AVG, true),
+      "38.1 tok/s · ttft 715ms · avg 900ms");
+check("one call is not an average of itself",
+      ctx.text({ ...AVG, ttft_ms_n: 1 }), "38.1 tok/s · ttft 715ms");
+check("a first-byte call gets no ttft average — different clock",
+      ctx.text({ ...WHOLE, ttft_ms_mean: 900, ttft_ms_n: 4 }),
+      "2.4 tok/s · first byte 3.2s");
+check("the tooltip names the mean and how many calls it is over",
+      ctx.tooltip(AVG).includes("mean time to first token 900ms over the last 4 calls"),
+      true);
+check("a window of one call has no mean line", ctx.tooltip(FAST).includes("mean time"), false);
+
 /* ---- the story ---- */
 const tip = ctx.tooltip(FAST);
 check("the tooltip dates the call and names the model",
@@ -168,6 +218,15 @@ check("...and the rolling median with both bounds of its window",
 check("...and where the call went", tip.includes("via https://api.deepseek.com/v1"), true);
 check("an error answer's tooltip has no rate lines",
       ctx.tooltip(ERR).includes("tokens/s"), false);
+const cachedTip = ctx.tooltip(CACHED);
+check("the tooltip names the share and the two counts behind it",
+      cachedTip.includes("cache hit 97.0%: 124570 of 128393 prompt tokens"), true);
+check("...and the share over the window, with both of its bounds",
+      cachedTip.includes("cache hit 96.8% over the last 4 calls in 10m"), true);
+check("a record without a share says nothing about the cache",
+      ctx.tooltip(FAST).includes("cache hit"), false);
+check("one call in the window is not a window: no share line",
+      ctx.tooltip({ ...CACHED, cache_hit_n: 1 }).includes("over the last"), false);
 
 /* ---- a session that went quiet ---- */
 const quiet = ctx.tooltip(IDLE);
@@ -201,10 +260,17 @@ check("a whole-body answer's rate reaches the rail line too",
       ctx.rail(WHOLEBODY).kids[1].textContent, "2.4 tok/s · first byte 3.2s");
 check("a session that never went through the shim gets no line at all",
       ctx.rail(OAUTH), null);
+check("the rail line carries the share in its compact form",
+      ctx.rail({ name: "cached", tps: CACHED }).kids.map((k) => k.textContent),
+      ["⚡", "38.1 tok/s · ttft 715ms · 97%", "45s ago"]);
 // Quiet and never-measured are two states: one draws "none", the other nothing.
 
 /* ---- the card chip ---- */
-ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, GONE, WHOLEBODY, OAUTH]);
+const CACHED_LIVE = { ...CACHED, live: { window_s: 2, bin_s: 0.5,
+                                         inflight: 1, state: "streaming", rate: 41.25 } };
+ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, GONE, WHOLEBODY, OAUTH,
+                 { name: "cached", harness: "claude", tps: CACHED },
+                 { name: "livec", harness: "claude", tps: CACHED_LIVE }]);
 check("the chip is the glance with the story on hover",
       [ctx.chip("pi").textContent, ctx.chip("pi").className, ctx.chip("pi").title === tip],
       ["38.1 tok/s · ttft 715ms", "sess-brief-tps", true]);
@@ -216,6 +282,8 @@ check("and a whole-body answer's rate is drawn on the chip too",
       ctx.chip("whole").textContent, "2.4 tok/s · first byte 3.2s");
 check("no chip for an unmetered session, nor for one the rail no longer knows",
       [ctx.chip("nc"), ctx.chip("gone")], [null, null]);
+check("the chip carries the share compactly, as the rail does",
+      ctx.chip("cached").textContent, "38.1 tok/s · ttft 715ms · 97%");
 
 /* ---- the header badge and the PTY overlay ---- */
 ctx.setCurrent("ds4");
@@ -223,11 +291,19 @@ ctx.render();
 check("the attached session's badge shows its last rate",
       [dom["term-tps"].className, dom["term-tps"].textContent],
       ["badge tps", "249 tok/s · ttft 1.1s"]);
-check("and the overlay over the PTY draws the number big and the rest small",
-      [dom["term-tps-overlay"].className,
-       dom["term-tps-overlay"].kids.map((k) => [k.className, k.textContent])],
+/* The overlay is two stacked areas: what is running now (drawn only when a
+   call is in flight) and how the last finished call went. The era of one
+   run-on line under a big number is over -- the two answer different
+   questions and are read at different moments (claunch-k196e.2). */
+const overlayAreas = () => dom["term-tps-overlay"].kids
+  .map((k) => [k.className, k.kids.map((c) => [c.className, c.textContent])]);
+check("and the overlay over the PTY draws the number big, then the call's own reading",
+      [dom["term-tps-overlay"].className, overlayAreas()],
       ["term-tps-overlay",
-       [["term-tps-big", "249 tok/s"], ["term-tps-small", "ttft 1.1s · deepseek flash · 45s ago"]]]);
+       [["term-tps-last",
+         [["term-tps-big", "249 tok/s"],
+          ["term-tps-small term-tps-when", "deepseek flash · 45s ago"],
+          ["term-tps-small term-tps-metrics", "ttft 1.1s"]]]]]);
 // (modelShort spells the id the way the rail does: hyphens as spaces)
 
 ctx.setRailOpen(true);                       // the rail covers the terminal (phone)
@@ -241,7 +317,7 @@ ctx.setRailOpen(false);
 ctx.setCurrent("broken");
 ctx.render();
 check("an error answer's badge and overlay say so instead of a rate",
-      [dom["term-tps"].textContent, dom["term-tps-overlay"].kids[0].textContent],
+      [dom["term-tps"].textContent, dom["term-tps-overlay"].kids[0].kids[0].textContent],
       ["HTTP 502", "HTTP 502"]);
 
 ctx.setCurrent("quiet");
@@ -253,18 +329,46 @@ ctx.setCurrent("gone-quiet");
 ctx.render();
 check("a quiet session's badge and overlay say none instead of the last rate",
       [dom["term-tps"].className, dom["term-tps"].textContent,
-       dom["term-tps-overlay"].className,
-       dom["term-tps-overlay"].kids.map((k) => k.textContent)],
+       dom["term-tps-overlay"].className, overlayAreas()],
       ["badge tps stale idle", "idle", "term-tps-overlay stale idle",
-       ["idle", "deepseek flash · 1h00m ago"]]);
+       [["term-tps-last",
+         [["term-tps-big", "idle"],
+          ["term-tps-small term-tps-when", "deepseek flash · 1h00m ago"]]]]]);
+
+ctx.setCurrent("cached");
+ctx.render();
+check("the badge and the overlay both name the share beside the call's latency",
+      [dom["term-tps"].textContent, overlayAreas()],
+      ["38.1 tok/s · ttft 715ms · cache 97%",
+       [["term-tps-last",
+         [["term-tps-big", "38.1 tok/s"],
+          ["term-tps-small term-tps-when", "deepseek flash · 45s ago"],
+          ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]]);
+
+/* A call in flight has not reported its usage yet, so the lower area still
+   says whose share it is: "last", the finished call. */
+ctx.setCurrent("livec");
+ctx.render();
+check("a live call stacks its own area above the finished call's",
+      overlayAreas(),
+      [["term-tps-live",
+        [["term-tps-big", "≈41.3 tok/s"],
+         ["term-tps-chart", ""]]],
+       ["term-tps-last",
+        [["term-tps-small term-tps-when", "deepseek flash · last 38.1 tok/s · 45s ago"],
+         ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]);
+check("the live area carries no rate of its own in the lower one",
+      dom["term-tps-overlay"].kids[0].kids[0].textContent, "≈41.3 tok/s");
 
 ctx.setCurrent("whole");
 ctx.render();
 check("a whole-body answer reaches the badge and the overlay, with its first byte",
-      [dom["term-tps"].textContent,
-       dom["term-tps-overlay"].kids.map((k) => k.textContent)],
+      [dom["term-tps"].textContent, overlayAreas()],
       ["2.4 tok/s · first byte 3.2s",
-       ["2.4 tok/s", "first byte 3.2s · deepseek flash · 45s ago"]]);
+       [["term-tps-last",
+         [["term-tps-big", "2.4 tok/s"],
+          ["term-tps-small term-tps-when", "deepseek flash · 45s ago"],
+          ["term-tps-small term-tps-metrics", "first byte 3.2s"]]]]]);
 
 /* The live poll repaints twice a second, and most of those answers read the
    same (claunch-i3es6): an unchanged overlay keeps its nodes, and one that
@@ -282,7 +386,7 @@ check("a whole-body answer reaches the badge and the overlay, with its first byt
   ctx.setCurrent("ds4");
   ctx.render();
   check("and one that reads differently is",
-        [rebuilt, overlay.kids[0].textContent], [1, "249 tok/s"]);
+        [rebuilt, overlay.kids[0].kids[0].textContent], [1, "249 tok/s"]);
   ctx.setCurrent("whole");
   ctx.render();
   overlay.replaceChildren = replace;

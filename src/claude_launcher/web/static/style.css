@@ -1195,12 +1195,16 @@ html[data-theme="light"] #term-tps-overlay {
    older than ten minutes dims, since it says nothing about now. Absent
    (not "?") where the session has no record. */
 #session-list .rail-tps-line {
-  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 6px;
+  flex-basis: 100%; order: 2; display: flex; align-items: baseline; gap: 6px;
   min-width: 0; padding-left: 16px; margin-top: 1px; line-height: 16px;
 }
 #session-list .rail-tps-bolt { flex: none; font-size: 10px; color: #d29922; }
+/* The reading may fold onto a second line rather than run off the row: the
+   rate, the latency with its average, and the cache share together are wider
+   than a 260px rail, and a clipped tail here loses the unit of the number
+   that survives. The bolt and the age keep their place beside it. */
 #session-list .rail-tps {
-  flex: none; font-family: SFMono-Regular, Consolas, monospace;
+  flex: 1 1 auto; min-width: 0; font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px; color: #c9d1d9;
 }
 #session-list .rail-tps-age { flex: none; font-size: 11px; color: #7d8590; }
@@ -2646,6 +2650,20 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-tps-overlay .term-tps-big { font-size: 15px; font-weight: 600; line-height: 18px; }
 #term-tps-overlay .term-tps-small { font-size: 10px; color: #8b949e; line-height: 12px; }
+/* Two stacked areas (claunch-k196e.2): what is running now -- state, chart,
+   the shim's other sessions -- above, and how the last finished call went
+   below. The divider is drawn only when both are on screen: one area plus an
+   empty sliver would read as a second thing that has nothing to say. */
+#term-tps-overlay .term-tps-live,
+#term-tps-overlay .term-tps-last {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px;
+}
+#term-tps-overlay .term-tps-live + .term-tps-last {
+  margin-top: 2px; padding-top: 3px;
+  border-top: 1px solid rgba(139, 148, 158, 0.28);
+}
+#term-tps-overlay .term-tps-when,
+#term-tps-overlay .term-tps-metrics { white-space: nowrap; }
 #term-tps-overlay.stale { color: #7d8590; border-color: #21262d; }
 /* Live (claunch-2fut4): a call in flight. The line under the number is the
    last thirty seconds of estimated output tokens/s, scaled to its own peak. */

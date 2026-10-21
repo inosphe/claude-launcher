@@ -964,12 +964,24 @@ def _fmt(value, unit: str = "") -> str:
     return "-" if value is None else f"{value}{unit}"
 
 
+def _cache_hit_text(s: dict) -> str:
+    """``(97.0% of prompt)`` for a summary line, or "" when there is none.
+
+    ``summarize``'s ratio is the summed share over the records it counted
+    (metering._ratio_over), so the percentage and the cache-read total on the
+    same line describe the same calls.
+    """
+    ratio = s.get("cache_hit_ratio")
+    return "" if ratio is None else f" ({ratio * 100:.1f}% of prompt)"
+
+
 def _tps_summary_lines(label: str, s: dict) -> List[str]:
     return [
         f"  {label}",
         f"    requests {s['requests']} (counted {s['counted']})  "
         f"out {s['output_tokens']} tok  in {s['input_tokens']} tok  "
-        f"cache-read {s['cache_read']} tok",
+        f"cache-read {s['cache_read']} tok{_cache_hit_text(s)}  "
+        f"cache-write {s.get('cache_write') or 0} tok",
         f"    tps median {_fmt(s['tps_median'])}  mean {_fmt(s['tps_mean'])}  "
         f"min {_fmt(s['tps_min'])}  max {_fmt(s['tps_max'])}  "
         f"ttft median {_fmt(s['ttft_ms_median'], 'ms')}",
