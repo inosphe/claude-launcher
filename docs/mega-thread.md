@@ -37,7 +37,9 @@ routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
 - `candidates`는 멤버별 `{session, thread, p_mine, p_not_mine, logit, choice, confidence, error}`,
   `chosen`은 전달을 시도한 쓰레드 id 목록이다.
 - `delivered`는 그 라우팅의 메시지가 **적어도 한 곳에 실제로 타이핑됐다**는 뜻이다. 쓰레드 행은
-  종료된 세션에도 남으므로, 행이 생겼다는 것과 전달됐다는 것은 다르다.
+  종료된 세션에도 남으므로, 행이 생겼다는 것과 전달됐다는 것은 다르다. 종료된 세션에는 타이핑 대신
+  쓰레드 알림 큐에 들어가므로(아래 「전달」) 그 응답 행은 `queued: true`, `hold: "exited"`이고
+  원장의 `delivered`는 `false`다.
 - `verdict`: `auto`(한 멤버가 임계값 통과) / `choose`(둘 이상, 사용자 선택 대기) / `manual`(사용자가
   직접 고름) / `none`(아무도 통과 못 함) / `error`(모든 호출 실패).
 
@@ -116,6 +118,9 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 멤버 자리는 세션이 종료돼도 남는다. 멤버십은 사용자가 만든 배치이고 세션의 생존 상태가 아니며, 같은
 이름·같은 쓰레드로 재개한 세션이 자기 자리를 잃으면 클러스터가 조용히 비어 보인다. 세션이 없으면
 `member_view`가 `status: "gone"`으로 보여 주고, 그 쓰레드로의 전달은 쓰레드 경로가 그대로 처리한다.
+종료된 세션에는 블록이 곧바로 타이핑되지 않고 세션별 알림 큐에 쌓였다가, 그 세션이 respawn되거나
+데몬 restore로 다시 launch될 때 타이핑된다(`daemon/thread_notices.py`, claunch-sgxfh). 그래서 라우팅
+응답과 원장은 그 건을 `delivered`가 아니라 `queued`로 적는다.
 자리를 지우는 일은 사용자가 `DELETE /{id}/members/{thread}`로 한다.
 
 전달이 끝난 뒤 `routes` 기록이 실패하면 응답은 여전히 200이고 `ledger_error`에 그 이유가 실린다.

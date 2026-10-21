@@ -292,11 +292,19 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                 if post is None:
                     raise RuntimeError("threads_api is not installed")
                 res = post(tid, text)
+                hold = res.get("hold")
+                # A block queued for an exited session is typed in only when
+                # that session is launched again (daemon/thread_notices.py),
+                # so it is not "delivered" yet in the ledger's sense (its
+                # ``delivered`` means typed into a terminal, and the thread row
+                # itself stays after the session is gone).
+                queued = hold == "exited"
                 out.append({
                     "thread": tid,
                     "session": member.get("session") or res["thread"]["session"],
-                    "delivered": bool(res.get("delivered")),
-                    "hold": res.get("hold"),
+                    "delivered": bool(res.get("delivered")) and not queued,
+                    "queued": queued,
+                    "hold": hold,
                 })
             except Exception as exc:  # noqa: BLE001 -- one thread, one report
                 log.info("megathread: could not deliver to %s: %s", tid, exc)

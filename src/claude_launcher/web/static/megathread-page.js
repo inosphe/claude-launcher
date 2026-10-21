@@ -108,6 +108,7 @@ globalThis.MegaThreadPage = (() => {
     return list.map((d) => {
       const who = d.session || d.thread;
       if (d.error) return `${who}: 실패 (${d.error})`;
+      if (d.queued) return `${who}: 종료된 세션 — 다시 시작(respawn/restore)하면 전달됩니다`;
       if (!d.delivered) return `${who}: 대기 중 (세션이 응답할 수 없음)`;
       return d.hold ? `${who}: 전달됨 · ${d.hold}` : `${who}: 전달됨`;
     }).join(" · ");
