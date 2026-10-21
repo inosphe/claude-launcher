@@ -37,6 +37,12 @@ const check = (name, cond, extra) => {
   console.log(`FAIL ${name}${extra === undefined ? "" : " — " + JSON.stringify(extra)}`);
 };
 
+/* The rail's filter box (index.html #session-search), as the clear path
+   drives it: a value and a caret it can take. Rows read its value at scroll
+   time, which is how the ORDER of the press is pinned -- a reveal aimed at a
+   filtered-out row scrolls a row the rail does not draw. */
+const filterBox = { value: "", focuses: 0, focus() { this.focuses++; } };
+
 /* ---- stub rail ----
    A row is what refreshSessions builds: an <li> carrying the session name in
    its dataset, plus whatever classes the other painters put on it. Grouped,
@@ -49,7 +55,10 @@ function node(dataset, cls, parentElement) {
     toggle: (c, on) => (on ? n.classes.add(c) : n.classes.delete(c)),
     contains: (c) => n.classes.has(c),
   };
-  n.scrollIntoView = (opts) => n.scrolls.push(opts);
+  n.scrollIntoView = (opts) => {
+    n.scrolls.push(opts);
+    n.valueAtScroll = filterBox.value;
+  };
   return n;
 }
 /* The rail box itself: rows live in it, and the reveal lays it out for real
@@ -127,7 +136,16 @@ const grid = {
   },
 };
 const $ = (id) => (id === "session-list" ? list : id === "session-grid" ? grid
-  : id === "session-group-tabs" ? tabBar : null);
+  : id === "session-group-tabs" ? tabBar : id === "session-search" ? filterBox : null);
+/* The clear path's collaborators, recorded rather than run: setSessionSearch
+   restarts the rail's filter state, syncSessionSearchClear restores the ×
+   button, syncSessionSearchOpen folds the search back to its icon. */
+const searchWrites = [];
+const clearSyncs = [];
+const folds = [];
+const setSessionSearch = (q) => { searchWrites.push(q); };
+const syncSessionSearchClear = () => { clearSyncs.push(1); };
+const syncSessionSearchOpen = (open) => { folds.push(open); };
 const CSS = { escape: (s) => s };
 const document = {
   querySelectorAll: (sel) => {
@@ -162,12 +180,14 @@ const stubs = {
   $, CSS, setSessionGroupTab, refreshSessions,
   sessionGridLayout, sessionGridPerLine, SESSION_GRID_FOLD_LINES, sessionGridVisible,
   sessionGridUnfolded, renderSessionGrid: (f) => renderSessionGrid(f),
+  setSessionSearch, syncSessionSearchClear, syncSessionSearchOpen,
 };
 new Function(
   "exports", "document", "setTimeout", "clearTimeout", "getView", ...Object.keys(stubs),
   // The module-level state the functions share, taken from app.js itself so
   // the window this checks is the shipped one.
   `let currentName = "s193";\n` +
+  `let sessionSearch = { q: "", hits: null, pending: false, error: "", index: null };\n` +
   /const GOTO_FLASH_MS = \d+;/.exec(src)[0] + "\n" +
   /const RAIL_LAID_OUT_MS = \d+;/.exec(src)[0] + "\n" +
   "let gotoFlashName = null;\nlet gotoFlashTimer = null;\n" +
@@ -175,6 +195,7 @@ new Function(
   [slice("applyGotoFlash"), slice("layRailOut"), slice("revealSessionListRow"),
    slice("revealSessionGridCell"),
    slice("revealSessionCard"), slice("gotoSessionCard"),
+   slice("clearSessionSearch"), slice("gotoSessionCardFromHeader"),
    /const BOOT_GOTO_POLLS = \d+;/.exec(src)[0],
    "let bootGotoName = null;\nlet bootGotoTries = 0;",
    slice("armBootGoto"), slice("revealBootSessionCard")].join("\n")
@@ -182,6 +203,9 @@ new Function(
   `
 Object.assign(exports, {
   applyGotoFlash, revealSessionCard, gotoSessionCard,
+  gotoSessionCardFromHeader,
+  setSearch: (q) => { sessionSearch = { q, hits: null, pending: false, error: "", index: null }; },
+  searchQ: () => sessionSearch.q,
   armBootGoto, revealBootSessionCard, bootPending: () => bootGotoName,
   bootPolls: () => BOOT_GOTO_POLLS,
   flashMs: () => ${/const GOTO_FLASH_MS = (\d+);/.exec(src)[1]},
@@ -347,6 +371,76 @@ check("a row that cannot scroll is still marked rather than throwing",
   sessionView = "list";
 }
 
+/* ---- the press drops a session filter that hides the card (claunch-p3ri9) ----
+   The rail keeps a filtered-out row in the list and hides it in the
+   stylesheet (`#session-list > li.session-filtered { display: none }`), so a
+   reveal aimed at it scrolls a row nobody can see: the press would answer
+   "found" and show nothing. The filter goes first and the reveal second, in
+   that order, and the press takes no caret for it -- it moves the reader, it
+   does not open a search. */
+{
+  settle();
+  sessionView = "list";
+  tabs = [];
+  rail = [row("s127"), row("s193")];
+  ctx.setCur("s193");
+  filterBox.value = "s19";
+  filterBox.focuses = 0;
+  ctx.setSearch("s19");
+  searchWrites.length = 0;
+  clearSyncs.length = 0;
+  folds.length = 0;
+  check("filter: the press answers that it found the card",
+        ctx.gotoSessionCardFromHeader() === true);
+  check("filter: the box is emptied", filterBox.value === "", filterBox.value);
+  check("filter: the search state is dropped through setSessionSearch(\"\")",
+        JSON.stringify(searchWrites) === JSON.stringify([""]), searchWrites);
+  check("filter: the × button is re-synced for the empty box",
+        clearSyncs.length === 1, clearSyncs);
+  check("filter: the search folds back to its icon instead of opening over the header",
+        JSON.stringify(folds) === JSON.stringify([false]), folds);
+  check("filter: the caret is left where the press put it",
+        filterBox.focuses === 0, filterBox.focuses);
+  check("filter: the card is scrolled to",
+        JSON.stringify(scrolledTo()) === JSON.stringify(["s193"]), scrolledTo());
+  check("filter: ...after the filter is gone, so the row it aims at is drawn",
+        rail[1].valueAtScroll === "", rail[1].valueAtScroll);
+  check("filter: and marked", JSON.stringify(flashed()) === JSON.stringify(["s193"]), flashed());
+  fire(only());
+
+  // Nothing typed and no search state: the ordinary press touches none of it.
+  rail = [row("s193")];
+  filterBox.value = "";
+  filterBox.focuses = 0;
+  ctx.setSearch("");
+  searchWrites.length = 0;
+  clearSyncs.length = 0;
+  folds.length = 0;
+  check("no filter: the press lands on the card", ctx.gotoSessionCardFromHeader() === true);
+  check("no filter: setSessionSearch is not called", searchWrites.length === 0, searchWrites);
+  check("no filter: no clear and no fold",
+        clearSyncs.length === 0 && folds.length === 0, [clearSyncs, folds]);
+  check("no filter: the caret is untouched", filterBox.focuses === 0, filterBox.focuses);
+  fire(only());
+
+  // A search state can outlive the characters in the box; the guard reads
+  // both, so a ranking nobody can see in the field is not left narrowing the
+  // rail the press is about to aim at.
+  rail = [row("s193")];
+  filterBox.value = "";
+  ctx.setSearch("mesh");
+  searchWrites.length = 0;
+  folds.length = 0;
+  check("state without text: the press still lands",
+        ctx.gotoSessionCardFromHeader() === true);
+  check("state without text: the search state is dropped anyway",
+        JSON.stringify(searchWrites) === JSON.stringify([""]), searchWrites);
+  check("state without text: and the row it aims at is unfiltered",
+        rail[0].valueAtScroll === "", rail[0].valueAtScroll);
+  fire(only());
+  ctx.setSearch("");
+}
+
 /* ---- arrival: the page opened on #/s/<name> goes to that card once ----
    (claunch-wyrsh) boot() arms it after its route(); a full poll retries while
    the card is not drawn yet, a bounded number of times, and only for the
@@ -435,6 +529,18 @@ check("it is a button, not a link", /<button id="term-goto"[^>]*type="button"/.t
 check("it says what it does on hover", /<button id="term-goto"[\s\S]{0,240}?title="[^"]+"/.test(head));
 check("app.js wires the press to it",
       /\$\("term-goto"\)\.addEventListener\("click"/.test(src));
+check("the stylesheet is what hides a filtered-out row, so the filter must go first",
+      /#session-list > li\.session-filtered\s*\{[^}]*display:\s*none/.test(css));
+const headerPress = slice("gotoSessionCardFromHeader");
+check("the press runs the filter-clearing path",
+      /\$\("term-goto"\)\.addEventListener\("click", \(\) => \{ gotoSessionCardFromHeader\(\); \}\)/
+        .test(src));
+check("...which clears the filter before it reveals the card",
+      headerPress.indexOf("clearSessionSearch") >= 0
+      && headerPress.indexOf("clearSessionSearch") < headerPress.indexOf("gotoSessionCard()"),
+      headerPress);
+check("...and asks for the no-caret variant",
+      /clearSessionSearch\(\{ focus: false \}\)/.test(headerPress));
 check("refreshSessions repaints the mark after every rebuild",
       /applyBriefingCards\(\);\s*(\/\/[^\n]*\n\s*)*applyGotoFlash\(\);/.test(src));
 check("the stylesheet draws the marked row", /#session-list li\.goto-flash\s*\{/.test(css));

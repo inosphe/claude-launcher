@@ -188,7 +188,7 @@ few, so typing narrows by substring at once and Enter asks by meaning.
 
 | surface | control | behaviour |
 |---|---|---|
-| **Session rail** | search box above the state filters (`#session-search`) | typing narrows by substring over name, identity, issue, branch, task and the briefing one-liner; Enter ranks the fleet by meaning and shows only the sessions the daemon named; Esc clears; a note under the box says "N of M match" and the index coverage |
+| **Session rail** | search box above the state filters (`#session-search`) | typing narrows by substring over name, identity, issue, branch, task and the briefing one-liner; Enter ranks the fleet by meaning and shows only the sessions the daemon named; Esc clears, and so does the header's `⇱ card` — a narrowed rail would otherwise hide the card that press jumps to; a note under the box says "N of M match" and the index coverage |
 | **Beads page** | search box in the filter bar (`.beads-search`) | Enter replaces the lanes with a ranked list — score chip (reranker's when it ran, amber when the id/title contains the query), status/priority badges, excerpt — with a head line that counts hits and states coverage; one request per board root the page shows, merged best-first; clear/Esc restores the lanes |
 | **Issue detail pane** | "Related by meaning" block | the focused issue's nearest neighbours, score-chipped, fetched with the detail |
 | **New-session form picker** | the existing "filter the board" box | typing stays substring; Enter asks the board of the chosen directory (or the parent session's) by meaning and lists the daemon's ranking first, then the substring matches it did not name; lead row says "by meaning" |

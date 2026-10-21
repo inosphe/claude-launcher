@@ -419,7 +419,9 @@
            on screen — you hunted for it, or you gave up and read the header.
            Sits with the title rather than in `.term-actions` because it
            changes nothing about the session; it only moves the reader's eye
-           to the card that stands for it. Owned by gotoSessionCard(). -->
+           to the card that stands for it. Owned by gotoSessionCardFromHeader(),
+           which also drops a session filter that would keep that card off the
+           rail. -->
       <button id="term-goto" class="term-btn goto-chip" type="button"
               title="scroll the session list to this session's card">⇱ card</button>
       <!-- Pin this session in the main tab strip. A toggle: lit

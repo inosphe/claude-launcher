@@ -2127,13 +2127,22 @@ function syncSessionSearchClear() {
 
 /* The pointer route to what Esc already did, down the same path: empty the
    box, drop the search state (a ranking by meaning with it), hide the button
-   again, and hand the caret back so the next query is typed straight in. */
-function clearSessionSearch() {
+   again, and hand the caret back so the next query is typed straight in.
+
+   The header's `⇱ card` takes the same path with `focus: false`: it clears a
+   filter that would hide the card it is about to reveal, and then leaves the
+   screen as it found it -- the caret where the press left it, and the search
+   folded back to its icon instead of opened over the project header. */
+function clearSessionSearch(opts) {
   const box = $("session-search");
   if (!box) return;
   box.value = "";
   setSessionSearch("");
   syncSessionSearchClear();
+  if (opts && opts.focus === false) {
+    syncSessionSearchOpen(false);
+    return;
+  }
   box.focus();
 }
 
@@ -15144,8 +15153,9 @@ $("term-details").addEventListener("click", () => openDetail(currentName));
 
 /* Navigation, not an action on the session: it scrolls the rail to the card
    for the terminal you are in and marks it for a moment (see
-   gotoSessionCard). */
-$("term-goto").addEventListener("click", () => { gotoSessionCard(); });
+   gotoSessionCardFromHeader, which also drops a session filter that would
+   have kept that card off the rail). */
+$("term-goto").addEventListener("click", () => { gotoSessionCardFromHeader(); });
 
 /* A kill can take two distinct intervals that the session's ordinary
    busy/idle status does not describe: the HTTP request itself, then a
@@ -22328,6 +22338,19 @@ function revealSessionCard(name) {
 function gotoSessionCard() {
   if (!currentName) return false;
   return revealSessionCard(currentName);
+}
+
+/* The `⇱ card` press. The rail hides every row a session filter does not
+   match (style.css: `.session-filtered { display: none }`), so a press with a
+   filter typed in would scroll to a row that is not drawn -- the button would
+   answer "found" and show nothing. The filter therefore goes first, and the
+   reveal after it, in that order: the row has to be visible before it can be
+   scrolled to. Nothing is cleared when the box and the search state are
+   already empty, so the ordinary press does no work beyond the scroll. */
+function gotoSessionCardFromHeader() {
+  const box = $("session-search");
+  if ((box && box.value) || sessionSearch.q) clearSessionSearch({ focus: false });
+  return gotoSessionCard();
 }
 
 /* The same move once on arrival (claunch-wyrsh). A reload, a bookmark or a
