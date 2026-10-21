@@ -49,6 +49,17 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 - **v1과 v2의 변경 토큰이 다르다.** v1은 `state.json`의 stat(`mtime_ns`, `size`)과 저널이고, v2는 체크포인트의 `revision`이 커밋마다 증가한다(`cflow2/store.py:404-419` — 상태 텍스트가 그대로이고 이벤트가 없으면 쓰기를 건너뛴다). 구독 커서를 한 형식으로 만들려면 이 차이를 흡수해야 한다.
 - **배달에는 이미 상한이 있다.** mesh는 `inbox_max`·`min_gap`으로 백프레셔를 걸고, 미답변·미배달을 `owed`로 회계한다(`mesh_policy.py:1-60`). 구독 이벤트가 이 회계를 우회하면 안 된다 — 우회하면 다수 구독에서 터미널이 막힌다.
 
+### 2.1 관제 형태별 현재 경로
+
+| 관제 형태 | 오늘 진행을 아는 경로 | 빠진 것 |
+|---|---|---|
+| coordinator(`improv-coordinator-v2`) | `jobs` 컬렉션, 자식의 mesh 보고, 보드, `children` | 자식 런의 단계·게이트 전이. 자식이 보고를 잊으면 알 길이 없다 |
+| leader(`improv-leader-v2`) | 자기 착지 큐, 자식의 착지 요청, 전용 감시 자식의 주기 알림 | 워커 런의 진행 자체(리더는 착지 요청 때 처음 본다) |
+| operator v2 | `opv2_poll`의 커서: Observer 이벤트, 게이트 대기, 진행 변화, 이탈 | 단계 전이와 보고 내용. operator 세션 전용이다 |
+| thread | 사용자↔세션 대화 | 에이전트↔에이전트 경로가 없다(사용자가 두 세션 사이를 옮겨 읽는다) |
+
+네 형태 모두 "위임한 쪽이 상대 런의 상태 변화를 커서로 따라간다"에 답하는 도구가 없다. operator의 `opv2_poll`이 가장 가깝고, 그 설계(커서·attention·progress·ended)가 참조할 선례다.
+
 ## 3. 설계 선택지
 
 ### A. 읽기 도구 (pull)
@@ -126,7 +137,7 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 ## 6. 이 문서가 다루지 않은 것
 
 - v1 cflow 클록의 폴링→변경 기반 전환 자체는 `claunch-2cnep`의 몫이다. 이 문서는 그 전환이 만드는 변경 통지를 소비하는 쪽만 다룬다.
-- coordinator의 위계 권한(`orphans`·`adopt`)은 `claunch-fnnrk`의 몫이다. 구독은 그 권한을 넓히지 않는다.
+- coordinator의 위계 권한(`orphans`·`adopt`)은 `claunch-fnnrk`(닫힘, 설계는 `docs/session-hierarchy-management.md`)와 그 자식 이슈들의 몫이다. 구독은 그 권한을 넓히지 않는다.
 - 위임 ask가 아무에게도 닿지 않는 라우팅 결함은 `claunch-b0cd`의 몫이다. 구독은 라우팅을 고치지 않는다.
 
 ## 7. 근거
