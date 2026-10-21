@@ -510,10 +510,16 @@ def test_api_holds_exclusive_window_and_reports_busy(setup, monkeypatch):
             plan = await (await post({"session": "s1"})).json()
             request = {"session": "s1", "plan_id": plan["plan_id"]}
             result = await (await post(request)).json()
-            assert result["status"] == "cleanup_pending" and mine.exists()
+            # A refusal is now kept as a schedule, not dropped: no later turn
+            # exists for the caller to retry from (claunch-q4cqy.2).
+            assert result["status"] == "scheduled" and mine.exists()
+            assert result["reason"] == "test running"
+            assert service._schedule_record("s1")["last_reason"] == "test running"
             window.busy = False
             result = await (await post(request)).json()
             assert result["removed"] == 1 and not window.held
+            # The schedule served its purpose; a later pass finds nothing to do.
+            assert service.run_scheduled("s1")["status"] == "none"
     asyncio.run(scenario())
 
 
@@ -624,3 +630,133 @@ def test_api_plans_once_per_session_and_never_across_sessions(setup, monkeypatch
             assert (await client.post("/api/artifact-cleanup", json={"session": []})).status == 400
     asyncio.run(scenario())
     assert sorted(walks) == ["s1", "s10"]
+
+
+# ---- scheduled applies (claunch-q4cqy.2) -----------------------------------
+#
+# An apply refused because the measurement window is busy used to end there: the
+# caller's turn was over and auto-release has no later turn. Four sessions in one
+# evening left ~1.15 GB that way. The daemon now keeps the request and replans it
+# when the window frees up.
+
+
+def test_a_busy_window_schedules_instead_of_ending(setup, monkeypatch):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+
+    class Window:
+        busy = True
+        async def acquire(self, cls, **kwargs):
+            assert cls == "sweep" and kwargs["wait"] == 0
+            if self.busy:
+                return {"granted": False, "reason": "the window is held by targeted:s9"}
+            return {"granted": True, "grant_id": "cleanup"}
+        def release(self, token):
+            assert token == "cleanup"
+
+    window = Window()
+
+    async def scenario():
+        app = web.Application()
+        app["manager"], app["window"] = service.manager, window
+        artifact_cleanup_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            plan = await (await client.post("/api/artifact-cleanup", json={"session": "s1"})).json()
+            body = {"session": "s1", "plan_id": plan["plan_id"]}
+            result = await (await client.post("/api/artifact-cleanup", json=body)).json()
+            assert result["status"] == "scheduled"
+            assert "the window is held" in result["reason"]
+            # The plan did not run; the tree is untouched.
+            assert mine.exists()
+            # The daemon's later pass finds the request and deletes with a free window.
+            window.busy = False
+            ran = service.run_scheduled("s1")
+            assert ran["status"] == "ran" and ran["removed"] == 1
+            assert not mine.exists()
+            assert service.scheduled() == []
+
+    asyncio.run(scenario())
+
+
+def test_scheduling_twice_keeps_the_first_clock_and_attempt_count(setup, monkeypatch):
+    service, _, _, _ = setup
+    monkeypatch.setattr(ac, "SCHEDULE_TTL", 3600.0)
+    first = service.schedule("s1", "busy")
+    monkeypatch.setattr(ac.Cleanup, "plan", lambda self, session, **kw: (_ for _ in ()).throw(
+        ac.CleanupError("still busy")))
+    assert service.run_scheduled("s1")["status"] == "cleanup_pending"
+    second = service.schedule("s1", "busy again")
+    assert second["created_at"] == first["created_at"]
+    assert second["expires_at"] == first["expires_at"]
+    assert second["attempts"] == 1 and second["last_reason"] == "busy again"
+
+
+def test_a_schedule_gives_up_at_its_attempt_bound(setup, monkeypatch):
+    service, _, _, _ = setup
+    monkeypatch.setattr(ac, "SCHEDULE_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(ac.Cleanup, "plan", lambda self, session, **kw: (_ for _ in ()).throw(
+        ac.CleanupError("still busy")))
+    service.schedule("s1", "busy")
+    assert service.run_scheduled("s1")["status"] == "cleanup_pending"
+    assert service.run_scheduled("s1")["status"] == "cleanup_pending"
+    result = service.run_scheduled("s1")
+    assert result["status"] == "expired" and result["attempts"] == 2
+    assert service._schedule_record("s1") is None
+
+
+def test_a_schedule_for_an_ended_session_is_abandoned(setup):
+    service, root, _, registry = setup
+    service.schedule("s1", "busy")
+    registry["s1"].exited = True
+    result = service.run_scheduled("s1")
+    assert result["status"] == "abandoned"
+    assert service._schedule_record("s1") is None
+    assert service.scheduled() == []
+
+
+def test_scheduled_lists_live_sessions_only(setup):
+    service, _, _, registry = setup
+    service.schedule("s1", "busy")
+    service.schedule("s10", "busy")
+    registry["s10"].exited = True
+    assert service.scheduled() == ["s1"]
+
+
+def test_the_clock_runs_a_due_schedule_when_the_window_frees(setup):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+
+    class Window:
+        def __init__(self):
+            self.held = False
+        async def acquire(self, cls, **kwargs):
+            if self.held:
+                return {"granted": False, "reason": "busy"}
+            self.held = True
+            return {"granted": True, "grant_id": "clock"}
+        def release(self, token):
+            assert self.held and token == "clock"
+            self.held = False
+
+    window = Window()
+    service.schedule("s1", "the window is held by targeted:s9")
+
+    async def scenario():
+        app = {"window": window}
+        task = asyncio.ensure_future(
+            artifact_cleanup_api.scheduled_clock(app, service, interval=0.01))
+        try:
+            # The pass runs in a worker thread: wait for the schedule to be
+            # dropped, not just for the directory to disappear.
+            for _ in range(500):
+                if not mine.exists() and service.scheduled() == []:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not mine.exists() and not window.held
+        assert service.scheduled() == []
+
+    asyncio.run(scenario())

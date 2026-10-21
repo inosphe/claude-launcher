@@ -389,6 +389,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     reminder_clock.start()
     window_reminder_clock = window_mod.WindowReminderClock(manager, app["window"])
     window_reminder_clock.start()
+    # A cleanup refused for a busy window is retried here instead of by the
+    # session that asked: its turn is over by then (claunch-q4cqy.2).
+    from . import artifact_cleanup_api
+
+    app["artifact_cleanup_clock"] = asyncio.ensure_future(
+        artifact_cleanup_api.scheduled_clock(app, app["artifact_cleanup"]))
     from .delayed_sweep import Clock as DelayedSweepClock
     delayed_sweep_clock = DelayedSweepClock(manager, window=app["window"], batch=True)
     delayed_sweep_clock.start()
