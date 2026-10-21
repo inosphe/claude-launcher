@@ -782,12 +782,25 @@ function panelSection(name) {
   }
   return panelBox;
 }
+/* The panel's record log, closed on every draw. `details` learns its open
+   state from the attribute alone, so a rebuilt node comes back folded and the
+   reader's choice is restored by renderPanel's fold key, not by this node. */
+function eventLog(s,events) {
+  const log=document.createElement("details");
+  log.className="obs-history";
+  log.dataset.fold="history";
+  log.append(node("summary",`세션 기록 ${events.length}건`));
+  for(const e of events)log.append(eventItem(s,e));
+  return log;
+}
 function renderPanel() {
   if(!panelBox)return;
   const name=panelBox.dataset.session, s=snapshot.sessions.find(s=>s.name===name);
   // A redraw closes every fold it replaces, so the open ones are read off
-  // the old draw first and opened again on the new one.
-  const foldKey=d=>`${d.closest("[data-event]")?.dataset.event||""}|${d.querySelector("summary")?.textContent||""}`;
+  // the old draw first and opened again on the new one. A fold that carries
+  // its own key keeps it across a changing count (the record log does: its
+  // summary says how many records are inside).
+  const foldKey=d=>d.dataset.fold||`${d.closest("[data-event]")?.dataset.event||""}|${d.querySelector("summary")?.textContent||""}`;
   const open=new Set([...panelBox.querySelectorAll("details")].filter(d=>d.open).map(foldKey));
   const title=node("h3","Observation ");
   if(s){const state=activity(s);title.append(node("span",state.label,`state ${state.kind}`));}
@@ -810,7 +823,16 @@ function renderPanel() {
   if(s) {
     parts.push(s.summary?richLine(s.summary,"obs-summary",s.name):node("p","아직 관찰 결과가 없습니다."));
     if(s.error)parts.push(node("p",s.error));
-    for(const e of sessionEvents(s).reverse())parts.push(eventItem(s,e));
+    // The record log folds shut (claunch-822yy): one session carried seven
+    // adopt lines from daemon restarts alone, and the panel hands every event
+    // it knows to the rail, so the log pushed the section's own summary and
+    // meter out of view. An unacknowledged request is the exception — hiding
+    // it behind a click is what this section exists to prevent.
+    const events=sessionEvents(s).reverse();
+    const requests=events.filter(e=>e.needs_action&&!e.acknowledged);
+    const records=events.filter(e=>!(e.needs_action&&!e.acknowledged));
+    for(const e of requests)parts.push(eventItem(s,e));
+    if(records.length)parts.push(eventLog(s,records));
     // A session the meter never reached and whose last call was never recorded
     // has nothing to report; the block is omitted rather than shown empty.
     const usage=usageBlock(s);

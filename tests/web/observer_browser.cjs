@@ -693,11 +693,32 @@ async function fadeCost(page, selector, fade) {
     await page.evaluate(()=>location.hash="#/log/s1");
     await page.getByText("Transcript retained",{exact:true}).waitFor();
     assert.equal(await page.locator('#log-tabs, #log-info-tab, #log-transcript-tab, #log-info-pane').count(),0);
+    // Routine session records — the adopt lines a daemon restart leaves behind
+    // — are folded shut in this section (claunch-822yy), while the request
+    // that needs an answer stays in the open.
+    data.sessions[0].events = [
+      ...previousEvents,
+      { id:"h1", origin:"daemon", kind:"adopt", text:"데몬 재시작 후 PTY 호스트의 세션 인수", at:"2030-01-02T00:00:00Z" },
+      { id:"h2", origin:"daemon", kind:"adopt", text:"데몬 재시작 후 PTY 호스트의 세션 인수", at:"2030-01-02T00:10:00Z" }
+    ];
     await page.evaluate(()=>location.hash="#/log/s1?detail=s1");
     const section=page.locator('#sess-view .sess-observer[data-session="s1"]');
     await section.getByText(/테스트 12개 통과/).waitFor();
-    assert.match(await section.innerText(),/배포 환경을 선택하십시오/,"the event timeline is there");
+    assert.match(await section.innerText(),/배포 환경을 선택하십시오/,"the request that needs an answer is drawn in the open");
     assert.equal(await section.getByRole('button',{name:'확인 표시'}).count(),1,"and its acknowledge action");
+    const history=section.locator('details.obs-history');
+    await history.waitFor();
+    assert.equal(await history.evaluate(d=>d.open),false,"the record log starts folded");
+    assert.match(await history.locator('summary').innerText(),/세션 기록 3건/);
+    assert.doesNotMatch(await section.innerText(),/데몬 재시작 후 PTY 호스트의 세션 인수/,"folded records are not read out");
+    assert.equal(await history.locator('[data-event="h1"], [data-event="h2"]').count(),2,"both adopt records are inside the fold");
+    assert.equal(await history.locator('[data-event="e1"]').count(),0,"the request that needs an answer stays outside it");
+    assert.equal(await history.locator('.event.routine').count(),2,"daemon records keep their compact routine line");
+    // Opening it is one click, and the log stays open across the redraw that
+    // the section's own ten-second poll performs.
+    await history.locator('summary').click();
+    await section.getByText(/데몬 재시작 후 PTY 호스트의 세션 인수/).first().waitFor();
+    assert.equal(await history.evaluate(d=>d.open),true);
     assert.match(await section.innerText(),/관찰 API 사용량/,"and the meter");
     // What the rest of the panel already says is not said again here: the
     // meshes, the pin, the waiting gates, the terminal and transcript links,
@@ -713,6 +734,8 @@ async function fadeCost(page, selector, fade) {
     await section.getByRole('button',{name:'지금 갱신'}).click();
     await section.getByText('Updated session summary',{exact:true}).waitFor();
     await section.getByText(/갱신됨 · 새 항목/).waitFor();
+    assert.equal(await section.locator('details.obs-history').evaluate(d=>d.open),true,
+      "the record log the reader opened survives the redraw");
     assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).length,before+1);
     assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).at(-1).url,"/api/observer/s1/refresh");
     // Repointed at another session, the section is that session's.
@@ -723,6 +746,7 @@ async function fadeCost(page, selector, fade) {
     await page.evaluate(()=>location.hash="#/log/missing?detail=missing");
     await page.locator('#sess-view .sess-observer[data-session="missing"]')
       .getByText('아직 이 세션의 관찰 정보가 없습니다.',{exact:true}).waitFor();
+    data.sessions[0].events=previousEvents;
     await page.evaluate(()=>location.hash="#/observer");
     await page.waitForSelector('#observer-view:not(.hidden)');
     // The rail's observe-pin box, beside the 📌 pin. It is checked last and on
