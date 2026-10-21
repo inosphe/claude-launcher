@@ -1063,9 +1063,16 @@ header on every request — the same header name the backend documents, so both
 the Claude (Anthropic protocol) and Pi (OpenAI protocol) paths carry it. The
 private `X-Claunch-Session` header the launcher uses internally is still
 stripped and never reaches the upstream. A caller that sets
-`x-session-affinity` itself keeps its value. The flag is part of the shim's
-identity: enabling or disabling it never reuses a shim started for the other
-choice, and shims started before the flag existed are untouched.
+`x-session-affinity` itself keeps its value.
+
+The flag is read **live**: the shim re-reads `providers.<name>.session_affinity`
+from the config on every request (at most ~100ms stale), so changing it —
+including from the web Settings page, which writes the same key through
+`GET`/`PUT /api/provider-affinity` — reaches already-running shims and sessions
+without a daemon restart, in both directions. The flag is not part of the
+shim's identity: one shim serves a provider in both states. A malformed
+(non-boolean) flag is a config error the shim logs and treats as off, so a
+typo degrades to no header instead of breaking traffic.
 
 ### Throughput records for API-key providers (`claunch tps`)
 

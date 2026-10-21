@@ -24845,6 +24845,7 @@ function openSettings(section) {
   refreshWslRegStub();
   refreshPtyHostSetting();
   refreshDelegateSetting();
+  refreshProviderAffinity();
 }
 
 let relaySettingsRows = [];
@@ -30286,6 +30287,7 @@ function renderWorkspaces() {
   view.appendChild(wslRegStubCard());
   view.appendChild(ptyHostSettingCard());
   view.appendChild(delegateSettingCard());
+  view.appendChild(providerAffinityCard());
 
   refocusSettingsField(focused);
 }
@@ -32117,6 +32119,94 @@ function delegateSettingCard() {
   const model = el("label", "delegate-field", " Model preset ");
   model.appendChild(delegateSelect("delegate-model", "model", st.model, st.presets, st.defaults.model));
   card.append(profile, model);
+  return card;
+}
+
+/* Sticky session affinity (claunch-vjgwd.1.1) -- providers.<name>.session_affinity,
+   read and written with GET/PUT /api/provider-affinity. Backends whose prompt
+   cache lives on one replica (Fireworks serverless) keep a session's cache
+   only while its requests keep reaching that replica; the flag makes the
+   routing shim forward the session name as the x-session-affinity header.
+   The shim reads the flag live, so a change here reaches running traffic
+   without a daemon restart, in both directions. */
+let providerAffinity = { rows: [], loaded: false, error: "", busy: "" };
+
+function takeProviderAffinity(data) {
+  Object.assign(providerAffinity, {
+    rows: data.providers || [], loaded: true, error: "",
+  });
+}
+
+async function refreshProviderAffinity() {
+  try {
+    const resp = await api("/api/provider-affinity");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeProviderAffinity(data);
+  } catch (err) {
+    providerAffinity.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveProviderAffinity(name, value) {
+  providerAffinity.busy = name;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/provider-affinity", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, session_affinity: value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeProviderAffinity(data);
+  } catch (err) {
+    providerAffinity.error = String(err);
+  }
+  providerAffinity.busy = "";
+  renderWorkspaces();
+}
+
+function providerAffinityCard() {
+  const st = providerAffinity;
+  const card = el("section", "ws-add provider-affinity");
+  card.appendChild(el("h3", null, "Sticky session affinity (prompt cache)"));
+  card.appendChild(el("p", "wf-note",
+    "For backends whose prompt cache lives on a single replica (Fireworks " +
+    "serverless is the case this exists for): send each session's name as the " +
+    "x-session-affinity header so its requests keep reaching the replica that " +
+    "holds its cache. Applies per provider, live — running sessions and shims " +
+    "pick a change up without a daemon restart. Same key as " +
+    "providers.<name>.session_affinity in ~/.claunch.yaml."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  if (!st.rows.length) {
+    card.appendChild(el("p", "wf-note", "no providers configured"));
+    return card;
+  }
+  const list = el("div", "provider-affinity-list");
+  for (const row of st.rows) {
+    const item = el("label", "provider-affinity-row");
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = !!row.session_affinity;
+    toggle.disabled = st.busy !== "";
+    toggle.addEventListener("change", () =>
+      saveProviderAffinity(row.name, toggle.checked));
+    item.appendChild(toggle);
+    item.appendChild(document.createTextNode(` ${row.name}`));
+    if (!row.fronted) {
+      item.appendChild(el("span", "wf-note",
+        " (not fronted by a routing/metering shim — the flag has no effect)"));
+    }
+    if (row.error) item.appendChild(el("span", "error", ` (${row.error})`));
+    list.appendChild(item);
+  }
+  card.appendChild(list);
   return card;
 }
 
