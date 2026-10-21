@@ -674,10 +674,10 @@ def transcript_window(reading: Optional[dict],
         out["total"] += total
         out["requests"] += _number(bucket.get("requests"))
         out["days"][start[:10]] = out["days"].get(start[:10], 0) + total
-        stamp = _epoch(start)
-        if stamp is not None:
-            out["first"] = stamp if out["first"] is None else min(out["first"], stamp)
-            out["last"] = stamp if out["last"] is None else max(out["last"], stamp)
+    # ``first``/``last`` stay None on purpose. A transcript reading is bucketed
+    # by day, so ``start`` is the day boundary -- midnight -- and reporting it
+    # as the last activity would put a time on the row that nothing measured.
+    # The ledger sums carry real timestamps; this path has only the day.
     return out
 
 

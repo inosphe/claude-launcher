@@ -29313,8 +29313,18 @@ function statsChart(buckets, unit) {
   const padB = 16;
   const padT = 6;
   const peak = Math.max(1, ...buckets.map((b) => b.total || 0));
-  const x = (i) => (buckets.length === 1 ? width / 2
-    : (i / (buckets.length - 1)) * width);
+  // Each bucket owns a column of the chart and its point sits at that column's
+  // centre, so one bucket still spans the whole width. A chart whose buckets
+  // are spread over the full width by count alone collapses to zero-width
+  // bands at n=1 -- and a session that started today has exactly one day
+  // bucket, which is the commonest case the detail panel shows.
+  const dx = width / buckets.length;
+  const x = (i) => (i + 0.5) * dx;
+  // The area runs to both edges: the first and last values extend half a
+  // column past their centre so the filled band reaches the frame.
+  const spans = (values) => [{ x: 0, v: values[0], i: 0 },
+    ...values.map((v, i) => ({ x: x(i), v, i })),
+    { x: width, v: values[values.length - 1], i: values.length - 1 }];
   const y = (v) => height - padB - ((v / peak) * (height - padB - padT));
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -29329,11 +29339,11 @@ function statsChart(buckets, unit) {
   const floor = buckets.map(() => 0);
   for (const [key, label, short] of USAGE_PARTS) {
     const roof = buckets.map((b, i) => floor[i] + (b[key] || 0));
-    const up = roof.map((v, i) => `L${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
-    const down = floor.map((v, i) => ({ v, i })).reverse().map(
-      ({ v, i }) => `L${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+    const up = spans(roof).map((p) => `L${p.x.toFixed(1)} ${y(p.v).toFixed(1)}`).join(" ");
+    const down = spans(floor).reverse().map(
+      (p) => `L${p.x.toFixed(1)} ${y(p.v).toFixed(1)}`).join(" ");
     const path = document.createElementNS(SVG, "path");
-    path.setAttribute("d", `M${x(0).toFixed(1)} ${y(floor[0]).toFixed(1)} ${up} ${down} Z`);
+    path.setAttribute("d", `M0.0 ${y(floor[0]).toFixed(1)} ${up} ${down} Z`);
     path.setAttribute("class", `stats-area usage-${short}`);
     const total = roof.reduce((n, v, i) => n + (buckets[i][key] || 0), 0);
     const title = document.createElementNS(SVG, "title");
@@ -29344,8 +29354,8 @@ function statsChart(buckets, unit) {
   }
 
   const line = document.createElementNS(SVG, "path");
-  line.setAttribute("d", buckets.map((b, i) =>
-    `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(b.total || 0).toFixed(1)}`).join(" "));
+  line.setAttribute("d", spans(buckets.map((b) => b.total || 0)).map(
+    (p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)} ${y(p.v).toFixed(1)}`).join(" "));
   line.setAttribute("class", "stats-total-line");
   svg.appendChild(line);
 
@@ -29353,10 +29363,9 @@ function statsChart(buckets, unit) {
   // titles would fight each other, and the table below has the same numbers.
   buckets.forEach((b, i) => {
     const hit = document.createElementNS(SVG, "rect");
-    const half = buckets.length > 1 ? width / (buckets.length - 1) / 2 : width / 2;
-    hit.setAttribute("x", Math.max(0, x(i) - half).toFixed(1));
+    hit.setAttribute("x", (i * dx).toFixed(1));
     hit.setAttribute("y", 0);
-    hit.setAttribute("width", (half * 2).toFixed(1));
+    hit.setAttribute("width", dx.toFixed(1));
     hit.setAttribute("height", String(height - padB));
     hit.setAttribute("class", "stats-hit");
     const inputs = b.inputs || {};

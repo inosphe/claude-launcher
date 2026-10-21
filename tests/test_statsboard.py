@@ -543,6 +543,26 @@ def test_a_session_the_ledger_cannot_speak_for_is_read_from_its_transcript(tmp_p
     assert row["days"] == {"2026-10-21": 1050}
     assert payload["counts"]["transcript"] == 1
     assert payload["counts"]["unmetered"] == 0
+    # A transcript reading is bucketed by day, so a bucket's `start` is the
+    # day boundary -- midnight for a day bucket. The row leaves the activity
+    # columns empty rather than reporting that boundary as a time something
+    # happened; the ledger rows are the ones that carry real stamps.
+    assert row["first_at"] is None and row["last_at"] is None
+
+
+def test_a_transcript_row_does_not_report_a_day_boundary_as_activity(tmp_path, ledger):
+    """``transcript_window`` returns no activity stamps of its own.
+
+    Its only time is a bucket's ``start``, which for a day bucket is midnight
+    -- a boundary, not a moment at which anything happened. Reporting it
+    would print a time on the row that nothing measured, so the window
+    leaves the columns empty and the ledger rows keep carrying real stamps.
+    """
+    part = statsboard.transcript_window(
+        reading(("2026-10-21T00:00:00+09:00", 10, 0, 0, 1), harness="claude"),
+        ["2026-10-21"])
+    assert part["total"] == 10
+    assert part["first"] is None and part["last"] is None
 
 
 def test_a_transcript_row_counts_only_the_buckets_inside_the_window(tmp_path, ledger):

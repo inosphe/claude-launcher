@@ -411,8 +411,37 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         withClass("stats-total-line").map((a) => a.attrs.d));
   check("each bucket keeps a hover reading of its own",
         withClass("stats-hit").length === 3, withClass("stats-hit").length);
+  // A band whose points all share one x is a vertical line of zero width: the
+  // path still parses and still starts with "M", so the shape has to be read
+  // as coordinates, not matched as a prefix.
+  const xsOf = (d) => [...String(d || "").matchAll(/(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)]
+    .map((m) => Number(m[1]));
+  check("every stacked band has width",
+        withClass("stats-area").every((a) => new Set(xsOf(a.attrs.d)).size >= 2),
+        withClass("stats-area").map((a) => a.attrs.d));
+  check("the total line spans the chart",
+        new Set(xsOf(withClass("stats-total-line")[0].attrs.d)).size >= 2,
+        withClass("stats-total-line")[0].attrs.d);
+
   check("a partial reading polls again soon",
         timers.length === 1 && timers[0].ms === 2000, timers.map((t) => t.ms));
+
+  // A session that started today has exactly one day bucket -- the commonest
+  // reading the panel shows, and the one a count-based x axis collapses.
+  ctx.setAnswer((url) => url.includes("/api/stats/overview")
+    ? { ok: true, status: 200, body: overview }
+    : { ok: true, status: 200, body: { ...reading, buckets: [reading.buckets[2]] } });
+  await ctx.refresh();
+  check("a one-bucket reading still draws full-width bands",
+        withClass("stats-area").length === 4 &&
+        withClass("stats-area").every((a) => new Set(xsOf(a.attrs.d)).size >= 2 &&
+          Math.max(...xsOf(a.attrs.d)) - Math.min(...xsOf(a.attrs.d)) > 100),
+        withClass("stats-area").map((a) => a.attrs.d));
+  check("a one-bucket reading still draws its total line",
+        withClass("stats-total-line").length === 1 &&
+        /L-?\d/.test(withClass("stats-total-line")[0].attrs.d) &&
+        new Set(xsOf(withClass("stats-total-line")[0].attrs.d)).size >= 2,
+        withClass("stats-total-line").map((a) => a.attrs.d));
 
   // Clicking a row is the other way in.
   withClass("stats-row")[1].handlers.click[0]({ preventDefault() {} });
