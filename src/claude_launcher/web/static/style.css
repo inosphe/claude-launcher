@@ -5400,6 +5400,20 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .prompt-preset-text strong { color: #e6edf3; }
 .prompt-preset-text p { margin: 5px 0 0; color: #9da5b0; white-space: pre-wrap; }
 .prompt-preset-row .wf-btn { flex: none; }
+/* Settings > Sticky session affinity: one row per provider -- the name as a
+   fixed-width lead column, the not-fronted note or config error beside it,
+   rows separated like the prompt preset list. The bare checkbox list read as
+   one run-on line once seven providers were configured (claunch-vjgwd.1.1.1). */
+.provider-affinity-list { margin: 12px 0 4px; border: 1px solid #30363d;
+  border-radius: 6px; background: #1b1e24; }
+.provider-affinity-row { display: flex; align-items: baseline; gap: 12px;
+  padding: 8px 14px; border-top: 1px solid #2a2e36; flex-wrap: wrap; }
+.provider-affinity-row:first-child { border-top: none; }
+.provider-affinity-name { display: flex; align-items: center; gap: 8px;
+  min-width: 200px; color: #e6edf3; font-weight: 600; cursor: pointer; }
+.provider-affinity-name input[type="checkbox"] { margin: 0; }
+.provider-affinity-note { color: #7d8590; font-size: 12px; }
+.provider-affinity-note.error { color: #f85149; }
 .status-check-settings { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #30363d; border-radius: 6px; }
 .status-check-settings h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }
