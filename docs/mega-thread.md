@@ -89,7 +89,7 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 | 0명 | `none` | logit 상위 5명(`TOP_N`)을 후보로 돌려줌 |
 | 모든 호출 실패 | `error` | 503 없이 200 + `errors`, 전달 없음 |
 | 예산 초과 | — | 429, Jev를 부르기 전에 거절 |
-| 클러스터가 `closed` | — | 409, 채점하지 않음 |
+| 클러스터가 `closed` | — | 409, 채점하지 않음. `POST /{id}/status`로 다시 열면 라우팅이 재개된다 |
 
 호출이 실패한 멤버는 채점되지 않으므로 그 멤버가 정답이었을 수 있다. 그래서 실패가 하나라도 있으면
 `auto`로 내리지 않는다 — 남은 한 멤버에게 조용히 전달하면 사용자는 자기가 어디에 말했는지 모른 채
@@ -147,6 +147,7 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 | `GET` | `/api/megathreads?closed=` | 클러스터 목록 |
 | `POST` | `/api/megathreads` | `{title, members?: [{session, thread?}]}` 생성 |
 | `GET` | `/api/megathreads/{id}` | 멤버별 세션 상태·쓰레드 제목·안 읽은 수 |
+| `POST` | `/api/megathreads/{id}/status` | `{status: open\|closed}` 닫기·다시 열기. 다른 값은 400, 없는 클러스터는 404 |
 | `POST` | `/api/megathreads/{id}/members` | `{session, thread?}` 입장. 쓰레드가 없으면 그 세션의 최근 열린 쓰레드, 그것도 없으면 새로 연다 |
 | `DELETE` | `/api/megathreads/{id}/members/{thread}` | 나가기 |
 | `POST` | `/api/megathreads/{id}/route` | `{text}` 또는 `{text, choose: [...]}` |
@@ -161,8 +162,8 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
   깨뜨리지 않음, 정책 기본값과 NaN 폴백.
 - `tests/test_megathread_api.py` — 입장 시 쓰레드 생성, 소유권 거절, 단독 라우팅이 **한 멤버에게만**
   전달되는지, 비선택 쓰레드에 메시지 행이 없는지, 선택 후 전달과 중복 id, `none`/`error`에 전달 0건,
-  예산 경계와 동시 라우팅 직렬화, `closed` 409, NaN 거절, 설정 조회·수정, 원장 실패가 전달을 500으로
-  바꾸지 않음.
+  예산 경계와 동시 라우팅 직렬화, `closed` 409, 닫기·다시 열기와 잘못된 status 400, NaN 거절,
+  설정 조회·수정, 원장 실패가 전달을 500으로 바꾸지 않음.
 - `tests/web/megathread_check.js` — 링 배치·선 굵기·판정별 행과 문구·전송 본문·SVG 노드 수, 그리고
   페이지가 주소·레일·`VIEWS`·라우터에 배선됐는지.
 - 회귀: `tests/test_threads_store.py`, `tests/test_threads_api.py`, `tests/test_threads_mcp.py`,
@@ -209,6 +210,10 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
    logit이 중심에서 각 노드로 가는 선의 굵기다. 임계값을 넘은 노드는 초록, 0 이상은 노랑, 그 아래는 회색이며
    종료된 세션은 흐리게 그린다. 노드를 누르면 그 세션의 터미널로 간다.
 3. **오른쪽**: 최근 라우팅 20건 — 입력, 판정, 사용 토큰, 멤버별 logit, 전달한 곳의 수.
+
+머리의 `닫기` 버튼은 클러스터를 `closed`로 바꾸고(`POST /{id}/status`), 같은 버튼이 `다시 열기`로
+바뀐다. 닫힌 클러스터는 왼쪽 목록에서 흐리게 서고, 입력창과 전송 버튼이 비활성되며, 라우팅은
+409로 거절된다. 멤버·라우팅 로그·예산은 그대로 남는다.
 
 입력은 아래 입력창에서 한다. `Ctrl/Cmd+Enter`로 보낸다.
 

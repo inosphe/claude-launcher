@@ -26,8 +26,8 @@ function slice(name) {
 }
 
 const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
-  "shortTitle", "verdictLine", "deliveryLine", "ledgerLine", "pct", "logitText",
-  "esc", "ring"];
+  "shortTitle", "verdictLine", "deliveryLine", "ledgerLine", "isOpen", "statusLabel",
+  "pct", "logitText", "esc", "ring"];
 const ctx = {};
 vm.createContext(ctx);
 // ringLayout's defaults read the page's own stage constants; take them from
@@ -123,6 +123,12 @@ assert.ok(ctx.deliveryLine([{ thread: "th-a", error: "boom" }]).includes("boom")
 assert.equal(ctx.ledgerLine({}), "");
 assert.equal(ctx.ledgerLine(null), "");
 assert.ok(ctx.ledgerLine({ ledger_error: "disk full" }).includes("disk full"));
+
+// A closed cluster keeps its button, labelled by the transition it offers.
+assert.equal(ctx.statusLabel({ status: "open" }), "닫기");
+assert.equal(ctx.statusLabel({ status: "closed" }), "다시 열기");
+assert.equal(ctx.isOpen({ status: "closed" }), false);
+assert.equal(ctx.isOpen({ status: "open" }), true);
 
 /* ---- number and text formatting ---------------------------------------- */
 assert.equal(ctx.pct(0.97), "97.0%");

@@ -19,6 +19,7 @@ Endpoints (``/api/megathreads``):
   GET    /settings         the router's policy and the rolling budget in use
   PUT    /settings         partial update of that policy
   GET    /{id}             one cluster with its members
+  POST   /{id}/status      {status: open|closed} close or reopen
   POST   /{id}/members     {session, thread?} join (thread opened when absent)
   DELETE /{id}/members/{thread}
   POST   /{id}/route       {text} judge, or {text, choose: [thread, ...]} deliver
@@ -146,6 +147,24 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
     async def h_get(request: web.Request) -> web.Response:
         try:
             cluster = await asyncio.to_thread(megas.get, request.match_info["id"])
+        except mega_store.MegaError as exc:
+            return fail(exc)
+        return web.json_response({"mega": cluster_view(cluster)})
+
+    async def h_status(request: web.Request) -> web.Response:
+        """Close a cluster or open it again.
+
+        Routing refuses a closed cluster with 409, so this is the only way
+        back: without it the status column could be set but never changed.
+        """
+        body = await _body(request)
+        status = str(body.get("status") or "").strip()
+        if status not in mega_store.STATUSES:
+            return web.json_response(
+                {"error": f"'status' is one of {', '.join(mega_store.STATUSES)}"}, status=400)
+        try:
+            cluster = await asyncio.to_thread(
+                megas.set_status, request.match_info["id"], status)
         except mega_store.MegaError as exc:
             return fail(exc)
         return web.json_response({"mega": cluster_view(cluster)})
@@ -395,6 +414,7 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
     r.add_put("/api/megathreads/settings", h_put_settings)
     r.add_get("/api/megathreads/{id}", h_get)
     r.add_get("/api/megathreads/{id}/routes", h_routes)
+    r.add_post("/api/megathreads/{id}/status", h_status)
     r.add_post("/api/megathreads/{id}/members", h_add_member)
     r.add_delete("/api/megathreads/{id}/members/{thread}", h_remove_member)
     r.add_post("/api/megathreads/{id}/route", h_route)
