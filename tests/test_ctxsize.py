@@ -57,8 +57,10 @@ def codex_context(model="gpt-5.6-sol", at="2026-08-27T08:27:13.265Z",
     """One Codex turn context, which precedes that turn's token events.
 
     ``effort`` is what codex records inside the turn's collaboration-mode
-    settings; the installed CLI writes ``null`` there even when the launch
-    passed ``-c model_reasoning_effort``, so ``None`` is the common shape.
+    settings. It is usually a value, not ``null``: measured 2026-10-21 over
+    the rollouts the daemon reads (``profiles/*/codex/**/rollout-*.jsonl``),
+    133 of 137 files carry one (medium 1167, high 287, ``null`` 99 turn
+    contexts). Both shapes are exercised below.
     """
     return json.dumps(
         {
@@ -444,7 +446,9 @@ def test_codex_effort_comes_from_the_same_turn_context_as_the_model(tmp_path):
 
 
 def test_codex_recording_no_effort_reports_none(tmp_path):
-    """What the installed codex writes: the field is there and ``null``."""
+    """The field can be there and ``null`` (99 of the 2026-10-21 sample's
+    turn contexts, and every turn context in four older files): no effort
+    rather than a guessed default."""
     path = write_jsonl(tmp_path, codex_context(), codex_count())
     assert "effort" not in ctxsize.read_codex_tail(path)
 

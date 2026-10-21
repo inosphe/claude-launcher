@@ -7484,8 +7484,8 @@ function ctxRailLine(s) {
   // "high" and the other at "low". Only harnesses that record it carry one
   // (`context.effort` comes from the transcript, never from the launcher's
   // configuration), so a row whose harness records none keeps exactly the
-  // line it had. Known harnesses that do not record it: codex writes
-  // ``null`` in every rollout measured here.
+  // line it had. Codex records one in most of the rollouts measured here
+  // (133 of 137 files), so a codex row usually shows it too.
   const effort = c && c.effort ? el("span", "rail-effort", `· ${c.effort}`) : null;
   if (effort) {
     effort.title = s.harness === "pi"

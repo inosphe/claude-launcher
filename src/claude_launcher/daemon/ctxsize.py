@@ -229,10 +229,13 @@ def codex_effort_of(entry: dict) -> Optional[str]:
     """The reasoning effort a Codex ``turn_context`` entry records, if any.
 
     Codex carries it inside the collaboration-mode settings of the turn it
-    belongs to. Every rollout on this machine (30 files, 2026-10-21) records
-    ``null`` there even when the launch passed ``-c model_reasoning_effort``,
-    so a codex row usually has no effort to show; this reads the value where
-    codex did record one rather than inventing it from the launcher's config.
+    belongs to. Measured on 2026-10-21 over the rollouts the daemon actually
+    reads (``~/.claude-launcher/profiles/*/codex/**/rollout-*.jsonl``): 133 of
+    137 files carry a value (medium 1167, high 287, ``null`` 99 turn
+    contexts), so a codex row normally *does* have an effort to show. Where
+    codex recorded ``null`` -- and in the four older files that record
+    nothing -- this reports no effort rather than inventing one from the
+    launcher's config.
     """
     if not isinstance(entry, dict) or entry.get("type") != "turn_context":
         return None
