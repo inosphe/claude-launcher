@@ -772,6 +772,51 @@ def none_mode(body: dict) -> Optional[str]:
     return None
 
 
+# Workflows whose sessions have no terminal for the board. An application
+# (gds6's plane) starts one per analysis job as ``job-<id>``: the opening task
+# is the whole specification, the result goes to that application's submission
+# tool, and the work-scope of the job forbids terminal and git commands. The
+# board otherwise costs such a session two turns it cannot spend on anything
+# the board is for -- "keep its status current" on the way in and the
+# wind-down block on the way out. In one measured corpus those turns were
+# 70.5% of the job sessions' tokens (claunch-nwnt5).
+TERMINALLESS_WORKFLOWS = frozenset({"gds-job"})
+
+
+def default_board_answer(body: dict) -> Optional[str]:
+    """Fill in the "no issue" answer that a terminal-less workflow implies.
+
+    A request that names a workflow in :data:`TERMINALLESS_WORKFLOWS` and says
+    nothing about the board of its own accord gets :data:`NONE_WAIT` written
+    into ``body["beads"]`` -- the same answer a caller sends when it wants no
+    issue, so every reader downstream already agrees on what it means: no
+    issue is minted, and the opening says so
+    (:func:`compose_none_note`).
+
+    This lives beside :func:`none_mode` because it is the same question with
+    one more way to answer it, and it is answered in the request rather than
+    in :meth:`Board.ensure_issue` so that the caller, the report and the
+    opening all read one answer. Without it the answer depends on every
+    caller remembering to send it: the caller that stopped doing so (gds6
+    before 0748d3ca) silently got the board back.
+
+    An answer the request gave itself always wins, on either side: "no issue"
+    is already this answer, and ``beads: true``, ``issue`` or ``issue_text``
+    name a record on purpose -- a caller that wants one on purpose still gets
+    one. Returns the mode it filled in, or ``None`` when it changed nothing.
+    """
+    if str(body.get("workflow") or "").strip() not in TERMINALLESS_WORKFLOWS:
+        return None
+    if body.get("beads") is not None:          # the request answered already
+        return None
+    if str(body.get("issue") or "").strip():
+        return None
+    if str(body.get("issue_text") or "").strip():
+        return None
+    body["beads"] = False
+    return NONE_WAIT
+
+
 def compose_none_note(mode: str, *, session: str = "") -> str:
     """The block appended to the opening task when the answer was "no issue".
 
