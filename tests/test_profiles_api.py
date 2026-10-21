@@ -20,7 +20,7 @@ import json
 import pytest
 
 from claude_launcher import install, plugins, profile, settings, store
-from claude_launcher.daemon import api
+from claude_launcher.daemon import api, profile_facts
 
 MODE = "permissions.defaultMode"
 
@@ -30,6 +30,10 @@ class _Request:
 
     def __init__(self, payload=None):
         self._payload = payload
+        # The listing answers from the daemon's profile facts; without a
+        # running daemon each call builds them fresh, which is what these
+        # tests are looking at (a profile changed on disk between calls).
+        self.app = {"profile_facts": profile_facts.ProfileFacts(interval=0)}
 
     async def json(self):
         if self._payload is None:

@@ -387,6 +387,14 @@ DAEMON_DEFAULTS = {
     # of <daemon dir>/logs/sysperf.log, rotated at 2 MB x 5 (daemon/sysperf.py,
     # claunch-zuk0b). 0 turns the collector off. Read when the daemon starts.
     "sysperf_interval_s": 5.0,
+    # Seconds between the daemon's one in-memory reading of the profile
+    # registry and its borrow verdicts (daemon/profile_facts.py,
+    # claunch-89eom). The session detail panel polls a session every two
+    # seconds and the borrow picker reads once per panel; both used to read
+    # ~/.claunch.yaml and re-validate every lender per request. 0 keeps the
+    # first answer and rebuilds only when a config write invalidates it.
+    # Read when the daemon starts.
+    "profile_facts_s": 5.0,
     # Killed sessions archived by the daemon on its own (daemon/auto_archive.py,
     # claunch-wz6a5): every auto_archive_interval_s seconds, archive at most
     # auto_archive_batch records that are killed (not paused/held/failed)
