@@ -3,7 +3,9 @@
    characters, including characters Enter would trim away, since it is the
    typed text the button erases. Pressing it empties the box, drops the search
    state through setSessionSearch("") so a ranking by meaning goes with it, and
-   returns the caret to the box. A page shipping older markup -- the box
+   returns the caret to the box. The header's `⇱ card` calls the same function
+   with `focus: false` -- it clears a filter that hides the card it is about to
+   reveal, and takes no caret for it. A page shipping older markup -- the box
    without the button, or neither -- still boots instead of throwing. And the
    markup and stylesheet ship the button inside the input's own cell, hidden to
    begin with, with the browser's native clear affordance suppressed so the
@@ -52,12 +54,14 @@ function node(value = "") {
    older-markup case the guards in both functions exist for. */
 function load(nodes) {
   const cleared = [];
+  const folded = [];
   const context = vm.createContext({
     $: (id) => nodes[id] || null,
     setSessionSearch: (q) => cleared.push(q),
+    syncSessionSearchOpen: (open) => folded.push(open),
   });
   vm.runInContext(slice("syncSessionSearchClear") + "\n" + slice("clearSessionSearch"), context);
-  return { context, cleared };
+  return { context, cleared, folded };
 }
 
 /* ---- the button follows the box's text --------------------------------- */
@@ -87,6 +91,19 @@ assert.equal(box.value, "", "the box is emptied");
 assert.deepEqual(page.cleared, [""], "the search state is dropped through setSessionSearch");
 assert.equal(button.classList.contains("hidden"), true, "the button hides itself again");
 assert.equal(box.focused, 1, "the caret goes back to the box");
+
+/* ---- the no-caret variant the header's press takes (claunch-p3ri9) ------
+   `⇱ card` clears a filter that would keep its card off the rail, and then
+   leaves the screen as it found it: the caret stays where the press put it,
+   and the search folds back to its icon instead of opening over the project
+   header a focused box would cover. */
+const quietBox = node("mesh");
+const quiet = load({ "session-search": quietBox, "session-search-clear": node() });
+quiet.context.clearSessionSearch({ focus: false });
+assert.equal(quietBox.value, "", "focus: false still empties the box");
+assert.deepEqual(quiet.cleared, [""], "...and still drops the search state");
+assert.equal(quietBox.focused, 0, "the caret is not taken by a press that only navigates");
+assert.deepEqual(quiet.folded, [false], "the search folds back to its icon");
 
 /* ---- older markup ------------------------------------------------------ */
 const boxOnly = node("mesh");
