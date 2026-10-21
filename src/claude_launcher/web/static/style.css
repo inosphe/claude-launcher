@@ -4379,6 +4379,29 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-tools .wf-btn { padding: 2px 8px; font-size: 12px; }
 .dfl-tools [aria-pressed="true"] { background: #172947; color: #a5d6ff; outline: 1px solid #388bfd; }
 
+/* The sequence view's key, in the head and only while that view is on
+   screen (claunch-qmwog.2). Same colours as the bars it explains. */
+.dfl-legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+  width: 100%; font-size: 11px; color: #8b949e;
+}
+.dfl-legend[hidden] { display: none; }
+.dfl-legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.dfl-legend-hint { color: #6e7681; font-style: italic; }
+.dfl-swatch {
+  display: inline-block; width: 12px; height: 8px; border-radius: 2px;
+  background: #1b1e24; border: 1px solid #30363d;
+}
+.dfl-swatch.ok { background: #12301f; border-color: #2f6f43; }
+.dfl-swatch.run { background: #12304f; border-color: #58a6ff; }
+.dfl-swatch.warn { background: #2b2413; border-color: #d29922; }
+.dfl-swatch.fail { background: #2a1617; border-color: #b0413e; }
+.dfl-swatch.skip { opacity: 0.55; }
+.dfl-swatch.plan { background: none; border: 1px dashed #4d5566; }
+.dfl-swatch.mark { height: 3px; border: 0; background: #58a6ff; opacity: 0.75; }
+.dfl-swatch.mark.warn { background: #d29922; }
+.dfl-swatch.mark.fail { background: #b0413e; }
+
 /* The sequence view: the same log on a time axis. A lane is a unit's
    interval -- or a question asked outside any unit -- and the thin marks
    inside it are the questions it asked, so an open one is visible as an

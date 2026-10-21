@@ -734,17 +734,24 @@
           // No open start (the log may only carry the answer): the mark is
           // made now and closed in the same breath.
           const ask = from || startAsk(key, unit, ev, when);
-          // A sim2 start need not carry its role; the answer does. A mark
-          // that opened in a lane of its own moves into its stage's lane,
-          // so the start and the answer are one interval, not two.
-          if (from && unit === null && ev.askRole &&
-              from.lane.unit === undefined && from.lane.group === undefined) {
-            const g = sim2Group(key);
-            let lane = byGroup.get(g.group);
-            if (!lane) {
-              lane = addLane("g:" + g.group, ask.item.start,
-                             { label: g.label, group: g.group, state: "ok" });
-              byGroup.set(g.group, lane);
+          // A start need not name the lane its answer names -- sim2 logs its
+          // role only on the answer, and a producer may name the unit there.
+          // A mark that opened in a lane of its own moves into the lane the
+          // answer names, so one question is one interval on one lane.
+          if (from && from.unit === null && from.lane.unit === undefined &&
+              from.lane.group === undefined && (unit !== null || ev.askRole)) {
+            let lane = null;
+            if (unit !== null) {
+              lane = unitLane(unit);
+              if (lane.start === null && ask.item.start !== null) lane.start = ask.item.start;
+            } else {
+              const g = sim2Group(key);
+              lane = byGroup.get(g.group);
+              if (!lane) {
+                lane = addLane("g:" + g.group, ask.item.start,
+                               { label: g.label, group: g.group, state: "ok" });
+                byGroup.set(g.group, lane);
+              }
             }
             const at = from.lane.asks.indexOf(ask.item);
             if (at >= 0) from.lane.asks.splice(at, 1);
@@ -757,9 +764,13 @@
           if (lane.unit === undefined && lane.group === undefined) {
             lane.end = when;                    // a lane of its own: its span is the ask
             lane.state = status;
-          } else if (lane.group !== undefined) {
-            lane.end = when;                    // a stage group: its span keeps growing
-            if (status !== "ok") lane.state = status;
+          } else {
+            // The tree marks a node cut (node.cut) when one of its questions
+            // ended abnormally, and paints it warn -- a green bar over a
+            // failed question would read as a clean unit. Same rule here.
+            if (status !== "ok") lane.cut = true;
+            if (lane.group !== undefined) lane.end = when;   // a stage keeps growing
+            if (status !== "ok" && lane.group !== undefined) lane.state = status;
           }
           touch(when);
           break;
@@ -787,6 +798,12 @@
     if (endedAt !== null) for (const lane of lanes) if (lane.end === null) lane.end = endedAt;
     for (const lane of lanes) {
       for (const a of lane.asks) if (a.end === null) a.end = lane.end;
+    }
+    // A unit one of whose questions ended abnormally is warn whatever the
+    // unit's own last event said -- the tree's node.cut rule, so a node
+    // that is yellow in the tree is yellow here too.
+    for (const lane of lanes) {
+      if (lane.cut && lane.state === "ok") lane.state = "warn";
     }
     lanes.sort((a, b) => (a.start === null ? Infinity : a.start) -
                          (b.start === null ? Infinity : b.start) || a.order - b.order);
@@ -935,9 +952,25 @@
   }
 
   /* The time axis's proportions, in the viewBox's own units: a label column
-     on the left, a clock axis across the top, one row a lane. */
+     on the left, a clock axis across the top, one row a lane, a legend
+     along the bottom. */
   const SEQ_W = 960, SEQ_PAD = 12, SEQ_LABEL = 210, SEQ_ROW = 20,
-        SEQ_BAR = 9, SEQ_AXIS = 22;
+        SEQ_BAR = 9, SEQ_AXIS = 22, SEQ_LEGEND = 20;
+
+  /* What the colours mean, in the pane and in a file: the lane's own state,
+     then the thin mark a question leaves. The tree draws each node's state
+     on the node itself, so its export needs no legend. */
+  const SEQ_LEGEND_ITEMS = [
+    ["dfl-seq-bar st-ok", "완료"],
+    ["dfl-seq-bar st-run", "진행 중"],
+    ["dfl-seq-bar st-warn", "경고"],
+    ["dfl-seq-bar st-fail", "실패"],
+    ["dfl-seq-bar st-skip", "건너뜀"],
+    ["dfl-seq-bar st-plan", "계획"],
+    ["dfl-seq-ask", "물음"],
+    ["dfl-seq-ask warn", "비정상 종료"],
+    ["dfl-seq-ask fail", "오류"],
+  ];
 
   /* The sequence view: one SVG kept across polls, like the tree's. A lane's
      row is written every draw (its bar grows as the axis does), and a lane
@@ -949,7 +982,8 @@
     svg.setAttribute("xmlns", NS);
     const gAxis = doc.createElementNS(NS, "g");
     const gRows = doc.createElementNS(NS, "g");
-    svg.appendChild(gAxis); svg.appendChild(gRows);
+    const gLegend = doc.createElementNS(NS, "g");
+    svg.appendChild(gAxis); svg.appendChild(gRows); svg.appendChild(gLegend);
     const rows = new Map();
 
     function mk(tag, parent, attrs) {
@@ -972,7 +1006,7 @@
       const t1 = Math.max(m.t1, t0 + 1);
       const lanes = m.lanes || [];
       const rowsH = Math.max(1, lanes.length) * SEQ_ROW;
-      const h = SEQ_PAD * 2 + SEQ_AXIS + rowsH + (m.hidden ? 12 : 0);
+      const h = SEQ_PAD * 2 + SEQ_AXIS + rowsH + (m.hidden ? 12 : 0) + SEQ_LEGEND;
       set(svg, "viewBox", `0 0 ${SEQ_W} ${h}`);
       set(svg, "width", SEQ_W);
       set(svg, "height", h);
@@ -992,10 +1026,24 @@
       }
       if (m.hidden) {
         const more = mk("text", gAxis, {
-          class: "dfl-seq-axis", x: SEQ_PAD, y: h - 4,
+          class: "dfl-seq-axis", x: SEQ_PAD, y: h - SEQ_LEGEND - 4,
         });
         more.textContent = `이전 ${m.hidden}개 단위는 그리지 않는다`;
       }
+
+      // The legend is part of the drawing: a downloaded file is read far
+      // from the pane's header, and the colours mean nothing without it.
+      while (gLegend.firstChild) gLegend.removeChild(gLegend.firstChild);
+      let lx = SEQ_LABEL;
+      const ly = h - 7;
+      for (const [cls, label] of SEQ_LEGEND_ITEMS) {
+        mk("rect", gLegend, { class: cls, x: lx, y: ly - 7, width: 12, height: 7, rx: 1 });
+        const t = mk("text", gLegend, { class: "dfl-seq-axis", x: lx + 16, y: ly });
+        t.textContent = label;
+        lx += 16 + label.length * 11 + 10;
+      }
+      const note = mk("text", gLegend, { class: "dfl-seq-axis", x: lx, y: ly });
+      note.textContent = "겹친 막대 = 동시 진행";
 
       const keep = new Set();
       lanes.forEach((lane, i) => {
@@ -1281,6 +1329,35 @@
     const pngBtn = press("PNG", "지금 보이는 차트를 PNG 파일로 내려받는다");
     head.appendChild(tools);
 
+    /* What the sequence colours mean, in the head, where the reader is --
+       and only there: the tree paints each node's state on the node, so a
+       legend over it would explain a chart that is not on screen. The
+       export carries the same key inside the drawing (makeSequenceView). */
+    const legend = doc.createElement("div");
+    legend.className = "dfl-legend";
+    legend.setAttribute("role", "note");
+    legend.setAttribute("aria-label", "시퀀스 뷰 범례");
+    const swatch = (cls, label) => {
+      const item = doc.createElement("span");
+      item.className = "dfl-legend-item";
+      const sw = doc.createElement("span");
+      sw.className = "dfl-swatch " + cls;
+      item.appendChild(sw);
+      item.appendChild(doc.createElement("span")).textContent = label;
+      legend.appendChild(item);
+      return item;
+    };
+    for (const [cls, label] of [
+      ["ok", "완료"], ["run", "진행 중"], ["warn", "경고"], ["fail", "실패"],
+      ["skip", "건너뜀"], ["plan", "계획"],
+      ["mark", "물음"], ["mark warn", "비정상 종료"], ["mark fail", "오류"],
+    ]) swatch(cls, label);
+    const hint = doc.createElement("span");
+    hint.className = "dfl-legend-item dfl-legend-hint";
+    hint.textContent = "겹친 막대 = 동시 진행";
+    legend.appendChild(hint);
+    head.appendChild(legend);
+
     const note = doc.createElement("p");
     note.className = "wf-note";
     note.textContent = "loading…";
@@ -1301,6 +1378,7 @@
     function paintMode() {
       treeBtn.setAttribute("aria-pressed", String(mode === "tree"));
       seqBtn.setAttribute("aria-pressed", String(mode === "sequence"));
+      legend.hidden = mode !== "sequence";
       const want = shownSvg();
       if (!want) return;
       if (parentOf(want) !== scroller) {

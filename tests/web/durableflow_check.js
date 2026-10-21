@@ -888,3 +888,84 @@ const SQ = DF.sequence(SLOG, true, SNOW);
   delete ctx.Blob; delete ctx.URL; delete ctx.Image; delete ctx.document;
   console.log("durableflow_check: export buttons ok");
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// (j) the batch's two follow-ups (claunch-qmwog.1/.2): a start closed by an
+// answer that names the unit, the cut rule, and the legend.
+{
+  // qmwog.1: the start named no lane; the answer names the unit. One lane,
+  // one mark, spanning start..answer.
+  const moved = DF.sequence([
+    { at: SAT("01"), event: "ask_start", key: "q" },
+    { at: SAT("04"), event: "ask", key: "q", unit: "u", stop: "stop" },
+  ], false, SNOW);
+  assert.deepStrictEqual(Array.from(moved.lanes, (l) => l.id), ["u:u"]);
+  assert.deepStrictEqual(Array.from(moved.lanes[0].asks, (x) => [x.start, x.end, x.status]),
+    [[Date.parse(SAT("01")), Date.parse(SAT("04")), "ok"]]);
+  assert.deepStrictEqual([moved.lanes[0].start, moved.lanes[0].state],
+    [Date.parse(SAT("01")), "run"], "a unit named only by its question starts there");
+  // qmwog.2: a unit whose question ended abnormally is warn, as the tree's
+  // node.cut paints it -- even though the unit itself reported done.
+  const cut = DF.sequence([
+    { at: SAT("00"), event: "unit", unit: "a", state: "start" },
+    { at: SAT("01"), event: "ask_start", key: "q1", unit: "a" },
+    { at: SAT("03"), event: "ask", key: "q1", unit: "a", stop: "timeout" },
+    { at: SAT("04"), event: "unit", unit: "a", state: "done" },
+  ], false, SNOW);
+  assert.deepStrictEqual([cut.lanes[0].state, cut.lanes[0].asks[0].status], ["warn", "warn"]);
+  const err = DF.sequence([
+    { at: SAT("00"), event: "unit", unit: "a", state: "start" },
+    { at: SAT("02"), event: "ask", key: "q", unit: "a", error: "boom" },
+    { at: SAT("04"), event: "unit", unit: "a", state: "done" },
+  ], false, SNOW);
+  assert.strictEqual(err.lanes[0].state, "warn");
+  // ...and a clean unit stays ok.
+  assert.strictEqual(DF.sequence([
+    { at: SAT("00"), event: "unit", unit: "a", state: "start" },
+    { at: SAT("02"), event: "ask", key: "q", unit: "a", stop: "stop" },
+    { at: SAT("04"), event: "unit", unit: "a", state: "done" },
+  ], false, SNOW).lanes[0].state, "ok");
+}
+
+// The legend: in the sequence drawing (so it travels with the file), in the
+// pane's head only while that view is on screen, and never in the tree's file.
+(async () => {
+  const svq = DF.makeSequenceView(doc);
+  svq.draw(SQ);
+  const legend = svq.svg.children[2];
+  const labels = legend.children.filter((n) => n.tag === "text").map((n) => n.textContent);
+  for (const want of ["완료", "진행 중", "경고", "실패", "건너뜀", "계획", "물음", "비정상 종료", "오류"]) {
+    assert.ok(labels.includes(want), `the drawing's key names ${want}`);
+  }
+  assert.ok(labels.some((t) => t.includes("겹친 막대")), "and says what an overlap means");
+  assert.strictEqual(legend.children.filter((n) => n.tag === "rect").length, 9);
+  // The exported sequence carries it; the tree's export has no sequence key
+  // (both files carry both views' CSS rules, so the check is the drawing's
+  // own text, not a class name).
+  const seqSrc = DF.svgSource(svq.svg);
+  assert.ok(seqSrc.includes("겹친 막대"));
+  assert.ok(seqSrc.includes("비정상 종료"));
+  const tv = DF.makeView(doc, new El("div"));
+  tv.draw(DF.model(LOG, false));
+  const treeSrc = DF.svgSource(tv.svg);
+  assert.ok(!treeSrc.includes("겹친 막대"));
+  assert.ok(!treeSrc.includes("비정상 종료"));
+
+  // The head's own key is sequence-only and follows the switch.
+  const host = new El("div");
+  const api = async () => ({ ok: true, json: async () => ({
+    sim: "legend-run", live: false, total: SLOG.length, since: 0, events: SLOG }) });
+  const mnt = DF.mount(host, "legend-run", {
+    doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 0 });
+  await new Promise((r) => setTimeout(r, 0));
+  const head = host.children[0];
+  const key = head.children[3];
+  assert.strictEqual(key.className, "dfl-legend");
+  assert.strictEqual(key.children.length, 10, "nine swatches and the overlap hint");
+  assert.strictEqual(key.hidden, true, "the tree view shows no sequence key");
+  head.children[2].children[1].click();          // 시퀀스
+  assert.strictEqual(key.hidden, false);
+  head.children[2].children[0].click();          // 트리
+  assert.strictEqual(key.hidden, true);
+  mnt.unmount();
+  console.log("durableflow_check: legend ok");
+})().catch((e) => { console.error(e); process.exit(1); });
