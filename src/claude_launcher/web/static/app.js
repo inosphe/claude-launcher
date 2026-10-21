@@ -5436,6 +5436,10 @@ async function refreshSessions(options) {
     label._railTitleBase = label.title;
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
+    // Guarded like the detail panel's late rows: node harnesses slice the
+    // row builder without the bucket line and its price helpers.
+    const railCtxTokens = typeof ctxTokensLine === "function"
+      ? ctxTokensLine(s) : null;
     // And how fast its backend answered last time, for a session that goes
     // through the metering shim -- one more full-width line, absent for
     // the sessions that have no such record. Guarded like the kill-state
@@ -5580,6 +5584,7 @@ async function refreshSessions(options) {
     roleWhole.title = role.textContent;
     roleLine.appendChild(roleWhole);
     li.append(dot, head, meta, roleLine, railCwd, ...(railCtx ? [railCtx] : []),
+              ...(railCtxTokens ? [railCtxTokens] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
               railSeen, ...(railLife ? [railLife] : []),
@@ -7438,6 +7443,85 @@ function modelSentence(s) {
   return `${c.model}${effort}${age ? ` (as of its turn ${age} ago)` : ""}`;
 }
 
+/* The per-model price table behind the cost estimates (Settings → Model
+   prices), read from /api/model-prices. Null until the first read answers:
+   a missing table turns every estimate off — "not priced" never reads as
+   "costs nothing". `modelPricesKey` is the table serialized once per read,
+   what a rail row's refresh key compares against: rows rebuild their price
+   text when the table changes, not when an unrelated poll happens. */
+let modelPrices = null;
+let modelPricesKey = "";
+let modelPricesError = "";
+
+async function refreshModelPrices() {
+  try {
+    const resp = await api("/api/model-prices");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    modelPrices = data;
+    modelPricesKey = JSON.stringify(data);
+    modelPricesError = "";
+  } catch (err) {
+    modelPricesError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+/* The symbol estimates are written in — picked beside the table; "$" where
+   nothing was picked. */
+function priceCurrency() {
+  return (modelPrices && modelPrices.currency) || "$";
+}
+
+/* The rate row for a model id, or null where the table has no row for it.
+   Keyed by the id the transcript records (`context.model`), not the
+   shortened display form — the table is written against what the harness
+   actually answered on. */
+function priceRateFor(model) {
+  const table = modelPrices && modelPrices.prices;
+  if (!table || !model) return null;
+  const rates = table[model];
+  return rates && typeof rates === "object" ? rates : null;
+}
+
+/* What one billed request costs at the given per-1M-token rates. A rate the
+   row does not set counts as 0: a person who prices only cache reads still
+   gets an estimate, a partial one, and the tooltip says which parts went
+   unpriced. */
+function readingCost(c, rates) {
+  if (!c || !rates) return null;
+  const cost = ((+rates.input || 0) * (c.input || 0) +
+                (+rates.cache_read || 0) * (c.cache_read || 0) +
+                (+rates.cache_write || 0) * (c.cache_write || 0) +
+                (+rates.output || 0) * (c.output || 0)) / 1e6;
+  return Number.isFinite(cost) ? cost : null;
+}
+
+/* The estimate as it reads on a rail row: "≈ $0.0042". usageCost fixes the
+   decimals by magnitude; the ≈ marks the number as computed from entered
+   rates, not read off a meter. */
+function costText(cost) {
+  return `≈ ${priceCurrency()}${usageCost(cost)}`;
+}
+
+/* The multiplication, for the tooltip: which rate applied to which bucket,
+   so an estimate can be checked against the bill it stands in for. */
+function costBreakdown(c, rates) {
+  if (!c || !rates) return "";
+  const row = (label, tokens, rate) =>
+    `  ${label} ${(tokens || 0).toLocaleString()} × ` +
+    `${priceCurrency()}${rate}/1M`;
+  const lines = [
+    row("read", c.input, +rates.input || 0),
+    row("cached read", c.cache_read, +rates.cache_read || 0),
+    row("write", c.cache_write, +rates.cache_write || 0),
+    row("output", c.output, +rates.output || 0),
+  ];
+  const cost = readingCost(c, rates);
+  return "estimated from Settings → Model prices:\n" + lines.join("\n") +
+    (cost === null ? "" : `\n= ${priceCurrency()}${usageCost(cost)}`);
+}
+
 /* The whole sentence, for a tooltip or a details row. Empty where there is
    nothing to say at all. */
 function ctxSentence(s) {
@@ -7652,6 +7736,43 @@ function ctxRailLine(s) {
   // does not move (claunch-hwbuc).
   line._railScale = scale;
   line.title = [ctxTooltip(s), scale].filter(Boolean).join("\n");
+  return line;
+}
+
+/* The line under the gauge: how the reading's total splits into the three
+   billed input buckets — read (fresh input), cached (replayed from cache),
+   write (written to cache) — and, where the person priced this model, what
+   that request cost at those rates. Counts use the same usageShort scale as
+   the usage line below, so a figure means the same thing on both; the ≈
+   figure is computed from entered rates, not read off a meter, and says so
+   in the tooltip along with the multiplication. Nothing at all where the
+   harness has recorded no reading — the gauge's own "?" already carries
+   that. */
+function ctxTokensLine(s) {
+  const c = s && s.context;
+  if (!c) return null;
+  const rates = priceRateFor(c.model);
+  const cost = readingCost(c, rates);
+  const line = el("span", "rail-ctx-tokens");
+  line.append(
+    el("span", "rct-part", `read ${usageShort(c.input || 0)}`),
+    el("span", "rct-sep", "·"),
+    el("span", "rct-part", `cached ${usageShort(c.cache_read || 0)}`),
+    el("span", "rct-sep", "·"),
+    el("span", "rct-part", `write ${usageShort(c.cache_write || 0)}`),
+  );
+  if (cost !== null) {
+    line.append(el("span", "rct-sep", "·"),
+                el("span", "rct-cost", costText(cost)));
+  }
+  line.title = [
+    `last request: read ${(c.input || 0).toLocaleString()} fresh input · ` +
+    `cached ${(c.cache_read || 0).toLocaleString()} replayed from cache · ` +
+    `write ${(c.cache_write || 0).toLocaleString()} written to cache`,
+    rates ? costBreakdown(c, rates)
+          : "no per-1M rates for this model — add them in Settings → " +
+            "Model prices to see an estimate",
+  ].join("\n");
   return line;
 }
 
@@ -8229,6 +8350,32 @@ function usageRailLine(s) {
               usageBar(u, "rail-usage-bar"));
   line.title = usageTooltip(u) + "\nbar: fresh input · cache read · cache write · output";
   return line;
+}
+
+/* The detail panel's row for the reading's billed buckets: read (fresh
+   input), cached (replayed from cache), write (written to cache), plus the
+   estimated cost where the model is priced. Where it is not, the row still
+   shows the buckets and says "not priced" — the counts are facts from the
+   transcript; only the estimate waits on a rate. */
+function ctxCostDetailRow(dl, s) {
+  const c = s && s.context;
+  if (!c) return;
+  const rates = priceRateFor(c.model);
+  const cost = readingCost(c, rates);
+  dl.appendChild(el("dt", null, "last request"));
+  const parts = [
+    `read ${usageShort(c.input || 0)}`,
+    `cached ${usageShort(c.cache_read || 0)}`,
+    `write ${usageShort(c.cache_write || 0)}`,
+  ];
+  if (cost !== null) parts.push(costText(cost));
+  else parts.push("not priced");
+  const dd = el("dd", "ctx-cost-detail", parts.join(" · "));
+  dd.title = rates
+    ? costBreakdown(c, rates)
+    : "no per-1M rates for this model — set them in Settings → Model " +
+      "prices to see an estimate";
+  dl.appendChild(dd);
 }
 
 /* The detail panel's row: the glance, the bar and the breakdown as visible
@@ -9032,6 +9179,21 @@ function refreshRailSeen(list) {
       } else if (typeof ctx._railScale === "string") {
         const title = [note, ctx._railScale].filter(Boolean).join("\n");
         if (ctx.title !== title) ctx.title = title;
+      }
+    }
+    // The bucket line under the gauge: rebuilt when the reading or the
+    // price table moves (modelPricesKey is the table serialized once per
+    // read, so a poll that changed neither costs this row nothing). Only
+    // swapped where it exists — a row whose harness records no reading has
+    // no line to replace, and the row builder hangs a fresh one the moment
+    // a reading lands.
+    const tk = li.querySelector(".rail-ctx-tokens");
+    if (tk && typeof ctxTokensLine === "function") {
+      const tkKey = JSON.stringify([s.context || null, modelPricesKey]);
+      if (tk._railKey !== tkKey) {
+        const fresh = ctxTokensLine(s);
+        if (fresh) swap(tk, fresh)._railKey = tkKey;
+        else tk.remove();
       }
     }
     // The titles are written once, at what they end up reading (the same
@@ -25535,6 +25697,7 @@ function openSettings(section) {
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
   refreshRoleWorkflowSettings();
   refreshLlmSettings();
+  refreshModelPrices();
   refreshSimDefaults();
   refreshQaNudge();
   refreshMegaThread();
@@ -31406,6 +31569,7 @@ function renderWorkspaces() {
 
   view.appendChild(modelChoicesCard());
   view.appendChild(llmSettingsCard());
+  view.appendChild(modelPricesCard());
   view.appendChild(simDefaultsCard());
   view.appendChild(qaNudgeCard());
   view.appendChild(megaThreadCard());
@@ -32812,6 +32976,188 @@ function llmSettingsCard() {
       "key in above."
     ));
   }
+  return card;
+}
+
+/* The per-model price table the cost estimates read (the bucket line under
+   the context gauge and the detail panel's "last request" row). One row per
+   model id — the id the transcript records, not the shortened display form —
+   with a per-1M-token rate for each billed bucket; a rate left empty counts
+   as 0, a row whose every rate is empty is dropped on save. The draft lives
+   outside the DOM like llmDraft: this page re-renders on every poll. */
+let modelPricesDraft = null;
+let modelPricesNotice = "";
+let modelPricesBusy = false;
+
+function modelPricesDraftValues() {
+  if (modelPricesDraft) return modelPricesDraft;
+  const saved = modelPrices || {};
+  const prices = {};
+  for (const [model, rates] of Object.entries(saved.prices || {})) {
+    prices[model] = {
+      input: rates.input ?? "",
+      cache_read: rates.cache_read ?? "",
+      cache_write: rates.cache_write ?? "",
+      output: rates.output ?? "",
+    };
+  }
+  modelPricesDraft = { currency: saved.currency || "$", prices };
+  return modelPricesDraft;
+}
+
+async function modelPricesSave() {
+  const draft = modelPricesDraftValues();
+  const prices = {};
+  for (const model of Object.keys(draft.prices)) {
+    const row = {};
+    for (const key of ["input", "cache_read", "cache_write", "output"]) {
+      const v = String(draft.prices[model][key] ?? "").trim();
+      if (v === "") continue;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) {
+        modelPricesError = `${model}: ${key} must be a non-negative number`;
+        renderWorkspaces();
+        return;
+      }
+      row[key] = n;
+    }
+    prices[model] = row;
+  }
+  modelPricesBusy = true;
+  modelPricesNotice = "";
+  modelPricesError = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/model-prices", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ currency: draft.currency, prices }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    modelPrices = data;
+    modelPricesKey = JSON.stringify(data);
+    modelPricesDraft = null;
+    modelPricesNotice = "Saved. New readings price against this table.";
+  } catch (err) {
+    modelPricesError = String(err);
+  }
+  modelPricesBusy = false;
+  renderWorkspaces();
+}
+
+function modelPricesCard() {
+  const card = el("section", "ws-add model-prices");
+  card.appendChild(el("h3", null, "Model prices"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Per-1M-token rates for a model id (the id the transcript records — " +
+    "the one in the gauge line's tooltip). Where a row exists, the session " +
+    "card under the context gauge and the detail panel's last-request row " +
+    "estimate the cost of the latest request from these rates. A rate left " +
+    "empty counts as 0; emptying every rate drops the row."
+  ));
+  if (modelPricesError) card.appendChild(el("p", "error", modelPricesError));
+  if (modelPricesNotice) card.appendChild(el("p", "wf-note", modelPricesNotice));
+  if (!modelPrices) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const draft = modelPricesDraftValues();
+  const form = el("form", "model-prices-form");
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    modelPricesSave();
+  });
+
+  const curLabel = el("label", "mp-currency", "Currency symbol");
+  const cur = document.createElement("input");
+  cur.id = "mp-currency";
+  cur.type = "text";
+  cur.value = draft.currency;
+  cur.maxLength = 8;
+  cur.addEventListener("input", () => { draft.currency = cur.value; });
+  curLabel.appendChild(cur);
+  form.appendChild(curLabel);
+
+  const table = el("div", "mp-table");
+  const head = el("div", "mp-row mp-head");
+  head.append(el("span", "mp-model-head", "model"),
+              ...["read", "cached read", "write", "output"].map(
+                (h) => el("span", "mp-rate-head", h)),
+              el("span", "mp-rate-head", ""));
+  table.appendChild(head);
+  for (const model of Object.keys(draft.prices).sort()) {
+    const rates = draft.prices[model];
+    const row = el("div", "mp-row");
+    const name = el("span", "mp-model", model);
+    name.title = model;
+    row.appendChild(name);
+    for (const key of ["input", "cache_read", "cache_write", "output"]) {
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.inputMode = "decimal";
+      inp.className = "mp-rate";
+      inp.value = rates[key];
+      inp.placeholder = "0";
+      inp.addEventListener("input", () => { rates[key] = inp.value; });
+      row.appendChild(inp);
+    }
+    const drop = el("button", "wf-btn clear mp-drop", "✕");
+    drop.type = "button";
+    drop.title = "drop this row";
+    drop.addEventListener("click", () => {
+      delete draft.prices[model];
+      renderWorkspaces();
+    });
+    row.appendChild(drop);
+    table.appendChild(row);
+  }
+  form.appendChild(table);
+
+  // Adding a row: the id typed in, or one of the models the rail currently
+  // shows, offered by a datalist so a typo'd id does not silently estimate
+  // nothing.
+  const seen = [...new Set((sessionsCache || [])
+    .map((s) => s && s.context && s.context.model)
+    .filter(Boolean))].sort();
+  const addRow = el("div", "mp-row mp-add");
+  const addName = document.createElement("input");
+  addName.id = "mp-add-model";
+  addName.type = "text";
+  addName.placeholder = "model id, e.g. claude-opus-5";
+  addName.setAttribute("list", "mp-model-options");
+  const addList = document.createElement("datalist");
+  addList.id = "mp-model-options";
+  for (const m of seen) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    addList.appendChild(opt);
+  }
+  const addBtn = el("button", "wf-btn approve", "Add model");
+  addBtn.type = "button";
+  const addModel = () => {
+    const m = addName.value.trim();
+    if (!m) return;
+    if (!draft.prices[m]) {
+      draft.prices[m] = { input: "", cache_read: "", cache_write: "",
+                          output: "" };
+    }
+    modelPricesDraft = draft;
+    renderWorkspaces();
+  };
+  addBtn.addEventListener("click", addModel);
+  addName.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addModel(); }
+  });
+  addRow.append(addName, addList, addBtn);
+  form.appendChild(addRow);
+
+  const submit = el("button", "wf-btn approve", "Save prices");
+  submit.type = "submit";
+  if (modelPricesBusy) submit.disabled = true;
+  form.appendChild(submit);
+  card.appendChild(form);
   return card;
 }
 
@@ -40786,6 +41132,11 @@ function renderSession(data) {
     // Under the conversation, because it is a fact about the conversation and
     // not about the process: how much of it the harness last carried.
     metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
+    // Under the size, the same reading's three billed buckets and what they
+    // cost at the rates entered for this model (Settings → Model prices).
+    // Guarded like the usage row below: node harnesses slice this renderer
+    // without the late helpers.
+    if (typeof ctxCostDetailRow === "function") ctxCostDetailRow(dl, s);
     // Beside the size, what the same conversation has spent in total: the
     // size is the last request, this is all of them. Guarded like the rail's
     // late helpers: the node harnesses slice this renderer without it.
@@ -53044,6 +53395,7 @@ async function boot() {
     refreshSessionSims(),
     refreshQaRail(),
     refreshThreadsRail(),
+    refreshModelPrices(),
   ]);
   // Last, and once. A #/s/<name> link attaches here — which is why a reload
   // puts you back in the session instead of at an empty slot — and it renders

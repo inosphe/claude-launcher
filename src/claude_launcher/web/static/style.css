@@ -674,7 +674,7 @@ html[data-theme="light"] #term-tps-overlay {
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
+   (.rail-cwd, .rail-ctx-line, .rail-ctx-tokens, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
    .rail-note, .rail-progress, .rail-procs, .rail-status-checks, .rail-talk,
    .sess-cflow, .sess-cflow2, .sess-brief,
    and the selected card's .rail-role-line) are full-width, and they
@@ -1277,6 +1277,22 @@ html[data-theme="light"] #term-tps-overlay {
   font-size: 11px; color: #7d8590; line-height: 16px;
 }
 #session-list .rail-ctx.unknown { color: #6e7681; font-style: italic; }
+/* The billed-bucket line under the gauge: how the reading splits into read
+   (fresh input), cached (replayed from cache) and write (written to cache),
+   with the estimated cost of the request where the model is priced. Same
+   indent and order as the gauge so it reads as part of the same block;
+   monospace figures because they are compared across rows; the cost in the
+   green no other rail element uses, marking it as computed from entered
+   rates rather than read off a meter. */
+#session-list .rail-ctx-tokens {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding-left: 16px; line-height: 16px;
+  font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; color: #7d8590;
+}
+#session-list .rail-ctx-tokens .rct-part { flex: none; }
+#session-list .rail-ctx-tokens .rct-sep { flex: none; opacity: 0.6; }
+#session-list .rail-ctx-tokens .rct-cost { flex: none; color: #3fb950; }
 /* The throughput line under the gauge: how fast the backend answered the
    last call, for a session that goes through the metering shim. Same
    indent and order as the gauge line so it reads as part of the same
@@ -7035,6 +7051,21 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .llm-settings-form label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .llm-settings-form input, .llm-settings-form select { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
 .llm-settings-form input:disabled, .llm-settings-form select:disabled { color: #7d8590; background: #161b22; }
+/* Model prices: a model id wide, four narrow rate columns, a drop button.
+   The table is a grid so the rate inputs line up across rows — these
+   figures are typed against each other, and a column that ragged-reads
+   invites a rate into the wrong bucket. */
+.model-prices-form { margin: 14px 0 10px; }
+.mp-currency { display: inline-flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+.mp-currency input { width: 8ch; box-sizing: border-box; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.mp-table { display: grid; gap: 6px 8px; }
+.mp-row { display: grid; grid-template-columns: minmax(140px, 1fr) repeat(4, minmax(64px, 80px)) auto; gap: 6px 8px; align-items: center; }
+.mp-head { color: #8b949e; font-size: 11px; }
+.mp-model { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-rate { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.mp-add { margin-top: 10px; grid-template-columns: minmax(140px, 1fr) auto auto; }
+.mp-add input { padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.model-prices-form .wf-btn { margin-top: 10px; }
 /* Read-only holds a value worth reading (the profile's endpoint), so it stays
    legible where :disabled greys out a field that is empty anyway. */
 .llm-settings-form input[readonly] { color: #adbac7; background: #161b22; cursor: default; }

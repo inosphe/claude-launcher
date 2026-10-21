@@ -134,6 +134,9 @@ function build(opts) {
     "refreshQaRail",
     // and the session threads rail (threadspane_check).
     "refreshThreadsRail",
+    // and the per-model price table the context bucket line prices against
+    // (modelprice_check).
+    "refreshModelPrices",
     // The poll's batch also reads the window strip (termwindow_check).
     "refreshTermWindow",
     // and the timer line (termtimers_check).
@@ -172,6 +175,7 @@ function build(opts) {
     () => {},   // refreshSessionSims (sessionresources_check)
     () => {},   // refreshQaRail (the ? qa light; qapane_check)
     () => {},   // refreshThreadsRail (the 🗪 threads light; threadspane_check)
+    async () => {},   // refreshModelPrices (the price table for the context bucket line; modelprice_check)
 
     () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
     () => {},   // refreshTermTimers (the timer line; termtimers_check)
