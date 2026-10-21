@@ -3,6 +3,7 @@
 - 이슈: `claunch-ijg51`
 - 작성: 세션 `s1236`, 2026-10-21
 - 상태: 설계안. 구현 전이며, 사용자가 방향을 고른 뒤 별도 회차에서 구현한다.
+- 구현(`claunch-ijg51.1`): A+B를 이 문서의 1단계 계약대로 구현했다 — MCP 도구 `runs`·`subscribe`·`unsubscribe`·`subscriptions`(`src/claude_launcher/cflow_watch_mcp.py`), 읽기와 커서(`src/claude_launcher/cflow_watch.py`), 구독 기록과 배달(`src/claude_launcher/daemon/cflow_watch.py`). 구독 기록은 세션의 `loops.json`에 `"watch"` 키로 산다.
 - 근거 표기: 「사실」은 코드·문서·명령 출력으로 확인한 것이다. 「추정」은 확인하지 못한 판단이다. 원인을 확인하지 못한 것은 「원인 미상」으로 적는다.
 
 ## 0. 요약

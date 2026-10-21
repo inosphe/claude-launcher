@@ -943,6 +943,12 @@ def build_app(
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
     r.add_post("/api/cflow2/collection", h_cflow2_collection)
     r.add_post("/api/cflow2/inputs/check", h_cflow2_inputs_check)
+    # Watching another session's cflow run (claunch-ijg51.1): read + subscribe.
+    # The board itself is built by the daemon's main and held on the app.
+    r.add_get("/api/cflow-watch/runs", h_cflow_watch_runs)
+    r.add_get("/api/cflow-watch/subscriptions", h_cflow_watch_subscriptions)
+    r.add_post("/api/cflow-watch/subscribe", h_cflow_watch_subscribe)
+    r.add_post("/api/cflow-watch/unsubscribe", h_cflow_watch_unsubscribe)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -5732,6 +5738,34 @@ async def h_cflow2_runs(request: web.Request) -> web.Response:
             cwds.append(cwd)
     runs = await asyncio.to_thread(cflow2_web.list_runs, cwds)
     return json_response({"runs": runs})
+
+
+async def h_cflow_watch_runs(request: web.Request) -> web.Response:
+    board = request.app.get("cflow_watch")
+    if board is None:
+        return json_error(503, "cflow watch is not running in this daemon")
+    return await board.h_runs(request)
+
+
+async def h_cflow_watch_subscriptions(request: web.Request) -> web.Response:
+    board = request.app.get("cflow_watch")
+    if board is None:
+        return json_error(503, "cflow watch is not running in this daemon")
+    return await board.h_subscriptions(request)
+
+
+async def h_cflow_watch_subscribe(request: web.Request) -> web.Response:
+    board = request.app.get("cflow_watch")
+    if board is None:
+        return json_error(503, "cflow watch is not running in this daemon")
+    return await board.h_subscribe(request)
+
+
+async def h_cflow_watch_unsubscribe(request: web.Request) -> web.Response:
+    board = request.app.get("cflow_watch")
+    if board is None:
+        return json_error(503, "cflow watch is not running in this daemon")
+    return await board.h_unsubscribe(request)
 
 
 async def h_cflow2_rail(request: web.Request) -> web.Response:

@@ -401,6 +401,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # A session's side runs end with it (docs/cflow-v2.md 2.9).
         manager.exit_hooks.append(cflow2_clock.session_exited)
     app["cflow2_clock"] = cflow2_clock
+    # Watching another session's cflow run (claunch-ijg51.1): the read tool's
+    # HTTP side plus the delivery loop that reads watched journals.
+    from . import cflow_watch as cflow_watch_mod
+
+    watch_board = cflow_watch_mod.WatchBoard(manager, mesh_manager)
+    app["cflow_watch"] = watch_board
+    watch_board.start()
     # An ended session's pytest basetemps go with it (claunch-4zc51.2), and
     # the ones whose session ended while no daemon was up go now. Wired here
     # and not in create_app: tests build apps over registries of made-up
@@ -534,6 +541,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("procs_clock", procs_clock.shutdown())
         await teardown.step("trigger_clock", trigger_clock.shutdown())
         await teardown.step("event_clock", event_clock.shutdown())
+        await teardown.step("cflow_watch", watch_board.shutdown())
         if cflow2_clock is not None:
             await teardown.step("cflow2_clock", cflow2_clock.shutdown())
         await teardown.step("ping_clock", ping_clock.shutdown())

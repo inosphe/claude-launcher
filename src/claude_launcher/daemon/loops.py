@@ -87,27 +87,50 @@ def ledger_file(session: str) -> Path:
     return paths.session_dir(session) / "loops.json"
 
 
-def _load(session: str) -> List[dict]:
+def _read_doc(session: str) -> dict:
+    """The whole ledger document. ``watch`` rides in it too (cflow_watch):
+    the session already owns this file, and a second ledger beside it is the
+    kind of pair that drifts (docs/cflow-subscription.md, 2.2)."""
     path = ledger_file(session)
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return []
+        return {}
     except (OSError, ValueError) as exc:
         log.warning("loops: cannot read %s: %s", path, exc)
-        return []
-    rows = doc.get("loops") if isinstance(doc, dict) else None
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _load(session: str) -> List[dict]:
+    rows = _read_doc(session).get("loops")
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
-def _save(session: str, rows: List[dict]) -> None:
+def _write_doc(session: str, doc: dict) -> None:
     path = ledger_file(session)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps({"loops": rows}, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)
+
+
+def _save(session: str, rows: List[dict]) -> None:
+    doc = _read_doc(session)
+    doc["loops"] = rows
+    _write_doc(session, doc)
+
+
+def watch_rows(session: str) -> List[dict]:
+    """This session's cflow watch subscriptions (see :mod:`.cflow_watch`)."""
+    rows = _read_doc(session).get("watch")
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def save_watch(session: str, rows: List[dict]) -> None:
+    doc = _read_doc(session)
+    doc["watch"] = rows
+    _write_doc(session, doc)
 
 
 def is_open(entry: dict) -> bool:
