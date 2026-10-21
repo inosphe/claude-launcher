@@ -261,6 +261,10 @@
 :is(#observer-view, .sess-observer) .obs-chip-pass { border-color: #2e6b3e; color: #7ee2a0; }
 :is(#observer-view, .sess-observer) .obs-chip-fail { border-color: #8a3a3a; color: #ff9b9b; }
 :is(#observer-view, .sess-observer) .sess-brief-more > summary { cursor: pointer; color: #8b96a5; font-size: 12px; }
+/* The detail panel's record log (observer.js eventLog): one summary line
+   standing in for every session record, shut until the reader opens it. */
+.sess-observer .obs-history { margin: 8px 0; border-top: 1px solid #2a2e36; }
+.sess-observer .obs-history > summary { cursor: pointer; color: #8b96a5; font-size: 12px; }
 
 /* Keep controls together and reserve the remaining height for results. */
 #observer-view .observer-main > header { padding:8px 16px; }
