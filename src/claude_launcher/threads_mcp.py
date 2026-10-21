@@ -17,7 +17,10 @@ Guests (claunch-p9wes). thread_invite asks another session into one of this
 session's threads as a guest reviewer and advisor; thread_uninvite removes
 it, or -- called by the guest on itself -- leaves. A guest reads and replies
 in the thread with the same thread_read / thread_reply, and thread_list
-returns the threads it is a guest in apart from its own (guest_threads).
+returns the threads it is a guest in apart from its own (guest_threads),
+each with how many of the owner's messages it has not read (owner_unread,
+claunch-p9wes.1). A guest's session ending is written into each thread as a
+system message and typed to its owner as one line.
 """
 
 from __future__ import annotations
@@ -62,7 +65,8 @@ TOOLS = [
                     "and guest messages you have not read (agent_unread), the QA questions each touches "
                     "(links) and its guests. 'guest_threads' lists apart the other sessions' threads you "
                     "were invited into as a guest (reviewer and advisor only), each with 'guest' (who "
-                    "invited you, how many messages you have not read).",
+                    "invited you, how many messages you have not read, and how many of those the owner "
+                    "wrote -- owner_unread).",
      "inputSchema": {"type": "object", "properties": {
          "closed": {"type": "boolean", "description": "include closed threads (default false)"}}}},
     {"name": "thread_read",

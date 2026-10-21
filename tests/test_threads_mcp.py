@@ -212,6 +212,8 @@ def test_invite_and_uninvite_carry_the_session(monkeypatch):
         threads_mcp.call_tool("thread_invite", {"thread_id": "th-1"})
     tools = {t["name"]: t for t in threads_mcp.TOOLS}
     assert "guest_threads" in tools["thread_list"]["description"]
+    assert "owner_unread" in tools["thread_list"]["description"]      # claunch-p9wes.1
     assert "QA tools" in tools["thread_invite"]["description"]
     body = prompt_packs.shipped("mcp-threads").body
     assert "thread_invite" in body and "guest_threads" in body and "reviewer and advisor" in body
+    assert "owner_unread" in body and "guest's session ends" in body

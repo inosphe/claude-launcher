@@ -191,8 +191,10 @@ globalThis.ThreadsPane = (() => {
   }
 
   /* Who wrote message `m` of a thread of session `owner`: the owner, a
-     guest by its name (claunch-p9wes), or the user ("나"). */
+     guest by its name (claunch-p9wes), the daemon (a system notice, such as
+     a guest's departure, claunch-p9wes.1), or the user ("나"). */
   function speaker(m, owner) {
+    if (m && m.author === "system") return "알림";
     if (m && m.author === "agent") return owner;
     if (m && m.author === "guest") return `${m.guest || "게스트"} (게스트)`;
     return "나";
@@ -884,8 +886,18 @@ globalThis.ThreadsPane = (() => {
       const top = node("div", "th-item-top");
       top.append(node("span", "th-item-title", t.title));
       if (t.status === "closed") top.append(node("span", "th-chip", "닫힘"));
-      if (guest) top.append(node("span", "th-chip th-chip-owner", t.session));
-      else if ((t.guests || []).length) {
+      if (guest) {
+        top.append(node("span", "th-chip th-chip-owner", t.session));
+        /* How much the owner wrote since the guest last read (claunch-p9wes.1):
+           the owner's replies are not typed into the guest, so this is its
+           cue to read the thread again. */
+        const n = (t.guest && t.guest.owner_unread) || 0;
+        if (n > 0) {
+          const c = node("span", "th-chip th-chip-unread", `답글 ${n}`);
+          c.title = `마지막으로 읽은 뒤 ${t.session}이(가) 쓴 글 ${n}개`;
+          top.append(c);
+        }
+      } else if ((t.guests || []).length) {
         const g = node("span", "th-chip th-chip-guests", `게스트 ${t.guests.length}`);
         g.title = t.guests.map((x) => x.session).join("\n");
         top.append(g);

@@ -8025,6 +8025,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .thh-msg.thh-user { align-self: flex-end; background: #10203a; border: 1px solid #1f6feb; }
 .thh-msg.thh-agent { align-self: flex-start; background: #161b22; border: 1px solid #30363d; }
 .thh-msg.thh-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477; }
+.thh-msg.thh-system { align-self: center; background: transparent; border: 1px dashed #30363d; color: #7d8590; }
 .thh-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; font-size: 11px; color: #7d8590; }
 .thh-who { font-weight: 600; }
 /* View modes (claunch-zny1o): tree / newest share a list panel | detail split. */
@@ -8436,6 +8437,11 @@ body.split-max #term-wf { flex: 1 1 0; }
 .th-guest-head { margin: 0 0 2px; font-size: 12px; color: #d2a8ff; }
 .th-guest-note { margin: 0 0 4px; font-size: 11px; color: #7d8590; }
 .th-chip-owner, .th-chip-guests { color: #d2a8ff; border-color: #4b3477; }
+/* Owner messages a guest has not read since its last read (claunch-p9wes.1). */
+.th-chip-unread { color: #e3b341; border-color: #6b5320; }
+/* A daemon notice in the conversation (a guest's session ending, claunch-p9wes.1). */
+.th-msg.th-system { align-self: center; background: transparent; border: 1px dashed #30363d; }
+.th-msg.th-system .th-msg-who, .th-msg.th-system .th-msg-body { color: #7d8590; }
 .th-msg.th-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477;
   border-bottom-left-radius: 3px; }
 .th-msg.th-guest .th-msg-who { color: #d2a8ff; }
