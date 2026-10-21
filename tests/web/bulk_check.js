@@ -1,14 +1,18 @@
 /* The rail's bulk bar, run against the real syncBulkActions from app.js.
 
-   Five buttons that act on the working fleet — stop, pause, resume paused,
-   resume, archive. What has to hold is that
+   Six buttons that act on the working fleet — stop, pause, resume paused,
+   resume, archive, clean. What has to hold is that
    each one is up exactly when it would do something and carries the count of
    what that is: a bar showing "stop 3" on a rail with nothing running is a
    button that lies about the fleet, and a bar that hides `resume` while there
    are exited sessions is a rail you cannot get back. The counts also split
    the two sides — running vs exited — and every status that is not "exited"
    counts as running, including `starting`, which is a session in the middle
-   of coming up and very much something `stop` should reach. */
+   of coming up and very much something `stop` should reach.
+
+   `clean` is the one verb that reads every exited record rather than a
+   partition: the daemon's clear takes paused, held and archived records
+   alike, so it counts them all and appears wherever the rail shows one. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -29,7 +33,8 @@ if (end < 0) throw new Error("unbalanced syncBulkActions");
 /* The stub DOM is the five buttons and nothing else — `hidden` is a class in
    this app, so that is what the check reads. In DOM order, which is the
    order the bar reads in. */
-const IDS = ["stop-all", "pause-all", "resume-paused", "resume-all", "archive-exited"];
+const IDS = ["stop-all", "pause-all", "resume-paused", "resume-all", "archive-exited",
+             "cleanup-exited"];
 const buttons = {};
 for (const id of IDS) {
   buttons[id] = {
@@ -86,24 +91,24 @@ check(
 );
 
 check(
-  "a rail with only exited sessions offers resume and archive",
+  "a rail with only exited sessions offers resume, archive and clean",
   bar(of("exited", "exited")),
-  ["resume 2", "archive 2 exited"]
+  ["resume 2", "archive 2 exited", "clean 2 exited"]
 );
 
 check(
   "a mixed rail counts each working state separately",
   bar(of("idle", "exited", "busy", "exited", "exited")),
-  ["stop 2", "pause 2", "resume 3", "archive 3 exited"]
+  ["stop 2", "pause 2", "resume 3", "archive 3 exited", "clean 3 exited"]
 );
 
 check(
-  "archived records are excluded from the working actions",
+  "archived records are excluded from the working actions but not from clean",
   bar([
     { name: "live", status: "idle" },
     { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
   ]),
-  ["stop 1", "pause 1"]
+  ["stop 1", "pause 1", "clean 1 exited"]
 );
 
 /* A paused record is exited with the marker: it is counted by the paused
@@ -118,11 +123,12 @@ const paused = [
     archived_at: "2026-09-02T01:00:00Z" },
 ];
 check("paused records get their own resume and leave the killed counts alone",
-      bar(paused), ["stop 1", "pause 1", "resume 1 paused", "resume 1", "archive 1 exited"]);
+      bar(paused), ["stop 1", "pause 1", "resume 1 paused", "resume 1",
+                    "archive 1 exited", "clean 3 exited"]);
 check("combined mode offers running actions and paused resume",
       bar(paused, "running-paused"), ["stop 1", "pause 1", "resume 1 paused"]);
-check("paused mode exposes only the paused resume", bar(paused, "paused"),
-      ["resume 1 paused"]);
+check("paused mode exposes only the paused resume and the clean",
+      bar(paused, "paused"), ["resume 1 paused", "clean 3 exited"]);
 // The bar is gated on every partition, not on running plus killed: in the
 // Paused view those two are 0 by construction, and a bar hidden on their
 // sum took the paused resume button down with it.
@@ -130,7 +136,7 @@ check("and the bar itself stays up for it", barEl.classes.has("hidden"), false);
 bar(paused, "running");
 check("the bar stays up in running mode", barEl.classes.has("hidden"), false);
 check("killed mode does not count the paused", bar(paused, "killed"),
-      ["resume 1", "archive 1 exited"]);
+      ["resume 1", "archive 1 exited", "clean 3 exited"]);
 
 const mixed = [
   { name: "live", status: "idle" },
@@ -140,8 +146,12 @@ const mixed = [
 check("running mode exposes only its running actions", bar(mixed, "running"),
       ["stop 1", "pause 1"]);
 check("killed mode exposes only its killed actions", bar(mixed, "killed"),
-      ["resume 1", "archive 1 exited"]);
-check("archived mode does not act on hidden current records", bar(mixed, "archived"), []);
+      ["resume 1", "archive 1 exited", "clean 2 exited"]);
+// The clear takes archived records, so the one view built entirely from them
+// still offers it — and offers nothing else, because no other verb on this
+// bar touches an archived record.
+check("archived mode offers the clean and nothing else", bar(mixed, "archived"),
+      ["clean 2 exited"]);
 
 /* Going back to nothing has to put the bar away again: these are toggled, not
    rebuilt, so a stale "stop 2" left up over an emptied rail would still be
@@ -173,12 +183,26 @@ check(
   /kill/.test(buttons["pause-all"].title) && /resumed/.test(buttons["pause-all"].title),
   true
 );
+// The one irreversible verb: its warning has to say so, and it has to name
+// the records the other buttons lean on (paused, archived) because it takes
+// those too.
+check(
+  "clean says it is permanent, takes paused and archived records, and keeps reports",
+  /permanently/.test(buttons["cleanup-exited"].title)
+    && /paused/.test(buttons["cleanup-exited"].title)
+    && /archived/.test(buttons["cleanup-exited"].title)
+    && /reports/.test(buttons["cleanup-exited"].title),
+  true
+);
 
 check("multi-selection shows only selected bulk partitions", bar([
   { status: "busy" }, { status: "exited" }, { status: "exited", paused_at: "now" }
-], ["running", "paused"]), ["stop 1", "pause 1", "resume 1 paused"]);
+], ["running", "paused"]), ["stop 1", "pause 1", "resume 1 paused", "clean 2 exited"]);
+check("a running-only selection offers no clean",
+      bar([{ status: "busy" }, { status: "exited" }], ["running"]),
+      ["stop 1", "pause 1"]);
 check("empty selection hides all bulk actions", bar(of("busy", "exited"), []), []);
-check("archive mixed with killed offers killed actions", bar(of("busy", "exited"), ["killed", "archived"]), ["resume 1", "archive 1 exited"]);
+check("archive mixed with killed offers killed actions", bar(of("busy", "exited"), ["killed", "archived"]), ["resume 1", "archive 1 exited", "clean 1 exited"]);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

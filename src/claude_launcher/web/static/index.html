@@ -272,6 +272,11 @@
       <button id="resume-paused" class="bulk hidden" type="button"></button>
       <button id="resume-all" class="bulk hidden" type="button"></button>
       <button id="archive-exited" class="bulk hidden" type="button"></button>
+      <!-- The permanent one: `claunch clear-sessions` with the option to take
+           the captured output too. It reads the daemon's plan (dry run) before
+           it asks, so the count and names in the confirmation are the
+           daemon's, not this page's guess. -->
+      <button id="cleanup-exited" class="bulk hidden" type="button"></button>
     </div>
     <!-- The dock holds the nav's place in the rail. On a desktop with a
          pointer it is one row tall: the nav inside shows its first row and

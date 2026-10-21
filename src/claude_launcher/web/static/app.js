@@ -1493,14 +1493,16 @@ function byLineage(sessions, visibleSessions = sessions) {
   return out;
 }
 
-/* The rail's bulk bar. Three verbs that act on the working fleet, each
-   labelled with the number it would touch and hidden when that number is
-   zero — so the bar is a reading of the rail rather than a fixed row of
-   controls, half of which would do nothing on any given rail.
+/* The rail's bulk bar. Verbs that act on the working fleet, each labelled
+   with the number it would touch and hidden when that number is zero — so
+   the bar is a reading of the rail rather than a fixed row of controls, half
+   of which would do nothing on any given rail.
 
-   Stop ends programs, resume brings exited records back, and archive moves
+   Stop ends programs, resume brings exited records back, archive moves
    exited records out of the working fleet while keeping them inspectable and
-   resumable. Permanent removal remains on the explicit API and CLI paths. */
+   resumable, and clean drops the records for good — the same act as
+   `claunch clear-sessions`, which is why it is the one button here whose
+   confirmation carries the plan the daemon itself computed. */
 function syncBulkActions(sessions, filter = "current") {
   // Three partitions of the working fleet, the same three the filter buttons
   // count: running, killed (exited without the pause marker) and paused
@@ -1514,6 +1516,14 @@ function syncBulkActions(sessions, filter = "current") {
   const paused = (Array.isArray(filter) ? filter.includes("paused") : filter === "current" || filter === "paused" || filter === "running-paused")
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
                       && !!s.paused_at && !s.held_at).length : 0;
+  // Cleanup is the one verb that reads no single partition: the daemon's
+  // clear takes every exited record — paused, held, archived and delayed
+  // alike — so counting the killed ones alone would understate the press.
+  // It is offered wherever the rail shows an ended session at all.
+  const showsEnded = Array.isArray(filter)
+    ? filter.some((f) => f !== "running" && f !== "running-paused")
+    : filter !== "running" && filter !== "running-paused";
+  const ended = showsEnded ? sessions.filter((s) => s.status === "exited").length : 0;
   const set = (id, n, label, title) => {
     const btn = $(id);
     if (!btn) return;  // an older index.html served by a newer daemon
@@ -1535,12 +1545,17 @@ function syncBulkActions(sessions, filter = "current") {
   set("archive-exited", dead, `archive ${dead} exited`,
       "move exited sessions into the archive while retaining their records, "
       + "conversations and resume capability");
+  set("cleanup-exited", ended, `⌫ clean ${ended} exited`,
+      "permanently drop the record of every exited session — paused and "
+      + "archived ones included — and optionally delete the output each one "
+      + "captured; the confirmation names the daemon's full list before "
+      + "anything goes, and round reports stay either way");
   // The bar's own border would otherwise sit above the nav as a stray rule on
   // a rail with nothing on it. Every partition counts, the paused one
   // included: in the Paused view running and killed both read 0, and a bar
   // gated on those two alone hid the one button that view is for.
   const bar = $("bulk-actions");
-  if (bar) bar.classList.toggle("hidden", live + dead + paused === 0);
+  if (bar) bar.classList.toggle("hidden", live + dead + paused + ended === 0);
 }
 
 /* The stand-in for confirm()/alert() on the flows that end a session or its
@@ -15533,6 +15548,110 @@ $("archive-exited").addEventListener("click", async () => {
   );
   await refreshSessions({ state: "current" });
 });
+
+/* Cleanup: the web form of `claunch clear-sessions [--logs]`. Drop the
+   record of every exited session — which is also what makes it resumable —
+   and, at the person's choice, the output it captured under sessions/<name>/.
+   Round reports are outside that directory by design (daemon/paths.py) and
+   are never part of this.
+
+   The plan is asked of the daemon (`?dry_run=1`) rather than counted here.
+   Two reasons, both of which the confirmation depends on: the page's poll
+   leaves archived records out, and the clear takes them; and a record a mesh
+   row still names is kept, which only the daemon can say. The modal is then
+   the only place the act is approved, and it names every record it will
+   take. */
+async function clearExitedSessions() {
+  let plan = null;
+  try {
+    const resp = await api("/api/sessions?dry_run=1", { method: "DELETE" });
+    plan = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      await modalInfo("Could not read the cleanup plan",
+                      (plan && plan.error) || `HTTP ${resp.status}`);
+      return;
+    }
+  } catch {
+    return;  // the auth overlay is up; api() has already raised it
+  }
+  const drop = (plan && plan.removed) || [];
+  const kept = (plan && plan.kept) || [];
+  const name = (k) => k.name + " (" +
+    ((k.meshes || []).map((m) => m.mesh).join(", ") || "mesh") + ")";
+  if (!drop.length) {
+    await modalInfo(
+      "Nothing to clean up",
+      kept.length
+        ? "Every exited record is still on a mesh: " + kept.map(name).join(", ")
+          + ". Leave the mesh first, then clean up."
+        : "There are no exited session records to drop."
+    );
+    return;
+  }
+  const marks = (plan && plan.marks) || {};
+  const body = [
+    `${drop.length} exited session record(s): ${drop.join(", ")}`,
+    "",
+    "Dropping a record is permanent: the session stops being resumable, and "
+      + "nothing on this page brings it back.",
+  ];
+  if (marks.paused) body.push(`${marks.paused} of them are filed as paused.`);
+  if (marks.archived) body.push(`${marks.archived} of them are in the archive.`);
+  if (kept.length) {
+    body.push(
+      "Kept anyway — a mesh row still names " + kept.map(name).join(", ")
+        + ". Leave the mesh to drop those."
+    );
+  }
+  body.push(
+    "",
+    "Round reports (reports/<session>/) sit outside the session directory "
+      + "and are never taken by this."
+  );
+  const answer = await showModal({
+    title: `Clean up ${drop.length} exited session(s)?`,
+    body: body.join("\n"),
+    choices: {
+      options: [
+        {
+          label: "Records only",
+          hint: "each session's captured output stays under sessions/<name>/",
+          value: { logs: false },
+        },
+        {
+          label: "Records and captured output",
+          hint: "sessions/<name>/ goes too — what each session printed is lost",
+          value: { logs: true },
+        },
+      ],
+    },
+    actions: [
+      { label: "Cancel", value: null },
+      { label: "Clean up", value: { clean: true }, danger: true },
+    ],
+  });
+  if (!answer) return;
+  const result = await bulkAction(
+    $("cleanup-exited"),
+    `/api/sessions${answer.logs ? "?logs=1" : ""}`,
+    { method: "DELETE" },
+    "clean up"
+  );
+  if (!result) return;
+  await refreshSessions({ state: "current" });
+  // The kept records are still on the rail, so saying so is the difference
+  // between "some rows survived" and "the button did not work".
+  const left = result.kept || [];
+  if (left.length) {
+    await modalInfo(
+      `${left.length} record(s) kept`,
+      left.map((k) => `${k.name} — still a member of `
+        + ((k.meshes || []).map((m) => m.mesh).join(", ") || "a mesh")).join("\n")
+    );
+  }
+}
+
+$("cleanup-exited").addEventListener("click", clearExitedSessions);
 
 for (const filter of SESSION_FILTERS) {
   const button = $(`session-filter-${filter}`);
