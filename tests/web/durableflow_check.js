@@ -782,3 +782,109 @@ const SQ = DF.sequence(SLOG, true, SNOW);
   mnt.unmount();
   console.log("durableflow_check: sequence ok");
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// (h) the questions still in flight are marks with no end (review, 2026-10-21)
+{
+  const OPEN = [
+    { at: SAT("00"), event: "unit", unit: "a", state: "start", label: "A" },
+    { at: SAT("02"), event: "ask_start", key: "q1", unit: "a" },
+    { at: SAT("30"), event: "unit", unit: "b", state: "start", label: "B" },
+    { at: SAT("31"), event: "ask_start", key: "q2", unit: "b" },
+  ];
+  const open = DF.sequence(OPEN, true, Date.parse(SAT("40")));
+  const [a, b] = open.lanes;
+  assert.deepStrictEqual([a.asks.length, a.asks[0].end, a.asks[0].status], [1, null, "run"]);
+  assert.deepStrictEqual([b.asks.length, b.asks[0].end], [1, null]);
+  // The questions in flight are what the parallelism is: the model's count
+  // and the timeline's peak are the same number here.
+  assert.strictEqual(DF.model(OPEN, true).running, 2);
+  assert.strictEqual(open.peak, 2);
+  // A question outside any unit is a lane of its own, open until it answers.
+  const free = DF.sequence([{ at: SAT("05"), event: "ask_start", key: "lonely" }], true, Date.parse(SAT("40")));
+  assert.deepStrictEqual([free.lanes.length, free.lanes[0].label, free.lanes[0].end,
+                          free.lanes[0].asks[0].end], [1, "lonely", null, null]);
+  assert.strictEqual(free.peak, 1);
+  // The answer closes the same mark (no second one), and the run's end
+  // closes what is still open.
+  const closed = DF.sequence([...OPEN, { at: SAT("35"), event: "ask", key: "q1", unit: "a" }], true, Date.parse(SAT("40")));
+  assert.deepStrictEqual(Array.from(closed.lanes[0].asks, (x) => [x.start, x.end, x.status]),
+    [[Date.parse(SAT("02")), Date.parse(SAT("35")), "ok"]]);
+  assert.strictEqual(closed.peak, 2);
+  const ended = DF.sequence([...OPEN, { at: SAT("36"), event: "run_end", state: "done" }], false, Date.parse(SAT("40")));
+  assert.deepStrictEqual(Array.from(ended.lanes, (l) => l.asks[0].end),
+    [Date.parse(SAT("36")), Date.parse(SAT("36"))]);
+  // A sim2 start that carries no role still lands in its stage's lane once
+  // the answer names it: one mark, not two, and no lane of its own left.
+  const moved = DF.sequence([
+    { at: SAT("01"), event: "ask_start", key: "B:effects|h1:0" },
+    { at: SAT("03"), event: "ask", askRole: "B", key: "B:effects|h1:0", stop: "stop" },
+  ], false, SNOW);
+  assert.deepStrictEqual(Array.from(moved.lanes, (l) => l.id), ["g:B:effects"]);
+  assert.deepStrictEqual(Array.from(moved.lanes[0].asks, (x) => [x.start, x.end, x.status]),
+    [[Date.parse(SAT("01")), Date.parse(SAT("03")), "ok"]]);
+  console.log("durableflow_check: open asks ok");
+}
+
+// (i) the export buttons: the whole way from the SVG to a saved file --------
+(async () => {
+  const seen = { urls: [], revoke: 0, draw: 0, toBlob: 0, download: "", shown: null, sizes: [] };
+  const canvas = {
+    width: 0, height: 0,
+    getContext() {
+      return { fillStyle: "", fillRect() {}, drawImage() { seen.draw++; } };
+    },
+    toBlob(cb, type) { seen.toBlob++; cb({ type, size: 1 }); },
+  };
+  const link = { href: "", download: "", click() { seen.download = this.download; }, remove() { seen.removed = true; } };
+  ctx.Blob = class { constructor(parts, opts) { this.parts = parts; this.type = opts && opts.type; } };
+  ctx.URL = {
+    createObjectURL(b) { seen.urls.push(b); return "blob:test"; },
+    revokeObjectURL() { seen.revoke++; },
+  };
+  ctx.Image = class {
+    set src(v) { this._src = v; setTimeout(() => this.onload && this.onload(), 0); }
+    get src() { return this._src; }
+  };
+  ctx.document = {
+    createElement(tag) { return tag === "canvas" ? canvas : link; },
+    body: { appendChild() {} },
+  };
+  // saveBlob releases its URL on a timer; the stub records that it asked and
+  // never fires, so the test leaves no timer holding the stubs below.
+  ctx.setTimeout = () => 1;
+  const host = new El("div");
+  const api = async () => ({ ok: true, json: async () => ({
+    sim: "png-run", live: false, total: SLOG.length, since: 0, events: SLOG }) });
+  const mnt = DF.mount(host, "png-run", {
+    doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 0 });
+  await new Promise((r) => setTimeout(r, 0));
+  const tools = host.children[0].children[2];
+  // SVG: the file carries the markup and the rules that paint it.
+  tools.children[2].click();
+  assert.strictEqual(seen.download, "durable-png-run-tree.svg");
+  assert.match(seen.urls[0].parts[0], /^<svg/);
+  assert.match(seen.urls[0].parts[0], /<style>/);
+  // PNG: the same view drawn onto a canvas at twice its size, then saved.
+  const tree = mnt.view.svg;
+  const before = seen.urls.length;
+  tools.children[3].click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(seen.urls.length > before, "the PNG blob is created");
+  assert.strictEqual(seen.download, "durable-png-run-tree.png");
+  assert.deepStrictEqual([canvas.width, canvas.height],
+    [Number(tree.getAttribute("width")) * 2, Number(tree.getAttribute("height")) * 2]);
+  assert.strictEqual(seen.draw, 1, "the image is drawn once");
+  assert.strictEqual(seen.toBlob, 1, "and handed back as a PNG");
+  assert.ok(seen.revoke >= 1, "the object URL is released");
+  // The same buttons follow the view on screen.
+  tools.children[1].click();
+  tools.children[3].click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.strictEqual(seen.download, "durable-png-run-sequence.png");
+  assert.deepStrictEqual([canvas.width, canvas.height],
+    [Number(mnt.sequence.svg.getAttribute("width")) * 2,
+     Number(mnt.sequence.svg.getAttribute("height")) * 2]);
+  mnt.unmount();
+  delete ctx.Blob; delete ctx.URL; delete ctx.Image; delete ctx.document;
+  console.log("durableflow_check: export buttons ok");
+})().catch((e) => { console.error(e); process.exit(1); });

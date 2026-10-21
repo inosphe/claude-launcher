@@ -668,17 +668,36 @@
       }
       return lane;
     }
-    function closeAsk(key, unit, start, end, status) {
-      const lane = unit !== null ? unitLane(unit, null)
-        : addLane("a:" + key + "#" + (++asks), start, { label: askLabel(key), key });
-      // A unit first named by its question starts no earlier than that question.
-      if (lane.unit !== undefined && lane.start === null && start !== null) lane.start = start;
-      lane.asks.push({ key, start, end, status });
-      if (lane.unit === undefined) {          // a question outside any unit
-        lane.start = start; lane.end = end; lane.state = status;
+    /* The lane and the mark a question opens in: its unit's lane, the stage
+       group's lane (sim2), or a lane of its own. The mark is pushed at
+       ``ask_start`` with no end -- that is what makes a question in flight a
+       visible interval running out to now -- and the ``ask`` that closes it
+       fills this same object instead of adding a second mark. */
+    function startAsk(key, unit, ev, start) {
+      let lane;
+      if (unit !== null) {
+        lane = unitLane(unit, null);
+        // A unit first named by its question starts no earlier than it.
+        if (lane.start === null && start !== null) lane.start = start;
+      } else if (ev && ev.askRole) {
+        // sim2 asks a thousand questions, one role each: the tree draws one
+        // counted node per stage, and the timeline draws one lane per stage
+        // with every question as a mark inside it.
+        const g = sim2Group(key);
+        lane = byGroup.get(g.group);
+        if (!lane) {
+          lane = addLane("g:" + g.group, start,
+                         { label: g.label, group: g.group, state: "ok" });
+          byGroup.set(g.group, lane);
+        }
+        if (lane.start === null || (start !== null && start < lane.start)) lane.start = start;
+      } else {
+        lane = addLane("a:" + key + "#" + (++asks), start, { label: askLabel(key), key });
       }
-      touch(start); touch(end);
-      return lane;
+      const item = { key, start, end: null, status: "run" };
+      lane.asks.push(item);
+      touch(start);
+      return { unit, lane, item };
     }
 
     for (const ev of events || []) {
@@ -701,8 +720,7 @@
           const key = String(ev.key || "");
           const unit = ev.unit != null ? String(ev.unit) : null;
           if (!open.has(key)) open.set(key, []);
-          open.get(key).push({ unit, start: when });
-          if (unit !== null) unitLane(unit, ev);
+          open.get(key).push(startAsk(key, unit, ev, when));
           break;
         }
         case "ask": {
@@ -713,26 +731,37 @@
           const pend = open.get(key);
           const from = pend && pend.length ? pend.shift() : null;
           if (pend && !pend.length) open.delete(key);
-          const start = from ? from.start : when;
-          if (unit === null && ev.askRole) {
-            // sim2 asks a thousand questions, one role each: the tree draws
-            // one counted node per stage, and the timeline draws one lane per
-            // stage with every question as a mark inside it.
+          // No open start (the log may only carry the answer): the mark is
+          // made now and closed in the same breath.
+          const ask = from || startAsk(key, unit, ev, when);
+          // A sim2 start need not carry its role; the answer does. A mark
+          // that opened in a lane of its own moves into its stage's lane,
+          // so the start and the answer are one interval, not two.
+          if (from && unit === null && ev.askRole &&
+              from.lane.unit === undefined && from.lane.group === undefined) {
             const g = sim2Group(key);
             let lane = byGroup.get(g.group);
             if (!lane) {
-              lane = addLane("g:" + g.group, start,
+              lane = addLane("g:" + g.group, ask.item.start,
                              { label: g.label, group: g.group, state: "ok" });
               byGroup.set(g.group, lane);
             }
-            if (lane.start === null || (start !== null && start < lane.start)) lane.start = start;
-            lane.end = when;
-            lane.asks.push({ key, start, end: when, status });
-            if (status !== "ok") lane.state = status;
-            break;
+            const at = from.lane.asks.indexOf(ask.item);
+            if (at >= 0) from.lane.asks.splice(at, 1);
+            from.lane = lane;
+            lane.asks.push(ask.item);
           }
-          closeAsk(key, unit !== null ? unit : (from ? from.unit : null),
-                   start, when, status);
+          ask.item.end = when;
+          ask.item.status = status;
+          const lane = ask.lane;
+          if (lane.unit === undefined && lane.group === undefined) {
+            lane.end = when;                    // a lane of its own: its span is the ask
+            lane.state = status;
+          } else if (lane.group !== undefined) {
+            lane.end = when;                    // a stage group: its span keeps growing
+            if (status !== "ok") lane.state = status;
+          }
+          touch(when);
           break;
         }
         case "done":
@@ -743,6 +772,14 @@
           if (when !== null) endedAt = when;
           break;
         default: break;
+      }
+    }
+    // A lane of its own that every mark left (a sim2 start that moved into
+    // its stage) is not a lane any more.
+    for (let i = lanes.length - 1; i >= 0; i--) {
+      const lane = lanes[i];
+      if (!lane.asks.length && lane.unit === undefined && lane.group === undefined) {
+        lanes.splice(i, 1);
       }
     }
     // A run that ended closes what was still open at its end; a live one
