@@ -137,29 +137,31 @@ def test_a_malformed_affinity_flag_is_rejected(home, bad):
         routing.session_affinity("openrouter")
 
 
-def test_affinity_default_keeps_existing_fingerprints():
-    # shims started before the flag existed keep their identity
+def test_fingerprint_ignores_the_affinity_flag(home):
+    # one shim serves a provider in both flag states — the shim reads the
+    # flag live, so the identity must not depend on it
+    _write_provider()
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"session_affinity": True}))
     assert routing.fingerprint("https://u/", SPEC) == routing.fingerprint(
-        "https://u/", SPEC, affinity=False)
-    assert routing.fingerprint("https://u/", SPEC) != routing.fingerprint(
-        "https://u/", SPEC, affinity=True)
+        "https://u/", SPEC)
 
 
-def test_front_passes_affinity_to_the_shim(home, monkeypatch):
+def test_front_passes_the_provider_to_the_shim(home, monkeypatch):
     monkeypatch.setenv("CLAUNCH_METERING", "1")  # conftest switches it off
     store.update(lambda doc: doc.setdefault("providers", {}).update({
         "fw": {"env": {"ANTHROPIC_BASE_URL": "https://api.fireworks.ai/inference"},
                "session_affinity": True}}))
     seen = {}
 
-    def _fake_ensure(upstream, block, affinity=False):
-        seen["args"] = (upstream, block, affinity)
+    def _fake_ensure(upstream, block, provider=None):
+        seen["args"] = (upstream, block, provider)
         return "http://127.0.0.1:1/"
 
     monkeypatch.setattr(routing, "ensure_shim", _fake_ensure)
     assert routing.front("https://api.fireworks.ai/inference", "fw") == \
         "http://127.0.0.1:1/"
-    assert seen["args"] == ("https://api.fireworks.ai/inference", {}, True)
+    assert seen["args"] == ("https://api.fireworks.ai/inference", {}, "fw")
 
 
 # --------------------------------------------------------------------------- #
@@ -292,9 +294,20 @@ def _header(headers: dict, name: str):
     return None
 
 
+def _write_fw_provider(affinity=None):
+    def _mutate(doc: dict) -> None:
+        entry = {"env": {"ANTHROPIC_BASE_URL": "https://api.fireworks.ai/"}}
+        if affinity is not None:
+            entry["session_affinity"] = affinity
+        doc["providers"] = {"fw": entry}
+
+    store.update(_mutate)
+
+
 @pytest.mark.slow_shim
 def test_shim_forwards_the_session_as_affinity_when_enabled(upstream, shims):
-    base = routing.ensure_shim(upstream.url, {}, affinity=True)
+    _write_fw_provider(affinity=True)
+    base = routing.ensure_shim(upstream.url, {}, provider="fw")
     _post_with_headers(
         base + "v1/chat/completions", {"model": "m"},
         {"X-Claunch-Session": "s1221"},
@@ -307,7 +320,8 @@ def test_shim_forwards_the_session_as_affinity_when_enabled(upstream, shims):
 
 @pytest.mark.slow_shim
 def test_shim_without_affinity_adds_no_header(upstream, shims):
-    base = routing.ensure_shim(upstream.url, {})
+    _write_fw_provider()
+    base = routing.ensure_shim(upstream.url, {}, provider="fw")
     _post_with_headers(
         base + "v1/chat/completions", {"model": "m"},
         {"X-Claunch-Session": "s1221"},
@@ -317,14 +331,95 @@ def test_shim_without_affinity_adds_no_header(upstream, shims):
 
 
 @pytest.mark.slow_shim
+def test_shim_picks_up_a_toggle_without_a_restart(upstream, shims):
+    """The point of the live read: one running shim follows the flag both ways.
+
+    The shim caches the parsed config for ``store._DISK_TTL`` (100ms), so the
+    pause after each toggle is the documented staleness bound, not a race.
+    """
+    _write_fw_provider()
+    base = routing.ensure_shim(upstream.url, {}, provider="fw")
+
+    def _affinity_seen():
+        _post_with_headers(
+            base + "v1/chat/completions", {"model": "m"},
+            {"X-Claunch-Session": "s1221"},
+        )
+        return _header(upstream.requests[-1]["headers"], "x-session-affinity")
+
+    assert _affinity_seen() is None
+    store.update(lambda doc: doc["providers"]["fw"].update(
+        {"session_affinity": True}))
+    time.sleep(0.15)
+    assert _affinity_seen() == "s1221"
+    store.update(lambda doc: doc["providers"]["fw"].pop("session_affinity"))
+    time.sleep(0.15)
+    assert _affinity_seen() is None
+
+
+@pytest.mark.slow_shim
+def test_shim_treats_a_malformed_flag_as_off_and_keeps_serving(upstream, shims):
+    _write_fw_provider(affinity="yes")
+    base = routing.ensure_shim(upstream.url, {}, provider="fw")
+    status, _ = _post_with_headers(
+        base + "v1/chat/completions", {"model": "m"},
+        {"X-Claunch-Session": "s1221"},
+    )
+    seen = upstream.requests[-1]
+    assert status == 200  # traffic survives the config error
+    assert _header(seen["headers"], "x-session-affinity") is None
+
+
+@pytest.mark.slow_shim
 def test_shim_respects_a_caller_supplied_affinity_header(upstream, shims):
-    base = routing.ensure_shim(upstream.url, {}, affinity=True)
+    _write_fw_provider(affinity=True)
+    base = routing.ensure_shim(upstream.url, {}, provider="fw")
     _post_with_headers(
         base + "v1/chat/completions", {"model": "m"},
         {"X-Claunch-Session": "s1221", "X-Session-Affinity": "caller-own"},
     )
     seen = upstream.requests[-1]
     assert _header(seen["headers"], "x-session-affinity") == "caller-own"
+
+
+@pytest.mark.slow_shim
+def test_a_legacy_static_affinity_shim_keeps_its_spawn_time_choice(
+        upstream, shims):
+    # --session-affinity without --provider: what an older build started. The
+    # static choice stands for the shim's whole life even if config changes.
+    import subprocess
+    import sys
+
+    fp = routing.fingerprint(upstream.url, {})
+    port = routing.candidate_ports(fp)[3]
+    routing.state_dir().mkdir(parents=True, exist_ok=True)
+    log = open(routing.log_file(fp), "ab")
+    child = subprocess.Popen(
+        [sys.executable, "-m", "claude_launcher.routing_shim",
+         "--upstream", upstream.url, "--spec", "{}", "--port", str(port),
+         "--fingerprint", fp, "--session-affinity"],
+        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        env=routing._shim_env(), start_new_session=True,
+    )
+    log.close()
+    try:
+        for _ in range(100):
+            info = routing.health(port, timeout=0.5)
+            if info is not None:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("the legacy shim never came up")
+        _write_fw_provider()  # flag stays off in config
+        _post_with_headers(
+            routing.local_url(port) + "v1/chat/completions", {"model": "m"},
+            {"X-Claunch-Session": "s1221"},
+        )
+        seen = upstream.requests[-1]
+        assert _header(seen["headers"], "x-session-affinity") == "s1221"
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
 
 
 @pytest.mark.slow_shim
@@ -408,7 +503,7 @@ def test_stop_reaches_a_second_shim_serving_the_same_pair(upstream, shims):
     routing.ensure_shim(upstream.url, SPEC)
     fp = routing.fingerprint(upstream.url, SPEC)
     stray = routing.candidate_ports(fp)[3]
-    routing._spawn(upstream.url, SPEC, stray, fp, False)
+    routing._spawn(upstream.url, SPEC, stray, fp, None)
     for _ in range(150):
         info = routing.health(stray, timeout=0.5)
         if info is not None:

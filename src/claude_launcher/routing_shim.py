@@ -16,10 +16,15 @@ Run directly with::
         --spec '{"order":["coreweave"],"allow_fallbacks":false}' --port 31500 \\
         --fingerprint abc123
 
-``--spec '{}'`` is the metering-only shim. ``--session-affinity`` makes the
-shim forward the calling session's name (from the private ``X-Claunch-Session``
-header, which is still stripped) as ``x-session-affinity`` for backends that
-route a session's requests to the replica holding its prompt cache.
+``--spec '{}'`` is the metering-only shim. ``--provider <name>`` makes the
+shim read ``providers.<name>.session_affinity`` from the live config on every
+request and, while the flag is on, forward the calling session's name (from
+the private ``X-Claunch-Session`` header, which is still stripped) as
+``x-session-affinity`` for backends that route a session's requests to the
+replica holding its prompt cache. The read is live — toggling the flag
+(including from the web Settings page) reaches this shim without a restart,
+in both directions. A shim started with the legacy ``--session-affinity``
+flag and no ``--provider`` keeps that static choice for its whole life.
 
 Exit codes: ``3`` the port was taken (the caller re-probes and reuses whoever
 won it), ``2`` bad arguments.
@@ -97,6 +102,33 @@ def _is_json(content_type: str) -> bool:
     return "json" in content_type.lower()
 
 
+def _affinity_on(app: web.Application) -> bool:
+    """Whether to forward the session name as the affinity header right now.
+
+    The shim knows its provider's config name (``--provider``) and reads the
+    flag from the live config per request — ``store.load`` serves at most
+    100ms-stale state, so a toggle in ``~/.claunch.yaml`` (including from the
+    web Settings page) reaches already-running shims without a restart, in
+    both directions. A malformed flag is a config error, not a reason to
+    break traffic: the header is skipped, the error is logged once per
+    distinct message, and the launch-time strictness of
+    :func:`routing.session_affinity` surfaces where a human looks.
+    """
+    cfg = app["cfg"]
+    provider = cfg.get("provider")
+    if not provider:
+        # A shim started by an older build with the static --session-affinity
+        # flag: no provider name to re-read, so the spawn-time choice stands.
+        return bool(cfg.get("session_affinity"))
+    try:
+        return routing.session_affinity(provider)
+    except routing.RoutingError as exc:
+        if app.get("affinity_error") != str(exc):
+            print(f"session_affinity config error: {exc}", file=sys.stderr)
+            app["affinity_error"] = str(exc)
+        return False
+
+
 def _metered_path(path: str) -> bool:
     """Only completions carry usage; a models listing or a count is noise.
 
@@ -119,7 +151,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     # The session name rides in on a private header the daemon added for us;
     # it is ours to read and must not reach the upstream.
     session_name = headers.popall(metering.SESSION_HEADER, [None])[-1]
-    if cfg.get("session_affinity") and session_name:
+    if session_name and _affinity_on(request.app):
         # Sticky routing for prompt-cached backends: the session keeps one
         # affinity key for its whole life, so the replica that holds its cache
         # keeps serving it. A caller that set the header itself wins — the
@@ -275,10 +307,11 @@ async def _client_session(app: web.Application):
 
 
 def build_app(upstream: str, spec: dict, fingerprint: str,
+              provider: "str | None" = None,
               session_affinity: bool = False) -> web.Application:
     app = web.Application(client_max_size=1024 * 1024 * 256)
     app["cfg"] = {"upstream": upstream, "spec": spec, "fingerprint": fingerprint,
-                  "session_affinity": session_affinity}
+                  "provider": provider, "session_affinity": session_affinity}
     app["live"] = metering.LiveBoard(fingerprint)
     app.cleanup_ctx.append(_client_session)
     app.cleanup_ctx.append(_live_flusher)
@@ -321,8 +354,12 @@ def main(argv=None) -> int:
     parser.add_argument("--spec", required=True, help="routing spec as JSON")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--fingerprint", required=True)
+    parser.add_argument("--provider", default=None,
+                        help="config name of the provider this shim fronts; "
+                             "the shim reads its session_affinity flag live")
     parser.add_argument("--session-affinity", action="store_true",
-                        help="forward the session name as x-session-affinity")
+                        help="legacy static switch for shims started without "
+                             "--provider (kept for running old shims)")
     args = parser.parse_args(argv)
     try:
         spec = json.loads(args.spec)
@@ -332,7 +369,8 @@ def main(argv=None) -> int:
     if not isinstance(spec, dict):
         print("--spec must be a JSON object ({} for metering only)", file=sys.stderr)
         return 2
-    app = build_app(args.upstream, spec, args.fingerprint, args.session_affinity)
+    app = build_app(args.upstream, spec, args.fingerprint,
+                    provider=args.provider, session_affinity=args.session_affinity)
     return asyncio.run(serve(app, args.port))
 
 

@@ -872,6 +872,8 @@ def build_app(
     r.add_put("/api/pty-host-setting", h_pty_host_setting_set)
     r.add_get("/api/delegate-setting", h_delegate_setting_get)
     r.add_put("/api/delegate-setting", h_delegate_setting_set)
+    r.add_get("/api/provider-affinity", h_provider_affinity_get)
+    r.add_put("/api/provider-affinity", h_provider_affinity_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
     r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
@@ -4150,6 +4152,89 @@ async def h_delegate_setting_set(request: web.Request) -> web.Response:
         return json_response(_delegate_setting_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
+
+
+def _provider_affinity_state() -> dict:
+    """Every configured provider with its sticky session-affinity flag.
+
+    ``fronted`` tells the UI whether the provider's traffic passes through a
+    routing/metering shim at all — the flag only means something when it does.
+    A malformed flag (or spec) reads back as off with the error surfaced, so
+    the page shows *why* the toggle looks wrong instead of hiding it.
+    """
+    from .. import metering as metering_mod
+    from .. import routing as routing_mod
+
+    doc = store.load()
+    section = doc.get("providers")
+    rows = []
+    if isinstance(section, dict):
+        for name in sorted(section):
+            if not isinstance(section[name], dict):
+                continue
+            row = {"name": name, "session_affinity": False, "error": "",
+                   "fronted": False}
+            try:
+                row["session_affinity"] = routing_mod.session_affinity(name, doc)
+            except routing_mod.RoutingError as exc:
+                row["error"] = str(exc)
+            try:
+                row["fronted"] = bool(routing_mod.spec(name, doc)) or (
+                    metering_mod.provider_enabled(name, doc)
+                )
+            except routing_mod.RoutingError:
+                row["fronted"] = True  # a malformed spec still forces a shim
+            rows.append(row)
+    return {"providers": rows}
+
+
+async def h_provider_affinity_get(request: web.Request) -> web.Response:
+    """``providers.<name>.session_affinity`` for every configured provider.
+
+    The web Settings page renders one toggle per provider; the flag is read
+    live by the routing shims, so a write here reaches running traffic
+    without a daemon restart (claunch-vjgwd.1.1)."""
+    try:
+        return json_response(_provider_affinity_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_provider_affinity_set(request: web.Request) -> web.Response:
+    """Set one provider's flag (``{"name": str, "session_affinity": bool}``).
+
+    ``true`` writes the key; ``false`` drops it (absent is off, so the file
+    stays minimal). The provider must exist in the config.
+    """
+    from .. import routing as routing_mod
+
+    body = await _json_body(request)
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return json_error(400, "'name' must be a non-empty string")
+    value = body.get("session_affinity")
+    if not isinstance(value, bool):
+        return json_error(400, "'session_affinity' must be a boolean")
+    try:
+        doc = store.load()
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    entry = (doc.get("providers") or {}).get(name)
+    if not isinstance(entry, dict):
+        return json_error(400, f"unknown provider {name!r}")
+
+    def _mutate(doc: dict) -> None:
+        entry = doc["providers"][name]
+        if value:
+            entry[routing_mod.AFFINITY_KEY] = True
+        else:
+            entry.pop(routing_mod.AFFINITY_KEY, None)
+
+    try:
+        store.update(_mutate)
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    return json_response(_provider_affinity_state())
 
 
 async def h_prompter_prompts(request: web.Request) -> web.Response:

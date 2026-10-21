@@ -41,10 +41,16 @@ affinity. Backends whose prompt cache lives on a single replica (Fireworks
 serverless is the case this exists for — see their prompt-caching guide, which
 recommends a stable ``user``/``x-session-affinity`` key) serve a session's
 requests from cache only while those requests keep reaching that replica. A
-provider that declares ``session_affinity: true`` gets a shim that forwards
-the calling session's name as the ``x-session-affinity`` header (see
-:data:`AFFINITY_HEADER`). The header is part of the fingerprint, so enabling
-or disabling it never rides a shim started for the other choice.
+provider that declares ``session_affinity: true`` gets the calling session's
+name forwarded as the ``x-session-affinity`` header (see :data:`AFFINITY_HEADER`).
+
+The flag is *not* part of the shim's identity. A shim is started with the
+provider's name (``--provider``) and reads ``session_affinity`` from the live
+config on every request (:func:`store.load` serves at most 100ms-stale state),
+so toggling the flag in ``~/.claunch.yaml`` — including from the web Settings
+page — changes what running shims and freshly launched sessions do without a
+daemon restart, in both directions. A malformed flag logs to the shim's
+stderr and skips the header rather than breaking traffic.
 """
 
 from __future__ import annotations
@@ -198,17 +204,17 @@ def canonical(block: Dict) -> str:
     return json.dumps(block, sort_keys=True, separators=(",", ":"))
 
 
-def fingerprint(upstream: str, block: Dict, affinity: bool = False) -> str:
+def fingerprint(upstream: str, block: Dict) -> str:
     """Identity of one shim: the upstream it fronts and the spec it merges.
 
     An empty spec is a valid identity — the metering-only shim for that
-    upstream (see :mod:`metering`). ``affinity`` is part of the identity too:
-    a shim that adds the session-affinity header must not be shared with, or
-    mistaken for, one that does not. The default keeps every fingerprint that
-    predates the flag unchanged.
+    upstream (see :mod:`metering`). Provider-declared *behaviour* (the
+    session-affinity header) is deliberately not part of the identity: the
+    shim reads the live flag per request, so one shim serves a provider in
+    both flag states and a toggle reaches running traffic immediately.
     """
     return hashlib.sha256(
-        f"{upstream}\n{canonical(block)}\n{int(bool(affinity))}".encode("utf-8")
+        f"{upstream}\n{canonical(block)}".encode("utf-8")
     ).hexdigest()[:16]
 
 
@@ -330,7 +336,7 @@ def _shim_env() -> dict:
     return env
 
 
-def _spawn(upstream: str, block: Dict, port: int, fp: str, affinity: bool) -> "subprocess.Popen":
+def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[str]) -> "subprocess.Popen":
     """Start a detached shim process; its output goes to the fingerprint's log."""
     state_dir().mkdir(parents=True, exist_ok=True)
     log = open(log_file(fp), "ab")
@@ -343,8 +349,8 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str, affinity: bool) -> "s
         "--port", str(port),
         "--fingerprint", fp,
     ]
-    if affinity:
-        argv.append("--session-affinity")
+    if provider:
+        argv.extend(["--provider", provider])
     kwargs: dict = {}
     if sys.platform == "win32":
         CREATE_NO_WINDOW = 0x08000000
@@ -468,16 +474,17 @@ def _free_port(fp: str) -> Optional[int]:
     return None
 
 
-def ensure_shim(upstream: str, block: Dict, affinity: bool = False) -> str:
+def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None) -> str:
     """Base URL of a live shim fronting ``upstream`` with ``block`` merged in.
 
     Reuses a running shim for the same pair and starts one otherwise. Callers
     that arrive together converge on a single shim: one of them takes the start
-    claim and the others wait for what it starts. With ``affinity`` the shim
-    also forwards the calling session's name as ``x-session-affinity`` (see
-    :data:`AFFINITY_KEY`); that need is part of the shim's identity.
+    claim and the others wait for what it starts. ``provider`` is the config
+    name of the provider this shim fronts; the shim reads that provider's
+    session-affinity flag from the live config per request, so a toggle
+    reaches running traffic without a restart (see the module docstring).
     """
-    fp = fingerprint(upstream, block, affinity)
+    fp = fingerprint(upstream, block)
     port = _find(fp)
     if port is not None:
         _record(fp, port, upstream, block, None)
@@ -512,7 +519,7 @@ def ensure_shim(upstream: str, block: Dict, affinity: bool = False) -> str:
                 f"no free loopback port for the routing shim in "
                 f"{candidate_ports(fp)[0]}..{candidate_ports(fp)[-1]}"
             )
-        child = _spawn(upstream, block, start_port, fp, affinity)
+        child = _spawn(upstream, block, start_port, fp, provider)
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             info = health(start_port, timeout=0.5)
@@ -552,13 +559,12 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None) -> str:
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
-    affinity = session_affinity(provider_name, doc)
     if block:
-        return ensure_shim(upstream, block, affinity)
+        return ensure_shim(upstream, block, provider_name)
     if not metering.provider_enabled(provider_name, doc):
         return upstream
     try:
-        return ensure_shim(upstream, {}, affinity)
+        return ensure_shim(upstream, {}, provider_name)
     except RoutingError as exc:
         print(
             f"claunch: metering shim for provider {provider_name!r} unavailable, "
