@@ -10,7 +10,13 @@ keywords = ["claude", "claude-code", "launcher", "profile", "cli"]
 dependencies = [
     "pyyaml>=6",
     "aiohttp>=3.10,<4",
-    "zvec>=0.7,<1",
+    # Upper bound below 0.8: 0.8.0 ships macosx_11_0_arm64 wheels only and no
+    # sdist, so a fresh resolve (every new worktree, since uv.lock is ignored)
+    # picks it and `uv sync` fails on Linux with "doesn't have a source
+    # distribution or wheel for the current platform" (claunch-im642). 0.7.0
+    # carries cp314 manylinux/musllinux/win wheels, so it is the version every
+    # platform can install.
+    "zvec>=0.7,<0.8",
     "pyte>=0.8.2",
     "pywinpty>=2.0.12; sys_platform == 'win32'",
     "truststore>=0.9.1",
