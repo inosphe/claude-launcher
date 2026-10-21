@@ -205,7 +205,7 @@ globalThis.MegaThreadPage = (() => {
   }
 
   async function sendText() {
-    if (!state.mega || state.busy) return;
+    if (!state.mega || state.busy || !isOpen(state.mega)) return;
     const text = state.draft.trim();
     if (!text) return;
     state.busy = true;
@@ -235,7 +235,7 @@ globalThis.MegaThreadPage = (() => {
   }
 
   async function sendPicks() {
-    if (!state.mega || state.busy || !state.picks.size) return;
+    if (!state.mega || state.busy || !isOpen(state.mega) || !state.picks.size) return;
     const text = state.draft.trim();
     if (!text) return;
     state.busy = true;
@@ -249,6 +249,27 @@ globalThis.MegaThreadPage = (() => {
       state.notice = deliveryLine(res.delivered) + ledgerLine(res);
       state.draft = "";
       state.picks.clear();
+      await loadOne(state.mega.id);
+    } catch (err) {
+      state.error = String(err.message || err);
+    }
+    state.busy = false;
+    render();
+  }
+
+  /* Close or reopen the cluster. The status is the only thing that changes;
+     members, routes and the budget stay as they are. */
+  async function toggleStatus() {
+    if (!state.mega || state.busy) return;
+    state.busy = true;
+    state.error = "";
+    const next = isOpen(state.mega) ? "closed" : "open";
+    try {
+      await apiSend(`/api/megathreads/${encodeURIComponent(state.mega.id)}/status`, { status: next });
+      state.notice = next === "closed"
+        ? "mega thread를 닫았습니다 — 다시 열 때까지 라우팅하지 않습니다"
+        : "mega thread를 다시 열었습니다";
+      if (next === "closed") state.picks.clear();
       await loadOne(state.mega.id);
     } catch (err) {
       state.error = String(err.message || err);
@@ -365,11 +386,23 @@ globalThis.MegaThreadPage = (() => {
     return parts.join("");
   }
 
+  /* Closed clusters are listed, but dimmed: the page still has to reach them
+     to reopen them, and routing refuses them with 409. */
+  function isOpen(mega) {
+    return !mega || mega.status === "open";
+  }
+
+  function statusLabel(mega) {
+    return isOpen(mega) ? "닫기" : "다시 열기";
+  }
+
   function sideList(root) {
     const aside = node("aside", "mt-list");
     aside.appendChild(node("h2", null, "Mega threads"));
     for (const cluster of state.clusters) {
-      const row = node("button", `mt-cluster${state.mega && state.mega.id === cluster.id ? " on" : ""}`);
+      const on = state.mega && state.mega.id === cluster.id ? " on" : "";
+      const shut = cluster.status === "open" ? "" : " mt-closed";
+      const row = node("button", `mt-cluster${on}${shut}`);
       row.type = "button";
       row.appendChild(node("span", "mt-cluster-title", cluster.title));
       row.appendChild(node("span", "mt-cluster-sub", `${cluster.members.length}명`));
@@ -417,9 +450,15 @@ globalThis.MegaThreadPage = (() => {
       root.appendChild(main);
       return;
     }
+    const open = isOpen(state.mega);
     const head = node("div", "mt-head");
     head.appendChild(node("h2", null, state.mega.title));
     head.appendChild(node("span", "wf-note", `${membersOf().length}명 · 상태 ${state.mega.status}`));
+    const toggle = node("button", "wf-btn mt-status", statusLabel(state.mega));
+    toggle.type = "button";
+    toggle.disabled = state.busy;
+    toggle.addEventListener("click", toggleStatus);
+    head.appendChild(toggle);
     main.appendChild(head);
     main.appendChild(membersStrip());
 
@@ -437,16 +476,21 @@ globalThis.MegaThreadPage = (() => {
     });
     main.appendChild(ringWrap);
 
-    if (state.judgment && (state.judgment.verdict === "choose" || state.judgment.verdict === "none")) {
+    if (open && state.judgment
+        && (state.judgment.verdict === "choose" || state.judgment.verdict === "none")) {
       main.appendChild(optionsPanel());
     }
 
-    const composer = node("div", "mt-compose");
+    const composer = node("div", open ? "mt-compose" : "mt-compose mt-shut");
     const input = document.createElement("textarea");
     input.rows = 2;
-    input.placeholder = "여러 세션 중 어디로 갈지 데몬이 판정합니다";
+    // The daemon refuses a routing on a closed cluster with 409; the page
+    // says so before the reader types into a box that cannot send.
+    input.placeholder = open
+      ? "여러 세션 중 어디로 갈지 데몬이 판정합니다"
+      : "닫힌 mega thread입니다 — 다시 열면 보낼 수 있습니다";
     input.value = state.draft;
-    input.disabled = state.busy;
+    input.disabled = state.busy || !open;
     input.addEventListener("input", () => { state.draft = input.value; syncSend(); });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -457,7 +501,7 @@ globalThis.MegaThreadPage = (() => {
     composer.appendChild(input);
     const send = node("button", "wf-btn mt-send", state.picks.size ? "선택한 곳으로 보내기" : "보내기");
     send.type = "button";
-    send.disabled = state.busy || !state.draft.trim();
+    send.disabled = state.busy || !open || !state.draft.trim();
     send.addEventListener("click", () => (state.picks.size ? sendPicks() : sendText()));
     composer.appendChild(send);
     main.appendChild(composer);
@@ -519,7 +563,7 @@ globalThis.MegaThreadPage = (() => {
     const button = root && root.querySelector(".mt-send");
     if (!button) return;
     button.textContent = state.picks.size ? "선택한 곳으로 보내기" : "보내기";
-    button.disabled = state.busy || !String(state.draft || "").trim();
+    button.disabled = state.busy || !isOpen(state.mega) || !String(state.draft || "").trim();
   }
 
   function optionsPanel() {
@@ -620,6 +664,6 @@ globalThis.MegaThreadPage = (() => {
   return {
     open, stop, render, ring,
     ringLayout, edgeWidth, nodeTone, routeBody, optionRows, verdictLine,
-    deliveryLine, pct, logitText, esc,
+    deliveryLine, statusLabel, pct, logitText, esc,
   };
 })();

@@ -497,3 +497,31 @@ def test_t17_a_delivery_nobody_accepted_is_not_logged_as_delivered(tmp_path, mon
         assert row["chosen"] == [a["id"]] and row["delivered"] is False
 
     run(tmp_path, scenario)
+
+
+def test_t18_close_and_reopen(tmp_path, monkeypatch):
+    async def ok(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
+
+    monkeypatch.setattr(jev, "system_one", ok)
+
+    async def scenario(req, manager, threads, megas):
+        a, b, mega = await two_member_cluster(req)
+        closed = await req("POST", f"/api/megathreads/{mega['id']}/status",
+                           {"status": "closed"})
+        assert closed["mega"]["status"] == "closed"
+        # A closed cluster takes no routing (409), and the transition above is
+        # the only way back.
+        await req("POST", f"/api/megathreads/{mega['id']}/route", {"text": "hi"}, status=409)
+        await req("POST", f"/api/megathreads/{mega['id']}/status",
+                  {"status": "paused"}, status=400)
+        await req("POST", "/api/megathreads/mt-nope/status", {"status": "closed"}, status=404)
+
+        opened = await req("POST", f"/api/megathreads/{mega['id']}/status",
+                           {"status": "open"})
+        assert opened["mega"]["status"] == "open"
+        res = await req("POST", f"/api/megathreads/{mega['id']}/route", {"text": "hello"})
+        assert res["verdict"] == "auto"
+        assert [d["thread"] for d in res["delivered"]] == [a["id"]]
+
+    run(tmp_path, scenario)

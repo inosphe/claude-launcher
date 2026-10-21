@@ -8427,6 +8427,9 @@ a.category-ref:hover { text-decoration: underline; }
   border: 1px solid #2a2e36; border-radius: 6px; cursor: pointer; text-align: left; }
 .mt-cluster:hover { background: #22262d; }
 .mt-cluster.on { border-color: #58a6ff; color: #d8dbe0; }
+.mt-cluster.mt-closed { opacity: 0.5; }
+.mt-status { margin-left: auto; }
+.mt-compose.mt-shut { opacity: 0.55; }
 .mt-cluster-title { font-size: 13px; }
 .mt-cluster-sub { font-size: 11px; color: #8b949e; }
 .mt-new { margin-top: 12px; padding-top: 10px; border-top: 1px solid #2a2e36; display: flex; flex-direction: column; gap: 6px; }
