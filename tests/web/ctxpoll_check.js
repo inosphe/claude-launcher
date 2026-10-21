@@ -260,23 +260,37 @@ const ctxLineOf = (name) => {
   return descendants(li).find((k) => k.classes.has("rail-ctx-line"));
 };
 
+/* The wall clock, moved on purpose. The one part of the line's tooltip that
+   moves while the reading itself does not is the age, and a harness that runs
+   its two polls in the same second cannot tell a line that follows the age
+   from one that ignores it — the title would not change either way, and the
+   in-place write this file is here to hold would fall out of the code
+   unnoticed (review of claunch-hwbuc, s1305-rev: the check that stood here
+   compared a copy of the title with the title). So the clock is the harness's
+   to move, and the polls below are an hour apart. */
+const clock = { skew: 0 };
+const realNow = Date.now;
+Date.now = () => realNow() + clock.skew;
+
 const first = measure(() => { ctx.setSessions(base); ctx.refresh(list); });
 check("the first pass formats every row's numbers", first.formatted >= SESSIONS * 5, true);
 
 const before = ctxLineOf("s0");
-const beforeTitle = before.title;
+check("the line starts with the reading's age", /as of 3m ago/.test(before.title), true);
+
+clock.skew = 3_600_000;
 replaced = 0;
 const second = measure(() => { ctx.setSessions(reparsed()); ctx.refresh(list); });
 check("a poll that re-parses the same readings formats nothing again",
       second.formatted, 0);
 check("...and rebuilds no context line", replaced, 0);
 check("...while the line is still the node it was", ctxLineOf("s0") === before, true);
-check("...and its tooltip still carries a sentence", /context [\d,]+ tokens/.test(before.title), true);
-
-/* The age is the one thing that has to move without a rebuild: a tooltip that
-   stops saying "as of … ago" is a tooltip that lies about its own reading. */
-const aged = beforeTitle.replace(/as of .*? ago/, "as of 1h00m ago");
-check("a moved age reaches the tooltip without a rebuild", before.title !== aged, true);
+check("...and the age in its tooltip moved on without a rebuild",
+      /as of 1h\d\dm ago/.test(before.title), true);
+check("...with the bar's scale still beside it",
+      /bar spans 0–1M tokens/.test(before.title), true);
+const secondRebuilds = replaced;
+Date.now = realNow;
 
 /* A reading that really changed is not served from the cache. */
 const moved = reparsed();
@@ -295,8 +309,9 @@ check("...showing the new count",
    rather more in a page — and CTXPOLL_ROWS sizes the fleet to the rail being
    talked about (the trace's rail was a few hundred rows). */
 console.log(`ctxpoll_check: ${SESSIONS} rows — first pass ${first.ms.toFixed(1)}ms ` +
-            `(${first.formatted} formats), unchanged poll ${second.ms.toFixed(1)}ms ` +
-            `(${second.formatted} formats, 0 rebuilds), moved row ${third.ms.toFixed(1)}ms`);
+            `(${first.formatted} formats), a poll an hour later ${second.ms.toFixed(1)}ms ` +
+            `(${second.formatted} formats, ${secondRebuilds} rebuilds), ` +
+            `moved row ${third.ms.toFixed(1)}ms`);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

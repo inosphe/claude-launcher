@@ -160,6 +160,7 @@
   }
   function fit() {
     frame = 0;
+    tabular = new WeakMap();
     observer.disconnect();
     header.classList.remove("term-compact");
     header.querySelectorAll(".toolbar-overflow").forEach(el => el.classList.remove("toolbar-overflow"));
@@ -215,7 +216,10 @@
   // harness that lifts this function out alone still has to answer the same
   // way). The style answer is cached per element: it cannot change without a
   // class or an attribute, and both are records this observer sees.
-  const tabular = new WeakMap();
+  // Replaced at the start of every fit: a fit writes classes, and a class is
+  // exactly what a computed style can move under (review of claunch-hwbuc,
+  // s1305-rev). Cached between fits only, for the mutations between them.
+  let tabular = new WeakMap();
   function tabularUnder(node) {
     // A characterData record's target is the text node; the style belongs to
     // the element it sits in.
