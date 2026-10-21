@@ -1,4 +1,4 @@
-/* Throughput controls and UTC period comparison against meaningful saved samples. */
+/* Throughput controls, summary tiles, axis chart and UTC period comparison against meaningful saved samples. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -61,6 +61,20 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     const errors = []; page.on('pageerror', e => errors.push(String(e)));
     await page.goto(`http://127.0.0.1:${server.address().port}/#/wf/s29|%2Frepo`);
     const section = page.locator('#wf-view .cf2-throughput'); await section.waitFor();
+    // Default view: three selects, tiles and an axis chart; no date fields until asked for (claunch-sbfsi).
+    assert.equal(await section.locator('input[type="datetime-local"]:visible').count(), 0, 'no date fields by default');
+    assert.equal(await section.locator('[data-metric-field="bin"]').inputValue(), 'auto');
+    const tiles = section.locator('.cf2-throughput-tile');
+    assert.equal(await tiles.count(), 4);
+    assert.match(await tiles.nth(0).textContent(), /Completed runs2in 6 h/);
+    assert.match(await tiles.nth(1).textContent(), /Rate \/ hour0\.33/);
+    assert.match(await tiles.nth(2).textContent(), /Coverage100%/);
+    assert.match(await tiles.nth(3).textContent(), /Mean duration1h 30mn=2/);
+    const axis = await section.locator('svg .cf2-axis-label').allTextContents();
+    assert(axis.includes('10:00') && axis.includes('16:00') && axis.includes('0'), 'time and value axis labels: ' + axis);
+    assert.equal(await section.locator('svg .cf2-bar-count').count(), 2, 'non-empty bars carry their count');
+    assert.match(await section.locator('.cf2-throughput-legend').textContent(), /completed runs per 15 minutes/);
+    const row = async which => (await section.locator(`.cf2-throughput-comparison tr[data-period="${which}"] td`).allTextContents()).join(' | ');
     // Presets roll with newly observed data; a newly reported merge is included.
     detail.throughput.observed_at = at(17); detail.throughput.runs[2].ended = at(17);
     detail.throughput.runs[2].merges.push(merge(16, 'f')); detail.journal.push({event: 'reported'});
@@ -69,26 +83,33 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     assert.match(await section.locator('[data-metric-field="beforeEnd"]').inputValue(), /^2026-10-13T14:00/);
     assert.match(await section.locator('[data-metric-field="afterEnd"]').inputValue(), /^2026-10-13T17:00/);
     await section.locator('[data-metric-field="metric"]').selectOption('merges');
-    assert.match(await section.locator('.cf2-throughput-comparison').textContent(), /After: 1 observed reported merges/);
+    assert.equal(await row('after'), 'After | 1 | 3.00 | 0.33 | 100.00%');
+    assert.equal(await tiles.count(), 3, 'merges have no duration tile');
     detail.throughput.observed_at = at(16); detail.throughput.runs[2].ended = at(16);
     detail.throughput.runs[2].merges.pop();
     await page.locator('body').click({position: {x: 1, y: 1}}); await page.evaluate(() => refreshWf());
     await section.locator('[data-metric-field="metric"]').selectOption('runs');
     const set = async (key, value) => {const input = section.locator(`[data-metric-field="${key}"]`); await input.fill(value.slice(0, 16)); await input.dispatchEvent('change');};
+    await section.locator('[data-metric-field="span"]').selectOption('custom');
+    assert.equal(await section.locator('.cf2-throughput-custom input:visible').count(), 2, 'custom period shows start and end');
+    await section.locator('.cf2-throughput-compare > summary').click();
+    assert.equal(await section.locator('.cf2-throughput-compare input:visible').count(), 4);
     await set('start', at(9).slice(0, -1)); await set('end', at(16).slice(0, -1));
     await set('beforeStart', at(9).slice(0, -1)); await set('beforeEnd', at(11).slice(0, -1));
     await set('afterStart', at(11).slice(0, -1)); await set('afterEnd', at(16).slice(0, -1));
     const comparison = section.locator('.cf2-throughput-comparison');
-    assert.match(await comparison.textContent(), /Before: 1 observed completed runs · 2.00 hours · 0.50 \/ hour/);
-    assert.match(await comparison.textContent(), /After: 1 observed completed runs · 5.00 hours · 0.20 \/ hour/);
-    assert.match(await comparison.textContent(), /improvement: -60.00%/);
-    assert.match(await comparison.textContent(), /mean duration 7200.00 seconds \(n=1\)/);
+    assert.equal(await row('before'), 'Before | 1 | 2.00 | 0.50 | 100.00% | 1h (n=1)');
+    assert.equal(await row('after'), 'After | 1 | 5.00 | 0.20 | 100.00% | 2h (n=1)');
+    assert.equal(await row('change'), 'Change | -0.30 / hour · improvement: -60.00%');
     await section.locator('[data-metric-field="metric"]').selectOption('merges');
-    assert.match(await comparison.textContent(), /Before: 2 observed reported merges · 2.00 hours · 1.00 \/ hour/);
-    assert.match(await comparison.textContent(), /After: 3 observed reported merges · 5.00 hours · 0.60 \/ hour/);
-    assert.match(await comparison.textContent(), /improvement: -40.00%/);
-    await section.locator('summary').click();
-    assert.equal(await section.locator('table tr').count(), 8);
+    assert.equal(await row('before'), 'Before | 2 | 2.00 | 1.00 | 100.00%');
+    assert.equal(await row('after'), 'After | 3 | 5.00 | 0.60 | 100.00%');
+    assert.match(await row('change'), /improvement: -40.00%/);
+    const binsBox = section.locator('details[data-cf2-key="throughput-bins"]');
+    await binsBox.locator('summary').click();
+    assert.equal(await binsBox.locator('table tr').count(), 29, 'Auto: 7 hours in 15 minute bins');
+    await section.locator('[data-metric-field="bin"]').selectOption('3600000');
+    assert.equal(await binsBox.locator('table tr').count(), 8, 'fixed 1 hour bins');
     await page.locator('body').click({position: {x: 1, y: 1}});
     detail.throughput.observed_at = at(17); detail.throughput.runs[2].ended = at(17);
     detail.journal.push({event: 'loop_iteration'}); await page.evaluate(() => refreshWf());
@@ -97,7 +118,8 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     assert.match(await section.locator('[data-metric-field="afterEnd"]').inputValue(), /^2026-10-13T16:00/);
     assert.match(await section.locator('[data-metric-field="end"]').inputValue(), /^2026-10-13T16:00/);
     assert.equal(await section.locator('[data-metric-field="span"]').inputValue(), 'custom');
-    assert(await section.locator('details').evaluate(e => e.open), 'bins disclosure survives poll');
+    assert(await binsBox.evaluate(e => e.open), 'bins disclosure survives poll');
+    assert(await section.locator('.cf2-throughput-compare').evaluate(e => e.open), 'comparison disclosure survives poll');
     await set('beforeEnd', '2026-10-13T09:15:00');
     assert.match(await comparison.textContent(), /not calculable \(zero baseline or insufficient coverage\)/);
     await set('beforeEnd', at(11).slice(0, -1));
@@ -113,12 +135,48 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     assert.equal(pure.gap.rate, null); assert.equal(pure.missing.rate, null); assert.equal(pure.empty.rate, null);
     detail.throughput.runs[1].merge_complete = false;
     await page.locator('body').click({position: {x: 1, y: 1}}); await page.evaluate(() => refreshWf());
-    assert.match(await comparison.textContent(), /Before: 2 observed reported merges · 2.00 hours · unconfirmed/);
+    assert.equal(await row('before'), 'Before | 2 | 2.00 | unconfirmed | 50.00%');
+    assert.equal(await row('change'), 'Change | unconfirmed');
     assert.match(await comparison.textContent(), /not calculable/);
     assert(await section.locator('.cf2-metric-unknown').count());
-    await section.locator('[data-metric-field="span"]').selectOption('168');
+    // A fixed bin too fine for the period no longer blanks the chart: it is disabled and Auto takes over.
     await section.locator('[data-metric-field="bin"]').selectOption('900000');
-    assert.match(await section.textContent(), /Chart limit: 128 bins/);
+    await section.locator('[data-metric-field="span"]').selectOption('168');
+    assert.match(await section.textContent(), /15 minutes bins would exceed 128 bars for this period — switched to Auto/);
+    assert.equal(await section.locator('[data-metric-field="bin"]').inputValue(), 'auto');
+    assert(await section.locator('[data-metric-field="bin"] option[value="900000"]').evaluate(o => o.disabled), '15 minutes disabled for 7 days');
+    assert.equal(await section.locator('svg rect.cf2-metric-hit').count(), 28, '7 days in Auto bins of 6 hours');
+    assert.match(await section.locator('.cf2-throughput-legend').textContent(), /per 6 hours/);
+    assert.equal(await section.locator('.cf2-throughput-custom input:visible').count(), 0, 'preset hides custom fields');
+    // Auto stays inside the bar limit however long the period: past 48 days it
+    // takes whole days, so 365 days is 8-day bins and 1970..now is still <= 48 bars.
+    const bars = () => section.locator('svg rect.cf2-metric-hit').count();
+    const valueLabels = () => section.locator('svg text.cf2-axis-label[x="32"]').allTextContents();
+    await section.locator('[data-metric-field="span"]').selectOption('custom');
+    await set('end', at(16).slice(0, -1));
+    await set('start', new Date(Date.parse(at(16)) - 365 * 86400000).toISOString().slice(0, 16));
+    assert.equal(await bars(), 46, '365 days in Auto bins of 8 days');
+    assert.match(await section.locator('.cf2-throughput-legend').textContent(), /per 8 days/);
+    await set('start', '1970-01-01T00:00');
+    const longest = await bars();
+    assert(longest > 0 && longest <= 48, 'Auto keeps 1970..now at or under 48 bars: ' + longest);
+    assert.match((await section.locator('svg .cf2-axis-label').allTextContents()).join(' '), /1970-01-01/, 'year shown on long axes');
+    // A fixed 1 day over 365 days is disabled and falls back to the same bounded Auto.
+    await set('start', new Date(Date.parse(at(16)) - 365 * 86400000).toISOString().slice(0, 16));
+    await section.locator('[data-metric-field="bin"]').selectOption('86400000');
+    assert.match(await section.textContent(), /1 day bins would exceed 128 bars for this period — switched to Auto/);
+    assert.equal(await bars(), 46);
+    // Value axis shows whole counts only: a peak of 3 is labelled 0 and 3, not 1.5.
+    await set('start', '2026-10-13T11:00'); await set('end', '2026-10-13T17:00');
+    await section.locator('[data-metric-field="bin"]').selectOption('21600000');
+    assert.equal(await bars(), 1);
+    assert.deepEqual(await valueLabels(), ['0', '3']);
+    // The right edge is labelled with the period's real end, not the end of a full last bin.
+    await set('end', '2026-10-13T16:30');
+    await section.locator('[data-metric-field="bin"]').selectOption('3600000');
+    const timeLabels = await section.locator('svg text.cf2-axis-label:not([x="32"])').allTextContents();
+    assert.equal(timeLabels[timeLabels.length - 1], '16:30', 'end tick: ' + timeLabels);
+    await section.locator('[data-metric-field="span"]').selectOption('168');
     if (process.env.CFLOW_METRICS_FIXTURE) {
       detail.throughput = JSON.parse(fs.readFileSync(process.env.CFLOW_METRICS_FIXTURE));
       detail.run.run = 'real-s29-example';
