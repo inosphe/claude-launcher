@@ -5720,6 +5720,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .profile-mode-editor .wf-note { margin: 6px 0; }
 .profiles-table { width: 100%; }
 .profiles-table td:last-child { color: #7d8590; overflow-wrap: anywhere; }
+/* The profiles list is a card by the shared .ws-add/.ws-list/.ws-card rule,
+   whose 760px cap suits forms but not this eight-column table: capped, the
+   table scrolled horizontally while the page still had whitespace to give
+   (claunch-tw3xb). The list uses whatever width the view has left. */
+#ws-view .profiles-list { max-width: none; }
 .install-table { width: 100%; }
 .install-table .install-cmd, .install-files td:last-child { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .install-table .install-pending { color: #d29922; font-weight: 600; }
