@@ -18,6 +18,15 @@ three input components, output tokens, model, and timestamp.  Codex readings
 also carry ``model_context_window``.  Claude readings can carry the configured
 ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` as ``compact_window``.
 
+Each harness also records the reasoning effort its request ran at, in a place
+of its own -- Claude on the ``api-request`` line before the turn, Pi in the
+``thinking_level_change`` header entry, Codex inside the same
+``turn_context`` that names the model.  Where the harness recorded one the
+reading carries it as ``effort``; where it did not the key is absent rather
+than filled from the launcher's configuration, because ``/effort`` (claude)
+and ``/thinking`` (pi) can change it after the launch and a configuration
+value would then name something the session is not running.
+
 The reading is the latest value persisted by the harness.  During an active
 answer it can therefore describe the preceding model request.  A session with
 no recorded request returns ``None``.  Harnesses without a supported transcript
@@ -61,6 +70,15 @@ CODEX_HARNESS = "codex"
 #: case on every poll.
 FIRST_CHUNK = 64 * 1024
 MAX_TAIL = 1024 * 1024
+
+#: How much further back of a found reading the effort is looked for. The
+#: record that carries it sits immediately before the turn it produced, but a
+#: 64 KiB window can begin in the middle of that line and drop it (the read
+#: discards a partial first line); one widening is enough for it. The cap
+#: matters for a harness version that writes no such record at all -- without
+#: it every poll of such a session would read the whole ``MAX_TAIL`` looking
+#: for something that is not there.
+EFFORT_LOOKBACK = 256 * 1024
 
 #: How long a *failed* lookup is remembered. Both Claude's fallback locator
 #: and Codex's rollout locator can scan multiple files. The miss must expire
@@ -160,6 +178,79 @@ def usage_of(entry: dict) -> Optional[dict]:
     }
 
 
+def claude_effort_of(entry: dict) -> Optional[str]:
+    """The reasoning effort one Claude ``api-request`` entry ran at, or ``None``.
+
+    Claude Code writes an ``api-request`` line for each turn it sends, right
+    before the assistant entries that turn produced, and records the effort
+    there as ``params.output_config.effort``. That is the value the session
+    actually used -- the profile's settings and the launcher's own arguments
+    are what it was *started* with, and ``/effort`` can change it mid-session
+    (measured on 2026-10-21: session s1242's request says ``low`` while its
+    profile's ``settings.json`` says ``effortLevel: medium``).
+
+    Not every claude version writes these lines; the ones that do not report
+    no effort rather than a default.
+    """
+    if not isinstance(entry, dict) or entry.get("type") != "api-request":
+        return None
+    params = entry.get("params")
+    if not isinstance(params, dict):
+        return None
+    output = params.get("output_config")
+    if not isinstance(output, dict):
+        return None
+    return str(output.get("effort") or "").strip() or None
+
+
+def claude_effort_stop(entry: dict) -> bool:
+    """Whether this entry starts a turn older than the reading being read.
+
+    The scan runs backwards, so an ``api-request`` met after passing a user
+    entry belongs to an *earlier* turn: pairing it with the reading would
+    report the previous turn's effort as this one's. A user entry closes the
+    search for that reading.
+    """
+    return isinstance(entry, dict) and entry.get("type") == "user"
+
+
+def pi_effort_of(entry: dict) -> Optional[str]:
+    """The thinking level a Pi ``thinking_level_change`` entry records.
+
+    Pi writes one when the level changes, and ``off`` is a level of its own
+    (thinking disabled) rather than an absence -- it is reported as such.
+    """
+    if not isinstance(entry, dict) or entry.get("type") != "thinking_level_change":
+        return None
+    return str(entry.get("thinkingLevel") or "").strip() or None
+
+
+def codex_effort_of(entry: dict) -> Optional[str]:
+    """The reasoning effort a Codex ``turn_context`` entry records, if any.
+
+    Codex carries it inside the collaboration-mode settings of the turn it
+    belongs to. Measured on 2026-10-21 over the rollouts the daemon actually
+    reads (``~/.claude-launcher/profiles/*/codex/**/rollout-*.jsonl``): 133 of
+    137 files carry a value (medium 1167, high 287, ``null`` 99 turn
+    contexts), so a codex row normally *does* have an effort to show. Where
+    codex recorded ``null`` -- and in the four older files that record
+    nothing -- this reports no effort rather than inventing one from the
+    launcher's config.
+    """
+    if not isinstance(entry, dict) or entry.get("type") != "turn_context":
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    mode = payload.get("collaboration_mode")
+    if not isinstance(mode, dict):
+        return None
+    settings = mode.get("settings")
+    if not isinstance(settings, dict):
+        return None
+    return str(settings.get("reasoning_effort") or "").strip() or None
+
+
 def codex_usage_of(entry: dict) -> Optional[dict]:
     """Normalize one Codex ``token_count`` rollout entry.
 
@@ -248,7 +339,8 @@ def pi_usage_of(entry: dict) -> Optional[dict]:
     }
 
 
-def read_tail(path: Path, usage=usage_of) -> Optional[dict]:
+def read_tail(path: Path, usage=usage_of, effort_of=None,
+              effort_stop=None) -> Optional[dict]:
     """The newest context reading in ``path``, or ``None``.
 
     ``usage`` is the per-entry normalizer -- Claude's by default, Pi's for a
@@ -258,6 +350,15 @@ def read_tail(path: Path, usage=usage_of) -> Optional[dict]:
     Reads from the end and widens until a reading is found or ``MAX_TAIL`` is
     spent. Giving up is the honest answer: a session whose last megabyte holds
     no assistant turn is one this module cannot speak for.
+
+    ``effort_of`` is the per-entry extractor for the reasoning effort that
+    reading ran at (``claude_effort_of`` here), and ``effort_stop`` says an
+    entry is old enough that the effort it would carry belongs to a previous
+    turn. Both are optional: without ``effort_of`` this is exactly the scan
+    it always was. With one, the scan continues past a found reading (its
+    record sits *before* the turn it produced) but only within
+    ``EFFORT_LOOKBACK`` of the file's end -- a harness version that writes no
+    such record must not turn every poll into a ``MAX_TAIL`` read.
     """
     try:
         size = path.stat().st_size
@@ -274,6 +375,7 @@ def read_tail(path: Path, usage=usage_of) -> Optional[dict]:
         lines = blob.decode("utf-8", errors="replace").splitlines()
         if size > window and lines:
             lines = lines[1:]          # the read began mid-line
+        reading = None
         for line in reversed(lines):
             line = line.strip()
             if not line:
@@ -282,24 +384,74 @@ def read_tail(path: Path, usage=usage_of) -> Optional[dict]:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            reading = usage(entry)
-            if reading is not None:
+            if reading is None:
+                reading = usage(entry)
+                if reading is not None and effort_of is None:
+                    return reading
+                continue
+            if effort_stop is not None and effort_stop(entry):
+                break
+            value = effort_of(entry)
+            if value:
+                reading["effort"] = value
                 return reading
         if window >= size or window >= MAX_TAIL:
-            return None
+            return reading
+        if reading is not None and window >= EFFORT_LOOKBACK:
+            return reading
         window = min(window * 4, MAX_TAIL)
 
 
 def read_pi_tail(path: Path) -> Optional[dict]:
-    """The newest Pi context reading in ``path``, or ``None``."""
-    return read_tail(path, pi_usage_of)
+    """The newest Pi context reading in ``path``, or ``None``.
+
+    Pi records its thinking level once, in the session header entries at the
+    top of the file (``thinking_level_change``; measured across the 310
+    session files on this machine, 2026-10-21: exactly one per file, at the
+    same offset). A reverse scan from the end would therefore have to read
+    the whole file to find it, so it is read from the head instead. A level
+    changed *later* in a session would not be seen; nothing pi writes today
+    can change it.
+    """
+    reading = read_tail(path, pi_usage_of)
+    if reading is None:
+        return None
+    effort = _pi_thinking_level(path)
+    if effort:
+        reading["effort"] = effort
+    return reading
 
 
-def _codex_model_before(path: Path, end: int) -> Optional[str]:
-    """Find the closest model before a newline boundary, in fixed-size reads.
+def _pi_thinking_level(path: Path) -> Optional[str]:
+    """The thinking level named by Pi's header entries, or ``None``.
+
+    Only the first ``FIRST_CHUNK`` bytes are read. The entry is one line near
+    the top of a file whose later lines are whole messages, so the head is a
+    fixed cost regardless of how long the conversation got; if it is not in
+    there, this version of pi does not record one.
+    """
+    try:
+        with path.open("rb") as fh:
+            blob = fh.read(FIRST_CHUNK)
+    except OSError:
+        return None
+    for line in blob.decode("utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        level = pi_effort_of(entry)
+        if level:
+            return level
+    return None
+
+
+def _codex_context_before(path: Path, end: int) -> Optional[dict]:
+    """Find the closest ``turn_context`` before a newline boundary.
 
     A turn can contain megabytes of tool output between its model and usage.
-    Only model lines need decoding here; usage remains bounded by MAX_TAIL.
+    Only turn-context lines need decoding here; usage remains bounded by
+    ``MAX_TAIL``.
     """
     pending = []
     try:
@@ -320,11 +472,11 @@ def _codex_model_before(path: Path, end: int) -> Optional[str]:
                     if b'"turn_context"' not in line:
                         continue
                     try:
-                        model = codex_model_of(json.loads(line))
+                        entry = json.loads(line)
                     except ValueError:
                         continue
-                    if model:
-                        return model
+                    if codex_model_of(entry):
+                        return entry
                 end = start
     except OSError:
         return None
@@ -370,13 +522,24 @@ def read_codex_tail(path: Path) -> Optional[dict]:
             model = codex_model_of(entry)
             if model:
                 reading["model"] = model
+                # The effort, when codex recorded one, belongs to the same
+                # turn_context as the model: the reading and its effort are
+                # selected together or not at all.
+                effort = codex_effort_of(entry)
+                if effort:
+                    reading["effort"] = effort
                 return reading
         if window >= size or window >= MAX_TAIL:
             if reading is not None and size > window:
                 # The first partial line was discarded above. Include that
                 # entire line in the older scan, in case it is turn_context.
                 boundary = size - window + blob.find(b"\n") + 1
-                reading["model"] = _codex_model_before(path, boundary)
+                context = _codex_context_before(path, boundary)
+                if context is not None:
+                    reading["model"] = codex_model_of(context)
+                    effort = codex_effort_of(context)
+                    if effort:
+                        reading["effort"] = effort
             return reading
         window = min(window * 4, MAX_TAIL)
 
@@ -592,7 +755,8 @@ def for_session(sdef) -> Optional[dict]:
     elif harness == PI_HARNESS:
         reading = read_pi_tail(path)
     else:
-        reading = read_tail(path)
+        reading = read_tail(path, usage_of, claude_effort_of,
+                            claude_effort_stop)
     _reads[key] = (stat.st_mtime, stat.st_size, reading)
     return reading
 

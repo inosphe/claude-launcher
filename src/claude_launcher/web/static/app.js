@@ -7317,7 +7317,11 @@ function modelSentence(s) {
   const c = s && s.context;
   if (!c || !c.model) return "not known yet — no context reading recorded";
   const age = ctxAgeOf(c.at);
-  return `${c.model}${age ? ` (as of its turn ${age} ago)` : ""}`;
+  // The effort the turn ran at belongs in the same sentence, for the same
+  // reason the model is here: it is what the reading was taken *under*, and
+  // a harness that records none (codex today) simply has no clause.
+  const effort = c.effort ? ` at ${c.effort} effort` : "";
+  return `${c.model}${effort}${age ? ` (as of its turn ${age} ago)` : ""}`;
 }
 
 /* The whole sentence, for a tooltip or a details row. Empty where there is
@@ -7341,6 +7345,7 @@ function ctxSentence(s) {
   }
   const parts = [`context ${count} tokens`];
   if (c.model) parts.push(c.model);
+  if (c.effort) parts.push(`${c.effort} effort`);
   const age = ctxAgeOf(c.at);
   parts.push(age ? `as of ${age} ago` : "as of its last turn");
   return parts.join(" · ");
@@ -7495,7 +7500,20 @@ function ctxRailLine(s) {
   const short = c ? modelShort(c.model) : "";
   const model = short ? el("span", "rail-model", short) : null;
   if (model) model.title = c.model;
-  line.append(...(model ? [model] : []), bar, num);
+  // The effort the last turn ran at, right where the model is read: two
+  // sessions on the same model are not the same session when one is at
+  // "high" and the other at "low". Only harnesses that record it carry one
+  // (`context.effort` comes from the transcript, never from the launcher's
+  // configuration), so a row whose harness records none keeps exactly the
+  // line it had. Codex records one in most of the rollouts measured here
+  // (133 of 137 files), so a codex row usually shows it too.
+  const effort = c && c.effort ? el("span", "rail-effort", `· ${c.effort}`) : null;
+  if (effort) {
+    effort.title = s.harness === "pi"
+      ? `thinking level ${c.effort} (recorded in its session file)`
+      : `reasoning effort ${c.effort} (recorded on its last request)`;
+  }
+  line.append(...(model ? [model] : []), ...(effort ? [effort] : []), bar, num);
   const note = ctxTooltip(s);
   const scale = c
     ? "bar spans 0–1M tokens" +

@@ -161,12 +161,14 @@ be (a count with no percentage beside it, because no denominator exists to
 make one from, and an absence that must never be drawn as a zero) and
 ``railctx_check`` on where that ends up on a rail row, which is a separate
 failure — a note that stops being hung on anything leaves no trace at all —
-and ``railmodel_check`` on the third fact the same reading carries, which
-until now only tooltips ever showed: WHICH MODEL the session is answering
-on, shortened onto the rail row beside the gauge and spelled out in full in
-the detail panel, where a version number torn in half ("haiku 4 5") or a row
-that quietly stops being appended would both name the wrong thing in
-silence — ``railcwd_check`` on the row's directory line, WHERE the session
+and ``railmodel_check`` on the facts the same reading carries, which until
+now only tooltips ever showed: WHICH MODEL the session is answering on and
+at WHICH EFFORT, shortened onto the rail row beside the gauge and spelled out
+in full in the detail panel, where a version number torn in half ("haiku 4
+5") or a row that quietly stops being appended would both name the wrong
+thing in silence, and where an effort the harness did not record must stay
+absent rather than be filled from the launcher's configuration —
+``railcwd_check`` on the row's directory line, WHERE the session
 runs: a worktree of this launcher's own making reads as "repository ›
 checkout" rather than the "…/worktrees/<name>" the tail-of-path shortening
 would print (one constant word kept, the one that differs dropped), the
