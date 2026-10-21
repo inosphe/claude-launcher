@@ -425,6 +425,26 @@ ctx.setMeshes([
   check("the tag box does not take a line of its own",
         decl("#session-list .rail-meshes", "flex-basis"), undefined);
 
+  /* The name itself is the one label on this rail that is never cut — a
+     clipped name reads as a different session, which is the one loss a row
+     of near-identical names cannot afford (claunch-u6das). It wraps inside
+     its span instead, while the group around it keeps the nowrap above; any
+     of the truncating declarations coming back silently undoes the
+     guarantee, and the narrow-container percentage cap would clip the
+     wrapped second line the same way the ellipsis clipped the tail. */
+  check("the rail name wraps instead of being cut",
+        decl("#session-list .rail-name", "white-space"), "normal");
+  check("the rail name declares no text-overflow — it is never truncated",
+        decl("#session-list .rail-name", "text-overflow"), undefined);
+  ok("the rail name declares no clipping overflow (visible is the default, not a clip)",
+     !decl("#session-list .rail-name", "overflow") ||
+     decl("#session-list .rail-name", "overflow") === "visible",
+     `overflow is ${decl("#session-list .rail-name", "overflow")}`);
+  check("an unbroken worktree-style name breaks rather than widening the rail",
+        decl("#session-list .rail-name", "overflow-wrap"), "anywhere");
+  check("the narrow-container name cap is gone — it would clip the wrapped second line",
+        decl("#session-list .rail-name", "max-width"), "none");
+
   /* Shrinking is what replaced wrapping, so it must stop while the pill can
      still say which room: a capsule holding nothing is not an abbreviation. */
   for (const sel of ["#session-list .rail-mesh", "#session-list .mesh-role"]) {
