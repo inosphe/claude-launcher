@@ -5380,6 +5380,17 @@ async function refreshSessions(options) {
         meshBox.appendChild(tag);
       }
     }
+    // What it follows: its cflow-watch subscriptions. Last of the pills,
+    // after the rooms, because it is the one about other sessions rather
+    // than about this one. Guarded like the other late helpers here.
+    const watching = typeof railWatchTag === "function" ? railWatchTag(s) : null;
+    let watchBox = null;
+    if (watching) {
+      watchBox = document.createElement("span");
+      watchBox.className = "rail-watch";
+      watchBox.textContent = watching.text;
+      watchBox.title = watching.title;
+    }
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = railMetaText(s);
@@ -5537,7 +5548,8 @@ async function refreshSessions(options) {
     // belonging last.
     head.append(label, keys, ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
-                ...(meshBox ? [meshBox] : []));
+                ...(meshBox ? [meshBox] : []),
+                ...(watchBox ? [watchBox] : []));
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
     // scanning for "which of these has nobody touched" finds it in one
@@ -5862,6 +5874,30 @@ function railMeshTags(name, under = null) {
     });
   }
   return shown;
+}
+
+/* What this session watches: its cflow-watch subscriptions, as one pill.
+   The rail has no room for a list of targets, so the card carries the count
+   and puts the targets in its hover; the detail panel draws the whole list.
+   Null when it watches nothing, which is what every caller tests — the
+   common case, and a pill saying "watch 0" is noise on a 260px rail. */
+function railWatchTag(s) {
+  const rows = Array.isArray(s.watch) ? s.watch : [];
+  if (!rows.length) return null;
+  return {
+    text: `watch ${rows.length}`,
+    title: "watching: " + rows.map(watchTargetLabel).join(", "),
+  };
+}
+
+/* One subscription as a human reads it: the run's target, and the kinds of
+   event it hears when the subscription narrowed them. ``kinds`` is null when
+   the subscription takes the defaults (``cflow_watch.DEFAULT_KINDS``), which
+   is the ordinary case and must not read as "nothing". */
+function watchTargetLabel(row) {
+  const target = String((row && row.target) || "");
+  const kinds = row && Array.isArray(row.kinds) ? row.kinds : null;
+  return kinds && kinds.length ? `${target} (${kinds.join(", ")})` : target;
 }
 
 /* The names a session answers to in its rooms, when they are not the name
@@ -39450,6 +39486,35 @@ function sessionPrPanel(s) {
   return box;
 }
 
+/* The cflow runs this session watches. A subscription is a standing order to
+   be told when another session's run moves; until now only the MCP tools
+   could list one, so the fact lived in the session's own ledger and nowhere a
+   reader looking at the session could see it. One row per subscription, not
+   one comma-joined line: each carries three facts (target, what it hears,
+   since when) and a target is often a long session name. Absent when it
+   watches nothing — the ordinary case. */
+function sessWatchPanel(data) {
+  const rows = Array.isArray(data.watch) ? data.watch : [];
+  if (!rows.length) return null;
+  const box = el("section", "sess-watch");
+  box.appendChild(el("h3", null, "Watching"));
+  box.appendChild(el("p", "wf-note",
+    "cflow runs this session subscribes to — their moves are typed into " +
+    "its own terminal."));
+  for (const row of rows) {
+    const line = el("div", "sess-watch-row");
+    line.appendChild(el("span", "sess-watch-target", String(row.target || "")));
+    line.appendChild(el("span", "sess-watch-kinds",
+      Array.isArray(row.kinds) && row.kinds.length
+        ? row.kinds.join(", ") : "all events"));
+    if (row.since) {
+      line.appendChild(el("span", "sess-watch-since", `since ${localStamp(row.since)}`));
+    }
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function sessDetailTabs(name) {
   const bar = el("div", "seq-tabs sess-subtabs");
   bar.setAttribute("role", "tablist");
@@ -39955,6 +40020,15 @@ function renderSession(data) {
     if (typeof sessionPrPanel === "function") {
       const prs = sessionPrPanel(s);
       if (prs) view.appendChild(prs);
+    }
+    // What the session follows, above the static facts: a subscription is a
+    // standing relation that changes what the rest of the panel means (a
+    // quiet session may be quiet because it is waiting on someone else's
+    // run), and it is the one section here that another session's actions
+    // move.
+    if (typeof sessWatchPanel === "function") {
+      const watch = sessWatchPanel(data);
+      if (watch) view.appendChild(watch);
     }
     const dl = el("dl", "sess-meta");
     metaRow(
