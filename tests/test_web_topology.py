@@ -492,6 +492,7 @@ CHECKS = [
         "observerrecord_check.js",
         "observercompact_check.js",
         "observerstatus_check.js",
+        "observerpriority_check.js",
         "observerended_check.js",
         "railhold_check.js",
         "railtyping_check.js",

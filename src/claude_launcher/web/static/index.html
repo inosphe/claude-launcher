@@ -345,6 +345,7 @@
       <label>보기 <select id="observer-scope"><option value="global">전체</option><option value="mesh">메시</option><option value="session">세션</option></select></label>
       <label id="observer-selection-label" hidden>대상 <select id="observer-selection"></select></label>
       <label>활동 <select id="observer-activity"><option value="all">전체</option><option value="working">동작 중</option><option value="waiting">대기</option><option value="done">완료 후 유휴</option><option value="idle">유휴·미확인</option></select></label>
+      <label>알림 <select id="observer-priority" title="이벤트의 우선순위로 거릅니다. 통지는 daemon 재시작·PTY host 인수 같은 수명주기 알림이고, 긴급은 사람이 답해야 하는 것입니다."><option value="all">전체</option><option value="normal">보통 이상</option><option value="urgent">긴급만</option></select></label>
       <label><input id="observer-actions-only" type="checkbox"> 조치 필요만</label>
       <label><input id="observer-ended" type="checkbox"> 종료된 세션 포함</label>
       <button id="observer-sort" type="button">최신순 정렬</button>
@@ -361,7 +362,7 @@
       <details id="observer-usage" hidden><summary>관찰 API 사용량 합계 (전체 세션)</summary><pre id="observer-usage-body"></pre></details>
       <details class="observer-help"><summary>화면 안내</summary>
       <p id="observer-layout-hint" class="hint"></p>
-      <p class="hint">직접 보고·사용자 질문·cflow 응답 대기를 표시합니다. 자동 요약의 근거는 각 이벤트에서 확인할 수 있습니다. 장기 대기는 마지막 실질 활동 후 30분 이상인 경우입니다.</p>
+      <p class="hint">직접 보고·사용자 질문·cflow 응답 대기를 표시합니다. 이벤트마다 우선순위(통지·보통·긴급)가 붙고, 통지 수준은 흐리게 접혀 그려집니다. 사람의 승인을 기다리는 요청은 해당 세션 카드의 「사용자 승인 대기」에 표시됩니다. 자동 요약의 근거는 각 이벤트에서 확인할 수 있습니다. 장기 대기는 마지막 실질 활동 후 30분 이상인 경우입니다.</p>
       </details>
       </div>
       <section id="observer-cards" aria-label="세션 결과"></section>
