@@ -80,6 +80,7 @@ from . import (
 )
 from . import paths
 from . import daemon_prompt
+from . import profile_facts
 from . import sessionstats, statscompare, statsworker
 from . import tokenusage
 from . import exited_rows
@@ -756,6 +757,18 @@ def build_app(
     app["loop_lag"] = loop_lag_mod.LoopLag(log_threshold=lag_threshold)
     app.on_startup.append(_start_loop_lag)
     app.on_shutdown.append(_stop_loop_lag)
+    # The profile registry and the borrow verdicts derived from it, read once
+    # per interval instead of once per request (daemon/profile_facts.py,
+    # claunch-89eom). Every profile-reading handler answers from here.
+    try:
+        facts_interval = float(
+            store.daemon_config().get("profile_facts_s", profile_facts.DEFAULT_INTERVAL)
+        )
+    except (TypeError, ValueError):
+        facts_interval = profile_facts.DEFAULT_INTERVAL
+    app["profile_facts"] = profile_facts.ProfileFacts(interval=facts_interval)
+    app.on_startup.append(_start_profile_facts)
+    app.on_shutdown.append(_stop_profile_facts)
     # The machine's CPU, memory and disk I/O for the rail header and the
     # System performance page, with a rotating sample log (claunch-zuk0b).
     from . import sysperf as sysperf_mod
@@ -1417,6 +1430,14 @@ async def _start_loop_lag(app: web.Application) -> None:
 
 async def _stop_loop_lag(app: web.Application) -> None:
     await app["loop_lag"].stop()
+
+
+async def _start_profile_facts(app: web.Application) -> None:
+    app["profile_facts"].start()
+
+
+async def _stop_profile_facts(app: web.Application) -> None:
+    app["profile_facts"].stop()
 
 
 async def _close_cli_shell(app: web.Application) -> None:
@@ -2729,16 +2750,19 @@ async def h_profiles(request: web.Request) -> web.Response:
     # answer six distinct questions, on a handler the dashboard calls while
     # it is booting -- so it was also half a second of event loop that every
     # other request on the page had to wait behind.
-    doc = store.load()
-    profiles = profile_mod.list_all()
-    registry = harness_registry.registry(doc)
-    harness_names = harness_registry.names(doc)
+    #
+    # The document, the listing and the registry now come from the daemon's
+    # profile facts (daemon/profile_facts.py, claunch-89eom): the same read
+    # the borrow picker and the session detail poll answer from, kept current
+    # on an interval instead of repeated here.
+    facts = request.app["profile_facts"].facts()
+    doc = facts.doc
+    profiles = list(facts.profiles)
+    registry = facts.registry
+    harness_names = list(facts.harness_names)
     # available() asks the machine, not the profile, so it has exactly as many
     # answers as there are harnesses.
-    available = {
-        name: bool(entry and entry.available())
-        for name, entry in registry.items()
-    }
+    available = facts.available
     items = []
     selectors = []
     profile_options = []
@@ -2990,6 +3014,9 @@ async def h_profiles_pi_tui_mode(request: web.Request) -> web.Response:
             parent.pop(key)
 
     doc = store.update(_mutate)
+    # The listing the form reads is answered from the daemon's profile facts;
+    # a write here is a person waiting to see the new value.
+    request.app["profile_facts"].invalidate()
     return json_response(
         {
             "profile": target.name,
@@ -3200,39 +3227,28 @@ async def h_borrow_options(request: web.Request) -> web.Response:
     explicit lender to replace authentication inherited from its parent;
     creation and reborrow clients have a separate own-profile authentication
     choice and collapse the duplicate there.
+
+    Answered from the daemon's profile facts (``daemon/profile_facts.py``):
+    the lender matrix is validated once per refresh interval, not once per
+    panel (claunch-89eom). ``refresh=1`` rebuilds that row now -- the manual
+    path for a person who just replaced a token.
     """
     selector = str(request.query.get("profile") or "").strip()
     if not selector:
         return json_error(400, "query parameter 'profile' is required")
     try:
-        runtime = profile_mod.require_selector(selector)
-        harness_name = lineage.effective_harness(runtime)
+        # The existence check stays in the request: an unknown profile is a
+        # 400 about this request, not a build error to keep in the snapshot.
+        profile_mod.require_selector(selector)
+        manual = str(request.query.get("refresh") or "").lower() in (
+            "1", "true", "yes", "manual",
+        )
+        payload = await asyncio.to_thread(
+            request.app["profile_facts"].borrow_options, selector, refresh=manual
+        )
     except (ProfileError, lineage.LineageError) as exc:
         return json_error(400, str(exc))
-    entry = harness_registry.get(harness_name)
-    capability = borrowing.capability(entry)
-    options = []
-    if capability["allowed"]:
-        for lender in profile_mod.list_all():
-            report = borrowing.validate(
-                runtime, lender.name, entry=entry
-            ).to_dict()
-            report["name"] = lender.name
-            report["selectable"] = bool(report["valid"])
-            report["label"] = (
-                lender.name
-                if report["valid"]
-                else f"{lender.name} — {report['message']}"
-            )
-            options.append(report)
-    return json_response(
-        {
-            "profile": runtime.selector,
-            "harness": harness_name,
-            "capability": capability,
-            "options": options,
-        }
-    )
+    return json_response(payload)
 
 
 async def h_harnesses(request: web.Request) -> web.Response:
@@ -3242,12 +3258,16 @@ async def h_harnesses(request: web.Request) -> web.Response:
     about but the machine has not installed is a *different* thing from one
     claunch does not know about. Session forms do not use this as a selector;
     they project the harness already configured on their selected profile.
+
+    Both the registry and the name order come from the daemon's profile facts.
+    They used to be rebuilt inside the comprehension below -- one config read
+    and one merge per declared harness, per request (claunch-89eom).
     """
+    facts = request.app["profile_facts"].facts()
     return json_response(
         {
             "harnesses": [
-                harness_registry.registry()[name].to_dict()
-                for name in harness_registry.names()
+                facts.registry[name].to_dict() for name in facts.harness_names
             ]
         }
     )
@@ -3281,6 +3301,9 @@ async def h_harness_models_save(request: web.Request) -> web.Response:
                 doc.pop("model_choices", None)
 
         saved = store.update(mutate)
+        # The harness registry merged from this document is part of the
+        # profile facts every listing and borrow verdict is answered from.
+        request.app["profile_facts"].invalidate()
     except KeyError:
         return json_error(404, f"unknown harness: {name}")
     except (harness_registry.HarnessConfigError, ValueError) as exc:
@@ -4353,6 +4376,9 @@ async def h_provider_affinity_set(request: web.Request) -> web.Response:
         store.update(_mutate)
     except store.StoreError as exc:
         return json_error(500, str(exc))
+    # Provider affinity feeds the provider constraints behind every harness
+    # policy verdict in the profile facts.
+    request.app["profile_facts"].invalidate()
     return json_response(_provider_affinity_state())
 
 
@@ -10751,6 +10777,9 @@ async def h_session_meta(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     cwd = _session_cwd(session)
+    # Read outside ``describe``: the profile facts are shared by every
+    # request, and the worker below only needs the object.
+    facts = request.app["profile_facts"]
 
     def describe() -> dict:
         # In a worker, like the children view: the transcript tail, the
@@ -10769,13 +10798,17 @@ async def h_session_meta(request: web.Request) -> web.Response:
         unmapped = getattr(session, "unmapped_model_id", None)
         if unmapped:
             info["unmapped_model_id"] = unmapped
-        harness = harness_registry.registry().get(info.get("harness") or "")
+        harness = facts.harness(info.get("harness") or "")
         borrowed_auth = None
         if info.get("borrow") and info.get("profile"):
-            runtime_profile = profile_mod.resolve_selector(info["profile"])
-            borrowed_auth = borrowing.validate(
-                runtime_profile, info["borrow"], entry=harness
-            ).to_dict()
+            # The verdict comes from the daemon's profile facts, so the
+            # two-second poll is a lookup instead of a policy evaluation per
+            # lender (claunch-89eom). Its staleness is bounded by that
+            # snapshot's interval, which is why the interval is short.
+            borrowed_auth = facts.borrow_validation(
+                info["profile"], info["borrow"],
+                harness_name=info.get("harness") or "",
+            )
         # Containment, not equality: a session launched with `--worktree`
         # sits in `<repo>/.claude/worktrees/<name>`, which is the workspace
         # the user vouched for with another branch checked out -- not a

@@ -103,17 +103,21 @@ def capability(entry: Optional[harnesses.Harness]) -> dict:
     }
 
 
-def _canonical_token_source(profile: Profile) -> Optional[Profile]:
+def _canonical_token_source(
+    profile: Profile, doc: Optional[dict] = None
+) -> Optional[Profile]:
     """Nearest profile that contributes the shared launcher token."""
-    for candidate in reversed(lineage.chain(profile)):
+    for candidate in reversed(lineage.chain(profile, doc)):
         if credentials.stored_token(candidate):
             return candidate
     return None
 
 
-def _claude_default_credential(profile: Profile) -> Tuple[str, Optional[Profile]]:
+def _claude_default_credential(
+    profile: Profile, doc: Optional[dict] = None
+) -> Tuple[str, Optional[Profile]]:
     """Credential kind/source selected by Claude's existing token precedence."""
-    for candidate in reversed(lineage.chain(profile)):
+    for candidate in reversed(lineage.chain(profile, doc)):
         if credentials.stored_token(candidate):
             return "launcher-token", candidate
         if credentials.credentials_token(candidate):
@@ -152,11 +156,18 @@ def validate(
     *,
     entry: Optional[harnesses.Harness] = None,
     provider_override: Optional[str] = None,
+    doc: Optional[dict] = None,
 ) -> BorrowValidation:
-    """Validate one borrow without returning or serializing any secret value."""
+    """Validate one borrow without returning or serializing any secret value.
+
+    ``doc`` is the already-loaded config document. A caller that validates
+    many pairs -- the daemon's profile inventory does, once per refresh --
+    passes it so each verdict does not re-parse ``~/.claunch.yaml`` through
+    the policy, provider and lineage layers below.
+    """
     if entry is None:
         try:
-            entry = harnesses.get(lineage.effective_harness(runtime_profile))
+            entry = harnesses.get(lineage.effective_harness(runtime_profile, doc), doc)
         except lineage.LineageError as exc:
             return BorrowValidation(
                 False, False, "invalid-runtime-profile", str(exc), "?", "none"
@@ -178,6 +189,7 @@ def validate(
         runtime_policy = harness_policy.evaluate(
             runtime_profile,
             harness_name,
+            doc=doc,
             provider_override=provider_override,
         )
     except (
@@ -222,6 +234,7 @@ def validate(
         lender_policy = harness_policy.evaluate(
             lender,
             harness_name,
+            doc=doc,
             provider_override=provider_override,
         )
     except (
@@ -251,7 +264,7 @@ def validate(
 
     try:
         if cap["mode"] == "token":
-            source = _canonical_token_source(lender)
+            source = _canonical_token_source(lender, doc)
             route = entry.token_env if entry else None
             if source is None:
                 return BorrowValidation(
@@ -284,9 +297,9 @@ def validate(
                 source_profile=source.name,
             )
 
-        provider = provider_override or providers.resolve_name(lender)
-        if providers.uses_anthropic_oauth(provider):
-            kind, source = _claude_default_credential(lender)
+        provider = provider_override or providers.resolve_name(lender, doc)
+        if providers.uses_anthropic_oauth(provider, doc):
+            kind, source = _claude_default_credential(lender, doc)
             if kind == "missing":
                 return BorrowValidation(
                     True,
@@ -332,15 +345,15 @@ def validate(
             )
 
         route = entry.token_env if entry else "ANTHROPIC_AUTH_TOKEN"
-        source = _canonical_token_source(lender)
+        source = _canonical_token_source(lender, doc)
         configured = False
         if source is None:
-            provider_env = providers.provider_env(provider)
-            lender_env = lineage.effective_env(lender)
+            provider_env = providers.provider_env(provider, doc)
+            lender_env = lineage.effective_env(lender, doc)
             configured = bool(
                 lender_env.get(route)
                 or provider_env.get(route)
-                or providers.auth_token(provider)
+                or providers.auth_token(provider, doc)
             )
         if source is None and not configured:
             return BorrowValidation(
