@@ -1898,6 +1898,10 @@ function restoreQueueText(s) {
 function renderRestoreQueueBanner(q) {
   const box = typeof document !== "undefined" && document.getElementById("restore-queue-banner");
   if (!box) return;
+  // While the successor is still restoring, that banner owns the box: it
+  // counts every session the boot is bringing back, not only the delayed
+  // ones the queue starts (claunch-9akgh).
+  if (daemonBootPhase === "restoring") return;
   box.classList.toggle("hidden", !q);
   if (!q) { box.textContent = ""; return; }
   const parts = [`Restoring after restart: ${q.done}/${q.total} started`,
@@ -1909,6 +1913,47 @@ function renderRestoreQueueBanner(q) {
   box.title = "Sessions the daemon restarts one at a time after a restart. "
     + "They are not failed or on hold: each starts by itself in turn, and "
     + "opening one (or messaging it) starts it now.";
+}
+
+/* ---- the boot's own progress (claunch-9akgh) ----
+
+   A daemon now binds its port before it restores the fleet, so a page can be
+   talking to a successor while that successor is still bringing sessions
+   back. `/api/daemon` and `/api/health` carry `boot: {phase, done, total}`
+   for exactly this; without it the rail simply fills in over ten seconds
+   with nothing saying why, which reads the same as sessions going missing. */
+let daemonBootPhase = null;   // "restoring" while a successor fills its fleet
+
+function renderBootProgress(boot) {
+  const box = typeof document !== "undefined" && document.getElementById("restore-queue-banner");
+  if (!box || daemonBootPhase !== "restoring") return;
+  const total = Number(boot && boot.total) || 0;
+  const done = Number(boot && boot.done) || 0;
+  const seconds = Number(boot && boot.elapsed);
+  box.textContent = total
+    ? `Restarting the daemon — restoring sessions ${done}/${total}`
+      + (seconds > 0 ? ` (${Math.round(seconds)}s)` : "")
+    : "Restarting the daemon — restoring sessions…";
+  box.title = "The new daemon is answering already; it is still bringing "
+    + "the sessions the previous one was running back under it.";
+  box.classList.remove("hidden");
+}
+
+/* Called with the `boot` object from /api/health (every poll) and from
+   /api/daemon (boot()). The edge this watches for is restoring -> ready:
+   the tail of the restore lands after the tick's session read, so the rail
+   needs one more refresh to show it. */
+function syncBootProgress(boot) {
+  const was = daemonBootPhase;
+  daemonBootPhase = boot && boot.phase === "restoring" ? "restoring" : null;
+  if (daemonBootPhase === "restoring") {
+    renderBootProgress(boot);
+  } else if (was === "restoring") {
+    const box = typeof document !== "undefined"
+      && document.getElementById("restore-queue-banner");
+    if (box) { box.classList.add("hidden"); box.textContent = ""; }
+    if (typeof refreshSessions === "function") refreshSessions();
+  }
 }
 
 function railMetaText(s) {
@@ -16395,6 +16440,28 @@ function showTermNotice(msg) {
 }
 
 function handleFrame(msg) {
+  if (msg.type === "shutdown") {
+    // The daemon wrote this before it stopped answering, so this page knows
+    // the outage was asked for instead of inferring it from silence
+    // (claunch-9akgh). `restart` says which: a successor is coming, or the
+    // daemon is being stopped and nothing will answer until someone starts
+    // one. A stop must not be dressed up as a restart that will resolve.
+    if (msg.restart === false) {
+      notify(
+        "daemon stopping",
+        "the daemon said it is stopping — nothing relaunches it on its own, " +
+          "so this page goes quiet until someone starts one",
+        { key: NOTICE_LINK, kind: "bad", sticky: true }
+      );
+      setDaemonOnline(false);
+    } else {
+      announceRestartAsked(
+        "the daemon said it is restarting — every open terminal reconnects " +
+          "to the next one, and this page re-reads everything when it answers"
+      );
+    }
+    return;
+  }
   if (msg.type === "init") {
     // Seed the grid with the session's current size without echoing it back;
     // the fit below sends this viewer's own size as the single resize.
@@ -51876,6 +51943,9 @@ async function boot() {
     return;   // down, or the auth overlay is up — the poll comes back to this
   }
   daemonCache = info;
+  // Guarded like the tail of this function: reduced harnesses slice boot()
+  // without the boot-progress block (tests/web/notice_check.js).
+  if (typeof syncBootProgress === "function") syncBootProgress(info.boot);
   // That read was authenticated and answered, so the cookie this socket
   // needs exists. boot() runs again on every recovery, and the guard inside
   // means only the first of those opens anything.
@@ -52513,6 +52583,10 @@ if (typeof document !== "undefined" && $("shadow-input")) {
 async function pollOnce() {
   const health = await daemonHealth();
   if (!health) { setDaemonOnline(false); return; }
+  // A successor answers while it is still restoring (claunch-9akgh); this
+  // is the tick that turns that into "restoring 12/33" on the rail. Guarded
+  // like the rest of this tick: reduced harnesses slice pollOnce alone.
+  if (typeof syncBootProgress === "function") syncBootProgress(health.boot);
   if (restartAsked) {
     if (health.boot_id === restartAsked.boot &&
         Date.now() - restartAsked.at < RESTART_DRAIN_MS) {
