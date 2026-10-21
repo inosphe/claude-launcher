@@ -340,6 +340,11 @@ nodes:
   2.6 「목록에서 고르는 입력」). 폼은 combobox를 그리고, 목록 밖의 값은 시작과 런
   도중 변경에서 거절된다. 예: `reviewer_harness: {type: string, options: {from:
   harnesses, of: reviewer_profile}}`.
+- 관련 있는 칸은 `group: <제목>`으로 한 블록에 묶는다(규격 2.6 「폼의 묶음」). 같은
+  `group`의 입력은 그 제목 아래에 모여 두 칸씩 짝지어 서고, 블록의 칸들은 서로 줄이
+  맞는다. 블록의 두 칸을 다 쓰게 하려면 `wide: true`를 단다 — 아래 칸들을 여는
+  스위치가 그 예로, 예: `force_pr: {type: bool, label: PR 강제, group: PR}`,
+  `session_routing: {type: bool, group: 라우팅, wide: true}`.
 - PM이 자식을 spawn할 때: MCP `spawn`의 `cflow_inputs`에
   `{"goal": "...", "invariants": [{"text": "...", "probe": "..."}]}`처럼 준다.
   CLI는 `--input goal=... --input scope=src/a --input scope=src/b` 또는

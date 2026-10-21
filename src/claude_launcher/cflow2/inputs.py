@@ -35,6 +35,12 @@ What :func:`apply` does with the values:
   delivered to every task, so the last task's prompt carries them for the
   agent's own check of the text-only items.
 
+Two declaration keys only shape the form, never the value: ``group`` puts the
+input in a block with a heading of that name (the other inputs of the same
+group are drawn beside it, so a group's rows line up with each other), and
+``wide: true`` makes the row take the whole width of its block instead of
+one of its two columns.
+
 A ``string`` input may declare ``options: {from, of, empty}``: its value is
 picked from a list the host fills at run time instead of a fixed ``choices``
 (the form draws a combobox, docs/cflow-v2.md 2.6). ``from`` names the list:
@@ -97,7 +103,7 @@ LIST_TYPES = (T_LIST, T_INVARIANTS, T_ACCEPTANCE)
 CHECK_TYPES = (T_INVARIANTS, T_ACCEPTANCE)
 
 KEYS = ("type", "label", "help", "required", "default", "choices", "placeholder", "precheck",
-        "set_by", "options")
+        "set_by", "options", "group", "wide")
 #: What ``options.from`` may name (the module docstring): the lists a host's
 #: catalog answers.
 OPT_PROFILES = "profiles"
@@ -203,6 +209,14 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
                 raise InputsError(f"input {name!r}: choices repeat a value")
         elif choices is not None:
             raise InputsError(f"input {name!r}: choices apply to type enum only")
+        group = decl.get("group")
+        if group is not None:
+            if not isinstance(group, str) or not group.strip():
+                raise InputsError(f"input {name!r}: group must be a non-empty name")
+            group = group.strip()
+        wide = decl.get("wide", False)
+        if not isinstance(wide, bool):
+            raise InputsError(f"input {name!r}: wide must be true or false")
         precheck = decl.get("precheck")
         if precheck is not None and precheck not in PRECHECKS:
             raise InputsError(f"input {name!r}: unknown precheck {precheck!r} "
@@ -236,6 +250,8 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
             "precheck": precheck,
             "set_by": sorted(set(set_by or [])),
             "options": options,
+            "group": group,
+            "wide": wide,
         }
         if decl.get("default") is not None:
             value, err = _coerce(entry, decl["default"], strict=True)

@@ -202,6 +202,9 @@ console.log("cflow2inputs_check: ok");
        return n;
      }
      ${slice("cflowInputsForm")}
+     ${slice("cflowInputBlocks")}
+     ${slice("cflowInputGroup")}
+     ${slice("cflowInputRow")}
      ${slice("cflowInputControl")}
      ${slice("cflowInputHelpToggle")}
      ctx.cflowInputsForm = cflowInputsForm;`)(fctx, fctx.document, fctx.Option);
@@ -248,4 +251,98 @@ console.log("cflow2inputs_check: ok");
   const goalRow = byClass(d, ".cf2-input").find((r) => r.dataset.input === "goal");
   assert.equal(goalRow.classList.contains("cf2-input-wide"), true,
     "a textarea takes the whole box");
+}
+
+// `group` and `wide` (claunch-qke6g): a group's rows live in a block with
+// that heading, and the box still reads their values out of the nested rows.
+{
+  function classList3() {
+    const set = new Set();
+    return { add: (c) => set.add(c), remove: (c) => set.delete(c),
+             contains: (c) => set.has(c),
+             toggle: (c, on) => { if (on === undefined ? !set.has(c) : on) set.add(c); else set.delete(c); } };
+  }
+  function byClass(root, q) {
+    const cls = q.replace(/^\./, "");
+    const out = [];
+    const walk = (n) => {
+      for (const c of n.children || []) {
+        if ((c.className || "").split(/\s+/).includes(cls)) out.push(c);
+        walk(c);
+      }
+    };
+    return (walk(root), out);
+  }
+  function elem(tag) {
+    const e = {
+      tag, children: [], dataset: {}, className: "", textContent: "",
+      value: "", checked: false, type: "", rows: 0, placeholder: "", title: "",
+      options: [],
+      appendChild(c) { e.children.push(c); return c; },
+      append(...cs) { for (const c of cs) e.children.push(c); },
+      addEventListener() {}, setAttribute() {},
+      querySelector(q) { return byClass(e, q)[0] || null; },
+      querySelectorAll(q) { return byClass(e, q); },
+    };
+    e.classList = classList3();
+    return e;
+  }
+  const fctx = { document: { createElement: (t) => elem(t) } };
+  fctx.Option = function (label, value) {
+    this.text = label; this.value = value === undefined ? label : value;
+  };
+  new Function("ctx", "document", "Option",
+    `const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
+     function el(tag, cls, text) {
+       const n = document.createElement(tag);
+       if (cls) n.className = cls;
+       if (text !== undefined) n.textContent = text;
+       return n;
+     }
+     ${slice("cflowInputsValues")}
+     ${slice("cflowInputsForm")}
+     ${slice("cflowInputBlocks")}
+     ${slice("cflowInputGroup")}
+     ${slice("cflowInputRow")}
+     ${slice("cflowInputControl")}
+     ${slice("cflowInputHelpToggle")}
+     ctx.cflowInputsForm = cflowInputsForm;
+     ctx.cflowInputsValues = cflowInputsValues;`)(fctx, fctx.document, fctx.Option);
+
+  const box = elem("div");
+  fctx.cflowInputsForm(box, [
+    { name: "a", type: "string" },
+    { name: "b", type: "bool", group: "Block" },
+    { name: "c", type: "string", group: "Block" },
+    { name: "d", type: "string", group: "Block", wide: true },
+    { name: "e", type: "string" },
+  ], [], null);
+  const groups = byClass(box, ".cf2-input-group");
+  assert.equal(groups.length, 1, "the grouped inputs share one block");
+  assert.equal(groups[0].children[0].textContent, "Block", "the block is titled by the group");
+  assert.deepStrictEqual(groups[0].querySelectorAll(".cf2-input").map((r) => r.dataset.input),
+    ["b", "c", "d"], "every member of the group is drawn inside it");
+  assert.deepStrictEqual(byClass(box, ".cf2-input").map((r) => r.dataset.input),
+    ["a", "b", "c", "d", "e"], "an ungrouped input stays a row of the box");
+  const wide = groups[0].querySelectorAll(".cf2-input")
+    .find((r) => r.dataset.input === "d");
+  assert.ok(wide.classList.contains("cf2-input-full"),
+    "`wide` takes the row's width without moving the caption above it");
+  groups[0].querySelectorAll(".cf2-input")
+    .find((r) => r.dataset.input === "c").querySelector(".cf2-input-value").value = "x";
+  assert.deepStrictEqual(fctx.cflowInputsValues(box), { b: false, c: "x" },
+    "values are read out of the block's rows too");
+
+  // A declaration that interleaves a group still draws that group once, at
+  // the first member's place (docs 2.6).
+  const mixed = elem("div");
+  fctx.cflowInputsForm(mixed, [
+    { name: "a", type: "string", group: "G" },
+    { name: "b", type: "string" },
+    { name: "c", type: "string", group: "G" },
+  ], [], null);
+  const blocks = byClass(mixed, ".cf2-input-group");
+  assert.equal(blocks.length, 1, "an interleaved group is drawn as one block");
+  assert.deepStrictEqual(byClass(mixed, ".cf2-input").map((r) => r.dataset.input),
+    ["a", "c", "b"], "the block sits where the group first appears");
 }

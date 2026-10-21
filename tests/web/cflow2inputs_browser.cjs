@@ -13,35 +13,40 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
 
 /* The start inputs of improv-worker-v2, cut down to one of each shape: a wide
    textarea, a one-line string, a checkbox, an enum, and the combobox rows
-   whose `options` list arrives from the daemon. */
+   whose `options` list arrives from the daemon. `group`/`wide` are the
+   workflow's own (claunch-qke6g): the reviewer, routing and PR inputs are
+   blocks, and the routing switch spans its block. */
 const FIELDS = [
   { name: 'goal', type: 'text', label: 'Goal', required: true,
     help: 'This round\u2019s goal.' },
   { name: 'issue', type: 'string', label: 'Issue', default: '' },
-  { name: 'force_pr', type: 'bool', label: 'PR only',
+  { name: 'max_rounds', type: 'int', label: 'Max rounds',
+    help: 'How many rounds this run may take.' },
+  { name: 'force_pr', type: 'bool', label: 'PR only', group: 'PR',
     help: 'Land only as a pull request.' },
-  { name: 'force_no_pr', type: 'bool', label: 'No pull request',
+  { name: 'force_no_pr', type: 'bool', label: 'No pull request', group: 'PR',
     help: 'Only the existing local landing is used; the request explains why.' },
   { name: 'relation', type: 'enum', choices: ['stacked', 'independent'],
     default: 'stacked', label: 'Relation to parent',
     help: 'stacked works on the parent\u2019s stack branch; independent works on master.' },
   { name: 'reviewer_profile', type: 'string', label: 'Reviewer profile',
-    placeholder: 'e.g. work', default: '',
+    placeholder: 'e.g. work', default: '', group: 'Reviewer',
     help: 'The profile of the child reviewer. Empty inherits this session\u2019s.',
     options: { from: 'profiles', empty: 'session' } },
   { name: 'reviewer_harness', type: 'string', label: 'Reviewer harness',
-    placeholder: 'e.g. codex', default: '',
+    placeholder: 'e.g. codex', default: '', group: 'Reviewer',
     help: 'The harness of the child reviewer. Empty uses the profile\u2019s own.',
     options: { from: 'harnesses', of: 'reviewer_profile' } },
-  { name: 'session_routing', type: 'bool', default: false,
+  { name: 'session_routing', type: 'bool', default: false, group: 'Routing',
+    wide: true,
     label: 'Difficulty-based session routing',
     help: 'Each item is rated and easy ones are implemented by a forked child.' },
   { name: 'delegate_profile', type: 'string', label: 'Delegate child profile',
-    placeholder: 'e.g. ds4', default: '',
+    placeholder: 'e.g. ds4', default: '', group: 'Routing',
     help: 'The profile of the delegated child. Empty uses the daemon setting.',
     options: { from: 'profiles', empty: 'delegate' } },
   { name: 'delegate_model', type: 'string', label: 'Delegate child model preset',
-    placeholder: 'e.g. small', default: '',
+    placeholder: 'e.g. small', default: '', group: 'Routing',
     help: 'The model of the delegated child, as its profile\u2019s harness accepts it.',
     options: { from: 'models', of: 'delegate_profile' } },
 ];
@@ -129,11 +134,24 @@ const OPTIONS = {
           columns: getComputedStyle(box).gridTemplateColumns.split(/\s+/).filter(Boolean).length,
           overflow: box.scrollWidth > box.clientWidth + 1,
           height: rect(box).h,
+          boxWidth: rect(box).w,
           issue: rect(row('issue')),
+          maxRounds: rect(row('max_rounds')),
           forcePr: rect(row('force_pr')),
+          forceNoPr: rect(row('force_no_pr')),
           forcePrLabel: rect(row('force_pr').querySelector('.cf2-input-label')),
           relationLabel: rect(row('relation').querySelector('.cf2-input-label')),
           relationControl: rect(row('relation').querySelector('.cf2-input-control')),
+          routing: rect(row('session_routing')),
+          routingControl: rect(row('session_routing').querySelector('.cf2-input-control')),
+          delegateProfile: rect(row('delegate_profile')),
+          delegateModel: rect(row('delegate_model')),
+          groups: [...box.querySelectorAll('.cf2-input-group')].map((s) => Object.assign(
+            rect(s),
+            { title: s.querySelector('.cf2-input-group-title').textContent,
+              fields: [...s.querySelectorAll('.cf2-input')].map((r) => r.dataset.input),
+              columns: getComputedStyle(s.querySelector('.cf2-input-group-fields'))
+                .gridTemplateColumns.split(/\s+/).filter(Boolean).length })),
           profileRow: rect(row('reviewer_profile')),
           harnessRow: rect(row('reviewer_harness')),
           profileLabel: rect(row('reviewer_profile').querySelector('.cf2-input-label')),
@@ -167,9 +185,38 @@ const OPTIONS = {
       `neighbouring inputs share a row (${wide.profileRow.y} vs ${wide.harnessRow.y})`);
     assert.ok(wide.harnessRow.x > wide.profileRow.x + wide.profileRow.w / 2,
       'the second input is to the right of the first');
-    assert.ok(Math.abs(wide.issue.y - wide.forcePr.y) < 1,
-      'a one-line input and a checkbox share a row');
+    assert.ok(Math.abs(wide.issue.y - wide.maxRounds.y) < 1,
+      'neighbouring inputs without a group share a row');
     assert.equal(wide.overflow, false, 'the box does not overflow its container');
+
+    // ---- groups: reviewer, routing and PR are blocks of their own -------
+    assert.deepEqual(wide.groups.map((g) => g.title), ['PR', 'Reviewer', 'Routing'],
+      'each declared group gets one block, in declaration order');
+    assert.deepEqual(wide.groups.map((g) => g.fields),
+      [['force_pr', 'force_no_pr'], ['reviewer_profile', 'reviewer_harness'],
+       ['session_routing', 'delegate_profile', 'delegate_model']],
+      'every member of a group is drawn inside that group');
+    // The block starts at the box's own content edge and spans it, so its
+    // caption/control columns sit on the same x as the rows above it.
+    assert.ok(Math.abs(wide.groups[0].x - wide.issue.x) < 2,
+      'a group block starts on the box column, like the rows above it');
+    assert.ok(wide.groups[0].w > wide.boxWidth - 40,
+      'a group block spans the box');
+    assert.ok(wide.groups[0].y >= wide.maxRounds.bottom - 1,
+      'a group starts below the rows before it');
+    // The block is what pairs the rows of one concern: without it a field
+    // paired with whichever unrelated field happened to come next.
+    assert.ok(Math.abs(wide.forcePr.y - wide.forceNoPr.y) < 1,
+      'the two rows of the PR block share a line');
+    assert.ok(wide.forceNoPr.x > wide.forcePr.right,
+      'the second row of the block is to the right of the first');
+    assert.ok(Math.abs(wide.delegateProfile.y - wide.delegateModel.y) < 1,
+      'the delegate rows line up with each other');
+    assert.ok(wide.routing.bottom <= wide.delegateProfile.y + 1,
+      'a `wide` row takes the line above the pair it governs');
+    assert.ok(Math.abs(wide.routingControl.right - wide.groups[2].right) < 2
+              && wide.routingControl.w > wide.delegateProfile.w,
+      'a `wide` row spans both columns of its block');
 
     // ---- one line per input: the caption, then the control --------------
     assert.ok(Math.abs(wide.profileLabel.y + wide.profileLabel.h / 2
@@ -246,6 +293,10 @@ const OPTIONS = {
       await page.setViewportSize({ width, height: 900 });
       const narrow = await measure();
       assert.equal(narrow.columns, 1, `${width}: one input to a row`);
+      assert.deepEqual(narrow.groups.map((g) => g.columns), [1, 1, 1],
+        `${width}: a group block is one column too`);
+      assert.ok(narrow.delegateModel.y > narrow.delegateProfile.bottom - 1,
+        `${width}: the rows of a group stack`);
       assert.equal(narrow.overflow, false, `${width}: no horizontal overflow`);
       assert.ok(narrow.forcePr.y > narrow.issue.bottom - 1,
         `${width}: the next input starts below the previous one`);

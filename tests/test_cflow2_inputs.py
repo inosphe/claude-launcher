@@ -38,7 +38,8 @@ def test_schema_lands_in_meta():
     assert list(sch) == ["goal", "issue", "rounds", "dry", "mode", "scope", "invariants", "acceptance"]
     assert sch["goal"] == {"type": "text", "label": "목표", "help": "", "required": True,
                            "default": None, "choices": None, "placeholder": "",
-                           "precheck": None, "set_by": [], "options": None}
+                           "precheck": None, "set_by": [], "options": None,
+                           "group": None, "wide": False}
     assert sch["rounds"]["default"] == 3 and sch["mode"]["choices"] == ["full", "quick"]
     assert C("nodes: {a: {prompt: a}}\nbody: a\n").meta["inputs"] == {}
 
@@ -55,10 +56,32 @@ def test_schema_lands_in_meta():
     ("x: {type: list, default: a}", "is not a list"),
     ("x: {type: invariants, default: [{probe: true}]}", "non-empty text"),
     ("x: {type: bool, precheck: docker}", "unknown precheck 'docker'"),
+    ("x: {type: string, group: ''}", "group must be a non-empty name"),
+    ("x: {type: string, group: 3}", "group must be a non-empty name"),
+    ("x: {type: string, wide: yes}", "wide must be true or false"),
 ])
 def test_schema_errors_are_compile_errors(decl, msg):
     with pytest.raises(FrontendError, match=msg):
         C(f"inputs:\n  {decl}\nnodes: {{a: {{prompt: a}}}}\nbody: a\n")
+
+
+def test_group_and_wide_shape_the_form_only():
+    """`group` and `wide` are form layout (docs 2.6): the schema carries them
+    to the form, and the values they sit beside validate as before."""
+    chart = C("""
+    inputs:
+      a: {type: string, group: Block}
+      b: {type: string, group: " Block "}
+      c: {type: bool, group: Block, wide: true}
+      d: {type: string}
+    nodes: {x: {prompt: x}}
+    body: x
+    """)
+    sch = chart.meta["inputs"]
+    assert [sch[n]["group"] for n in "abcd"] == ["Block", "Block", "Block", None]
+    assert [sch[n]["wide"] for n in "abcd"] == [False, False, True, False]
+    values, errors = inputs.normalize(sch, {"a": "x", "d": "y"})
+    assert errors == {} and values["c"] is False
 
 
 def test_normalize_coerces_defaults_and_reports_per_field():
@@ -140,6 +163,17 @@ def test_bundled_definitions_declare_inputs():
     assert worker["invariants"]["type"] == "invariants"
     assert worker["acceptance"]["type"] == "acceptance"
     assert layers.load("sample-v2").meta["inputs"]
+
+
+def test_worker_v2_groups_the_reviewer_routing_and_pr_inputs():
+    """claunch-qke6g: the fields of one concern share a block, so the operator
+    reads them together and their rows line up."""
+    sch = layers.load("improv-worker-v2").meta["inputs"]
+    assert {n: d["group"] for n, d in sch.items() if d["group"]} == {
+        "reviewer_profile": "리뷰어", "reviewer_harness": "리뷰어",
+        "session_routing": "라우팅", "delegate_profile": "라우팅", "delegate_model": "라우팅",
+        "force_pr": "PR", "force_no_pr": "PR"}
+    assert [n for n, d in sch.items() if d["wide"]] == ["session_routing"]
 
 
 # --------------------------------------------------------------------------- #
