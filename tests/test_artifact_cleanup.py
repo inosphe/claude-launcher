@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -666,6 +668,7 @@ def test_a_busy_window_schedules_instead_of_ending(setup, monkeypatch):
             result = await (await client.post("/api/artifact-cleanup", json=body)).json()
             assert result["status"] == "scheduled"
             assert "the window is held" in result["reason"]
+            assert result["already"] is False  # this call started the clock
             # The plan did not run; the tree is untouched.
             assert mine.exists()
             # The daemon's later pass finds the request and deletes with a free window.
@@ -758,5 +761,131 @@ def test_the_clock_runs_a_due_schedule_when_the_window_frees(setup):
                 await task
         assert not mine.exists() and not window.held
         assert service.scheduled() == []
+
+    asyncio.run(scenario())
+
+
+def test_re_scheduling_after_expiry_starts_a_fresh_clock(setup, monkeypatch):
+    # claunch-q4cqy.2 review, finding 1: inheriting an expired record's
+    # expires_at answered "scheduled" for a request the daemon would drop on
+    # its next pass, so nothing ever ran.
+    service, _, _, _ = setup
+    monkeypatch.setattr(ac, "SCHEDULE_TTL", 3600.0)
+    first = service.schedule("s1", "busy")
+    stale = service._schedule_record("s1")
+    stale["expires_at"] = time.time() - 1
+    stale["attempts"] = 3
+    service._write_schedule(stale)
+    again = service.schedule("s1", "busy again")
+    assert again["expires_at"] > time.time()
+    assert again["expires_at"] != first["expires_at"]
+    assert again["attempts"] == 0
+    assert service.scheduled() == ["s1"]
+    assert service.run_scheduled("s1")["status"] == "ran"
+
+
+def test_scheduled_drops_an_expired_record(setup):
+    # Finding 2: nothing else walks the cleanup folder, so an expired record
+    # stayed on disk forever.
+    service, _, _, _ = setup
+    service.schedule("s1", "busy")
+    stale = service._schedule_record("s1")
+    stale["expires_at"] = time.time() - 1
+    service._write_schedule(stale)
+    assert service.scheduled() == []
+    assert service._schedule_record("s1") is None
+    assert not service._schedule_file("s1").exists()
+
+
+def test_a_refusal_that_merely_mentions_a_session_keeps_the_schedule(setup, monkeypatch):
+    # Finding 5: "invalid session name in ..." also contains "session", and
+    # matching it abandoned a cleanup that could still run.
+    service, _, _, _ = setup
+    monkeypatch.setattr(ac.Cleanup, "plan", lambda self, session, **kw: (_ for _ in ()).throw(
+        ac.CleanupError("invalid session name in C:/scratch")))
+    service.schedule("s1", "busy")
+    result = service.run_scheduled("s1")
+    assert result["status"] == "cleanup_pending"
+    assert service._schedule_record("s1") is not None
+    assert service.scheduled() == ["s1"]
+
+
+def test_a_plan_and_a_second_refusal_report_the_standing_schedule(setup):
+    # Finding 3: a caller that sees the standing schedule reports it instead of
+    # scheduling a retry of its own.
+    service, root, _, _ = setup
+    completed(root / "s1c1012000000")
+    service.schedule("s1", "the window is held by targeted:s9")
+    plan = service.plan("s1")
+    assert plan["scheduled"]["last_reason"] == "the window is held by targeted:s9"
+    assert plan["scheduled"]["attempts"] == 0
+
+    class Window:
+        async def acquire(self, cls, **kwargs):
+            return {"granted": False, "reason": "the window is held by targeted:s9"}
+        def release(self, token):
+            raise AssertionError("an ungranted window is never released")
+
+    async def scenario():
+        app = web.Application()
+        app["manager"], app["window"] = service.manager, Window()
+        artifact_cleanup_api.install(app)
+        before = service._schedule_record("s1")["created_at"]
+        async with TestClient(TestServer(app)) as client:
+            body = {"session": "s1", "plan_id": service.plan("s1")["plan_id"]}
+            first = await (await client.post("/api/artifact-cleanup", json=body)).json()
+            second = await (await client.post("/api/artifact-cleanup", json=body)).json()
+            # Both refusals point at the schedule that was already standing;
+            # neither starts a second clock.
+            assert first["status"] == "scheduled" and first["already"] is True
+            assert second["status"] == "scheduled" and second["already"] is True
+            assert service._schedule_record("s1")["created_at"] == before
+    asyncio.run(scenario())
+
+
+def test_cancelling_the_clock_waits_for_a_running_cleanup(setup, monkeypatch):
+    # Finding 4: cancellation returned the exclusive grant while the deletion
+    # thread was still running, so a test could start on half-deleted files.
+    service, root, _, _ = setup
+    completed(root / "s1c1012000000")
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = ac.Cleanup.run_scheduled
+
+    def slow(self, session):
+        started.set()
+        try:
+            return original(self, session)
+        finally:
+            release.wait(10)
+            finished.set()
+
+    monkeypatch.setattr(ac.Cleanup, "run_scheduled", slow)
+    service.schedule("s1", "busy")
+    held = {"now": False}
+
+    class Window:
+        async def acquire(self, cls, **kwargs):
+            held["now"] = True
+            return {"granted": True, "grant_id": "clock"}
+        def release(self, token):
+            # The only assertion that matters: the deletion is over by now.
+            assert finished.is_set(), "released before the cleanup thread finished"
+            held["now"] = False
+
+    async def scenario():
+        task = asyncio.ensure_future(
+            artifact_cleanup_api.scheduled_clock({"window": Window()}, service, interval=0.01))
+        for _ in range(500):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set()
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert held["now"] and not finished.is_set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set() and not held["now"]
 
     asyncio.run(scenario())

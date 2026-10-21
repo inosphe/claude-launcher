@@ -88,6 +88,18 @@ SCHEDULE_TTL = 24 * 3600.0
 SCHEDULE_MAX_ATTEMPTS = 20
 SCHEDULE_NAME = "scheduled.json"
 
+#: ``_context()`` refusals that mean the session itself is gone. A scheduled run
+#: that hits one of these gives up instead of retrying, because no later attempt
+#: can bring the session back. Matched exactly: a refusal that merely mentions a
+#: session ("invalid session name in ...") says nothing about the session being
+#: over, and abandoning on it would drop a cleanup that could still run
+#: (claunch-q4cqy.2 review, finding 5).
+SESSION_GONE = frozenset({
+    "a managed session is required",
+    "unknown session",
+    "cleanup is only available to a live session",
+})
+
 
 def _snapshot(path: Path, deadline: float | None = None) -> dict:
     _plain(path)
@@ -339,6 +351,13 @@ class Cleanup:
                  for p, why in self._candidates(session, scratch, root, repo)]
         now = time.time()
         plan = {"plan_id": token, "session": session, "created_at": now, "items": items}
+        standing = self._schedule_record(session)
+        if standing:
+            # A scheduler is already waiting for the window; a caller that sees
+            # this reports it instead of scheduling its own retry
+            # (claunch-q4cqy.2 review, finding 3).
+            plan["scheduled"] = {key: standing.get(key) for key in
+                                 ("created_at", "expires_at", "attempts", "last_reason")}
         with self._plans_lock:
             self.plans = {k: v for k, v in self.plans.items() if now - v["created_at"] < 600}
             # One outstanding plan per session, bounded by the session registry.
@@ -369,6 +388,14 @@ class Cleanup:
             return None
         return record
 
+    def scheduled_record(self, session):
+        """The cleanup already waiting for this session, or None.
+
+        Callers use this to say "already scheduled" instead of scheduling a
+        second time; the record itself is what the clock runs.
+        """
+        return self._schedule_record(session)
+
     def _write_schedule(self, record) -> None:
         folder = self._schedule_file(record["session"]).parent
         folder.mkdir(exist_ok=True)
@@ -384,18 +411,26 @@ class Cleanup:
     def schedule(self, session, reason):
         """Remember that this session's cleanup must run when the window frees.
 
-        Scheduling twice keeps the first clock and the attempt count; only the
+        Scheduling again keeps the first clock and the attempt count; only the
         reason is refreshed. A caller that retries its own apply therefore does
         not reset the bound that eventually gives up.
+
+        A record that has already given up -- expired or out of attempts -- is
+        not inherited: handing its clock to a new request would make the answer
+        "scheduled" for a request the daemon will never run (claunch-q4cqy.2
+        review, finding 1).
         """
         self._context(session)  # a schedule belongs to a live session
         now = time.time()
         previous = self._schedule_record(session)
+        spent = (not previous
+                 or float(previous.get("expires_at") or 0) <= now
+                 or int(previous.get("attempts") or 0) >= SCHEDULE_MAX_ATTEMPTS)
         record = {
             "session": session,
-            "created_at": (previous or {}).get("created_at", now),
-            "expires_at": (previous or {}).get("expires_at", now + SCHEDULE_TTL),
-            "attempts": int((previous or {}).get("attempts") or 0),
+            "created_at": now if spent else previous["created_at"],
+            "expires_at": now + SCHEDULE_TTL if spent else previous["expires_at"],
+            "attempts": 0 if spent else int(previous.get("attempts") or 0),
             "last_reason": str(reason or ""),
         }
         self._write_schedule(record)
@@ -413,15 +448,26 @@ class Cleanup:
             log.info("cleanup: schedule for %s dropped (%s)", session, why)
 
     def scheduled(self):
-        """Live sessions whose cleanup is waiting for the window."""
+        """Live sessions whose cleanup is waiting for the window.
+
+        A record past its TTL is dropped here: nothing else walks this folder,
+        and ``schedule()`` treats an expired record as absent, so leaving the
+        file would only keep a dead request on disk (claunch-q4cqy.2 review,
+        finding 2).
+        """
         names = []
+        now = time.time()
         for current in self.manager.list():
             if current.exited or getattr(current, "held_at", None):
                 continue  # the exit funnel's reaper owns an ended session
             name = current.sdef.name
             record = self._schedule_record(name)
-            if record and float(record.get("expires_at") or 0) > time.time():
-                names.append(name)
+            if not record:
+                continue
+            if float(record.get("expires_at") or 0) <= now:
+                self.unschedule(name, "expired")
+                continue
+            names.append(name)
         return names
 
     def run_scheduled(self, session):
@@ -445,7 +491,7 @@ class Cleanup:
             plan = self.plan(session)
             document = self.apply(session, plan["plan_id"])
         except CleanupError as exc:
-            if "session" in str(exc):
+            if str(exc) in SESSION_GONE:
                 # Ended, unknown or not live: the exit funnel's reaper owns it
                 # now, and retrying cannot bring the session back.
                 self.unschedule(session, str(exc))

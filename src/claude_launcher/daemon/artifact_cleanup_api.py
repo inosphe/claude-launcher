@@ -84,6 +84,7 @@ def install(app):
                     # at the terminal (claunch-q4cqy.2). Keep the request and
                     # let scheduled_clock() run it when the window frees up.
                     reason = grant.get("reason", "measurement window unavailable")
+                    already = service.scheduled_record(session) is not None
                     try:
                         service.schedule(session, reason)
                         status = "scheduled"
@@ -91,7 +92,7 @@ def install(app):
                         reason = f"{reason} (could not schedule: {exc})"
                         status = "cleanup_pending"
                     return web.json_response({"status": status, "plan_id": token,
-                                              "reason": reason})
+                                              "reason": reason, "already": already})
                 try:
                     job = asyncio.create_task(asyncio.to_thread(service.apply, session, token))
                     try:
@@ -134,8 +135,19 @@ async def scheduled_clock(app, service, interval=SCHEDULED_POLL):
                                          workers=1, wait=0)
             if not grant.get("granted"):
                 continue  # still busy; the next pass asks again
+            job = asyncio.create_task(asyncio.to_thread(service.run_scheduled, session))
             try:
-                await asyncio.to_thread(service.run_scheduled, session)
+                try:
+                    await asyncio.shield(job)
+                except asyncio.CancelledError:
+                    # Shutdown cancels the clock. to_thread keeps running after
+                    # that, so wait for the deletion before the exclusive grant
+                    # goes back -- a test must not start on half-deleted files
+                    # (claunch-q4cqy.2 review, finding 4).
+                    while not job.done():
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.wait([job])
+                    raise
             except Exception:  # noqa: BLE001 -- one session must not stop the others
                 log.warning("cleanup: scheduled pass failed for %s", session, exc_info=True)
             finally:

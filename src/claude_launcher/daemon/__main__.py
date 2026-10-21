@@ -584,6 +584,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             await teardown.step("cflow2_clock", cflow2_clock.shutdown())
         await teardown.step("ping_clock", ping_clock.shutdown())
         await teardown.step("window_reminder_clock", window_reminder_clock.shutdown())
+        await teardown.step("artifact_cleanup_clock", _stop_clock(app["artifact_cleanup_clock"]))
         await teardown.step("delayed_sweep_clock", delayed_sweep_clock.shutdown())
         await teardown.step("reminder_clock", reminder_clock.shutdown())
         await teardown.step("ask_clock", ask_clock.shutdown())
@@ -609,6 +610,20 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("http runner", runner.cleanup())
         teardown.report()
     return RESTART_CODE if app["restart_requested"] else 0
+
+
+async def _stop_clock(task) -> None:
+    """Cancel a bare clock task and wait for it to finish.
+
+    The task's own handler drains work it already started before releasing a
+    measurement window grant, so awaiting the task is what keeps the grant held
+    for the deletion (artifact_cleanup_api.scheduled_clock).
+    """
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 class _Teardown:
