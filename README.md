@@ -687,6 +687,9 @@ A profile overlays `api_key`, `models`, `context_window`, `auto_compact_at`,
 `reasoning_effort` and `harness_options` on its provider (root ancestor first,
 the profile itself last); `endpoints` and
 `openai_reasoning_format` identify the backend and stay on the provider.
+The profile's own `reasoning_effort` can be set from the Profiles page
+(`#/settings/profiles`) instead of by hand — same key, same precedence, and
+removing it there is the same as deleting the line.
 
 `endpoints.openai` is the OpenAI-compatible API base URL, including any
 version path required by the backend (for Fireworks,
@@ -4414,12 +4417,27 @@ projects and each workspace's beads board, and each row's **Sync** panel
 The Settings page has four sections. **General** is the machine's own
 settings.
 **Profiles** (`#/settings/profiles`) is the profile manager: one row per
-profile with its harness, provider, config directory and permission mode, and
-the control for that mode — which is the one profile setting every session
-feels before it does anything. A row whose value differs from what claunch
-converges shows the move (`auto → plan`) rather than a value, because that
-profile's convergence has not run yet; a profile on another harness shows a
-dash, since the key is one Claude Code reads and that harness never will.
+profile with its harness, provider, reasoning effort, config directory and
+permission mode, and the control for that mode — which is the one profile
+setting every session feels before it does anything. A row whose value differs
+from what claunch converges shows the move (`auto → plan`) rather than a
+value, because that profile's convergence has not run yet; a profile on
+another harness shows a dash, since the key is one Claude Code reads and that
+harness never will.
+
+The **Effort** cell is the default reasoning effort a launch of that profile
+applies, resolved the way the launch resolves it. It distinguishes three
+states because they answer different questions: `harness default` (no layer
+sets one), the value alone (declared on this profile), and the value with
+`(inherited)` (from the provider, the template or the profile's `env`). The
+selector writes exactly one key, `profiles.<name>.reasoning_effort`, and offers
+the levels the neutral provider spec carries (`low`, `medium`, `high`); a value
+written by hand outside them stays visible and selectable so the next Save
+cannot silently rewrite it. **Save** with `(harness default)` removes the key
+and lets the provider — or the harness — decide again. The value applies to
+new sessions; an effort chosen when a session was created wins for that one.
+A profile whose harness has no translation for the field shows why its launch
+will be refused instead of a value (`reasoning_effort_problem`).
 
 Permission mode supports a **shared default and per-profile overrides** — see
 [Keys claunch defaults](#keys-claunch-defaults). **Apply shared default** saves
@@ -4683,7 +4701,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/line-sync` | the session line's sync state: `{mode: local\|remote, text, rev, at, client}` (memory only; gone on a daemon restart) |
 | POST   | `/api/sessions/{name}/line-sync` | `{mode}` switches the session (every viewer follows); `{text, if_text?, client}` replaces the shared text (409 while `local`; `if_text` makes it conditional). Each change goes to every attached viewer as a `line_sync` frame |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
-| GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details (each profile's own row also carries `directory`, `permission_mode` when it runs Claude, and that profile's `harness_policy`) |
+| GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details (each profile's own row also carries `directory`, `permission_mode` when it runs Claude, that profile's `harness_policy`, `reasoning_effort` — the effort a launch applies — and `reasoning_effort_declared`; the payload also publishes `reasoning_effort_choices`) |
+| POST   | `/api/profiles/reasoning-effort` | declare a profile's default reasoning effort: `{"profile": "work", "effort": "medium"}` (any of `low`, `medium`, `high`), or `{"effort": null}` to remove the key and let the provider or the harness decide; `400` on an unknown level or profile, before anything is written |
 | POST   | `/api/profiles/permission-mode` | declare claunch's default permission mode and converge: `{"mode": "auto"}` (any of `default`, `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`), or `{"mode": null}` to undeclare and fall back to the packaged default; `400` on an unknown mode, before anything is written |
 | GET    | `/api/borrow-options`          | `?profile=PROFILE[:HARNESS]` — secret-free lender validation; returns every base-profile option, including the runtime base profile, with policy/credential status and `selectable` |
 | GET    | `/api/roles`                   | packaged role preview (name, aliases, stance); a selected mesh's `/roles` resource is authoritative |
