@@ -497,7 +497,42 @@ html[data-theme="light"] #term-tps-overlay {
 }
 #sg-tip .sg-tip-close:hover { color: #e6edf3; background: #30363d; }
 #sg-tip .sg-tip-close:focus-visible { outline: 2px solid #58a6ff; }
-#session-list { list-style: none; overflow-y: auto; overflow-x: hidden; flex: 1; }
+#session-list { list-style: none; overflow-y: auto; overflow-x: hidden; flex: 1;
+  /* A row the browser brings into view (keyboard focus, the rail's own `k`
+     movement, a tab press) is aimed at the scroller's top edge, which the
+     sticky group heading covers (`position: sticky; top: 0` below). Reserve
+     the heading's height so the row lands under it rather than behind it. */
+  scroll-padding-top: 30px; }
+/* The ancestor band (renderRailAncestors, app.js): one line per direct
+   ancestor of the session at the top of the list, root first. It sits above
+   the scroller, so it holds still while the rows move, and it is hidden --
+   taking no space at all -- while that session has no ancestors above it. */
+#rail-ancestors {
+  list-style: none; margin: 0; padding: 0; flex: none;
+  background: #14161a; border-bottom: 1px solid #2a2e36;
+}
+#rail-ancestors li { display: block; margin: 0; padding: 0; }
+#rail-ancestors .rail-ancestor {
+  display: flex; align-items: center; gap: 5px; width: 100%;
+  padding: 3px 10px; border: 0; border-radius: 0; background: none;
+  color: #8b949e; font-size: 11px; line-height: 14px; text-align: left;
+  cursor: pointer;
+}
+#rail-ancestors .rail-ancestor:hover { background: #22262d; color: #e6edf3; }
+#rail-ancestors .rail-ancestor:focus-visible {
+  outline: 2px solid #58a6ff; outline-offset: -2px;
+}
+#rail-ancestors .rail-ancestor-tick { flex: none; color: #6e7681; }
+#rail-ancestors .rail-ancestor-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The oldest links of a chain longer than RAIL_ANCESTOR_MAX, folded into one
+   count line so a deep chain still costs at most three rows. */
+#rail-ancestors .rail-ancestor-more {
+  display: block; padding: 3px 10px; color: #6e7681; font-size: 11px;
+  line-height: 14px;
+}
 #session-list .session-group {
   display: block; padding: 0; border: 0; background: transparent; list-style: none;
 }

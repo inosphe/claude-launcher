@@ -403,6 +403,7 @@ CHECKS = [
         "lineage_check.js",
         "railgroupdepth_check.js",
         "raillineagekin_check.js",
+        "railancestors_check.js",
         "sessionfilters_check.js",
         "restorequeue_check.js",
         "sessiongrouptabs_check.js",

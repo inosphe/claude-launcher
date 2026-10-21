@@ -460,6 +460,25 @@ check("the reveal is what lays the rail out, and only in the list view",
       /function layRailOut\(\)/.test(src)
       && /const laidOut = sessionView === "grid" \? null : layRailOut\(\);/.test(src));
 
+/* The press and the ancestor band above the list (railancestors_check.js owns
+   the band itself): a jump has to show the landed card's chain, and the band
+   changes the list's box, so it is pointed and painted before the scroll is
+   measured. */
+const revealSrc = slice("revealSessionCard");
+const pinAt = revealSrc.indexOf("pinRailAncestors(name, GOTO_FLASH_MS)");
+check("the press pins the ancestor band to the row it lands on",
+      pinAt >= 0, revealSrc.slice(0, 0));
+check("...before the scroll that has to measure the list with the band in place",
+      pinAt >= 0 && pinAt < revealSrc.indexOf("scrollIntoView"),
+      { pinAt, scrollAt: revealSrc.indexOf("scrollIntoView") });
+check("the pin call is guarded, so a sliced harness still runs the press",
+      /typeof pinRailAncestors === "function"/.test(revealSrc));
+check("every rebuild repaints the band from the rows it just drew",
+      /renderRailAncestors\(\)/.test(slice("refreshSessions")));
+check("the band is in the rail, above the list it describes",
+      html.indexOf('id="rail-ancestors"') > 0
+      && html.indexOf('id="rail-ancestors"') < html.indexOf('id="session-list"'));
+
 if (failures) {
   console.log(`${failures} failure(s)`);
   process.exit(1);

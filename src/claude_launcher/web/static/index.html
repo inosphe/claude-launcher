@@ -244,6 +244,14 @@
          back to its top. -->
     <div id="session-group-header" class="session-group-header hidden" role="button"
          tabindex="0" aria-label="Scroll the open group to its top"></div>
+    <!-- The direct ancestors (parent, grandparent, ...) of the session at the
+         top of the list, one line each, drawn as a small band above the
+         scroller so the chain stays in view while its rows move under it
+         (renderRailAncestors, app.js). Hidden -- no height -- while that
+         session has no ancestor above it. A line is a button that scrolls the
+         rail to that ancestor's card. -->
+    <ul id="rail-ancestors" class="hidden"
+        aria-label="Ancestors of the session at the top of the list"></ul>
     <!-- Every session the rail can show: this daemon's rows (li[data-name],
          keyed by bare name, with their controls) and other daemons' members
          of the meshes held here (li.shadow-card, GET /api/shadows,

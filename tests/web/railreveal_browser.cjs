@@ -30,6 +30,15 @@ for (let i = 0; i < ROWS; i++) {
   sessions.push({ name: `s${String(i).padStart(3, "0")}`, status: "idle", cwd: "/repo",
                   harness: "claude", model: "opus" });
 }
+/* The target gets a parent and a grandparent, near the foot of the rail: the
+   press has to land the card, keep the rail long enough for the layout-skip
+   regression, AND show the chain above it (renderRailAncestors). */
+const GRANDPARENT = `s${String(ROWS - 22).padStart(3, "0")}`;
+const PARENT = `s${String(ROWS - 21).padStart(3, "0")}`;
+for (const s of sessions) {
+  if (s.name === PARENT) s.parent = GRANDPARENT;
+  if (s.name === TARGET) s.parent = PARENT;
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
@@ -116,6 +125,45 @@ const landing = (page, name) => page.evaluate((name) => {
     // and still reads as not found.
     assert.ok(Math.abs(landed.error) < landed.railHeight / 2,
       `the row is centred, not merely in view (error ${landed.error}px, rail ${landed.railHeight}px)`);
+
+    // The press also points the ancestor band at the card it landed on: the
+    // chain shown is the landed session's (not whichever row the scroll left
+    // at the top), and it costs a few lines. This is measured after the
+    // mark's 1.6s, so a band that only followed the top row would fail here.
+    const band = await page.evaluate(() => {
+      const b = document.querySelector("#rail-ancestors");
+      return {
+        hidden: b.classList.contains("hidden"),
+        anchor: b.dataset.anchor,
+        lines: [...b.querySelectorAll(".rail-ancestor")].map((el) => el.dataset.name),
+        height: Math.round(b.getBoundingClientRect().height),
+      };
+    });
+    assert.equal(band.hidden, false, "the band is shown for a session with ancestors");
+    assert.equal(band.anchor, TARGET, "the band follows the card the press landed on");
+    assert.deepEqual(band.lines, [GRANDPARENT, PARENT],
+      "parent and grandparent, root first");
+    assert.ok(band.height > 0 && band.height <= 60,
+      `the band stays small (${band.height}px)`);
+    const clearOfBand = await page.evaluate((name) => {
+      const b = document.querySelector("#rail-ancestors").getBoundingClientRect();
+      const r = document.querySelector(`#session-list li[data-name="${CSS.escape(name)}"]`)
+        .getBoundingClientRect();
+      return r.top >= b.bottom;
+    }, TARGET);
+    assert.ok(clearOfBand, "the landed row is not under the band");
+
+    // A reader who touches the rail is no longer asking about that card: the
+    // band goes back to following the scroll (the mark is a highlight, it
+    // does not own the band).
+    const afterGesture = await page.evaluate(() => {
+      document.querySelector("#session-list")
+        .dispatchEvent(new WheelEvent("wheel", { deltaY: 1 }));
+      const b = document.querySelector("#rail-ancestors");
+      return { anchor: b.dataset.anchor, hidden: b.classList.contains("hidden") };
+    });
+    assert.notEqual(afterGesture.anchor, TARGET,
+      "a gesture on the rail ends the press's pin");
 
     // The skip the press borrowed is given back, so the poll keeps the
     // rendering win it was bought for (claunch-oo8au.1).
