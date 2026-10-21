@@ -15,7 +15,7 @@
 2. **배달 경로도 이미 있다.** 데몬은 세션 터미널에 텍스트를 주입하고, 백프레셔·수신 확인·재시도를 이미 갖고 있다(`daemon/mesh_policy.py:1-60`, `daemon/session.py:2651-2710`).
 3. **빠진 것은 구독 기록과 커서다.** 누가 어떤 런의 어떤 이벤트를 어디까지 읽었는지를 저장하는 자리가 없고, v2 런의 전이를 통지하는 소비자도 없다.
 
-이 문서는 그 빈틈을 세 선택지로 나누고, 1단계로 읽기 도구, 2단계로 구독을 권한다(5절). 미확정 결정은 7절에 모았다.
+이 문서는 그 빈틈을 네 선택지로 나누고, 1단계로 읽기 도구, 2단계로 구독을 권한다(4절). 미확정 결정은 5절에 모았다.
 
 ## 1. 문제
 
@@ -24,11 +24,16 @@
 | # | 현상 | 근거 |
 |---|---|---|
 | P1 | 위임 자식이 워크플로 산문이 지정한 시점에만 손으로 mesh 보고를 보낸다. 그 시점 밖의 진행은 어떤 채널로도 나가지 않는다 | `workflows/v2/improv-worker-v2.yaml` `delegate-work`(1304행 부근): "보고: 부모에게 mesh 한 통. 완료면 `DELEGATE DONE: ...`" |
-| P2 | v2 런의 전이를 통지하는 소비자가 없다. v1에는 `RunEventClock`이 4종(human-gate·round-done·orphaned·session-ended)을 보내지만, v2 쪽은 `_scan_v2_ends`의 kill-on-end뿐이다 | `daemon/cflow_clock.py:2946-3050`, `:3260` |
+| P2 | v2 런의 전이를 통지하는 소비자가 없다. v1에는 `RunEventClock`이 4종(human-gate·round-done·orphaned·session-ended)을 보내지만, v2 쪽은 `_scan_v2_ends`의 kill-on-end뿐이다 | `daemon/cflow_clock.py:2946-3050`, `:3291` |
 | P3 | 수신자가 spawn 부모 또는 mesh leader로 고정되어 있다. coordinator·PM·operator·임의의 peer는 받을 대상으로 지정될 수 없다 | `daemon/cflow_clock.py` `_recipient()`: 부모 → mesh leader 순 |
 | P4 | 배달은 일회성 주입이고 커서·백필이 없다. 데몬 재시작과 대화 압축 뒤에 무엇을 놓쳤는지 알 방법이 없다 | `daemon/cflow_clock.py:3632` `_deliver`; 대기분 `_debt`는 메모리에만 있다 |
 | P5 | pull 채널이 반쪽이다. `flow_status`는 자기 런만 읽고(다른 세션 런은 `authorize`가 거절), `children`의 런 요약은 v1만이며, v2 런 목록은 웹 API에만 있다 | `cflow2/runtime.py:2611-2627`, `daemon/cflow_clock.py:3910-3954`, `daemon/api.py:5721-5734` |
 | P6 | v2 위임 자식이 보고 없이 종료하면 부모 노드는 계속 기다린다. `delegate-work`의 `done_when`은 자식 보고 도착을 전제하고, v2에는 `orphaned`에 해당하는 통지가 없다 | `improv-worker-v2.yaml` `delegate-work`; `daemon/cflow_clock.py:_exit_events`는 v1 상태만 읽는다 |
+| P7 | "답을 기다린다"를 남기는 장부(`loops.json`)는 있으나 `resume_when`을 평가하는 주체가 없다. 응답 감시도 배달된 메시지에 한해 600초 뒤 한 번만 알린다 | `daemon/loops.py:1-27`, `daemon/mesh.py:10106` |
+| P8 | `owed`는 받은 쪽이 무엇이든 한 마디 보내면 모든 부채를 닫는다. 관제 세션이 `claunch mesh owed`로 "아직 답이 없다"를 판정하면 다른 메시지 하나가 그 판정을 뒤집는다 | `daemon/mesh.py:1345-1362` |
+| P9 | 세션 리마인더는 BUSY 상태에서만 주입된다. 유휴로 프롬프트에 앉은 관제 세션은 "네가 답할 것이 남았다·자식이 살아 있다" 줄을 받지 못한다 | `daemon/session_reminder.py:1149-1168` |
+| P10 | 다른 세션의 조건을 기다리는 도구가 없다. `wait`은 30–600초 무조건 대기이고, "자식이 끝날 때까지·런이 움직일 때까지" 기다리는 수단은 폴링이나 턴 종료뿐이다 | `wait_mcp.py:1-35` |
+| P11 | 자식 종료를 부모에게 알리는 이벤트가 없다(v1 미완 런의 `orphaned`는 예외). `rebrief`도 살아 있는 자식만 보여 주므로, 압축 뒤에는 "끝난 자식"과 "없던 자식"이 구분되지 않는다 | `daemon/rebrief.py:580-595`, `daemon/__main__.py:388-409` |
 
 P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 기록하지만, `_exit_events`가 `cflow_state.scopes_in`(v1)과 `cflow_engine.status`(v1)만 읽으므로 v2 자식은 통지 대상이 되지 않는다(`daemon/cflow_clock.py:3223-3290`). 부모가 그 사실을 아는 경로는 `children`을 다시 부르는 것뿐인데, 그 요약도 v1만 담는다.
 
@@ -60,6 +65,12 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 
 네 형태 모두 "위임한 쪽이 상대 런의 상태 변화를 커서로 따라간다"에 답하는 도구가 없다. operator의 `opv2_poll`이 가장 가깝고, 그 설계(커서·attention·progress·ended)가 참조할 선례다.
 
+### 2.2 이미 있는 위임 장부와 그 한계
+
+`daemon/loops.py`는 "내가 무엇을 기다리는가"를 세션 디렉터리의 `loops.json`에 남긴다. 작성자는 에이전트(`loop_add`/`loop_close`)와, inbox가 가득 차 거절된 send다. 응답 대기는 mesh 응답 감시에서 파생된다(`reply_waits`). 남는 문제는 **`resume_when`을 평가하는 주체가 없다**는 것이다 — 읽는 자리는 `loops`와 `rebrief`뿐이고, 대화 압축 뒤 그 도구를 부르지 않으면 장부는 다시 잊힌다. 응답 감시도 배달된 메시지에 한해 600초 뒤 한 번만 fyi를 보낸다(`daemon/mesh.py:10106`).
+
+그래서 구독 설계의 첫 질문은 "무엇을 새로 만들까"가 아니라 "이 장부를 누가 언제 평가할까"다. 구독은 이 장부와 경쟁하는 두 번째 장부가 되면 안 된다. 권고안(4절)은 `loops.json`을 구독 기록의 저장 자리로 재사용하고, 평가 주체만 데몬에 두는 것이다.
+
 ## 3. 설계 선택지
 
 ### A. 읽기 도구 (pull)
@@ -77,7 +88,7 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 
 데몬이 등록된 구독자의 커서를 따라 런 전이를 배달한다.
 
-- tool: `subscribe(session, events?, cursor?)` / `unsubscribe` / `subscriptions`. 구독 기록은 데몬 상태에 저장한다(메모리 아님).
+- tool: `subscribe(session, events?, cursor?)` / `unsubscribe` / `subscriptions`. 구독 기록은 세션 디렉터리의 `loops.json`을 넓혀 저장한다(데몬 메모리가 아니다).
 - 이벤트 원천: v2 체크포인트 `events` 테이블 + `revision`, v1 저널 + 상태 diff. 새 스캔을 만들지 않고 기존 `cflow2_clock` 패스에 편승한다(`claunch-2cnep`의 변경 기반 깨우기와 같은 자리).
 - 이벤트 집합(초안): `run_started`, `node_entered`, `report`(보고 요약 한 줄), `gate`(사람이 풀어야 하는 것), `ask`(라우팅·타임아웃), `delegation_closed`, `run_done|failed`, `session_exited`.
 - 배달: 이벤트를 모아 **한 통의 fyi 블록**으로 압축한다. mesh 백프레셔 회계를 그대로 쓰고, 구독자당 상한을 둔다.
@@ -113,6 +124,7 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 **B를 목표로 두고, 첫 단계는 A로 연다.**
 
 - A는 B가 쓰는 읽기 계약(슬롯·상태·마지막 보고·owed)을 그대로 정의한다. B는 그 계약에 이벤트와 커서만 얹으면 되므로, A를 먼저 내면 B의 설계가 측정 가능한 형태로 굳는다.
+- B의 구독 기록은 새 파일을 만들지 않고 `loops.json`을 넓힌다. 장부·만료·`rebrief` 노출이 이미 있다. 빠진 것은 `resume_when`을 평가하는 데몬 쪽 주체이고, 그것이 곧 구독 배달 루프다. 두 번째 장부를 만들면 `rebrief`와 `owed`가 서로 다른 답을 하게 된다.
 - C는 B의 이벤트 소스 중 한 갈래로 흡수한다. 별도 기능으로 두면 같은 일을 두 곳에서 관리하게 된다.
 - D는 A·B가 서기 전의 임시 운영으로만 남긴다.
 
@@ -159,6 +171,12 @@ P6의 발생 조건은 확인했다: `session_exited` 훅은 자식 종료를 �
 - `src/claude_launcher/daemon/operators_v2.py:1154-1230` — `poll`의 커서·attention·progress
 - `src/claude_launcher/daemon/flow_nudge.py:93-135` — `owed`: v1·v2를 함께 읽는다
 - `src/claude_launcher/daemon/mesh_policy.py:1-60` — 백프레셔·owed·ack_timeout
+- `src/claude_launcher/daemon/mesh.py:1345-1362` — `owed`: 한 마디가 모든 부채를 닫는다
+- `src/claude_launcher/daemon/mesh.py:10106-10177` — 응답 감시의 한 번짜리 알림
+- `src/claude_launcher/daemon/loops.py:1-27` — 열린 루프 장부와 `resume_when`
+- `src/claude_launcher/daemon/session_reminder.py:1149-1168` — BUSY가 아니면 리마인더를 보류한다
+- `src/claude_launcher/daemon/rebrief.py:580-595` — 살아 있는 자식만 보여 준다
+- `src/claude_launcher/wait_mcp.py:1-35` — 무조건 대기만 있다
 - `src/claude_launcher/daemon/session.py:2651-2710` — `queue_delivery`
 - `src/claude_launcher/daemon/session_events.py:1-60` — 세션 제어 이벤트 저장(200건)
 - `src/claude_launcher/workflows/v2/improv-worker-v2.yaml:1304-1352` — `delegate-work`의 보고 규약
