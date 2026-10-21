@@ -24,28 +24,86 @@ from . import journal as journal_mod
 from .cflow import state as v1_state
 
 
-#: Events a watcher hears by default: a report was filed, a person is owed a
-#: decision, a run ended, or a delegated decision moved. Node transitions
-#: (``entered``/``left``) are deliberately outside it — a long run would fill
-#: the watcher's terminal, and the pull side (``slot``) shows them on demand.
+#: Events a watcher hears by default: a report was filed, a person or a peer
+#: is owed a decision, a run ended, or a delegated decision moved. Node
+#: transitions (``entered``/``left``) are deliberately outside it — a long run
+#: would fill the watcher's terminal, and the pull side (``slot``) shows them
+#: on demand.
+#:
+#: The names are the ones the two runtimes actually emit, not the status names
+#: they lead to (``cflow2/runtime.py`` ``emit`` calls, ``cflow/engine.py``
+#: ``state_mod.journal`` calls). v2 has one ``waiting`` event whose ``kind``
+#: says why (``choose``/``ask`` are gates; ``pause``/``loop_limit``/``visit``
+#: are not — :data:`GATE_WAITING`), and no ``failed`` event: a failed end comes
+#: as ``done`` with ``ok: false`` plus ``verify_failed``/``delegate_failed``.
 DEFAULT_KINDS: Tuple[str, ...] = (
     "reported",
     "done",
     "aborted",
-    "failed",
     "select_held",
+    "waiting",
     "ask_routed",
     "ask_timeout",
     "ask_answered",
+    "ask_withdrawn",
     "round_requested",
+    "delegate_failed",
+    "verify_failed",
+    "started",
     "step_report",
-    "waiting_selection",
-    "waiting_approval",
+    "step_completed",
+    "gate_wait",
+    "select_presented",
+    "checklist_presented",
+    "timer_presented",
+    "ask_escalated",
+    "ask_declined",
+    "ask_deferred",
+    "sub_ended",
+    "published",
 )
+
+#: The ``kind`` values of the v2 ``waiting`` event that mean "someone must
+#: decide". The rest are pacing, and a watcher that asked for gates only should
+#: not hear them.
+GATE_WAITING = ("choose", "ask")
 
 #: A hard ceiling on events carried by one delivery. The watcher reads the run
 #: itself for the rest (``events_since`` with the returned cursor).
 BATCH_LIMIT = 40
+
+#: Run states no later event will follow. The board announces the transition
+#: once, because a run that ends without filing a report is exactly the case a
+#: supervisor misses.
+TERMINAL_STATUSES = ("done", "aborted", "failed")
+
+
+def token(cwd: str, scope: str) -> str:
+    """A cheap change token for a slot: what the daemon compares per tick.
+
+    Reading a run means decoding a whole checkpoint (``RunStore.journal``), so
+    the board asks this first: nothing moved means no read at all. It covers
+    every file the two runtimes write for one run — the v2 checkpoint and its
+    legacy pair, and the v1 state and journal.
+    """
+    from .cflow2 import store as v2_store
+
+    st = v2_store.RunStore(cwd, scope)
+    paths = [st.checkpoint_path if st.checkpoint_path.exists() else st.state_path,
+             st.journal_path]
+    try:  # a v2 scope ("<session>@<daemon>") is not a valid v1 scope name
+        paths += [v1_state._state_path(cwd, scope), v1_state.journal_path(cwd, scope)]
+    except Exception:  # noqa: BLE001 - no v1 slot by that name
+        pass
+    parts: List[str] = []
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            parts.append("-")
+            continue
+        parts.append(f"{info.st_mtime_ns}:{info.st_size}")
+    return "|".join(parts)
 
 
 def _v2_slot(cwd: str, scope: str) -> Optional[dict]:
@@ -176,30 +234,39 @@ def _parse_cursor(cursor: str) -> Tuple[str, int]:
 
 def _detail(event: dict) -> str:
     bits = []
-    for key in ("node", "step", "instance", "label", "outcome", "status", "option", "reason"):
+    for key in ("node", "step", "instance", "kind", "ask", "label", "outcome",
+                "status", "option", "reason"):
         value = event.get(key)
         if value not in (None, ""):
             bits.append(f"{key}={value}")
     return " ".join(bits)
 
 
-def events_since(cwd: str, scope: str, cursor: str,
-                 kinds: Optional[Iterable[str]] = None) -> Tuple[List[dict], str]:
-    """The events after ``cursor`` and the cursor that follows what was returned.
+def reading(cwd: str, scope: str, cursor: str,
+            kinds: Optional[Iterable[str]] = None) -> dict:
+    """Everything one tick needs about a slot: what moved, and where it stands.
+
+    ``events``/``cursor`` answer "what moved since that cursor"; ``run``,
+    ``status`` and ``owed`` answer "where is it now" so the caller can announce
+    a run that ended or a gate that opened even when the journal recorded no
+    event for it (v1 does not journal a gate; v2 records approvals in state).
+    ``token`` is the change token the cursor was read at, for the next tick to
+    skip a slot nothing touched. ``present`` is False when the slot holds no
+    live run.
 
     The returned cursor names the journal position just past the last event
     *sent*, so a truncated batch (``BATCH_LIMIT``) leaves the rest for the
     next call instead of skipping it. Events filtered out by ``kinds`` are
-    still stepped over.
-
-    A cursor from another run in the same slot, or one ahead of the journal
-    (a truncated journal), starts over at the beginning of this run: the
-    watcher would otherwise silently skip everything it has not seen.
+    still stepped over — and the cursor is returned even when nothing matched,
+    so a quiet run costs one read, not one read per tick.
     """
     found = _v2_slot(cwd, scope) or _v1_slot(cwd, scope)
     if found is None:
-        return [], cursor
+        return {"events": [], "cursor": cursor, "run": None, "status": None,
+                "owed": [], "current": [], "token": token(cwd, scope),
+                "present": False}
     wanted = frozenset(kinds) if kinds is not None else frozenset(DEFAULT_KINDS)
+    gates_only = kinds is None
     events: List[dict] = found["events"]
     run, count = _parse_cursor(cursor)
     if not run or run != str(found.get("run")) or count > len(events):
@@ -209,17 +276,36 @@ def events_since(cwd: str, scope: str, cursor: str,
     for index in range(count, len(events)):
         record = events[index]
         pos = index + 1
-        if str(record.get("event") or "") not in wanted:
+        name = str(record.get("event") or "")
+        if name not in wanted:
+            continue
+        if name == "waiting" and gates_only and record.get("kind") not in GATE_WAITING:
             continue
         selected.append({
-            "event": str(record.get("event") or ""),
+            "event": name,
             "at": record.get("at") or record.get("ts"),
             "detail": _detail(record),
             "node": record.get("node") or record.get("step"),
         })
         if len(selected) >= BATCH_LIMIT:
             break
-    return selected, f"{found.get('run')}:{pos}"
+    return {
+        "events": selected,
+        "cursor": f"{found.get('run')}:{pos}",
+        "run": found.get("run"),
+        "status": found.get("status"),
+        "owed": list(found.get("owed") or []),
+        "current": list(found.get("current") or []),
+        "token": token(cwd, scope),
+        "present": True,
+    }
+
+
+def events_since(cwd: str, scope: str, cursor: str,
+                 kinds: Optional[Iterable[str]] = None) -> Tuple[List[dict], str]:
+    """``(events, cursor)`` — the reading's two delivery fields."""
+    found = reading(cwd, scope, cursor, kinds)
+    return found["events"], found["cursor"]
 
 
 def compose_block(watcher: str, lines: Sequence[str]) -> str:
