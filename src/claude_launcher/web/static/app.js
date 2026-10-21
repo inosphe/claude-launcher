@@ -33021,7 +33021,10 @@ async function modelPricesSave() {
       }
       row[key] = n;
     }
-    prices[model] = row;
+    // A row whose every rate was emptied is a dropped row, not a free one:
+    // an empty object would come back truthy from priceRateFor and render
+    // "≈ $0.0000" — the very misreading this card's note promises against.
+    if (Object.keys(row).length) prices[model] = row;
   }
   modelPricesBusy = true;
   modelPricesNotice = "";
