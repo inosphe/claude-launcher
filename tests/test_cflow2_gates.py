@@ -759,6 +759,50 @@ def test_mcp_lists_the_new_tools_and_answers_by_identity(tmp_path, monkeypatch):
     assert d.status()["tasks"][0]["label"] == "a"
 
 
+def test_a_v2_ask_is_answerable_through_the_v1_answer_tool(tmp_path, monkeypatch):
+    """claunch-c3vq4: the asked child holds both 'answer' tools.
+
+    A reviewer asked by its parent's cflow2 run was told to record the answer
+    with ``flow_answer`` but called the v1 ``answer`` tool — the tool list
+    offers two tools for one act and nothing says which family an id belongs
+    to. The v1 lookup knows no ``ask2-`` ids, so it answered "it was answered,
+    it escalated past you, or its run moved on" about a request that was open
+    and waiting on that very session, while ``flow_asks`` still listed it.
+    The id names its family, so the v1 tool routes it instead of guessing.
+    """
+    from claude_launcher.cflow import mcp as cflow_mcp
+
+    d = Drv(tmp_path, DELEGATED)
+    _route(d, now=time.time())  # answering runs on the real clock
+    rec = next(iter(d.state()["asks"].values()))
+    assert rec["resolution"] == runtime.RES_ASKED
+    assert [e["session"] for e in rec["asked"]] == ["s-rev"]
+    monkeypatch.setattr(asks, "default_nudge", lambda *a: None)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s-rev")
+
+    receipt = cflow_mcp.call_tool(
+        "answer", {"ask": rec["id"], "decision": "approve", "reason": "checked it"})
+
+    assert receipt["decision"] == "approve" and receipt["as"] == "rev"
+    assert asks.pending_for("s-rev") == []
+    assert d.status()["tasks"][0]["label"] == "a"
+
+
+def test_flow_answer_hands_a_v1_ask_id_to_the_v1_gate(monkeypatch):
+    """The mirror: a non-``ask2-`` id is a cflow v1 ask.
+
+    ``flow_answer`` used to look it up in the v2 index and report that the
+    request "moved past" the responder. Routed by id, the v1 gate answers —
+    and with no v1 run here, its own refusal is what comes back.
+    """
+    from claude_launcher.cflow import engine as v1_engine
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s-rev")
+    with pytest.raises(v1_engine.CflowError, match=r"Call 'asks'"):
+        cflow2_mcp.call_tool("flow_answer",
+                             {"ask_id": "ask-0123abcd", "decision": "approve"})
+
+
 # ---------------------------------------------------------------------------
 # procedure param defaults
 
