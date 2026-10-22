@@ -74,7 +74,7 @@ from .cflow.state import StateError as CflowStateError
 from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
 from .daemon import instance_manifest
-from .daemon_client import DaemonClientError
+from .daemon_client import DaemonClientError, DaemonSpooled
 from .credentials import CredentialsError
 from .lineage import LineageError
 from .migrate import MigrateError
@@ -1792,6 +1792,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # config, materialize declared-but-missing profile dirs) before running.
         bootstrap.run()
         return args.func(args)
+    except DaemonSpooled as exc:
+        # Queued for the daemon, not lost: a nonzero exit here would read
+        # as "send again", and a resend is a second message (claunch-19liw.2.1).
+        print(str(exc))
+        return 0
     except (
         profile.ProfileError,
         harness_policy.HarnessPolicyError,

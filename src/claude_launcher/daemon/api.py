@@ -784,6 +784,10 @@ def build_app(
     # tick (daemon/auto_archive.py, claunch-wz6a5).
     from . import auto_archive
     auto_archive.install(app, manager)
+    # Writes sessions queued while this daemon was unreachable, applied once
+    # each (daemon/spool_drain.py, claunch-19liw.2.1).
+    from . import spool_drain
+    spool_drain.install(app)
     # Thread files past their 30 days (daemon/uploads.py, claunch-5gpcf).
     uploads.install(app)
     # The Stats page reads transcripts in a child process, off this loop's
@@ -7257,6 +7261,18 @@ async def h_mesh_send(request: web.Request) -> web.Response:
         return json_error(400, "'body' must be a string")
     sections = body.get("sections")
     ref = body.get("ref")
+    # A send that timed out on the client is queued there with this id
+    # (claunch-19liw.2.1); recording it here lets the drain skip that copy,
+    # and a copy that arrives live again is answered without a second send.
+    from .. import request_spool
+    from . import spool_drain
+    request_id = request.headers.get(request_spool.HEADER, "")
+    seen = spool_drain.seen_ids(request.app) if request_id else None
+    if seen is not None and request_id in seen:
+        return json_response({
+            "id": None, "recipients": [], "duplicate": request_id,
+            "relay": request.app["relay_state"](),
+        })
     result = await _mesh_mgr(request).send(
         request.match_info["mesh"],
         sender,
@@ -7268,6 +7284,8 @@ async def h_mesh_send(request: web.Request) -> web.Response:
         sections=sections if isinstance(sections, dict) else None,
         ref=ref if isinstance(ref, dict) else None,
     )
+    if seen is not None:
+        seen.add(request_id)
     return json_response({**result, "relay": request.app["relay_state"]()})
 
 
