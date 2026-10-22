@@ -61,6 +61,10 @@ const combinations = [
   { name: 'archived-killed', sessions: [{ category: 'archived' }, { category: 'killed' }] },
   { name: 'killed-running', sessions: [{ category: 'killed' }, { category: 'running' }] },
   { name: 'archived-paused', sessions: [{ category: 'archived' }, { category: 'paused' }] },
+  { name: 'killed-hold', sessions: [{ category: 'killed' }, { category: 'hold' }] },
+  { name: 'killed-delayed', sessions: [{ category: 'killed' }, { category: 'delayed' }] },
+  { name: 'killed-paused', sessions: [{ category: 'killed' }, { category: 'paused' }] },
+  { name: 'all-hold', sessions: [{ category: 'hold' }, { category: 'hold' }] },
   { name: 'unknown', sessions: [{ category: 'archived' }, {}] },
   { name: 'empty-list', sessions: [] },
 ];
@@ -68,6 +72,31 @@ assert.deepStrictEqual(Array.from(ctx.WorktreesPage.filterItems(combinations, 'a
   ['all-archived']);
 assert.deepStrictEqual(Array.from(ctx.WorktreesPage.filterItems(combinations, 'killed'), w => w.name),
   ['all-archived', 'all-killed', 'archived-killed']);
+
+// A session that is frozen but resumable (hold, delayed, paused) counts as
+// Running on this page (claunch-25bvn): it keeps its worktree out of the
+// killed filter, and a removal that takes the checkout names it among the
+// sessions it ends.
+for (const name of ['killed-hold', 'killed-delayed', 'killed-paused', 'all-hold']) {
+  assert(!Array.from(ctx.WorktreesPage.filterItems(combinations, 'killed'), w => w.name).includes(name),
+    `${name} must stay out of the killed filter`);
+}
+const removal = [
+  { name: 'one', state: 'active', sessions: [
+    { name: 'live', category: 'running' },
+    { name: 'frozen', category: 'hold' },
+    { name: 'queued', category: 'delayed' },
+    { name: 'stopped', category: 'paused' },
+    { name: 'dead', category: 'killed' },
+    { name: 'filed', category: 'archived' },
+  ] },
+  { name: 'two', state: 'orphaned', sessions: [{ name: 'parked', category: 'paused' }] },
+];
+assert.deepStrictEqual(Array.from(ctx.WorktreesPage.runningSessions(removal)),
+  ['live', 'frozen', 'queued', 'stopped']);
+assert.deepStrictEqual(Array.from(ctx.WorktreesPage.runningSessions([])), []);
+assert.deepStrictEqual(
+  Array.from(ctx.WorktreesPage.runningSessions([{ name: 'x', state: 'active' }])), []);
 
 // Exercise expansion, status rendering, refreshing and retry without HTML
 // interpretation of repository-controlled filenames.
