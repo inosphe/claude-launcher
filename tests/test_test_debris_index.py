@@ -146,7 +146,10 @@ def test_an_orphan_named_after_a_live_session_is_ambiguous():
     states = {"s29": index.LIVE, "s7": index.ENDED}
     assert index.classify("s29d", states) == index.AMBIGUOUS
     assert index.classify("s29om", states) == index.AMBIGUOUS
-    assert index.classify("s29w2", states) == index.AMBIGUOUS
+    # ``s29w2`` is a numbered sweep generation: reaper._SWEEP gives it to s29
+    # (tests/test_basetemp_reaper.py: ("s995w2", "s995", True)), so it is s29's
+    # and live, not ambiguous.
+    assert index.classify("s29w2", states) == index.LIVE
     # An ended session's prefix is not protected: nothing is using it.
     assert index.classify("s7d", states) == index.ORPHAN
     assert index.classify("nothing-like-a-session", states) == index.ORPHAN
@@ -164,7 +167,7 @@ def test_an_ambiguous_orphan_never_reaches_a_removal_batch(tmp_path):
 
 
 def test_owner_shape_decides_by_longest_matching_name():
-    """``s29w2`` belongs to ``s29``: it has the ``<session>-<anything>`` shape."""
+    """``s29w2`` belongs to ``s29`` (a sweep generation), unless a longer name is registered."""
     states = {"s29": index.LIVE, "s29w2": index.ENDED}
     assert index.classify("s29w2", states) == index.ENDED
     assert index.classify("s29c1021200000", states) == index.LIVE
