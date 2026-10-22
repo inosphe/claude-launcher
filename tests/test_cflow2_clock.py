@@ -342,6 +342,120 @@ def test_a_closed_subagent_delegation_is_not_announced(tmp_path, monkeypatch):
     assert clock.scan(now=T0 + 3) == []
 
 
+# -- driver re-nudge (claunch-slia4.1) ---------------------------------------
+
+CHOOSE_RUN = """
+    nodes:
+      a: {prompt: A}
+      b: {prompt: B}
+    body:
+      choose:
+        prompt: pick
+        options:
+          go: {then: a}
+          stay: {then: b}
+"""
+
+
+class StatusSession(FakeSession):
+    """A fake driver whose status() the re-nudge gate reads (busy -> no nudge)."""
+
+    def __init__(self, name, cwd, status="idle"):
+        super().__init__(name, cwd)
+        self._status = status
+
+    def status(self, threshold=None):
+        return self._status
+
+
+def test_a_choose_waiting_driver_is_renudged_on_an_interval(tmp_path, monkeypatch):
+    """claunch-slia4.1: a run left at an agent choose -- no wait to fire, so
+    the ticked-based notice never resends -- is told again on an interval."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
+                   renudge_interval=600.0)
+    assert clock.scan(now=T0) == []            # the wait begins: baseline only
+    assert clock.scan(now=T0 + 599) == []      # inside the interval
+    notices = clock.scan(now=T0 + 601)
+    assert len(notices) == 1
+    cwd, name, text = notices[0]
+    assert cwd == str(tmp_path) and name == "own"
+    assert "waiting on you" in text
+    assert cflow2_clock.WHY_NUDGE in text
+    assert clock.scan(now=T0 + 602) == []      # one nudge per interval
+    notices = clock.scan(now=T0 + 1202)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
+def test_a_busy_driver_is_not_renudged(tmp_path, monkeypatch):
+    """A driver mid-turn reaches the run itself; the interval is not spent."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    session = StatusSession("own", str(tmp_path), status="busy")
+    clock = _clock(FakeManager(session), renudge_interval=600.0)
+    clock.scan(now=T0)
+    assert clock.scan(now=T0 + 601) == []
+    session._status = "idle"
+    notices = clock.scan(now=T0 + 602)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
+def test_resolving_the_choice_stops_its_renudge(tmp_path, monkeypatch):
+    """After flow_select the run's wait on the driver is a new one: no second
+    nudge about the resolved choose, and the next interval names what now
+    waits (task a), not the choose."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
+                   renudge_interval=600.0)
+    clock.scan(now=T0)
+    notices = clock.scan(now=T0 + 601)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+    monkeypatch.setenv("CLAUNCH_SESSION", "own")
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    mcp.call_tool("flow_select", {"node": st["choices"][0]["instance"],
+                                  "option": "go", "cwd": str(tmp_path),
+                                  "scope": "own"})
+    assert [t["label"] for t in runtime.status(cwd=str(tmp_path), scope="own",
+                                               tick=False)["tasks"]] == ["a"]
+    assert clock.scan(now=T0 + 602) == []      # no immediate second nudge
+    notices = clock.scan(now=T0 + 1202)
+    assert len(notices) == 1
+    assert "waiting on you: a" in notices[0][2]
+
+
+def test_a_finished_run_drops_its_renudge_baseline(tmp_path, monkeypatch):
+    """Once the run stops waiting on its driver the stamp is forgotten, so a
+    later run in the same slot starts its own interval from its own entry."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
+                   renudge_interval=600.0)
+    clock.scan(now=T0)
+    assert clock.scan(now=T0 + 601)            # nudged once
+    monkeypatch.setenv("CLAUNCH_SESSION", "own")
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    mcp.call_tool("flow_select", {"node": st["choices"][0]["instance"],
+                                  "option": "go", "cwd": str(tmp_path),
+                                  "scope": "own"})
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    mcp.call_tool("flow_report", {"node": st["tasks"][0]["instance"],
+                                  "outcome": "ok", "value": {},
+                                  "cwd": str(tmp_path), "scope": "own"})
+    assert runtime.status(cwd=str(tmp_path), scope="own",
+                          tick=False)["status"] == "done"
+    assert clock.scan(now=T0 + 602) == []      # done: no wait, no nudge
+    # a fresh run in the same slot earns its own baseline at first sight.
+    # (Without the pop, the old stamp T0+601 would have fired at T0+1203,
+    # 602s later -- the [] above is the pop's proof.)
+    _start(tmp_path, CHOOSE_RUN, now=T0 + 700)
+    assert clock.scan(now=T0 + 1203) == []        # first sight: new baseline
+    assert clock.scan(now=T0 + 1203 + 599) == []  # inside the new interval
+    notices = clock.scan(now=T0 + 1203 + 601)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
 def test_session_spawn_refused_falls_back_to_next_executor(tmp_path):
     def spawn(parent_name, body):
         raise cflow2_exec.SpawnRefused("spawn policy: max_children reached")

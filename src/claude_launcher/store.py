@@ -694,6 +694,13 @@ DAEMON_DEFAULTS = {
     # daemon start. cflow2_poll is its tick in seconds (read at start).
     "cflow2_clock": True,
     "cflow2_poll": 10.0,
+    # The v2 clock's re-nudge (daemon/cflow2_clock.py, claunch-slia4.1):
+    # seconds between "the run moved -- waiting on you" notices resent to a
+    # driver whose run still waits on it (an unreported task, an agent choose
+    # nobody picked). A choose has no wait to fire, so without this the run is
+    # silent from its entry until a restart's resume nudge. 0 or less
+    # disables the re-nudge. Read live by the clock on every pass.
+    "cflow2_renudge_interval": 600.0,
     # claunch reposync (claunch-dh73y): "ask" -- a sync that pushes to the
     # shared remote waits for a person (a y/N prompt at the user's own
     # terminal, the web UI's approval card for an agent session); "auto" --

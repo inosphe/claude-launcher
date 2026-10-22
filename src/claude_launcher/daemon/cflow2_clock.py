@@ -95,11 +95,19 @@ from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
 from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths
-from .session import delivery_wake
+from .session import STATUS_IDLE, delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
 DEFAULT_POLL = 10.0
+
+#: How often a run still waiting on its driver (an unreported task, an agent
+#: choose nobody picked) is told again, in seconds. A choose has no wait to
+#: fire, so without this the run is silent from its entry until a daemon
+#: restart's resume nudge -- the s1308 seven-hour stuck (claunch-slia4.1).
+#: Configurable as ``cflow2_renudge_interval`` (store.DAEMON_DEFAULTS); 0
+#: or less disables the re-nudge.
+DEFAULT_RENUDGE_INTERVAL = 600.0
 
 #: Who the journal names when a session's own ending finished its run: the
 #: last question of a round was answered by ending the session, not by
@@ -232,6 +240,7 @@ class Cflow2Clock:
         restart_runner: Optional[Callable[[str, Dict[str, Any], str], Dict[str, Any]]] = None,
         platform: Optional[str] = None,
         mesh: Any = None,
+        renudge_interval: Optional[float] = None,
     ) -> None:
         self.manager = manager
         #: The mesh manager a landing request's leader fallback reads
@@ -299,6 +308,14 @@ class Cflow2Clock:
         #: driver its run moved (claunch-feve0). In memory only: a restart
         #: forgets it, and the resume nudge covers what moved while down.
         self._open_delegations: Dict[Tuple[str, str], Set[str]] = {}
+        #: Seconds between re-nudges of a run still waiting on its driver
+        #: (None: ``cflow2_renudge_interval`` from the daemon config).
+        self.renudge_interval = renudge_interval
+        #: ``(cwd, scope) -> when the driver was last told (or the wait began
+        #: and the first interval started)``. In memory only, like
+        #: ``_open_delegations``: a restart forgets it and the resume nudge
+        #: covers the down time.
+        self._driver_nudged: Dict[Tuple[str, str], float] = {}
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -672,18 +689,24 @@ class Cflow2Clock:
             self._claim(cwd, scope, first)
         if first.get("status") not in runtime.LIVE_STATUSES:
             self._open_delegations.pop((cwd, scope), None)
+            self._driver_nudged.pop((cwd, scope), None)
             if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
                 started = runtime.start_next_round(cwd, scope, now)
                 if started:
                     notices.append((cwd, started.get("driver") or _name(scope), round_block(started)))
             return
         probe = self._probe if self.probe_runner is not None else None
+        clock_now = time.time() if now is None else float(now)
         payload = runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
+        told = False
         if payload.get("ticked") and _waits_on_driver(payload):
             notices.append((cwd, payload.get("driver") or _name(scope), moved_block(scope, payload)))
+            told = True
         elif self._delegation_closed(cwd, scope, first) and _waits_on_driver(payload):
             notices.append((cwd, payload.get("driver") or _name(scope),
                             moved_block(scope, payload, why=WHY_DELEGATION)))
+            told = True
+        self._renudge(cwd, scope, payload, clock_now, notices, told)
         # Taken now, not only at the end of the pass: a step below that raises
         # would leave the old set, and every later pass would announce the
         # same closed delegation again.
@@ -703,7 +726,6 @@ class Cflow2Clock:
             return
         self._open_delegations[(cwd, scope)] = _open_delegations(state)
         halted = _halted(state)
-        clock_now = time.time() if now is None else float(now)
         for did, rec in (state.get("delegations") or {}).items():
             if self.stop.is_set():
                 return
@@ -727,6 +749,64 @@ class Cflow2Clock:
         if not before:
             return False
         return bool(before - _open_delegations(state))
+
+    # -- driver re-nudge (claunch-slia4.1) ------------------------------------
+
+    def _renudge_interval_seconds(self) -> float:
+        if self.renudge_interval is not None:
+            return float(self.renudge_interval)
+        try:
+            return float(store.daemon_config().get("cflow2_renudge_interval",
+                                                   DEFAULT_RENUDGE_INTERVAL))
+        except Exception:  # noqa: BLE001 - a broken config must not stop the tick
+            return DEFAULT_RENUDGE_INTERVAL
+
+    def _driver_idle(self, scope: str) -> bool:
+        """Whether the slot's driver session is idle (a busy driver reaches
+        the run itself; a test double without a status read as idle)."""
+        try:
+            session = self.manager.get(cstore.session_of(scope))
+        except Exception:
+            return False
+        status = getattr(session, "status", None)
+        if status is None:
+            return True
+        try:
+            return status() == STATUS_IDLE
+        except Exception:  # noqa: BLE001 - a broken session must not spam it
+            return False
+
+    def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
+                 clock_now: float, notices: List[Notice], told: bool) -> None:
+        """Tell a run's driver again when the run has waited on it past the
+        re-nudge interval (claunch-slia4.1).
+
+        A choose has no wait to fire, so ``ticked`` stays 0 and the run is
+        silent from its entry -- the s1308 stuck. The interval starts at the
+        wait's first sight (or at any notice above, which is fresh context for
+        the driver) and stops when the run stops waiting on its driver, so a
+        resolved choose or a finished run cannot be nudged about again. A busy
+        driver is skipped without spending the interval: when its turn ends,
+        the next pass re-nudges at once if the wait is already that old."""
+        key = (cwd, scope)
+        if not _waits_on_driver(payload):
+            self._driver_nudged.pop(key, None)
+            return
+        if told:
+            self._driver_nudged[key] = clock_now
+            return
+        interval = self._renudge_interval_seconds()
+        if interval <= 0:
+            return
+        last = self._driver_nudged.get(key)
+        if last is None:
+            self._driver_nudged[key] = clock_now
+            return
+        if clock_now - last < interval or not self._driver_idle(scope):
+            return
+        self._driver_nudged[key] = clock_now
+        notices.append((cwd, payload.get("driver") or _name(scope),
+                        moved_block(scope, payload, why=WHY_NUDGE)))
 
     # -- restarts (docs 2.2, restart) ----------------------------------------
     def _claim_restarts(self, cwd: str, scope: str, now: Optional[float],
@@ -1133,6 +1213,8 @@ def _open_delegations(state: Dict[str, Any]) -> Set[str]:
 #: Why the clock says a run moved (the protocol line of :func:`moved_block`).
 WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
 WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
+WHY_NUDGE = ("the run is still waiting on you -- the clock re-nudges a waiting "
+             "driver on an interval (claunch-slia4.1)")
 
 
 def _waits_on_driver(payload: Dict[str, Any]) -> bool:
