@@ -1296,6 +1296,17 @@ finished call went underneath (model, its rate and age, then that call's
 latency with the window's mean and the cache share). The divider between them
 is drawn only when both are on screen.
 
+A call that failed is drawn where the rate would be (claunch-waakh.1): a
+non-2xx last call shows the upstream's own HTTP status (`HTTP 429`) in the rail
+line, the card chip, the header badge, the overlay and the tooltip, in an alarm
+colour, and keeps showing it while the retry is already in flight — Claude Code
+shows the session only the harness's "API error", so this reading is where the
+cause stays readable. A backend that answers 200 and then ends the body with an
+error event has no failing status to report, so the shim keeps that error too
+(`error.type` and a message cut to 200 characters) and the reading shows the
+type instead (`rate_limit_error`, `overloaded_error`). An idle row draws
+nothing from it: a call already outside the window is not an alarm about now.
+
 That block is computed over a window bounded on two axes: the last ten calls,
 and only those made in the last ten minutes. The count on its own was not a
 window — a session that called ten times over a day and a half had its
