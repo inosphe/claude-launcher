@@ -109,12 +109,38 @@ def test_selectors_of_one_profile_and_provider_share_one_account_read(
 
     assert calls == ["work"]
     assert (first_cached, second_cached) == (False, True)
-    assert first["key"] == second["key"] == "work/claude"
+    assert first["key"] == second["key"] == "work/claude/anthropic"
     assert (first["profile"], first["provider"], first["harness"]) == (
         "work",
         "claude",
         "claude",
     )
+
+
+def test_a_harness_with_its_own_login_is_not_served_the_providers_cache(
+    home, monkeypatch
+):
+    """``work:codex`` reads the codex login, ``work:claude`` the provider's:
+    same profile and provider name, two accounts, two reads."""
+    _fresh_cache(monkeypatch)
+    work = profile.create("work")
+    (work.config_dir / "codex").mkdir()
+    calls = []
+
+    def fetch(selected):
+        calls.append(selected.selector)
+        return usage.UsageReport(windows=[], raw={}, source=selected.selector)
+
+    monkeypatch.setattr(profile_usage.usage, "fetch", fetch)
+
+    codex, codex_cached, _ = profile_usage.fetch("work:codex")
+    claude, claude_cached, _ = profile_usage.fetch("work:claude")
+
+    assert calls == ["work:codex", "work:claude"]
+    assert (codex_cached, claude_cached) == (False, False)
+    assert (codex["source"], claude["source"]) == ("work:codex", "work:claude")
+    assert codex["key"] == "work/default/codex-app-server"
+    assert claude["key"] == "work/default/anthropic"
 
 
 def test_targets_lists_each_profile_once_with_its_provider_and_reader(home):
@@ -148,7 +174,7 @@ def test_targets_lists_each_profile_once_with_its_provider_and_reader(home):
         "profile": "work",
         "provider": "default",
         "harness": "claude",
-        "key": "work/default",
+        "key": "work/default/anthropic",
         "reader": "anthropic",
         "supported": True,
     }

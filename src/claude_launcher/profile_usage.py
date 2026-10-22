@@ -7,7 +7,10 @@ A quota belongs to an account, and the account is the profile's credential
 for its provider -- not the harness that happens to run on it. So the unit
 here is the (profile, provider) pair: ``work`` and ``work:claude`` that
 resolve to the same pair share one cache entry and one provider call, and
-the dashboard lists one row per pair (:func:`targets`).
+the dashboard lists one row per pair (:func:`targets`). The key also names
+the reader (:func:`usage.reader`): a harness that keeps its own login
+(``work:codex``) reads another account than the profile's provider does,
+and ``providers.resolve_name`` does not look at the harness.
 """
 
 from __future__ import annotations
@@ -44,10 +47,17 @@ _ERRORS = (
 
 
 def _resolve(selector: str):
-    """The profile usage reads for ``selector``, and its (profile, provider) key."""
+    """The profile usage reads for ``selector``, its provider, and its cache key.
+
+    Raises :class:`usage.UsageError` when no reader applies.
+    """
     selected = usage.resolve_target(profile_mod.require_selector(selector))
     provider = providers.resolve_name(selected)
-    return selected, provider, f"{selected.name}/{provider}"
+    return selected, provider, _key(selected, provider, usage.reader(selected))
+
+
+def _key(selected, provider: str, reader: str) -> str:
+    return f"{selected.name}/{provider}/{reader}"
 
 
 def targets() -> list[dict]:
@@ -60,13 +70,14 @@ def targets() -> list[dict]:
     for profile in profile_mod.list_all():
         row: dict = {"profile": profile.name, "provider": None, "harness": None}
         try:
-            selected, provider, key = _resolve(profile.name)
+            selected = usage.resolve_target(profile)
             row.update(
-                key=key,
-                provider=provider,
+                key=profile.name,
+                provider=providers.resolve_name(selected),
                 harness=lineage.effective_harness(selected),
             )
             row["reader"] = usage.reader(selected)
+            row["key"] = _key(selected, row["provider"], row["reader"])
             row["supported"] = True
         except _ERRORS as exc:
             row.setdefault("key", profile.name)
