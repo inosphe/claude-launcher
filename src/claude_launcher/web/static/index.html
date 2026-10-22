@@ -119,8 +119,9 @@
         <!-- Who owns the session PTYs (claunch-xnnct.3): off, a connected
              host, a host on older code (stale), or set on but unreachable. -->
         <span id="pty-host-badge" class="badge hidden"></span>
-        <!-- The machine's CPU, memory and disk I/O (claunch-zuk0b), drawn by
-             sysperf-page.js; a link to the System performance page. -->
+        <!-- The machine's CPU, memory, disk I/O and disk capacity
+             (claunch-zuk0b, claunch-frgt1), drawn by sysperf-page.js; a link
+             to the System performance page. -->
         <a id="sysperf-badge" class="badge hidden" href="#/sysperf"></a>
         <div id="p2p-menu" class="hidden"></div>
       </div>
@@ -1513,7 +1514,8 @@
          chart-page.js from the rail's own caches. -->
     <div id="chart-view" class="hidden"></div>
     <div id="profile-usage-view" class="hidden"></div>
-    <!-- System performance: CPU, memory and disk I/O history (sysperf-page.js). -->
+    <!-- System performance: CPU, memory, disk I/O history and disk
+         capacity (sysperf-page.js). -->
     <div id="sysperf-view" class="hidden"></div>
     <div id="threads-view" class="hidden"></div>
     <!-- One input box over several (session, thread) pairs; the daemon asks

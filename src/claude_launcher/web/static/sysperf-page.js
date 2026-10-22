@@ -1,7 +1,9 @@
-/* System performance (claunch-zuk0b): the rail header's CPU / MEM / IO badge
-   and the #/sysperf page behind it. The daemon samples the machine
-   (daemon/sysperf.py) every few seconds into an in-memory history and a
-   rotating log; this module reads GET /api/sysperf.
+/* System performance (claunch-zuk0b, claunch-frgt1): the rail header's
+   CPU / MEM / IO / DISK badge and the #/sysperf page behind it. The daemon
+   samples the machine (daemon/sysperf.py) every few seconds into an
+   in-memory history and a rotating log; this module reads GET /api/sysperf.
+   Each sample carries `usage`: one entry per drive (the daemon's own root
+   plus every workspace's), which the badge summarises and the page tabulates.
 
    The badge asks for the latest sample only (a few hundred bytes) and skips
    its poll while the tab is hidden. The page reads the whole history once on
@@ -34,12 +36,38 @@
     return `${n.toFixed(digits)}${units[i]}${suffix}`;
   }
   const fmtPct = (n) => (typeof n === "number" && Number.isFinite(n) ? `${n.toFixed(n >= 10 ? 0 : 1)}%` : "—");
+  // Inode counts are large integers and are compared as counts ("67,108,864"),
+  // not scaled the way bytes are.
+  const fmtCount = (n) => (typeof n === "number" && Number.isFinite(n) ? n.toLocaleString() : "—");
   const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const ioTotal = (s) => (typeof s.disk_read_bps === "number" ? s.disk_read_bps + (s.disk_write_bps || 0) : null);
 
+  // Bytes and inodes are two ways one drive can be full: WSL ran out of
+  // inodes with 506 GB free (claunch-frgt1.1), so a drive is graded by the
+  // worse of the two.
+  const inodePct = (d) => (d && d.inodes && typeof d.inodes.pct === "number" ? d.inodes.pct : null);
+  const drivePct = (d) => {
+    const bytes = typeof d.pct === "number" ? d.pct : null;
+    const inodes = inodePct(d);
+    return Math.max(bytes == null ? 0 : bytes, inodes == null ? 0 : inodes);
+  };
+
+  // The fullest drive among the sample's usage entries: the badge names that
+  // one and grades itself by it, since a full disk stops work sooner than a
+  // busy one.
+  function fullestDrive(usage) {
+    let worst = null;
+    for (const d of usage || []) {
+      if (typeof d.pct !== "number" && inodePct(d) == null) continue;
+      if (!worst || drivePct(d) > drivePct(worst)) worst = d;
+    }
+    return worst;
+  }
+
   function grade(s) {
     if (!s) return "latency-idle";
-    const worst = Math.max(s.cpu_pct || 0, s.mem_pct || 0, s.disk_busy_pct || 0);
+    const disk = fullestDrive(s.usage);
+    const worst = Math.max(s.cpu_pct || 0, s.mem_pct || 0, s.disk_busy_pct || 0, disk ? drivePct(disk) : 0);
     if (worst >= 90) return "latency-bad";
     if (worst >= 70) return "latency-slow";
     return "latency-ok";
@@ -61,20 +89,42 @@
     badge.classList.remove("hidden");
     const s = data && data.latest;
     if (!s) {
-      badge.textContent = "CPU … · MEM … · IO …";
+      badge.textContent = "CPU … · MEM … · IO … · DISK …";
       badge.className = "badge latency-idle";
       badge.title = error || (data && data.error) || "waiting for the first sample";
       return;
     }
-    badge.textContent = `CPU ${fmtPct(s.cpu_pct)} · MEM ${fmtPct(s.mem_pct)} · IO ${fmtBytes(ioTotal(s), "/s")}`;
+    const usage = (s.usage || []).filter((d) => d && d.mount);
+    const disk = fullestDrive(usage);
+    // The badge has room for the fullest drive and a count of the rest; the
+    // tooltip and the page's capacity table list every drive. Inodes are
+    // named when the drive reports them, because that is what fills first
+    // under WSL.
+    const extra = disk ? usage.length - 1 : 0;
+    const inodes = disk ? inodePct(disk) : null;
+    badge.textContent = `CPU ${fmtPct(s.cpu_pct)} · MEM ${fmtPct(s.mem_pct)} · IO ${fmtBytes(ioTotal(s), "/s")}` +
+      (disk ? ` · DISK ${disk.label} ${fmtPct(disk.pct)}` : "") +
+      (inodes == null ? "" : ` · INO ${fmtPct(inodes)}`) +
+      (extra > 0 ? ` +${extra}` : "");
     badge.className = `badge ${grade(s)}`;
     badge.title = [
       `CPU ${fmtPct(s.cpu_pct)} of ${s.cpus || "?"} CPUs` + (s.load1 != null ? `, load ${s.load1}` : ""),
       `memory ${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)} (${fmtPct(s.mem_pct)})`,
       `disk read ${fmtBytes(s.disk_read_bps, "/s")}, write ${fmtBytes(s.disk_write_bps, "/s")}` +
         (s.disk_busy_pct != null ? `, busiest disk ${fmtPct(s.disk_busy_pct)} busy` : ""),
-      `source: ${s.source || "?"} · ${fmtTime(s.ts)} — click for history`,
-    ].join("\n");
+    ].concat(usage.flatMap((d) => {
+      const lines = [
+        `disk ${d.label} (${d.mount}): ${fmtBytes(d.used)} used of ${fmtBytes(d.total)}, ` +
+        `${fmtBytes(d.free)} free (${fmtPct(d.pct)})`,
+      ];
+      if (d.inodes) {
+        lines.push(`inodes ${d.label} (${d.mount}): ${fmtCount(d.inodes.used)} used of ` +
+          `${fmtCount(d.inodes.total)}, ${fmtCount(d.inodes.free)} free (${fmtPct(d.inodes.pct)})`);
+      }
+      return lines;
+    }))
+      .concat([`source: ${s.source || "?"} · ${fmtTime(s.ts)} — click for history`])
+      .join("\n");
   }
 
   async function pollBadge() {
@@ -273,6 +323,41 @@
     return table;
   }
 
+  /* Capacity per drive: the daemon's own root plus every registered
+     workspace's drive, deduplicated by mount (daemon/sysperf.disk_usage).
+     Inode columns are "—" on filesystems that do not report them. */
+  function capacityTable(usage) {
+    const drives = (usage || []).filter((d) => d && d.mount);
+    if (!drives.length) return null;
+    const table = node("table", "sysperf-table sysperf-usage");
+    const head = node("tr");
+    for (const h of ["Drive", "Used", "Free", "Total", "Used %", "Inodes", "Inode %"]) {
+      head.append(node("th", "", h));
+    }
+    table.append(head);
+    for (const d of drives) {
+      const tr = node("tr");
+      const name = node("td", "", d.label || d.mount);
+      name.title = d.mount;
+      const graded = (value, text) => {
+        const cell = node("td", "", text);
+        // Same grades as the badge: slow at 70 %, bad at 90 %.
+        if (typeof value === "number") {
+          if (value >= 90) cell.className = "s-full";
+          else if (value >= 70) cell.className = "s-near";
+        }
+        return cell;
+      };
+      const ino = d.inodes;
+      tr.append(name, node("td", "", fmtBytes(d.used)), node("td", "", fmtBytes(d.free)),
+        node("td", "", fmtBytes(d.total)), graded(d.pct, fmtPct(d.pct)),
+        node("td", "", ino ? `${fmtCount(ino.used)} / ${fmtCount(ino.total)}` : "—"),
+        graded(ino ? ino.pct : null, ino ? fmtPct(ino.pct) : "—"));
+      table.append(tr);
+    }
+    return table;
+  }
+
   function render() {
     const view = document.getElementById("sysperf-view");
     if (!view || !page.open) return;
@@ -318,6 +403,17 @@
       const disks = diskTable(latest.disks);
       if (disks) card.append(disks);
       view.append(card);
+      const capacity = capacityTable(latest.usage);
+      if (capacity) {
+        const capCard = node("section", "window-section sysperf-card");
+        capCard.append(node("h3", "", "Disk capacity"));
+        capCard.append(node("p", "wf-note",
+          "The drive holding the daemon's runtime root, plus the drive of every registered workspace. " +
+          "Each drive is listed once however many workspaces sit on it. Inodes are the other way a " +
+          "drive fills up — on WSL a disk can stop accepting files with plenty of bytes free."));
+        capCard.append(capacity);
+        view.append(capCard);
+      }
     }
     if (info.log && info.log.path) {
       const card = node("section", "window-section sysperf-card");
