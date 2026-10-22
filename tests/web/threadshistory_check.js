@@ -404,6 +404,82 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   assert.strictEqual(composer().dataset.thread, 'th-4');
   assert.strictEqual(textArea().placeholder, 's1에게 보내기');
 
+  // ---- auto refresh (claunch-8vofx) ----
+  // The poll sends the last answer's stamp back; unchanged is a no-op, a
+  // change redraws, and the conversation is read again only when its row moved.
+  let stamp = 'S1';
+  ctx.api = async url => {
+    calls.push(url);
+    const since = new URLSearchParams(url.split('?')[1] || '').get('since');
+    if (since === stamp) return { ok: true, status: 200, json: async () => ({ unchanged: true, stamp }) };
+    const m = url.match(/^\/api\/threads\/(th-[^?]+)$/);
+    const data = url.startsWith('/api/threads/index') ? JSON.parse(JSON.stringify({ ...indexFor(url), stamp }))
+      : url.startsWith('/api/threads/history') ? { ...reply(url), stamp }
+        : m ? conversation(m[1]) : { error: 'unexpected ' + url };
+    return { ok: !data.error, status: data.error ? 404 : 200, json: async () => data };
+  };
+  page.open('tree', 'th-1');
+  await settle();
+  // The list came from an answer without a stamp: the first poll asks for it whole.
+  calls.length = 0;
+  await page.poll(); await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/index']);
+  assert.strictEqual(page.state.stamp, 'S1');
+  calls.length = 0;
+  let drawn = view.children;
+  await page.poll(); await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/index?since=S1']);
+  assert.strictEqual(view.children, drawn);                       // nothing changed: no redraw
+  // A message in the thread shown: the list and that conversation are read.
+  index.threads.find(t => t.id === 'th-1').last_seq = 7;
+  stamp = 'S2';
+  calls.length = 0;
+  await page.poll(); await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/index?since=S1', '/api/threads/th-1']);
+  assert.notStrictEqual(view.children, drawn);
+  assert.strictEqual(page.state.stamp, 'S2');
+  // Another thread moved: the list is redrawn, the conversation is not read.
+  index.threads.find(t => t.id === 'th-2').excerpt = 'new reply';
+  stamp = 'S3';
+  calls.length = 0;
+  drawn = view.children;
+  await page.poll(); await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/index?since=S2']);
+  assert.ok(view.textContent.includes('new reply'));
+  // The stamp moved but the list read the same: no redraw.
+  stamp = 'S4';
+  drawn = view.children;
+  await page.poll(); await settle();
+  assert.strictEqual(view.children, drawn);
+  // A filter changes what the list is: its first poll asks for it whole.
+  page.state.session = 's1';
+  calls.length = 0;
+  await page.poll(); await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/index?session=s1']);
+  page.state.session = '';
+  // No poll while a post is out.
+  page.state.sending.add('th-1');
+  calls.length = 0;
+  await page.poll();
+  assert.deepStrictEqual(calls, []);
+  page.state.sending.delete('th-1');
+  // feed polls its page the same way.
+  reply = () => ({ threads: [thread('th-a', 's1', 'open', [['user', 'hello']])], total: 1, page: 1, per_page: 20, pages: 1, sessions });
+  page.open('feed');
+  await settle();
+  calls.length = 0;
+  await page.poll(); await settle();
+  assert.deepStrictEqual(calls, [`/api/threads/history?page=1&since=${stamp}`]);
+  stamp = 'S5';
+  reply = () => ({ threads: [thread('th-a', 's1', 'open', [['user', 'hello'], ['agent', 'fresh']])], total: 1, page: 1, per_page: 20, pages: 1, sessions });
+  await page.poll(); await settle();
+  assert.ok(view.textContent.includes('fresh'));
+  // A closed page does not poll.
+  page.stop();
+  calls.length = 0;
+  await page.poll();
+  assert.deepStrictEqual(calls, []);
+
   // An unknown mode falls back to tree.
   page.open('nope');
   assert.strictEqual(page.state.view, 'tree');

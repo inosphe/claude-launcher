@@ -14,8 +14,18 @@
      a page at a time (GET /api/threads/history).
    tree and newest read the list from GET /api/threads/index (no message
    bodies) and one conversation from GET /api/threads/<id>, which reads
-   without moving any read position. */
+   without moving any read position.
+
+   Every mode keeps itself current (claunch-8vofx): while the page is open
+   and its tab is shown, a poll every POLL_MS asks the same route with
+   `since=<stamp>`, the store's change stamp from the last answer. Nothing
+   changed is a few bytes and no redraw; a change brings the list (or the
+   feed page), redrawn only when it differs, and the conversation on the
+   right is read again only when its row moved. A poll does not run over a
+   read or a post of the page's own, and a redraw keeps the list's scroll
+   and the composer's caret. */
 (() => {
+  const POLL_MS = 3000;
   const VIEWS = [
     ["tree", "Sessions › threads", "Sessions with their threads in a list panel; pick a thread to read it."],
     ["newest", "Newest thread", "Only the most recently active thread, with the thread list beside it."],
@@ -26,6 +36,10 @@
     open: false, view: "tree", selected: "", page: 1, session: "", status: "",
     data: null, index: null, detail: null, error: "", detailError: "",
     collapsed: new Set(), seq: 0, detailSeq: 0,
+    // The poll: the change stamp of the last answer and what it was asked
+    // with (mode, filters, page), the timer, and reads of the page's own
+    // still out.
+    stamp: "", stampKey: "", timer: null, busy: 0,
     // The composer, per thread: typed text, images waiting to be sent
     // ([{file, src}]), posts still out, and what the last post said.
     drafts: new Map(), attached: new Map(), sending: new Set(), notice: null, refocus: "",
@@ -75,18 +89,33 @@
     return data;
   }
 
+  // What a list answer depends on: the mode's route and its query.
+  const listQuery = () => (state.view === "feed"
+    ? new URLSearchParams([["page", String(state.page)], ...filters()])
+    : filters());
+  const listUrl = (q) => (state.view === "feed" ? "/api/threads/history" : "/api/threads/index")
+    + (q.toString() ? `?${q}` : "");
+  const queryKey = () => `${state.view === "feed" ? "feed" : "index"}?${listQuery()}`;
+  function keep(data) {
+    state.stamp = (data && data.stamp) || "";
+    state.stampKey = queryKey();
+  }
+
   async function load() {
     if (state.view === "feed") return loadFeed();
     const seq = ++state.seq;
-    const q = filters();
+    state.busy++;
     try {
-      const data = await fetchJson("/api/threads/index" + (q.toString() ? `?${q}` : ""));
+      const data = await fetchJson(listUrl(listQuery()));
       if (seq !== state.seq || !state.open) return;
       state.index = data;
+      keep(data);
       state.error = "";
     } catch (error) {
       if (seq !== state.seq) return;
       state.error = error.message || String(error);
+    } finally {
+      state.busy--;
     }
     if (!state.open) return;
     render();
@@ -95,19 +124,84 @@
 
   async function loadFeed() {
     const seq = ++state.seq;
-    const q = new URLSearchParams([["page", String(state.page)], ...filters()]);
+    state.busy++;
     try {
-      const data = await fetchJson(`/api/threads/history?${q}`);
+      const data = await fetchJson(listUrl(listQuery()));
       if (seq !== state.seq || !state.open) return;
       state.data = data;
+      keep(data);
       state.error = "";
       // A filter can shrink the result under the page we were on.
       if (data.page > data.pages) { state.page = data.pages; return loadFeed(); }
     } catch (error) {
       if (seq !== state.seq) return;
       state.error = error.message || String(error);
+    } finally {
+      state.busy--;
     }
     if (state.open) render();
+  }
+
+  // Whether the conversation shown is behind its row in the list.
+  function detailStale() {
+    const id = target();
+    if (!id) return !!state.detail;
+    const d = state.detail;
+    if (!d || d.thread.id !== id) return true;
+    const row = ((state.index && state.index.threads) || []).find(t => t.id === id);
+    if (!row) return false;     // filtered out of the list: nothing says it moved
+    const t = d.thread;
+    return row.last_seq !== t.last_seq || row.updated_at !== t.updated_at
+      || row.status !== t.status || row.title !== t.title;
+  }
+
+  // One poll tick (claunch-8vofx). Skipped while a read or a post of the
+  // page's own is out: that one redraws anyway, and the next tick sees it.
+  async function poll() {
+    if (!state.open || state.busy || state.sending.size) return;
+    const seq = state.seq;
+    const q = listQuery();
+    const key = queryKey();
+    if (state.stamp && state.stampKey === key) q.set("since", state.stamp);
+    let data;
+    try {
+      data = await fetchJson(listUrl(q));
+    } catch (error) {
+      if (seq !== state.seq || !state.open) return;
+      const text = error.message || String(error);
+      if (text !== state.error) { state.error = text; render(); }
+      return;
+    }
+    // A read of the page's own started meanwhile: its answer is the newer one.
+    if (seq !== state.seq || !state.open || key !== queryKey()) return;
+    const cleared = !!state.error;
+    state.error = "";
+    if (data.unchanged) {
+      if (cleared) render();
+      return;
+    }
+    const before = state.view === "feed" ? state.data : state.index;
+    const same = !!before && JSON.stringify({ ...before, stamp: "" }) === JSON.stringify({ ...data, stamp: "" });
+    keep(data);
+    if (state.view === "feed") {
+      state.data = data;
+      if (data.page > data.pages) { state.page = data.pages; return loadFeed(); }
+      if (!same || cleared) render();
+      return;
+    }
+    state.index = data;
+    if (!same || cleared) render();
+    if (detailStale()) return loadDetail();
+  }
+
+  function startPoll() {
+    if (state.timer || typeof setInterval !== "function") return;
+    // app.js's visiblePoll skips a hidden tab and drops a tick that would
+    // stack on a read still out; without it, the hidden check alone.
+    const tick = typeof globalThis.visiblePoll === "function"
+      ? globalThis.visiblePoll(poll, () => state.timer)
+      : () => (typeof document !== "undefined" && document.hidden ? undefined : poll());
+    state.timer = setInterval(tick, POLL_MS);
   }
 
   async function loadDetail() {
@@ -501,9 +595,12 @@
   function render() {
     const view = document.getElementById("threads-view");
     if (!view) return;
-    // A redraw rebuilds the composer: whoever was typing in it keeps the focus.
+    // A redraw rebuilds the composer: whoever was typing in it keeps the
+    // focus and the caret; the list panel keeps its scroll.
     const was = view.querySelector?.(".thh-compose textarea");
     const typing = !!was && document.activeElement === was;
+    const caret = typing ? [was.selectionStart, was.selectionEnd] : null;
+    const scrolled = view.querySelector?.(".thh-list")?.scrollTop || 0;
     view.replaceChildren(controls());
     const [, , note] = VIEWS.find(([name]) => name === state.view);
     view.append(node("p", "wf-note thh-modenote",
@@ -521,7 +618,12 @@
     view.append(split);
     const box = view.querySelector?.(".thh-compose textarea");
     if (box && (typing || state.refocus === box.closest?.(".thh-compose")?.dataset.thread)) box.focus();
+    if (box && caret && box.value === was.value) {
+      try { box.setSelectionRange(caret[0], caret[1]); } catch { /* not a text box here */ }
+    }
     state.refocus = "";
+    const list = scrolled && view.querySelector?.(".thh-list");
+    if (list) list.scrollTop = scrolled;
   }
 
   function renderFeed(view) {
@@ -542,6 +644,7 @@
     state.view = next;
     state.selected = next === "tree" ? (id || state.selected || "") : state.selected;
     state.open = true;
+    startPoll();
     if (listed) {
       // Same list, another thread or mode: only the right side changes.
       render();
@@ -552,6 +655,10 @@
     load();
   }
 
-  function stop() { state.open = false; }
-  globalThis.ThreadsHistoryPage = { open, stop, load, render, state, route };
+  function stop() {
+    state.open = false;
+    if (state.timer) clearInterval(state.timer);
+    state.timer = null;
+  }
+  globalThis.ThreadsHistoryPage = { open, stop, load, render, poll, state, route };
 })();

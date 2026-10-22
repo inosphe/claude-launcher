@@ -586,13 +586,14 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         q = request.query
         res, err = await call(threads.history, page=q.get("page") or 1,
                               per_page=q.get("per_page") or thread_store.HISTORY_PAGE,
-                              session=q.get("session") or None, status=q.get("status") or None)
+                              session=q.get("session") or None, status=q.get("status") or None,
+                              since=q.get("since") or None)
         return err or web.json_response(res)
 
     async def h_index(request):
         q = request.query
         res, err = await call(threads.index, session=q.get("session") or None,
-                              status=q.get("status") or None)
+                              status=q.get("status") or None, since=q.get("since") or None)
         return err or web.json_response(res)
 
     async def h_open(request):
