@@ -109,21 +109,35 @@
                 title="reload archived sessions">Archived ⟳</button>
         <span id="daemon-info"></span>
       </div>
-      <!-- The relay's state and the two round trips a slow reply can be
-           spent in: browser to daemon, daemon to relay (claunch-8ufey).
-           Side by side, because a person comparing them is asking which. -->
+      <!-- One line of status by default (claunch-m5cux): the relay's state,
+           the two round trips a slow reply can be spent in (claunch-8ufey),
+           the P2P road, the PTY host's owner and the machine's numbers,
+           joined on a single line. The badges themselves — with their
+           colours, their titles and the P2P menu — sit in the overlay that
+           a hover (or a focus, or a click, where there is no pointer)
+           opens; it is drawn by status-line.js. -->
       <div id="link-row">
-        <span id="relay-badge" class="badge hidden"></span>
-        <span id="latency-badge" class="badge hidden"></span>
-        <span id="p2p-badge" class="badge hidden" role="button" tabindex="0"></span>
-        <!-- Who owns the session PTYs (claunch-xnnct.3): off, a connected
-             host, a host on older code (stale), or set on but unreachable. -->
-        <span id="pty-host-badge" class="badge hidden"></span>
-        <!-- The machine's CPU, memory, disk I/O and disk capacity
-             (claunch-zuk0b, claunch-frgt1), drawn by sysperf-page.js; a link
-             to the System performance page. -->
-        <a id="sysperf-badge" class="badge hidden" href="#/sysperf"></a>
-        <div id="p2p-menu" class="hidden"></div>
+        <button id="status-line" class="status-line hidden" type="button"
+                aria-expanded="false" aria-controls="status-overlay">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-text"></span>
+        </button>
+        <div id="status-overlay" class="status-overlay hidden">
+          <div id="status-pills">
+            <span id="relay-badge" class="badge hidden"></span>
+            <span id="latency-badge" class="badge hidden"></span>
+            <span id="p2p-badge" class="badge hidden" role="button" tabindex="0"></span>
+            <!-- Who owns the session PTYs (claunch-xnnct.3): off, a connected
+                 host, a host on older code (stale), or set on but unreachable. -->
+            <span id="pty-host-badge" class="badge hidden"></span>
+            <!-- The machine's CPU, memory, disk I/O and disk capacity
+                 (claunch-zuk0b, claunch-frgt1), drawn by sysperf-page.js; a link
+                 to the System performance page. -->
+            <a id="sysperf-badge" class="badge hidden" href="#/sysperf"></a>
+          </div>
+          <div id="status-detail" class="status-detail"></div>
+          <div id="p2p-menu" class="hidden"></div>
+        </div>
       </div>
     </header>
     <!-- The tier above the rail: which project's sessions and meshes the
@@ -1618,6 +1632,7 @@
 <script src="static/session-grid.js"></script>
 <script src="static/profile-usage.js"></script>
 <script src="static/sysperf-page.js"></script>
+<script src="static/status-line.js"></script>
 <script src="static/p2p.js"></script>
 <script src="static/app.js"></script>
 <script src="static/toolbar.js"></script>

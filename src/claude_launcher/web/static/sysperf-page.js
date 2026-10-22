@@ -85,13 +85,18 @@
   function renderBadge(data, error) {
     const badge = document.getElementById("sysperf-badge");
     if (!badge) return;
-    if (data && data.enabled === false) { badge.classList.add("hidden"); return; }
+    if (data && data.enabled === false) {
+      badge.classList.add("hidden");
+      globalThis.StatusLine?.sync();
+      return;
+    }
     badge.classList.remove("hidden");
     const s = data && data.latest;
     if (!s) {
       badge.textContent = "CPU … · MEM … · IO … · DISK …";
       badge.className = "badge latency-idle";
       badge.title = error || (data && data.error) || "waiting for the first sample";
+      globalThis.StatusLine?.sync();
       return;
     }
     const usage = (s.usage || []).filter((d) => d && d.mount);
@@ -125,6 +130,7 @@
     }))
       .concat([`source: ${s.source || "?"} · ${fmtTime(s.ts)} — click for history`])
       .join("\n");
+    globalThis.StatusLine?.sync();
   }
 
   async function pollBadge() {

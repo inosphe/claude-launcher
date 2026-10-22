@@ -628,6 +628,7 @@ function p2pRender() {
   badge.title = s.tip + (p2pActions(s).length ? " (click for controls)" : "");
   badge.className = "badge p2p-" + (s.state === "P2P" ? "on" : s.state);
   p2pMenuFill();
+  globalThis.StatusLine?.sync();
 }
 
 function controlRetire(old) {
@@ -1072,6 +1073,7 @@ function renderLatencyBadge() {
   const up = controlUp();
   if (!up && !latencySamples.length) {
     badge.classList.add("hidden");
+    globalThis.StatusLine?.sync();
     return;
   }
   const web = up ? latencyWeb() : { ms: null, stalled: false };
@@ -1146,6 +1148,7 @@ function renderLatencyBadge() {
   }
   lines.push(`round trips; amber ≥ ${LATENCY_SLOW_MS}ms, red ≥ ${LATENCY_BAD_MS}ms`);
   badge.title = lines.join("\n");
+  globalThis.StatusLine?.sync();
 }
 
 /* ---- terminals on the control socket ----
@@ -46863,6 +46866,8 @@ function renderRelayBadge(relay) {
       `uplink to ${relay.url || "the relay"} is disconnected — ` +
       `remote machines unreachable${detail}`;
   }
+  // The header's one line reads this badge back off the DOM (status-line.js).
+  globalThis.StatusLine?.sync();
 }
 
 /* The PTY host badge (claunch-xnnct.3), from GET /api/daemon's pty_host.
@@ -46922,6 +46927,7 @@ function renderPtyHostBadge(state) {
   if (!state || typeof state !== "object") {
     badge.classList.add("hidden");
     ptyHostState = null;
+    globalThis.StatusLine?.sync();
     return;
   }
   ptyHostState = state;
@@ -46935,8 +46941,10 @@ function renderPtyHostBadge(state) {
     badge.dataset.hoverBound = "1";
     badge.addEventListener("mouseenter", () => {
       if (ptyHostState) badge.title = ptyHostTitle(ptyHostState);
+      globalThis.StatusLine?.sync();
     });
   }
+  globalThis.StatusLine?.sync();
 }
 
 async function refreshMeshList(options) {
