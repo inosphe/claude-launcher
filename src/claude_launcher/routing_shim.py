@@ -407,6 +407,8 @@ async def _health(request: web.Request) -> web.Response:
             "route": cfg.get("route"),
             "provider": cfg.get("provider"),
             "inflight": request.app["inflight"],
+            # Asked to shut down: routing._find no longer hands it out.
+            "stopping": bool(request.app.get("stopping")),
             "pid": os.getpid(),
         }
     )
@@ -414,6 +416,7 @@ async def _health(request: web.Request) -> web.Response:
 
 async def _shutdown(request: web.Request) -> web.Response:
     app = request.app
+    app["stopping"] = True
     if request.query.get("when") == "idle" and app["inflight"]:
         # A superseded shim (routing.retire): stop once the requests still
         # running through it have finished, so no stream is cut.

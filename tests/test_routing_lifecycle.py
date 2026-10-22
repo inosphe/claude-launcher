@@ -165,6 +165,80 @@ def test_a_shim_handed_out_again_is_within_the_grace(owner):
     assert routing.reconcile([])["retired"] == []
 
 
+def test_a_pass_cannot_retire_a_shim_between_its_lookup_and_its_stamp(owner, monkeypatch):
+    # s1424 review of fac43725: the reuse path found the shim, a pass retired
+    # it on the old "ensured" stamp, and the launch got the URL of a shim
+    # that then stopped. The pass runs in its own thread, as in the daemon.
+    import threading
+
+    url = routing.ensure_shim("https://launch-only.example/", {})
+    port = routing._port_of(url)
+    fp = routing.fingerprint("https://launch-only.example/", {})
+    record = routing._record_file(fp, port)
+    data = routing._read_json(record)
+    data["ensured"] = time.time() - routing.GRACE_S - 5  # handed out long ago
+    record.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    real_find = routing._find
+    result = {}
+    pass_ = threading.Thread(target=lambda: result.update(routing.reconcile([])))
+
+    def _find_then_a_pass(fp_):
+        found = real_find(fp_)
+        if not pass_.is_alive() and not result:
+            pass_.start()
+            pass_.join(timeout=2)  # long enough for an unguarded pass to retire it
+        return found
+
+    monkeypatch.setattr(routing, "_find", _find_then_a_pass)
+    assert routing.ensure_shim("https://launch-only.example/", {}) == url
+    routing.apply_session({"ANTHROPIC_BASE_URL": url}, "s-new")
+    pass_.join(timeout=10)
+    assert result["retired"] == []
+    assert routing.health(port) is not None
+
+
+def test_a_shim_told_to_stop_is_not_handed_out(home, monkeypatch):
+    fp = routing.fingerprint("https://u.example/", {})
+    port = routing.candidate_ports(fp)[0]
+    monkeypatch.setattr(routing, "_port_free", lambda p: p != port)
+    info = {"marker": routing.MARKER, "fingerprint": fp, "inflight": 1}
+    monkeypatch.setattr(routing, "health", lambda p, timeout=0.6: dict(info) if p == port else None)
+    assert routing._find(fp) == port
+    info["stopping"] = True
+    assert routing._find(fp) is None
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX TIME_WAIT rule")
+def test_a_port_left_in_time_wait_by_an_exited_shim_reads_free(home):
+    # The shim closes each health probe's connection first, so its port keeps
+    # a TIME_WAIT after it exits; tests that start and stop shims back to back
+    # ran out of the eight candidate ports that way.
+    import socket
+
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    port = server.getsockname()[1]
+    client = socket.create_connection(("127.0.0.1", port))
+    conn, _ = server.accept()
+    conn.close()  # the server side closes first -> TIME_WAIT on ``port``
+    client.recv(1)
+    client.close()
+    server.close()
+    assert routing._port_free(port)
+    # a live listener still reads taken
+    live = socket.socket()
+    live.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    live.bind(("127.0.0.1", port))
+    live.listen()
+    try:
+        assert not routing._port_free(port)
+    finally:
+        live.close()
+
+
 def test_the_ensure_api_registers_the_asking_process(owner):
     url = shims_mod._ensure_for({"upstream": "https://u.example/", "spec": {}, "pid": 4242})
     assert routing._load_users()[str(routing._port_of(url))]["pids"] == [4242]
@@ -186,9 +260,12 @@ def test_an_idle_only_shutdown_waits_for_the_request_in_flight(home):
         app = routing_shim.build_app("https://u.example/", {}, "fp")
         app["stop"] = asyncio.Event()
         async with TestClient(TestServer(app)) as client:
+            assert (await (await client.get(routing.HEALTH_PATH)).json())["stopping"] is False
             app["inflight"] = 1  # a stream still going through
             resp = await client.post(routing.SHUTDOWN_PATH + "?when=idle")
             assert (await resp.json())["inflight"] == 1
+            # still serving that stream, but no longer handed out
+            assert (await (await client.get(routing.HEALTH_PATH)).json())["stopping"] is True
             await asyncio.sleep(0.1)
             assert not app["stop"].is_set()
             app["inflight"] = 0

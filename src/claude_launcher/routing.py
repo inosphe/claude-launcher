@@ -714,6 +714,12 @@ def health(port: int, timeout: float = 0.6) -> Optional[dict]:
 
 def _port_free(port: int) -> bool:
     sock = socket.socket()
+    if os.name != "nt":
+        # Bind as the shim's server does (asyncio sets SO_REUSEADDR on POSIX):
+        # every health probe the shim answers leaves a TIME_WAIT on its port,
+        # and without this the port reads as taken for a minute after the
+        # shim exits. On Windows the option would bind over a live listener.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", port))
         return True
@@ -904,9 +910,28 @@ def _find(fp: str) -> Optional[int]:
         if _port_free(port):
             continue  # nothing listens there; no request to make
         info = health(port)
-        if info is not None and info.get("fingerprint") == fp:
+        # A shim told to shut down (:func:`retire`) is skipped: handing it out
+        # would register a session on a shim about to go away.
+        if info is not None and info.get("fingerprint") == fp \
+                and not info.get("stopping"):
             return port
     return None
+
+
+def _reuse(fp: str, upstream: str, block: Dict, route: Optional[str]) -> Optional[str]:
+    """The URL of a running shim for ``fp``, stamped as handed out.
+
+    Found and stamped under :data:`_LOCK`, the lock :func:`reconcile` takes
+    for its last look and the retire request. Otherwise a pass could retire
+    the shim between the two (it would see the old "ensured" stamp) and the
+    launch would get the URL of a shim that is about to stop.
+    """
+    with _LOCK:
+        port = _find(fp)
+        if port is None:
+            return None
+        _record(fp, port, upstream, block, None, route=route)
+        return local_url(port)
 
 
 def _free_port(fp: str) -> Optional[int]:
@@ -940,19 +965,17 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
     if not _OWNER:
         return _ensure_via_daemon(upstream, block, provider, route)
     fp = fingerprint(upstream, block, route=route)
-    port = _find(fp)
-    if port is not None:
-        _record(fp, port, upstream, block, None, route=route)
-        return local_url(port)
+    url = _reuse(fp, upstream, block, route)
+    if url is not None:
+        return url
     if not _try_claim(fp):
         # Another launch is starting this exact shim right now. Wait for it
         # rather than adding a second one beside it.
         deadline = time.monotonic() + START_TIMEOUT + 5
         while time.monotonic() < deadline:
-            port = _find(fp)
-            if port is not None:
-                _record(fp, port, upstream, block, None, route=route)
-                return local_url(port)
+            url = _reuse(fp, upstream, block, route)
+            if url is not None:
+                return url
             time.sleep(0.1)
         raise RoutingError(
             f"another process holds the start claim for the routing shim to "
@@ -964,10 +987,9 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
         # that peer released it, would otherwise start a second shim on the
         # next port (observed as two live shims for one pair under four
         # simultaneous launches).
-        port = _find(fp)
-        if port is not None:
-            _record(fp, port, upstream, block, None, route=route)
-            return local_url(port)
+        url = _reuse(fp, upstream, block, route)
+        if url is not None:
+            return url
         start_port = _free_port(fp)
         if start_port is None:
             raise RoutingError(
