@@ -313,8 +313,10 @@ def upstream():
 
 
 @pytest.fixture
-def shims(home):
+def shims(home, monkeypatch):
     """Stop whatever a test started — the shim outlives the process that spawns it."""
+    # Only the daemon starts shims; this test stands in for it.
+    monkeypatch.setattr(routing, "_OWNER", True)
     yield
     routing.stop()
 

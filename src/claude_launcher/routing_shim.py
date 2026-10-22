@@ -1,7 +1,8 @@
 """The loopback proxy in front of an API-key provider.
 
-Started on demand by :mod:`claude_launcher.routing` — see that module for why
-it exists and how sessions find it. This file is only the transport: forward
+Started by the daemon through :mod:`claude_launcher.routing` (the only process
+that starts or stops one) — see that module for why it exists and how
+sessions find it. This file is only the transport: forward
 everything to the upstream unchanged, except that a JSON object body gains the
 configured routing field on the way out (when a spec was given), and every
 completion answer (``/v1/messages`` from Claude Code, ``/v1/chat/completions``
@@ -239,6 +240,19 @@ def _resolve_route(cfg: dict, session_name):
 
 
 async def _proxy(request: web.Request) -> web.StreamResponse:
+    # Counted for the whole handler, so an idle-only shutdown (``_shutdown``
+    # with ``when=idle``) waits for every request it carries, not only the
+    # metered ones.
+    request.app["inflight"] += 1
+    try:
+        return await _proxy_counted(request)
+    finally:
+        request.app["inflight"] -= 1
+        if request.app["inflight"] == 0 and request.app.get("stop_when_idle"):
+            request.app["stop"].set()
+
+
+async def _proxy_counted(request: web.Request) -> web.StreamResponse:
     cfg = request.app["cfg"]
     body = await request.read()
     headers = _forwarded(request.headers)
@@ -391,16 +405,25 @@ async def _health(request: web.Request) -> web.Response:
             "upstream": cfg["upstream"],
             "spec": cfg["spec"],
             "route": cfg.get("route"),
+            "provider": cfg.get("provider"),
+            "inflight": request.app["inflight"],
             "pid": os.getpid(),
         }
     )
 
 
 async def _shutdown(request: web.Request) -> web.Response:
+    app = request.app
+    if request.query.get("when") == "idle" and app["inflight"]:
+        # A superseded shim (routing.retire): stop once the requests still
+        # running through it have finished, so no stream is cut.
+        app["stop_when_idle"] = True
+        return web.json_response({"stopping": app["cfg"]["fingerprint"],
+                                  "inflight": app["inflight"]})
     # Set the flag *after* this response has had a moment to flush, so the
     # caller learns the shim is going down rather than seeing a dropped socket.
-    asyncio.get_running_loop().call_later(0.05, request.app["stop"].set)
-    return web.json_response({"stopped": request.app["cfg"]["fingerprint"]})
+    asyncio.get_running_loop().call_later(0.05, app["stop"].set)
+    return web.json_response({"stopped": app["cfg"]["fingerprint"]})
 
 
 def _connector() -> "aiohttp.TCPConnector | None":
@@ -439,6 +462,7 @@ def build_app(upstream: str, spec: dict, fingerprint: str,
     app["cfg"] = {"upstream": upstream, "spec": spec, "fingerprint": fingerprint,
                   "provider": provider, "session_affinity": session_affinity,
                   "route": route}
+    app["inflight"] = 0
     app["live"] = metering.LiveBoard(fingerprint)
     app.cleanup_ctx.append(_client_session)
     app.cleanup_ctx.append(_live_flusher)

@@ -142,6 +142,13 @@ class RoutingError(Exception):
     """Raised for a malformed ``routing`` block or a shim that will not start."""
 
 
+class ShimUnavailable(RoutingError):
+    """A process other than the daemon needed a shim, none was running, and
+    the daemon could not be asked to start one. Never answered by launching
+    against the upstream directly (claunch-19liw.2 decision): the caller
+    fails instead."""
+
+
 # --------------------------------------------------------------------------- #
 # configuration
 # --------------------------------------------------------------------------- #
@@ -684,6 +691,10 @@ def apply_session(env: dict, session: Optional[str]) -> None:
     for key in BASE_URL_ENV_KEYS:
         if is_shim_url(env.get(key)):
             env[key] = session_url(env[key], session)
+            if _OWNER:
+                # The daemon keeps the shim up while this session lives
+                # (:func:`reconcile`).
+                add_user(_port_of(env[key]), session=session)
 
 
 def health(port: int, timeout: float = 0.6) -> Optional[dict]:
@@ -775,22 +786,38 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[st
 def _record(fp: str, port: int, upstream: str, block: Dict, pid,
             route: Optional[str] = None) -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
-    _record_file(fp, port).write_text(
+    path = _record_file(fp, port)
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    _write_atomic(
+        path,
         json.dumps(
             {
                 "fingerprint": fp,
                 "port": port,
                 "upstream": upstream,
                 "spec": block,
-                "pid": pid,
+                "pid": pid if pid is not None else previous.get("pid"),
                 "url": local_url(port),
                 "route": route,
+                # When this daemon first saw the shim: :func:`reconcile` gives
+                # a new shim a grace before it may retire it, so a launch
+                # between ensuring the shim and registering its session is
+                # not raced.
+                "since": previous.get("since") or time.time(),
             },
             indent=2,
             sort_keys=True,
         ),
-        encoding="utf-8",
     )
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _start_diagnosis(child, port: int) -> str:
@@ -880,6 +907,12 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
                 route: Optional[str] = None) -> str:
     """Base URL of a live shim fronting ``upstream`` with ``block`` merged in.
 
+    Only the daemon starts shims (:func:`own_lifecycle`, claunch-19liw.2.3):
+    in any other process this asks the daemon for the shim
+    (:func:`_ensure_via_daemon`) and raises :class:`ShimUnavailable` when
+    neither a running shim nor the daemon is there. Below is the daemon's
+    half.
+
     Reuses a running shim for the same pair and starts one otherwise. Callers
     that arrive together converge on a single shim: one of them takes the start
     claim and the others wait for what it starts. ``provider`` is the config
@@ -891,6 +924,8 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
     not the upstream, and the shim resolves upstream, credentials and the
     model alias table from the live config on every request.
     """
+    if not _OWNER:
+        return _ensure_via_daemon(upstream, block, provider, route)
     fp = fingerprint(upstream, block, route=route)
     port = _find(fp)
     if port is not None:
@@ -990,6 +1025,8 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
         return upstream
     try:
         return ensure_shim(upstream, {}, provider_name)
+    except ShimUnavailable:
+        raise  # outside the daemon: no direct fallback (claunch-19liw.2)
     except RoutingError as exc:
         print(
             f"claunch: metering shim for provider {provider_name!r} unavailable, "
@@ -1052,6 +1089,8 @@ def instances() -> List[dict]:
     except OSError:
         return out
     for rec in records:
+        if rec == _users_file():
+            continue  # who uses which shim (add_user), not a shim record
         try:
             info = json.loads(rec.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1062,6 +1101,8 @@ def instances() -> List[dict]:
             rec.unlink(missing_ok=True)  # stale record: the shim is gone
             continue
         info["pid"] = live.get("pid", info.get("pid"))
+        if "inflight" in live:
+            info["inflight"] = live["inflight"]
         out.append(info)
     return out
 
@@ -1089,3 +1130,220 @@ def stop(fingerprints: Optional[List[str]] = None) -> List[str]:
         _record_file(str(fp), int(info["port"])).unlink(missing_ok=True)
         stopped.append(str(fp))
     return stopped
+
+
+# --------------------------------------------------------------------------- #
+# the daemon owns the shims (claunch-19liw.2.3)
+# --------------------------------------------------------------------------- #
+# Shims used to be started by whichever process launched a harness first: a
+# session shell's ``claunch run``, a test, the daemon. Nobody stopped them, so
+# they piled up (13 measured on 2026-10-22: five for one upstream, two left by
+# a test, two running a worktree's code). Now the daemon is the only process
+# that starts one, with its own interpreter and code root (``_shim_env``
+# follows this module's file), and the only one that stops one. A shim stays a
+# process of its own (``start_new_session``), so a daemon restart cuts no
+# stream: the next daemon adopts what is running.
+
+_OWNER = False
+
+#: How long a shim is kept after this daemon first saw it, whatever else
+#: :func:`reconcile` finds: covers a launch between ensuring the shim and
+#: registering its session.
+GRACE_S = 60.0
+
+#: How often the daemon reconciles (``daemon/shims.py``).
+RECONCILE_S = 30.0
+
+#: The daemon API a process other than the daemon asks for a shim through.
+ENSURE_API = "/api/routing/ensure"
+
+
+def own_lifecycle(on: bool = True) -> None:
+    """Make this process the one that starts and stops shims. The daemon
+    calls it as it boots; tests that run real shims call it too."""
+    global _OWNER
+    _OWNER = on
+
+
+def owns_lifecycle() -> bool:
+    return _OWNER
+
+
+def _port_of(url: str) -> Optional[int]:
+    rest = url[len("http://127.0.0.1:"):] if url.startswith("http://127.0.0.1:") else ""
+    text = rest.split("/", 1)[0]
+    return int(text) if text.isdigit() else None
+
+
+def _ensure_via_daemon(upstream: str, block: Dict, provider: Optional[str],
+                       route: Optional[str]) -> str:
+    """The shim for this pair, asked of the daemon, which starts it if needed
+    and keeps it while this process lives. With no daemon to ask, a shim that
+    is already running is still used; with neither, :class:`ShimUnavailable`
+    (no direct fallback, claunch-19liw.2)."""
+    from . import daemon_client  # the daemon client imports half the package
+
+    client = daemon_client.connect()
+    if client is not None:
+        try:
+            answer = client.post(ENSURE_API, {
+                "upstream": upstream, "spec": block, "provider": provider,
+                "route": route, "pid": os.getpid(),
+            }, timeout=START_TIMEOUT + 10)
+        except daemon_client.DaemonClientError as exc:
+            raise ShimUnavailable(f"the daemon could not provide the routing shim "
+                                  f"for {upstream}: {exc}") from exc
+        url = answer.get("url") if isinstance(answer, dict) else None
+        if not url:
+            raise ShimUnavailable(f"the daemon answered no routing shim URL for {upstream}")
+        return url
+    port = _find(fingerprint(upstream, block, route=route))
+    if port is not None:
+        return local_url(port)
+    raise ShimUnavailable(
+        f"no routing shim for {upstream} is running and the daemon is not "
+        "running to start one: shims are started by the daemon only "
+        "(start it with 'claunch daemon start')"
+    )
+
+
+def _users_file() -> Path:
+    return state_dir() / "users.json"
+
+
+def _load_users() -> Dict[str, dict]:
+    try:
+        data = json.loads(_users_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def add_user(port: Optional[int], *, session: Optional[str] = None,
+             pid: Optional[int] = None) -> None:
+    """Record that ``session`` (a daemon session) or ``pid`` (a ``claunch
+    run`` outside the daemon) talks to the shim on ``port``. Kept on disk,
+    since shims outlive a daemon restart and so must the reasons to keep
+    them."""
+    if port is None or not (session or pid):
+        return
+    users = _load_users()
+    entry = users.setdefault(str(port), {})
+    if session:
+        entry["sessions"] = sorted(set(entry.get("sessions") or []) | {session})
+    if pid:
+        entry["pids"] = sorted(set(entry.get("pids") or []) | {int(pid)})
+    state_dir().mkdir(parents=True, exist_ok=True)
+    _write_atomic(_users_file(), json.dumps(users, indent=2, sort_keys=True))
+
+
+def _pid_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        from .daemon_client import process_alive
+
+        return bool(process_alive(pid))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def desired(doc: Optional[dict] = None) -> List[dict]:
+    """The shims the config asks for on its own: for every provider whose
+    Claude base URL goes through a shim (a ``routing`` block, a required
+    header, metering), the shim fronting that URL. A dynamic provider's shim
+    is keyed on the profile that launches it and Pi's on its OpenAI endpoint;
+    those are started by the launch and kept while it lives."""
+    from . import providers  # providers imports this module
+
+    doc = store.load() if doc is None else doc
+    out: List[dict] = []
+    for name, env in providers.registry(doc).items():
+        upstream = env.get("ANTHROPIC_BASE_URL")
+        if not upstream or providers.uses_anthropic_oauth(name, doc):
+            continue
+        try:
+            if dynamic(name, doc):
+                continue
+            block = spec(name, doc)
+            if not (block or requires_shim(name, doc)
+                    or metering.provider_enabled(name, doc)):
+                continue
+        except RoutingError:
+            continue
+        out.append({"provider": name, "upstream": upstream, "spec": block or {},
+                    "fingerprint": fingerprint(upstream, block or {})})
+    return out
+
+
+def retire(info: dict) -> bool:
+    """Ask the shim in ``info`` (an :func:`instances` row) to stop once its
+    in-flight requests are done. A shim from a build without that request
+    (no ``inflight`` in its health answer) is left running: it cannot say
+    whether it is mid-stream. True when the request was sent."""
+    if "inflight" not in info:
+        return False
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{info['port']}{SHUTDOWN_PATH}?when=idle",
+        method="POST", data=b"")
+    try:
+        urllib.request.urlopen(req, timeout=5.0).close()
+    except (urllib.error.URLError, OSError):
+        return False
+    return True
+
+
+def reconcile(live_sessions, doc: Optional[dict] = None,
+              now: Optional[float] = None) -> dict:
+    """One pass of the daemon's shim upkeep: start what the config wants,
+    retire what nothing needs.
+
+    A shim is kept while the config wants its fingerprint (:func:`desired`),
+    a user registered with :func:`add_user` is alive (a session in
+    ``live_sessions``, a pid still running), it has requests in flight, or it
+    is within :data:`GRACE_S` of being first seen. Anything else is retired.
+    So a config edit starts the new shim here and lets the old one go once
+    the sessions launched against it have ended. Returns what it did, for the
+    daemon log.
+    """
+    now = time.time() if now is None else now
+    live_sessions = set(live_sessions)
+    started: List[str] = []
+    errors: List[str] = []
+    wanted = set()
+    for want in desired(doc):
+        wanted.add(want["fingerprint"])
+        try:
+            ensure_shim(want["upstream"], want["spec"], want["provider"])
+            started.append(want["fingerprint"])
+        except RoutingError as exc:
+            errors.append(f"{want['provider']}: {exc}")
+    users = _load_users()
+    kept_users: Dict[str, dict] = {}
+    retired: List[str] = []
+    seen_fps = set()
+    for info in instances():
+        port = str(info.get("port"))
+        fp = info.get("fingerprint")
+        entry = users.get(port) or {}
+        sessions = [s for s in entry.get("sessions") or [] if s in live_sessions]
+        pids = [p for p in entry.get("pids") or [] if _pid_alive(int(p))]
+        if sessions or pids:
+            kept_users[port] = {k: v for k, v in
+                                (("sessions", sessions), ("pids", pids)) if v}
+        # A second shim for a wanted fingerprint is a duplicate: new launches
+        # find the first one, so only its own users keep it.
+        duplicate = fp in seen_fps
+        seen_fps.add(fp)
+        if (fp in wanted and not duplicate) or sessions or pids or info.get("inflight"):
+            continue
+        if now - float(info.get("since") or now) < GRACE_S:
+            continue
+        if retire(info):
+            retired.append(f"{fp}:{port}")
+    state_dir().mkdir(parents=True, exist_ok=True)
+    _write_atomic(_users_file(), json.dumps(kept_users, indent=2, sort_keys=True))
+    return {"started": started, "retired": retired, "errors": errors}

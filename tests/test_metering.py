@@ -609,6 +609,7 @@ def upstream():
 @pytest.fixture
 def shims(home, monkeypatch):
     monkeypatch.setenv("CLAUNCH_METERING", "1")  # conftest turns it off by default
+    monkeypatch.setattr(routing, "_OWNER", True)  # standing in for the daemon
     yield
     routing.stop()
 
