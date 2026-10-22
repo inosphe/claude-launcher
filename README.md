@@ -532,10 +532,16 @@ claunch create work --reinit        # finish or redo work's setup in place
 isolated `CLAUDE_CONFIG_DIR`, so a global install never reaches it; answering
 yes runs the same install as `claunch install work`.
 
+`claunch create --reinit` asks a different question
+(`reinstall the MCP server and skills into 'work', rewriting the files it
+manages? [Y/n]`): that path runs over a directory someone may already have
+used, and the install rewrites the files it manages.
+
 The question is asked only where a person can answer it. A managed session
-(`CLAUNCH_SESSION` set) and a stdin that is not a terminal skip it and print
-the command to run later instead, so a scripted `create` never blocks on
-stdin. `--install` and `--no-install` answer it without a terminal.
+(`CLAUNCH_SESSION` set) and a stdin that is not a terminal -- or is not there
+at all -- skip it and print the command to run later instead, so a scripted
+`create` never blocks on stdin. `--install` and `--no-install` answer it
+without a terminal.
 
 ```bash
 claunch create work --install       # install without asking
