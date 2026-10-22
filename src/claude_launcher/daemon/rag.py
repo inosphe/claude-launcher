@@ -267,11 +267,13 @@ class RagClient:
         }
         async with self._session() as http:
             data = await self._post(http, "/rerank", body)
+        # Cohere and Jina answer in ``results``; Fireworks answers the same rows
+        # in ``data`` (measured 2026-10-22, claunch-gm0b9).
         try:
-            rows = data["results"]
+            rows = data["results"] if "results" in data else data["data"]
             out = [(int(r["index"]), float(r["relevance_score"])) for r in rows]
         except (KeyError, TypeError, ValueError):
-            raise RagError("rag rerank response has no results[].relevance_score") from None
+            raise RagError("rag rerank response has no results[]/data[].relevance_score") from None
         out.sort(key=lambda p: -p[1])
         return out
 

@@ -57,6 +57,7 @@ class Endpoint:
         self.rerank_calls: list = []
         self.headers: list = []
         self.fail_embed = False
+        self.rerank_key = "results"
 
     async def embeddings(self, request):
         body = await request.json()
@@ -78,7 +79,7 @@ class Endpoint:
             score = 0.9 if word in doc.lower() else 0.1 / (i + 1)
             results.append({"index": i, "relevance_score": score, "document": {"text": doc}})
         results.sort(key=lambda r: -r["relevance_score"])
-        return aioweb.json_response({"id": "rerank-1", "results": results[: body.get("top_n", 10)],
+        return aioweb.json_response({"id": "rerank-1", self.rerank_key: results[: body.get("top_n", 10)],
                                      "model": body["model"], "usage": {"total_tokens": 1}})
 
 
@@ -330,6 +331,26 @@ def test_client_sends_the_openai_and_cohere_shapes():
             with pytest.raises(rag.RagError) as err:
                 await client.embed(["x"])
             assert "500" in str(err.value) and "rag-secret" not in str(err.value)
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_client_reads_the_fireworks_rerank_shape():
+    """Fireworks puts the rerank rows under ``data`` instead of ``results``."""
+    ep = Endpoint()
+    ep.rerank_key = "data"
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            client = rag.RagClient(_cfg(server))
+            pairs = await client.rerank("pytest question", ["kanban doc", "pytest doc"], 2)
+            assert pairs[0] == (1, pytest.approx(0.9))
+            ep.rerank_key = "ranking"
+            with pytest.raises(rag.RagError):
+                await client.rerank("pytest question", ["kanban doc"], 1)
         finally:
             await server.close()
 
