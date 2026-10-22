@@ -142,6 +142,19 @@ def matches(name: str, session: str) -> bool:
     )
 
 
+def stamped_run(name: str, session: str) -> bool:
+    """Whether ``name`` is a ``<session>c<MMDDHHMMSS>`` run basetemp.
+
+    The shape ``tools/changed_tests.py`` writes, one per run. Callers that
+    label basetemps for a person (the Artifacts page) read the kind from
+    here rather than matching the stamp themselves, so two lists of the same
+    root cannot disagree about which directories are a run's.
+    """
+    if not session or not name.startswith(session):
+        return False
+    return bool(_STAMP.fullmatch(name[len(session):]))
+
+
 def sweep_generation(name: str, session: str) -> bool:
     """Whether ``name`` is one of ``session``'s sweep basetemps.
 

@@ -8,6 +8,7 @@ import os
 import sqlite3
 from aiohttp import web
 
+from . import artifact_inventory
 from .artifact_cleanup import Cleanup, CleanupError
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,9 @@ def install(app):
     service = Cleanup(app["manager"])
     # The daemon's clock drives scheduled applies from here (__main__ starts it).
     app["artifact_cleanup"] = service
+    # The Artifacts page's size walk, one at a time; the cell is written in
+    # place because an aiohttp app's keys do not change after it starts.
+    app["artifact_usage"] = {"task": None}
     # Per session, not one for the daemon: a plan walks every file its session
     # owns, and one session's long walk must not hold every other session's
     # request past the client's timeout (claunch-30rkn).
@@ -109,6 +113,64 @@ def install(app):
             return web.json_response({"error": str(exc), "status": "cleanup_pending"}, status=400)
 
     app.router.add_post("/api/artifact-cleanup", handle)
+
+    async def artifacts(request):
+        """The Artifacts page's listing: what cleanup looks at, and its size.
+
+        Reads only -- nothing here walks a tree. Sizes come from the cache
+        ``/api/artifacts/measure`` fills.
+        """
+        document = await asyncio.to_thread(artifact_inventory.inventory,
+                                           app["manager"])
+        return web.json_response(document)
+
+    async def measure(request):
+        """Walk the listing's paths in the background and keep each answer.
+
+        Paths are derived from the daemon's own listing, never from the
+        request: an endpoint that walked whatever a caller named would be a
+        way to measure (and disclose) any directory on this machine.
+        """
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if body is None:
+            body = {}
+        if not isinstance(body, dict) or set(body) - {"session", "force"}:
+            return web.json_response(
+                {"error": "only session and force are accepted; paths are not accepted"},
+                status=400)
+        session = body.get("session") or ""
+        if not isinstance(session, str):
+            return web.json_response({"error": "session must be a string"}, status=400)
+        force = body.get("force")
+        if force is not None and not isinstance(force, bool):
+            return web.json_response({"error": "force must be a boolean"}, status=400)
+        document = await asyncio.to_thread(artifact_inventory.inventory,
+                                           app["manager"])
+        if session and not any(row["name"] == session
+                               for row in document["sessions"]):
+            return web.json_response({"error": f"unknown session {session!r}"},
+                                     status=400)
+        every = artifact_inventory.measurable_paths(
+            document["sessions"], document["orphans"])
+        await asyncio.to_thread(artifact_inventory.retain, every)
+        targets = artifact_inventory.measurable_paths(
+            document["sessions"], document["orphans"], session=session)
+        job = app["artifact_usage"]
+        # One walk at a time: a request that arrives while one runs is answered
+        # from the page's next poll instead of queueing a second walk of the
+        # same disk.
+        if targets and (job["task"] is None or job["task"].done()):
+            job["task"] = asyncio.ensure_future(asyncio.to_thread(
+                artifact_inventory.measure, targets, bool(force)))
+        return web.json_response({"paths": len(targets),
+                                  "running": artifact_inventory.running()},
+                                 status=202)
+
+    app.router.add_get("/api/artifacts", artifacts)
+    app.router.add_post("/api/artifacts/measure", measure)
 
 
 async def scheduled_clock(app, service, interval=SCHEDULED_POLL):

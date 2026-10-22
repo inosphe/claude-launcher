@@ -316,6 +316,7 @@
       <a href="#/category" data-page="category"><span>⌘</span>Category</a>
       <a href="#/workspaces" data-page="workspaces"><span>▣</span>Workspaces</a>
       <a href="#/worktrees" data-page="worktrees"><span>⑂</span>Worktrees</a>
+      <a href="#/artifacts" data-page="artifacts"><span>⌗</span>Artifacts</a>
       <a href="#/glossary" data-page="glossary"><span>≡</span>Glossary</a>
       <a href="#/spec" data-page="spec"><span>⊞</span>Spec</a>
       <a href="#/cli" data-page="cli"><span>&gt;_</span>CLI</a>
@@ -1544,6 +1545,10 @@
     <!-- The launcher worktrees (<repo>/.claude/worktrees/*), grouped by age,
          with the sessions in them; drawn by worktrees-page.js. -->
     <div id="worktrees-view" class="hidden"></div>
+    <!-- What artifact cleanup looks at, per session: the scratch directory
+         and basetemp trees it owns, their disk usage, the orphans, and the
+         cleanup receipts and schedules; drawn by artifacts-page.js. -->
+    <div id="artifacts-view" class="hidden"></div>
     <!-- One commit and its diff (#/commit/<sha>), reached from every commit
          the dashboard shows; drawn by commit-page.js. -->
     <div id="commit-view" class="hidden"></div>
@@ -1615,6 +1620,7 @@
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
 <script src="static/worktrees-page.js"></script>
+<script src="static/artifacts-page.js"></script>
 <script src="static/commit-page.js"></script>
 <script src="static/chart-page.js"></script>
 <script src="static/glossary-page.js"></script>

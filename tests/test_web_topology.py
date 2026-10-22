@@ -613,6 +613,7 @@ CHECKS = [
         "operator_check.js",
         "chat_check.js",
         "worktreespage_check.js",
+        "artifacts_check.js",
         "commitpage_check.js",
         "chartpage_check.js",
         "profileusage_check.js",

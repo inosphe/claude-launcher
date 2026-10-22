@@ -7742,6 +7742,50 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .wt-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .wt-dialog-actions .wf-btn { margin-right: 0; }
 
+/* ---- Artifacts page (artifacts-page.js, daemon/artifact_inventory.py) ----
+   What artifact cleanup looks at, per session. Sized by lines of path plus
+   one measurement each; the size column keeps its own right-aligned width so
+   a long path cannot push the numbers out of the eye's way. */
+@media (max-width: 820px) { #artifacts-view { padding: 14px 12px; } }
+.ar-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  font-size: 13px; margin: 8px 0 2px; }
+.ar-root { font-size: 12px; color: #8b949e; margin: 0 0 4px;
+  overflow-wrap: anywhere; }
+.ar-muted { color: #8b949e; font-size: 12px; }
+.ar-body { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.ar-session { background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #6e7681;
+  border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+  min-width: 0; font-size: 13px; }
+.ar-session.live { border-left-color: #2ea043; }
+.ar-session.orphaned { border-left-color: #d29922; }
+.ar-session-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ar-name { font-weight: 600; color: #c9d1d9; text-decoration: none; }
+a.ar-name:hover { color: #58a6ff; }
+.ar-cwd { font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 46ch; }
+.ar-session-head .wf-btn { margin-left: auto; margin-right: 0; padding: 3px 10px; }
+.ar-size { font-size: 12px; color: #b8c8db; white-space: nowrap; margin-left: auto; }
+.ar-session-head .ar-size { margin-left: 0; }
+.ar-rows { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ar-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0;
+  padding: 2px 0; border-bottom: 1px solid #22262d; }
+.ar-row:last-child { border-bottom: none; }
+.ar-path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
+  min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; user-select: text; }
+.ar-row .ar-size { margin-left: 0; }
+.ar-kind { flex: 0 0 auto; }
+.wt-chip.ar-area { background: #1c2d4a; color: #79c0ff; }
+.wt-chip.ar-kind { background: #30363d; color: #b8c8db; }
+.wt-chip.ar-stale { background: #3d2e00; color: #e3b341; }
+.wt-chip.ar-why { background: #3a2422; color: #ffa198; }
+.wt-chip.ar-running { background: #1c2d4a; color: #79c0ff; }
+.wt-chip.ar-scheduled { background: #3d2e00; color: #e3b341; }
+.wt-chip.ar-receipt { background: #30363d; color: #8b949e; }
+.ar-cleanup { display: flex; flex-direction: column; gap: 2px; padding-top: 4px;
+  border-top: 1px dashed #2a2e36; }
+.ar-cleanup-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ar-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #8b949e; }
+
 /* ---- remote-shadow sessions (daemon/shadow.py) ----
    Another daemon's mesh members, drawn in #session-list among the local rows
    and under the same group headings. Styled apart from them on purpose (a
