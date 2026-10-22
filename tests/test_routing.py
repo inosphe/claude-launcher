@@ -54,6 +54,14 @@ def test_fingerprint_ignores_key_order_but_not_content():
     assert a != routing.fingerprint("https://other/", {"order": ["cw"]})
 
 
+def test_fingerprint_changes_with_the_shim_protocol(monkeypatch):
+    """A shim keeps the code it was started with across an upgrade, so the
+    protocol it speaks is part of its identity (claunch-g1m1t)."""
+    now = routing.fingerprint("https://u/", SPEC)
+    monkeypatch.setattr(routing, "SHIM_PROTOCOL", routing.SHIM_PROTOCOL - 1)
+    assert routing.fingerprint("https://u/", SPEC) != now
+
+
 def test_ports_are_derived_from_the_fingerprint(home):
     fp = routing.fingerprint("https://u/", SPEC)
     ports = routing.candidate_ports(fp)
@@ -571,6 +579,24 @@ def test_a_changed_spec_gets_its_own_shim(upstream, shims):
     second = routing.ensure_shim(upstream.url, {"order": ["together"]})
     assert first != second
     assert len(routing.instances()) == 2
+
+
+@pytest.mark.slow_shim
+def test_a_shim_from_an_older_protocol_is_not_reused(upstream, shims, monkeypatch):
+    """claunch-g1m1t: after an upgrade the shim still running the old code
+    answered health for the same (upstream, spec) and was handed to new
+    launches, which it then answered 404 on the ``/s/<session>/`` path."""
+    current = routing.SHIM_PROTOCOL
+    monkeypatch.setattr(routing, "SHIM_PROTOCOL", current - 1)
+    old = routing.ensure_shim(upstream.url, SPEC)
+    monkeypatch.setattr(routing, "SHIM_PROTOCOL", current)
+
+    new = routing.ensure_shim(upstream.url, SPEC)
+
+    assert new != old
+    assert len(routing.instances()) == 2
+    port = int(new.rstrip("/").rsplit(":", 1)[1])
+    assert routing.health(port)["protocol"] == current
 
 
 @pytest.mark.slow_shim
