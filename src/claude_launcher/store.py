@@ -461,6 +461,13 @@ DAEMON_DEFAULTS = {
     # (session_reminder.scan_packs). The record refresh runs even when off.
     "prompt_pack_reminder": True,
     "prompt_pack_reminder_interval": 600.0,
+    # How long a session's screen must have stood still, measured at delivery
+    # time, before a due reminder is held instead of typed in
+    # (daemon/cflow_clock.REMINDER_STALL, claunch-pumne). The busy/idle gate
+    # alone cannot keep reminders out of a turn parked on a long command or
+    # on a spinner; this one reads the screen. Seconds; 0 turns it off. Read
+    # LIVE like the keys above.
+    "reminder_stall_hold": 15.0,
     "score_goal_default": False,
     # The run event clock's machine switch: whether an overseer session (the
     # driver's spawn parent, else its mesh leader) is told when a run it
