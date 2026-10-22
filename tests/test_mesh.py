@@ -1736,7 +1736,7 @@ def test_merged_server_offers_both_toolsets():
     from claude_launcher import (
         mcp_server, mesh_mcp, status_checks_mcp, wait_mcp, window_mcp, observer_mcp,
         operator_v2_mcp, search_mcp, glossary_mcp, category_mcp, reposync_mcp, sim_mcp, artifact_cleanup_mcp, qa_mcp,
-        threads_mcp, prompt_packs_mcp, webdebug_mcp, cflow_watch_mcp,
+        threads_mcp, shell_mcp, prompt_packs_mcp, webdebug_mcp, cflow_watch_mcp,
     )
     from claude_launcher.cflow import mcp as cflow_mcp
     from claude_launcher.cflow2 import mcp as cflow2_mcp
@@ -1752,7 +1752,8 @@ def test_merged_server_offers_both_toolsets():
         + [t["name"] for t in sim_mcp.TOOLS] + [t["name"] for t in cflow2_mcp.TOOLS] + [t["name"] for t in cflow_watch_mcp.TOOLS] \
         + [t["name"] for t in reposync_mcp.TOOLS] \
         + [t["name"] for t in artifact_cleanup_mcp.TOOLS] + [t["name"] for t in qa_mcp.TOOLS] \
-        + [t["name"] for t in threads_mcp.TOOLS] + [t["name"] for t in prompt_packs_mcp.TOOLS] \
+        + [t["name"] for t in threads_mcp.TOOLS] + [t["name"] for t in shell_mcp.TOOLS] \
+        + [t["name"] for t in prompt_packs_mcp.TOOLS] \
         + [t["name"] for t in webdebug_mcp.TOOLS]
     assert len(set(names)) == len(names)  # merge() guards this too
     listed = mcp_server.SERVER.handle(

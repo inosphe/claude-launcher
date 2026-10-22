@@ -23,6 +23,7 @@ import asyncio
 import functools
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
@@ -39,6 +40,25 @@ log = logging.getLogger(__name__)
 #: bytes a new viewer is replayed before they switch to live. Bounded so a
 #: crashed command that floods the shell cannot balloon the daemon's memory.
 SHELL_BUFFER_MAX = 256 * 1024
+
+#: The most output one read returns, so a caller cannot ask the daemon to
+#: copy the whole ring into one response and a slow reader stays cheap.
+READ_MAX = 64 * 1024
+
+#: A proposed line's own limits: long enough for a compound command or a
+#: short script, short enough that the pane stays readable. The per-session
+#: cap keeps one agent from filling the user's strip; the total cap bounds
+#: the memory the daemon spends on proposals nobody has decided.
+SUGGESTION_MAX_TEXT = 4096
+SUGGESTION_MAX_WHY = 1000
+SUGGESTION_PENDING_PER_SESSION = 10
+SUGGESTION_PENDING_MAX = 50
+SUGGESTION_KEEP_DECIDED = 200
+
+
+def _now() -> str:
+    """UTC seconds, the timestamp shape the daemon's records use."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def default_shell_argv() -> List[str]:
@@ -105,6 +125,13 @@ class ShellPty:
         self._reader: Optional[threading.Thread] = None
         self._buffer: deque = deque()          # raw output chunks, oldest last
         self._buffered = 0                     # their total length
+        #: Bytes ever read from the child in this incarnation. The ring keeps
+        #: only its tail, so this is the cursor a reader resumes from: the
+        #: buffer covers ``[_total - _buffered, _total)``.
+        self._total = 0
+        #: Input proposed by agent sessions, by suggestion id. A proposal is
+        #: text and a reason; only the user's accept writes it to the PTY.
+        self._suggestions: Dict[str, dict] = {}
         self._subscribers = set()
         self._loop = asyncio.get_running_loop()
         #: One writer into the PTY at a time; see :meth:`write_bytes`.
@@ -117,6 +144,11 @@ class ShellPty:
     @property
     def rows(self) -> int:
         return self._rows
+
+    @property
+    def total(self) -> int:
+        """Bytes read from this incarnation — the cursor a later read uses."""
+        return self._total
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -148,6 +180,7 @@ class ShellPty:
             self._pty = None
         self._buffer.clear()
         self._buffered = 0
+        self._total = 0
         self.exited = False
         self.exit_code = None
         # Same inheritance the session harness gets, and the same correction:
@@ -217,6 +250,7 @@ class ShellPty:
             return
         self._buffer.append(chunk)
         self._buffered += len(chunk)
+        self._total += len(chunk)
         while self._buffered > SHELL_BUFFER_MAX:
             self._buffered -= len(self._buffer[0])
             self._buffer.popleft()
@@ -259,6 +293,146 @@ class ShellPty:
         """A viewer has gone; drop the partial character it never finished."""
         if self._pty is not None:
             self._pty.forget_writer(writer)
+
+    # ------------------------------------------------------------------ #
+    # shared reading (agents)
+    # ------------------------------------------------------------------ #
+    def read_output(self, after: Optional[int] = None, limit: int = READ_MAX) -> dict:
+        """A slice of the output ring, for a reader that is not a terminal.
+
+        ``after`` is the ``offset`` a previous read returned; without one the
+        caller gets the tail. Offsets are absolute byte positions in this
+        incarnation, so they survive the ring dropping old bytes: a reader
+        that fell behind is told how much it missed (``dropped``) and
+        resumes at ``retained_from`` instead of silently skipping it.
+        """
+        limit = max(1, min(int(limit), READ_MAX))
+        blob = b"".join(self._buffer)
+        retained_from = self._total - len(blob)
+        if after is None:
+            start = max(retained_from, self._total - limit)
+            dropped = 0
+        else:
+            start = max(int(after), retained_from)
+            dropped = max(0, retained_from - int(after)) if int(after) < self._total else 0
+            start = min(start, self._total)
+        end = min(self._total, start + limit)
+        chunk = blob[start - retained_from:end - retained_from]
+        return {
+            "offset": end,
+            "start": start,
+            "end": end,
+            "total": self._total,
+            "pid": self.pid,
+            "retained_from": retained_from,
+            "dropped": dropped,
+            # The cursor is from an earlier incarnation (the shell was
+            # restarted); its numbering began again at 0.
+            "reset": after is not None and int(after) > self._total,
+            "text": chunk.decode("utf-8", "replace"),
+            "exited": self.exited,
+            "exit_code": self.exit_code,
+        }
+
+    # ------------------------------------------------------------------ #
+    # input proposals (agents propose, the user decides)
+    # ------------------------------------------------------------------ #
+    def suggestions(self, state: Optional[str] = None) -> List[dict]:
+        """The proposal queue, oldest first; ``state`` filters it."""
+        rows = [dict(r) for r in self._suggestions.values()]
+        if state:
+            rows = [r for r in rows if r["state"] == state]
+        return rows
+
+    def suggest(self, session: str, text: str, why: str = "") -> dict:
+        """Queue text an agent session proposes the user run.
+
+        Nothing here reaches the child: a proposal is a row the CLI tab
+        shows beside its accept control. The only path from a proposal to
+        the PTY is :meth:`accept`, which the user's side calls.
+        """
+        session = (session or "").strip()
+        if not session:
+            raise ValueError("session is required")
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("text is required")
+        if "\x00" in text:
+            raise ValueError("text must not contain NUL")
+        if len(text) > SUGGESTION_MAX_TEXT:
+            raise ValueError(f"text is longer than {SUGGESTION_MAX_TEXT} characters")
+        if len(why or "") > SUGGESTION_MAX_WHY:
+            raise ValueError(f"why is longer than {SUGGESTION_MAX_WHY} characters")
+        pending = [r for r in self._suggestions.values() if r["state"] == "pending"]
+        if len(pending) >= SUGGESTION_PENDING_MAX:
+            raise ValueError("the shell already has the maximum number of pending suggestions")
+        if sum(1 for r in pending if r["session"] == session) >= SUGGESTION_PENDING_PER_SESSION:
+            raise ValueError(f"{session} already has {SUGGESTION_PENDING_PER_SESSION} pending suggestions")
+        row = {
+            "id": "sh-" + secrets.token_hex(3),
+            "session": session,
+            "text": text,
+            "why": why or "",
+            "state": "pending",
+            "created_at": _now(),
+            "decided_at": None,
+            "decided_by": None,
+        }
+        self._suggestions[row["id"]] = row
+        self._prune_suggestions()
+        self._broadcast_suggestions()
+        return dict(row)
+
+    def decide(self, sid: str, state: str, by: str) -> dict:
+        """Move a pending proposal to ``state`` (``accepted``/``rejected``).
+
+        Deciding does not write anything; :meth:`accept` does that after it.
+        """
+        row = self._suggestions.get(sid)
+        if row is None:
+            raise KeyError(sid)
+        if row["state"] != "pending":
+            raise ValueError(f"suggestion {sid} was already {row['state']}")
+        row["state"] = state
+        row["decided_at"] = _now()
+        row["decided_by"] = by
+        self._prune_suggestions()
+        self._broadcast_suggestions()
+        return dict(row)
+
+    def withdraw(self, sid: str, session: str) -> dict:
+        """The proposing session takes its own pending suggestion back."""
+        row = self._suggestions.get(sid)
+        if row is None:
+            raise KeyError(sid)
+        if row["session"] != session:
+            raise PermissionError("only the session that proposed it may withdraw a suggestion")
+        return self.decide(sid, "withdrawn", session)
+
+    async def accept(self, sid: str, by: str = "user") -> dict:
+        """The user accepts: type the text (and Enter) into the child."""
+        row = self._suggestions.get(sid)
+        if row is None:
+            raise KeyError(sid)
+        if row["state"] != "pending":
+            raise ValueError(f"suggestion {sid} was already {row['state']}")
+        if self.exited or self._pty is None:
+            raise RuntimeError("the shell is not running; restart it in the CLI tab first")
+        row = self.decide(sid, "accepted", by)
+        await self.write_bytes(row["text"].encode("utf-8") + b"\r", "suggestion")
+        return row
+
+    def _broadcast_suggestions(self) -> None:
+        self._broadcast(("suggestions", self.suggestions("pending")))
+
+    def _prune_suggestions(self) -> None:
+        """Keep the queue bounded: decided rows fall off oldest first."""
+        decided = [r for r in self._suggestions.values() if r["state"] != "pending"]
+        if len(decided) <= SUGGESTION_KEEP_DECIDED:
+            return
+        decided.sort(key=lambda r: r["created_at"])
+        for row in decided[: len(decided) - SUGGESTION_KEEP_DECIDED]:
+            self._suggestions.pop(row["id"], None)
 
     def resize(self, cols: int, rows: int) -> None:
         """The viewer's grid. Remembered for the next child, applied and

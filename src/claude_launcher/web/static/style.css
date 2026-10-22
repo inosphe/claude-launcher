@@ -3214,6 +3214,39 @@ body.term-split[data-page="log"] #log-view { flex: var(--split-term, 0.6) 1 0; m
 #cli-term .xterm-viewport {
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+/* Input agent sessions propose for this shell; the user runs or dismisses
+   each row. It sits above the terminal so it never pushes the prompt away
+   without the user's own scroll, and scrolls on its own when it grows. */
+#cli-suggest {
+  flex: none; max-height: 34vh; overflow-y: auto;
+  border-bottom: 1px solid #2a2e36; background: #161a20;
+  padding: 4px 10px;
+}
+.cli-suggest-row {
+  display: flex; align-items: baseline; gap: 8px; padding: 4px 0;
+  font-size: 12px; color: #c6cdd5; border-bottom: 1px solid #21262d;
+}
+.cli-suggest-row:last-child { border-bottom: none; }
+.cli-suggest-who { color: #8b949e; flex: none; font-variant-numeric: tabular-nums; }
+.cli-suggest-text {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: #e6edf3; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px; padding: 1px 6px;
+  font-family: inherit;
+}
+.cli-suggest-why {
+  flex: 0 1 auto; min-width: 0; max-width: 32%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: #8b949e;
+}
+.cli-suggest-why:empty { display: none; }
+.cli-suggest-btn {
+  flex: none; background: #21262d; color: #c6cdd5; border: 1px solid #30363d;
+  border-radius: 4px; font-size: 11px; padding: 1px 8px; cursor: pointer;
+}
+.cli-suggest-btn:hover { background: #30363d; }
+.cli-suggest-run { color: #3fb950; border-color: #238636; }
+.cli-suggest-run:hover { background: #12261a; }
+.cli-suggest-row.busy { opacity: 0.5; }
 
 /* ---- split mode: the run pane halved into the terminal's column ----
    Both panes grow from a zero basis, so the two ratio variables ARE the
