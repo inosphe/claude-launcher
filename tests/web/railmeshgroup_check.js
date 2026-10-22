@@ -87,7 +87,10 @@ const api = async () => ({ ok: true, json: async () => served });
    from raillayout_check, which owns the row's layout; here the rows only have
    to be built so their rooms and their role can be read. */
 const stubs = `
-let sessionFilter = "all";
+// A filter the real sessionMatchesFilter admits every live record under: the
+// rail draws only admitted rows (claunch-7hlnj), and this harness's subject
+// is the rows, not the filter.
+let sessionFilter = "current";
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null, snapshotName = null;
 let keptTerms = new Map();
