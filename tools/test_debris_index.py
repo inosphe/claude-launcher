@@ -23,7 +23,7 @@ never changes a permission bit -- the plan is for a person to approve.
     uv run --no-sync python tools/test_debris_index.py
     uv run --no-sync python tools/test_debris_index.py --measure
     uv run --no-sync python tools/test_debris_index.py --json
-    uv run --no-sync python tools/test_debris_index.py --root D:/tmp/t --stale-days 3
+    uv run --no-sync python tools/test_debris_index.py --root "$CLAUNCH_TEST_DIR" --stale-days 3
 
 Exit codes, in the shape the other tools use:
 
@@ -93,10 +93,12 @@ def classify(name: str, states: Dict[str, str]) -> str:
     """Whose entry ``name`` is: a live session, an ended one, or nobody's.
 
     ``ambiguous`` is the fourth answer, and it exists because the reaper's
-    shape list is deliberately narrow: ``s29d``, ``s29om`` and ``s29w2`` are
-    none of `<session>`, `<session>w`, `<session>c<stamp>` or
+    shape list is deliberately narrow: ``s29d`` and ``s29om`` are none of
+    `<session>`, `<session>w<digits>`, `<session>c<stamp>` or
     `<session>-<anything>`, so nothing owns them -- while they are obviously
-    named after a session that is still alive. Deleting them on the strength
+    named after a session that is still alive. (``s29w2`` is not one of them:
+    the reaper's ``_SWEEP`` shape claims numbered sweep generations since
+    #387, so it belongs to ``s29``.) Deleting them on the strength
     of "no owner" is the mistake this guards (measured 2026-10-22: five such
     trees under basetemp, 510 inodes, all held by hand).
     """
