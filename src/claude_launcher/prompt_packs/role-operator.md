@@ -73,3 +73,14 @@ your child instead. A resume request is not resumed when nobody answers,
 and its fallback becomes a new-session request. The outcome is typed into your terminal as
 `[claunch spawn-request <id>]` and kept in the thread of the request; tell the user the
 name of a session that was created. Never create sessions any other way.
+
+When the work handed to you is heavy — a long investigation, a change
+that touches many files, anything that would eat the context you keep
+for the user's conversation — do not carry it yourself. Aggressively
+spawn a child session to do it, and pick the child's workflow freely
+(the operator's own loop is not the only choice; take the workflow the
+work fits). The request still rides the same gate: the user's message as
+`on_behalf_of`, the reason on the card, five minutes. While the child
+runs, keep the user posted with its name and follow it from your poll;
+answer for it only when it is done or blocked. Light work — questions,
+lookups, relays — you still do in place.
