@@ -4783,15 +4783,61 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 #cflow-list .linkish:hover,
 #cflow-orphan-list .linkish:hover { color: #58a6ff; }
 
-/* relay badge (header): permanent connectivity indicator. It owns a row of
-   its own, so it keeps to one line — a name too long for the rail is cut
-   short rather than allowed to grow the header; the title has the full one. */
-#link-row {
-  width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+/* The header's status (claunch-m5cux): one line of the badges' numbers, and
+   the badges themselves — relay, latency, p2p, pty host, machine — in an
+   overlay a hover opens. The line never wraps: a rail too narrow for it
+   cuts the tail with an ellipsis, and the overlay is where the rest is.
+   The dot is the worst grade any badge reports, so "something is wrong"
+   survives even when the number that says which is past the cut. */
+#link-row { position: relative; width: 100%; display: block; }
+#status-line {
+  width: 100%; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding: 2px 8px 2px 7px; border: 1px solid transparent;
+  border-radius: 10px; background: #24282f; color: #c6cdd5;
+  font: inherit; font-size: 11px; line-height: 1.5; text-align: left;
+  white-space: nowrap; overflow: hidden; cursor: pointer;
 }
+#status-line:hover, #status-line:focus-visible {
+  background: #2c313a; border-color: #3c444d; outline: none;
+}
+.status-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: #6e7681;
+}
+.status-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+#link-row.status-ok .status-dot { background: #3fb950; }
+#link-row.status-slow .status-dot { background: #e3b341; }
+#link-row.status-bad .status-dot { background: #ff7b72; }
+/* Wider than the rail it hangs from: the point of the overlay is to have
+   room the one line does not. It stays inside the viewport, and it is
+   flush with the line — a gap there is a gap a pointer leaves the row
+   through. */
+#status-overlay {
+  position: absolute; top: 100%; left: 0; z-index: 60;
+  display: flex; flex-direction: column; gap: 8px;
+  width: max-content; min-width: 100%;
+  max-width: min(560px, calc(100vw - 32px));
+  max-height: min(70vh, 480px); overflow-y: auto; overflow-x: hidden;
+  padding: 8px 10px; border: 1px solid #3c444d; border-radius: 8px;
+  background: #161b22; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+#status-pills { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.status-detail { display: flex; flex-direction: column; gap: 8px; }
+.status-group-name {
+  font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #6e7681; margin-bottom: 2px;
+}
+.status-group-line {
+  font-size: 11px; line-height: 1.45; color: #9da5b0;
+  overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+}
+/* In the overlay a pill has room to say everything, including its drives. */
+#status-overlay .badge { white-space: normal; max-width: 100%; }
 #relay-badge {
-  max-width: 100%; display: inline-block; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto;
+  max-width: 100%; display: inline-block; min-width: 0; flex: 0 1 auto;
 }
 /* Link latency (claunch-8ufey): browser<->daemon and daemon<->relay round
    trips. It never shrinks -- the numbers are the point -- and wraps under

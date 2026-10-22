@@ -82,9 +82,21 @@ const server = http.createServer((req, res) => {
     await page.goto(base);
 
     // 1. the badge in the header
+    // The badge lives in the header's status overlay since claunch-m5cux:
+    // attached (and drawn) on load, visible once the line is hovered.
     const badge = page.locator("#sidebar > header #sysperf-badge");
-    await badge.waitFor({ state: "visible" });
+    await badge.waitFor({ state: "attached" });
     await page.waitForFunction(() => /CPU 93%/.test(document.getElementById("sysperf-badge").textContent));
+    // The one line carries the numbers without the pointer: it is what the
+    // header shows by default.
+    const line = page.locator("#sidebar > header #status-line");
+    await line.waitFor({ state: "visible" });
+    assert.match(await line.textContent(), /cpu 93%/,
+                 "the one line names the machine's numbers");
+    await line.hover();
+    await badge.waitFor({ state: "visible" });
+    assert.match(await page.locator("#status-detail").textContent(),
+                 /inodes \/ \(\/\)/, "the overlay prints the detail the title keeps");
     const text = await badge.textContent();
     // The fullest drive is /mnt/d by bytes (95 %); "/" is fuller by inodes
     // (100 %) and is what the badge names. Both readings are shown.
@@ -102,6 +114,10 @@ const server = http.createServer((req, res) => {
     await badge.click();
     await page.waitForFunction(() => location.hash === "#/sysperf");
     await page.waitForSelector("#sysperf-view svg.sysperf-chart");
+    // The overlay is the header's, not the page's: leave it so what follows
+    // measures the page itself.
+    await page.mouse.move(900, 700);
+    await page.waitForFunction(() => document.getElementById("status-overlay").classList.contains("hidden"));
     assert.ok(requests.includes("?history=1"), "the page reads the history");
     const view = await page.evaluate(() => {
       const v = document.getElementById("sysperf-view");

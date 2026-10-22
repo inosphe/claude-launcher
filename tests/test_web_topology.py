@@ -485,6 +485,7 @@ CHECKS = [
         "notice_check.js",
         "restartgate_check.js",
         "ptyhostbadge_check.js",
+        "statusline_check.js",
         "ptyhostsetting_check.js",
         "testoutputdir_check.js",
         "delegatesetting_check.js",
