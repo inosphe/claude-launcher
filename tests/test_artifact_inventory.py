@@ -123,6 +123,31 @@ def test_scratch_lists_only_the_candidates_cleanup_would_take(place):
     assert kinds["s1-preview-r2"] == "preview"
 
 
+def test_the_listing_asks_cleanup_for_the_candidate_rule(place, monkeypatch):
+    """One function decides for both the plan and the page (claunch-bgs76.1).
+
+    The listing used to restate the name rule beside ``Cleanup._candidates``'s
+    copy, so a change to one left the page showing directories the plan would
+    not take (or hiding ones it would).
+    """
+    scratch = place.sessions / "s1" / "scratch"
+    entry(scratch / "kept")
+    entry(scratch / "dropped")
+    calls = []
+
+    def candidate(path, session, registered):
+        calls.append((path.name, session))
+        return path.name == "kept"
+
+    monkeypatch.setattr(inventory.cleanup, "scratch_candidate", candidate)
+
+    document = inventory.inventory(place.manager)
+
+    rows = [row for row in by_name(document, "s1")["items"] if row["area"] == "scratch"]
+    assert [row["name"] for row in rows] == ["kept"]
+    assert {name for name, session in calls if session == "s1"} == {"kept", "dropped"}
+
+
 def test_a_live_session_inside_an_artifact_marks_it_excluded(place):
     # A preview worktree a live session stands in: cleanup skips it, and the
     # page has to say so rather than offer a size that implies it can go.

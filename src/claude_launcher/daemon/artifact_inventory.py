@@ -4,8 +4,9 @@ The web UI's Artifacts page draws this read-only listing. It answers the
 question a person asks before running a cleanup: which directories belong to
 which session, which of them the cleanup would consider, and how much they
 cost on disk. Nothing here deletes anything -- :mod:`artifact_cleanup` keeps
-that, and the two agree because the listing reuses its candidate rules
-(``_plain``, ``_scratch_artifact``) and the basetemp ownership rules
+that, and the two agree because the listing reuses its candidate rule
+(``artifact_cleanup.scratch_candidate``, the one ``Cleanup._candidates`` also
+calls) and the basetemp ownership rules
 (``basetemp_reaper.owner``/``matches``/``sweep_generation``) rather than
 restating them.
 
@@ -289,14 +290,6 @@ def _checkout_root(cwd: str) -> Optional[str]:
     return None
 
 
-def _scratch_candidate(path: Path, session: str, registered: set) -> bool:
-    """The rule ``Cleanup._candidates`` applies to a scratch entry."""
-    if (path.name.startswith("pytest-") or path.name == "browser"
-            or (path.name.startswith(session + "-") and "preview" in path.name)):
-        return True
-    return cleanup._scratch_artifact(path, registered)
-
-
 def _foreign() -> set:
     try:
         return cleanup._foreign_names()
@@ -416,7 +409,7 @@ def inventory(manager) -> dict:
         scratch_files = _entries(scratch)
         items = []
         for entry in scratch_files:
-            if _scratch_candidate(entry, name, registered_for(cwd)):
+            if cleanup.scratch_candidate(entry, name, registered_for(cwd)):
                 items.append(_item_row(entry, "scratch",
                                        _kind_area("scratch", entry.name, name),
                                        cached, active, live_roots))
