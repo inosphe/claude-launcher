@@ -885,6 +885,10 @@ def test_the_commit_step_prose_is_identical_in_both_layers():
 def test_the_round_report_is_told_where_the_hashes_already_are(path):
     """The HTML page is written from memory unless it is pointed at the list,
     and a hash typed from memory is the one fact in a report nobody can catch
-    being wrong."""
+    being wrong. The pointer itself moved into the round-report skill
+    (claunch-mxxm) — the wrapup quotes the skill instead of carrying the spec."""
     wrapup = yaml.safe_load(path.read_text(encoding="utf-8"))["steps"]["wrapup"]
-    assert "claunch commits" in wrapup["instructions"]
+    from claude_launcher import report_spec
+
+    assert "claunch commits" in report_spec.SKILL_MD
+    assert "round-report" in wrapup["instructions"]

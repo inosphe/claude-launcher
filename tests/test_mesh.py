@@ -1598,9 +1598,9 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, nine skills — and nothing outside the project: workflow
+    # one server, ten skills — and nothing outside the project: workflow
     # seeding is the global/profile installs' business
-    assert len([line for line in done if line.startswith("skill ->")]) == 9
+    assert len([line for line in done if line.startswith("skill ->")]) == 10
     # the topology skills (wire peers, delegate a domain, re-draw the tree)
     # land beside mesh
     for name in ("mesh-wire", "mesh-delegate", "mesh-retopology"):
@@ -1692,7 +1692,7 @@ def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
 
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     done = install.install_into_user()
-    assert len([line for line in done if line.startswith("skill ->")]) == 9
+    assert len([line for line in done if line.startswith("skill ->")]) == 10
     assert [line for line in done if line.startswith("workflow ->")]
     assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
     doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))
