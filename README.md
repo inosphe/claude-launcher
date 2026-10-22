@@ -5008,6 +5008,21 @@ The supported cases are deliberately narrow:
 - A Claude-compatible profile whose effective endpoint is the managed Kimi
   Code service (`api.kimi.com/coding`) queries its authenticated `/v1/usages`
   endpoint. This covers existing Kimi profiles that run through Claude Code.
+- A Claude-compatible profile whose endpoint is Fireworks (`api.fireworks.ai`)
+  reports the account's spend: `monthly_spend` is the month to date from the
+  `monthly-spend-usd` quota. The Fireworks API has no prepaid-balance endpoint,
+  so the credit left is shown only when the configuration records the
+  balance read from the console, on the provider or on a profile (a profile
+  wins over its ancestors and the provider):
+
+  ```yaml
+  providers:
+    fireworks:
+      credit: {balance_usd: 500, as_of: 2026-10-01}
+  ```
+
+  The `credit` window is then that balance less the rated cost from the
+  start of `as_of` through today (`billing/summary`).
 - `usage work:codex` uses that profile's isolated `CODEX_HOME` and Codex
   app-server's documented `account/rateLimits/read` RPC.
 - `usage work:kimi` starts the Kimi Code local server under that profile's
