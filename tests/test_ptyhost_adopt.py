@@ -161,6 +161,9 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         await s.send_keys(["later:away", "Enter"])
         await _wait_screen(s, "later:away")  # the line reached the child
         pid = s.pid
+        # Let the status settle to idle before the shutdown reads it for
+        # was_busy: the last screen write is younger than idle_threshold.
+        await asyncio.sleep(1.0)
         await mgr.shutdown_all(mode="keep")
         host.close()
         (tmp_path / "go").touch()
@@ -183,7 +186,11 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         s2 = mgr2.get("a1")
         assert mgr2.adopted == ["a1"]
         assert s2.pid == pid and not s2.exited
-        assert "a1" not in mgr2.resumed_busy and "a1" not in mgr2.resumed_idle
+        # Idle at the shutdown, an adopted session joins the resume
+        # nudge's audience so a run waiting on it gets its wake-up
+        # (claunch-slia4) — same list a relaunched idle one lands on.
+        assert "a1" not in mgr2.resumed_busy
+        assert list(mgr2.resumed_idle) == ["a1"]
         assert "a1" not in mgr2.restore_queue
         log_bytes = paths.session_log("a1").read_bytes()
         assert log_bytes.count(b"late:away") == 1 and log_bytes.count(b"READY") == 1
@@ -196,6 +203,40 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         assert "adopt" in kinds and "exit" not in kinds
         assert getattr(s2, "ended_by", None) is None
         print(f"restore_all with one adopted session: {took * 1000:.0f} ms")
+        await mgr2.shutdown_all(mode="stop")
+        assert _wait(lambda: not _pid_alive(pid))
+
+    asyncio.run(run())
+
+
+def test_a_busy_adopted_session_joins_the_nudge_audience(host, tmp_path, monkeypatch):
+    """``was_busy`` decides which resume-nudge list an adopted session
+    lands on (claunch-slia4): a busy one joins ``resumed_busy`` the way a
+    relaunched one does, so a run its interrupted turn was driving gets a
+    wake-up after all."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="b1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        # What persist() reads at the shutdown, without faking a turn on
+        # a dumb PTY child: the record's was_busy comes from the manager's
+        # delayed-busy set as well as the live status.
+        mgr._delayed_busy.add("b1")
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+        (tmp_path / "go").touch()
+        assert not s.exited
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        assert mgr2.restore_all() == []
+        s2 = mgr2.get("b1")
+        assert mgr2.adopted == ["b1"]
+        assert "b1" in mgr2.resumed_busy
+        assert "b1" not in mgr2.resumed_idle
         await mgr2.shutdown_all(mode="stop")
         assert _wait(lambda: not _pid_alive(pid))
 
