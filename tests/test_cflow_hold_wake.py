@@ -1,17 +1,19 @@
-"""A person acting on a held session's cflow run wakes it (claunch-2xyjw).
+"""A person acting on a session's cflow run brings that session back.
 
-A held record (daemon/hold.py) is exited as far as the PTY goes, so every
-cflow nudge used to skip it: the dashboard's buttons (``_scope_sessions``
-answered only live sessions), the CLI's nudge (``responders.nudge`` skipped
-``status == exited``, and ``/deliver`` refused an exited record), and the v2
-CLI's select/move/report/abort/extend did not nudge at all. The action landed
-on disk and the run sat until something else woke the session.
+A record that is not running is exited as far as the PTY goes, so every cflow
+nudge used to skip it. A held record (daemon/hold.py) comes back through
+``wake_soon`` (claunch-2xyjw); a paused or killed one comes back through
+``resume_soon`` (claunch-xxxsx), because an answer typed into a record nobody
+runs is an answer nobody reads. Both are covered here, along with the
+endings neither brings back (failed, archived) and the read-only views that
+still list live sessions only.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+from types import SimpleNamespace
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -24,11 +26,17 @@ from claude_launcher.daemon.session import DeadSession
 from test_daemon_e2e import _manager, _register_py_harness, _wait_screen
 
 HELD_AT = "2026-10-09T12:00:00+00:00"
+PAUSED_AT = "2026-10-09T12:05:00+00:00"
+FAILED_AT = "2026-10-09T12:10:00+00:00"
+ARCHIVED_AT = "2026-10-09T12:15:00+00:00"
 
 
-def add_dead(mgr, name: str, cwd: str, *, held_at=None) -> DeadSession:
+def add_dead(mgr, name: str, cwd: str, *, held_at=None, paused_at=None,
+             failed_at=None, archived_at=None) -> DeadSession:
     record = DeadSession(
-        SessionDef(name=name, harness="claude", cwd=cwd), exit_code=0, held_at=held_at,
+        SessionDef(name=name, harness="claude", cwd=cwd), exit_code=0,
+        held_at=held_at, paused_at=paused_at, failed_at=failed_at,
+        archived_at=archived_at,
     )
     mgr._sessions[name] = record
     return record
@@ -36,37 +44,79 @@ def add_dead(mgr, name: str, cwd: str, *, held_at=None) -> DeadSession:
 
 def _record_wakes(mgr) -> list:
     woken = []
-    mgr.wake_soon = lambda name, **kw: woken.append((name, kw.get("by"),
+    mgr.wake_soon = lambda name, **kw: woken.append((name, "wake", kw.get("by"),
                                                      kw.get("deliver"))) or True
+    mgr.resume_soon = lambda name, **kw: woken.append((name, "resume", kw.get("by"),
+                                                       kw.get("deliver"))) or True
     return woken
 
 
 # --------------------------------------------------------------------------- #
 # the dashboard's cflow actions
 # --------------------------------------------------------------------------- #
-def test_dashboard_nudge_wakes_a_held_driver_and_skips_a_killed_one(home, tmp_path):
+def test_dashboard_nudge_wakes_held_and_resumes_paused_or_killed(home, tmp_path):
     async def run():
         mgr = _manager()
         cwd = str(tmp_path)
         add_dead(mgr, "held", cwd, held_at=HELD_AT)
+        add_dead(mgr, "paused", cwd, paused_at=PAUSED_AT)
         add_dead(mgr, "killed", cwd)
+        add_dead(mgr, "failed", cwd, failed_at=FAILED_AT)
+        add_dead(mgr, "archived", cwd, archived_at=ARCHIVED_AT)
         woken = _record_wakes(mgr)
         resolved = api_mod._session_cwd(mgr.get("held"))
 
         assert await api_mod._nudge_sessions(mgr, resolved, "held", "go on") == ["held"]
-        assert woken == [("held", "cflow", "go on")]
-        assert await api_mod._nudge_sessions(mgr, resolved, "killed", "go on") == []
-        assert len(woken) == 1
+        assert woken == [("held", "wake", "cflow", "go on")]
+        assert await api_mod._nudge_sessions(mgr, resolved, "paused", "go on") == ["paused"]
+        assert woken[-1] == ("paused", "resume", "cflow", "go on")
+        assert await api_mod._nudge_sessions(mgr, resolved, "killed", "go on") == ["killed"]
+        assert woken[-1] == ("killed", "resume", "cflow", "go on")
+        assert len(woken) == 3
+        # A failed record ended on its own and an archived one was filed away
+        # on purpose: neither is a person's cflow answer's to bring back.
+        assert await api_mod._nudge_sessions(mgr, resolved, "failed", "go on") == []
+        assert await api_mod._nudge_sessions(mgr, resolved, "archived", "go on") == []
+        assert len(woken) == 3
 
+        # The start/archive path keeps its narrower rule: only a held driver.
         app = {"manager": mgr, "cflow_nudge_tasks": set()}
         assert api_mod._schedule_cflow_nudges(app, resolved, "held", "moved",
                                               force=True) == ["held"]
-        assert woken[-1] == ("held", "cflow", "moved")
+        assert woken[-1] == ("held", "wake", "cflow", "moved")
         assert api_mod._schedule_cflow_nudges(app, resolved, "killed", "moved") == []
         assert app["cflow_nudge_tasks"] == set()
 
         # The read-only views still list live sessions only.
         assert api_mod._scope_sessions(mgr, resolved, "held") == []
+        assert api_mod._scope_sessions(mgr, resolved, "killed") == []
+
+    asyncio.run(run())
+
+
+def test_resume_soon_respawns_an_exited_record_and_queues_the_answer(home, tmp_path):
+    """The manager verb behind it: an exited record is respawned once, the
+    nudge lands in the resumed session, and the held path is left alone."""
+    async def run():
+        mgr = _manager()
+        add_dead(mgr, "killed", str(tmp_path))
+        add_dead(mgr, "held", str(tmp_path), held_at=HELD_AT)
+        resumed, queued = [], []
+
+        async def fake_respawn(name):
+            resumed.append(name)
+            return SimpleNamespace(queue_delivery=queued.append)
+
+        mgr.respawn_async = fake_respawn
+        assert mgr.resume_soon("held", by="cflow", deliver="x") is False
+        assert mgr.resume_soon("missing", by="cflow", deliver="x") is False
+        assert mgr.resume_soon("killed", by="cflow", deliver="go on") is True
+        for _ in range(20):
+            if queued:
+                break
+            await asyncio.sleep(0.01)
+        assert resumed == ["killed"]
+        assert queued == ["go on"]
 
     asyncio.run(run())
 
@@ -132,7 +182,7 @@ def test_deferred_deliver_wakes_a_held_session(home, tmp_path):
                 json={"text": "nudge", "defer": True},
             )).json()
             assert body["queued"] is True and body["woken"] is True
-            assert woken == [("held", "deliver", "nudge")]
+            assert woken == [("held", "wake", "deliver", "nudge")]
 
             body = await (await client.post(
                 "/api/sessions/killed/deliver", headers=headers,

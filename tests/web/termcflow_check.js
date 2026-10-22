@@ -73,6 +73,7 @@ let transcriptName = null;
 let transcriptMachine = null;
 let cflowCache = [];
 let cflow2RailCache = {};
+let sessionsCache = [];
 function refreshCflow2Rail() {}
 let refits = 0;
 function refitSoon() { refits++; }
@@ -93,6 +94,7 @@ new Function(
   stubs
   + ["askWho", "answerFellToUs", "answerBranchOptions", "scopeSession", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
+     "sessionCategory", "gateWakeNote",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow"]
     .map(slice).join("\n") + `
@@ -103,6 +105,7 @@ Object.assign(exports, {
   asked: () => asked,
   setRuns: (r) => { cflowCache = r; },
   setRail: (r) => { cflow2RailCache = r; },
+  setSessions: (r) => { sessionsCache = r; },
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
   setTranscript: (n, m = null) => { transcriptName = n; transcriptMachine = m; },
@@ -502,6 +505,76 @@ const RUN = {
                          answers: [] } });
   ctx.renderTermCflow();
   check("v2: another session's row is not drawn", strip.classes.has("hidden"));
+
+  /* ---- a session that is not running: every press says it comes back
+     (claunch-xxxsx). The daemon resumes the driver and queues the answer's
+     nudge into it, so the tooltip has to say so. ---- */
+  const GATE = { ...ROW, gated: true, owed: ["ask: end-decision"], answers: [
+    { kind: "ask", instance: "round/end@41", label: "end-decision",
+      prompt: "what next?", options: [{ name: "approve", description: "the task starts" },
+                                      { name: "new-task" }] }] };
+  ctx.setRail({ s16: GATE });
+  ctx.setSessions([{ name: "s16", status: "exited", paused_at: "2026-10-09T12:05:00+00:00" }]);
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("wake note: paused keeps the option's own title",
+        bs[0].title === "the task starts — answering resumes this session — paused → running",
+        bs[0].title);
+  check("wake note: paused says the answer resumes it",
+        bs.every((b) => b.title.includes("paused → running")), bs.map((b) => b.title));
+  check("wake note: an option with no description is the note alone",
+        bs[1].title === "answering resumes this session — paused → running", bs[1].title);
+
+  ctx.setSessions([{ name: "s16", status: "exited", held_at: "2026-10-09T12:00:00+00:00" }]);
+  ctx.renderTermCflow();
+  check("wake note: hold says the answer wakes it",
+        buttons(strip).every((b) => b.title.includes("hold → running")),
+        buttons(strip).map((b) => b.title));
+
+  ctx.setSessions([{ name: "s16", status: "exited" }]);
+  ctx.renderTermCflow();
+  check("wake note: killed says the answer respawns it",
+        buttons(strip).every((b) => b.title.includes("killed → running")),
+        buttons(strip).map((b) => b.title));
+
+  ctx.setSessions([{ name: "s16", status: "idle" }]);
+  ctx.renderTermCflow();
+  check("wake note: a running session gets no note",
+        buttons(strip).every((b) => !b.title.includes("→ running")),
+        buttons(strip).map((b) => b.title));
+
+  ctx.setSessions([{ name: "s16", status: "exited",
+                     failed_at: "2026-10-09T12:10:00+00:00" }]);
+  ctx.renderTermCflow();
+  check("wake note: a failed record is not promised a resume",
+        buttons(strip).every((b) => !b.title.includes("→ running")),
+        buttons(strip).map((b) => b.title));
+  ctx.setSessions([]);
+
+  /* the v1 strip carries the same note */
+  ctx.setRuns([{ ...RUN, status: "waiting_approval", step_id: "landing-gate", gate: "g" }]);
+  ctx.setSessions([{ name: "s16", status: "exited", paused_at: "2026-10-09T12:05:00+00:00" }]);
+  ctx.renderTermCflow();
+  check("wake note: the v1 strip says it too",
+        buttons(strip).map((b) => b.title).join(" ").includes("paused → running"),
+        buttons(strip).map((b) => b.title));
+  ctx.setSessions([]);
+  ctx.setRuns([]);
+
+  /* the run page's own presses carry the note too (claunch-xxxsx): the move
+     and report cards answer /api/cflow2/move/resolve and the limit card
+     answers /api/cflow2/extend, both of which nudge the driver -- so a
+     stopped session comes back from those presses as well, and the two
+     surfaces must not disagree. */
+  const render2 = slice("renderCflow2Into");
+  check("run page: the report grant and both refusals carry the wake note",
+        /grant\.title = withWake\(/.test(render2)
+        && (render2.match(/refuse\.title = withWake\(/g) || []).length === 2,
+        render2.match(/\.title = withWake\([^\n]*/g));
+  check("run page: the move grant carries the wake note",
+        /move\.title = withWake\(/.test(render2));
+  check("run page: the limit presses carry the wake note",
+        /b\.title = withWake\(extra\.stop/.test(render2));
 
   check("the v2 rail poll repaints it",
         /applyCflow2Badges\(\);\s*(\/\/[^\n]*\n\s*)*if \(typeof renderTermCflow === "function"\) renderTermCflow\(\);/.test(src));
