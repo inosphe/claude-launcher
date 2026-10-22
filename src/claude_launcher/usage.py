@@ -16,6 +16,9 @@ Codex exposes its account limits through the documented app-server JSONL RPC.
 Kimi Code exposes managed-plan limits through its ``/usages`` endpoint; the
 Kimi harness reaches it through the CLI's authenticated local web server while
 a Claude-compatible Kimi provider can call it with that profile's API key.
+A Fireworks provider has no plan limit; its reading is the account's spend
+(claunch-f5w4x.5): the month to date from the ``monthly-spend-usd`` quota,
+and, when the configuration records a credit balance, what is left of it.
 Harnesses without a supported equivalent are rejected explicitly.
 """
 
@@ -32,10 +35,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
-from . import config, credentials, harnesses, lineage, providers, runner
+from . import config, credentials, harnesses, lineage, providers, runner, store
 from .profile import Profile
 
 _OAUTH_BETA = "oauth-2025-04-20"
@@ -43,6 +46,10 @@ _MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _KIMI_CODE_ORIGIN = "https://api.kimi.com"
 _KIMI_CODE_USAGE_URL = f"{_KIMI_CODE_ORIGIN}/coding/v1/usages"
 _KIMI_WEB_READY_RE = re.compile(r"^Kimi server:\s+(https?://\S+)$")
+_FIREWORKS_HOSTS = {"api.fireworks.ai", "api.fireworks.ai:443"}
+_FIREWORKS_API = "https://api.fireworks.ai/v1"
+#: The quota value an account without a spend limit reports.
+_FIREWORKS_NO_LIMIT = 9_999_999
 
 
 class UsageError(Exception):
@@ -63,6 +70,7 @@ class UsageWindow:
     used_dollars: Optional[float] = None
     limit_dollars: Optional[float] = None
     status: Optional[str] = None
+    remaining_dollars: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -408,6 +416,159 @@ def _fetch_kimi_provider(profile: Profile, url: str, token: str) -> UsageReport:
     )
 
 
+def _fireworks_context(profile: Profile) -> Optional[str]:
+    """The bearer credential of a profile whose provider is Fireworks, or
+    ``None`` when its provider is another backend."""
+    provider = providers.resolve_name(profile)
+    if provider == providers.DEFAULT_PROVIDER:
+        return None
+    declared_env = providers.provider_env(provider)
+    declared_env.update(lineage.effective_env(profile))
+    raw_base = str(declared_env.get("ANTHROPIC_BASE_URL") or "")
+    try:
+        parsed = urllib.parse.urlsplit(raw_base)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "https" or parsed.netloc.lower() not in _FIREWORKS_HOSTS:
+        return None
+    env = runner.child_env(profile, with_token=True, base_env={})
+    return str(env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or "").strip()
+
+
+def credit_setting(profile: Profile) -> Optional[tuple[float, date]]:
+    """The credit balance recorded for ``profile``'s account: ``(balance in
+    USD, the day it was read)``, or ``None`` when none is recorded.
+
+    The Fireworks API does not report a prepaid balance, so a person copies
+    it from the console into ``credit: {balance_usd, as_of}`` on the provider
+    entry or on a profile (the profile itself, then its ancestors, then the
+    provider). Raises :class:`UsageError` for a malformed entry.
+    """
+    doc = store.load()
+    provider = providers.resolve_name(profile, doc)
+    layers = [providers.entries(doc).get(provider, {})] + [
+        store.profile_entry(p.name, doc) for p in lineage.chain(profile, doc)
+    ]
+    raw = None
+    for entry in layers:
+        if isinstance(entry.get("credit"), dict):
+            raw = entry["credit"]
+    if raw is None:
+        return None
+    balance = _number(raw.get("balance_usd"))
+    as_of = raw.get("as_of")
+    if isinstance(as_of, datetime):
+        as_of = as_of.date()
+    elif not isinstance(as_of, date):
+        try:
+            as_of = date.fromisoformat(str(as_of))
+        except ValueError:
+            as_of = None
+    if balance is None or as_of is None:
+        raise UsageError(
+            "credit needs balance_usd (a number) and as_of (YYYY-MM-DD), "
+            f"found {raw!r}"
+        )
+    return balance, as_of
+
+
+def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
+    url = f"{_FIREWORKS_API}/{path}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = _api_error_message(exc.read())
+        if exc.code in (401, 403):
+            raise UsageError(
+                f"Fireworks billing authorization failed ({exc.code}); "
+                "check the profile's API key"
+            ) from exc
+        suffix = f": {detail}" if detail else ""
+        raise UsageError(f"Fireworks billing request failed ({exc.code}){suffix}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise UsageError(f"could not reach the Fireworks API: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"unexpected Fireworks response: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise UsageError("Fireworks API returned an invalid response")
+    return payload
+
+
+def _money(value) -> float:
+    """A ``google.type.Money`` value (``units`` string, ``nanos``) in units."""
+    if not isinstance(value, dict):
+        return 0.0
+    return (_number(value.get("units")) or 0.0) + (_number(value.get("nanos")) or 0.0) / 1e9
+
+
+def _fireworks_spent_since(account: str, token: str, since: date, today: date) -> float:
+    """Rated cost from the start of ``since`` through ``today`` (the summary's
+    end date is exclusive)."""
+    summary = _fireworks_get(
+        f"{account}/billing/summary",
+        token,
+        {
+            "startTime": f"{since.isoformat()}T00:00:00Z",
+            "endTime": f"{(today + timedelta(days=1)).isoformat()}T00:00:00Z",
+        },
+    )
+    return sum(_money(item.get("totalCost")) for item in summary.get("lineItems") or [])
+
+
+def _fetch_fireworks(profile: Profile, token: str, now: Optional[datetime] = None) -> UsageReport:
+    if not token:
+        raise credentials.CredentialsError(
+            f"no Fireworks API key for profile {profile.name!r}; "
+            f"run 'claunch set-token {profile.name}' first"
+        )
+    credit = credit_setting(profile)
+    now = now or datetime.now(timezone.utc)
+    accounts = _fireworks_get("accounts", token).get("accounts") or []
+    account = accounts[0].get("name") if accounts and isinstance(accounts[0], dict) else None
+    if not account:
+        raise UsageError("the Fireworks API key names no account")
+    quota = _fireworks_get(f"{account}/quotas/monthly-spend-usd", token)
+    spent = _number(quota.get("usage")) or 0.0
+    limit = _number(quota.get("value"))
+    if limit is not None and (limit <= 0 or limit >= _FIREWORKS_NO_LIMIT):
+        limit = None
+    month_end = (now.replace(day=28) + timedelta(days=4)).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    windows = [
+        UsageWindow(
+            name="monthly_spend",
+            utilization=spent / limit * 100 if limit else 0.0,
+            resets_at=month_end.isoformat().replace("+00:00", "Z"),
+            used_dollars=spent,
+            limit_dollars=limit,
+            remaining_dollars=limit - spent if limit else None,
+        )
+    ]
+    raw = {"account": account, "quota": quota}
+    if credit is not None:
+        balance, as_of = credit
+        used = _fireworks_spent_since(account, token, as_of, now.date())
+        windows.append(
+            UsageWindow(
+                name="credit",
+                utilization=used / balance * 100 if balance > 0 else 100.0,
+                resets_at=None,
+                used_dollars=used,
+                limit_dollars=balance,
+                remaining_dollars=balance - used,
+            )
+        )
+        raw["credit"] = {"balance_usd": balance, "as_of": as_of.isoformat(), "spent": used}
+    return UsageReport(windows=windows, raw=raw, source="fireworks-billing")
+
+
 def _codex_window_name(minutes) -> str:
     try:
         value = int(minutes)
@@ -693,6 +854,9 @@ def _default_usage_has_credentials(profile: Profile) -> bool:
     kimi = _kimi_provider_context(profile)
     if kimi is not None:
         return bool(kimi[1])
+    fireworks = _fireworks_context(profile)
+    if fireworks is not None:
+        return bool(fireworks)
     if not providers.uses_anthropic_oauth(providers.resolve_name(profile)):
         return False
     token, _profile_scoped = lineage.resolve_token(profile)
@@ -741,6 +905,8 @@ def reader(profile: Profile) -> str:
     if name == harnesses.CLAUDE_HARNESS:
         if _kimi_provider_context(profile) is not None:
             return "kimi-provider"
+        if _fireworks_context(profile) is not None:
+            return "fireworks-billing"
         provider = providers.resolve_name(profile)
         if not providers.uses_anthropic_oauth(provider):
             raise UsageError(
@@ -765,6 +931,11 @@ def fetch(profile: Profile) -> UsageReport:
         if kimi is None:
             raise UsageError(f"profile {profile.selector!r} no longer selects Kimi Code")
         return _fetch_kimi_provider(profile, *kimi)
+    if kind == "fireworks-billing":
+        token = _fireworks_context(profile)
+        if token is None:
+            raise UsageError(f"profile {profile.selector!r} no longer selects Fireworks")
+        return _fetch_fireworks(profile, token)
     if kind == "anthropic":
         return _fetch_claude(profile)
     entry = harnesses.get(lineage.effective_harness(profile))

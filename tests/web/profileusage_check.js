@@ -17,6 +17,10 @@
      chart        -- the 5h and 7d lines from the samples, clamped to 0-100,
                      split where two samples are more than two periods apart;
                      a window the table does not name draws nothing.
+     dollars      -- samples with no 5h/7d window but dollar fields (a
+                     Fireworks account, claunch-f5w4x.5) chart in dollars:
+                     credit left and month spend, unclamped; a dollar window
+                     is shown even at 0%; the axis tops out at a 1-2-5 step.
      disk         -- sizes read as B / KB / MB. */
 const assert = require('assert');
 const fs = require('fs');
@@ -116,6 +120,26 @@ const body = {
   same(series[0].runs, [[[0, 2], [900, 100]], [[4500, 3]]]);
   assert.strictEqual(series[1].runs.length, 2);
   same(T.chartSeries([{ at: 0, windows: [{ name: 'primary', utilization: 4 }] }], 900), []);
+
+  // Dollar charts.
+  const fw = (at, spend, left) => ({ at, windows: [
+    { name: 'monthly_spend', utilization: 0, used_dollars: spend },
+    { name: 'credit', utilization: 10, used_dollars: 50, limit_dollars: 500, remaining_dollars: left }] });
+  let plan = T.chartPlan([fw(0, 240, 260), fw(900, 247.84, 252.16)], 900);
+  assert.strictEqual(plan.unit, 'usd');
+  same(plan.series.map((s) => s.label), ['credit left', 'month spend']);
+  same(plan.series[0].runs, [[[0, 260], [900, 252.16]]]);
+  same(plan.series[1].runs, [[[0, 240], [900, 247.84]]]);
+  assert.strictEqual(T.chartPlan([sample(0, 2, 50)], 900).unit, 'pct');
+  // Without a credit entry only the spend line is drawn; null is no point.
+  plan = T.chartPlan([{ at: 0, windows: [
+    { name: 'monthly_spend', utilization: 0, used_dollars: 3, remaining_dollars: null }] }], 900);
+  same(plan.series.map((s) => s.name), ['monthly_spend']);
+  assert.deepStrictEqual([T.niceMax(247.84), T.niceMax(1000), T.niceMax(0.3), T.niceMax(0)],
+    [500, 1000, 0.5, 1]);
+  const spend = { name: 'monthly_spend', utilization: 0, resets_at: null, used_dollars: 0 };
+  assert.deepStrictEqual(T.shownWindows([used, spend]).map((w) => w.name),
+    ['five_hour', 'monthly_spend']);
 
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],

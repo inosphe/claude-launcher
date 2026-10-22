@@ -3369,8 +3369,9 @@ async def h_usage_history(request: web.Request) -> web.Response:
 
     ``key`` is a ``key`` of ``/api/usage/targets``; ``since`` (epoch
     seconds) keeps the samples at or after it. A sample is the time and each
-    window's utilization and reset; the rest of the reading stays in the
-    file (``usage_history``, claunch-f5w4x.3).
+    window's utilization, reset and dollar amounts (a Fireworks account
+    reports spend and credit in dollars, claunch-f5w4x.5); the rest of the
+    reading stays in the file (``usage_history``, claunch-f5w4x.3).
     """
     key = str(request.query.get("key") or "").strip()
     if not key:
@@ -3391,6 +3392,11 @@ async def h_usage_history(request: web.Request) -> web.Response:
                         "name": w.get("name"),
                         "utilization": w.get("utilization"),
                         "resets_at": w.get("resets_at"),
+                        **{
+                            field: w[field]
+                            for field in ("used_dollars", "limit_dollars", "remaining_dollars")
+                            if w.get(field) is not None
+                        },
                     }
                     for w in row.get("windows") or []
                     if isinstance(w, dict)

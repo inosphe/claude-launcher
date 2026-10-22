@@ -36,6 +36,7 @@
     "codex-app-server": "via Codex app-server",
     "kimi-managed-usage": "via Kimi Code usage API",
     "kimi-web-server": "via Kimi Code local server",
+    "fireworks-billing": "via Fireworks billing API",
   };
   // Statuses `claunch usage` leaves out: the ones that say nothing is wrong.
   const QUIET_STATUSES = new Set(["allowed", "ok"]);
@@ -46,6 +47,14 @@
     ["five_hour", "5h", "#388bfd"],
     ["seven_day", "7d", "#db6d28"],
   ];
+  // A source that reports dollars and no percentage window (Fireworks,
+  // claunch-f5w4x.5) is charted in dollars: per window the field drawn.
+  const DOLLAR_WINDOWS = [
+    ["credit", "credit left", "#388bfd", "remaining_dollars"],
+    ["monthly_spend", "month spend", "#db6d28", "used_dollars"],
+  ];
+  // How a card names a window whose reading name is not self-explanatory.
+  const WINDOW_LABELS = { monthly_spend: "this month", credit: "credit" };
   // The ranges a history chart offers, in seconds (null: every sample).
   const RANGES = [["1d", 86400], ["7d", 7 * 86400], ["30d", 30 * 86400], ["All", null]];
 
@@ -136,23 +145,59 @@
      points of the samples that report it, split into runs wherever two
      samples are more than two periods apart (the daemon was down, or the
      account could not be read), so a gap is drawn as a gap. */
+  function seriesOf(samples, period, name, value) {
+    const runs = [];
+    let run = [], last = null;
+    for (const sample of samples) {
+      const window = (sample.windows || []).find((w) => w.name === name);
+      const y = window ? value(window) : NaN;
+      if (!Number.isFinite(y)) continue;
+      if (last !== null && sample.at - last > 2 * period && run.length) { runs.push(run); run = []; }
+      run.push([sample.at, y]);
+      last = sample.at;
+    }
+    if (run.length) runs.push(run);
+    return runs;
+  }
+
   function chartSeries(samples, period) {
     const series = [];
     for (const [name, label, color] of CHART_WINDOWS) {
-      const runs = [];
-      let run = [], last = null;
-      for (const sample of samples) {
-        const window = (sample.windows || []).find((w) => w.name === name);
-        const pct = window ? Number(window.utilization) : NaN;
-        if (!Number.isFinite(pct)) continue;
-        if (last !== null && sample.at - last > 2 * period && run.length) { runs.push(run); run = []; }
-        run.push([sample.at, Math.max(0, Math.min(100, pct))]);
-        last = sample.at;
-      }
-      if (run.length) runs.push(run);
+      const runs = seriesOf(samples, period, name, (w) => {
+        const pct = w.utilization === null || w.utilization === undefined ? NaN : Number(w.utilization);
+        return Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : NaN;
+      });
       if (runs.length) series.push({ name, label, color, runs });
     }
     return series;
+  }
+
+  /* The dollar lines (DOLLAR_WINDOWS) of the same samples, unclamped. */
+  function dollarSeries(samples, period) {
+    const series = [];
+    for (const [name, label, color, field] of DOLLAR_WINDOWS) {
+      const runs = seriesOf(samples, period, name, (w) =>
+        (w[field] === null || w[field] === undefined ? NaN : Number(w[field])));
+      if (runs.length) series.push({ name, label, color, field, runs });
+    }
+    return series;
+  }
+
+  /* What a history chart draws: the percentage lines when the samples have
+     any, else the dollar lines. One axis either way. */
+  function chartPlan(samples, period) {
+    const pct = chartSeries(samples, period);
+    if (pct.length) return { unit: "pct", series: pct };
+    return { unit: "usd", series: dollarSeries(samples, period) };
+  }
+
+  /* The top of a dollar axis: the next 1, 2 or 5 step above the largest
+     value, so the grid reads in round amounts. */
+  function niceMax(value) {
+    if (!(value > 0)) return 1;
+    const step = 10 ** Math.floor(Math.log10(value));
+    for (const k of [1, 2, 5, 10]) if (value <= k * step) return k * step;
+    return 10 * step;
   }
 
   function svg(tag, attrs) {
@@ -166,13 +211,14 @@
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   }
 
-  /* Two lines on one 0-100% axis, a crosshair and a tooltip on hover. */
+  /* The lines on one axis (0-100%, or 0 to a round dollar amount), a
+     crosshair and a tooltip on hover. */
   function chart(samples) {
-    const series = chartSeries(samples, state.period);
+    const { unit, series } = chartPlan(samples, state.period);
     const box = node("div", "profile-usage-chart");
     if (!series.length) {
       box.append(node("p", "wf-note", samples.length
-        ? "This source reports no 5h or 7d window to chart."
+        ? "This source reports no 5h, 7d or dollar window to chart."
         : "No samples in this range yet."));
       return box;
     }
@@ -180,14 +226,19 @@
     const ats = series.flatMap((s) => s.runs.flat().map(([at]) => at));
     let x0 = Math.min(...ats), x1 = Math.max(...ats);
     if (x1 - x0 < 60) { x0 -= 1800; x1 += 1800; }
+    const top = unit === "pct" ? 100
+      : niceMax(Math.max(...series.flatMap((s) => s.runs.flat().map(([, v]) => v))));
+    const bottom = unit === "pct" ? 0
+      : Math.min(0, ...series.flatMap((s) => s.runs.flat().map(([, v]) => v)));
     const x = (at) => L + (at - x0) / (x1 - x0) * (W - L - R);
-    const y = (pct) => T + (100 - pct) / 100 * (H - T - B);
+    const y = (v) => T + (top - v) / (top - bottom) * (H - T - B);
+    const tick = (v) => (unit === "pct" ? `${v}%` : `$${Number(v.toFixed(2))}`);
     const plot = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "profile-usage-svg",
       role: "img", "aria-label": `usage history, ${samples.length} samples` });
-    for (const pct of [0, 50, 100]) {
-      plot.append(svg("line", { x1: L, x2: W - R, y1: y(pct), y2: y(pct), class: "pu-grid" }));
-      const label = svg("text", { x: L - 6, y: y(pct) + 4, class: "pu-axis", "text-anchor": "end" });
-      label.textContent = `${pct}%`;
+    for (const v of [bottom, (bottom + top) / 2, top]) {
+      plot.append(svg("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: "pu-grid" }));
+      const label = svg("text", { x: L - 6, y: y(v) + 4, class: "pu-axis", "text-anchor": "end" });
+      label.textContent = tick(v);
       plot.append(label);
     }
     for (const [at, anchor] of [[x0, "start"], [x1, "end"]]) {
@@ -225,9 +276,12 @@
       cross.setAttribute("x1", x(best.at));
       cross.setAttribute("x2", x(best.at));
       cross.setAttribute("visibility", "visible");
-      const parts = CHART_WINDOWS.map(([name, label]) => {
-        const w = (best.windows || []).find((item) => item.name === name);
-        return w && Number.isFinite(Number(w.utilization)) ? `${label} ${Number(w.utilization).toFixed(1)}%` : null;
+      const parts = series.map((s) => {
+        const w = (best.windows || []).find((item) => item.name === s.name);
+        if (!w) return null;
+        const v = Number(unit === "pct" ? w.utilization : w[s.field]);
+        if (!Number.isFinite(v)) return null;
+        return unit === "pct" ? `${s.label} ${v.toFixed(1)}%` : `${s.label} ${money(v)}`;
       }).filter(Boolean);
       tip.textContent = `${stamp(best.at)} · ${parts.join(" · ")}`;
       tip.classList.remove("hidden");
@@ -319,7 +373,8 @@
   /* The windows `claunch usage` prints: the ones with use or a reset time,
      or all of them when none has either. */
   function shownWindows(windows) {
-    const active = windows.filter((window) => Number(window.utilization) > 0 || window.resets_at);
+    const active = windows.filter((window) => Number(window.utilization) > 0 || window.resets_at
+      || Number.isFinite(dollars(window.used_dollars)));
     return active.length ? active : windows;
   }
 
@@ -330,27 +385,40 @@
     return "low";
   }
 
+  // A dollar field as a number; null and missing are not $0.
+  function dollars(value) {
+    return value === null || value === undefined || value === "" ? NaN : Number(value);
+  }
+
   function money(value) {
-    const number = Number(value);
+    const number = dollars(value);
     return Number.isFinite(number) ? `$${number.toFixed(2)}` : "";
   }
 
   function windowLine(window) {
     const line = node("div", "profile-usage-window");
-    const pct = Number(window.utilization);
+    // Spend with no limit has no percentage: the line shows the amount.
+    const amountOnly = Number.isFinite(dollars(window.used_dollars))
+      && !Number.isFinite(dollars(window.limit_dollars));
+    const pct = amountOnly ? NaN : Number(window.utilization);
     line.append(
-      node("strong", "", String(window.name)),
-      node("span", `profile-usage-pct ${level(pct)}`, Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "—"),
+      node("strong", "", WINDOW_LABELS[window.name] || String(window.name)),
+      node("span", `profile-usage-pct ${level(pct)}`, amountOnly ? money(window.used_dollars)
+        : Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "—"),
     );
     const bar = node("div", `profile-usage-bar ${level(pct)}`);
     const fill = node("span");
     fill.style.width = `${Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0}%`;
     bar.append(fill);
+    if (amountOnly) bar.classList.add("hidden");
     line.append(bar);
     const notes = [];
     const used = money(window.used_dollars);
     const limit = money(window.limit_dollars);
-    if (used || limit) notes.push(limit ? `${used || "$0.00"} of ${limit}` : used);
+    const left = money(window.remaining_dollars);
+    if (limit) notes.push(`${used || "$0.00"} of ${limit}`);
+    else if (used && !amountOnly) notes.push(used);
+    if (left) notes.push(`${left} left`);
     const resets = toDate(window.resets_at);
     if (resets) notes.push(resetText(resets, Date.now()));
     if (window.status && !QUIET_STATUSES.has(String(window.status))) notes.push(`[${window.status}]`);
@@ -401,6 +469,10 @@
       const windows = reading.data.windows || [];
       if (!windows.length) section.append(node("p", "wf-note", "No usage windows reported."));
       for (const window of shownWindows(windows)) section.append(windowLine(window));
+      // The Fireworks API reports no prepaid balance (claunch-f5w4x.5).
+      if (reading.data.source === "fireworks-billing" && !windows.some((w) => w.name === "credit")) {
+        section.append(node("p", "wf-note", "To show credit left, copy the balance from the Fireworks console into ~/.claunch.yaml as credit: {balance_usd: <amount>, as_of: <YYYY-MM-DD>} on this provider or profile."));
+      }
       const updated = toDate(reading.updatedAt);
       if (updated) {
         const ago = Date.now() - updated.valueOf();
@@ -427,7 +499,7 @@
     header.append(all);
     view.append(header);
     const minutes = Math.round(state.period / 60);
-    view.append(node("p", "wf-note", `Subscription limits by profile and provider. The daemon reads every account once every ${minutes} minutes, each on its own timer, and keeps every reading as history; Refresh reads immediately and restarts that account's timer.`));
+    view.append(node("p", "wf-note", `Subscription limits and account spend by profile and provider. The daemon reads every account once every ${minutes} minutes, each on its own timer, and keeps every reading as history; Refresh reads immediately and restarts that account's timer.`));
     if (state.disk) {
       view.append(node("p", "wf-note profile-usage-disk",
         `History on disk: ${sizeText(state.disk.bytes)} in ${state.disk.files} file(s) · ${state.disk.dir}`));
@@ -503,6 +575,9 @@
   }
   globalThis.ProfileUsagePage = {
     open, stop,
-    _test: { readUsage, readFacts, resetText, shownWindows, countdownText, sizeText, chartSeries, tick, state },
+    _test: {
+      readUsage, readFacts, resetText, shownWindows, countdownText, sizeText, chartSeries,
+      dollarSeries, chartPlan, niceMax, windowLine, tick, state,
+    },
   };
 })();
