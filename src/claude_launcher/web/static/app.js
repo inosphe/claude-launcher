@@ -19756,6 +19756,44 @@ function renderLinkPanel() {
   if (stick) log.scrollTop = log.scrollHeight;
 }
 
+/* Force reconnect: everything a reload renews about the page's
+   connections, without the reload. The state at the press goes into the log
+   first, since the press changes it; then a fresh login cookie, so the
+   sockets reopened next carry one the daemon knows; then the control socket
+   and the terminal link, both closed from this side and opened again. If
+   this clears a freeze the cause is in the sockets; if only a reload does,
+   it is in page state outside them -- which is the question the button is
+   for, and the log keeps the answer. */
+let forceReconnecting = false;
+
+async function forceReconnect() {
+  if (forceReconnecting) return;
+  forceReconnecting = true;
+  try {
+    const now = Date.now();
+    const snap = { grade: linkPanelGrade(now).grade };
+    const short = { "control socket": "c", "terminal link": "t", "daemon / page": "d" };
+    for (const [title, rows] of linkPanelRows(now)) {
+      for (const [k, v] of rows) snap[`${short[title]}.${k.replace(/\s+/g, "_")}`] = v;
+    }
+    linkLog("force.snapshot", snap);
+    linkLogFlush();
+    let login;
+    try { login = (await relogin()) ? "ok" : "no stored token"; }
+    catch (e) { login = `failed: ${e && e.message ? e.message : e}`; }
+    // Closing the control socket ends every channel on it, a terminal
+    // riding one included; its own close then runs linkDown.
+    if (controlSock) controlRecycle("force reconnect");
+    else { controlTry = 0; openControlSocket(); }
+    if (ws) linkTakeDead("force reconnect");
+    reconnectNow(true);
+    linkLog("force.done", { login, control: controlSock ? "reopening" : "none", term: linkState });
+  } finally {
+    forceReconnecting = false;
+    renderLinkPanel();
+  }
+}
+
 function toggleLinkPanel(open) {
   linkPanelOpen = typeof open === "boolean" ? open : !linkPanelOpen;
   const panel = $("conn-panel");
@@ -19774,12 +19812,9 @@ function wireLinkPanel() {
   $("term-conn").addEventListener("click", () => toggleLinkPanel());
   if ($("m-conn")) $("m-conn").addEventListener("click", () => toggleLinkPanel());
   $("conn-panel-close").addEventListener("click", () => toggleLinkPanel(false));
-  $("conn-panel-reconnect").addEventListener("click", () => {
-    if (typeof linkLog === "function") linkLog("panel.reconnect", { session: linkName, state: linkState });
-    if (linkState === "reconnecting" || linkState === "lost") reconnectNow(true);
-    else if (ws) linkTakeDead("reconnect pressed in the link panel");
-    renderLinkPanel();
-  });
+  for (const id of ["term-force", "m-force", "conn-panel-reconnect"]) {
+    if ($(id)) $(id).addEventListener("click", () => forceReconnect());
+  }
   $("conn-panel-copy").addEventListener("click", async () => {
     const btn = $("conn-panel-copy");
     try {

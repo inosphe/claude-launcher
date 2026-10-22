@@ -19,7 +19,8 @@ function between(src, from, to) {
   return src.slice(a, b);
 }
 
-const button = between(html, '<button id="term-conn"', '</button>') + '</button>';
+const button = between(html, '<button id="term-conn"', '</button>') + '</button>'
+  + between(html, '<button id="term-force"', '</button>') + '</button>';
 const mobile = between(html, '<button id="m-conn"', '</button>') + '</button>';
 const panel = between(html, '<div id="conn-panel"', '\n</div>\n') + '\n</div>';
 const logCode = between(app, '/* ---- the link log (claunch-xbdy7) ----', '/* ---- the connection the page keeps ----');
@@ -43,7 +44,10 @@ var daemonOnline = true, daemonBoot = "boot-a";
 var CONTROL_BACKOFF = [1, 2, 3], LINK_BACKOFF = [1, 2, 3, 4], LINK_PING_MS = 10000;
 function controlUp() { return !!controlSock && controlSock.readyState === 1; }
 function reconnectNow(byUser) { calls.push(["reconnectNow", byUser]); }
-function linkTakeDead(why) { calls.push(["linkTakeDead", why]); }
+function linkTakeDead(why) { calls.push(["linkTakeDead", why]); ws = null; }
+async function relogin() { calls.push(["relogin"]); return true; }
+function controlRecycle(why) { calls.push(["controlRecycle", why]); controlSock = null; }
+function openControlSocket() { calls.push(["openControlSocket"]); controlSock = { readyState: 0 }; }
 `;
 
 const server = http.createServer((req, res) => {
@@ -111,15 +115,29 @@ const server = http.createServer((req, res) => {
     assert.match(await chip.getAttribute('class'), /\bdown\b/);
     assert.match(await page.locator('#conn-panel-grade').innerText(), /given up/);
 
-    // reconnect: a retry for a link that is down, a forced drop for a live one.
-    await page.locator('#conn-panel-reconnect').click();
+    // force reconnect, from the header or the panel: the state at the press
+    // is logged first, then a fresh login, then both connections reopened.
     await page.evaluate(() => {
       linkState = 'live';
-      ws = { readyState: 1, linkVia: 'channel', ch: 4, linkStartedAt: Date.now(), linkReadyAt: Date.now() };
+      controlSock = { readyState: 1 };
+      ws = { readyState: 1, linkVia: 'socket', linkStartedAt: Date.now(), linkReadyAt: Date.now() };
     });
-    await page.locator('#conn-panel-reconnect').click();
+    await page.locator('#term-force').click();
+    await page.waitForFunction(() => calls.length >= 4);
     assert.deepEqual(await page.evaluate(() => calls), [
-      ['reconnectNow', true], ['linkTakeDead', 'reconnect pressed in the link panel'],
+      ['relogin'], ['controlRecycle', 'force reconnect'],
+      ['linkTakeDead', 'force reconnect'], ['reconnectNow', true],
+    ]);
+    const snap = await page.evaluate(() => linkLogEntries().find((e) => e.k === 'force.snapshot'));
+    assert.equal(snap['t.via'], 'socket', 'the snapshot holds what the page believed at the press');
+    assert.equal(snap['c.state'], 'OPEN');
+    assert.equal(snap.grade, 'warn');
+    // With the control socket already gone it is opened, not recycled.
+    await page.evaluate(() => { calls = []; controlSock = null; ws = null; linkState = 'lost'; });
+    await page.locator('#conn-panel-reconnect').click();
+    await page.waitForFunction(() => calls.length >= 3);
+    assert.deepEqual(await page.evaluate(() => calls), [
+      ['relogin'], ['openControlSocket'], ['reconnectNow', true],
     ]);
 
     // copy hands out the rows and the whole log as text.
@@ -127,7 +145,7 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.getElementById('conn-panel-copy').textContent === 'copied');
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     assert.match(copied, /\[terminal link\]/);
-    assert.match(copied, /panel\.reconnect/, 'the log section carries the panel\'s own entries');
+    assert.match(copied, /force\.done/, 'the log section carries the panel\'s own entries');
 
     // Dragged by its title bar.
     const before = await box.boundingBox();
@@ -165,6 +183,6 @@ const server = http.createServer((req, res) => {
     assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= 360), true, 'no horizontal scroll');
 
     assert.deepEqual(errors, [], 'no page errors');
-    console.log('browser link panel: grade chip, open/close, rows and log, reconnect, copy, drag, phone width passed');
+    console.log('browser link panel: grade chip, open/close, rows and log, force reconnect, copy, drag, phone width passed');
   } finally { await browser.close(); server.close(); }
 })().catch(error => { console.error(error); server.close(); process.exitCode = 1; });

@@ -71,6 +71,8 @@
     <button id="m-conn" class="m-act conn-chip ok" type="button"
             aria-expanded="false" aria-controls="conn-panel"
             title="connection status (debug)">⇄</button>
+    <button id="m-force" class="m-act force-chip" type="button"
+            title="force reconnect without reloading">↻</button>
     <!-- Mirror of the header's take-size button: the header goes down on a
          phone, and a phone is as likely as any window to be the second
          viewer of a session. -->
@@ -531,6 +533,13 @@
       <button id="term-conn" class="term-btn conn-chip ok" type="button"
               aria-expanded="false" aria-controls="conn-panel"
               title="connection status (debug)">⇄ link</button>
+      <!-- Force reconnect (forceReconnect): logs what the page believed,
+           renews the login cookie, and reopens the control socket and this
+           terminal's link, all without a reload. Up whether or not the page
+           thinks anything is wrong, because the freezes it is for are the
+           ones the page did not notice. -->
+      <button id="term-force" class="term-btn force-chip" type="button"
+              title="force reconnect: reopen the control socket and this terminal's link without reloading">↻</button>
       <!-- Up only while this viewer is scrolled back into history: the session
            is still running underneath, and this is the reason its terminal is
            not advancing. -->
@@ -1642,7 +1651,7 @@
   </div>
   <div class="conn-panel-actions">
     <button id="conn-panel-reconnect" type="button"
-            title="drop this terminal's link and attach again">reconnect</button>
+            title="reopen the control socket and this terminal's link without reloading">force reconnect</button>
     <button id="conn-panel-copy" type="button"
             title="copy this panel and the whole link log as text">copy</button>
     <button id="conn-panel-download" type="button"

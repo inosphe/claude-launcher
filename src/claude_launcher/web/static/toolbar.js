@@ -7,7 +7,7 @@
     "term-goto": "⇱", "term-pin": "📌", "term-status": "●",
     "term-handle": "@", "term-tps": "↯", "term-timer": "◷",
     "term-note": "note",
-    "term-timer-skip": "⏭", "term-hold": "⇥", "term-link": "↻", "term-conn": "⇄",
+    "term-timer-skip": "⏭", "term-hold": "⇥", "term-link": "↻", "term-conn": "⇄", "term-force": "↻",
     "term-scroll": "↥", "term-resume": "▶", "term-brief": "▤",
     "term-observer": "◉", "term-webdebug": "⧉", "term-blockbar": "☰", "term-rebrief": "↻",
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
