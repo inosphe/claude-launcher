@@ -6,6 +6,7 @@ nothing here touches the real ``C:/t``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -32,14 +33,30 @@ def _run_tree(root: Path, name: str, *, workers: int = 2, summary: dict | None =
     return path
 
 
-def _reaper(tmp_path: Path, sessions: list, foreign: set = frozenset()) -> br.BasetempReaper:
+def _reaper(
+    tmp_path: Path,
+    sessions: list,
+    foreign: set = frozenset(),
+    grants: set = frozenset(),
+) -> br.BasetempReaper:
     return br.BasetempReaper(
         lambda: list(sessions),
         root=tmp_path / "t",
         history=tmp_path / "daemon" / br.HISTORY_NAME,
         background=False,
         foreign=lambda: set(foreign),
+        grants=lambda: set(grants),
     )
+
+
+def _aged(path: Path, hours: float) -> Path:
+    """Set ``path``'s mtime (and its entries') ``hours`` into the past."""
+    when = time.time() - hours * 3600.0
+    for root, dirs, names in os.walk(path):
+        for name in [*dirs, *names]:
+            os.utime(os.path.join(root, name), (when, when))
+    os.utime(path, (when, when))
+    return path
 
 
 def _rows(tmp_path: Path) -> list:
@@ -56,6 +73,7 @@ def _session(name: str) -> SimpleNamespace:
 @pytest.mark.parametrize("name, session, expected", [
     ("s995c1011010955", "s995", True),
     ("s995w", "s995", True),
+    ("s995w2", "s995", True),           # a numbered sweep generation
     ("s995-iso", "s995", True),
     ("s995", "s995", True),             # the bare name: the general test directory
     ("s995-", "s995", False),
@@ -220,7 +238,8 @@ def test_an_unlistable_0200_tree_is_repaired_and_removed(tmp_path):
 
 
 @pytest.mark.parametrize("func", [os.open, os.scandir, os.lstat])
-def test_a_failed_walk_call_is_recorded_not_retried(tmp_path, monkeypatch, func):    # POSIX rmtree reports os.open/os.scandir/os.lstat failures too; calling
+def test_a_failed_walk_call_is_recorded_not_retried(tmp_path, monkeypatch, func):
+    # POSIX rmtree reports os.open/os.scandir/os.lstat failures too; calling
     # os.open(path) again raises TypeError, which must not escape the reap
     # (s995-rev3, CHANGES REQUESTED @ aa27b127).
     root = tmp_path / "t"
@@ -278,6 +297,118 @@ def test_a_daemon_shutdown_runs_no_exit_hooks(tmp_path):
     fake = SimpleNamespace(shutting_down=True, exit_hooks=[called.append])
     SessionManager._session_exited(fake, _session("s995"))
     assert called == []
+
+
+# ---- the periodic pass (claunch-ssroc) --------------------------------------- #
+# Boot and the exit funnel only see a session end, so a leader that sweeps
+# between handoffs used to keep every generation until the next handoff.
+
+def test_the_periodic_pass_keeps_the_newest_generation_and_ages_out_the_rest(tmp_path):
+    root = tmp_path / "t"
+    newest = _aged(_run_tree(root, "s29w"), 0)
+    old = _aged(_run_tree(root, "s29w5"), 7)
+    old2 = _aged(_run_tree(root, "s29w4"), 9)
+    fresh = _aged(_run_tree(root, "s29w2"), 1)     # not oldest, but still young
+
+    rows = _reaper(tmp_path, [("s29", False)]).reap_live()
+
+    assert newest.is_dir()
+    assert fresh.is_dir()
+    assert not old.exists() and not old2.exists()
+    assert {Path(r["path"]).name for r in rows} == {"s29w5", "s29w4"}
+    assert {r["reason"] for r in rows} == {"sweep-generation"}
+    assert {r["session"] for r in rows} == {"s29"}
+    assert {r["outcome"] for r in rows} == {"removed"}
+    assert {Path(r["path"]).name for r in _rows(tmp_path)} == {"s29w5", "s29w4"}
+
+
+def test_the_periodic_pass_keeps_a_generation_a_live_grant_is_using(tmp_path):
+    # The session holds the measurement window: its run is writing into
+    # <session>w right now, so no generation of it goes.
+    root = tmp_path / "t"
+    held = _aged(_run_tree(root, "s29w"), 9)
+    other = _aged(_run_tree(root, "s29w4"), 9)
+
+    rows = _reaper(tmp_path, [("s29", False)], grants={"s29"}).reap_live()
+
+    assert held.is_dir() and other.is_dir()
+    assert rows == []
+
+
+def test_the_periodic_pass_leaves_ended_foreign_and_other_names_alone(tmp_path):
+    root = tmp_path / "t"
+    ended = _aged(_run_tree(root, "s1w"), 9)
+    foreign = _aged(_run_tree(root, "s2w"), 9)
+    nested = _aged(_run_tree(root, "s995-rev2w"), 9)
+    mine = _aged(_run_tree(root, "s3w9"), 9)
+    keep_newest = _aged(_run_tree(root, "s3w"), 0)
+    sessions = [("s1", True), ("s2", False), ("s995", False),
+                ("s995-rev2", False), ("s3", False)]
+
+    alien = _aged(_run_tree(root, "s7w"), 24 * 9)   # only s7 (elsewhere) knows it
+
+    rows = _reaper(tmp_path, sessions, foreign={"s2", "s7"}).reap_live()
+
+    assert ended.is_dir()                 # the exit funnel's business
+    assert foreign.is_dir()               # live under another instance
+    assert alien.is_dir()                 # orphan-shaped, but a foreign live name
+    assert nested.is_dir()                # another live session's
+    assert keep_newest.is_dir()
+    assert not mine.exists()
+    assert [Path(r["path"]).name for r in rows] == ["s3w9"]
+
+
+def test_the_periodic_pass_reaps_only_old_orphan_names(tmp_path):
+    root = tmp_path / "t"
+    stale = _aged(_run_tree(root, "sweepw"), 24 * 8)
+    young = _aged(_run_tree(root, "dfv2-abc"), 24 * 3)
+    owned = _aged(_run_tree(root, "s1c1011010955"), 24 * 8)
+
+    rows = _reaper(tmp_path, [("s1", False)]).reap_live()
+
+    assert not stale.exists()
+    assert young.is_dir()                 # younger than basetemp_orphan_days
+    assert owned.is_dir()                 # a known name, still running
+    assert [(Path(r["path"]).name, r["orphan"]) for r in rows] == [("sweepw", True)]
+    assert rows[0]["session"] is None
+
+
+def test_the_periodic_pass_reads_its_thresholds_from_the_config(tmp_path):
+    from claude_launcher import store
+
+    root = tmp_path / "t"
+    young = _aged(_run_tree(root, "s1w"), 3)
+    _aged(_run_tree(root, "s1w2"), 4)
+    store.set_daemon_field("basetemp_sweep_hours", 0)
+    store.set_daemon_field("basetemp_orphan_days", 0)
+
+    rows = _reaper(tmp_path, [("s1", False)]).reap_live()
+
+    assert young.is_dir()
+    assert rows == []
+    assert br.settings() == (0.0, 0.0)
+
+
+def test_the_clock_runs_the_pass_off_the_event_loop_and_stops(tmp_path):
+    root = tmp_path / "t"
+    old = _aged(_run_tree(root, "s1w2"), 9)
+    _aged(_run_tree(root, "s1w"), 0)
+    reaper = _reaper(tmp_path, [("s1", False)])
+
+    async def scenario():
+        clock = br.BasetempClock(reaper, poll=0.01)
+        clock.start()
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if clock.last is not None:
+                break
+        await clock.shutdown()
+        return clock.last
+
+    rows = asyncio.run(scenario())
+
+    assert not old.exists()
+    assert [Path(r["path"]).name for r in rows] == ["s1w2"]
 
 
 # ---- the history file -------------------------------------------------------- #

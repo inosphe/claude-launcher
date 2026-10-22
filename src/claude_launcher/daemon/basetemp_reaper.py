@@ -41,10 +41,28 @@ Windows root is one ``C:/t`` for the whole machine. So before anything goes,
 :func:`foreign_live` reads every *other* instance's registry, and a name that
 is running or held there is skipped: an ``s1`` that ended here must not take
 the trees of the ``s1`` still running under ``local2``.
+
+Boot and the exit funnel only see a session *end*, so a leader that swept
+several times between two handoffs kept every generation until the next one
+(claunch-ssroc: four trees, ~375k inodes and 2.0GB on 2026-10-22). The
+periodic pass, :meth:`BasetempReaper.reap_live` on
+:class:`BasetempClock`, closes that while sessions are still running:
+
+* a live session's sweep generations (``<session>w``, ``<session>w<number>``)
+  -- the newest one is kept, and of the rest only those whose directory was
+  last written ``basetemp_sweep_hours`` ago (default 6);
+* a name no session of this instance owns (``sweepw``, ``dfv2-*``,
+  ``s1162tree*``) -- once it is ``basetemp_orphan_days`` old (default 7).
+
+Both branches read their keys from the config on every pass, and 0 turns the
+branch off. A session holding a measurement-window grant is skipped: a test
+run that holds the window is writing into its basetemp right now.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -57,7 +75,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from .. import atomic, pytest_basetemp
 from . import paths
@@ -71,7 +89,22 @@ HISTORY_RETENTION = HISTORY_RETENTION_DAYS * 86400.0
 #: The summary ``tools/changed_tests.py`` leaves in a basetemp it ran in.
 RUN_SUMMARY = "claunch-run.json"
 
+#: Defaults for the periodic pass; live values are ``basetemp_sweep_hours``
+#: and ``basetemp_orphan_days`` in ``store.DAEMON_DEFAULTS``. 0 turns the
+#: branch off.
+SWEEP_HOURS = 6.0
+ORPHAN_DAYS = 7.0
+
+#: Seconds between periodic passes. A generation is hours old before it goes
+#: and an orphan days, so an hour costs nothing and keeps the root scan off a
+#: busy machine's back.
+TICK = 3600.0
+
 _STAMP = re.compile(r"c\d{10}")
+#: ``tools/sweep.py``'s basetemp under the root: ``<session>w``, and the
+#: numbered generations a fixed name leaves behind when a later run cannot
+#: reuse it (``<session>w2``, ``<session>w15``).
+_SWEEP = re.compile(r"w\d*")
 
 
 def default_root() -> Path:
@@ -91,8 +124,47 @@ def matches(name: str, session: str) -> bool:
     if not session or not name.startswith(session):
         return False
     rest = name[len(session):]
-    return rest == "" or rest == "w" or bool(_STAMP.fullmatch(rest)) or (
+    return rest == "" or bool(_SWEEP.fullmatch(rest)) or bool(_STAMP.fullmatch(rest)) or (
         rest.startswith("-") and len(rest) > 1
+    )
+
+
+def sweep_generation(name: str, session: str) -> bool:
+    """Whether ``name`` is one of ``session``'s sweep basetemps.
+
+    Only the generations ``tools/sweep.py`` writes: the bare ``w`` and the
+    numbered ``w<digits>``. The bare ``<session>`` directory (the general
+    test directory) and the ``-``-named manual basetemps are not swept runs,
+    so the periodic pass leaves them to the exit funnel.
+    """
+    if not session or not name.startswith(session):
+        return False
+    return bool(_SWEEP.fullmatch(name[len(session):]))
+
+
+def settings() -> Tuple[float, float]:
+    """``(sweep_hours, orphan_days)`` from the daemon config, read now.
+
+    Read on every pass, like the auto-archive keys, so an edit takes effect
+    without a restart. ``store`` is imported here rather than at module level:
+    it pulls in ``yaml``, and the gate tools import this package under
+    ``python -S`` where that import fails (see :mod:`..pytest_basetemp`).
+    """
+    try:
+        from .. import store
+
+        cfg = store.daemon_config()
+    except Exception:  # noqa: BLE001 - no config is the defaults, not an error
+        return SWEEP_HOURS, ORPHAN_DAYS
+
+    def number(key: str, default: float) -> float:
+        try:
+            return max(float(cfg.get(key, default)), 0.0)
+        except (TypeError, ValueError):
+            return default
+
+    return number("basetemp_sweep_hours", SWEEP_HOURS), number(
+        "basetemp_orphan_days", ORPHAN_DAYS
     )
 
 
@@ -308,9 +380,11 @@ class BasetempReaper:
         history: Optional[Path] = None,
         background: bool = True,
         foreign: Callable[[], set] = foreign_live,
+        grants: Optional[Callable[[], set]] = None,
     ) -> None:
         self._sessions = sessions
         self._foreign = foreign
+        self._grants = grants if grants is not None else (lambda: set())
         self._root = root
         self._history = history
         self._background = background
@@ -350,6 +424,107 @@ class BasetempReaper:
         """At boot: reap every session the registry holds as ended."""
         self._submit([name for name, ended in self._sessions() if ended])
 
+    def reap_live(self, *, now: Optional[float] = None) -> List[dict]:
+        """The periodic pass: old sweep generations of live sessions, and
+        names no session owns.
+
+        Runs inline: the clock calls it through ``asyncio.to_thread`` so the
+        walks never sit on the event loop. A session that is running or held
+        in another instance (``foreign_live``) is skipped whole, and so is
+        one holding a measurement-window grant -- its run is writing into
+        that basetemp at this moment.
+        """
+        now = time.time() if now is None else now
+        sweep_hours, orphan_days = settings()
+        rows: List[dict] = []
+        with self._lock:
+            sessions = list(self._sessions())
+            names = [name for name, _ in sessions]
+            elsewhere = self._foreign()
+            held = self._grants()
+            try:
+                entries = [p for p in self.root.iterdir() if p.is_dir()]
+            except OSError:
+                return []
+            if sweep_hours > 0:
+                rows += self._reap_generations(
+                    entries, sessions, names, elsewhere, held,
+                    now - sweep_hours * 3600.0,
+                )
+            if orphan_days > 0:
+                rows += self._reap_orphans(
+                    entries, names, elsewhere, now - orphan_days * 86400.0
+                )
+            if rows:
+                self._append(rows)
+        return rows
+
+    def _reap_generations(
+        self,
+        entries: List[Path],
+        sessions: List[tuple],
+        names: List[str],
+        elsewhere: set,
+        held: set,
+        cutoff: float,
+    ) -> List[dict]:
+        """Each live session's sweep generations but the newest, aged out.
+
+        The newest is kept whatever its age: it is the one the next run
+        would have reused, and keeping it bounds the pile-up without emptying
+        the root under a session that is between sweeps.
+        """
+        rows: List[dict] = []
+        for name, ended in sessions:
+            if ended or name in elsewhere or name in held:
+                continue
+            stamped: List[Tuple[float, Path]] = []
+            for path in entries:
+                if (
+                    sweep_generation(path.name, name)
+                    and owner(path.name, names) == name
+                ):
+                    when = _mtime(path)
+                    if when is not None:
+                        stamped.append((when, path))
+            stamped.sort(key=lambda pair: pair[0], reverse=True)
+            for when, path in stamped[1:]:
+                if when < cutoff:
+                    row = self._reap_one(name, path)
+                    row["reason"] = "sweep-generation"
+                    rows.append(row)
+        return rows
+
+    def _reap_orphans(
+        self,
+        entries: List[Path],
+        names: List[str],
+        elsewhere: set,
+        cutoff: float,
+    ) -> List[dict]:
+        """Directories whose name is no known session's, once they are old.
+
+        ``sweepw`` (a sweep run with no ``CLAUNCH_SESSION``), ``dfv2-*`` and
+        ``s1162tree*`` were left by sessions this registry never heard of and
+        would otherwise stay forever. Age alone decides: a fresh one may be a
+        sessionless sweep writing right now. A name some *other* instance's
+        live session answers to is not an orphan, however old: that session's
+        tree must not go because this registry never heard the name.
+        """
+        rows: List[dict] = []
+        for path in entries:
+            if owner(path.name, names) is not None:
+                continue
+            if any(matches(path.name, name) for name in elsewhere):
+                continue
+            when = _mtime(path)
+            if when is None or when >= cutoff:
+                continue
+            row = self._reap_one(None, path)
+            row["orphan"] = True
+            rows.append(row)
+        return rows
+
     def _submit(self, names: List[str]) -> None:
         if not names:
             return
@@ -377,7 +552,7 @@ class BasetempReaper:
                 self._append(rows)
         return rows
 
-    def _reap_one(self, session: str, path: Path) -> dict:
+    def _reap_one(self, session: Optional[str], path: Path) -> dict:
         row = {"session": session, "path": path.as_posix(), **describe(path)}
         row["reaped_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         failed: List[str] = []
@@ -421,12 +596,88 @@ class BasetempReaper:
             log.exception("basetemp history: could not write %s", dest)
 
 
+def _mtime(path: Path) -> Optional[float]:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _fresh(line: str, cutoff: float) -> bool:
     try:
         stamp = json.loads(line).get("reaped_at")
         return datetime.fromisoformat(stamp).timestamp() >= cutoff
     except (ValueError, TypeError, AttributeError):
         return False
+
+
+def window_grants(window) -> Callable[[], set]:
+    """The session names holding a measurement-window grant right now.
+
+    A run that holds the window is running tests into its basetemp, so the
+    periodic pass must leave that session's generations alone even when the
+    directory is old. ``status`` is the documented read (``claunch window
+    status``) and takes the state lock, so this is safe from the reap thread.
+    ``requested_by`` is included because a delayed sweep drops
+    ``CLAUNCH_SESSION`` and names the leader it works for.
+    """
+    def view() -> set:
+        try:
+            holders = window.status().get("holders") or []
+        except Exception:  # noqa: BLE001 - no window is no exclusion
+            return set()
+        names: set = set()
+        for holder in holders:
+            if not isinstance(holder, dict):
+                continue
+            for key in ("session", "requested_by"):
+                name = holder.get(key)
+                if name:
+                    names.add(str(name))
+        return names
+
+    return view
+
+
+class BasetempClock:
+    """Runs :meth:`BasetempReaper.reap_live` every :data:`TICK` seconds.
+
+    Boot and the exit funnel only see a session end, so a leader that swept
+    several times between handoffs kept every generation until the next one
+    (claunch-ssroc). The first pass runs right after the clock starts, off
+    the event loop, and then once per tick; the reaper's own lock serialises
+    it with the exit funnel.
+    """
+
+    def __init__(self, reaper: BasetempReaper, *, poll: float = TICK) -> None:
+        self.reaper = reaper
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+        #: The last pass's rows, for a reader that asks (tests, a console).
+        self.last: Optional[List[dict]] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(
+                self._run(), name="basetemp-clock"
+            )
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                self.last = await asyncio.to_thread(self.reaper.reap_live)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one bad pass must not stop the clock
+                log.exception("basetemp: periodic reap failed")
+            await asyncio.sleep(self.poll)
 
 
 def registry_view(manager) -> Callable[[], List[tuple]]:
