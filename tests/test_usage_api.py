@@ -35,6 +35,11 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
 
     assert response.status == 200
     body = json.loads(response.text)
+    # The cache facts are in the body too: a read through /api/batch gets no
+    # headers (claunch-f5w4x.1).
+    assert body.pop("cached") is False
+    assert body.pop("updated_at") == float(response.headers["X-Usage-Updated-At"])
+    assert response.headers["X-Usage-Cached"] == "false"
     assert body == {
         "key": "work/openai",
         "profile": "work",
