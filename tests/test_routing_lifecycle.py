@@ -161,3 +161,20 @@ def test_an_idle_only_shutdown_waits_for_the_request_in_flight(home):
             assert app["stop"].is_set()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# tests leave no shim behind (claunch-19liw.2.5)
+# --------------------------------------------------------------------------- #
+def test_a_shim_a_test_started_is_reaped_even_when_its_record_is_gone(owner, spawned_shims):
+    import shutil
+
+    routing.ensure_shim("https://reap.example/", {})
+    (child,) = spawned_shims
+    # The temp home the record lived in is gone: routing.stop() is blind,
+    # which is how two test shims outlived their run.
+    shutil.rmtree(routing.state_dir())
+    assert routing.stop() == []
+    assert child.poll() is None
+    spawned_shims.reap()
+    assert child.poll() is not None
