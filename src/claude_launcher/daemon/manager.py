@@ -2057,6 +2057,48 @@ class SessionManager:
         task.add_done_callback(self._wake_tasks.discard)
         return True
 
+    def resume_soon(self, name: str, *, by: str = "", deliver: str = "") -> bool:
+        """Schedule :meth:`respawn_async` for an exited record, and queue
+        ``deliver`` into it once it is back (claunch-xxxsx).
+
+        The verb a person's own action on a stopped record needs: answering
+        the cflow gate of a paused or killed session is a use of that session,
+        and an answer typed into a record nobody runs is an answer nobody
+        reads. ``wake_soon`` is the sibling for a held record, which keeps the
+        hold's own bookkeeping (:meth:`wake_async`, the delayed queue); a live
+        session is already awake, and a held one belongs to that path, so both
+        are refused here rather than respawned twice.
+
+        Returns whether a resume was scheduled — False for a live or held
+        record, one already coming back, or when no loop is running.
+        """
+        try:
+            session = self.get(name)
+        except ManagerError:
+            return False
+        if not session.exited or getattr(session, "held_at", None):
+            return False
+        if name in self._waking:
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        async def run() -> None:
+            try:
+                back = await self.respawn_async(name)
+            except Exception:  # noqa: BLE001 -- the answer stands; the record stays down
+                log.exception("resume of exited session %r failed", name)
+                return
+            if deliver:
+                back.queue_delivery(deliver)
+
+        task = loop.create_task(run())
+        self._wake_tasks.add(task)
+        task.add_done_callback(self._wake_tasks.discard)
+        return True
+
     def escalate_children(self, name: str) -> List[str]:
         """Move ``name``'s direct children up to ``name``'s own parent.
 

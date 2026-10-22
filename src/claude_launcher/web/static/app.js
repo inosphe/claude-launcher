@@ -20162,7 +20162,13 @@ async function refreshTermTimers() {
    and the terminal refitted only when what it would draw changes (`sig`);
    the 2s poll that repaints the same gate must not, or the buttons would be
    replaced under the pointer and the session resized for nothing. */
-function termCflowAnswers(r) {
+function termCflowAnswers(r, session) {
+  const note = gateWakeNote(session);
+  // A press on a session that is not running brings it back; the press says
+  // so (claunch-xxxsx). Nothing to add for a running one.
+  const withWake = (presses) => note
+    ? presses.map((p) => ({ ...p, title: p.title ? `${p.title} — ${note}` : note }))
+    : presses;
   const body = { cwd: r.cwd, scope: r.scope };
   const pick = (o, ask) => ({
     label: o.name || String(o),
@@ -20174,40 +20180,40 @@ function termCflowAnswers(r) {
   if (answerFellToUs(r)) {
     const opts = answerBranchOptions(r);
     if (opts !== null) {
-      return opts.map((o) => pick(o,
+      return withWake(opts.map((o) => pick(o,
         `Answer '${r.step_id}' with '${o.name || o}' yourself?\n\n` +
-        "It was put to nobody, so nothing else will."));
+        "It was put to nobody, so nothing else will.")));
     }
-    return [{
+    return withWake([{
       label: "Approve", cls: "approve", path: "/api/cflow/approve", body,
       ask: `Answer '${r.step_id}' yourself?\n\nIt was put to nobody, so ` +
         "nothing else will.",
-    }];
+    }]);
   }
   if (r.status === "waiting_approval") {
     const isLoop = r.reason === "loop_limit";
-    return [{
+    return withWake([{
       label: isLoop ? "Extend loop limit"
         : r.reason === "declined" ? "Override the refusal" : "Approve",
       cls: "approve", path: "/api/cflow/approve", body,
       ask: isLoop ? `Extend the loop limit at step '${r.step_id}'?`
         : `Approve the gate at step '${r.step_id}'?`,
-    }];
+    }]);
   }
   if (r.status === "waiting_selection") {
     const proposed = (r.proposal || {}).option;
-    return (r.options || []).map((o) => {
+    return withWake((r.options || []).map((o) => {
       const a = pick(o, `Select '${o.name}'?`);
       if (o.name === proposed) {
         a.cls = "proposed";
         a.title = `the agent proposes this${a.title ? " — " + a.title : ""}`;
       }
       return a;
-    });
+    }));
   }
   if (r.status === "waiting_goto") {
     const gr = r.goto_request || {};
-    return [
+    return withWake([
       {
         label: `Move to '${gr.step}'`, cls: "approve",
         path: "/api/cflow/goto/resolve",
@@ -20222,7 +20228,7 @@ function termCflowAnswers(r) {
         body: { ...body, decision: "deny" },
         reason: "Refuse the move? A reason is optional but is what the agent reads:",
       },
-    ];
+    ]);
   }
   return [];
 }
@@ -20259,15 +20265,39 @@ function termCflowQuestion(r) {
    visit limit, with the same body and the same confirm. require_reason is
    an agent constraint; a person may answer without it (docs 2.11). Like the
    run page, reframe asks what the options miss. A halt or an acceptance
-   hold has no dashboard press; the strip links to the run page. */
-function termCflow2Answers(r, a) {
+   hold has no dashboard press; the strip links to the run page.
+
+   Each press carries `gateWakeNote` for a session that is not running: the
+   answer brings the session back rather than landing on a record nobody
+   runs (claunch-xxxsx). */
+function gateWakeNote(session) {
+  const s = (typeof sessionsCache === "object" && sessionsCache || [])
+    .find((x) => x && x.name === session);
+  if (!s) return "";
+  const category = typeof sessionCategory === "function" ? sessionCategory(s) : "";
+  if (category === "hold" || category === "delayed")
+    return "answering wakes this session — hold → running";
+  if (category === "paused")
+    return "answering resumes this session — paused → running";
+  if (category === "killed")
+    return "answering respawns this session — killed → running";
+  return "";
+}
+
+function termCflow2Answers(r, a, session) {
+  const note = gateWakeNote(session);
+  // The note rides on every press the strip offers, appended to whatever
+  // the press already says. A running session has nothing to add.
+  const withWake = (presses) => note
+    ? presses.map((p) => ({ ...p, title: p.title ? `${p.title} — ${note}` : note }))
+    : presses;
   const body = { cwd: r.cwd, scope: r.scope, node: a.instance };
   const what = a.label || a.instance || "?";
   if (a.kind === "move") {
     // the driver's move request (flow_request_move): the run page's Move / Refuse
     // (a.report: the report kind -- report this task as a.outcome, claunch-vwmoj)
     const slot = { cwd: r.cwd, scope: r.scope };
-    return [
+    return withWake([
       {
         label: a.report ? `Report '${a.outcome}'` : `Move to '${what}'`, cls: "approve",
         path: "/api/cflow2/move/resolve",
@@ -20287,11 +20317,11 @@ function termCflow2Answers(r, a) {
         reason: (a.report ? "Refuse the report?" : "Refuse the move?") +
           " A reason is optional but is what the driver reads:",
       },
-    ];
+    ]);
   }
   if (a.kind === "choose" || a.kind === "ask") {
     const isAsk = a.kind === "ask";
-    return (a.options || []).map((o) => {
+    return withWake((a.options || []).map((o) => {
       const name = o.name || String(o);
       const out = {
         label: name,
@@ -20312,10 +20342,10 @@ function termCflow2Answers(r, a) {
         out.reasonRequired = true;
       }
       return out;
-    });
+    }));
   }
   if (a.kind === "loop_limit" || a.kind === "visit_limit") {
-    return cf2LimitPresses(a.kind === "visit_limit").map(([label, , extra]) => ({
+    return withWake(cf2LimitPresses(a.kind === "visit_limit").map(([label, , extra]) => ({
       label,
       ...(extra.by ? { cls: "approve" } : {}),
       ...(extra.stop ? { title: "it finishes with outcome fail" } : {}),
@@ -20323,7 +20353,7 @@ function termCflow2Answers(r, a) {
       body: { ...body, ...extra },
       ask: extra.by ? `${label} at ${what}?`
         : "Stop here? It finishes with outcome fail.",
-    }));
+    })));
   }
   return [];
 }
@@ -20355,7 +20385,7 @@ function termCflowView() {
       what: `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
         sessCflowLabel(r),
       question: termCflowQuestion(r),
-      answers: termCflowAnswers(r),
+      answers: termCflowAnswers(r, currentName),
       after: null,
     };
   }
@@ -20370,9 +20400,9 @@ function termCflowView() {
     href: "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`),
     what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
       `${a.kind || "waiting"}${more}`,
-    question: termCflow2Answers(r2, a).length ? question
+    question: termCflow2Answers(r2, a, currentName).length ? question
       : `${question} — answer it on the run page`,
-    answers: termCflow2Answers(r2, a),
+    answers: termCflow2Answers(r2, a, currentName),
     after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
   };
 }
@@ -39184,6 +39214,10 @@ function renderCflow2Into(box, data, ui, force = false) {
 
   // -- waiting on a person: choices, questions, limits ----------------------
   const yours = cf2Section("Waiting on you");
+  // The session behind this run, when it is not running: every press below
+  // brings it back, and its tooltip says so (claunch-xxxsx).
+  const wakeNote = typeof gateWakeNote === "function" ? gateWakeNote(data.session) : "";
+  const withWake = (title) => [title || "", wakeNote].filter(Boolean).join(" — ");
   const answerRow = (key, presses) => {
     const row = el("div", "cf2-press");
     const reason = cf2ReasonInput(key);
@@ -39277,7 +39311,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     const presses = (c.options || []).map((o) => {
       const b = el("button", "wf-btn sm option", o.name);
       b.dataset.value = o.name;
-      b.title = o.description || "";
+      b.title = withWake(o.description);
       return b;
     });
     const { row, reason } = answerRow(key, presses);
@@ -39324,7 +39358,7 @@ function renderCflow2Into(box, data, ui, force = false) {
         b.dataset.recommended = "true";
         b.appendChild(el("span", "cf2-rec-chip", "권장"));
       }
-      b.title = o.description || "";
+      b.title = withWake(o.description);
       return b;
     });
     const { row, reason } = answerRow(key, presses);

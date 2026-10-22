@@ -5039,13 +5039,20 @@ def _scope_sessions(
     *,
     live_sessions: Optional[Dict[Tuple[str, str], object]] = None,
     include_held: bool = False,
+    include_revivable: bool = False,
 ) -> list:
     """The session this run maps 1:1 to (scope == session name; a v2 slot of
     this daemon without its ``@<daemon>``), if alive.
 
     ``include_held`` also answers a held record (daemon/hold.py): a person
     acting on its run is a use of it, and the nudge that follows wakes it
-    (:func:`_cflow_nudge_held`, claunch-2xyjw)."""
+    (:func:`_cflow_nudge_held`, claunch-2xyjw).
+
+    ``include_revivable`` extends that to the endings a person's own answer
+    brings back — a paused or killed record, resumed by
+    :meth:`SessionManager.resume_soon` (:func:`_cflow_nudge_resumed`,
+    claunch-xxxsx). ``failed`` and ``archived`` stay out: one ended on its own
+    with an error, the other was filed away on purpose."""
     name = cflow_clock.session_name(scope)
     if not name:
         return []
@@ -5054,11 +5061,26 @@ def _scope_sessions(
     for session in manager.list():
         if (
             session.sdef.name == name
-            and (not session.exited or (include_held and cflow_clock.is_held(session)))
+            and (
+                not session.exited
+                or (include_held and cflow_clock.is_held(session))
+                or (include_revivable
+                    and session_mod.session_category(session) in _REVIVABLE_CATEGORIES)
+            )
             and _session_cwd(session) == cwd
         ):
             return [name]
     return []
+
+
+#: The ending partitions a person's action on a run brings back
+#: (:func:`_scope_sessions`'s ``include_revivable``): paused, and killed —
+#: exit without the pause marker, whether the process was killed or ended by
+#: itself. A failed record and an archived one are not revived.
+_REVIVABLE_CATEGORIES = (
+    session_mod.CATEGORY_PAUSED,
+    session_mod.CATEGORY_KILLED,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -5653,9 +5675,16 @@ async def _nudge_sessions(
 ) -> list:
     """Queue a resume nudge for the run's own session (scope == session
     name, 1:1), so an agent that stopped its turn picks the run back up.
-    Default-scope runs belong to no session — nothing to nudge."""
+    Default-scope runs belong to no session — nothing to nudge.
+
+    A driver that is not running is brought back rather than skipped: a person
+    answering the gate of a held, paused or killed session is a use of that
+    session, and the nudge rides into the woken one (claunch-2xyjw for hold,
+    claunch-xxxsx for paused and killed). A failed or archived record is left
+    as it is — the answer is recorded and the run waits for a person."""
     nudged = []
-    for name in _scope_sessions(manager, cwd, scope, include_held=True):
+    for name in _scope_sessions(manager, cwd, scope, include_held=True,
+                                include_revivable=True):
         try:
             session = manager.get(name)
         except Exception:  # noqa: BLE001 — raced with a removal
@@ -5663,9 +5692,24 @@ async def _nudge_sessions(
         if cflow_clock.is_held(session):
             if _cflow_nudge_held(manager, name, message):
                 nudged.append(name)
+        elif session.exited:
+            if _cflow_nudge_resumed(manager, name, message):
+                nudged.append(name)
         elif session.queue_delivery(message):
             nudged.append(name)
     return nudged
+
+
+def _cflow_nudge_resumed(manager: SessionManager, name: str, message: str) -> bool:
+    """Resume a paused or killed driver for a person's action on its run and
+    queue the nudge into the resumed session (claunch-xxxsx). The sibling of
+    :func:`_cflow_nudge_held`: without it the answer lands on disk and the run
+    waits on a session that is not there."""
+    try:
+        return bool(manager.resume_soon(name, by="cflow", deliver=message))
+    except Exception:  # noqa: BLE001 — a failed resume leaves the record down
+        log.exception("resume of exited session %r for a cflow nudge failed", name)
+        return False
 
 
 def _cflow_nudge_held(manager: SessionManager, name: str, message: str) -> bool:
