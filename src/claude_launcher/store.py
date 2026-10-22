@@ -401,6 +401,12 @@ DAEMON_DEFAULTS = {
     # and ended at least auto_archive_killed_days days ago, oldest first, so
     # an old backlog drains a batch per tick. Days or batch 0 turns it off.
     # Read LIVE on every tick, no restart needed.
+    # Every profile's subscription usage read by the daemon once per fifteen
+    # minutes, each (profile, provider) on its own timer, each read one line
+    # of <daemon dir>/usage-history/<key>.jsonl kept forever
+    # (daemon/usage_clock.py, claunch-f5w4x.3). false stops the reads; a
+    # page's Refresh still reads. Read LIVE on every tick.
+    "usage_refresh": True,
     "auto_archive_killed_days": 7.0,
     "auto_archive_interval_s": 600.0,
     "auto_archive_batch": 20,

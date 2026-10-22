@@ -61,7 +61,7 @@ def test_auto_refresh_is_cached_per_selector_and_manual_refresh_bypasses_it(
     assert manual_at == 1060.0
 
 
-def test_auto_refresh_fetches_again_after_five_minute_cooldown(monkeypatch):
+def test_auto_refresh_fetches_again_after_the_period(monkeypatch):
     now = [1000.0]
     calls = []
     monkeypatch.setattr(profile_usage.time, "time", lambda: now[0])
@@ -79,9 +79,10 @@ def test_auto_refresh_fetches_again_after_five_minute_cooldown(monkeypatch):
     now[0] += profile_usage.AUTO_COOLDOWN_SECONDS
     _payload, cached, updated_at = profile_usage.fetch("work:claude")
 
-    assert calls == [1000.0, 1300.0]
+    assert profile_usage.AUTO_COOLDOWN_SECONDS == profile_usage.PERIOD_SECONDS == 15 * 60
+    assert calls == [1000.0, 1900.0]
     assert cached is False
-    assert updated_at == 1300.0
+    assert updated_at == 1900.0
 
 
 def _fresh_cache(monkeypatch):
@@ -177,6 +178,12 @@ def test_targets_lists_each_profile_once_with_its_provider_and_reader(home):
         "key": "work/default/anthropic",
         "reader": "anthropic",
         "supported": True,
+        # Never read: due now (claunch-f5w4x.3).
+        "schedule": {
+            "updated_at": None,
+            "next_at": None,
+            "period_s": profile_usage.PERIOD_SECONDS,
+        },
     }
     assert (rows["codex"]["harness"], rows["codex"]["reader"]) == (
         "codex",
