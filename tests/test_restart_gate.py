@@ -86,6 +86,9 @@ class _FakeDaemon:
     def ensure_running(self, **kw):
         return self.client
 
+    def connect_or_start(self, **kw):
+        return self.client
+
     def connect(self):
         return self.client
 
@@ -1071,7 +1074,7 @@ def test_daemon_client_restart_sends_the_mode(monkeypatch):
 
     modes = []
     monkeypatch.setattr(daemon_client, "stop", lambda **kw: modes.append(kw.get("mode")))
-    monkeypatch.setattr(daemon_client, "ensure_running", lambda: "client")
+    monkeypatch.setattr(daemon_client, "connect_or_start", lambda: "client")
     monkeypatch.setattr(daemon_client.runtime_state, "read_daemon_json", lambda: {})
     assert daemon_client.restart() == "client"
     assert daemon_client.restart(with_pty_host=True) == "client"

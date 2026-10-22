@@ -2062,7 +2062,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if daemon_client.connect() is not None:
             print("daemon is already running")
             return 0
-        client = daemon_client.ensure_running()
+        client = daemon_client.connect_or_start()
         print(f"daemon started at {client.base_url}")
         return 0
     if action == "stop":
@@ -2274,7 +2274,7 @@ def _gated_restart(reason: str = "", *, with_pty_host: bool = False,
     if state in (daemon_client.NOT_RUNNING, daemon_client.STALE_RECORD):
         # A restart with nothing running is a start, exactly as on the
         # immediate path — there is no daemon to host a gate.
-        client = daemon_client.ensure_running()
+        client = daemon_client.connect_or_start()
         print(f"daemon started at {client.base_url}")
         return 0
     if state != daemon_client.SERVING:
@@ -2539,7 +2539,7 @@ def _force_replace(reason: str = "", *, with_pty_host: bool = False,
         print(f"daemon restarted at {client.base_url}{_host_suffix(with_pty_host)}")
         return 0
     if state == daemon_client.NOT_RUNNING:
-        client = daemon_client.ensure_running()
+        client = daemon_client.connect_or_start()
         print(f"daemon started at {client.base_url}")
         return 0
     pid = report.get("pid") or 0
@@ -2565,7 +2565,7 @@ def _force_replace(reason: str = "", *, with_pty_host: bool = False,
         print(f"clearing a stale record for pid {pid}")
     if with_pty_host:
         _shutdown_pty_host()
-    client = daemon_client.ensure_running()
+    client = daemon_client.connect_or_start()
     print(f"daemon restarted at {client.base_url}")
     return 0
 
@@ -2616,7 +2616,7 @@ def _restart_all_instances(*, with_pty_host: bool = False,
             daemon_client.stop(mode="full" if with_pty_host else "keep",
                                keep_stale=keep_stale)
             time.sleep(0.3)
-            client = daemon_client.ensure_running()
+            client = daemon_client.connect_or_start()
             restarted += 1
             print(f"{label}: restarted at {client.base_url}")
     finally:

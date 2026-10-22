@@ -139,7 +139,7 @@ def test_the_record_is_on_disk_before_the_daemon_is_stopped(home, monkeypatch):
     monkeypatch.setattr(daemon_client, "stop", _stop)
     monkeypatch.setattr(
         daemon_client,
-        "ensure_running",
+        "connect_or_start",
         lambda **kw: types.SimpleNamespace(base_url="http://127.0.0.1:8377"),
     )
     monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)

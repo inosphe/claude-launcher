@@ -249,6 +249,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if sections:
         payload["sections"] = sections
     result = client.post(f"/api/mesh/{args.mesh}/messages", payload)
+    if result.get("duplicate"):
+        # The daemon had already applied this request id (claunch-19liw.2.1).
+        print(f"already sent as request {result['duplicate']}; not sent again")
+        return 0
     # Recipients with no terminal left to read this. Named on the RESULT
     # line, not only in the notice: "sent ... to bob" is the sentence a
     # sender acts on, and it is the one that is wrong when bob is dead.

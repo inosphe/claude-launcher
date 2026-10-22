@@ -4,7 +4,7 @@ predecessor's slow shutdown, and failing clearly when it never lets go.
 claunch-a5l9: a restart's external stop+start flow (``cli_sessions.
 _cmd_daemon``'s ordinary and ``--force`` branches) called ``stop()`` (which
 gives up waiting for the predecessor's lock after 10s regardless of whether
-it actually let go — see its own docstring) and then ``ensure_running()``
+it actually let go — see its own docstring) and then ``connect_or_start()``
 exactly once. The spawned successor's own grace window
 (``daemon/__main__.py``'s ``_acquire_with_grace``, 15s) can lose the same
 race for the same reason, and by design exits quietly (code 0) — correct for
@@ -61,7 +61,7 @@ def test_restart_retries_until_the_predecessor_finally_lets_go(home, monkeypatch
     sentinel = object()
     attempts = {"n": 0}
 
-    def fake_ensure_running():
+    def fake_connect_or_start():
         attempts["n"] += 1
         if attempts["n"] < 3:
             raise daemon_client.DaemonClientError(
@@ -69,7 +69,7 @@ def test_restart_retries_until_the_predecessor_finally_lets_go(home, monkeypatch
             )
         return sentinel
 
-    monkeypatch.setattr(daemon_client, "ensure_running", fake_ensure_running)
+    monkeypatch.setattr(daemon_client, "connect_or_start", fake_connect_or_start)
 
     assert daemon_client.restart() is sentinel
     assert attempts["n"] == 3
@@ -94,7 +94,7 @@ def test_restart_fails_clearly_once_the_lock_budget_is_exhausted(home, monkeypat
             "daemon did not come up within 15s (see daemon.log)"
         )
 
-    monkeypatch.setattr(daemon_client, "ensure_running", always_fails)
+    monkeypatch.setattr(daemon_client, "connect_or_start", always_fails)
 
     with pytest.raises(daemon_client.DaemonClientError) as excinfo:
         daemon_client.restart()
@@ -126,7 +126,7 @@ def test_restart_stops_early_once_the_lock_frees_but_spawning_still_fails(
             "daemon exited with code 1 before coming up (see daemon.log)"
         )
 
-    monkeypatch.setattr(daemon_client, "ensure_running", always_fails)
+    monkeypatch.setattr(daemon_client, "connect_or_start", always_fails)
 
     with pytest.raises(daemon_client.DaemonClientError):
         daemon_client.restart()
@@ -138,7 +138,7 @@ def test_restart_succeeds_on_the_first_try_when_nothing_is_racing(home, monkeypa
     just works and nothing backs off or retries."""
     fake_time = _still_draining(monkeypatch)
     sentinel = object()
-    monkeypatch.setattr(daemon_client, "ensure_running", lambda: sentinel)
+    monkeypatch.setattr(daemon_client, "connect_or_start", lambda: sentinel)
 
     assert daemon_client.restart() is sentinel
     assert fake_time.sleeps == []
@@ -148,7 +148,7 @@ def test_restart_succeeds_on_the_first_try_when_nothing_is_racing(home, monkeypa
 #
 # 2026-09-11 22:18: ``stop()`` gave up after 10s while 63 sessions took 10.4s
 # to drain, daemon.json was still on disk (its unlink had lost a race with a
-# reader), and the listener was still up. ``ensure_running()`` connected to
+# reader), and the listener was still up. ``connect_or_start()`` connected to
 # that dying daemon, ``restart()`` handed it back as the successor, nothing
 # was spawned, and there was no daemon at all for 45 minutes.
 
@@ -157,12 +157,12 @@ def test_restart_does_not_accept_the_predecessor_as_the_successor(home, monkeypa
     fake_time = _still_draining(monkeypatch)
     records = iter([
         {"pid": 111},   # before stop: the predecessor
-        {"pid": 111},   # first ensure_running(): still the predecessor's record
+        {"pid": 111},   # first connect_or_start(): still the predecessor's record
         {"pid": 222},   # second: the successor announced itself
     ])
     monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: next(records))
     clients = iter(["dying-predecessor", "successor"])
-    monkeypatch.setattr(daemon_client, "ensure_running", lambda: next(clients))
+    monkeypatch.setattr(daemon_client, "connect_or_start", lambda: next(clients))
 
     assert daemon_client.restart() == "successor"
     assert fake_time.sleeps == [daemon_client.RESTART_BACKOFF_START]
@@ -176,6 +176,6 @@ def test_a_daemon_that_answers_with_the_lock_free_is_the_successor(home, monkeyp
     _still_draining(monkeypatch)
     monkeypatch.setattr(runtime_state, "lock_is_free", lambda: True)
     monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: {"pid": 111})
-    monkeypatch.setattr(daemon_client, "ensure_running", lambda: "serving")
+    monkeypatch.setattr(daemon_client, "connect_or_start", lambda: "serving")
 
     assert daemon_client.restart() == "serving"

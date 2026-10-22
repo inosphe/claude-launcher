@@ -40,6 +40,13 @@ def _serving_after(monkeypatch, seconds: float):
     return client
 
 
+@pytest.fixture(autouse=True)
+def user_shell(monkeypatch):
+    """These are the user-shell start path: a session's shell never spawns
+    (claunch-19liw.2.1, tests/test_ensure_running_session.py)."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+
 @pytest.fixture
 def short_clocks(monkeypatch):
     monkeypatch.setattr(daemon_client, "START_TIMEOUT", 0.3)

@@ -7,10 +7,11 @@ operator's terminal sits in, and the profile home its harness reads. Every one
 of them is right *in that shell* and wrong in any process that outlives it or
 acts for more than one session.
 
-The daemon is such a process, and it is routinely started from a session's
-shell: ``daemon_client.ensure_running`` spawns it from whatever CLI found it
-absent, and each restart's successor inherits the previous daemon's
-environment. Until claunch-2yiij only the process-owner tag was removed on the
+The daemon is such a process, and it was routinely started from a session's
+shell: ``daemon_client.ensure_running`` spawned it from whatever CLI found it
+absent (no longer from a session's shell, claunch-19liw.2.1; an explicit
+``claunch daemon start`` there still does), and each restart's successor
+inherits the previous daemon's environment. Until claunch-2yiij only the process-owner tag was removed on the
 way, so a daemon spawned from s609's shell kept ``CLAUNCH_SESSION=s609`` for
 every later generation, and everything it did on its own account read that
 name as its caller -- the driver of every v2 run it started, the actor of its

@@ -1988,7 +1988,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, `kimi`, `agent`, plus your own) and whether each is installed here. |
 | `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list, and (unless `spawn.allow_workspace` is off) where an agent may send a child (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
 | `workspace code [WS] [--worktree NAME] [--session S] [--install] [--stop]` | Open a workspace, one of its worktrees, or a session's directory in VS Code in the browser (code-server run by the daemon) and print the URL; with no workspace, list the running servers (see [VS Code in the browser](#vs-code-in-the-browser-one-code-server-per-workspace-and-worktree)). |
-| `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
+| `daemon start\|stop\|status\|restart` | Explicit daemon control. Commands run from your own shell auto-start an absent daemon, tmux-style; a managed session's shell never starts one (a `mesh send` there is queued until the daemon is up, other commands fail), and a daemon that is up but not answering is reported, never replaced. |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
 | `daemon relay [KEY [VALUE]] [--relay HANDLE] [--remove HANDLE]` | Show or set the relay uplinks (reach this daemon from outside the LAN — see below). With no argument it lists every configured relay; `--relay` targets one of several (a new handle adds it) and `--remove` drops one. |
@@ -2006,11 +2006,17 @@ keeps the classic `~/.claude-launcher/daemon/` directory and fixed port, so
 nothing changes unless you opt in.
 
 ```bash
-claunch -L test new-session -s scratch   # auto-starts the 'test' instance daemon
+claunch -L test daemon start             # creates the 'test' instance
+claunch -L test new-session -s scratch   # later starts of it are automatic
 claunch -L test sessions                 # separate world from the default daemon
 claunch -L test daemon stop
 claunch daemon restart --all             # restart every RUNNING instance
 ```
+
+`-L NAME` with a name that has no state directory yet is refused rather than
+started, so a typo or a relay's directory label cannot bring up a stray
+instance; only `claunch -L NAME daemon start` creates one, and it refuses a
+name equal to a `daemon.relays[].name`.
 
 `daemon restart --all` restarts the default instance and every named one that
 is currently serving (stopped instances are skipped, not started) — the "pick

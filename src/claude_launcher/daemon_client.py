@@ -2,11 +2,13 @@
 
 Discovery: the daemon writes ``daemon.json`` (host/port/pid) and a ``token``
 file under ``<launcher home>/daemon/``; the client reads both, so auth is
-automatic for the local user. When the daemon is not running, session commands
-auto-start it (tmux-style): spawn ``python -m claude_launcher.daemon`` fully
-detached, then poll ``/api/health`` until it answers. Two racing CLIs may both
-spawn — the daemon's singleton lock picks one winner and the loser exits, so
-both clients converge.
+automatic for the local user. When the daemon is not running, commands run
+from a user's shell auto-start it (tmux-style): spawn ``python -m
+claude_launcher.daemon`` fully detached, then poll ``/api/health`` until it
+answers. Two racing CLIs may both spawn — the daemon's singleton lock picks
+one winner and the loser exits, so both clients converge. A managed
+session's shell never auto-starts one (claunch-19liw.2.1, see
+:func:`ensure_running`).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from . import request_spool
 from .daemon import actors, paths, runtime_state
 
 #: How long auto-start waits for the daemon to come up when it cannot see
@@ -63,6 +66,25 @@ class DaemonClientError(Exception):
     """Raised for daemon-unreachable and API-error conditions."""
 
 
+class DaemonSpooled(DaemonClientError):
+    """A write was queued for the daemon instead of sent (claunch-19liw.2.1).
+
+    Not a failure of the command: the request is on disk and the daemon
+    applies it once, when it is up. The CLI prints this and exits 0, so a
+    caller does not send again (a resend is a second request id).
+    """
+
+    def __init__(self, message: str, request_id: str, path) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.path = path
+
+
+def _in_session() -> str:
+    """The managed session whose shell this is, or ''."""
+    return os.environ.get("CLAUNCH_SESSION", "").strip()
+
+
 class DaemonClient:
     def __init__(self, base_url: str, token: str, *, actor: Optional[str] = None) -> None:
         self.base_url = base_url.rstrip("/")
@@ -90,6 +112,9 @@ class DaemonClient:
         """``body`` goes as JSON; ``data`` instead sends those bytes as they
         are under ``content_type`` (an image upload's raw body)."""
         url = self.base_url + path
+        request_id = ""
+        if request_spool.spoolable(method, path):
+            request_id = request_spool.new_request_id()
         if data is None and body is not None:
             data = json.dumps(body).encode("utf-8")
             content_type = "application/json"
@@ -99,6 +124,8 @@ class DaemonClient:
             req.add_header(actors.HEADER, self.actor)
         if data is not None and content_type:
             req.add_header("Content-Type", content_type)
+        if request_id:
+            req.add_header(request_spool.HEADER, request_id)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = resp.read()
@@ -106,7 +133,12 @@ class DaemonClient:
             detail = _error_detail(exc)
             raise DaemonClientError(f"{method} {path}: {detail}") from exc
         except (urllib.error.URLError, OSError) as exc:
-            raise DaemonClientError(f"cannot reach daemon at {self.base_url}: {exc}") from exc
+            reason = f"cannot reach daemon at {self.base_url}: {exc}"
+            if request_id and _in_session():
+                # It may have been applied by a daemon that was only slow;
+                # the id lets the daemon skip this copy if so.
+                raise _spool(method, path, body, reason, request_id) from exc
+            raise DaemonClientError(reason) from exc
         if raw:
             return payload
         try:
@@ -128,6 +160,43 @@ class DaemonClient:
 
     def delete(self, path: str, **kw):
         return self.request("DELETE", path, **kw)
+
+
+def _spool(method: str, path: str, body: Optional[dict], reason: str,
+           request_id: Optional[str] = None) -> DaemonSpooled:
+    """Queue one write for the daemon and return the exception that says so."""
+    request_id = request_id or request_spool.new_request_id()
+    target = request_spool.put(_in_session(), method, path, body, request_id)
+    return DaemonSpooled(
+        f"queued {request_id} -- {reason}; the daemon delivers it once it is "
+        f"up (do not resend: {target}). A session does not start the daemon: "
+        "ask the user to start it ('claunch daemon start') if it stays down",
+        request_id,
+        target,
+    )
+
+
+class SpoolingClient(DaemonClient):
+    """What :func:`ensure_running` hands a session's shell when the daemon
+    cannot be reached (claunch-19liw.2.1).
+
+    Nothing is sent. A write :func:`request_spool.spoolable` admits is
+    queued (:class:`DaemonSpooled`); every other call -- reads, and writes
+    that must not land late -- fails with ``reason``. Callers keep their
+    one ``ensure_running()`` line; the decision lives here.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("", "")
+        self.reason = reason
+
+    def request(self, method: str, path: str, body: Optional[dict] = None, **kw):
+        if request_spool.spoolable(method, path):
+            raise _spool(method, path, body, self.reason)
+        raise DaemonClientError(
+            f"{self.reason}; {method} {path} was not sent. A session does not "
+            "start the daemon: ask the user to start it ('claunch daemon start')"
+        )
 
 
 def _error_detail(exc: urllib.error.HTTPError) -> str:
@@ -422,8 +491,125 @@ def spawn_daemon(
         os.close(log)
 
 
+#: Gap between two looks while :func:`ensure_running` waits out a daemon
+#: that is restarting or busy.
+RECOVER_GAP = 0.5
+
+
 def ensure_running(*, auto_start: bool = True) -> DaemonClient:
-    """Connect to the daemon, auto-starting it if needed.
+    """Connect to the daemon, starting it only from a user's shell.
+
+    A daemon that does not answer is usually one that is restarting or busy
+    and back within seconds (claunch-19liw.2: 436 of 504 session-shell spawns
+    were for UNRESPONSIVE), so the first move is to look again for up to
+    :data:`START_TIMEOUT` before deciding anything. What is decided then:
+
+    - from a managed session's shell (``CLAUNCH_SESSION`` set) nothing is
+      spawned, whatever the state: a daemon started there inherits that
+      session's environment and acts under its name for every later
+      generation (claunch-19liw.2.1). The caller gets a
+      :class:`SpoolingClient`, which queues the writes that may land late
+      and fails everything else;
+    - UNRESPONSIVE fails everywhere (claunch-4ui): a live daemon holds the
+      singleton lock, so a replacement only loses the lock race after
+      15 seconds of waiting, and the diagnosis says why it is not absent;
+    - absent (NOT_RUNNING / STALE_RECORD) in a user's shell starts one, as
+      it always has (the user's decision on claunch-19liw.2). The wait is
+      skipped when the lock is free: nothing is coming back by itself.
+
+    ``auto_start=False`` takes one look and fails instead of starting, for
+    the daemon's own calls back into itself.
+    """
+    _check_registered()
+    session = _in_session()
+    started = time.monotonic()
+    # The daemon's own call back into itself takes one look, as before.
+    deadline = started + (START_TIMEOUT if auto_start else 0.0)
+    while True:
+        client, report = connect_with_diagnosis()
+        if client is not None:
+            return client
+        if (
+            not session
+            and is_absent(report)
+            and runtime_state.lock_is_free()
+        ):
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(RECOVER_GAP)
+    reason = unreachable_reason(report)
+    if session:
+        return SpoolingClient(
+            f"{reason} (looked for {int(time.monotonic() - started)}s)"
+        )
+    if not is_absent(report):
+        raise DaemonClientError(
+            f"{reason}; not starting another (a live daemon holds the lock). "
+            f"Check it with 'claunch daemon status' (see {paths.log_file()})"
+        )
+    if not auto_start:
+        raise DaemonClientError(
+            "daemon is not running (start it with 'claunch daemon start')"
+        )
+    return start(report, via="ensure_running")
+
+
+def _check_registered() -> None:
+    """Refuse a ``-L NAME`` that names no instance (claunch-19liw.2.2).
+
+    An instance is registered when its state directory exists
+    (:func:`paths.known_instances`). A name seen for the first time is
+    usually a typo or another kind of name -- on 10-21 a relay's directory
+    label went into ``-L`` and started an instance that registered with the
+    relays under the main daemon's name -- so only ``claunch -L NAME daemon
+    start`` makes one.
+    """
+    name = paths.instance()
+    if not name or (paths.base_home() / "daemons" / name).is_dir():
+        return
+    known = ", ".join(n or "(default)" for n in paths.known_instances()) or "none"
+    raise DaemonClientError(
+        f"no daemon instance named {name!r} (registered: {known}); "
+        f"nothing was started. Create it with 'claunch -L {name} daemon start'"
+    )
+
+
+def _check_relay_name() -> None:
+    """Refuse an instance named like a relay's directory label
+    (claunch-19liw.2.2): that label is how the relays tell daemons apart,
+    and ``-L`` with it is the mistake that put two daemons under one name."""
+    name = paths.instance()
+    if not name:
+        return
+    from . import store
+
+    taken = sorted({
+        str(r.get("name") or "").strip() for r in store.relays_config()
+    } - {""})
+    if name in taken:
+        raise DaemonClientError(
+            f"instance name {name!r} is a relay name in daemon.relays "
+            f"({', '.join(taken)}); pick another instance name"
+        )
+
+
+def connect_or_start() -> DaemonClient:
+    """The running daemon, or a new one: for the commands whose job is to
+    start it (``claunch daemon start``/``restart``), from any shell."""
+    client, report = connect_with_diagnosis()
+    if client is not None:
+        return client
+    return start(report)
+
+
+def start(report: Optional[dict] = None, *, via: str = "start") -> DaemonClient:
+    """Spawn the daemon and wait until it answers.
+
+    The explicit start: ``claunch daemon start``/``restart`` and the
+    user-shell branch of :func:`ensure_running` come here, and nothing
+    else does. ``report`` is the diagnosis that led here, for the spawn
+    record.
 
     The wait after a spawn has two clocks. :data:`START_TIMEOUT` is the
     fixed one, and the only one when the spawned process cannot be watched
@@ -435,16 +621,10 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
     it is being waited for rather than being handed a false "did not come
     up" seconds before it does.
     """
-    client = connect()
-    if client is not None:
-        return client
-    report = _last_report
-    if not auto_start:
-        raise DaemonClientError(
-            "daemon is not running (start it with 'claunch daemon start')"
-        )
+    _check_relay_name()
+    report = report if report is not None else (_last_report or {})
     proc = spawn_daemon(
-        reason=f"ensure_running: {report.get('state')} -- {report.get('why')}"
+        reason=f"{via}: {report.get('state')} -- {report.get('why')}"
     )
     started = time.monotonic()
     deadline = started + START_TIMEOUT
@@ -564,7 +744,7 @@ def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False,
     ``stop()`` waits at most ``stop_timeout`` for the predecessor to actually
     release its singleton lock and gives up rather than hanging forever (see
     its docstring) — a predecessor whose session winddown runs long is not
-    yet gone when that returns. A single :func:`ensure_running` call right
+    yet gone when that returns. A single :func:`connect_or_start` call right
     after would spawn a successor that loses the lock race, and that
     successor's own grace window (``_acquire_with_grace`` in
     ``daemon/__main__.py``) is a second bounded wait that can lose too — by
@@ -593,7 +773,7 @@ def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False,
     while True:
         attempt += 1
         try:
-            client = ensure_running()
+            client = connect_or_start()
             announced = runtime_state.read_daemon_json() or {}
             if (
                 predecessor

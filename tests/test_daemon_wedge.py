@@ -219,7 +219,7 @@ def test_restart_does_not_recommend_force_off_a_single_round(home, monkeypatch, 
     monkeypatch.setattr(daemon_client, "diagnose", lambda **kw: next(looks))
     monkeypatch.setattr(daemon_client, "stop", lambda **kw: True)
     monkeypatch.setattr(
-        daemon_client, "ensure_running",
+        daemon_client, "connect_or_start",
         lambda **kw: daemon_client.DaemonClient("http://x", "t"),
     )
     assert cli.main(["daemon", "restart"]) == 0
@@ -243,7 +243,7 @@ def test_force_stands_down_when_the_second_look_answers(home, monkeypatch, capsy
     )
     monkeypatch.setattr(daemon_client, "stop", lambda **kw: True)
     monkeypatch.setattr(
-        daemon_client, "ensure_running",
+        daemon_client, "connect_or_start",
         lambda **kw: daemon_client.DaemonClient("http://x", "t"),
     )
     assert cli.main(["daemon", "restart", "--force"]) == 0
@@ -262,7 +262,7 @@ def test_force_ends_the_wedged_process_then_starts_a_successor(
         lambda pid, **kw: ended.append(pid) or True,
     )
     monkeypatch.setattr(
-        daemon_client, "ensure_running",
+        daemon_client, "connect_or_start",
         lambda **kw: started.append(True) or daemon_client.DaemonClient("http://x", "t"),
     )
     assert cli.main(["daemon", "restart", "--force"]) == 0
@@ -284,7 +284,7 @@ def test_force_on_a_healthy_daemon_restarts_it_gracefully_instead(
     )
     monkeypatch.setattr(daemon_client, "stop", lambda **kw: True)
     monkeypatch.setattr(
-        daemon_client, "ensure_running",
+        daemon_client, "connect_or_start",
         lambda **kw: daemon_client.DaemonClient("http://x", "t"),
     )
     assert cli.main(["daemon", "restart", "--force"]) == 0
@@ -297,7 +297,7 @@ def test_force_with_nothing_running_just_starts_one(home, monkeypatch, capsys):
         lambda pid, **kw: pytest.fail("there is nothing to end"),
     )
     monkeypatch.setattr(
-        daemon_client, "ensure_running",
+        daemon_client, "connect_or_start",
         lambda **kw: daemon_client.DaemonClient("http://x", "t"),
     )
     assert cli.main(["daemon", "restart", "--force"]) == 0
