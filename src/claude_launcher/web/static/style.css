@@ -2789,11 +2789,16 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-tps-overlay .term-tps-when,
 #term-tps-overlay .term-tps-metrics { white-space: nowrap; }
-/* The account's 5h/7d usage under the throughput (claunch-f5w4x.2), each
-   window coloured by how close it is to its limit, as on #/profile-usage. */
+/* The account's usage under the throughput (claunch-f5w4x.2), each window
+   coloured by how close it is to its limit, as on #/profile-usage. A borrowed
+   session has two rows, its own profile's and the lender's, each led by the
+   profile name (claunch-f5w4x.4). */
 #term-tps-overlay .term-usage {
-  display: flex; gap: 8px; font-size: 11px; line-height: 14px; white-space: nowrap;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px;
+  font-size: 11px; line-height: 14px; white-space: nowrap;
 }
+#term-tps-overlay .term-usage-row { display: flex; gap: 8px; }
+#term-tps-overlay .term-usage-who { color: #c9d1d9; }
 #term-tps-overlay .term-tps-live + .term-usage,
 #term-tps-overlay .term-tps-last + .term-usage {
   margin-top: 2px; padding-top: 3px;
