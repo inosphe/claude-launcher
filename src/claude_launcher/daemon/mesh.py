@@ -5121,6 +5121,11 @@ class MeshManager:
             "authority": mesh.authority,
             "default": rs.default,
             "yaml": mesh_roles.to_yaml(mesh.roles_doc or rs.to_doc()),
+            # True when this mesh's own copy is lossy — a newer daemon wrote
+            # parts this build cannot read, and they were dropped at load.
+            # The UI flags the download so a re-upload does not silently
+            # erase the newer daemon's fields for good.
+            "lossy": bool((mesh.roles_doc or {}).get("x-dropped-keys")),
             "roles": [
                 {
                     "name": r.name,
