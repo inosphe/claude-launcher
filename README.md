@@ -1064,8 +1064,8 @@ providers:
 The shim then forwards the calling session's name as the `x-session-affinity`
 header on every request — the same header name the backend documents, so both
 the Claude (Anthropic protocol) and Pi (OpenAI protocol) paths carry it. The
-private `X-Claunch-Session` header the launcher uses internally is still
-stripped and never reaches the upstream. A caller that sets
+session's name reaches the shim as the `/s/<session>` prefix of its base URL,
+which the shim takes off before forwarding. A caller that sets
 `x-session-affinity` itself keeps its value.
 
 The flag is read **live**: the shim re-reads `providers.<name>.session_affinity`
@@ -1119,9 +1119,13 @@ claunch tps --clear             # drop every record file
 
 Records live under `~/.claude-launcher/metering/<shim fingerprint>.jsonl`, one
 JSON object per line, so they are also easy to read with `jq`. A daemon-managed
-session is named in its records: the daemon sends `X-Claunch-Session: <name>`
-in every request through Claude Code's `ANTHROPIC_CUSTOM_HEADERS`, and the
-shim strips that header before the upstream sees it. A request the shim cannot
+session is named in its records: the daemon gives it the base URL
+`http://127.0.0.1:<port>/s/<name>`, the harness appends its own path
+(`/v1/messages`, `/chat/completions`), and the shim takes the `/s/<name>`
+prefix off before the upstream sees the request. A `claunch run` from inside a
+managed session gets the same prefix with that session's name; outside one
+the URL has none. Sessions launched before this change still send the old
+`X-Claunch-Session` header, which the shim reads and strips. A request the shim cannot
 count (an error answer, a compressed body it did not ask for) is still
 recorded with its timing and `counted: false`.
 
@@ -1143,9 +1147,8 @@ launch prints a one-line warning and uses the upstream URL directly (a
 `routing` spec keeps the hard failure described above).
 
 The `pi` harness goes through the same shim: its resolved OpenAI base URL
-from `endpoints.openai` is fronted the same way, the packaged extension
-registers `X-Claunch-Session` as a provider header for daemon-managed
-sessions, and the shim records each `/v1/chat/completions` call. An OpenAI
+from `endpoints.openai` is fronted the same way (with the same `/s/<name>`
+prefix for daemon-managed sessions), and the shim records each `/v1/chat/completions` call. An OpenAI
 stream only carries token counts when the request asks for them, so behind
 the shim claunch lets Pi send `stream_options.include_usage` (a backend that
 rejects that field can opt out with `providers.<name>.metering: false`).

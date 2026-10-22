@@ -55,7 +55,10 @@ ENV_OVERRIDE = "CLAUNCH_METERING"
 #: Key under a dict-valued ``metering:`` that overrides :data:`SUMMARY_MAX_AGE`.
 MAX_AGE_KEY = "summary_max_age"
 
-#: Request header the daemon adds so the shim can attribute a request.
+#: Request header a session launched before claunch-19liw.2.4 names itself
+#: with. Sessions now name themselves in the base URL's path
+#: (:data:`routing.SESSION_PATH_PREFIX`); the shim still reads and strips
+#: this header for the ones started earlier.
 SESSION_HEADER = "x-claunch-session"
 
 #: Claude Code's hook for extra request headers: newline-separated
@@ -113,25 +116,6 @@ def records_dir() -> Path:
 
 def record_file(fingerprint: str) -> Path:
     return records_dir() / f"{fingerprint}.jsonl"
-
-
-# --------------------------------------------------------------------------- #
-# the session header
-# --------------------------------------------------------------------------- #
-def apply_session_header(env: dict, session: str) -> None:
-    """Add ``X-Claunch-Session: session`` to the env's custom headers.
-
-    Lines already there (a user's own ``ANTHROPIC_CUSTOM_HEADERS``) are kept;
-    an earlier session line is replaced so a restored session never reports
-    under a stale name.
-    """
-    kept = [
-        line
-        for line in (env.get(CUSTOM_HEADERS_ENV) or "").splitlines()
-        if line.strip() and not line.lower().startswith(SESSION_HEADER + ":")
-    ]
-    kept.append(f"X-Claunch-Session: {session}")
-    env[CUSTOM_HEADERS_ENV] = "\n".join(kept)
 
 
 # --------------------------------------------------------------------------- #
