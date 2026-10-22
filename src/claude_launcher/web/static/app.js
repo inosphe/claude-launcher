@@ -16461,7 +16461,10 @@ function configureSessionFork(source) {
     view.forkRolePicked = f.quick_fork_role.value;
     syncQuickForkRole();
   };
-  f.quick_fork_workflow.onchange = () => { view.forkWfPicked = true; };
+  f.quick_fork_workflow.onchange = () => { view.forkWfPicked = true; syncQuickForkInputs(); };
+  view.forkWorkflows = [];
+  view.forkInputsFor = null;
+  syncQuickForkInputs();
   syncQuickForkRole();
   Promise.resolve(loadQuickForkWorkflows(source, load)).catch(() => {});
 }
@@ -16488,6 +16491,35 @@ async function loadQuickForkWorkflows(source, load) {
     ...names.map((n) => ({ value: n, label: n })),
   ], keep);
   view.inheritance.workflow = pair;
+  view.forkWorkflows = (wfs && wfs.workflows) || [];
+  syncQuickForkInputs();
+}
+
+/* The workflow the Workflow row names, by name: "." is the pair the
+   origin's run hands a child, "-" none. */
+function quickForkWorkflowName(f, view) {
+  const v = f.quick_fork_workflow.value;
+  if (v === ".") return ((view && view.inheritance) || {}).workflow || "";
+  return v === "-" ? "" : (v || "");
+}
+
+/* The copy's start inputs (claunch-fqkqt): the picked v2 workflow's
+   "Workflow variables", the same box the new-session form draws, checked
+   against the origin's directory where the copy stands. Redrawn -- so
+   cleared -- only when the picked workflow changes. */
+function syncQuickForkInputs() {
+  const f = $("new-session");
+  const box = $("new-quick-fork-inputs");
+  if (!f || !box) return;
+  const view = sessionFormView();
+  const list = view.forkWorkflows || [];
+  const name = quickForkWorkflowName(f, view);
+  const entry = name ? cflowPickEntry(name, list) : null;
+  const key = entry ? `${name}|${JSON.stringify(entry.inputs || [])}` : "";
+  if (key === view.forkInputsFor) return;
+  view.forkInputsFor = key;
+  const cwd = ((view.source || {}).cwd) || "";
+  cflowInputsMount(box, entry, { picked: name, list, cwdOf: () => cwd });
 }
 
 /* Rebuild the Role row for the mesh now picked: the vocabulary is the mesh's
@@ -16563,6 +16595,10 @@ function quickForkRequestOptions(f, view) {
   if (mesh && mesh !== "-") options.mesh = mesh;
   const wf = f.quick_fork_workflow.value;
   if (wf && wf !== "-") options.workflow = wf;
+  const inputsBox = $("new-quick-fork-inputs");
+  if (options.workflow && inputsBox && !inputsBox.classList.contains("hidden")) {
+    options.cflow_inputs = cflowInputsValues(inputsBox);
+  }
   if (meshName && f.quick_fork_role.value) {
     options.role = f.quick_fork_role.value;
     const holders = quickForkExclusiveHolders(meshName, (view.forkRoles || {}).roles,
@@ -16611,6 +16647,7 @@ async function quickForkSession(name, task, options, view = {}) {
   if (task) body.task = task;
   if (options && options.mesh) body.mesh = options.mesh;
   if (options && options.workflow) body.workflow = options.workflow;
+  if (options && options.workflow && options.cflow_inputs) body.cflow_inputs = options.cflow_inputs;
   if (options && options.role) body.role = options.role;
   if (options && options.sibling) body.sibling = true;
   if (options && options.self_merge_allowed) body.self_merge_allowed = true;
@@ -24477,11 +24514,16 @@ let cflowInputsCheckSeq = 0;
 /* The live check of the box drawn last, for the Profile picker's one
    listener (an `options` list may hang on the new session's profile). */
 let cflowInputsRecheck = null;
-function cflowInputsLive(box, picked, cwdOf, profileEl) {
+/* `list` is the workflow list `picked` was chosen from: the new-session
+   form's (workflowsCache, the default), or the run page's start panel and
+   the quick-fork dialog, which fetch their own. The sequence is kept per box
+   so a check answered for one box never drops another box's answer. */
+function cflowInputsLive(box, picked, cwdOf, profileEl, list) {
   let timer = null;
   const run = async () => {
     const seq = ++cflowInputsCheckSeq;
-    const body = Object.assign(cflowPickBody(picked, workflowsCache), {
+    box.dataset.cf2Seq = String(seq);
+    const body = Object.assign(cflowPickBody(picked, list || workflowsCache), {
       cwd: cwdOf() || undefined, cflow_inputs: cflowInputsValues(box),
       profile: (profileEl && profileEl.value) || undefined,
     });
@@ -24491,7 +24533,7 @@ function cflowInputsLive(box, picked, cwdOf, profileEl) {
         body: JSON.stringify(body),
       });
       const doc = await resp.json().catch(() => ({}));
-      if (seq !== cflowInputsCheckSeq || !resp.ok) return;
+      if (box.dataset.cf2Seq !== String(seq) || !resp.ok) return;
       cflowInputsErrors(box, doc.errors || {});
       cflowInputsOptions(box, doc.options || {});
       const general = box.querySelector(".cf2-constraint-error");
@@ -24509,7 +24551,9 @@ function cflowInputsLive(box, picked, cwdOf, profileEl) {
     cflowGhPrecheck(row, cwdOf, schedule);
   }
   if (box.querySelector("datalist")) {
-    cflowInputsRecheck = schedule;
+    // Only a box with a Profile picker beside it takes the picker's one
+    // listener; another box would steal it from the new-session form.
+    if (profileEl) cflowInputsRecheck = schedule;
     if (profileEl && !profileEl.dataset.cf2Recheck) {
       profileEl.dataset.cf2Recheck = "1";
       profileEl.addEventListener("change", () => cflowInputsRecheck && cflowInputsRecheck());
@@ -24840,6 +24884,22 @@ function cflowInputsForm(box, fields, constraints, seeded) {
     list.appendChild(el("p", "cf2-input-error cf2-constraint-error hidden"));
     box.appendChild(list);
   }
+}
+
+/* Draw the "Workflow variables" box for a picked list entry outside the
+   new-session form: the run page's start panel and the quick-fork dialog
+   (claunch-fqkqt). The same fields, the same live check, the same values
+   (cflowInputsValues) as the new-session form's box. Clears the box; hides
+   it when the entry is not a v2 workflow or declares no inputs. Returns
+   whether fields were drawn. */
+function cflowInputsMount(box, entry, { picked, list, cwdOf } = {}) {
+  box.innerHTML = "";
+  const fields = (entry && Number(entry.version) === 2 && entry.inputs) || [];
+  box.classList.toggle("hidden", !fields.length);
+  if (!fields.length) return false;
+  cflowInputsForm(box, fields, entry.input_constraints || [], null);
+  cflowInputsLive(box, picked, cwdOf || (() => ""), null, list);
+  return true;
 }
 
 /* What the box holds, as the API's `cflow_inputs`: empty values are left
@@ -37421,7 +37481,7 @@ function pendingBanner(data, after) {
 
 /* POST a cflow action, surfacing the daemon's error text. Returns the parsed
    body on success, null otherwise. */
-async function cflowPost(path, body) {
+async function cflowPost(path, body, { onRefused } = {}) {
   try {
     const resp = await api(path, {
       method: "POST",
@@ -37430,6 +37490,9 @@ async function cflowPost(path, body) {
     });
     const doc = await resp.json().catch(() => ({}));
     if (!resp.ok) {
+      // A refused v2 start answers per-input `errors`; the caller marks them
+      // on its Workflow variables box before the message is shown.
+      if (onRefused) onRefused(doc);
       alert(doc.error || `HTTP ${resp.status}`);
       return null;
     }
@@ -39633,8 +39696,19 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
      option cannot wrap, and these are absolute paths. */
   const source = el("p", "wf-source mono");
   const versionNote = el("p", "wf-note cf2-v1-note hidden", CFLOW_V1_NOTE);
+  /* A v2 pick's start inputs, the same box the new-session form draws
+     (claunch-fqkqt): whatever is typed here is the run's data.inputs at
+     start. Redrawn -- so cleared -- only when the pick changes. */
+  const inputsBox = el("div", "cf2-inputs wf-start-inputs hidden");
+  const startInputs = (pick) => {
+    if (pick.workflow_version !== 2 || inputsBox.classList.contains("hidden")) return {};
+    cflowInputsErrors(inputsBox, {});
+    return { cflow_inputs: cflowInputsValues(inputsBox) };
+  };
+  const refused = { onRefused: (doc) => cflowInputsErrors(inputsBox, doc.errors || {}) };
   const showSource = () => {
     const w = cflowPickEntry(sel.value, flows);
+    cflowInputsMount(inputsBox, w, { picked: sel.value, list: flows, cwdOf: () => cwd });
     source.replaceChildren();
     desc.textContent = w && w.description ? w.description : "";
     versionNote.classList.toggle("hidden", !(w && w.deprecated));
@@ -39683,8 +39757,8 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     ask.disabled = true;
     ask.textContent = "Requesting…";
     const doc = await cflowPost("/api/cflow/request", {
-      cwd, scope, ...pick, context: ctx.value.trim(),
-    });
+      cwd, scope, ...pick, context: ctx.value.trim(), ...startInputs(pick),
+    }, refused);
     const nudged = doc ? [
       ...(doc.nudged_sessions || []),
       ...(doc.nudge_scheduled_sessions || []),
@@ -39727,8 +39801,8 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     direct.disabled = true;
     direct.textContent = "Starting…";
     const doc = await cflowPost("/api/cflow/start", {
-      cwd, scope, ...pick, context: ctx.value.trim(),
-    });
+      cwd, scope, ...pick, context: ctx.value.trim(), ...startInputs(pick),
+    }, refused);
     const nudged = doc ? [
       ...(doc.nudged_sessions || []),
       ...(doc.nudge_scheduled_sessions || []),
@@ -39758,6 +39832,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   box.appendChild(desc);
   box.appendChild(versionNote);
   box.appendChild(source);
+  box.appendChild(inputsBox);
   box.appendChild(el(
     "p", "wf-note",
     live
@@ -45099,7 +45174,7 @@ function sessionFormConfig(mode) {
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
         "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge"],
-      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed"] },
+      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs"] },
   };
   return modes[mode] || modes.new;
 }

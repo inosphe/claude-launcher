@@ -442,6 +442,7 @@ CHECKS = [
         "borrowform_check.js",
         "sessrun_check.js",
         "wfstart_check.js",
+        "startinputs_check.js",
         "wfrecent_check.js",
         "wheel_check.js",
         "transcript_check.js",
