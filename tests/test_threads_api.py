@@ -534,3 +534,20 @@ def test_a_choice_ask_and_the_open_ask_bound(tmp_path):
         await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "one too many"},
                   status=400)
     run(tmp_path, scenario)
+
+
+def test_a_guest_cannot_ask_in_a_thread(tmp_path):
+    """claunch-etw0s rework (reviewer s1389-rev): only the thread's owner
+    asks -- a guest's ask would be unanswerable (store.answer takes the
+    agent's asks only), so h_ask refuses before the entry exists."""
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "Review me"})
+        tid = res["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        out = await req("POST", f"/api/threads/{tid}/asks", {"session": "s2", "text": "advice?"},
+                        status=403)
+        assert "guest" in out["error"]
+        await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "owner asks"})
+        read = await req("GET", f"/api/threads/{tid}")
+        assert [m for m in read["messages"] if m["kind"] == "ask"][0]["author"] == "agent"
+    run(tmp_path, scenario)

@@ -655,6 +655,10 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if actor == thread_store.USER:
             return web.json_response({"error": "session is required: a session asks, the user answers"},
                                      status=400)
+        t = await asyncio.to_thread(threads.get, tid)
+        if actor != t["session"]:
+            return web.json_response(
+                {"error": "a session asks in its own thread; a guest advises and does not ask"}, status=403)
         try:
             text = _ask_text(body.get("text"))
             kind, choices = _ask_kind(body)

@@ -514,3 +514,22 @@ def test_t11_choice_and_text_asks(st):
     assert out["data"]["answer"]["decision"] is None
     assert out["data"]["answer"]["text"] == "이렇게"
     assert st.open_asks("s1") == 0                                # both asks are answered
+
+
+def test_t11_retrying_the_same_answer_is_idempotent_across_time(st, monkeypatch):
+    """claunch-etw0s rework (reviewer s1389-rev): the idempotency comparison
+    excludes the ``at`` stamp -- like the operator conversation's answer --
+    so a retried same answer is not a conflict even after the second moves."""
+    import itertools
+
+    from claude_launcher.threads import store as store_mod
+    tid = st.open("s1", "s1", "again?")["thread"]["id"]
+    ask = st.post("s1", tid, "한 번 더?", kind="ask",
+                  data={"type": "approve", "choices": [], "answer": None})["message"]
+    tick = itertools.count()
+    monkeypatch.setattr(store_mod, "_now", lambda: f"2026-10-22T00:00:{next(tick):02d}+00:00")
+    first = st.answer(S.USER, tid, ask["seq"], decision="approve", text="go")
+    retried = st.answer(S.USER, tid, ask["seq"], decision="approve", text="go")
+    assert retried["data"]["answer"] == first["data"]["answer"]
+    with pytest.raises(S.Conflict):
+        st.answer(S.USER, tid, ask["seq"], decision="deny")
