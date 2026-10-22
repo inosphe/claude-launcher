@@ -788,6 +788,57 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     P.unmount();
   }
 
+  /* asks (claunch-etw0s): an agent's thread_ask renders with its answer
+     state; the owner answers from the pane and the answer is recorded on
+     the entry (a fresh read redraws the bubble). */
+  {
+    let answered = null;
+    const askT = {id: "th-q", session: "s1", title: "Landing?", status: "open", last_seq: 3,
+                  last: {author: "agent", body: "이대로 진행할까요?"}};
+    const askMsgs = () => [
+      {seq: 1, author: "user", body: "준비됐습니다", at: "2026-10-21T00:00:00+00:00"},
+      {seq: 3, author: "agent", kind: "ask", body: "이대로 진행할까요?",
+       at: "2026-10-21T00:00:01+00:00",
+       data: answered ? {type: "approve", choices: [], answer: answered}
+                      : {type: "approve", choices: [], answer: null}},
+    ];
+    const qcalls = [];
+    const qapi = async (p, opts = {}) => {
+      qcalls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+      let doc = {};
+      if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads: [askT], open: 1, agent_seq: 0};
+      else if (p.startsWith("/api/threads/th-q?after=")) doc = {thread: askT, messages: askMsgs()};
+      else if (p.endsWith("/answer")) {
+        answered = {decision: "approve", text: "go", at: "2026-10-21T00:00:02+00:00"};
+        doc = {message: askMsgs()[1]};
+      }
+      return {ok: true, status: 200, json: async () => doc};
+    };
+    const qh = document.createElement("div");
+    P.mount(qh, "s1", {api: qapi, storageKey: "qk"});
+    await settle();
+    const ask = qh.querySelector(".th-ask");
+    assert.ok(ask, "the ask renders as its own bubble");
+    assert.ok(ask.querySelector(".th-ask-type").textContent === "승인 요청");
+    assert.ok(ask.querySelector(".th-ask-waiting").text().includes("답변 대기"));
+    const note = ask.querySelector(".th-ask-note");
+    assert.ok(note, "an approve ask carries the optional note field");
+    note.value = "go";
+    note.fire("input");
+    const btns = ask.querySelectorAll(".th-ask-btn");
+    assert.deepEqual(btns.map((b) => b.textContent), ["승인", "거절"]);
+    btns[0].fire("click");
+    await settle();
+    assert.deepEqual(qcalls.find((c) => c[1].endsWith("/answer")),
+                     ["POST", "/api/threads/th-q/asks/3/answer", {decision: "approve", text: "go"}]);
+    const said = qh.querySelector(".th-ask-said");
+    assert.ok(said && said.text().includes("사용자 답변 · 승인"), "the answer shows on the entry");
+    P.unmount();
+    // the all-threads page and a guest's view read the thread without
+    // answer controls (only the owner's pane answers).
+    assert.ok(src.includes("답변 대기 — 소유 세션의 창에서 답합니다"));
+  }
+
   /* wiring */
   assert.ok(html.includes('id="term-threadsbtn"'));
   assert.ok(html.indexOf('src="static/threads-pane.js"') > 0

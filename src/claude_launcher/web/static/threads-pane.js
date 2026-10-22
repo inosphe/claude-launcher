@@ -497,11 +497,19 @@ globalThis.ThreadsPane = (() => {
     const have = convo && convo.id === tid ? convo : null;
     const after = have && have.messages.length ? have.messages[have.messages.length - 1].seq : 0;
     const row = allThreads(list).find((t) => t.id === tid);
-    if (have && row && row.last_seq <= after) { have.thread = row; return; }
-    const read = early && early.tid === tid && early.after === after ? early : readThread(tid, after);
+    if (have && row && row.last_seq <= after && row.updated_at === have.thread.updated_at) {
+      have.thread = row;
+      return;
+    }
+    // last_seq moved: new messages to append. It did not but updated_at did:
+    // an entry changed in place (an ask answered, claunch-etw0s) -- the
+    // whole conversation is read again so the change shows.
+    const fresh = !!(have && row && row.last_seq <= after);
+    const read = !fresh && early && early.tid === tid && early.after === after ? early : readThread(tid, fresh ? 0 : after);
     const doc = await read.promise;
     if (tid !== current) return;
-    convo = {id: tid, thread: doc.thread, messages: (have ? have.messages : []).concat(doc.messages || [])};
+    convo = fresh ? {id: tid, thread: doc.thread, messages: doc.messages || []}
+                  : {id: tid, thread: doc.thread, messages: (have ? have.messages : []).concat(doc.messages || [])};
   }
 
   async function act(fn) {
@@ -819,6 +827,87 @@ globalThis.ThreadsPane = (() => {
     return row;
   }
 
+  /* An agent's ask (thread_ask, claunch-etw0s): the question with its answer
+     state. The thread's owner answers here (approve/deny buttons, choice
+     buttons, or a free-text field); a guest of the thread and the all-
+     threads page see the question read-only. The answer is recorded on the
+     entry and typed into the asking session as one thread block. */
+  const askDrafts = new Map();   // `${tid}:${seq}` -> the note being typed
+  const ASK_TYPE_LABEL = {approve: "승인 요청", choice: "선택", text: "질문"};
+
+  function answerAsk(tid, seq, decision) {
+    const key = `ask:${tid}:${seq}`;
+    const text = (askDrafts.get(`${tid}:${seq}`) || "").trim();
+    if (decision === undefined && !text) return undefined;
+    return once(key, () => act(async () => {
+      const body = decision === undefined ? {text} : {decision, ...(text ? {text} : {})};
+      await request(`/api/threads/${encodeURIComponent(tid)}/asks/${seq}/answer`, body);
+      askDrafts.delete(`${tid}:${seq}`);
+      convo = null;   // the answer landed on the entry in place: a fresh read redraws it
+    }));
+  }
+
+  /* The answer state of a conversation's asks: part of what a kept message
+     list drew. An ask answered elsewhere changes it without a new message,
+     so a kept list with another signature is rebuilt (claunch-etw0s). */
+  function askSig(messages) {
+    return messages.filter((m) => m.kind === "ask")
+      .map((m) => `${m.seq}:${((m.data || {}).answer || {}).at || ""}`).join(",");
+  }
+
+  function askBubble(t, m) {
+    const data = m.data || {};
+    const type = data.type || "text";
+    const answer = data.answer || null;
+    const mine = t.session === name;   // the owner's pane answers; a guest's watches
+    const row = node("div", "th-msg th-ask th-agent");
+    const meta = node("div", "th-msg-meta");
+    meta.append(node("span", "th-msg-who", speaker(m, t.session)),
+                node("span", "th-ask-type", ASK_TYPE_LABEL[type] || type),
+                node("span", "th-msg-at", stamp(m.at)));
+    row.append(meta);
+    row.append(bodyOf(m.body));
+    const box = node("div", "th-ask-answer");
+    if (answer && answer.at) {
+      const said = type === "approve" ? (answer.decision === "approve" ? "승인" : "거절")
+        : (type === "choice" ? answer.decision : null);
+      box.append(node("small", "th-ask-said", ["사용자 답변", said].filter(Boolean).join(" · ")));
+      if (answer.text) box.append(bodyOf(answer.text));
+      row.append(box);
+      return row;
+    }
+    box.append(node("small", "th-ask-waiting", mine ? "답변 대기" : "답변 대기 — 소유 세션의 창에서 답합니다"));
+    if (!mine) { row.append(box); return row; }
+    const draftKey = `${t.id}:${m.seq}`;
+    const busy = inflight.has(`ask:${t.id}:${m.seq}`);
+    const field = node("textarea", "th-ask-note");
+    field.rows = 1;
+    field.placeholder = type === "text" ? "답변을 입력하세요" : "덧붙일 말 (선택)";
+    field.value = askDrafts.get(draftKey) || "";
+    field.setAttribute("aria-label", "질문에 대한 답변");
+    field.addEventListener("input", () => askDrafts.set(draftKey, field.value));
+    field.addEventListener("keydown", (e) => {
+      if (sendKey(e) && type === "text" && field.value.trim()) {
+        e.preventDefault();
+        answerAsk(t.id, m.seq, undefined);
+      }
+    });
+    const buttons = node("div", "th-ask-buttons");
+    const button = (label, decision) => {
+      const b = node("button", "term-btn th-ask-btn", busy ? "전송 중…" : label);
+      b.type = "button";
+      b.disabled = busy || (decision === undefined && !(askDrafts.get(draftKey) || "").trim());
+      b.addEventListener("click", () => answerAsk(t.id, m.seq, decision));
+      buttons.append(b);
+    };
+    if (type === "approve") { button("승인", "approve"); button("거절", "deny"); }
+    else if (type === "choice") for (const c of data.choices || []) button(c, c);
+    else button("답변 전송", undefined);
+    box.append(field, buttons);
+    row.append(box);
+    return row;
+  }
+
   function renderList(side, threads, read) {
     const guestOf = (list && list.guest_threads) || [];
     const fresh = unseen(threads.concat(guestOf), read);
@@ -1069,20 +1158,24 @@ globalThis.ThreadsPane = (() => {
     // Reduced harnesses whose stub DOM cannot move a node rebuild as before.
     const kept = main.querySelector(".th-messages");
     const n = convo.messages.length;
+    const sig = askSig(convo.messages);
     const keep = !!kept && kept._thread === t.id && kept._drawn <= n
       && (!kept._drawn || convo.messages[kept._drawn - 1].seq === kept._lastSeq)
+      && kept._askSig === sig
       && typeof main.insertBefore === "function" && typeof kept.removeChild === "function";
     const msgs = keep ? kept : node("div", "th-messages");
     const from = keep ? kept._drawn : 0;
     // The pending bubble and the empty note always sit after the messages.
     if (keep) while (msgs.childNodes.length > from) msgs.removeChild(msgs.lastChild);
     for (const m of convo.messages.slice(from)) {
+      if (m.kind === "ask") { msgs.append(askBubble(t, m)); continue; }
       msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
                          m.files || [], t.id, speaker(m, t.session)));
     }
     msgs._thread = t.id;
     msgs._drawn = n;
     msgs._lastSeq = n ? convo.messages[n - 1].seq : null;
+    msgs._askSig = sig;
     const out = pending.get(t.id);
     if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || [], out.files || []));
     if (!n && !out) {
@@ -1174,6 +1267,7 @@ globalThis.ThreadsPane = (() => {
     const editing = !!convo && renaming === convo.id;
     const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], t.guests || [],
                                             inviting === convo.id, inflight.has(INVITE), convo.messages.length,
+                                            askSig(convo.messages),
                                             inflight.has(convo.id), pending.get(convo.id) || null,
                                             (attached.get(convo.id) || []).length,
                                             editing, inflight.has(RENAME)] : null);

@@ -33,9 +33,11 @@ from . import daemon_client, mcp_rpc
 
 INSTRUCTIONS = """\
 Session threads (thread_* tools): answer a "[claunch thread th-... ]" block
-with thread_reply on that thread, in markdown. When the user must act now,
-alert them in a thread (every message there is a dashboard notice). Full
-guidance: prompt pack 'mcp-threads' (load it on demand, see Prompt packs).
+with thread_reply on that thread, in markdown. thread_ask asks the user a
+simple approve/choice/text question there -- no QA record; use qa_ask when
+the question belongs in the QA pane. When the user must act now, alert them
+in a thread (every message there is a dashboard notice). Full guidance:
+prompt pack 'mcp-threads' (load it on demand, see Prompt packs).
 """
 
 _TID = {"thread_id": {"type": "string", "description": "thread id (th-xxxxxx)"}}
@@ -86,6 +88,22 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          **_TID, "text": {"type": "string", "description": "the message, in markdown"}, **_IMAGES},
          "required": ["thread_id"]}},
+    {"name": "thread_ask",
+     "description": "Ask the user a simple question in one of your threads, answered in the threads "
+                    "pane: 'approve' (they approve or deny), 'choice' (they pick one of 'choices'), or "
+                    "'text' (they answer freely). Simpler than a QA question (qa_ask): no QA pane "
+                    "record, no revisions -- one question, one answer, kept in the thread. The answer "
+                    "is typed back to you as a thread block when it comes.",
+     "inputSchema": {"type": "object", "properties": {
+         **_TID,
+         "text": {"type": "string", "description": "the question, at most 4000 characters"},
+         "type": {"type": "string", "enum": ["approve", "choice", "text"],
+                  "description": "approve: the user approves or denies (default); choice: the user "
+                                 "picks one of 'choices'; text: a free-text answer"},
+         "choices": {"type": "array", "items": {"type": "string"},
+                     "description": "2..10 nonempty options, each at most 300 characters -- a choice "
+                                    "ask only"}},
+         "required": ["thread_id", "text"]}},
     {"name": "thread_open",
      "description": "Start a new thread with the user on a sub-topic, optionally with its first message. "
                     "Open one whenever what you have to say has diverged from an existing thread's "
@@ -208,6 +226,12 @@ def call_tool(name: str, args: dict) -> dict:
         if images:
             body["images"] = _stage_images(c, images)
         return c.post(f"/api/threads/{tid}/messages", body)
+    if name == "thread_ask":
+        tid = _tid(args)
+        body = {"session": me, "text": args.get("text") or "", "type": args.get("type") or "approve"}
+        if args.get("choices"):
+            body["choices"] = args["choices"]
+        return c.post(f"/api/threads/{tid}/asks", body)
     if name == "thread_open":
         images = _read_images(args.get("images"))
         body = {"session": me, "title": args.get("title") or ""}

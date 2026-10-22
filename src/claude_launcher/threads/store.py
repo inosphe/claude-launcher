@@ -107,6 +107,13 @@ RAIL_REPLIES = 5
 RAIL_EXCERPT = 160
 SYSTEM = "system"
 KINDS = ("message", "ask", "dispatch", "system")
+#: The agent's simple ask in a session thread (claunch-etw0s): the user
+#: answers it in the threads pane, mirroring the operator conversation's
+#: ask (daemon/operators_v2.py ASK_TYPES).
+ASK_TYPES = ("approve", "choice", "text")
+#: A session may have at most this many unanswered asks across its threads
+#: (the operator conversation's bound, daemon/operators_v2.py).
+MAX_OPEN_ASKS = 50
 #: The owner key of an operator's threads (claunch-iw5i8.12.1).
 OPERATOR_PREFIX = "operator:"
 
@@ -953,6 +960,58 @@ class ThreadStore:
             db.execute("UPDATE messages SET data = ? WHERE seq = ?", (raw, int(seq)))
             if touch:
                 db.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (_now(), r["thread"]))
+            return _message(db.execute("SELECT * FROM messages WHERE seq = ?", (int(seq),)).fetchone())
+
+    def open_asks(self, owner: str) -> int:
+        """How many of ``owner``'s asks (the agent's, in any of its threads)
+        have no answer yet -- the bound a new thread_ask is checked against."""
+        with self._connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session = ? AND kind = 'ask'"
+                " AND author = 'agent' AND json_extract(data, '$.answer') IS NULL",
+                (owner,),
+            ).fetchone()[0]
+
+    def answer(self, actor: str, tid: str, seq: int, *, decision=None, text=None) -> dict:
+        """Record ``actor``'s answer to the agent's ask ``seq`` of thread
+        ``tid``: only the user answers (the asking session waits, as in the
+        operator conversation). ``decision`` is 'approve'/'deny' for an
+        'approve' ask and one of the ask's choices for a 'choice' ask; a
+        'text' ask takes the answer as its note. Answering again with the
+        same decision and note is idempotent -- compared without the ``at``
+        stamp, the way the operator conversation's answer works
+        (daemon/operators_v2.py) -- and only a different answer is a
+        conflict."""
+        if actor != USER:
+            raise Forbidden("only the user answers an ask; the asking session waits for them")
+        with self._write() as db:
+            row = self._row(db, tid)
+            self._may(row, actor)
+            r = db.execute("SELECT * FROM messages WHERE seq = ? AND thread = ?", (int(seq), tid)).fetchone()
+            if r is None or r["kind"] != "ask" or r["author"] != AGENT:
+                raise NotFound(f"thread {tid} has no ask {seq}")
+            data = json.loads(r["data"] or "{}")
+            ask_type = data.get("type", "text")
+            if ask_type == "approve":
+                if decision not in ("approve", "deny"):
+                    raise ThreadError("decision must be 'approve' or 'deny'")
+                note = _text(text, "text", MAX_BODY, required=False)
+            elif ask_type == "choice":
+                if decision not in (data.get("choices") or []):
+                    raise ThreadError("decision must be one of the ask's choices")
+                note = _text(text, "text", MAX_BODY, required=False)
+            else:
+                decision = None
+                note = _text(text, "answer", MAX_BODY)
+            answer = {"decision": decision, "text": note or None, "at": _now()}
+            if (data.get("answer") or {}).get("at"):
+                old = {k: data["answer"].get(k) for k in ("decision", "text")}
+                if old != {"decision": decision, "text": note or None}:
+                    raise Conflict("ask already answered")
+                return _message(r)
+            data["answer"] = answer
+            db.execute("UPDATE messages SET data = ? WHERE seq = ?", (_data(data), int(seq)))
+            db.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (_now(), tid))
             return _message(db.execute("SELECT * FROM messages WHERE seq = ?", (int(seq),)).fetchone())
 
     def scan(self, owner: str, *, kinds=None, author: Optional[str] = None, after: int = 0,

@@ -276,6 +276,32 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   assert.strictEqual(links[0].href, 'api/threads/th-p/images/ab.png');
   assert.strictEqual(links[0].children[0].src, links[0].href);
 
+  // An agent's ask (claunch-etw0s): the read-only pages show the answer
+  // state as a chip -- waiting, then the user's answer with its note.
+  const askThread = (answer) => ({
+    id: 'th-ask', session: 's1', title: 'Landing?', status: 'open',
+    updated_at: '2026-10-14T10:00:00+00:00', omitted: 0,
+    messages: [{ seq: 1, thread: 'th-ask', author: 'agent', kind: 'ask', body: '이대로 진행?',
+                 at: '2026-10-14T10:00:00+00:00',
+                 data: { type: 'approve', choices: [], answer } }],
+  });
+  reply = () => ({ threads: [askThread(null)], total: 1, page: 1, per_page: 20, pages: 1, sessions });
+  page.open('feed');
+  await settle();
+  const waiting = view.byClass('thh-msg')[0];
+  assert.ok(waiting.byClass('thh-ask-waiting').length === 1
+            && waiting.textContent.includes('답변 대기'), 'an unanswered ask says 답변 대기');
+  assert.strictEqual(waiting.byClass('thh-answer').length, 0);
+  reply = () => ({ threads: [askThread({ decision: 'approve', text: 'go', at: '2026-10-14T10:01:00+00:00' })],
+    total: 1, page: 1, per_page: 20, pages: 1, sessions });
+  page.open('feed');
+  await settle();
+  const answered = view.byClass('thh-msg')[0];
+  assert.ok(answered.byClass('thh-ask-answered').length === 1
+            && answered.textContent.includes('사용자 답변 · 승인'), 'the answered ask shows the decision');
+  assert.ok(answered.textContent.includes('go') && answered.byClass('thh-answer').length === 1,
+            'the answer note lands under the question');
+
   // ---- the composer (claunch-1qj0b) ----
   const posts = [];
   let postReply = () => ({ status: 200, data: { delivered: true } });

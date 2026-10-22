@@ -12,6 +12,7 @@ from claude_launcher.daemon import threads_api
 from claude_launcher.threads import store as S
 
 
+
 class FakeSession:
     def __init__(self, name):
         self.sdef = SimpleNamespace(name=name)
@@ -474,3 +475,91 @@ def test_an_ended_guest_leaves_its_threads(tmp_path):
         await req("POST", f"/api/threads/{tid}/messages", {"text": "still there?"})
         assert len(mgr.sessions["s2"].delivered) == n          # no longer typed into
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_the_agent_asks_in_a_thread_and_the_user_answers(tmp_path):
+    """claunch-etw0s: thread_ask posts a kind 'ask' entry (typed back to
+    nobody -- the agent wrote it), the pane's answer is recorded on the
+    entry and typed into the owning session as one thread block."""
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"session": "s1", "title": "Landing", "text": "준비됐습니다"})
+        tid = res["thread"]["id"]
+
+        ask = await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "이대로 착지할까요?"})
+        m = ask["message"]
+        assert m["kind"] == "ask" and m["data"]["type"] == "approve"
+        assert mgr.sessions["s1"].delivered == []        # its own ask is not typed back
+        assert "delivered" not in ask
+
+        await req("POST", f"/api/threads/{tid}/asks", {"text": "user cannot ask"}, status=400)
+        await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "", "type": "approve"},
+                  status=400)
+        await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "x", "type": "choice"},
+                  status=400)
+        await req("POST", f"/api/threads/{tid}/asks",
+                  {"session": "s1", "text": "x", "type": "choice", "choices": ["only"]}, status=400)
+
+        answered = await req("POST", f"/api/threads/{tid}/asks/{m['seq']}/answer",
+                             {"decision": "approve", "text": "go"})
+        assert answered["message"]["data"]["answer"]["decision"] == "approve"
+        block = mgr.sessions["s1"].delivered[-1]
+        assert block.startswith(f'{threads_api.PREFIX} {tid} "Landing"]')
+        assert "answered your ask" in block and "decision: approved" in block and "  > go" in block
+
+        await req("POST", f"/api/threads/{tid}/asks/{m['seq']}/answer", {"decision": "deny"}, status=409)
+        await req("POST", f"/api/threads/{tid}/asks/{m['seq']}/answer", {"decision": "approve"},
+                  status=409)
+        await req("POST", f"/api/threads/{tid}/asks/{m['seq']}/answer",
+                  {"decision": "approve", "session": "s1"}, status=403)
+
+        read = await req("GET", f"/api/threads/{tid}")
+        assert read["messages"][-1]["data"]["answer"]["text"] == "go"
+    run(tmp_path, scenario)
+
+
+def test_a_choice_ask_and_the_open_ask_bound(tmp_path):
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"session": "s1", "title": "Pick one"})
+        tid = res["thread"]["id"]
+        ask = await req("POST", f"/api/threads/{tid}/asks",
+                        {"session": "s1", "text": "어느 쪽?", "type": "choice",
+                         "choices": ["a", "b"], "extra": "ignored"})
+        seq = ask["message"]["seq"]
+        await req("POST", f"/api/threads/{tid}/asks/{seq}/answer", {"decision": "c"}, status=400)
+        out = await req("POST", f"/api/threads/{tid}/asks/{seq}/answer", {"decision": "a"})
+        assert out["message"]["data"]["answer"]["decision"] == "a"
+
+        for i in range(S.MAX_OPEN_ASKS):
+            await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": f"q{i}"})
+        await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "one too many"},
+                  status=400)
+    run(tmp_path, scenario)
+
+
+def test_a_guest_cannot_ask_in_a_thread(tmp_path):
+    """claunch-etw0s rework (reviewer s1389-rev): only the thread's owner
+    asks -- a guest's ask would be unanswerable (store.answer takes the
+    agent's asks only), so h_ask refuses before the entry exists."""
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "Review me"})
+        tid = res["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        out = await req("POST", f"/api/threads/{tid}/asks", {"session": "s2", "text": "advice?"},
+                        status=403)
+        assert "guest" in out["error"]
+        await req("POST", f"/api/threads/{tid}/asks", {"session": "s1", "text": "owner asks"})
+        read = await req("GET", f"/api/threads/{tid}")
+        assert [m for m in read["messages"] if m["kind"] == "ask"][0]["author"] == "agent"
+    run(tmp_path, scenario)
+
+
+def test_asking_in_an_unknown_thread_is_a_404_not_a_500(tmp_path):
+    """claunch-etw0s rework (reviewer s1389-rev): the owner check reads the
+    thread outside call(), so an unknown thread's ask must map the store's
+    NotFound to 404 itself -- otherwise the ThreadError reaches the
+    middleware and the route 500s."""
+    async def scenario(req, mgr):
+        out = await req("POST", "/api/threads/th-nope/asks", {"session": "s1", "text": "anyone?"},
+                        status=404)
+        assert "th-nope" in out["error"]
+    run(tmp_path, scenario)

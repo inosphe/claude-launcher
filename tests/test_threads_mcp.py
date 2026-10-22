@@ -217,3 +217,29 @@ def test_invite_and_uninvite_carry_the_session(monkeypatch):
     body = prompt_packs.shipped("mcp-threads").body
     assert "thread_invite" in body and "guest_threads" in body and "reviewer and advisor" in body
     assert "owner_unread" in body and "guest's session ends" in body
+
+
+def test_thread_ask_posts_to_the_asks_route(monkeypatch):
+    """claunch-etw0s: thread_ask posts a kind 'ask' through the asks route,
+    carrying the session; defaults to an approve ask."""
+    client = Client()
+    monkeypatch.setattr(threads_mcp, "_client", lambda: client)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    threads_mcp.call_tool("thread_ask", {"thread_id": "th-1", "text": "이대로 진행?"})
+    assert client.calls[-1] == ("POST", "/api/threads/th-1/asks",
+                                {"session": "s7", "text": "이대로 진행?", "type": "approve"})
+    threads_mcp.call_tool("thread_ask", {"thread_id": "th-1", "text": "어느 쪽?", "type": "choice",
+                                         "choices": ["a", "b"]})
+    assert client.calls[-1] == ("POST", "/api/threads/th-1/asks",
+                                {"session": "s7", "text": "어느 쪽?", "type": "choice",
+                                 "choices": ["a", "b"]})
+    with pytest.raises(threads_mcp.ThreadMcpError, match="thread_id"):
+        threads_mcp.call_tool("thread_ask", {"text": "no thread"})
+
+
+def test_thread_ask_is_a_registered_tool_with_its_types():
+    tools = {t["name"]: t for t in threads_mcp.TOOLS}
+    ask = tools["thread_ask"]
+    assert ask["inputSchema"]["required"] == ["thread_id", "text"]
+    assert ask["inputSchema"]["properties"]["type"]["enum"] == ["approve", "choice", "text"]
+    assert "QA" in ask["description"]            # the lighter-than-qa_ask line is told

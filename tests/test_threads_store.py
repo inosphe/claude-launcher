@@ -465,3 +465,71 @@ def test_t10_a_v5_database_is_rebuilt_to_v6_with_its_rows(tmp_path):
     assert len(st.read("th-aaaaaa")["messages"]) == 3
     with sqlite3.connect(str(path)) as raw:
         assert raw.execute("PRAGMA user_version").fetchone()[0] == S.SCHEMA_VERSION == 6
+
+
+def test_t11_the_agent_asks_and_the_user_answers(st):
+    """claunch-etw0s: a session thread holds the agent's simple ask
+    (thread_ask) and the user's answer is recorded on the entry."""
+    tid = st.open("s1", "s1", "ship it?", "context")["thread"]["id"]
+    ask = st.post("s1", tid, "이대로 착지할까요?", kind="ask",
+                  data={"type": "approve", "choices": [], "answer": None})["message"]
+    assert ask["kind"] == "ask" and ask["data"]["answer"] is None
+    assert st.open_asks("s1") == 1
+
+    with pytest.raises(S.Forbidden):
+        st.answer("s1", tid, ask["seq"], decision="approve")     # the asking session waits
+    with pytest.raises(S.ThreadError):
+        st.answer(S.USER, tid, ask["seq"], decision="yes")       # approve takes approve/deny
+
+    answered = st.answer(S.USER, tid, ask["seq"], decision="approve", text="go")
+    assert answered["data"]["answer"]["decision"] == "approve"
+    assert answered["data"]["answer"]["text"] == "go" and answered["data"]["answer"]["at"]
+    assert st.open_asks("s1") == 0
+    # the same answer again is idempotent; a different one is a conflict
+    again = st.answer(S.USER, tid, ask["seq"], decision="approve", text="go")
+    assert again["data"]["answer"] == answered["data"]["answer"]
+    with pytest.raises(S.Conflict):
+        st.answer(S.USER, tid, ask["seq"], decision="deny")
+
+    with pytest.raises(S.NotFound):
+        st.answer(S.USER, tid, 9999, decision="approve")
+    plain = st.post(S.USER, tid, "not an ask")["message"]
+    with pytest.raises(S.NotFound):
+        st.answer(S.USER, tid, plain["seq"], decision="approve")
+
+
+def test_t11_choice_and_text_asks(st):
+    tid = st.open("s1", "s1", "pick")["thread"]["id"]
+    choice = st.post("s1", tid, "어느 쪽?", kind="ask",
+                     data={"type": "choice", "choices": ["a", "b"], "answer": None})["message"]
+    with pytest.raises(S.ThreadError):
+        st.answer(S.USER, tid, choice["seq"], decision="c")
+    assert st.answer(S.USER, tid, choice["seq"], decision="b")["data"]["answer"]["decision"] == "b"
+
+    text = st.post("s1", tid, "의견을 들려주세요", kind="ask",
+                   data={"type": "text", "choices": [], "answer": None})["message"]
+    with pytest.raises(S.ThreadError):
+        st.answer(S.USER, tid, text["seq"])                       # a text ask needs its note
+    out = st.answer(S.USER, tid, text["seq"], text="  이렇게  ")
+    assert out["data"]["answer"]["decision"] is None
+    assert out["data"]["answer"]["text"] == "이렇게"
+    assert st.open_asks("s1") == 0                                # both asks are answered
+
+
+def test_t11_retrying_the_same_answer_is_idempotent_across_time(st, monkeypatch):
+    """claunch-etw0s rework (reviewer s1389-rev): the idempotency comparison
+    excludes the ``at`` stamp -- like the operator conversation's answer --
+    so a retried same answer is not a conflict even after the second moves."""
+    import itertools
+
+    from claude_launcher.threads import store as store_mod
+    tid = st.open("s1", "s1", "again?")["thread"]["id"]
+    ask = st.post("s1", tid, "한 번 더?", kind="ask",
+                  data={"type": "approve", "choices": [], "answer": None})["message"]
+    tick = itertools.count()
+    monkeypatch.setattr(store_mod, "_now", lambda: f"2026-10-22T00:00:{next(tick):02d}+00:00")
+    first = st.answer(S.USER, tid, ask["seq"], decision="approve", text="go")
+    retried = st.answer(S.USER, tid, ask["seq"], decision="approve", text="go")
+    assert retried["data"]["answer"] == first["data"]["answer"]
+    with pytest.raises(S.Conflict):
+        st.answer(S.USER, tid, ask["seq"], decision="deny")

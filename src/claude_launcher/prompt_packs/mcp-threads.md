@@ -18,6 +18,18 @@ in the terminal as usual.
   parallel line of work to report on).
 - `thread_close` settles one.
 
+### Asking the user: thread_ask vs qa_ask
+
+`thread_ask` asks the user a simple question in a thread — `type` 'approve'
+(they approve or deny), 'choice' (they pick one of `choices`), or 'text' (a
+free-text answer). They answer in the threads pane and the answer is typed
+back to you as a thread block. It is deliberately lighter than a QA
+question: no QA pane record, no revisions — one question, one answer, kept
+in the thread. Reach for `qa_ask` when the question belongs in the QA pane
+(a decision you need recorded, re-askable, linked to threads) or when the QA
+guidance says so; reach for `thread_ask` for the small in-topic question.
+Unanswered asks are bounded (50) — do not stack asks the user has not seen.
+
 Write every `thread_reply` and `thread_open` text as
 GitHub-flavored markdown: the pane renders it (headings, lists, **bold**,
 `code`, fenced code blocks, tables, links) and keeps single line breaks; it
