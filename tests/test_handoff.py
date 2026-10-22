@@ -905,7 +905,7 @@ def fake_daemon(monkeypatch):
     return install
 
 
-def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, capsys, monkeypatch):
+def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, capsys, monkeypatch, tmp_path):
     from claude_launcher import cli
 
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -926,6 +926,18 @@ def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, caps
     assert "claunch quick-fork merge -f" not in out
     assert cli.main(["quick-fork", "a", "--allow-self-merge"]) == 0
     assert client.calls[-1] == ("post", "/api/sessions/a/quick-fork", {"self_merge_allowed": True})
+    # v2 start inputs ride as cflow_inputs, the spawn's flags (claunch-fqkqt.1);
+    # a file is overlaid by each --input, and a malformed pair posts nothing
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('{"goal": "from file", "rounds": 3}', encoding="utf-8")
+    assert cli.main(["quick-fork", "a", "--workflow", "w", "--inputs-file", str(inputs),
+                     "--input", "goal=other way"]) == 0
+    assert client.calls[-1] == ("post", "/api/sessions/a/quick-fork", {
+        "workflow": "w", "cflow_inputs": {"goal": "other way", "rounds": 3}})
+    calls = len(client.calls)
+    assert cli.main(["quick-fork", "a", "--workflow", "w", "--input", "nope"]) == 1
+    assert len(client.calls) == calls
+    assert "--input expects NAME=VALUE" in capsys.readouterr().err
     # no session at all: refused before any call
     assert cli.main(["quick-fork"]) == 1
     # inside a session the origin defaults to it
