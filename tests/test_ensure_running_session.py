@@ -197,7 +197,8 @@ def test_drain_delivers_once_from_the_original_sender_with_its_time():
     mm, home = _mesh()
     rid = _queue()
     queued_at = _spooled()[0]["queued_at"]
-    app = {"mesh": mm, "manager": None, "spool_seen": request_spool.SeenIds()}
+    app = {"mesh": mm, "manager": None, "spool_seen": request_spool.SeenIds(),
+           "spool_inflight": set()}
 
     assert asyncio.run(spool_drain.drain_once(app)) == 1
     assert asyncio.run(spool_drain.drain_once(app)) == 0
@@ -212,7 +213,8 @@ def test_an_id_applied_before_a_restart_is_not_applied_again():
     mm, home = _mesh()
     rid = _queue()
     request_spool.SeenIds().add(rid)          # the previous daemon took it live
-    app = {"mesh": mm, "manager": None, "spool_seen": request_spool.SeenIds()}
+    app = {"mesh": mm, "manager": None, "spool_seen": request_spool.SeenIds(),
+           "spool_inflight": set()}
     assert asyncio.run(spool_drain.drain_once(app)) == 0
     assert not [m for m in home.messages if "hello" in str(m.get("body"))]
     assert _spooled() == []
@@ -223,7 +225,8 @@ def test_a_request_that_cannot_be_applied_is_kept_in_failed():
     rid = request_spool.new_request_id()
     request_spool.put("s1", "POST", "/api/mesh/nosuch/messages",
                       {"from": "s1", "to": "lead", "body": "x"}, rid)
-    app = {"mesh": mm, "manager": None, "spool_seen": request_spool.SeenIds()}
+    app = {"mesh": mm, "manager": None, "spool_seen": request_spool.SeenIds(),
+           "spool_inflight": set()}
     assert asyncio.run(spool_drain.drain_once(app)) == 0
     kept = json.loads((request_spool.root() / "failed" / f"{rid}.json").read_text())
     assert kept["id"] == rid and kept["error"]
@@ -267,3 +270,69 @@ def test_the_live_daemon_drains_at_startup_and_answers_a_resend_as_duplicate():
 
     home = asyncio.run(run())
     assert len([m for m in home.messages if "from the spool" in str(m.get("body"))]) == 1
+
+
+def test_a_drain_during_the_live_send_does_not_deliver_twice():
+    """The client timed out and queued its copy while the handler was still
+    awaiting the send with the same id; the drain that runs meanwhile must
+    leave the copy, and the drain after must drop it (s1404 review)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+
+    async def run():
+        mm, home = _mesh()
+        real_send = mm.send
+        started, gate = asyncio.Event(), asyncio.Event()
+
+        async def slow_send(*a, **kw):
+            started.set()
+            await gate.wait()
+            return await real_send(*a, **kw)
+
+        mm.send = slow_send
+        app = build_app(mm.manager, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        rid = request_spool.new_request_id()
+        body = {"from": "s1", "to": "lead", "body": "raced"}
+        try:
+            live = asyncio.ensure_future(client.post(
+                "/api/mesh/home/messages", json=body,
+                headers={"Authorization": "Bearer sekrit", request_spool.HEADER: rid},
+            ))
+            await started.wait()
+            request_spool.put("s1", "POST", "/api/mesh/home/messages", body, rid)
+            assert await spool_drain.drain_once(app) == 0
+            assert len(_spooled()) == 1          # left for the next drain
+            gate.set()
+            resp = await live
+            assert resp.status == 200
+            assert await spool_drain.drain_once(app) == 0
+            assert _spooled() == []              # dropped as already applied
+        finally:
+            await client.close()
+        return home
+
+    home = asyncio.run(run())
+    assert len([m for m in home.messages if "raced" in str(m.get("body"))]) == 1
+
+
+def test_mcp_send_reports_a_queued_send_as_queued_not_as_an_error(monkeypatch):
+    from claude_launcher import mesh_mcp
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s-test")
+    dead = daemon_client.DaemonClient("http://127.0.0.1:1", "t")
+    monkeypatch.setattr(daemon_client, "connect_with_diagnosis",
+                        lambda **kw: (dead, {"state": daemon_client.SERVING}))
+    reply = mesh_mcp.SERVER.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "send",
+                   "arguments": {"mesh": "home", "to": "lead", "body": "hi"}},
+    })
+    result = reply["result"]
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    assert '"queued": "rq-' in text and '"resend": false' in text
+    assert "do not resend" in text
+    assert len(_spooled()) == 1

@@ -7262,30 +7262,35 @@ async def h_mesh_send(request: web.Request) -> web.Response:
     sections = body.get("sections")
     ref = body.get("ref")
     # A send that timed out on the client is queued there with this id
-    # (claunch-19liw.2.1); recording it here lets the drain skip that copy,
-    # and a copy that arrives live again is answered without a second send.
+    # (claunch-19liw.2.1). The id is claimed before the send is awaited, so
+    # a drain that runs meanwhile leaves the queued copy alone, and recorded
+    # as applied once it is sent, so that copy is dropped afterwards. A copy
+    # that arrives live again is answered without a second send.
     from .. import request_spool
     from . import spool_drain
     request_id = request.headers.get(request_spool.HEADER, "")
-    seen = spool_drain.seen_ids(request.app) if request_id else None
-    if seen is not None and request_id in seen:
+    if request_id and not spool_drain.claim(request.app, request_id):
         return json_response({
             "id": None, "recipients": [], "duplicate": request_id,
             "relay": request.app["relay_state"](),
         })
-    result = await _mesh_mgr(request).send(
-        request.match_info["mesh"],
-        sender,
-        to,
-        text,
-        external=bool(body.get("external")),
-        type=str(body.get("type") or "say"),
-        reply_to=str(body.get("reply_to") or "") or None,
-        sections=sections if isinstance(sections, dict) else None,
-        ref=ref if isinstance(ref, dict) else None,
-    )
-    if seen is not None:
-        seen.add(request_id)
+    try:
+        result = await _mesh_mgr(request).send(
+            request.match_info["mesh"],
+            sender,
+            to,
+            text,
+            external=bool(body.get("external")),
+            type=str(body.get("type") or "say"),
+            reply_to=str(body.get("reply_to") or "") or None,
+            sections=sections if isinstance(sections, dict) else None,
+            ref=ref if isinstance(ref, dict) else None,
+        )
+        if request_id:
+            spool_drain.seen_ids(request.app).add(request_id)
+    finally:
+        if request_id:
+            spool_drain.release(request.app, request_id)
     return json_response({**result, "relay": request.app["relay_state"]()})
 
 

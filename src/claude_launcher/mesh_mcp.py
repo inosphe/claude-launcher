@@ -1209,8 +1209,8 @@ def _client():
                 f"only on what the retry returns"
             )
         raise MeshMcpError(
-            f"the claunch {reason} (start it with any claunch "
-            f"session command, or 'claunch daemon start')"
+            f"the claunch {reason}. A session does not start the daemon "
+            f"(claunch-19liw.2.1): ask the user to run 'claunch daemon start'"
         )
     return client
 
@@ -1397,7 +1397,12 @@ def call_tool(name: str, args: dict) -> dict:
             payload["reply_to"] = str(args["reply_to"])
         if isinstance(args.get("sections"), dict):
             payload["sections"] = args["sections"]
-        result = _client().post(f"/api/mesh/{mesh}/messages", payload)
+        try:
+            result = _client().post(f"/api/mesh/{mesh}/messages", payload)
+        except daemon_client.DaemonSpooled as exc:
+            # Queued, not failed (claunch-19liw.2.1): an error result reads
+            # as "send again", and a resend is a second message.
+            return {"queued": exc.request_id, "resend": False, "note": str(exc)}
         relay = result.pop("relay", None)
         result["relay"] = _relay_summary(relay)
         return result

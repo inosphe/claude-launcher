@@ -6,11 +6,13 @@ that may land late is queued on disk (:mod:`..request_spool`). This clock
 applies the queue at startup and then every :data:`DRAIN_INTERVAL` seconds,
 so a request queued during a stall is picked up without a restart.
 
-A request is applied once. Its id is recorded in the spool's ``seen`` file
-when it is applied, by this clock or by the live handler (``h_mesh_send``
-reads the same header): a request that timed out on its way in was often
-applied by a daemon that was only slow, and its queued copy is then dropped
-here. The file outlives restarts for the same reason.
+A request is applied once. Its id is claimed (:func:`claim`) before it is
+applied and recorded in the spool's ``seen`` file once it has been, by this
+clock or by the live handler (``h_mesh_send`` reads the same header): a
+request that timed out on its way in was often applied by a daemon that was
+only slow, and its queued copy is then dropped here -- or left for the next
+drain while the live send is still being awaited. The file outlives
+restarts for the same reason.
 
 What is kept from the original request: the sender (the body's ``from``)
 and the time it was queued, carried on the message's ``ref`` as
@@ -42,6 +44,27 @@ _MESH_SEND = re.compile(r"^/api/mesh/(?P<mesh>[^/?]+)/messages$")
 def seen_ids(app: web.Application) -> request_spool.SeenIds:
     """The daemon's one record of applied request ids (set by :func:`install`)."""
     return app["spool_seen"]
+
+
+def claim(app: web.Application, request_id: str) -> bool:
+    """Mark ``request_id`` as being applied; False when it already was
+    applied or another apply of it is in flight.
+
+    The live handler awaits the send, and the drain may run during that
+    await with the client's queued copy of the same request. Without this
+    mark neither has recorded the id yet and both send it.
+    """
+    if request_id in seen_ids(app):
+        return False
+    inflight = app["spool_inflight"]
+    if request_id in inflight:
+        return False
+    inflight.add(request_id)
+    return True
+
+
+def release(app: web.Application, request_id: str) -> None:
+    app["spool_inflight"].discard(request_id)
 
 
 def _sender_state(app: web.Application, sender: str) -> str:
@@ -93,15 +116,22 @@ async def drain_once(app: web.Application) -> int:
             with contextlib.suppress(OSError):
                 path.unlink()
             continue
+        if not claim(app, rid):
+            # The live request with this id is still being applied: the
+            # next drain finds it in ``seen`` and drops this copy.
+            continue
         sender = str((doc.get("body") or {}).get("from") or doc.get("session") or "")
         try:
-            result = await _apply(app, doc)
-        except Exception as exc:  # anything: the file is kept in failed/
-            target = request_spool.fail(path, doc, f"{type(exc).__name__}: {exc}")
-            log.warning("spool: %s from %s could not be applied (%s); kept at %s",
-                        rid, sender, exc, target)
-            continue
-        seen.add(rid)
+            try:
+                result = await _apply(app, doc)
+            except Exception as exc:  # anything: the file is kept in failed/
+                target = request_spool.fail(path, doc, f"{type(exc).__name__}: {exc}")
+                log.warning("spool: %s from %s could not be applied (%s); kept at %s",
+                            rid, sender, exc, target)
+                continue
+            seen.add(rid)
+        finally:
+            release(app, rid)
         with contextlib.suppress(OSError):
             path.unlink()
         applied += 1
@@ -150,6 +180,7 @@ async def _stop(app: web.Application) -> None:
 def install(app: web.Application) -> SpoolDrainer:
     drainer = SpoolDrainer(app)
     app["spool_seen"] = request_spool.SeenIds()
+    app["spool_inflight"] = set()
     app["spool_drain"] = drainer
     app.on_startup.append(_start)
     app.on_shutdown.append(_stop)
