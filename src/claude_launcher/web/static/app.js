@@ -39250,8 +39250,9 @@ function renderCflow2Into(box, data, ui, force = false) {
       "its verify runs on the grant; a failure puts the task back with the output"));
     const key = `${host}:move:${mr.id}`;
     const grant = el("button", "wf-btn sm approve", `Report '${mr.outcome}'`);
+    grant.title = withWake("");
     const refuse = el("button", "wf-btn sm", "Refuse");
-    refuse.title = "the task stays open; the driver reads your reason and continues";
+    refuse.title = withWake("the task stays open; the driver reads your reason and continues");
     const { row, reason } = answerRow(key, [grant, refuse]);
     reason.placeholder = "reason (optional; the driver reads it)";
     grant.addEventListener("click", async () => {
@@ -39278,8 +39279,9 @@ function renderCflow2Into(box, data, ui, force = false) {
     }
     const key = `${host}:move:${mr.id}`;
     const move = el("button", "wf-btn sm approve", `Move to '${target}'`);
+    move.title = withWake("");
     const refuse = el("button", "wf-btn sm", "Refuse");
-    refuse.title = "the run stays where it is; the driver reads your reason and continues";
+    refuse.title = withWake("the run stays where it is; the driver reads your reason and continues");
     const { row, reason } = answerRow(key, [move, refuse]);
     reason.placeholder = "reason (optional; the driver reads it)";
     move.addEventListener("click", async () => {
@@ -39389,7 +39391,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     const row = el("div", "cf2-press");
     for (const [label, , extra] of presses) {
       const b = el("button", extra.by ? "wf-btn sm approve" : "wf-btn sm", label);
-      if (extra.stop) b.title = "it finishes with outcome fail";
+      b.title = withWake(extra.stop ? "it finishes with outcome fail" : "");
       b.addEventListener("click", async () => {
         if (extra.stop && !confirm("Stop here? It finishes with outcome fail.")) return;
         b.disabled = true;

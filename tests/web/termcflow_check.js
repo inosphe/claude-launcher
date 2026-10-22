@@ -561,6 +561,21 @@ const RUN = {
   ctx.setSessions([]);
   ctx.setRuns([]);
 
+  /* the run page's own presses carry the note too (claunch-xxxsx): the move
+     and report cards answer /api/cflow2/move/resolve and the limit card
+     answers /api/cflow2/extend, both of which nudge the driver -- so a
+     stopped session comes back from those presses as well, and the two
+     surfaces must not disagree. */
+  const render2 = slice("renderCflow2Into");
+  check("run page: the report grant and both refusals carry the wake note",
+        /grant\.title = withWake\(/.test(render2)
+        && (render2.match(/refuse\.title = withWake\(/g) || []).length === 2,
+        render2.match(/\.title = withWake\([^\n]*/g));
+  check("run page: the move grant carries the wake note",
+        /move\.title = withWake\(/.test(render2));
+  check("run page: the limit presses carry the wake note",
+        /b\.title = withWake\(extra\.stop/.test(render2));
+
   check("the v2 rail poll repaints it",
         /applyCflow2Badges\(\);\s*(\/\/[^\n]*\n\s*)*if \(typeof renderTermCflow === "function"\) renderTermCflow\(\);/.test(src));
 
