@@ -131,6 +131,11 @@
     기록을 위반으로 보고하는 검사는 기록을 지우는 것으로 응답된다.
   - 자기 워크트리 안에 임시 파일을 쏟지 않는다. 충돌은 피하지만 트리를 더럽혀
     미커밋 변경을 근거로 삼는 판정(preflight·스윕 대조군)을 오염시킨다.
+  - 스윕이 도는 동안(`claunch window` 상태가 sweep 보유) 스윕의 basetemp
+    (`<런처 홈>/basetemp/<세션>-<job>w`)와 다른 세션의 basetemp를 지우지 않는다.
+    정리는 스윕이 비어 있는 구간에, 사용자 승인 범위(claunch-zrpa4)에서만 한다.
+    pytest는 explicit basetemp 안의 테스트 디렉터리가 사라지면 `FileNotFoundError`로
+    실패한다(claunch-zbu54.1: 스윕 job ca5e348e 원인 미상, 삭제 주체 미기록).
   - **이미 `/tmp`를 왕복시킨 측정이 있으면 다시 잰다.** 값이 맞았는지가 아니라
     근거가 섰는지가 문제다.
 
