@@ -53,16 +53,16 @@ def test_outside_the_daemon_a_missing_shim_is_an_error_and_nothing_is_spawned(ho
     monkeypatch.setattr(routing, "_spawn", lambda *a, **k: pytest.fail("only the daemon spawns"))
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
     with pytest.raises(routing.ShimUnavailable, match="daemon"):
-        routing.ensure_shim("https://u.example/", {})
+        routing.ensure_shim(_upstream("u"), {})
 
 
 def test_outside_the_daemon_metering_does_not_fall_back_to_the_upstream(home, monkeypatch):
     monkeypatch.setenv("CLAUNCH_METERING", "1")
     monkeypatch.setattr(routing, "_spawn", lambda *a, **k: pytest.fail("only the daemon spawns"))
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
-    _providers(deepseek="https://d.example/anthropic")
+    _providers(deepseek=_upstream("d"))
     with pytest.raises(routing.ShimUnavailable):
-        routing.front("https://d.example/anthropic", "deepseek")
+        routing.front(_upstream("d"), "deepseek")
 
 
 def test_outside_the_daemon_the_shim_is_asked_of_the_daemon(home, monkeypatch):
@@ -75,19 +75,19 @@ def test_outside_the_daemon_the_shim_is_asked_of_the_daemon(home, monkeypatch):
 
     monkeypatch.setattr(routing, "_spawn", lambda *a, **k: pytest.fail("only the daemon spawns"))
     monkeypatch.setattr(daemon_client, "connect", lambda: _Client())
-    assert routing.ensure_shim("https://u.example/", {"order": ["x"]}, "p") == "http://127.0.0.1:31600/"
+    assert routing.ensure_shim(_upstream("u"), {"order": ["x"]}, "p") == "http://127.0.0.1:31600/"
     (path, body), = calls
     assert path == routing.ENSURE_API
-    assert body["upstream"] == "https://u.example/" and body["spec"] == {"order": ["x"]}
+    assert body["upstream"] == _upstream("u") and body["spec"] == {"order": ["x"]}
     assert body["provider"] == "p" and isinstance(body["pid"], int)
 
 
 def test_outside_the_daemon_a_running_shim_is_used_when_the_daemon_is_down(owner, monkeypatch):
-    url = routing.ensure_shim("https://u.example/", {})
+    url = routing.ensure_shim(_upstream("u"), {})
     monkeypatch.setattr(routing, "_OWNER", False)
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
     monkeypatch.setattr(routing, "_spawn", lambda *a, **k: pytest.fail("only the daemon spawns"))
-    assert routing.ensure_shim("https://u.example/", {}) == url
+    assert routing.ensure_shim(_upstream("u"), {}) == url
 
 
 # --------------------------------------------------------------------------- #
@@ -123,13 +123,13 @@ def test_a_config_change_starts_the_new_shim_and_retires_the_old_once_unused(own
 
 
 def test_a_new_shim_is_not_retired_within_the_grace(owner):
-    url = routing.ensure_shim("https://launch-only.example/", {})
+    url = routing.ensure_shim(_upstream("launch-only"), {})
     assert routing.reconcile([])["retired"] == []
     assert routing.health(int(url.rsplit(":", 1)[1].strip("/"))) is not None
 
 
 def test_a_session_on_the_shim_is_registered_as_its_user(owner):
-    url = routing.ensure_shim("https://u.example/", {})
+    url = routing.ensure_shim(_upstream("u"), {})
     env = {"ANTHROPIC_BASE_URL": url}
     routing.apply_session(env, "s42")
     port = routing._port_of(url)
@@ -143,7 +143,7 @@ def test_a_session_registered_during_a_pass_is_kept_and_its_shim_not_retired(own
     # A shim the config does not want (a Pi or dynamic route) that a new
     # session attaches to while a reconcile pass is running: the pass took its
     # users snapshot before the session existed (s1404 review of 723b944c).
-    url = routing.ensure_shim("https://launch-only.example/", {})
+    url = routing.ensure_shim(_upstream("launch-only"), {})
     port = routing._port_of(url)
     real_instances = routing.instances
 
@@ -161,18 +161,18 @@ def test_a_session_registered_during_a_pass_is_kept_and_its_shim_not_retired(own
     assert routing.reconcile(["late"], now=later)["retired"] == []
     assert routing.health(port) is not None
     # and once it has ended, the shim goes
-    assert routing.reconcile([], now=later)["retired"] == [f"{routing.fingerprint('https://launch-only.example/', {})}:{port}"]
+    assert routing.reconcile([], now=later)["retired"] == [f"{routing.fingerprint(_upstream("launch-only"), {})}:{port}"]
 
 
 def test_a_shim_handed_out_again_is_within_the_grace(owner):
-    url = routing.ensure_shim("https://launch-only.example/", {})
+    url = routing.ensure_shim(_upstream("launch-only"), {})
     port = routing._port_of(url)
-    fp = routing.fingerprint("https://launch-only.example/", {})
+    fp = routing.fingerprint(_upstream("launch-only"), {})
     record = routing._record_file(fp, port)
     data = routing._read_json(record)
     data["ensured"] = time.time() - routing.GRACE_S - 5  # handed out long ago
     record.write_text(__import__("json").dumps(data), encoding="utf-8")
-    routing.ensure_shim("https://launch-only.example/", {})  # a launch takes it again
+    routing.ensure_shim(_upstream("launch-only"), {})  # a launch takes it again
     assert routing.reconcile([])["retired"] == []
 
 
@@ -182,9 +182,9 @@ def test_a_pass_cannot_retire_a_shim_between_its_lookup_and_its_stamp(owner, mon
     # that then stopped. The pass runs in its own thread, as in the daemon.
     import threading
 
-    url = routing.ensure_shim("https://launch-only.example/", {})
+    url = routing.ensure_shim(_upstream("launch-only"), {})
     port = routing._port_of(url)
-    fp = routing.fingerprint("https://launch-only.example/", {})
+    fp = routing.fingerprint(_upstream("launch-only"), {})
     record = routing._record_file(fp, port)
     data = routing._read_json(record)
     data["ensured"] = time.time() - routing.GRACE_S - 5  # handed out long ago
@@ -202,7 +202,7 @@ def test_a_pass_cannot_retire_a_shim_between_its_lookup_and_its_stamp(owner, mon
         return found
 
     monkeypatch.setattr(routing, "_find", _find_then_a_pass)
-    assert routing.ensure_shim("https://launch-only.example/", {}) == url
+    assert routing.ensure_shim(_upstream("launch-only"), {}) == url
     routing.apply_session({"ANTHROPIC_BASE_URL": url}, "s-new")
     pass_.join(timeout=10)
     assert result["retired"] == []
@@ -210,7 +210,7 @@ def test_a_pass_cannot_retire_a_shim_between_its_lookup_and_its_stamp(owner, mon
 
 
 def test_a_shim_told_to_stop_is_not_handed_out(home, monkeypatch):
-    fp = routing.fingerprint("https://u.example/", {})
+    fp = routing.fingerprint(_upstream("u"), {})
     port = routing.candidate_ports(fp)[0]
     monkeypatch.setattr(routing, "_port_free", lambda p: p != port)
     info = {"marker": routing.MARKER, "fingerprint": fp, "inflight": 1}
@@ -251,7 +251,7 @@ def test_a_port_left_in_time_wait_by_an_exited_shim_reads_free(home):
 
 
 def test_the_ensure_api_registers_the_asking_process(owner):
-    url = shims_mod._ensure_for({"upstream": "https://u.example/", "spec": {}, "pid": 4242})
+    url = shims_mod._ensure_for({"upstream": _upstream("u"), "spec": {}, "pid": 4242})
     assert routing._load_users()[str(routing._port_of(url))]["pids"] == [4242]
 
 
@@ -294,7 +294,7 @@ def test_an_idle_only_shutdown_waits_for_the_request_in_flight(home):
 def test_a_shim_a_test_started_is_reaped_even_when_its_record_is_gone(owner, spawned_shims):
     import shutil
 
-    routing.ensure_shim("https://reap.example/", {})
+    routing.ensure_shim(_upstream("reap"), {})
     (child,) = spawned_shims
     # The temp home the record lived in is gone: routing.stop() is blind,
     # which is how two test shims outlived their run.
