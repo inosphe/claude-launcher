@@ -205,6 +205,18 @@ nodes:
          그다음 각 후보를 `uv run --no-sync python tools/merge_ready.py --repo <대상 저장소>
          --branch <브랜치>`(원격이면 `<remote>/<브랜치>`)로 심사한다. 큐의 tip과 브랜치 tip이
          다르면 그 후보는 이번 배치에서 빼고 워커에게 tip 불일치를 알린다.
+         심사 명령에는 `--allow-target-advance`를 붙인다: 미리보기가 이전 master에서
+         만들어졌고 그 뒤 master가 움직였어도, 두 변경이 서로 다른 경로를 바꾸고
+         patch id가 같으면 재측정 없이 통과시킨다.
+      2a. 후보가 둘 이상이고 증거가 찬 상태이면 미리보기를 겹쳐서 만든다. 첫
+         후보를 머지하기 전의 master를 기준으로 나머지 후보의 미리보기를
+         `uv run --no-sync python tools/preview_land.py --branch <브랜치> --base master`로
+         미리 만들어 둔다. 앞 후보가 머지되어 master가 앞으로 가면 2의
+         가산 판정이 둘째 후보를 통과시킨다(프리뷰 재측정 없음). 두 머지가 같은
+         경로를 바꿨으면 exit 1이므로 새 master에서 미리보기를 다시 만든다.
+         가산 판정은 텍스트 독립성만 증명한다. 의미상 상호작용은 사후 스윕이
+         맡는다(tools/merge_ready.py 머리말의 s130 사례). 테스트 창은 세션당
+         표적 실행 하나만 허용하므로 미리보기는 차례로 돈다.
       3. 통과한 후보는 flow_collection set으로 status waiting, 이번에 넣지 않는
          후보는 deferred(사유 note), 거절은 rejected(사유를 워커와 보드에).
       4. PR 후보(pr_url이 있음)는 아래 PR 절차의 1–2(상태·mergeable·head 일치)까지
@@ -401,6 +413,20 @@ nodes:
       다시 들어가 restart가 다시 실행되고(웹 UI 승인 게이트를 다시 거친다), 리더가
       재기동 명령을 직접 실행하는 일은 없다. 시도는 deployed-wait 만료와 합쳐
       5회이고, 소진하거나 close를 고르면 reflect-closed(반영 실패/미확인)다.
+
+      선행 심사: 재기동 결과를 기다리는 동안 리더의 턴은 비어 있고 master는
+      움직이지 않는다. 이 시간에 다음 회차의 후보를 미리 심사한다.
+      collections.landing에서 status가 requested이고 증거(브랜치, tip, 표적
+      테스트 수치)가 찬 후보마다 integrate-preflight의 2와 같은 merge_ready
+      심사를 돌리고, 재측정이 필요하다는 답(exit 1)이면
+      `uv run --no-sync python tools/preview_land.py --branch <브랜치>`로
+      미리보기 ref를 만들어 둔다. 미리보기는 `$CLAUNCH_SCRATCH` 아래 별도
+      워크트리에서 돈다 — 공유 체크아웃에서 돌리지 않는다. 이 선행 심사는
+      restart 결과 판정과 보고를 늦추지 않는다: 결과 블록이 오면 돌던 것은
+      백그라운드로 두고 판정부터 한다. 다음 integrate-preflight는 master가
+      그대로면 이 미리보기 ref를 그대로 쓰고, 움직였으면 merge_ready가 다시
+      판정한다. 이 선행 심사로 후보의 status를 바꾸지 않는다(waiting/deferred는
+      integrate-preflight의 3이 정한다).
     returns:
       ok: {}
       restart_failed: {reason: str}
@@ -510,7 +536,25 @@ nodes:
       검증 결과는 지속 큐와 영수증으로 확인하고 실패는 handle-regression에서
       별도 수정 자식에 위임한다.
       통지는 요청자에게 항목별로 보낸다. 근거 묶음은 원래 이슈 코멘트에 남긴다.
-    done_when: landed 항목마다 머지 SHA·검증 job·라이브 반영 완료/생략/실패 상태가 통지됐다
+
+      회고 보고: 통지를 마치면 이 회차의 회고와 개선안을 스레드 도구로 사용자에게
+      보고한다(recursive self improvement). 이 런의 첫 보고면 `thread_list`로
+      제목이 「improv-leader 회고」인 열린 스레드가 있는지 보고, 없으면
+      `thread_open`으로 그 제목으로 연다. 이후 회차는 그 스레드에
+      `thread_reply`로 이어 쓴다(회차마다 새 스레드를 열지 않는다). 머지가 0건인
+      회차(nothing_merged)는 보고하지 않는다. 한 메시지, 표 중심, 한 화면 이내:
+      1. 회차 요약: round 번호, 머지 건수와 SHA, 회차 소요와 구간별 소요(통합
+         대기, 프리뷰 대기, 머지, 재기동 대기, 반영 확인), pause와 사후 스윕 상태.
+         수치는 flow_status와 저널(`.cflow2/` 회차 저널)에서 읽은 값이다.
+      2. 회고: 이번 회차에서 막히거나 오래 걸린 곳과 근거. 원인을 확인하지
+         못한 것은 「원인 미상」이라고만 적고 확인되지 않은 설명을 붙이지 않는다.
+      3. 개선안: 항목마다 (내용, 근거 수치, 수정 위치(파일·단계), 기대 효과,
+         위험)을 적는다. 개선안이 없으면 없다고 적는다.
+      사용자에게 결정을 구하는 항목은 질문으로 따로 표시한다. 이 보고는 워크플로나
+      코드를 스스로 고치는 일이 아니다 — 수정은 사용자가 승인한 뒤 별도 작업으로 한다.
+    done_when: |
+      landed 항목마다 머지 SHA·검증 job·라이브 반영 완료/생략/실패 상태가 통지됐고,
+      머지가 있었던 회차이면 회고 스레드에 회차 요약·회고·개선안이 올라갔다
     effects: [board.write]
 
   wrapup:
