@@ -3034,6 +3034,9 @@ let gotoFlashName = null;
    reason as the mark above — syncSessionView runs during load and paints the
    band for the view it picks. */
 const RAIL_ANCESTOR_MAX = 3;
+// One band line's drawn height: `.rail-ancestor`'s 3px + 14px line + 3px
+// (style.css). fitRailLead reserves this per line above the list's first row.
+const RAIL_ANCESTOR_LINE_PX = 20;
 let railAncestorPin = null;
 // While this is in the future the pin wins even with its row off screen: a
 // reveal holds the band on the landed session for the length of the mark, so
@@ -23022,21 +23025,24 @@ function markDetailRow() {
    So the list keeps a small band above it: the direct ancestors of the
    session at the top of the visible rows, root first and the parent last,
    one line each (railAncestorChain). The band is a sibling of the scroller
-   rather than a sticky row inside it, so it stays put while the rows move
-   under it, it never fights the sticky group headings that already pin at
-   the scroller's top, and it costs nothing -- `.hidden`, no height -- while
-   the anchor row has no ancestors above it. A line is a button: pressing it
+   rather than a row inside it, so it stays put while the rows move under it.
+   It floats over the scroller's top edge (absolute in #session-list-wrap,
+   above the sticky group headings) instead of taking a row of the rail's
+   column: the band changes height whenever the anchor's depth does, and as
+   a block it resized the scroller and its scrollbar under the reader's
+   scroll each time (claunch-kx54r). It is `.hidden` while the anchor row has
+   no ancestors above it. A line is a button: pressing it
    scrolls the rail to that ancestor's card, the same move the header's
    `⇱ card` makes for the attached session.
 
    `#term-goto` sits on the same band (pinRailAncestors). revealSessionCard
    pins the band to the session it lands on *before* measuring the scroll, so
-   a jump shows whose child the landed card is, and the band's own height is
-   settled when `scrollIntoView` measures -- a smooth scroll commits to the
-   height it measured once (layRailOut). The pin is held for the mark's
-   length (the scroll may still be running), then stays while its row is on
-   screen; a wheel, a touch, a key press or a click on the rail drops it and
-   the band follows the scroll again.
+   a jump shows whose child the landed card is, and the scroll padding that
+   reserves the band's height is settled when `scrollIntoView` measures -- a
+   smooth scroll commits to the target it measured once (layRailOut). The pin
+   is held for the mark's length (the scroll may still be running), then
+   stays while its row is on screen; a wheel, a touch, a key press or a click
+   on the rail drops it and the band follows the scroll again.
 
    Its state (RAIL_ANCESTOR_MAX, railAncestorPin, railAncestorHoldUntil,
    railAncestorWired) is declared with the other rail painting state above,
@@ -23116,6 +23122,12 @@ function renderRailAncestors() {
   const shown = chain.length > RAIL_ANCESTOR_MAX
     ? chain.slice(chain.length - (RAIL_ANCESTOR_MAX - 1)) : chain;
   const more = chain.length - shown.length;
+  // The band floats over the scroller (style.css, claunch-kx54r), so it has to
+  // stop short of the scrollbar. That width changes without the chain
+  // changing (a poll adds enough rows to need a scrollbar), so it is checked
+  // on every pass; it is written only when it moved.
+  fitRailAncestors(band, list);
+  fitRailLead(list, hiddenView);
   // Most scroll frames land on the same chain: the band is rebuilt only when
   // what it would draw changed, so a drag down the rail is a few DOM writes
   // and not one per frame.
@@ -23126,6 +23138,7 @@ function renderRailAncestors() {
   band.dataset.anchor = anchor || "";
   if (!shown.length) {
     band.classList.add("hidden");
+    setRailAncestorsHeight(list, 0);
     return;
   }
   if (more > 0) {
@@ -23156,6 +23169,54 @@ function renderRailAncestors() {
     band.appendChild(li);
   }
   band.classList.remove("hidden");
+  // The scroller's box does not move with the band, so a row the browser
+  // brings into view would land under it: the list's scroll-padding reserves
+  // the band's height (style.css). Read once per chain change, not per frame.
+  // scrollHeight covers the phone layout, where the band is a zero-height
+  // sticky box its lines overflow.
+  setRailAncestorsHeight(list, Math.max(band.offsetHeight || 0, band.scrollHeight || 0));
+}
+
+/* The band's right edge: the scroller's scrollbar width (offsetWidth minus
+   clientWidth -- 0 for an overlay scrollbar or a list too short to scroll),
+   so the floating band never covers the scrollbar's top. */
+function fitRailAncestors(band, list) {
+  if (!band.style || !band.style.setProperty) return;
+  const w = Math.max(0, (list.offsetWidth || 0) - (list.clientWidth || 0));
+  const value = `${w}px`;
+  if (band.style.getPropertyValue("--rail-scrollbar-w") === value) return;
+  band.style.setProperty("--rail-scrollbar-w", value);
+}
+
+/* --rail-lead-h on the list: its top padding, the room the band takes over
+   the first drawn row when the list is scrolled to the top. The band floats,
+   so without it a first row whose parent is not drawn (a filter hides it) sits
+   under its own band at scrollTop 0 with nothing above to scroll away. It
+   depends on which row is drawn first, not on the scroll position, so
+   scrolling never changes it; a poll that puts a different row first can. */
+function fitRailLead(list, hiddenView) {
+  if (!list.style || !list.style.setProperty) return;
+  let lines = 0;
+  if (!hiddenView) {
+    for (const li of list.querySelectorAll("li[data-name]") || []) {
+      if (li.getBoundingClientRect().height <= 0) continue;
+      lines = Math.min(railAncestorChain(li.dataset.name).length, RAIL_ANCESTOR_MAX);
+      break;
+    }
+  }
+  // The band's 1px bottom border is under its last line.
+  const value = `${lines ? lines * RAIL_ANCESTOR_LINE_PX + 1 : 0}px`;
+  if (list.style.getPropertyValue("--rail-lead-h") === value) return;
+  list.style.setProperty("--rail-lead-h", value);
+}
+
+/* --rail-ancestors-h on the list: what its scroll-padding-top adds for the
+   band floating over its top edge (0 while the band is hidden). */
+function setRailAncestorsHeight(list, px) {
+  if (!list.style || !list.style.setProperty) return;
+  const value = `${Math.round(px)}px`;
+  if (list.style.getPropertyValue("--rail-ancestors-h") === value) return;
+  list.style.setProperty("--rail-ancestors-h", value);
 }
 
 /* The band's one scroll listener and one click delegate, armed by the first
@@ -23351,9 +23412,9 @@ function revealSessionCard(name) {
   }
   // The ancestor band above the list first: it is the landed session's chain
   // the reader wants to see (not whatever row the scroll leaves at the top),
-  // and rendering it here settles the band's height before the scroll below
-  // is measured -- the band changes the list's box and a smooth scroll
-  // commits to the height it measured once. Guarded like the other optional
+  // and rendering it here settles the list's scroll padding for the band
+  // before the scroll below is measured -- a smooth scroll commits to the
+  // target it measured once. Guarded like the other optional
   // painters: the isolated rail harnesses slice this function without it.
   if (typeof pinRailAncestors === "function") pinRailAncestors(name, GOTO_FLASH_MS);
   // Centred, not merely "into view": a row brought to the very edge of the

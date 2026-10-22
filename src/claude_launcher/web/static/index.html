@@ -259,12 +259,18 @@
          back to its top. -->
     <div id="session-group-header" class="session-group-header hidden" role="button"
          tabindex="0" aria-label="Scroll the open group to its top"></div>
+    <!-- The list and the grid share one positioned box, so the ancestor band
+         can float over the scroller's top edge instead of taking a row of
+         the rail's column: the band appearing, growing or going away then
+         moves neither the scroller's box nor its scrollbar
+         (claunch-kx54r). -->
+    <div id="session-list-wrap">
     <!-- The direct ancestors (parent, grandparent, ...) of the session at the
-         top of the list, one line each, drawn as a small band above the
-         scroller so the chain stays in view while its rows move under it
-         (renderRailAncestors, app.js). Hidden -- no height -- while that
-         session has no ancestor above it. A line is a button that scrolls the
-         rail to that ancestor's card. -->
+         top of the list, one line each, laid over the top of the scroller so
+         the chain stays in view while its rows move under it
+         (renderRailAncestors, app.js). Hidden while that session has no
+         ancestor above it. A line is a button that scrolls the rail to that
+         ancestor's card. -->
     <ul id="rail-ancestors" class="hidden"
         aria-label="Ancestors of the session at the top of the list"></ul>
     <!-- Every session the rail can show: this daemon's rows (li[data-name],
@@ -275,6 +281,7 @@
          #/r/<machine>/<name>. -->
     <ul id="session-list"></ul>
     <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
+    </div>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
          empty on an archived-only rail rather than three inactive controls. -->
