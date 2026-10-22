@@ -384,3 +384,98 @@ def test_claude_provider_uses_anthropic_usage_api(home, monkeypatch):
 
     assert reached == {"url": usage.config.usage_url(), "token": "oauth-token"}
     assert report.source == "oauth-usage"
+
+
+def _fireworks_profile(name="fw", credit=None):
+    p = profile.create(name)
+    entry = {"env": {"ANTHROPIC_BASE_URL": "https://api.fireworks.ai/inference"}}
+    if credit is not None:
+        entry["credit"] = credit
+    store.update(lambda doc: doc.update({"providers": {"fireworks": entry}}))
+    providers.set_profile_selection(p, "fireworks")
+    credentials.save_token(p, "fw-secret")
+    return p
+
+
+def _fireworks_api(monkeypatch, *, spend="247.84", limit="9999999", line_items=()):
+    reached = []
+    replies = {
+        "/v1/accounts": {"accounts": [{"name": "accounts/acme"}]},
+        "/v1/accounts/acme/quotas/monthly-spend-usd": {"usage": float(spend), "value": limit},
+        "/v1/accounts/acme/billing/summary": {"lineItems": list(line_items)},
+    }
+
+    def fake_urlopen(req, timeout):
+        parts = usage.urllib.parse.urlsplit(req.full_url)
+        reached.append((parts.path, dict(usage.urllib.parse.parse_qsl(parts.query))))
+        assert req.get_header("Authorization") == "Bearer fw-secret"
+        return _FakeResponse(json.dumps(replies[parts.path]).encode())
+
+    monkeypatch.setattr(usage.urllib.request, "urlopen", fake_urlopen)
+    return reached
+
+
+def test_fireworks_provider_reads_the_month_spend_and_no_limit(home, monkeypatch):
+    p = _fireworks_profile()
+    reached = _fireworks_api(monkeypatch)
+    selected = usage.resolve_target(p)
+
+    assert usage.reader(selected) == "fireworks-billing"
+    report = usage.fetch(selected)
+
+    assert report.source == "fireworks-billing"
+    [month] = report.windows
+    assert (month.name, month.used_dollars, month.limit_dollars, month.remaining_dollars) == (
+        "monthly_spend", 247.84, None, None)
+    assert month.utilization == 0.0 and month.resets_at.endswith("-01T00:00:00Z")
+    # No credit recorded: the billing summary is not asked.
+    assert [path for path, _ in reached] == [
+        "/v1/accounts", "/v1/accounts/acme/quotas/monthly-spend-usd"]
+
+
+def test_fireworks_credit_left_is_the_balance_less_the_spend_since_its_day(home, monkeypatch):
+    p = _fireworks_profile(credit={"balance_usd": 500, "as_of": "2026-10-01"})
+    cost = lambda units, nanos: {"totalCost": {"currencyCode": "USD", "units": units, "nanos": nanos}}
+    reached = _fireworks_api(
+        monkeypatch, limit="1000",
+        line_items=[cost("6", 734447500), cost("240", 265552500)])
+    now = usage.datetime(2026, 10, 22, 21, 0, tzinfo=usage.timezone.utc)
+
+    report = usage._fetch_fireworks(usage.resolve_target(p), "fw-secret", now=now)
+
+    month, credit = report.windows
+    assert (month.limit_dollars, month.remaining_dollars) == (1000.0, 1000.0 - 247.84)
+    assert month.utilization == 247.84 / 1000 * 100
+    assert month.resets_at == "2026-11-01T00:00:00Z"
+    assert credit.name == "credit"
+    assert (credit.used_dollars, credit.limit_dollars) == (247.0, 500.0)
+    assert credit.remaining_dollars == 253.0 and credit.utilization == 247.0 / 500 * 100
+    # The summary covers the balance's day through today (its end is exclusive).
+    assert reached[-1] == ("/v1/accounts/acme/billing/summary", {
+        "startTime": "2026-10-01T00:00:00Z", "endTime": "2026-10-23T00:00:00Z"})
+
+
+def test_a_profile_credit_entry_wins_over_the_providers(home, monkeypatch):
+    p = _fireworks_profile(credit={"balance_usd": 500, "as_of": "2026-10-01"})
+    store.update(lambda doc: doc["profiles"][p.name].update(
+        {"credit": {"balance_usd": 80, "as_of": "2026-10-20"}}))
+    assert usage.credit_setting(p) == (80.0, usage.date(2026, 10, 20))
+
+
+def test_a_malformed_credit_entry_is_named(home, monkeypatch):
+    p = _fireworks_profile(credit={"balance_usd": "lots"})
+    _fireworks_api(monkeypatch)
+    with pytest.raises(usage.UsageError, match="balance_usd"):
+        usage.fetch(usage.resolve_target(p))
+
+
+def test_cli_prints_fireworks_dollars(home, monkeypatch, capsys):
+    _fireworks_profile(credit={"balance_usd": 500, "as_of": "2026-10-01"})
+    _fireworks_api(monkeypatch, line_items=[
+        {"totalCost": {"currencyCode": "USD", "units": "100", "nanos": 0}}])
+
+    assert cli.main(["usage", "fw"]) == 0
+    out = capsys.readouterr().out
+    assert "(via Fireworks billing API)" in out
+    assert "$247.84" in out
+    assert "$100.00 of $500.00, $400.00 left" in out

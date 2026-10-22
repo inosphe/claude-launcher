@@ -1340,6 +1340,7 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
         "codex-app-server": "  (via Codex app-server)",
         "kimi-managed-usage": "  (via Kimi Code usage API)",
         "kimi-web-server": "  (via Kimi Code local server)",
+        "fireworks-billing": "  (via Fireworks billing API)",
     }.get(report.source, "")
     print(f"usage for profile {name!r}{suffix}")
     active = [w for w in report.windows if w.utilization > 0 or w.resets_at]
@@ -1352,6 +1353,13 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
         note = _fmt_reset(w.resets_at)
         if w.status and w.status not in ("allowed", "ok"):
             note = f"{note}  [{w.status}]".strip()
+        if w.used_dollars is not None:
+            money = f"${w.used_dollars:.2f}"
+            if w.limit_dollars is not None:
+                money += f" of ${w.limit_dollars:.2f}"
+            if w.remaining_dollars is not None:
+                money += f", ${w.remaining_dollars:.2f} left"
+            note = f"{money}  {note}".strip()
         print(f"  {w.name:<18} {bar} {w.utilization:5.1f}%  {note}")
 
 

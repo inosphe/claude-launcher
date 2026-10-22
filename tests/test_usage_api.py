@@ -56,6 +56,7 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
                 "resets_at": "2030-01-01T00:00:00+00:00",
                 "used_dollars": None,
                 "limit_dollars": None,
+                "remaining_dollars": None,
                 "status": "ok",
             }
         ],
@@ -103,6 +104,28 @@ def test_usage_history_endpoint_answers_samples_and_disk_stats():
     assert stats["samples"] == 3
     assert stats["bytes"] == usage_history.path_for(key).stat().st_size
     assert stats["basis"] == "projected"
+
+
+def test_usage_history_samples_carry_the_dollar_amounts_a_reading_has():
+    """claunch-f5w4x.5: a Fireworks sample is charted in dollars, so the
+    endpoint keeps the dollar fields that are set (and only those)."""
+    key = "fw/fireworks/fireworks-billing"
+    windows = [
+        {"name": "monthly_spend", "utilization": 0.0, "resets_at": "2026-11-01T00:00:00Z",
+         "used_dollars": 247.84, "limit_dollars": None, "remaining_dollars": None},
+        {"name": "credit", "utilization": 49.4, "resets_at": None,
+         "used_dollars": 247.0, "limit_dollars": 500.0, "remaining_dollars": 253.0},
+    ]
+    usage_history.append(key, {"key": key, "source": "fireworks-billing", "windows": windows}, 1000.0)
+
+    body = json.loads(asyncio.run(api.h_usage_history(SimpleNamespace(query={"key": key}))).text)
+
+    assert body["samples"][0]["windows"] == [
+        {"name": "monthly_spend", "utilization": 0.0, "resets_at": "2026-11-01T00:00:00Z",
+         "used_dollars": 247.84},
+        {"name": "credit", "utilization": 49.4, "resets_at": None,
+         "used_dollars": 247.0, "limit_dollars": 500.0, "remaining_dollars": 253.0},
+    ]
 
 
 def test_usage_history_endpoint_rejects_a_missing_key_and_a_bad_since():

@@ -177,3 +177,31 @@ def test_a_line_cut_short_is_skipped():
     assert [s["at"] for s in usage_history.read(key)] == [1.0]
     assert usage_history.last(key)["at"] == 1.0
     assert usage_history.stats(key, period=900)["samples"] == 1
+
+
+def test_a_full_file_rotates_and_reads_span_every_generation(monkeypatch):
+    key = "fw/fireworks/fireworks-billing"
+    monkeypatch.setattr(usage_history, "MAX_BYTES", 1)  # every append rotates
+    monkeypatch.setattr(usage_history, "KEEP", 2)
+    for at in (1.0, 2.0, 3.0, 4.0):
+        usage_history.append(key, {"windows": []}, at)
+
+    # Current + two generations; the first sample went with the third.
+    names = [p.name for p in usage_history.paths(key)]
+    quoted = usage_history.path_for(key).name[: -len(usage_history.SUFFIX)]
+    assert names == [f"{quoted}.2.jsonl", f"{quoted}.1.jsonl", f"{quoted}.jsonl"]
+    assert [s["at"] for s in usage_history.read(key)] == [2.0, 3.0, 4.0]
+    assert [s["at"] for s in usage_history.read(key, since=3.0)] == [3.0, 4.0]
+    assert usage_history.last(key)["at"] == 4.0
+
+    st = usage_history.stats(key, period=900)
+    assert (st["samples"], st["files"], st["first_at"]) == (3, 3, 2.0)
+    assert st["bytes"] == sum(p.stat().st_size for p in usage_history.paths(key))
+    assert usage_history.total()["files"] == 3
+
+
+def test_a_file_under_the_limit_is_not_rotated():
+    key = "k2"
+    usage_history.append(key, {"windows": []}, 1.0)
+    usage_history.append(key, {"windows": []}, 2.0)
+    assert usage_history.paths(key) == [usage_history.path_for(key)]

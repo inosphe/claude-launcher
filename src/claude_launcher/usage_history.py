@@ -3,8 +3,13 @@
 
 :mod:`profile_usage` calls :func:`append` each time a provider read succeeds,
 never for an answer served from its cache, so a line is one real reading of
-the account. The files live under ``<daemon dir>/usage-history`` and are kept
-forever; :func:`stats` reports what they weigh so the page can show it.
+the account. The files live under ``<daemon dir>/usage-history``; :func:`stats`
+reports what they weigh so the page can show it.
+
+A key's file is rotated once it reaches :data:`MAX_BYTES` (claunch-f5w4x.5):
+``<key>.jsonl`` becomes ``<key>.1.jsonl``, the older generations move up one,
+and the one past :data:`KEEP` is deleted. Reads span every generation, oldest
+first, so a chart does not lose its past at a rotation.
 
 A line is the reading's payload (the same dict ``/api/usage`` answers) plus
 ``at``, the epoch seconds of the read. The last line of a key is also what a
@@ -22,6 +27,10 @@ from typing import Iterator, List, Optional
 from urllib.parse import quote
 
 SUFFIX = ".jsonl"
+#: Bytes at which a key's file is rotated: about a month of 15-minute samples.
+MAX_BYTES = 1024 * 1024
+#: Rotated generations kept per key; the oldest past this is deleted.
+KEEP = 12
 #: Bytes read from the end of a file to find its last line.
 _TAIL = 64 * 1024
 
@@ -40,12 +49,40 @@ def path_for(key: str) -> Path:
     return history_dir() / (quote(key, safe="") + SUFFIX)
 
 
+def _generation(key: str, n: int) -> Path:
+    """The ``n``-th rotated file of ``key`` (1 is the newest)."""
+    return history_dir() / f"{quote(key, safe='')}.{n}{SUFFIX}"
+
+
+def paths(key: str) -> List[Path]:
+    """Every file of ``key`` that exists, oldest first, the current one last."""
+    found = [_generation(key, n) for n in range(KEEP, 0, -1)] + [path_for(key)]
+    return [path for path in found if path.exists()]
+
+
+def _rotate(key: str) -> None:
+    """Shift the generations of ``key`` up by one. Call with ``_guard`` held."""
+    _generation(key, KEEP).unlink(missing_ok=True)
+    for n in range(KEEP - 1, 0, -1):
+        older = _generation(key, n)
+        if older.exists():
+            older.replace(_generation(key, n + 1))
+    path_for(key).replace(_generation(key, 1))
+
+
 def append(key: str, payload: dict, at: float) -> None:
-    """Write one sample of ``key``. Raises :class:`OSError` when the disk does."""
+    """Write one sample of ``key``, rotating its file first when it has
+    reached :data:`MAX_BYTES`. Raises :class:`OSError` when the disk does."""
     line = json.dumps({**payload, "at": at}, ensure_ascii=False, separators=(",", ":"))
     target = path_for(key)
     with _guard:
         target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            full = target.stat().st_size >= MAX_BYTES
+        except FileNotFoundError:
+            full = False
+        if full:
+            _rotate(key)
         with open(target, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
@@ -65,14 +102,18 @@ def _lines(path: Path) -> Iterator[dict]:
                 yield row
 
 
+def _rows(key: str) -> Iterator[dict]:
+    for path in paths(key):
+        yield from _lines(path)
+
+
 def read(key: str, since: Optional[float] = None) -> List[dict]:
-    """Samples of ``key`` in file order, those at or after ``since`` when given."""
-    return [row for row in _lines(path_for(key)) if since is None or row["at"] >= since]
+    """Samples of ``key`` in file order across its generations, those at or
+    after ``since`` when given."""
+    return [row for row in _rows(key) if since is None or row["at"] >= since]
 
 
-def last(key: str) -> Optional[dict]:
-    """The newest sample of ``key``, read from the end of its file."""
-    path = path_for(key)
+def _last_in(path: Path) -> Optional[dict]:
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -91,23 +132,33 @@ def last(key: str) -> Optional[dict]:
     return None
 
 
+def last(key: str) -> Optional[dict]:
+    """The newest sample of ``key``, read from the end of its newest file."""
+    for path in reversed(paths(key)):
+        row = _last_in(path)
+        if row is not None:
+            return row
+    return None
+
+
 def stats(key: str, *, period: float) -> dict:
-    """What the file of ``key`` weighs: bytes, samples, first and last sample
-    time, and the average growth per day.
+    """What the files of ``key`` weigh: bytes, samples, first and last sample
+    time, the average growth per day, and how many files hold them.
 
     The growth is observed (bytes over the days between the first and the
     last sample) once the file spans a day; before that it is projected from
     the mean line size at one sample per ``period`` seconds, and ``basis``
     says which.
     """
-    path = path_for(key)
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        size = 0
+    size = 0
+    for path in paths(key):
+        try:
+            size += path.stat().st_size
+        except FileNotFoundError:
+            continue
     first_at = last_at = None
     count = 0
-    for row in _lines(path):
+    for row in _rows(key):
         count += 1
         first_at = row["at"] if first_at is None else first_at
         last_at = row["at"]
@@ -120,7 +171,8 @@ def stats(key: str, *, period: float) -> dict:
             per_day, basis = size / count * 86400 / period, "projected"
     return {
         "bytes": size, "samples": count, "first_at": first_at, "last_at": last_at,
-        "per_day_bytes": per_day, "basis": basis,
+        "per_day_bytes": per_day, "basis": basis, "files": len(paths(key)),
+        "rotate_bytes": MAX_BYTES, "keep": KEEP,
     }
 
 

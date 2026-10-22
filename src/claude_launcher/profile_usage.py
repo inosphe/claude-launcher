@@ -196,6 +196,7 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
                         "resets_at": item.resets_at,
                         "used_dollars": item.used_dollars,
                         "limit_dollars": item.limit_dollars,
+                        "remaining_dollars": item.remaining_dollars,
                         "status": item.status,
                     }
                     for item in report.windows
