@@ -303,12 +303,17 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                 # that session is launched again (daemon/thread_notices.py),
                 # so it is not "delivered" yet in the ledger's sense (its
                 # ``delivered`` means typed into a terminal, and the thread row
-                # itself stays after the session is gone).
-                queued = hold == "exited" or any(h == "exited" for h in gholds.values())
+                # itself stays after the session is gone). Which target was
+                # typed decides: one exited guest beside a live owner leaves
+                # the row delivered, and ``queued`` is only for a message that
+                # reached no terminal at all (claunch-p9wes.1.1).
+                typed = (bool(res.get("delivered")) and hold != "exited") or any(
+                    gholds.get(n) != "exited" for n in guests)
+                queued = (not typed) and (hold == "exited" or any(h == "exited" for h in gholds.values()))
                 out.append({
                     "thread": tid,
                     "session": member.get("session") or res["thread"]["session"],
-                    "delivered": bool(res.get("delivered") or guests) and not queued,
+                    "delivered": typed,
                     "queued": queued,
                     "hold": hold,
                     "guests": guests,

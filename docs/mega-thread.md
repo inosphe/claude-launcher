@@ -41,7 +41,8 @@ routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
   쓰레드 알림 큐에 들어가므로(아래 「전달」) 그 응답 행은 `queued: true`, `hold: "exited"`이고
   원장의 `delivered`는 `false`다. 멘션이 소유 세션이 아닌 게스트만 지목한 메시지는 그 게스트가 받은 것으로
   센다 — 응답 행의 `guests`가 타자된 게스트 이름이고, 게스트가 아직 받을 수 없으면 `guests_hold`에 이유가
-  실린다(claunch-p9wes.1.1).
+  실린다(claunch-p9wes.1.1). 한 대상이 종료돼 그 몫만 큐에 들어가고 다른 대상은 실제로 받았으면 그 행은
+  `delivered: true`, `queued: false`다 — `queued`는 어느 터미널에도 타자되지 않았을 때만 참이다.
 - `verdict`: `auto`(한 멤버가 임계값 통과) / `choose`(둘 이상, 사용자 선택 대기) / `manual`(사용자가
   직접 고름) / `none`(아무도 통과 못 함) / `error`(모든 호출 실패).
 
