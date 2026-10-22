@@ -143,3 +143,87 @@ def test_a_session_still_gets_a_variable_its_definition_sets(home, tmp_path, mon
                                             env={"HERDR_PANE_ID": "w9:p9"}))
     _, env, _ = harness_mod.build_command(sdef)
     assert env["HERDR_PANE_ID"] == "w9:p9"
+
+
+#: What s1388's shell (a session on the routing shim) exported; the daemon it
+#: started kept the Claude line through every successor (claunch-19liw.1).
+S1388_HEADERS = {
+    "ANTHROPIC_CUSTOM_HEADERS": "X-Claunch-Session: s1388",
+    "CLAUNCH_PI_HEADERS": '{"X-Claunch-Session":"s1388"}',
+}
+
+
+def test_the_header_names_match_their_owners():
+    from claude_launcher import metering, pi_provider
+
+    assert session_env.CLAUDE_HEADERS_ENV == metering.CUSTOM_HEADERS_ENV
+    assert session_env.PI_HEADERS_ENV == pi_provider.ENV_HEADERS
+    assert session_env.SESSION_HEADER == metering.SESSION_HEADER
+
+
+def test_scrub_drops_a_header_variable_left_with_only_the_session_line():
+    assert session_env.scrub({**S1388_HEADERS, "PATH": "/bin"}) == {"PATH": "/bin"}
+
+
+def test_scrub_keeps_the_users_own_headers():
+    env = {
+        "ANTHROPIC_CUSTOM_HEADERS": "X-Team: core\nx-claunch-session: s1388\nX-Trace: 1",
+        "CLAUNCH_PI_HEADERS": '{"x-claunch-session":"s1388","X-Team":"core"}',
+    }
+    out = session_env.scrub(env)
+    assert out["ANTHROPIC_CUSTOM_HEADERS"] == "X-Team: core\nX-Trace: 1"
+    assert out["CLAUNCH_PI_HEADERS"] == '{"X-Team":"core"}'
+
+
+def test_scrub_leaves_header_variables_without_a_session_line_untouched():
+    env = {"ANTHROPIC_CUSTOM_HEADERS": "X-Team: core", "CLAUNCH_PI_HEADERS": "not json"}
+    assert session_env.scrub(env) == env
+
+
+def test_scrub_in_place_reports_a_rewritten_header_variable():
+    env = {"ANTHROPIC_CUSTOM_HEADERS": "X-Team: core\nX-Claunch-Session: s1388"}
+    assert session_env.scrub_in_place(env) == ["ANTHROPIC_CUSTOM_HEADERS"]
+    assert env == {"ANTHROPIC_CUSTOM_HEADERS": "X-Team: core"}
+
+
+def test_spawn_daemon_hands_the_child_no_session_header(monkeypatch):
+    seen = {}
+
+    def fake_popen(argv, **kw):
+        seen.update(kw)
+        raise OSError("not really")
+
+    _pollute(monkeypatch, S1388_HEADERS)
+    monkeypatch.setattr(daemon_client.subprocess, "Popen", fake_popen)
+    with pytest.raises(OSError):
+        daemon_client.spawn_daemon(reason="test")
+    assert not set(S1388_HEADERS) & set(seen["env"])
+
+
+def test_the_daemon_drops_the_session_header_at_boot(monkeypatch):
+    import os
+
+    _pollute(monkeypatch, S1388_HEADERS)
+    monkeypatch.setattr(instance_manifest, "apply", lambda: None)
+    monkeypatch.setattr(instance_manifest, "pinned_port", lambda: None)
+    seen = {}
+
+    def booted(_foreground):
+        seen["env"] = dict(os.environ)
+        raise _Booted
+
+    monkeypatch.setattr(daemon_main, "_setup_logging", booted)
+    with pytest.raises(_Booted):
+        daemon_main.main([])
+    assert not set(S1388_HEADERS) & set(seen["env"])
+
+
+def test_a_session_off_the_shim_gets_no_inherited_session_header(home, tmp_path, monkeypatch):
+    """The daemon adds the header only for a session on the shim; one that is
+    not must not report under the name left in the daemon's environment."""
+    _pollute(monkeypatch, S1388_HEADERS)
+    profile_mod.create("work")
+    sdef = harness_mod.normalize(SessionDef(name="s1406", profile="work", cwd=str(tmp_path)))
+    _, env, _ = harness_mod.build_command(sdef)
+    assert "s1388" not in env.get("ANTHROPIC_CUSTOM_HEADERS", "")
+    assert "s1388" not in env.get("CLAUNCH_PI_HEADERS", "")
