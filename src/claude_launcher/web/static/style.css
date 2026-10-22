@@ -497,19 +497,36 @@ html[data-theme="light"] #term-tps-overlay {
 }
 #sg-tip .sg-tip-close:hover { color: #e6edf3; background: #30363d; }
 #sg-tip .sg-tip-close:focus-visible { outline: 2px solid #58a6ff; }
+/* The box the list and the grid share, and the band's positioning context
+   (claunch-kx54r). It takes the column's free height in their place; each of
+   them fills it in turn (the other is `.hidden`). */
+#session-list-wrap {
+  position: relative; flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+}
 #session-list { list-style: none; overflow-y: auto; overflow-x: hidden; flex: 1;
+  min-height: 0;
   /* A row the browser brings into view (keyboard focus, the rail's own `k`
      movement, a tab press) is aimed at the scroller's top edge, which the
-     sticky group heading covers (`position: sticky; top: 0` below). Reserve
-     the heading's height so the row lands under it rather than behind it. */
-  scroll-padding-top: 30px; }
+     sticky group heading covers (`position: sticky; top: 0` below), and the
+     ancestor band floats over that heading. Reserve both so the row lands
+     under them rather than behind them; renderRailAncestors keeps
+     --rail-ancestors-h at the band's drawn height (0 while hidden). */
+  scroll-padding-top: calc(30px + var(--rail-ancestors-h, 0px)); }
 /* The ancestor band (renderRailAncestors, app.js): one line per direct
-   ancestor of the session at the top of the list, root first. It sits above
-   the scroller, so it holds still while the rows move, and it is hidden --
-   taking no space at all -- while that session has no ancestors above it. */
+   ancestor of the session at the top of the list, root first. It floats over
+   the top of the scroller rather than standing above it in the column, so
+   showing, growing or hiding it moves neither the scroller's box nor its
+   scrollbar -- the rows' scroll position is the same number before and after
+   (claunch-kx54r). `right` leaves the scrollbar uncovered
+   (--rail-scrollbar-w, measured by renderRailAncestors), and the z-index puts
+   it over the sticky group heading (z-index 2). */
 #rail-ancestors {
-  list-style: none; margin: 0; padding: 0; flex: none;
+  list-style: none; margin: 0; padding: 0;
+  position: absolute; top: 0; left: 0; right: var(--rail-scrollbar-w, 0px);
+  z-index: 3;
   background: #14161a; border-bottom: 1px solid #2a2e36;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
 }
 #rail-ancestors li { display: block; margin: 0; padding: 0; }
 #rail-ancestors .rail-ancestor {
@@ -6213,7 +6230,20 @@ body.embed #main { width: 100%; }
   .session-filters button { min-height: 28px; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
+  #session-list-wrap { flex: 1 0 auto; }
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
+  /* The page scrolls here, not the list, so a band pinned to the list box
+     would scroll away with the first rows. It sticks to the top of the rail
+     instead, still out of the flow: a zero-height sticky box whose lines
+     overflow it, so the rows under it do not move either. */
+  #rail-ancestors {
+    position: sticky; top: 0; right: auto; height: 0; overflow: visible;
+    background: none; border-bottom: 0; box-shadow: none;
+  }
+  #rail-ancestors li { background: #14161a; }
+  #rail-ancestors li:last-child {
+    border-bottom: 1px solid #2a2e36; box-shadow: 0 2px 6px rgba(0, 0, 0, .35);
+  }
   #rail-nav-dock { position: sticky; bottom: 0; }
   #rail-nav { font-size: 12px; }
   #rail-nav a { padding: 12px 4px; }

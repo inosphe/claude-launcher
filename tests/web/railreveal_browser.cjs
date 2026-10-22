@@ -153,6 +153,30 @@ const landing = (page, name) => page.evaluate((name) => {
     }, TARGET);
     assert.ok(clearOfBand, "the landed row is not under the band");
 
+    // The band floats over the scroller (claunch-kx54r): showing it changes
+    // neither the scroller's box nor its scroll position, and it leaves the
+    // scrollbar uncovered.
+    const floating = await page.evaluate(() => {
+      const list = document.querySelector("#session-list");
+      const b = document.querySelector("#rail-ancestors");
+      const box = () => {
+        const r = list.getBoundingClientRect();
+        return { top: r.top, height: r.height, client: list.clientWidth,
+                 scrollTop: list.scrollTop };
+      };
+      const shown = box();
+      const bandRight = b.getBoundingClientRect().right;
+      const listLeft = list.getBoundingClientRect().left;
+      b.classList.add("hidden");
+      const gone = box();
+      b.classList.remove("hidden");
+      return { shown, gone, bandRight, inner: listLeft + list.clientWidth };
+    });
+    assert.deepEqual(floating.shown, floating.gone,
+      "the band takes no room from the scroller");
+    assert.ok(floating.bandRight <= floating.inner + 0.5,
+      `the band stops short of the scrollbar (${floating.bandRight} > ${floating.inner})`);
+
     // A reader who touches the rail is no longer asking about that card: the
     // band goes back to following the scroll (the mark is a highlight, it
     // does not own the band).
