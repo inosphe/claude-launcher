@@ -6,6 +6,8 @@ user and a session, held in the session's threads pane.
   POST /api/threads                              open    {session | to, title?, text?, qa?}
   GET  /api/threads/{id}[?after=&limit=&reader=] the thread and its messages
   POST /api/threads/{id}/messages                post    {session?, text, ask_qa?}
+  POST /api/threads/{id}/asks                    ask     {session, text, type?, choices?} (thread_ask)
+  POST /api/threads/{id}/asks/{seq}/answer       answer  {decision?, text?} — the user answers
   POST /api/threads/{id}/close                   close   {session?}
   POST /api/threads/{id}/reopen                  reopen  {session?}
   POST /api/threads/{id}/title                   rename  {session?, title}
@@ -78,6 +80,18 @@ typed into the owner (it is advice, the owner decides). The owner's own
 replies are not typed into the guests -- they read them with thread_read --
 so two agents never answer each other in a loop. The guest's session lists
 the thread apart from its own (``guest_threads`` of the list route).
+
+Asks (claunch-etw0s). The agent's ``thread_ask`` MCP tool posts a simple
+question into one of its threads -- kind 'ask', type 'approve' | 'choice' |
+'text', mirroring the operator conversation's ask (daemon/operators_v2.py).
+The user answers in the threads pane (``POST .../asks/{seq}/answer``); the
+answer is recorded on the entry (``data.answer = {decision, text, at}``)
+and typed into the owning session as one block, the way a QA answer
+arrives. Only the user answers; the asking session waits, and the pane
+shows an unanswered ask as 답변 대기. A session may hold at most
+store.MAX_OPEN_ASKS unanswered asks. Simpler than the QA tools on purpose:
+no QA pane record, no revisions -- one question, one answer, kept in the
+thread.
 """
 
 from __future__ import annotations
@@ -97,6 +111,13 @@ log = logging.getLogger(__name__)
 
 PREFIX = "[claunch thread"
 
+#: The agent's ask text is short -- the operator conversation's cap
+#: (daemon/operators_v2.py).
+ASK_TEXT_MAX = 4000
+ASK_CHOICE_MAX = 300
+ASK_CHOICES_MIN = 2
+ASK_CHOICES_MAX = 10
+
 #: Background flushes of notices queued for an ended session (see
 #: :func:`flush_notices`); held so none is collected mid-flight.
 _flush_tasks: set = set()
@@ -114,6 +135,34 @@ def notice_id(thread: dict, message: Optional[dict], kind: str = "m") -> str:
 
 def _quote(text: str) -> str:
     return "\n".join("  > " + line for line in (text or "").splitlines()) or "  > (empty)"
+
+
+def _ask_text(value) -> str:
+    """The ask's question: nonempty, capped like the operator's."""
+    if not isinstance(value, str) or not value.strip():
+        raise thread_store.ThreadError("text is required")
+    value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(value) > ASK_TEXT_MAX:
+        raise thread_store.ThreadError(f"text is longer than {ASK_TEXT_MAX} characters")
+    return value
+
+
+def _ask_kind(body: dict):
+    """(type, choices): 'choice' takes 2..10 nonempty choices of at most
+    ASK_CHOICE_MAX characters; the other types take none."""
+    kind = body.get("type") or "approve"
+    if kind not in thread_store.ASK_TYPES:
+        raise thread_store.ThreadError("type is one of " + ", ".join(thread_store.ASK_TYPES))
+    choices = body.get("choices") or []
+    if kind == "choice":
+        if (not isinstance(choices, list) or not ASK_CHOICES_MIN <= len(choices) <= ASK_CHOICES_MAX
+                or any(not isinstance(c, str) or not c.strip() or len(c) > ASK_CHOICE_MAX for c in choices)):
+            raise thread_store.ThreadError(
+                f"a choice ask needs {ASK_CHOICES_MIN}..{ASK_CHOICES_MAX} nonempty choices, "
+                f"each at most {ASK_CHOICE_MAX} characters")
+    elif choices:
+        raise thread_store.ThreadError("choices belong to a choice ask")
+    return kind, choices
 
 
 def _subject_line(thread: dict) -> list[str]:
@@ -238,6 +287,21 @@ def guest_wrote_text(thread: dict, message: dict, guest: str) -> str:
         _body_lines(message), *_image_lines(message, who), *_file_lines(message, who),
         f"It is advice: you decide what to act on. If it needs an answer, thread_reply(thread_id=\"{tid}\", "
         f"text=...); that reply is not typed into {guest}."])
+
+
+def ask_answered_text(thread: dict, message: dict) -> str:
+    """The block typed into the owning session when the user answers its
+    ask (claunch-etw0s) -- the thread counterpart of a QA answer block."""
+    tid = thread["id"]
+    answer = ((message.get("data") or {}).get("answer")) or {}
+    decision = answer.get("decision")
+    said = {"approve": "approved", "deny": "denied"}.get(decision, decision)
+    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] The user answered your ask:"]
+    if said:
+        lines.append(f"  decision: {said}")
+    if answer.get("text"):
+        lines.append(_quote(answer["text"]))
+    return "\n".join(lines)
 
 
 def install(app, store: Optional[thread_store.ThreadStore] = None):
@@ -578,6 +642,61 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
         return web.json_response(res)
 
+    async def h_ask(request):
+        """The agent's ask in one of its threads (thread_ask MCP tool,
+        claunch-etw0s): kind 'ask', the user answers in the pane. Nothing is
+        typed into the session for its own ask."""
+        body = await body_of(request)
+        actor = actor_of(body)
+        tid = request.match_info["id"]
+        err = await asyncio.to_thread(operator_thread, tid)
+        if err:
+            return err
+        if actor == thread_store.USER:
+            return web.json_response({"error": "session is required: a session asks, the user answers"},
+                                     status=400)
+        try:
+            text = _ask_text(body.get("text"))
+            kind, choices = _ask_kind(body)
+        except thread_store.ThreadError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
+        if await asyncio.to_thread(threads.open_asks, actor) >= thread_store.MAX_OPEN_ASKS:
+            return web.json_response(
+                {"error": f"{thread_store.MAX_OPEN_ASKS} unanswered asks; wait for the user before asking more"},
+                status=400)
+        data = {"type": kind, "choices": choices, "answer": None}
+        res, err = await call(threads.post, actor, tid, text, kind="ask", data=data)
+        if err:
+            return err
+        await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
+        return web.json_response(res)
+
+    async def h_answer(request):
+        """The user's answer to the agent's ask (the threads pane): recorded
+        on the entry and typed into the owning session."""
+        body = await body_of(request)
+        actor = actor_of(body)
+        tid, seq = request.match_info["id"], request.match_info["seq"]
+        err = await asyncio.to_thread(operator_thread, tid)
+        if err:
+            return err
+        if actor != thread_store.USER:
+            return web.json_response({"error": "only the user answers an ask"}, status=403)
+        try:
+            seq = int(seq)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "seq must be an integer"}, status=400)
+        msg, err = await call(threads.answer, actor, tid, seq, decision=body.get("decision"),
+                              text=body.get("text"))
+        if err:
+            return err
+        res = {"message": msg}
+        t = await asyncio.to_thread(threads.get, tid)
+        tell(res, t["session"], ask_answered_text(t, msg),
+             notice=notice_id(t, msg), thread=tid)
+        await asyncio.to_thread(link, [t], t["session"])
+        return web.json_response(res)
+
     async def h_post(request):
         body = await body_of(request)
         actor = actor_of(body)
@@ -703,6 +822,8 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_post("/api/threads", h_open)
     r.add_get("/api/threads/{id}", h_read)
     r.add_post("/api/threads/{id}/messages", h_post)
+    r.add_post("/api/threads/{id}/asks", h_ask)
+    r.add_post("/api/threads/{id}/asks/{seq}/answer", h_answer)
     r.add_post("/api/threads/{id}/close", status_route("closed"))
     r.add_post("/api/threads/{id}/reopen", status_route("open"))
     r.add_post("/api/threads/{id}/title", h_title)

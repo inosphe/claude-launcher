@@ -10,7 +10,7 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 |---|---|---|
 | 저장소 | `src/claude_launcher/threads/store.py` | 데몬 SQLite `daemon_dir()/threads.sqlite3`. 표 `threads`(세션, 제목, open/closed, 연 쪽, 마지막 seq, 에이전트가 읽은 seq)와 `messages`(전역 seq, author `user`/`agent`, 본문, 첨부 이미지) |
 | HTTP | `src/claude_launcher/daemon/threads_api.py` | `/api/threads` 라우트. 사용자 메시지를 세션 터미널에 전달 |
-| MCP | `src/claude_launcher/threads_mcp.py` | `thread_list` / `thread_read` / `thread_reply` / `thread_open` / `thread_close` / `thread_invite` / `thread_uninvite` |
+| MCP | `src/claude_launcher/threads_mcp.py` | `thread_list` / `thread_read` / `thread_reply` / `thread_ask` / `thread_open` / `thread_close` / `thread_invite` / `thread_uninvite` |
 | 웹 | `src/claude_launcher/web/static/threads-pane.js` | 터미널 헤더의 `🗪 threads` 버튼, 분할 영역(`#term-wf`)의 쓰레드 목록·대화·입력창 |
 
 ## 흐름
@@ -44,6 +44,27 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
   세션을 지우면(`clear-sessions`) 그 디렉터리와 함께 큐도 사라진다.
 - 에이전트의 읽음 위치(`agent_read`)는 소유 세션이 `thread_read`로 읽거나 `thread_reply`로 답할 때 이동한다.
   `thread_list`의 `agent_unread`는 그 뒤의 사용자·게스트 메시지 수다. 사용자의 읽음 위치는 브라우저 localStorage에 있다.
+
+## 에이전트의 질문 — thread_ask (claunch-etw0s)
+
+에이전트가 `thread_ask`로 쓰레드에 간단한 질문을 올리면, 사용자는 패널에서 답한다. operator 대화의 ask
+(`operators_v2.py`)와 같은 모양이다.
+
+| 동작 | 경로 | 비고 |
+|---|---|---|
+| 질문 | MCP `thread_ask(thread_id, text, type, choices?)` → `POST /api/threads/{id}/asks {session, text, type?, choices?}` | `type`은 `approve`(승인/거절, 기본)·`choice`(선택지 2~10개)·`text`(자유 답변). 메시지 `kind`가 `ask`고 `data`에 `type`·`choices`·`answer`가 있다 |
+| 답변 | `POST /api/threads/{id}/asks/{seq}/answer {decision?, text?}` — 사용자만 | 답변은 entry의 `data.answer`(`{decision, text, at}`)에 기록되고, 소유 세션에는 한 블록으로 전달된다. 같은 답변 재전송은 무시하고, 다른 답변은 409다 |
+| 미답변 상한 | `MAX_OPEN_ASKS`(50, `store.py`) | operator 대화와 같은 상한. 넘기면 400 |
+
+- 질문 자체는 에이전트 터미널에 전달되지 않는다(자기 글은 돌아오지 않는다). 답변이 달리면 소유 세션에
+  `[claunch thread th-… "주제"] The user answered your ask:` 블록이 전달된다(QA 답변 블록의 대칭). 종료된
+  세션은 `thread-notices` 큐에 쌓인다.
+- 패널(`threads-pane.js`)은 미답변 질문을 「답변 대기」로 표시하고, 승인/거절·선택 버튼 또는 자유 답변
+  입력창을 그린다. 소유 세션의 창에서만 답할 수 있고, 게스트(다른 세션의 쓰레드를 본 경우)와 전체 쓰레드
+  페이지는 읽기만 한다. 답변은 메시지 추가 없이 entry를 갱신하므로, 패널은 쓰레드의 `updated_at` 변화를
+  보고 대화를 다시 읽어 답변 상태를 반영한다(`askSig`).
+- QA 도구와의 구분: `thread_ask`는 QA pane 레코드도 개정도 없이 쓰레드 안에서 한 쌍으로 끝나는 경량
+  질문이다. QA pane에 기록되어야 할 결정은 `qa_ask`를 쓴다(안내는 팩 `mcp-threads`).
 
 ## 게스트 (claunch-p9wes)
 

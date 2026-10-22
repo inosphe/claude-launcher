@@ -8566,6 +8566,21 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg-body .md-table { display: block; max-width: 100%; overflow-x: auto; }
 .th-msg.th-user .md-code, .th-msg.th-user .md-pre { background: #0b1a33; }
 .th-msg.th-user .md-link { color: #79c0ff; }
+/* An agent's ask (thread_ask, claunch-etw0s): the bubble is framed like a
+   question -- a tinted border, the type chip, and an answer row with the
+   decision buttons (or the free-text field) until the user answers. */
+.th-msg.th-ask { border-color: #9e6a03; background: #1c1a10; }
+.th-ask-type { padding: 0 6px; border: 1px solid #9e6a03; border-radius: 8px; color: #d29922;
+  font-size: 10px; font-weight: 600; }
+.th-ask-answer { margin-top: 6px; border-top: 1px dashed #30363d; padding-top: 6px; }
+.th-ask-waiting { color: #d29922; }
+.th-ask-said { color: #3fb950; font-weight: 600; }
+.th-ask-note { width: 100%; box-sizing: border-box; margin-top: 6px; border: 1px solid #30363d;
+  border-radius: 6px; background: #0d1117; color: #e6edf3; padding: 5px 8px; resize: vertical;
+  min-height: 28px; font: inherit; font-size: 12.5px; }
+.th-ask-note:focus { outline: none; border-color: #1f6feb; }
+.th-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.th-ask-btn { padding: 3px 12px; }
 /* The composer: one framed box, the text on top and a footer with the key
    hint and the send button. Empty, it is one line high (claunch-1n081);
    the box grows with its text (fit()). */
