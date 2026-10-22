@@ -58,6 +58,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -83,6 +84,33 @@ AFFINITY_KEY = "session_affinity"
 #: the private ``X-Claunch-Session`` header (see :mod:`metering`); the shim
 #: forwards it under this name so the upstream can route stickily.
 AFFINITY_HEADER = "x-session-affinity"
+
+#: Per-provider config key naming a header the upstream *requires* to carry a
+#: session id (``providers.<name>.session_header``). OpenCode Go
+#: (``https://opencode.ai/zen/go/v1``) answers 400 ``MissingSessionID`` to any
+#: request without ``x-opencode-session``. Unlike :data:`AFFINITY_KEY` this is
+#: not an optimisation the provider may do without, so a provider that declares
+#: it always goes through the shim (see :func:`front`).
+SESSION_HEADER_KEY = "session_header"
+
+#: The id sent under :data:`SESSION_HEADER_KEY` for a request that carries no
+#: session name -- a plain ``claunch run`` or ``claunch validate``, launched
+#: outside the daemon. The header is mandatory for such a provider, so it is
+#: sent anyway; these launches share one id.
+SESSION_HEADER_FALLBACK = "claunch"
+
+#: Per-provider config key naming the header the upstream reads an Anthropic
+#: Messages credential from (``providers.<name>.anthropic_auth_header``).
+#: Claude Code is handed its token as ``ANTHROPIC_AUTH_TOKEN``, which it sends
+#: as ``Authorization: Bearer``; OpenCode Go answers that on ``/v1/messages``
+#: with 401 ``Go requires a credential`` and accepts only ``x-api-key`` there,
+#: while its ``/v1/chat/completions`` accepts only the bearer. So the shim
+#: moves the credential for Anthropic Messages paths alone.
+ANTHROPIC_AUTH_KEY = "anthropic_auth_header"
+
+#: The values :data:`ANTHROPIC_AUTH_KEY` accepts. ``authorization`` is the
+#: default (the bearer goes out as sent) and only exists to be written down.
+ANTHROPIC_AUTH_HEADERS = ("authorization", "x-api-key")
 
 #: Body field the spec is merged into. OpenRouter's name for it.
 BODY_FIELD = "provider"
@@ -170,6 +198,64 @@ def session_affinity(provider_name: str, doc: Optional[dict] = None) -> bool:
             f"(got {type(value).__name__})"
         )
     return value
+
+
+def session_header(provider_name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """The header name ``provider_name`` requires a session id under, or ``None``.
+
+    Absent key is off. A present value that is not a header name is a config
+    error, same policy as :func:`session_affinity`.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return None
+    entry = section.get(provider_name)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get(SESSION_HEADER_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9-]+", value):
+        raise RoutingError(
+            f"providers.{provider_name}.{SESSION_HEADER_KEY} must be a header "
+            f"name such as x-opencode-session (got {value!r})"
+        )
+    return value
+
+
+def anthropic_auth_header(provider_name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """``"x-api-key"`` when ``provider_name`` wants the Messages credential
+    moved out of ``Authorization``, else ``None``.
+
+    Absent key (or ``authorization``) is off. Any other value is a config
+    error, same policy as :func:`session_affinity`.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return None
+    entry = section.get(provider_name)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get(ANTHROPIC_AUTH_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.lower() not in ANTHROPIC_AUTH_HEADERS:
+        raise RoutingError(
+            f"providers.{provider_name}.{ANTHROPIC_AUTH_KEY} must be one of "
+            f"{', '.join(ANTHROPIC_AUTH_HEADERS)} (got {value!r})"
+        )
+    return "x-api-key" if value.lower() == "x-api-key" else None
+
+
+def requires_shim(provider_name: str, doc: Optional[dict] = None) -> bool:
+    """Whether the upstream refuses requests a harness sends unaided, so
+    the provider must go through the shim even with metering off."""
+    return bool(
+        session_header(provider_name, doc)
+        or anthropic_auth_header(provider_name, doc)
+    )
 
 
 #: Per-provider config key switching the shim to live resolution
@@ -810,6 +896,10 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
     * a ``routing`` block — the shim *must* come up: falling back to the
       direct URL would silently drop the pin, which is precisely the failure
       this feature exists to prevent, so the launch fails instead;
+    * a ``session_header`` or ``anthropic_auth_header`` — same: the
+      upstream refuses what the harness sends unaided (see
+      :func:`requires_shim`), so a direct launch would fail on its first
+      request;
     * metering (:mod:`metering`, on by default for every provider that is not
       the Anthropic OAuth route) — a record is observability, not
       correctness, so a shim that cannot start is reported on stderr and the
@@ -835,8 +925,8 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
             else f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
         )
         return ensure_shim(upstream, block or {}, provider_name, route=route)
-    if block:
-        return ensure_shim(upstream, block, provider_name)
+    if block or requires_shim(provider_name, doc):
+        return ensure_shim(upstream, block or {}, provider_name)
     if not metering.provider_enabled(provider_name, doc):
         return upstream
     try:
@@ -863,8 +953,11 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
-    if not block and not dynamic(provider_name, doc) and not metering.provider_enabled(
-        provider_name, doc
+    if (
+        not block
+        and not dynamic(provider_name, doc)
+        and not requires_shim(provider_name, doc)
+        and not metering.provider_enabled(provider_name, doc)
     ):
         return
     upstream = env.get("ANTHROPIC_BASE_URL")
