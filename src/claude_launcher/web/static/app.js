@@ -142,6 +142,132 @@ async function budgeted(send) {
   }
 }
 
+/* ---- the link log (claunch-xbdy7) ----
+
+   "The terminal stopped updating and took no input until a reload" is
+   reported after the fact, by a person, and by then the page that saw it is
+   gone: the console was not open, and a reload is what fixed it. So the
+   page writes down what its sockets did -- opened, closed with which code,
+   taken for dead and why, retried, gave up -- into localStorage, where it
+   outlives the reload.
+
+   It rotates: at most LINK_LOG_MAX entries and LINK_LOG_CHARS characters,
+   the oldest dropped first, so it never grows past a few hundred KB. Writes
+   are batched (LINK_LOG_FLUSH_MS, and at once when the page is hidden) and
+   merged with what is stored, so two tabs append rather than overwrite each
+   other; each entry carries this page load's id (`p`) to tell them apart.
+   The key is scoped by BASE, like the token, because several daemons share
+   one relay origin.
+
+   Read it from the console on the page that froze, or the next one:
+   `claunchLinkLog.text()`, `claunchLinkLog.download()`,
+   `claunchLinkLog.clear()`. */
+const LINK_LOG_KEY = `claunch.linklog:${BASE}`;
+const LINK_LOG_MAX = 2000;
+const LINK_LOG_CHARS = 512 * 1024;
+const LINK_LOG_FLUSH_MS = 1000;
+const linkLogPage = Math.random().toString(36).slice(2, 8);
+let linkLogPending = [];
+let linkLogTimer = null;
+
+function linkLogStored() {
+  try {
+    const raw = localStorage.getItem(LINK_LOG_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/* Keep the newest entries that fit both caps. */
+function linkLogTrim(list) {
+  let out = list.length > LINK_LOG_MAX ? list.slice(list.length - LINK_LOG_MAX) : list;
+  let text = JSON.stringify(out);
+  while (text.length > LINK_LOG_CHARS && out.length > 1) {
+    out = out.slice(Math.ceil(out.length / 4));
+    text = JSON.stringify(out);
+  }
+  return { list: out, text };
+}
+
+function linkLogFlush() {
+  clearTimeout(linkLogTimer);
+  linkLogTimer = null;
+  if (!linkLogPending.length) return;
+  const fresh = linkLogPending;
+  linkLogPending = [];
+  let { list, text } = linkLogTrim(linkLogStored().concat(fresh));
+  try {
+    localStorage.setItem(LINK_LOG_KEY, text);
+  } catch {
+    // Over the origin's quota (other keys share it): keep the newer half.
+    try {
+      ({ text } = linkLogTrim(list.slice(Math.floor(list.length / 2))));
+      localStorage.setItem(LINK_LOG_KEY, text);
+    } catch { /* storage blocked: the log lives only as long as this page */ }
+  }
+}
+
+/* Write one event down. `detail` is a flat object of short values. */
+function linkLog(kind, detail) {
+  const entry = { t: Date.now(), p: linkLogPage, k: kind };
+  if (detail) {
+    for (const [key, value] of Object.entries(detail)) {
+      if (value !== undefined && value !== null && value !== "") entry[key] = value;
+    }
+  }
+  linkLogPending.push(entry);
+  if (linkLogPending.length > LINK_LOG_MAX) linkLogPending.shift();
+  if (linkLogTimer === null) linkLogTimer = setTimeout(linkLogFlush, LINK_LOG_FLUSH_MS);
+}
+
+function linkLogEntries() {
+  return linkLogTrim(linkLogStored().concat(linkLogPending)).list;
+}
+
+function linkLogLine(e) {
+  const rest = Object.entries(e)
+    .filter(([key]) => key !== "t" && key !== "p" && key !== "k")
+    .map(([key, value]) => `${key}=${typeof value === "string" ? JSON.stringify(value) : value}`);
+  return [new Date(e.t).toISOString(), `p=${e.p}`, e.k, ...rest].join(" ");
+}
+
+if (typeof window !== "undefined" && typeof document !== "undefined") {
+  window.claunchLinkLog = {
+    entries: () => linkLogEntries(),
+    text: () => linkLogEntries().map(linkLogLine).join("\n"),
+    download: () => {
+      linkLogFlush();
+      const blob = new Blob([window.claunchLinkLog.text() + "\n"], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `claunch-linklog-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    },
+    clear: () => {
+      linkLogPending = [];
+      try { localStorage.removeItem(LINK_LOG_KEY); } catch { /* blocked */ }
+    },
+  };
+  linkLog("page.load", { base: BASE, ua: navigator.userAgent });
+  // The moments a socket's fate usually turns on, so the log can say what
+  // the machine and the tab were doing around a close.
+  window.addEventListener("online", () => linkLog("net.online"));
+  window.addEventListener("offline", () => linkLog("net.offline"));
+  window.addEventListener("pageshow", (ev) => linkLog("page.show", { persisted: !!ev.persisted }));
+  window.addEventListener("pagehide", () => { linkLog("page.hide"); linkLogFlush(); });
+  document.addEventListener("freeze", () => { linkLog("page.freeze"); linkLogFlush(); });
+  document.addEventListener("resume", () => linkLog("page.resume"));
+  document.addEventListener("visibilitychange", () => {
+    linkLog(document.hidden ? "page.hidden" : "page.visible");
+    if (document.hidden) linkLogFlush();
+  });
+}
+
 /* ---- the connection the page keeps ----
 
    The budget above caps what the page has in flight; it does not cap what
@@ -199,14 +325,19 @@ function openControlSocket() {
   const sock = new WebSocket(`${proto}://${location.host}` + url("/api/control/ws"));
   sock.binaryType = "arraybuffer";
   controlSock = sock;
+  if (typeof linkLog === "function") linkLog("control.open", { try: controlTry });
 
   sock.onopen = () => {
     if (sock !== controlSock) return;
+    if (typeof linkLog === "function") linkLog("control.opened");
     controlTry = 0;
     latencyStart();
+    // A terminal that reconnected while this socket was down did so on a
+    // socket of its own; move it onto a channel now there is one again.
+    if (typeof linkPreferChannel === "function") linkPreferChannel();
   };
   sock.onmessage = (ev) => controlMessage(sock, ev);
-  sock.onclose = () => controlClosed(sock);
+  sock.onclose = (ev) => controlClosed(sock, ev);
 }
 
 /* Everything the control socket delivers, from whichever road it is on.
@@ -228,8 +359,15 @@ function controlMessage(sock, ev) {
   if (msg.type === "p2p_answer" || msg.type === "p2p_error") p2pSignal(msg);
 }
 
-function controlClosed(sock) {
+function controlClosed(sock, ev) {
   if (sock !== controlSock) return;
+  if (typeof linkLog === "function") {
+    linkLog("control.closed", {
+      code: ev ? ev.code : null, reason: ev ? String(ev.reason || "") : "",
+      clean: ev ? !!ev.wasClean : null, via: sock.transport || "ws",
+      channels: typeof channelLinks !== "undefined" ? channelLinks.size : null,
+    });
+  }
   controlSock = null;
   controlAbort("control socket closed");
   latencyStop();
@@ -447,7 +585,7 @@ function controlAdopt(direct, link) {
   }
   controlSock = direct;
   direct.onmessage = (ev) => controlMessage(direct, ev);
-  direct.onclose = () => controlClosed(direct);
+  direct.onclose = (ev) => controlClosed(direct, ev);
   p2pTry = 0;
   p2pLastFail = null;
   controlRetire(old);
@@ -801,6 +939,7 @@ function controlRecycle(why) {
   const sock = controlSock;
   if (!sock) return;
   console.info("claunch: control socket taken for dead (" + why + "); reopening");
+  if (typeof linkLog === "function") linkLog("control.dead", { why });
   sock.onopen = null;
   sock.onmessage = null;
   sock.onclose = null;
@@ -1123,10 +1262,16 @@ function channelFrame(msg) {
     return;
   }
   if (msg.type === "attach_error") {
+    if (typeof linkLog === "function") {
+      linkLog("channel.refused", { ch: msg.ch, session: link.name, error: msg.error });
+    }
     link._ended(1011, msg.error || "attach refused", false);
     return;
   }
   if (msg.type === "detached") {
+    if (typeof linkLog === "function") {
+      linkLog("channel.detached", { ch: msg.ch, session: link.name, code: msg.code });
+    }
     link._ended(msg.code || 1000, "", true);
     return;
   }
@@ -16764,6 +16909,47 @@ let sessionEnded = false; // an `exit` frame arrived: the program, not the link
 let attachedBoot = null;  // daemon incarnation the socket's pid belongs to
 const linkEncoder = new TextEncoder();
 
+/* ---- a link that is open and carries nothing (claunch-xbdy7) ----
+
+   claunch-fm3ud taught the control socket to notice it had gone quiet, and a
+   terminal riding it as a channel is reattached when it is recycled. Three
+   ways a terminal froze were left, each ending in "no update, no input, a
+   reload fixes it":
+
+   - A terminal that reconnected while the control socket was down (its
+     reopen and the terminal's retry run on separate backoffs, so this is
+     the usual order after a drop) took a socket of its own. Nothing
+     watched that socket: a hop that dropped it without a close (the WSL
+     localhost relay, the tunnel, a sleep) left it OPEN forever.
+   - A channel the daemon ended without the page hearing (its `detached`
+     frame is one the daemon drops when the control socket is not draining,
+     channel.Carrier.UNWAITED_MAX) stayed "live" on a socket that pongs
+     fine, and keystrokes went to a channel id nobody serves.
+   - An attach that never answered (an `attached` frame lost the same way,
+     or a handshake the browser queued and never sent) left the link in
+     `opening`, where no retry runs and the header chip is hidden.
+
+   So the terminal link gets the same evidence the control socket has: a
+   `ping` on the link itself every LINK_PING_MS, which daemon/ws.py answers
+   with `pong` on whichever carrier the link is on. Once the link has echoed
+   one, a ping unanswered past LINK_PONG_DEADLINE_MS -- or past
+   LINK_PROBE_MS after a wake -- takes the link for dead, and it goes down the
+   ordinary way (linkDown: the retry, the held keystrokes). An `opening` link
+   gets LINK_OPEN_DEADLINE_MS to see its init frame. And when the control
+   socket opens, a terminal on a socket of its own moves onto a channel
+   (linkPreferChannel). linkWatchTick is the clock; the page runs it once a
+   second. */
+const LINK_OPEN_DEADLINE_MS = 15000;
+const LINK_PING_MS = 10000;
+const LINK_PONG_DEADLINE_MS = 20000;
+const LINK_PROBE_MS = 5000;
+const LINK_WAKE_GAP_MS = 15000;
+let linkPingAt = null;    // Date.now() of the ping in flight on this link
+let linkLastPing = 0;     // Date.now() of the last ping sent
+let linkEchoed = false;   // this link has answered a ping
+let linkProbeBy = null;   // Date.now() by which a wake probe must be answered
+let linkWallAt = null;    // Date.now() of the last tick, for the gap check
+
 function setLink(state) {
   linkState = state;
   syncLinkChip();
@@ -16858,14 +17044,21 @@ function openSocket(name) {
   // A channel on the control socket when there is one, and a socket of this
   // terminal's own when there is not. Both speak the same protocol from
   // here down; only the connection count differs.
-  const sock = openChannel(name, { scrollback: true }) || new WebSocket(
+  const channel = openChannel(name, { scrollback: true });
+  const sock = channel || new WebSocket(
     `${proto}://${location.host}`
     + url(`/api/sessions/${encodeURIComponent(name)}/ws?scrollback=1`)
   );
   sock.binaryType = "arraybuffer";
   sock.linkOpenedAt = null;
   sock.linkReadyAt = null;
+  sock.linkStartedAt = Date.now();
+  sock.linkVia = channel ? "channel" : "socket";
   ws = sock;
+  if (typeof linkWatchReset === "function") linkWatchReset();
+  if (typeof linkLog === "function") {
+    linkLog("term.open", { session: name, via: sock.linkVia, ch: channel ? channel.ch : null });
+  }
 
   sock.onopen = () => {
     if (ticket !== linkTicket) return;
@@ -16923,6 +17116,10 @@ function showTermNotice(msg) {
 }
 
 function handleFrame(msg) {
+  if (msg.type === "pong") {
+    if (typeof linkPong === "function") linkPong();
+    return;
+  }
   if (msg.type === "shutdown") {
     // The daemon wrote this before it stopped answering, so this page knows
     // the outage was asked for instead of inferring it from silence
@@ -18929,7 +19126,7 @@ function linkDown(ev, sock) {
   const readyMs = sock && Number.isFinite(sock.linkReadyAt)
     ? now - sock.linkReadyAt : null;
   if (readyMs !== null && readyMs >= LINK_STABLE_MS) linkTry = 0;
-  console.warn("[claunch] terminal WebSocket closed", {
+  const report = {
     session: linkName,
     code: ev ? ev.code : null,
     reason: ev ? ev.reason : "",
@@ -18937,7 +19134,11 @@ function linkDown(ev, sock) {
     openMs: sock && Number.isFinite(sock.linkOpenedAt) ? now - sock.linkOpenedAt : null,
     readyMs,
     retries: linkTry,
-  });
+  };
+  console.warn("[claunch] terminal WebSocket closed", report);
+  if (typeof linkLog === "function") {
+    linkLog("term.closed", { ...report, via: sock ? sock.linkVia : null });
+  }
   if (term) term.write("\r\n\x1b[90m[disconnected — reconnecting…]\x1b[0m\r\n");
   // Tell the daemon, over the connection the page did manage to get. A
   // socket that never reached OPEN leaves nothing on the daemon's side --
@@ -18961,6 +19162,7 @@ function scheduleReconnect() {
   clearTimeout(linkTimer);
   linkTimer = null;
   if (linkTry >= LINK_BACKOFF.length) {
+    if (typeof linkLog === "function") linkLog("term.lost", { session: linkName, tries: linkTry });
     setLink("lost");
     if (term) {
       term.write(
@@ -18978,13 +19180,22 @@ function scheduleReconnect() {
 async function tryReconnect() {
   if (linkState !== "reconnecting" || !linkName) return;  // the only state it runs from
   const ticket = linkTicket;
-  if (!(await daemonHealth())) { scheduleReconnect(); return; }
+  if (!(await daemonHealth())) {
+    if (typeof linkLog === "function") linkLog("term.health_down", { session: linkName, tries: linkTry });
+    scheduleReconnect();
+    return;
+  }
   if (ticket !== linkTicket || linkState !== "reconnecting") return;
   // The daemon is up, so the remaining reason an upgrade would be refused is
   // the cookie the old one minted. api() renews it from the remembered token
   // on 401, which is why this goes through api() and not fetch().
   try { await api("/api/daemon"); }
-  catch { scheduleReconnect(); return; }   // still unauthorised: the overlay is up
+  catch {
+    // still unauthorised: the overlay is up
+    if (typeof linkLog === "function") linkLog("term.auth_failed", { session: linkName });
+    scheduleReconnect();
+    return;
+  }
   if (ticket !== linkTicket || linkState !== "reconnecting") return;
   openSocket(linkName);
 }
@@ -19012,6 +19223,7 @@ function reconnectNow(byUser) {
    retry already in flight can speak for the link again. */
 function closeLink() {
   linkTicket += 1;
+  linkWatchReset();
   clearTimeout(linkTimer);
   linkTimer = null;
   linkTry = 0;
@@ -19022,6 +19234,109 @@ function closeLink() {
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
   attachedPid = null;   // re-learned from the next socket's init frame
   attachedBoot = null;
+}
+
+/* Forget the liveness evidence: a new socket has to earn its own. */
+function linkWatchReset() {
+  linkPingAt = null;
+  linkLastPing = Date.now();
+  linkEchoed = false;
+  linkProbeBy = null;
+  linkWallAt = null;
+}
+
+function linkPong() {
+  linkPingAt = null;
+  linkEchoed = true;
+  linkProbeBy = null;
+}
+
+/* Why the current link is to be taken for dead, or null. */
+function linkOverdue(now) {
+  if (!ws) return null;
+  // No init frame yet, whether the handshake (or `attached`) never came or
+  // it came and the attachment behind it never started.
+  const started = ws.linkStartedAt;
+  if (Number.isFinite(started) && ws.linkReadyAt === null
+      && now - started >= LINK_OPEN_DEADLINE_MS) {
+    return "no init within " + LINK_OPEN_DEADLINE_MS / 1000 + "s of opening";
+  }
+  if (linkState !== "live" || !linkEchoed) return null;
+  if (linkProbeBy !== null && now >= linkProbeBy) {
+    return "no pong within " + LINK_PROBE_MS / 1000 + "s of waking";
+  }
+  if (linkPingAt !== null && now - linkPingAt >= LINK_PONG_DEADLINE_MS) {
+    return "ping unanswered for " + LINK_PONG_DEADLINE_MS / 1000 + "s";
+  }
+  return null;
+}
+
+/* Close the link from this side and run what its own close would have run.
+   The handlers come off first, as in controlRecycle: a dead socket's close
+   may arrive much later or never. A channel's close also tells the daemon
+   to let it go (ChannelLink.close sends `detach`). */
+function linkTakeDead(why) {
+  const sock = ws;
+  if (!sock) return;
+  console.warn("[claunch] terminal link taken for dead", { session: linkName, why });
+  if (typeof linkLog === "function") {
+    linkLog("term.dead", { session: linkName, why, via: sock.linkVia, state: linkState });
+  }
+  linkTicket += 1;               // anything the old socket still says is noise
+  sock.onopen = null;
+  sock.onmessage = null;
+  sock.onclose = null;
+  try { sock.close(); } catch { /* already closed */ }
+  ws = null;
+  linkWatchReset();
+  linkDown({ code: 4000, reason: why, wasClean: false }, sock);
+}
+
+/* Once a second while the page is up: send the link's next ping when one is
+   due, and take a link that has stopped answering for dead. */
+function linkWatchTick() {
+  const now = Date.now();
+  if (!ws || sessionEnded || (linkState !== "live" && linkState !== "opening")) {
+    linkWallAt = now;
+    return;
+  }
+  const why = linkOverdue(now);
+  if (why) { linkTakeDead(why); return; }
+  if (linkState !== "live" || ws.readyState !== WebSocket.OPEN) { linkWallAt = now; return; }
+  // A gap no one-second clock leaves: the machine slept or the tab froze.
+  // Ask the link at once whether it is still there.
+  const gap = linkWallAt !== null && now - linkWallAt >= LINK_WAKE_GAP_MS;
+  linkWallAt = now;
+  if (gap && linkEchoed && linkProbeBy === null) {
+    linkProbeBy = now + LINK_PROBE_MS;
+    linkLastPing = 0;
+  }
+  if (linkPingAt === null && now - linkLastPing >= LINK_PING_MS) {
+    try {
+      ws.send(JSON.stringify({ type: "ping" }));
+      linkPingAt = now;
+      linkLastPing = now;
+    } catch { /* closing: its close event is on the way */ }
+  }
+}
+
+/* A live terminal on a socket of its own, with the control socket now up:
+   reattach it as a channel. The socket of its own is the one no other check
+   watches, and it is a connection the page set out not to spend. Only a
+   link that is live and idle-safe moves -- keystrokes typed during the swap
+   are held and replayed by the ordinary path (sendInput, flushInput). */
+function linkPreferChannel() {
+  if (!ws || ws.linkVia !== "socket" || linkState !== "live" || sessionEnded || !linkName) return;
+  if (typeof controlUp === "function" && !controlUp()) return;
+  const old = ws;
+  if (typeof linkLog === "function") linkLog("term.to_channel", { session: linkName });
+  linkTicket += 1;
+  old.onopen = null;
+  old.onmessage = null;
+  old.onclose = null;
+  try { old.close(1000, "moved to a channel"); } catch { /* already closed */ }
+  ws = null;
+  openSocket(linkName);
 }
 
 function detach() {
@@ -20028,6 +20343,9 @@ async function toggleHold() {
 // person having to be there. Guarded like the rest: it does nothing unless
 // the link is down.
 window.addEventListener("online", () => reconnectNow());
+// The link's own clock (linkWatchTick). Through `window` so a harness that
+// hands this block a window without timers runs the ticks by hand.
+if (typeof window.setInterval === "function") window.setInterval(linkWatchTick, 1000);
 
 /* ---- text size ----
    Scaling the glyphs scales the session: the grid is however many cells fit
@@ -20535,6 +20853,7 @@ function resetLive() {
   linkTimer = null;
   linkTry = 0;
   linkTicket += 1;               // sockets opened before are no one's link now
+  if (typeof linkWatchReset === "function") linkWatchReset();
   linkName = null;
   linkQueue = [];
   sessionEnded = false;
@@ -20704,6 +21023,7 @@ function restoreTerminal(b) {
   // no init frame comes for a parked terminal to paint it again.
   if (typeof renderTermInputState === "function") renderTermInputState();
   if (ws && ws.readyState === WebSocket.OPEN && !sessionEnded) {
+    if (typeof linkWatchReset === "function") linkWatchReset();
     wireActive(b);
     linkName = b.name;          // resetLive cleared it; a live socket's retries need it
     setLink("live");
