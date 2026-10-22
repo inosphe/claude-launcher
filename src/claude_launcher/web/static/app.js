@@ -23342,6 +23342,7 @@ function mobileTitle() {
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
     case "worktrees": return "worktrees";
+    case "artifacts": return "artifacts";
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
@@ -23512,6 +23513,7 @@ const VIEWS = {
   beads: "beads-view",
   category: "category-view",
   worktrees: "worktrees-view",
+  artifacts: "artifacts-view",
   commit: "commit-view",
   threads: "threads-view",
   megathreads: "megathreads-view",
@@ -24313,6 +24315,8 @@ function parseHash(h) {
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "worktrees") return { page: "worktrees" };
+  // #/artifacts: what artifact cleanup looks at, per session (artifacts-page.js).
+  if (parts[0] === "artifacts") return { page: "artifacts" };
   // #/commit/<sha>?session=<name> (or ?cwd=<dir>): one commit and its diff
   // (commit-page.js). The repository rides in the query, like `detail`,
   // because a directory is full of the separators a segment is split on.
@@ -24395,6 +24399,7 @@ function route() {
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
+  if (r.page !== "artifacts") globalThis.ArtifactsPage?.stop();
   if (r.page !== "commit") globalThis.CommitPage?.stop();
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "megathreads") globalThis.MegaThreadPage?.stop();
@@ -24483,6 +24488,7 @@ function route() {
     case "workspaces": openSettings("workspaces"); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
+    case "artifacts": showView("artifacts"); globalThis.ArtifactsPage.open(); break;
     case "commit": showView("commit");
       globalThis.CommitPage.open(r.sha, { session: r.session, cwd: r.cwd }); break;
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
