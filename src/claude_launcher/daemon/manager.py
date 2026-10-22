@@ -288,8 +288,11 @@ class SessionManager:
         #: knew — so this list is not filtered by what the session was doing.
         self.resumed_blank: List[str] = []
         #: Names :meth:`restore_all` took over from the PTY host still
-        #: running (claunch-xnnct.1): same process, nothing resumed, so they
-        #: are on none of the lists above.
+        #: running (claunch-xnnct.1). The conversation was never lost, but
+        #: the restart cut the daemon-mediated side of whatever the session
+        #: was doing, so an adopted session joins the resume nudge's
+        #: audience on the same lists a relaunched one lands on
+        #: (:attr:`resumed_busy` / :attr:`resumed_idle`, claunch-slia4).
         self.adopted: List[str] = []
         #: Names :meth:`restore_all` filed as *delayed* instead of relaunching
         #: (claunch-0j6gb.2), in registry order; the restore queue
@@ -3497,6 +3500,16 @@ class SessionManager:
             if clock is not None:
                 clock["adopt"] += _perf_counter() - t1
         self.adopted.append(sdef.name)
+        # The nudge audience a relaunch fills (manager.persist writes
+        # ``was_busy`` per record; the relaunch path reads it the same
+        # way). An idle adopted session whose run is waiting on it — a
+        # choose its last turn never picked — would otherwise sit
+        # forever: the cflow2 clock only wakes a driver when a wait
+        # actually fires, and a choose has none (claunch-slia4).
+        if entry.get("was_busy"):
+            self.resumed_busy.append(sdef.name)
+        else:
+            self.resumed_idle[sdef.name] = entry.get("last_output_at")
         self.events.record(session, "adopt", "데몬 재시작 후 PTY 호스트의 세션 인수",
                            pid=session.pid, replayed=len(replay),
                            gap=int(reply.get("gap") or 0))
