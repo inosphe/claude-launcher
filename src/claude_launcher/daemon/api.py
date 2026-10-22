@@ -906,6 +906,8 @@ def build_app(
     r.add_get("/api/test-output-dir", h_test_output_dir)
     r.add_get("/api/delegate-setting", h_delegate_setting_get)
     r.add_put("/api/delegate-setting", h_delegate_setting_set)
+    r.add_get("/api/sweep-batch-setting", h_sweep_batch_setting_get)
+    r.add_put("/api/sweep-batch-setting", h_sweep_batch_setting_set)
     r.add_get("/api/model-tiers", h_model_tiers_get)
     r.add_put("/api/model-tiers", h_model_tiers_put)
     r.add_get("/api/provider-affinity", h_provider_affinity_get)
@@ -4438,6 +4440,69 @@ async def h_delegate_setting_set(request: web.Request) -> web.Response:
         for field, value in writes.items():
             store.set_daemon_field(f"delegate_{field}", value)
         return json_response(_delegate_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+#: The sweep batching settings the Settings page edits, with the largest value
+#: each accepts (a hundred merges in one batch, a day of settle).
+_SWEEP_BATCH_FIELDS = {
+    "size": ("delayed_sweep_batch_size", 100),
+    "settle": ("delayed_sweep_batch_settle", 86400),
+}
+
+
+def _sweep_batch_setting_state() -> dict:
+    cfg = store.daemon_config()
+    return {
+        "size": cfg["delayed_sweep_batch_size"],
+        "settle": cfg["delayed_sweep_batch_settle"],
+        "defaults": {
+            "size": store.DAEMON_DEFAULTS["delayed_sweep_batch_size"],
+            "settle": store.DAEMON_DEFAULTS["delayed_sweep_batch_settle"],
+        },
+    }
+
+
+async def h_sweep_batch_setting_get(request: web.Request) -> web.Response:
+    """``daemon.delayed_sweep_batch_size`` / ``delayed_sweep_batch_settle``:
+    how the post-merge sweeps are grouped (``delayed_sweep.batch_policy``),
+    with the built-in defaults. The clock reads them each tick, so a change
+    applies without a restart."""
+    try:
+        return json_response(_sweep_batch_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_sweep_batch_setting_set(request: web.Request) -> web.Response:
+    """Set either field (``{"size": int, "settle": seconds}``); ``null``
+    restores the built-in default. ``size`` 0 turns batching off; ``settle``
+    0 closes a batch at the next tick."""
+    body = await _json_body(request)
+    writes = {}
+    for field, (key, ceiling) in _SWEEP_BATCH_FIELDS.items():
+        if field not in body:
+            continue
+        value = body[field]
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return json_error(400, f"'{field}' must be a number or null")
+            if not 0 <= value <= ceiling:
+                return json_error(400, f"'{field}' must be between 0 and {ceiling}")
+            if field == "size":
+                if value != int(value):
+                    return json_error(400, "'size' must be a whole number")
+                value = int(value)
+            else:
+                value = float(value)
+        writes[key] = value
+    if not writes:
+        return json_error(400, "give 'size' and/or 'settle'")
+    try:
+        for key, value in writes.items():
+            store.set_daemon_field(key, value)
+        return json_response(_sweep_batch_setting_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

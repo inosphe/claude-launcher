@@ -26107,6 +26107,7 @@ function openSettings(section) {
   refreshPtyHostSetting();
   refreshTestOutputDir();
   refreshDelegateSetting();
+  refreshSweepBatchSetting();
   refreshModelTiers();
   refreshProviderAffinity();
 }
@@ -32193,6 +32194,7 @@ function renderWorkspaces() {
   view.appendChild(ptyHostSettingCard());
   view.appendChild(testOutputDirCard());
   view.appendChild(delegateSettingCard());
+  view.appendChild(sweepBatchSettingCard());
   view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
 
@@ -34256,6 +34258,118 @@ function delegateSettingCard() {
   const model = el("label", "delegate-field", " Model preset ");
   model.appendChild(delegateSelect("delegate-model", "model", st.model, st.presets, st.defaults.model));
   card.append(profile, model);
+  return card;
+}
+
+/* Post-merge sweep batching -- daemon.delayed_sweep_batch_size and
+   daemon.delayed_sweep_batch_settle, read and written with GET/PUT
+   /api/sweep-batch-setting. The sweep clock reads both each tick, so a
+   saved value applies within seconds, without a daemon restart. The Reset
+   button sends null, which restores the built-in default. */
+let sweepBatchSetting = {
+  size: 5, settle: 600, defaults: { size: 5, settle: 600 },
+  loaded: false, error: "", busy: false,
+};
+
+function takeSweepBatchSetting(data) {
+  Object.assign(sweepBatchSetting, {
+    size: data.size, settle: data.settle, defaults: data.defaults || sweepBatchSetting.defaults,
+    loaded: true, error: "",
+  });
+}
+
+async function refreshSweepBatchSetting() {
+  try {
+    const resp = await api("/api/sweep-batch-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeSweepBatchSetting(data);
+  } catch (err) {
+    sweepBatchSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveSweepBatchSetting(field, value) {
+  sweepBatchSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/sweep-batch-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [field]: value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeSweepBatchSetting(data);
+  } catch (err) {
+    sweepBatchSetting.error = String(err);
+  }
+  sweepBatchSetting.busy = false;
+  renderWorkspaces();
+}
+
+function sweepBatchField(field, label, unit, detail) {
+  const st = sweepBatchSetting;
+  const row = el("div", "sweep-batch-field");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.id = `sweep-batch-${field}`;
+  input.min = "0";
+  input.step = field === "size" ? "1" : "60";
+  input.disabled = st.busy;
+  input.value = String(st[field]);
+  input.addEventListener("change", () => {
+    const text = String(input.value).trim();
+    if (text === "") return saveSweepBatchSetting(field, null);
+    return saveSweepBatchSetting(field, Number(text));
+  });
+  const reset = el("button", "wf-btn clear", "Reset");
+  reset.type = "button";
+  reset.disabled = st.busy || st[field] === st.defaults[field];
+  reset.title = `back to the default, ${st.defaults[field]} ${unit}`;
+  reset.addEventListener("click", () => saveSweepBatchSetting(field, null));
+  const head = el("label", "sweep-batch-label", `${label} `);
+  head.append(input, el("span", "sweep-batch-unit", ` ${unit} (default ${st.defaults[field]})`), reset);
+  row.appendChild(head);
+  row.appendChild(el("p", "wf-note", detail));
+  return row;
+}
+
+function sweepBatchSettingCard() {
+  const st = sweepBatchSetting;
+  const card = el("section", "ws-add sweep-batch-settings");
+  card.appendChild(el("h3", null, "Post-merge sweep batching"));
+  card.appendChild(el("p", "wf-note",
+    "After a merge reaches master the daemon queues a sweep (the full test " +
+    "run, about 8 minutes holding the test window exclusively). Merges queued " +
+    "close together are grouped: the sweep runs once on the newest merge of " +
+    "the group and covers the older ones. A group closes when it holds " +
+    "'Batch size' merges, or when its oldest merge has waited 'Settle time'. " +
+    "Neither value delays a merge or the next leader round, which does not wait " +
+    "for sweeps; they decide when the sweep starts and how many merges one " +
+    "sweep covers. Same settings as daemon.delayed_sweep_batch_size / " +
+    "delayed_sweep_batch_settle in ~/.claunch.yaml. A saved value applies " +
+    "from the next sweep clock tick (within 15 seconds), no restart needed."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  card.appendChild(sweepBatchField("size", "Batch size", "merges",
+    "Largest group of merges one sweep covers; a group this large closes at " +
+    "once. Raising it means fewer sweeps (less test-window time) but a failed " +
+    "sweep implicates more merges, and the failed batch has to be split " +
+    "(tools/delayed_sweep.py unbatch) to find the merge. 0 turns batching off: " +
+    "every merge is swept alone. Range 0-100."));
+  card.appendChild(sweepBatchField("settle", "Settle time", "seconds",
+    "How long the oldest queued merge waits for company before its group is " +
+    "closed with fewer merges than the batch size. Raising it delays the " +
+    "sweep result (and a pause on a failure) by the same amount, and lets " +
+    "more merges share one sweep; the sweep also starts later, which can keep " +
+    "it out of the way of a leader preview requested in between. Lowering it " +
+    "gets results sooner and sweeps more often. 0 closes a group at the next " +
+    "tick. Range 0-86400."));
   return card;
 }
 
