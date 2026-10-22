@@ -1077,6 +1077,60 @@ shim's identity: one shim serves a provider in both states. A malformed
 (non-boolean) flag is a config error the shim logs and treats as off, so a
 typo degrades to no header instead of breaking traffic.
 
+### Upstreams with their own header rules (OpenCode Go)
+
+Some upstreams accept a request only with a header neither harness sends, or
+want the key under a different header than the one the harness picks. Two
+provider keys let the shim fix the request on its way out:
+
+| Key | Value | What the shim does |
+|---|---|---|
+| `session_header` | a header name (`[A-Za-z0-9-]+`) | adds that header to every request, carrying the calling session's name (`claunch` when the request names no session). A caller that sets the header itself keeps its value. |
+| `anthropic_auth_header` | `x-api-key` | on Anthropic-protocol requests (any path containing `/messages`) moves `Authorization: Bearer <key>` to `x-api-key: <key>`. OpenAI-protocol requests (`/chat/completions`, Pi) keep the bearer. |
+
+Either key puts the provider behind the shim even with metering off. Both are
+read live from the config on every request, like `session_affinity`; a
+malformed value is a config error the shim logs once and treats as unset.
+
+[OpenCode Go](https://opencode.ai) needs both. Its endpoint
+`https://opencode.ai/zen/go/v1` rejects a request without an
+`x-opencode-session` header (`400 MissingSessionID`), its `/v1/messages`
+accepts only `x-api-key` (a bearer gets `401 Go requires a credential`), and
+its `/v1/chat/completions` accepts only a bearer. Claude Code sends the
+profile token as a bearer (`ANTHROPIC_AUTH_TOKEN`), so without
+`anthropic_auth_header` the Claude harness gets the 401. Model names are
+checked upstream: an unknown name answers `400 Model is unavailable`.
+
+```yaml
+providers:
+  opencode:
+    endpoints:
+      anthropic: https://opencode.ai/zen/go      # Claude Code appends /v1/messages
+      openai: https://opencode.ai/zen/go/v1      # Pi appends /chat/completions
+    session_header: x-opencode-session
+    anthropic_auth_header: x-api-key
+    models:
+      default: deepseek-v4.1-flash
+      large: deepseek-v4.1-flash
+      small: deepseek-v4.1-flash
+
+profiles:
+  opencode:
+    provider: opencode
+```
+
+The key is the profile's token, stored per machine and never in the file:
+
+```bash
+claunch set-token opencode            # paste the OpenCode API key
+claunch validate opencode             # Claude harness heartbeat
+claunch validate opencode:pi          # Pi harness heartbeat
+```
+
+The `https://opencode.ai/inference/...` paths belong to the pay-as-you-go Zen
+account, not to a Go subscription; with a Go key they answer `402 Insufficient
+account funds`.
+
 ### Prompt-cache TTL
 
 Claude Code decides how long a prompt-cache entry lives: the setting
