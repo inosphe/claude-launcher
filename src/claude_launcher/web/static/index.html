@@ -1560,6 +1560,10 @@
           <button id="cli-act" class="term-btn hidden" type="button"></button>
         </span>
       </div>
+      <!-- Input agent sessions propose for this shell. It never reaches the
+           PTY unless the user presses run here; drawn by app.js from the
+           socket's "suggestions" frames (daemon/shell_api.py). -->
+      <div id="cli-suggest" class="hidden" aria-live="polite"></div>
       <div id="cli-term"></div>
     </div>
     <div id="glossary-view" class="hidden"></div>

@@ -21301,6 +21301,7 @@ let cliStatus = "off";
 let cliRetry = 0;
 let cliRemoteResize = false;
 let cliFitTimer = null;
+let cliSuggestions = [];   // agent proposals waiting for the user's decision
 
 /* The header's one control; what it does is named by its label — restart an
    exited shell, retry a dead link. */
@@ -21327,6 +21328,69 @@ function cliSetStatus(state) {
   act.title = state === "exited"
     ? "the shell exited — start a fresh one"
     : "the daemon stopped answering — try the socket again";
+}
+
+/* ---- agent proposals above the CLI shell ----
+
+   An agent session cannot type here; it proposes a line (shell_suggest) and
+   the user decides. The strip is fed by the socket's "suggestions" frames
+   and by the init frame that arrives with whatever is already pending, so
+   it survives navigation and a late attach. "run" types the proposal into
+   the PTY through the daemon's accept route — the same route the MCP tools
+   are refused; "dismiss" only settles the row. */
+function renderCliSuggestions(items) {
+  cliSuggestions = Array.isArray(items) ? items : [];
+  const host = $("cli-suggest");
+  if (!host) return;
+  host.replaceChildren();
+  host.classList.toggle("hidden", cliSuggestions.length === 0);
+  for (const item of cliSuggestions) {
+    const row = document.createElement("div");
+    row.className = "cli-suggest-row";
+    const who = document.createElement("span");
+    who.className = "cli-suggest-who";
+    who.textContent = item.session || "agent";
+    who.title = "proposed by this session";
+    const text = document.createElement("code");
+    text.className = "cli-suggest-text";
+    text.textContent = item.text || "";
+    const why = document.createElement("span");
+    why.className = "cli-suggest-why";
+    why.textContent = item.why || "";
+    if (item.why) why.title = item.why;
+    const run = document.createElement("button");
+    run.type = "button";
+    run.className = "cli-suggest-btn cli-suggest-run";
+    run.textContent = "run";
+    run.title = "type this into the shell and press Enter";
+    run.addEventListener("click", () => decideCliSuggestion(item.id, "accept", row));
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "cli-suggest-btn";
+    dismiss.textContent = "dismiss";
+    dismiss.addEventListener("click", () => decideCliSuggestion(item.id, "reject", row));
+    row.append(who, text, why, run, dismiss);
+    host.append(row);
+  }
+}
+
+async function decideCliSuggestion(id, verb, row) {
+  if (row) row.classList.add("busy");
+  try {
+    const resp = await api(
+      `/api/shell/suggestions/${encodeURIComponent(id)}/${verb}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+    );
+    if (!resp.ok) {
+      if (row) row.classList.remove("busy");
+      return;
+    }
+    // The daemon broadcasts the new queue too; drop the row now so the
+    // click feels immediate even before that frame lands.
+    renderCliSuggestions(cliSuggestions.filter((s) => s.id !== id));
+  } catch {
+    if (row) row.classList.remove("busy");
+  }
 }
 
 /* Enter the CLI page. The terminal object IS the page's content and is
@@ -21450,6 +21514,9 @@ function ensureCliSocket() {
           cliSetStatus("live");
           cliRefit(60);   // then claim this viewer's own size
         }
+        renderCliSuggestions(msg.suggestions || []);
+      } else if (msg.type === "suggestions") {
+        renderCliSuggestions(msg.items || []);
       } else if (msg.type === "exit") {
         if (cliTerm) cliTerm.write(
           `\r\n\x1b[90m[shell exited (code ${msg.code}) — restart it from the header]\x1b[0m\r\n`);

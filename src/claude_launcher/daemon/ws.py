@@ -662,6 +662,9 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
                     # died — the client shows the restart control instead of
                     # pretending keystrokes can land anywhere.
                     "exited": shell.exited,
+                    # Proposals agents left while nobody was watching; the
+                    # strip shows them from the first frame on.
+                    "suggestions": shell.suggestions("pending"),
                 }
             )
         )
@@ -720,6 +723,12 @@ async def _pump_cli(
             cols, rows = payload
             await ws.send_str(
                 json.dumps({"type": "resize", "cols": cols, "rows": rows})
+            )
+        elif kind == "suggestions":
+            # An agent proposed input, or the user decided one. The CLI tab
+            # draws its strip from this; nothing here reaches the child.
+            await ws.send_str(
+                json.dumps({"type": "suggestions", "items": payload})
             )
         elif kind == "init":
             # A restart: the child was replaced under this socket. Say which

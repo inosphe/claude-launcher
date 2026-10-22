@@ -721,6 +721,11 @@ def build_app(
     # conversations beside the terminal, typed into the session by id.
     from . import threads_api
     threads_api.install(app)
+    # The shared user shell (daemon/shell_api.py): the CLI tab's persistent
+    # shell, opened read-only to agent sessions and to their input proposals.
+    # Installed after app["shell"] exists (set above, clipty.ShellPty).
+    from . import shell_api
+    shell_api.install(app)
     # Mega threads (daemon/megathread_api.py, claunch-v5nhp): one input box
     # that reaches several session threads, with Jev deciding which of them a
     # message is for. After threads_api: delivery posts a user message into
