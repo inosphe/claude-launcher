@@ -551,3 +551,15 @@ def test_a_guest_cannot_ask_in_a_thread(tmp_path):
         read = await req("GET", f"/api/threads/{tid}")
         assert [m for m in read["messages"] if m["kind"] == "ask"][0]["author"] == "agent"
     run(tmp_path, scenario)
+
+
+def test_asking_in_an_unknown_thread_is_a_404_not_a_500(tmp_path):
+    """claunch-etw0s rework (reviewer s1389-rev): the owner check reads the
+    thread outside call(), so an unknown thread's ask must map the store's
+    NotFound to 404 itself -- otherwise the ThreadError reaches the
+    middleware and the route 500s."""
+    async def scenario(req, mgr):
+        out = await req("POST", "/api/threads/th-nope/asks", {"session": "s1", "text": "anyone?"},
+                        status=404)
+        assert "th-nope" in out["error"]
+    run(tmp_path, scenario)

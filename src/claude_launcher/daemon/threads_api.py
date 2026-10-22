@@ -655,7 +655,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if actor == thread_store.USER:
             return web.json_response({"error": "session is required: a session asks, the user answers"},
                                      status=400)
-        t = await asyncio.to_thread(threads.get, tid)
+        try:
+            t = await asyncio.to_thread(threads.get, tid)
+        except thread_store.ThreadError as exc:
+            # call() maps store errors, but this read sits outside it; without
+            # the mapping an unknown thread's ask dies as a 500 (claunch-etw0s
+            # rework, reviewer s1389-rev).
+            return web.json_response({"error": str(exc)}, status=exc.status)
         if actor != t["session"]:
             return web.json_response(
                 {"error": "a session asks in its own thread; a guest advises and does not ask"}, status=403)
