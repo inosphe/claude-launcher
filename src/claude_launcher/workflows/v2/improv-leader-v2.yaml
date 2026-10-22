@@ -291,18 +291,6 @@ nodes:
       merges는 각 행 {issue, tip, merge_sha}이고, master tip(원격이 있으면 `<remote>/master`와 같음)이 보고에 있다
     effects: [git.merge, git.push, board.write]
 
-  admission:
-    title: 저장소 실패 상태 재확인
-    prompt: |
-      data.reviewed의 후보를 머지하기 전에 지속 큐의 저장소 pause를 재확인한다.
-      활성 실패 때문에 후보가 거절되면 paused로 보고하고 관제 대기로 돌아간다.
-      미위임 실패는 handle-regression으로 처리한다. ok는 verify가 다시 확인한다.
-    returns: {ok: {}, paused: {reason: str}}
-    verify: [uv, run, --no-sync, python, tools/delayed_sweep.py, check-batch,
-             --env, CFLOW_DATA_REVIEWED]
-    effects: [fs.read]
-    done_when: 모든 후보가 현재 저장소의 머지 허용 정책을 통과한다
-
   checkpoint-check:
     title: 머지 단계별 검증 작업 기록 확인
     prompt: |
@@ -444,6 +432,10 @@ nodes:
       실패 SHA, 영수증, 실패 테스트와 로그, 현재 master SHA를 확인한다.
       실패 원인이 미확인이면 「원인 미상」으로 기록한다. 이미 repair_issue가
       있으면 기존 자식의 진행 상태를 확인하고 중복으로 만들지 않는다.
+      실패가 환경성으로 보이면(기존 실패와 같은 테스트가 다른 머지에서도 나옴, 의존 환경
+      차이 등) 수정 이슈를 등록하기 전에 재측정(requeue 또는 remeasure로 같은 SHA를
+      다시 재는 것)이 가능한지 먼저 판단한다. 가능하면 재측정 결과를 확인한 뒤에 수정
+      이슈 여부를 정한다. 환경성인지 판단할 근거가 없으면 「원인 미상」으로 기록한다.
       `delayed_sweep.py requeue`는 stuck 또는 cancelled 상태의 job만 받는다. 그 밖의
       상태에는 쓰지 않는다.
       미위임 실패마다 원래 머지 이슈 아래에 수정 이슈를 만든다(중복 검색 먼저).
@@ -664,9 +656,21 @@ body:
                 then:
                   seq:
                     - {seq: [integrate-preflight], bind: reviewed}
-                    - seq: [admission]
+                    # 저장소 pause 재확인: 리더가 보고할 일이 없는 기계 판정이라 작업이 아니라
+                    # 대기다. check-batch가 0이면 통과하고, 활성 pause 때문에 후보가 거절되면
+                    # (종료 코드 2 = 판정 불가) 머지하지 않고 관제 대기로 돌아간다.
+                    # 미위임 실패는 handle-regression으로 처리한다.
+                    - id: admission
+                      wait:
+                        describe: 후보가 현재 저장소의 머지 허용 정책을 통과한다
+                        probe: [uv, run, --no-sync, python, tools/delayed_sweep.py, check-batch,
+                                --env, CFLOW_DATA_REVIEWED]
+                        poll: 5
+                        seconds: 60
+                        undecided_max: 1
                       on:
-                        paused: {continue: null}
+                        undecidable: {continue: null}
+                        timeout: {continue: null}
                     - id: batch
                       try:
                         seq:

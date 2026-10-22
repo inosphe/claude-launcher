@@ -55,7 +55,7 @@ def test_async_verification_gates_and_merge_interval_are_declared():
     opts = {o["name"]: o for o in chart.node("standby").get("options")}
     assert opts["integrate"]["interval"] == 300
     assert "handle-regression" in opts
-    for label, action in (("admission", "check-batch"), ("checkpoint-check", "check-enqueued")):
+    for label, action in (("checkpoint-check", "check-enqueued"),):
         run = by_label[label].get("verify")["run"]
         assert run[4:6] == ["tools/delayed_sweep.py", action]
     assert by_label["checkpoint-check"].get("verify")["run"][-1] == "CFLOW_DATA_MERGED"
@@ -106,11 +106,18 @@ def _allow(cmd, cwd, env, timeout):
     return 0, "queue admission/checkpoint verified"
 
 
+def _admit(ld, code=0):
+    """The admission wait runs check-batch by itself: 0 passes, 2 means paused."""
+    assert ld.tasks() == []
+    ld.now += 6
+    ld.tick(lambda cmd, cwd: (code, "check-batch"))
+
+
 def _preflight(ld):
     ld.report("intake")
     ld.select("integrate")
     ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
-    ld.report("admission", verify=_allow)
+    _admit(ld)
     assert ld.tasks() == ["integrate"]
 
 
@@ -173,7 +180,7 @@ def test_disabled_restart_hides_pending_reflection_and_persists_in_next_round(tm
     assert "reflect-pending" not in {o["name"] for o in ld.st["choices"][0]["options"]}
     ld.select("integrate")
     ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
-    ld.report("admission", verify=_allow)
+    _admit(ld)
     _merged(ld)
     ld.report("checkpoint-check", verify=_allow)
     assert ld.tasks() == ["landed-notice"]
@@ -190,7 +197,7 @@ def test_paused_repository_can_reflect_existing_merges_without_admitting_new_mer
     ld.report("intake")
     ld.select("integrate")
     ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
-    ld.report("admission", "paused", {"reason": "repair requires new daemon code"})
+    _admit(ld, 2)
     ld.select("reflect-pending")
     assert ld.tasks() == ["reflect"]
     ld.restart()
@@ -308,7 +315,7 @@ def test_a_pause_between_preflight_and_merge_returns_to_standby(tmp_path):
     ld.report("intake")
     ld.select("integrate")
     ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
-    ld.report("admission", "paused", {"reason": "regression detected"})
+    _admit(ld, 2)
     assert [c["label"] for c in ld.st["choices"]] == ["standby"]
     ld.select("handle-regression")
     assert ld.tasks() == ["handle-regression"]
@@ -354,7 +361,7 @@ def test_an_empty_preflight_or_dropped_batch_returns_to_standby(tmp_path):
     ld.now += 300
     ld.select("integrate")
     ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
-    ld.report("admission", verify=_allow)
+    _admit(ld)
     ld.report("integrate", "empty", {"reason": "head changed"})
     assert [c["label"] for c in ld.st["choices"]] == ["standby"]
 
