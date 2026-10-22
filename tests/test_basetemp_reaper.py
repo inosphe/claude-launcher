@@ -86,6 +86,36 @@ def test_matches_only_the_shapes(name, session, expected):
     assert br.matches(name, session) is expected
 
 
+@pytest.mark.parametrize("name, session, expected", [
+    ("s995w", "s995", True),
+    ("s995w2", "s995", True),
+    # A sweep run from a differently-named worktree: sweep.py names the
+    # basetemp after $CLAUNCH_SESSION, which is that worktree's session.
+    ("s995-07cd9bfd7e2cbe0dfc551b74w", "s995", True),
+    ("s995-07cd9bfd7e2cbe0dfc551b74w3", "s995", True),
+    ("s995-egr6yt1014051949", "s995", True),   # the stamped form
+    ("s995-iso", "s995", False),        # a basetemp pinned by hand
+    ("s995-ctrlj-treeiso", "s995", False),
+    ("s995", "s995", False),            # the general test directory
+    ("s995-", "s995", False),
+    ("s995ww", "s995", False),
+    ("s99-07cd9bfd7e2cbe0dfc551b74w", "s995", False),
+])
+def test_sweep_generation_is_the_swept_shapes_only(name, session, expected):
+    assert br.sweep_generation(name, session) is expected
+
+
+def test_is_sweep_tree_wants_the_xdist_workers(tmp_path):
+    # The name is only the gate: a hand-pinned basetemp can end in "w" and a
+    # serial run leaves no popen-gw*, so the content has to decide
+    # (claunch-9gpqk: s677-narrow, s90-ipo2q-preview are not sweeps).
+    xdist = _run_tree(tmp_path / "t", "s1w", workers=2)
+    serial = _run_tree(tmp_path / "t", "s1-notasweepw", workers=0)
+    assert br.is_sweep_tree(xdist) is True
+    assert br.is_sweep_tree(serial) is False
+    assert br.is_sweep_tree(tmp_path / "missing") is False
+
+
 def test_owner_is_the_longest_matching_name():
     names = ["s995", "s995-rev2", "s99"]
     assert br.owner("s995-rev2c1011010955", names) == "s995-rev2"
@@ -320,6 +350,36 @@ def test_the_periodic_pass_keeps_the_newest_generation_and_ages_out_the_rest(tmp
     assert {r["session"] for r in rows} == {"s29"}
     assert {r["outcome"] for r in rows} == {"removed"}
     assert {Path(r["path"]).name for r in _rows(tmp_path)} == {"s29w5", "s29w4"}
+
+
+def test_the_periodic_pass_reaps_a_worktree_sweeps_generartions(tmp_path):
+    # claunch-9gpqk: sweep.py names the basetemp after $CLAUNCH_SESSION, and
+    # a leader's sweep runs from a differently-named worktree, so the tree is
+    # "<session>-<label>w". Once that worktree session is gone from the
+    # registry, owner() collapses the name to the leader -- alive, so neither
+    # the generation branch nor the orphan branch used to reach it (339 such
+    # trees under s29 on 2026-10-22).
+    root = tmp_path / "t"
+    newest = _aged(_run_tree(root, "s29-ca5e348ea55ca759c74e5529w"), 0)
+    old = _aged(_run_tree(root, "s29-0127c4f7c5d6cbd8e1cc25b0w"), 24 * 9)
+    old2 = _aged(_run_tree(root, "s29-07cd9bfd7e2cbe0dfc551b74w"), 24 * 7)
+    young = _aged(_run_tree(root, "s29-ff00ff00ff00ff00ff00ff00w"), 2)
+    stamped = _aged(_run_tree(root, "s29-egr6yt1014051949"), 24 * 8)
+    # Name says sweep, content says a hand-pinned serial basetemp: kept.
+    serial_w = _aged(_run_tree(root, "s29-ipo2q-previeww", workers=0), 24 * 9)
+    # Not a sweep shape at all: kept.
+    pinned = _aged(_run_tree(root, "s29-ctrlj-treeiso"), 24 * 9)
+
+    rows = _reaper(tmp_path, [("s29", False)]).reap_live()
+
+    assert newest.is_dir()
+    assert young.is_dir()
+    assert serial_w.is_dir()
+    assert pinned.is_dir()                # a basetemp pinned by hand
+    assert not old.exists() and not old2.exists() and not stamped.exists()
+    assert {Path(r["path"]).name for r in rows} == {
+        "s29-0127c4f7c5d6cbd8e1cc25b0w", "s29-07cd9bfd7e2cbe0dfc551b74w",
+        "s29-egr6yt1014051949"}
 
 
 def test_the_periodic_pass_keeps_a_generation_a_live_grant_is_using(tmp_path):

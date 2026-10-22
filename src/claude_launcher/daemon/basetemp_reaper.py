@@ -48,9 +48,10 @@ several times between two handoffs kept every generation until the next one
 periodic pass, :meth:`BasetempReaper.reap_live` on
 :class:`BasetempClock`, closes that while sessions are still running:
 
-* a live session's sweep generations (``<session>w``, ``<session>w<number>``)
-  -- the newest one is kept, and of the rest only those whose directory was
-  last written ``basetemp_sweep_hours`` ago (default 6);
+* a live session's sweep generations (``<session>w``, ``<session>w<number>``,
+  and the ``<session>-<label>w`` a run from a differently-named worktree
+  leaves) -- the newest one is kept, and of the rest only those whose
+  directory was last written ``basetemp_sweep_hours`` ago (default 6);
 * a name no session of this instance owns (``sweepw``, ``dfv2-*``,
   ``s1162tree*``) -- once it is ``basetemp_orphan_days`` old (default 7).
 
@@ -101,10 +102,17 @@ ORPHAN_DAYS = 7.0
 TICK = 3600.0
 
 _STAMP = re.compile(r"c\d{10}")
-#: ``tools/sweep.py``'s basetemp under the root: ``<session>w``, and the
-#: numbered generations a fixed name leaves behind when a later run cannot
-#: reuse it (``<session>w2``, ``<session>w15``).
-_SWEEP = re.compile(r"w\d*")
+#: ``tools/sweep.py``'s basetemp under the root: ``<session>w``, the numbered
+#: generations a fixed name leaves behind when a later run cannot reuse it
+#: (``<session>w2``, ``<session>w15``), and the ``-``-labelled form a run
+#: from a differently-named worktree leaves (``<session>-<label>w``).
+_SWEEP = re.compile(r"(?:-.+)?w\d*")
+#: The same, stamped: ``<session>-<label>t<MMDDHHMMSS>``. Seen on this host as
+#: ``s29-egr6yt1014051949`` -- a sweep run whose basetemp carries a run stamp
+#: instead of the bare ``w``.
+_STAMPED_SWEEP = re.compile(r"-.+t\d{10}")
+#: ``popen-gw<N>``: the directory xdist puts under a basetemp for each worker.
+_XDIST_WORKER = "popen-gw"
 
 
 def default_root() -> Path:
@@ -132,14 +140,51 @@ def matches(name: str, session: str) -> bool:
 def sweep_generation(name: str, session: str) -> bool:
     """Whether ``name`` is one of ``session``'s sweep basetemps.
 
-    Only the generations ``tools/sweep.py`` writes: the bare ``w`` and the
-    numbered ``w<digits>``. The bare ``<session>`` directory (the general
-    test directory) and the ``-``-named manual basetemps are not swept runs,
-    so the periodic pass leaves them to the exit funnel.
+    The shapes ``tools/sweep.py`` writes: the bare ``w``, the numbered
+    ``w<digits>``, and the ``-``-labelled ``<label>w`` a run started from a
+    differently-named worktree leaves, because the tool names the basetemp
+    after ``$CLAUNCH_SESSION`` and that session is the worktree's. Those
+    labels are generated (``s29-07cd9bfd7e2cbe0dfc551b74w``), and once the
+    worktree session is gone from the registry ``owner()`` collapses the name
+    to the base session -- which is alive, so neither this branch nor the
+    orphan branch ever reaches them (claunch-9gpqk: 339 such trees under s29
+    on 2026-10-22, ~49M inodes by sample).
+
+    A ``-``-labelled name that does *not* end in ``w`` or a run stamp is a
+    basetemp a session pinned by hand (``s1160-ctrlj-treeiso``) and is not a
+    swept run; the bare ``<session>`` directory is the general test directory.
+    Both are left to the exit funnel. ``matches`` keeps answering True for
+    them -- only this predicate is the narrower one.
+
+    The name alone cannot settle it: a hand-pinned basetemp may end in ``w``
+    (``s677-narrow``, ``s90-ipo2q-preview`` on this host), and a sweep may
+    not (``<session>-<label>t<MMDDHHMMSS>``). So the shape is only the gate;
+    :func:`is_sweep_tree` reads the content that does settle it, and
+    :meth:`BasetempReaper._reap_generations` requires both.
     """
     if not session or not name.startswith(session):
         return False
-    return bool(_SWEEP.fullmatch(name[len(session):]))
+    rest = name[len(session):]
+    return bool(_SWEEP.fullmatch(rest) or _STAMPED_SWEEP.fullmatch(rest))
+
+
+def is_sweep_tree(path: Path) -> bool:
+    """Whether ``path`` holds an xdist run's worker directories.
+
+    ``popen-gw<N>`` is what xdist creates under the basetemp for each worker,
+    and it is the one signal that separates a sweep tree from a basetemp a
+    session pinned by hand (claunch-9gpqk). One ``scandir`` per candidate,
+    stopping at the first match: a serial run leaves none and is left to the
+    exit funnel.
+    """
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.name.startswith(_XDIST_WORKER) and entry.is_dir():
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def settings() -> Tuple[float, float]:
@@ -483,6 +528,7 @@ class BasetempReaper:
                 if (
                     sweep_generation(path.name, name)
                     and owner(path.name, names) == name
+                    and is_sweep_tree(path)
                 ):
                     when = _mtime(path)
                     if when is not None:
