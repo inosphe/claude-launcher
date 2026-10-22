@@ -191,6 +191,22 @@ def test_index_lists_threads_without_messages_grouped_by_session(tmp_path, monke
     run(tmp_path, scenario)
 
 
+def test_index_and_history_take_since(tmp_path):
+    """claunch-8vofx: the threads page polls with the last stamp and is told
+    only that nothing changed until something does."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "one", "text": "hi"}))["thread"]["id"]
+        ix = await req("GET", "/api/threads/index")
+        mark = ix["stamp"]
+        assert await req("GET", f"/api/threads/index?since={mark}") == {"unchanged": True, "stamp": mark}
+        assert await req("GET", f"/api/threads/history?page=1&since={mark}") == {"unchanged": True, "stamp": mark}
+        await req("POST", f"/api/threads/{tid}/messages", {"text": "again"})
+        fresh = await req("GET", f"/api/threads/index?since={mark}")
+        assert fresh["stamp"] != mark and fresh["threads"][0]["excerpt"] == "again"
+        assert (await req("GET", f"/api/threads/history?since={mark}"))["threads"]
+    run(tmp_path, scenario)
+
+
 def test_a_held_session_is_woken_and_an_exited_one_queues_the_block(home, tmp_path):
     """claunch-sgxfh: an exited session has no terminal, so the block waits
     in the notice journal until it is launched again — it is not dropped."""

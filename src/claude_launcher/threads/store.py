@@ -74,6 +74,7 @@ decides who may write them and keeps them out of the session-thread surfaces
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -754,12 +755,34 @@ class ThreadStore:
             return [dict(r) for r in db.execute(
                 "SELECT id, title, status, qa FROM threads WHERE session = ? ORDER BY created_at, id", (session,))]
 
-    def history(self, *, page=1, per_page=HISTORY_PAGE, session=None, status=None) -> dict:
+    def stamp(self) -> str:
+        """A short value that moves whenever what the threads page shows
+        moves (claunch-8vofx): a thread opened or deleted, a message
+        appended (``last_seq``), a status flip, a rename, an answered ask
+        (``updated_at``). One aggregate over the threads table, so the page
+        can poll it every few seconds and fetch the list only when it
+        changed. Read positions are left out: the page does not show them.
+        A rename to a title of the same length within the same second as
+        the thread's last change is the one change it misses; the next
+        change of any kind carries it."""
+        with self._connect() as db:
+            r = db.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), ''), COALESCE(SUM(last_seq), 0),"
+                " COALESCE(SUM(status = 'open'), 0), COALESCE(SUM(LENGTH(title)), 0)"
+                " FROM threads WHERE session NOT LIKE ?", (OPERATOR_PREFIX + "%",),
+            ).fetchone()
+        # Hashed: short, and safe in a query string as it is (the raw
+        # timestamp's "+" would read back as a space).
+        return hashlib.blake2b("|".join(str(v) for v in r).encode(), digest_size=8).hexdigest()
+
+    def history(self, *, page=1, per_page=HISTORY_PAGE, session=None, status=None, since=None) -> dict:
         """Every session's threads with their conversations, most recently
         active first, one page at a time (claunch-8k02k). Each thread carries
         its last ``HISTORY_MESSAGES`` messages in order; ``omitted`` counts
         the older ones left out. ``sessions`` lists every session that has
-        threads (with how many), for the page's filter."""
+        threads (with how many), for the page's filter. ``stamp`` is
+        ``stamp()`` read before the page; given back as ``since`` while it
+        still holds, the answer is only ``{"unchanged": true, "stamp"}``."""
         try:
             page = max(1, int(page or 1))
             per_page = max(1, min(HISTORY_MAX_PAGE, int(per_page or HISTORY_PAGE)))
@@ -767,6 +790,9 @@ class ThreadStore:
             raise ThreadError("page and per_page are integers") from None
         if status not in (None, "", "open", "closed"):
             raise ThreadError("status is open or closed")
+        mark = self.stamp()
+        if since and str(since) == mark:
+            return {"unchanged": True, "stamp": mark}
         # Operator conversations are not a session's (claunch-iw5i8.12.1).
         where, args = ["session NOT LIKE ?"], [OPERATOR_PREFIX + "%"]
         if session:
@@ -803,9 +829,10 @@ class ThreadStore:
             "per_page": per_page,
             "pages": max(1, -(-total // per_page)),
             "sessions": sessions,
+            "stamp": mark,
         }
 
-    def index(self, *, session=None, status=None) -> dict:
+    def index(self, *, session=None, status=None, since=None) -> dict:
         """Every session's threads without their conversations, most recently
         active first, for the threads page's list panel (claunch-zny1o): each
         thread's row with ``messages`` (its message count) and ``excerpt``
@@ -814,9 +841,13 @@ class ThreadStore:
         ``updated_at``), most recently active first. ``all_sessions`` is every
         session that has threads whatever the filters say (as ``history``
         lists them), for the page's session filter. At most ``INDEX_MAX``
-        threads; ``truncated`` says the rest were left out."""
+        threads; ``truncated`` says the rest were left out. ``stamp`` and
+        ``since`` are as in ``history``."""
         if status not in (None, "", "open", "closed"):
             raise ThreadError("status is open or closed")
+        mark = self.stamp()
+        if since and str(since) == mark:
+            return {"unchanged": True, "stamp": mark}
         where, args = ["t.session NOT LIKE ?"], [OPERATOR_PREFIX + "%"]
         if session:
             where.append("t.session = ?")
@@ -851,7 +882,7 @@ class ThreadStore:
             g["threads"] += 1
             g["open"] += t["status"] == "open"
         return {"threads": threads, "sessions": list(groups.values()), "all_sessions": every,
-                "total": total, "truncated": total > len(threads)}
+                "total": total, "truncated": total > len(threads), "stamp": mark}
 
     def rail(self) -> dict:
         """Per session with threads: how many are open, the seq of the

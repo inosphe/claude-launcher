@@ -212,6 +212,19 @@ id는 무시한다(거절하지 않는다). 판정은 `talk_links.subject_in`이
   처음부터 페이지를 넘기고, `tail`은 마지막 메시지만 준다(읽음 위치는 움직이지 않는다).
 - 여러 세션의 쓰레드에 한 번의 입력으로 말하는 기능은 `docs/mega-thread.md`다.
 
+## 쓰레드 페이지의 자동 새로고침 (claunch-8vofx)
+
+전체 쓰레드 페이지(`#/threads/tree/<id>`, `#/threads/newest`, `#/threads/feed`, `threads-history.js`)는 열려 있고 탭이
+보이는 동안 3초마다 자기 목록 경로를 다시 읽는다.
+
+| 단계 | 위치 | 내용 |
+|---|---|---|
+| 변경 표시 | `ThreadStore.stamp()` | threads 테이블 집계 1회(쓰레드 수, `updated_at` 최댓값, `last_seq` 합, open 수, 제목 길이 합)의 해시. 메시지 추가·닫기·다시 열기·이름 변경·ask 응답에서 바뀌고, 읽음 위치 이동에서는 바뀌지 않는다. 운영자 대화는 포함하지 않는다 |
+| 조건부 응답 | `GET /api/threads/index`, `GET /api/threads/history`의 `since` | 응답마다 `stamp`를 싣는다. `since`가 지금 stamp와 같으면 목록을 만들지 않고 `{"unchanged": true, "stamp"}`만 돌려준다 |
+| 폴링 | `threads-history.js` `poll()` | app.js의 `visiblePoll`로 숨은 탭에서는 건너뛴다. 페이지 자신의 읽기·게시가 진행 중이면 건너뛴다. 받은 목록이 이전과 같으면 다시 그리지 않고, 오른쪽 대화는 그 쓰레드의 행(`last_seq`·`updated_at`·status·제목)이 바뀐 경우에만 다시 읽는다. 다시 그릴 때 목록 패널의 스크롤 위치와 입력창의 커서 위치를 유지한다 |
+
+stamp가 놓치는 경우는 하나다: 쓰레드의 마지막 변경과 같은 초 안에 같은 길이의 제목으로 이름을 바꾼 경우. 이후 어떤 변경이든 생기면 함께 반영된다.
+
 ## 범위 밖
 
 - 메시 연합: 쓰레드는 그 세션을 실행하는 데몬에만 저장된다. 게스트도 같은 데몬의 세션만 초대할 수 있다.

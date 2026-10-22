@@ -17,6 +17,9 @@ T9 images on a message, from the user (claunch-shl2r) or the agent
 T10 guests (claunch-p9wes): the user or the owner invites a session into a
    thread; the guest writes there (author guest) and nothing more; it is
    listed apart in the guest's list; a v5 database is rebuilt to v6
+T12 the change stamp (claunch-8vofx): it moves on every change the threads
+   page shows and not on a read; index and history given it back as
+   ``since`` answer only ``unchanged``
 """
 
 import pytest
@@ -533,3 +536,47 @@ def test_t11_retrying_the_same_answer_is_idempotent_across_time(st, monkeypatch)
     assert retried["data"]["answer"] == first["data"]["answer"]
     with pytest.raises(S.Conflict):
         st.answer(S.USER, tid, ask["seq"], decision="deny")
+
+
+def test_t12_the_stamp_moves_on_what_the_page_shows(st, monkeypatch):
+    clock = iter(["2026-10-22T10:00:00+00:00"] * 50)    # every change in the same second
+    monkeypatch.setattr(S, "_now", lambda: next(clock))
+    seen = [st.stamp()]
+
+    def moved():
+        now = st.stamp()
+        assert now not in seen
+        seen.append(now)
+
+    tid = st.open(S.USER, "s1", "plan", "hi")["thread"]["id"]
+    moved()
+    st.post("s1", tid, "reply")
+    moved()
+    st.set_status(S.USER, tid, "closed")
+    moved()
+    st.rename(S.USER, tid, "a longer plan")
+    moved()
+    st.open(S.USER, "s2", "other")
+    moved()
+    st.read(tid, reader="s1")                      # a read position is not shown
+    assert st.stamp() == seen[-1]
+    # An operator's conversation is not on the page.
+    st.open(S.USER, S.OPERATOR_PREFIX + "op1", "talk", "x")
+    assert st.stamp() == seen[-1]
+
+
+def test_t12_since_answers_unchanged_until_something_moves(st):
+    tid = st.open(S.USER, "s1", "plan", "hi")["thread"]["id"]
+    ix = st.index()
+    assert ix["stamp"] == st.stamp() and ix["threads"]
+    assert st.index(since=ix["stamp"]) == {"unchanged": True, "stamp": ix["stamp"]}
+    h = st.history()
+    assert h["stamp"] == ix["stamp"]
+    assert st.history(since=h["stamp"], session="s1") == {"unchanged": True, "stamp": h["stamp"]}
+    st.post(S.USER, tid, "more")
+    fresh = st.index(since=ix["stamp"])
+    assert "unchanged" not in fresh and fresh["stamp"] != ix["stamp"]
+    assert "unchanged" not in st.history(since=h["stamp"])
+    # A bad filter is refused whatever the stamp says.
+    with pytest.raises(S.ThreadError):
+        st.index(status="nope", since=fresh["stamp"])
