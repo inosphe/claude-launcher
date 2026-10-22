@@ -34,7 +34,10 @@ spawns, the rest wait for what it started. (Watching the port instead is not
 enough — between binding and answering there is a window where a shim looks
 like a stranger, and the next caller starts a duplicate beside it.) A changed
 spec is a different fingerprint, so config edits are picked up by the next
-launch instead of being served stale by a running shim.
+launch instead of being served stale by a running shim. The shim's own
+request protocol (:data:`SHIM_PROTOCOL`) is part of the fingerprint too: a
+shim still running code from before an upgrade answers health for its old
+fingerprint, so it is never handed to a launch that speaks the new protocol.
 
 The same shim carries one more provider-declared behaviour: sticky session
 affinity. Backends whose prompt cache lives on a single replica (Fireworks
@@ -124,6 +127,15 @@ SHUTDOWN_PATH = "/__claunch__/shutdown"
 #: Marker every shim health response carries, so a stranger listening on the
 #: derived port is never mistaken for one of ours.
 MARKER = "claunch-routing-shim"
+
+#: What a launch expects the shim to understand, beyond the upstream's own API.
+#: Bump it whenever a shim from the previous code would answer a request from
+#: the current launcher wrongly. It is hashed into :func:`fingerprint`, so a
+#: running shim from older code (it keeps the code it was started with across
+#: an upgrade) no longer matches and :func:`reconcile` retires it instead of a
+#: launch reusing it. 2: the session name arrives as the ``/s/<session>/`` path
+#: prefix; a protocol-1 shim answers that path with 404.
+SHIM_PROTOCOL = 2
 
 # Ports are derived from the fingerprint (see module docstring). The window sits
 # in the registered range, below the ephemeral ports both Windows and Linux hand
@@ -349,7 +361,7 @@ def fingerprint(upstream: str, block: Dict, route: Optional[str] = None) -> str:
     else:
         subject = upstream
     return hashlib.sha256(
-        f"{subject}\n{canonical(block)}".encode("utf-8")
+        f"{subject}\n{canonical(block)}\nprotocol:{SHIM_PROTOCOL}".encode("utf-8")
     ).hexdigest()[:16]
 
 

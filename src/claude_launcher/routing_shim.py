@@ -401,6 +401,7 @@ async def _health(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "marker": routing.MARKER,
+            "protocol": routing.SHIM_PROTOCOL,
             "fingerprint": cfg["fingerprint"],
             "upstream": cfg["upstream"],
             "spec": cfg["spec"],
