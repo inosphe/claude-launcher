@@ -8786,8 +8786,9 @@ body.split-max #term-wf { flex: 1 1 0; }
 }
 .sysperf-table th { color: #9da5b0; font-weight: normal; }
 .sysperf-disks { margin-top: 10px; }
-/* Disk capacity (claunch-frgt1): the drive table, graded the way the badge
-   grades itself — 70 % is worth noticing, 90 % stops work. */
+/* Disk capacity (claunch-frgt1, claunch-frgt1.1): the drive table, graded
+   the way the badge grades itself — 70 % is worth noticing, 90 % stops work.
+   The byte and inode columns share these grades: either one can fill. */
 .sysperf-usage { margin-top: 6px; }
 .sysperf-usage td.s-near { color: #e3b341; }
 .sysperf-usage td.s-full { color: #ff7b72; }

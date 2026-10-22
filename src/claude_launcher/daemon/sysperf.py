@@ -12,6 +12,12 @@ plus every registered workspace. A path becomes its mount point, so the same
 drive counts once however many workspaces sit on it (``/mnt/c`` under WSL,
 ``C:\\`` on Windows).
 
+Each entry also carries ``inodes`` where the filesystem reports them
+(claunch-frgt1.1). On WSL a disk can be almost empty by bytes and still stop
+work because its inodes are gone — measured 2026-10-22: ``/`` had 506 GB free
+with 237,046 of 67,108,864 inodes left. Windows and WSL's drvfs do not report
+real inode counts, so that field is null there rather than a placeholder.
+
 Counters come from psutil when it is importable, else from procfs (Linux,
 WSL), else from the Win32 API through ctypes (CPU and memory only: Windows
 has no counter for whole-disk bytes without psutil or a WMI query). Under
@@ -281,6 +287,8 @@ def read_counters() -> dict:
 #   label    the short name the badge prints ("C:", "/mnt/c")
 #   total, used, free   bytes
 #   pct      used / total in percent, None when the size is unknown
+#   inodes   {total, used, free, pct}, or None where the filesystem does not
+#            report inode counts (Windows, WSL's drvfs)
 
 #: How long the drive list (and its numbers) is reused. Capacity moves
 #: slowly and resolving it reads the config file, so one reading per minute
@@ -327,11 +335,41 @@ def drive_label(mount: str) -> str:
     return mount or "?"
 
 
+def inode_usage(mount: str, *, statvfs: Optional[Callable[[str], Any]] = None) -> Optional[dict]:
+    """Inode counts for the filesystem at ``mount``, or None.
+
+    Python has no ``os.statvfs`` on Windows, and WSL's drvfs answers with
+    placeholders rather than NTFS's real MFT count (``f_files=999`` with
+    ``f_ffree=1000000``). A total of 999 with a million free is not a
+    reading, so a value that fails this arithmetic is dropped instead of
+    displayed as "0 %".
+    """
+    statvfs = getattr(os, "statvfs", None) if statvfs is None else statvfs
+    if statvfs is None:
+        return None
+    try:
+        raw = statvfs(mount)
+    except OSError:
+        return None
+    total = int(getattr(raw, "f_files", 0) or 0)
+    free = int(getattr(raw, "f_ffree", 0) or 0)
+    if total <= 0 or free < 0 or free > total:
+        return None
+    used = total - free
+    return {
+        "total": total,
+        "used": used,
+        "free": free,
+        "pct": round(100.0 * used / total, 1),
+    }
+
+
 def disk_usage(
     paths: Iterable[str],
     *,
     mount_of: Optional[Callable[[str], Optional[str]]] = None,
     usage_of: Optional[Callable[[str], Any]] = None,
+    inodes_of: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> List[dict]:
     """Capacity of every distinct drive among ``paths``, mount-sorted.
 
@@ -341,6 +379,7 @@ def disk_usage(
     """
     mount_of = mount_point if mount_of is None else mount_of
     usage_of = shutil.disk_usage if usage_of is None else usage_of
+    inodes_of = inode_usage if inodes_of is None else inodes_of
     found: Dict[str, dict] = {}
     for raw in paths:
         mount = mount_of(str(raw))
@@ -360,6 +399,7 @@ def disk_usage(
             "used": used,
             "free": free,
             "pct": round(100.0 * used / total, 1) if total else None,
+            "inodes": inodes_of(mount),
         }
     return [found[mount] for mount in sorted(found)]
 

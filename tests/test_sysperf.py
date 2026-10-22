@@ -253,10 +253,12 @@ def test_disk_usage_lists_each_mount_once():
         ["/ws/a", "/ws/b", "/ws/c"],
         mount_of=mounts.get,
         usage_of=lambda mount: sizes[mount],
+        inodes_of=lambda mount: None,
     )
     assert [row["mount"] for row in rows] == ["/", "/mnt/d"]
     assert rows[0] == {
-        "mount": "/", "label": "/", "total": 1000, "used": 250, "free": 750, "pct": 25.0,
+        "mount": "/", "label": "/", "total": 1000, "used": 250, "free": 750,
+        "pct": 25.0, "inodes": None,
     }
     assert rows[1]["pct"] == 25.0
 
@@ -272,6 +274,52 @@ def test_disk_usage_skips_a_drive_it_cannot_read():
     )
     assert [row["mount"] for row in rows] == ["/"]
     assert rows[0]["pct"] == 90.0
+
+
+def test_inode_usage_reads_statvfs():
+    raw = SimpleNamespace(f_files=1000, f_ffree=250)
+    assert sysperf.inode_usage("/", statvfs=lambda mount: raw) == {
+        "total": 1000, "used": 750, "free": 250, "pct": 75.0,
+    }
+
+
+def test_inode_usage_drops_what_a_filesystem_does_not_really_report(monkeypatch):
+    # Windows has no os.statvfs at all, which is the platform this check
+    # exists for; dropping it here is that platform's shape.
+    monkeypatch.delattr(sysperf.os, "statvfs", raising=False)
+    assert sysperf.inode_usage("/") is None
+    monkeypatch.undo()
+    # WSL's drvfs answers placeholders: 999 total, a million free.
+    placeholders = SimpleNamespace(f_files=999, f_ffree=1000000)
+    assert sysperf.inode_usage("/mnt/c", statvfs=lambda mount: placeholders) is None
+    # A filesystem with no inode table, and one that cannot be read.
+    assert sysperf.inode_usage("/", statvfs=lambda mount: SimpleNamespace(f_files=0, f_ffree=0)) is None
+
+    def broken(mount):
+        raise OSError("statvfs failed")
+
+    assert sysperf.inode_usage("/", statvfs=broken) is None
+
+
+def test_disk_usage_carries_inode_counts():
+    inodes = {"total": 1000, "used": 900, "free": 100, "pct": 90.0}
+    rows = sysperf.disk_usage(
+        ["/ws"],
+        mount_of=lambda path: "/",
+        usage_of=lambda mount: _disk(1000, 250),
+        inodes_of=lambda mount: inodes,
+    )
+    assert rows[0]["inodes"] == inodes
+
+
+def test_disk_usage_without_inode_data_says_so():
+    rows = sysperf.disk_usage(
+        ["/ws"],
+        mount_of=lambda path: "/mnt/c",
+        usage_of=lambda mount: _disk(1000, 250),
+        inodes_of=lambda mount: None,
+    )
+    assert rows[0]["inodes"] is None
 
 
 def test_usage_paths_are_the_daemon_root_and_every_workspace(tmp_path, monkeypatch):

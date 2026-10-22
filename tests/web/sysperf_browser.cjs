@@ -23,9 +23,14 @@ const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 const now = Math.floor(Date.now() / 1000);
 // Two drives, as claunch-frgt1 reports them: the daemon root's filesystem
 // and a workspace on another mount, the latter nearly full.
+// The first drive is the WSL shape claunch-frgt1.1 exists for: bytes are
+// fine, inodes are nearly gone. The second reports no inode table at all,
+// as WSL's drvfs and Windows do.
 const usage = [
-  { mount: "/", label: "/", total: 1000 * 2 ** 30, used: 450 * 2 ** 30, free: 550 * 2 ** 30, pct: 45 },
-  { mount: "/mnt/d", label: "/mnt/d", total: 2000 * 2 ** 30, used: 1900 * 2 ** 30, free: 100 * 2 ** 30, pct: 95 },
+  { mount: "/", label: "/", total: 1000 * 2 ** 30, used: 450 * 2 ** 30, free: 550 * 2 ** 30, pct: 45,
+    inodes: { total: 67108864, used: 66871820, free: 237044, pct: 100 } },
+  { mount: "/mnt/d", label: "/mnt/d", total: 2000 * 2 ** 30, used: 1900 * 2 ** 30, free: 100 * 2 ** 30, pct: 95,
+    inodes: null },
 ];
 const history = Array.from({ length: 60 }, (_, i) => ({
   ts: now - (59 - i) * 5, interval_s: 5, source: "procfs", cpus: 8,
@@ -81,9 +86,12 @@ const server = http.createServer((req, res) => {
     await badge.waitFor({ state: "visible" });
     await page.waitForFunction(() => /CPU 93%/.test(document.getElementById("sysperf-badge").textContent));
     const text = await badge.textContent();
-    assert.match(text, /^CPU 93% · MEM 56% · IO [\d.]+M\/s · DISK \/mnt\/d 95% \+1$/);
-    assert.match(await badge.getAttribute("title"), /disk \/mnt\/d \(\/mnt\/d\): .* \(95%\)/);
+    // The fullest drive is /mnt/d by bytes (95 %); "/" is fuller by inodes
+    // (100 %) and is what the badge names. Both readings are shown.
+    assert.match(text, /^CPU 93% · MEM 56% · IO [\d.]+M\/s · DISK \/ 45% · INO 100% \+1$/);
     assert.match(await badge.getAttribute("title"), /disk \/ \(\/\): /);
+    assert.match(await badge.getAttribute("title"), /inodes \/ \(\/\): 66,871,820 used of 67,108,864, 237,044 free \(100%\)/);
+    assert.match(await badge.getAttribute("title"), /disk \/mnt\/d \(\/mnt\/d\): .* \(95%\)/);
     assert.equal(await badge.getAttribute("href"), "#/sysperf");
     assert.match(await badge.getAttribute("class"), /latency-bad/, "graded by its busiest number");
     assert.match(await badge.getAttribute("title"), /of 8 CPUs/);
@@ -119,7 +127,8 @@ const server = http.createServer((req, res) => {
     assert.match(view.capacity, /\/mnt\/d/);
     assert.match(view.capacity, /95%/);
     assert.match(view.capacity, /45%/);
-    assert.equal(view.full, 1, "the 95% drive is graded full, the 45% one is not");
+    assert.match(view.capacity, /66,871,820 \/ 67,108,864/, "the inode count itself is shown");
+    assert.equal(view.full, 2, "the 95% drive by bytes and the 100% one by inodes");
     assert.ok(view.log, "the page says where the log is");
     assert.ok(view.wide, "no horizontal page scroll");
 
