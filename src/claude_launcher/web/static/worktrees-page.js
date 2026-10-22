@@ -16,7 +16,7 @@ globalThis.WorktreesPage = (() => {
     unlinked: "세션 기록 없음",
   };
   const STATE_TITLE = {
-    active: "archived가 아닌 세션(running·paused·killed)이 이 워크트리를 쓰고 있다",
+    active: "archived가 아닌 세션(running·hold·delayed·paused·killed)이 이 워크트리를 쓰고 있다",
     orphaned: "이 워크트리를 쓴 세션이 모두 archived다",
     unlinked: "이 워크트리를 디렉터리로 가진 세션 기록이 없다",
   };
@@ -115,6 +115,11 @@ globalThis.WorktreesPage = (() => {
     return out;
   }
 
+  /* The two lifecycle filters read the whole worktree: `killed` is a
+     checkout every one of whose sessions is archived or killed, so a hold,
+     delayed or paused session keeps it out -- those read as Running here
+     (RUNNING_CATEGORIES) and a worktree someone can still wake is not a dead
+     one (claunch-25bvn). */
   function filterItems(all, filter, search = "") {
     const q = search.trim().toLowerCase();
     return all.filter(w => (filter === "all" ||
@@ -126,13 +131,26 @@ globalThis.WorktreesPage = (() => {
         .some(v => String(v || "").toLowerCase().includes(q))));
   }
 
+  /* The categories that read as Running on this page: running itself, plus
+     the three the daemon keeps frozen but resumable -- hold, delayed and
+     paused. The session rail files those under its running presets
+     (app.js SESSION_FILTER_RUNNING_PAUSED), and archiving one of them ends
+     it, so a removal that takes a worktree takes them with it and names
+     them in the dialog. Killed and archived are not here: they have nothing
+     left to end (claunch-25bvn). */
+  const RUNNING_CATEGORIES = new Set(["running", "hold", "delayed", "paused"]);
+
+  function runningSessions(targets) {
+    return targets.filter(w => w.state === "active").flatMap(w => (w.sessions || [])
+      .filter(s => RUNNING_CATEGORIES.has(s.category)).map(s => s.name));
+  }
+
   /* One confirmation for one checkout or a batch. Resolves to
      {archive, force} or null when cancelled. */
   function confirmRemove(targets, { title, forceOffered = false } = {}) {
     return new Promise(resolve => {
       const live = targets.filter(w => w.state === "active");
-      const running = live.flatMap(w => (w.sessions || [])
-        .filter(s => s.category === "running").map(s => s.name));
+      const running = runningSessions(targets);
       const dialog = node("dialog", "wt-dialog");
       dialog.appendChild(node("h3", null, title || "워크트리 삭제"));
       const list = node("ul", "wt-dialog-list");
@@ -453,5 +471,6 @@ globalThis.WorktreesPage = (() => {
 
   function stop() { sequence++; loading = false; }
 
-  return { open, stop, bucketOf, mergeLabel, createLabel, changesPanel, filterItems, pathRow };
+  return { open, stop, bucketOf, mergeLabel, createLabel, changesPanel, filterItems,
+    pathRow, runningSessions };
 })();
