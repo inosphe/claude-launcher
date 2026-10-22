@@ -62,6 +62,55 @@ def test_create_asks_and_installs_on_the_default_answer(home, capsys, monkeypatc
     assert (profile.resolve("work").config_dir / settings.CLAUDE_JSON).is_file()
 
 
+@pytest.mark.parametrize("answer", ["y", "Y"])
+def test_create_installs_on_an_explicit_yes(home, capsys, monkeypatch, answer):
+    # The default answer is covered above; this pins the explicit one, which
+    # is what a person types when they do not want to think about defaults.
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setattr("sys.stdin", _Terminal())
+    asked = _answer(monkeypatch, answer)
+
+    assert run("create", "work", "--no-seed") == 0
+
+    assert asked, "create must ask before installing"
+    assert "installed:" in capsys.readouterr().out
+
+
+def test_create_does_not_ask_when_there_is_no_stdin(home, capsys, monkeypatch):
+    # A process can run with sys.stdin = None (pythonw, some launchers). That
+    # is not a terminal either, and reaching for .isatty() on it raises
+    # AttributeError -- cli_sessions.py guards the same way.
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setattr("sys.stdin", None)
+    monkeypatch.setattr("builtins.input", _no_input)
+
+    assert run("create", "work", "--no-seed") == 0
+
+    out = capsys.readouterr().out
+    assert "stdin is not a terminal" in out
+    assert "installed:" not in out
+
+
+def test_create_asks_to_reinstall_when_reinitializing(home, capsys, monkeypatch):
+    # --reinit runs over a directory someone may already have used, and the
+    # install rewrites the files it manages. The question has to say that
+    # instead of describing a profile that was empty a moment ago.
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setattr("sys.stdin", _Pipe())
+    assert run("create", "work", "--no-seed", "--no-install") == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr("sys.stdin", _Terminal())
+    asked = _answer(monkeypatch, "y")
+
+    assert run("create", "work", "--no-seed", "--reinit") == 0
+
+    out = capsys.readouterr().out
+    assert asked, "reinit must ask too"
+    assert "rewriting the files it manages" in asked[0]
+    assert "installed:" in out
+
+
 def test_create_skips_the_install_when_answered_no(home, capsys, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     monkeypatch.setattr("sys.stdin", _Terminal())

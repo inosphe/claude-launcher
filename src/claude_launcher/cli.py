@@ -104,21 +104,29 @@ def _carries_seeded_files(p: profile.Profile) -> bool:
     )
 
 
-def _install_after_create(p: profile.Profile, forced: Optional[bool]) -> None:
-    """Offer to run ``claunch install`` against the profile just created.
+def _install_after_create(
+    p: profile.Profile, forced: Optional[bool], *, reinit: bool = False
+) -> None:
+    """Offer to run ``claunch install`` against the profile this create made.
 
     A profile is an isolated config dir, so a global install never reaches it;
     without this the second command a new profile needs is one the person has
     to remember. The question is asked only where a person can answer it: a
     managed session (``CLAUNCH_SESSION`` set) and a stdin that is not a
-    terminal each get the command to run later instead, so a scripted create
-    never blocks on stdin. ``--install`` / ``--no-install`` answer it directly.
+    terminal -- or is not there at all -- each get the command to run later
+    instead, so a scripted create never blocks on stdin. ``--install`` /
+    ``--no-install`` answer it directly.
 
-    Answering goes to the install when the answer is not a no -- the default
-    is yes, unlike the repository's other confirmations. Those guard
-    destructive steps (overwriting an edited file, removing one); this asks
-    for the step the operator came for, and it only adds files to a profile
-    that was empty a moment ago.
+    ``--reinit`` runs the same offer over a directory someone may already have
+    used, so it asks a different question: the install rewrites the files it
+    manages, and a reinit that stayed silent about that would describe a fresh
+    start that is not happening. A plain create adds files to a profile it
+    made a moment ago, and its question says only that.
+
+    Either way the default is yes, unlike the repository's other
+    confirmations. Those guard destructive steps (overwriting an edited file,
+    removing one); this asks for the step the operator came for, and adding
+    files to the profile it just made is not a loss.
     """
     if forced is None:
         if os.environ.get("CLAUNCH_SESSION"):
@@ -127,16 +135,20 @@ def _install_after_create(p: profile.Profile, forced: Optional[bool]) -> None:
                 f"run 'claunch install {p.name}'"
             )
             return
-        if not sys.stdin.isatty():
+        if sys.stdin is None or not sys.stdin.isatty():
             print(
                 f"install: skipped (stdin is not a terminal); "
                 f"run 'claunch install {p.name}'"
             )
             return
+        question = (
+            f"reinstall the MCP server and skills into {p.name!r}, "
+            f"rewriting the files it manages? [Y/n]: "
+            if reinit
+            else f"install the MCP server and skills into {p.name!r}? [Y/n]: "
+        )
         try:
-            answer = input(
-                f"install the MCP server and skills into {p.name!r}? [Y/n]: "
-            )
+            answer = input(question)
         except EOFError:
             print(f"install: skipped (no answer); run 'claunch install {p.name}'")
             return
@@ -234,7 +246,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         for action, error in shared.failed:
             line = plugins_mod.error_line(error)
             print(f"could not apply shared {action.describe()}: {line}")
-    _install_after_create(p, args.install)
+    _install_after_create(p, args.install, reinit=args.reinit)
     entry = harnesses.get(selected)
     if entry and entry.auth == "api-key":
         print(f"next: claunch set-token {p.name}")
