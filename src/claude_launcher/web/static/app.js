@@ -8310,39 +8310,50 @@ function ensureTermLivePoll() {
 
 /* ---- subscription usage on the PTY (claunch-f5w4x.2) ----
 
-   The account's 5-hour and 7-day windows, drawn under the throughput in the
-   same overlay. The figures are /api/usage's with refresh=auto: the daemon
-   reads every account once per fifteen minutes on its own clock and answers
-   from its cache in between (profile_usage.py, daemon/usage_clock.py), and
-   this page asks at most once in five minutes per profile, so watching a
-   session costs no extra account reads and shows the clock's reading within
-   five minutes of it.
+   The account's usage windows, drawn under the throughput in the same
+   overlay. The figures are /api/usage's with refresh=auto: the daemon reads
+   every account once per fifteen minutes on its own clock and answers from
+   its cache in between (profile_usage.py, daemon/usage_clock.py), and this
+   page asks at most once in five minutes per selector, so watching a session
+   costs no extra account reads and shows the clock's reading within five
+   minutes of it.
 
-   Claude Code first: only claude-harness sessions are asked, and only the
-   Anthropic readings are drawn. Another provider joins by a row in each
-   table -- the harness that may be asked, and the source whose window names
-   map to the short labels. */
+   Every harness with a usage reader is asked: claude (Anthropic, or Kimi as
+   its provider), codex and kimi (usage.reader). The labels come from the
+   normalized window names, whatever the source: five_hour 5h, seven_day 7d,
+   weekly wk; a codex bucket prefix (`<limit>.five_hour`) stays in front of
+   the label. A session that borrows another profile's token (s.borrow) runs
+   on the lender's account, so it gets two lines, its own profile's and the
+   lender's (claunch-f5w4x.4), each named; a side that cannot be read is left
+   out. */
 const TERM_USAGE_TTL_MS = 5 * 60 * 1000;
-const TERM_USAGE_HARNESSES = new Set(["claude"]);
-const TERM_USAGE_WINDOWS = {
-  "oauth-usage": [["five_hour", "5h"], ["seven_day", "7d"]],
-  "ratelimit-headers": [["five_hour", "5h"], ["seven_day", "7d"]],
-};
-/* profile selector -> {at, data, pending}: one read per profile, whichever
+const TERM_USAGE_HARNESSES = new Set(["claude", "codex", "kimi"]);
+const TERM_USAGE_LABELS = [["five_hour", "5h"], ["seven_day", "7d"], ["weekly", "wk"]];
+/* profile selector -> {at, data, pending}: one read per selector, whichever
    session of it is on screen. */
 const termUsageReads = new Map();
 
-function termUsageSelector(s) {
-  if (!s || !s.profile || s.status === "exited") return "";
-  return TERM_USAGE_HARNESSES.has(s.harness || "claude") ? String(s.profile) : "";
+/* The selectors whose usage session `s` shows, own profile first:
+   [{selector, who, lender}]. A profile is asked with the session's harness,
+   so `work` on codex reads the codex login; the lender is asked with the
+   same harness, the one that runs on its token. */
+function termUsageSelectors(s) {
+  if (!s || !s.profile || s.status === "exited") return [];
+  const harness = s.harness || "claude";
+  if (!TERM_USAGE_HARNESSES.has(harness)) return [];
+  const named = (p) => (String(p).includes(":") ? String(p) : `${p}:${harness}`);
+  const base = (p) => String(p).split(":")[0];
+  const out = [{ selector: named(s.profile), who: base(s.profile), lender: false }];
+  if (s.borrow && base(s.borrow) !== base(s.profile)) {
+    out.push({ selector: named(base(s.borrow)), who: base(s.borrow), lender: true });
+  }
+  return out;
 }
 
-/* The usage line for session `s`, or null: [{label, pct, level}] plus the
-   tooltip. Starts a read when the profile has none younger than the TTL; the
-   answer redraws the overlay. A failed read draws nothing until the next. */
-function termUsageLine(s, now = Date.now()) {
-  const selector = termUsageSelector(s);
-  if (!selector) return null;
+/* The answer of /api/usage for `selector`, or null. Starts a read when the
+   selector has none younger than the TTL; the answer redraws the overlay. A
+   failed read is null until the next. */
+function termUsageRead(selector, now = Date.now()) {
   let read = termUsageReads.get(selector);
   if (!read || (!read.pending && now - read.at >= TERM_USAGE_TTL_MS)) {
     read = { at: now, data: read ? read.data : null, pending: true };
@@ -8359,21 +8370,51 @@ function termUsageLine(s, now = Date.now()) {
         if (typeof renderTermTps === "function") renderTermTps();
       });
   }
-  return termUsageParts(read.data, now);
+  return read.data;
 }
 
-/* The drawable part of one /api/usage answer: the mapped windows in table
-   order, each with its rounded percentage, and a tooltip with the reset
-   times the way `claunch usage` writes them. */
+/* The usage block for session `s`, or null: {rows: [{who, items}], title}.
+   `who` is set only on a borrowed session, where the two lines need their
+   profile names ("sr", "→nc"); a lone line is the session's own. */
+function termUsageLine(s, now = Date.now()) {
+  const targets = termUsageSelectors(s);
+  const borrowed = targets.length > 1;
+  const rows = [];
+  const titles = [];
+  for (const t of targets) {
+    const parts = termUsageParts(termUsageRead(t.selector, now), now);
+    if (!parts) continue;
+    rows.push({ who: borrowed ? (t.lender ? `→${t.who}` : t.who) : "", items: parts.items });
+    titles.push(t.lender ? `borrowed: ${parts.title}` : parts.title);
+  }
+  return rows.length ? { rows, title: titles.join("\n\n") } : null;
+}
+
+/* The short label of a normalized window name, or "" for one the overlay
+   does not draw. */
+function termUsageLabel(name) {
+  const text = String(name || "");
+  const dot = text.lastIndexOf(".");
+  const prefix = dot >= 0 ? text.slice(0, dot) : "";
+  const hit = TERM_USAGE_LABELS.find(([n]) => n === text.slice(dot + 1));
+  return hit ? (prefix ? `${prefix} ${hit[1]}` : hit[1]) : "";
+}
+
+/* The drawable part of one /api/usage answer: the windows with a label, in
+   the order 5h, 7d, wk (the reader's order within one), each with its
+   rounded percentage, and a tooltip with the reset times the way `claunch
+   usage` writes them. */
 function termUsageParts(data, now = Date.now()) {
-  const names = data && TERM_USAGE_WINDOWS[data.source];
-  if (!names) return null;
-  const windows = new Map((data.windows || []).map((w) => [w.name, w]));
+  if (!data || !Array.isArray(data.windows)) return null;
+  const rank = (w) => TERM_USAGE_LABELS.findIndex(([n]) => n === String(w.name).split(".").pop());
+  const windows = data.windows
+    .map((w, i) => ({ w, i, label: termUsageLabel(w.name) }))
+    .filter((x) => x.label)
+    .sort((a, b) => rank(a.w) - rank(b.w) || a.i - b.i);
   const items = [];
   const notes = [];
-  for (const [name, label] of names) {
-    const w = windows.get(name);
-    const pct = w ? Number(w.utilization) : NaN;
+  for (const { w, label } of windows) {
+    const pct = Number(w.utilization);
     if (!Number.isFinite(pct)) continue;
     items.push({ label, pct: Math.round(pct),
       level: pct >= 90 ? "high" : pct >= 70 ? "mid" : "low" });
@@ -8482,8 +8523,12 @@ function renderTermTps() {
       const usageBox = parts.usage ? el("div", "term-usage") : null;
       if (usageBox) {
         usageBox.title = parts.usage.title;
-        for (const item of parts.usage.items) {
-          usageBox.appendChild(el("span", `term-usage-item ${item.level}`, `${item.label} ${item.pct}%`));
+        for (const row of parts.usage.rows) {
+          const line = usageBox.appendChild(el("div", "term-usage-row"));
+          if (row.who) line.appendChild(el("span", "term-usage-who", row.who));
+          for (const item of row.items) {
+            line.appendChild(el("span", `term-usage-item ${item.level}`, `${item.label} ${item.pct}%`));
+          }
         }
       }
       if (parts.usageOnly) {
