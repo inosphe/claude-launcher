@@ -750,7 +750,11 @@ def test_improv_worker_wrapup_asks_for_the_report_in_both_layers(path):
     text = wrapup_of(path)["instructions"]
     assert "회차 보고서" in text
     assert "claunch report path" in text
-    assert "claunch report save" in text
+    # the save/location detail moved into the round-report skill
+    # (claunch-mxxm); the yaml quotes the skill instead of carrying the spec
+    from claude_launcher import report_spec
+
+    assert "claunch report save" in report_spec.SKILL_MD
     assert "claunch report ls" in wrapup_of(path)["done_when"]
 
 

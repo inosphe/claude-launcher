@@ -72,6 +72,7 @@ from . import (
     mesh_install,
     mesh_topology,
     projects,
+    report_spec,
     settings,
     workspec_skill,
 )
@@ -269,6 +270,7 @@ def _skill_lines(skills_dir: Path) -> List[str]:
         f"skill -> {mesh_install.write_skill(skills_dir)}",
         *(f"skill -> {p}" for p in mesh_topology.write_skills(skills_dir)),
         f"skill -> {commit_stamp.write_skill(skills_dir)}",
+        f"skill -> {report_spec.write_skill(skills_dir)}",
         f"skill -> {artifact_skill.write_skill(skills_dir)}",
         f"skill -> {workspec_skill.write_skill(skills_dir)}",
     ]

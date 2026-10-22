@@ -632,7 +632,12 @@ def test_the_worker_lands_a_batch_once_and_settles_every_issue(layer):
     assert "배치 회차면 **실린 이슈마다** 같은 사유로 닫는다" in wrapup
     assert "여기서 손대지 않는다 — 상태도 assignee도 그대로다" in wrapup
     assert "UNQUEUED: $CLAUNCH_SESSION landed without it" not in wrapup
-    assert "배치 회차면 주 이슈 id 하나로 한 장" in wrapup   # one report per landing
+    # one report per landing — the phrase now lives in the round-report skill
+    # (claunch-mxxm); the yaml quotes the skill instead of carrying the spec
+    assert "배치 회차면 주 이슈 id 하나로 한 장" not in wrapup
+    from claude_launcher import report_spec
+
+    assert "one page from the primary issue's id" in report_spec.SKILL_MD
     recheck = " ".join((wf.steps["queue-recheck"].select.prompt or "").split())
     assert '--assignee ""' in recheck
     assert "UNQUEUED: $CLAUNCH_SESSION landed without it" in recheck
