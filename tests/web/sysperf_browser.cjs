@@ -8,7 +8,7 @@
      2. the badge polls the latest sample only (no ?history);
      3. clicking it opens the page, which reads the history once and draws
         three line charts (CPU, Memory, Disk I/O with a read/write legend),
-        the detail table and the log location;
+        the detail table, the per-drive capacity table and the log location;
      4. hovering a chart shows one tooltip listing every series;
      5. leaving the page drops it: the view is hidden again.
    Set SYSPERF_SHOT=<path> to save a screenshot of the page. */
@@ -21,12 +21,19 @@ const { safeListen } = require("./safe_listen.cjs");
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 
 const now = Math.floor(Date.now() / 1000);
+// Two drives, as claunch-frgt1 reports them: the daemon root's filesystem
+// and a workspace on another mount, the latter nearly full.
+const usage = [
+  { mount: "/", label: "/", total: 1000 * 2 ** 30, used: 450 * 2 ** 30, free: 550 * 2 ** 30, pct: 45 },
+  { mount: "/mnt/d", label: "/mnt/d", total: 2000 * 2 ** 30, used: 1900 * 2 ** 30, free: 100 * 2 ** 30, pct: 95 },
+];
 const history = Array.from({ length: 60 }, (_, i) => ({
   ts: now - (59 - i) * 5, interval_s: 5, source: "procfs", cpus: 8,
   cpu_pct: 20 + 15 * Math.sin(i / 6), mem_total: 16 * 2 ** 30,
   mem_used: 9 * 2 ** 30, mem_pct: 56.3, load1: 1.5,
   disk_read_bps: 1024 * 1024 * (1 + Math.cos(i / 5)), disk_write_bps: 300 * 1024,
   disk_busy_pct: 12, disks: { sda: { read_bps: 1048576, write_bps: 307200, busy_pct: 12 } },
+  usage,
 }));
 const latest = { ...history[history.length - 1], cpu_pct: 93.4 };
 const requests = [];
@@ -74,7 +81,9 @@ const server = http.createServer((req, res) => {
     await badge.waitFor({ state: "visible" });
     await page.waitForFunction(() => /CPU 93%/.test(document.getElementById("sysperf-badge").textContent));
     const text = await badge.textContent();
-    assert.match(text, /^CPU 93% · MEM 56% · IO \d\.\dM\/s$/);
+    assert.match(text, /^CPU 93% · MEM 56% · IO [\d.]+M\/s · DISK \/mnt\/d 95% \+1$/);
+    assert.match(await badge.getAttribute("title"), /disk \/mnt\/d \(\/mnt\/d\): .* \(95%\)/);
+    assert.match(await badge.getAttribute("title"), /disk \/ \(\/\): /);
     assert.equal(await badge.getAttribute("href"), "#/sysperf");
     assert.match(await badge.getAttribute("class"), /latency-bad/, "graded by its busiest number");
     assert.match(await badge.getAttribute("title"), /of 8 CPUs/);
@@ -95,16 +104,22 @@ const server = http.createServer((req, res) => {
         lines: [...v.querySelectorAll("path.sysperf-line")].map((p) => p.getAttribute("class")),
         legend: [...v.querySelectorAll(".sysperf-legend-item")].map((e) => e.textContent),
         table: v.querySelector(".sysperf-table").textContent,
+        capacity: v.querySelector(".sysperf-usage")?.textContent ?? "",
+        full: [...v.querySelectorAll(".sysperf-usage td")].filter((td) => td.className === "s-full").length,
         log: v.textContent.includes("sysperf.log"),
         wide: document.documentElement.scrollWidth <= window.innerWidth,
       };
     });
     assert.equal(view.hidden, false);
-    assert.deepEqual(view.titles, ["CPU", "Memory", "Disk I/O", "Now", "Log"]);
+    assert.deepEqual(view.titles, ["CPU", "Memory", "Disk I/O", "Now", "Disk capacity", "Log"]);
     assert.equal(view.charts, 3);
     assert.equal(view.lines.length, 4, "CPU, memory, disk read and disk write");
     assert.deepEqual(view.legend, ["Read", "Write"]);
     assert.match(view.table, /of 8 logical CPUs/);
+    assert.match(view.capacity, /\/mnt\/d/);
+    assert.match(view.capacity, /95%/);
+    assert.match(view.capacity, /45%/);
+    assert.equal(view.full, 1, "the 95% drive is graded full, the 45% one is not");
     assert.ok(view.log, "the page says where the log is");
     assert.ok(view.wide, "no horizontal page scroll");
 

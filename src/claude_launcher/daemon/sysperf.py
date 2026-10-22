@@ -1,10 +1,16 @@
-"""The machine's CPU, memory and disk I/O, sampled for the dashboard
-(claunch-zuk0b).
+"""The machine's CPU, memory, disk I/O and disk capacity, sampled for the
+dashboard (claunch-zuk0b, claunch-frgt1).
 
 The rail header shows the latest sample; the System performance page draws
 the in-memory history; and every sample is also written as one JSON line to a
 size-rotated log (``<daemon dir>/logs/sysperf.log``) so a slowdown that
 happened while nobody had the page open still leaves a record to read.
+
+Capacity is a gauge, not a rate: each sample carries ``usage``, one entry per
+drive the daemon cares about — the filesystem holding its own runtime root
+plus every registered workspace. A path becomes its mount point, so the same
+drive counts once however many workspaces sit on it (``/mnt/c`` under WSL,
+``C:\\`` on Windows).
 
 Counters come from psutil when it is importable, else from procfs (Linux,
 WSL), else from the Win32 API through ctypes (CPU and memory only: Windows
@@ -28,13 +34,15 @@ import logging
 import logging.handlers
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 from aiohttp import web
 
+from .. import workspaces
 from . import paths
 
 #: Seconds between samples (``daemon.sysperf_interval_s``; 0 turns the
@@ -266,6 +274,112 @@ def read_counters() -> dict:
     return reading
 
 
+# --------------------------------------------------------------- capacity
+#
+# A capacity entry is one drive:
+#   mount    the filesystem's mount point ("/" or "/mnt/c", "C:\\")
+#   label    the short name the badge prints ("C:", "/mnt/c")
+#   total, used, free   bytes
+#   pct      used / total in percent, None when the size is unknown
+
+#: How long the drive list (and its numbers) is reused. Capacity moves
+#: slowly and resolving it reads the config file, so one reading per minute
+#: is enough for a badge that is redrawn every few seconds.
+USAGE_TTL = 60.0
+
+_WIN_DRIVE = re.compile(r"^([A-Za-z]):[\\/]?$")
+
+
+def mount_point(path: str) -> Optional[str]:
+    """The filesystem root ``path`` lives on, or None if it cannot be found.
+
+    Windows drives are their own root, so a "C:\\..." path answers "C:\\"
+    without walking anywhere. Elsewhere the path is walked up to an existing
+    ancestor and then to the nearest mount point, which is what maps both a
+    native "/" and a WSL "/mnt/c" to a drive.
+    """
+    try:
+        current = Path(os.path.abspath(os.path.expanduser(str(path))))
+    except (OSError, ValueError, TypeError):
+        return None
+    drive, _ = os.path.splitdrive(str(current))
+    if drive:
+        return drive + os.sep
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+    while not os.path.ismount(current):
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return str(current)
+
+
+def drive_label(mount: str) -> str:
+    """How the drive is named on screen: "C:" for a Windows drive letter,
+    the mount point itself otherwise ("/", "/mnt/c")."""
+    found = _WIN_DRIVE.match(mount or "")
+    if found:
+        return found.group(1).upper() + ":"
+    return mount or "?"
+
+
+def disk_usage(
+    paths: Iterable[str],
+    *,
+    mount_of: Optional[Callable[[str], Optional[str]]] = None,
+    usage_of: Optional[Callable[[str], Any]] = None,
+) -> List[dict]:
+    """Capacity of every distinct drive among ``paths``, mount-sorted.
+
+    Two workspaces on one drive give one entry. A path whose drive cannot be
+    resolved or read (an unplugged network share, a permission error) is
+    skipped rather than raising: the badge still has to show the others.
+    """
+    mount_of = mount_point if mount_of is None else mount_of
+    usage_of = shutil.disk_usage if usage_of is None else usage_of
+    found: Dict[str, dict] = {}
+    for raw in paths:
+        mount = mount_of(str(raw))
+        if not mount or mount in found:
+            continue
+        try:
+            usage = usage_of(mount)
+        except OSError:
+            continue
+        total = int(getattr(usage, "total", 0) or 0)
+        used = int(getattr(usage, "used", 0) or 0)
+        free = int(getattr(usage, "free", 0) or 0)
+        found[mount] = {
+            "mount": mount,
+            "label": drive_label(mount),
+            "total": total,
+            "used": used,
+            "free": free,
+            "pct": round(100.0 * used / total, 1) if total else None,
+        }
+    return [found[mount] for mount in sorted(found)]
+
+
+def usage_paths() -> List[str]:
+    """The paths whose drives the badge reports: the daemon's own runtime
+    root first, then every registered workspace."""
+    targets = [str(paths.daemon_dir())]
+    try:
+        targets.extend(workspace.path for workspace in workspaces.list_all())
+    except Exception as exc:  # a broken config must not stop the sampling
+        log.warning("sysperf: cannot list workspaces: %s: %s", type(exc).__name__, exc)
+    return targets
+
+
+def read_usage() -> List[dict]:
+    """Capacity of the daemon root's drive and every workspace's drive."""
+    return disk_usage(usage_paths())
+
+
 def sample(prev: dict, cur: dict, *, ts: Optional[float] = None) -> dict:
     """The rates between two readings. Counters that went backwards (a
     disk that disappeared and came back, a counter wrap) give 0, never a
@@ -345,6 +459,8 @@ class SysPerf:
         interval: float = INTERVAL,
         history: int = HISTORY,
         reader: Callable[[], dict] = read_counters,
+        usage: Callable[[], List[dict]] = read_usage,
+        usage_ttl: float = USAGE_TTL,
         log_file: Optional[Path] = None,
         log_max_bytes: int = LOG_MAX_BYTES,
         log_backups: int = LOG_BACKUPS,
@@ -355,7 +471,10 @@ class SysPerf:
         self.log_file = log_file
         self.log_max_bytes = log_max_bytes
         self.log_backups = log_backups
+        self.usage_ttl = usage_ttl
         self._reader = reader
+        self._usage_reader = usage
+        self._usage_cache: Optional[Tuple[float, List[dict]]] = None
         self._prev: Optional[dict] = None
         self._task: Optional[asyncio.Task] = None
         # A logger of its own per collector: never propagated into
@@ -392,16 +511,38 @@ class SysPerf:
             self._log.removeHandler(handler)
             handler.close()
 
-    def tick(self, reading: dict) -> Optional[dict]:
-        """Fold one reading in; return the new sample (None for the first)."""
+    def tick(self, reading: dict, *, usage: Optional[List[dict]] = None) -> Optional[dict]:
+        """Fold one reading in; return the new sample (None for the first).
+
+        ``usage`` is the capacity list to carry in the sample; passing it
+        here rather than appending afterwards keeps the log line, which is
+        written now, identical to the sample the page reads."""
         prev, self._prev = self._prev, reading
         if prev is None:
             return None
         point = sample(prev, reading)
+        if usage is not None:
+            point["usage"] = usage
         self.history.append(point)
         if self._handler is not None:
             self._log.info(json.dumps(point, separators=(",", ":"), sort_keys=True))
         return point
+
+    def usage(self) -> List[dict]:
+        """The drives' capacity, reused for ``usage_ttl`` seconds: the badge
+        is redrawn every few seconds, capacity moves far slower than that."""
+        now = time.monotonic()
+        cached = self._usage_cache
+        if cached is not None and now - cached[0] < self.usage_ttl:
+            return cached[1]
+        try:
+            value = self._usage_reader()
+        except Exception as exc:
+            log.warning("sysperf: reading disk capacity failed: %s: %s",
+                        type(exc).__name__, exc)
+            return []
+        self._usage_cache = (now, value)
+        return value
 
     def poll_once(self) -> Optional[dict]:
         try:
@@ -413,7 +554,7 @@ class SysPerf:
             self.error = message
             return None
         self.error = None
-        return self.tick(reading)
+        return self.tick(reading, usage=self.usage())
 
     def start(self) -> None:
         if not self.enabled:

@@ -4780,11 +4780,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .badge.latency-idle { background: #30363d; color: #8b949e; }
 .badge.latency-slow { background: #46350f; color: #e3b341; }
 .badge.latency-bad { background: #442022; color: #ff7b72; }
-/* The machine's CPU / MEM / IO (claunch-zuk0b): a link to #/sysperf, graded
+/* The machine's CPU / MEM / IO / DISK (claunch-zuk0b, claunch-frgt1): a link to #/sysperf, graded
    with the latency colours by its busiest number. */
+/* Four readings (CPU, MEM, IO, DISK) do not fit one line on a 260px rail:
+   the pill wraps between them instead of running off the header. */
 #sysperf-badge {
-  flex: none; white-space: nowrap; font-variant-numeric: tabular-nums;
-  text-decoration: none;
+  flex: 0 1 auto; min-width: 0; white-space: normal;
+  font-variant-numeric: tabular-nums; text-decoration: none;
 }
 #sysperf-badge:hover { text-decoration: underline; }
 /* Which road the control socket is on through the tunnel (claunch-mhzt4). */
@@ -8784,6 +8786,11 @@ body.split-max #term-wf { flex: 1 1 0; }
 }
 .sysperf-table th { color: #9da5b0; font-weight: normal; }
 .sysperf-disks { margin-top: 10px; }
+/* Disk capacity (claunch-frgt1): the drive table, graded the way the badge
+   grades itself — 70 % is worth noticing, 90 % stops work. */
+.sysperf-usage { margin-top: 6px; }
+.sysperf-usage td.s-near { color: #e3b341; }
+.sysperf-usage td.s-full { color: #ff7b72; }
 
 /* ---- Category trees (category-page.js, #/category, claunch-p2v4m) ---- */
 #category-view, .category-host {

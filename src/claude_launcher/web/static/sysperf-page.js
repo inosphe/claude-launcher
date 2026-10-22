@@ -1,7 +1,9 @@
-/* System performance (claunch-zuk0b): the rail header's CPU / MEM / IO badge
-   and the #/sysperf page behind it. The daemon samples the machine
-   (daemon/sysperf.py) every few seconds into an in-memory history and a
-   rotating log; this module reads GET /api/sysperf.
+/* System performance (claunch-zuk0b, claunch-frgt1): the rail header's
+   CPU / MEM / IO / DISK badge and the #/sysperf page behind it. The daemon
+   samples the machine (daemon/sysperf.py) every few seconds into an
+   in-memory history and a rotating log; this module reads GET /api/sysperf.
+   Each sample carries `usage`: one entry per drive (the daemon's own root
+   plus every workspace's), which the badge summarises and the page tabulates.
 
    The badge asks for the latest sample only (a few hundred bytes) and skips
    its poll while the tab is hidden. The page reads the whole history once on
@@ -37,9 +39,22 @@
   const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const ioTotal = (s) => (typeof s.disk_read_bps === "number" ? s.disk_read_bps + (s.disk_write_bps || 0) : null);
 
+  // The fullest drive among the sample's usage entries: the badge names that
+  // one and grades itself by it, since a full disk stops work sooner than a
+  // busy one.
+  function fullestDrive(usage) {
+    let worst = null;
+    for (const d of usage || []) {
+      if (typeof d.pct !== "number") continue;
+      if (!worst || d.pct > worst.pct) worst = d;
+    }
+    return worst;
+  }
+
   function grade(s) {
     if (!s) return "latency-idle";
-    const worst = Math.max(s.cpu_pct || 0, s.mem_pct || 0, s.disk_busy_pct || 0);
+    const disk = fullestDrive(s.usage);
+    const worst = Math.max(s.cpu_pct || 0, s.mem_pct || 0, s.disk_busy_pct || 0, disk ? disk.pct : 0);
     if (worst >= 90) return "latency-bad";
     if (worst >= 70) return "latency-slow";
     return "latency-ok";
@@ -61,20 +76,29 @@
     badge.classList.remove("hidden");
     const s = data && data.latest;
     if (!s) {
-      badge.textContent = "CPU … · MEM … · IO …";
+      badge.textContent = "CPU … · MEM … · IO … · DISK …";
       badge.className = "badge latency-idle";
       badge.title = error || (data && data.error) || "waiting for the first sample";
       return;
     }
-    badge.textContent = `CPU ${fmtPct(s.cpu_pct)} · MEM ${fmtPct(s.mem_pct)} · IO ${fmtBytes(ioTotal(s), "/s")}`;
+    const usage = (s.usage || []).filter((d) => d && d.mount);
+    const disk = fullestDrive(usage);
+    // The badge has room for the fullest drive and a count of the rest; the
+    // tooltip and the page's capacity table list every drive.
+    const extra = disk ? usage.length - 1 : 0;
+    badge.textContent = `CPU ${fmtPct(s.cpu_pct)} · MEM ${fmtPct(s.mem_pct)} · IO ${fmtBytes(ioTotal(s), "/s")}` +
+      (disk ? ` · DISK ${disk.label} ${fmtPct(disk.pct)}${extra > 0 ? ` +${extra}` : ""}` : "");
     badge.className = `badge ${grade(s)}`;
     badge.title = [
       `CPU ${fmtPct(s.cpu_pct)} of ${s.cpus || "?"} CPUs` + (s.load1 != null ? `, load ${s.load1}` : ""),
       `memory ${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)} (${fmtPct(s.mem_pct)})`,
       `disk read ${fmtBytes(s.disk_read_bps, "/s")}, write ${fmtBytes(s.disk_write_bps, "/s")}` +
         (s.disk_busy_pct != null ? `, busiest disk ${fmtPct(s.disk_busy_pct)} busy` : ""),
-      `source: ${s.source || "?"} · ${fmtTime(s.ts)} — click for history`,
-    ].join("\n");
+    ].concat(usage.map((d) =>
+      `disk ${d.label} (${d.mount}): ${fmtBytes(d.used)} used of ${fmtBytes(d.total)}, ` +
+      `${fmtBytes(d.free)} free (${fmtPct(d.pct)})`))
+      .concat([`source: ${s.source || "?"} · ${fmtTime(s.ts)} — click for history`])
+      .join("\n");
   }
 
   async function pollBadge() {
@@ -273,6 +297,34 @@
     return table;
   }
 
+  /* Capacity per drive: the daemon's own root plus every registered
+     workspace's drive, deduplicated by mount (daemon/sysperf.disk_usage). */
+  function capacityTable(usage) {
+    const drives = (usage || []).filter((d) => d && d.mount);
+    if (!drives.length) return null;
+    const table = node("table", "sysperf-table sysperf-usage");
+    const head = node("tr");
+    for (const h of ["Drive", "Used", "Free", "Total", "Used %"]) {
+      head.append(node("th", "", h));
+    }
+    table.append(head);
+    for (const d of drives) {
+      const tr = node("tr");
+      const name = node("td", "", d.label || d.mount);
+      name.title = d.mount;
+      const pct = node("td", "", fmtPct(d.pct));
+      // Same grades as the badge: slow at 70 %, bad at 90 %.
+      if (typeof d.pct === "number") {
+        if (d.pct >= 90) pct.className = "s-full";
+        else if (d.pct >= 70) pct.className = "s-near";
+      }
+      tr.append(name, node("td", "", fmtBytes(d.used)), node("td", "", fmtBytes(d.free)),
+        node("td", "", fmtBytes(d.total)), pct);
+      table.append(tr);
+    }
+    return table;
+  }
+
   function render() {
     const view = document.getElementById("sysperf-view");
     if (!view || !page.open) return;
@@ -318,6 +370,16 @@
       const disks = diskTable(latest.disks);
       if (disks) card.append(disks);
       view.append(card);
+      const capacity = capacityTable(latest.usage);
+      if (capacity) {
+        const capCard = node("section", "window-section sysperf-card");
+        capCard.append(node("h3", "", "Disk capacity"));
+        capCard.append(node("p", "wf-note",
+          "The drive holding the daemon's runtime root, plus the drive of every registered workspace. " +
+          "Each drive is listed once however many workspaces sit on it."));
+        capCard.append(capacity);
+        view.append(capCard);
+      }
     }
     if (info.log && info.log.path) {
       const card = node("section", "window-section sysperf-card");

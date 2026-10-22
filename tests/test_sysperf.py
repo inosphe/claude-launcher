@@ -1,19 +1,22 @@
-"""The machine sampler behind the rail header's CPU / MEM / IO badge and the
-System performance page (daemon/sysperf.py, claunch-zuk0b)."""
+"""The machine sampler behind the rail header's CPU / MEM / IO / DISK badge
+and the System performance page (daemon/sysperf.py, claunch-zuk0b,
+claunch-frgt1)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher import store
+from claude_launcher import store, workspaces
 from claude_launcher.daemon import sysperf
 
 STATIC = Path(__file__).resolve().parents[1] / "src" / "claude_launcher" / "web" / "static"
@@ -219,6 +222,126 @@ def test_read_counters_on_this_machine():
     assert reading["source"] in ("psutil", "procfs", "win32")
 
 
+# ---------------------------------------------------------------- capacity
+
+
+def _disk(total, used):
+    return SimpleNamespace(total=total, used=used, free=total - used)
+
+
+def test_mount_point_of_a_directory_is_its_filesystem_root(tmp_path):
+    mount = sysperf.mount_point(str(tmp_path))
+    assert mount and os.path.ismount(mount)
+
+
+def test_mount_point_walks_a_missing_path_to_an_existing_ancestor(tmp_path):
+    assert (sysperf.mount_point(str(tmp_path / "missing" / "deeper"))
+            == sysperf.mount_point(str(tmp_path)))
+
+
+def test_drive_label_names_windows_drives_and_posix_mounts():
+    assert sysperf.drive_label("F:\\") == "F:"
+    assert sysperf.drive_label("c:") == "C:"
+    assert sysperf.drive_label("/mnt/c") == "/mnt/c"
+    assert sysperf.drive_label("/") == "/"
+
+
+def test_disk_usage_lists_each_mount_once():
+    mounts = {"/ws/a": "/", "/ws/b": "/", "/ws/c": "/mnt/d"}
+    sizes = {"/": _disk(1000, 250), "/mnt/d": _disk(2000, 500)}
+    rows = sysperf.disk_usage(
+        ["/ws/a", "/ws/b", "/ws/c"],
+        mount_of=mounts.get,
+        usage_of=lambda mount: sizes[mount],
+    )
+    assert [row["mount"] for row in rows] == ["/", "/mnt/d"]
+    assert rows[0] == {
+        "mount": "/", "label": "/", "total": 1000, "used": 250, "free": 750, "pct": 25.0,
+    }
+    assert rows[1]["pct"] == 25.0
+
+
+def test_disk_usage_skips_a_drive_it_cannot_read():
+    def usage(mount):
+        if mount == "/mnt/e":
+            raise OSError("the drive is not connected")
+        return _disk(100, 90)
+
+    rows = sysperf.disk_usage(
+        ["/a", "/b"], mount_of={"/a": "/mnt/e", "/b": "/"}.get, usage_of=usage
+    )
+    assert [row["mount"] for row in rows] == ["/"]
+    assert rows[0]["pct"] == 90.0
+
+
+def test_usage_paths_are_the_daemon_root_and_every_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(sysperf.paths, "daemon_dir", lambda: tmp_path / "daemon")
+    monkeypatch.setattr(sysperf.workspaces, "list_all", lambda: [
+        workspaces.Workspace("a", "/mnt/c/works/a"),
+        workspaces.Workspace("b", "/mnt/d/works/b"),
+    ])
+    assert sysperf.usage_paths() == [
+        str(tmp_path / "daemon"), "/mnt/c/works/a", "/mnt/d/works/b",
+    ]
+
+
+def test_usage_paths_survive_a_boardless_or_broken_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(sysperf.paths, "daemon_dir", lambda: tmp_path / "daemon")
+
+    def broken():
+        raise store.StoreError("cannot read config file")
+
+    monkeypatch.setattr(sysperf.workspaces, "list_all", broken)
+    assert sysperf.usage_paths() == [str(tmp_path / "daemon")]
+
+
+def test_samples_carry_disk_capacity_and_reuse_it():
+    clock = iter(range(100))
+    calls = []
+
+    def usage():
+        calls.append(1)
+        return [{"mount": "/", "label": "/", "total": 100, "used": 50, "free": 50, "pct": 50.0}]
+
+    sp = sysperf.SysPerf(reader=lambda: _reading(float(next(clock)), 0, 1), usage=usage)
+    assert sp.poll_once() is None
+    point = sp.poll_once()
+    assert point["usage"][0]["pct"] == 50.0
+    assert sp.snapshot()["latest"]["usage"] == point["usage"]
+    for _ in range(3):
+        sp.poll_once()
+    assert len(calls) == 1, "capacity is reused inside USAGE_TTL"
+
+
+def test_usage_cache_expires_after_its_ttl():
+    clock = iter(range(100))
+    calls = []
+
+    def usage():
+        calls.append(1)
+        return []
+
+    sp = sysperf.SysPerf(
+        reader=lambda: _reading(float(next(clock)), 0, 1), usage=usage, usage_ttl=-1
+    )
+    for _ in range(3):
+        sp.poll_once()
+    assert len(calls) == 3
+
+
+def test_usage_reader_failure_leaves_the_sample_without_capacity():
+    clock = iter(range(100))
+
+    def usage():
+        raise OSError("statvfs failed")
+
+    sp = sysperf.SysPerf(reader=lambda: _reading(float(next(clock)), 0, 1), usage=usage)
+    sp.poll_once()
+    point = sp.poll_once()
+    assert point["usage"] == []
+    assert sp.snapshot()["error"] is None, "capacity is not the counter reading"
+
+
 def test_api_latest_and_history(tmp_path):
     clock = iter(range(100))
 
@@ -226,7 +349,10 @@ def test_api_latest_and_history(tmp_path):
         t = next(clock)
         return _reading(float(t), t * 10, t * 100, disks={"sda": (t * 512, 0, 0)})
 
-    collector = sysperf.SysPerf(interval=0, reader=reader, log_file=tmp_path / "sysperf.log")
+    usage = [{"mount": "/", "label": "/", "total": 1000, "used": 250, "free": 750, "pct": 25.0}]
+    collector = sysperf.SysPerf(
+        interval=0, reader=reader, usage=lambda: usage, log_file=tmp_path / "sysperf.log"
+    )
     for _ in range(3):
         collector.poll_once()
 
@@ -246,6 +372,7 @@ def test_api_latest_and_history(tmp_path):
 
     latest, full = asyncio.run(run())
     assert latest["latest"]["cpu_pct"] == 10.0
+    assert latest["latest"]["usage"] == usage
     assert "history" not in latest
     assert latest["enabled"] is False  # interval 0: the collector is off
     assert len(full["history"]) == 2
@@ -295,3 +422,8 @@ def test_dashboard_wires_badge_page_and_route():
     assert 'if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();' in app_js
     assert "/api/sysperf" in page_js
     assert "globalThis.SysPerfPage = { open, stop, startBadge, stopBadge }" in page_js
+    # Disk capacity (claunch-frgt1): the badge names the fullest drive and
+    # the page tabulates them.
+    assert "DISK ${disk.label}" in page_js
+    assert 'node("h3", "", "Disk capacity")' in page_js
+    assert ".sysperf-usage" in (STATIC / "style.css").read_text(encoding="utf-8")
