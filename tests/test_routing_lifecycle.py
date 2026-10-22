@@ -7,6 +7,7 @@ rest once nothing needs them.
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -22,6 +23,17 @@ def owner(home, monkeypatch):
     monkeypatch.setattr(routing, "_OWNER", True)
     yield
     routing.stop()
+
+
+#: A shim is found by its fingerprint's ports, not by the home it was recorded
+#: in, so two xdist workers (or two sessions' runs) asking for the same
+#: upstream share one shim and one's teardown stops the other's. Upstreams a
+#: test starts and retires carry this process's own suffix.
+_RUN = os.urandom(3).hex()
+
+
+def _upstream(name: str) -> str:
+    return f"https://{name}-{_RUN}.example/anthropic"
 
 
 def _providers(**upstreams):
@@ -82,33 +94,32 @@ def test_outside_the_daemon_a_running_shim_is_used_when_the_daemon_is_down(owner
 # the daemon: one shim per provider, replaced on a config change
 # --------------------------------------------------------------------------- #
 def test_reconcile_starts_one_shim_per_provider_and_no_duplicates(owner):
-    _providers(a="https://a.example/anthropic", b="https://b.example/anthropic")
+    _providers(a=_upstream("a"), b=_upstream("b"))
     shims_mod.reconcile_once(None)
     shims_mod.reconcile_once(None)
     live = routing.instances()
-    assert sorted(i["upstream"] for i in live) == [
-        "https://a.example/anthropic", "https://b.example/anthropic"]
+    assert sorted(i["upstream"] for i in live) == [_upstream("a"), _upstream("b")]
 
 
 def test_a_config_change_starts_the_new_shim_and_retires_the_old_once_unused(owner):
-    _providers(a="https://a.example/anthropic")
+    _providers(a=_upstream("a"))
     routing.reconcile([])
     (old,) = routing.instances()
     routing.add_user(old["port"], session="s1")
 
-    _providers(a="https://a2.example/anthropic")
+    _providers(a=_upstream("a2"))
     later = time.time() + routing.GRACE_S + 1
     routing.reconcile(["s1"], now=later)
     upstreams = sorted(i["upstream"] for i in routing.instances())
     # the new one is up, the old one stays while s1 (launched against it) lives
-    assert upstreams == ["https://a.example/anthropic", "https://a2.example/anthropic"]
+    assert upstreams == [_upstream("a"), _upstream("a2")]
 
     result = routing.reconcile([], now=later)
     assert result["retired"] == [f"{old['fingerprint']}:{old['port']}"]
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and routing.health(old["port"]) is not None:
         time.sleep(0.05)
-    assert [i["upstream"] for i in routing.instances()] == ["https://a2.example/anthropic"]
+    assert [i["upstream"] for i in routing.instances()] == [_upstream("a2")]
 
 
 def test_a_new_shim_is_not_retired_within_the_grace(owner):
