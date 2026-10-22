@@ -461,24 +461,26 @@ served = { sessions: [WATCHED, FORGOTTEN, PLAIN, GONE] };
 
   /* The stylesheet's invariant, which this line is now part of: the rail row
      wraps, and only the declared full-width children may break it. A
-     line-breaker that landed before the ⓘ would push it onto a line of its
-     own — the four-line row this rail has been bitten by before. So the line
-     must be a direct child of the row, and it must sit after the name group,
-     not inside it. */
+     line-breaker that landed before the buttons box would push the buttons
+     onto a line of their own — the four-line row this rail has been bitten
+     by before. So the line must be a direct child of the row, and it must
+     sit after the name group, not inside it. */
   const kids = row("watched").kids;
   const seenIdx = kids.findIndex((k) => k.classes.has("rail-seen"));
   const headIdx = kids.findIndex((k) => k.classes.has("rail-head"));
-  const infoIdx = kids.findIndex((k) => k.classes.has("sess-info"));
+  const actionsIdx = kids.findIndex((k) => k.classes.has("rail-actions"));
   check("the line is a direct child of the row, after the name group",
         seenIdx > headIdx && seenIdx >= 0, true);
-  /* ⓘ stays on the row: it is ordered back onto the name line by the
-     stylesheet, so its position in the DOM after a line-breaker is fine —
-     what must not happen is the line-breaker disappearing into the head
-     box, where `nowrap` would squeeze it out of existence instead. */
+  /* ⓘ stays on the row, in the buttons line's box: its position in the DOM
+     after a line-breaker is fine — what must not happen is the line-breaker
+     disappearing into the head box, where `nowrap` would squeeze it out of
+     existence instead. */
   check("...and not inside it, where nowrap would crush it",
         descendants(kids[headIdx]).some((k) => k.classes.has("rail-seen")),
         false);
-  check("the ⓘ is still on the row", infoIdx >= 0, true);
+  check("the ⓘ is still on the row, inside the buttons box",
+        actionsIdx >= 0 && descendants(kids[actionsIdx]).some((k) => k.classes.has("sess-info")),
+        true);
 
   /* ---------------------------------------------------------------- */
   /* the stamps moving is not a reason to rebuild the rail             */

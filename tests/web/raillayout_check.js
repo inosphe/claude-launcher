@@ -8,9 +8,9 @@
    What has to hold: the name, the role it holds and the rooms it is in are
    ONE group in ONE container, so they share a line and shrink instead of
    wrapping; nothing that belongs on that line declares itself full-width; the
-   only full-width children are the four deliberate lines below (the briefing
-   one-liner, the context gauge, the cflow run and the folded-open briefing
-   card) and all sort AFTER the toggle; and the tags still say which rooms,
+   only full-width children are the deliberate lines below — the buttons line
+   (.rail-actions, claunch-ku033) first, then the sub-lines — each sorting at
+   or after the toggle's order; and the tags still say which rooms,
    since a pill that can shrink to an empty capsule has lost the fact it was
    drawn for.
 
@@ -227,17 +227,22 @@ ctx.setMeshes([
   /* The row's own children ARE its lines: anything that is not on the name
      line has to be a full-width child, so counting the direct children is
      how many things are competing for that line. The name, its role and its
-     rooms must not be three of them. */
+     rooms must not be three of them — and neither must the action buttons,
+     which travel in the full-width .rail-actions box one line below the
+     name line (claunch-ku033). */
   // rail-role-line: the role again, drawn only on the selected card
   // (claunch-g4owg.1; railroleline_browser.cjs measures it)
-  check("the row's parts are the dot, the name group, the profile, the selected card's role line, the directory line, the context line, the attention line, the spawn + and the ⓘ",
+  check("the row's parts are the dot, the name group, the profile, the selected card's role line, the directory line, the context line, the attention line and the buttons box",
         kidClasses(row("s21")),
         ["dot busy", "rail-head", "meta", "rail-role-line", "rail-cwd", "rail-ctx-line unknown",
-         "rail-seen", "sess-plus", "sess-info"]);
-  check("a session with no role and one room keeps the same nine parts",
+         "rail-seen", "rail-actions"]);
+  check("a session with no role and one room keeps the same eight parts",
         kidClasses(row("loner")),
         ["dot idle", "rail-head", "meta", "rail-role-line", "rail-cwd", "rail-ctx-line unknown",
-         "rail-seen", "sess-plus", "sess-info"]);
+         "rail-seen", "rail-actions"]);
+  check("the spawn + and the ⓘ travel inside the buttons box, not loose on the row",
+        (row("s21").querySelector(".rail-actions") || node("span")).kids.map((k) => k.className),
+        ["sess-plus", "sess-info"]);
 
   /* New sessions store their role on mesh membership. The rail must use that
      authoritative value even when /api/sessions intentionally returns no
@@ -367,6 +372,7 @@ ctx.setMeshes([
      created/lifetime line, for every session with a creation stamp — see
      raillife_check.) */
   const BREAKERS = [
+    "#session-list .rail-actions",
     "#session-list .rail-cwd", "#session-list .rail-beads",
     "#session-list .rail-brief", "#session-list .rail-ctx-line",
     "#session-list .rail-seen", "#session-list .rail-life",
@@ -387,7 +393,7 @@ ctx.setMeshes([
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the age line, the quiet line, the note line (or its editor), the progress line, the process line, the commit line, the status-check line, the cflow line, the cflow v2 line, the simulation line, the briefing card, the talk line and the selected card's role line break the row",
+  check("only the buttons line, the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the age line, the quiet line, the note line (or its editor), the progress line, the process line, the commit line, the status-check line, the cflow line, the cflow v2 line, the simulation line, the briefing card, the talk line and the selected card's role line break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
@@ -411,15 +417,28 @@ ctx.setMeshes([
 
   const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));
   ok("the ▸ toggle declares an order", Number.isFinite(toggleOrder));
+  const actionsOrder = Number(decl("#session-list .rail-actions", "order"));
+  ok("the buttons line declares an order", Number.isFinite(actionsOrder));
   for (const sel of BREAKERS) {
+    if (sel === "#session-list .rail-actions") {
+      // The buttons line is the toggle's own line: it sorts at the toggle's
+      // order, directly after the name line, and the toggle's matching order
+      // keeps it the last button inside the box.
+      ok(`${sel} sorts at the toggle's order — it is the toggle's line`,
+         Number.isFinite(actionsOrder) && actionsOrder === toggleOrder,
+         `order ${decl(sel, "order")} vs toggle ${toggleOrder}`);
+      continue;
+    }
     const o = Number(decl(sel, "order"));
-    ok(`${sel} sorts after the toggle so the toggle stays on the name line`,
-       Number.isFinite(o) && o > toggleOrder, `order ${decl(sel, "order")} vs toggle ${toggleOrder}`);
+    ok(`${sel} sorts after the buttons line so the name and buttons keep their lines`,
+       Number.isFinite(o) && o > actionsOrder, `order ${decl(sel, "order")} vs buttons line ${actionsOrder}`);
   }
 
   /* The name group holds its line by refusing to wrap and by basing at 0 —
      a flex line is wrapped on base sizes and only shrunk afterwards, so a
-     content-sized box would push the ⓘ and ▸ off before shrinking. */
+     content-sized box would push the meta off before shrinking. The row's
+     buttons are not on this line at all any more: they travel in the
+     full-width .rail-actions box under it. */
   check("the name group never wraps",
         decl("#session-list .rail-head", "flex-wrap"), "nowrap");
   const headFlex = decl("#session-list .rail-head", "flex") || "";
@@ -443,8 +462,17 @@ ctx.setMeshes([
      !decl("#session-list .rail-name", "overflow") ||
      decl("#session-list .rail-name", "overflow") === "visible",
      `overflow is ${decl("#session-list .rail-name", "overflow")}`);
+  /* The name still wraps whole (never clipped) when the group is squeezed,
+     but the break must not be advertised per character: `anywhere` lets a
+     squeezed flex line collapse the name to one character per line
+     (claunch-ku033). `break-word` breaks an unbroken worktree-style name
+     only to fill the width the name is actually given, and the em floor
+     keeps the shrink from squeezing it below a readable line. */
   check("an unbroken worktree-style name breaks rather than widening the rail",
-        decl("#session-list .rail-name", "overflow-wrap"), "anywhere");
+        decl("#session-list .rail-name", "overflow-wrap"), "break-word");
+  ok("the rail name keeps a readable floor so the shrink cannot squeeze it into a vertical stack",
+     /^\d+(\.\d+)?em$/.test(decl("#session-list .rail-name", "min-width") || ""),
+     `min-width is ${decl("#session-list .rail-name", "min-width")}`);
   check("the narrow-container name cap is gone — it would clip the wrapped second line",
         decl("#session-list .rail-name", "max-width"), "none");
 
