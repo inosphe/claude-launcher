@@ -359,6 +359,11 @@ class Queue:
                 elif not covered and (not pause or not pause["job"]):
                     db.execute("INSERT INTO pauses(common,job) VALUES (?,?) ON CONFLICT(common) "
                                "DO UPDATE SET job=excluded.job,repair_issue=NULL", (row["common"], ident))
+                    if auto_remeasure:
+                        # The merges this tip covered are swept one by one, so the first
+                        # that fails is the one that broke the batch (``unbatch``).
+                        db.execute("UPDATE jobs SET status='queued',covered_by=NULL,bisect_of=?,available=0 "
+                                   "WHERE covered_by=? AND status='covered'", (ident, ident))
                 elif not covered and pause["repair_issue"] and pause["repair_issue"] == row["issue"]:
                     # The repair's own merge sweep failed: the pause follows the new
                     # failure and the slot empties so the next repair can be assigned.

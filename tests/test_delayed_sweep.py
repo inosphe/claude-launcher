@@ -1046,6 +1046,21 @@ def test_a_failed_batch_is_narrowed_by_unbatch_even_while_paused(repo, tmp_path)
     assert again["id"] == jobs[0]["id"] and again["bisect_of"] == tip["id"]
 
 
+def test_a_repeated_batch_failure_releases_the_covered_merges_by_itself(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abc"))
+    tip = q.claim(batch=(3, 0))
+    q.finish(tip["id"], "failed", "r", "boom", auto_remeasure=True)
+    assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["covered", "covered"]  # first failure: measured again
+    assert q.status(repo)["pauses"] == []
+    assert q.claim(batch=(3, 0))["id"] == tip["id"]
+    q.finish(tip["id"], "failed", "r2", "boom", auto_remeasure=True)
+    assert q.status(repo)["pauses"][0]["job"] == tip["id"]
+    assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["queued", "queued"]
+    again = q.claim(batch=(3, 0))
+    assert again["id"] == jobs[0]["id"] and again["bisect_of"] == tip["id"]
+
+
 def test_unbatch_refuses_a_tip_that_has_no_verdict(repo, tmp_path):
     q = queue(tmp_path)
     jobs = merges(q, repo, ["a", "b"])
