@@ -59,9 +59,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from claude_launcher import pytest_basetemp  # noqa: E402
 from claude_launcher.daemon import basetemp_reaper as reaper  # noqa: E402
 
-#: Registry directories, in read order: this instance's daemon directory and
-#: every named instance under it. Missing ones are skipped.
-LIVE, ENDED, ORPHAN = "live", "ended", "orphan"
+LIVE, ENDED, ORPHAN, AMBIGUOUS = "live", "ended", "orphan", "ambiguous"
 
 
 def session_states(dirs: Optional[Iterable[Path]] = None) -> Dict[str, str]:
@@ -92,11 +90,23 @@ def session_states(dirs: Optional[Iterable[Path]] = None) -> Dict[str, str]:
 
 
 def classify(name: str, states: Dict[str, str]) -> str:
-    """Whose entry ``name`` is: a live session, an ended one, or nobody's."""
+    """Whose entry ``name`` is: a live session, an ended one, or nobody's.
+
+    ``ambiguous`` is the fourth answer, and it exists because the reaper's
+    shape list is deliberately narrow: ``s29d``, ``s29om`` and ``s29w2`` are
+    none of `<session>`, `<session>w`, `<session>c<stamp>` or
+    `<session>-<anything>`, so nothing owns them -- while they are obviously
+    named after a session that is still alive. Deleting them on the strength
+    of "no owner" is the mistake this guards (measured 2026-10-22: five such
+    trees under basetemp, 510 inodes, all held by hand).
+    """
     owner = reaper.owner(name, states)
-    if owner is None:
-        return ORPHAN
-    return states[owner]
+    if owner is not None:
+        return states[owner]
+    for live in (n for n, s in states.items() if s == LIVE):
+        if name.startswith(live):
+            return AMBIGUOUS
+    return ORPHAN
 
 
 def readable(path: Path) -> bool:
@@ -194,7 +204,134 @@ def plan(rows: List[dict], stale_days: float) -> List[dict]:
     ]
 
 
-def render(rows: List[dict], batches: List[dict], root: Path) -> str:
+# ---- worktrees ----------------------------------------------------------- #
+#
+# `$CLAUNCH_SCRATCH` sits inside the launcher home, so a linked worktree made
+# there (a review checkout, a test tree) is registered with the session's own
+# repository and outlives the session unless someone removes it. 443 were
+# registered on 2026-10-22, 308 of them under a session's scratch.
+#
+# Removal is `git worktree remove` (which unregisters) -- not `rm -rf`, which
+# leaves the registration behind and makes `git worktree prune` the only way
+# to find it again. Nothing here removes anything.
+
+#: A path under this segment belongs to the session named right after it:
+#: ``<launcher home>/daemon/sessions/<session>/scratch/<tree>``.
+_SESSIONS_SEGMENT = "sessions"
+_SCRATCH_SEGMENT = "scratch"
+
+
+def parse_worktrees(porcelain: str) -> List[dict]:
+    """``git worktree list --porcelain`` -> one dict per worktree.
+
+    The format is blank-line separated stanzas of ``key value`` lines; only
+    the three keys this needs are read, and an unparsable stanza is skipped
+    rather than guessed at.
+    """
+    out: List[dict] = []
+    current: Dict[str, str] = {}
+    for line in porcelain.splitlines() + [""]:
+        if not line.strip():
+            if current.get("worktree"):
+                branch = current.get("branch") or ""
+                out.append({
+                    "path": current["worktree"],
+                    "head": current.get("HEAD", ""),
+                    "branch": branch[len("refs/heads/"):] if branch else "",
+                    "detached": not branch,
+                })
+            current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value
+    return out
+
+
+def session_of(path: str) -> Optional[str]:
+    """The session a scratch worktree belongs to, or ``None``.
+
+    Only the daemon's own layout is read: a path that does not sit under
+    ``daemon/sessions/<name>/scratch/`` names no session here, and guessing
+    from an arbitrary directory name would be worse than saying nothing.
+    """
+    parts = Path(path).parts
+    for i in range(len(parts) - 2):
+        if parts[i] == "sessions" and parts[i + 2] == _SCRATCH_SEGMENT:
+            return parts[i + 1]
+    return None
+
+
+def worktree_rows(repo: Path, states: Dict[str, str], root: Path,
+                  reachable: Optional[set] = None) -> List[dict]:
+    """Every registered worktree whose path sits under ``root``, judged.
+
+    ``reachable`` is the set of commits some ref still points at
+    (:func:`reachable_commits`). A commit nothing reaches is the one case a
+    worktree cannot be recovered from after removal, so it decides the
+    verdict together with whether the owning session is alive.
+    """
+    rows = []
+    for item in parse_worktrees(_git(repo, "worktree", "list", "--porcelain")):
+        path = Path(item["path"])
+        try:
+            inside = path.resolve().is_relative_to(root.resolve())
+        except OSError:
+            inside = False
+        if not inside:
+            continue
+        session = session_of(item["path"])
+        state = states.get(session) if session else None
+        row = {
+            "path": item["path"],
+            "session": session,
+            "state": state or "unknown",
+            "branch": item["branch"] or "(detached)",
+            "head": item["head"],
+            "removable": False,
+            "why": "",
+        }
+        if state == LIVE:
+            row["why"] = "live session"
+        elif reachable is not None and item["head"] and item["head"] not in reachable:
+            row["why"] = "commit reachable from no ref"
+        else:
+            dirty = _git(path, "status", "--porcelain").strip()
+            if dirty:
+                row["why"] = "uncommitted changes"
+            else:
+                row["removable"] = True
+                row["why"] = "ended session, clean, commit still reachable"
+        rows.append(row)
+    return rows
+
+
+def reachable_commits(repo: Path) -> Optional[set]:
+    """Every commit some ref points at, or ``None`` when git cannot say."""
+    try:
+        out = _git(repo, "rev-list", "--all")
+    except OSError:
+        return None
+    if out is None:
+        return None
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git in ``repo`` and return stdout; ``""`` when it fails."""
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout if done.returncode == 0 else ""
+
+
+def render(rows: List[dict], batches: List[dict], root: Path,
+           worktrees: Optional[List[dict]] = None) -> str:
     lines = [f"root: {root}", f"entries: {len(rows)}", ""]
     counts: Dict[str, int] = {}
     for row in rows:
@@ -218,6 +355,17 @@ def render(rows: List[dict], batches: List[dict], root: Path) -> str:
         if batch["count"] > 20:
             lines.append(f"  ... and {batch['count'] - 20} more")
         lines.append("")
+    if worktrees is not None:
+        removable = [w for w in worktrees if w["removable"]]
+        lines.append(
+            f"[worktrees] {len(worktrees)} under the launcher home, "
+            f"{len(removable)} removable "
+            f"(git worktree remove <path> && git worktree prune)"
+        )
+        for item in worktrees:
+            mark = "REMOVE" if item["removable"] else "keep  "
+            lines.append(f"  {mark} {item['path']}  [{item['state']}] {item['why']}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -230,6 +378,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--measure", action="store_true",
                     help="walk each tree for file and byte counts (slow)")
     ap.add_argument("--json", action="store_true", help="emit the index as JSON")
+    ap.add_argument("--worktrees", action="store_true",
+                    help="also index the linked worktrees under the launcher home "
+                         "(one `git status` per candidate; slower)")
+    ap.add_argument("--repo", type=Path, default=Path.cwd(),
+                    help="repository whose worktrees to index (default: cwd)")
     args = ap.parse_args(argv)
 
     root = args.root or pytest_basetemp.root()
@@ -238,13 +391,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if rows is None:
         return missing_root(root)
     batches = plan(rows, args.stale_days)
+    trees = None
+    if args.worktrees:
+        trees = worktree_rows(args.repo, states, reaper.paths.base_home(),
+                              reachable_commits(args.repo))
     if args.json:
-        print(json.dumps(
-            {"root": root.as_posix(), "entries": rows, "batches": batches},
-            ensure_ascii=False, indent=1,
-        ))
+        payload = {"root": root.as_posix(), "entries": rows, "batches": batches}
+        if trees is not None:
+            payload["worktrees"] = trees
+        print(json.dumps(payload, ensure_ascii=False, indent=1))
     else:
-        print(render(rows, batches, root))
+        print(render(rows, batches, root, trees))
     return 0
 
 

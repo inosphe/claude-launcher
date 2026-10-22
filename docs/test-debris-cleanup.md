@@ -48,6 +48,12 @@ live 판정(`live_name` — running 또는 held). 이 도구는 그 넷을 다�
 `sessions.json`만 남은 인스턴스와 `CLAUNCH_INSTANCE_BASE`가 설정된 경우.
 둘 다 테스트로 고정했다.
 
+reaper의 이름 규칙에 걸리지 않는데 **이름이 살아 있는 세션으로 시작하는** 항목은
+네 번째 판정 `ambiguous`로 보낸다(`s29d`, `s29om`, `s29w2` — 2026-10-22 배치 A에서
+손으로 보류한 5개, 510 inode). 어떤 삭제 배치에도 들어가지 않는다. 이 가드는
+orphan에만 적용한다: 배치 B 후보는 정의상 live 세션이 소유한 트리이므로 같은
+규칙을 대면 428/428이 제외되어 B가 0건이 된다.
+
 | 이름 모양 | 만든 곳 |
 | --- | --- |
 | `<세션>c<MMDDHHMMSS>` | `tools/changed_tests.py` (실행마다 하나) |
@@ -115,6 +121,28 @@ live 781개 중 하루가 넘은 것은 528개다. 이들을 지우면 held 세�
 `/tmp`에 `claunch-vscode-1000-*` 빈 디렉터리 1,340개가 있다(각 1 inode).
 `/tmp`는 머신 전역이므로 다른 세션의 것이 섞여 있다. 회수량이 작고 판정 비용이
 크므로 마지막 순서다.
+
+### 배치 D — 세션 scratch 아래 linked worktree
+
+`$CLAUNCH_SCRATCH`가 런처 홈 안에 있어서, 거기 만든 linked worktree는 세션의
+저장소에 등록된 채로 세션보다 오래 산다. 2026-10-22 측정: `git worktree list`
+**443줄**, 그중 런처 홈 아래가 **308개**, 판정상 제거 가능이 **172개**.
+
+```
+uv run --no-sync python tools/test_debris_index.py --worktrees [--repo <저장소>]
+```
+
+판정은 넷이고, 하나라도 걸리면 남긴다.
+
+| 판정 | 조건 |
+| --- | --- |
+| 보호 | 그 경로의 세션이 live(held 포함) |
+| 보호 | 커밋을 가리키는 ref가 하나도 없다 — 지우면 그 커밋은 복구되지 않는다 |
+| 보호 | `git status --porcelain`이 비어 있지 않다(미커밋 변경) |
+| 제거 가능 | 종료된 세션 · 깨끗함 · 커밋이 어떤 ref에서든 도달 가능 |
+
+삭제는 `git worktree remove <path>` 뒤 `git worktree prune`이다. `rm -rf`는
+등록을 남겨 다음 사람이 그 경로를 다시 찾지 못하게 한다.
 
 ## 이 색인이 세우지 못한 것
 

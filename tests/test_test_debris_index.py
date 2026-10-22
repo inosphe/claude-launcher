@@ -136,6 +136,33 @@ def test_orphan_is_an_entry_no_registry_names():
     assert index.classify("dfv2-20261021-190339", states) == index.ORPHAN
 
 
+def test_an_orphan_named_after_a_live_session_is_ambiguous():
+    """``s29d`` has no shape in the reaper's list, but s29 is alive.
+
+    Measured 2026-10-22: five such trees under basetemp were held by hand at
+    batch A because deleting them on "no owner" could have destroyed a live
+    session's working tree.
+    """
+    states = {"s29": index.LIVE, "s7": index.ENDED}
+    assert index.classify("s29d", states) == index.AMBIGUOUS
+    assert index.classify("s29om", states) == index.AMBIGUOUS
+    assert index.classify("s29w2", states) == index.AMBIGUOUS
+    # An ended session's prefix is not protected: nothing is using it.
+    assert index.classify("s7d", states) == index.ORPHAN
+    assert index.classify("nothing-like-a-session", states) == index.ORPHAN
+
+
+def test_an_ambiguous_orphan_never_reaches_a_removal_batch(tmp_path):
+    root = tmp_path / "basetemp"
+    root.mkdir()
+    _tree(root, "s29d")
+    states = {"s29": index.LIVE}
+    rows = index.build(root, states, do_measure=False)
+    batches = {b["step"]: b for b in index.plan(rows, stale_days=0.0)}
+    assert rows[0]["state"] == index.AMBIGUOUS
+    assert batches["orphaned"]["count"] == 0
+
+
 def test_owner_shape_decides_by_longest_matching_name():
     """``s29w2`` belongs to ``s29``: it has the ``<session>-<anything>`` shape."""
     states = {"s29": index.LIVE, "s29w2": index.ENDED}
@@ -194,6 +221,94 @@ def test_a_stale_ended_tree_is_batched_by_age(tmp_path):
     rows = index.build(root, {"s4": index.ENDED}, do_measure=False)
     batches = {b["step"]: b for b in index.plan(rows, stale_days=1.0)}
     assert batches["stale"]["paths"] == [old.as_posix()]
+
+
+# ---- worktrees ----------------------------------------------------------- #
+
+PORCELAIN = """\
+worktree /repo
+HEAD aaaa1111
+branch refs/heads/master
+
+worktree /home/me/.claude-launcher/daemon/sessions/s9/scratch/rev-x
+HEAD bbbb2222
+detached
+
+worktree /home/me/.claude-launcher/daemon/sessions/s10/scratch/tree
+HEAD cccc3333
+branch refs/heads/feature
+"""
+
+
+def test_porcelain_is_read_into_one_row_per_worktree():
+    rows = index.parse_worktrees(PORCELAIN)
+    assert [r["path"] for r in rows][1].endswith("rev-x")
+    assert rows[0]["branch"] == "master" and rows[0]["detached"] is False
+    assert rows[1]["detached"] is True and rows[1]["branch"] == ""
+    assert rows[2]["branch"] == "feature"
+
+
+def test_a_scratch_path_names_its_session_and_anything_else_does_not():
+    assert index.session_of("/x/daemon/sessions/s9/scratch/rev-x") == "s9"
+    assert index.session_of("/x/.claude/worktrees/s9-20261022") is None
+    assert index.session_of("/x/daemon/sessions/s9/nope") is None
+
+
+@pytest.fixture
+def repo_with_worktrees(tmp_path):
+    """A repository, one worktree under a fake launcher home, one outside it."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a, cwd=repo: subprocess.run(["git", "-C", str(cwd), *a], check=True,
+                                              capture_output=True, text=True)
+    run("init", "-q", "-b", "master")
+    run("config", "user.email", "t@example.com")
+    run("config", "user.name", "t")
+    (repo / "a.txt").write_text("a")
+    run("add", "-A")
+    run("commit", "-qm", "init")
+    home = tmp_path / "home"
+    inside = home / "daemon" / "sessions" / "s9" / "scratch" / "rev-x"
+    inside.parent.mkdir(parents=True)
+    run("worktree", "add", "--detach", str(inside), "HEAD")
+    outside = tmp_path / "elsewhere"
+    run("worktree", "add", "--detach", str(outside), "HEAD")
+    return repo, home, inside, outside
+
+
+def test_only_worktrees_under_the_launcher_home_are_indexed(repo_with_worktrees):
+    repo, home, inside, outside = repo_with_worktrees
+    states = {"s9": index.ENDED}
+    rows = index.worktree_rows(repo, states, home, index.reachable_commits(repo))
+    assert [r["path"] for r in rows] == [str(inside)]
+    assert rows[0]["session"] == "s9" and rows[0]["removable"] is True
+
+
+def test_a_live_session_keeps_its_worktree(repo_with_worktrees):
+    repo, home, inside, _ = repo_with_worktrees
+    rows = index.worktree_rows(repo, {"s9": index.LIVE}, home,
+                               index.reachable_commits(repo))
+    assert rows[0]["removable"] is False
+    assert rows[0]["why"] == "live session"
+
+
+def test_uncommitted_changes_keep_a_worktree(repo_with_worktrees):
+    repo, home, inside, _ = repo_with_worktrees
+    (inside / "dirty.txt").write_text("wip")
+    rows = index.worktree_rows(repo, {"s9": index.ENDED}, home,
+                               index.reachable_commits(repo))
+    assert rows[0]["removable"] is False
+    assert rows[0]["why"] == "uncommitted changes"
+
+
+def test_a_commit_no_ref_reaches_keeps_a_worktree(repo_with_worktrees):
+    """The one case that cannot be recovered after removal."""
+    repo, home, inside, _ = repo_with_worktrees
+    rows = index.worktree_rows(repo, {"s9": index.ENDED}, home, set())
+    assert rows[0]["removable"] is False
+    assert rows[0]["why"] == "commit reachable from no ref"
 
 
 # ---- the entry point ----------------------------------------------------- #
