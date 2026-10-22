@@ -2318,3 +2318,16 @@ def test_a_child_spawn_waits_for_the_spawn_request_block():
     ]
     for rel in inline:
         assert "[claunch spawn-request <id>]" in (pkg / rel).read_text(encoding="utf-8"), rel
+
+
+def test_the_targeted_run_starts_in_the_background_whenever_possible():
+    """claunch-4s5d0: the user asked that the test step start its run in the
+    background whenever the harness allows it. The earlier baseline made it
+    conditional on the expected run time ("예상 시간이 길면"), which left short
+    runs in the foreground; the waiting rules around it are unchanged."""
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "targeted-test")
+    prompt = _words(node.get("prompt"))
+    assert "예상 시간과 관계없이 가능하면 항상 백그라운드로 시작한다" in prompt
+    assert "예상 시간이 길면 백그라운드" not in prompt
+    assert "백그라운드 실행의 끝은 그 프로세스로 기다린다" in prompt
