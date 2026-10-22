@@ -439,3 +439,28 @@ def test_listing_can_widen_its_bases_to_the_session_scratch_tree(repo, tmp_path)
     names = [w["name"] for w in inv.list_repo(str(repo), [], bases=bases)["worktrees"]]
     assert "s1/scratch/preview" in names
     assert "preview" not in names  # the name is the base it was cut into
+
+
+def test_cli_answers_exit_2_when_the_session_read_fails(monkeypatch):
+    """A daemon that answers the health probe and then fails the session read
+    is the same answer as no daemon: nothing was planned, so exit 2 -- not
+    exit 1, which the codes reserve for a refusal (s1448-rev, claunch-rc6z8)."""
+    from claude_launcher import cli_worktree, daemon_client
+
+    class Flaky:
+        """Connected, then refuses the one read the plan depends on."""
+
+        def get(self, _path):
+            raise daemon_client.DaemonClientError("timed out")
+
+    monkeypatch.setattr(daemon_client, "connect_with_diagnosis",
+                        lambda: (Flaky(), {"state": "serving", "pid": 1}))
+    with pytest.raises(cli_worktree._NoDaemon):
+        cli_worktree._inventory()
+
+    # ...and the prune path turns that into 2 with its "nothing was planned"
+    # line, not into the generic failure path.
+    args = type("A", (), {"repo": "", "older_than": 7.0, "force": False,
+                          "dry_run": False, "json": False})()
+    assert cli_worktree._cmd_prune(args) == cli_worktree.EXIT_NO_DAEMON
+    assert cli_worktree._cmd_list(args) == cli_worktree.EXIT_NO_DAEMON

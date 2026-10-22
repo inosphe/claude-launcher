@@ -442,8 +442,10 @@ the CLI covers the scratch trees as well.
 
 Exit codes follow `claunch window`: `0` the plan was made (or the removals
 ran), `1` something was refused or failed, `2` the session state could not be
-read because the daemon was unreachable — in which case nothing was planned at
-all, since whether a session can come back is the daemon's answer.
+read — no daemon, or one that could not answer the session read — in which case
+nothing was planned at all, since whether a session can come back is the
+daemon's answer. `2` is not "declined": a script that acts on `1` must not act
+on `2`.
 
 ## Login & tokens
 

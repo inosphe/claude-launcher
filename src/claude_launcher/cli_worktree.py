@@ -40,7 +40,8 @@ exits 0 -- so it can be run first, read, and then run again with ``--force``.
 Exit codes, the same discipline ``claunch window`` follows so a caller can
 tell the two failures apart: ``0`` the plan was made (or the removals ran),
 ``1`` something was refused or failed, ``2`` the session state could not be
-read (the daemon was unreachable), so nothing was even planned.
+read (no daemon, or a daemon that could not answer the session read), so
+nothing was even planned.
 """
 
 from __future__ import annotations
@@ -90,11 +91,22 @@ def _inventory() -> Dict[str, dict]:
     second reading of the lifecycle fields. Only ``running``/``hold``/
     ``delayed``/``paused`` can come back into a checkout, and that question
     has one answer.
+
+    A client that answered the health probe and then failed on the read is the
+    same answer as no client at all -- the session state was not read -- so
+    both leave as :class:`_NoDaemon` and both exit 2. Without that, a daemon
+    busy enough to time out one request while still answering the probe would
+    report exit 1, which the exit codes reserve for "refused or failed": a
+    script would read "the cleanup was declined" where in fact nothing was
+    even planned (s1448-rev, claunch-rc6z8).
     """
     client, report = daemon_client.connect_with_diagnosis()
     if client is None:
         raise _NoDaemon(daemon_client.unreachable_reason(report))
-    sessions = _sessions(client)
+    try:
+        sessions = _sessions(client)
+    except daemon_client.DaemonClientError as exc:
+        raise _NoDaemon(str(exc)) from exc
     roots = _roots(sessions)
     return inv.inventory(roots, sessions, bases=_bases(roots))
 
