@@ -29,6 +29,7 @@ definition, never inherited.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Dict, List, Mapping, MutableMapping, Optional
@@ -89,6 +90,18 @@ HERDR_PANE_ENV = (
 #: Every name removed unconditionally.
 SESSION_ENV = CLAUNCH_SESSION_ENV + HARNESS_SESSION_ENV + HERDR_PANE_ENV
 
+#: The request headers that name a session to the routing shim: one line of
+#: Claude's ``ANTHROPIC_CUSTOM_HEADERS`` (``metering.CUSTOM_HEADERS_ENV``) and
+#: one key of Pi's JSON object (``pi_provider.ENV_HEADERS``). The daemon adds
+#: it only for a session whose base URL is the shim, so anywhere else an
+#: inherited one stays: a daemon started from s1388's shell kept
+#: ``X-Claunch-Session: s1388`` through every successor and handed it to each
+#: session not on the shim, whose ``claunch run`` then metered as s1388
+#: (claunch-19liw.1). Only that line or key goes; the rest are the user's.
+CLAUDE_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
+PI_HEADERS_ENV = "CLAUNCH_PI_HEADERS"
+SESSION_HEADER = "x-claunch-session"  # metering.SESSION_HEADER
+
 #: Profile homes the harness sets per session (see :func:`profile_home_env`).
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 
@@ -122,6 +135,44 @@ def _inside_profiles(value: str) -> bool:
     return path == root or root in path.parents
 
 
+def _without_session_header(name: str, value: str) -> Optional[str]:
+    """``value`` of header variable ``name`` without the session header;
+    ``None`` when nothing else is left."""
+    if name == PI_HEADERS_ENV:
+        try:
+            headers = json.loads(value or "{}")
+        except ValueError:
+            return value
+        if not isinstance(headers, dict):
+            return value
+        kept = {k: v for k, v in headers.items() if str(k).lower() != SESSION_HEADER}
+        if len(kept) == len(headers):
+            return value
+        return json.dumps(kept, separators=(",", ":")) if kept else None
+    lines = value.splitlines()
+    kept_lines = [
+        line for line in lines
+        if line.strip() and not line.strip().lower().startswith(SESSION_HEADER + ":")
+    ]
+    if len(kept_lines) == len([line for line in lines if line.strip()]):
+        return value
+    return "\n".join(kept_lines) if kept_lines else None
+
+
+def _header_edits(env: Mapping[str, str]) -> Dict[str, Optional[str]]:
+    """The header variables in ``env`` that carry a session header, mapped to
+    their value without it (``None``: remove the variable)."""
+    out: Dict[str, Optional[str]] = {}
+    for name in (CLAUDE_HEADERS_ENV, PI_HEADERS_ENV):
+        value = env.get(name)
+        if value is None:
+            continue
+        stripped = _without_session_header(name, value)
+        if stripped != value:
+            out[name] = stripped
+    return out
+
+
 def session_names(env: Mapping[str, str]) -> List[str]:
     """The names in ``env`` that belong to a managed session.
 
@@ -144,18 +195,31 @@ def session_names(env: Mapping[str, str]) -> List[str]:
 
 def scrub(env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     """A copy of ``env`` (default: this process's) without any session's
-    variables."""
+    variables, and without the session header in the request-header ones."""
     out = dict(os.environ if env is None else env)
+    edits = _header_edits(out)
     for name in session_names(out):
         out.pop(name, None)
+    _apply(out, edits)
     return out
 
 
 def scrub_in_place(env: Optional[MutableMapping[str, str]] = None) -> List[str]:
-    """Remove the session variables from ``env`` (default: ``os.environ``)
-    and return the names removed."""
+    """Remove the session variables from ``env`` (default: ``os.environ``),
+    and the session header from the request-header ones; return the names
+    removed or rewritten."""
     target = os.environ if env is None else env
     removed = session_names(target)
+    edits = _header_edits(target)
     for name in removed:
         target.pop(name, None)
-    return removed
+    _apply(target, edits)
+    return removed + list(edits)
+
+
+def _apply(env: MutableMapping[str, str], edits: Mapping[str, Optional[str]]) -> None:
+    for name, value in edits.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
