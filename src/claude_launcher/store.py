@@ -404,6 +404,14 @@ DAEMON_DEFAULTS = {
     "auto_archive_killed_days": 7.0,
     "auto_archive_interval_s": 600.0,
     "auto_archive_batch": 20,
+    # pytest basetemps the daemon reclaims while sessions are still running
+    # (daemon/basetemp_reaper.py, claunch-ssroc). A live session's sweep
+    # generations other than its newest go once their directory was last
+    # written this many hours ago; a directory whose name belongs to no
+    # session of this instance goes after this many days. Both are read LIVE
+    # on every pass; 0 turns that branch off.
+    "basetemp_sweep_hours": 6.0,
+    "basetemp_orphan_days": 7.0,
     # Bytes one file uploaded from the web UI may weigh (daemon/uploads.py,
     # claunch-5gpcf): a create form's or a thread message's attachment, or a
     # file sent from the session line. Streamed to disk, so this bounds disk

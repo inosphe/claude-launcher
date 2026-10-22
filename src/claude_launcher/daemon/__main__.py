@@ -450,9 +450,18 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # the ones whose session ended while no daemon was up go now. Wired here
     # and not in create_app: tests build apps over registries of made-up
     # names, and this deletes real directories under C:/t.
-    reaper = basetemp_reaper.BasetempReaper(basetemp_reaper.registry_view(manager))
+    reaper = basetemp_reaper.BasetempReaper(
+        basetemp_reaper.registry_view(manager),
+        # A session holding the window is writing into its basetemp right
+        # now; the periodic pass leaves it alone (claunch-ssroc).
+        grants=basetemp_reaper.window_grants(app["window"]),
+    )
     manager.exit_hooks.append(reaper.session_exited)
     reaper.reap_ended()
+    # ...and while sessions are still running: a live session's old sweep
+    # generations, and names no session owns, once per tick (claunch-ssroc).
+    reaper_clock = basetemp_reaper.BasetempClock(reaper)
+    reaper_clock.start()
     # Published so the dashboard can report what these two are holding. Only
     # the two that type into a driving session on a timer: those are the ones
     # a person watching a terminal has no way to see coming, and the ones
@@ -574,6 +583,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # Pending wind-downs are dropped, not finished: shutdown_all below
         # ends every session the daemon's way, and they come back on restart.
         await teardown.step("beads", app["beads"].cancel_all())
+        await teardown.step("basetemp_clock", reaper_clock.shutdown())
         await teardown.step("checklist_clock", checklist_clock.shutdown())
         await teardown.step("restart_clock", restart_clock.shutdown())
         await teardown.step("procs_clock", procs_clock.shutdown())
