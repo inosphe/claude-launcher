@@ -1848,6 +1848,14 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body["mesh"] = str(args.mesh).strip()
     if getattr(args, "workflow", None):
         body["workflow"] = str(args.workflow).strip()
+    # The copy's v2 start inputs, the same flags and the same check as a
+    # spawn's (claunch-fqkqt.1): the daemon refuses them for no workflow.
+    inputs, bad = _cflow_inputs(args)
+    if bad:
+        print(f"error: {bad}", file=sys.stderr)
+        return 1
+    if inputs is not None:
+        body["cflow_inputs"] = inputs
     if getattr(args, "role", None):
         # The daemon refuses an exclusive role (leader) a live member holds,
         # and a role with no mesh to hold it in.
@@ -3789,6 +3797,8 @@ def register(sub) -> None:
              "role (leader) a live member holds is refused. The copy's "
              "opening says when it differs from the origin's",
     )
+    p_qf.add_argument("--input", action="append", metavar="NAME=VALUE", help=INPUT_HELP)
+    p_qf.add_argument("--inputs-file", metavar="PATH", help=INPUTS_FILE_HELP)
     p_qf.add_argument(
         "--sibling", action="store_true",
         help="place the copy beside the origin, under the origin's parent "

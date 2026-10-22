@@ -905,7 +905,7 @@ def fake_daemon(monkeypatch):
     return install
 
 
-def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, capsys, monkeypatch):
+def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, capsys, monkeypatch, tmp_path):
     from claude_launcher import cli
 
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -926,6 +926,18 @@ def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, caps
     assert "claunch quick-fork merge -f" not in out
     assert cli.main(["quick-fork", "a", "--allow-self-merge"]) == 0
     assert client.calls[-1] == ("post", "/api/sessions/a/quick-fork", {"self_merge_allowed": True})
+    # v2 start inputs ride as cflow_inputs, the spawn's flags (claunch-fqkqt.1);
+    # a file is overlaid by each --input, and a malformed pair posts nothing
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text('{"goal": "from file", "rounds": 3}', encoding="utf-8")
+    assert cli.main(["quick-fork", "a", "--workflow", "w", "--inputs-file", str(inputs),
+                     "--input", "goal=other way"]) == 0
+    assert client.calls[-1] == ("post", "/api/sessions/a/quick-fork", {
+        "workflow": "w", "cflow_inputs": {"goal": "other way", "rounds": 3}})
+    calls = len(client.calls)
+    assert cli.main(["quick-fork", "a", "--workflow", "w", "--input", "nope"]) == 1
+    assert len(client.calls) == calls
+    assert "--input expects NAME=VALUE" in capsys.readouterr().err
     # no session at all: refused before any call
     assert cli.main(["quick-fork"]) == 1
     # inside a session the origin defaults to it
@@ -1435,3 +1447,75 @@ def test_origin_run_name_reads_the_origins_v2_run_then_its_v1_run(monkeypatch):
         api_mod.cflow_engine, "status", lambda cwd, scope=None: {"status": "idle"},
     )
     assert api_mod._origin_run_name("b", "/x") == ""
+
+
+INPUTS_FLOW = """\
+cflow: 2
+name: asks-inputs
+inputs:
+  goal: {type: text, required: true, label: Goal}
+  rounds: {type: int}
+nodes:
+  w: {title: W, prompt: "goal ${data.inputs.goal}"}
+body: w
+"""
+
+
+def test_quick_fork_starts_its_run_with_the_dialogs_workflow_variables(
+    home, tmp_path, forkable, typed, monkeypatch
+):
+    """The fork dialog's Workflow variables box (claunch-fqkqt) rides the
+    body as ``cflow_inputs``: the copy's v2 run starts with them as its
+    data.inputs, a value the workflow refuses refuses the fork with the
+    field named, and inputs for no workflow are refused, not dropped."""
+    from claude_launcher.cflow2 import layers
+    from claude_launcher.cflow2.store import RunStore
+    from claude_launcher.daemon import cflow2_web
+
+    _register_py_harness()
+    v2 = tmp_path / ".claunch" / "workflows" / "v2"
+    v2.mkdir(parents=True)
+    (v2 / "asks-inputs.yaml").write_text(INPUTS_FLOW, encoding="utf-8")
+    monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
+    monkeypatch.setattr(cflow2_web, "_LISTS", {})
+
+    async def run():
+        mgr = _mgr()
+        meshes = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, meshes)
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"workflow": "asks-inputs", "cflow_inputs": {"rounds": "many"}},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 400, doc
+            assert "goal" in doc["error"] and "rounds" in doc["error"]
+            assert not any(s.sdef.name.startswith("a-qf") for s in mgr.list())
+
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"cflow_inputs": {"goal": "g"}}, headers=BEARER,
+            )
+            assert resp.status == 400, await resp.json()
+            assert "cflow_inputs" in (await resp.json())["error"]
+
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"workflow": "asks-inputs",
+                      "cflow_inputs": {"goal": "try the other way", "rounds": "2"}},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            name = doc["session"]["name"]
+            state = RunStore(str(tmp_path), name).load_state()
+            assert state["data"]["inputs"] == {"goal": "try the other way", "rounds": 2}
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

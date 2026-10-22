@@ -12302,6 +12302,12 @@ async def stage_quick_fork(
         spawn_body["workflow"] = workflow
     if workflow_version == 2:
         spawn_body["workflow_version"] = 2
+    # The copy's v2 start inputs (the dialog's Workflow variables,
+    # claunch-fqkqt), checked by onboarding against the workflow the copy is
+    # started on -- the same check a spawn's cflow_inputs gets, and the same
+    # refusal when the workflow is none or not v2.
+    if body.get("cflow_inputs") is not None:
+        spawn_body["cflow_inputs"] = body.get("cflow_inputs")
     if role:
         # Without a mesh preflight refuses it ("only mean something with a
         # mesh"); with one, it refuses an exclusive role (leader) a live
