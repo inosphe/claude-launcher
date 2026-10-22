@@ -56,8 +56,13 @@ periodic pass, :meth:`BasetempReaper.reap_live` on
   ``s1162tree*``) -- once it is ``basetemp_orphan_days`` old (default 7).
 
 Both branches read their keys from the config on every pass, and 0 turns the
-branch off. A session holding a measurement-window grant is skipped: a test
-run that holds the window is writing into its basetemp right now.
+branch off. A session holding a measurement-window grant is skipped whole:
+its run is writing into its basetemp right now and the grant does not say
+which directory that is. So a leader that sweeps for an hour holds the
+grant for an hour and nothing of its own is reaped meanwhile -- the next
+pass after the release takes it (329 trees under s29 on 2026-10-22). If a
+person ever asks why a live root is not shrinking, this is the reason to
+check first: ``claunch window status``.
 """
 
 from __future__ import annotations
@@ -521,6 +526,13 @@ class BasetempReaper:
         """
         rows: List[dict] = []
         for name, ended in sessions:
+            # A session holding a window grant is running tests right now, and
+            # which directory that run writes into is not in the grant -- so
+            # the whole session is left alone until the grant is released.
+            # The cost is visible and worth saying: a leader that sweeps for
+            # an hour holds the grant for an hour, and the daemon reaps none
+            # of its generations until the run ends. The next pass after the
+            # release takes them (claunch-9gpqk measured 329 waiting).
             if ended or name in elsewhere or name in held:
                 continue
             stamped: List[Tuple[float, Path]] = []
