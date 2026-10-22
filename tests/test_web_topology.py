@@ -488,6 +488,7 @@ CHECKS = [
         "ptyhostsetting_check.js",
         "testoutputdir_check.js",
         "delegatesetting_check.js",
+        "sweepbatchsetting_check.js",
         "noticehistory_check.js",
         "termcache_check.js",
         "gpurender_check.js",
