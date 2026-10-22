@@ -58,11 +58,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -80,9 +83,36 @@ SPEC_KEY = "routing"
 AFFINITY_KEY = "session_affinity"
 
 #: Header the shim adds when affinity is enabled. The session name rides in on
-#: the private ``X-Claunch-Session`` header (see :mod:`metering`); the shim
-#: forwards it under this name so the upstream can route stickily.
+#: the base URL's ``/s/<session>`` prefix (:data:`SESSION_PATH_PREFIX`); the
+#: shim forwards it under this name so the upstream can route stickily.
 AFFINITY_HEADER = "x-session-affinity"
+
+#: Per-provider config key naming a header the upstream *requires* to carry a
+#: session id (``providers.<name>.session_header``). OpenCode Go
+#: (``https://opencode.ai/zen/go/v1``) answers 400 ``MissingSessionID`` to any
+#: request without ``x-opencode-session``. Unlike :data:`AFFINITY_KEY` this is
+#: not an optimisation the provider may do without, so a provider that declares
+#: it always goes through the shim (see :func:`front`).
+SESSION_HEADER_KEY = "session_header"
+
+#: The id sent under :data:`SESSION_HEADER_KEY` for a request that carries no
+#: session name -- a plain ``claunch run`` or ``claunch validate``, launched
+#: outside the daemon. The header is mandatory for such a provider, so it is
+#: sent anyway; these launches share one id.
+SESSION_HEADER_FALLBACK = "claunch"
+
+#: Per-provider config key naming the header the upstream reads an Anthropic
+#: Messages credential from (``providers.<name>.anthropic_auth_header``).
+#: Claude Code is handed its token as ``ANTHROPIC_AUTH_TOKEN``, which it sends
+#: as ``Authorization: Bearer``; OpenCode Go answers that on ``/v1/messages``
+#: with 401 ``Go requires a credential`` and accepts only ``x-api-key`` there,
+#: while its ``/v1/chat/completions`` accepts only the bearer. So the shim
+#: moves the credential for Anthropic Messages paths alone.
+ANTHROPIC_AUTH_KEY = "anthropic_auth_header"
+
+#: The values :data:`ANTHROPIC_AUTH_KEY` accepts. ``authorization`` is the
+#: default (the bearer goes out as sent) and only exists to be written down.
+ANTHROPIC_AUTH_HEADERS = ("authorization", "x-api-key")
 
 #: Body field the spec is merged into. OpenRouter's name for it.
 BODY_FIELD = "provider"
@@ -111,6 +141,13 @@ STOP_TIMEOUT = 5.0
 
 class RoutingError(Exception):
     """Raised for a malformed ``routing`` block or a shim that will not start."""
+
+
+class ShimUnavailable(RoutingError):
+    """A process other than the daemon needed a shim, none was running, and
+    the daemon could not be asked to start one. Never answered by launching
+    against the upstream directly (claunch-19liw.2 decision): the caller
+    fails instead."""
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +207,64 @@ def session_affinity(provider_name: str, doc: Optional[dict] = None) -> bool:
             f"(got {type(value).__name__})"
         )
     return value
+
+
+def session_header(provider_name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """The header name ``provider_name`` requires a session id under, or ``None``.
+
+    Absent key is off. A present value that is not a header name is a config
+    error, same policy as :func:`session_affinity`.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return None
+    entry = section.get(provider_name)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get(SESSION_HEADER_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9-]+", value):
+        raise RoutingError(
+            f"providers.{provider_name}.{SESSION_HEADER_KEY} must be a header "
+            f"name such as x-opencode-session (got {value!r})"
+        )
+    return value
+
+
+def anthropic_auth_header(provider_name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """``"x-api-key"`` when ``provider_name`` wants the Messages credential
+    moved out of ``Authorization``, else ``None``.
+
+    Absent key (or ``authorization``) is off. Any other value is a config
+    error, same policy as :func:`session_affinity`.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return None
+    entry = section.get(provider_name)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get(ANTHROPIC_AUTH_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.lower() not in ANTHROPIC_AUTH_HEADERS:
+        raise RoutingError(
+            f"providers.{provider_name}.{ANTHROPIC_AUTH_KEY} must be one of "
+            f"{', '.join(ANTHROPIC_AUTH_HEADERS)} (got {value!r})"
+        )
+    return "x-api-key" if value.lower() == "x-api-key" else None
+
+
+def requires_shim(provider_name: str, doc: Optional[dict] = None) -> bool:
+    """Whether the upstream refuses requests a harness sends unaided, so
+    the provider must go through the shim even with metering off."""
+    return bool(
+        session_header(provider_name, doc)
+        or anthropic_auth_header(provider_name, doc)
+    )
 
 
 #: Per-provider config key switching the shim to live resolution
@@ -528,7 +623,7 @@ def is_shim_url(url: Optional[str]) -> bool:
     """Whether ``url`` is one :func:`local_url` could have produced.
 
     A loopback URL on a port inside the shim window. Only the daemon uses it,
-    to decide whether the session header (see :mod:`metering`) has a shim to
+    to decide whether a session's ``/s/<session>`` prefix has a shim to
     read it — a user's own loopback upstream on another port is left alone.
     """
     if not url or not url.startswith("http://127.0.0.1:"):
@@ -539,6 +634,68 @@ def is_shim_url(url: Optional[str]) -> bool:
         return False
     port = int(port_text)
     return _PORT_BASE <= port < _PORT_BASE + _PORT_SPAN + _PORT_TRIES
+
+
+#: Path prefix that names the calling session to a shim: a session's base URL
+#: is ``http://127.0.0.1:<port>/s/<session>`` and the harness appends its own
+#: path (``/v1/messages`` for Claude Code, ``/chat/completions`` for Pi). The
+#: shim takes the name off and forwards the rest. It replaces the
+#: ``X-Claunch-Session`` header the daemon used to put into
+#: ``ANTHROPIC_CUSTOM_HEADERS``/``CLAUNCH_PI_HEADERS``: a header variable is
+#: inherited by every process the session starts, including a daemon, and
+#: from there by unrelated sessions (claunch-19liw.1). A base URL is a backend
+#: key (:data:`runner.BACKEND_ENV_KEYS`), dropped from the inherited env and
+#: recomputed on every launch (claunch-19liw.2.4).
+SESSION_PATH_PREFIX = "/s/"
+
+#: The env keys a harness reads its base URL from: Claude Code's, and Pi's
+#: (``pi_provider.ENV_BASE_URL``, spelled out here because ``pi_provider``
+#: imports this module).
+BASE_URL_ENV_KEYS = ("ANTHROPIC_BASE_URL", "CLAUNCH_PI_BASE_URL")
+
+
+def split_session_path(raw_path: str):
+    """``(session, rest)`` of a request path that arrived at a shim.
+
+    ``/s/s1/v1/messages`` is ``("s1", "/v1/messages")``. A path without the
+    prefix (an older session still sending the header) comes back as
+    ``(None, raw_path)``.
+    """
+    if not raw_path.startswith(SESSION_PATH_PREFIX):
+        return None, raw_path
+    name, _, tail = raw_path[len(SESSION_PATH_PREFIX):].partition("/")
+    if not name:
+        return None, raw_path
+    return urllib.parse.unquote(name), "/" + tail
+
+
+def session_url(url: str, session: str) -> str:
+    """Shim base URL ``url`` with ``session``'s path prefix.
+
+    A prefix already there is replaced, so applying it twice (or for a
+    restored session under a new name) leaves one. A trailing slash on
+    ``url`` is kept: Claude's base URL has one, Pi's does not.
+    """
+    parts = urllib.parse.urlsplit(url)
+    _, rest = split_session_path(parts.path or "/")
+    prefix = SESSION_PATH_PREFIX + urllib.parse.quote(session, safe="")
+    path = prefix + (rest if rest != "/" else ("/" if url.endswith("/") else ""))
+    return urllib.parse.urlunsplit(parts._replace(path=path))
+
+
+def apply_session(env: dict, session: Optional[str]) -> None:
+    """Name ``session`` in the base URL of every harness in ``env`` that talks
+    to a shim. A base URL that is not a shim is left alone; so is everything
+    when there is no session."""
+    if not session:
+        return
+    for key in BASE_URL_ENV_KEYS:
+        if is_shim_url(env.get(key)):
+            env[key] = session_url(env[key], session)
+            if _OWNER:
+                # The daemon keeps the shim up while this session lives
+                # (:func:`reconcile`).
+                add_user(_port_of(env[key]), session=session)
 
 
 def health(port: int, timeout: float = 0.6) -> Optional[dict]:
@@ -557,6 +714,12 @@ def health(port: int, timeout: float = 0.6) -> Optional[dict]:
 
 def _port_free(port: int) -> bool:
     sock = socket.socket()
+    if os.name != "nt":
+        # Bind as the shim's server does (asyncio sets SO_REUSEADDR on POSIX):
+        # every health probe the shim answers leaves a TIME_WAIT on its port,
+        # and without this the port reads as taken for a minute after the
+        # shim exits. On Windows the option would bind over a live listener.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", port))
         return True
@@ -630,22 +793,50 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str, provider: Optional[st
 def _record(fp: str, port: int, upstream: str, block: Dict, pid,
             route: Optional[str] = None) -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
-    _record_file(fp, port).write_text(
+    path = _record_file(fp, port)
+    with _LOCK:
+        _write_record(path, fp, port, upstream, block, pid, route)
+
+
+def _write_record(path: Path, fp: str, port: int, upstream: str, block: Dict,
+                  pid, route: Optional[str]) -> None:
+    previous = _read_json(path)
+    _write_atomic(
+        path,
         json.dumps(
             {
                 "fingerprint": fp,
                 "port": port,
                 "upstream": upstream,
                 "spec": block,
-                "pid": pid,
+                "pid": pid if pid is not None else previous.get("pid"),
                 "url": local_url(port),
                 "route": route,
+                # When this process last handed the shim out (every
+                # ensure_shim rewrites the record): :func:`reconcile` keeps a
+                # shim for :data:`GRACE_S` after that, so a launch between
+                # ensuring the shim and registering its session
+                # (:func:`add_user`) is not raced.
+                "ensured": time.time(),
             },
             indent=2,
             sort_keys=True,
         ),
-        encoding="utf-8",
     )
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _start_diagnosis(child, port: int) -> str:
@@ -719,9 +910,28 @@ def _find(fp: str) -> Optional[int]:
         if _port_free(port):
             continue  # nothing listens there; no request to make
         info = health(port)
-        if info is not None and info.get("fingerprint") == fp:
+        # A shim told to shut down (:func:`retire`) is skipped: handing it out
+        # would register a session on a shim about to go away.
+        if info is not None and info.get("fingerprint") == fp \
+                and not info.get("stopping"):
             return port
     return None
+
+
+def _reuse(fp: str, upstream: str, block: Dict, route: Optional[str]) -> Optional[str]:
+    """The URL of a running shim for ``fp``, stamped as handed out.
+
+    Found and stamped under :data:`_LOCK`, the lock :func:`reconcile` takes
+    for its last look and the retire request. Otherwise a pass could retire
+    the shim between the two (it would see the old "ensured" stamp) and the
+    launch would get the URL of a shim that is about to stop.
+    """
+    with _LOCK:
+        port = _find(fp)
+        if port is None:
+            return None
+        _record(fp, port, upstream, block, None, route=route)
+        return local_url(port)
 
 
 def _free_port(fp: str) -> Optional[int]:
@@ -735,6 +945,12 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
                 route: Optional[str] = None) -> str:
     """Base URL of a live shim fronting ``upstream`` with ``block`` merged in.
 
+    Only the daemon starts shims (:func:`own_lifecycle`, claunch-19liw.2.3):
+    in any other process this asks the daemon for the shim
+    (:func:`_ensure_via_daemon`) and raises :class:`ShimUnavailable` when
+    neither a running shim nor the daemon is there. Below is the daemon's
+    half.
+
     Reuses a running shim for the same pair and starts one otherwise. Callers
     that arrive together converge on a single shim: one of them takes the start
     claim and the others wait for what it starts. ``provider`` is the config
@@ -746,20 +962,20 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
     not the upstream, and the shim resolves upstream, credentials and the
     model alias table from the live config on every request.
     """
+    if not _OWNER:
+        return _ensure_via_daemon(upstream, block, provider, route)
     fp = fingerprint(upstream, block, route=route)
-    port = _find(fp)
-    if port is not None:
-        _record(fp, port, upstream, block, None, route=route)
-        return local_url(port)
+    url = _reuse(fp, upstream, block, route)
+    if url is not None:
+        return url
     if not _try_claim(fp):
         # Another launch is starting this exact shim right now. Wait for it
         # rather than adding a second one beside it.
         deadline = time.monotonic() + START_TIMEOUT + 5
         while time.monotonic() < deadline:
-            port = _find(fp)
-            if port is not None:
-                _record(fp, port, upstream, block, None, route=route)
-                return local_url(port)
+            url = _reuse(fp, upstream, block, route)
+            if url is not None:
+                return url
             time.sleep(0.1)
         raise RoutingError(
             f"another process holds the start claim for the routing shim to "
@@ -771,10 +987,9 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
         # that peer released it, would otherwise start a second shim on the
         # next port (observed as two live shims for one pair under four
         # simultaneous launches).
-        port = _find(fp)
-        if port is not None:
-            _record(fp, port, upstream, block, None, route=route)
-            return local_url(port)
+        url = _reuse(fp, upstream, block, route)
+        if url is not None:
+            return url
         start_port = _free_port(fp)
         if start_port is None:
             raise RoutingError(
@@ -810,6 +1025,10 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
     * a ``routing`` block — the shim *must* come up: falling back to the
       direct URL would silently drop the pin, which is precisely the failure
       this feature exists to prevent, so the launch fails instead;
+    * a ``session_header`` or ``anthropic_auth_header`` — same: the
+      upstream refuses what the harness sends unaided (see
+      :func:`requires_shim`), so a direct launch would fail on its first
+      request;
     * metering (:mod:`metering`, on by default for every provider that is not
       the Anthropic OAuth route) — a record is observability, not
       correctness, so a shim that cannot start is reported on stderr and the
@@ -835,12 +1054,14 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
             else f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
         )
         return ensure_shim(upstream, block or {}, provider_name, route=route)
-    if block:
-        return ensure_shim(upstream, block, provider_name)
+    if block or requires_shim(provider_name, doc):
+        return ensure_shim(upstream, block or {}, provider_name)
     if not metering.provider_enabled(provider_name, doc):
         return upstream
     try:
         return ensure_shim(upstream, {}, provider_name)
+    except ShimUnavailable:
+        raise  # outside the daemon: no direct fallback (claunch-19liw.2)
     except RoutingError as exc:
         print(
             f"claunch: metering shim for provider {provider_name!r} unavailable, "
@@ -863,8 +1084,11 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
-    if not block and not dynamic(provider_name, doc) and not metering.provider_enabled(
-        provider_name, doc
+    if (
+        not block
+        and not dynamic(provider_name, doc)
+        and not requires_shim(provider_name, doc)
+        and not metering.provider_enabled(provider_name, doc)
     ):
         return
     upstream = env.get("ANTHROPIC_BASE_URL")
@@ -900,6 +1124,8 @@ def instances() -> List[dict]:
     except OSError:
         return out
     for rec in records:
+        if rec == _users_file():
+            continue  # who uses which shim (add_user), not a shim record
         try:
             info = json.loads(rec.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -910,6 +1136,8 @@ def instances() -> List[dict]:
             rec.unlink(missing_ok=True)  # stale record: the shim is gone
             continue
         info["pid"] = live.get("pid", info.get("pid"))
+        if "inflight" in live:
+            info["inflight"] = live["inflight"]
         out.append(info)
     return out
 
@@ -937,3 +1165,251 @@ def stop(fingerprints: Optional[List[str]] = None) -> List[str]:
         _record_file(str(fp), int(info["port"])).unlink(missing_ok=True)
         stopped.append(str(fp))
     return stopped
+
+
+# --------------------------------------------------------------------------- #
+# the daemon owns the shims (claunch-19liw.2.3)
+# --------------------------------------------------------------------------- #
+# Shims used to be started by whichever process launched a harness first: a
+# session shell's ``claunch run``, a test, the daemon. Nobody stopped them, so
+# they piled up (13 measured on 2026-10-22: five for one upstream, two left by
+# a test, two running a worktree's code). Now the daemon is the only process
+# that starts one, with its own interpreter and code root (``_shim_env``
+# follows this module's file), and the only one that stops one. A shim stays a
+# process of its own (``start_new_session``), so a daemon restart cuts no
+# stream: the next daemon adopts what is running.
+
+_OWNER = False
+
+#: Serialises every write of the users file and the shim records, and
+#: :func:`reconcile`'s last look before it retires a shim: a session added on
+#: the launch path (``harness.build_command`` → :func:`apply_session`, or the
+#: ensure API) while a pass is running is never lost or retired under it.
+#: Reentrant: ``reconcile`` holds it across ``_record``-writing calls.
+_LOCK = threading.RLock()
+
+#: How long a shim is kept after this daemon last handed it out
+#: (``ensured`` in its record), whatever else :func:`reconcile` finds: covers
+#: a launch between ensuring the shim and registering its session.
+GRACE_S = 60.0
+
+#: How often the daemon reconciles (``daemon/shims.py``).
+RECONCILE_S = 30.0
+
+#: The daemon API a process other than the daemon asks for a shim through.
+ENSURE_API = "/api/routing/ensure"
+
+
+def own_lifecycle(on: bool = True) -> None:
+    """Make this process the one that starts and stops shims. The daemon
+    calls it as it boots; tests that run real shims call it too."""
+    global _OWNER
+    _OWNER = on
+
+
+def owns_lifecycle() -> bool:
+    return _OWNER
+
+
+def _port_of(url: str) -> Optional[int]:
+    rest = url[len("http://127.0.0.1:"):] if url.startswith("http://127.0.0.1:") else ""
+    text = rest.split("/", 1)[0]
+    return int(text) if text.isdigit() else None
+
+
+def _ensure_via_daemon(upstream: str, block: Dict, provider: Optional[str],
+                       route: Optional[str]) -> str:
+    """The shim for this pair, asked of the daemon, which starts it if needed
+    and keeps it while this process lives. With no daemon to ask, a shim that
+    is already running is still used; with neither, :class:`ShimUnavailable`
+    (no direct fallback, claunch-19liw.2)."""
+    from . import daemon_client  # the daemon client imports half the package
+
+    client = daemon_client.connect()
+    if client is not None:
+        try:
+            answer = client.post(ENSURE_API, {
+                "upstream": upstream, "spec": block, "provider": provider,
+                "route": route, "pid": os.getpid(),
+            }, timeout=START_TIMEOUT + 10)
+        except daemon_client.DaemonClientError as exc:
+            raise ShimUnavailable(f"the daemon could not provide the routing shim "
+                                  f"for {upstream}: {exc}") from exc
+        url = answer.get("url") if isinstance(answer, dict) else None
+        if not url:
+            raise ShimUnavailable(f"the daemon answered no routing shim URL for {upstream}")
+        return url
+    port = _find(fingerprint(upstream, block, route=route))
+    if port is not None:
+        return local_url(port)
+    raise ShimUnavailable(
+        f"no routing shim for {upstream} is running and the daemon is not "
+        "running to start one: shims are started by the daemon only "
+        "(start it with 'claunch daemon start')"
+    )
+
+
+def _users_file() -> Path:
+    return state_dir() / "users.json"
+
+
+def _load_users() -> Dict[str, dict]:
+    return _read_json(_users_file())
+
+
+def add_user(port: Optional[int], *, session: Optional[str] = None,
+             pid: Optional[int] = None) -> None:
+    """Record that ``session`` (a daemon session) or ``pid`` (a ``claunch
+    run`` outside the daemon) talks to the shim on ``port``. Kept on disk,
+    since shims outlive a daemon restart and so must the reasons to keep
+    them."""
+    if port is None or not (session or pid):
+        return
+    with _LOCK:
+        users = _load_users()
+        entry = users.setdefault(str(port), {})
+        if session:
+            entry["sessions"] = sorted(set(entry.get("sessions") or []) | {session})
+        if pid:
+            entry["pids"] = sorted(set(entry.get("pids") or []) | {int(pid)})
+        state_dir().mkdir(parents=True, exist_ok=True)
+        _write_atomic(_users_file(), json.dumps(users, indent=2, sort_keys=True))
+
+
+def _pid_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        from .daemon_client import process_alive
+
+        return bool(process_alive(pid))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def desired(doc: Optional[dict] = None) -> List[dict]:
+    """The shims the config asks for on its own: for every provider whose
+    Claude base URL goes through a shim (a ``routing`` block, a required
+    header, metering), the shim fronting that URL. A dynamic provider's shim
+    is keyed on the profile that launches it and Pi's on its OpenAI endpoint;
+    those are started by the launch and kept while it lives."""
+    from . import providers  # providers imports this module
+
+    doc = store.load() if doc is None else doc
+    out: List[dict] = []
+    for name, env in providers.registry(doc).items():
+        upstream = env.get("ANTHROPIC_BASE_URL")
+        if not upstream or providers.uses_anthropic_oauth(name, doc):
+            continue
+        try:
+            if dynamic(name, doc):
+                continue
+            block = spec(name, doc)
+            if not (block or requires_shim(name, doc)
+                    or metering.provider_enabled(name, doc)):
+                continue
+        except RoutingError:
+            continue
+        out.append({"provider": name, "upstream": upstream, "spec": block or {},
+                    "fingerprint": fingerprint(upstream, block or {})})
+    return out
+
+
+def retire(info: dict) -> bool:
+    """Ask the shim in ``info`` (an :func:`instances` row) to stop once its
+    in-flight requests are done. A shim from a build without that request
+    (no ``inflight`` in its health answer) is left running: it cannot say
+    whether it is mid-stream. That is also what keeps the sessions that were
+    already running when the daemon was upgraded safe: their shims come from
+    the older build and they have no :func:`add_user` entry. True when the
+    request was sent."""
+    if "inflight" not in info:
+        return False
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{info['port']}{SHUTDOWN_PATH}?when=idle",
+        method="POST", data=b"")
+    try:
+        urllib.request.urlopen(req, timeout=5.0).close()
+    except (urllib.error.URLError, OSError):
+        return False
+    return True
+
+
+def reconcile(live_sessions, doc: Optional[dict] = None,
+              now: Optional[float] = None) -> dict:
+    """One pass of the daemon's shim upkeep: start what the config wants,
+    retire what nothing needs.
+
+    A shim is kept while the config wants its fingerprint (:func:`desired`),
+    a user registered with :func:`add_user` is alive (a session in
+    ``live_sessions``, a pid still running), it has requests in flight, or it
+    was handed out within :data:`GRACE_S`. Anything else is retired. So a
+    config edit starts the new shim here and lets the old one go once the
+    sessions launched against it have ended. Returns what it did, for the
+    daemon log.
+
+    ``live_sessions`` is a snapshot taken before the pass, and the launch
+    path keeps registering users while it runs (ensuring a shim can take
+    seconds). So the users file is read once as that snapshot, each
+    retirement is decided again under :data:`_LOCK` just before it is sent,
+    and the file is written back merged: a user added during the pass is
+    kept as it is, only the snapshot's users are pruned.
+    """
+    now = time.time() if now is None else now
+    live_sessions = set(live_sessions)
+    started: List[str] = []
+    errors: List[str] = []
+    wanted = set()
+    for want in desired(doc):
+        wanted.add(want["fingerprint"])
+        try:
+            ensure_shim(want["upstream"], want["spec"], want["provider"])
+            started.append(want["fingerprint"])
+        except RoutingError as exc:
+            errors.append(f"{want['provider']}: {exc}")
+    with _LOCK:
+        snapshot = _load_users()
+    retired: List[str] = []
+    seen_fps = set()
+    for info in instances():
+        port = str(info.get("port"))
+        fp = info.get("fingerprint")
+        entry = snapshot.get(port) or {}
+        sessions = [s for s in entry.get("sessions") or [] if s in live_sessions]
+        pids = [p for p in entry.get("pids") or [] if _pid_alive(int(p))]
+        # A second shim for a wanted fingerprint is a duplicate: new launches
+        # find the first one, so only its own users keep it.
+        duplicate = fp in seen_fps
+        seen_fps.add(fp)
+        if (fp in wanted and not duplicate) or sessions or pids or info.get("inflight"):
+            continue
+        with _LOCK:
+            # The last look: a user registered, or the shim handed out, since
+            # the snapshot keeps it. Sent under the lock, so neither can slip
+            # in between this look and the request (a loopback POST).
+            current = _load_users().get(port) or {}
+            if set(current.get("sessions") or []) - set(entry.get("sessions") or []) \
+                    or set(current.get("pids") or []) - set(entry.get("pids") or []):
+                continue
+            record = _read_json(_record_file(str(fp), int(info["port"])))
+            if now - float(record.get("ensured") or 0) < GRACE_S:
+                continue
+            if retire(info):
+                retired.append(f"{fp}:{port}")
+    with _LOCK:
+        merged: Dict[str, dict] = {}
+        for port, entry in _load_users().items():
+            before = snapshot.get(port) or {}
+            sessions = [s for s in entry.get("sessions") or []
+                        if s in live_sessions or s not in (before.get("sessions") or [])]
+            pids = [p for p in entry.get("pids") or []
+                    if p not in (before.get("pids") or []) or _pid_alive(int(p))]
+            if sessions or pids:
+                merged[port] = {k: v for k, v in
+                                (("sessions", sessions), ("pids", pids)) if v}
+        state_dir().mkdir(parents=True, exist_ok=True)
+        _write_atomic(_users_file(), json.dumps(merged, indent=2, sort_keys=True))
+    return {"started": started, "retired": retired, "errors": errors}

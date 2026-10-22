@@ -788,6 +788,10 @@ def build_app(
     # each (daemon/spool_drain.py, claunch-19liw.2.1).
     from . import spool_drain
     spool_drain.install(app)
+    # The routing shims: started and retired by this daemon only, and asked
+    # for here by processes outside it (daemon/shims.py, claunch-19liw.2.3).
+    from . import shims as shims_mod
+    shims_mod.install(app, manager)
     # Thread files past their 30 days (daemon/uploads.py, claunch-5gpcf).
     uploads.install(app)
     # The Stats page reads transcripts in a child process, off this loop's

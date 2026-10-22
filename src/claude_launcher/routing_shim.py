@@ -1,14 +1,18 @@
 """The loopback proxy in front of an API-key provider.
 
-Started on demand by :mod:`claude_launcher.routing` — see that module for why
-it exists and how sessions find it. This file is only the transport: forward
+Started by the daemon through :mod:`claude_launcher.routing` (the only process
+that starts or stops one) — see that module for why it exists and how
+sessions find it. This file is only the transport: forward
 everything to the upstream unchanged, except that a JSON object body gains the
 configured routing field on the way out (when a spec was given), and every
 completion answer (``/v1/messages`` from Claude Code, ``/v1/chat/completions``
 from the ``pi`` harness) is watched on its way back so one throughput record
 per request lands in :mod:`claude_launcher.metering`'s files. The session a
-request belongs to arrives in a private ``X-Claunch-Session`` header, which
-is stripped before the upstream sees it.
+request belongs to arrives as the first path segments, ``/s/<session>/...``
+(the daemon puts them into the session's base URL, see
+:data:`routing.SESSION_PATH_PREFIX`); they are taken off before the request
+goes upstream. A request without them is read the old way, from a private
+``X-Claunch-Session`` header, which is stripped either way.
 
 Run directly with::
 
@@ -19,12 +23,18 @@ Run directly with::
 ``--spec '{}'`` is the metering-only shim. ``--provider <name>`` makes the
 shim read ``providers.<name>.session_affinity`` from the live config on every
 request and, while the flag is on, forward the calling session's name (from
-the private ``X-Claunch-Session`` header, which is still stripped) as
+the ``/s/<session>`` path prefix, or the legacy header) as
 ``x-session-affinity`` for backends that route a session's requests to the
 replica holding its prompt cache. The read is live — toggling the flag
 (including from the web Settings page) reaches this shim without a restart,
 in both directions. A shim started with the legacy ``--session-affinity``
 flag and no ``--provider`` keeps that static choice for its whole life.
+The same live read covers ``providers.<name>.session_header``: the session
+name (or ``routing.SESSION_HEADER_FALLBACK`` when none arrived) goes out
+under that header on every request, for upstreams such as OpenCode Go that
+refuse a request without one, and ``providers.<name>.anthropic_auth_header:
+x-api-key`` moves a bearer credential to ``x-api-key`` on Anthropic Messages
+paths, for upstreams that read it only from there.
 
 ``--route <name>`` starts the shim for a *dynamic* provider. The shim then
 re-reads ``providers.<name>`` on every request — the anthropic endpoint to
@@ -97,14 +107,14 @@ def _forwarded(headers) -> CIMultiDict:
     return out
 
 
-def _target(upstream: str, request: web.Request) -> str:
+def _target(upstream: str, request: web.Request, path: str) -> str:
     """Upstream URL for a request that arrived at the shim.
 
     ``upstream`` may carry a path prefix of its own (``https://host/api/``);
-    the request path is appended to it, so ``/v1/messages`` becomes
-    ``https://host/api/v1/messages``.
+    ``path`` (the request's raw path with the session prefix taken off) is
+    appended to it, so ``/v1/messages`` becomes ``https://host/api/v1/messages``.
     """
-    url = upstream.rstrip("/") + request.rel_url.raw_path
+    url = upstream.rstrip("/") + path
     query = request.rel_url.raw_query_string
     return f"{url}?{query}" if query else url
 
@@ -138,6 +148,54 @@ def _affinity_on(app: web.Application) -> bool:
             print(f"session_affinity config error: {exc}", file=sys.stderr)
             app["affinity_error"] = str(exc)
         return False
+
+
+def _session_header(app: web.Application):
+    """The header the provider requires a session id under, read live.
+
+    Same live read and error policy as :func:`_affinity_on`: a malformed
+    value is logged once per distinct message and no header is added.
+    """
+    provider = app["cfg"].get("provider")
+    if not provider:
+        return None
+    try:
+        return routing.session_header(provider)
+    except routing.RoutingError as exc:
+        if app.get("session_header_error") != str(exc):
+            print(f"session_header config error: {exc}", file=sys.stderr)
+            app["session_header_error"] = str(exc)
+        return None
+
+
+def _anthropic_auth_header(app: web.Application):
+    """``providers.<name>.anthropic_auth_header``, read live (see
+    :func:`_session_header` for the error policy)."""
+    provider = app["cfg"].get("provider")
+    if not provider:
+        return None
+    try:
+        return routing.anthropic_auth_header(provider)
+    except routing.RoutingError as exc:
+        if app.get("anthropic_auth_error") != str(exc):
+            print(f"anthropic_auth_header config error: {exc}", file=sys.stderr)
+            app["anthropic_auth_error"] = str(exc)
+        return None
+
+
+def _bearer_to_api_key(headers: CIMultiDict) -> None:
+    """Move an ``Authorization: Bearer`` credential to ``x-api-key``.
+
+    A caller that already sent ``x-api-key`` keeps it as sent.
+    """
+    auth = headers.get("Authorization")
+    if not auth or headers.get("x-api-key") is not None:
+        return
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return
+    headers.popall("Authorization", None)
+    headers["x-api-key"] = token.strip()
 
 
 def _metered_path(path: str) -> bool:
@@ -182,12 +240,28 @@ def _resolve_route(cfg: dict, session_name):
 
 
 async def _proxy(request: web.Request) -> web.StreamResponse:
+    # Counted for the whole handler, so an idle-only shutdown (``_shutdown``
+    # with ``when=idle``) waits for every request it carries, not only the
+    # metered ones.
+    request.app["inflight"] += 1
+    try:
+        return await _proxy_counted(request)
+    finally:
+        request.app["inflight"] -= 1
+        if request.app["inflight"] == 0 and request.app.get("stop_when_idle"):
+            request.app["stop"].set()
+
+
+async def _proxy_counted(request: web.Request) -> web.StreamResponse:
     cfg = request.app["cfg"]
     body = await request.read()
     headers = _forwarded(request.headers)
-    # The session name rides in on a private header the daemon added for us;
-    # it is ours to read and must not reach the upstream.
-    session_name = headers.popall(metering.SESSION_HEADER, [None])[-1]
+    # The session name rides in on the path prefix of the session's base URL
+    # (or, from a session launched before the prefix existed, on a private
+    # header); either is ours to read and must not reach the upstream.
+    session_name, path = routing.split_session_path(request.rel_url.raw_path)
+    from_header = headers.popall(metering.SESSION_HEADER, [None])[-1]
+    session_name = session_name or from_header
     upstream = cfg["upstream"]
     table: dict = {}
     if cfg.get("route"):
@@ -217,9 +291,14 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         # same rule merge_body applies to the body.
         if AFFINITY_HEADER not in headers:
             headers[AFFINITY_HEADER] = session_name
+    required = _session_header(request.app)
+    if required and required not in headers:
+        headers[required] = session_name or routing.SESSION_HEADER_FALLBACK
+    if "/messages" in path and _anthropic_auth_header(request.app):
+        _bearer_to_api_key(headers)
     meter = None
-    if request.method == "POST" and _metered_path(request.path):
-        meter = metering.Meter(session=session_name, path=request.path)
+    if request.method == "POST" and _metered_path(path):
+        meter = metering.Meter(session=session_name, path=path)
         # Ask for an uncompressed body: the meter reads the usage out of the
         # bytes going past, and a gzip'd answer would be forwarded blind.
         headers.popall("accept-encoding", None)
@@ -228,7 +307,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     if meter is not None:
         live.begin(meter)
     try:
-        return await _forward(request, cfg, upstream, body, headers, meter)
+        return await _forward(request, cfg, upstream, path, body, headers, meter)
     finally:
         # Every way out -- an answer, an upstream error, a client that hung up
         # and cancelled this handler -- ends the call in the live view, or the
@@ -237,12 +316,12 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             live.end(meter)
 
 
-async def _forward(request, cfg, upstream, body, headers, meter) -> web.StreamResponse:
+async def _forward(request, cfg, upstream, path, body, headers, meter) -> web.StreamResponse:
     session: aiohttp.ClientSession = request.app["session"]
     try:
         upstream_resp = await session.request(
             request.method,
-            _target(upstream, request),
+            _target(upstream, request, path),
             headers=headers,
             data=body,
             allow_redirects=False,
@@ -326,16 +405,28 @@ async def _health(request: web.Request) -> web.Response:
             "upstream": cfg["upstream"],
             "spec": cfg["spec"],
             "route": cfg.get("route"),
+            "provider": cfg.get("provider"),
+            "inflight": request.app["inflight"],
+            # Asked to shut down: routing._find no longer hands it out.
+            "stopping": bool(request.app.get("stopping")),
             "pid": os.getpid(),
         }
     )
 
 
 async def _shutdown(request: web.Request) -> web.Response:
+    app = request.app
+    app["stopping"] = True
+    if request.query.get("when") == "idle" and app["inflight"]:
+        # A superseded shim (routing.retire): stop once the requests still
+        # running through it have finished, so no stream is cut.
+        app["stop_when_idle"] = True
+        return web.json_response({"stopping": app["cfg"]["fingerprint"],
+                                  "inflight": app["inflight"]})
     # Set the flag *after* this response has had a moment to flush, so the
     # caller learns the shim is going down rather than seeing a dropped socket.
-    asyncio.get_running_loop().call_later(0.05, request.app["stop"].set)
-    return web.json_response({"stopped": request.app["cfg"]["fingerprint"]})
+    asyncio.get_running_loop().call_later(0.05, app["stop"].set)
+    return web.json_response({"stopped": app["cfg"]["fingerprint"]})
 
 
 def _connector() -> "aiohttp.TCPConnector | None":
@@ -374,6 +465,7 @@ def build_app(upstream: str, spec: dict, fingerprint: str,
     app["cfg"] = {"upstream": upstream, "spec": spec, "fingerprint": fingerprint,
                   "provider": provider, "session_affinity": session_affinity,
                   "route": route}
+    app["inflight"] = 0
     app["live"] = metering.LiveBoard(fingerprint)
     app.cleanup_ctx.append(_client_session)
     app.cleanup_ctx.append(_live_flusher)

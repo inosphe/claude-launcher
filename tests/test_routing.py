@@ -165,6 +165,69 @@ def test_front_passes_the_provider_to_the_shim(home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# a header the upstream requires to carry a session id (OpenCode Go)
+# --------------------------------------------------------------------------- #
+def test_session_header_is_off_by_default_and_reads_the_provider_block(home):
+    _write_provider()
+    assert routing.session_header("openrouter") is None
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"session_header": "x-opencode-session"}))
+    assert routing.session_header("openrouter") == "x-opencode-session"
+    assert routing.session_header("nonexistent") is None
+
+
+@pytest.mark.parametrize("bad", [True, "", "x opencode", "x:y", 1, []])
+def test_a_malformed_session_header_is_rejected(home, bad):
+    _write_provider()
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"session_header": bad}))
+    with pytest.raises(routing.RoutingError):
+        routing.session_header("openrouter")
+
+
+def test_anthropic_auth_header_reads_the_provider_block(home):
+    _write_provider()
+    assert routing.anthropic_auth_header("openrouter") is None
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"anthropic_auth_header": "x-api-key"}))
+    assert routing.anthropic_auth_header("openrouter") == "x-api-key"
+    assert routing.requires_shim("openrouter") is True
+    # the default spelled out is the same as absent
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"anthropic_auth_header": "authorization"}))
+    assert routing.anthropic_auth_header("openrouter") is None
+    assert routing.requires_shim("openrouter") is False
+
+
+@pytest.mark.parametrize("bad", [True, "", "api-key", 1])
+def test_a_malformed_anthropic_auth_header_is_rejected(home, bad):
+    _write_provider()
+    store.update(lambda doc: doc["providers"]["openrouter"].update(
+        {"anthropic_auth_header": bad}))
+    with pytest.raises(routing.RoutingError):
+        routing.anthropic_auth_header("openrouter")
+
+
+def test_a_session_header_provider_is_fronted_with_metering_off(home, monkeypatch):
+    # conftest switches metering off; the header is mandatory for the
+    # upstream, so the shim must front the provider anyway
+    store.update(lambda doc: doc.setdefault("providers", {}).update({
+        "ocgo": {"env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"},
+                 "session_header": "x-opencode-session"}}))
+    seen = {}
+
+    def _fake_ensure(upstream, block, provider=None):
+        seen["args"] = (upstream, block, provider)
+        return "http://127.0.0.1:1/"
+
+    monkeypatch.setattr(routing, "ensure_shim", _fake_ensure)
+    env = {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"}
+    routing.apply(env, "ocgo")
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/"
+    assert seen["args"] == ("https://opencode.ai/zen/go", {}, "ocgo")
+
+
+# --------------------------------------------------------------------------- #
 # a real shim in front of a real (throwaway) upstream
 # --------------------------------------------------------------------------- #
 class _Upstream:
@@ -250,8 +313,10 @@ def upstream():
 
 
 @pytest.fixture
-def shims(home):
+def shims(home, monkeypatch):
     """Stop whatever a test started — the shim outlives the process that spawns it."""
+    # Only the daemon starts shims; this test stands in for it.
+    monkeypatch.setattr(routing, "_OWNER", True)
     yield
     routing.stop()
 
@@ -314,6 +379,22 @@ def test_shim_forwards_the_session_as_affinity_when_enabled(upstream, shims):
     )
     seen = upstream.requests[-1]
     # the private header is still stripped; the affinity name carries it on
+    assert _header(seen["headers"], "x-claunch-session") is None
+    assert _header(seen["headers"], "x-session-affinity") == "s1221"
+
+
+@pytest.mark.slow_shim
+def test_shim_reads_the_session_off_the_url_path_for_affinity(upstream, shims):
+    _write_fw_provider(affinity=True)
+    base = routing.session_url(routing.ensure_shim(upstream.url, {}, provider="fw"), "s1221")
+    _post_with_headers(base + "v1/chat/completions", {"model": "m"}, {})
+    seen = upstream.requests[-1]
+    assert seen["path"] == "/api/v1/chat/completions"
+    assert _header(seen["headers"], "x-session-affinity") == "s1221"
+    # the path names the session even when a stale header says otherwise
+    _post_with_headers(base + "v1/chat/completions", {"model": "m"},
+                       {"X-Claunch-Session": "s1388"})
+    seen = upstream.requests[-1]
     assert _header(seen["headers"], "x-claunch-session") is None
     assert _header(seen["headers"], "x-session-affinity") == "s1221"
 
@@ -532,6 +613,9 @@ def test_stop_takes_the_shim_down_and_forgets_it(upstream, shims):
 @pytest.mark.slow_shim
 def test_child_env_points_claude_at_the_shim(home, upstream, shims, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    # A run outside a managed session: no session name in the base URL. The
+    # suite itself often runs inside one.
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
 
     def _mutate(doc: dict) -> None:
         doc["providers"] = {
@@ -574,3 +658,85 @@ def test_child_env_leaves_a_provider_without_routing_alone(home, monkeypatch):
     store.set_profile_field("work", "provider", "openrouter")
     env = runner.child_env(p, with_token=True)
     assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api/"
+
+
+def _write_ocgo_provider(header="x-opencode-session"):
+    store.update(lambda doc: doc.__setitem__("providers", {"ocgo": {
+        "env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"},
+        "session_header": header}}))
+
+
+@pytest.mark.slow_shim
+def test_shim_sends_the_session_under_the_required_header(upstream, shims):
+    _write_ocgo_provider()
+    base = routing.ensure_shim(upstream.url, {}, provider="ocgo")
+    _post_with_headers(base + "v1/messages", {"model": "m"},
+                       {"X-Claunch-Session": "s1404"})
+    seen = upstream.requests[-1]
+    assert _header(seen["headers"], "x-claunch-session") is None
+    assert _header(seen["headers"], "x-opencode-session") == "s1404"
+    # without a session name (claunch run / validate outside the daemon) the
+    # header still goes out, since the upstream refuses a request without it
+    _post_with_headers(base + "v1/messages", {"model": "m"}, {})
+    assert _header(upstream.requests[-1]["headers"], "x-opencode-session") == \
+        routing.SESSION_HEADER_FALLBACK
+    # a caller that set the header itself wins
+    _post_with_headers(base + "v1/messages", {"model": "m"},
+                       {"X-Claunch-Session": "s1404",
+                        "X-Opencode-Session": "caller-own"})
+    assert _header(upstream.requests[-1]["headers"], "x-opencode-session") == \
+        "caller-own"
+
+
+@pytest.mark.slow_shim
+def test_shim_sends_the_url_path_session_under_the_required_header(upstream, shims):
+    store.update(lambda doc: doc.__setitem__("providers", {"ocgo": {
+        "env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"},
+        "session_header": "x-opencode-session",
+        "anthropic_auth_header": "x-api-key"}}))
+    base = routing.session_url(routing.ensure_shim(upstream.url, {}, provider="ocgo"), "s1404")
+    _post_with_headers(base + "v1/messages", {"model": "m"},
+                       {"Authorization": "Bearer sk-test"})
+    seen = upstream.requests[-1]
+    assert seen["path"] == "/api/v1/messages"
+    assert _header(seen["headers"], "x-opencode-session") == "s1404"
+    # the Messages-only auth move still sees a Messages path under the prefix
+    assert _header(seen["headers"], "x-api-key") == "sk-test"
+
+
+@pytest.mark.slow_shim
+def test_shim_treats_a_malformed_session_header_as_off(upstream, shims):
+    _write_ocgo_provider(header="x opencode")
+    base = routing.ensure_shim(upstream.url, {}, provider="ocgo")
+    status, _ = _post_with_headers(base + "v1/messages", {"model": "m"},
+                                   {"X-Claunch-Session": "s1404"})
+    assert status == 200
+    assert _header(upstream.requests[-1]["headers"], "x-opencode-session") is None
+
+
+def _post_as(url: str, headers: dict):
+    req = urllib.request.Request(
+        url, data=b'{"model":"m"}',
+        headers={"content-type": "application/json", **headers}, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.status
+
+
+@pytest.mark.slow_shim
+def test_shim_moves_the_bearer_to_x_api_key_on_messages_only(upstream, shims):
+    store.update(lambda doc: doc.__setitem__("providers", {"ocgo": {
+        "env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"},
+        "anthropic_auth_header": "x-api-key"}}))
+    base = routing.ensure_shim(upstream.url, {}, provider="ocgo")
+    bearer = {"Authorization": "Bearer sk-test"}
+    # Claude Code: Anthropic Messages (and its count_tokens) read x-api-key
+    for path in ("v1/messages", "v1/messages/count_tokens"):
+        assert _post_as(base + path, bearer) == 200
+        seen = upstream.requests[-1]["headers"]
+        assert _header(seen, "authorization") is None
+        assert _header(seen, "x-api-key") == "sk-test"
+    # pi: chat completions keeps the bearer, which is what that path reads
+    _post_as(base + "v1/chat/completions", bearer)
+    seen = upstream.requests[-1]["headers"]
+    assert _header(seen, "authorization") == "Bearer sk-test"
+    assert _header(seen, "x-api-key") is None

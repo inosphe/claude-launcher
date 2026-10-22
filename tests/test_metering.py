@@ -340,14 +340,32 @@ def test_metering_is_on_unless_switched_off(home, monkeypatch):
     assert metering.enabled({"metering": False}) is True
 
 
-def test_session_header_is_added_and_replaced_not_duplicated():
-    env = {"ANTHROPIC_CUSTOM_HEADERS": "X-Mine: 1\nx-claunch-session: old"}
-    metering.apply_session_header(env, "s9")
-    lines = env["ANTHROPIC_CUSTOM_HEADERS"].splitlines()
-    assert lines == ["X-Mine: 1", "X-Claunch-Session: s9"]
-    env = {}
-    metering.apply_session_header(env, "s10")
-    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "X-Claunch-Session: s10"
+def test_session_url_names_the_session_in_the_path_and_replaces_an_old_name():
+    base = routing.local_url(routing.candidate_ports(routing.fingerprint("https://u/", {}))[0])
+    named = routing.session_url(base, "s9")
+    assert named == base + "s/s9/"  # Claude's base URL keeps its slash
+    assert routing.session_url(named, "s10") == base + "s/s10/"
+    assert routing.session_url(base.rstrip("/"), "s9") == base + "s/s9"  # Pi's has none
+    assert routing.is_shim_url(named)
+
+
+def test_split_session_path_reads_the_prefix_and_leaves_other_paths_alone():
+    assert routing.split_session_path("/s/s1/v1/messages") == ("s1", "/v1/messages")
+    assert routing.split_session_path("/s/s1/chat/completions") == ("s1", "/chat/completions")
+    assert routing.split_session_path("/s/a%20b/v1/messages") == ("a b", "/v1/messages")
+    assert routing.split_session_path("/v1/messages") == (None, "/v1/messages")
+    assert routing.split_session_path("/s//v1") == (None, "/s//v1")
+
+
+def test_apply_session_rewrites_only_shim_base_urls():
+    shim = routing.local_url(routing.candidate_ports(routing.fingerprint("https://u/", {}))[0])
+    env = {"ANTHROPIC_BASE_URL": shim, pi_provider.ENV_BASE_URL: "https://direct.example"}
+    routing.apply_session(env, "s9")
+    assert env["ANTHROPIC_BASE_URL"] == shim + "s/s9/"
+    assert env[pi_provider.ENV_BASE_URL] == "https://direct.example"
+    env = {"ANTHROPIC_BASE_URL": shim}
+    routing.apply_session(env, None)
+    assert env["ANTHROPIC_BASE_URL"] == shim
 
 
 def test_is_shim_url_recognises_only_the_shim_window():
@@ -452,15 +470,6 @@ def test_pi_projection_goes_through_the_metering_shim_and_asks_for_stream_usage(
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
     assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example"
     assert pi_provider.ENV_STREAM_USAGE not in env
-
-
-def test_pi_session_header_is_set_and_replaced_not_duplicated():
-    env = {pi_provider.ENV_HEADERS: json.dumps({"X-Custom": "1", "x-claunch-session": "old"})}
-    pi_provider.apply_session_header(env, "s9")
-    assert json.loads(env[pi_provider.ENV_HEADERS]) == {"X-Custom": "1", "X-Claunch-Session": "s9"}
-    env = {pi_provider.ENV_HEADERS: "not json"}
-    pi_provider.apply_session_header(env, "s9")
-    assert json.loads(env[pi_provider.ENV_HEADERS]) == {"X-Claunch-Session": "s9"}
 
 
 def test_pi_extension_registers_the_headers_and_the_usage_flag():
@@ -600,6 +609,7 @@ def upstream():
 @pytest.fixture
 def shims(home, monkeypatch):
     monkeypatch.setenv("CLAUNCH_METERING", "1")  # conftest turns it off by default
+    monkeypatch.setattr(routing, "_OWNER", True)  # standing in for the daemon
     yield
     routing.stop()
 
@@ -615,7 +625,27 @@ def _wait_for_record(fp, n=1, timeout=10.0):
 
 
 @pytest.mark.slow_shim
-def test_a_metering_shim_records_a_streamed_completion_with_its_session(home, upstream, shims):
+def test_a_metering_shim_takes_the_session_off_the_path_and_records_it(home, upstream, shims):
+    base = routing.session_url(routing.ensure_shim(upstream.url, {}), "s1")
+    fp = routing.fingerprint(upstream.url, {})
+    req = urllib.request.Request(
+        base + "v1/messages",
+        data=json.dumps({"model": "m", "stream": True}).encode(),
+        headers={"content-type": "application/json", "x-api-key": "sk-test"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        assert b"message_stop" in resp.read()
+    # the upstream sees its own path, with no trace of the session prefix
+    assert upstream.requests[-1]["path"] == "/anthropic/v1/messages"
+    (rec,) = _wait_for_record(fp)
+    assert rec["session"] == "s1" and rec["path"] == "/v1/messages"
+
+
+@pytest.mark.slow_shim
+def test_a_metering_shim_still_reads_the_legacy_session_header(home, upstream, shims):
+    # A session launched before the path prefix existed names itself in a
+    # header; the shim reads it during the changeover and strips it.
     base = routing.ensure_shim(upstream.url, {})
     fp = routing.fingerprint(upstream.url, {})
     req = urllib.request.Request(
@@ -682,6 +712,7 @@ def test_a_metering_shim_records_an_openai_completion_the_way_pi_sends_it(home, 
 @pytest.mark.slow_shim
 def test_child_env_of_an_api_key_provider_points_at_a_metering_shim(home, upstream, shims, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)  # a run outside a session
 
     def _mutate(doc):
         doc["providers"] = {
@@ -697,6 +728,11 @@ def test_child_env_of_an_api_key_provider_points_at_a_metering_shim(home, upstre
     assert routing.is_shim_url(env["ANTHROPIC_BASE_URL"])
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-stored"
     # the OAuth route is never fronted
+    # a run from inside a managed session meters under that session
+    monkeypatch.setenv("CLAUNCH_SESSION", "s5")
+    env = runner.child_env(p, with_token=True)
+    assert env["ANTHROPIC_BASE_URL"] == routing.session_url(routing.ensure_shim(upstream.url, {}), "s5")
+    # the OAuth route is never fronted
     store.set_profile_field("work", "provider", "default")
     env = runner.child_env(p, with_token=True)
     assert not routing.is_shim_url(env.get("ANTHROPIC_BASE_URL"))
@@ -705,7 +741,7 @@ def test_child_env_of_an_api_key_provider_points_at_a_metering_shim(home, upstre
 # --------------------------------------------------------------------------- #
 # the daemon names the session in the requests it launches
 # --------------------------------------------------------------------------- #
-def test_daemon_launch_carries_the_session_header_only_behind_a_shim(home, tmp_path, monkeypatch, metering_on):
+def test_daemon_launch_names_the_session_in_the_shim_url_and_sets_no_header(home, tmp_path, monkeypatch, metering_on):
     from claude_launcher.daemon import harness
     from claude_launcher.daemon.session import SessionDef
 
@@ -730,18 +766,18 @@ def test_daemon_launch_carries_the_session_header_only_behind_a_shim(home, tmp_p
     store.set_profile_field("work", "provider", "deepseek")
     sdef = harness.normalize(SessionDef(name="s42", profile="work", cwd=str(tmp_path)))
     _, env, _ = harness.build_command(sdef)
-    assert env["ANTHROPIC_BASE_URL"] == shim_url
+    assert env["ANTHROPIC_BASE_URL"] == shim_url + "s/s42/"
     assert env["CLAUNCH_SESSION"] == "s42"
-    assert "X-Claunch-Session: s42" in env["ANTHROPIC_CUSTOM_HEADERS"].splitlines()
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in env
 
-    # metering off: direct upstream, and no header pointing at a shim that is not there
+    # metering off: direct upstream, and no session prefix on it
     monkeypatch.setenv("CLAUNCH_METERING", "0")
     _, env, _ = harness.build_command(sdef)
     assert env["ANTHROPIC_BASE_URL"] == "https://d/anthropic"
     assert "ANTHROPIC_CUSTOM_HEADERS" not in env
 
 
-def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_path, monkeypatch, metering_on):
+def test_daemon_pi_launch_names_the_session_in_the_shim_url(home, tmp_path, monkeypatch, metering_on):
     import sys
 
     from claude_launcher.daemon import harness
@@ -779,9 +815,9 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
     store.set_profile_field("work", "provider", "omlx")
     sdef = harness.normalize(SessionDef(name="s43", profile="work:keyed", cwd=str(tmp_path)))
     _, env, _ = harness.build_command(sdef)
-    assert env[pi_provider.ENV_BASE_URL] == shim_url.rstrip("/")
+    assert env[pi_provider.ENV_BASE_URL] == shim_url + "s/s43"
     assert env[pi_provider.ENV_STREAM_USAGE] == "1"
-    assert json.loads(env[pi_provider.ENV_HEADERS]) == {"X-Claunch-Session": "s43"}
+    assert pi_provider.ENV_HEADERS not in env
     assert "ANTHROPIC_CUSTOM_HEADERS" not in env  # that one is Claude Code's
 
     monkeypatch.setenv("CLAUNCH_METERING", "0")
