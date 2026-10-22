@@ -182,6 +182,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const calls = [];
   let failCreate = false;
   let postHold = null;
+  let postUnknown = [];      // names the thread does not have (claunch-p9wes.1.1)
   let failPost = false;
   let failRename = false;
   const api = async (p, opts = {}) => {
@@ -196,7 +197,10 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
       doc = {thread: threads[0], messages: messages["th-1"].filter((m) => m.seq > after)};
     } else if (/^\/api\/threads\/th-2\?after=/.test(p)) {
       doc = {thread: threads[1], messages: []};
-    } else if (p === "/api/threads/th-1/messages") doc = {message: {seq: 3}, delivered: true, hold: postHold};
+    } else if (p === "/api/threads/th-1/messages") {
+      doc = {message: {seq: 3}, delivered: true, hold: postHold};
+      if (postUnknown.length) doc.unknown_mentions = postUnknown;
+    }
     else if (p === "/api/threads") doc = {thread: {id: "th-9"}, delivered: false};
     else if (p.endsWith("/close")) doc = {thread: threads[0]};
     else if (/^\/api\/threads\/th-\d\/title$/.test(p)) {
@@ -291,6 +295,16 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     assert.ok(warn[0].textContent.includes(words) && warn[0].textContent.includes("s1"), warn[0].textContent);
   }
   postHold = null;
+
+  // a name the thread does not have reaches nobody and says so (claunch-p9wes.1.1)
+  postUnknown = ["s9"];
+  host.querySelector(".th-compose .th-text").value = "@s9 봐 주세요";
+  host.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
+  await settle();
+  const unknownWarn = host.querySelectorAll(".wf-warning");
+  assert.equal(unknownWarn.length, 1, "an unknown mention is reported");
+  assert.ok(unknownWarn[0].textContent.includes("@s9"), unknownWarn[0].textContent);
+  postUnknown = [];
 
   // a failed send keeps the message: the bubble says so and the text is back in the composer
   host.querySelector(".th-compose .th-text").value = "lost one";

@@ -424,26 +424,27 @@ def test_a_guest_is_invited_told_its_role_and_listed_apart(tmp_path):
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
 
 
-def test_messages_reach_the_owner_and_the_guests_without_a_loop(tmp_path):
-    """A user message goes to the owner and every guest; a guest's message
-    goes to the owner as advice; the owner's reply goes to nobody."""
+def test_a_message_without_a_mention_reaches_the_owner_alone(tmp_path):
+    """claunch-p9wes.1.1: with no mention a thread with guests behaves like
+    one without them -- the owner is typed into, the guests read the thread
+    later; a guest's message still reaches the owner as advice, and the
+    owner's reply reaches nobody."""
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"session": "s1", "title": "Design"}))["thread"]["id"]
         await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s2"})
         await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s3"})
         assert mgr.sessions["s1"].delivered == []        # the owner invited them itself
-        before = {n: len(s.delivered) for n, s in mgr.sessions.items()}
+        base = {n: len(s.delivered) for n, s in mgr.sessions.items()}   # after the two invite blocks
         res = await req("POST", f"/api/threads/{tid}/messages", {"text": "which way?"})
-        assert res["delivered"] is True and res["guests_delivered"] == {"s2": True, "s3": True}
-        g = mgr.sessions["s2"].delivered[-1]
-        assert "(you are a guest of session s1 here)" in g and "  > which way?" in g
-        assert "reviewer and advisor only" in g
+        assert res["delivered"] is True
+        assert "guests_delivered" not in res and "mentions" not in res
         assert "  > which way?" in mgr.sessions["s1"].delivered[-1]
+        assert len(mgr.sessions["s2"].delivered) == base["s2"] and len(mgr.sessions["s3"].delivered) == base["s3"]
         res = await req("POST", f"/api/threads/{tid}/messages", {"session": "s2", "text": "option B"})
         assert res["message"]["author"] == "guest" and res["message"]["guest"] == "s2"
         o = mgr.sessions["s1"].delivered[-1]
         assert "Guest session s2 (reviewer and advisor) wrote" in o and "  > option B" in o
-        assert len(mgr.sessions["s3"].delivered) == before["s3"] + 1      # guests do not hear each other
+        assert len(mgr.sessions["s3"].delivered) == base["s3"]        # guests do not hear each other unasked
         counts = {n: len(s.delivered) for n, s in mgr.sessions.items()}
         await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "going with B"})
         assert {n: len(s.delivered) for n, s in mgr.sessions.items()} == counts
@@ -451,6 +452,81 @@ def test_messages_reach_the_owner_and_the_guests_without_a_loop(tmp_path):
         await req("POST", f"/api/threads/{tid}/title", {"session": "s2", "title": "x"}, status=403)
         read = await req("GET", f"/api/threads/{tid}?reader=s2")
         assert [m["author"] for m in read["messages"]] == ["user", "guest", "agent"]
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_mentions_route_a_message_to_the_sessions_it_names(tmp_path):
+    """claunch-p9wes.1.1: @<session> names one, @all names the owner and every
+    guest; nobody hears its own message, a name that is no participant is
+    reported instead of delivered, and @all with names is still one delivery
+    each."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"session": "s1", "title": "Design"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s2"})
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s3"})
+
+        def counts():
+            return {n: len(s.delivered) for n, s in mgr.sessions.items()}
+
+        # the user names one guest: it goes there and not to the owner
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 무게는 어디에 두나요?"})
+        assert res["mentions"] == {"all": False, "targets": ["s2"]}
+        assert res["guests_delivered"] == {"s2": True} and "delivered" not in res
+        g = mgr.sessions["s2"].delivered[-1]
+        assert "(you are a guest of session s1 here)" in g and "  > @s2 무게는" in g
+        assert "names you with an @-mention" in g and "reviewer and advisor only" in g
+        assert counts() == {**base, "s2": base["s2"] + 1}
+
+        # a guest names another guest: that one only, never the owner
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"session": "s2", "text": "@s3 의견 주세요"})
+        assert res["guests_delivered"] == {"s3": True} and counts() == {**base, "s3": base["s3"] + 1}
+        assert "Guest session s2 named you" in mgr.sessions["s3"].delivered[-1]
+
+        # the owner names a guest: its terminal gets the reply
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "@s3 확인 부탁"})
+        assert res["guests_delivered"] == {"s3": True} and counts() == {**base, "s3": base["s3"] + 1}
+        block = mgr.sessions["s3"].delivered[-1]
+        assert "Session s1, the owner of this thread, named you" in block and "  > @s3 확인 부탁" in block
+
+        # @all names the owner and every guest
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@all 모두 봐 주세요"})
+        assert res["mentions"] == {"all": True, "targets": ["s1", "s2", "s3"]}
+        assert res["delivered"] is True and res["guests_delivered"] == {"s2": True, "s3": True}
+        assert counts() == {n: c + 1 for n, c in base.items()}
+
+        # @all from a guest: the owner and the other guest, not itself
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"session": "s2", "text": "@all 정리했습니다"})
+        assert counts() == {**base, "s1": base["s1"] + 1, "s3": base["s3"] + 1}
+        assert "Guest session s2 (reviewer and advisor) wrote" in mgr.sessions["s1"].delivered[-1]
+
+        # @all with a name is one delivery each, not two
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@all @s2 하나씩만"})
+        assert counts() == {n: c + 1 for n, c in base.items()}
+        assert res["guests_delivered"] == {"s2": True, "s3": True}
+
+        # a name that is no participant: reported, delivered to nobody
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@ghost 봐 주세요"})
+        assert res["unknown_mentions"] == ["ghost"] and res["mentions"] == {"all": False, "targets": []}
+        assert "delivered" not in res and "guests_delivered" not in res
+        assert counts() == base
+
+        # its own name does not bring the message back to the writer
+        base = counts()
+        await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "@s1 메모"})
+        assert counts() == base
+
+        # an address is not a mention, so the message goes to the owner
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "bob@example.com 에게 물어보세요"})
+        assert "mentions" not in res and "unknown_mentions" not in res
+        assert counts() == {**base, "s1": base["s1"] + 1}
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
 
 

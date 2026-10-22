@@ -20,7 +20,7 @@ claunch-v5nhp. 여러 세션의 쓰레드에 **한 번의 입력**으로 말하�
 | 라우팅 | `src/claude_launcher/daemon/megathread_route.py` | 멤버별 state 조립, Jev 호출, log-odds 판정 |
 | HTTP | `src/claude_launcher/daemon/megathread_api.py` | `/api/megathreads` 라우트, 설정 엔드포인트 |
 | Jev | `src/claude_launcher/daemon/jev.py` | `system_one(..., model=)`과 `model_for(cfg, feature)` |
-| 전달 | `src/claude_launcher/daemon/threads_api.py` | `app["threads_post_user"]` — 쓰레드에 사용자 메시지를 쓰고 세션·게스트에 타이핑하는 기존 경로 |
+| 전달 | `src/claude_launcher/daemon/threads_api.py` | `app["threads_post_user"]` — 쓰레드에 사용자 메시지를 쓰고 멘션 규칙(`docs/session-threads.md` 「멘션」)에 따라 세션·게스트에 타이핑하는 기존 경로 |
 | 설정 | `src/claude_launcher/store.py` | `megathread_*`, `jev_model_*` 기본값 |
 
 ## 데이터 모델
@@ -111,9 +111,10 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 
 ## 전달
 
-선택된 쓰레드마다 `threads.post(user, thread, text)` → 소유 세션과 게스트에게 `[claunch thread …]` 블록이
-타이핑된다. 선택되지 않은 멤버에는 행도, 알림도, 타이핑도 없다. 그래서 그 세션은 이 대화를 나중에도
-참조할 수 없다 — "인지하지 않는다"를 저장하지 않는 것으로 보장한다.
+선택된 쓰레드마다 `threads.post(user, thread, text)` → 멘션 규칙에 따라 소유 세션(멘션이 없으면 소유 세션 하나,
+있으면 이름이 적힌 세션)에 `[claunch thread …]` 블록이 타이핑된다. 선택되지 않은 멤버에는 행도, 알림도,
+타이핑도 없다. 그래서 그 세션은 이 대화를 나중에도 참조할 수 없다 — "인지하지 않는다"를 저장하지 않는 것으로
+보장한다. 게스트에게 타이핑되는 조건은 `docs/session-threads.md`의 「멘션」 절과 같다(claunch-p9wes.1.1).
 
 멤버 자리는 세션이 종료돼도 남는다. 멤버십은 사용자가 만든 배치이고 세션의 생존 상태가 아니며, 같은
 이름·같은 쓰레드로 재개한 세션이 자기 자리를 잃으면 클러스터가 조용히 비어 보인다. 세션이 없으면

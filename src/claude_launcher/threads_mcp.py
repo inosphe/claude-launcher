@@ -21,6 +21,13 @@ returns the threads it is a guest in apart from its own (guest_threads),
 each with how many of the owner's messages it has not read (owner_unread,
 claunch-p9wes.1). A guest's session ending is written into each thread as a
 system message and typed to its owner as one line.
+
+Mentions (claunch-p9wes.1.1). A message body names who it is for with
+``@<session>`` or ``@all`` (the owner and every guest). A thread's guests are
+not typed into by default -- they read the thread with thread_read -- so a
+reply reaches a guest's terminal only by naming it; with no mention the
+message goes to the owner alone, as in a thread without guests. A name that
+is no participant of the thread is returned in ``unknown_mentions``.
 """
 
 from __future__ import annotations
@@ -82,7 +89,11 @@ TOOLS = [
     {"name": "thread_reply",
      "description": "Write a message in one of your threads. The text is GitHub-flavored markdown, "
                     "rendered in the threads pane (lists, code fences, tables, links). Attach pictures "
-                    "with 'images' (file paths); a message may be images alone. Replying to a "
+                    "with 'images' (file paths); a message may be images alone. Name who the message is for "
+                    "with @<session> or @all (the thread's owner and every guest): a thread's guests are not "
+                    "typed into unless a message names them, and naming a session is how a reply reaches it. "
+                    "A name that is no participant of the thread is returned in 'unknown_mentions' and "
+                    "delivered to nobody. Replying to a "
                     "closed thread reopens it, except as a guest (the thread stays closed). Only for the thread's own topic: when the text is about "
                     "another subject than the thread's title, use thread_open for a new thread instead.",
      "inputSchema": {"type": "object", "properties": {
@@ -119,8 +130,9 @@ TOOLS = [
     {"name": "thread_invite",
      "description": "Invite another session into one of your threads as a guest: a reviewer and advisor "
                     "that reads the conversation and writes advice in it, and does not do the work or use "
-                    "the QA tools for it. It is told so; the user's messages there are typed into it too, "
-                    "and its messages are typed into you.",
+                    "the QA tools for it. It is told so. Nothing is typed into it unless a message in the "
+                    "thread names it (@<session> or @all); its messages are typed into you as advice, and "
+                    "naming it in your reply is how your answer reaches its terminal.",
      "inputSchema": {"type": "object", "properties": {
          **_TID, "session": {"type": "string", "description": "the session to invite"}},
          "required": ["thread_id", "session"]}},

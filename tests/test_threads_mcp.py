@@ -219,6 +219,22 @@ def test_invite_and_uninvite_carry_the_session(monkeypatch):
     assert "owner_unread" in body and "guest's session ends" in body
 
 
+def test_mentions_are_told_to_the_agent(monkeypatch):
+    """claunch-p9wes.1.1: the reply tool says how a name routes the message,
+    the invite tool says nothing is typed into a guest unnamed, and the pack
+    carries the same rule."""
+    client = Client()
+    monkeypatch.setattr(threads_mcp, "_client", lambda: client)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    tools = {t["name"]: t for t in threads_mcp.TOOLS}
+    reply = tools["thread_reply"]["description"]
+    assert "@all" in reply and "@<session>" in reply and "unknown_mentions" in reply
+    assert "@<session>" in tools["thread_invite"]["description"]
+    body = prompt_packs.shipped("mcp-threads").body
+    assert "@all" in body and "unknown_mentions" in body
+    assert "No mention at all" in body
+
+
 def test_thread_ask_posts_to_the_asks_route(monkeypatch):
     """claunch-etw0s: thread_ask posts a kind 'ask' through the asks route,
     carrying the session; defaults to an approve ask."""

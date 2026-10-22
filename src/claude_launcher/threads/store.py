@@ -58,6 +58,12 @@ every thread it was in and writes a ``system`` notice in each, so the
 thread itself says the guest is gone rather than its messages simply
 stopping (claunch-p9wes.1).
 
+Mentions (claunch-p9wes.1.1). A message body may name the sessions it is
+for: ``@<session>`` names one, ``@all`` names every participant of the
+thread (the owner and its guests). :func:`parse_mentions` only reads the
+tokens; which of them are participants, and who is then typed in, is the
+route's call (daemon/threads_api.py).
+
 Operator conversations (claunch-iw5i8.12.1). An operator v2 keeps its
 conversation with the user here too, in threads whose owner is
 ``operator:<id>`` (:func:`operator_owner`) rather than a session: the operator
@@ -121,6 +127,30 @@ OPERATOR_PREFIX = "operator:"
 
 def operator_owner(op_id: str) -> str:
     return OPERATOR_PREFIX + str(op_id)
+
+
+#: The mention that names every participant of a thread -- its owner and its
+#: guests (claunch-p9wes.1.1).
+MENTION_ALL = "all"
+
+#: ``@name`` in a message body. The ``@`` must not follow a name character,
+#: so ``bob@example.com`` is an address and not a mention; the name takes the
+#: session-name alphabet (daemon/manager._NAME_RE) and is trimmed of trailing
+#: dots and dashes, so a mention that ends a sentence still reads as one.
+MENTION_RE = re.compile(r"(?<![\w.@-])@([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def parse_mentions(text) -> list[str]:
+    """The ``@name`` tokens of a message body, in order, each once.
+
+    Only the tokens: whether a name is a participant of the thread, and what
+    an unknown one means, is the caller's call (daemon/threads_api.py)."""
+    out: list[str] = []
+    for match in MENTION_RE.finditer(str(text or "")):
+        token = match.group(1).rstrip(".-")
+        if token and token not in out:
+            out.append(token)
+    return out
 
 
 class ThreadError(Exception):

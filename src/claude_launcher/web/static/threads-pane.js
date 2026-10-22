@@ -542,8 +542,15 @@ globalThis.ThreadsPane = (() => {
      delivered=true only means the session accepted it; `hold` names what
      is keeping it out of the terminal right now (claunch-a41i5), and
      without saying so a held message looks like a lost one. `who` is the
-     session the thread belongs to (the all-threads page posts too). */
+     session the thread belongs to (the all-threads page posts too).
+     A name the thread does not have (@s9 of another conversation) reaches
+     nobody: the daemon returns it in `unknown_mentions` (claunch-p9wes.1.1),
+     and the message that named only such names is typed into no session. */
   function deliveryNotice(res, who = name) {
+    if ((res.unknown_mentions || []).length) {
+      const names = res.unknown_mentions.map((n) => "@" + n).join(", ");
+      return `${names} — 이 쓰레드의 참여자가 아니라 그 세션에는 전달하지 않았습니다. 메시지는 쓰레드에 남았습니다.`;
+    }
     if (res.delivered === false) return `${who} 세션에 전달하지 못했습니다. 메시지는 쓰레드에 남았습니다.`;
     if (res.hold === "exited") return `${who} 세션이 종료 상태라 전달을 보류했습니다. 세션을 다시 시작(respawn/restore)하면 그때 전달됩니다. 메시지는 쓰레드에 남아 있습니다.`;
     if (res.hold === "draft") return `${who} 터미널 입력창에 보내지 않은 입력이 있어 전달 대기 중입니다. 그 입력을 보내거나(Enter) 지우면(Ctrl-C) 이어서 전달됩니다.`;
