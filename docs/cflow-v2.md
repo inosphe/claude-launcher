@@ -2294,7 +2294,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`delegation`, `outcome`, `value`, `receipt_path`, `scope`, `cwd`) |
 | `flow_rule` | 규칙의 `text`·`why` 조회 |
 | `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |
-| `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
+| `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`). 응답자의 도구 목록에는 v1 `answer`도 함께 있으므로 계열은 id가 정한다: `ask2-…`는 이 도구가, `ask-…`는 v1 게이트가 받는다 — 어느 도구로 불러도 그 ask를 받은 세션만 답할 수 있다(claunch-c3vq4) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6). `set_by: [user]` 입력은 쓰지 못한다 |

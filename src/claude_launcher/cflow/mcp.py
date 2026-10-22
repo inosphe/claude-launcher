@@ -315,7 +315,8 @@ TOOLS = [
             "precisely because the run does not get to decide it. You cannot "
             "answer a request that was not put to you, nor one from your own "
             "run, and you never receive the asking step's instructions — the "
-            "work stays theirs."
+            "work stays theirs. An 'ask2-...' id is a cflow v2 ask: it is "
+            "answered through this tool too."
         ),
         "inputSchema": {
             "type": "object",
@@ -579,6 +580,25 @@ def _session() -> str:
     :func:`engine.answer`).
     """
     return str(os.environ.get(state_mod.SESSION_ENV) or "").strip()
+
+
+def _answer_any_family(ask_id: str, decision: str, reason: Optional[str], *,
+                       by_session: str) -> dict:
+    """Answer an ask of either family, routed by the family its id names.
+
+    A responder asked by a cflow v2 run is told to use ``flow_answer``, but the
+    tool list it holds carries this v1 ``answer`` too — two tools for one act.
+    A v2 id answered here used to fall through to the v1 lookup, which knows
+    nothing about ``ask2-`` ids, and reported "it was answered, it escalated
+    past you, or its run moved on" about a request that was open and waiting
+    (claunch-c3vq4). The family is in the id, so route on it instead of
+    answering about a run this gate never saw.
+    """
+    from ..cflow2 import asks as asks2
+
+    if ask_id.startswith(asks2.ID_PREFIX):
+        return asks2.answer_by_id(ask_id, decision, reason, by_session=by_session)
+    return engine.answer_ask(ask_id, decision, reason, by_session=by_session)
 
 
 def _request_child_goto(args: dict) -> dict:
@@ -847,8 +867,9 @@ def _call_tool(name: str, args: dict) -> dict:
             else "nothing is waiting on your decision",
         }
     elif name == "answer":
-        payload = engine.answer_ask(
-            str(args.get("ask") or ""),
+        ask_id = str(args.get("ask") or "")
+        payload = _answer_any_family(
+            ask_id,
             str(args.get("decision") or ""),
             args.get("reason") or None,
             by_session=_session(),

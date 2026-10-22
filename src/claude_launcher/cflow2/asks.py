@@ -46,6 +46,14 @@ NUDGE_FELL = (
     "[cflow2] an ask of your run could not be answered by any responder: {how}"
 )
 
+#: Every cflow2 ask id starts with this (a v1 ask is ``ask-<hex>``). The
+#: prefix is how an answer call knows which gate owns the id it was handed:
+#: an agent asked by one family reaches for whichever ``answer`` tool its
+#: tool list offers, and an id silently belonging to the other family made
+#: that call report "it was answered, it moved past you" about a request
+#: that was open and waiting (claunch-c3vq4).
+ID_PREFIX = "ask2-"
+
 
 # -- the index: ask id -> run --------------------------------------------------
 
@@ -438,7 +446,7 @@ def pending_for(session: str) -> List[Dict[str, Any]]:
     if not session:
         return out
     try:
-        files = sorted(index_dir().glob("ask2-*.json"))
+        files = sorted(index_dir().glob(f"{ID_PREFIX}*.json"))
     except OSError:
         return out
     for path in files:

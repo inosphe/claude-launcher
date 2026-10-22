@@ -281,7 +281,8 @@ TOOLS = [
             "'abstain' when you have no basis to decide -- it then goes to the next "
             "candidate group. Judge it yourself; 'reason' is journaled in the asking "
             "run. Your identity is your session, not an argument; the asking session "
-            "cannot answer its own question."
+            "cannot answer its own question. An 'ask-...' id is a cflow v1 ask and "
+            "is answered through the v1 'answer' tool's gate either way."
         ),
         "inputSchema": {
             "type": "object",
@@ -671,8 +672,18 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
     if name == "flow_answer":
         from . import asks
 
-        return asks.answer_by_id(str(args.get("ask_id") or "").strip(),
-                                 str(args.get("decision") or ""), args.get("reason"),
+        ask_id = str(args.get("ask_id") or "").strip()
+        decision = str(args.get("decision") or "")
+        if ask_id and not ask_id.startswith(asks.ID_PREFIX):
+            # A cflow v1 ask id answered through this tool. The family is in
+            # the id, so hand it to the v1 gate: otherwise the responder is
+            # told a request that is open and waiting on it "moved past" it
+            # (claunch-c3vq4 — the mirror of the v1 'answer' tool's case).
+            from ..cflow import engine as v1_engine
+
+            return v1_engine.answer_ask(ask_id, decision, args.get("reason"),
+                                        by_session=session)
+        return asks.answer_by_id(ask_id, decision, args.get("reason"),
                                  by_session=session)
     if name == "flow_asks":
         from . import asks
