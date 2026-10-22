@@ -96,8 +96,9 @@ new Function(
   "exports", "el", "$", "sessionsCache", "currentName", "railOpen", "tpsSparkline",
   ["fmtAge", "modelShort", "terminalOnScreen", "tpsFmt", "tpsAgeSecs", "ttftFmt",
    "tpsLatencyText", "tpsAvgLatencyText", "tpsSecs", "tpsLiveText", "tpsCacheText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
-   "tpsChip", "renderTermTps"].map(slice).join("\n") + `
+   "tpsErrorText", "tpsErrorClass", "tpsChip", "renderTermTps"].map(slice).join("\n") + `
 exports.text = tpsText;
+exports.errorText = tpsErrorText;
 exports.tooltip = tpsTooltip;
 exports.rail = tpsRailLine;
 exports.chip = tpsChip;
@@ -140,6 +141,19 @@ const IDLE = {
 const BIG = { ...FAST, tps: 248.75, ttft_ms: 1054, ttfb_ms: 1067 };
 const ERR = { ts: AT, model: null, status: 502, counted: false, tps: null, ttft_ms: null,
               window: 1, tps_median: null, ttft_ms_median: null };
+/* A rate limit from the upstream (claunch-waakh.1). The shim records the
+   status it forwarded; the harness shows the session a bare "API error", so
+   this number is the only place the cause was visible. The shape here is a
+   real record from 2026-10-21 (`status: 429, counted: false, tps: null`). */
+const RATE = { ts: AT, model: null, status: 429, counted: false, tps: null,
+               ttft_ms: null, ttfb_ms: 1801, window: 1, tps_median: null,
+               tps_median_n: 0, ttft_ms_median: null, max_age_s: 600, idle: false };
+/* The same failure delivered inside a 200: the body ends in an Anthropic
+   `error` event, so the status says nothing and the type has to stand in. */
+const BODY_ERR = { ...RATE, status: 200, error: { type: "overloaded_error",
+                                                  message: "Overloaded" } };
+const RATE_WITH_TYPE = { ...RATE, error: { type: "rate_limit_error",
+                                           message: "rate limit exceeded" } };
 /* A reading from a daemon that predates the window bound: it still carries a
    number for a call an hour old, and the fallback threshold must still dim
    it. A restarted daemon sends IDLE for this session instead. */
@@ -176,6 +190,37 @@ check("an uncounted error answer shows its status where the number would be",
 check("no block at all is an empty string, never a zero", ctx.text(null), "");
 check("a session that has gone quiet reads none, not its last number",
       ctx.text(IDLE), "idle");
+
+/* ---- why the last call failed (claunch-waakh.1) ---- */
+check("a rate limit shows its HTTP status where the number would be",
+      ctx.text(RATE), "HTTP 429");
+check("...and the backend's error type when it sent one",
+      ctx.text(RATE_WITH_TYPE), "HTTP 429 · rate_limit_error");
+check("an error inside a 200 has no status to show, so its type stands in",
+      ctx.text(BODY_ERR), "overloaded_error");
+check("...and an error with no type of its own still reads as the status",
+      ctx.text({ ...RATE, status: 500, error: {} }), "HTTP 500");
+check("a session with nothing in flight still shows the last failure",
+      ctx.text({ ...RATE, live: { state: "idle", inflight: 0, rate: 0 } }),
+      "HTTP 429 · idle");
+check("a retry that is already streaming keeps the failure on the line",
+      ctx.text({ ...RATE, live: { state: "streaming", inflight: 1, rate: 42 } }),
+      "HTTP 429 · ≈42.0 tok/s");
+check("a quiet row draws no alarm about a call outside its window",
+      [ctx.text({ ...RATE, idle: true }), ctx.errorText({ ...RATE, idle: true })],
+      ["idle", ""]);
+check("a call that went through has no error token",
+      [ctx.errorText(FAST), ctx.errorText(null)], ["", ""]);
+check("the tooltip names the failure and repeats the backend's words",
+      ctx.tooltip(RATE_WITH_TYPE)
+        .includes("that call failed: HTTP 429 · rate_limit_error -- rate limit exceeded"),
+      true);
+check("...and an error carried inside a 200 is dated like any other call",
+      ctx.tooltip(BODY_ERR).split("\n")[0], "last call 45s ago (HTTP 200)");
+check("the failed reading is classed for the alarm colour, a good one is not",
+      [ctx.rail({ name: "rate", tps: RATE }).className,
+       ctx.rail({ name: "ok", tps: FAST }).className],
+      ["rail-tps-line err", "rail-tps-line"]);
 
 /* ---- the cache's share of that call (claunch-k196e) ---- */
 check("a measured cache share rides on the glance, in words where there is room",
@@ -276,7 +321,8 @@ const LIVE_ONLY = { live: { window_s: 2, bin_s: 0.5, inflight: 1,
 ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, GONE, WHOLEBODY, OAUTH,
                  { name: "cached", harness: "claude", tps: CACHED },
                  { name: "livec", harness: "claude", tps: CACHED_LIVE },
-                 { name: "liveonly", harness: "claude", tps: LIVE_ONLY }]);
+                 { name: "liveonly", harness: "claude", tps: LIVE_ONLY },
+                 { name: "rate", harness: "claude", tps: RATE }]);
 check("the chip is the glance with the story on hover",
       [ctx.chip("pi").textContent, ctx.chip("pi").className, ctx.chip("pi").title === tip],
       ["38.1 tok/s · ttft 715ms", "sess-brief-tps", true]);
@@ -290,6 +336,9 @@ check("no chip for an unmetered session, nor for one the rail no longer knows",
       [ctx.chip("nc"), ctx.chip("gone")], [null, null]);
 check("the chip carries the share compactly, as the rail does",
       ctx.chip("cached").textContent, "38.1 tok/s · ttft 715ms · 97%");
+check("the chip carries a failed call's status, in the alarm colour",
+      [ctx.chip("rate").textContent, ctx.chip("rate").className],
+      ["HTTP 429", "sess-brief-tps err"]);
 
 /* ---- the header badge and the PTY overlay ---- */
 ctx.setCurrent("ds4");
@@ -489,6 +538,32 @@ check("the overlay draws only this session's two areas, with no peer panel",
         ["term-tps-last",
          [["term-tps-small term-tps-when", "deepseek flash · last 38.1 tok/s · 45s ago"],
           ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]]);
+
+/* The overlay says it too: a failed last call is the reading a person is
+   looking for when the harness only said "API error" (claunch-waakh.1). */
+ctx.setSessions([{ name: "rate", harness: "claude", tps: RATE }]);
+ctx.setCurrent("rate");
+ctx.render();
+check("the badge and the overlay name the failed status",
+      [dom["term-tps"].className, dom["term-tps"].textContent,
+       dom["term-tps-overlay"].className, overlayAreas()],
+      ["badge tps err", "HTTP 429", "term-tps-overlay err",
+       [["term-tps-last",
+         [["term-tps-big", "HTTP 429"],
+          ["term-tps-small term-tps-when", "45s ago"]]]]]);
+
+const RATE_LIVE = { ...RATE, live: { window_s: 2, bin_s: 0.5, inflight: 1,
+                                     state: "waiting", rate: 0, since_s: 1.2 } };
+ctx.setSessions([{ name: "ratelive", harness: "claude", tps: RATE_LIVE }]);
+ctx.setCurrent("ratelive");
+ctx.render();
+check("a retry in flight keeps the failure in the finished call's area",
+      [dom["term-tps-overlay"].className, overlayAreas()],
+      ["term-tps-overlay live err",
+       [["term-tps-live",
+         [["term-tps-big", "waiting 1.2s"], ["term-tps-chart", ""]]],
+        ["term-tps-last",
+         [["term-tps-small term-tps-when", "HTTP 429 · 45s ago"]]]]]);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

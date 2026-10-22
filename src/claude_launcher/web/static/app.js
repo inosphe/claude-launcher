@@ -8042,6 +8042,7 @@ function tpsCacheText(t, compact) {
    it would read as this call's. */
 function tpsText(t, compact) {
   if (!t) return "";
+  const err = typeof tpsErrorText === "function" ? tpsErrorText(t) : "";
   const live = typeof tpsLiveText === "function" ? tpsLiveText(t.live) : "";
   /* Only this session's own reading (claunch-waakh): the shim's other
      sessions are not drawn here. Their totals made this line -- the rail's
@@ -8049,16 +8050,46 @@ function tpsText(t, compact) {
      ("≈0.0 tok/s · ×8 (1+1+1+1+1+1+1+1) Σ≈530 avg≈66.2"). The session's own
      subagent calls are already in these figures: they run under this
      session's name on the shim. */
-  if (live) return live;
+  if (live) return err ? `${err} · ${live}` : live;
   if (t.idle) return "idle";
-  if (!t.counted || !Number.isFinite(t.tps)) {
-    return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
-  }
+  if (!t.counted || !Number.isFinite(t.tps)) return err || "tps ?";
   const lat = tpsLatencyText(t);
   const avg = typeof tpsAvgLatencyText === "function" ? tpsAvgLatencyText(t) : "";
   const cache = typeof tpsCacheText === "function" ? tpsCacheText(t, compact) : "";
-  return `${tpsFmt(t.tps)} tok/s` + (lat ? ` · ${lat}` : "") + (avg ? ` · ${avg}` : "") +
-    (cache ? ` · ${cache}` : "");
+  return `${tpsFmt(t.tps)} tok/s` + (err ? ` · ${err}` : "") + (lat ? ` · ${lat}` : "") +
+    (avg ? ` · ${avg}` : "") + (cache ? ` · ${cache}` : "");
+}
+
+/* How the last call failed, when it did (claunch-waakh.1).
+
+   The shim records the upstream's own HTTP status, so a rate limit that
+   arrives as a 429 is readable even though the harness shows the session a
+   plain "API error". A backend that answers 200 and then ends the body with
+   an error event has no failing status to show, so the error's own type
+   stands in (`overloaded_error`); the record keeps it beside the status.
+   `rate_limit_error` on a 200 and `HTTP 429` are the same fact reported two
+   ways, and both are drawn as one short token.
+
+   Idle rows say nothing: their last call is already outside the daemon's
+   window, so an error from it would be an alarm about something that is no
+   longer happening. */
+function tpsErrorText(t) {
+  if (!t || t.idle) return "";
+  const status = Number.isFinite(t.status) ? t.status : null;
+  const failed = status !== null && (status < 200 || status >= 300);
+  const err = t.error && typeof t.error === "object" ? t.error : null;
+  const kind = err && typeof err.type === "string" ? err.type : "";
+  const code = failed ? `HTTP ${status}` : "";
+  if (code && kind) return `${code} · ${kind}`;
+  if (code) return code;
+  if (kind) return kind;
+  return err ? "error" : "";
+}
+
+/* The alarm colour, wherever the reading is drawn. Empty for a call that
+   went through, so the class list of a healthy row is unchanged. */
+function tpsErrorClass(t) {
+  return typeof tpsErrorText === "function" && tpsErrorText(t) ? " err" : "";
 }
 
 /* The live glance: "≈42 tok/s" while content arrives, "waiting 3.2s" while
@@ -8101,6 +8132,14 @@ function tpsTooltip(t) {
   if (t.ts) {
     lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
                (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
+  }
+  /* Why it failed, in the backend's own words where it gave them
+     (claunch-waakh.1). The status above is already on the line; this is the
+     part the harness never showed the session. */
+  const err = typeof tpsErrorText === "function" ? tpsErrorText(t) : "";
+  if (err && !t.idle) {
+    const detail = t.error && typeof t.error.message === "string" ? t.error.message : "";
+    lines.push(`that call failed: ${err}` + (detail ? ` -- ${detail}` : ""));
   }
   if (t.idle) {
     lines.push(`no call in the last ${fmtAge(t.max_age_s)} -- nothing to measure,` +
@@ -8171,7 +8210,8 @@ function tpsStaleClass(t) {
 function tpsRailLine(s) {
   const t = s && s.tps;
   if (!t) return null;
-  const line = el("span", "rail-tps-line" + tpsStaleClass(t));
+  const errCls = typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
+  const line = el("span", "rail-tps-line" + tpsStaleClass(t) + errCls);
   /* Compact: the row is 260px by default, and a spelled-out "cache 97%"
      beside the rate, the latency and the age does not fit (see tpsText). */
   const num = el("span", "rail-tps", tpsText(t, true));
@@ -8187,7 +8227,8 @@ function tpsChip(name) {
   const s = sessionsCache.find((x) => x.name === name);
   const t = s && s.tps;
   if (!t) return null;
-  const chip = el("span", "sess-brief-tps" + tpsStaleClass(t), tpsText(t, true));
+  const errCls = typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
+  const chip = el("span", "sess-brief-tps" + tpsStaleClass(t) + errCls, tpsText(t, true));
   chip.title = tpsTooltip(t);
   return chip;
 }
@@ -8360,7 +8401,8 @@ function renderTermTps() {
     if (t) {
       const text = tpsText(t);
       if (badge.textContent !== text) badge.textContent = text;
-      badge.className = "badge tps" + tpsStaleClass(t);
+      const errCls = typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
+      badge.className = "badge tps" + tpsStaleClass(t) + errCls;
       badge.title = tpsTooltip(t);
     }
   }
@@ -8384,6 +8426,13 @@ function renderTermTps() {
     const avgLat = t && !t.idle && typeof tpsAvgLatencyText === "function" ? tpsAvgLatencyText(t) : "";
     const cache = t && !t.idle && typeof tpsCacheText === "function" ? tpsCacheText(t, false) : "";
     const age = t && tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : "";
+    /* Why the last call failed, when it did (claunch-waakh.1). It rides in
+       the lower area: the `big` line of the non-live layout already carries
+       it for an uncounted answer (tpsText), so it is named there only when
+       the rate took that place. */
+    const err = t && typeof tpsErrorText === "function" ? tpsErrorText(t) : "";
+    const rateShown = !!(t && !t.idle && t.counted && Number.isFinite(t.tps));
+    const errCls = t && typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
     let parts = null;
     if (show && !t) {
       parts = { live: false, usageOnly: true, cls: "term-tps-overlay" };
@@ -8394,21 +8443,21 @@ function renderTermTps() {
       const model = l.model || t.model;
       parts = {
         live: true,
-        cls: "term-tps-overlay" + tpsStaleClass(t),
+        cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
         big: tpsLiveText(l),
         series: Array.isArray(l.series) ? l.series : [],
         when: [model ? modelShort(model) : "",
-          t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
-          age].filter(Boolean).join(" · "),
+          rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
+          err, age].filter(Boolean).join(" · "),
         metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
       };
     } else if (show) {
       parts = {
         live: false,
-        cls: "term-tps-overlay" + tpsStaleClass(t),
-        big: !t.idle && t.counted && Number.isFinite(t.tps)
-          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
-        when: [t.model ? modelShort(t.model) : "", age].filter(Boolean).join(" · "),
+        cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
+        big: rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
+        when: [t.model ? modelShort(t.model) : "", rateShown ? err : "", age]
+          .filter(Boolean).join(" · "),
         metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
         title: tpsTooltip(t),
       };

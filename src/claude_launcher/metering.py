@@ -69,6 +69,12 @@ CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 #: lookup; a bigger one is forwarded as-is and recorded without token counts.
 BUFFER_LIMIT = 8 * 1024 * 1024
 
+#: How much of an error message the record keeps. The message is there to name
+#: the failure ("rate limit exceeded, retry in 30s"), not to carry a stack
+#: trace or a whole HTML page into a line that is rewritten several times a
+#: second.
+ERROR_MESSAGE_LIMIT = 200
+
 #: How a record's ``ts`` is written and read back: local time with its own UTC
 #: offset. The offset is what makes an age computable from a file that may
 #: carry records written on either side of a clock change.
@@ -170,6 +176,13 @@ class Meter:
     see :func:`finish`. It is not the same as ``stream``: that one is the
     response's content type, and an SSE body that ends before a single delta
     (an error event, a refusal) is streamed without ever being generated.
+
+    ``error`` is the failure the upstream put *inside* the answer, when it did:
+    an SSE ``error`` event or a JSON body carrying ``error``. The status alone
+    cannot say this — a backend that answers 200 and then sends
+    ``{"type": "error", ...}`` (a rate limit raised mid-request, an overloaded
+    model) looks like a successful call to everything that reads only the
+    status (claunch-waakh.1).
     """
 
     session: Optional[str]
@@ -178,6 +191,7 @@ class Meter:
     model: Optional[str] = None
     stream: Optional[bool] = None
     status: Optional[int] = None
+    error: Optional[dict] = None
     encoding: Optional[str] = None
     first_byte: Optional[float] = None
     first_token: Optional[float] = None
@@ -265,6 +279,11 @@ class Meter:
             return
         if not isinstance(doc, dict):
             return
+        if isinstance(doc.get("error"), dict):
+            # Both wire formats put a failure the backend raised mid-request
+            # here, under a 200 status: Anthropic's ``error`` event and OpenAI's
+            # error chunk share the key.
+            self._take_error(doc["error"])
         if str(doc.get("object") or "").startswith("chat.completion"):
             self._openai_chunk(doc, now)
             return
@@ -345,6 +364,26 @@ class Meter:
             if value is not None:
                 self.usage[key] = value
 
+    def _take_error(self, payload: dict) -> None:
+        """Keep the first error the answer carried, type and a short message.
+
+        The first one is the one that ended the answer; later events in the
+        same body are aftermath. ``type`` is the field both protocols use for
+        the machine-readable kind (``rate_limit_error``, ``overloaded_error``);
+        ``code`` is what some gateways send instead.
+        """
+        if self.error is not None:
+            return
+        kind = payload.get("type") or payload.get("code")
+        out: Dict[str, str] = {}
+        if isinstance(kind, str) and kind:
+            out["type"] = kind
+        message = payload.get("message")
+        if isinstance(message, str) and message:
+            out["message"] = message[:ERROR_MESSAGE_LIMIT]
+        if out:
+            self.error = out
+
     def _read_buffer(self) -> None:
         if self._overflow or not self._buffer:
             return
@@ -354,6 +393,8 @@ class Meter:
             return
         if isinstance(doc, dict):
             self._take_message(doc)
+            if isinstance(doc.get("error"), dict):
+                self._take_error(doc["error"])
             # No first-token mark is taken here. A whole JSON answer arrives
             # in one chunk, so any mark read off the arrival would sit at the
             # end of the call and leave the generation rate dividing by the
@@ -402,6 +443,9 @@ class Meter:
             "session": self.session,
             "path": self.path,
             "status": self.status,
+            # Present only when the answer itself carried a failure: a 200 that
+            # ends in an error event has no status to tell that story with.
+            "error": self.error,
             "stream": bool(self.stream),
             # Not the same fact as ``stream``: an SSE answer that ended before
             # a single delta streamed without generating, and has no rate.
@@ -927,6 +971,10 @@ def session_summary(
         "ts": last.get("ts"),
         "model": last.get("model"),
         "status": last.get("status"),
+        # The failure the last answer carried inside itself, if any
+        # (claunch-waakh.1): a 200 that ends in an error event is invisible to
+        # a reader that only knows the status.
+        "error": last.get("error"),
         "counted": bool(last.get("counted")),
         "idle": not window,
         "age_s": int(age) if age is not None else None,

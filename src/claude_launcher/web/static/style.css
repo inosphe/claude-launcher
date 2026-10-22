@@ -2815,6 +2815,16 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #session-list .rail-tps-line.live .rail-tps,
 .sess-brief-tps.live,
 .badge.tps.live { color: #3fb950; }
+/* The last call failed (claunch-waakh.1): the upstream's HTTP status, or the
+   error it put inside a 200, is drawn where the rate would be, in the alarm
+   colour. This rule sits after the live one on purpose -- a retry that is
+   already streaming carries both classes, and the failure is the fact a
+   reader needs, not the green of the retry. */
+#session-list .rail-tps-line.err .rail-tps,
+#session-list .rail-tps-line.err .rail-tps-bolt,
+.sess-brief-tps.err,
+.badge.tps.err { color: #ff7b72; }
+#term-tps-overlay.err { color: #ff7b72; border-color: #6e2a2a; }
 /* The daemon's notice for the person at this terminal (ws.py "Notices"):
    a banner over the grid's top edge, never a line in it. */
 .term-notice {

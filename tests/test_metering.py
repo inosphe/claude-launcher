@@ -323,6 +323,76 @@ def test_reader_records_a_compressed_or_error_body_without_counts():
 
 
 # --------------------------------------------------------------------------- #
+# the error an answer carried inside itself (claunch-waakh.1)
+# --------------------------------------------------------------------------- #
+def test_reader_keeps_the_error_a_200_answer_ended_with():
+    """A backend that answers 200 and then sends an error event has no failing
+    status to report -- the harness shows the session a plain "API error" and
+    the status says the call went through. The record keeps the error itself,
+    which is the only place the cause survives.
+    """
+    m = metering.Meter(session="s1", path="/v1/messages")
+    m.headers(200, _Headers({"content-type": "text/event-stream"}))
+    m.chunk(b'event: error\n'
+            b'data: {"type":"error","error":{"type":"overloaded_error",'
+            b'"message":"Overloaded"}}\n\n')
+    rec = m.finish()
+    assert rec["status"] == 200
+    assert rec["streamed"] is False and rec["counted"] is False
+    assert rec["error"] == {"type": "overloaded_error", "message": "Overloaded"}
+
+
+def test_reader_keeps_the_error_behind_a_failing_status():
+    """A 429 that explains itself in the body keeps both facts: the status the
+    shim forwarded and the backend's own words (a real record shape from
+    2026-10-21 carries `status: 429, counted: false, tps: null`)."""
+    m = metering.Meter(session="s1", path="/v1/messages")
+    m.headers(429, _Headers({"content-type": "application/json"}))
+    m.chunk(json.dumps({"type": "error", "error": {
+        "type": "rate_limit_error", "message": "rate limit exceeded, retry in 30s",
+    }}).encode())
+    rec = m.finish()
+    assert rec["status"] == 429 and rec["counted"] is False
+    assert rec["error"] == {"type": "rate_limit_error",
+                            "message": "rate limit exceeded, retry in 30s"}
+
+
+def test_a_call_that_went_through_records_no_error():
+    m = metering.Meter(session="s1", path="/v1/messages")
+    m.headers(200, _Headers({"content-type": "application/json"}))
+    m.chunk(json.dumps({"model": "m", "usage": {"input_tokens": 3,
+                                                "output_tokens": 4}}).encode())
+    rec = m.finish()
+    assert rec["error"] is None and rec["counted"] is True
+
+
+def test_the_error_message_is_kept_short():
+    """A gateway that answers with an HTML page must not put it in a line the
+    dashboard rewrites four times a second."""
+    m = metering.Meter(session="s1", path="/v1/messages")
+    m.headers(500, _Headers({"content-type": "application/json"}))
+    m.chunk(json.dumps({"error": {"message": "x" * 900}}).encode())
+    err = m.finish()["error"]
+    assert len(err["message"]) == metering.ERROR_MESSAGE_LIMIT
+
+
+def test_session_summary_carries_the_last_calls_error(home):
+    """The row's `error` is the same call's status read beside it -- a 200
+    that failed says so through this field and nowhere else."""
+    metering.append("fp1", _rec(session="s1", tps=40.0, ts=_ago(21)))
+    metering.append("fp1", _rec(session="s1", tps=None, counted=False, status=429,
+                                 output_tokens=None,
+                                 error={"type": "rate_limit_error"},
+                                 ts=_ago(20)))
+    got = metering.session_summary("s1")
+    assert got["status"] == 429
+    assert got["error"] == {"type": "rate_limit_error"}
+    # A record written before the field existed carries no error at all.
+    metering.append("fp1", _rec(session="s2", tps=40.0, ts=_ago(20)))
+    assert metering.session_summary("s2")["error"] is None
+
+
+# --------------------------------------------------------------------------- #
 # config switches and the session header
 # --------------------------------------------------------------------------- #
 def test_metering_is_on_unless_switched_off(home, monkeypatch):
