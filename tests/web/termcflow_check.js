@@ -115,6 +115,118 @@ Object.assign(exports, {
 });`
 )(ctx, $, el);
 
+/* ---- the run page, rendered for real (claunch-xxxsx.1) ------------------
+   The wake note on the run page's presses was first checked by a source
+   regex (".title = withWake(" somewhere in the body), which stays green
+   when withWake joins nothing and the button ends up with an empty title.
+   Here the real renderCflow2Into is sliced out of app.js and driven
+   against a page-shaped stub, and the assertions read the rendered
+   buttons' title values.
+   The stub names its child arrays childNodes/children -- the names the
+   real DOM uses. claunch-lx3r/claunch-cvfw: a stub-only name (kids) turns
+   a production typo into a green check. */
+function pageNode(tag) {
+  const n = {
+    tag, text: "", title: "", type: "", href: "", value: "", placeholder: "",
+    disabled: false, open: false, className: "", dataset: {}, handlers: {},
+    kids: [], classes: new Set(),
+    appendChild(c) { this.kids.push(c); return c; },
+    append(...cs) { cs.forEach((c) => this.kids.push(c)); },
+    addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
+    contains(x) { return x === this || pageWalk(this).includes(x); },
+    querySelector(sel) {
+      if (!sel.startsWith(".")) return null;
+      return pageWalk(this).find((k) => k.classes.has(sel.slice(1))) || null;
+    },
+    matches() { return false; },
+    focus() {},
+    get childNodes() { return this.kids; },
+    get children() { return this.kids; },
+    get textContent() { return this.text; },
+    set textContent(v) { this.text = String(v); },
+    set innerHTML(v) { if (v === "") this.kids = []; },
+    classList: {
+      add: (...cs) => cs.forEach((c) => n.classes.add(c)),
+      remove: (...cs) => cs.forEach((c) => n.classes.delete(c)),
+      contains: (c) => n.classes.has(c),
+    },
+  };
+  return n;
+}
+function pageWalk(n, out = []) {
+  for (const k of n.kids) { if (!k) continue; out.push(k); pageWalk(k, out); }
+  return out;
+}
+function pageEl(tag, cls, text) {
+  const n = pageNode(tag);
+  if (cls) String(cls).split(/\s+/).forEach((c) => c && n.classes.add(c));
+  if (text !== undefined && text !== null) n.text = String(text);
+  return n;
+}
+const runPage = (() => {
+  const stub = `
+let cf2PaneClose = null;
+let cf2Drafts = {};
+let sessionsCache = [];
+const CFLOW2_STATUS_CLS = {};
+const document = { activeElement: null, body: {}, createElement: (t) => pageEl(t) };
+const el = pageEl;
+function cflowPost() { return Promise.resolve({}); }
+function captureCflow2View() { return () => {}; }
+function wfOwnerChip() { return null; }
+function wfFullLink() { return pageEl("a", null, "open"); }
+function cflow2RunActions() { return []; }
+function cflow2Callstack() { return pageEl("div"); }
+function cflow2InputsBlock() { return pageEl("div"); }
+function cflow2LayoutControls() { return pageEl("div"); }
+function cflow2RecurText() { return "no"; }
+function cflow2Reports() { return []; }
+function cflow2UndecidedCounts() { return {}; }
+function cflow2Undecidable() { return []; }
+function cflow2ForceReport() { return pageEl("div"); }
+function cflow2TriggerLines() { return []; }
+function cflow2CollectionTable() { return pageEl("div"); }
+function cflow2RunHistory() { return pageEl("div"); }
+function cflow2Throughput() { return pageEl("div"); }
+function cflow2TreeInto() {}
+function cflow2TreeRows() { return []; }
+function cf2NodePane() { return pageEl("div"); }
+function cf2QuestionView() { return pageEl("div"); }
+function cf2MovePlanView() { return pageEl("div"); }
+function cf2AnswerHeld() { return ""; }
+function cf2AnswerLegend() { return pageEl("div"); }
+function cf2AskLegendItems() { return []; }
+function alert() {}
+function confirm() { return false; }
+function prompt() { return null; }
+function mdInto(box) { return box; }
+function mdPlain(s) { return String(s); }
+function localStamp(s) { return String(s); }
+`;
+  const ctx = {};
+  new Function(
+    "exports", "pageEl",
+    stub
+    + ["scopeSession", "sessionCategory", "gateWakeNote", "cf2Card", "cf2Section",
+       "cf2ReasonInput", "cf2LimitPresses", "renderCflow2Into"].map(slice).join("\n")
+    + `
+Object.assign(exports, {
+  renderCflow2Into,
+  setSessions: (r) => { sessionsCache = r; },
+});`
+  )(ctx, pageEl);
+  return {
+    render(data) {
+      const box = pageEl("div");
+      ctx.renderCflow2Into(box, data, { host: "page" }, true);
+      return box;
+    },
+    setSessions: ctx.setSessions,
+  };
+})();
+const pageButtons = (box) => pageWalk(box).filter((k) => k.tag === "button");
+const pageTitles = (box) => pageButtons(box).map((b) => b.title);
+
 let failures = 0;
 const check = (name, cond, extra) => {
   if (cond) return;
@@ -565,16 +677,84 @@ const RUN = {
      and report cards answer /api/cflow2/move/resolve and the limit card
      answers /api/cflow2/extend, both of which nudge the driver -- so a
      stopped session comes back from those presses as well, and the two
-     surfaces must not disagree. */
-  const render2 = slice("renderCflow2Into");
-  check("run page: the report grant and both refusals carry the wake note",
-        /grant\.title = withWake\(/.test(render2)
-        && (render2.match(/refuse\.title = withWake\(/g) || []).length === 2,
-        render2.match(/\.title = withWake\([^\n]*/g));
-  check("run page: the move grant carries the wake note",
-        /move\.title = withWake\(/.test(render2));
-  check("run page: the limit presses carry the wake note",
-        /b\.title = withWake\(extra\.stop/.test(render2));
+     surfaces must not disagree.
+     Rendered, not grepped (claunch-xxxsx.1): the boxes below come out of
+     the real renderCflow2Into, and the button title VALUES are read. */
+  const page = (extra) => ({
+    cwd: "/repo", scope: "s16", session: "s16", sessions: ["s16"],
+    status: "waiting_approval",
+    run: { run: "run-1", workflow: "improv-worker-v2", round: 1,
+           status: "waiting_approval", ...extra },
+  });
+  const PAUSED = [{ name: "s16", status: "exited",
+                    paused_at: "2026-10-09T12:05:00+00:00" }];
+  const RESUME = "answering resumes this session — paused → running";
+  runPage.setSessions(PAUSED);
+
+  let box = runPage.render(page({
+    move_request: { kind: "report", id: "m1", node: "work@3", title: "work",
+                    outcome: "ok", by: "s1521" } }));
+  let pbs = pageButtons(box);
+  check("run page: the report card renders two presses", pbs.length === 2,
+        pbs.map((b) => b.text));
+  check("run page: the rendered report grant carries the wake note",
+        pbs[0].title === RESUME, pbs.map((b) => b.title));
+  check("run page: the rendered report refusal keeps its words and the note",
+        pbs[1].title === "the task stays open; the driver reads your reason " +
+          "and continues — " + RESUME, pbs[1].title);
+
+  box = runPage.render(page({
+    move_request: { kind: "move", id: "m2", node: "land", title: "land",
+                    by: "s1521" } }));
+  pbs = pageButtons(box);
+  check("run page: the rendered move grant carries the wake note",
+        pbs.length === 2 && pbs[0].title === RESUME, pbs.map((b) => b.title));
+  check("run page: the rendered move refusal keeps its words and the note",
+        pbs[1].title === "the run stays where it is; the driver reads your " +
+          "reason and continues — " + RESUME, pbs[1].title);
+
+  box = runPage.render(page({
+    loop_limits: [{ instance: "round@3", label: "round", iterations: 5, max: 5 }] }));
+  pbs = pageButtons(box);
+  check("run page: the rendered limit card carries the wake note",
+        pbs.length === 3 && pbs[0].title === RESUME &&
+        pbs[1].title === RESUME, pbs.map((b) => b.title));
+  check("run page: the rendered stop press keeps its outcome and adds the note",
+        pbs[2].title === "it finishes with outcome fail — " + RESUME, pbs[2].title);
+
+  box = runPage.render(page({
+    choices: [{ instance: "c1", label: "next", options: [
+      { name: "next-round", description: "loop" }, { name: "finish" }] }],
+    asks: [{ instance: "a1", label: "end-decision", options: [
+      { name: "approve", description: "the task starts" }, { name: "new-task" }] }] }));
+  pbs = pageButtons(box);
+  check("run page: the rendered choice presses carry the note",
+        pbs[0].title === "loop — " + RESUME &&
+        pbs[1].title === RESUME, pbs.map((b) => b.title));
+  check("run page: the rendered ask presses carry the note",
+        pbs[2].title === "the task starts — " + RESUME &&
+        pbs[3].title === RESUME, pbs.map((b) => b.title));
+
+  /* a running session, a failed record and a session the page cannot see:
+     no wake is promised where none will be delivered */
+  const QUIET = {
+    move_request: { kind: "report", id: "m1", node: "work@3", title: "work",
+                    outcome: "ok", by: "s1521" },
+    loop_limits: [{ instance: "round@3", label: "round", iterations: 5, max: 5 }],
+  };
+  runPage.setSessions([{ name: "s16", status: "idle" }]);
+  check("run page: a running session renders no note",
+        pageTitles(runPage.render(page(QUIET))).every((t) => !t.includes("→ running")),
+        pageTitles(runPage.render(page(QUIET))));
+  runPage.setSessions([{ name: "s16", status: "exited",
+                         failed_at: "2026-10-09T12:10:00+00:00" }]);
+  check("run page: a failed record is not promised a resume",
+        pageTitles(runPage.render(page(QUIET))).every((t) => !t.includes("→ running")),
+        pageTitles(runPage.render(page(QUIET))));
+  runPage.setSessions([]);
+  check("run page: a session it cannot see renders no note",
+        pageTitles(runPage.render(page(QUIET))).every((t) => !t.includes("→ running")),
+        pageTitles(runPage.render(page(QUIET))));
 
   check("the v2 rail poll repaints it",
         /applyCflow2Badges\(\);\s*(\/\/[^\n]*\n\s*)*if \(typeof renderTermCflow === "function"\) renderTermCflow\(\);/.test(src));
