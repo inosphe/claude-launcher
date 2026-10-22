@@ -359,6 +359,19 @@ def test_only_the_originating_instance_delivers_the_result(repo, tmp_path, monke
     assert len(notices) == 1
 
 
+def test_a_failure_notice_names_the_revert_candidates(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    q.finish(bad["id"], "failed", "receipt", json.dumps(["FAILED tests/test_bad.py::t - x"]))
+    notices = []
+    async def deliver(notice):
+        notices.append(notice)
+        return True
+    manager = SimpleNamespace(get=lambda owner: SimpleNamespace(exited=False, deliver=deliver))
+    asyncio.run(Clock(manager, q).tick())
+    assert "revert candidates" in notices[0] and bad["sha"][:12] in notices[0]
+
+
 def test_retries_back_off_and_park_as_stuck_after_the_limit(repo, tmp_path, monkeypatch):
     # claunch-ersj2: a deterministic "no verdict" retried every 60 s for days,
     # and as the oldest rows those jobs were claimed ahead of every queued one.
@@ -535,6 +548,82 @@ def test_a_failing_second_measurement_keeps_the_pause_for_the_repair_path(repo, 
         q.requeue(bad["id"])
     q.repair(repo, bad["id"], "fix")
     q.admit(repo, "fix")
+
+
+def test_a_runner_failure_is_measured_again_before_it_pauses(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "failed", "first receipt", "test_x failed", auto_remeasure=True)
+    row = q.get(job["id"])
+    assert row["status"] == "queued" and row["remeasures"] == 1 and row["notified"] == 1
+    assert json.loads(row["history"])[0]["detail"] == "test_x failed"
+    assert q.status(repo)["pauses"] == []
+    q.admit(repo, "normal")  # merging goes on while the second measurement waits
+    assert q.claim()["id"] == job["id"]
+    q.finish(job["id"], "passed", "green receipt", auto_remeasure=True)
+    row = q.get(job["id"])
+    assert row["status"] == "passed" and "remeasure passed; intermittent" in row["detail"]
+    assert q.status(repo)["pauses"] == []
+
+
+def test_a_failure_that_repeats_takes_the_pause(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "failed", "first receipt", "test_x failed", auto_remeasure=True)
+    q.claim()
+    q.finish(job["id"], "failed", "second receipt", "test_x failed", auto_remeasure=True)
+    assert q.get(job["id"])["status"] == "failed"
+    assert q.status(repo)["pauses"][0]["job"] == job["id"]
+    with pytest.raises(ValueError, match="paused"):
+        q.admit(repo, "normal")
+
+
+def test_suspects_are_the_merges_after_the_last_green_sweep_ranked_by_the_failing_tests(repo, tmp_path):
+    q = queue(tmp_path)
+    green, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(green["id"], "passed", "green receipt")
+    other, _ = enqueue(q, repo, "other")
+    (repo / "tests").mkdir(exist_ok=True)
+    git(repo, "switch", "-q", "-c", "mod", "master")
+    (repo / "mod.py").write_text("x = 1\n")
+    (repo / "tests" / "test_mod.py").write_text("def test_mod():\n    pass\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "mod")
+    git(repo, "switch", "-q", "master")
+    git(repo, "merge", "--no-ff", "-qm", "merge mod", "mod")
+    bad = q.enqueue(repo, git(repo, "rev-parse", "HEAD"), "mod", "leader", TOOL)
+    later, _ = enqueue(q, repo, "later")
+    failures = json.dumps(["FAILED tests/test_mod.py::test_mod - boom"])
+    q.finish(bad["id"], "failed", "receipt", failures)
+    found = q.suspects(bad["id"])
+    assert found["base"] == green["sha"]
+    assert [m["sha"] for m in found["suspects"]] == [bad["sha"], other["sha"]]
+    assert found["suspects"][0]["meets_failing_tests"] == ["mod.py", "tests/test_mod.py"]
+    assert found["suspects"][0]["issue"] == "mod" and found["suspects"][1]["meets_failing_tests"] == []
+    assert [m["sha"] for m in found["after"]] == [later["sha"]]
+    assert found["failing_tests"] == ["tests/test_mod.py"]
+
+
+def test_suspects_without_a_green_sweep_are_the_latest_merges(repo, tmp_path):
+    q = queue(tmp_path)
+    first, _ = enqueue(q, repo, "a")
+    second, _ = enqueue(q, repo, "b")
+    q.claim()
+    q.finish(second["id"], "failed", "receipt", "not a failure list")
+    found = q.suspects(second["id"])
+    assert found["base"] is None and found["failing_tests"] == []
+    assert [m["sha"] for m in found["suspects"]] == [second["sha"], first["sha"]]
+
+
+def test_a_failure_pauses_at_once_without_the_automatic_remeasure(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "failed", "receipt", "test_x failed")
+    assert q.status(repo)["pauses"][0]["job"] == job["id"]
 
 
 def test_remeasure_refuses_what_is_not_the_failed_pause_job(repo, tmp_path):
@@ -953,6 +1042,21 @@ def test_a_failed_batch_is_narrowed_by_unbatch_even_while_paused(repo, tmp_path)
     assert q.status(repo)["pauses"][0]["job"] == tip["id"]
     assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["covered", "covered"]
     assert q.unbatch(tip["id"])["released"] == 2
+    again = q.claim(batch=(3, 0))
+    assert again["id"] == jobs[0]["id"] and again["bisect_of"] == tip["id"]
+
+
+def test_a_repeated_batch_failure_releases_the_covered_merges_by_itself(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abc"))
+    tip = q.claim(batch=(3, 0))
+    q.finish(tip["id"], "failed", "r", "boom", auto_remeasure=True)
+    assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["covered", "covered"]  # first failure: measured again
+    assert q.status(repo)["pauses"] == []
+    assert q.claim(batch=(3, 0))["id"] == tip["id"]
+    q.finish(tip["id"], "failed", "r2", "boom", auto_remeasure=True)
+    assert q.status(repo)["pauses"][0]["job"] == tip["id"]
+    assert [q.get(j["id"])["status"] for j in jobs[:2]] == ["queued", "queued"]
     again = q.claim(batch=(3, 0))
     assert again["id"] == jobs[0]["id"] and again["bisect_of"] == tip["id"]
 
