@@ -8271,9 +8271,11 @@ function ensureTermLivePoll() {
 
    The account's 5-hour and 7-day windows, drawn under the throughput in the
    same overlay. The figures are /api/usage's with refresh=auto: the daemon
-   reads an account at most once in five minutes and answers from its cache
-   in between (profile_usage.py), and this page asks no more often than that
-   per profile, so watching a session costs no extra account reads.
+   reads every account once per fifteen minutes on its own clock and answers
+   from its cache in between (profile_usage.py, daemon/usage_clock.py), and
+   this page asks at most once in five minutes per profile, so watching a
+   session costs no extra account reads and shows the clock's reading within
+   five minutes of it.
 
    Claude Code first: only claude-harness sessions are asked, and only the
    Anthropic readings are drawn. Another provider joins by a row in each
