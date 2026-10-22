@@ -46,6 +46,7 @@ from .. import (
     translators,
     usage,
     profile_usage,
+    usage_history,
 )
 from .. import auto_compact as auto_compact_mod
 from .. import install
@@ -784,6 +785,11 @@ def build_app(
     # tick (daemon/auto_archive.py, claunch-wz6a5).
     from . import auto_archive
     auto_archive.install(app, manager)
+    # Every profile's subscription usage read once per period, a timer per
+    # (profile, provider) key, each read a history sample
+    # (daemon/usage_clock.py, claunch-f5w4x.3).
+    from . import usage_clock
+    usage_clock.install(app)
     # Writes sessions queued while this daemon was unreachable, applied once
     # each (daemon/spool_drain.py, claunch-19liw.2.1).
     from . import spool_drain
@@ -864,6 +870,7 @@ def build_app(
     r.add_post("/api/install/apply", h_install_apply)
     r.add_get("/api/usage", h_usage)
     r.add_get("/api/usage/targets", h_usage_targets)
+    r.add_get("/api/usage/history", h_usage_history)
     r.add_get("/api/metering", h_metering)
     r.add_get("/api/metering/live", h_metering_live)
     r.add_get("/api/borrow-options", h_borrow_options)
@@ -3326,9 +3333,15 @@ async def h_usage(request: web.Request) -> web.Response:
     ) as exc:
         return json_error(400, str(exc))
     # The cache facts ride in the body as well as the headers: a dashboard
-    # read that goes through /api/batch gets the body only.
+    # read that goes through /api/batch gets the body only. ``next_at`` is
+    # when the daemon's clock reads this key again (daemon/usage_clock.py).
     return json_response(
-        {**payload, "cached": cached, "updated_at": updated_at},
+        {
+            **payload,
+            "cached": cached,
+            "updated_at": updated_at,
+            "next_at": updated_at + profile_usage.PERIOD_SECONDS,
+        },
         headers={
             "X-Usage-Cached": "true" if cached else "false",
             "X-Usage-Updated-At": str(updated_at),
@@ -3345,7 +3358,50 @@ async def h_usage_targets(request: web.Request) -> web.Response:
     is asked.
     """
     rows = await asyncio.to_thread(profile_usage.targets)
-    return json_response({"targets": rows})
+    history = await asyncio.to_thread(usage_history.total)
+    return json_response(
+        {"targets": rows, "period_s": profile_usage.PERIOD_SECONDS, "history": history}
+    )
+
+
+async def h_usage_history(request: web.Request) -> web.Response:
+    """The usage samples of one key and what its file weighs.
+
+    ``key`` is a ``key`` of ``/api/usage/targets``; ``since`` (epoch
+    seconds) keeps the samples at or after it. A sample is the time and each
+    window's utilization and reset; the rest of the reading stays in the
+    file (``usage_history``, claunch-f5w4x.3).
+    """
+    key = str(request.query.get("key") or "").strip()
+    if not key:
+        return json_error(400, "key is required")
+    since = None
+    if request.query.get("since"):
+        try:
+            since = float(request.query["since"])
+        except ValueError:
+            return json_error(400, "since must be epoch seconds")
+
+    def read() -> dict:
+        samples = [
+            {
+                "at": row["at"],
+                "windows": [
+                    {
+                        "name": w.get("name"),
+                        "utilization": w.get("utilization"),
+                        "resets_at": w.get("resets_at"),
+                    }
+                    for w in row.get("windows") or []
+                    if isinstance(w, dict)
+                ],
+            }
+            for row in usage_history.read(key, since=since)
+        ]
+        stats = usage_history.stats(key, period=profile_usage.PERIOD_SECONDS)
+        return {"key": key, "samples": samples, "stats": stats}
+
+    return json_response(await asyncio.to_thread(read))
 
 
 async def h_borrow_options(request: web.Request) -> web.Response:

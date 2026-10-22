@@ -8286,6 +8286,26 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .profile-usage-other { margin: 16px 0; color: #8b949e; }
 .profile-usage-other summary { cursor: pointer; }
 .profile-usage-other li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 6px 0; }
+/* Next periodic read, and the history chart of one account (claunch-f5w4x.3). */
+.profile-usage-next { font-variant-numeric: tabular-nums; }
+.profile-usage-head .profile-usage-next { margin-left: auto; }
+.profile-usage-head .profile-usage-next ~ .wf-btn { margin-left: 0; }
+.profile-usage-history { margin-top: 8px; border-top: 1px solid #21262d; padding-top: 8px; }
+.profile-usage-ranges { display: flex; gap: 6px; margin-bottom: 6px; }
+.profile-usage-ranges .wf-btn.active, .profile-usage-head .wf-btn.active { border-color: #388bfd; color: #58a6ff; }
+.profile-usage-chart { position: relative; }
+.profile-usage-svg { display: block; width: 100%; height: auto; max-height: 220px; }
+.profile-usage-svg .pu-grid { stroke: #21262d; stroke-width: 1; }
+.profile-usage-svg .pu-axis { fill: #8b949e; font-size: 10px; }
+.profile-usage-svg .pu-direct { fill: #c9d1d9; font-size: 11px; }
+.profile-usage-svg .pu-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.profile-usage-svg .pu-cross { stroke: #6e7681; stroke-width: 1; stroke-dasharray: 3 3; }
+.profile-usage-legend { display: flex; gap: 12px; font-size: 11px; color: #8b949e; margin-bottom: 4px; }
+.profile-usage-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.profile-usage-swatch { display: inline-block; width: 10px; height: 3px; border-radius: 2px; }
+.profile-usage-tip { position: absolute; top: 18px; padding: 3px 8px; font-size: 11px; color: #c9d1d9; background: #161b22; border: 1px solid #30363d; border-radius: 4px; pointer-events: none; white-space: nowrap; }
+.profile-usage-tip.hidden { display: none; }
+.profile-usage-disk { font-variant-numeric: tabular-nums; }
 .profile-usage-other li small { flex-basis: 100%; }
 /* All threads page (threads-history.js, claunch-8k02k) */
 #threads-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }

@@ -11,18 +11,32 @@ the dashboard lists one row per pair (:func:`targets`). The key also names
 the reader (:func:`usage.reader`): a harness that keeps its own login
 (``work:codex``) reads another account than the profile's provider does,
 and ``providers.resolve_name`` does not look at the harness.
+
+Every key refreshes on one period (:data:`PERIOD_SECONDS`, fifteen minutes):
+an automatic read inside it is answered from the cache, and the daemon's
+refresh clock (``daemon/usage_clock.py``) reads each key again once its own
+period since the last provider read has run out (:func:`due`). A manual read
+reaches the provider at once and so starts that key's period over. Each
+provider read that succeeds is one sample in :mod:`usage_history`
+(claunch-f5w4x.3); the newest sample is the cache a restarted daemon starts
+from.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from . import credentials, lineage, profile as profile_mod, providers, usage
+from . import credentials, lineage, profile as profile_mod, providers, usage, usage_history
 
-AUTO_COOLDOWN_SECONDS = 5 * 60
+log = logging.getLogger(__name__)
+
+#: Seconds between two provider reads of one key, automatic or periodic.
+PERIOD_SECONDS = 15 * 60
+AUTO_COOLDOWN_SECONDS = PERIOD_SECONDS
 
 
 @dataclass
@@ -60,6 +74,51 @@ def _key(selected, provider: str, reader: str) -> str:
     return f"{selected.name}/{provider}/{reader}"
 
 
+def _entry(key: str) -> Optional[_Entry]:
+    """The cache entry of ``key``; a key this daemon has not read yet starts
+    from its newest history sample. Call with ``_guard`` held."""
+    entry = _entries.get(key)
+    if entry is None:
+        try:
+            sample = usage_history.last(key)
+        except OSError:
+            sample = None
+        if sample is not None:
+            payload = {k: v for k, v in sample.items() if k != "at"}
+            entry = _entries[key] = _Entry(requested_at=sample["at"], payload=payload)
+    return entry
+
+
+def schedule(key: str) -> dict:
+    """When ``key`` was last read from its provider and when its period ends.
+
+    Both are ``None`` for a key never read: it is due now.
+    """
+    with _guard:
+        entry = _entry(key)
+    if entry is None:
+        return {"updated_at": None, "next_at": None, "period_s": PERIOD_SECONDS}
+    return {
+        "updated_at": entry.requested_at,
+        "next_at": entry.requested_at + PERIOD_SECONDS,
+        "period_s": PERIOD_SECONDS,
+    }
+
+
+def due(rows: list[dict], now: Optional[float] = None) -> list[dict]:
+    """The rows of :func:`targets` whose key's period has run out, one per key."""
+    now = time.time() if now is None else now
+    seen, found = set(), []
+    for row in rows:
+        if not row.get("supported") or row["key"] in seen:
+            continue
+        seen.add(row["key"])
+        next_at = schedule(row["key"])["next_at"]
+        if next_at is None or next_at <= now:
+            found.append(row)
+    return found
+
+
 def targets() -> list[dict]:
     """One row per profile: its provider, the harness that reads the quota,
     and whether any reader applies (``supported``, else ``reason``).
@@ -79,6 +138,7 @@ def targets() -> list[dict]:
             row["reader"] = usage.reader(selected)
             row["key"] = _key(selected, row["provider"], row["reader"])
             row["supported"] = True
+            row["schedule"] = schedule(row["key"])
         except _ERRORS as exc:
             row.setdefault("key", profile.name)
             row.update(supported=False, reason=str(exc))
@@ -91,7 +151,7 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
 
     The selector is resolved to its (profile, provider) pair first, and the
     cache and lock are kept per pair. Manual reads always reach the provider.
-    Automatic reads return the last result during the five-minute window.
+    Automatic reads return the last result during the key's period.
     Per-pair locks collapse simultaneous page-entry requests into one
     provider call.
     """
@@ -102,7 +162,7 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
     now = time.time()
     with _guard:
         lock = _locks.setdefault(key, threading.Lock())
-        entry = _entries.get(key)
+        entry = _entry(key)
         if not manual and entry is not None and now - entry.requested_at < AUTO_COOLDOWN_SECONDS:
             if entry.error:
                 raise usage.UsageError(entry.error)
@@ -149,4 +209,8 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
             entry.payload = payload
             entry.requested_at = time.time()
             updated_at = entry.requested_at
+        try:
+            usage_history.append(key, payload, updated_at)
+        except OSError as exc:
+            log.warning("usage history: cannot write %s: %s", key, exc)
         return payload, False, updated_at
