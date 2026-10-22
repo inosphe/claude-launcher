@@ -17,7 +17,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .. import daemon_client, providers, session_env, store
+from .. import daemon_client, providers, routing, session_env, store
 from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
@@ -952,6 +952,10 @@ def main(argv=None) -> int:
             "did not exit in time); exiting"
         )
         return 0
+    # This daemon now starts and stops the routing shims; no other process
+    # does (routing.own_lifecycle, claunch-19liw.2.3). After the lock, so a
+    # daemon that lost the race never starts one.
+    routing.own_lifecycle()
 
     cfg = store.daemon_config()
     host = str(cfg["host"])

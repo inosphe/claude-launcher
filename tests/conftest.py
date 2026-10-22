@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -388,6 +389,52 @@ def no_reg_exe_shim(monkeypatch):
     a WSL machine. The tests of the shim itself set ``is_wsl`` back on.
     """
     monkeypatch.setattr("claude_launcher.wsl_reg_stub.is_wsl", lambda: False)
+
+
+class _SpawnedShims(list):
+    """The routing shim processes this test started."""
+
+    def reap(self) -> None:
+        for child in self:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        self.clear()
+
+
+@pytest.fixture(autouse=True)
+def spawned_shims(monkeypatch):
+    """No routing shim a test started outlives the test (claunch-19liw.2.5).
+
+    A shim is a detached process (``start_new_session``), and ``routing.stop``
+    finds shims through their records under the launcher home. The home is
+    the test's ``tmp_path``: once pytest removed it, nothing could find the
+    shim again, and two were left running for days (pids 1097158, 1176483,
+    upstream https://fw.example.com). So every ``routing._spawn`` is tracked
+    here by its process, and whatever is still running at teardown is
+    terminated, whatever the records say.
+    """
+    from claude_launcher import routing
+
+    # Only the daemon starts shims (routing.own_lifecycle). A test that runs
+    # the daemon's ``main`` sets that for the whole worker process; each test
+    # starts without it and the fixtures that stand in for the daemon set it.
+    monkeypatch.setattr(routing, "_OWNER", False)
+    tracked = _SpawnedShims()
+    real = routing._spawn
+
+    def _tracking(*args, **kwargs):
+        child = real(*args, **kwargs)
+        tracked.append(child)
+        return child
+
+    monkeypatch.setattr(routing, "_spawn", _tracking)
+    yield tracked
+    tracked.reap()
 
 
 @pytest.fixture(scope="session")

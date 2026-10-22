@@ -155,7 +155,7 @@ def judge_projection(profile_name: str, session: str) -> dict:
     renamed to ``CLAUNCH_SIMJ_*``, and the key it authenticates with. The
     key goes over the daemon's authenticated API to the process that uses
     it and is never written to a session definition."""
-    from .. import harnesses, pi_provider, profile as profile_mod, runner
+    from .. import harnesses, pi_provider, profile as profile_mod, routing, runner
     doc = config_store.load()
     harness = harnesses.registry(doc).get("pi")
     if harness is None:
@@ -168,7 +168,7 @@ def judge_projection(profile_name: str, session: str) -> dict:
         raise sim_store.SimError(f"judge profile {profile_name}: {exc}")
     if not env:
         raise sim_store.SimError(f"judge profile {profile_name} has no provider the pi harness can use")
-    pi_provider.apply_session_header(env, session)
+    routing.apply_session(env, session)
     out = {k.replace("CLAUNCH_PI_", "CLAUNCH_SIMJ_", 1): v for k, v in env.items()}
     out["CLAUNCH_SIMJ_PROVIDER"] = "claunch-judge"
     out["CLAUNCH_SIMJ_TOKEN_ENV"] = "CLAUNCH_SIMJ_API_KEY"

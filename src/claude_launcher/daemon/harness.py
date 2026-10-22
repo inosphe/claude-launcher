@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry, pytest_basetemp, session_env
-from .. import lineage, metering, pi_provider, profile as profile_mod, projects, providers, routing, runner
+from .. import lineage, pi_provider, profile as profile_mod, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import instance_manifest, mcp_ready, mesh_roles, paths, pty_backend
@@ -1329,14 +1329,6 @@ def build_command(
     # when the session ends. Assembling the env is pure -- the directory
     # itself is created by ``Session.__init__``, like the scratch above.
     env["CLAUNCH_TEST_DIR"] = str(pytest_basetemp.session_test_dir(sdef.name))
-    if sdef.harness == CLAUDE_HARNESS and routing.is_shim_url(
-        env.get("ANTHROPIC_BASE_URL")
-    ):
-        # The shim serving this provider is shared by every session on it;
-        # the header is how a record gets this session's name (see
-        # ``metering``). Only meaningful when the base URL is our shim, and
-        # only claude reads ``ANTHROPIC_CUSTOM_HEADERS``.
-        metering.apply_session_header(env, sdef.name)
     env.update(sdef.env)
     if prof is not None and entry is not None:
         try:
@@ -1350,12 +1342,13 @@ def build_command(
             )
         except runner.RunnerError as exc:
             raise HarnessError(str(exc)) from exc
-    if routing.is_shim_url(env.get(pi_provider.ENV_BASE_URL)):
-        # Pi's counterpart of the ``ANTHROPIC_CUSTOM_HEADERS`` line above. It
-        # has to come after ``finalize_harness_env``, which rebuilds the
-        # whole ``CLAUNCH_PI_*`` projection (and decides whether the base URL
-        # is the shim at all).
-        pi_provider.apply_session_header(env, sdef.name)
+    # The shim serving this provider is shared by every session on it; the
+    # ``/s/<session>`` prefix of the base URL is how a record (metering), the
+    # affinity key and a provider's session header get this session's name
+    # (claunch-19liw.2.4). Only a base URL that is our shim gets it. After
+    # ``finalize_harness_env``, which rebuilds Pi's whole ``CLAUNCH_PI_*``
+    # projection (and decides whether its base URL is the shim at all).
+    routing.apply_session(env, sdef.name)
     # Storage isolation is launcher-owned and cannot be escaped through
     # ``--env``. Claude stays at the historical root; each other supported
     # harness gets its own child directory.

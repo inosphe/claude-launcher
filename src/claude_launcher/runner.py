@@ -303,6 +303,11 @@ def child_env(
         # provider declares one, the base URL is swung to a local shim that
         # merges the spec into every request — see :mod:`routing`.
         routing.apply(env, provider, profile=profile.name)
+        # A run from inside a managed session meters (and keeps its affinity
+        # key) under that session; outside one the URL carries no name. The
+        # daemon sets its sessions' name itself, after this
+        # (``harness.build_command``), since their base env has none.
+        routing.apply_session(env, env.get("CLAUNCH_SESSION"))
     # Claude gateways authenticate with the declared bearer-token route. When
     # it is active the packaged rule forces ANTHROPIC_API_KEY="", preventing
     # Claude Code from also emitting a competing X-Api-Key header.
@@ -589,6 +594,7 @@ def finalize_harness_env(
     _finalize_declared_auth(harness, env)
     try:
         pi_provider.apply_env(profile, harness, env, borrow=borrow, effort=effort)
+        routing.apply_session(env, env.get("CLAUNCH_SESSION"))
         pi_provider.apply_tools_env(profile, harness, env, tools=tools)
     except pi_provider.PiProviderError as exc:
         raise RunnerError(str(exc)) from exc
