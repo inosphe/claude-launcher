@@ -105,8 +105,13 @@ def owner(name: str, sessions: Iterable[str]) -> Optional[str]:
     return best
 
 
-def _live(entry: dict) -> Optional[str]:
-    """The name of a registry record that is running or held, else ``None``."""
+def live_name(entry: dict) -> Optional[str]:
+    """The name of a registry record that is running or held, else ``None``.
+
+    A held session's program has ended but the session has not
+    (``Session.held_at``), so it reads as live: resuming it must find its
+    basetemps where it left them.
+    """
     sdef = entry.get("def") if isinstance(entry.get("def"), dict) else {}
     name = sdef.get("name")
     if name and (entry.get("was_running") or entry.get("held_at")):
@@ -114,7 +119,11 @@ def _live(entry: dict) -> Optional[str]:
     return None
 
 
-def _registry(directory: Path) -> List[dict]:
+#: The old spelling, kept for this module's own call sites.
+_live = live_name
+
+
+def registry(directory: Path) -> List[dict]:
     """The session records an instance directory holds, read-only.
 
     ``sessions.db`` when there is one (opened ``mode=ro`` so a reader never
@@ -147,23 +156,33 @@ def _registry(directory: Path) -> List[dict]:
     return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 
 
-def foreign_live() -> set:
-    """Names running or held in any daemon instance other than this one."""
-    own = paths.daemon_dir().resolve()
+def registry_dirs() -> List[Path]:
+    """Every directory that may hold a session registry.
+
+    The base is :func:`paths.base_home`, not the launcher home: a named
+    instance may run under its own home while its registry stays in the
+    base (claunch-llmi1, and the reason ``foreign_live`` reads it too).
+    """
     base = paths.base_home()
     dirs = [base / "daemon"]
     try:
         dirs += [p for p in (base / "daemons").iterdir() if p.is_dir()]
     except OSError:
         pass
+    return dirs
+
+
+def foreign_live() -> set:
+    """Names running or held in any daemon instance other than this one."""
+    own = paths.daemon_dir().resolve()
     names: set = set()
-    for directory in dirs:
+    for directory in registry_dirs():
         try:
             if not directory.is_dir() or directory.resolve() == own:
                 continue
         except OSError:
             continue
-        names.update(n for n in map(_live, _registry(directory)) if n)
+        names.update(n for n in map(_live, registry(directory)) if n)
     return names
 
 

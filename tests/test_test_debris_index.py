@@ -91,6 +91,42 @@ def test_a_missing_registry_is_not_an_error(tmp_path):
     assert index.session_states([tmp_path / "nope"]) == {}
 
 
+def _legacy_instance(directory: Path, records) -> Path:
+    """An instance that predates ``sessions.db`` and still keeps a JSON file."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "sessions.json").write_text(json.dumps(records), encoding="utf-8")
+    return directory
+
+
+def test_a_legacy_sessions_json_instance_is_read_too(tmp_path, monkeypatch):
+    """An instance that never migrated still names its sessions.
+
+    Reproduced by s1450-rev (claunch-zrpa4 review): with only the database
+    read, a live session recorded here fell through to ``orphan`` and its
+    tree was batched for deletion. ``basetemp_reaper.foreign_live`` calls the
+    same state live, so the two disagreed about the same name.
+    """
+    base = tmp_path / "home"
+    _legacy_instance(base / "daemons" / "old", [_session("s77", running=True)])
+    monkeypatch.setattr(index.reaper.paths, "base_home", lambda: base)
+    assert index.session_states() == {"s77": index.LIVE}
+
+
+def test_the_registry_is_looked_for_under_the_instance_base(tmp_path, monkeypatch):
+    """``CLAUNCH_INSTANCE_BASE`` moves the registries, not the launcher home.
+
+    Reading only ``config.launcher_home()`` here returned no sessions at all,
+    and every entry became an orphan.
+    """
+    launcher_home = tmp_path / "launcher"
+    instance_base = tmp_path / "instances"
+    launcher_home.mkdir()
+    _registry(instance_base / "daemon", [_session("s88", running=True)])
+    monkeypatch.setattr(index.reaper.paths, "base_home", lambda: instance_base)
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(launcher_home))
+    assert index.session_states() == {"s88": index.LIVE}
+
+
 # ---- classification ------------------------------------------------------ #
 
 

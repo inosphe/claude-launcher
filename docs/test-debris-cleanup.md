@@ -36,9 +36,17 @@ error 3,318건으로 실패했다(claunch-slia4.1).
 
 ## 소유 판정
 
-소유는 이름으로 정하고, 규칙은 exit reaper와 같은 함수
-(`daemon.basetemp_reaper.owner`)를 쓴다. 두 곳이 같은 디렉터리의 주인을 다르게
-볼 수 없다.
+소유를 정하는 네 가지를 전부 `daemon.basetemp_reaper`에서 가져온다: 이름 규칙
+(`owner`), 레지스트리 디렉터리 집합(`registry_dirs`, 기준은 `paths.base_home()`),
+레코드 읽기(`registry` — `sessions.db`, 없으면 레거시 `sessions.json`), 그리고
+live 판정(`live_name` — running 또는 held). 이 도구는 그 넷을 다시 구현하지
+않으므로 두 곳이 같은 디렉터리의 주인을 다르게 볼 수는 없다. 어긋남이 생긴다면
+그것은 그 모듈 자체가 바뀐 것이다.
+
+중요한 방향은 하나다 — 살아 있는 세션의 트리가 `ended`로 읽히면 아무도 다시
+보지 않는 삭제 배치에 들어간다. 리뷰에서 잡힌 두 경우가 정확히 그 자리였다:
+`sessions.json`만 남은 인스턴스와 `CLAUNCH_INSTANCE_BASE`가 설정된 경우.
+둘 다 테스트로 고정했다.
 
 | 이름 모양 | 만든 곳 |
 | --- | --- |

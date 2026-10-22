@@ -34,17 +34,21 @@ Exit codes, in the shape the other tools use:
 part (a full pass over every inode under the root) and it is off by default:
 the plan's batches are ordered by name and age, which do not need a walk.
 
-Ownership is by name and comes from ``daemon.basetemp_reaper.owner``, the
-same function the exit reaper uses, so this index and the reaper cannot
-disagree about who owns a directory. A *live* session here means a registry
-record that is running or held, in this instance or any other.
+Everything that decides ownership comes from ``daemon.basetemp_reaper``, and
+that is the guarantee this tool makes: the name rule (``owner``), the set of
+registry directories (``registry_dirs``, anchored at ``paths.base_home`` so a
+named instance's registry is found), the records themselves (``registry``,
+which reads ``sessions.db`` and falls back to the legacy ``sessions.json``),
+and the live rule (``live_name``: running *or held*). It does not re-derive
+any of them, so this index and the reaper go wrong together or not at all.
+That matters in one direction only — an entry read as *ended* when a session
+is live lands in a removal batch nobody will review again.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -52,7 +56,7 @@ from typing import Dict, Iterable, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import config, pytest_basetemp  # noqa: E402
+from claude_launcher import pytest_basetemp  # noqa: E402
 from claude_launcher.daemon import basetemp_reaper as reaper  # noqa: E402
 
 #: Registry directories, in read order: this instance's daemon directory and
@@ -60,63 +64,25 @@ from claude_launcher.daemon import basetemp_reaper as reaper  # noqa: E402
 LIVE, ENDED, ORPHAN = "live", "ended", "orphan"
 
 
-def registry_dirs() -> List[Path]:
-    """Every directory that may hold a session registry."""
-    base = config.launcher_home()
-    dirs = [base / "daemon"]
-    try:
-        dirs += sorted(p for p in (base / "daemons").iterdir() if p.is_dir())
-    except OSError:
-        pass
-    return dirs
-
-
-def read_registry(directory: Path) -> List[dict]:
-    """The session records one instance holds, read-only.
-
-    ``mode=ro`` on purpose: reading another daemon's registry must not create,
-    migrate or lock the database, and this tool runs while those daemons are
-    live.
-    """
-    db = directory / "sessions.db"
-    if not db.is_file():
-        return []
-    try:
-        conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5.0)
-        try:
-            rows = conn.execute("SELECT data FROM sessions").fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
-    out = []
-    for (data,) in rows:
-        try:
-            entry = json.loads(data)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(entry, dict):
-            out.append(entry)
-    return out
-
-
 def session_states(dirs: Optional[Iterable[Path]] = None) -> Dict[str, str]:
     """``name -> 'live' | 'ended'`` for every session any registry knows.
 
-    A held session's program has ended but the session has not
-    (``Session.held_at``), so it reads as live -- importing it into an
-    ended session's basetemp would be the same mistake the reaper avoids
-    (``basetemp_reaper.registry_view``).
+    Both the directory set (:func:`basetemp_reaper.registry_dirs`) and the
+    records (:func:`basetemp_reaper.registry`) come from the reaper, so this
+    index cannot disagree with the exit reaper about which sessions exist --
+    including an instance that still keeps a ``sessions.json`` and one whose
+    home sits under ``CLAUNCH_INSTANCE_BASE``. ``live_name`` is the reaper's
+    own live rule: a held session's program has ended but the session has
+    not, and resuming it must find its basetemps where it left them.
     """
     states: Dict[str, str] = {}
-    for directory in dirs if dirs is not None else registry_dirs():
-        for entry in read_registry(directory):
+    for directory in dirs if dirs is not None else reaper.registry_dirs():
+        for entry in reaper.registry(directory):
             sdef = entry.get("def") if isinstance(entry.get("def"), dict) else {}
             name = sdef.get("name") or entry.get("name")
             if not isinstance(name, str) or not name:
                 continue
-            live = bool(entry.get("was_running")) or bool(entry.get("held_at"))
-            state = LIVE if live else ENDED
+            state = LIVE if reaper.live_name(entry) else ENDED
             # One registry saying live wins: a name is recorded in more than
             # one instance when it was adopted, and only the live one matters.
             if states.get(name) == LIVE:
