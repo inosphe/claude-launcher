@@ -391,6 +391,60 @@ repository's mode for the next checkout. The volume probe is Windows-only;
 elsewhere the filesystem reads as unknown and a `cow: true` hook is reported
 as `cow-unavailable`.
 
+#### Cleaning up finished worktrees (`claunch worktree`)
+
+Nothing takes a checkout away when its session ends: it keeps its branch and
+whatever was left in it, and the list grows. By 2026-10-22 that list was 442
+`git worktree list` lines — 308 of them under the per-session scratch trees,
+about 600k inodes by sample. The web UI's Worktrees page can clear the ones it
+lists, but it lists only the repositories the fleet has touched, and most of
+those 308 belong to repositories no live session stands in.
+
+`claunch worktree` is the same reading from a shell, over every root, and a
+selection rule severe enough to be run unattended:
+
+```bash
+claunch worktree list                    # every launcher worktree, and its size
+claunch worktree list --repo . --no-size # one repository, without the file walk
+claunch worktree prune                   # the plan: what would go, what is kept, and why
+claunch worktree prune --older-than 30   # a wider horizon than the default week
+claunch worktree prune --force           # remove what the plan listed
+```
+
+`list` prints one row per checkout — state (`active` / `orphaned` /
+`unlinked`), name, branch (with `*merged*` when the trunk already has it), the
+sessions standing in it with their lifecycle partition, when it was made, and
+the file count and size. Branches are never shown as removable: removing a
+checkout keeps the branch, because a branch is history and whether it can go is
+a separate decision. `--json` dumps the rows for a script.
+
+`prune` removes a checkout only when **all four** hold:
+
+| Condition | Kept when |
+| --------- | --------- |
+| no session that can come back | a joined session is `running`, `hold`, `delayed` or `paused` — the four that read as Running on both surfaces, since a held session is asleep and a message wakes it into the same directory. `archived`, `killed` and `failed` are gone for good; a checkout with no session record has nobody to come back |
+| clean tree | `git status` reports a modified or untracked file, or cannot be read |
+| reachable commit | it stands detached on a commit no branch and no `refs/claunch/preview/*` names — removing it would lose that commit |
+| old enough | its directory's mtime is younger than `--older-than` days (default 7). The mtime, not the creation stamp: a checkout made long ago and written to today is not old |
+
+**The default is a plan.** Without `--force` the command prints what it would
+remove and why each other checkout is kept, and removes nothing — so it can be
+run first, read, and then run again with `--force`. `--force` here means
+"remove for real", the way git uses it; it does **not** discard changes. A
+dirty checkout is reported and kept, and has to be handled by hand.
+
+Removal goes through the page's own verb (`daemon/worktree_inventory.remove`),
+so both surfaces behave the same: links inside the checkout are unlinked
+first and never followed, the branch stays, and a checkout with a directory
+that is already gone has its registration cleared with `git worktree prune`.
+The web page's delete still lists only the repositories the fleet has touched;
+the CLI covers the scratch trees as well.
+
+Exit codes follow `claunch window`: `0` the plan was made (or the removals
+ran), `1` something was refused or failed, `2` the session state could not be
+read because the daemon was unreachable — in which case nothing was planned at
+all, since whether a session can come back is the daemon's answer.
+
 ## Login & tokens
 
 `claude setup-token` runs an interactive flow (it renders a full-screen TUI), so

@@ -349,3 +349,93 @@ def test_route_reports_sessions_archived_before_a_later_one_failed(repo, monkeyp
     assert body["failed"][0]["sessions"] == ["second"]
     assert "second" in body["failed"][0]["error"]
     assert wt.path.is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# claunch worktree prune: which checkouts it may remove (cli_worktree.select)
+# --------------------------------------------------------------------------- #
+def _wt_row(**over):
+    row = {
+        "name": "s1-old", "path": "/tmp/x/s1-old", "root": "/tmp/x", "branch": "s1-old",
+        "head": "0" * 12, "detached": False, "is_trunk": False, "locked": False,
+        "missing": False, "sessions": [], "state": inv.STATE_UNLINKED,
+        "created_at": "2026-10-01T00:00:00+00:00",
+    }
+    row.update(over)
+    return row
+
+
+def _select(row, **over):
+    from claude_launcher import cli_worktree
+
+    kwargs = {"older_than_days": 7.0, "age_days": 30.0, "dirty": False,
+              "reachable": True, "cwd": "/tmp/elsewhere"}
+    kwargs.update(over)
+    return cli_worktree.select(row, **kwargs)
+
+
+def test_prune_selects_the_finished_old_clean_checkout():
+    from claude_launcher import cli_worktree
+
+    # No session at all (the 308 under the session scratch trees), or only
+    # sessions that have ended for good: removable when the rest holds.
+    assert _select(_wt_row()) == []
+    for category in ("archived", "killed", "failed"):
+        row = _wt_row(sessions=[{"name": "s9", "category": category}])
+        assert _select(row) == [], category
+    assert cli_worktree.RUNNING_CATEGORIES == {"running", "hold", "delayed", "paused"}
+
+
+def test_prune_keeps_what_can_come_back():
+    from claude_launcher import cli_worktree
+
+    # The four partitions that read as Running on both surfaces. hold and
+    # paused are the two the operator called out (claunch-25bvn): a held
+    # session is asleep and a message wakes it into the same directory.
+    for category in sorted(cli_worktree.RUNNING_CATEGORIES):
+        row = _wt_row(sessions=[{"name": "s9", "category": category}])
+        reasons = _select(row)
+        assert any("s9" in r and category in r for r in reasons), (category, reasons)
+    # An unreadable category is not a licence to delete.
+    assert _select(_wt_row(sessions=[{"name": "s9", "category": ""}]))
+
+    assert _select(_wt_row(), dirty=True)
+    assert _select(_wt_row(), dirty=None)  # git status failed
+    assert _select(_wt_row(), reachable=False)
+    assert _select(_wt_row(), age_days=6.9)
+    assert _select(_wt_row(), age_days=None)
+    assert _select(_wt_row(locked=True))
+    assert _select(_wt_row(is_trunk=True))
+    # ...and never the checkout this command is standing in.
+    assert _select(_wt_row(), cwd="/tmp/x/s1-old")
+
+
+def test_prune_reads_age_from_the_directory_not_the_creation_stamp(repo):
+    """A checkout made long ago but written to today is recent: the mtime is
+    the question --older-than asks, and the creation stamp is the fallback."""
+    from claude_launcher import cli_worktree
+
+    wt = worktree.create(repo, "touched")
+    row = {"path": str(wt.path), "created_at": "2020-01-01T00:00:00+00:00"}
+    now = cli_worktree.time_now()
+    assert cli_worktree._age_days(row, now) < 1.0
+    assert cli_worktree._age_days({"path": str(repo / "gone"),
+                                   "created_at": row["created_at"]}, now) > 365
+
+
+def test_listing_can_widen_its_bases_to_the_session_scratch_tree(repo, tmp_path):
+    """The page lists only <repo>/.claude/worktrees; a checkout cut into a
+    session's scratch tree is a worktree of the same repository and is listed
+    when that directory is passed as a base (claunch-rc6z8)."""
+    scratch = tmp_path / "sessions" / "s1" / "scratch"
+    scratch.mkdir(parents=True)
+    cut = scratch / "preview"
+    git("worktree", "add", "-q", str(cut), "-b", "preview-branch", cwd=repo)
+
+    assert "s1/scratch/preview" not in [
+        w["name"] for w in inv.list_repo(str(repo), [])["worktrees"]
+    ]
+    bases = inv.default_bases(str(repo)) + [str(tmp_path / "sessions")]
+    names = [w["name"] for w in inv.list_repo(str(repo), [], bases=bases)["worktrees"]]
+    assert "s1/scratch/preview" in names
+    assert "preview" not in names  # the name is the base it was cut into

@@ -203,14 +203,39 @@ def _state(sessions: List[dict]) -> str:
     return STATE_ORPHANED if sessions else STATE_UNLINKED
 
 
-def list_repo(root: str, sessions: List[dict]) -> dict:
+def default_bases(root: str) -> List[str]:
+    """The directories a launcher worktree of ``root`` is cut into.
+
+    One: ``<root>/.claude/worktrees``. :func:`list_repo` and :func:`index`
+    take a wider list when a caller wants the checkouts under the session
+    scratch trees as well (``claunch worktree list|prune``, whose whole
+    reason for existing is the ones the page cannot see) -- those are real
+    linked worktrees of the same repository, made by tools that cut into
+    ``$CLAUNCH_SCRATCH`` rather than by :mod:`claude_launcher.worktree`.
+    """
+    return [str(worktree_mod.worktrees_dir(Path(root)))]
+
+
+def _name_in(path: str, bases: List[str]) -> Optional[str]:
+    """``path`` relative to the first base that contains it."""
+    for base in bases:
+        if _inside(path, base) and _key(path) != _key(base):
+            return os.path.relpath(path, base).replace(os.sep, "/")
+    return None
+
+
+def list_repo(root: str, sessions: List[dict],
+              bases: Optional[Iterable[str]] = None) -> dict:
     """Every launcher worktree of ``root`` with its branch, merge state and
     the sessions joined to it.
 
     ``sessions`` are ``{"name", "cwd", "category", "status", "created_at"}``
     dicts — the daemon's records reduced to what the join needs, so this can
-    be read without a live manager.
+    be read without a live manager. ``bases`` narrows or widens which
+    directories count as a launcher worktree of this repository; see
+    :func:`default_bases`.
     """
+    wanted = list(bases) if bases is not None else default_bases(root)
     base_dir = str(worktree_mod.worktrees_dir(Path(root)))
     base = trunk(root)
     counts = _ahead_behind(root, base) if base else {}
@@ -218,9 +243,11 @@ def list_repo(root: str, sessions: List[dict]) -> dict:
     items: List[dict] = []
     for entry in _porcelain(root):
         path = os.path.abspath(str(entry.get("worktree", "")))
-        if not path or not _inside(path, base_dir) or _key(path) == _key(base_dir):
+        if not path or _key(path) == _key(base_dir):
             continue
-        name = os.path.relpath(path, base_dir).replace(os.sep, "/")
+        name = _name_in(path, wanted)
+        if name is None:
+            continue
         ref = entry.get("branch")
         branch = ref[len("refs/heads/"):] if isinstance(ref, str) and \
             ref.startswith("refs/heads/") else ""
@@ -261,14 +288,15 @@ def list_repo(root: str, sessions: List[dict]) -> dict:
             "create": worktree_mod.creation_mode(Path(root))}
 
 
-def inventory(roots: Iterable[str], sessions: List[dict]) -> dict:
+def inventory(roots: Iterable[str], sessions: List[dict],
+              bases: Optional[Iterable[str]] = None) -> dict:
     """:func:`list_repo` for every root; a root git cannot read is reported,
     not raised."""
     repos: List[dict] = []
     errors: List[dict] = []
     for root in roots:
         try:
-            repo = list_repo(root, sessions)
+            repo = list_repo(root, sessions, bases=bases)
         except worktree_mod.WorktreeError as exc:
             errors.append({"root": root, "error": str(exc)})
             continue
@@ -284,23 +312,25 @@ class RemoveError(Exception):
     """A checkout that was not removed, and why."""
 
 
-def index(roots: Iterable[str]) -> Dict[str, Tuple[str, dict]]:
+def index(roots: Iterable[str],
+          bases: Optional[Iterable[str]] = None) -> Dict[str, Tuple[str, dict]]:
     """``normalised path -> (root, porcelain entry)`` of every launcher
     worktree of ``roots`` -- one ``git worktree list`` per repository, read
     once for a whole batch rather than once per path in it."""
     out: Dict[str, Tuple[str, dict]] = {}
     for root in roots:
-        base_dir = str(worktree_mod.worktrees_dir(Path(root)))
+        wanted = list(bases) if bases is not None else default_bases(root)
         for entry in _porcelain(root):
             p = os.path.abspath(str(entry.get("worktree", "")))
-            if _inside(p, base_dir) and _key(p) != _key(base_dir):
+            if _name_in(p, wanted) is not None:
                 out[_key(p)] = (root, entry)
     return out
 
 
-def find(roots: Iterable[str], path: str) -> Optional[Tuple[str, dict]]:
+def find(roots: Iterable[str], path: str,
+         bases: Optional[Iterable[str]] = None) -> Optional[Tuple[str, dict]]:
     """``(root, porcelain entry)`` of the launcher worktree at ``path``."""
-    return index(roots).get(_key(path))
+    return index(roots, bases=bases).get(_key(path))
 
 
 def changes(path: str) -> List[dict]:
