@@ -105,6 +105,9 @@ def test_this_checkout_resolves_to_its_own_tools_script():
 # is claunch-bxxji / claunch-l6aay.1; a new entry here needs the same reason.
 _TOOLS_PROBES_STILL_ALLOWED = {
     ("improv-leader-v2.yaml", "tools/deploy_check.py"),
+    # admission: the leader's persistent verification queue is claude-launcher's own
+    # (the task's verify named the same script before it became a wait, claunch-8qn6h)
+    ("improv-leader-v2.yaml", "tools/delayed_sweep.py"),
     ("perf-monitor-v2.yaml", "tools/perf_probe.py"),
 }
 
