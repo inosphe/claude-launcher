@@ -293,18 +293,31 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                     raise RuntimeError("threads_api is not installed")
                 res = post(tid, text)
                 hold = res.get("hold")
+                # A message whose mentions name only guests is typed into them
+                # and nowhere else (threads_api.session_mentions), so the
+                # owner's ``delivered`` alone would record it as undelivered
+                # while a guest read it (claunch-p9wes.1.1).
+                guests = [n for n, ok in (res.get("guests_delivered") or {}).items() if ok]
+                gholds = res.get("guests_hold") or {}
                 # A block queued for an exited session is typed in only when
                 # that session is launched again (daemon/thread_notices.py),
                 # so it is not "delivered" yet in the ledger's sense (its
                 # ``delivered`` means typed into a terminal, and the thread row
-                # itself stays after the session is gone).
-                queued = hold == "exited"
+                # itself stays after the session is gone). Which target was
+                # typed decides: one exited guest beside a live owner leaves
+                # the row delivered, and ``queued`` is only for a message that
+                # reached no terminal at all (claunch-p9wes.1.1).
+                typed = (bool(res.get("delivered")) and hold != "exited") or any(
+                    gholds.get(n) != "exited" for n in guests)
+                queued = (not typed) and (hold == "exited" or any(h == "exited" for h in gholds.values()))
                 out.append({
                     "thread": tid,
                     "session": member.get("session") or res["thread"]["session"],
-                    "delivered": bool(res.get("delivered")) and not queued,
+                    "delivered": typed,
                     "queued": queued,
                     "hold": hold,
+                    "guests": guests,
+                    "guests_hold": gholds,
                 })
             except Exception as exc:  # noqa: BLE001 -- one thread, one report
                 log.info("megathread: could not deliver to %s: %s", tid, exc)

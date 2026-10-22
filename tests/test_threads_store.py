@@ -20,6 +20,8 @@ T10 guests (claunch-p9wes): the user or the owner invites a session into a
 T12 the change stamp (claunch-8vofx): it moves on every change the threads
    page shows and not on a read; index and history given it back as
    ``since`` answer only ``unchanged``
+T13 mentions (claunch-p9wes.1.1): the ``@``-tokens of a body, in order and
+   once each; an address is not one, and a trailing dot does not spoil one
 """
 
 import pytest
@@ -580,3 +582,17 @@ def test_t12_since_answers_unchanged_until_something_moves(st):
     # A bad filter is refused whatever the stamp says.
     with pytest.raises(S.ThreadError):
         st.index(status="nope", since=fresh["stamp"])
+
+
+def test_t13_mentions_are_the_at_tokens_of_a_body():
+    """claunch-p9wes.1.1: the store reads the tokens only; who they route to
+    is the route's call."""
+    body = "@s1319 @s1287 이 부분 리뷰해줘"
+    assert S.parse_mentions(body) == ["s1319", "s1287"]
+    assert S.parse_mentions("@all 확인 부탁") == [S.MENTION_ALL] == ["all"]
+    assert S.parse_mentions("@s2 @s2 두 번 적어도 한 번") == ["s2"]      # once each, in order
+    assert S.parse_mentions("mail bob@example.com, grep x@y") == []      # an address is not a mention
+    assert S.parse_mentions("@s1109. 그리고 @s29-egr6y,") == ["s1109", "s29-egr6y"]
+    assert S.parse_mentions("@ s1109") == []                            # a space ends the name
+    assert S.parse_mentions("@") == [] and S.parse_mentions(None) == []
+    assert S.parse_mentions("`@s2` 코드 안") == ["s2"]                   # no fence parsing: it is a token

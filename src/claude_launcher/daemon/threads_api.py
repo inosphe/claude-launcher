@@ -74,12 +74,22 @@ delivered block (claunch-236ei, talk_links.subject_in / mentioned).
 Guests (claunch-p9wes). The user or the owner may invite another session
 into a thread as a guest; the guest is told with a block that names its
 role -- reviewer and advisor only: it reads the thread and writes advice in
-it, and it does not do the thread's work or use the QA tools for it. A user
-message is typed into the owner and into every guest; a guest's message is
-typed into the owner (it is advice, the owner decides). The owner's own
-replies are not typed into the guests -- they read them with thread_read --
-so two agents never answer each other in a loop. The guest's session lists
-the thread apart from its own (``guest_threads`` of the list route).
+it, and it does not do the thread's work or use the QA tools for it. The
+owner's own replies are not typed into the guests -- they read them with
+thread_read -- so two agents never answer each other in a loop. The guest's
+session lists the thread apart from its own (``guest_threads`` of the list
+route).
+
+Mentions (claunch-p9wes.1.1). A message body may name who it is for:
+``@all`` names every participant of the thread (its owner and its guests),
+``@<session>`` names one. With no mention at all the message is typed into
+the owner alone -- a thread with guests then behaves like one without them,
+and the guests read it later with thread_read. With one or more mentions it
+is typed only into the sessions named, the owner included only when it is
+named; the author never receives its own message, and a name that is not a
+participant of the thread is reported back as ``unknown_mentions`` instead
+of delivered (daemon/threads_api.session_mentions, threads/store.py
+``parse_mentions``).
 
 Asks (claunch-etw0s). The agent's ``thread_ask`` MCP tool posts a simple
 question into one of its threads -- kind 'ask', type 'approve' | 'choice' |
@@ -238,6 +248,14 @@ def _guest_role(tid: str, owner: str) -> str:
             "the user goes into your reply here.")
 
 
+def _named_line() -> str:
+    """Why a guest that reads none of the thread's traffic by default got
+    this one: the message named it (claunch-p9wes.1.1)."""
+    return ("This message names you with an @-mention (or @all), so it is typed in here. Messages that name "
+            "nobody stay in the thread: read them with thread_read, and thread_list's guest_threads row says "
+            "how many you have not read.")
+
+
 def guest_invited_text(thread: dict, by: str) -> str:
     tid, owner = thread["id"], thread["session"]
     inviter = "the user" if by == thread_store.USER else f"session {by}"
@@ -245,10 +263,10 @@ def guest_invited_text(thread: dict, by: str) -> str:
         f"{PREFIX} {tid} \"{thread['title']}\"] You are invited by {inviter} as a guest to this thread of "
         f"session {owner}.",
         _guest_role(tid, owner),
-        f"The user's messages in this thread are typed in here too; {owner}'s replies are not -- read them with "
-        "thread_read. thread_list lists this thread under guest_threads, whose guest.owner_unread counts "
-        f"{owner}'s messages since your last read. You cannot close or rename it; "
-        f"thread_uninvite(thread_id=\"{tid}\") leaves it."])
+        "A message is typed in here only when it names you (@<your session>) or names everyone (@all); the rest "
+        f"-- {owner}'s replies included -- you read with thread_read. thread_list lists this thread under "
+        "guest_threads, whose guest.owner_unread counts messages since your last read. You cannot close or "
+        f"rename it; thread_uninvite(thread_id=\"{tid}\") leaves it."])
 
 
 def guest_removed_text(thread: dict) -> str:
@@ -267,7 +285,8 @@ def owner_invited_text(thread: dict, guest: str) -> str:
     tid = thread["id"]
     return (f"{PREFIX} {tid} \"{thread['title']}\"] The user invited session {guest} into this thread as a guest "
             f"reviewer and advisor. Its messages are typed in here as advice: you decide what to act on, and "
-            f"the work stays yours. Your replies here are not typed into {guest} (it reads the thread).")
+            f"the work stays yours. Your replies here are not typed into {guest} unless you name it "
+            f"(@{guest}, or @all); otherwise it reads the thread.")
 
 
 def guest_user_wrote_text(thread: dict, message: dict, *, reopened: bool = False) -> str:
@@ -276,7 +295,7 @@ def guest_user_wrote_text(thread: dict, message: dict, *, reopened: bool = False
     return "\n".join([
         f"{PREFIX} {tid} \"{thread['title']}\"] (you are a guest of session {thread['session']} here) {head}",
         _body_lines(message), *_image_lines(message), *_file_lines(message),
-        _guest_role(tid, thread["session"])])
+        _named_line(), _guest_role(tid, thread["session"])])
 
 
 def guest_wrote_text(thread: dict, message: dict, guest: str) -> str:
@@ -286,7 +305,29 @@ def guest_wrote_text(thread: dict, message: dict, guest: str) -> str:
         f"{PREFIX} {tid} \"{thread['title']}\"] Guest session {guest} (reviewer and advisor) wrote in this thread:",
         _body_lines(message), *_image_lines(message, who), *_file_lines(message, who),
         f"It is advice: you decide what to act on. If it needs an answer, thread_reply(thread_id=\"{tid}\", "
-        f"text=...); that reply is not typed into {guest}."])
+        f"text=...); name it (@{guest} or @all) in that reply to type it into {guest}'s terminal, otherwise it "
+        "reads the thread."])
+
+
+def guest_mentioned_text(thread: dict, message: dict, guest: str) -> str:
+    """A guest named another guest: typed into the one named
+    (claunch-p9wes.1.1)."""
+    tid, owner = thread["id"], thread["session"]
+    who = f"Guest {guest}"
+    return "\n".join([
+        f"{PREFIX} {tid} \"{thread['title']}\"] Guest session {guest} named you in this thread of session {owner}:",
+        _body_lines(message), *_image_lines(message, who), *_file_lines(message, who),
+        _named_line(), _guest_role(tid, owner)])
+
+
+def owner_mentioned_text(thread: dict, message: dict, owner: str) -> str:
+    """The owner named a guest in its message: typed into that guest."""
+    tid = thread["id"]
+    who = f"Session {owner}"
+    return "\n".join([
+        f"{PREFIX} {tid} \"{thread['title']}\"] Session {owner}, the owner of this thread, named you in a message:",
+        _body_lines(message), *_image_lines(message, who), *_file_lines(message, who),
+        _named_line(), _guest_role(tid, owner)])
 
 
 def ask_answered_text(thread: dict, message: dict) -> str:
@@ -445,34 +486,121 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         return talk_links.mentioned(message["body"], qa_rows(thread["session"]),
                                     skip=[thread["qa"]] if thread.get("qa") else [])
 
+    def session_mentions(thread: dict, message: Optional[dict], author: Optional[str]) -> dict:
+        """Who a message's ``@``-mentions route it to (claunch-p9wes.1.1).
+
+        ``tokens`` is every name the body carries; ``unknown`` those that are
+        no participant of this thread -- reported back, not delivered.
+        ``targets`` are the sessions it is typed into: with no mention at all
+        the owner alone, so a thread with guests behaves like one without
+        them and the guests read it later; with mentions only those named, by
+        ``@<session>`` or by ``@all`` (the owner and every guest). A body that
+        names only sessions that are no participant is typed into nobody, and
+        the author never receives its own message.
+        """
+        tokens = thread_store.parse_mentions((message or {}).get("body") or "")
+        owner = thread["session"]
+        guests = [g["session"] for g in thread.get("guests") or []]
+        everyone = [owner, *guests]
+        all_named = thread_store.MENTION_ALL in tokens
+        named = [n for n in everyone if n in tokens]
+        if all_named:
+            chosen = everyone
+        elif named:
+            chosen = named
+        elif tokens:
+            chosen = []          # names nobody here: reported, delivered to nobody
+        else:
+            chosen = [owner]     # no mention: as if the thread had no guests
+        return {
+            "all": all_named,
+            "named": named,
+            "tokens": tokens,
+            "targets": [n for n in chosen if n != author],
+            "unknown": [t for t in tokens if t != thread_store.MENTION_ALL and t not in everyone],
+        }
+
+    def mention_fields(res: dict, route: dict) -> None:
+        """The routing a write returns: what the body named and what it did
+        not match. Both only when there is a mention, so a message that names
+        nobody answers as it always did."""
+        if route["tokens"]:
+            res["mentions"] = {"all": route["all"], "targets": route["targets"]}
+        if route["unknown"]:
+            res["unknown_mentions"] = route["unknown"]
+
     def tell(res: dict, name: str, text: str, notice: str = "", thread: str = "") -> None:
         res["delivered"] = deliver(name, text, (res.get("message") or {}).get("images"),
                                    notice=notice, thread=thread)
         res["hold"] = hold_of(name) if res["delivered"] else None
 
-    def tell_guests(res: dict, text: str, notice: str = "", thread: str = "") -> None:
-        """Type ``text`` into every guest of the thread; ``guests_delivered``
-        says per guest whether it was accepted."""
+    def guest_holds(res: dict, delivered: dict) -> None:
+        """``guests_hold``: why a guest that accepted the message is not typed
+        into yet, read the same way as the owner's ``hold``. A caller that
+        reports "delivered" as "typed into a terminal" (mega threads'
+        ledger) needs it to tell a queued guest from a typed one
+        (claunch-p9wes.1.1)."""
+        holds = {name: hold_of(name) for name, ok in delivered.items() if ok}
+        holds = {name: why for name, why in holds.items() if why}
+        if holds:
+            res["guests_hold"] = holds
+
+    def tell_user_message(res: dict, thread: dict, *, ask_qa: bool = False) -> None:
+        """Type a user message into the sessions it is meant for: the owner
+        when the body names nobody, otherwise only the sessions it names
+        (claunch-p9wes.1.1). ``guests_delivered`` says per named guest whether
+        the message was accepted, and ``guests_hold`` why one that was
+        accepted is not typed in yet -- the owner's ``hold`` for a guest."""
+        route = session_mentions(thread, res.get("message"), None)
+        mention_fields(res, route)
+        targets = set(route["targets"])
+        qa_mentions = mentions_in(thread, res.get("message"))
+        notice = notice_id(thread, res.get("message"))
+        if thread["session"] in targets:
+            tell(res, thread["session"],
+                 user_wrote_text(thread, res["message"], reopened=res.get("reopened", False),
+                                 ask_qa=ask_qa, mentions=qa_mentions),
+                 notice=notice, thread=thread["id"])
         images = (res.get("message") or {}).get("images")
-        res["guests_delivered"] = {g["session"]: deliver(g["session"], text, images,
-                                                         notice=notice, thread=thread)
-                                   for g in res["thread"].get("guests") or []}
+        delivered = {g["session"]: deliver(g["session"], guest_user_wrote_text(thread, res["message"],
+                                                                              reopened=res.get("reopened", False)),
+                                           images, notice=notice, thread=thread["id"])
+                     for g in thread.get("guests") or [] if g["session"] in targets}
+        if delivered:
+            res["guests_delivered"] = delivered
+            guest_holds(res, delivered)
+
+    def mention_delivery(res: dict, thread: dict, actor: str, *, guest: bool,
+                         route: Optional[dict] = None) -> None:
+        """Type a message its author wrote into the guests it names: the
+        owner's or another guest's message reaches a guest only through
+        ``@<guest>`` or ``@all``, so two agents never answer each other in a
+        loop (claunch-p9wes.1.1)."""
+        route = route or session_mentions(thread, res.get("message"), actor)
+        mention_fields(res, route)
+        images = (res.get("message") or {}).get("images")
+        out = {}
+        for g in thread.get("guests") or []:
+            if g["session"] not in route["targets"]:
+                continue
+            text = (guest_mentioned_text(thread, res["message"], actor) if guest
+                    else owner_mentioned_text(thread, res["message"], actor))
+            out[g["session"]] = deliver(g["session"], text, images)
+        if out:
+            res["guests_delivered"] = out
+            guest_holds(res, out)
 
     def owner_message(tid: str, text: str) -> dict:
-        """Post a user message into one thread and type it into its owner and
-        guests: the text-only half of :func:`h_post`, for callers inside the
-        daemon that already hold a thread id (mega threads, claunch-v5nhp).
-        Exposed as ``app["threads_post_user"]``."""
+        """Post a user message into one thread and type it into the sessions
+        its mentions name -- a thread with guests and no mention behaves as
+        one without guests (claunch-p9wes.1.1): the text-only half of
+        :func:`h_post`, for callers inside the daemon that already hold a
+        thread id (mega threads, claunch-v5nhp). Exposed as
+        ``app["threads_post_user"]``."""
         res = threads.post(thread_store.USER, tid, text)
         t = res["thread"]
         link([t], t["session"])
-        mentions = mentions_in(t, res["message"])
-        notice = notice_id(t, res["message"])
-        tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
-                                                mentions=mentions),
-             notice=notice, thread=t["id"])
-        tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]),
-                    notice=notice, thread=t["id"])
+        tell_user_message(res, t)
         return res
 
     # Handed to daemon/megathread_api.py: a mega thread delivers by posting a
@@ -725,15 +853,14 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         t = res["thread"]
         await asyncio.to_thread(link, [t], t["session"])
         if actor == thread_store.USER:
-            mentions = await asyncio.to_thread(mentions_in, t, res["message"])
-            notice = notice_id(t, res["message"])
-            tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
-                                                    ask_qa=body.get("ask_qa") is True, mentions=mentions),
-                 notice=notice, thread=t["id"])
-            tell_guests(res, guest_user_wrote_text(t, res["message"], reopened=res["reopened"]),
-                        notice=notice, thread=t["id"])
+            tell_user_message(res, t, ask_qa=body.get("ask_qa") is True)
         elif res.get("as") == thread_store.GUEST:
-            tell(res, t["session"], guest_wrote_text(t, res["message"], actor))
+            route = await asyncio.to_thread(session_mentions, t, res["message"], actor)
+            if t["session"] in route["targets"]:
+                tell(res, t["session"], guest_wrote_text(t, res["message"], actor))
+            await asyncio.to_thread(mention_delivery, res, t, actor, guest=True, route=route)
+        else:
+            await asyncio.to_thread(mention_delivery, res, t, actor, guest=False)
         return web.json_response(res)
 
     def status_route(status: str):

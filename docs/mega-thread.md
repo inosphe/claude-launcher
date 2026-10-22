@@ -20,7 +20,7 @@ claunch-v5nhp. 여러 세션의 쓰레드에 **한 번의 입력**으로 말하�
 | 라우팅 | `src/claude_launcher/daemon/megathread_route.py` | 멤버별 state 조립, Jev 호출, log-odds 판정 |
 | HTTP | `src/claude_launcher/daemon/megathread_api.py` | `/api/megathreads` 라우트, 설정 엔드포인트 |
 | Jev | `src/claude_launcher/daemon/jev.py` | `system_one(..., model=)`과 `model_for(cfg, feature)` |
-| 전달 | `src/claude_launcher/daemon/threads_api.py` | `app["threads_post_user"]` — 쓰레드에 사용자 메시지를 쓰고 세션·게스트에 타이핑하는 기존 경로 |
+| 전달 | `src/claude_launcher/daemon/threads_api.py` | `app["threads_post_user"]` — 쓰레드에 사용자 메시지를 쓰고 멘션 규칙(`docs/session-threads.md` 「멘션」)에 따라 세션·게스트에 타이핑하는 기존 경로 |
 | 설정 | `src/claude_launcher/store.py` | `megathread_*`, `jev_model_*` 기본값 |
 
 ## 데이터 모델
@@ -39,7 +39,10 @@ routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
 - `delivered`는 그 라우팅의 메시지가 **적어도 한 곳에 실제로 타이핑됐다**는 뜻이다. 쓰레드 행은
   종료된 세션에도 남으므로, 행이 생겼다는 것과 전달됐다는 것은 다르다. 종료된 세션에는 타이핑 대신
   쓰레드 알림 큐에 들어가므로(아래 「전달」) 그 응답 행은 `queued: true`, `hold: "exited"`이고
-  원장의 `delivered`는 `false`다.
+  원장의 `delivered`는 `false`다. 멘션이 소유 세션이 아닌 게스트만 지목한 메시지는 그 게스트가 받은 것으로
+  센다 — 응답 행의 `guests`가 타자된 게스트 이름이고, 게스트가 아직 받을 수 없으면 `guests_hold`에 이유가
+  실린다(claunch-p9wes.1.1). 한 대상이 종료돼 그 몫만 큐에 들어가고 다른 대상은 실제로 받았으면 그 행은
+  `delivered: true`, `queued: false`다 — `queued`는 어느 터미널에도 타자되지 않았을 때만 참이다.
 - `verdict`: `auto`(한 멤버가 임계값 통과) / `choose`(둘 이상, 사용자 선택 대기) / `manual`(사용자가
   직접 고름) / `none`(아무도 통과 못 함) / `error`(모든 호출 실패).
 
@@ -111,9 +114,10 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 
 ## 전달
 
-선택된 쓰레드마다 `threads.post(user, thread, text)` → 소유 세션과 게스트에게 `[claunch thread …]` 블록이
-타이핑된다. 선택되지 않은 멤버에는 행도, 알림도, 타이핑도 없다. 그래서 그 세션은 이 대화를 나중에도
-참조할 수 없다 — "인지하지 않는다"를 저장하지 않는 것으로 보장한다.
+선택된 쓰레드마다 `threads.post(user, thread, text)` → 멘션 규칙에 따라 소유 세션(멘션이 없으면 소유 세션 하나,
+있으면 이름이 적힌 세션)에 `[claunch thread …]` 블록이 타이핑된다. 선택되지 않은 멤버에는 행도, 알림도,
+타이핑도 없다. 그래서 그 세션은 이 대화를 나중에도 참조할 수 없다 — "인지하지 않는다"를 저장하지 않는 것으로
+보장한다. 게스트에게 타이핑되는 조건은 `docs/session-threads.md`의 「멘션」 절과 같다(claunch-p9wes.1.1).
 
 멤버 자리는 세션이 종료돼도 남는다. 멤버십은 사용자가 만든 배치이고 세션의 생존 상태가 아니며, 같은
 이름·같은 쓰레드로 재개한 세션이 자기 자리를 잃으면 클러스터가 조용히 비어 보인다. 세션이 없으면

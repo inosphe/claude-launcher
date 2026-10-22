@@ -21,6 +21,12 @@ T13 a closed mega thread takes no routing
 T14 a settings value that is not a finite number is refused
 T15 two routings of one cluster do not both pass the same budget check
 T16 a routing log that cannot be written does not undo a delivery
+T17 a message to an exited session is queued, and the ledger says not
+   delivered
+T20 a message whose mention names only a guest is delivered to that guest,
+   and the ledger follows it (claunch-p9wes.1.1)
+T21 an exited guest beside a live owner does not make the row queued
+   (claunch-p9wes.1.1): the owner was typed, so ``delivered`` holds
 """
 
 import asyncio
@@ -551,3 +557,62 @@ def test_t19_the_rail_rows_carry_every_field_the_member_picker_reads():
 
     picker_reads = {"name", "status", "progress", "issue", "branch", "note", "role", "kind"}
     assert picker_reads <= RAIL_FIELDS, sorted(picker_reads - RAIL_FIELDS)
+
+
+def test_t20_a_mention_that_names_only_a_guest_is_delivered_to_that_guest(tmp_path, monkeypatch):
+    """claunch-p9wes.1.1: a mega thread delivers through threads_api, whose
+    mentions decide who is typed into. When the message names a guest and not
+    the owner, the ledger row has to follow the guest -- otherwise the ring
+    says "대기 중" about a message a session already received."""
+    async def high(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
+
+    monkeypatch.setattr(jev, "system_one", high)
+
+    async def scenario(req, manager, threads, megas):
+        a, b, mega = await two_member_cluster(req)
+        await req("POST", f"/api/threads/{a['id']}/guests", {"session": "s1", "guest": "s3"})
+        owner_before = len(manager.sessions["s1"].delivered)
+        guest_before = len(manager.sessions["s3"].delivered)
+
+        res = await req("POST", f"/api/megathreads/{mega['id']}/route",
+                        {"text": "@s3 please review the log line"})
+        assert res["verdict"] == "auto"
+        row = res["delivered"][0]
+        assert row["thread"] == a["id"]
+        assert row["delivered"] is True and row["queued"] is False
+        assert row["guests"] == ["s3"] and row["guests_hold"] == {}
+        assert len(manager.sessions["s1"].delivered) == owner_before   # not named
+        assert len(manager.sessions["s3"].delivered) == guest_before + 1
+        assert megas.routes(mega["id"])["routes"][0]["delivered"] is True
+
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_t21_an_exited_guest_beside_a_live_owner_leaves_the_row_delivered(tmp_path, monkeypatch):
+    """claunch-p9wes.1.1: ``@all`` types the message into the owner and every
+    guest. If one guest is gone, that one block is queued for its next launch
+    -- but the owner's terminal already has it, so the row (and the ring's
+    "전달됨") must not read as queued for the whole message."""
+    async def high(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
+
+    monkeypatch.setattr(jev, "system_one", high)
+
+    async def scenario(req, manager, threads, megas):
+        a, b, mega = await two_member_cluster(req)
+        await req("POST", f"/api/threads/{a['id']}/guests", {"session": "s1", "guest": "s3"})
+        owner_before = len(manager.sessions["s1"].delivered)
+        manager.sessions["s3"].exited = True
+
+        res = await req("POST", f"/api/megathreads/{mega['id']}/route",
+                        {"text": "@all 확인 부탁"})
+        assert res["verdict"] == "auto"
+        row = res["delivered"][0]
+        assert row["thread"] == a["id"]
+        assert row["delivered"] is True and row["queued"] is False and row["hold"] is None
+        assert row["guests"] == ["s3"] and row["guests_hold"] == {"s3": "exited"}
+        assert len(manager.sessions["s1"].delivered) == owner_before + 1   # typed
+        assert megas.routes(mega["id"])["routes"][0]["delivered"] is True
+
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))

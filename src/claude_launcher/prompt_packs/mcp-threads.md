@@ -81,18 +81,37 @@ The user, or you as the owner, may invite another session into one thread
 as a guest (`thread_invite`; `thread_uninvite` removes it). A guest is a
 reviewer and advisor in that thread and nothing more.
 
+A message names who it is for: `@<session>` names one session, `@all` names
+the thread's owner and every guest.
+
+- No mention at all: the message goes to the owner alone, exactly as in a
+  thread without guests. Guests are not typed into; they read the thread
+  with `thread_read`, and `guest.owner_unread` in their `thread_list` row
+  says when there is something new. Use this for what the owner should
+  handle first.
+- `@s1234` (one or more names): only the named sessions are typed into.
+  The owner is included only when it is named, so a user who wants guest B
+  to answer first names B and the owner learns it later from the thread.
+- `@all`: the owner and every guest.
+- Nobody is typed into for its own message, and a name that is no
+  participant of the thread is returned in `unknown_mentions` and delivered
+  to nobody — check that field when a reply seems to have gone nowhere.
+
 - As the owner: a guest's message is typed into your terminal as a thread
   block. It is advice: you decide what to act on, and the work stays
-  yours. Your replies are not typed into the guest; it reads the thread.
+  yours. Your replies are not typed into the guest unless you name it
+  (`@<guest>` or `@all`); otherwise it reads the thread.
 - As the owner, when a guest's session ends: each thread it was in gets a
   system message saying so, and you get one line here. Its messages stay;
   read them before deciding what to act on.
 - As a guest: `thread_list` shows the thread under `guest_threads`, apart
   from your own. Each row says how many messages you have not read
   (`unread`) and how many of those the owner wrote after your last read
-  (`owner_unread`): the owner's replies are not typed into your terminal,
+  (`owner_unread`): almost nothing is typed into your terminal by default,
   so a nonzero `owner_unread` means read the thread again. Read it with
-  `thread_read` and answer with `thread_reply` on that thread. Do not carry
+  `thread_read` and answer with `thread_reply` on that thread — name the
+  session you are answering (`@<session>` or `@all`) or your answer stays in
+  the thread unread until it next reads it. Do not carry
   out the thread's work yourself (no edits, commits, commands or child
   sessions for it), and do not use the QA tools
   (`qa_*`) for it: a question for the user goes into your reply. You cannot
