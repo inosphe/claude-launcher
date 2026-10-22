@@ -8269,6 +8269,11 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .thh-msg.thh-system { align-self: center; background: transparent; border: 1px dashed #30363d; color: #7d8590; }
 .thh-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; font-size: 11px; color: #7d8590; }
 .thh-who { font-weight: 600; }
+/* An agent's ask on the read-only threads pages (claunch-etw0s): the answer
+   state is a chip in the meta row; the answer text lands under the body. */
+.thh-ask-waiting { color: #d29922; }
+.thh-ask-answered { color: #3fb950; font-weight: 600; }
+.thh-answer { border-left: 2px solid #30363d; padding-left: 8px; color: #c9d1d9; }
 /* View modes (claunch-zny1o): tree / newest share a list panel | detail split. */
 .thh-modes { display: inline-flex; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
 .thh-mode { background: transparent; color: #7d8590; border: 0; border-right: 1px solid #30363d; padding: 4px 12px; font-size: 12px; cursor: pointer; }

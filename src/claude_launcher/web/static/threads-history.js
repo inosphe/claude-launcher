@@ -280,6 +280,17 @@
       node("span", "thh-at", when(m.at)));
     if (m.body) msg.append(meta, body(node("div", "thh-body"), m.body));
     else msg.append(meta);
+    // An agent's ask (thread_ask, claunch-etw0s): this page is read-only,
+    // so it shows the answer state instead of the pane's answer controls.
+    if (m.kind === "ask") {
+      const data = m.data || {};
+      const answer = data.answer || {};
+      const said = data.type === "approve" ? (answer.decision === "approve" ? "승인" : "거절")
+        : data.type === "choice" ? answer.decision : null;
+      meta.append(node("span", answer.at ? "thh-ask-answered" : "thh-ask-waiting",
+                       answer.at ? ["사용자 답변", said].filter(Boolean).join(" · ") : "답변 대기"));
+      if (answer.at && answer.text) msg.append(body(node("div", "thh-body thh-answer"), answer.text));
+    }
     const pics = images(m);
     if (pics) msg.append(pics);
     return msg;
