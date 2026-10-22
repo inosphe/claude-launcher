@@ -37,6 +37,7 @@ from . import (
     cli_sync,
     cli_transcript,
     cli_window,
+    cli_worktree,
     cli_project,
     cli_reposync,
     cli_workspace,
@@ -1752,6 +1753,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_sim.register(sub)
     cli_commits.register(sub)
     cli_window.register(sub)
+    cli_worktree.register(sub)
     cli_connections.register(sub)
     cli_loops.register(sub)
     cli_operators.register(sub)
