@@ -537,6 +537,44 @@ def test_a_failing_second_measurement_keeps_the_pause_for_the_repair_path(repo, 
     q.admit(repo, "fix")
 
 
+def test_a_runner_failure_is_measured_again_before_it_pauses(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "failed", "first receipt", "test_x failed", auto_remeasure=True)
+    row = q.get(job["id"])
+    assert row["status"] == "queued" and row["remeasures"] == 1 and row["notified"] == 1
+    assert json.loads(row["history"])[0]["detail"] == "test_x failed"
+    assert q.status(repo)["pauses"] == []
+    q.admit(repo, "normal")  # merging goes on while the second measurement waits
+    assert q.claim()["id"] == job["id"]
+    q.finish(job["id"], "passed", "green receipt", auto_remeasure=True)
+    row = q.get(job["id"])
+    assert row["status"] == "passed" and "remeasure passed; intermittent" in row["detail"]
+    assert q.status(repo)["pauses"] == []
+
+
+def test_a_failure_that_repeats_takes_the_pause(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "failed", "first receipt", "test_x failed", auto_remeasure=True)
+    q.claim()
+    q.finish(job["id"], "failed", "second receipt", "test_x failed", auto_remeasure=True)
+    assert q.get(job["id"])["status"] == "failed"
+    assert q.status(repo)["pauses"][0]["job"] == job["id"]
+    with pytest.raises(ValueError, match="paused"):
+        q.admit(repo, "normal")
+
+
+def test_a_failure_pauses_at_once_without_the_automatic_remeasure(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "failed", "receipt", "test_x failed")
+    assert q.status(repo)["pauses"][0]["job"] == job["id"]
+
+
 def test_remeasure_refuses_what_is_not_the_failed_pause_job(repo, tmp_path):
     q = queue(tmp_path)
     bad = paused_on(q, repo)
