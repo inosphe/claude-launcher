@@ -417,6 +417,19 @@ def test_inherit_cleans_up_and_does_not_touch_the_old_state():
     assert new2 == new and summary["event"] == "collection_inherited" and summary["inherited"]
 
 
+def test_inherit_keeps_records_a_trigger_push_marked_with_tid():
+    spec = landing(lifecycle={"inherit": True, "drop": "none"})
+    st = C.empty(spec)
+    C.apply_push(st, spec, item("a"), principal="child", by="w1", now=1, tid="r/t1:0")
+    C.apply_push(st, spec, item("b"), principal="child", by="w1", now=2)
+    new, summary = C.inherit_report(st, spec)
+    assert [r["issue"] for r in new["items"]] == ["a", "b"] and summary["invalid"] == []
+    assert new["items"][0]["_tid"] == "r/t1:0"
+    # the replay guard still sees the inherited marker
+    ev = C.apply_push(new, spec, item("a"), principal="child", by="w1", now=3, tid="r/t1:0")
+    assert ev.get("replay")
+
+
 def test_inherit_off_or_kind_change_starts_empty():
     spec, st = _mixed()
     spec["lifecycle"]["inherit"] = False

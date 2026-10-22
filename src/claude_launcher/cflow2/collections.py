@@ -603,7 +603,8 @@ def inherit_report(old_col_state: Optional[Dict[str, Any]],
     for rec in new["items"]:
         if not isinstance(rec, dict):
             continue
-        fields = {f: v for f, v in rec.items() if f not in RESERVED_FIELDS}
+        # A trigger push marks its record with TID; it is not a declared field.
+        fields = {f: v for f, v in rec.items() if f not in RESERVED_FIELDS and f != TID}
         try:
             _check_fields(spec, fields, settable=False)
             missing = [f for f, d in spec["item"].items()
