@@ -241,6 +241,56 @@ def _retry_writable(failed: List[str]) -> Callable:
 _REMOVALS = (os.unlink, os.remove, os.rmdir)
 
 
+def _restore_traversal(root: Path) -> bool:
+    """Give the owner read and search back on every directory under ``root``.
+
+    A basetemp left by an older build can be ``0200`` (claunch-ersj2): nobody
+    can list it, so ``rmtree`` reports an ``os.scandir`` failure before it
+    removes anything, and the tree is written down as "locked" and tried
+    again on every boot -- 9,135 of 10,033 history rows on this machine
+    (2026-10-22), and the inodes with them. The removal retry in
+    :func:`_retry_writable` cannot reach that: it runs after the walk has
+    already failed on the directory itself.
+
+    Restoring the bits is what makes a second walk possible. Only directories
+    are touched (a file's read-only bit is the removal retry's business),
+    symlinks are not followed, and the mode is added to, never assigned.
+    Returns whether anything changed.
+    """
+    changed = False
+    stack = [root]
+    while stack:
+        path = stack.pop()
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        mode = stat.S_IMODE(st.st_mode)
+        if not (mode & stat.S_IRUSR and mode & stat.S_IXUSR):
+            try:
+                os.chmod(path, mode | stat.S_IRWXU)
+                changed = True
+            except OSError:
+                continue
+        try:
+            with os.scandir(path) as entries:
+                stack.extend(
+                    Path(e.path) for e in entries if e.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            continue
+    return changed
+
+
+def _rmtree(path: Path, handler: Callable) -> None:
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=handler)
+    else:
+        shutil.rmtree(path, onerror=handler)
+
+
 class BasetempReaper:
     """Deletes ended sessions' basetemps and keeps one line per deletion.
 
@@ -332,10 +382,14 @@ class BasetempReaper:
         row["reaped_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         failed: List[str] = []
         handler = _retry_writable(failed)
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=handler)
-        else:
-            shutil.rmtree(path, onerror=handler)
+        _rmtree(path, handler)
+        if path.exists() and _restore_traversal(path):
+            # A directory nobody can list fails the walk before any removal
+            # is attempted, so the removal retry never sees it. With the bits
+            # back the second walk can do the whole job.
+            failed = []
+            handler = _retry_writable(failed)
+            _rmtree(path, handler)
         if path.exists():
             # A file another process still holds open: Windows refuses to
             # delete it even once it is writable. Left for the next ending
