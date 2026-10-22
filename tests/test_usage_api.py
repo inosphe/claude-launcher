@@ -5,11 +5,11 @@ import json
 from types import SimpleNamespace
 
 from claude_launcher.daemon import api
-from claude_launcher import usage
+from claude_launcher import profile_usage, usage
 
 
 def test_usage_endpoint_normalizes_report(monkeypatch):
-    selected = SimpleNamespace(selector="work:codex")
+    selected = SimpleNamespace(selector="work:codex", name="work")
     report = usage.UsageReport(
         windows=[
             usage.UsageWindow(
@@ -22,8 +22,12 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
         raw={"ignored": True},
         source="codex-app-server",
     )
-    monkeypatch.setattr(api.profile_mod, "require_selector", lambda _: selected)
-    monkeypatch.setattr(usage, "resolve_target", lambda value: value)
+    monkeypatch.setattr(profile_usage, "_entries", {})
+    monkeypatch.setattr(profile_usage, "_locks", {})
+    monkeypatch.setattr(
+        profile_usage, "_resolve", lambda _: (selected, "openai", "work/openai")
+    )
+    monkeypatch.setattr(profile_usage.lineage, "effective_harness", lambda _p: "codex")
     monkeypatch.setattr(usage, "fetch", lambda value: report)
     request = SimpleNamespace(query={"profile": "work:codex"})
 
@@ -32,7 +36,10 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
     assert response.status == 200
     body = json.loads(response.text)
     assert body == {
-        "profile": "work:codex",
+        "key": "work/openai",
+        "profile": "work",
+        "provider": "openai",
+        "harness": "codex",
         "source": "codex-app-server",
         "windows": [
             {
@@ -51,3 +58,13 @@ def test_usage_endpoint_requires_profile():
     response = asyncio.run(api.h_usage(SimpleNamespace(query={})))
     assert response.status == 400
     assert json.loads(response.text)["error"] == "profile is required"
+
+
+def test_usage_targets_endpoint_lists_profile_provider_rows(monkeypatch):
+    rows = [{"profile": "work", "provider": "claude", "supported": True}]
+    monkeypatch.setattr(profile_usage, "targets", lambda: rows)
+
+    response = asyncio.run(api.h_usage_targets(SimpleNamespace(query={})))
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"targets": rows}

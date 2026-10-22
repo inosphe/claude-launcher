@@ -855,6 +855,7 @@ def build_app(
     r.add_get("/api/install/plan", h_install_plan)
     r.add_post("/api/install/apply", h_install_apply)
     r.add_get("/api/usage", h_usage)
+    r.add_get("/api/usage/targets", h_usage_targets)
     r.add_get("/api/metering", h_metering)
     r.add_get("/api/metering/live", h_metering_live)
     r.add_get("/api/borrow-options", h_borrow_options)
@@ -3323,6 +3324,18 @@ async def h_usage(request: web.Request) -> web.Response:
             "X-Usage-Updated-At": str(updated_at),
         },
     )
+
+
+async def h_usage_targets(request: web.Request) -> web.Response:
+    """List the (profile, provider) pairs the usage page shows.
+
+    One row per profile (``profile_usage.targets``): its provider, the
+    harness that reads the quota and whether a reader applies. Read from
+    configuration only, so the page can draw every row before any account
+    is asked.
+    """
+    rows = await asyncio.to_thread(profile_usage.targets)
+    return json_response({"targets": rows})
 
 
 async def h_borrow_options(request: web.Request) -> web.Response:

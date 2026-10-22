@@ -727,22 +727,47 @@ def resolve_target(profile: Profile) -> Profile:
     )
 
 
-def fetch(profile: Profile) -> UsageReport:
-    """Fetch usage through the API supported by the profile's harness."""
+def reader(profile: Profile) -> str:
+    """Name the reader :func:`fetch` uses for ``profile``, without any I/O.
+
+    Raises :class:`UsageError` with the reason when no reader applies, so a
+    listing can tell "not available here" apart from a failed request before
+    asking the account endpoint anything.
+    """
     name = lineage.effective_harness(profile)
     entry = harnesses.get(name)
     if entry is None:
         raise UsageError(f"unknown harness {name!r}")
     if name == harnesses.CLAUDE_HARNESS:
-        kimi = _kimi_provider_context(profile)
-        if kimi is not None:
-            return _fetch_kimi_provider(profile, *kimi)
-        return _fetch_claude(profile)
-    if entry.usage == "codex-app-server":
-        return _fetch_codex(profile, entry)
-    if entry.usage == "kimi-web-server":
-        return _fetch_kimi(profile, entry)
+        if _kimi_provider_context(profile) is not None:
+            return "kimi-provider"
+        provider = providers.resolve_name(profile)
+        if not providers.uses_anthropic_oauth(provider):
+            raise UsageError(
+                "Claude harness usage reporting requires an Anthropic service "
+                f"provider; profile {profile.selector!r} selects provider "
+                f"{provider!r} (service {providers.service(provider)!r})"
+            )
+        return "anthropic"
+    if entry.usage in ("codex-app-server", "kimi-web-server"):
+        return entry.usage
     raise UsageError(
         f"usage reporting is not available for harness {name!r}; "
         "claude, codex and kimi are currently supported"
     )
+
+
+def fetch(profile: Profile) -> UsageReport:
+    """Fetch usage through the API supported by the profile's harness."""
+    kind = reader(profile)
+    if kind == "kimi-provider":
+        kimi = _kimi_provider_context(profile)
+        if kimi is None:
+            raise UsageError(f"profile {profile.selector!r} no longer selects Kimi Code")
+        return _fetch_kimi_provider(profile, *kimi)
+    if kind == "anthropic":
+        return _fetch_claude(profile)
+    entry = harnesses.get(lineage.effective_harness(profile))
+    if kind == "codex-app-server":
+        return _fetch_codex(profile, entry)
+    return _fetch_kimi(profile, entry)
