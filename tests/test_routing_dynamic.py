@@ -205,7 +205,7 @@ def test_merge_body_model_passes_non_json_through(raw=b"not json"):
 # --- launch env ---------------------------------------------------------------
 
 
-def test_child_env_of_a_dynamic_provider_drops_launch_time_model_ids(home):
+def test_child_env_of_a_dynamic_provider_drops_launch_time_model_ids(home, shims):
     _provider("fw", {"dynamic": True,
                      "api_key": "k",
                      "endpoints": {"anthropic": "https://fw.example.com"},
