@@ -45,6 +45,27 @@ SPAWN_BACKOFF = 300.0
 WATCH_WORKFLOW = "sweep-job-v2"
 
 
+def suspect_lines(queue, job):
+    """The notice lines naming the merges that can have broken a failed sweep.
+
+    Empty when the list cannot be computed: a notice never waits on it."""
+    try:
+        found = queue.suspects(job["id"])
+    except Exception:
+        log.exception("suspects of %s were not computed", job["id"])
+        return ""
+    rows = [f"  {m['sha'][:12]} {m['issue'] or '-'} {m['subject'][:60]}"
+            + (f" [meets {', '.join(m['meets_failing_tests'][:3])}]" if m["meets_failing_tests"] else "")
+            for m in found["suspects"]]
+    later = [f"  {m['sha'][:12]} {m['issue'] or '-'} {m['subject'][:60]}" for m in found["after"]]
+    text = ("revert candidates (merges after the last green sweep, up to the failed SHA; "
+            "those meeting a failing test first):\n" + "\n".join(rows) + "\n")
+    if later:
+        text += ("merged after the failed SHA (not measured, not suspects; a revert may "
+                 "have to carry them):\n" + "\n".join(later) + "\n")
+    return text
+
+
 def batch_policy(cfg=None):
     """(size, settle seconds) for batching background sweeps, or None when off.
 
@@ -103,6 +124,8 @@ class Clock:
                           f"sha: {job['sha']}\nstatus: {job['status']}\n"
                           f"receipt: {job['receipt']}\n"
                           + (f"detail: {job['detail']}\n" if job["status"] == "stuck" else "")
+                          + (await asyncio.to_thread(suspect_lines, queue, job)
+                             if job["status"] == "failed" else "")
                           + "protocol: call flow_status, read tools/delayed_sweep.py status "
                           "for this repository. A failed active pause requires the "
                           "leader's handle-regression route and a repair child. "

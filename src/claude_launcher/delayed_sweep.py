@@ -472,6 +472,58 @@ class Queue:
         with self.connect() as db:
             db.execute("UPDATE jobs SET notified=1 WHERE id=?", (ident,))
 
+    def suspects(self, job, limit=20):
+        """Merges that can have broken ``job``'s sweep, and the merges stacked on top.
+
+        ``suspects``: the first-parent merges after the newest passed sweep that is
+        an ancestor of the job's SHA, up to and including that SHA -- the tree the
+        sweep measured. Without such a sweep, the last ``limit`` merges before it.
+        Those whose changed files meet a failing test (the file itself, or the module
+        the test is named after) come first; the order inside each group is newest
+        first. ``after``: merges that landed past the failed SHA. They were not
+        measured, so they are not suspects, and a revert of a suspect may have to
+        carry them."""
+        row = self.get(job)
+        repo, sha = row["repo"], row["sha"]
+        passed = [j for j in self.status()["jobs"]
+                  if j["common"] == row["common"] and j["status"] == "passed" and j["sha"] != sha
+                  and self.contains(repo, j["sha"], sha)]
+        base = max(passed, key=lambda j: j["created"])["sha"] if passed else None
+        span = f"{base}..{sha}" if base else sha
+
+        def merges(spec, *extra):
+            try:
+                return git(repo, "rev-list", "--first-parent", "--merges", *extra, spec).split()
+            except subprocess.CalledProcessError:
+                return []
+
+        failing = set()
+        try:
+            for line in json.loads(row["detail"] or "[]"):
+                head = str(line).split(" ", 1)[-1].split("::", 1)[0].split(" - ", 1)[0]
+                if head.endswith(".py"):
+                    failing.add(head)
+        except (TypeError, ValueError):
+            pass  # a detail that is not the runner's failure list names no tests
+        stems = {Path(f).stem.removeprefix("test_") for f in failing}
+        by_sha = {j["sha"]: j["issue"] for j in self.status()["jobs"] if j["common"] == row["common"]}
+
+        def describe(merge):
+            files = git(repo, "diff", "--name-only", merge + "^1", merge).split()
+            meets = sorted(f for f in files if f in failing or Path(f).stem in stems)
+            return {"sha": merge, "issue": by_sha.get(merge, ""),
+                    "subject": git(repo, "log", "-1", "--format=%s", merge),
+                    "meets_failing_tests": meets, "files": len(files)}
+
+        found = [describe(m) for m in merges(span, *([] if base else ["-n", str(limit)]))]
+        found.sort(key=lambda d: not d["meets_failing_tests"])  # stable: newest first inside a group
+        after = []
+        if self.contains(repo, sha, "refs/heads/master"):
+            after = [{"sha": m, "issue": by_sha.get(m, ""), "subject": git(repo, "log", "-1", "--format=%s", m)}
+                     for m in merges(f"{sha}..refs/heads/master")]
+        return {"job": job, "sha": sha, "base": base, "failing_tests": sorted(failing),
+                "suspects": found, "after": after}
+
 
 def run_one(queue, ident, scratch):
     """Run against a detached, clean checkout; infrastructural failures retry."""

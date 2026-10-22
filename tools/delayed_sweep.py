@@ -246,6 +246,8 @@ def main(argv=None):
     p.add_argument("--job", required=True)
     p = sub.add_parser("job-state", help="exit 0 once the job (or its batch tip) has a verdict, 1 while it waits")
     p.add_argument("--job", required=True)
+    p = sub.add_parser("suspects", help="merges that can have broken a failed sweep, and the merges stacked on it")
+    p.add_argument("--job", required=True)
     p = sub.add_parser("nudge", help="print the reminder for a session watching this sweep job")
     p.add_argument("--job", required=True)
     p = sub.add_parser("run-one")
@@ -278,6 +280,8 @@ def main(argv=None):
             result = job_state(queue, args.job)
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result["done"] else 1
+        elif args.action == "suspects":
+            result = queue.suspects(args.job)
         elif args.action == "nudge":
             print(nudge_text(queue, args.job))
             return 0
