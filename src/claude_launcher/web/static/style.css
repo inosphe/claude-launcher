@@ -2799,6 +2799,19 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-tps-overlay .term-tps-when,
 #term-tps-overlay .term-tps-metrics { white-space: nowrap; }
+/* The account's 5h/7d usage under the throughput (claunch-f5w4x.2), each
+   window coloured by how close it is to its limit, as on #/profile-usage. */
+#term-tps-overlay .term-usage {
+  display: flex; gap: 8px; font-size: 11px; line-height: 14px; white-space: nowrap;
+}
+#term-tps-overlay .term-tps-live + .term-usage,
+#term-tps-overlay .term-tps-last + .term-usage {
+  margin-top: 2px; padding-top: 3px;
+  border-top: 1px solid rgba(139, 148, 158, 0.28);
+}
+#term-tps-overlay .term-usage-item.low { color: #8b949e; }
+#term-tps-overlay .term-usage-item.mid { color: #e3b341; }
+#term-tps-overlay .term-usage-item.high { color: #ff7b72; }
 #term-tps-overlay.stale { color: #7d8590; border-color: #21262d; }
 /* Live (claunch-2fut4): a call in flight. The line under the number is the
    last thirty seconds of estimated output tokens/s, scaled to its own peak. */

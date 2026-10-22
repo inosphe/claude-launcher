@@ -8257,6 +8257,86 @@ function ensureTermLivePoll() {
   if (!tpsLiveTimer) tpsLiveTimer = setInterval(pollTermLive, TPS_LIVE_POLL_MS);
 }
 
+/* ---- subscription usage on the PTY (claunch-f5w4x.2) ----
+
+   The account's 5-hour and 7-day windows, drawn under the throughput in the
+   same overlay. The figures are /api/usage's with refresh=auto: the daemon
+   reads an account at most once in five minutes and answers from its cache
+   in between (profile_usage.py), and this page asks no more often than that
+   per profile, so watching a session costs no extra account reads.
+
+   Claude Code first: only claude-harness sessions are asked, and only the
+   Anthropic readings are drawn. Another provider joins by a row in each
+   table -- the harness that may be asked, and the source whose window names
+   map to the short labels. */
+const TERM_USAGE_TTL_MS = 5 * 60 * 1000;
+const TERM_USAGE_HARNESSES = new Set(["claude"]);
+const TERM_USAGE_WINDOWS = {
+  "oauth-usage": [["five_hour", "5h"], ["seven_day", "7d"]],
+  "ratelimit-headers": [["five_hour", "5h"], ["seven_day", "7d"]],
+};
+/* profile selector -> {at, data, pending}: one read per profile, whichever
+   session of it is on screen. */
+const termUsageReads = new Map();
+
+function termUsageSelector(s) {
+  if (!s || !s.profile || s.status === "exited") return "";
+  return TERM_USAGE_HARNESSES.has(s.harness || "claude") ? String(s.profile) : "";
+}
+
+/* The usage line for session `s`, or null: [{label, pct, level}] plus the
+   tooltip. Starts a read when the profile has none younger than the TTL; the
+   answer redraws the overlay. A failed read draws nothing until the next. */
+function termUsageLine(s, now = Date.now()) {
+  const selector = termUsageSelector(s);
+  if (!selector) return null;
+  let read = termUsageReads.get(selector);
+  if (!read || (!read.pending && now - read.at >= TERM_USAGE_TTL_MS)) {
+    read = { at: now, data: read ? read.data : null, pending: true };
+    termUsageReads.set(selector, read);
+    api(`/api/usage?profile=${encodeURIComponent(selector)}&refresh=auto`, { noBatch: true })
+      .then(async (resp) => {
+        const data = await resp.json();
+        read.data = resp.ok ? data : null;
+      })
+      .catch(() => { read.data = null; })
+      .finally(() => {
+        read.pending = false;
+        read.at = Date.now();
+        if (typeof renderTermTps === "function") renderTermTps();
+      });
+  }
+  return termUsageParts(read.data, now);
+}
+
+/* The drawable part of one /api/usage answer: the mapped windows in table
+   order, each with its rounded percentage, and a tooltip with the reset
+   times the way `claunch usage` writes them. */
+function termUsageParts(data, now = Date.now()) {
+  const names = data && TERM_USAGE_WINDOWS[data.source];
+  if (!names) return null;
+  const windows = new Map((data.windows || []).map((w) => [w.name, w]));
+  const items = [];
+  const notes = [];
+  for (const [name, label] of names) {
+    const w = windows.get(name);
+    const pct = w ? Number(w.utilization) : NaN;
+    if (!Number.isFinite(pct)) continue;
+    items.push({ label, pct: Math.round(pct),
+      level: pct >= 90 ? "high" : pct >= 70 ? "mid" : "low" });
+    const at = w.resets_at ? new Date(w.resets_at) : null;
+    let note = `${label} ${pct.toFixed(1)}%`;
+    if (at && !Number.isNaN(at.valueOf())) {
+      const mins = Math.floor((at.valueOf() - now) / 60000);
+      note += mins <= 0 ? " (resetting)" : mins < 60 ? ` (resets in ${mins}m)`
+        : ` (resets in ${Math.floor(mins / 60)}h${String(mins % 60).padStart(2, "0")}m)`;
+    }
+    if (w.status && w.status !== "allowed" && w.status !== "ok") note += ` [${w.status}]`;
+    notes.push(note);
+  }
+  return items.length ? { items, title: `${data.profile || ""} usage\n${notes.join("\n")}` } : null;
+}
+
 function renderTermTps() {
   const badge = $("term-tps");
   const overlay = $("term-tps-overlay");
@@ -8275,7 +8355,10 @@ function renderTermTps() {
     }
   }
   if (overlay) {
-    const show = !!t && terminalOnScreen();
+    // The account usage rides under the throughput, and alone when the
+    // session has no throughput reading yet (claunch-f5w4x.2).
+    const usage = typeof termUsageLine === "function" ? termUsageLine(s) : null;
+    const show = (!!t || !!usage) && terminalOnScreen();
     overlay.classList.toggle("hidden", !show);
     // What the overlay will read, worked out before any node is built: the
     // live poll asks twice a second, and an idle or waiting session answers
@@ -8292,7 +8375,9 @@ function renderTermTps() {
     const cache = t && !t.idle && typeof tpsCacheText === "function" ? tpsCacheText(t, false) : "";
     const age = t && tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : "";
     let parts = null;
-    if (show && t.live && typeof tpsSparkline === "function") {
+    if (show && !t) {
+      parts = { live: false, usageOnly: true, cls: "term-tps-overlay" };
+    } else if (show && t.live && typeof tpsSparkline === "function") {
       /* Live: the state and its chart on top, the last finished call under
          them in its own area. */
       const l = t.live;
@@ -8318,6 +8403,7 @@ function renderTermTps() {
         title: tpsTooltip(t),
       };
     }
+    if (parts && usage) parts.usage = usage;
     const key = parts ? JSON.stringify(parts) : null;
     if (parts && overlay._tpsKey !== key) {
       overlay._tpsKey = key;
@@ -8332,6 +8418,18 @@ function renderTermTps() {
          line under it, so the area is not built at all (claunch-k196e.3).
          The non-live branch always has `big` for it, so only the live one
          can come up empty. */
+      const usageBox = parts.usage ? el("div", "term-usage") : null;
+      if (usageBox) {
+        usageBox.title = parts.usage.title;
+        for (const item of parts.usage.items) {
+          usageBox.appendChild(el("span", `term-usage-item ${item.level}`, `${item.label} ${item.pct}%`));
+        }
+      }
+      if (parts.usageOnly) {
+        overlay.replaceChildren(usageBox);
+        overlay.title = parts.usage.title;
+        return;
+      }
       const lastHas = !parts.live || !!(parts.when || parts.metrics);
       const lastBox = lastHas ? el("div", "term-tps-last") : null;
       if (lastBox) {
@@ -8345,11 +8443,10 @@ function renderTermTps() {
         const liveBox = el("div", "term-tps-live");
         liveBox.appendChild(el("span", "term-tps-big", parts.big));
         liveBox.appendChild(tpsSparkline(parts.series));
-        if (lastBox) overlay.replaceChildren(liveBox, lastBox);
-        else overlay.replaceChildren(liveBox);
+        overlay.replaceChildren(...[liveBox, lastBox, usageBox].filter(Boolean));
       } else {
-        overlay.replaceChildren(lastBox);
-        overlay.title = parts.title;
+        overlay.replaceChildren(...[lastBox, usageBox].filter(Boolean));
+        overlay.title = parts.usage ? `${parts.title}\n\n${parts.usage.title}` : parts.title;
       }
     }
   }
