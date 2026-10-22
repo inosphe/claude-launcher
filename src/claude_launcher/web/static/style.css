@@ -2824,6 +2824,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #session-list .rail-tps-line.err .rail-tps-bolt,
 .sess-brief-tps.err,
 .badge.tps.err { color: #ff7b72; }
+/* The badge has a fill of its own, so the alarm replaces it rather than
+   sitting red on the amber one. */
+.badge.tps.err { background: #3a1d1d; }
 #term-tps-overlay.err { color: #ff7b72; border-color: #6e2a2a; }
 /* The daemon's notice for the person at this terminal (ws.py "Notices"):
    a banner over the grid's top edge, never a line in it. */
