@@ -46,7 +46,6 @@
   let hovering = false;        // the pointer is on the line or the overlay
   let focused = false;         // the line or the overlay has the keyboard
   let pinned = false;          // clicked open: a pointer leaving keeps it
-  let dismissed = false;       // clicked shut under the pointer, till it moves
   let closeTimer = null;       // the seam between the line and the overlay
   let detailSignature = "";    // what the overlay's detail was built from
   let detailStale = true;      // a badge moved while the overlay was shut
@@ -115,7 +114,7 @@
     const overlay = $("status-overlay");
     const line = $("status-line");
     if (!overlay || !line) return;
-    const show = (hovering && !dismissed) || focused || pinned || menuOpen();
+    const show = hovering || focused || pinned || menuOpen();
     overlay.classList.toggle("hidden", !show);
     line.setAttribute("aria-expanded", show ? "true" : "false");
     if (show && detailStale) {
@@ -137,7 +136,6 @@
     hovering = false;
     focused = false;
     pinned = false;
-    dismissed = false;
     // The menu is the overlay's, so it goes first: draw() reads it to decide
     // whether anything still wants the overlay open.
     const menu = $("p2p-menu");
@@ -164,8 +162,7 @@
       clearTimeout(closeTimer);
       if (pinned || menuOpen()) return;
       closeTimer = setTimeout(() => {
-        if (which === "focus") focused = false;
-        else { hovering = false; dismissed = false; }
+        if (which === "focus") focused = false; else hovering = false;
         draw();
       }, 120);
     };
@@ -176,15 +173,26 @@
       if (!row.contains(e.relatedTarget)) release("focus");
     });
     // No pointer (touch, keyboard): the click is how the overlay opens, and
-    // a second one puts it away. Unpinning under the pointer has to say so —
-    // `hovering` is still true there — and the pointer moving away clears it,
-    // so the next hover opens again.
+    // a second one puts it away. Unpinning clears the other two holds as
+    // well — under the pointer `hovering` is still true, and a badge clicked
+    // a moment ago may still hold the keyboard — so the second click means
+    // closed rather than being overruled by the state that opened it. The
+    // next hover (after the pointer leaves) opens it again.
     line.addEventListener("click", (e) => {
       e.stopPropagation();
       pinned = !pinned;
-      dismissed = !pinned;
+      if (!pinned) {
+        hovering = false;
+        focused = false;
+      }
       draw();
     });
+    // The machine badge is a link, and what it opens is the reader's next
+    // move: the overlay gets out of the way instead of covering the page the
+    // click just called for. Its focus alone would otherwise hold the row
+    // open until something else took it (claunch-m5cux review).
+    const machine = $("sysperf-badge");
+    if (machine) machine.addEventListener("click", () => close());
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && (hovering || focused || pinned)) close();
     });

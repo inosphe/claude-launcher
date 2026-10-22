@@ -295,7 +295,29 @@ function full() {
   check("the next hover opens it again", !overlay.classList.contains("hidden"));
   line.fire("click", { stopPropagation() {} });
 
+  // A badge inside the overlay can hold the keyboard (focus stays in the
+  // row), and a click on the line must still shut it — otherwise the one
+  // control that closes the overlay is overruled by the state that opened it
+  // (claunch-m5cux review: the machine badge link left it open forever).
+  row.fire("focusin");
+  check("focus in the row opens it", !overlay.classList.contains("hidden"));
+  line.fire("click", { stopPropagation() {} });
+  check("a click shuts it even while the row holds focus",
+        overlay.classList.contains("hidden"));
+  check("...and says so", line.getAttribute("aria-expanded") === "false");
+  line.fire("click", { stopPropagation() {} });
+
+  // The machine badge is a link: the page it opens is what the reader asked
+  // for, so the overlay steps out of the way.
+  row.fire("mouseenter");
+  w.nodes["sysperf-badge"].fire("click", { stopPropagation() {} });
+  check("clicking the machine badge link closes the overlay",
+        overlay.classList.contains("hidden"));
+  // It must not take the badge's own navigation with it: nothing here
+  // preventDefaults, so the anchor still goes to #/sysperf.
+
   // The p2p menu is the overlay's: closing takes it along.
+  row.fire("mouseenter");
   w.nodes["p2p-menu"].className = "";
   w.doc.fire("keydown", { key: "Escape" });
   check("Escape closes the overlay", overlay.classList.contains("hidden"));
