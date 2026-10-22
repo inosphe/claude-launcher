@@ -971,3 +971,94 @@ def test_exclusive_rides_the_document_round_trip(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# lossless round trip (claunch-k3vu)
+# --------------------------------------------------------------------------- #
+
+def test_a_lenient_parse_records_what_it_dropped_on_the_document():
+    # claunch-k3vu. The log line reaches an operator's terminal once; the
+    # YAML they download later reaches them never. The dropped keys ride the
+    # stored document itself, so the loss is visible at every export.
+    doc = {
+        "version": 1,
+        "roles": {
+            "sentry": {"stance": "check", "future_thing": 1},
+            "scribe": {"stance": "build"},
+        },
+    }
+    loaded = mesh_roles.load_override(doc)
+    rows = loaded["x-dropped-keys"]
+    assert {"path": "role 'sentry'", "keys": ["future_thing"]} in rows
+    # A downgrade of the version number is part of the same loss.
+    future = mesh_roles.load_override({
+        "version": 99, "roles": {"sentry": {"stance": "check"}},
+    })
+    assert {"path": "version", "keys": ["99"]} in future["x-dropped-keys"]
+
+
+def test_a_clean_document_carries_no_loss_record():
+    loaded = mesh_roles.load_override({"roles": {"sentry": {"stance": "x"}}})
+    assert "x-dropped-keys" not in loaded
+    assert "x-dropped-keys" not in mesh_roles.parse(mesh_roles.DEFAULT_YAML)
+
+
+def test_the_lossy_copy_announces_itself_in_its_yaml():
+    doc = mesh_roles.load_override({
+        "roles": {"sentry": {"stance": "x", "future_thing": 1}},
+    })
+    text = mesh_roles.to_yaml(doc)
+    assert text.startswith("# LOSSY COPY")
+    assert "x-dropped-keys" in text
+    # A clean copy carries no banner.
+    clean = mesh_roles.to_yaml({"version": 1, "roles": {}})
+    assert not clean.startswith("#")
+
+
+def test_reuploading_a_lossy_copy_warns_and_does_not_keep_stale_notes():
+    # claunch-k3vu. The federation gap: an operator downloads the lossy YAML,
+    # tweaks one line, uploads it back — and the newer daemon's fields are
+    # gone for good. This build cannot bring them back; it must not stay
+    # quiet about it either. The upload (strict) is accepted — the copy has
+    # no keys THIS build rejects — but the carried record is consumed with a
+    # warning, not stored as if it described this build.
+    doc = mesh_roles.load_override({
+        "roles": {"sentry": {"stance": "x", "future_thing": 1}},
+    })
+    text = mesh_roles.to_yaml(doc)
+    uploaded = mesh_roles.parse(text)  # strict — the upload path
+    assert "x-dropped-keys" not in uploaded
+    assert "future_thing" not in (uploaded["roles"]["sentry"] or {})
+    # A lenient side (federation) re-records what IT dropped, and only that.
+    again = mesh_roles.parse(text, lenient=True)
+    own = again.get("x-dropped-keys") or []
+    assert all("future_thing" not in str(row) for row in own)
+
+
+def test_roles_view_flags_a_lossy_vocabulary(home, tmp_path):
+    import copy as _copy
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        mm.create("m")
+        await mm.join("m", "s1", handle="lead1")
+        assert mm.roles_view("m")["lossy"] is False
+        lossy = mm.roles_view("m").copy()
+        doc = mm.roles_view("m")["yaml"]
+        parsed = mesh_roles.parse(doc, lenient=True, dropped=[])
+        parsed["x-dropped-keys"] = [
+            {"path": "role 'worker'", "keys": ["future_thing"]}
+        ]
+        mesh = mm.get("m")
+        mesh.set_roles_doc(parsed)
+        lossy = mm.roles_view("m")
+        assert lossy["lossy"] is True
+        assert lossy["yaml"].startswith("# LOSSY COPY")
+        await mgr.shutdown_all()
+
+    asyncio.run(run())

@@ -576,7 +576,8 @@ roles:
 
 
 def _known_keys(
-    body: dict, allowed: set, what: str, lenient: bool, refusal: str = ""
+    body: dict, allowed: set, what: str, lenient: bool,
+    refusal: str = "", dropped: Optional[list] = None,
 ) -> dict:
     """``body`` with unknown keys refused (strict) or dropped (lenient).
 
@@ -598,7 +599,11 @@ def _known_keys(
 
     Dropping is logged rather than silent: an operator reading the daemon log
     can see which key this build did not know, which is how the version skew
-    gets noticed at all.
+    gets noticed at all. The log line reaches the operator's terminal once,
+    though — not the YAML they download later. :func:`parse` threads a
+    ``dropped`` list through here, so the loss also lands in the stored
+    document itself (``x-dropped-keys``) and survives into every exported
+    copy.
 
     ``refusal`` overrides the strict message where a call site already had one
     people (and tests) read — this function changed *who* refuses, not what an
@@ -620,6 +625,8 @@ def _known_keys(
         "(%s); the document was written by a newer build",
         what, ", ".join(unknown), allowed_list,
     )
+    if dropped is not None:
+        dropped.append({"path": what, "keys": unknown})
     return {k: v for k, v in body.items() if k not in set(unknown)}
 
 
@@ -645,10 +652,12 @@ def _text(value, cap: int, what: str) -> str:
     return text
 
 
-def _parse_role(name: str, body, lenient: bool = False) -> Role:
+def _parse_role(
+    name: str, body, lenient: bool = False, dropped: Optional[list] = None
+) -> Role:
     if not isinstance(body, dict):
         raise RoleError(f"role {name!r} must be a mapping, got {body!r}")
-    body = _known_keys(body, _ROLE_KEYS, f"role {name!r}", lenient)
+    body = _known_keys(body, _ROLE_KEYS, f"role {name!r}", lenient, dropped=dropped)
     raw_aliases = body.get("aliases") or []
     if not isinstance(raw_aliases, list):
         raise RoleError(f"role {name!r}: aliases must be a list")
@@ -680,13 +689,15 @@ def _parse_role(name: str, body, lenient: bool = False) -> Role:
     )
 
 
-def _parse_pattern(body, where: str, lenient: bool = False) -> dict:
+def _parse_pattern(
+    body, where: str, lenient: bool = False, dropped: Optional[list] = None
+) -> dict:
     """One end of a rule -> its document form. ``{}`` matches every member."""
     if body is None:
         body = {}
     if not isinstance(body, dict):
         raise RoleError(f"{where} must be a mapping like {{role: worker}}")
-    body = _known_keys(body, {"role", "tier"}, where, lenient)
+    body = _known_keys(body, {"role", "tier"}, where, lenient, dropped=dropped)
     out: dict = {}
     if body.get("role") is not None:
         # Left as written; it is checked against the *resolved* vocabulary in
@@ -714,13 +725,15 @@ def _parse_pattern(body, where: str, lenient: bool = False) -> dict:
     return out
 
 
-def _parse_rule(body, index: int, lenient: bool = False) -> dict:
+def _parse_rule(
+    body, index: int, lenient: bool = False, dropped: Optional[list] = None
+) -> dict:
     where = f"auto_link rule {index + 1}"
     if not isinstance(body, dict):
         raise RoleError(
             f"{where} must be a mapping with a 'between:' pair, got {body!r}"
         )
-    body = _known_keys(body, {"between", "within"}, where, lenient)
+    body = _known_keys(body, {"between", "within"}, where, lenient, dropped=dropped)
     pair = body.get("between")
     if not isinstance(pair, list) or len(pair) != 2:
         raise RoleError(
@@ -734,8 +747,8 @@ def _parse_rule(body, index: int, lenient: bool = False) -> dict:
         )
     out: dict = {
         "between": [
-            _parse_pattern(pair[0], f"{where} end 1", lenient),
-            _parse_pattern(pair[1], f"{where} end 2", lenient),
+            _parse_pattern(pair[0], f"{where} end 1", lenient, dropped),
+            _parse_pattern(pair[1], f"{where} end 2", lenient, dropped),
         ]
     }
     if within != "any":
@@ -743,10 +756,12 @@ def _parse_rule(body, index: int, lenient: bool = False) -> dict:
     return out
 
 
-def _parse_auto_link(body, lenient: bool = False) -> dict:
+def _parse_auto_link(
+    body, lenient: bool = False, dropped: Optional[list] = None
+) -> dict:
     if not isinstance(body, dict):
         raise RoleError("'auto_link' must be a mapping with a 'rules:' list")
-    body = _known_keys(body, {"rules"}, "auto_link", lenient)
+    body = _known_keys(body, {"rules"}, "auto_link", lenient, dropped=dropped)
     rules = body.get("rules")
     if rules is None:
         rules = []
@@ -754,10 +769,12 @@ def _parse_auto_link(body, lenient: bool = False) -> dict:
         raise RoleError("auto_link.rules must be a list")
     if len(rules) > MAX_RULES:
         raise RoleError(f"{len(rules)} auto_link rules, over the {MAX_RULES} limit")
-    return {"rules": [_parse_rule(r, i, lenient) for i, r in enumerate(rules)]}
+    return {
+        "rules": [_parse_rule(r, i, lenient, dropped) for i, r in enumerate(rules)]
+    }
 
 
-def parse(text, lenient: bool = False) -> dict:
+def parse(text, lenient: bool = False, dropped: Optional[list] = None) -> dict:
     """Validate a role-set document (YAML text or an already-parsed mapping).
 
     Returns the document as a plain dict, ready to persist and federate.
@@ -772,6 +789,15 @@ def parse(text, lenient: bool = False) -> dict:
     it is a mesh that silently loses its whole custom vocabulary — every role,
     including the ones this daemon reads perfectly well — because one newer
     daemon added one field.
+
+    ``dropped`` (lenient callers) collects what this parse dropped, as
+    ``{"path", "keys"}`` rows. :func:`parse` copies it onto the returned
+    document as ``x-dropped-keys`` — the loss stops being a terminal log line
+    and travels with the document, so an operator downloading the YAML later
+    sees what their daemon could not read. A document that *arrives* with
+    ``x-dropped-keys`` warns here (someone is re-uploading a lossy copy) and
+    the key is replaced by this parse's own record: stale loss notes must not
+    survive as if they described this build.
     """
     if isinstance(text, str):
         if len(text) > MAX_DOC:
@@ -788,12 +814,23 @@ def parse(text, lenient: bool = False) -> dict:
         raise RoleError("role set is empty")
     if not isinstance(doc, dict):
         raise RoleError(f"role set must be a mapping, got {type(doc).__name__}")
+    prior = doc.get("x-dropped-keys")
+    if prior:
+        log.warning(
+            "role set: this copy carries x-dropped-keys (%s) — it was exported "
+            "by a daemon that could not read those parts of it; fields it "
+            "drops are gone from this copy",
+            ", ".join(str(d) for d in prior),
+        )
+    dropped = list(dropped) if dropped is not None else []
     doc = _known_keys(
         doc,
-        {"version", "default", "roles", "replace", "auto_link"},
+        {"version", "default", "roles", "replace", "auto_link",
+         "x-dropped-keys"},
         "role set",
         lenient,
         refusal="unknown top-level key(s): {keys} (allowed: {allowed})",
+        dropped=dropped,
     )
     version = doc.get("version", SCHEMA_VERSION)
     try:
@@ -817,6 +854,9 @@ def parse(text, lenient: bool = False) -> dict:
             "written by a newer build; anything this one does not know has "
             "been dropped", version, SCHEMA_VERSION,
         )
+        dropped.append(
+            {"path": "version", "keys": [str(version)]}
+        )
     roles = doc.get("roles")
     if roles is None:
         roles = {}
@@ -833,7 +873,8 @@ def parse(text, lenient: bool = False) -> dict:
         # only meaningful against the default set, so it is validated here but
         # resolved in `resolve`.
         out_roles[name] = (
-            None if body is None else _parse_role(name, body, lenient).to_dict()
+            None if body is None
+            else _parse_role(name, body, lenient, dropped).to_dict()
         )
     out: dict = {"version": SCHEMA_VERSION, "roles": out_roles}
     if doc.get("replace"):
@@ -841,7 +882,9 @@ def parse(text, lenient: bool = False) -> dict:
     if doc.get("default") is not None:
         out["default"] = _check_name(doc.get("default"), "default role")
     if doc.get("auto_link") is not None:
-        out["auto_link"] = _parse_auto_link(doc.get("auto_link"), lenient)
+        out["auto_link"] = _parse_auto_link(doc.get("auto_link"), lenient, dropped)
+    if lenient and dropped:
+        out["x-dropped-keys"] = dropped
     return out
 
 
@@ -1037,7 +1080,8 @@ def load_override(doc) -> Optional[dict]:
     if not doc:
         return None
     try:
-        parsed = parse(doc, lenient=True)
+        dropped: list = []
+        parsed = parse(doc, lenient=True, dropped=dropped)
         resolve(parsed)  # prove it still resolves before we adopt it
         return parsed
     except RoleError as exc:
@@ -1046,5 +1090,19 @@ def load_override(doc) -> Optional[dict]:
 
 
 def to_yaml(doc: dict) -> str:
-    """A role-set document as YAML the user can edit and upload back."""
-    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=88)
+    """A role-set document as YAML the user can edit and upload back.
+
+    A lossy copy says so in its own first lines — the operator downloading it
+    meets the warning without reading the mapping, and the machine-readable
+    ``x-dropped-keys`` rides the document so a re-upload warns on this side.
+    """
+    text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=88)
+    if doc.get("x-dropped-keys"):
+        note = (
+            "# LOSSY COPY: keys this daemon could not read were dropped from "
+            "this document —\n"
+            "# re-uploading it removes them for good. See x-dropped-keys "
+            "below for\n# what, and upload against a build that knows them.\n"
+        )
+        text = note + text
+    return text
