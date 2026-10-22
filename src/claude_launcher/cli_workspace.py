@@ -116,6 +116,14 @@ def register(sub) -> None:
     )
     wsub = p.add_subparsers(dest="workspace_command", required=True)
 
+    from . import workspace_check
+
+    p_check = wsub.add_parser(
+        "check", help="check the session's repository and linked worktree occupancy"
+    )
+    workspace_check.add_arguments(p_check)
+    p_check.set_defaults(func=workspace_check.check)
+
     p_add = wsub.add_parser(
         "add", help="register a directory as a workspace (it must exist)"
     )

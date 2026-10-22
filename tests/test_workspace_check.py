@@ -30,23 +30,16 @@ anything this does not.
 
 from __future__ import annotations
 
-import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from claude_launcher import cli, workspace_check
+
 ROOT = Path(__file__).resolve().parents[1]
-GATE = ROOT / "tools" / "workspace_check.py"
-
-
-def _load():
-    spec = importlib.util.spec_from_file_location("workspace_check_under_test", GATE)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-workspace_check = _load()
 
 
 class _FakeClient:
@@ -528,3 +521,54 @@ def test_an_explicit_issue_wins_over_the_session_record(gate, repos):
     })
     assert _run(workspace_check, cwd=repos["worktree"], issue="claunch-bbbbb") == 0
     assert "/api/beads/claunch-aaaaa" not in client.asked
+
+
+@pytest.mark.parametrize("command", ["workspace", "ws"])
+@pytest.mark.parametrize("verdict", [0, 1, 2])
+def test_cli_checks_an_external_workspace(command, verdict, gate, repos, monkeypatch, capsys):
+    """The installed command keeps verdicts and needs no tools/ in the target."""
+    target = repos["mine"]
+    assert not (target / "tools" / "workspace_check.py").exists()
+    client = gate({
+        "/api/sessions/explicit-session": _session(repos["mine"]),
+        "/api/beads/explicit-issue": _issue(repos["other"] if verdict == 1 else target),
+    }, client=verdict != 2)
+    monkeypatch.chdir(repos["other"])
+
+    def cannot_start(*args, **kwargs):
+        raise AssertionError("a location check must not start a daemon")
+
+    monkeypatch.setattr(workspace_check.daemon_client, "ensure_running", cannot_start)
+    code = cli.main([
+        command, "check", "--cwd", str(target),
+        "--session", "explicit-session", "--issue", "explicit-issue",
+    ])
+    assert code == verdict
+    out = capsys.readouterr().out
+    assert f"standing in: {workspace_check._norm(str(target))}" in out
+    assert {0: "MATCH:", 1: "MISMATCH:", 2: "cannot tell:"}[verdict] in out
+    if client:
+        assert "/api/beads/explicit-issue" in client.asked
+        assert "/api/sessions/explicit-session" in client.asked
+
+
+def test_cli_defaults_to_session_environment_and_current_directory(gate, repos, monkeypatch):
+    client = gate({
+        "/api/sessions/s1": _session(repos["mine"]),
+        "/api/beads/claunch-aaaaa": _issue(repos["mine"]),
+    })
+    monkeypatch.chdir(repos["mine"])
+    assert cli.main(["workspace", "check"]) == 0
+    assert "/api/beads/claunch-aaaaa" in client.asked
+
+
+def test_cli_help_runs_outside_the_launcher_checkout(tmp_path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    proc = subprocess.run(
+        [sys.executable, "-m", "claude_launcher.cli", "workspace", "check", "--help"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    for option in ("--session", "--issue", "--cwd"):
+        assert option in proc.stdout
