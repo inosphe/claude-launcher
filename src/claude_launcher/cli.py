@@ -104,6 +104,49 @@ def _carries_seeded_files(p: profile.Profile) -> bool:
     )
 
 
+def _install_after_create(p: profile.Profile, forced: Optional[bool]) -> None:
+    """Offer to run ``claunch install`` against the profile just created.
+
+    A profile is an isolated config dir, so a global install never reaches it;
+    without this the second command a new profile needs is one the person has
+    to remember. The question is asked only where a person can answer it: a
+    managed session (``CLAUNCH_SESSION`` set) and a stdin that is not a
+    terminal each get the command to run later instead, so a scripted create
+    never blocks on stdin. ``--install`` / ``--no-install`` answer it directly.
+
+    Answering goes to the install when the answer is not a no -- the default
+    is yes, unlike the repository's other confirmations. Those guard
+    destructive steps (overwriting an edited file, removing one); this asks
+    for the step the operator came for, and it only adds files to a profile
+    that was empty a moment ago.
+    """
+    if forced is None:
+        if os.environ.get("CLAUNCH_SESSION"):
+            print(
+                f"install: skipped in a managed session; "
+                f"run 'claunch install {p.name}'"
+            )
+            return
+        if not sys.stdin.isatty():
+            print(
+                f"install: skipped (stdin is not a terminal); "
+                f"run 'claunch install {p.name}'"
+            )
+            return
+        try:
+            answer = input(
+                f"install the MCP server and skills into {p.name!r}? [Y/n]: "
+            )
+        except EOFError:
+            print(f"install: skipped (no answer); run 'claunch install {p.name}'")
+            return
+        forced = answer.strip().lower() not in ("n", "no")
+    if not forced:
+        print(f"install: skipped; run 'claunch install {p.name}' later")
+        return
+    run_install(p.name, None)
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     if args.parent:
         profile.require(args.parent)  # fail before creating if parent is missing
@@ -191,6 +234,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         for action, error in shared.failed:
             line = plugins_mod.error_line(error)
             print(f"could not apply shared {action.describe()}: {line}")
+    _install_after_create(p, args.install)
     entry = harnesses.get(selected)
     if entry and entry.auth == "api-key":
         print(f"next: claunch set-token {p.name}")
@@ -1413,6 +1457,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_create.add_argument(
         "--harness",
         help="harness this profile runs (default: inherit, then the provider's, then claude)",
+    )
+    p_create.add_argument(
+        "--install",
+        dest="install",
+        action="store_true",
+        default=None,
+        help="install the MCP server and skills into the new profile without asking",
+    )
+    p_create.add_argument(
+        "--no-install",
+        dest="install",
+        action="store_false",
+        help="do not offer to install into the new profile",
     )
     p_create.set_defaults(func=_cmd_create)
 

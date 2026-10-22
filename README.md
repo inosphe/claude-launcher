@@ -525,6 +525,23 @@ profile after the shared declaration changes.
 claunch create work --reinit        # finish or redo work's setup in place
 ```
 
+### Installing into the new profile
+
+`claunch create` ends by offering the install the profile needs
+(`install the MCP server and skills into 'work'? [Y/n]`). A profile is an
+isolated `CLAUDE_CONFIG_DIR`, so a global install never reaches it; answering
+yes runs the same install as `claunch install work`.
+
+The question is asked only where a person can answer it. A managed session
+(`CLAUNCH_SESSION` set) and a stdin that is not a terminal skip it and print
+the command to run later instead, so a scripted `create` never blocks on
+stdin. `--install` and `--no-install` answer it without a terminal.
+
+```bash
+claunch create work --install       # install without asking
+claunch create work --no-install    # skip; 'claunch install work' later
+```
+
 ## Per-profile environment variables
 
 Each profile can set environment variables in its `env` block. They live in the
