@@ -294,6 +294,8 @@ let controlSock = null;
 let controlTry = 0;
 let controlTimer = null;
 let controlSeq = 0;
+let controlOpenedAt = null;   // Date.now() the current socket opened (the link panel reads it)
+let controlLastRx = null;     // Date.now() of its last frame, of any kind
 const controlWaiting = new Map();
 
 function controlUp() {
@@ -330,6 +332,7 @@ function openControlSocket() {
   sock.onopen = () => {
     if (sock !== controlSock) return;
     if (typeof linkLog === "function") linkLog("control.opened");
+    controlOpenedAt = Date.now();
     controlTry = 0;
     latencyStart();
     // A terminal that reconnected while this socket was down did so on a
@@ -348,6 +351,7 @@ function controlMessage(sock, ev) {
     if (controlRetired.has(sock)) controlRetiredMessage(sock, ev);
     return;
   }
+  controlLastRx = Date.now();
   if (typeof ev.data !== "string") { channelBinary(ev.data); return; }
   let msg;
   try { msg = JSON.parse(ev.data); } catch { return; }
@@ -17197,6 +17201,7 @@ let linkLastPing = 0;     // Date.now() of the last ping sent
 let linkEchoed = false;   // this link has answered a ping
 let linkProbeBy = null;   // Date.now() by which a wake probe must be answered
 let linkWallAt = null;    // Date.now() of the last tick, for the gap check
+let linkLastPong = null;  // Date.now() of the last pong on any link (the link panel reads it)
 
 function setLink(state) {
   linkState = state;
@@ -17317,6 +17322,7 @@ function openSocket(name) {
 
   sock.onmessage = (ev) => {
     if (ticket !== linkTicket) return;
+    sock.linkLastRx = Date.now();
     if (typeof ev.data === "string") {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
@@ -19494,6 +19500,7 @@ function linkWatchReset() {
 }
 
 function linkPong() {
+  linkLastPong = Date.now();
   linkPingAt = null;
   linkEchoed = true;
   linkProbeBy = null;
@@ -19609,6 +19616,213 @@ $("term-link").addEventListener("click", () => reconnectNow(true));
 $("term-size").addEventListener("click", stealSize);
 $("m-size").addEventListener("click", stealSize);
 $("m-link").addEventListener("click", () => $("term-link").click());
+
+/* ---- the link panel (claunch-xbdy7 follow-up) ----
+
+   The chip above only appears once the page itself knows the link is down.
+   The reports that matter are the other kind: a terminal that stopped
+   updating while every chip said it was fine, and a reload that fixed it.
+   So the header carries a small always-on button whose colour is the page's
+   own reading of its two connections, and pressing it floats a panel with
+   the raw state behind that reading -- the control socket, this terminal's
+   link, the daemon incarnation each was opened against -- and the tail of
+   the link log, with copy and download, so what the page believed at the
+   moment of a freeze can be read before the reload throws it away. */
+const LINK_PANEL_LOG_LINES = 40;
+let linkPanelOpen = false;
+let linkPanelPos = null;   // {left, top} once dragged; null keeps the default corner
+
+function linkPanelAge(at, now) {
+  if (!Number.isFinite(at)) return "—";
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  return s < 120 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
+}
+
+function linkPanelReady(state) {
+  return ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][state] || String(state);
+}
+
+/* ok / warn / down, and the reason for anything but ok. */
+function linkPanelGrade(now) {
+  if (linkState === "lost") return { grade: "down", why: "terminal link given up" };
+  if (linkState === "reconnecting") return { grade: "down", why: "terminal link reconnecting" };
+  if (linkName && !sessionEnded && !ws) return { grade: "down", why: "no terminal socket" };
+  if (linkPingAt !== null && now - linkPingAt >= LINK_PING_MS) {
+    return { grade: "warn", why: `terminal ping unanswered ${Math.round((now - linkPingAt) / 1000)}s` };
+  }
+  if (!controlUp()) return { grade: "warn", why: "control socket down" };
+  // The poll has met a daemon this terminal was not attached to: a restart
+  // the link has not caught up with.
+  if (ws && attachedBoot && daemonBoot && attachedBoot !== daemonBoot) {
+    return { grade: "warn", why: "terminal attached to an earlier daemon boot" };
+  }
+  if (ws && ws.linkVia === "socket") return { grade: "warn", why: "terminal on a socket of its own" };
+  return { grade: "ok", why: "" };
+}
+
+/* The panel's rows as [section, [[key, value], ...]]: one source for the
+   table on screen and the text the copy button hands out. */
+function linkPanelRows(now) {
+  const sock = controlSock;
+  const rtt = latencySamples.length ? latencySamples[latencySamples.length - 1] : null;
+  const control = [
+    ["state", sock ? linkPanelReady(sock.readyState) : "none"],
+    ["via", sock ? (sock.transport || "ws") : "—"],
+    ["opened", sock ? linkPanelAge(controlOpenedAt, now) : "—"],
+    ["last frame", linkPanelAge(controlLastRx, now)],
+    ["retries", `${controlTry}/${CONTROL_BACKOFF.length}`],
+    ["reopen scheduled", controlTimer ? "yes" : "no"],
+    ["rtt", rtt === null ? "—" : `${Math.round(rtt)}ms${latencyVia ? ` (${latencyVia})` : ""}`],
+    ["ping in flight", latencySentAt === null ? "no" : "yes"],
+    ["reads waiting", String(controlWaiting.size)],
+    ["channels", String(channelLinks.size)],
+    ["p2p", p2pStopped ? "stopped" : p2pOff ? "off" : p2pLink ? "negotiating/live" : p2pLastFail ? `failed: ${p2pLastFail}` : "—"],
+  ];
+  const term = [
+    ["session", linkName || "—"],
+    ["state", linkState + (sessionEnded ? " (session exited)" : "")],
+    ["via", ws ? (ws.linkVia === "channel" ? `channel ${ws.ch}` : "socket") : "—"],
+    ["socket", ws ? linkPanelReady(ws.readyState) : "none"],
+    ["started", ws ? linkPanelAge(ws.linkStartedAt, now) : "—"],
+    ["init", ws ? (ws.linkReadyAt === null ? "not yet" : linkPanelAge(ws.linkReadyAt, now)) : "—"],
+    ["last frame", ws ? linkPanelAge(ws.linkLastRx, now) : "—"],
+    ["ping", linkPingAt === null ? "none in flight" : `waiting ${Math.round((now - linkPingAt) / 1000)}s`],
+    ["last pong", linkPanelAge(linkLastPong, now)],
+    ["echoed", linkEchoed ? "yes" : "no"],
+    ["retries", `${linkTry}/${LINK_BACKOFF.length}`],
+    ["held keys", String(linkQueue.length)],
+  ];
+  const daemon = [
+    ["poll verdict", daemonOnline ? "online" : "offline"],
+    ["boot (poll)", daemonBoot || "—"],
+    ["boot (terminal)", attachedBoot || "—"],
+    ["page", `${linkLogPage} · ${BASE}`],
+    ["tab", `${document.hidden ? "hidden" : "visible"} · ${navigator.onLine ? "online" : "offline"}`],
+  ];
+  return [["control socket", control], ["terminal link", term], ["daemon / page", daemon]];
+}
+
+function linkPanelText(now) {
+  const lines = [`claunch link panel @ ${new Date(now).toISOString()}`];
+  const g = linkPanelGrade(now);
+  lines.push(`grade: ${g.grade}${g.why ? ` (${g.why})` : ""}`);
+  for (const [title, rows] of linkPanelRows(now)) {
+    lines.push("", `[${title}]`);
+    for (const [k, v] of rows) lines.push(`${k}: ${v}`);
+  }
+  lines.push("", "[link log]", window.claunchLinkLog ? window.claunchLinkLog.text() : "");
+  return lines.join("\n");
+}
+
+function renderLinkPanel() {
+  const now = Date.now();
+  const g = linkPanelGrade(now);
+  for (const [id, cls] of [["term-conn", "term-btn"], ["m-conn", "m-act"]]) {
+    const chip = $(id);
+    if (!chip) continue;
+    chip.className = `${cls} conn-chip ${g.grade}${linkPanelOpen ? " open" : ""}`;
+    chip.title = `connection status (debug)${g.why ? ` — ${g.why}` : ""}`;
+    chip.setAttribute("aria-expanded", linkPanelOpen ? "true" : "false");
+  }
+  const panel = $("conn-panel");
+  panel.classList.toggle("hidden", !linkPanelOpen);
+  if (!linkPanelOpen) return;
+  $("conn-panel-grade").textContent = g.grade + (g.why ? ` — ${g.why}` : "");
+  $("conn-panel-grade").className = `conn-panel-grade ${g.grade}`;
+  const body = $("conn-panel-rows");
+  body.replaceChildren();
+  for (const [title, rows] of linkPanelRows(now)) {
+    const head = document.createElement("tr");
+    const th = document.createElement("th");
+    th.colSpan = 2;
+    th.textContent = title;
+    head.appendChild(th);
+    body.appendChild(head);
+    for (const [k, v] of rows) {
+      const tr = document.createElement("tr");
+      const a = document.createElement("td");
+      const b = document.createElement("td");
+      a.textContent = k;
+      b.textContent = v;
+      tr.append(a, b);
+      body.appendChild(tr);
+    }
+  }
+  const log = $("conn-panel-log");
+  const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  const entries = linkLogEntries();
+  log.textContent = entries.slice(-LINK_PANEL_LOG_LINES).map(linkLogLine).join("\n");
+  $("conn-panel-logcount").textContent = `last ${Math.min(entries.length, LINK_PANEL_LOG_LINES)} of ${entries.length}`;
+  if (stick) log.scrollTop = log.scrollHeight;
+}
+
+function toggleLinkPanel(open) {
+  linkPanelOpen = typeof open === "boolean" ? open : !linkPanelOpen;
+  const panel = $("conn-panel");
+  if (linkPanelPos) {
+    panel.style.left = `${linkPanelPos.left}px`;
+    panel.style.top = `${linkPanelPos.top}px`;
+    panel.style.right = "auto";
+    panel.style.maxHeight = `${Math.max(160, window.innerHeight - linkPanelPos.top - 16)}px`;
+  }
+  renderLinkPanel();
+}
+
+/* Wired only where the markup is: the link harness (tests/web) runs this
+   block without it. */
+function wireLinkPanel() {
+  $("term-conn").addEventListener("click", () => toggleLinkPanel());
+  if ($("m-conn")) $("m-conn").addEventListener("click", () => toggleLinkPanel());
+  $("conn-panel-close").addEventListener("click", () => toggleLinkPanel(false));
+  $("conn-panel-reconnect").addEventListener("click", () => {
+    if (typeof linkLog === "function") linkLog("panel.reconnect", { session: linkName, state: linkState });
+    if (linkState === "reconnecting" || linkState === "lost") reconnectNow(true);
+    else if (ws) linkTakeDead("reconnect pressed in the link panel");
+    renderLinkPanel();
+  });
+  $("conn-panel-copy").addEventListener("click", async () => {
+    const btn = $("conn-panel-copy");
+    try {
+      await navigator.clipboard.writeText(linkPanelText(Date.now()));
+      btn.textContent = "copied";
+    } catch {
+      btn.textContent = "copy failed";
+    }
+    setTimeout(() => { btn.textContent = "copy"; }, 1500);
+  });
+  $("conn-panel-download").addEventListener("click", () => window.claunchLinkLog.download());
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && linkPanelOpen) toggleLinkPanel(false);
+  });
+
+  /* Dragged by its title bar, kept inside the window. */
+  $("conn-panel-head").addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || ev.target.closest("button")) return;
+    const panel = $("conn-panel");
+    const box = panel.getBoundingClientRect();
+    const dx = ev.clientX - box.left;
+    const dy = ev.clientY - box.top;
+    const move = (e) => {
+      const left = Math.min(Math.max(0, e.clientX - dx), window.innerWidth - box.width);
+      const top = Math.min(Math.max(0, e.clientY - dy), window.innerHeight - 40);
+      linkPanelPos = { left, top };
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+      panel.style.right = "auto";
+      panel.style.maxHeight = `${Math.max(160, window.innerHeight - top - 16)}px`;
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    ev.preventDefault();
+  });
+
+  if (typeof window.setInterval === "function") window.setInterval(renderLinkPanel, 1000);
+}
+if ($("term-conn")) wireLinkPanel();
 
 /* ---- queued deliveries ----
    Mesh messages are not typed into a terminal the moment they are sent: the

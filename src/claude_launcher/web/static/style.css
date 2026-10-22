@@ -2498,6 +2498,45 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    means the same thing — this end is on its own until someone acts. */
 .link-chip.lost { background: #442022; color: #ff7b72; }
 .link-chip:hover { color: #fff; }
+/* The link panel's button: a dot coloured by linkPanelGrade(). */
+.conn-chip { font-variant-numeric: tabular-nums; }
+.conn-chip::before { content: "● "; }
+.conn-chip.ok::before { color: #3fb950; }
+.conn-chip.warn::before { color: #d29922; }
+.conn-chip.down::before { color: #ff7b72; }
+.conn-chip.open { border-color: #58a6ff; color: #c9d1d9; }
+.conn-panel {
+  position: fixed; top: 64px; right: 16px; z-index: 1000;
+  width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 80px);
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; border: 1px solid #30363d; border-radius: 8px;
+  background: #161b22; color: #c9d1d9; font-size: 12px; overflow: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.conn-panel.hidden { display: none; }
+.conn-panel-head { display: flex; align-items: center; gap: 8px; cursor: move; user-select: none; }
+.conn-panel-title { font-weight: 600; }
+.conn-panel-grade { flex: 1; overflow-wrap: anywhere; }
+.conn-panel-grade.ok { color: #3fb950; }
+.conn-panel-grade.warn { color: #d29922; }
+.conn-panel-grade.down { color: #ff7b72; }
+.conn-panel-x { background: none; border: none; color: #8b949e; font-size: 16px; cursor: pointer; }
+.conn-panel-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.conn-panel-actions button {
+  font: inherit; padding: 2px 10px; cursor: pointer;
+  background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+}
+.conn-panel-actions button:hover { border-color: #8b949e; }
+.conn-panel-rows { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.conn-panel-rows th { text-align: left; color: #8b949e; font-weight: 600; padding: 6px 0 2px; }
+.conn-panel-rows td { padding: 1px 6px 1px 0; vertical-align: top; overflow-wrap: anywhere; }
+.conn-panel-rows td:first-child { color: #8b949e; white-space: nowrap; width: 9em; }
+.conn-panel-loghead { color: #8b949e; font-weight: 600; }
+.conn-panel-log {
+  margin: 0; min-height: 80px; max-height: 220px; overflow: auto;
+  padding: 4px 6px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+  font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
 /* A viewer scrolled back into history (virtual scroll). Informational, so a
    quiet blue like the resume button — it explains why the grid is frozen. */
 .scroll-chip { color: #9ecbff; border-color: #1f4272; cursor: default; }
