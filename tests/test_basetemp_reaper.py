@@ -200,9 +200,27 @@ def test_read_only_files_are_removed(tmp_path):
     assert "locked" not in row
 
 
+def test_an_unlistable_0200_tree_is_repaired_and_removed(tmp_path):
+    # claunch-zbu54: a basetemp written before the claunch-ersj2 fix is 0200,
+    # so rmtree fails on os.scandir before removing anything. The removal
+    # retry never reached it: 9,135 of 10,033 history rows on 2026-10-22 were
+    # "locked", the same trees over and over, and their inodes were never
+    # freed. The walk needs read and search back, not the write bit.
+    root = tmp_path / "t"
+    tree = _run_tree(root, "s995c1011010955")
+    for path in (tree / "popen-gw0", tree):
+        os.chmod(path, 0o200)
+
+    _reaper(tmp_path, [("s995", True)]).session_exited(_session("s995"))
+
+    assert not tree.exists()
+    [row] = _rows(tmp_path)
+    assert row["outcome"] == "removed"
+    assert "locked" not in row
+
+
 @pytest.mark.parametrize("func", [os.open, os.scandir, os.lstat])
-def test_a_failed_walk_call_is_recorded_not_retried(tmp_path, monkeypatch, func):
-    # POSIX rmtree reports os.open/os.scandir/os.lstat failures too; calling
+def test_a_failed_walk_call_is_recorded_not_retried(tmp_path, monkeypatch, func):    # POSIX rmtree reports os.open/os.scandir/os.lstat failures too; calling
     # os.open(path) again raises TypeError, which must not escape the reap
     # (s995-rev3, CHANGES REQUESTED @ aa27b127).
     root = tmp_path / "t"
