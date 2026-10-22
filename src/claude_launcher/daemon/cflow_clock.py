@@ -179,6 +179,24 @@ REMINDER_SETTLE = 30.0
 #: cannot carry it, short enough that a minute of real work does.
 REMINDER_MIN_MOVEMENT = 60.0
 
+#: How long a session's screen has to have stood still, measured at delivery
+#: time, before its repeating reminder is held instead of typed in
+#: (claunch-pumne).
+#:
+#: The rule above asks whether a *repeat* has been earned; this one asks,
+#: for every delivery of every source, whether the terminal has anything new
+#: to read. The busy/idle gate cannot answer that: a turn parked on a long
+#: command, or a TUI animating a spinner, reads as busy for as long as the
+#: command or the spinner runs, so reminders kept landing in terminals that
+#: had not drawn a line in minutes. A held reminder takes the same
+#: ``held_at`` a stopped session gets, so the existing resume rule re-arms a
+#: fresh interval when the screen moves again instead of replaying it
+#: (:class:`SessionReminderService`).
+#:
+#: Seconds; ``daemon.reminder_stall_hold`` overrides it and 0 turns the hold
+#: off. Read live, like the reminder intervals.
+REMINDER_STALL = 15.0
+
 
 def _movement_readings(session) -> tuple:
     """This terminal's two independent "did it move" readings.
@@ -363,6 +381,55 @@ def session_idle_for(session) -> Optional[float]:
     except Exception:  # noqa: BLE001 - idle time is decoration only
         return None
     return None if value is None else float(value)
+
+
+def stall_hold_seconds(cfg: Optional[dict] = None) -> float:
+    """The configured stall-hold threshold in seconds; 0 means off.
+
+    ``reminder_stall_hold`` is read live on every delivery, like the reminder
+    intervals. A value that cannot be read as a number falls back to the
+    default rather than to 0: a broken config must not silently switch the
+    hold off, which is the state that floods the terminals.
+    """
+    try:
+        value = float((cfg or {}).get("reminder_stall_hold", REMINDER_STALL))
+    except (TypeError, ValueError):
+        return REMINDER_STALL
+    return max(0.0, value)
+
+
+def session_screen_idle_for(session) -> Optional[float]:
+    """Seconds the session's screen has been still, or ``None``.
+
+    Read off :meth:`Session.screen_idle_for`, which answers while the session
+    is busy as well — the state this gate is about, and the one
+    :func:`session_idle_for` cannot see. ``None`` means nothing was measured
+    (no sample yet, a parked grid, or a session object that does not expose
+    the API), and no suppression is inferred from it.
+    """
+    reader = getattr(session, "screen_idle_for", None)
+    if not callable(reader):
+        return None
+    try:
+        value = reader()
+    except Exception:  # noqa: BLE001 - idle time is decoration only
+        return None
+    return None if value is None else float(value)
+
+
+def stalled_for_reminder(session, hold: float) -> Optional[float]:
+    """The still seconds that hold this session's reminder, or ``None``.
+
+    Returns the measurement only when it clears ``hold`` (``hold <= 0``
+    disables the gate), so a caller can decide and log the number without
+    reading the clock twice.
+    """
+    if hold <= 0:
+        return None
+    idle = session_screen_idle_for(session)
+    if idle is None or idle < hold:
+        return None
+    return idle
 
 
 def answered_only_the_reminder(
