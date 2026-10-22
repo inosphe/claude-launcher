@@ -96,6 +96,10 @@ states: ended=53, live=781, orphan=23, unreadable=49
 1. **repair 49개** — `chmod -R u+rwX`로 탐색 비트를 되살린다. 이 단계 없이는
    어떤 도구도 그 디렉터리를 지우지 못한다(`rmdir`도 `Directory not empty`로
    실패한다). 되살린 뒤 그 49개를 지운다.
+   repair는 **삭제 후보만** 받는다: 상태를 읽기 여부보다 먼저 보므로 `live`와
+   `ambiguous`는 0200이어도 여기 들어오지 않는다. 순서를 뒤집으면 가드가 한
+   줄 뒤에서 무너진다(0200인 live 트리가 "chmod 후 삭제" 목록에 실린다 —
+   리뷰에서 잡혔다).
 2. **orphan 23개** — 주인이 없으므로 기다릴 이유가 없다.
 3. **stale 5개** — 종료된 s201의 것이고 하루가 넘었다. reaper가 집었어야 할
    몫이다.
@@ -137,6 +141,7 @@ uv run --no-sync python tools/test_debris_index.py --worktrees [--repo <저장�
 | 판정 | 조건 |
 | --- | --- |
 | 보호 | 그 경로의 세션이 live(held 포함) |
+| 보호 | 그 세션을 어떤 레지스트리에서도 찾을 수 없다(`unknown`) — basetemp의 orphan과 달리 워크트리는 exit 훅이 다시 보지 않으므로 "주인 없음"은 "종료됨"과 같은 증거가 아니다 |
 | 보호 | 커밋을 가리키는 ref가 하나도 없다 — 지우면 그 커밋은 복구되지 않는다 |
 | 보호 | `git status --porcelain`이 비어 있지 않다(미커밋 변경) |
 | 제거 가능 | 종료된 세션 · 깨끗함 · 커밋이 어떤 ref에서든 도달 가능 |

@@ -212,6 +212,37 @@ def test_an_unreadable_tree_goes_to_repair_and_not_to_a_delete_batch(tmp_path):
     os.chmod(locked, 0o755)
 
 
+def test_an_unreadable_live_or_ambiguous_tree_stays_out_of_every_batch(tmp_path):
+    """State is decided before readability (s1450-rev, claunch-zrpa4 review).
+
+    The other order put a mode-0200 live tree into ``repair``, whose first
+    step is "chmod it, then delete it" — the guard undone one line later.
+    """
+    root = tmp_path / "basetemp"
+    root.mkdir()
+    live = _tree(root, "s1c1021200000", mode=0o200)
+    ambiguous = _tree(root, "s29d", mode=0o200)
+    states = {"s1": index.LIVE, "s29": index.LIVE}
+    rows = index.build(root, states, do_measure=False)
+    batches = {b["step"]: b for b in index.plan(rows, stale_days=0.0)}
+    assert {r["state"] for r in rows} == {index.LIVE, index.AMBIGUOUS}
+    for step in ("repair", "orphaned", "stale"):
+        assert batches[step]["count"] == 0, step
+    os.chmod(live, 0o755)
+    os.chmod(ambiguous, 0o755)
+
+
+def test_an_unreadable_orphan_is_repaired_first_then_removed(tmp_path):
+    """Repair is the precondition of removal, not a removal batch of its own."""
+    root = tmp_path / "basetemp"
+    root.mkdir()
+    orphan = _tree(root, "nobody-owns-this", mode=0o200)
+    rows = index.build(root, {}, do_measure=False)
+    batches = {b["step"]: b for b in index.plan(rows, stale_days=0.0)}
+    assert batches["repair"]["paths"] == [orphan.as_posix()]
+    os.chmod(orphan, 0o755)
+
+
 def test_a_stale_ended_tree_is_batched_by_age(tmp_path):
     root = tmp_path / "basetemp"
     root.mkdir()
@@ -301,6 +332,21 @@ def test_uncommitted_changes_keep_a_worktree(repo_with_worktrees):
                                index.reachable_commits(repo))
     assert rows[0]["removable"] is False
     assert rows[0]["why"] == "uncommitted changes"
+
+
+def test_a_session_in_no_registry_keeps_its_worktree(repo_with_worktrees):
+    """``unknown`` is not ``ended``: nothing would ever revisit this tree.
+
+    A basetemp orphan is safe to batch because no exit hook will rewrite it;
+    a worktree is removed by hand, so "no registry names this session" is not
+    the same evidence as "the session ended" (s1450-rev, claunch-zrpa4.1).
+    """
+    repo, home, inside, _ = repo_with_worktrees
+    rows = index.worktree_rows(repo, {}, home, index.reachable_commits(repo))
+    assert rows[0]["session"] == "s9"
+    assert rows[0]["state"] == "unknown"
+    assert rows[0]["removable"] is False
+    assert rows[0]["why"] == "session in no registry"
 
 
 def test_a_commit_no_ref_reaches_keeps_a_worktree(repo_with_worktrees):

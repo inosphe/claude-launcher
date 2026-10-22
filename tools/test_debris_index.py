@@ -172,19 +172,31 @@ def missing_root(root: Path) -> int:
 def plan(rows: List[dict], stale_days: float) -> List[dict]:
     """Removal batches, in the order they have to run.
 
-    1. ``repair`` -- ``chmod -R u+rwX`` each unreadable tree. Nothing else can
-       touch a mode-``0200`` tree, including ``rmdir`` (claunch-zbu54).
+    State is decided before readability, and that order is the point: a
+    ``live`` or ``ambiguous`` tree stays out of *every* batch even when it is
+    unreadable. The other order put a mode-``0200`` live tree into ``repair``,
+    and the plan's own first step is "chmod it, then delete it" -- so the
+    guard this tool exists for was undone one line later (found by
+    s1450-rev, reproduced with a 0200 live tree plus a 0200 ambiguous one:
+    ``repair`` held both).
+
+    1. ``repair`` -- an unreadable tree that is a removal candidate:
+       ``chmod -R u+rwX`` first, because nothing can remove a mode-``0200``
+       tree, ``rmdir`` included (claunch-zbu54). Repair is not a removal
+       batch; what follows from it is.
     2. ``orphaned`` -- no registered session owns the name; no exit will ever
        claim it.
     3. ``stale`` -- owned by an ended session and older than ``stale_days``.
        The exit reaper should already have taken these; when it has not, the
        history says why (``locked``).
-    4. ``held`` -- not in the plan. A held session may still be resumed.
+    4. ``live`` and ``ambiguous`` -- in no batch at all.
     """
     stale_hours = stale_days * 24.0
     batches = {"repair": [], "orphaned": [], "stale": []}
     for row in rows:
         if row["kind"] != "dir":
+            continue
+        if row["state"] in (LIVE, AMBIGUOUS):
             continue
         if not row["readable"]:
             batches["repair"].append(row)
@@ -292,6 +304,13 @@ def worktree_rows(repo: Path, states: Dict[str, str], root: Path,
         }
         if state == LIVE:
             row["why"] = "live session"
+        elif state != ENDED:
+            # A session no registry names is an orphan by the basetemp rule,
+            # but a worktree is removed with `git worktree remove`, not
+            # rewritten by an exit hook -- so nothing would ever revisit it,
+            # and "unclaimed" is not the same evidence as "ended, clean and
+            # still reachable". It stays.
+            row["why"] = "session in no registry"
         elif reachable is not None and item["head"] and item["head"] not in reachable:
             row["why"] = "commit reachable from no ref"
         else:
