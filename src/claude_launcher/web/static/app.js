@@ -4541,6 +4541,10 @@ function setSessionFilter(filter, remember = true) {
       && (s === filter ? !sessionFilter.includes(s) : sessionFilter.includes(s)));
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, JSON.stringify(sessionFilter));
   syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
+  // The rail draws only the rows the filter admits, so a widened filter has
+  // rows to build: from the records in hand now, rather than after the poll
+  // below answers.
+  refreshSessions({ cached: true });
   // Archived records are not part of the recurring rail poll. Selecting a
   // filter is an explicit request for one fresh snapshot of its category.
   refreshSessions({ state: sessionFilterRefreshState() });
@@ -5129,7 +5133,9 @@ async function refreshSessions(options) {
      // The open tab picks which rows are drawn.
      typeof sessionGroupTab === "object" ? sessionGroupTab : null,
      // The mesh header's local/remote pick drops rows from the same cache.
-     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both"],
+     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both",
+     // And so does the state filter: only the rows it admits are drawn.
+     typeof sessionFilter === "undefined" ? null : sessionFilter],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -5306,7 +5312,24 @@ async function refreshSessions(options) {
       box.textContent = String(box._sessionCount);
     }
   };
+  // A row the state filter turns away is not drawn at all (claunch-7hlnj).
+  // It used to be built and hidden with `session-filtered`, so the rail held
+  // a full card for every unarchived record: on a working machine 623 of 771
+  // rows were display:none, 47k of the page's 57k elements, rebuilt, signed
+  // and decorated on every poll. The filter is what keeps the rail short
+  // (claunch-jhvdu), so it has to keep the DOM short too. The tabs still
+  // count from `rows` whole -- their badges apply the filter themselves --
+  // and `session-filtered` stays for what changes between rebuilds: the
+  // search, and a record that left the filter while the rail was held.
+  const drawnByFilter = (row) => {
+    if (row.type === "session") return sessionMatchesFilter(row.session);
+    if (row.type === "shadow" && typeof shadowMatchesFilter === "function") {
+      return shadowMatchesFilter(row.shadow);
+    }
+    return true;
+  };
   for (const row of rows) {
+    if (!drawnByFilter(row)) continue;
     if (row.type === "ungroup") {
       groupBodies.length = 0;
       groupCounts.length = 0;
