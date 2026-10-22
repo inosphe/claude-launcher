@@ -242,9 +242,9 @@ served = { sessions: [
      child budget). */
   check("the meta stays one child of the row",
         row("s84").kids.filter((k) => k.className === "meta").length, 1);
-  check("the row's parts are unchanged (dot, name group, meta, the selected card's role line, the three deliberate lines, the buttons box)",
+  check("the row's parts are unchanged (dot, name group, meta, the three deliberate lines, the buttons box)",
         row("s84").kids.map((k) => k.className),
-        ["dot busy", "rail-head", "meta", "rail-role-line", "rail-cwd", "rail-ctx-line unknown",
+        ["dot busy", "rail-head", "meta", "rail-cwd", "rail-ctx-line unknown",
          "rail-seen", "rail-actions"]);
   check("the spawn + and the ⓘ travel inside the buttons box",
         (row("s84").querySelector(".rail-actions") || { kids: [] }).kids.map((k) => k.className),
