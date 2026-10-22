@@ -2664,6 +2664,8 @@ _LIVE_KEYS = (
     "wsl_hide_reg_exe",
     # read by the auto-archive clock on every tick
     "auto_archive_killed_days", "auto_archive_interval_s", "auto_archive_batch",
+    # read by the basetemp reaper's periodic pass on every pass (claunch-ssroc)
+    "basetemp_sweep_hours", "basetemp_orphan_days",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
     # read by improv-worker-v2 at each delegation (claunch-yl0to)
