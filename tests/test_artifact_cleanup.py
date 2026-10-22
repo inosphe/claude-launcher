@@ -889,3 +889,30 @@ def test_cancelling_the_clock_waits_for_a_running_cleanup(setup, monkeypatch):
         assert finished.is_set() and not held["now"]
 
     asyncio.run(scenario())
+
+
+def test_scratch_candidate_holds_the_name_rule_and_the_artifact_probe(setup, tmp_path):
+    """The rule lives here once (claunch-bgs76.1).
+
+    ``Cleanup._candidates`` and the Artifacts page's listing both ask this
+    function; a caller that restates the names would let the plan and the
+    page disagree about the same directory.
+    """
+    _, _, sessions, _ = setup
+    scratch = sessions / "s1" / "scratch"
+    (scratch / "pytest-of-me").mkdir()
+    (scratch / "browser").mkdir()
+    (scratch / "s1-preview-r2").mkdir()
+    (scratch / "notes").mkdir()
+    # Another session's preview name belongs to that session, not to s1.
+    (scratch / "s10-preview-r2").mkdir()
+    # claunch-30rkn: no name rule matches these, the artifact probe does.
+    (scratch / "bt-preview" / "popen-gw0").mkdir(parents=True)
+    completed(scratch / "runs-1")
+
+    taken = {
+        path.name for path in scratch.iterdir()
+        if ac.scratch_candidate(path, "s1", set())
+    }
+    assert taken == {"pytest-of-me", "browser", "s1-preview-r2", "bt-preview", "runs-1"}
+    assert not ac.scratch_candidate(scratch / "notes", "s1", set())

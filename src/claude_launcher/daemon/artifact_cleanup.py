@@ -246,6 +246,21 @@ def _scratch_artifact(path: Path, registered: set) -> bool:
         return False
 
 
+def scratch_candidate(path: Path, session: str, registered: set) -> bool:
+    """Whether a scratch entry is one cleanup would consider.
+
+    The single copy of the rule: the Artifacts page lists what a plan would
+    take, so it asks this function rather than restating the names
+    (claunch-bgs76.1). Two copies had already been written once, and a rule
+    that only one of them follows makes the page and the plan disagree about
+    the same directory.
+    """
+    if (path.name.startswith("pytest-") or path.name == "browser"
+            or (path.name.startswith(session + "-") and "preview" in path.name)):
+        return True
+    return _scratch_artifact(path, registered)
+
+
 class Cleanup:
     def __init__(self, manager):
         self.manager = manager
@@ -279,9 +294,7 @@ class Cleanup:
                         continue
                     reserved = any(basetemp.matches(path.name, name) for name in foreign)
                 else:
-                    if not (path.name.startswith("pytest-") or path.name == "browser"
-                            or path.name.startswith(session + "-") and "preview" in path.name
-                            or _scratch_artifact(path, registered)):
+                    if not scratch_candidate(path, session, registered):
                         continue
                     reserved = False
                 reason = "other daemon owns matching name" if reserved else ""
