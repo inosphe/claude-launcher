@@ -140,13 +140,14 @@ new Function(
   "exports", "document", "$", "sessionsCache", "CSS",
   "requestAnimationFrame", "setTimeout",
   `const RAIL_ANCESTOR_MAX = ${/const RAIL_ANCESTOR_MAX = (\d+);/.exec(src)[1]};\n`
+  + `const RAIL_ANCESTOR_LINE_PX = ${/const RAIL_ANCESTOR_LINE_PX = (\d+);/.exec(src)[1]};\n`
   + "let railAncestorPin = null;\nlet railAncestorHoldUntil = 0;\n"
   + "let railAncestorWired = false;\n"
   + "const revealCalls = [];\n"
   + "function revealSessionCard(n) { revealCalls.push(n); return true; }\n"
   + [slice("railAncestorChain"), slice("railTopVisibleRow"), slice("railRowOnScreen"),
      slice("renderRailAncestors"), slice("fitRailAncestors"),
-     slice("setRailAncestorsHeight"), slice("wireRailAncestors"),
+     slice("setRailAncestorsHeight"), slice("fitRailLead"), slice("wireRailAncestors"),
      slice("pinRailAncestors"), slice("clearRailAncestorPin")].join("\n")
   + `
 Object.assign(exports, {
@@ -284,6 +285,22 @@ check("an overflowing zero-height band reserves what its lines take",
 band.scrollHeight = 0;
 list.clientWidth = 260;
 
+/* At scrollTop 0 nothing above the first row scrolls away, so the band its
+   ancestors draw would cover it: the list's top padding holds that band's
+   height. It follows the first drawn row, not the row at the top edge. */
+rows = [row("d", 22), row("e", 158)];
+ctx.renderRailAncestors();
+check("the first row's band is reserved above it (three lines and a border)",
+      list.style.props["--rail-lead-h"] === "61px", list.style.props);
+rows = [row("a", -386), row("b", -250), row("c", -114), row("d", 22)];
+ctx.renderRailAncestors();
+check("the reserve follows the first drawn row, not the scroll",
+      list.style.props["--rail-lead-h"] === "0px", list.style.props);
+rows = [row("e", -386, 0), row("b", 22)];
+ctx.renderRailAncestors();
+check("a filtered first row (no height) is skipped for the reserve",
+      list.style.props["--rail-lead-h"] === "21px", list.style.props);
+
 /* ---- the grid view has no rows to anchor the band ---- */
 list.classList.add("hidden");
 ctx.renderRailAncestors();
@@ -355,6 +372,11 @@ check("the folded count line has a style",
       /#rail-ancestors \.rail-ancestor-more\s*\{/.test(css));
 check("the scroller reserves the sticky heading's height for rows brought into view",
       /#session-list\s*\{[^}]*scroll-padding-top:\s*calc\(30px \+ var\(--rail-ancestors-h/.test(css));
+check("the list's top padding is the first row's band",
+      /#session-list\s*\{[^}]*padding-top:\s*var\(--rail-lead-h/.test(css));
+check("the reserve's line height matches a band line (3px + 14px + 3px)",
+      /\.rail-ancestor\s*\{[^}]*padding:\s*3px 10px;[^}]*line-height:\s*14px/.test(css)
+      && /const RAIL_ANCESTOR_LINE_PX = 20;/.test(src));
 
 if (failures) {
   console.log(`${failures} failure(s)`);

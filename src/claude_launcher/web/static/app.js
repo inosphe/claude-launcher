@@ -3034,6 +3034,9 @@ let gotoFlashName = null;
    reason as the mark above — syncSessionView runs during load and paints the
    band for the view it picks. */
 const RAIL_ANCESTOR_MAX = 3;
+// One band line's drawn height: `.rail-ancestor`'s 3px + 14px line + 3px
+// (style.css). fitRailLead reserves this per line above the list's first row.
+const RAIL_ANCESTOR_LINE_PX = 20;
 let railAncestorPin = null;
 // While this is in the future the pin wins even with its row off screen: a
 // reveal holds the band on the landed session for the length of the mark, so
@@ -23094,6 +23097,7 @@ function renderRailAncestors() {
   // changing (a poll adds enough rows to need a scrollbar), so it is checked
   // on every pass; it is written only when it moved.
   fitRailAncestors(band, list);
+  fitRailLead(list, hiddenView);
   // Most scroll frames land on the same chain: the band is rebuilt only when
   // what it would draw changed, so a drag down the rail is a few DOM writes
   // and not one per frame.
@@ -23152,6 +23156,28 @@ function fitRailAncestors(band, list) {
   const value = `${w}px`;
   if (band.style.getPropertyValue("--rail-scrollbar-w") === value) return;
   band.style.setProperty("--rail-scrollbar-w", value);
+}
+
+/* --rail-lead-h on the list: its top padding, the room the band takes over
+   the first drawn row when the list is scrolled to the top. The band floats,
+   so without it a first row whose parent is not drawn (a filter hides it) sits
+   under its own band at scrollTop 0 with nothing above to scroll away. It
+   depends on which row is drawn first, not on the scroll position, so
+   scrolling never changes it; a poll that puts a different row first can. */
+function fitRailLead(list, hiddenView) {
+  if (!list.style || !list.style.setProperty) return;
+  let lines = 0;
+  if (!hiddenView) {
+    for (const li of list.querySelectorAll("li[data-name]") || []) {
+      if (li.getBoundingClientRect().height <= 0) continue;
+      lines = Math.min(railAncestorChain(li.dataset.name).length, RAIL_ANCESTOR_MAX);
+      break;
+    }
+  }
+  // The band's 1px bottom border is under its last line.
+  const value = `${lines ? lines * RAIL_ANCESTOR_LINE_PX + 1 : 0}px`;
+  if (list.style.getPropertyValue("--rail-lead-h") === value) return;
+  list.style.setProperty("--rail-lead-h", value);
 }
 
 /* --rail-ancestors-h on the list: what its scroll-padding-top adds for the

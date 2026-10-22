@@ -512,7 +512,10 @@ html[data-theme="light"] #term-tps-overlay {
      ancestor band floats over that heading. Reserve both so the row lands
      under them rather than behind them; renderRailAncestors keeps
      --rail-ancestors-h at the band's drawn height (0 while hidden). */
-  scroll-padding-top: calc(30px + var(--rail-ancestors-h, 0px)); }
+  scroll-padding-top: calc(30px + var(--rail-ancestors-h, 0px));
+  /* Room for the band the first drawn row shows at scrollTop 0, so the band
+     never covers that row (fitRailLead keeps --rail-lead-h). */
+  padding-top: var(--rail-lead-h, 0px); }
 /* The ancestor band (renderRailAncestors, app.js): one line per direct
    ancestor of the session at the top of the list, root first. It floats over
    the top of the scroller rather than standing above it in the column, so

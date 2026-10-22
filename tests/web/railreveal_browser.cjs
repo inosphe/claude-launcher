@@ -240,6 +240,49 @@ const landing = (page, name) => page.evaluate((name) => {
       `without the laid-out rail the same scroll is off by more than a rail: ${estimated.error}px`
       + ` (rail ${estimated.railHeight}px, height estimated ${estimated.before}`
       + ` against ${estimated.truth})`);
+
+    // The band floats, so at the very top it would sit on the first row
+    // whenever that row's parent is not drawn (the state filter hides an
+    // archived one) -- nothing above it scrolls away. The list keeps that
+    // band's height as its top padding (fitRailLead), on the desktop rail and
+    // on the phone layout where the page scrolls.
+    sessions.push({ name: "gone", status: "exited", archived: true, cwd: "/repo",
+                    harness: "claude", model: "opus" });
+    sessions[0].parent = "gone";
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      const top = await browser.newPage({ viewport });
+      await top.addInitScript(() => {
+        localStorage.setItem("claunch_token:/", "fixture-token");
+        window.setInterval = () => 0;
+      });
+      await top.goto(`http://127.0.0.1:${server.address().port}`);
+      await top.locator('#session-list li.sess-card[data-name="attached"]').waitFor();
+      const lead = await top.evaluate(async () => {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // The phone page scrolls the sidebar, which the band's listener does
+        // not watch; paint it the way the next poll would.
+        renderRailAncestors();
+        const b = document.querySelector("#rail-ancestors");
+        const first = [...document.querySelectorAll("#session-list li[data-name]")]
+          .find((li) => li.getBoundingClientRect().height > 0);
+        const lines = [...b.querySelectorAll("li")];
+        return {
+          hidden: b.classList.contains("hidden"),
+          names: [...b.querySelectorAll(".rail-ancestor")].map((el) => el.dataset.name),
+          first: first.dataset.name,
+          firstTop: first.getBoundingClientRect().top,
+          bandBottom: Math.max(...lines.map((li) => li.getBoundingClientRect().bottom)),
+        };
+      });
+      await top.close();
+      const where = `${viewport.width}px`;
+      assert.equal(lead.first, "attached", `${where}: the first drawn row is the fixture's`);
+      assert.equal(lead.hidden, false, `${where}: its undrawn parent shows the band at the top`);
+      assert.deepEqual(lead.names, ["gone"], `${where}: the band names that parent`);
+      assert.ok(lead.firstTop >= lead.bandBottom - 0.5,
+        `${where}: the band does not cover the first row at the top`
+        + ` (band ends ${lead.bandBottom}, row starts ${lead.firstTop})`);
+    }
   } finally {
     await browser.close();
     server.close();
