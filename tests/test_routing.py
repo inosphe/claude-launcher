@@ -382,6 +382,22 @@ def test_shim_forwards_the_session_as_affinity_when_enabled(upstream, shims):
 
 
 @pytest.mark.slow_shim
+def test_shim_reads_the_session_off_the_url_path_for_affinity(upstream, shims):
+    _write_fw_provider(affinity=True)
+    base = routing.session_url(routing.ensure_shim(upstream.url, {}, provider="fw"), "s1221")
+    _post_with_headers(base + "v1/chat/completions", {"model": "m"}, {})
+    seen = upstream.requests[-1]
+    assert seen["path"] == "/api/v1/chat/completions"
+    assert _header(seen["headers"], "x-session-affinity") == "s1221"
+    # the path names the session even when a stale header says otherwise
+    _post_with_headers(base + "v1/chat/completions", {"model": "m"},
+                       {"X-Claunch-Session": "s1388"})
+    seen = upstream.requests[-1]
+    assert _header(seen["headers"], "x-claunch-session") is None
+    assert _header(seen["headers"], "x-session-affinity") == "s1221"
+
+
+@pytest.mark.slow_shim
 def test_shim_without_affinity_adds_no_header(upstream, shims):
     _write_fw_provider()
     base = routing.ensure_shim(upstream.url, {}, provider="fw")
@@ -595,6 +611,9 @@ def test_stop_takes_the_shim_down_and_forgets_it(upstream, shims):
 @pytest.mark.slow_shim
 def test_child_env_points_claude_at_the_shim(home, upstream, shims, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    # A run outside a managed session: no session name in the base URL. The
+    # suite itself often runs inside one.
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
 
     def _mutate(doc: dict) -> None:
         doc["providers"] = {
@@ -665,6 +684,22 @@ def test_shim_sends_the_session_under_the_required_header(upstream, shims):
                         "X-Opencode-Session": "caller-own"})
     assert _header(upstream.requests[-1]["headers"], "x-opencode-session") == \
         "caller-own"
+
+
+@pytest.mark.slow_shim
+def test_shim_sends_the_url_path_session_under_the_required_header(upstream, shims):
+    store.update(lambda doc: doc.__setitem__("providers", {"ocgo": {
+        "env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"},
+        "session_header": "x-opencode-session",
+        "anthropic_auth_header": "x-api-key"}}))
+    base = routing.session_url(routing.ensure_shim(upstream.url, {}, provider="ocgo"), "s1404")
+    _post_with_headers(base + "v1/messages", {"model": "m"},
+                       {"Authorization": "Bearer sk-test"})
+    seen = upstream.requests[-1]
+    assert seen["path"] == "/api/v1/messages"
+    assert _header(seen["headers"], "x-opencode-session") == "s1404"
+    # the Messages-only auth move still sees a Messages path under the prefix
+    assert _header(seen["headers"], "x-api-key") == "sk-test"
 
 
 @pytest.mark.slow_shim

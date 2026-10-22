@@ -49,7 +49,8 @@ ENV_TOOLS = "CLAUNCH_PI_TOOLS"
 #: Pi ask for ``stream_options.include_usage`` so the shim sees token counts.
 ENV_STREAM_USAGE = "CLAUNCH_PI_STREAM_USAGE"
 #: JSON object of extra request headers the extension registers with the
-#: provider; the daemon puts ``X-Claunch-Session`` here (see ``metering``).
+#: provider. The session's name is not one of them: it rides in the base URL
+#: (``routing.SESSION_PATH_PREFIX``).
 ENV_HEADERS = "CLAUNCH_PI_HEADERS"
 PROJECTION_ENV = frozenset(
     {
@@ -356,25 +357,6 @@ def fronted_base_url(base_url: str, provider_name: str,
     """
     fronted = routing.front(base_url, provider_name, profile=profile)
     return fronted.rstrip("/") if fronted != base_url else base_url
-
-
-def apply_session_header(env: dict, session: str) -> None:
-    """Name ``session`` in every request Pi sends through the shim.
-
-    Same purpose as ``metering.apply_session_header`` for Claude Code: the
-    shim is shared by every session on the same upstream, and the header is
-    the only way a record gets the session's name. The extension registers
-    the headers with the provider; the shim strips them before forwarding.
-    """
-    try:
-        headers = json.loads(env.get(ENV_HEADERS) or "{}")
-    except ValueError:
-        headers = {}
-    if not isinstance(headers, dict):
-        headers = {}
-    headers = {k: v for k, v in headers.items() if k.lower() != "x-claunch-session"}
-    headers["X-Claunch-Session"] = session
-    env[ENV_HEADERS] = json.dumps(headers, separators=(",", ":"))
 
 
 def apply_tools_env(

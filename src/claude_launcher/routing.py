@@ -64,6 +64,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -81,8 +82,8 @@ SPEC_KEY = "routing"
 AFFINITY_KEY = "session_affinity"
 
 #: Header the shim adds when affinity is enabled. The session name rides in on
-#: the private ``X-Claunch-Session`` header (see :mod:`metering`); the shim
-#: forwards it under this name so the upstream can route stickily.
+#: the base URL's ``/s/<session>`` prefix (:data:`SESSION_PATH_PREFIX`); the
+#: shim forwards it under this name so the upstream can route stickily.
 AFFINITY_HEADER = "x-session-affinity"
 
 #: Per-provider config key naming a header the upstream *requires* to carry a
@@ -614,7 +615,7 @@ def is_shim_url(url: Optional[str]) -> bool:
     """Whether ``url`` is one :func:`local_url` could have produced.
 
     A loopback URL on a port inside the shim window. Only the daemon uses it,
-    to decide whether the session header (see :mod:`metering`) has a shim to
+    to decide whether a session's ``/s/<session>`` prefix has a shim to
     read it — a user's own loopback upstream on another port is left alone.
     """
     if not url or not url.startswith("http://127.0.0.1:"):
@@ -625,6 +626,64 @@ def is_shim_url(url: Optional[str]) -> bool:
         return False
     port = int(port_text)
     return _PORT_BASE <= port < _PORT_BASE + _PORT_SPAN + _PORT_TRIES
+
+
+#: Path prefix that names the calling session to a shim: a session's base URL
+#: is ``http://127.0.0.1:<port>/s/<session>`` and the harness appends its own
+#: path (``/v1/messages`` for Claude Code, ``/chat/completions`` for Pi). The
+#: shim takes the name off and forwards the rest. It replaces the
+#: ``X-Claunch-Session`` header the daemon used to put into
+#: ``ANTHROPIC_CUSTOM_HEADERS``/``CLAUNCH_PI_HEADERS``: a header variable is
+#: inherited by every process the session starts, including a daemon, and
+#: from there by unrelated sessions (claunch-19liw.1). A base URL is a backend
+#: key (:data:`runner.BACKEND_ENV_KEYS`), dropped from the inherited env and
+#: recomputed on every launch (claunch-19liw.2.4).
+SESSION_PATH_PREFIX = "/s/"
+
+#: The env keys a harness reads its base URL from: Claude Code's, and Pi's
+#: (``pi_provider.ENV_BASE_URL``, spelled out here because ``pi_provider``
+#: imports this module).
+BASE_URL_ENV_KEYS = ("ANTHROPIC_BASE_URL", "CLAUNCH_PI_BASE_URL")
+
+
+def split_session_path(raw_path: str):
+    """``(session, rest)`` of a request path that arrived at a shim.
+
+    ``/s/s1/v1/messages`` is ``("s1", "/v1/messages")``. A path without the
+    prefix (an older session still sending the header) comes back as
+    ``(None, raw_path)``.
+    """
+    if not raw_path.startswith(SESSION_PATH_PREFIX):
+        return None, raw_path
+    name, _, tail = raw_path[len(SESSION_PATH_PREFIX):].partition("/")
+    if not name:
+        return None, raw_path
+    return urllib.parse.unquote(name), "/" + tail
+
+
+def session_url(url: str, session: str) -> str:
+    """Shim base URL ``url`` with ``session``'s path prefix.
+
+    A prefix already there is replaced, so applying it twice (or for a
+    restored session under a new name) leaves one. A trailing slash on
+    ``url`` is kept: Claude's base URL has one, Pi's does not.
+    """
+    parts = urllib.parse.urlsplit(url)
+    _, rest = split_session_path(parts.path or "/")
+    prefix = SESSION_PATH_PREFIX + urllib.parse.quote(session, safe="")
+    path = prefix + (rest if rest != "/" else ("/" if url.endswith("/") else ""))
+    return urllib.parse.urlunsplit(parts._replace(path=path))
+
+
+def apply_session(env: dict, session: Optional[str]) -> None:
+    """Name ``session`` in the base URL of every harness in ``env`` that talks
+    to a shim. A base URL that is not a shim is left alone; so is everything
+    when there is no session."""
+    if not session:
+        return
+    for key in BASE_URL_ENV_KEYS:
+        if is_shim_url(env.get(key)):
+            env[key] = session_url(env[key], session)
 
 
 def health(port: int, timeout: float = 0.6) -> Optional[dict]:

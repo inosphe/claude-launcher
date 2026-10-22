@@ -98,6 +98,8 @@ SESSION_ENV = CLAUNCH_SESSION_ENV + HARNESS_SESSION_ENV + HERDR_PANE_ENV
 #: ``X-Claunch-Session: s1388`` through every successor and handed it to each
 #: session not on the shim, whose ``claunch run`` then metered as s1388
 #: (claunch-19liw.1). Only that line or key goes; the rest are the user's.
+#: The daemon no longer sets it (the session's name is in its base URL now,
+#: claunch-19liw.2.4); the scrub stays for env inherited from older shells.
 CLAUDE_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 PI_HEADERS_ENV = "CLAUNCH_PI_HEADERS"
 SESSION_HEADER = "x-claunch-session"  # metering.SESSION_HEADER
