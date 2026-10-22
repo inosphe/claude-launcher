@@ -162,6 +162,34 @@ def test_two_sessions_share_the_socket_without_sharing_frames(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_terminal_ping_on_a_channel_is_answered_on_that_channel(home, tmp_path):
+    """The page's link watchdog (claunch-xbdy7) pings the terminal itself,
+    not the control socket: a channel the daemon has let go answers nothing
+    while the socket under it still pongs. So the terminal's own ``pong``
+    has to come back tagged with the channel that asked."""
+    _harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            await _live(mgr, "s1", tmp_path)
+            async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                await _until(ws, "init")
+                await ws.send_json({"type": "attach", "ch": 4, "session": "s1"})
+                await _until(ws, "attached", ch=4)
+                await _until(ws, "init", ch=4)
+                await ws.send_json({"type": "ping", "ch": 4})
+                pong = await _until(ws, "pong", ch=4)
+                assert pong["ch"] == 4
+                assert "t" not in pong, "the terminal's pong, not the control socket's"
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_channel_ends_without_ending_the_socket(home, tmp_path):
     """A person leaving a session must not cost the page its reads: the
     whole arrangement is that the socket outlives every channel on it."""

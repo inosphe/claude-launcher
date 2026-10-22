@@ -479,6 +479,7 @@ CHECKS = [
         "zoom_check.js",
         "sizeowner_check.js",
         "reconnect_check.js",
+        "linkwatch_check.js",
         "snapshot_check.js",
         "notice_check.js",
         "restartgate_check.js",
