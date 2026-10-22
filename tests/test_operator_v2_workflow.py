@@ -102,6 +102,23 @@ def test_work_goes_to_the_session_already_doing_it(tmp_path):
     assert {"opv2_spawn", "opv2_resume"} <= tools
 
 
+def test_heavy_work_is_delegated_to_a_spawned_child(tmp_path):
+    """claunch-h9l3d: heavy work is not carried inline -- it is delegated to
+    a spawned child whose workflow the delegator picks freely. The rule
+    rides every task and the role pack tells the operator the same."""
+    from claude_launcher import prompt_packs
+
+    run = Run(tmp_path)
+    task = run.st["tasks"][0]
+    rules = {r["id"] for r in task["rules"]}
+    assert "heavy-work-delegate" in rules
+    rule = next(r for r in task["rules"] if r["id"] == "heavy-work-delegate")
+    for phrase in ("spawn", "on_behalf_of", "workflow"):
+        assert phrase in rule["text"]
+    pack = prompt_packs.shipped("role-operator").body
+    assert "heavy" in pack and "spawn a child session" in pack
+
+
 def test_landing_questions_go_to_opv2_landing(tmp_path):
     """claunch-iw5i8.10: the task and the role pack send a landing question
     to opv2_landing and its `landed`, since ancestry misreads a squash merge;
