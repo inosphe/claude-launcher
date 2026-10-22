@@ -230,15 +230,15 @@ ctx.setMeshes([
      rooms must not be three of them — and neither must the action buttons,
      which travel in the full-width .rail-actions box one line below the
      name line (claunch-ku033). */
-  // rail-role-line: the role again, drawn only on the selected card
-  // (claunch-g4owg.1; railroleline_browser.cjs measures it)
-  check("the row's parts are the dot, the name group, the profile, the selected card's role line, the directory line, the context line, the attention line and the buttons box",
+  // The role is drawn once, on the name line, on every card (claunch-hknpm
+  // removed the selected card's extra role line).
+  check("the row's parts are the dot, the name group, the profile, the directory line, the context line, the attention line and the buttons box",
         kidClasses(row("s21")),
-        ["dot busy", "rail-head", "meta", "rail-role-line", "rail-cwd", "rail-ctx-line unknown",
+        ["dot busy", "rail-head", "meta", "rail-cwd", "rail-ctx-line unknown",
          "rail-seen", "rail-actions"]);
-  check("a session with no role and one room keeps the same eight parts",
+  check("a session with no role and one room keeps the same seven parts",
         kidClasses(row("loner")),
-        ["dot idle", "rail-head", "meta", "rail-role-line", "rail-cwd", "rail-ctx-line unknown",
+        ["dot idle", "rail-head", "meta", "rail-cwd", "rail-ctx-line unknown",
          "rail-seen", "rail-actions"]);
   check("the spawn + and the ⓘ travel inside the buttons box, not loose on the row",
         (row("s21").querySelector(".rail-actions") || node("span")).kids.map((k) => k.className),
@@ -249,9 +249,6 @@ ctx.setMeshes([
      duplicated role field. */
   check("the rail reads a new session's role from mesh membership",
         (row("mesh-reviewer").querySelector(".rail-head") || node("span")).querySelectorAll(".mesh-role").map((t) => t.text),
-        ["reviewer"]);
-  check("the selected card's role line carries the same role",
-        (row("mesh-reviewer").querySelector(".rail-role-line") || node("span")).querySelectorAll(".mesh-role").map((t) => t.text),
         ["reviewer"]);
 
   /* The point of the change: role and rooms are siblings inside one box, not
@@ -386,14 +383,12 @@ ctx.setMeshes([
     "#session-list .rail-commits",
     "#session-list .rail-progress",
     "#session-list .sess-cflow", "#session-list .sess-cflow2", "#session-list .sess-sims", "#session-list .sess-brief",
-    // the selected card's role, whole on a line of its own (claunch-g4owg.1)
-    "#session-list li.active > .rail-role-line",
   ];
   const fullWidth = [...rules].filter(([sel, d]) =>
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the buttons line, the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the age line, the quiet line, the note line (or its editor), the progress line, the process line, the commit line, the status-check line, the cflow line, the cflow v2 line, the simulation line, the briefing card, the talk line and the selected card's role line break the row",
+  check("only the buttons line, the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the age line, the quiet line, the note line (or its editor), the progress line, the process line, the commit line, the status-check line, the cflow line, the cflow v2 line, the simulation line, the briefing card and the talk line break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
