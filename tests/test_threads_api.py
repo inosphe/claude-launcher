@@ -530,6 +530,36 @@ def test_mentions_route_a_message_to_the_sessions_it_names(tmp_path):
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
 
 
+def test_a_named_guest_that_cannot_take_it_now_says_why(home, tmp_path):
+    """claunch-p9wes.1.1: a mention types the message into the guest, and the
+    response carries the guest's ``hold`` the way the owner's ``hold`` is
+    carried -- a caller that reads "delivered" as "typed into a terminal"
+    (mega threads' ledger) has to tell a queued guest from a typed one."""
+    from claude_launcher.daemon import thread_notices
+
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "t"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s2"})
+        typed_before = list(mgr.sessions["s2"].delivered)      # the invite block
+        mgr.sessions["s2"].exited = True
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 이어서 봐 주세요"})
+        assert res["mentions"] == {"all": False, "targets": ["s2"]}
+        assert res["guests_delivered"] == {"s2": True} and res["guests_hold"] == {"s2": "exited"}
+        assert "delivered" not in res and mgr.sessions["s2"].delivered == typed_before
+        queued = thread_notices.pending("s2")
+        assert len(queued) == 1 and "이어서 봐 주세요" in queued[0]["text"]
+        assert queued[0]["thread"] == tid
+
+        # a live guest has nothing in the way, so no hold is reported
+        mgr.sessions["s2"].exited = False
+        before = len(mgr.sessions["s2"].delivered)
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 확인 부탁"})
+        assert res["guests_delivered"] == {"s2": True} and "guests_hold" not in res
+        assert len(mgr.sessions["s2"].delivered) == before + 1
+        assert "@s2 확인 부탁" in mgr.sessions["s2"].delivered[-1]
+    run(tmp_path, scenario)
+
+
 def test_a_guest_is_removed_or_leaves(tmp_path):
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"to": "s1", "title": "Plan"}))["thread"]["id"]

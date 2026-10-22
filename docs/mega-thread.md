@@ -39,7 +39,9 @@ routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
 - `delivered`는 그 라우팅의 메시지가 **적어도 한 곳에 실제로 타이핑됐다**는 뜻이다. 쓰레드 행은
   종료된 세션에도 남으므로, 행이 생겼다는 것과 전달됐다는 것은 다르다. 종료된 세션에는 타이핑 대신
   쓰레드 알림 큐에 들어가므로(아래 「전달」) 그 응답 행은 `queued: true`, `hold: "exited"`이고
-  원장의 `delivered`는 `false`다.
+  원장의 `delivered`는 `false`다. 멘션이 소유 세션이 아닌 게스트만 지목한 메시지는 그 게스트가 받은 것으로
+  센다 — 응답 행의 `guests`가 타자된 게스트 이름이고, 게스트가 아직 받을 수 없으면 `guests_hold`에 이유가
+  실린다(claunch-p9wes.1.1).
 - `verdict`: `auto`(한 멤버가 임계값 통과) / `choose`(둘 이상, 사용자 선택 대기) / `manual`(사용자가
   직접 고름) / `none`(아무도 통과 못 함) / `error`(모든 호출 실패).
 

@@ -534,11 +534,23 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                                    notice=notice, thread=thread)
         res["hold"] = hold_of(name) if res["delivered"] else None
 
+    def guest_holds(res: dict, delivered: dict) -> None:
+        """``guests_hold``: why a guest that accepted the message is not typed
+        into yet, read the same way as the owner's ``hold``. A caller that
+        reports "delivered" as "typed into a terminal" (mega threads'
+        ledger) needs it to tell a queued guest from a typed one
+        (claunch-p9wes.1.1)."""
+        holds = {name: hold_of(name) for name, ok in delivered.items() if ok}
+        holds = {name: why for name, why in holds.items() if why}
+        if holds:
+            res["guests_hold"] = holds
+
     def tell_user_message(res: dict, thread: dict, *, ask_qa: bool = False) -> None:
         """Type a user message into the sessions it is meant for: the owner
         when the body names nobody, otherwise only the sessions it names
         (claunch-p9wes.1.1). ``guests_delivered`` says per named guest whether
-        the message was accepted."""
+        the message was accepted, and ``guests_hold`` why one that was
+        accepted is not typed in yet -- the owner's ``hold`` for a guest."""
         route = session_mentions(thread, res.get("message"), None)
         mention_fields(res, route)
         targets = set(route["targets"])
@@ -556,6 +568,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                      for g in thread.get("guests") or [] if g["session"] in targets}
         if delivered:
             res["guests_delivered"] = delivered
+            guest_holds(res, delivered)
 
     def mention_delivery(res: dict, thread: dict, actor: str, *, guest: bool,
                          route: Optional[dict] = None) -> None:
@@ -575,6 +588,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             out[g["session"]] = deliver(g["session"], text, images)
         if out:
             res["guests_delivered"] = out
+            guest_holds(res, out)
 
     def owner_message(tid: str, text: str) -> dict:
         """Post a user message into one thread and type it into the sessions

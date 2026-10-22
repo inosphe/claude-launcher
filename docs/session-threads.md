@@ -128,8 +128,9 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
   (`@s1109.`는 `s1109`).
 - `thread_reply` 응답은 멘션이 있을 때만 `mentions`(`all`, `targets` — 실제로 타자한 세션)를, 참여자가 아닌 이름이
   있을 때만 `unknown_mentions`를 싣는다. 멘션이 없는 응답은 이전과 같은 모양이다. 전달 결과는 소유 세션이면
-  `delivered`·`hold`, 게스트면 `guests_delivered`(게스트별 수락 여부)다. 참여자가 아닌 이름만 적은 본문은
-  아무에게도 전달되지 않는다(`targets`가 빈 목록).
+  `delivered`·`hold`, 게스트면 `guests_delivered`(게스트별 수락 여부)와 `guests_hold`(게스트가 받았지만 아직
+  타자되지 않은 이유 — 소유 세션의 `hold`와 같은 값)다. 참여자가 아닌 이름만 적은 본문은 아무에게도 전달되지
+  않는다(`targets`가 빈 목록).
 - 쓰레드를 여는 첫 메시지(`POST /api/threads`)는 멘션을 보지 않고 소유 세션에 전달한다. 새 쓰레드에는 게스트가
   없어서 라우팅할 대상이 소유 세션뿐이다.
 - 메가 쓰레드(`daemon/megathread_api.py`)가 부르는 `app["threads_post_user"]`도 같은 라우팅을 쓴다.
