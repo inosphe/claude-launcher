@@ -62,6 +62,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -787,10 +788,13 @@ def _record(fp: str, port: int, upstream: str, block: Dict, pid,
             route: Optional[str] = None) -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
     path = _record_file(fp, port)
-    try:
-        previous = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        previous = {}
+    with _LOCK:
+        _write_record(path, fp, port, upstream, block, pid, route)
+
+
+def _write_record(path: Path, fp: str, port: int, upstream: str, block: Dict,
+                  pid, route: Optional[str]) -> None:
+    previous = _read_json(path)
     _write_atomic(
         path,
         json.dumps(
@@ -802,16 +806,25 @@ def _record(fp: str, port: int, upstream: str, block: Dict, pid,
                 "pid": pid if pid is not None else previous.get("pid"),
                 "url": local_url(port),
                 "route": route,
-                # When this daemon first saw the shim: :func:`reconcile` gives
-                # a new shim a grace before it may retire it, so a launch
-                # between ensuring the shim and registering its session is
-                # not raced.
-                "since": previous.get("since") or time.time(),
+                # When this process last handed the shim out (every
+                # ensure_shim rewrites the record): :func:`reconcile` keeps a
+                # shim for :data:`GRACE_S` after that, so a launch between
+                # ensuring the shim and registering its session
+                # (:func:`add_user`) is not raced.
+                "ensured": time.time(),
             },
             indent=2,
             sort_keys=True,
         ),
     )
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -1146,9 +1159,16 @@ def stop(fingerprints: Optional[List[str]] = None) -> List[str]:
 
 _OWNER = False
 
-#: How long a shim is kept after this daemon first saw it, whatever else
-#: :func:`reconcile` finds: covers a launch between ensuring the shim and
-#: registering its session.
+#: Serialises every write of the users file and the shim records, and
+#: :func:`reconcile`'s last look before it retires a shim: a session added on
+#: the launch path (``harness.build_command`` → :func:`apply_session`, or the
+#: ensure API) while a pass is running is never lost or retired under it.
+#: Reentrant: ``reconcile`` holds it across ``_record``-writing calls.
+_LOCK = threading.RLock()
+
+#: How long a shim is kept after this daemon last handed it out
+#: (``ensured`` in its record), whatever else :func:`reconcile` finds: covers
+#: a launch between ensuring the shim and registering its session.
 GRACE_S = 60.0
 
 #: How often the daemon reconciles (``daemon/shims.py``).
@@ -1212,11 +1232,7 @@ def _users_file() -> Path:
 
 
 def _load_users() -> Dict[str, dict]:
-    try:
-        data = json.loads(_users_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return _read_json(_users_file())
 
 
 def add_user(port: Optional[int], *, session: Optional[str] = None,
@@ -1227,14 +1243,15 @@ def add_user(port: Optional[int], *, session: Optional[str] = None,
     them."""
     if port is None or not (session or pid):
         return
-    users = _load_users()
-    entry = users.setdefault(str(port), {})
-    if session:
-        entry["sessions"] = sorted(set(entry.get("sessions") or []) | {session})
-    if pid:
-        entry["pids"] = sorted(set(entry.get("pids") or []) | {int(pid)})
-    state_dir().mkdir(parents=True, exist_ok=True)
-    _write_atomic(_users_file(), json.dumps(users, indent=2, sort_keys=True))
+    with _LOCK:
+        users = _load_users()
+        entry = users.setdefault(str(port), {})
+        if session:
+            entry["sessions"] = sorted(set(entry.get("sessions") or []) | {session})
+        if pid:
+            entry["pids"] = sorted(set(entry.get("pids") or []) | {int(pid)})
+        state_dir().mkdir(parents=True, exist_ok=True)
+        _write_atomic(_users_file(), json.dumps(users, indent=2, sort_keys=True))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1283,7 +1300,10 @@ def retire(info: dict) -> bool:
     """Ask the shim in ``info`` (an :func:`instances` row) to stop once its
     in-flight requests are done. A shim from a build without that request
     (no ``inflight`` in its health answer) is left running: it cannot say
-    whether it is mid-stream. True when the request was sent."""
+    whether it is mid-stream. That is also what keeps the sessions that were
+    already running when the daemon was upgraded safe: their shims come from
+    the older build and they have no :func:`add_user` entry. True when the
+    request was sent."""
     if "inflight" not in info:
         return False
     req = urllib.request.Request(
@@ -1304,10 +1324,17 @@ def reconcile(live_sessions, doc: Optional[dict] = None,
     A shim is kept while the config wants its fingerprint (:func:`desired`),
     a user registered with :func:`add_user` is alive (a session in
     ``live_sessions``, a pid still running), it has requests in flight, or it
-    is within :data:`GRACE_S` of being first seen. Anything else is retired.
-    So a config edit starts the new shim here and lets the old one go once
-    the sessions launched against it have ended. Returns what it did, for the
+    was handed out within :data:`GRACE_S`. Anything else is retired. So a
+    config edit starts the new shim here and lets the old one go once the
+    sessions launched against it have ended. Returns what it did, for the
     daemon log.
+
+    ``live_sessions`` is a snapshot taken before the pass, and the launch
+    path keeps registering users while it runs (ensuring a shim can take
+    seconds). So the users file is read once as that snapshot, each
+    retirement is decided again under :data:`_LOCK` just before it is sent,
+    and the file is written back merged: a user added during the pass is
+    kept as it is, only the snapshot's users are pruned.
     """
     now = time.time() if now is None else now
     live_sessions = set(live_sessions)
@@ -1321,29 +1348,46 @@ def reconcile(live_sessions, doc: Optional[dict] = None,
             started.append(want["fingerprint"])
         except RoutingError as exc:
             errors.append(f"{want['provider']}: {exc}")
-    users = _load_users()
-    kept_users: Dict[str, dict] = {}
+    with _LOCK:
+        snapshot = _load_users()
     retired: List[str] = []
     seen_fps = set()
     for info in instances():
         port = str(info.get("port"))
         fp = info.get("fingerprint")
-        entry = users.get(port) or {}
+        entry = snapshot.get(port) or {}
         sessions = [s for s in entry.get("sessions") or [] if s in live_sessions]
         pids = [p for p in entry.get("pids") or [] if _pid_alive(int(p))]
-        if sessions or pids:
-            kept_users[port] = {k: v for k, v in
-                                (("sessions", sessions), ("pids", pids)) if v}
         # A second shim for a wanted fingerprint is a duplicate: new launches
         # find the first one, so only its own users keep it.
         duplicate = fp in seen_fps
         seen_fps.add(fp)
         if (fp in wanted and not duplicate) or sessions or pids or info.get("inflight"):
             continue
-        if now - float(info.get("since") or now) < GRACE_S:
-            continue
-        if retire(info):
-            retired.append(f"{fp}:{port}")
-    state_dir().mkdir(parents=True, exist_ok=True)
-    _write_atomic(_users_file(), json.dumps(kept_users, indent=2, sort_keys=True))
+        with _LOCK:
+            # The last look: a user registered, or the shim handed out, since
+            # the snapshot keeps it. Sent under the lock, so neither can slip
+            # in between this look and the request (a loopback POST).
+            current = _load_users().get(port) or {}
+            if set(current.get("sessions") or []) - set(entry.get("sessions") or []) \
+                    or set(current.get("pids") or []) - set(entry.get("pids") or []):
+                continue
+            record = _read_json(_record_file(str(fp), int(info["port"])))
+            if now - float(record.get("ensured") or 0) < GRACE_S:
+                continue
+            if retire(info):
+                retired.append(f"{fp}:{port}")
+    with _LOCK:
+        merged: Dict[str, dict] = {}
+        for port, entry in _load_users().items():
+            before = snapshot.get(port) or {}
+            sessions = [s for s in entry.get("sessions") or []
+                        if s in live_sessions or s not in (before.get("sessions") or [])]
+            pids = [p for p in entry.get("pids") or []
+                    if p not in (before.get("pids") or []) or _pid_alive(int(p))]
+            if sessions or pids:
+                merged[port] = {k: v for k, v in
+                                (("sessions", sessions), ("pids", pids)) if v}
+        state_dir().mkdir(parents=True, exist_ok=True)
+        _write_atomic(_users_file(), json.dumps(merged, indent=2, sort_keys=True))
     return {"started": started, "retired": retired, "errors": errors}

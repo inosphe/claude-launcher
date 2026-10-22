@@ -128,6 +128,43 @@ def test_a_session_on_the_shim_is_registered_as_its_user(owner):
     assert routing._load_users()[str(port)]["sessions"] == ["s42"]
 
 
+def test_a_session_registered_during_a_pass_is_kept_and_its_shim_not_retired(owner, monkeypatch):
+    # A shim the config does not want (a Pi or dynamic route) that a new
+    # session attaches to while a reconcile pass is running: the pass took its
+    # users snapshot before the session existed (s1404 review of 723b944c).
+    url = routing.ensure_shim("https://launch-only.example/", {})
+    port = routing._port_of(url)
+    real_instances = routing.instances
+
+    def _instances_while_a_session_launches():
+        rows = real_instances()
+        routing.add_user(port, session="late")  # harness.build_command -> apply_session
+        return rows
+
+    monkeypatch.setattr(routing, "instances", _instances_while_a_session_launches)
+    later = time.time() + routing.GRACE_S + 1
+    assert routing.reconcile([], now=later)["retired"] == []
+    assert routing._load_users()[str(port)]["sessions"] == ["late"]
+    monkeypatch.setattr(routing, "instances", real_instances)
+    # the next pass sees "late" alive and keeps it
+    assert routing.reconcile(["late"], now=later)["retired"] == []
+    assert routing.health(port) is not None
+    # and once it has ended, the shim goes
+    assert routing.reconcile([], now=later)["retired"] == [f"{routing.fingerprint('https://launch-only.example/', {})}:{port}"]
+
+
+def test_a_shim_handed_out_again_is_within_the_grace(owner):
+    url = routing.ensure_shim("https://launch-only.example/", {})
+    port = routing._port_of(url)
+    fp = routing.fingerprint("https://launch-only.example/", {})
+    record = routing._record_file(fp, port)
+    data = routing._read_json(record)
+    data["ensured"] = time.time() - routing.GRACE_S - 5  # handed out long ago
+    record.write_text(__import__("json").dumps(data), encoding="utf-8")
+    routing.ensure_shim("https://launch-only.example/", {})  # a launch takes it again
+    assert routing.reconcile([])["retired"] == []
+
+
 def test_the_ensure_api_registers_the_asking_process(owner):
     url = shims_mod._ensure_for({"upstream": "https://u.example/", "spec": {}, "pid": 4242})
     assert routing._load_users()[str(routing._port_of(url))]["pids"] == [4242]
