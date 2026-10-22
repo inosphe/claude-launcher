@@ -520,6 +520,7 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
     ``auto_start=False`` takes one look and fails instead of starting, for
     the daemon's own calls back into itself.
     """
+    _check_registered()
     session = _in_session()
     started = time.monotonic()
     # The daemon's own call back into itself takes one look, as before.
@@ -554,6 +555,45 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
     return start(report, via="ensure_running")
 
 
+def _check_registered() -> None:
+    """Refuse a ``-L NAME`` that names no instance (claunch-19liw.2.2).
+
+    An instance is registered when its state directory exists
+    (:func:`paths.known_instances`). A name seen for the first time is
+    usually a typo or another kind of name -- on 10-21 a relay's directory
+    label went into ``-L`` and started an instance that registered with the
+    relays under the main daemon's name -- so only ``claunch -L NAME daemon
+    start`` makes one.
+    """
+    name = paths.instance()
+    if not name or (paths.base_home() / "daemons" / name).is_dir():
+        return
+    known = ", ".join(n or "(default)" for n in paths.known_instances()) or "none"
+    raise DaemonClientError(
+        f"no daemon instance named {name!r} (registered: {known}); "
+        f"nothing was started. Create it with 'claunch -L {name} daemon start'"
+    )
+
+
+def _check_relay_name() -> None:
+    """Refuse an instance named like a relay's directory label
+    (claunch-19liw.2.2): that label is how the relays tell daemons apart,
+    and ``-L`` with it is the mistake that put two daemons under one name."""
+    name = paths.instance()
+    if not name:
+        return
+    from . import store
+
+    taken = sorted({
+        str(r.get("name") or "").strip() for r in store.relays_config()
+    } - {""})
+    if name in taken:
+        raise DaemonClientError(
+            f"instance name {name!r} is a relay name in daemon.relays "
+            f"({', '.join(taken)}); pick another instance name"
+        )
+
+
 def connect_or_start() -> DaemonClient:
     """The running daemon, or a new one: for the commands whose job is to
     start it (``claunch daemon start``/``restart``), from any shell."""
@@ -581,6 +621,7 @@ def start(report: Optional[dict] = None, *, via: str = "start") -> DaemonClient:
     it is being waited for rather than being handed a false "did not come
     up" seconds before it does.
     """
+    _check_relay_name()
     report = report if report is not None else (_last_report or {})
     proc = spawn_daemon(
         reason=f"{via}: {report.get('state')} -- {report.get('why')}"
