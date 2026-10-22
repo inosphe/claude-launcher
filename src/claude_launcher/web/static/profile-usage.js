@@ -17,6 +17,26 @@
   // At most this many account reads at once: a codex read starts a
   // subprocess, and "Refresh all" would otherwise start one per profile.
   const MAX_PARALLEL = 3;
+  // The source names `claunch usage` prints (cli._print_usage).
+  const SOURCES = {
+    "ratelimit-headers": "via rate-limit headers",
+    "codex-app-server": "via Codex app-server",
+    "kimi-managed-usage": "via Kimi Code usage API",
+    "kimi-web-server": "via Kimi Code local server",
+  };
+  // Statuses `claunch usage` leaves out: the ones that say nothing is wrong.
+  const QUIET_STATUSES = new Set(["allowed", "ok"]);
+
+  /* The cache facts of one read. The body carries them; the headers are a
+     fallback, and a read that went through /api/batch has none
+     (claunch-f5w4x.1). */
+  function readFacts(response, data) {
+    const header = (name) => (response.headers ? response.headers.get(name) : null);
+    const cached = typeof data.cached === "boolean"
+      ? data.cached : header("X-Usage-Cached") === "true";
+    const updatedAt = Number(data.updated_at ?? header("X-Usage-Updated-At")) || Date.now() / 1000;
+    return { cached, updatedAt };
+  }
 
   async function readUsage(row, manual) {
     if (state.busy.has(row.key)) return;
@@ -24,16 +44,13 @@
     render();
     try {
       const suffix = manual ? "&refresh=manual" : "&refresh=auto";
+      // Out of the batch: a codex read starts a subprocess, and a batch
+      // answers when its slowest path does.
       const response = await globalThis.api(
-        `/api/usage?profile=${encodeURIComponent(row.profile)}${suffix}`);
+        `/api/usage?profile=${encodeURIComponent(row.profile)}${suffix}`, { noBatch: true });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      state.values.set(row.key, {
-        data,
-        cached: response.headers.get("X-Usage-Cached") === "true",
-        updatedAt: Number(response.headers.get("X-Usage-Updated-At")) || Date.now() / 1000,
-        error: "",
-      });
+      state.values.set(row.key, { data, ...readFacts(response, data), error: "" });
     } catch (error) {
       state.values.set(row.key, { data: null, error: error.message || String(error) });
     } finally {
@@ -67,6 +84,22 @@
     return `${rest}m`;
   }
 
+  /* "2h16m" as `claunch usage` writes it (cli._fmt_reset): whole minutes,
+     hours without days. */
+  function resetText(resets, now) {
+    const minutes = Math.floor((resets.valueOf() - now) / 60000);
+    if (minutes <= 0) return "resetting";
+    if (minutes < 60) return `resets in ${minutes}m`;
+    return `resets in ${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+  }
+
+  /* The windows `claunch usage` prints: the ones with use or a reset time,
+     or all of them when none has either. */
+  function shownWindows(windows) {
+    const active = windows.filter((window) => Number(window.utilization) > 0 || window.resets_at);
+    return active.length ? active : windows;
+  }
+
   function level(pct) {
     if (!Number.isFinite(pct)) return "";
     if (pct >= 90) return "high";
@@ -83,7 +116,7 @@
     const line = node("div", "profile-usage-window");
     const pct = Number(window.utilization);
     line.append(
-      node("strong", "", String(window.name).replaceAll("_", " ")),
+      node("strong", "", String(window.name)),
       node("span", `profile-usage-pct ${level(pct)}`, Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "—"),
     );
     const bar = node("div", `profile-usage-bar ${level(pct)}`);
@@ -95,15 +128,14 @@
     const used = money(window.used_dollars);
     const limit = money(window.limit_dollars);
     if (used || limit) notes.push(limit ? `${used || "$0.00"} of ${limit}` : used);
-    if (window.status) notes.push(String(window.status));
     const resets = toDate(window.resets_at);
-    if (resets) {
-      const left = resets.valueOf() - Date.now();
-      notes.push(left > 0
-        ? `resets in ${span(left)} (${resets.toLocaleString()})`
-        : `reset ${resets.toLocaleString()}`);
+    if (resets) notes.push(resetText(resets, Date.now()));
+    if (window.status && !QUIET_STATUSES.has(String(window.status))) notes.push(`[${window.status}]`);
+    if (notes.length) {
+      const small = node("small", "", notes.join(" · "));
+      if (resets) small.title = `resets ${resets.toLocaleString()}`;
+      line.append(small);
     }
-    if (notes.length) line.append(node("small", "", notes.join(" · ")));
     return line;
   }
 
@@ -131,12 +163,12 @@
     } else {
       const windows = reading.data.windows || [];
       if (!windows.length) section.append(node("p", "wf-note", "No usage windows reported."));
-      for (const window of windows) section.append(windowLine(window));
+      for (const window of shownWindows(windows)) section.append(windowLine(window));
       const updated = toDate(reading.updatedAt);
       if (updated) {
         const ago = Date.now() - updated.valueOf();
         section.append(node("p", "wf-note profile-usage-updated",
-          `${reading.cached ? "Cached" : "Updated"} ${span(ago)} ago · ${reading.data.source || ""}`));
+          `${reading.cached ? "Cached" : "Updated"} ${span(ago)} ago · ${SOURCES[reading.data.source] || reading.data.source || ""}`));
       }
     }
     return section;
@@ -212,5 +244,7 @@
   }
 
   function stop() { state.open = false; }
-  globalThis.ProfileUsagePage = { open, stop };
+  globalThis.ProfileUsagePage = {
+    open, stop, _test: { readUsage, readFacts, resetText, shownWindows, state },
+  };
 })();

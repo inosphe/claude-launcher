@@ -3325,8 +3325,10 @@ async def h_usage(request: web.Request) -> web.Response:
         credentials.CredentialsError,
     ) as exc:
         return json_error(400, str(exc))
+    # The cache facts ride in the body as well as the headers: a dashboard
+    # read that goes through /api/batch gets the body only.
     return json_response(
-        payload,
+        {**payload, "cached": cached, "updated_at": updated_at},
         headers={
             "X-Usage-Cached": "true" if cached else "false",
             "X-Usage-Updated-At": str(updated_at),
