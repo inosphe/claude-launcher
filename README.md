@@ -538,7 +538,11 @@ its own token keeps it and rotates nothing. `claunch keys list` on such a child
 shows that pool and names its owner (`pool: profile 'base' (inherited …)`)
 instead of claiming the child has none, because that is the pool every launch
 of the child advances. `claunch keys strategy` on the child reports that pool's
-strategy for the same reason, and names the owner on a second line.
+strategy for the same reason, and names the owner on a second line — and
+`claunch keys strategy <child> <strategy>` *sets* that same pool, naming the
+owner in its output, because that is the strategy the child's next launch
+obeys. A profile that holds no key anywhere in its chain is refused with the
+same advice as before.
 
 Two keys in one pool never hold the same token: `claunch keys add` and
 `claunch set-token` (which replaces a key) both refuse a duplicate, so a
