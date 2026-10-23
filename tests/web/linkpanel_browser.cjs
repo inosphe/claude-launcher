@@ -32,6 +32,12 @@ var BASE = "/";
 function $(id) { return document.getElementById(id); }
 var calls = [];
 var linkState = "live", linkName = "s7", linkTry = 0, linkQueue = [], sessionEnded = false;
+var sessionEndedBy = null, sessionEndedAt = null;
+function termInputEndedWhy() {
+  return sessionEnded
+    ? { ended: true, why: "record running, same pid", status: "busy", pid: 4242, attached: 4242 }
+    : { ended: false, why: "socket bound to a running child" };
+}
 var linkPingAt = null, linkEchoed = true, linkLastPong = Date.now() - 2000, attachedBoot = "boot-a";
 var ws = { readyState: 1, linkVia: "channel", ch: 3, linkStartedAt: Date.now() - 5000,
            linkReadyAt: Date.now() - 4000, linkLastRx: Date.now() - 1000 };
@@ -138,6 +144,20 @@ const server = http.createServer((req, res) => {
     await render();
     assert.match(await chip.getAttribute('class'), /\bdown\b/);
     assert.match(await page.locator('#conn-panel-grade').innerText(), /given up/);
+
+    // An exited flag names what set it and what the session line made of
+    // it against the record (claunch-ink90.1).
+    await page.evaluate(() => {
+      sessionEnded = true; sessionEndedBy = 'init'; sessionEndedAt = Date.now() - 3000; linkState = 'idle';
+    });
+    await render();
+    const ended = await page.locator('#conn-panel-rows').innerText();
+    assert.match(ended, /exited by\s+init · 3s ago/, 'the panel names what set the exited flag');
+    assert.match(ended, /session line\s+ended: record running, same pid \(record busy, pid 4242; socket pid 4242\)/,
+      'the panel shows the session line verdict and the record it read');
+    await page.evaluate(() => { sessionEnded = false; sessionEndedBy = null; sessionEndedAt = null; });
+    await render();
+    assert.match(await page.locator('#conn-panel-rows').innerText(), /session line\s+open: socket bound to a running child/);
 
     // force reconnect, from the header or the panel: the state at the press
     // is logged first, then a fresh login, then both connections reopened.

@@ -506,7 +506,8 @@ for (const initialized of [false, true]) {
    above, and restoreTerminal opens a FRESH socket for any parked session that
    has not ended — which is this loop again, one navigation later. */
 check("the parked copy reads the same flag",
-      src.includes("if (msg.exited) b.exited = true;"));
+      src.includes('if (msg.exited) shimEnded(b, "init"')
+        && /function shimEnded\(b, by, detail\) \{\s*if \(!b\.exited\) \{\s*b\.exited = true;/.test(src));
 
 /* --- walking away takes the link with you ------------------------------ */
 {

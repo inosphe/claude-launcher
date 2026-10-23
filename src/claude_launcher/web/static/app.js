@@ -17388,6 +17388,10 @@ let linkTicket = 0;       // bumped whenever a socket stops being the current on
 let linkKickAt = 0;       // last event-driven retry, for the throttle above
 let linkQueue = [];       // keystrokes typed while it was down
 let sessionEnded = false; // an `exit` frame arrived: the program, not the link
+// What set it ("init", "exit", "snapshot", "parked") and when, for the link
+// log and the link panel (claunch-ink90.1).
+let sessionEndedBy = null;
+let sessionEndedAt = null;
 let attachedBoot = null;  // daemon incarnation the socket's pid belongs to
 const linkEncoder = new TextEncoder();
 
@@ -17646,6 +17650,12 @@ function handleFrame(msg) {
       && (!msg.boot_id || !attachedBoot || msg.boot_id === attachedBoot);
     attachedPid = msg.pid || null;
     attachedBoot = msg.boot_id || null;
+    // Whether this socket starts on a live child is the first fact a
+    // "session ended" over a running session is traced back to.
+    if (typeof linkLog === "function") {
+      linkLog("term.init", { session: currentName, pid: attachedPid, boot: attachedBoot,
+                             status: msg.status, exited: !!msg.exited, same });
+    }
     // A daemon from before size ownership sends no `owner`: every viewer
     // sized the session then, so this one does too.
     sizeOwner = msg.owner !== false;
@@ -17675,7 +17685,7 @@ function handleFrame(msg) {
     // takes for an outage by reconnecting, repainting, and being closed again
     // a moment later. That loop is what a reader sees as a terminal that will
     // not sit still.
-    if (msg.exited) endSession();
+    if (msg.exited) endSession("init", { status: msg.status, code: msg.exit_code });
   } else if (msg.type === "buffer") {
     altScreen = !!msg.alt;
     if (!altScreen) {
@@ -17738,7 +17748,7 @@ function handleFrame(msg) {
     // Not a broken link: the program finished under this socket. The notice
     // belongs here rather than in endSession(), because this is the case
     // where it lands after the program's own last output.
-    endSession();
+    endSession("exit", { code: msg.code });
     term.write(
       `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
       `- press "resume" above to relaunch it\x1b[0m\r\n`
@@ -17758,9 +17768,16 @@ function handleFrame(msg) {
    Idempotent on purpose: the daemon can say it twice — the init flag, and the
    exit frame the daemon's write path answers with if this terminal got a
    report out before that flag was read — and the second telling must not
-   re-run the notice above or move a scroll position. */
-function endSession() {
-  if (sessionEnded) return;
+   re-run the notice above or move a scroll position.
+
+   `by` names the telling ("init", "exit") and `detail` what came with it.
+   Every telling goes to the link log, the repeated one too (`again`): when
+   the session line says "session ended" over a running session, the log is
+   what says which frame put it there (claunch-ink90.1). */
+function endSession(by, detail) {
+  const again = sessionEnded;
+  noteSessionEnded(by, { ...detail, again: again || undefined });
+  if (again) return;
   sessionEnded = true;
   renderSizeChip();
   linkQueue = [];
@@ -17771,6 +17788,19 @@ function endSession() {
   scrollOffset = 0;
   updateScrollChip();
   refreshTermInput();
+}
+
+/* Record what ended the session for this terminal: the link log entry, and
+   the origin the link panel shows. A repeated telling is logged but keeps
+   the first origin. */
+function noteSessionEnded(by, detail) {
+  if (!sessionEnded) {
+    sessionEndedBy = by || null;
+    sessionEndedAt = Date.now();
+  }
+  if (typeof linkLog === "function") {
+    linkLog("term.ended", { session: currentName, by, pid: attachedPid, boot: attachedBoot, ...detail });
+  }
 }
 
 /* ---- the one-line send-keys input --------------------------------------
@@ -17824,11 +17854,40 @@ function termInputQueueNote(ended) {
    bound to (or any running record behind a snapshot, which has no pid). The
    same pid is the poll lagging behind an exit frame, so that stays ended. */
 function termInputEnded() {
-  if (!sessionEnded) return false;
+  const verdict = termInputEndedWhy();
+  termInputLogVerdict(verdict);
+  return verdict.ended;
+}
+
+/* termInputEnded's verdict with the reason it was reached and the record it
+   read: { ended, why, status, pid, attached }. */
+function termInputEndedWhy() {
+  if (!sessionEnded) return { ended: false, why: "socket bound to a running child" };
   const rec = currentName && sessionsCache.find((s) => s.name === currentName);
-  if (!rec || rec.status === "exited") return true;
-  if (snapshotName && snapshotName === currentName) return false;
-  return !(rec.pid && rec.pid !== attachedPid);
+  if (!rec) return { ended: true, why: "no record", attached: attachedPid };
+  const seen = { status: rec.status, pid: rec.pid || null, attached: attachedPid };
+  if (rec.status === "exited") return { ended: true, why: "record exited", ...seen };
+  if (snapshotName && snapshotName === currentName) {
+    return { ended: false, why: "snapshot's session running", ...seen };
+  }
+  if (rec.pid && rec.pid !== attachedPid) return { ended: false, why: "record running, new pid", ...seen };
+  return { ended: true, why: rec.pid ? "record running, same pid" : "record running, no pid", ...seen };
+}
+
+/* The link log keeps each change of the session line's verdict while the
+   socket says the session ended: the poll repaints it every few seconds, so
+   only a change is written. Which branch held "session ended" over a
+   running session -- the same pid, no pid, no record -- is the evidence a
+   report of that needs (claunch-ink90.1). */
+let termInputVerdictKey = null;
+function termInputLogVerdict(verdict) {
+  const key = sessionEnded ? `${currentName}|${verdict.why}|${verdict.status}|${verdict.pid}` : null;
+  if (key === termInputVerdictKey) return;
+  termInputVerdictKey = key;
+  if (key === null || typeof linkLog !== "function") return;
+  linkLog("input.verdict", { session: currentName, ended: verdict.ended, why: verdict.why,
+                             by: sessionEndedBy, status: verdict.status, pid: verdict.pid,
+                             attached: verdict.attached });
 }
 
 /* Repaint the field for the current session's state, ownership aside: the
@@ -19714,6 +19773,8 @@ function closeLink() {
   linkName = null;
   linkQueue = [];
   sessionEnded = false;
+  sessionEndedBy = null;
+  sessionEndedAt = null;
   setLink("idle");
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
   attachedPid = null;   // re-learned from the next socket's init frame
@@ -19890,6 +19951,13 @@ function linkPanelGrade(now) {
   return { grade: "ok", why: "" };
 }
 
+function linkPanelVerdict() {
+  if (typeof termInputEndedWhy !== "function") return "—";
+  const v = termInputEndedWhy();
+  const rec = v.status === undefined ? "" : ` (record ${v.status}, pid ${v.pid ?? "—"}; socket pid ${v.attached ?? "—"})`;
+  return `${v.ended ? "ended" : "open"}: ${v.why}${rec}`;
+}
+
 /* The panel's rows as [section, [[key, value], ...]]: one source for the
    table on screen and the text the copy button hands out. */
 function linkPanelRows(now) {
@@ -19911,6 +19979,11 @@ function linkPanelRows(now) {
   const term = [
     ["session", linkName || "—"],
     ["state", linkState + (sessionEnded ? " (session exited)" : "")],
+    // What set the exited flag, and what the session line makes of it
+    // against the rail's record (claunch-ink90.1).
+    ["exited by", sessionEnded
+      ? `${sessionEndedBy || "?"} · ${linkPanelAge(sessionEndedAt, now)}` : "—"],
+    ["session line", linkPanelVerdict()],
     ["via", ws ? (ws.linkVia === "channel" ? `channel ${ws.ch}` : "socket") : "—"],
     ["socket", ws ? linkPanelReady(ws.readyState) : "none"],
     ["started", ws ? linkPanelAge(ws.linkStartedAt, now) : "—"],
@@ -21585,6 +21658,7 @@ function suspendActive() {
     pid: attachedPid, boot: attachedBoot,
     alt: altScreen, mouse: mouseTracking,
     scroll: scrollOffset, exited: sessionEnded,
+    endedBy: sessionEndedBy, endedAt: sessionEndedAt,
     retries: linkTry,
     owner: sizeOwner, held: sizeHeld,
   };
@@ -21618,6 +21692,8 @@ function resetLive() {
   linkName = null;
   linkQueue = [];
   sessionEnded = false;
+  sessionEndedBy = null;
+  sessionEndedAt = null;
   lastLocalKey = 0;
   attachedPid = null;
   attachedBoot = null;
@@ -21655,6 +21731,20 @@ function dropKept(name) {
   }
 }
 
+/* A parked terminal told its session ended: the same record noteSessionEnded
+   keeps for the live one, on the parked state, so restoreTerminal brings the
+   origin back with the flag (claunch-ink90.1). */
+function shimEnded(b, by, detail) {
+  if (!b.exited) {
+    b.exited = true;
+    b.endedBy = by;
+    b.endedAt = Date.now();
+  }
+  if (typeof linkLog === "function") {
+    linkLog("term.ended", { session: b.name, by, parked: true, pid: b.pid, boot: b.boot, ...detail });
+  }
+}
+
 /* The passive handler a parked terminal's socket runs. Binary output keeps
    refreshing the hidden buffer — that is the whole point of leaving the
    socket up — and the control frames update only the parked state so the
@@ -21677,7 +21767,7 @@ function shimFrame(b, ev) {
       // restoreTerminal opens a fresh socket for a parked terminal whose
       // session has not ended, and doing that to one that has is where the
       // loop above starts.
-      if (msg.exited) b.exited = true;
+      if (msg.exited) shimEnded(b, "init", { status: msg.status, code: msg.exit_code });
     } else if (msg.type === "buffer") {
       b.alt = !!msg.alt;
     } else if (msg.type === "mouse") {
@@ -21691,7 +21781,7 @@ function shimFrame(b, ev) {
     } else if (msg.type === "resize") {
       if (b.term) b.term.resize(msg.cols, msg.rows);
     } else if (msg.type === "exit") {
-      b.exited = true;
+      shimEnded(b, "exit", { code: msg.code });
       b.alt = false;
       b.mouse = false;
       b.scroll = 0;
@@ -21758,6 +21848,12 @@ function restoreTerminal(b) {
   altScreen = b.alt;
   mouseTracking = !!b.mouse;
   sessionEnded = b.exited;
+  sessionEndedBy = b.exited ? (b.endedBy || "parked") : null;
+  sessionEndedAt = b.exited ? (b.endedAt || null) : null;
+  if (typeof linkLog === "function") {
+    linkLog("term.restore", { session: b.name, exited: !!b.exited, by: sessionEndedBy, pid: b.pid,
+                              socket: b.ws ? b.ws.readyState : null });
+  }
   linkTry = b.retries || 0;
   // A parked socket keeps its place: the refit below claims the size if
   // nobody holds it, and otherwise the header offers to take it.
@@ -22106,6 +22202,9 @@ async function snapshotAttach(name) {
   scrollOffset = 0;
   linkName = null;
   linkQueue = [];
+  // A new terminal: whatever ended the previous one is not this one's origin.
+  sessionEnded = false;
+  noteSessionEnded("snapshot");
   sessionEnded = true;
   setLink("idle");
 
