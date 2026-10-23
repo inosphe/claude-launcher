@@ -28,6 +28,12 @@ RETRY_MAX_DELAY = 3600.0
 #: Same-SHA remeasures a failed pause job gets: a pass clears the pause as an
 #: intermittent failure, a second failure is a real regression for the repair path.
 REMEASURE_LIMIT = 1
+#: A runner that sees its sweep fail measures the same SHA once more before the
+#: failure pauses the repository (``finish(auto_remeasure=True)``). Over the
+#: queue's history most failures named a test that failed again on other SHAs, so
+#: a pause was taken for an intermittent test; a pass the second time is recorded
+#: as intermittent and pauses nothing.
+AUTO_REMEASURE_LIMIT = 1
 #: Merges one sweep covers, and how long the oldest queued merge waits for company
 #: before it is swept alone. Checkpoints are cumulative (A, A+B, A+B+C), so the
 #: newest one in a batch is the tree that contains all of them: one sweep answers
@@ -307,7 +313,7 @@ class Queue:
         with self.connect() as db:
             db.execute("UPDATE jobs SET pid=? WHERE id=? AND status='running'", (pid, ident))
 
-    def finish(self, ident, status, receipt=None, detail=""):
+    def finish(self, ident, status, receipt=None, detail="", auto_remeasure=False):
         if status not in ("passed", "failed", "retry"):
             raise ValueError("invalid verification result")
         with self.connect() as db:
@@ -339,9 +345,25 @@ class Queue:
                 # A SHA master cannot reach (merge discarded after enqueue) has no
                 # repair that could contain it, so its failure would pause forever.
                 covered = covered or self.orphaned(row["repo"], row["sha"])
-                if not covered and (not pause or not pause["job"]):
+                if (auto_remeasure and not covered and (not pause or not pause["job"])
+                        and row["remeasures"] < AUTO_REMEASURE_LIMIT):
+                    # Measure the same SHA again first. The first failure stays in
+                    # history, nothing is notified and nothing is paused: merging
+                    # goes on, and only a second failure takes the pause below.
+                    history = json.loads(row["history"]) + [{
+                        "status": "failed", "receipt": receipt, "detail": detail, "at": time.time()}]
+                    db.execute("UPDATE jobs SET status='queued',failures=0,available=0,pid=0,notified=1,"
+                               "remeasures=remeasures+1,history=?,detail=? WHERE id=?",
+                               (json.dumps(history), "auto remeasure after a failure: " + str(detail)[:300],
+                                ident))
+                elif not covered and (not pause or not pause["job"]):
                     db.execute("INSERT INTO pauses(common,job) VALUES (?,?) ON CONFLICT(common) "
                                "DO UPDATE SET job=excluded.job,repair_issue=NULL", (row["common"], ident))
+                    if auto_remeasure:
+                        # The merges this tip covered are swept one by one, so the first
+                        # that fails is the one that broke the batch (``unbatch``).
+                        db.execute("UPDATE jobs SET status='queued',covered_by=NULL,bisect_of=?,available=0 "
+                                   "WHERE covered_by=? AND status='covered'", (ident, ident))
                 elif not covered and pause["repair_issue"] and pause["repair_issue"] == row["issue"]:
                     # The repair's own merge sweep failed: the pause follows the new
                     # failure and the slot empties so the next repair can be assigned.
@@ -354,6 +376,10 @@ class Queue:
                            (row["sha"], row["common"]))
                 db.execute("UPDATE jobs SET detail=? WHERE id=?",
                            ("remeasure passed; intermittent \u2014 open a follow-up issue", ident))
+            elif status == "passed" and row["remeasures"] and not (pause and pause["job"]):
+                # The failure did not repeat on the same SHA and no pause was taken.
+                db.execute("UPDATE jobs SET detail=? WHERE id=?",
+                           ("remeasure passed; intermittent \u2014 the first failure is in history", ident))
             elif status == "passed" and pause and pause["job"] and pause["repair_issue"] == row["issue"]:
                 failed = self.get(pause["job"])
                 if self.contains(row["repo"], failed["sha"], row["sha"]):
@@ -451,6 +477,58 @@ class Queue:
         with self.connect() as db:
             db.execute("UPDATE jobs SET notified=1 WHERE id=?", (ident,))
 
+    def suspects(self, job, limit=20):
+        """Merges that can have broken ``job``'s sweep, and the merges stacked on top.
+
+        ``suspects``: the first-parent merges after the newest passed sweep that is
+        an ancestor of the job's SHA, up to and including that SHA -- the tree the
+        sweep measured. Without such a sweep, the last ``limit`` merges before it.
+        Those whose changed files meet a failing test (the file itself, or the module
+        the test is named after) come first; the order inside each group is newest
+        first. ``after``: merges that landed past the failed SHA. They were not
+        measured, so they are not suspects, and a revert of a suspect may have to
+        carry them."""
+        row = self.get(job)
+        repo, sha = row["repo"], row["sha"]
+        passed = [j for j in self.status()["jobs"]
+                  if j["common"] == row["common"] and j["status"] == "passed" and j["sha"] != sha
+                  and self.contains(repo, j["sha"], sha)]
+        base = max(passed, key=lambda j: j["created"])["sha"] if passed else None
+        span = f"{base}..{sha}" if base else sha
+
+        def merges(spec, *extra):
+            try:
+                return git(repo, "rev-list", "--first-parent", "--merges", *extra, spec).split()
+            except subprocess.CalledProcessError:
+                return []
+
+        failing = set()
+        try:
+            for line in json.loads(row["detail"] or "[]"):
+                head = str(line).split(" ", 1)[-1].split("::", 1)[0].split(" - ", 1)[0]
+                if head.endswith(".py"):
+                    failing.add(head)
+        except (TypeError, ValueError):
+            pass  # a detail that is not the runner's failure list names no tests
+        stems = {Path(f).stem.removeprefix("test_") for f in failing}
+        by_sha = {j["sha"]: j["issue"] for j in self.status()["jobs"] if j["common"] == row["common"]}
+
+        def describe(merge):
+            files = git(repo, "diff", "--name-only", merge + "^1", merge).split()
+            meets = sorted(f for f in files if f in failing or Path(f).stem in stems)
+            return {"sha": merge, "issue": by_sha.get(merge, ""),
+                    "subject": git(repo, "log", "-1", "--format=%s", merge),
+                    "meets_failing_tests": meets, "files": len(files)}
+
+        found = [describe(m) for m in merges(span, *([] if base else ["-n", str(limit)]))]
+        found.sort(key=lambda d: not d["meets_failing_tests"])  # stable: newest first inside a group
+        after = []
+        if self.contains(repo, sha, "refs/heads/master"):
+            after = [{"sha": m, "issue": by_sha.get(m, ""), "subject": git(repo, "log", "-1", "--format=%s", m)}
+                     for m in merges(f"{sha}..refs/heads/master")]
+        return {"job": job, "sha": sha, "base": base, "failing_tests": sorted(failing),
+                "suspects": found, "after": after}
+
 
 def run_one(queue, ident, scratch):
     """Run against a detached, clean checkout; infrastructural failures retry."""
@@ -498,7 +576,8 @@ def run_one(queue, ident, scratch):
         if fresh and counts and code == 0 and sweep.is_green(data):
             queue.finish(ident, "passed", str(receipt))
         elif fresh and code == 1 and (counts.get("failed") or counts.get("error")):
-            queue.finish(ident, "failed", str(receipt), json.dumps(data.get("failures") or []))
+            queue.finish(ident, "failed", str(receipt), json.dumps(data.get("failures") or []),
+                         auto_remeasure=True)
         else:
             queue.finish(ident, "retry", str(receipt) if receipt.exists() else None,
                          f"sweep execution exit {code}; no regression verdict")
