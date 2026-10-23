@@ -68,17 +68,18 @@ import logging
 import math
 import re
 import sys
+import threading
 import time
 from array import array
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 import aiohttp
 
 from .. import atomic, beads_db, cli_beads, store
-from . import paths, search_keywords
+from . import paths, pools, search_keywords
 
 try:
     import ssl as _ssl
@@ -472,6 +473,26 @@ class VectorIndex:
         self._loaded = False
         self._lock: Optional[asyncio.Lock] = None
         self._col = None
+        #: Guards ``entries`` and the collection handle. A sync writes from a
+        #: worker thread (``put``/``drop``/``refresh_meta``) while the event
+        #: loop and other workers read, and on a free-threaded build those
+        #: run in parallel. Held only around Python-side state, never across
+        #: a zvec call that does I/O, except the one-time open.
+        self._mutex = threading.RLock()
+
+    # -- readers that are safe beside a writer ------------------------------ #
+    def ids(self) -> Set[str]:
+        """A copy of the document ids, taken in one step."""
+        with self._mutex:
+            return set(self.entries)
+
+    def items(self) -> List[Tuple[str, "Entry"]]:
+        """A copy of ``(id, entry)`` pairs, taken in one step."""
+        with self._mutex:
+            return list(self.entries.items())
+
+    def size(self) -> int:
+        return len(self.entries)
 
     # -- persistence ---------------------------------------------------- #
     @property
@@ -486,6 +507,12 @@ class VectorIndex:
 
     def _open(self, *, create: bool):
         """The zvec collection, opened once per index object."""
+        if self._col is not None:
+            return self._col
+        with self._mutex:
+            return self._open_locked(create=create)
+
+    def _open_locked(self, *, create: bool):
         if self._col is not None:
             return self._col
         zvec = _zvec()
@@ -627,8 +654,9 @@ class VectorIndex:
     def diff(self, docs: List[Doc]) -> Tuple[List[Doc], List[str]]:
         """What a sync must do: documents to (re)embed, ids to drop."""
         wanted = {d.id: d for d in docs if d.id}
-        stale = [d for d in wanted.values() if d.id not in self.entries or self.entries[d.id].hash != d.hash]
-        gone = [doc_id for doc_id in self.entries if doc_id not in wanted]
+        have = {doc_id: entry.hash for doc_id, entry in self.items()}
+        stale = [d for d in wanted.values() if have.get(d.id) != d.hash]
+        gone = [doc_id for doc_id in have if doc_id not in wanted]
         return stale, gone
 
     def clear(self) -> None:
@@ -638,10 +666,11 @@ class VectorIndex:
             with contextlib.suppress(Exception):
                 col.destroy()
             self._col = None
-        self.entries.clear()
-        self.keywords = search_keywords.KeywordIndex()
-        self._loaded = True
-        self.updated_at = _now_iso()
+        with self._mutex:
+            self.entries.clear()
+            self.keywords = search_keywords.KeywordIndex()
+            self._loaded = True
+            self.updated_at = _now_iso()
 
     def put(self, doc: Doc, vecs: List[array]) -> None:
         if not vecs:
@@ -666,15 +695,16 @@ class VectorIndex:
         ]
         # A document that shrank leaves its tail behind: the ids past the new
         # chunk count are still in the collection and would keep matching.
-        previous = self.entries.get(doc.id)
+        previous = self.entries.get(doc.id)  # one dict read; atomic on either build
         if previous is not None and previous.chunks > len(vecs):
             with contextlib.suppress(Exception):
                 col.delete([vector_id(doc.id, i) for i in range(len(vecs), previous.chunks)])
         for start in range(0, len(rows), WRITE_BATCH):
             col.upsert(rows[start:start + WRITE_BATCH])
-        self.entries[doc.id] = Entry(doc.hash, len(vecs), meta)
+        with self._mutex:
+            self.entries[doc.id] = Entry(doc.hash, len(vecs), meta)
+            self.updated_at = _now_iso()
         self.keywords.put(doc.id, meta)
-        self.updated_at = _now_iso()
 
     def refresh_meta(self, doc: Doc) -> None:
         """Carry changed display fields (status, assignee) for an entry whose
@@ -690,7 +720,8 @@ class VectorIndex:
                     _zvec().Doc(id=vector_id(doc.id, i), fields={"meta": text})
                     for i in range(entry.chunks)
                 ])
-        self.entries[doc.id] = Entry(entry.hash, entry.chunks, dict(doc.meta))
+        with self._mutex:
+            self.entries[doc.id] = Entry(entry.hash, entry.chunks, dict(doc.meta))
         self.keywords.put(doc.id, doc.meta)
 
     def drop(self, doc_id: str) -> None:
@@ -701,9 +732,10 @@ class VectorIndex:
         if col is not None:
             with contextlib.suppress(Exception):
                 col.delete([vector_id(doc_id, i) for i in range(entry.chunks)])
-        del self.entries[doc_id]
+        with self._mutex:
+            self.entries.pop(doc_id, None)
+            self.updated_at = _now_iso()
         self.keywords.drop(doc_id)
-        self.updated_at = _now_iso()
 
     # -- queries -------------------------------------------------------- #
     def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = (),
@@ -773,7 +805,7 @@ class VectorIndex:
             return []
         hits = []
         skip = set(exclude)
-        for doc_id, entry in self.entries.items():
+        for doc_id, entry in self.items():
             if doc_id in skip:
                 continue
             hay = f"{doc_id} {entry.meta.get('title') or entry.meta.get('name') or ''}".lower()
@@ -1060,14 +1092,10 @@ class RagService:
         try:
             index = await self._index(kind, root, cfg)
             docs = await self._docs(kind, root)
-            if force:
-                index.clear()
-                index.dims = int(cfg.get("dimensions") or 0)
-            stale, gone = index.diff(docs)
-            for doc_id in gone:
-                index.drop(doc_id)
-            for doc in docs:
-                index.refresh_meta(doc)
+            # Writes go to a worker: each is a zvec call (a destroy, deletes,
+            # one update per changed document) and ran on the event loop.
+            stale = await pools.background(
+                self._reconcile, index, docs, force, int(cfg.get("dimensions") or 0))
             prog.total = len(docs)
             prog.pending = len(stale)
             prog.indexed = prog.total - prog.pending
@@ -1116,16 +1144,37 @@ class RagService:
         finally:
             prog.finished_at = _now_iso()
 
-    async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress) -> None:
-        texts = [c for d in group for c in d.chunks]
-        vecs = await client.embed(texts)
+    @staticmethod
+    def _reconcile(index: VectorIndex, docs: List[Doc], force: bool, dims: int) -> List[Doc]:
+        """Bring the index's rows in line with ``docs``; return what to embed.
+
+        Runs in a worker thread (see :meth:`_sync`).
+        """
+        if force:
+            index.clear()
+            index.dims = dims
+        stale, gone = index.diff(docs)
+        for doc_id in gone:
+            index.drop(doc_id)
+        for doc in docs:
+            index.refresh_meta(doc)
+        return stale
+
+    @staticmethod
+    def _put_group(index: VectorIndex, group: List[Doc], vecs: List[array]) -> None:
+        """Write a group's vectors; runs in a worker thread."""
         pos = 0
         for doc in group:
             n = len(doc.chunks)
             index.put(doc, vecs[pos:pos + n])
             pos += n
-            prog.indexed += 1
-            prog.pending = max(0, prog.pending - 1)
+
+    async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress) -> None:
+        texts = [c for d in group for c in d.chunks]
+        vecs = await client.embed(texts)
+        await pools.background(self._put_group, index, group, vecs)
+        prog.indexed += len(group)
+        prog.pending = max(0, prog.pending - len(group))
 
     async def wait_sync(self, prog: Progress, budget: float) -> None:
         """Give a running sync up to ``budget`` seconds to finish."""
@@ -1476,8 +1525,11 @@ class RagService:
         qvec, embed_cached = await self._query_vector(client, cfg, query)
         embed_ms = int((time.monotonic() - started) * 1000)
         candidates = max(limit, int(cfg.get("candidates") or limit))
-        excluded = self._inactive_documents(index) if mode == "active" else set()
-        rank_args = {"include": set(index.entries) - excluded} if mode == "active" else {}
+        excluded = (
+            await asyncio.to_thread(self._inactive_from, index, self._live_names())
+            if mode == "active" else set()
+        )
+        rank_args = {"include": index.ids() - excluded} if mode == "active" else {}
         # Retrieve enough passages to avoid spending the candidate budget on
         # one issue's comments. Bound widening to keep vector lookup predictable.
         passages = {}
@@ -1485,13 +1537,16 @@ class RagService:
             window = candidates
             while True:
                 ranked = await asyncio.to_thread(index.rank, qvec, window, **rank_args)
-                groups = {search_keywords.group_key(d, index.entries[d].meta) for d, _ in ranked
-                          if d in index.entries}
+                groups = set()
+                for d, _ in ranked:
+                    held = index.entries.get(d)
+                    if held is not None:
+                        groups.add(search_keywords.group_key(d, held.meta))
                 if len(groups) >= candidates or len(ranked) < window or window >= candidates * 16:
                     break
                 window *= 2
             keywords = await asyncio.to_thread(index.keywords.rank, query, len(index.entries), exclude=excluded)
-            exact = index.lexical(query, len(index.entries), exclude=excluded)
+            exact = await asyncio.to_thread(index.lexical, query, index.size(), exclude=excluded)
             order, scores, passages = search_keywords.fuse(index, ranked, keywords, exact, candidates)
             lexical = {doc_id for doc_id, _ in keywords} | set(exact)
         else:
@@ -1499,7 +1554,7 @@ class RagService:
             scores = dict(ranked)
             order = [doc_id for doc_id, _ in ranked]
             lexical = set()
-            for doc_id in index.lexical(query, limit, exclude=excluded):
+            for doc_id in await asyncio.to_thread(index.lexical, query, limit, exclude=excluded):
                 lexical.add(doc_id)
                 scores.setdefault(doc_id, 0.0)
                 if doc_id in order:
@@ -1591,14 +1646,26 @@ class RagService:
         fail closed: old metadata
         cannot establish that a removed process is still alive.
         """
-        live = {
+        return self._inactive_from(index, self._live_names())
+
+    def _live_names(self) -> set:
+        """Names of the live sessions. Reads the manager, so call it on the loop."""
+        return {
             session.sdef.name for session in (self.manager.list() if self.manager else [])
             if not getattr(session, "exited", True)
             and not getattr(session, "paused_at", None)
             and not getattr(session, "archived_at", None)
         }
+
+    @staticmethod
+    def _inactive_from(index: "VectorIndex", live: set) -> set:
+        """The ids whose records name no live session: one pass over the index.
+
+        Pure over its arguments, so a worker thread can run it -- the pass is
+        O(documents) and ran on the event loop.
+        """
         excluded = set()
-        for doc_id, entry in index.entries.items():
+        for doc_id, entry in index.items():
             meta = entry.meta
             if meta.get("kind") in ("beads", "comment"):
                 names = {meta.get("assignee"), meta.get("created_by")}
@@ -1642,11 +1709,12 @@ class RagService:
             row.update(entry.meta)
             matches = (passages or {}).get(doc_id, [])
             if len(matches) > 1:
+                held = {m: index.entries.get(m) for m in matches if m != doc_id}
                 row["matches"] = [
-                    {"id": match, "kind": index.entries[match].meta.get("kind"),
-                     "excerpt": index.entries[match].meta.get("excerpt", ""),
-                     "source_url": index.entries[match].meta.get("source_url")}
-                    for match in matches if match != doc_id and match in index.entries
+                    {"id": match, "kind": got.meta.get("kind"),
+                     "excerpt": got.meta.get("excerpt", ""),
+                     "source_url": got.meta.get("source_url")}
+                    for match, got in held.items() if got is not None
                 ]
             results.append(row)
         # A search answer is asked for *now*, so the session state on it is
@@ -1666,12 +1734,13 @@ class RagService:
         }
 
     def _rerank_group_text(self, index, doc_id, matches):
-        matches = [m for m in matches if m in index.entries]
-        if len(matches) <= 1:
+        held = [e for e in (index.entries.get(m) for m in matches) if e is not None]
+        if len(held) <= 1:
             return self._rerank_text(index, doc_id)
-        meta = index.entries[doc_id].meta
-        width = RERANK_CHARS // len(matches)
-        body = "\n".join(str(index.entries[m].meta.get("excerpt") or "")[:width] for m in matches)
+        entry = index.entries.get(doc_id)
+        meta = entry.meta if entry is not None else {}
+        width = RERANK_CHARS // len(held)
+        body = "\n".join(str(e.meta.get("excerpt") or "")[:width] for e in held)
         return str(meta.get("title") or meta.get("name") or doc_id) + "\n" + body[:RERANK_CHARS]
 
     def _live_states(self, rows: List[dict]) -> None:
@@ -1711,7 +1780,8 @@ class RagService:
             row["sessions"] = named
 
     def _rerank_text(self, index: VectorIndex, doc_id: str) -> str:
-        meta = index.entries[doc_id].meta
+        entry = index.entries.get(doc_id)
+        meta = entry.meta if entry is not None else {}
         title = meta.get("title") or meta.get("name") or doc_id
         excerpt = meta.get("excerpt") or meta.get("one_line") or ""
         # Every candidate is cut to RERANK_CHARS. The unified corpus stores

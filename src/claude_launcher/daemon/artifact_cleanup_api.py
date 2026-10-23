@@ -8,7 +8,7 @@ import os
 import sqlite3
 from aiohttp import web
 
-from . import artifact_inventory
+from . import artifact_inventory, pools
 from .artifact_cleanup import Cleanup, CleanupError
 
 log = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ def install(app):
                     return web.json_response({"status": status, "plan_id": token,
                                               "reason": reason, "already": already})
                 try:
-                    job = asyncio.create_task(asyncio.to_thread(service.apply, session, token))
+                    job = asyncio.create_task(pools.background(service.apply, session, token))
                     try:
                         result = await asyncio.shield(job)
                     except asyncio.CancelledError:
@@ -186,7 +186,7 @@ async def scheduled_clock(app, service, interval=SCHEDULED_POLL):
     while True:
         await asyncio.sleep(interval)
         try:
-            sessions = await asyncio.to_thread(service.scheduled)
+            sessions = await pools.background(service.scheduled)
         except Exception:  # noqa: BLE001 -- a bad pass must not end the clock
             log.warning("cleanup: could not list scheduled sessions", exc_info=True)
             continue
@@ -197,7 +197,7 @@ async def scheduled_clock(app, service, interval=SCHEDULED_POLL):
                                          workers=1, wait=0)
             if not grant.get("granted"):
                 continue  # still busy; the next pass asks again
-            job = asyncio.create_task(asyncio.to_thread(service.run_scheduled, session))
+            job = asyncio.create_task(pools.background(service.run_scheduled, session))
             try:
                 try:
                     await asyncio.shield(job)

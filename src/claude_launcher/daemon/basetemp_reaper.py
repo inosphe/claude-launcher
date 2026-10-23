@@ -84,7 +84,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from .. import atomic, pytest_basetemp
-from . import paths
+from . import paths, pools
 
 log = logging.getLogger(__name__)
 
@@ -762,7 +762,7 @@ class BasetempClock:
     async def _run(self) -> None:
         while True:
             try:
-                self.last = await asyncio.to_thread(self.reaper.reap_live)
+                self.last = await pools.background(self.reaper.reap_live)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one bad pass must not stop the clock

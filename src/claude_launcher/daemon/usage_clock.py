@@ -24,6 +24,7 @@ from typing import Optional, Set
 from aiohttp import web
 
 from .. import profile_usage, store, usage
+from . import pools
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class UsageClock:
         """Read the keys that are due; returns the keys it read."""
         if not enabled():
             return []
-        rows = await asyncio.to_thread(profile_usage.targets)
+        rows = await pools.background(profile_usage.targets)
         rows = [row for row in profile_usage.due(rows) if row["key"] not in self.reading]
         gate = asyncio.Semaphore(PARALLEL)
 
@@ -71,7 +72,7 @@ class UsageClock:
             async with gate:
                 self.reading.add(row["key"])
                 try:
-                    await asyncio.to_thread(profile_usage.fetch, row["profile"])
+                    await pools.background(profile_usage.fetch, row["profile"])
                 except usage.UsageError as exc:
                     log.info("usage clock: %s: %s", row["key"], exc)
                 finally:

@@ -20,7 +20,7 @@ from aiohttp import web
 from .. import daemon_client, providers, routing, session_env, store
 from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
-from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
+from . import cflow_clock, paths, pools, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
 from . import hold as hold_mod, instance_manifest, operator_keepalive, restore_queue, session_procs, session_reminder
 from .api import build_app, close_websockets, notify_shutdown
@@ -219,6 +219,8 @@ def _close_pty_host(client, mode: str) -> None:
 
 async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) -> int:
     _quiet_reset_errors(asyncio.get_running_loop())
+    pool_sizes = pools.install(asyncio.get_running_loop(), cfg)
+    log.info("thread pools: %s", pool_sizes)
     pty_host = _connect_pty_host(cfg)
     manager = SessionManager(
         idle_threshold=float(cfg["idle_threshold"]),
@@ -619,6 +621,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # The app's own on_shutdown/on_cleanup hooks run in here.
         await teardown.step("http runner", runner.cleanup())
         teardown.report()
+    pools.shutdown()
     return RESTART_CODE if app["restart_requested"] else 0
 
 
