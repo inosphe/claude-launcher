@@ -99,8 +99,11 @@ const LISTING = {
       entry: { endpoints: { anthropic: "https://apis.opengateway.ai",
                             openai: "https://apis.opengateway.ai/v1" },
                models: { default: "deepseek/deepseek-v4.1-flash-ultrafast" },
-               context_window: 1000000 },
-      problems: [] },
+               context_window: 1000000,
+               api_key_set: true,
+               routing: { order: ["CoreWeave"] },
+               harness_options: { claude: { env: { A: "1" } } } },
+      problems: [], kept: ["routing"] },
     { name: "broken", entry: {}, problems: ["endpoints is required"] },
   ],
   presets: [
@@ -140,6 +143,28 @@ const LISTING = {
   ok("an installed provider with a problem shows the reason", page.includes("endpoints is required"));
   ok("an installed provider's facts are drawn",
      page.includes("anthropic: https://apis.opengateway.ai"));
+
+  // --- loading a provider and saving it back is lossless -------------------
+  // The reviewed defect: the form drew no control for `routing`, `dynamic`,
+  // `capabilities` or the harness options other than claude.model_tag, and a
+  // save replaced the stored entry, deleting them while reporting success.
+  {
+    const loaded = context.providerDraftFromEntry(LISTING.providers[0].entry,
+                                                  { kept: ["routing"] });
+    const back = context.providerEntryFromDraft(loaded);
+    check("routing survives a load and a save", back.routing, { order: ["CoreWeave"] });
+    check("an un-drawn harness option survives", back.harness_options.claude.env, { A: "1" });
+    ok("the key is never part of the entry the form sends",
+       loaded.residual.api_key === undefined && !("api_key" in loaded.residual));
+    const was = context.providersState.draft;
+    context.providersState.draft = loaded;
+    const panel = text(context.providersPanel());
+    context.providersState.draft = was;
+    ok("the page says which keys it is not drawing",
+       panel.includes("saving cannot remove them") && panel.includes("routing"));
+    ok("the page says a key is stored without showing it",
+       panel.includes("a key is stored for this provider"));
+  }
 
   // --- presets -------------------------------------------------------------
   const selects = byTag(card, "select");

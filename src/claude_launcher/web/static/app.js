@@ -35286,8 +35286,39 @@ const PROVIDER_FORM_FIELDS = [
     choices: ["", "deepseek", "openai"] },
 ];
 
-function providerDraftFromEntry(entry) {
-  const draft = { name: "", profile: "" };
+/* ``options.kept`` names the keys of the loaded entry this form does not draw.
+   They are not deleted by a save (the server merges them back in) and the page
+   says so, because a person who edits everything they can see should not have
+   to guess what they could not. */
+/* The parts of a loaded entry no control draws, kept so a save can put them
+   back: routing, dynamic, env, capabilities, and the harness options other
+   than the one tag this form shows. Without this the form would be a lossy
+   round trip — it would report success and silently drop a routing rule. */
+function providerResidual(entry) {
+  const rest = JSON.parse(JSON.stringify(entry || {}));
+  const empty = (node) => !node || typeof node !== "object" || !Object.keys(node).length;
+  for (const field of PROVIDER_FORM_FIELDS) {
+    const parts = field.key.split(".");
+    if (parts.length === 1) { delete rest[parts[0]]; continue; }
+    const parent = parts.slice(0, -1)
+      .reduce((node, part) => (node && typeof node === "object" ? node[part] : undefined), rest);
+    if (parent && typeof parent === "object") delete parent[parts[parts.length - 1]];
+  }
+  // Drop only the containers the deletions emptied, so a provider that carries
+  // no harness options does not gain an empty `harness_options` on save.
+  const options = rest.harness_options;
+  if (options && typeof options === "object") {
+    for (const harness of Object.keys(options)) if (empty(options[harness])) delete options[harness];
+    if (empty(options)) delete rest.harness_options;
+  }
+  return rest;
+}
+
+function providerDraftFromEntry(entry, options) {
+  const draft = { name: "", profile: "", kept: [], api_key_set: false, residual: {} };
+  if (options && Array.isArray(options.kept)) draft.kept = options.kept.slice();
+  draft.api_key_set = entry.api_key_set === true;
+  draft.residual = providerResidual(entry);
   for (const field of PROVIDER_FORM_FIELDS) draft[field.key] = "";
   const text = (value) => (value === undefined || value === null ? "" : String(value));
   draft["endpoints.anthropic"] = text((entry.endpoints || {}).anthropic);
@@ -35300,6 +35331,11 @@ function providerDraftFromEntry(entry) {
   draft.auto_compact_at = text(entry.auto_compact_at);
   const claude = ((entry.harness_options || {}).claude) || {};
   draft["harness_options.claude.model_tag"] = text(claude.model_tag);
+  // Editing a provider that already carries harness options: the tag is the one
+  // leaf this form draws, and clearing it has to mean something. Sent back
+  // explicitly (even empty) so the server's merge keeps the rest and clears
+  // this — see provider_install.merge_entry.
+  draft.had_options = Object.keys(entry.harness_options || {}).length > 0;
   draft.anthropic_auth_header = text(entry.anthropic_auth_header);
   draft.session_header = text(entry.session_header);
   draft.session_affinity = entry.session_affinity === true;
@@ -35316,7 +35352,9 @@ function providerDraftFromEntry(entry) {
 /* The draft back to a provider entry: only the fields that carry a value, so a
    blank input leaves the key out rather than writing an empty string. */
 function providerEntryFromDraft(draft) {
-  const entry = {};
+  // Start from what the form cannot draw so the round trip is lossless; the
+  // controls then set (or clear) the keys they own.
+  const entry = JSON.parse(JSON.stringify((draft && draft.residual) || {}));
   const put = (path, value) => {
     const parts = path.split(".");
     let node = entry;
@@ -35345,6 +35383,9 @@ function providerEntryFromDraft(draft) {
       continue;
     }
     put(field.key, value);
+  }
+  if (draft.had_options) {
+    put("harness_options.claude.model_tag", draft["harness_options.claude.model_tag"] || "");
   }
   return entry;
 }
@@ -35411,8 +35452,9 @@ function providersPanel() {
     "A provider is a backend in ~/.claunch.yaml: where it is, which models it " +
     "serves, how much context they carry. Saving here writes that entry " +
     "atomically — a refused entry changes nothing. Presets are starting values " +
-    "for this form, one YAML file per provider in the directory named below; " +
-    "edit them by hand, or leave the form empty and fill it in."));
+    "for this form, one YAML file per provider shipped with the package " +
+    "(the directory named below); a per-machine adjustment belongs in " +
+    "~/.claunch.yaml, not in the preset. Leave the form empty to fill it in."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.data) {
     if (!st.error) card.appendChild(el("p", "wf-note", "reading…"));
@@ -35432,7 +35474,7 @@ function providersPanel() {
     load.type = "button";
     load.title = "load this provider into the form";
     load.addEventListener("click", () => {
-      st.draft = providerDraftFromEntry(row.entry || {});
+      st.draft = providerDraftFromEntry(row.entry || {}, { kept: row.kept || [] });
       st.draft.name = row.name;
       st.notice = "";
       st.check = null;
@@ -35508,6 +35550,17 @@ function providersPanel() {
   form.appendChild(nameRow);
 
   for (const field of PROVIDER_FORM_FIELDS) form.appendChild(providerFormRow(field, draft));
+
+  if (draft.api_key_set) {
+    form.appendChild(el("p", "wf-note provider-key-stored",
+      "a key is stored for this provider and is never sent to this page — " +
+      "leave api_key empty to keep it, type a new one to replace it"));
+  }
+  if (draft.kept && draft.kept.length) {
+    form.appendChild(el("p", "wf-note provider-kept",
+      `kept as they are (this form draws no control for them, so saving cannot ` +
+      `remove them): ${draft.kept.join(", ")}`));
+  }
 
   const profileRow = el("label", "provider-form-row");
   profileRow.appendChild(el("span", "provider-form-label", "pin to profile"));

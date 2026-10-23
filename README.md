@@ -894,6 +894,17 @@ draws the same entry as a form and writes it for you.
   `max_tokens: 1`. The credential is the entry's `api_key`, or the pinned
   profile's `set-token` secret. A failure is reported and never blocks the save —
   a key that is not on this machine yet is not a typo.
+- **Saving over an existing provider keeps what the form cannot draw.** The form
+  draws a fixed list of keys (`provider_install.FORM_FIELDS`); a stored entry
+  can carry more — `routing` and `dynamic` (written by `claunch routing set`),
+  `env`, `capabilities`, and the `harness_options` channels other than
+  `claude.model_tag`. Those are merged back from the stored entry, and the page
+  names them under the form. A control that does not exist cannot be cleared, so
+  removing one of them is a `~/.claunch.yaml` edit.
+- **`api_key` is never sent to the browser.** The listing reports
+  `api_key_set: true/false` instead of the value; leaving the field empty keeps
+  the stored key, typing one replaces it, and clearing it is a
+  `~/.claunch.yaml` edit.
 
 The page and its three routes (`GET /api/providers`, `POST /api/providers`,
 `POST /api/providers/check`) come from the daemon process, which runs the

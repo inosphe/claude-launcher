@@ -24,6 +24,7 @@ Three rules shape it:
 
 from __future__ import annotations
 
+import copy
 import re
 import time
 from typing import Dict, List, Optional, Tuple
@@ -44,6 +45,29 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 #: Seconds a connection check waits before it reports a timeout.
 PROBE_TIMEOUT = 10.0
+
+#: The top-level provider keys the dashboard form draws. :func:`save` keeps
+#: every *other* key of a stored entry: a control that does not exist cannot be
+#: cleared, so a form saving over a provider must not delete what it never
+#: showed. This is the list, not a guess -- ``app.js`` builds its controls from
+#: the same keys, and :func:`listing` publishes it so the page can say which
+#: keys it is leaving alone.
+FORM_FIELDS: Tuple[str, ...] = (
+    "api_key",
+    "endpoints",
+    "models",
+    "context_window",
+    "auto_compact_at",
+    "harness_options",
+    "anthropic_auth_header",
+    "session_header",
+    "session_affinity",
+    "allowed_harnesses",
+    "service",
+    "harness",
+    "reasoning_effort",
+    "openai_reasoning_format",
+)
 
 
 class InstallError(providers.ProviderError):
@@ -179,21 +203,74 @@ def validate(name, entry) -> List[str]:
     return problems
 
 
+def merge_entry(previous, entry) -> Dict[str, object]:
+    """``entry`` as it should be stored, keeping what the form cannot draw.
+
+    The dashboard draws :data:`FORM_FIELDS` and nothing else. A stored entry
+    can also carry keys no control renders -- ``routing``, ``dynamic``,
+    ``env``, ``capabilities`` -- and a form that replaced the entry wholesale
+    would delete them without a word while the page reported success. A
+    control that does not exist cannot be cleared, so those keys are kept from
+    ``previous`` unless the new entry names them.
+
+    Two keys need more than that rule:
+
+    * ``harness_options`` is drawn one leaf at a time (``claude.model_tag``),
+      so it is merged a level deeper; ``claude.env`` and ``pi.settings``
+      survive a save that only touched the tag.
+    * ``api_key`` is never sent to the browser (:func:`listing` reports
+      ``api_key_set`` instead). An entry without one therefore means "leave
+      the stored key alone", not "remove it".
+
+    Removing either by hand is a ``~/.claunch.yaml`` edit.
+    """
+    new = copy.deepcopy(entry) if isinstance(entry, dict) else {}
+    old = previous if isinstance(previous, dict) else {}
+    out: Dict[str, object] = {
+        key: copy.deepcopy(value)
+        for key, value in old.items()
+        if key not in FORM_FIELDS
+    }
+    out.update(new)
+    old_options = old.get("harness_options")
+    if isinstance(old_options, dict):
+        merged = copy.deepcopy(old_options)
+        new_options = out.get("harness_options")
+        if isinstance(new_options, dict):
+            for harness, values in new_options.items():
+                if isinstance(values, dict) and isinstance(merged.get(harness), dict):
+                    merged[harness] = {**merged[harness], **copy.deepcopy(values)}
+                else:
+                    merged[harness] = copy.deepcopy(values)
+        out["harness_options"] = merged
+    if "api_key" not in new and old.get("api_key"):
+        out["api_key"] = old["api_key"]
+    return out
+
+
 def save(name, entry, *, profile: Optional[str] = None) -> dict:
     """Store ``entry`` as ``providers.<name>``; optionally pin ``profile`` to it.
 
-    One atomic write covers both: the provider entry and the profile's
-    selection land together or not at all, so a form that names a profile
-    cannot leave a selection pointing at a provider that failed to write.
+    The stored entry is merged with what is already there (:func:`merge_entry`),
+    so a key the form does not draw survives a save that did not mean to touch
+    it. One atomic write covers the provider and the profile selection
+    together: a form that names a profile cannot leave a selection pointing at
+    a provider that failed to write.
     """
-    problems = validate(name, entry)
+    doc = store.load()
+    existing = doc.get("providers")
+    previous = (
+        existing.get(name) if isinstance(existing, dict) and isinstance(name, str)
+        else None
+    )
+    merged = merge_entry(previous, entry)
+    problems = validate(name, merged)
     if problems:
         raise InstallError("; ".join(problems))
     name = check_name(name)
-    doc = store.load()
     section = doc.get("providers")
     section = dict(section) if isinstance(section, dict) else {}
-    section[name] = dict(entry)
+    section[name] = merged
     doc["providers"] = section
     if profile:
         target = _pin(doc, profile, name)
@@ -222,6 +299,19 @@ def _pin(doc: dict, profile: str, provider: str) -> Profile:
     return target
 
 
+def _public_entry(entry: dict) -> dict:
+    """A stored entry as it may be sent to the browser: no secret, no surprise.
+
+    ``api_key`` stays out of the payload -- the page shows whether one is
+    stored (``api_key_set``) and never receives its value, the way the profile
+    and LLM-settings pages already treat a stored token.
+    """
+    out = copy.deepcopy(entry) if isinstance(entry, dict) else {}
+    stored = out.pop("api_key", "")
+    out["api_key_set"] = bool(str(stored or "").strip())
+    return out
+
+
 def listing() -> dict:
     """What the Settings page reads: installed providers, presets, profiles."""
     doc = store.load()
@@ -230,7 +320,12 @@ def listing() -> dict:
         if name in RESERVED:
             continue
         rows.append(
-            {"name": name, "entry": entry, "problems": validate(name, entry)}
+            {
+                "name": name,
+                "entry": _public_entry(entry),
+                "problems": validate(name, entry),
+                "kept": sorted(set(entry) - set(FORM_FIELDS)),
+            }
         )
     profile_rows = []
     for item in profile_mod.list_all():
@@ -257,6 +352,7 @@ def listing() -> dict:
             ),
             "anthropic_auth_headers": list(routing.ANTHROPIC_AUTH_HEADERS),
             "fields": list(provider_spec.known_fields()),
+            "form_fields": list(FORM_FIELDS),
             "reserved": list(RESERVED),
         },
     }

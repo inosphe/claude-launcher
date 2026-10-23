@@ -248,6 +248,78 @@ def test_a_pin_to_a_missing_profile_is_refused_and_nothing_is_written(home):
 
 
 # --------------------------------------------------------------------------- #
+# a save over a stored entry keeps what the form does not draw
+# --------------------------------------------------------------------------- #
+def test_saving_over_a_stored_entry_keeps_the_keys_the_form_does_not_draw(home):
+    """The round trip the reviewer reproduced: the form drops keys it cannot show.
+
+    ``app.js`` draws ``provider_install.FORM_FIELDS`` and nothing else. A stored
+    entry can also carry ``routing`` (written by ``claunch routing set``),
+    ``dynamic``, ``capabilities`` or a legacy ``env``. Loading such a provider
+    into the form and saving used to delete all of them while the page reported
+    success.
+    """
+    stored = _valid(
+        routing={"order": ["CoreWeave"]},
+        dynamic=True,
+        capabilities={"playwright": True},
+    )
+    provider_install.save("demo", stored)
+    provider_install.save("demo", _valid())  # exactly what the form sends back
+    entry = store.load()["providers"]["demo"]
+    assert entry["routing"] == {"order": ["CoreWeave"]}
+    assert entry["dynamic"] is True
+    assert entry["capabilities"] == {"playwright": True}
+
+
+def test_a_form_field_that_names_a_kept_key_still_wins(home):
+    """Keeping is for keys the form cannot draw; one it can draw is the form's."""
+    provider_install.save("demo", _valid(service="custom", routing={"order": ["A"]}))
+    provider_install.save("demo", _valid(service="anthropic"))
+    entry = store.load()["providers"]["demo"]
+    assert entry["service"] == "anthropic"
+    assert entry["routing"] == {"order": ["A"]}
+
+
+def test_only_the_drawn_harness_tag_is_replaced(home):
+    """``harness_options`` is drawn one leaf at a time; the rest is not the form's."""
+    provider_install.save("demo", _valid(harness_options={
+        "claude": {"model_tag": "old-tag", "env": {"A": "1"}},
+        "pi": {"settings": {"hideThinkingBlock": True}},
+    }))
+    provider_install.save("demo", _valid(harness_options={"claude": {"model_tag": ""}}))
+    options = store.load()["providers"]["demo"]["harness_options"]
+    assert options["claude"]["model_tag"] == ""
+    assert options["claude"]["env"] == {"A": "1"}
+    assert options["pi"] == {"settings": {"hideThinkingBlock": True}}
+
+
+def test_an_omitted_api_key_keeps_the_stored_one(home):
+    """The key never reaches the browser, so an empty field means "unchanged"."""
+    provider_install.save("demo", _valid(api_key="sk-stored"))
+    provider_install.save("demo", _valid())
+    assert store.load()["providers"]["demo"]["api_key"] == "sk-stored"
+    provider_install.save("demo", _valid(api_key="sk-new"))
+    assert store.load()["providers"]["demo"]["api_key"] == "sk-new"
+
+
+def test_the_listing_never_carries_the_key(home):
+    provider_install.save("demo", _valid(api_key="sk-secret-value"))
+    body = provider_install.listing()
+    assert "sk-secret-value" not in json.dumps(body)
+    row = body["providers"][0]
+    assert "api_key" not in row["entry"]
+    assert row["entry"]["api_key_set"] is True
+
+
+def test_the_listing_names_the_keys_it_is_not_drawing(home):
+    provider_install.save("demo", _valid(routing={"order": ["A"]}, dynamic=True))
+    body = provider_install.listing()
+    assert body["providers"][0]["kept"] == ["dynamic", "routing"]
+    assert "routing" not in body["fields"]["form_fields"]
+
+
+# --------------------------------------------------------------------------- #
 # every shape this machine runs
 # --------------------------------------------------------------------------- #
 SHAPES = [
