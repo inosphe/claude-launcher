@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 
 import pytest
 
+import claude_launcher
 from claude_launcher import (
     cli,
     credentials,
@@ -417,6 +420,32 @@ def test_runner_run_advances_the_pool(home, monkeypatch):
     assert profile_keys.load(p).keys[0].use_count == 1
 
 
+def _child_env():
+    """Environment for a child process that must import *this* checkout.
+
+    An editable install usually makes that automatic, but not always: under a
+    tool install, a non-editable ``uv sync``, or a pytest launched from another
+    interpreter, ``python -c`` in the child resolves ``claude_launcher`` to
+    whatever is installed instead of the tree under test. A gate that measures
+    a different tree than the one being reviewed is worse than no gate
+    (claunch-wllke.1.1), so the path is set explicitly and the child reports
+    where it landed.
+    """
+    src_root = Path(claude_launcher.__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(src_root)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    return env, src_root
+
+
+def _assert_child_read_the_checkout(reported: str, src_root: Path) -> None:
+    where = Path(reported).resolve()
+    assert where.is_relative_to(src_root), (
+        f"the child imported {where}, not the tree under test {src_root}"
+    )
+
+
 def test_concurrent_launches_each_take_their_own_step(home):
     """One pool, several launches at once, no lost update (claunch-wllke.2).
 
@@ -425,22 +454,29 @@ def test_concurrent_launches_each_take_their_own_step(home):
     write erases the earlier one's use count — so the counts come out short of
     the number of launches. Twelve real processes against a four-key pool must
     leave twelve uses behind, three on each key.
+
+    The child also prints where it imported ``claude_launcher`` from, so a run
+    in which the children measured some other build fails here instead of
+    passing on numbers that belong to that other build (claunch-wllke.1.1).
     """
     import subprocess
 
     tokens = [f"sk-K{i}AAAA1111BBBB" for i in range(4)]
     _pooled(*tokens)
 
+    env, src_root = _child_env()
     script = (
+        "import claude_launcher as m\n"
         "from claude_launcher import profile, profile_keys\n"
         "p = profile.require('work')\n"
         "selection = profile_keys.select_for_launch(p)\n"
         "print(selection.key.id)\n"
+        "print(m.__file__)\n"
     )
     procs = [
         subprocess.Popen(
             [sys.executable, "-c", script],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
         )
         for _ in range(12)
     ]
@@ -448,13 +484,93 @@ def test_concurrent_launches_each_take_their_own_step(home):
     for proc in procs:
         out, err = proc.communicate(timeout=120)
         assert proc.returncode == 0, err
-        chosen.append(out.strip())
+        key_id, where = out.strip().splitlines()
+        _assert_child_read_the_checkout(where, src_root)
+        chosen.append(key_id)
 
     pool = profile_keys.load(profile.require("work"))
     assert len(chosen) == 12
     assert sum(key.use_count for key in pool.keys) == 12
     assert [key.use_count for key in pool.keys] == [3, 3, 3, 3]
     assert set(chosen) == {key.id for key in pool.keys}
+
+
+def test_concurrent_key_adds_keep_every_key(home):
+    """Adding keys from several processes at once loses none (claunch-wllke.1.2).
+
+    ``add`` is the same read-modify-write as a launch: load the pool, change
+    it, save the whole object. Unlocked, the last writer wins and everything
+    the others wrote is gone. Six processes add a distinct token while six
+    more launch from the same pool; afterwards every added key must still be
+    there and every launch must have taken its own step.
+    """
+    import subprocess
+
+    _pooled("sk-BASE0000AAAA")
+
+    env, src_root = _child_env()
+    launch_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "p = profile.require('work')\n"
+        "profile_keys.select_for_launch(p)\n"
+        "print(m.__file__)\n"
+    )
+    add_script = (
+        "import sys\n"
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "p = profile.require('work')\n"
+        "profile_keys.add(p, sys.argv[1], label=sys.argv[1])\n"
+        "print(m.__file__)\n"
+    )
+    added = [f"sk-ADD{i:04d}ZZZZ" for i in range(6)]
+    commands = [["-c", add_script, token] for token in added]
+    commands += [["-c", launch_script] for _ in range(6)]
+    procs = [
+        subprocess.Popen(
+            [sys.executable, *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        for args in commands
+    ]
+    for proc in procs:
+        out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, err
+        _assert_child_read_the_checkout(out.strip().splitlines()[-1], src_root)
+
+    pool = profile_keys.load(profile.require("work"))
+    assert pool is not None
+    tokens = {key.token for key in pool.keys}
+    missing = [token for token in added if token not in tokens]
+    assert not missing, f"lost {len(missing)} of {len(added)} concurrent adds: {missing}"
+    assert sum(key.use_count for key in pool.keys) == 6
+
+
+def test_a_pinned_key_is_matched_by_id_not_by_position(home):
+    """A pin names one key; a bare number is not a position (claunch-wllke.1.2).
+
+    ``_index_of`` also reads a number as a 1-based position, which is the CLI's
+    shorthand for "the second key". A pin is not shorthand — it names the key
+    the user picked — so an id that is not in the pool must read as stale
+    rather than materialising some other key behind the user's back.
+    """
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    before = credentials.stored_token(p)
+
+    assert profile_keys.materialize(p, "1") is None
+    assert profile_keys.materialize(p, "2") is None
+
+    pool = profile_keys.load(p)
+    assert [key.use_count for key in pool.keys] == [0, 0]
+    assert credentials.stored_token(p) == before
+
+    # The real id still materialises, and only that key.
+    wanted = pool.keys[1]
+    selection = profile_keys.materialize(p, wanted.id)
+    assert selection is not None
+    assert selection.key.id == wanted.id
+    assert [key.use_count for key in profile_keys.load(p).keys] == [0, 1]
 
 
 def test_a_launch_refused_before_the_spawn_does_not_advance_the_pool(home, monkeypatch):
