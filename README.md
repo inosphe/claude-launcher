@@ -137,7 +137,8 @@ claunch run work:claude                  # explicit Claude selector
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
 | `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
-| `set-token <name> [t]` | Store the profile's one launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. `--clear` deletes it. |
+| `set-token <name> [t]` | Store the profile's launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. `--clear` deletes it (and any key pool); on a pooled profile this replaces the selected key (`--key ID` for another). |
+| `keys list\|add\|remove\|strategy\|select <name>` | Register several tokens on one profile and choose one per launch (see [several keys per profile](#several-keys-per-profile)). |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name[:harness]>` | Print the profile root, or the explicit harness's namespaced home. |
@@ -464,6 +465,49 @@ claunch set-token work sk-ant-oat01-...   # or omit the value to paste via stdin
 
 The token is saved at `<profile>/.launcher-token` (`0600`) and exported as
 `CLAUDE_CODE_OAUTH_TOKEN` on `claunch run`.
+
+### Several keys per profile
+
+A profile can hold more than one token and pick one for each launch. The
+chosen key is written into `.launcher-token` before the launch, so everything
+that already reads that file — `get-token`, inheritance from a parent
+profile, borrow checks, the dashboard — keeps seeing exactly one effective
+token.
+
+```bash
+claunch keys add work sk-ant-oat01-aaa --label home    # the first add adopts
+claunch keys add work sk-ant-oat01-bbb --label office  # the current set-token value
+claunch keys list work
+claunch keys strategy work rotation                    # rotation (default)
+claunch keys select work                               # what the next launch picks
+```
+
+Strategies:
+
+| Strategy | What it picks |
+| -------- | ------------- |
+| `rotation` | Keys in file order, one per launch, wrapping at the end. The default. |
+| `usage-min` | The key whose own subscription usage is lowest. |
+| `usage-max` | The key whose own subscription usage is highest. |
+| `random` | A uniformly random key. |
+
+`usage-min`/`usage-max` read each key's own usage, so they only work where the
+launcher token *is* the account credential (a Claude provider key, a Kimi
+provider key, a Fireworks key). A harness whose usage belongs to its own login
+(`codex`, the `kimi` CLI) has nothing to compare per key: the strategy falls
+back to `rotation` for that launch and says so in `claunch keys select`. Each
+`usage-*` launch reads every key's usage, so expect one usage request per key
+(and for Claude setup-tokens, one minimal API call per key) at launch time.
+
+Storage: the pool is `<profile>/.launcher-keys.json` (`0600`); `.launcher-token`
+stays the effective token. `claunch keys add` on a profile that still has a
+single `set-token` value starts the pool with that value as its first key, so
+nothing is lost. `claunch set-token NAME --clear` removes the pool with the
+token, and `claunch set-token NAME <value>` on a pooled profile replaces the
+selected key (`--key <id>` replaces another one and leaves the effective token
+alone). A child profile that holds no token of its own rotates its nearest
+ancestor's pool — the one whose token its launch injects; a child that holds
+its own token keeps it and rotates nothing.
 
 `get-token` prints it back out on stdout — the value alone, so it pipes cleanly:
 
@@ -5487,7 +5531,8 @@ A profile directory typically holds:
 | ---- | ------ |
 | `.claude.json`      | Seeded from your global config (onboarding flags, prefs). |
 | `settings.json`     | Seeded global settings (and any migrated `mcpServers`). |
-| `.launcher-token`   | The one shared launcher token stored by `set-token` (`0600`); the selected harness declares its env projection. |
+| `.launcher-token`   | The effective launcher token (`0600`); stored by `set-token`, or selected from the key pool at each launch. The harness declares its env projection. |
+| `.launcher-keys.json` | The key pool and selection strategy, when the profile holds several tokens (`0600`; see [several keys per profile](#several-keys-per-profile)). |
 | `.credentials.json` | Written by Claude Code itself after an interactive login. |
 | `codex/`, `pi/`, `kimi/`, `agent/` | Non-Claude harness auth/config homes, created as needed. |
 

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry, pytest_basetemp, session_env
-from .. import lineage, pi_provider, profile as profile_mod, projects, providers, routing, runner
+from .. import lineage, pi_provider, profile as profile_mod, profile_keys, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import instance_manifest, mcp_ready, mesh_roles, paths, pty_backend
@@ -1096,6 +1096,14 @@ def build_command(
                 prof, sdef.borrow, entry=entry
             )
         except borrowing.BorrowError as exc:
+            raise HarnessError(str(exc)) from exc
+    # A new session is a launch, so a profile holding several keys advances
+    # its strategy here (claunch-wllke). A restore reopens the same work and
+    # keeps the key it was already using; a null-token session never uses one.
+    if prof is not None and not sdef.null_token and not restoring and borrow_prof is None:
+        try:
+            profile_keys.select_for_launch(prof)
+        except profile_keys.KeysError as exc:
             raise HarnessError(str(exc)) from exc
     if sdef.harness == CLAUDE_HARNESS:
         assert prof is not None

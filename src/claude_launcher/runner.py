@@ -24,6 +24,7 @@ from . import (
     harnesses,
     lineage,
     pi_provider,
+    profile_keys,
     provider_spec,
     providers,
     routing,
@@ -812,6 +813,14 @@ def run(
     require_compact_fits(
         profile, provider or providers.resolve_name(borrow if borrow is not None else profile)
     )
+    # This run is a launch: a profile holding several keys advances its
+    # strategy here (claunch-wllke). A borrow uses the lender's current key
+    # and a null-token run uses none, so neither consumes a rotation step.
+    if borrow is None and not null_token:
+        try:
+            profile_keys.select_for_launch(profile)
+        except profile_keys.KeysError as exc:
+            raise RunnerError(str(exc)) from exc
     if not harness.builtin:
         if borrow is not None and not harness.borrowable:
             raise RunnerError(borrowing.capability(harness)["message"])

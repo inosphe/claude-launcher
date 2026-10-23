@@ -57,19 +57,27 @@ def save_token(profile: Profile, token: str) -> None:
 
 
 def clear_token(profile: Profile) -> List[str]:
-    """Delete the profile's stored token; return the filenames removed.
+    """Delete the profile's stored token(s); return the filenames removed.
 
     The legacy ``set-key`` file goes too: left behind, the next bootstrap's
     :func:`migrate_legacy_api_key` would move it back into the token path and
-    the clear would not hold. A ``/login``-written ``.credentials.json`` is
-    Claude Code's own file and is not touched.
+    the clear would not hold. A key pool (claunch-wllke) goes with them: left
+    behind, the next launch would select a key from it and write the token
+    file straight back. A ``/login``-written ``.credentials.json`` is Claude
+    Code's own file and is not touched.
     """
+    # Local import: profile_keys reads this module's token path and saves
+    # through it, so importing it at module scope would be a cycle.
+    from . import profile_keys
+
     removed: List[str] = []
     for name in (TOKEN_FILENAME, LEGACY_API_KEY_FILENAME):
         path = profile.config_dir / name
         if path.is_file():
             path.unlink()
             removed.append(name)
+    if profile_keys.forget(profile):
+        removed.append(profile_keys.KEYS_FILENAME)
     return removed
 
 
