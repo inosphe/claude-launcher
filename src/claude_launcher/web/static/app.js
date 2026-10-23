@@ -14933,8 +14933,17 @@ const newUsageState = {
   flash: "", flashFor: "",
 };
 
-function newUsageAge(epochSeconds) {
-  const at = Number(epochSeconds) * 1000;
+/* How long ago a stamp was. Two clocks reach this and they are written
+   differently: the usage cache keeps an epoch in seconds, and profile_keys
+   writes `last_used_at` as an ISO string (`_now`). Reading the ISO one as
+   seconds made NaN and a row that ended at "used " (claunch-yx2bd review). */
+function newUsageAge(value) {
+  let at = NaN;
+  if (typeof value === "number") at = value * 1000;
+  else if (typeof value === "string" && value) {
+    const seconds = Number(value);
+    at = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value);
+  }
   if (!Number.isFinite(at) || !at) return "";
   const minutes = Math.max(0, Math.round((Date.now() - at) / 60000));
   if (minutes < 1) return "just now";

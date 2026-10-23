@@ -10,9 +10,10 @@
    - the profile's own windows are drawn from the answer, in the same
      vocabulary the usage page uses (5h/7d/…, percent, reset countdown);
    - a pool is listed one row per key, each row carrying the masked token and
-     when that key was last spent ("never used" when it never was), and the
-     row the NEXT LAUNCH takes is marked from the server's `next` — not
-     guessed here;
+     when that key was last spent ("never used" when it never was; the stamp
+     arrives as an ISO string and the reader also takes epochs, because the
+     usage cache's own stamp is one), and the row the NEXT LAUNCH takes is
+     marked from the server's `next` — not guessed here;
    - the strategy select is offered only for a pool and enabled only when
      there are two or more keys to choose between, because that is the only
      case the choice changes anything;
@@ -142,7 +143,8 @@ const build = new Function(
   slice("newUsageKeySummary") + slice("newUsageFillStrategies") +
   slice("renderNewUsage") + slice("startNewUsageRead") +
   slice("setNewKeyStrategy") +
-  "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy, state: newUsageState };",
+  "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy, newUsageAge,"
+  + " state: newUsageState };",
 );
 const usage = build(...Object.values(env));
 
@@ -173,6 +175,16 @@ function doc(over = {}) {
 }
 
 async function main() {
+  /* ---- the age reader takes both clocks the answer can carry ---- */
+  // profile_keys writes last_used_at as an ISO string; the usage cache keeps
+  // an epoch in seconds. Reading the ISO one as seconds ended a row at
+  // "used " (claunch-yx2bd review), so both shapes are checked directly.
+  check("an ISO stamp is read as a time",
+    usage.newUsageAge(new Date(Date.now() - 120000).toISOString()), "2m ago");
+  check("an epoch in seconds is still read",
+    usage.newUsageAge(Date.now() / 1000 - 120), "2m ago");
+  check("an absent stamp reads as nothing", usage.newUsageAge(null), "");
+
   /* ---- no profile: silent, and nothing asked ---- */
   selectorNow = "";
   usage.renderNewUsage();
@@ -217,7 +229,7 @@ async function main() {
       next: { key_id: "k-2", strategy: "rotation", fallback: null },
       keys: [
         { id: "k-1", label: "main", masked: "sk-A…1111", current: true,
-          next: false, last_used_at: Date.now() / 1000 - 120,
+          next: false, last_used_at: new Date(Date.now() - 120000).toISOString(),
           usage: { windows: [windowLine("five_hour", 12)], error: null } },
         { id: "k-2", label: "spare", masked: "sk-B…2222", current: false,
           next: true, last_used_at: null,

@@ -203,7 +203,8 @@ def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypa
     keys = [
         {
             "id": "k-1", "label": "main", "masked": "sk-A…1111",
-            "current": True, "use_count": 2, "last_used_at": 880.0,
+            "current": True, "use_count": 2,
+            "last_used_at": "2026-10-23T14:40:00+00:00",
         },
         {
             "id": "k-2", "label": "spare", "masked": "sk-B…2222",
@@ -257,7 +258,10 @@ def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypa
     # The row carries what the form draws beside the numbers: the masked token
     # and when the key was last spent (None: never).
     assert [row["masked"] for row in doc["keys"]] == ["sk-A…1111", "sk-B…2222"]
-    assert [row["last_used_at"] for row in doc["keys"]] == [880.0, None]
+    # profile_keys._now writes an ISO string, not an epoch: the form's age
+    # reader has to accept that shape (claunch-yx2bd review).
+    assert [row["last_used_at"] for row in doc["keys"]] == [
+        "2026-10-23T14:40:00+00:00", None]
     assert "sk-AAAA" not in json.dumps(doc)
     assert "sk-BBBB" not in json.dumps(doc)
 
