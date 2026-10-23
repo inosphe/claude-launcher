@@ -54171,6 +54171,18 @@ function threadNoticeOpen(session, tid) {
   location.hash = "#/s/" + encodeURIComponent(session);
 }
 
+/* The threads pane's fork mode (claunch-uaxp8) ends in a session the pane has
+   never seen: the quick-fork that now owns the thread. The pane cannot
+   refresh the rail itself, so it calls this. The rail is refreshed FIRST and
+   awaited -- the terminal route paints its header from `sessionsCache`, and a
+   route entered before the copy is in it paints an empty one -- then the
+   copy's terminal opens with its threads pane on that thread. */
+globalThis.claunchOpenThread = async (session, tid) => {
+  if (!session || !tid) return;
+  await refreshSessions();
+  threadNoticeOpen(session, tid);
+};
+
 function threadNoticeCard(session, r) {
   const key = `thread-${r.thread}`;
   notify(`${session} replied in “${r.title}”`, r.excerpt || "", {

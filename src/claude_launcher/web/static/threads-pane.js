@@ -87,6 +87,9 @@ globalThis.ThreadsPane = (() => {
   let notice = "";
   let wanted = null;         // {session, tid}: the thread to show at the next mount there
   let focusCompose = false;  // a thread was just opened: its composer takes the focus
+  let forkCap = null;        // {ok, why}: can a new thread be started in a fork? null = asking
+  let forkOn = false;        // the new-thread form's fork checkbox (claunch-uaxp8)
+  let forkTurn = 0;          // the latest fork-capability question (a stale answer is dropped)
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
@@ -403,6 +406,46 @@ globalThis.ThreadsPane = (() => {
     return doc;
   }
 
+  /* Whether a new thread may be started in a quick-fork of this session
+     (claunch-uaxp8). Asked once when the form opens -- the answer reads the
+     session's transcript on disk, which is not something to poll -- and the
+     checkbox is drawn from it. A failed or unreadable answer disables the
+     box with the reason instead of hiding the feature. */
+  async function loadForkCap() {
+    if (!api) return;
+    const asked = name;          // the pane may be on another session by the answer
+    const turn = ++forkTurn;
+    forkCap = null;
+    let cap;
+    try {
+      const resp = await api(`/api/threads/forkable?session=${encodeURIComponent(asked)}`);
+      const doc = await resp.json().catch(() => ({}));
+      cap = {ok: resp.ok && doc.ok === true, why: String(doc.why || "")};
+    } catch (e) {
+      cap = {ok: false, why: (e && e.message) || String(e)};
+    }
+    if (!cap.ok && !cap.why) cap.why = "이 세션은 포크할 수 없습니다.";
+    if (!host || name !== asked || turn !== forkTurn) return;
+    forkCap = cap;
+    if (!cap.ok && forkOn) forkOn = false;
+    render();
+  }
+
+  /* Leave this pane for the copy that now owns the thread (claunch-uaxp8).
+     app.js refreshes the rail and routes there with this thread open
+     (threadNoticeOpen); a page without that hook still gets the route. */
+  function openFork(session, tid) {
+    const go = globalThis.claunchOpenThread;
+    if (typeof go === "function") {
+      Promise.resolve()
+        .then(() => go(session, tid))
+        .catch(() => { if (typeof location !== "undefined" && location) location.hash = "#/s/" + encodeURIComponent(session); });
+      return;
+    }
+    notice = `새 쓰레드는 포크 세션 ${session}이(가) 맡았습니다. 그 세션 화면에서 이어갑니다.`;
+    if (typeof location !== "undefined" && location) location.hash = "#/s/" + encodeURIComponent(session);
+  }
+
   /* Upload one image to the staging area; its id names it in the post. */
   async function stage(file) {
     const resp = await api("/api/threads/images", {
@@ -595,9 +638,11 @@ globalThis.ThreadsPane = (() => {
 
   function create(title, text) {
     return once("", () => act(async () => {
+      const forking = forkOn && !composeQa && !!(forkCap && forkCap.ok);
       const body = {to: name, title};
       if (text) body.text = text;
       if (composeQa) body.qa = composeQa.id;
+      if (forking) body.fork = true;
       await stageAll("", body);
       const res = await request("/api/threads", body);
       dropAttached("");
@@ -605,6 +650,12 @@ globalThis.ThreadsPane = (() => {
       drafts.delete("\u0000title");
       composing = false;
       composeQa = null;
+      forkOn = false;
+      if (res.fork && res.fork.session) {
+        // The thread belongs to the copy now: follow it there.
+        openFork(res.fork.session, res.thread.id);
+        return;
+      }
       current = res.thread.id;
       focusCompose = true;
       notice = deliveryNotice(res);
@@ -921,13 +972,42 @@ globalThis.ThreadsPane = (() => {
     return row;
   }
 
+  /* The form's fork mode row (claunch-uaxp8): the thread is started in a
+     copy of this session's conversation, the copy owns it, and this session
+     joins as its guest. Enabled only where a quick-fork is possible -- the
+     answer comes from /api/threads/forkable (loadForkCap) -- and never for a
+     thread tied to a QA question, which belongs to this session and cannot
+     move to the copy. A disabled box says why instead of disappearing. */
+  function forkRow() {
+    const row = node("label", "th-fork");
+    const box = node("input", "th-fork-box");
+    box.type = "checkbox";
+    const qaBound = !!composeQa;
+    const why = qaBound ? "QA 질문에 연결된 쓰레드는 포크할 수 없습니다."
+                        : (forkCap && !forkCap.ok ? forkCap.why : "");
+    const can = !qaBound && !!(forkCap && forkCap.ok);
+    box.checked = can && forkOn;
+    box.disabled = !can;
+    box.addEventListener("change", () => { forkOn = box.checked; render(); });
+    row.append(box, node("span", "th-fork-label", "포크 모드 — 대화 사본을 만들어 그 세션이 이 쓰레드를 맡습니다"));
+    const hint = why || (forkCap ? "" : "확인 중…");
+    if (hint) row.append(node("span", "th-fork-why", hint));
+    return row;
+  }
+
   function renderList(side, threads, read) {
     const guestOf = (list && list.guest_threads) || [];
     const fresh = unseen(threads.concat(guestOf), read);
     side.replaceChildren();
     const add = node("button", "term-btn th-new", composing ? "취소" : "+ 새 쓰레드");
     add.type = "button";
-    add.addEventListener("click", () => { composing = !composing; composeQa = null; render(); });
+    add.addEventListener("click", () => {
+      composing = !composing;
+      composeQa = null;
+      forkOn = false;
+      if (composing) loadForkCap();
+      render();
+    });
     side.append(add);
     if (composing) {
       const form = node("div", "th-newform");
@@ -945,7 +1025,7 @@ globalThis.ThreadsPane = (() => {
         drop.addEventListener("click", () => { composeQa = null; render(); });
         about.append(drop);
       }
-      const go = node("button", "term-btn th-send", inflight.has("") ? "여는 중…" : "시작");
+      const go = node("button", "term-btn th-send", inflight.has("") ? "여는 중…" : (forkOn ? "포크하고 시작" : "시작"));
       go.type = "button";
       go.disabled = inflight.has("");
       const submit = () => {
@@ -960,7 +1040,7 @@ globalThis.ThreadsPane = (() => {
       // buttons lead it, 시작 sits at the right end.
       const foot = node("div", "th-newform-foot");
       foot.append(...pickButton(""), go);
-      form.append(title, ...(about ? [about] : []), first, strip(""), foot);
+      form.append(title, ...(about ? [about] : []), first, strip(""), forkRow(), foot);
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
@@ -1271,7 +1351,7 @@ globalThis.ThreadsPane = (() => {
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
     const sideSig = JSON.stringify([threads, (list && list.guest_threads) || [], current, composing, composeQa, [...unseen(allThreads(list), read)], inflight.has(""),
-                                    (attached.get("") || []).length]);
+                                    (attached.get("") || []).length, forkOn, forkCap]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
       renderList(side, threads, read);
@@ -1338,6 +1418,8 @@ globalThis.ThreadsPane = (() => {
     composeQa = null;
     inviting = "";
     focusCompose = false;
+    forkCap = null;
+    forkOn = false;
     inflight.clear();
     pending.clear();
     for (const key of [...attached.keys()]) dropAttached(key);
@@ -1368,6 +1450,8 @@ globalThis.ThreadsPane = (() => {
     if (!composeQa || composeQa.id !== q.id) drafts.set("\u0000title", `${q.id}: ${q.title}`);
     composing = true;
     composeQa = {id: q.id, title: q.title};
+    forkOn = false;
+    loadForkCap();   // the box is drawn disabled about a question, but shows why
     drawn.side = "";
     render();
   }

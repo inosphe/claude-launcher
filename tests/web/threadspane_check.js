@@ -30,6 +30,13 @@
                   and a blank or unchanged title post nothing, a failed
                   rename keeps the box and its text, and a poll keeps
                   what is typed (claunch-6st9p).
+     fork      -- the new-thread form asks /api/threads/forkable when it
+                  opens, its box is enabled only for a session that can be
+                  copied (a disabled one carries the reason), ticking it
+                  sends {fork: true} and renames 시작 to 포크하고 시작, and a
+                  fork answer (res.fork.session) hands the thread to app.js's
+                  claunchOpenThread instead of selecting it here
+                  (claunch-uaxp8).
      guests    -- the threads this session is a guest in are listed apart
                   under 초대된 쓰레드 with their owner; a guest's message
                   shows under its name; 게스트 초대 posts {guest} to
@@ -117,8 +124,12 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const rendered = [];   // [class of the bubble, text] for each mdInto call
   const mdInto = (n, text) => { rendered.push(text); n.textContent = text; return n; };
   const winKeys = [];    // [type, listener, capture] mounted on the window
+  const opened = [];   // [session, thread] the fork path asked app.js to open
   const ctx = vm.createContext({
     addEventListener: (type, fn, capture) => winKeys.push([type, fn, capture]),
+    // app.js's hook (app.js claunchOpenThread): refresh the rail, then route
+    // to the session with its threads pane on the thread.
+    claunchOpenThread: (session, tid) => { opened.push([session, tid]); return Promise.resolve(); },
     document, localStorage, console, JSON, Date, Map, Set, Error, Promise, mdInto,
     setInterval: (fn, ms) => { timers.push(fn); return timers.length; },
     clearInterval: (id) => { timers[id - 1] = null; },
@@ -181,6 +192,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   ]};
   const calls = [];
   let failCreate = false;
+  let forkCapDoc = {session: "s1", ok: true, why: ""};   // GET /api/threads/forkable
+  let forkReply = null;                                  // POST /api/threads in fork mode
   let postHold = null;
   let postUnknown = [];      // names the thread does not have (claunch-p9wes.1.1)
   let postGuestHold = null;  // a guest that cannot take the message yet
@@ -192,7 +205,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     if (failPost && p === "/api/threads/th-1/messages") return {ok: false, status: 500, json: async () => ({error: "lost"})};
     if (failRename && p.endsWith("/title")) return {ok: false, status: 400, json: async () => ({error: "title too long"})};
     let doc = {};
-    if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
+    if (p.startsWith("/api/threads/forkable?session=")) doc = forkCapDoc;
+    else if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
       const after = Number(p.split("after=")[1]);
       doc = {thread: threads[0], messages: messages["th-1"].filter((m) => m.seq > after)};
@@ -207,7 +221,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
         doc.guests_hold = postGuestHold;
       }
     }
-    else if (p === "/api/threads") doc = {thread: {id: "th-9"}, delivered: false};
+    else if (p === "/api/threads") doc = forkReply || {thread: {id: "th-9"}, delivered: false};
     else if (p.endsWith("/close")) doc = {thread: threads[0]};
     else if (/^\/api\/threads\/th-\d\/title$/.test(p)) {
       const t = threads.find((x) => p === `/api/threads/${x.id}/title`);
@@ -544,6 +558,51 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(calls.filter((c) => c[1] === "/api/threads").length, 1, "one thread for a double click");
   assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s1", title: "Deploy", text: "when?"}]);
   assert.match(host.querySelector(".th-head").text(), /전달하지 못했습니다/);
+
+  // fork mode (claunch-uaxp8): the form asks whether a copy can be made, the
+  // box is enabled only when it can, the post carries fork: true, and the pane
+  // leaves for the copy that now owns the thread.
+  calls.length = 0;
+  host.querySelector(".th-new").fire("click");
+  await settle();
+  assert.ok(calls.some((c) => c[1] === "/api/threads/forkable?session=s1"),
+            "the form asks before offering a fork");
+  let fbox = host.querySelector(".th-newform .th-fork-box");
+  assert.ok(fbox, "the form carries a fork box");
+  assert.equal(fbox.type, "checkbox");
+  assert.equal(fbox.disabled, false, "a forkable session can tick it");
+  assert.match(css, /\.th-fork \{/, "the row is styled");
+  fbox.checked = true;
+  fbox.fire("change");
+  await settle();
+  fbox = host.querySelector(".th-newform .th-fork-box");
+  assert.equal(fbox.checked, true, "the box stays ticked through the redraw");
+  assert.equal(host.querySelector(".th-newform .th-send").textContent, "포크하고 시작");
+  forkReply = {thread: {id: "th-f"}, delivered: true,
+               fork: {session: "s1-qf1", origin: "s1", thread: "th-f"}};
+  const ftitle = host.querySelector(".th-newform .th-title-input");
+  ftitle.value = "Side topic";
+  ftitle.fire("input");
+  host.querySelector(".th-newform .th-send").fire("click");
+  await settle();
+  assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(),
+                   ["POST", "/api/threads", {to: "s1", title: "Side topic", fork: true}]);
+  assert.deepEqual(opened, [["s1-qf1", "th-f"]], "the pane follows the copy that owns the thread");
+  assert.ok(!host.querySelector(".th-newform"), "the form closes on success");
+  forkReply = null;
+
+  // a session that cannot be copied says why, and the box is off
+  forkCapDoc = {session: "s1", ok: false, why: "대화가 없어 복사할 수 없습니다"};
+  host.querySelector(".th-new").fire("click");
+  await settle();
+  fbox = host.querySelector(".th-newform .th-fork-box");
+  assert.equal(fbox.disabled, true, "an un-forkable session cannot tick it");
+  assert.match(host.querySelector(".th-newform").text(), /대화가 없어 복사할 수 없습니다/,
+               "the reason is on the form");
+  assert.equal(host.querySelector(".th-newform .th-send").textContent, "시작", "the plain label stays");
+  forkCapDoc = {session: "s1", ok: true, why: ""};
+  host.querySelector(".th-new").fire("click");   // close the form
+  await settle();
 
   assert.ok(!host.querySelector(".th-pane").classList.contains("th-solo"), "a shown thread keeps the two halves");
 
