@@ -20,10 +20,13 @@ launch), never inside ``credentials.stored_token``. Reads on display paths
 (borrowing checks, the briefing, ``usage.fetch``) must not advance the
 rotation: a dashboard refresh is not a launch.
 
-Inheritance: a profile with no pool of its own uses the nearest ancestor's
-pool (the same chain ``lineage`` uses for the token itself), and the selection
-is written into *that* profile's token file -- which is where the inherited
-read already looks.
+Inheritance: a launch selects from the pool of the profile whose token it
+actually reads -- its own pool, or an ancestor's pool while the profile itself
+holds no token (the same chain ``lineage.injectable_token`` walks), and the
+selection is written into *that* profile's token file. A profile that holds
+its own token never rotates an ancestor's pool: the chosen key would not reach
+its launch, and the ancestor's token file would change for a run that does not
+use it.
 """
 
 from __future__ import annotations
@@ -368,9 +371,24 @@ def _selected_index(pool: Pool) -> int:
 
 
 def owner(profile: Profile) -> Optional[Profile]:
-    """The nearest profile in the chain that owns a key pool, if any."""
+    """The profile whose token this launch reads, if it owns a key pool.
+
+    The chain walk matches ``lineage.injectable_token``: the profile's own
+    stored token, its own login credentials, else the nearest ancestor that
+    has either. A pool on any other profile is inert for this launch -- it
+    would pick a key the launch never uses and would rewrite a token file
+    that belongs to a different profile (claunch-wllke).
+    """
+    source = _token_source(profile)
+    if source is None or load(source) is None:
+        return None
+    return source
+
+
+def _token_source(profile: Profile) -> Optional[Profile]:
+    """The profile whose token ``lineage`` would inject for this launch."""
     for item in [profile, *_ancestors(profile)]:
-        if load(item) is not None:
+        if credentials.own_token(item) is not None:
             return item
     return None
 

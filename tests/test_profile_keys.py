@@ -247,6 +247,43 @@ def test_a_child_profile_rotates_the_parent_pool(home):
     assert credentials.stored_token(base) == "sk-CCCC2222DDDD"
 
 
+def test_a_child_with_its_own_token_does_not_rotate_the_parent_pool(home):
+    # `claunch set-token child <value>` leaves the child with a token and no
+    # pool; its launch injects the child's token, so the parent's pool must
+    # stay untouched (claunch-wllke).
+    base = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    credentials.save_token(child, "sk-CHILDOWNTOKEN")
+    lineage.set_parent(child, "base")
+    before = profile_keys.load(base)
+
+    assert profile_keys.select_for_launch(child) is None
+
+    after = profile_keys.load(base)
+    assert [k.token for k in after.keys] == [k.token for k in before.keys]
+    assert [k.use_count for k in after.keys] == [k.use_count for k in before.keys]
+    assert after.cursor == before.cursor
+    assert credentials.stored_token(base) == "sk-CCCC2222DDDD"
+    assert lineage.injectable_token(child) == "sk-CHILDOWNTOKEN"
+
+
+def test_a_child_with_its_own_pool_rotates_its_own(home):
+    base = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    profile_keys.add(child, "sk-CHILD1111")
+    profile_keys.add(child, "sk-CHILD2222")
+    lineage.set_parent(child, "base")
+    base_before = profile_keys.load(base)
+
+    selection = profile_keys.select_for_launch(child)
+
+    assert selection.owner.name == "child"
+    assert credentials.stored_token(child) == selection.key.token
+    assert [
+        (k.token, k.use_count) for k in profile_keys.load(base).keys
+    ] == [(k.token, k.use_count) for k in base_before.keys]
+
+
 # --- removal and CLI --------------------------------------------------------
 
 

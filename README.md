@@ -504,8 +504,10 @@ stays the effective token. `claunch keys add` on a profile that still has a
 single `set-token` value starts the pool with that value as its first key, so
 nothing is lost. `claunch set-token NAME --clear` removes the pool with the
 token, and `claunch set-token NAME <value>` on a pooled profile replaces the
-selected key. A child profile with no pool of its own rotates its nearest
-ancestor's pool.
+selected key (`--key <id>` replaces another one and leaves the effective token
+alone). A child profile that holds no token of its own rotates its nearest
+ancestor's pool — the one whose token its launch injects; a child that holds
+its own token keeps it and rotates nothing.
 
 `get-token` prints it back out on stdout — the value alone, so it pipes cleanly:
 
