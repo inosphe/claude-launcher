@@ -48,6 +48,29 @@ the interpreter range the daemon runs on. An existing
 `.venv` made with another version keeps working under `uv run --no-sync` (uv
 prints a warning); `uv sync --extra test` rebuilds it on 3.14.
 
+### Free-threaded 3.14t (experimental, claunch-d18v8)
+
+The code runs on `3.14t`: the daemon, CLI and the targeted test modules pass
+there, and background threads no longer delay the event loop (8 threads
+ranking and scanning an index: loop lag p99 132 ms on 3.14, 0.6 ms on 3.14t,
+one measurement). The blocker is `zvec`: PyPI has no `cp314t` wheel and no
+sdist for 0.7 or 0.8, so `uv sync` cannot resolve it for `3.14t`. It builds
+from source in about 9 minutes (cmake, a C++ toolchain, network for the
+submodules):
+
+```bash
+uv venv --python 3.14t .venv-ft
+uv pip install -p .venv-ft/bin/python "zvec @ git+https://github.com/alibaba/zvec" pyyaml "aiohttp>=3.10,<4" pyte truststore
+uv pip install -p .venv-ft/bin/python --no-deps -e .
+PYTHON_GIL=0 .venv-ft/bin/python -m claude_launcher.daemon
+```
+
+`zvec`'s extension does not declare that it runs without the GIL, so importing
+it turns the GIL back on for the whole process unless `PYTHON_GIL=0` is set.
+The daemon logs a warning at start when that happened. Without `PYTHON_GIL=0`
+a `3.14t` daemon behaves like the regular build. The supported install above
+stays `--python 3.14`.
+
 Optional: `uv tool install --python 3.14 ".[p2p]"` adds aiortc (about 88 MB). With it, a web
 page reached through the relay tunnel moves its control socket onto a WebRTC
 DataChannel straight to the daemon host when one can be negotiated, and stays
