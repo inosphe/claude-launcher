@@ -8220,7 +8220,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   padding: 0 6px; border-radius: 4px; font-size: 10px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .05em; background: #262b33; color: #9da5b0;
 }
-.cf2-kind.question, .cf2-kind.approval, .cf2-kind.choice { background: #2b2410; color: #e3b341; }
+.cf2-kind.question, .cf2-kind.approval, .cf2-kind.choice, .cf2-kind.decision { background: #2b2410; color: #e3b341; }
 .cf2-kind.task { background: #13233d; color: #79c0ff; }
 .cf2-kind.limit { background: #3a1d22; color: #ff7b72; }
 .cf2-kind.move, .cf2-kind.report { background: #2b2410; color: #e3b341; }
