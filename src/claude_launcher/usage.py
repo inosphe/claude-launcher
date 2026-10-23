@@ -1096,6 +1096,34 @@ def unmeasurable_reason(kind: str) -> Optional[str]:
     return f"the {kind!r} reader has no per-key usage path"
 
 
+def report_for_token(profile: Profile, token: str) -> Optional[UsageReport]:
+    """Usage this one key's token reads, or ``None`` when the key cannot be asked.
+
+    The per-key counterpart of :func:`fetch`: the report is the same shape, but
+    the credential is the token passed here instead of the profile's effective
+    token. That only means anything for the readers in :data:`KEYED_READERS`,
+    where the launcher token *is* the account's credential. The login-scoped
+    readers in :data:`LOGIN_SCOPED_READERS` answer ``None``: their usage belongs
+    to the login, not to a key, and rotating keys cannot spread it.
+    """
+    token = str(token or "").strip()
+    if not token:
+        return None
+    kind = reader(profile)
+    if kind == "anthropic":
+        return _fetch_claude(profile, token=token)
+    if kind == "kimi-provider":
+        context = _kimi_provider_context(profile, token=token)
+        if context is None:
+            return None
+        return _fetch_kimi_provider(profile, *context)
+    if kind == "fireworks-billing":
+        return _fetch_fireworks(profile, token)
+    if kind == "opencode-go":
+        return _fetch_opencode_go(profile, token)
+    return None
+
+
 def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
     """Peak utilization this one key shows (0-100), or ``None`` if unmeasurable.
 
@@ -1105,23 +1133,13 @@ def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
     authenticates with. The login-scoped readers in
     :data:`LOGIN_SCOPED_READERS` answer ``None``: their usage belongs to the
     login, not to a key, and rotating keys cannot spread it.
+
+    One peak per key is all a selection needs, so this keeps the number and
+    drops the windows; :func:`report_for_token` is the same read for callers
+    that display them.
     """
-    token = str(token or "").strip()
-    if not token:
-        return None
-    kind = reader(profile)
-    if kind == "anthropic":
-        report = _fetch_claude(profile, token=token)
-    elif kind == "kimi-provider":
-        context = _kimi_provider_context(profile, token=token)
-        if context is None:
-            return None
-        report = _fetch_kimi_provider(profile, *context)
-    elif kind == "fireworks-billing":
-        report = _fetch_fireworks(profile, token)
-    elif kind == "opencode-go":
-        report = _fetch_opencode_go(profile, token)
-    else:
+    report = report_for_token(profile, token)
+    if report is None:
         return None
     values = [
         window.utilization

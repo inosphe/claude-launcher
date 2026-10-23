@@ -873,6 +873,8 @@ def build_app(
     # The key pool a session's launch reads (claunch-wllke.1): the modal's
     # list. Masks only — see h_profile_keys.
     r.add_get("/api/profiles/{profile}/keys", h_profile_keys)
+    # The pool's strategy, written from the create form (claunch-yx2bd).
+    r.add_post("/api/profiles/{profile}/keys/strategy", h_profile_key_strategy)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
@@ -889,6 +891,10 @@ def build_app(
     r.add_get("/api/usage", h_usage)
     r.add_get("/api/usage/targets", h_usage_targets)
     r.add_get("/api/usage/history", h_usage_history)
+    # What the create form's Runs-as section shows for the selected profile
+    # (claunch-yx2bd): its usage, its key pool with each key's own usage, and
+    # the key the next launch would take.
+    r.add_get("/api/usage/keys", h_usage_keys)
     r.add_get("/api/metering", h_metering)
     r.add_get("/api/metering/live", h_metering_live)
     r.add_get("/api/borrow-options", h_borrow_options)
@@ -3390,6 +3396,129 @@ async def h_usage_targets(request: web.Request) -> web.Response:
     return json_response(
         {"targets": rows, "period_s": profile_usage.PERIOD_SECONDS, "history": history}
     )
+
+
+async def h_usage_keys(request: web.Request) -> web.Response:
+    """What the selected profile's credentials report, for the create form.
+
+    One read for the Runs-as section (claunch-yx2bd): the profile's own
+    subscription usage, the key pool a launch of it selects from with each
+    key's own usage where the reader can tell keys apart, the key the next
+    launch would take, and the strategies that can be set.
+
+    ``profile`` is a selector as the form writes it. ``refresh=auto`` (the
+    form's page-entry read) answers from the cache and reads only accounts
+    whose period has run out; any other value forces the provider read — the
+    same convention as ``/api/usage``. Tokens stay masked: the daemon reads
+    each key itself and this answer never carries a plaintext one.
+    """
+    selector = str(request.query.get("profile") or "").strip()
+    if not selector:
+        return json_error(400, "profile is required")
+    manual = request.query.get("refresh") != "auto"
+    try:
+        prof = profile_mod.require_selector(selector)
+    except profile_mod.ProfileError as exc:
+        return json_error(400, str(exc))
+    try:
+        payload = await asyncio.to_thread(_credential_preview, prof, selector, manual)
+    except (profile_keys.KeysError, credentials.CredentialsError) as exc:
+        # Same rule as h_profile_keys: an unreadable pool is an error, not an
+        # empty one.
+        return json_error(409, str(exc))
+    return json_response(payload)
+
+
+def _credential_preview(prof, selector: str, manual: bool) -> dict:
+    """The create form's Runs-as facts about ``prof`` (blocking; worker thread).
+
+    Reads at most one account per key that is not already cached. Three
+    decisions worth naming:
+
+    - the profile's own reading answers for the key currently in its token
+      file, so that key is skipped in the per-key pass rather than read twice;
+    - a usage strategy's pick is not previewed (``peek`` would spend one
+      account read per key to name a key the launch re-decides anyway), and a
+      random pick is not a fact to display at all;
+    - a failed key read is a row with an error, never a failed request: a
+      form that cannot read one key still shows the others.
+    """
+    view = profile_keys.view(prof)
+    keys = list(view.get("keys") or [])
+    strategy = view.get("strategy")
+    current = next((key for key in keys if key.get("current")), None)
+
+    next_key = None
+    next_unknown = None
+    if view.get("pooled"):
+        if strategy in profile_keys.MEASURING_STRATEGIES:
+            next_unknown = (
+                f"{strategy} reads every key's usage at launch and takes the "
+                f"{'lowest' if strategy == 'usage-min' else 'highest'}"
+            )
+        elif strategy in profile_keys.UNPREDICTABLE_STRATEGIES and len(keys) > 1:
+            next_unknown = f"{strategy} picks at launch"
+        else:
+            selection = profile_keys.peek(prof)
+            if selection is not None:
+                next_key = {
+                    "key_id": selection.key.id,
+                    "strategy": selection.strategy,
+                    "fallback": selection.fallback,
+                }
+
+    body = None
+    usage_error = None
+    try:
+        body, cached, updated_at = profile_usage.fetch(selector, manual=manual)
+        body = {
+            "source": body.get("source"),
+            "windows": body.get("windows") or [],
+            "cached": cached,
+            "updated_at": updated_at,
+            "next_at": updated_at + profile_usage.PERIOD_SECONDS,
+        }
+    except (usage.UsageError, credentials.CredentialsError) as exc:
+        usage_error = str(exc)
+
+    # The key in the token file is what the profile's own read just asked
+    # about — unless that read failed, in which case it is measured with the
+    # rest rather than left blank.
+    skip = [current["id"]] if (current and body is not None) else []
+    try:
+        readings = profile_usage.key_usage(selector, manual=manual, skip=skip)
+    except (usage.UsageError, credentials.CredentialsError) as exc:
+        readings = {"keys": {}, "unmeasurable": str(exc)}
+
+    rows = []
+    for key in keys:
+        row = dict(key)
+        row["next"] = bool(next_key and next_key["key_id"] == key["id"])
+        reading = readings.get("keys", {}).get(key["id"])
+        if reading is None and key.get("current") and body is not None:
+            reading = {
+                "key_id": key["id"],
+                "windows": body["windows"],
+                "source": body["source"],
+                "updated_at": body["updated_at"],
+                "error": None,
+            }
+        row["usage"] = reading
+        rows.append(row)
+
+    return {
+        "profile": prof.name,
+        "owner": view.get("owner"),
+        "pooled": bool(view.get("pooled")),
+        "strategy": strategy,
+        "strategies": list(profile_keys.STRATEGIES),
+        "next": next_key,
+        "next_unknown": next_unknown,
+        "unmeasurable": readings.get("unmeasurable"),
+        "keys": rows,
+        "usage": body,
+        "usage_error": usage_error,
+    }
 
 
 async def h_usage_history(request: web.Request) -> web.Response:
@@ -13043,6 +13172,49 @@ async def h_profile_keys(request: web.Request) -> web.Response:
         # empty one: "no keys" and "I cannot read the keys" lead an operator
         # to opposite next steps.
         return json_error(409, str(exc))
+
+
+async def h_profile_key_strategy(request: web.Request) -> web.Response:
+    """Set the strategy of the pool a launch of this profile reads.
+
+    Body: ``{"strategy": "usage-min"}`` — one of ``profile_keys.STRATEGIES``.
+    The write lands on the pool's own profile, not necessarily the one named:
+    a profile holding no token of its own matches its ancestor's pool, and a
+    strategy written to the child's (nonexistent) pool would silently do
+    nothing (the same split ``claunch keys strategy`` has, claunch-wllke.5.1).
+
+    This is a profile setting, not a property of one launch: it decides the
+    next key for every session of that profile, and the daemon's launch path
+    reads it there. The create form says so where it offers the row.
+    """
+    try:
+        prof = profile_mod.require_selector(request.match_info["profile"])
+    except profile_mod.ProfileError as exc:
+        return json_error(400, str(exc))
+    body = await _json_body(request)
+    strategy = str(body.get("strategy") or "").strip().lower()
+    try:
+        source = profile_keys.owner(prof)
+    except (profile_keys.KeysError, credentials.CredentialsError) as exc:
+        return json_error(409, str(exc))
+    if source is None:
+        return json_error(
+            409,
+            f"profile {prof.name!r} has no key pool; a strategy applies once "
+            f"it holds keys ('claunch keys add {prof.name}')",
+        )
+    try:
+        pool = await asyncio.to_thread(profile_keys.set_strategy, source, strategy)
+    except profile_keys.KeysError as exc:
+        return json_error(400, str(exc))
+    return json_response(
+        {
+            "profile": prof.name,
+            "owner": source.name,
+            "strategy": pool.strategy,
+            "keys": len(pool.keys),
+        }
+    )
 
 
 async def h_session_key(request: web.Request) -> web.Response:
