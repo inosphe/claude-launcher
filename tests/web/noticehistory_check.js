@@ -47,7 +47,15 @@
    Clear and the 100-row cap keep marked rows; Clear is only in the All view
    and the cap gives way rather than drop a marked row (claunch-knuet.1).
    Not read (claunch-v995u) shows only the unread rows; a row read there
-   leaves the view, a filter stored as "marked" still opens on Kept. */
+   leaves the view, a filter stored as "marked" still opens on Kept.
+
+   Marking a waiting request read (claunch-qqy2i): Mark read on a row of the
+   panel's "Waiting on you" list takes the request off that heading's count
+   and off the bell, and lists it under "Read, still open" with its buttons
+   and countdown. Nothing is posted — the request stays pending on the daemon
+   — and Mark unread counts it again. The flag survives a reload and reaches
+   this browser's other tabs; a request that leaves the pending set is
+   forgotten, so a later one the daemon gives the same id is unread again. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -641,6 +649,72 @@ function gotoRec(rec) {
     check("the settled id no longer silences a card",
           !/restart:r1/.test(w.storage.getItem("claunch.noticeHidden") || "[]"),
           w.storage.getItem("claunch.noticeHidden"));
+  }
+
+  /* --- a waiting request can be marked read (claunch-qqy2i) ------------- */
+  {
+    const storage = memoryStorage();
+    const w = build({ storage });
+    w.gate.restart = restartRec();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshRestartGate();
+    await w.api.refreshGotoGate();
+    w.api.noticePanelToggle(true);
+    const body = w.nodes["notice-panel-body"];
+    check("two requests wait and the panel counts both",
+          /Waiting on you \(2\)/.test(w.panel()) && w.badge() === "2", [w.panel(), w.badge()]);
+    check("each waiting row carries Mark read", !!w.press(body, "Mark read"), w.panel());
+
+    w.press(body, "Mark read").click();
+    check("Mark read takes the request off the waiting count",
+          /Waiting on you \(1\)/.test(w.panel()), w.panel());
+    check("and lists it under Read, still open",
+          /Read, still open \(1\)/.test(w.panel()) && w.panelRows().length === 2, w.panel());
+    check("with its countdown and its buttons still there",
+          /auto-approves in 5:00/.test(w.panel()) && !!w.press(body, "Approve"), w.panel());
+    check("the request itself is still open on the daemon and nothing was posted",
+          w.gate.restart.status === "pending" &&
+            w.apiCalls.every((p) => !/restart-request\/(approve|reject|extend)/.test(p)),
+          w.apiCalls);
+    check("the bell stops counting it", w.badge() === "1", w.badge());
+    check("and this browser remembers which request was read",
+          /restart:r1/.test(storage.getItem("claunch.noticeRead") || "[]"),
+          storage.getItem("claunch.noticeRead"));
+
+    w.press(body, "Mark unread").click();
+    check("Mark unread counts it again",
+          /Waiting on you \(2\)/.test(w.panel()) && !/Read, still open/.test(w.panel()),
+          w.panel());
+    check("and the bell counts it again", w.badge() === "2", w.badge());
+
+    w.press(body, "Mark read").click();
+    const again = build({ storage });
+    again.gate.restart = restartRec();
+    again.gate.goto = [gotoRec()];
+    await again.api.refreshRestartGate();
+    await again.api.refreshGotoGate();
+    again.api.noticePanelToggle(true);
+    check("a reload keeps the read request read",
+          /Waiting on you \(1\)/.test(again.panel()) &&
+            /Read, still open \(1\)/.test(again.panel()), again.panel());
+    check("and out of the bell", again.badge() === "1", again.badge());
+
+    again.press(again.nodes["notice-panel-body"], "Mark read").click();
+    check("with every request read the list says so",
+          /Waiting on you \(0\)/.test(again.panel()) &&
+            /every waiting request has been read/.test(again.panel()) &&
+            /Read, still open \(2\)/.test(again.panel()), again.panel());
+    check("and the bell counts none", again.badge() === "", again.badge());
+
+    again.gate.restart = null;                 // answered while nobody looked
+    await again.api.refreshRestartGate();
+    check("a request that left the pending set is forgotten by the read set",
+          !/restart:r1/.test(storage.getItem("claunch.noticeRead") || "[]"),
+          storage.getItem("claunch.noticeRead"));
+    again.gate.restart = restartRec();         // the daemon gives the id again
+    await again.api.refreshRestartGate();
+    check("so a later request with the same id waits again",
+          /Waiting on you \(1\)/.test(again.panel()), again.panel());
   }
 
   /* --- a reload keeps the history and the hidden card ------------------- */
@@ -1273,6 +1347,25 @@ function gotoRec(rec) {
     await hub.flush();
     check("Show card in one tab puts the card back in the other",
           !b.api.gateIsHidden("goto", "g1") && b.strip().length === 1, b.said());
+
+    // A waiting request marked read in one tab is read in the other
+    // (claunch-qqy2i).
+    [a, b] = tabs();
+    for (const w of [a, b]) { w.gate.goto = [gotoRec()]; await w.api.refreshGotoGate(); }
+    check("the request waits in both tabs", a.badge() === "1" && b.badge() === "1",
+          [a.badge(), b.badge()]);
+    a.api.noticePanelToggle(true);
+    a.press(a.nodes["notice-panel-body"], "Mark read").click();
+    await hub.flush();
+    check("Mark read in one tab takes the request off the other tab's count",
+          b.badge() === "", b.badge());
+    b.api.noticePanelToggle(true);
+    check("and lists it as read there",
+          /Waiting on you \(0\)/.test(b.panel()) && /Read, still open \(1\)/.test(b.panel()),
+          b.panel());
+    check("the other tab does not echo it back",
+          hub.sent.filter((m) => m.t === "gate-read").length === 1,
+          hub.sent.filter((m) => m.t === "gate-read"));
 
     // A gate answered in one tab: the other polls the gates now.
     [a, b] = tabs();

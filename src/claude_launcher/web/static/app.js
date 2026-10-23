@@ -53311,9 +53311,18 @@ function gateSessionLink(name, onOpen) {
    daemon and its deadline keeps running — the restart gate still approves
    itself at its timeout — which is why the bell keeps counting it.
 
-   The bell counts the waiting requests plus the unread history rows; a row
-   is read once its card or its row is clicked, or marked read in the panel
-   (claunch-x76l8). Opening the panel no longer reads everything.
+   A waiting request can also be marked read from its row in the panel
+   (claunch-qqy2i), and that is read in the same sense as a history row: it
+   leaves the "Waiting on you" list and the bell's count, and the panel
+   lists it under "Read, still open" with its buttons and countdown, so
+   marking it unread brings it back. The request itself does not move — it
+   is still pending on the daemon until someone answers it or its deadline
+   passes.
+
+   The bell counts the waiting requests that were not marked read plus the
+   unread history rows; a row is read once its card or its row is clicked,
+   or marked read in the panel (claunch-x76l8). Opening the panel no longer
+   reads everything.
 
    A row can also be marked (★, claunch-knuet), apart from read: the History
    head's All / Kept / Not read filter shows every row, only the marked ones
@@ -53321,13 +53330,15 @@ function gateSessionLink(name, onOpen) {
    and a marked row outlives the 100-row cap and Clear.
 
    Kept in this browser's localStorage (claunch-l978l): the history with each
-   row's read and marked flags, the hidden request ids and the filter. When the panel was last opened
+   row's read and marked flags, the hidden request ids, the waiting requests
+   marked read and the filter. When the panel was last opened
    (noticeSeen) is only read, to mark rows saved before read marks existed.
    A browser without
    storage still works; it only forgets on reload. Pending requests are never
    taken from storage — every poll reads them from the daemon. */
 const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
 const NOTICE_HIDDEN_KEY = "claunch.noticeHidden";
+const NOTICE_READ_KEY = "claunch.noticeRead";
 const NOTICE_SEEN_KEY = "claunch.noticeSeen";
 const NOTICE_FILTER_KEY = "claunch.noticeFilter";
 const NOTICE_HISTORY_MAX = 100;
@@ -53389,6 +53400,16 @@ const noticeHistory = (() => {
 const gateHiddenIds = new Set(
   (() => {
     const saved = noticeLoad(NOTICE_HIDDEN_KEY, []);
+    return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
+  })()
+);
+/* "<type>:<request id>" of waiting requests marked read in the panel
+   (claunch-qqy2i), in the same form as the hidden ids. Kept per browser,
+   like the hidden set: what a request waits on lives on the daemon, what
+   this reader has already seen lives here. */
+const gateReadIds = new Set(
+  (() => {
+    const saved = noticeLoad(NOTICE_READ_KEY, []);
     return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
   })()
 );
@@ -53604,8 +53625,9 @@ async function noticeSyncTick() {
    and rows and does not pass it on (the daemon hears it from this tab).
 
    Told: a card put away (×, a click, the panel opened, the threads pane
-   shown), rows read or unread, a gate card hidden or shown again, and a gate
-   answered (the other tabs re-poll the gates instead of waiting their turn).
+   shown), rows read or unread, a gate card hidden or shown again, a waiting
+   request marked read or unread, and a gate answered (the other tabs re-poll
+   the gates instead of waiting their turn).
    Each tab keeps its own history rows under its own ids, so a row is found
    by its sync id, and a row without one by its title and text within
    NOTICE_TAB_MATCH_MS of when it was written here. A browser without
@@ -53689,6 +53711,10 @@ function noticeTabsApply(msg) {
       }
     } else if (msg.t === "gate-unhide" && msg.type) {
       if (gateIsHidden(msg.type, msg.rid)) gateUnhide(msg.type, String(msg.rid));
+    } else if (msg.t === "gate-read" && msg.type) {
+      if (gateIsRead(msg.type, msg.rid) !== !!msg.read) {
+        gateMarkRead(msg.type, String(msg.rid), !!msg.read);
+      }
     } else if (msg.t === "gates") {
       for (const type of Object.keys(gatePending)) noticeGateRefresh(type);
     }
@@ -53746,15 +53772,17 @@ function gateHistorySync(type, pending, all) {
     const rec = byId.get(entry.gate.rid);
     gateHistorySettle(type, entry.gate.rid, rec && rec.status !== "pending" ? rec.status : null);
   }
-  let pruned = false;
-  for (const key of [...gateHiddenIds]) {
-    const [kind, ...rest] = key.split(":");
-    if (kind === type && !live.has(rest.join(":"))) {
-      gateHiddenIds.delete(key);
-      pruned = true;
+  // Hidden and read ids are forgotten with the request they name, so a
+  // request the daemon reuses the id of does not come back hidden or read.
+  for (const [ids, key] of [[gateHiddenIds, NOTICE_HIDDEN_KEY],
+                            [gateReadIds, NOTICE_READ_KEY]]) {
+    const before = ids.size;
+    for (const id of [...ids]) {
+      const [kind, ...rest] = id.split(":");
+      if (kind === type && !live.has(rest.join(":"))) ids.delete(id);
     }
+    if (ids.size !== before) noticeSave(key, [...ids]);
   }
-  if (pruned) noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   noticeBellPaint();
   noticePanelPaint();
 }
@@ -53787,6 +53815,27 @@ function gateUnhide(type, rid) {
     noticeHistorySave();
   }
   noticeGateRefresh(type);
+}
+
+/* A waiting request read in the panel (claunch-qqy2i). It leaves the
+   "Waiting on you" list and the bell's count; the request stays open on the
+   daemon with its deadline, and the panel keeps its row under "Read, still
+   open". Nothing is posted: the daemon is not told the request was read,
+   and the other browsers keep their own reading of it (the gate cards are
+   outside the daemon's notice sync, claunch-mfzlv). */
+function gateIsRead(type, rid) {
+  return gateReadIds.has(`${type}:${rid}`);
+}
+
+function gateMarkRead(type, rid, read) {
+  const key = `${type}:${rid}`;
+  if (gateReadIds.has(key) === !!read) return;
+  if (read) gateReadIds.add(key);
+  else gateReadIds.delete(key);
+  noticeTabsPost({ t: "gate-read", type, rid: String(rid), read: !!read });
+  noticeSave(NOTICE_READ_KEY, [...gateReadIds]);
+  noticeBellPaint();
+  noticePanelPaint();
 }
 
 /* The press on a gate card that answers nothing: the card goes, the request
@@ -53822,11 +53871,25 @@ function gatePendingCount() {
     gatePending.spawn.length + gatePending.ask.length + gatePending.nudge.length;
 }
 
+/* The waiting requests not yet marked read: what the panel's "Waiting on
+   you" heading and the bell count (claunch-qqy2i). A read one is still open
+   and still listed, under "Read, still open". */
+function gateWaitingCount() {
+  let n = 0;
+  for (const [type, recs] of Object.entries(gatePending)) {
+    for (const rec of recs) if (!gateIsRead(type, String(rec.id))) n += 1;
+  }
+  return n;
+}
+
 /* The rail's bell (and its phone twin): the number is the requests waiting
-   on a person, hidden or not; with none waiting, a dot says the history has
-   something newer than the last time the panel was opened. */
+   on a person that were not marked read, hidden or not; with none waiting,
+   a dot says the history has something newer than the last time the panel
+   was opened. The requests marked read are named in the tooltip instead of
+   counted — they are still open, their deadlines still run. */
 function noticeBellPaint() {
-  const waiting = gatePendingCount();
+  const waiting = gateWaitingCount();
+  const read = gatePendingCount() - waiting;
   const unread = noticeHistory.filter(noticeUnread).length;
   const hidden = [...gateHiddenIds].length > 0;
   const total = waiting + unread;
@@ -53843,6 +53906,7 @@ function noticeBellPaint() {
       parts.push(`${waiting} request(s) waiting on you` +
         (hidden ? " — some cards are hidden, their deadlines still run" : ""));
     }
+    if (read) parts.push(`${read} read, still open`);
     if (unread) parts.push(`${unread} unread`);
     parts.push("notification history");
     bell.title = parts.join(" · ");
@@ -53927,10 +53991,13 @@ function noticePanelButton(label, cls, title, onClick) {
 
 /* One waiting request in the panel: what the card says, with its buttons.
    The decisions post to the same endpoints the card does; a hidden card gets
-   a Show card press that puts it back in the corner. */
+   a Show card press that puts it back in the corner, and every row gets a
+   Mark read / Mark unread press (claunch-qqy2i) — a read row is dimmed and
+   listed under "Read, still open", its buttons unchanged. */
 function noticePanelGateRow(type, rec) {
-  const row = el("div", "notice-row pending");
   const rid = String(rec.id);
+  const read = gateIsRead(type, rid);
+  const row = el("div", "notice-row pending" + (read ? " read" : ""));
   const hidden = gateIsHidden(type, rid);
   const head = el("div", "notice-row-head");
   const actions = el("div", "gate-actions");
@@ -54150,6 +54217,13 @@ function noticePanelGateRow(type, rec) {
       () => gateUnhide(type, rid)
     ));
   }
+  head.appendChild(noticePanelButton(
+    read ? "Mark unread" : "Mark read", "notice-mark",
+    read ? "count it in the waiting list and the bell again"
+         : "take it off the waiting list and the bell; the request stays " +
+           "open with its deadline",
+    () => gateMarkRead(type, rid, !read)
+  ));
   row.appendChild(actions);
   return row;
 }
@@ -54226,15 +54300,28 @@ function noticePanelPaint() {
   const body = $("notice-panel-body");
   if (!body) return;
   body.innerHTML = "";
+  // Read waiting requests are listed too, apart from the ones not yet seen:
+  // their rows keep the buttons and the countdown, and Mark unread puts them
+  // back under the count (claunch-qqy2i).
   const waiting = [];
   for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask", "nudge"]) {
     for (const rec of gatePending[type]) waiting.push([type, rec]);
   }
-  body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
+  const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
+  const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
+  body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
   if (!waiting.length) {
     body.appendChild(el("p", "wf-note", "no request is waiting on a person"));
+  } else if (!unread.length) {
+    body.appendChild(el("p", "wf-note", "every waiting request has been read"));
   }
-  for (const [type, rec] of waiting) body.appendChild(noticePanelGateRow(type, rec));
+  for (const [type, rec] of unread) body.appendChild(noticePanelGateRow(type, rec));
+  if (read.length) {
+    body.appendChild(el(
+      "h3", "notice-panel-section", `Read, still open (${read.length})`
+    ));
+    for (const [type, rec] of read) body.appendChild(noticePanelGateRow(type, rec));
+  }
 
   const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
   const markedCount = past.filter((e) => e.marked).length;
