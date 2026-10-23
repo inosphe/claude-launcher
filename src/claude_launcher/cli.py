@@ -1399,6 +1399,7 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
         "kimi-managed-usage": "  (via Kimi Code usage API)",
         "kimi-web-server": "  (via Kimi Code local server)",
         "fireworks-billing": "  (via Fireworks billing API)",
+        "opencode-go": "  (via OpenCode Go usage API)",
     }.get(report.source, "")
     print(f"usage for profile {name!r}{suffix}")
     active = [w for w in report.windows if w.utilization > 0 or w.resets_at]

@@ -435,6 +435,36 @@ def test_opencode_go_reply_without_windows_is_an_error(home, monkeypatch):
         usage.fetch(usage.resolve_target(p))
 
 
+def test_opencode_go_without_a_key_names_set_token(home, monkeypatch):
+    p = _opencode_go_profile()
+    credentials.clear_token(p)
+    monkeypatch.setattr(usage.urllib.request, "urlopen", lambda req, timeout: pytest.fail("no request"))
+    with pytest.raises(credentials.CredentialsError, match="run 'claunch set-token oc' first"):
+        usage.fetch(usage.resolve_target(p))
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_opencode_go_rejected_key_names_set_token(home, monkeypatch, code):
+    p = _opencode_go_profile()
+
+    def fake_urlopen(req, timeout):
+        raise usage.urllib.error.HTTPError(req.full_url, code, "denied", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(usage.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(usage.UsageError, match=rf"rejected the API key \({code}\); run 'claunch set-token oc' with a current key"):
+        usage.fetch(usage.resolve_target(p))
+
+
+def test_cli_names_the_opencode_go_source(home, monkeypatch, capsys):
+    _opencode_go_profile()
+    monkeypatch.setattr(
+        usage.urllib.request, "urlopen",
+        lambda req, timeout: _FakeResponse(json.dumps(_GO_USAGE).encode()),
+    )
+    assert cli.main(["usage", "oc"]) == 0
+    assert "(via OpenCode Go usage API)" in capsys.readouterr().out
+
+
 def test_opencode_endpoint_other_than_go_has_no_reader(home):
     p = _opencode_go_profile(base="https://opencode.ai/zen")
     with pytest.raises(usage.UsageError, match="Anthropic service provider"):
