@@ -836,6 +836,111 @@ def test_concurrent_key_adds_keep_every_key(home):
     assert sum(key.use_count for key in pool.keys) == 6
 
 
+def _run_children(scripts, env, src_root):
+    """Run one child per ``[script, *args]`` list; assert each read this tree."""
+    import subprocess
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        for args in scripts
+    ]
+    for proc in procs:
+        out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, err
+        _assert_child_read_the_checkout(out.strip().splitlines()[-1], src_root)
+
+
+def test_concurrent_removes_each_take_their_key_out(home):
+    """Every remover's write survives the others' (claunch-wllke.1.2.2).
+
+    ``remove`` is the same read-modify-write as ``add``: each process loads
+    the pool, drops one key, saves the whole object. Unlocked, the last writer
+    wins and the keys the others removed come back -- or, on the way out, a
+    key the last writer never saw stays behind. Four processes removing four
+    distinct keys must leave no pool at all.
+    """
+    _pooled(*[f"sk-R{i}AAAA1111BBBB" for i in range(4)])
+    ids = [key.id for key in profile_keys.load(profile.require("work")).keys]
+    script = (
+        "import sys\n"
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.remove(profile.require('work'), sys.argv[1])\n"
+        "print(m.__file__)\n"
+    )
+
+    env, src_root = _child_env()
+    _run_children([["-c", script, key_id] for key_id in ids], env, src_root)
+
+    assert profile_keys.load(profile.require("work")) is None
+    assert credentials.stored_token(profile.require("work")) is None
+
+
+def test_concurrent_replaces_keep_every_replacement(home):
+    """Four replacements, four survivors -- no key left on its old token.
+
+    ``replace`` loads the pool, rewrites one key's token and saves the whole
+    object, so an unlocked run lets the later save erase an earlier key's new
+    token and resurrect an old one (claunch-wllke.1.2.2).
+    """
+    _pooled(*[f"sk-O{i}AAAA1111BBBB" for i in range(4)])
+    keys = profile_keys.load(profile.require("work")).keys
+    replacements = {key.id: f"sk-N{i}BBBB2222CCCC" for i, key in enumerate(keys)}
+    script = (
+        "import sys\n"
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.replace(profile.require('work'), sys.argv[2], ident=sys.argv[1])\n"
+        "print(m.__file__)\n"
+    )
+
+    env, src_root = _child_env()
+    _run_children(
+        [["-c", script, key_id, token] for key_id, token in replacements.items()],
+        env,
+        src_root,
+    )
+
+    pool = profile_keys.load(profile.require("work"))
+    assert {key.token for key in pool.keys} == set(replacements.values())
+    assert [key.id for key in pool.keys] == list(replacements)
+
+
+def test_a_strategy_change_during_rotation_is_not_lost(home):
+    """Setting the strategy while launches rotate keeps both writes.
+
+    ``select_for_launch`` saves the pool it read, strategy and all. A launch
+    that read before the change and saved after it puts ``rotation`` back, so
+    the user's ``keys strategy`` silently reverts (claunch-wllke.1.2.2). With
+    the lock, every launch sees whichever strategy is in force and the use
+    counts still add up to the number of launches.
+    """
+    _pooled(*[f"sk-S{i}AAAA1111BBBB" for i in range(3)])
+    strategy_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.set_strategy(profile.require('work'), 'random')\n"
+        "print(m.__file__)\n"
+    )
+    launch_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.select_for_launch(profile.require('work'))\n"
+        "print(m.__file__)\n"
+    )
+
+    env, src_root = _child_env()
+    scripts = [["-c", strategy_script]] + [["-c", launch_script] for _ in range(8)]
+    _run_children(scripts, env, src_root)
+
+    pool = profile_keys.load(profile.require("work"))
+    assert pool.strategy == "random"
+    assert sum(key.use_count for key in pool.keys) == 8
+
+
 def test_a_pinned_key_is_matched_by_id_not_by_position(home):
     """A pin names one key; a bare number is not a position (claunch-wllke.1.2).
 
