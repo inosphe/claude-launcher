@@ -1079,13 +1079,26 @@ def _waits_on_driver(payload: dict) -> bool:
     return cflow2_clock._waits_on_driver(payload)
 
 
+def _driver_delegations(payload: dict) -> list:
+    """The sub-agent delegations the driver itself has to run (claunch-7u8as).
+
+    The rule lives in the cflow2 clock, which is also what
+    :func:`_waits_on_driver` above defers to: one predicate, so a run this
+    clock calls due is a run that clock re-nudges about."""
+    from . import cflow2_clock
+
+    return [d for d in payload.get("delegations") or [] if cflow2_clock._driver_runs(d)]
+
+
 def v2_position(payload: dict) -> tuple:
     """A v2 run's position key: what it waits on the driver for. Instance
     ids carry their visit (``a@3``), so a loop's next lap is a new position."""
     tasks = sorted(str(t.get("instance")) for t in payload.get("tasks") or [])
     choices = sorted(str(c.get("instance")) for c in payload.get("choices") or []
                      if c.get("chooser") == cflow2_ir.CHOOSER_AGENT and not c.get("held"))
-    return ("v2", payload.get("run"), payload.get("status"), tuple(tasks), tuple(choices))
+    delegations = sorted(str(d.get("id")) for d in _driver_delegations(payload))
+    return ("v2", payload.get("run"), payload.get("status"), tuple(tasks), tuple(choices),
+            tuple(delegations))
 
 
 def v2_reminder_block(payload: dict, interval: float,
@@ -1102,6 +1115,8 @@ def v2_reminder_block(payload: dict, interval: float,
                if c.get("chooser") == cflow2_ir.CHOOSER_AGENT and not c.get("held")]
     at = [str(t.get("label") or t.get("instance")) for t in tasks]
     at += [str(c.get("label") or c.get("instance")) for c in choices]
+    at += [str(d.get("label") or d.get("node") or d.get("id"))
+           for d in _driver_delegations(payload)]
     head = ("# claunch cflow2: reminder -- machine-generated, not typed by the user "
             f"(every {interval:.0f}s while the run does not move)")
     lines = ["---", head,
