@@ -1490,10 +1490,12 @@ is drawn only when both are on screen.
 
 Under the throughput block and under the usage block the overlay draws a token
 timeline (claunch-0af4e): stacked areas of cached input, write and fresh input
-per time bucket, from the conversation's first request to now and at most the
-last twelve hours, with a dashed mark at every compaction. Hovering a chart
-grows that chart and shows the whole conversation, with an axis, a legend and
-the figures of the bucket under the pointer; moving the pointer off it returns
+as running totals from the start of the window (the stack only rises; its top
+is the window's whole sum, claunch-0af4e.1), from the conversation's first
+request to now and at most the last twelve hours, with a dashed mark at every
+compaction. Hovering a chart grows that chart and shows the whole conversation,
+with an axis (the window's total), a legend and the running totals at the
+point under the pointer plus that bucket's own tokens; moving the pointer off it returns
 it to the small view (claunch-a27zc). The two charts draw the same
 session series; `GET /api/sessions/{name}/token-series` serves it.
 

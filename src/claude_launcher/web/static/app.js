@@ -8388,6 +8388,19 @@ function termSeriesTotal(p) {
   return p.cache_read + p.cache_write + p.input;
 }
 
+/* The points as running totals from the first bucket of the window: each
+   part keeps its own sum, so the stack's top is the whole window's tokens at
+   that moment and never falls (claunch-0af4e.1). */
+function termSeriesCumulative(pts) {
+  let cache_read = 0, cache_write = 0, input = 0;
+  return pts.map((p) => {
+    cache_read += p.cache_read;
+    cache_write += p.cache_write;
+    input += p.input;
+    return { t: p.t, cache_read, cache_write, input };
+  });
+}
+
 function termSeriesChart(data, zoom) {
   const NS = "http://www.w3.org/2000/svg";
   const w = zoom ? 320 : 120, h = zoom ? 96 : 26;
@@ -8402,12 +8415,13 @@ function termSeriesChart(data, zoom) {
   svg.setAttribute("height", String(h));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   const pts = data.points;
-  const peak = Math.max(1, ...pts.map(termSeriesTotal));
+  const cum = termSeriesCumulative(pts);
+  const peak = Math.max(1, ...cum.map(termSeriesTotal));
   const xAt = (i) => (pts.length > 1 ? (i / (pts.length - 1)) * w : 0);
   const yAt = (v) => h - 1 - (v / peak) * (h - 3);
   const below = pts.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
-    const above = pts.map((p, i) => below[i] + p[key]);
+    const above = cum.map((p, i) => below[i] + p[key]);
     const top = above.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`);
     const base = below.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).reverse();
     const area = document.createElementNS(NS, "polygon");
@@ -8437,12 +8451,13 @@ function termSeriesChart(data, zoom) {
   box.appendChild(svg);
   const ago = (at) => `${fmtAge(Math.max(0, data.until - at))} ago`;
   const compactions = (data.compactions || []).length;
-  box.title = `${usageShort(pts.reduce((n, p) => n + termSeriesTotal(p), 0))} tokens sent over ` +
+  const total = cum.length ? termSeriesTotal(cum[cum.length - 1]) : 0;
+  box.title = `${usageShort(total)} tokens sent over ` +
     `${fmtAge(span)}` + (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
     (zoom ? "" : "\nhover for the whole conversation");
   if (zoom) {
     const axis = el("div", "term-series-axis");
-    axis.append(el("span", "", `${ago(data.start)}`), el("span", "", `peak ${usageShort(peak)}/${fmtAge(data.bucket_s)}`),
+    axis.append(el("span", "", `${ago(data.start)}`), el("span", "", `total ${usageShort(peak)}`),
       el("span", "", "now"));
     const legend = el("div", "term-series-legend");
     for (const [, label, colour] of TERM_SERIES_LAYERS.slice().reverse()) {
@@ -8456,8 +8471,9 @@ function termSeriesChart(data, zoom) {
       const rect = svg.getBoundingClientRect();
       const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
       const p = pts[Math.max(0, Math.min(pts.length - 1, Math.round(frac * (pts.length - 1))))];
-      readout.textContent = `${ago(p.t)}: in ${usageShort(p.input)} · cached ${usageShort(p.cache_read)}` +
-        ` · write ${usageShort(p.cache_write)}`;
+      const c = cum[pts.indexOf(p)];
+      readout.textContent = `${ago(p.t)}: in ${usageShort(c.input)} · cached ${usageShort(c.cache_read)}` +
+        ` · write ${usageShort(c.cache_write)} (+${usageShort(termSeriesTotal(p))} in ${fmtAge(data.bucket_s)})`;
     });
     svg.addEventListener("mouseleave", () => { readout.textContent = " "; });
     box.append(axis, legend, readout);
