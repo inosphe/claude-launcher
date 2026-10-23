@@ -329,3 +329,83 @@ def test_the_page_is_wired_into_the_dashboard():
     assert 'if (parts[0] === "artifacts") return { page: "artifacts" };' in app_js
     assert 'globalThis.ArtifactsPage.open()' in app_js
     assert 'globalThis.ArtifactsPage?.stop()' in app_js
+
+
+def test_the_job_counts_the_paths_the_walk_will_take(place, monkeypatch):
+    """The progress bar reads the walk, not the cached sizes (claunch-bwt74).
+
+    A forced walk leaves every old number in place until that path is
+    re-walked, so "rows with bytes" would read as done before the walk starts.
+    """
+    first = entry(place.root / "s1w", size=3)
+    second = entry(place.root / "s2w", size=4)
+    seen = []
+    original = inventory._measure_one
+
+    def watched(path):
+        seen.append(inventory.job())
+        return original(path)
+
+    monkeypatch.setattr(inventory, "_measure_one", watched)
+    assert inventory.measure([str(first), str(second)]) == 2
+
+    assert [row["total"] for row in seen] == [2, 2]
+    assert [row["done"] for row in seen] == [0, 1]
+    assert seen[0]["started"] and seen[0]["finished"] is None
+    final = inventory.job()
+    assert (final["total"], final["done"]) == (2, 2)
+    assert final["finished"]
+
+
+def test_a_cache_hit_is_not_part_of_the_bar(place):
+    # Skipping a path that already has a size is not progress the reader can
+    # watch; counting it would start the bar at 100%.
+    tree = entry(place.root / "s1w", size=5)
+    assert inventory.measure([str(tree)]) == 1
+    assert inventory.measure([str(tree)]) == 0
+    assert inventory.job()["total"] == 0
+
+
+def test_the_listing_carries_the_job_and_the_page_reads_it(place):
+    tree = entry(place.root / "s1w", size=8)
+
+    async def scenario():
+        app = web.Application()
+        app["manager"] = place.manager
+        artifact_cleanup_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/api/artifacts/measure", json={})
+            job = app["artifact_usage"]["task"]
+            if job is not None:
+                await job
+            document = await (await client.get("/api/artifacts")).json()
+            assert document["job"]["total"] >= 1
+            assert document["job"]["finished"]
+            assert str(tree)
+
+    asyncio.run(scenario())
+
+
+def test_the_page_scrolls_and_never_refreshes_itself():
+    """Four reader reports from claunch-bwt74, held at the source.
+
+    The page had no scroll container, re-rendered itself on open and while a
+    walk ran, and had one "empty" checkbox where the reader asked for a
+    killed/archived pair. The progress bar is drawn from the measure job.
+    [the CSS is checked here because the page has no other contract test.]
+    """
+    web_dir = Path(__file__).resolve().parent.parent / "src" / "claude_launcher" / "web" / "static"
+    css = (web_dir / "style.css").read_text(encoding="utf-8")
+    js = (web_dir / "artifacts-page.js").read_text(encoding="utf-8")
+    # 1. the page owns its scrollbar, like #wf-view and #worktrees-view
+    assert "#artifacts-view { flex: 1; overflow-y: auto;" in css
+    # 2. nothing walks or polls on its own: no automatic measure, no 1.5s poll
+    assert "requestMeasure({})" not in js
+    assert "schedulePoll(1500)" not in js
+    # 3. two separate category checkboxes, defaulting to showing everything
+    assert "killed 제외" in js and "archived 제외" in js
+    assert "excludeKilled = false, excludeArchived = false" in js
+    # 4. a progress bar drawn from the measure job
+    assert "ar-progress" in js and ".ar-progress-fill" in css
+    source = Path(inventory.__file__).read_text(encoding="utf-8")
+    assert '"job": job()' in source

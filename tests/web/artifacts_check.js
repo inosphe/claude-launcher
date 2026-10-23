@@ -70,6 +70,40 @@ assert.deepStrictEqual(Array.from(page.visibleSessions({ sessions: empties }, ''
   ['has-entries', 'has-items', 'has-receipt', 'has-schedule']);
 assert.strictEqual(page.visibleSessions({ sessions: empties }, '', true).length, 5);
 
+// Each category has its own switch (the reader asked for two, not one), and
+// both are off by default so the page opens on the list it always showed.
+const kinds = [
+  { name: 'live-one', live: true, category: 'running',
+    items: [{ path: '/t/a', kind: 'sweep' }] },
+  { name: 'dead-one', live: false, category: 'killed',
+    items: [{ path: '/t/b', kind: 'sweep' }] },
+  { name: 'old-one', live: false, category: 'archived',
+    items: [{ path: '/t/c', kind: 'sweep' }] },
+];
+const all = ['live-one', 'dead-one', 'old-one'];
+const names = (options) => Array.from(
+  page.visibleSessions({ sessions: kinds }, '', false, options), s => s.name);
+assert.deepStrictEqual(names({}), all);
+assert.deepStrictEqual(names({ excludeKilled: true }), ['live-one', 'old-one']);
+assert.deepStrictEqual(names({ excludeArchived: true }), ['live-one', 'dead-one']);
+assert.deepStrictEqual(names({ excludeKilled: true, excludeArchived: true }), ['live-one']);
+assert.strictEqual(page.hiddenByCategory({ sessions: kinds }, {}), 0);
+assert.strictEqual(page.hiddenByCategory({ sessions: kinds },
+  { excludeKilled: true, excludeArchived: true }), 2);
+
+// The bar reads the walk's own accounting: cached sizes cannot answer it,
+// because a forced walk leaves the old number in place until it re-walks.
+// The vm context has its own Object.prototype, so each field is compared.
+const bars = (job) => {
+  const state = page.progress(job === undefined ? {} : { job });
+  return [state.total, state.done, state.started, state.finished];
+};
+assert.deepStrictEqual(bars({ total: 4, done: 1, started: 'x' }), [4, 1, true, false]);
+// A done count past the total (a stale job the page kept) reads as full.
+assert.deepStrictEqual(bars({ total: 0, done: 9, started: 'x' }), [0, 0, true, false]);
+assert.deepStrictEqual(bars(undefined), [0, 0, false, false]);
+assert.deepStrictEqual(bars({ total: 2, done: 2, finished: 'y' }), [2, 2, false, true]);
+
 const data = {
   measurable: ['/t/scratch', '/t/s1w', '/t/orphan'],
   sessions: [{

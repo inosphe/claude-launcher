@@ -44,6 +44,13 @@ _running: set = set()
 _running_lock = threading.Lock()
 _save_lock = threading.Lock()
 
+#: The last walk a measure request started: how many paths it set out to walk
+#: and how many have answered. The page draws its progress bar from this
+#: instead of guessing from cached sizes, which a forced walk leaves in place
+#: until each path is re-walked. ``started``/``finished`` are ISO stamps.
+_job: Dict[str, object] = {"total": 0, "done": 0, "started": None, "finished": None}
+_job_lock = threading.Lock()
+
 
 def usage_path() -> Path:
     return paths.daemon_dir() / USAGE_FILE
@@ -97,6 +104,17 @@ def running() -> List[str]:
         return sorted(_running)
 
 
+def job() -> dict:
+    """The walk in progress (or the last one): ``total``, ``done``, stamps."""
+    with _job_lock:
+        return dict(_job)
+
+
+def _job_set(**fields) -> None:
+    with _job_lock:
+        _job.update(fields)
+
+
 def _stamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -132,9 +150,9 @@ def measure(targets: Iterable[str], force: bool = False) -> int:
     the page already polls for progress. A row that already has a size is
     skipped unless ``force``, so a poll that asks again costs nothing.
     """
-    done = 0
     seen = set()
     cached = load()
+    todo: List[str] = []
     for raw in targets:
         path = str(raw or "")
         if not path or path in seen:
@@ -142,6 +160,12 @@ def measure(targets: Iterable[str], force: bool = False) -> int:
         seen.add(path)
         if not force and "bytes" in (cached.get(path) or {}):
             continue
+        todo.append(path)
+    # The bar counts the paths this call will walk, decided before the first
+    # one starts: a skipped cache hit is not progress the reader can watch.
+    _job_set(total=len(todo), done=0, started=_stamp(), finished=None)
+    done = 0
+    for path in todo:
         with _running_lock:
             _running.add(path)
         try:
@@ -151,6 +175,8 @@ def measure(targets: Iterable[str], force: bool = False) -> int:
                 _running.discard(path)
         save_row(path, row)
         done += 1
+        _job_set(done=done)
+    _job_set(finished=_stamp())
     return done
 
 
@@ -449,6 +475,7 @@ def inventory(manager) -> dict:
                              for row in each["items"] if row["area"] == "basetemp"]
                           + orphans),
         "running": sorted(active),
+        "job": job(),
         "measurable": measurable_paths(doc_sessions, orphans),
         "usage_file": str(usage_path()),
     }
