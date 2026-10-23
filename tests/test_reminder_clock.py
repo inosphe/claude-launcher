@@ -1172,6 +1172,53 @@ def test_role_source_reminds_a_session_with_no_cflow_run(proj):
     assert "## Cflow" not in block
 
 
+class _StillScreenSession(_FakeSession):
+    """Busy, with a screen that has drawn nothing new for a long time.
+
+    This is the shape the rollback in claunch-pumne.1 is about: a turn
+    waiting on a long command, a long reasoning block, a streaming reply
+    that rewrites its own rows. The session is working, so nothing about
+    the screen's stillness may suppress a reminder it is due.
+    """
+
+    def __init__(self, name: str, cwd: str, still: float = 3600.0) -> None:
+        super().__init__(name, cwd)
+        self.still = still
+
+    def screen_idle_for(self):
+        return self.still
+
+    def idle_since(self):
+        return self.still
+
+
+def test_a_still_screen_does_not_hold_a_due_reminder(proj):
+    """claunch-pumne.1: the screen-stillness hold is gone.
+
+    Raising the reminder on "the screen has not moved for N seconds" reads
+    ordinary work as a parked turn -- 15 quiet seconds happen inside any
+    long command -- so it was rolled back. The session here is busy and has
+    drawn nothing for an hour; both the delivery and the header state must
+    behave exactly as they do for a session whose screen is moving.
+    """
+    sess = _StillScreenSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    cfg = {"role_reminder": True, "role_reminder_interval": 600.0}
+
+    asyncio.run(service.tick(1000.0))       # first sight arms the role source
+    asyncio.run(service.tick(1601.0))
+    assert len(sess.delivered) == 1
+
+    # The header never says the session is stuck: the `stalled` state the
+    # rollback removed must not come back under another name either. (The
+    # state is "stopped" here only because this test never starts the
+    # service's task loop; what matters is that stillness is not a state.)
+    state = service.status("w1", now=1601.0, cfg=cfg)["role"]["state"]
+    assert state not in ("stalled", "held")
+
+
 def test_role_source_skips_repeats_when_session_has_not_moved(proj):
     sess = _ActivitySession("w1", str(proj))
     mgr = _KinManager({"w1": sess})
