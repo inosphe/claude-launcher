@@ -21,6 +21,22 @@ from claude_launcher import (
 )
 
 
+def _login_credentials(p, token="login-only-token"):
+    """Write the ``/login`` ``.credentials.json`` a profile can authenticate by."""
+    (p.config_dir / credentials.CREDENTIALS_FILENAME).write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": token,
+                    "expiresAt": 9999999999999,
+                    "scopes": ["user:profile"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _pooled(*tokens, name="work", strategy=None):
     p = profile.create(name)
     for token in tokens:
@@ -657,6 +673,106 @@ def test_keys_strategy_still_says_so_when_no_pool_is_in_reach(home, capsys):
     assert cli.main(["keys", "strategy", "solo"]) == 0
 
     assert "has no key pool" in capsys.readouterr().out
+
+
+def test_keys_strategy_names_the_pool_a_set_would_create(home, capsys):
+    # The display half asks view(), which reports only a pool that exists; the
+    # set half lands on strategy_owner, which adopts a lone token into one. On
+    # a chain whose only credential is a single token the two forms disagreed
+    # about the same profile -- the display denied a pool the set then created
+    # (claunch-wllke.5.1.1.1). The display now names that destination, and the
+    # set is checked to land where it said.
+    base = profile.create("base")
+    credentials.save_token(base, "sk-AAAA1111BBBB")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "strategy", "child"]) == 0
+
+    said = capsys.readouterr().out
+    assert "has no key pool yet" in said
+    assert "profile 'base'" in said
+
+    assert cli.main(["keys", "strategy", "child", "usage-min"]) == 0
+    capsys.readouterr()
+
+    assert profile_keys.load(base).strategy == "usage-min"
+    assert not profile_keys.path(child).exists()
+    # What the display promised is where the set landed: one pool, one owner.
+    assert profile_keys.view(child)["owner"] == "base"
+    assert cli.main(["keys", "strategy", "child"]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "usage-min"
+
+
+def test_keys_strategy_says_the_pool_would_be_created_here(home, capsys):
+    # The same sentence for the nearer case: the lone token is the profile's
+    # own, so the pool a set creates is its own and no ancestor is named
+    # (claunch-wllke.5.1.1.1).
+    solo = profile.create("solo")
+    credentials.save_token(solo, "sk-AAAA1111BBBB")
+
+    assert cli.main(["keys", "strategy", "solo"]) == 0
+
+    said = capsys.readouterr().out
+    assert "has no key pool yet" in said
+    assert "into a pool here" in said
+
+    assert cli.main(["keys", "strategy", "solo", "random"]) == 0
+
+    pool = profile_keys.load(solo)
+    assert pool.strategy == "random"
+    assert len(pool.keys) == 1
+
+
+def test_keys_strategy_does_not_promise_a_pool_a_login_only_profile_cannot_start(
+    home, capsys
+):
+    # `strategy_owner` counts a /login `.credentials.json` as a token source,
+    # but `adopt_single_token` starts a pool from the launcher token file only.
+    # The display promised "into a pool here" for a profile the very next
+    # command refused -- the first fix created the same disagreement on a
+    # different shape of profile (claunch-wllke.5.1.1.1, caught in review).
+    solo = profile.create("solo")
+    _login_credentials(solo)
+
+    assert cli.main(["keys", "strategy", "solo"]) == 0
+
+    said = capsys.readouterr().out
+    assert "into a pool here" not in said
+    assert "would refuse" in said
+    assert "'claunch keys add solo'" in said
+
+    with pytest.raises(profile_keys.KeysError) as exc:
+        profile_keys.set_strategy(profile.require("solo"), "usage-min")
+
+    # Same sentence on both sides, which is the point: one string, one advice.
+    assert "'claunch keys add solo'" in str(exc.value)
+    assert not profile_keys.path(solo).exists()
+
+
+def test_keys_strategy_names_the_ancestor_whose_login_cannot_start_a_pool(
+    home, capsys
+):
+    # The inherited shape of the same case: the child's launches read the
+    # ancestor's login token, so `strategy_owner` names that ancestor, and the
+    # set refuses there with the same advice (claunch-wllke.5.1.1.1).
+    base = profile.create("base")
+    _login_credentials(base)
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "strategy", "child"]) == 0
+
+    said = capsys.readouterr().out
+    assert "selects from" not in said
+    assert "would refuse" in said
+    assert "'claunch keys add base'" in said
+
+    with pytest.raises(profile_keys.KeysError) as exc:
+        profile_keys.set_strategy(profile.require("child"), "usage-min")
+
+    assert "'claunch keys add base'" in str(exc.value)
+    assert not profile_keys.path(base).exists()
 
 
 def test_setting_a_childs_strategy_writes_the_pool_its_launches_read(home):

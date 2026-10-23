@@ -114,7 +114,41 @@ def _cmd_strategy(args: argparse.Namespace) -> int:
         except profile_keys.KeysError as exc:
             raise SystemExit(f"claunch: {exc}")
         if not data["pooled"]:
-            print(f"profile {p.name!r} has no key pool; strategy applies once it holds keys")
+            # `view()` reports the pool a launch can select from, which needs a
+            # pool file to exist; the set path lands on `strategy_owner`, which
+            # also accepts a lone token and adopts it into a pool. Saying only
+            # "no key pool" left the two forms of this command disagreeing
+            # about the same profile: the display denied a pool the set would
+            # then create (claunch-wllke.5.1.1.1). Name that destination here
+            # instead, so the answer does not depend on which form was typed.
+            target = profile_keys.strategy_owner(p)
+            if target is None:
+                print(
+                    f"profile {p.name!r} has no key pool and no token; "
+                    "strategy applies once it holds keys"
+                )
+            elif not profile_keys.can_adopt_single_token(target):
+                # The set would land there and then refuse: `strategy_owner`
+                # counts a /login `.credentials.json`, `adopt_single_token`
+                # starts a pool from the launcher token file alone. Printing
+                # the set's own advice here keeps the two forms from
+                # disagreeing on a shape the earlier wording got right
+                # (claunch-wllke.5.1.1.1).
+                print(
+                    f"profile {p.name!r} has no key pool yet, and setting a "
+                    f"strategy would refuse — {profile_keys.stored_key_advice(target)}"
+                )
+            elif target.name == p.name:
+                print(
+                    f"profile {p.name!r} has no key pool yet; setting a strategy "
+                    "adopts its single token into a pool here"
+                )
+            else:
+                print(
+                    f"profile {p.name!r} has no key pool yet; setting a strategy "
+                    f"adopts the single token of profile {target.name!r} into a "
+                    f"pool there, which every launch of {p.name!r} selects from"
+                )
             return 0
         print(data["strategy"])
         owner = data.get("owner")
