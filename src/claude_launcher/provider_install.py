@@ -222,7 +222,11 @@ def merge_entry(previous, entry) -> Dict[str, object]:
       ``api_key_set`` instead). An entry without one therefore means "leave
       the stored key alone", not "remove it".
 
-    Removing either by hand is a ``~/.claunch.yaml`` edit.
+    The pre-schema spellings of the credential, ``api-key`` and ``env``, need
+    no case of their own: neither is a :data:`FORM_FIELDS` member, so the rule
+    above already keeps them, and neither is sent for the form to post back.
+
+    Removing any of these by hand is a ``~/.claunch.yaml`` edit.
     """
     new = copy.deepcopy(entry) if isinstance(entry, dict) else {}
     old = previous if isinstance(previous, dict) else {}
@@ -299,25 +303,58 @@ def _pin(doc: dict, profile: str, provider: str) -> Profile:
     return target
 
 
+#: Top-level spellings a stored credential can take. ``api_key`` is the schema
+#: field the form draws; ``api-key`` is the pre-schema spelling an unmigrated
+#: entry still carries (:data:`provider_spec.LEGACY_PROVIDER_FIELDS`). Both name
+#: the same secret -- :func:`provider_spec.from_entry` reads one as the other --
+#: so both are treated as one.
+CREDENTIAL_FIELDS: Tuple[str, ...] = ("api_key", "api-key")
+
+#: The pre-schema ``env`` block. ``claunch migrate-config`` retires it, but a
+#: config that has not been migrated still carries one, and its
+#: ``ANTHROPIC_AUTH_TOKEN`` is the credential under Claude's own name
+#: (:func:`provider_spec.from_legacy_env` reads it back into ``api_key``).
+LEGACY_ENV_FIELD = "env"
+
+
+def _stored_credential(entry) -> bool:
+    """Whether the stored entry holds a credential, under any spelling above."""
+    if not isinstance(entry, dict):
+        return False
+    if any(str(entry.get(key) or "").strip() for key in CREDENTIAL_FIELDS):
+        return True
+    legacy = entry.get(LEGACY_ENV_FIELD)
+    if isinstance(legacy, dict):
+        return bool(str(legacy.get(provider_spec.CLAUDE_AUTH_TOKEN) or "").strip())
+    return False
+
+
 def _public_entry(entry: dict) -> dict:
     """A stored entry as it may be sent to the browser: no secret in it.
 
-    ``api_key`` stays out of the payload -- the page shows whether one is
-    stored (the row's ``api_key_set``) and never receives its value, the way
-    the profile and LLM-settings pages already treat a stored token.
+    Every spelling of the credential stays out of the payload: ``api_key``, the
+    pre-schema ``api-key``, the pre-schema ``env`` block whose
+    ``ANTHROPIC_AUTH_TOKEN`` is the same secret, and the values of
+    ``harness_options.claude.env``, which is the harness's environment and can
+    hold the token too. The page shows whether one is stored (the row's
+    ``api_key_set``) and never receives its value, the way the profile and
+    LLM-settings pages already treat a stored token.
 
-    So do the values of ``harness_options.claude.env``. That block is the
-    harness's environment and on this machine it can hold
-    ``ANTHROPIC_AUTH_TOKEN``; the form draws no control for it, so the page has
-    no use for the values, and :func:`merge_entry` puts the stored block back
-    into a save that never named it.
+    Withholding costs the round trip nothing, and each key is put back a
+    different way. ``api-key`` and ``env`` are not :data:`FORM_FIELDS` members,
+    so :func:`merge_entry` copies them from the stored entry as keys the form
+    cannot draw. ``api_key`` it restores by name, since an absent key field
+    means "unchanged". ``harness_options`` is drawn, so it is merged a level
+    deeper and ``claude.env`` survives a save that named only the tag.
 
     The flag belongs to the **row**, not the entry: the page posts the entry it
     loaded back, so a key that travelled inside it would be posted back too and
     refused as an unknown field on the next save.
     """
     out = copy.deepcopy(entry) if isinstance(entry, dict) else {}
-    out.pop("api_key", None)
+    for key in CREDENTIAL_FIELDS:
+        out.pop(key, None)
+    out.pop(LEGACY_ENV_FIELD, None)
     options = out.get("harness_options")
     if isinstance(options, dict):
         claude = options.get("claude")
@@ -341,9 +378,7 @@ def listing() -> dict:
             {
                 "name": name,
                 "entry": _public_entry(entry),
-                "api_key_set": bool(
-                    str((entry or {}).get("api_key") or "").strip()
-                ),
+                "api_key_set": _stored_credential(entry),
                 "problems": validate(name, entry),
                 "kept": sorted(set(entry) - set(FORM_FIELDS)),
             }

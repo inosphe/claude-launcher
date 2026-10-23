@@ -942,8 +942,9 @@ draws the same entry as a form and writes it for you.
   draws a fixed list of top-level keys (`provider_install.FORM_FIELDS`); a
   stored entry can carry more. The listing's `kept` list is exactly
   `set(entry) - set(FORM_FIELDS)` — the top-level keys no control renders:
-  `routing` and `dynamic` (written by `claunch routing set`), `env`,
-  `capabilities`. Those are merged back from the stored entry, and the page
+  `routing` and `dynamic` (written by `claunch routing set`), `capabilities`,
+  and the two pre-schema spellings an unmigrated config may still carry, `env`
+  and `api-key`. Those are merged back from the stored entry, and the page
   names them under the form. A control that does not exist cannot be cleared, so
   removing one of them is a `~/.claunch.yaml` edit.
 - **`harness_options` is merged a level deeper, and the page does not name its
@@ -954,12 +955,16 @@ draws the same entry as a form and writes it for you.
   `harness_options.claude.env` is not sent to the page at all — the block can
   hold `ANTHROPIC_AUTH_TOKEN`, and no control draws it — and the merge puts the
   stored block back into a save that never named it.
-- **A credential is never sent to the browser.** The listing reports
-  `api_key_set: true/false` on the provider's row, beside the entry rather than
-  in it — the entry a row carries is exactly what the page posts back, so a
-  display flag inside it would be refused as an unknown field. Leaving the key
-  field empty keeps the stored key, typing one replaces it, and clearing it is a
-  `~/.claunch.yaml` edit.
+- **A credential is never sent to the browser, under any spelling.** That covers
+  `api_key`, the pre-schema `api-key`, the pre-schema `env` block (its
+  `ANTHROPIC_AUTH_TOKEN` is the same secret) and `harness_options.claude.env`.
+  The page still names `api-key` and `env` under the form (above) but receives
+  none of their values. The listing reports `api_key_set: true/false` on the
+  provider's row, beside the entry rather than in it — the entry a row carries is
+  exactly what the page posts back, so a display flag inside it would be refused
+  as an unknown field; the flag is true when any of those spellings holds a
+  value. Leaving the key field empty keeps the stored key, typing one replaces
+  it, and clearing it is a `~/.claunch.yaml` edit.
 
 The page and its three routes (`GET /api/providers`, `POST /api/providers`,
 `POST /api/providers/check`) come from the daemon process, which runs the
