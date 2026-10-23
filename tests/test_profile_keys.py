@@ -418,6 +418,36 @@ def test_remove_accepts_a_one_based_index(home):
     assert gone.token == "sk-AAAA1111BBBB"
 
 
+def test_replace_refuses_a_token_another_key_holds(home):
+    # A second copy of a token makes the rotation spend one account twice and
+    # makes a usage strategy compare a key with itself (claunch-wllke.5).
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    first = profile_keys.load(p).keys[0]
+
+    with pytest.raises(profile_keys.KeysError, match="already holds that key"):
+        profile_keys.replace(p, "sk-CCCC2222DDDD", ident=first.id)
+
+    assert [k.token for k in profile_keys.load(p).keys] == [
+        "sk-AAAA1111BBBB",
+        "sk-CCCC2222DDDD",
+    ]
+
+
+def test_replace_may_restate_the_token_of_the_key_it_replaces(home):
+    # The rule is about *another* key: re-running set-token with the value a
+    # key already holds is a no-op, not a duplicate.
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    second = profile_keys.load(p).keys[1]
+
+    key = profile_keys.replace(p, "sk-CCCC2222DDDD", ident=second.id)
+
+    assert key.id == second.id
+    assert [k.token for k in profile_keys.load(p).keys] == [
+        "sk-AAAA1111BBBB",
+        "sk-CCCC2222DDDD",
+    ]
+
+
 def test_cli_add_list_and_strategy(home, capsys):
     profile.create("work")
 
@@ -456,6 +486,40 @@ def test_cli_list_reports_a_single_token_profile(home, capsys):
     out = capsys.readouterr().out
     assert "holds one token (…LE)" in out
     assert "claunch keys add work" in out
+
+
+def test_keys_list_names_the_profile_whose_pool_a_child_rotates(home, capsys):
+    # The child holds no token, so its every launch selects from and advances
+    # the parent's pool. Listing the child's own (absent) pool would hide the
+    # keys that are actually in play (claunch-wllke.5).
+    _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "list", "child"]) == 0
+
+    out = capsys.readouterr().out
+    assert "2 keys, strategy rotation" in out
+    assert "pool: profile 'base' (inherited" in out
+    assert "sk-A…BBBB" in out
+
+
+def test_a_deleted_token_file_is_reported_and_repaired_by_the_next_launch(
+    home, capsys
+):
+    # The pool file is the durable record and .launcher-token is derived from
+    # it: listing reports the gap without consuming a rotation, and the next
+    # launch writes the key back (claunch-wllke.5).
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    (p.config_dir / credentials.TOKEN_FILENAME).unlink()
+
+    assert cli.main(["keys", "list", "work"]) == 0
+    out = capsys.readouterr().out
+    assert ".launcher-token names no key of this pool" in out
+    assert credentials.stored_token(p) is None
+
+    selection = profile_keys.select_for_launch(p)
+    assert credentials.stored_token(p) == selection.key.token
 
 
 def test_set_token_replaces_the_selected_key_in_a_pool(home, capsys):

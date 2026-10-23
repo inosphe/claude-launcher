@@ -374,6 +374,11 @@ def remove(profile: Profile, ident: str) -> Key:
 def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
     """Replace one key's token in place (``set-token`` on a pooled profile).
 
+    Two keys hold the same token is a pool whose rotation spends the same
+    account twice and whose usage strategies compare a key with itself, so
+    this refuses it exactly as :func:`add` does -- the key being replaced is
+    the only one whose token may repeat (claunch-wllke.5).
+
     The effective token file is rewritten only when ``ident`` names the key
     the profile is currently on; replacing some other key leaves the token
     file alone, so it keeps naming the key the last launch actually used.
@@ -387,6 +392,12 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
             raise KeysError(f"profile {profile.name!r} has no key pool")
         current = _selected_index(pool)
         index = _index_of(pool, ident) if ident else current
+        if any(
+            other.token == token
+            for position, other in enumerate(pool.keys)
+            if position != index
+        ):
+            raise KeysError(f"profile {profile.name!r} already holds that key")
         old = pool.keys[index]
         key = Key(
             id=old.id,
@@ -477,11 +488,14 @@ def _selected_index(pool: Pool) -> int:
 def owner(profile: Profile) -> Optional[Profile]:
     """The profile whose token this launch reads, if it owns a key pool.
 
-    The chain walk matches ``lineage.injectable_token``: the profile's own
+    The chain walk follows ``lineage.injectable_token``: the profile's own
     stored token, its own login credentials, else the nearest ancestor that
-    has either. A pool on any other profile is inert for this launch -- it
-    would pick a key the launch never uses and would rewrite a token file
-    that belongs to a different profile (claunch-wllke).
+    has either. A pool counts as a token source of its own, because the launch
+    writes the selected key into the token file -- which is also what repairs
+    a deleted ``.launcher-token`` on the next launch (claunch-wllke.5). A pool
+    on any other profile is inert for this launch: it would pick a key the
+    launch never uses and would rewrite a token file that belongs to a
+    different profile (claunch-wllke).
     """
     source = _token_source(profile)
     if source is None or load(source) is None:
@@ -490,9 +504,19 @@ def owner(profile: Profile) -> Optional[Profile]:
 
 
 def _token_source(profile: Profile) -> Optional[Profile]:
-    """The profile whose token ``lineage`` would inject for this launch."""
+    """The profile whose token ``lineage`` would inject for this launch.
+
+    A pool counts even when the token file is missing: the pool is then the
+    only record of which tokens this profile has, and the launch writes the
+    selected one back into the file. Without this a deleted ``.launcher-token``
+    made the pool unreachable -- the profile read as tokenless, so no launch
+    ever selected from it and the pool stayed dead (claunch-wllke.5).
+    """
     for item in [profile, *_ancestors(profile)]:
-        if credentials.own_token(item) is not None:
+        # The pool file decides, not its contents: a pool that exists but
+        # cannot be read is an error the caller should see (load()'s rule),
+        # not a reason to walk past it and use an ancestor's token.
+        if credentials.own_token(item) is not None or path(item).is_file():
             return item
     return None
 
@@ -670,6 +694,13 @@ def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
 
 def select_for_launch(profile: Profile) -> Optional[Selection]:
     """Pick a key, make it the effective token and advance the pool.
+
+    The token file is written on every call, so a pool whose
+    ``.launcher-token`` was deleted is repaired by the profile's next launch:
+    the pool file is the durable record and the token file is derived from it.
+    Nothing reads the pool back into a token file ahead of a launch --
+    ``claunch keys list`` reports the missing file instead of consuming a
+    rotation to fix it (claunch-wllke.5).
 
     Returns ``None`` when no profile in the chain owns a pool, which is the
     pre-claunch-wllke behaviour: ``.launcher-token`` is simply left alone.
