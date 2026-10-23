@@ -941,6 +941,88 @@ def test_a_strategy_change_during_rotation_is_not_lost(home):
     assert sum(key.use_count for key in pool.keys) == 8
 
 
+def test_a_clear_racing_launches_leaves_no_pool(home):
+    """A clear that overlaps a launch still ends with no pool.
+
+    ``clear_token`` deletes the pool file, which is the same read-modify-write
+    as any other writer seen from the delete side: a launch that loaded the
+    pool just before the clear saves the whole object back afterwards and the
+    cleared pool returns (claunch-wllke.1.2.1.1). A launch never *creates* a
+    pool, so once both run under the lock the end state is "no pool" however
+    the two interleave -- which is what makes this assertable without timing.
+    """
+    launch_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.select_for_launch(profile.require('work'))\n"
+        "print(m.__file__)\n"
+    )
+    clear_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import credentials, profile\n"
+        "credentials.clear_token(profile.require('work'))\n"
+        "print(m.__file__)\n"
+    )
+    env, src_root = _child_env()
+    p = profile.create("work")
+    for round_index in range(6):
+        for position in range(4):
+            profile_keys.add(p, f"sk-C{round_index}{position}AAA1111BBBB")
+        scripts = [["-c", clear_script]] + [
+            ["-c", launch_script] for _ in range(6)
+        ]
+        _run_children(scripts, env, src_root)
+
+        assert profile_keys.load(p) is None
+        assert credentials.stored_token(p) is None
+
+
+def test_a_clear_racing_adds_never_restores_a_cleared_key(home):
+    """An add that overlaps a clear keeps only the new keys (claunch-wllke.1.2.1.1).
+
+    ``add`` reads the pool and saves it with one more key. A clear that landed
+    in between would be undone by that save -- every cleared key back, plus
+    the added one. With the lock the add either finishes before the clear (and
+    the clear takes the lot) or starts after it (and its pool holds only keys
+    that were never cleared), so no cleared token can survive.
+    """
+    add_script = (
+        "import sys\n"
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.add(profile.require('work'), sys.argv[1], label=sys.argv[1])\n"
+        "print(m.__file__)\n"
+    )
+    clear_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import credentials, profile\n"
+        "credentials.clear_token(profile.require('work'))\n"
+        "print(m.__file__)\n"
+    )
+    env, src_root = _child_env()
+    p = profile.create("work")
+    for round_index in range(6):
+        cleared = {
+            f"sk-OLD{round_index}{position}AAA1111BBBB" for position in range(2)
+        }
+        for token in sorted(cleared):
+            profile_keys.add(p, token)
+        added = [
+            f"sk-NEW{round_index}{position}AAA1111BBBB" for position in range(4)
+        ]
+        scripts = [["-c", clear_script]] + [
+            ["-c", add_script, token] for token in added
+        ]
+        _run_children(scripts, env, src_root)
+
+        pool = profile_keys.load(p)
+        if pool is None:
+            continue
+        tokens = {key.token for key in pool.keys}
+        assert not tokens & cleared, f"a cleared key came back: {tokens & cleared}"
+        assert tokens <= set(added)
+
+
 def test_a_pinned_key_is_matched_by_id_not_by_position(home):
     """A pin names one key; a bare number is not a position (claunch-wllke.1.2).
 

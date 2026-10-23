@@ -74,9 +74,29 @@ def clear_token(profile: Profile) -> List[str]:
     behind, the next launch would select a key from it and write the token
     file straight back. A ``/login``-written ``.credentials.json`` is Claude
     Code's own file and is not touched.
+
+    Both halves run under the pool lock. A launch or an ``add`` that loaded
+    the pool before the clear would otherwise save it back afterwards -- the
+    same lost update the lock exists to prevent, except that here the delete
+    is what gets lost and the cleared pool returns (claunch-wllke.1.2.1.1).
+    Holding it across the token files as well keeps one interleaving from
+    leaving a token file that names a key the cleared pool no longer holds.
     """
     # Local import: profile_keys reads this module's token path and saves
     # through it, so importing it at module scope would be a cycle.
+    from . import profile_keys
+
+    with profile_keys.pool_lock(profile):
+        return clear_token_locked(profile)
+
+
+def clear_token_locked(profile: Profile) -> List[str]:
+    """Delete the token files and the pool; the caller holds the pool lock.
+
+    Split from :func:`clear_token` for callers that are already inside
+    ``profile_keys.pool_lock`` (``profile_keys.remove`` of the last key), where
+    taking it again would wait on this process's own file lock.
+    """
     from . import profile_keys
 
     removed: List[str] = []
@@ -85,7 +105,7 @@ def clear_token(profile: Profile) -> List[str]:
         if path.is_file():
             path.unlink()
             removed.append(name)
-    if profile_keys.forget(profile):
+    if profile_keys.forget_locked(profile):
         removed.append(profile_keys.KEYS_FILENAME)
     return removed
 

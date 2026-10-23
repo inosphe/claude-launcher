@@ -216,7 +216,14 @@ def save(profile: Profile, pool: Pool) -> None:
 
 
 def forget(profile: Profile) -> bool:
-    """Delete the pool file; return whether there was one.
+    """Delete the pool file under the pool lock; return whether there was one.
+
+    The delete holds the same lock as the writes because every write is a
+    read-modify-write over the whole file: a launch or an ``add`` that loaded
+    the pool just before this call would otherwise save it straight back and
+    the removal would not hold -- the cleared pool would come back
+    (claunch-wllke.1.2.1.1). A caller that already holds the lock uses
+    :func:`forget_locked`.
 
     ``<pool>.lock`` is left in place (claunch-wllke.1.2.1). It is an empty
     owner-only file that holds no state, and unlinking it is the one thing
@@ -224,11 +231,17 @@ def forget(profile: Profile) -> bool:
     writer may already hold the file open and be waiting for its lock, so
     removing the path lets that waiter lock the old inode while the next
     writer creates and locks a new one -- two holders of one pool, which is
-    the lost update :func:`_pool_lock` exists to prevent. On Windows the
+    the lost update :func:`pool_lock` exists to prevent. On Windows the
     unlink fails outright while the descriptor is open. Nothing reads the
     lock as "this profile has a pool": :func:`load` and :func:`owner` ask
     :func:`path`, so an empty lock beside no pool file is inert.
     """
+    with pool_lock(profile):
+        return forget_locked(profile)
+
+
+def forget_locked(profile: Profile) -> bool:
+    """Delete the pool file; the caller holds :func:`pool_lock`."""
     file = path(profile)
     if not file.is_file():
         return False
@@ -245,18 +258,21 @@ LOCK_TIMEOUT = 5.0
 
 
 @contextlib.contextmanager
-def _pool_lock(profile: Profile) -> Iterator[None]:
+def pool_lock(profile: Profile) -> Iterator[None]:
     """Serialise a pool's read-modify-write against other processes.
 
     Every write to the pool is a read-modify-write: the caller loads the file,
-    changes one thing, and saves the whole object back. The writers are
-    separate processes — a session spawn in the daemon, ``claunch run`` in a
-    shell, ``claunch keys add`` in another terminal — so without a lock the
-    later save overwrites everything the earlier one changed: a cursor that
-    skips a key, a use count that undercounts, a key that was just added
-    disappearing again (claunch-wllke.2, claunch-wllke.1.2). The file itself
-    is replaced atomically, so this is only ever a lost update, never a torn
-    one.
+    changes one thing, and saves the whole object back -- or, for
+    :func:`forget` and ``credentials.clear_token``, deletes it, which is the
+    same race from the other side. The writers are separate processes -- a
+    session spawn in the daemon, ``claunch run`` in a shell, ``claunch keys
+    add`` in another terminal -- so without a lock the later save overwrites
+    everything the earlier one changed, and a delete is undone by a save that
+    read the pool first: a cursor that skips a key, a use count that
+    undercounts, a key that was just added disappearing again, a cleared pool
+    coming back (claunch-wllke.2, claunch-wllke.1.2, claunch-wllke.1.2.1.1).
+    The file itself is replaced atomically, so this is only ever a lost
+    update, never a torn one.
 
     The lock is ``<pool>.lock`` beside the pool. On timeout the caller
     proceeds unlocked with a warning: losing one update to a wedged holder is
@@ -341,7 +357,7 @@ def add(profile: Profile, token: str, label: str = "") -> Key:
     token = str(token or "").strip()
     if not token:
         raise KeysError("refusing to store an empty key")
-    with _pool_lock(profile):
+    with pool_lock(profile):
         pool = adopt_single_token(profile) or Pool()
         if any(k.token == token for k in pool.keys):
             raise KeysError(f"profile {profile.name!r} already holds that key")
@@ -360,7 +376,7 @@ def add(profile: Profile, token: str, label: str = "") -> Key:
 
 def remove(profile: Profile, ident: str) -> Key:
     """Remove the key named by id or 1-based index; promote a survivor."""
-    with _pool_lock(profile):
+    with pool_lock(profile):
         pool = load(profile)
         if pool is None:
             raise KeysError(f"profile {profile.name!r} has no key pool")
@@ -369,8 +385,10 @@ def remove(profile: Profile, ident: str) -> Key:
         if gone.id == pool.cursor:
             pool.cursor = None
         if not pool.keys:
-            forget(profile)
-            credentials.clear_token(profile)
+            # The whole clear -- token files and pool file -- under the lock we
+            # already hold, so no launch can put a token back between the two
+            # halves (claunch-wllke.1.2.1.1).
+            credentials.clear_token_locked(profile)
             return gone
         save(profile, pool)
         # Keep the effective token one of the remaining keys, so the next
@@ -398,7 +416,7 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
     token = str(token or "").strip()
     if not token:
         raise KeysError("refusing to store an empty key")
-    with _pool_lock(profile):
+    with pool_lock(profile):
         pool = load(profile)
         if pool is None:
             raise KeysError(f"profile {profile.name!r} has no key pool")
@@ -437,7 +455,7 @@ def set_strategy(profile: Profile, strategy: str) -> Pool:
         raise KeysError(
             f"unknown strategy {strategy!r} (expected one of {', '.join(STRATEGIES)})"
         )
-    with _pool_lock(profile):
+    with pool_lock(profile):
         pool = adopt_single_token(profile)
         if pool is None:
             raise KeysError(
@@ -681,7 +699,7 @@ def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
     owner_profile = owner(profile)
     if owner_profile is None:
         return None
-    with _pool_lock(owner_profile):
+    with pool_lock(owner_profile):
         pool = load(owner_profile)
         if pool is None or not pool.keys:
             return None
@@ -723,7 +741,7 @@ def select_for_launch(profile: Profile) -> Optional[Selection]:
     # The whole read-pick-write under the pool's lock: two launches that read
     # the same cursor would otherwise pick the same key and one cursor update
     # would be lost (claunch-wllke.2).
-    with _pool_lock(owner_profile):
+    with pool_lock(owner_profile):
         pool = load(owner_profile)
         if pool is None or not pool.keys:
             return None
