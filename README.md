@@ -972,8 +972,14 @@ draws the same entry as a form and writes it for you.
   leave a replaced secret in the file with nothing reading it — a save that
   names a non-empty key therefore stores `api_key` alone. A save that names no
   key leaves `api-key` where it is, because the form still cannot clear what it
-  never showed. The pre-schema `env` block is not touched by either case: it
-  can hold variables that are not this credential.
+  never showed. **A blank key counts as naming none.** The page never posts one
+  — a blank input is left out of the entry rather than written as `""` — so a
+  blank comes from an API caller, and storing it would shadow the real secret:
+  `from_entry` reads `api_key` first, so the launcher would start with no
+  credential while the stored one sat unread in the same entry. The write
+  therefore drops a blank `api_key` and keeps whatever was there. The pre-schema
+  `env` block is not touched by any of these cases: it can hold variables that
+  are not this credential.
 
 The page and its three routes (`GET /api/providers`, `POST /api/providers`,
 `POST /api/providers/check`) come from the daemon process, which runs the
