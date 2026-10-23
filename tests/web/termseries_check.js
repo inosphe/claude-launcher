@@ -96,11 +96,12 @@ const renderTermTps = () => { renders++; };
 const ctx = {};
 new Function(
   "exports", "el", "document", "api", "renderTermTps", "fmtAge", "usageShort",
-  '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesChart",
+  '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesCumulative", "termSeriesChart",
     "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker"].map(slice).join("\n") + `
 exports.read = termSeriesRead;
 exports.data = termSeriesData;
 exports.chart = termSeriesChart;
+exports.cumulative = termSeriesCumulative;
 exports.maker = termSeriesMaker;
 exports.reads = termSeriesReads;
 exports.hover = (v) => { termSeriesHover = v; };
@@ -140,7 +141,27 @@ const series = (win, start = 1000) => ({
         big.kids[2].kids.map((k) => k.textContent), ["input", "write", "cached input", "compaction"]);
   big.kids[0].handlers.mousemove({ clientX: 100 });
   check("the readout names the bucket under the pointer",
-        big.kids[3].textContent, "1m ago: in 1 · cached 40 · write 2");
+        big.kids[3].textContent, "1m ago: in 4 · cached 100 · write 8 (+43 in 1m)");
+
+  // Cumulative: running totals per part, so the stack only ever rises.
+  const run = ctx.cumulative(series("cap").points);
+  check("each part is a running total from the first bucket",
+        run.map((p) => [p.input, p.cache_read, p.cache_write]),
+        [[1, 10, 2], [2, 30, 4], [3, 60, 6], [4, 100, 8]]);
+  check("the stack's top never falls",
+        run.every((p, i) => i === 0 || (p.input + p.cache_read + p.cache_write) >=
+                            (run[i - 1].input + run[i - 1].cache_read + run[i - 1].cache_write)), true);
+  const tops = (svgEl) => svgEl.kids.filter((k) => k.attrs.class === "term-series-line input")[0]
+    .attrs.points.split(" ").map((pt) => Number(pt.split(",")[1]));
+  const ys = tops(svg);
+  check("the drawn top edge rises left to right (smaller y is higher)",
+        ys.every((y, i) => i === 0 || y <= ys[i - 1]), true);
+  check("the last point is the window's whole sum at the chart's top edge",
+        ys[ys.length - 1] < ys[0] && ys[ys.length - 1] === 2, true);
+  check("the axis names the total, not a per-bucket peak",
+        big.kids[1].kids.map((k) => k.textContent)[1], "total 112");
+  check("the tooltip counts the whole window",
+        small.title.startsWith("112 tokens sent over"), true);
 
   // Reading.
   reply = answer(series("cap"));

@@ -59,7 +59,7 @@ function el(tag, cls, text) {
 }
 const fmtAge = (s) => Math.round(s / 60) + "m", usageShort = (n) => String(n);
 ${src.slice(constStart, constEnd)}
-${["termSeriesTotal", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
+${["termSeriesTotal", "termSeriesCumulative", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
     "termSeriesMaker"].map(slice).join("\n")}
 const series = (win) => ({
   available: true, window: win, start: 0, until: 3600, bucket_s: 120, requests: 30,
