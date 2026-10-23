@@ -162,6 +162,7 @@
     frame = 0;
     tabular = new WeakMap();
     observer.disconnect();
+    sizes.disconnect();
     header.classList.remove("term-compact");
     header.querySelectorAll(".toolbar-overflow").forEach(el => el.classList.remove("toolbar-overflow"));
     more.classList.add("hidden");
@@ -197,6 +198,11 @@
     syncLifeTabstop();
     widths = new Map(items.map(el => [el, el.getBoundingClientRect().width]));
     texts = new Map(items.map(el => [el, el.textContent]));
+    // Every item's settled size, to keep a width-neutral proof honest: if one
+    // of them does move, the next layout says so without anyone reading a
+    // rect, and the row is measured again. The delivery for the observation
+    // just made is the size `widths` already holds, so it schedules nothing.
+    for (const el of items) sizes.observe(el);
     watch();
   }
   // A text change that only swapped digits inside a `tabular-nums` run cannot
@@ -253,16 +259,35 @@
   // states a text change therefore has to be provably width-neutral — digits
   // swapped inside a tabular run, at the same length — before the same answer
   // can be assumed.
+  //
+  // A batch the proof covers needs no measurement at all (claunch-xy9s0):
+  // digits of one width at the same positions leave the item's content the
+  // same width, and on a row that is neither compact nor overflowing an
+  // item's width is its content's. Reading a rect to confirm that was a
+  // style and a layout of the header forced on every countdown tick — the
+  // 1 Hz write this row takes for as long as a session is on screen, and in
+  // the trace the read the observer spent a third of its batches on. The
+  // measurement is not what holds the row together: `sizes` (in fit) reports
+  // any item whose settled width actually moved, after layout and without a
+  // forced reflow, so a proof that did not hold still ends in a fit. A
+  // settled row keeps the stricter rule above — a compact glyph or a share of
+  // the space is not provably unmoved by a text change the proof does not
+  // cover — and a batch the proof does not cover is measured as before.
   function sameWidths(records) {
     const settled = header.classList.contains("term-compact") || overflow.length > 0;
     const touched = new Set();
+    let proven = true;
     for (const r of records) {
       let node = r.target.nodeType === Node.ELEMENT_NODE ? r.target : r.target.parentElement;
       while (node && node !== header && !widths.has(node)) node = node.parentElement;
       if (!node || node === header) return false;
       touched.add(node);
-      if (settled && !(digitsOnly(texts.get(node), node.textContent) && tabularUnder(r.target))) return false;
+      if (!(digitsOnly(texts.get(node), node.textContent) && tabularUnder(r.target))) {
+        if (settled) return false;
+        proven = false;
+      }
     }
+    if (proven) return true;
     for (const el of touched) {
       if (el.classList.contains("toolbar-overflow")) return false;
       if (Math.abs(el.getBoundingClientRect().width - widths.get(el)) > 0.5) return false;
@@ -290,6 +315,23 @@
       return;
     }
     schedule();
+  });
+  // The settled width of every item on the row, reported after layout (no
+  // forced reflow, unlike the rect a proof would otherwise have to read). A
+  // width that moved under a proof that did not hold ends in a fit here; the
+  // delivery for a fresh observation is a size fit has just recorded, so it
+  // schedules nothing.
+  const sizes = new ResizeObserver((entries) => {
+    for (const e of entries) {
+      // Border box, the same box `widths` was measured on. An engine that
+      // reports only the content box is left out rather than compared against
+      // padding it does not have — a mismatch there would fit forever.
+      const raw = e.borderBoxSize;
+      const box = Array.isArray(raw) ? raw[0] : raw;
+      if (!box) continue;
+      const known = widths.get(e.target);
+      if (known === undefined || Math.abs(box.inlineSize - known) > 0.5) { schedule(); return; }
+    }
   });
   new ResizeObserver(schedule).observe(header);
   document.fonts.ready.then(schedule);
