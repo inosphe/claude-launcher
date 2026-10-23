@@ -8358,6 +8358,10 @@ const TERM_SERIES_LAYERS = [
   ["input", "input", "#bc8cff"],
   ["cache_read", "cached input", "#58a6ff"],
 ];
+/* The bottom of the log height axis, in tokens: a request smaller than this
+   sits on the baseline (claunch-e0e3n). One number, so 3000 or 10000 can be
+   tried against the same sessions. */
+const TERM_SERIES_FLOOR = 1000;
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
 /* Whether the pointer is on the chart: its slot name, or false for none. */
@@ -8416,6 +8420,39 @@ function termSeriesIndexAt(pts, at) {
   return lo - 0.5;
 }
 
+/* The height axis of one chart. The bottom is TERM_SERIES_FLOOR; the top is
+   the context window the daemon names in `limits.top`, so the same height
+   means the same count whatever the largest request was. A request larger
+   than the window pushes the top up to it, and a session that never reached
+   the floor is drawn from its smallest request up to its largest instead of
+   as a flat line under a window it never came near. Also the auto-compact
+   thresholds to draw as horizontal lines: one per distinct value (the two
+   sides of a borrowed session often agree), none that fall outside the axis. */
+function termSeriesScale(pts, limits) {
+  const totals = pts.map(termSeriesTotal);
+  const peak = Math.max(1, ...totals);
+  const named = limits && Number.isFinite(limits.top) && limits.top > 0 ? limits.top : 0;
+  let floor = TERM_SERIES_FLOOR;
+  let top = Math.max(named, peak);
+  let fixed = named >= peak && named > 0;
+  if (peak < floor) {
+    floor = Math.max(1, Math.min(...totals.filter((v) => v > 0), peak));
+    top = peak;
+    fixed = false;
+  }
+  top = Math.max(top, floor * 2);
+  const span = Math.log(top / floor);
+  const ratio = (v) => Math.log(Math.max(v, floor) / floor) / span;
+  const sides = ((limits && limits.sides) || [])
+    .filter((x) => x && Number.isFinite(x.compact) && x.compact > floor && x.compact <= top);
+  const lines = [];
+  for (const x of sides) {
+    const same = lines.find((l) => l.at === x.compact);
+    if (same) same.labels.push(x.label); else lines.push({ at: x.compact, labels: [x.label] });
+  }
+  return { peak, floor, top, fixed, ratio, compact: lines };
+}
+
 function termSeriesChart(data, zoom) {
   const NS = "http://www.w3.org/2000/svg";
   const w = zoom ? 320 : 120, h = zoom ? 96 : 26;
@@ -8430,16 +8467,16 @@ function termSeriesChart(data, zoom) {
   svg.setAttribute("height", String(h));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   const pts = data.points;
-  const peak = Math.max(1, ...pts.map(termSeriesTotal));
+  const { peak, floor, top, fixed, ratio, compact } = termSeriesScale(pts, data.limits);
   /* One request is one step of the same width; a single request is drawn
      across the whole chart. */
   const drawn = pts.length === 1 ? [pts[0], pts[0]] : pts;
   const xAt = (i) => (i / (drawn.length - 1)) * w;
-  /* Log height axis from 1 token: cached input dwarfs fresh input and write,
-     and on a linear axis the two thin parts were not visible. A boundary
-     under 1 token sits on the baseline. */
-  const logPeak = Math.log(Math.max(peak, 2));
-  const yAt = (v) => h - 1 - (v > 1 ? Math.log(v) / logPeak : 0) * (h - 3);
+  /* Log height axis from the floor (1k) to the top (the context window):
+     cached input dwarfs fresh input and write, and on a linear axis the two
+     thin parts were not visible. A boundary under the floor sits on the
+     baseline. */
+  const yAt = (v) => h - 1 - ratio(v) * (h - 3);
   const below = drawn.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
     const above = drawn.map((p, i) => below[i] + p[key]);
@@ -8470,6 +8507,24 @@ function termSeriesChart(data, zoom) {
     mark.setAttribute("y2", String(h));
     svg.appendChild(mark);
   }
+  /* The auto-compact threshold: a solid amber horizontal line (the
+     compaction mark is a dashed red vertical one). Two lines when the two
+     sides of a borrowed session differ; each is labelled with its side. */
+  for (const line of compact) {
+    const rule = document.createElementNS(NS, "line");
+    rule.setAttribute("class", "term-series-compact-line");
+    rule.setAttribute("x1", "0");
+    rule.setAttribute("x2", String(w));
+    rule.setAttribute("y1", yAt(line.at).toFixed(1));
+    rule.setAttribute("y2", yAt(line.at).toFixed(1));
+    rule.setAttribute("stroke", "#d29922");
+    rule.setAttribute("stroke-width", "1");
+    const tip = document.createElementNS(NS, "title");
+    tip.textContent = `auto compact at ${usageShort(line.at)}` +
+      (compact.length > 1 ? ` (${line.labels.join(", ")})` : "");
+    rule.appendChild(tip);
+    svg.appendChild(rule);
+  }
   const ago = (at) => `${fmtAge(Math.max(0, data.until - at))} ago`;
   /* Where the session changed whose token it runs on (a borrow started,
      changed or ended): a solid cyan line with a diamond on top, so it cannot
@@ -8495,10 +8550,11 @@ function termSeriesChart(data, zoom) {
     svg.appendChild(mark);
   }
   if (zoom) {
-    /* The height axis: log scale, its maximum is the largest context of the
-       window; a faint rule at every thousandth power below it. */
+    /* The height axis: log scale from the floor to the top (the context
+       window where the daemon names one, else the largest context of the
+       window); a faint rule at every thousandth power between them. */
     for (const [at, name] of [[1e3, "1k"], [1e6, "1M"], [1e9, "1B"]]) {
-      if (at >= peak || yAt(at) - yAt(peak) < 12) continue;
+      if (at < floor || at >= top || yAt(at) - yAt(top) < 12) continue;
       const tick = document.createElementNS(NS, "line");
       tick.setAttribute("class", "term-series-ymax-rule");
       tick.setAttribute("x1", "0");
@@ -8516,14 +8572,24 @@ function termSeriesChart(data, zoom) {
     rule.setAttribute("class", "term-series-ymax-rule");
     rule.setAttribute("x1", "0");
     rule.setAttribute("x2", String(w));
-    rule.setAttribute("y1", yAt(peak).toFixed(1));
-    rule.setAttribute("y2", yAt(peak).toFixed(1));
+    rule.setAttribute("y1", yAt(top).toFixed(1));
+    rule.setAttribute("y2", yAt(top).toFixed(1));
     const label = document.createElementNS(NS, "text");
     label.setAttribute("class", "term-series-ymax");
     label.setAttribute("x", "2");
-    label.setAttribute("y", String(yAt(peak) + 10));
-    label.textContent = `${usageShort(peak)} max (log)`;
+    label.setAttribute("y", String(yAt(top) + 10));
+    label.textContent = `${usageShort(top)} max (log${fixed ? ", context window" : ""})`;
     svg.append(rule, label);
+    for (const line of compact) {
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("class", "term-series-ytick");
+      text.setAttribute("x", String(w - 2));
+      text.setAttribute("text-anchor", "end");
+      text.setAttribute("y", String(yAt(line.at) - 2));
+      text.textContent = `compact ${usageShort(line.at)}` +
+        (compact.length > 1 ? ` (${line.labels.join(", ")})` : "");
+      svg.appendChild(text);
+    }
   }
   box.appendChild(svg);
   const compactions = (data.compactions || []).length;

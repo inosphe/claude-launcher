@@ -113,6 +113,10 @@ COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 #: Claude's own switches for compaction (see :mod:`claude_launcher.auto_compact`).
 auto_compact_off = auto_compact_mod.auto_compact_off
 
+#: The gauge's fixed 0-1M domain (app.js CTX_DOMAIN): the chart's top for a
+#: Claude session whose spec declares no window.
+SERIES_DOMAIN = 1_000_000
+
 #: How long a resolved window is trusted before the profile chain and the
 #: provider registry are consulted again. Resolution reads the config store,
 #: which is a file — fine once, a waste on every poll of every session.
@@ -864,6 +868,54 @@ def declared_context_window(sdef) -> Optional[int]:
         value = None
     _declared[key] = (value, now)
     return value
+
+
+class _BorrowView:
+    """``sdef`` with its ``borrow`` replaced, so the per-(profile, borrow)
+    resolvers above answer for one side of a borrowed session."""
+
+    def __init__(self, sdef, borrow: str):
+        self._sdef = sdef
+        self.borrow = borrow
+
+    def __getattr__(self, name):
+        return getattr(self._sdef, name)
+
+
+def series_limits(sdef, reading: Optional[dict] = None) -> dict:
+    """What the overlay's token chart draws its height axis against.
+
+    ``sides`` has one entry per account the session can be running on: its
+    own profile, and for a borrowed session the lender as well (the
+    transcript does not say which one answered a request, so both thresholds
+    are drawn). Each side carries ``label``, ``window`` (its context window:
+    what the harness records, else the spec's ``context_window``) and
+    ``compact`` (its auto-compact threshold). Pi applies ``auto_compact_at``
+    only as ``context_window - reserveTokens``, so a Pi side without a window
+    has no threshold. ``top`` is the larger window; Claude records none, so
+    without a declared one it is the gauge's 1M domain. ``None`` when nothing
+    is known (the chart then tops at the largest request).
+    """
+    profile = str(getattr(sdef, "profile", "") or "")
+    borrow = str(getattr(sdef, "borrow", "") or "")
+    harness = getattr(sdef, "harness", None)
+    if borrow and not getattr(sdef, "null_token", False):
+        views = [(profile, _BorrowView(sdef, "")), (borrow, sdef)]
+    else:
+        views = [(profile, sdef)]
+    recorded = (reading or {}).get("model_context_window")
+    sides = []
+    for label, view in views:
+        window = recorded or declared_context_window(view)
+        compact = compact_window_of(view)
+        if harness == PI_HARNESS and not window:
+            compact = None
+        sides.append({"label": label, "window": window or None,
+                      "compact": compact or None})
+    windows = [x["window"] for x in sides if x["window"]]
+    top = max(windows) if windows else (
+        SERIES_DOMAIN if harness == CLAUDE_HARNESS else None)
+    return {"sides": sides, "top": top}
 
 
 def attach(session) -> dict:
