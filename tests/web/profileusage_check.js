@@ -120,6 +120,12 @@ const body = {
   same(series[0].runs, [[[0, 2], [900, 100]], [[4500, 3]]]);
   assert.strictEqual(series[1].runs.length, 2);
   same(T.chartSeries([{ at: 0, windows: [{ name: 'primary', utilization: 4 }] }], 900), []);
+  // OpenCode Go: 5h, calendar week and plan month on the same percentage axis.
+  const go = T.chartSeries([{ at: 0, windows: [
+    { name: 'five_hour', utilization: 41 }, { name: 'weekly', utilization: 17 },
+    { name: 'monthly', utilization: 8 }] }], 900);
+  same(go.map((s) => s.label), ['5h', 'week', 'month']);
+  same(go[2].runs, [[[0, 8]]]);
 
   // Dollar charts.
   const fw = (at, spend, left) => ({ at, windows: [

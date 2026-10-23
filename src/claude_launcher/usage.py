@@ -19,6 +19,9 @@ a Claude-compatible Kimi provider can call it with that profile's API key.
 A Fireworks provider has no plan limit; its reading is the account's spend
 (claunch-f5w4x.5): the month to date from the ``monthly-spend-usd`` quota,
 and, when the configuration records a credit balance, what is left of it.
+An OpenCode Go provider (``opencode.ai/zen/go``) reports its plan windows --
+the rolling 5 hours, the week and the month, each a percentage and a reset
+time -- at ``/zen/go/v1/usage``, read with the profile's API key.
 Harnesses without a supported equivalent are rejected explicitly.
 """
 
@@ -50,6 +53,10 @@ _FIREWORKS_HOSTS = {"api.fireworks.ai", "api.fireworks.ai:443"}
 _FIREWORKS_API = "https://api.fireworks.ai/v1"
 #: The quota value an account without a spend limit reports.
 _FIREWORKS_NO_LIMIT = 9_999_999
+_OPENCODE_GO_HOSTS = {"opencode.ai", "opencode.ai:443"}
+_OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+#: OpenCode Go's window names, and the names a reading gives them.
+_OPENCODE_GO_WINDOWS = (("rolling", "five_hour"), ("weekly", "weekly"), ("monthly", "monthly"))
 
 
 class UsageError(Exception):
@@ -433,6 +440,90 @@ def _fireworks_context(profile: Profile) -> Optional[str]:
         return None
     env = runner.child_env(profile, with_token=True, base_env={})
     return str(env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or "").strip()
+
+
+def _opencode_go_context(profile: Profile) -> Optional[str]:
+    """The bearer credential of a profile whose provider is OpenCode Go, or
+    ``None`` when its provider is another backend."""
+    provider = providers.resolve_name(profile)
+    if provider == providers.DEFAULT_PROVIDER:
+        return None
+    declared_env = providers.provider_env(provider)
+    declared_env.update(lineage.effective_env(profile))
+    raw_base = str(declared_env.get("ANTHROPIC_BASE_URL") or "")
+    try:
+        parsed = urllib.parse.urlsplit(raw_base)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.netloc.lower() not in _OPENCODE_GO_HOSTS
+        or parsed.path.rstrip("/") not in {"/zen/go", "/zen/go/v1"}
+    ):
+        return None
+    # Not ``runner.child_env(with_token=True)``: OpenCode Go declares a
+    # session header, so that call would start the routing shim that fronts
+    # the endpoint for a harness -- a listing must not.
+    stored = lineage.stored_auth_token(profile)
+    return str(
+        stored or declared_env.get("ANTHROPIC_AUTH_TOKEN") or declared_env.get("ANTHROPIC_API_KEY") or ""
+    ).strip()
+
+
+def _opencode_go_windows(payload: dict) -> List[UsageWindow]:
+    """The plan windows of a ``/zen/go/v1/usage`` reply, in the order 5h,
+    week, month. The endpoint is not in OpenCode's published docs, so a
+    reply without any of them is an error, not an empty reading."""
+    rows = payload.get("usage") if isinstance(payload, dict) else None
+    windows: List[UsageWindow] = []
+    if isinstance(rows, dict):
+        for key, name in _OPENCODE_GO_WINDOWS:
+            row = rows.get(key)
+            if not isinstance(row, dict):
+                continue
+            pct = _number(row.get("percent"))
+            if pct is None:
+                continue
+            reset = row.get("resetsAt")
+            status = row.get("status")
+            windows.append(UsageWindow(
+                name=name,
+                utilization=max(0.0, min(100.0, pct)),
+                resets_at=str(reset) if reset else None,
+                status=str(status) if status else None,
+            ))
+    if not windows:
+        raise UsageError(f"unexpected OpenCode Go usage response: {json.dumps(payload)[:200]}")
+    return windows
+
+
+def _fetch_opencode_go(profile: Profile, token: str) -> UsageReport:
+    if not token:
+        raise credentials.CredentialsError(
+            f"no OpenCode API key for profile {profile.name!r}; "
+            f"run 'claunch set-token {profile.name}' first"
+        )
+    req = urllib.request.Request(_OPENCODE_GO_USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "claude-launcher",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        if exc.code in (401, 403):
+            raise UsageError(
+                f"OpenCode rejected the API key ({exc.code}); "
+                f"run 'claunch set-token {profile.name}' with a current key"
+            ) from exc
+        raise UsageError(f"OpenCode Go usage request failed ({exc.code}): {detail[:200]}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise UsageError(f"could not reach the OpenCode Go usage endpoint: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"unexpected (non-JSON) OpenCode Go usage response: {exc}") from exc
+    return UsageReport(windows=_opencode_go_windows(payload), raw=payload, source="opencode-go")
 
 
 def credit_setting(profile: Profile) -> Optional[tuple[float, date]]:
@@ -907,6 +998,8 @@ def reader(profile: Profile) -> str:
             return "kimi-provider"
         if _fireworks_context(profile) is not None:
             return "fireworks-billing"
+        if _opencode_go_context(profile) is not None:
+            return "opencode-go"
         provider = providers.resolve_name(profile)
         if not providers.uses_anthropic_oauth(provider):
             raise UsageError(
@@ -936,6 +1029,11 @@ def fetch(profile: Profile) -> UsageReport:
         if token is None:
             raise UsageError(f"profile {profile.selector!r} no longer selects Fireworks")
         return _fetch_fireworks(profile, token)
+    if kind == "opencode-go":
+        token = _opencode_go_context(profile)
+        if token is None:
+            raise UsageError(f"profile {profile.selector!r} no longer selects OpenCode Go")
+        return _fetch_opencode_go(profile, token)
     if kind == "anthropic":
         return _fetch_claude(profile)
     entry = harnesses.get(lineage.effective_harness(profile))

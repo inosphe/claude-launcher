@@ -5056,6 +5056,12 @@ The supported cases are deliberately narrow:
 
   The `credit` window is then that balance less the rated cost from the
   start of `as_of` through today (`billing/summary`).
+- A Claude-compatible profile whose endpoint is OpenCode Go
+  (`opencode.ai/zen/go`) reads the plan windows from `GET /zen/go/v1/usage`
+  with the profile's API key: `five_hour` (rolling 5 hours), `weekly` and
+  `monthly`, each a percentage with its reset time. The endpoint is not in
+  OpenCode's published API docs; a reply without these windows is reported
+  as an error.
 - `usage work:codex` uses that profile's isolated `CODEX_HOME` and Codex
   app-server's documented `account/rateLimits/read` RPC.
 - `usage work:kimi` starts the Kimi Code local server under that profile's
