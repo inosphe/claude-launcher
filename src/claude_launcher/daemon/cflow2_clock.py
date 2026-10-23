@@ -981,7 +981,8 @@ class Cflow2Clock:
                     did, f"no live session {scope!r} to spawn a child session from",
                     cwd=cwd, scope=scope)
                 return
-            run_id = st.load_state().get("run_id")
+            state = st.load_state()
+            run_id = state.get("run_id")
             runner = {"boot": self.boot, "phase": cflow2_exec.PHASE_SPAWNING,
                       "marker": cflow2_exec.delegation_marker(st, run_id, did)}
             # Persisted before the spawn call (B6): a daemon that dies in
@@ -1000,9 +1001,13 @@ class Cflow2Clock:
                 # The fallback is journaled by the runtime, but a journal is
                 # not a wake-up: before this notice the driver learned nothing
                 # and the run sat on a delegation only it can run (claunch-7u8as).
+                # The recipient is the run's driver, not the scope slot: a
+                # child session driving a run whose scope names the parent's
+                # slot would otherwise be told nothing (claunch-emft6).
                 if (result.get("result") == "rerouted"
                         and result.get("executor") == ir.EXEC_SUBAGENT):
-                    notices.append((cwd, _name(scope), fallback_block(
+                    driver = str(state.get("driver") or "") or _name(scope)
+                    notices.append((cwd, driver, fallback_block(
                         scope, did, rec.get("label") or rec.get("node") or did,
                         str(result.get("error") or ""))))
             return
