@@ -46,7 +46,11 @@ function node(tag) {
     value: "", disabled: false,
     selectionStart: 0, selectionEnd: 0,
     style: {}, scrollHeight: 0,
+    children: [],
     setSelectionRange(a, b) { n.selectionStart = a; n.selectionEnd = b; },
+    appendChild(c) { n.children.push(c); return c; },
+    setAttribute() {},
+    addEventListener() {},
     focus() {},
     classList: {
       add(c) { n.classes.add(c); },
@@ -61,7 +65,8 @@ function node(tag) {
   };
   Object.defineProperty(n, "textContent", {
     get() { return n._text; },
-    set(v) { n._text = String(v); },
+    // as in the browser: writing text replaces whatever children were there
+    set(v) { n._text = String(v); n.children.length = 0; },
   });
   return n;
 }
@@ -127,8 +132,12 @@ const PICKER = node("input");
 PICKER.files = [];
 PICKER.clicked = 0;
 PICKER.click = () => { PICKER.clicked++; };
+/* the strip above the bar that holds the images the line has not sent yet */
+const STAGED = node("div");
+STAGED.classes.add("hidden");
 const $ = (id) => ({
   "term-image-file": PICKER,
+  "term-image-staged": STAGED,
   "term-input-field": FIELD,
   "term-input-send": BTN,
   "term-input-note": NOTE,
@@ -142,7 +151,10 @@ const $ = (id) => ({
 /* which element the page would call focused. The window hook reads it to
    decide whether this Ctrl+J is the composer's or the browser's. */
 let ACTIVE = FIELD;
-const document = { get activeElement() { return ACTIVE; } };
+const document = {
+  get activeElement() { return ACTIVE; },
+  createElement(tag) { return node(tag); },
+};
 
 const ctx = {};
 /* the kinds array is data, not a function: read the declaration out of the
@@ -151,6 +163,8 @@ const kindsDecl = src.match(/const SCORE_FEEDBACK_KINDS = \[[^\]]*\];/);
 if (!kindsDecl) throw new Error("missing SCORE_FEEDBACK_KINDS");
 const imageKindsDecl = src.match(/const PASTE_IMAGE_KINDS = \{[^}]*\};/);
 if (!imageKindsDecl) throw new Error("missing PASTE_IMAGE_KINDS");
+const stagedDecl = src.match(/const stagedImages = new Map\(\);/);
+if (!stagedDecl) throw new Error("missing stagedImages");
 new Function(
   "exports", "api", "$", "navigator", "document",
   `let currentName = null;
@@ -161,7 +175,15 @@ let sessJournalBox = null;
 function sessInputJournalFill() {}
 ${kindsDecl[0]}
 ${imageKindsDecl[0]}
+${stagedDecl[0]}
+` + slice("el") + `
 ` + slice("termInputNote") + `
+` + slice("stagedFor") + `
+` + slice("setStagedImages") + `
+` + slice("renderStagedImages") + `
+` + slice("stageImage") + `
+` + slice("stageImageFiles") + `
+` + slice("clearStagedImages") + `
 ` + slice("sendKeyLine") + `
 ` + slice("currentScoreFeedback") + `
 ` + slice("renderScoreGoal") + `
@@ -178,6 +200,8 @@ ${imageKindsDecl[0]}
 ` + slice("clipboardImage") + `
 ` + slice("clipboardRefusal") + `
 ` + slice("pasteClipboardImage") + `
+` + slice("stageClipboardImage") + `
+` + slice("readClipboardImage") + `
 ` + slice("pastedImageFiles") + `
 ` + slice("onTermInputPaste") + `
 ` + slice("onTerminalPaste") + `
@@ -202,7 +226,11 @@ Object.assign(exports, {
   openImagePicker,
   onImagePickerChange,
   sendImageFiles,
+  stageImageFiles,
+  clearStagedImages,
+  stagedFor,
   pasteClipboardImage,
+  stageClipboardImage,
   setHarnesses: (h) => { harnessDetails = h; },
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
   setSessions: (rows) => { sessionsCache = rows; },
@@ -504,31 +532,37 @@ async function main() {
         sent[0].body);
   check("the box is emptied for the next block", FIELD.value === "");
 
-  /* ---- Alt+V hands the clipboard image to the session ---- */
+  /* ---- Alt+V on the line holds the clipboard image for the send ----
+     The line has a send step, so its Alt+V attaches: the image is stored
+     with `?stage=1` and named by the Enter that sends the text. The
+     terminal's Alt+V still delivers at once — see the xterm checks below. */
   sent = [];
   reply = { ok: true, doc: { ok: true, path: "C:/state/sessions/coder4/pastes/x.png",
-                             bytes: 12, delivered: true, keys: ["M-v"], reason: "" } };
+                             name: "x.png", bytes: 12, staged: true } };
   ctx.setSession("coder4", false);
   FIELD.disabled = false;
   FIELD.value = "look at ";
   FIELD.selectionStart = FIELD.selectionEnd = 8;
   const blob = { type: "image/png", size: 12 };
   clipboard = { items: [imageItem("image/png", blob)] };
+  ctx.clearStagedImages("coder4");
   const altv = press("v", { altKey: true });
   await settle();
   check("Alt+V is taken from the browser", altv.prevented === true);
   check("exactly one upload", sent.length === 1, sent);
-  check("...to the session's paste-image route",
-        sent[0].path === "/api/sessions/coder4/paste-image", sent[0].path);
+  check("...to the staging form of the paste-image route",
+        sent[0].path === "/api/sessions/coder4/paste-image?stage=1", sent[0].path);
   check("...carrying the blob itself, typed as the image it is",
         sent[0].body === blob && sent[0].contentType === "image/png", sent[0]);
+  check("...handing nothing to the session before the line is sent",
+        !sent.some((r) => r.path.endsWith("/keys")), sent);
   check("what was already typed is left alone — no path goes in the line",
         FIELD.value === "look at ", FIELD.value);
-  check("...and the line says the image reached the session",
-        NOTE.textContent.includes("sent to the session"), NOTE.textContent);
-  check("...with no keystroke sent from the page: the daemon sends it, on the "
-        + "machine whose clipboard now holds the image",
-        !sent.some((r) => r.path.endsWith("/keys")), sent);
+  check("...and the line holds the image until then",
+        ctx.stagedFor("coder4").map((i) => i.name).join() === "x.png",
+        ctx.stagedFor("coder4"));
+  check("...saying the Enter that sends the line carries it",
+        /press Enter/.test(NOTE.textContent), NOTE.textContent);
 
   /* ---- an empty clipboard says so and uploads nothing ---- */
   sent = [];
@@ -548,9 +582,13 @@ async function main() {
   check("...and names Ctrl+V as the way through",
         NOTE.textContent.includes("Ctrl+V"), NOTE.textContent);
 
-  /* ---- an ordinary Ctrl+V carrying an image takes the same path ---- */
+  /* ---- an ordinary Ctrl+V carrying an image is held for the send ---- */
   sent = [];
   FIELD.value = "";
+  STAGED.children.length = 0;
+  ctx.clearStagedImages("coder4");
+  reply = { ok: true, doc: { ok: true, path: "C:/state/pastes/a.png",
+                             name: "a.png", bytes: 9, staged: true } };
   const pasted = { type: "image/png", size: 9 };
   const ev = {
     currentTarget: FIELD, target: FIELD, prevented: false,
@@ -562,9 +600,15 @@ async function main() {
   };
   ctx.onTermInputPaste(ev);
   await settle();
-  check("a pasted image file is uploaded too", sent.length === 1, sent);
+  check("a pasted image file is uploaded", sent.length === 1, sent);
+  check("...to the staging form of the paste-image route",
+        sent[0].path === "/api/sessions/coder4/paste-image?stage=1", sent[0].path);
+  check("...and nothing is handed to the session yet", !sent.some((r) => r.path.endsWith("/keys")), sent);
   check("...and the browser's own paste is taken", ev.prevented === true);
   check("...and the box is left empty here too", FIELD.value === "", FIELD.value);
+  check("...and the line now holds it",
+        ctx.stagedFor("coder4").map((i) => i.name).join() === "a.png",
+        ctx.stagedFor("coder4"));
 
   /* ---- a paste with no image is left to the browser ---- */
   sent = [];
@@ -662,6 +706,8 @@ async function main() {
         down.pass === false && press2.pass === false && up.pass === false);
   check("...and uploads the browser's image once, on keydown",
         sent.length === 1 && sent[0].path === "/api/sessions/coder4/paste-image", sent);
+  check("...delivered, not staged — a terminal has no send step to wait for",
+        sent.length === 1 && !/\?stage=1/.test(sent[0].path), sent);
   check("...with the browser's own default taken", down.ev.prevented === true);
   const plainV = termKey("keydown", {});
   check("a plain v goes to the terminal", plainV.pass === true);
@@ -715,6 +761,9 @@ async function main() {
 
   /* ---- files copied in a file manager arrive on `files`, not `items` ---- */
   sent = [];
+  ctx.clearStagedImages("coder4");
+  reply = { ok: true, doc: { ok: true, path: "C:/state/pastes/shot.png",
+                             name: "shot.png", bytes: 5, staged: true } };
   const copied = { type: "", size: 5, name: "shot.PNG" };
   const fev = {
     currentTarget: FIELD, target: FIELD, prevented: false,
@@ -728,10 +777,13 @@ async function main() {
   check("...typed from its extension when the browser gave it no type",
         sent[0] && sent[0].contentType === "image/png", sent[0]);
 
-  /* ---- the image button: several files, one after another ---- */
+  /* ---- the image button: several files, one after another, all held ---- */
   sent = [];
   maxInFlight = 0;
-  reply = { ok: true, doc: OK_DOC };
+  ctx.clearStagedImages("coder4");
+  reply = { ok: true, doc: (n) => ({ ok: true, name: `pick-${n}.png`,
+                                     path: `C:/state/pastes/pick-${n}.png`,
+                                     bytes: 1, staged: true }) };
   ctx.openImagePicker();
   check("the image button opens the file picker", PICKER.clicked === 1);
   const picked = [
@@ -751,11 +803,57 @@ async function main() {
   check("...each typed as the image it is",
         sent.map((r) => r.contentType).join() === "image/png,image/webp,image/jpeg",
         sent.map((r) => r.contentType));
+  check("...to the staging form of the route, handed over to nothing",
+        sent.every((r) => r.path === "/api/sessions/coder4/paste-image?stage=1")
+        && !sent.some((r) => r.path.endsWith("/keys")),
+        sent.map((r) => r.path));
   check("...the file that is not an image is left out and said so",
-        NOTE.textContent.includes("3 of 3") && NOTE.textContent.includes("not an image"),
-        NOTE.textContent);
+        NOTE.textContent.includes("3 images attached")
+        && NOTE.textContent.includes("not an image"), NOTE.textContent);
+  check("...and the line holds all three, in order",
+        ctx.stagedFor("coder4").map((i) => i.name).join()
+        === "pick-1.png,pick-2.png,pick-3.png",
+        ctx.stagedFor("coder4").map((i) => i.name));
   check("...and the picker is cleared so the same file can be picked again",
         PICKER.value === "", PICKER.value);
+
+  /* ---- the send carries what the line holds, and empties it ---- */
+  sent = [];
+  reply = { ok: true, doc: { ok: true, bytes: 3 } };
+  FIELD.value = "look at this";
+  const withImages = await ctx.sendKeyLine(b.field, b.btn, b.note);
+  check("a send with images returns true", withImages === true);
+  check("...in one request to the keys route",
+        sent.length === 1 && sent[0].path === "/api/sessions/coder4/keys",
+        sent.map((r) => r.path));
+  check("...naming the staged images, in the order the line held them",
+        JSON.stringify(sent[0].body.images)
+        === JSON.stringify(["pick-1.png", "pick-2.png", "pick-3.png"]),
+        sent[0].body.images);
+  check("...beside the text and its Enter",
+        JSON.stringify(sent[0].body.keys) === JSON.stringify(["look at this", "Enter"]),
+        sent[0].body.keys);
+  check("...and the line holds nothing afterwards",
+        ctx.stagedFor("coder4").length === 0, ctx.stagedFor("coder4"));
+  check("...and the strip is hidden again", STAGED.classes.has("hidden"));
+
+  /* ---- images alone are a send too ---- */
+  sent = [];
+  reply = { ok: true, doc: (n) => ({ ok: true, name: "solo.png",
+                                     path: "C:/state/pastes/solo.png",
+                                     bytes: 1, staged: true }) };
+  await ctx.stageImageFiles([{ type: "image/png", size: 1, name: "solo.png" }], NOTE);
+  sent = [];
+  reply = { ok: true, doc: { ok: true, bytes: 1 } };
+  FIELD.value = "";
+  const solo = await ctx.sendKeyLine(b.field, b.btn, b.note);
+  check("an image with no text still sends", solo === true && sent.length === 1, sent);
+  check("...carrying the image and the Enter that submits it",
+        JSON.stringify(sent[0].body.images) === JSON.stringify(["solo.png"])
+        && JSON.stringify(sent[0].body.keys) === JSON.stringify(["", "Enter"]),
+        sent[0].body);
+  check("...and the line is empty again", FIELD.value === "");
+  reply = { ok: true, doc: OK_DOC };
 
   /* ---- one failure in a batch does not stop the rest, and is named ---- */
   sent = [];

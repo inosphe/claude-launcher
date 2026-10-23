@@ -2978,6 +2978,36 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-input > .term-btn {
   flex: none; height: var(--term-row); padding-top: 0; padding-bottom: 0;
 }
+/* The images the session line holds until it is sent (claunch-wxmcw): a strip
+   above the bar, one chip per image, so what is about to go with the line is
+   visible before Enter is pressed. It takes no room when empty (.hidden). */
+#term-image-staged {
+  flex: none; display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 6px 12px; overflow-x: auto;
+  background: #1b1e24; border-top: 1px solid #2a2e36;
+}
+#term-image-staged.hidden { display: none; }
+.term-staged-label {
+  flex: none; font-size: 11px; color: #9da7b3; white-space: nowrap;
+}
+.term-staged-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  max-width: 220px; padding: 2px 4px 2px 2px;
+  background: #14161a; border: 1px solid #30363d; border-radius: 5px;
+}
+.term-staged-thumb {
+  width: 24px; height: 24px; object-fit: cover; border-radius: 3px;
+  background: #0d0f12;
+}
+.term-staged-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: #d8dbe0;
+}
+.term-staged-remove {
+  flex: none; padding: 0 4px; font-size: 13px; line-height: 1;
+  color: #9da7b3; background: none; border: 0; border-radius: 3px; cursor: pointer;
+}
+.term-staged-remove:hover { color: #f85149; background: #21262d; }
 #term-clipboard-menu {
   position: absolute; bottom: 100%; left: 8px; z-index: 50;
   width: min(520px, calc(100% - 16px)); max-height: 60vh; overflow: auto;
@@ -7516,6 +7546,17 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .sess-input-failed { color: #f85149; border-color: #da3633; }
 .sess-input-cancelled { color: #6e7681; text-decoration: line-through; }
 .sess-input-cancel { margin-left: 8px; padding: 0 6px; font-size: 11px; }
+/* The images a line carried (claunch-wxmcw): a thumbnail each, after the
+   text, opening the stored file. Sized to sit on the row rather than make it
+   two lines tall; the row already wraps its text. */
+.sess-input-image-link {
+  flex: none; margin-left: 6px; line-height: 0; vertical-align: middle;
+}
+.sess-input-image {
+  width: 28px; height: 28px; object-fit: cover; border-radius: 3px;
+  border: 1px solid #30363d; background: #0d0f12; vertical-align: middle;
+}
+.sess-input-image-link:hover .sess-input-image { border-color: #58a6ff; }
 
 /* ---- Commit page (commit-page.js, #/commit/<sha>) ---- */
 #commit-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }

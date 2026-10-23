@@ -1271,6 +1271,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/runtime-mode", h_session_runtime_mode)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
+    r.add_get("/api/sessions/{name}/pastes/{file}", h_session_paste_file)
     # Files of any kind (claunch-5gpcf): staged for a create form or a
     # thread post, or stored straight into a running session's uploads.
     r.add_post("/api/uploads", h_upload)
@@ -13213,6 +13214,21 @@ PASTE_IMAGE_TYPES = {
     "image/webp": ".webp",
 }
 
+#: The reverse map, for a stored file whose media type is read back off its
+#: name (a staged image named by a later send, or served to the journal).
+PASTE_IMAGE_KINDS = {suffix: kind for kind, suffix in PASTE_IMAGE_TYPES.items()}
+
+#: The names this route writes, and the only ones a later request may name or
+#: fetch: a stamp, six hex characters, and the extension of a type it accepts.
+#: Anything else is a 404/400 rather than a path this module will open, so a
+#: request cannot walk out of the session's ``pastes/`` folder.
+PASTE_IMAGE_NAME = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}\.(png|jpg|gif|webp)$")
+
+#: How many images one session-line send may carry. The same bound an opening
+#: uses (``opening_images.MAX_IMAGES``): each one is a clipboard round trip
+#: paced by the paste settle window.
+PASTE_SEND_MAX_IMAGES = opening_images.MAX_IMAGES
+
 
 async def h_session_paste_image(request: web.Request) -> web.Response:
     """Store one pasted image for a session and hand it to the harness.
@@ -13230,6 +13246,13 @@ async def h_session_paste_image(request: web.Request) -> web.Response:
 
     The file is kept either way. It is how the clipboard gets the bytes, and
     it is the only record of what was handed over.
+
+    ``?stage=1`` stores the file and hands over nothing: the image is held for
+    a session-line send, which names it in ``images`` on ``/keys`` so the
+    picture and the text land in the composer together instead of the image
+    attaching to whatever the session was doing when it was pasted
+    (claunch-wxmcw). A staged send answers the same way otherwise, with
+    ``staged: true`` and no ``delivered``/``keys`` -- nothing was handed over.
 
     The body is the image itself, with its media type in ``Content-Type``. It
     is read in chunks against this route's own ceiling rather than through
@@ -13275,14 +13298,55 @@ async def h_session_paste_image(request: web.Request) -> web.Response:
     with target.open("wb") as fh:
         for chunk in chunks:
             fh.write(chunk)
+    if _query_flag(request, "stage"):
+        return json_response({
+            "ok": True,
+            "path": str(target),
+            "name": target.name,
+            "bytes": total,
+            "staged": True,
+        })
     delivered, keys, reason = await _deliver_pasted_image(session, target, kind)
     return json_response({
         "ok": True,
         "path": str(target),
+        "name": target.name,
         "bytes": total,
         "delivered": delivered,
         "keys": keys,
         "reason": reason,
+    })
+
+
+def _query_flag(request: web.Request, name: str) -> bool:
+    """A switch sent as ``?name=1`` (or ``true``/``yes``): a body that is the
+    image itself leaves nowhere else to put one."""
+    return (request.query.get(name) or "").strip().lower() in ("1", "true", "yes")
+
+
+async def h_session_paste_file(request: web.Request) -> web.Response:
+    """Serve one stored paste image back to the dashboard.
+
+    The session input journal names the images a line carried; showing them is
+    a ``<img src>`` in the detail panel, which cannot carry an Authorization
+    header. It rides the login cookie like every other dashboard fetch (the
+    thread images do the same, threads_api.h_image).
+
+    Only names this module writes are opened (PASTE_IMAGE_NAME), so a request
+    cannot reach any other file in the session's state directory. The name
+    holds a random suffix and never names other bytes, so the answer may be
+    cached for good.
+    """
+    session = _session(request)
+    name = request.match_info["file"]
+    if not PASTE_IMAGE_NAME.match(name):
+        return json_error(404, f"{name!r} is not a stored paste image")
+    path = paths.session_dir(session.sdef.name) / "pastes" / name
+    if not path.is_file():
+        return json_error(404, f"no stored paste image {name!r} for this session")
+    return web.FileResponse(path, headers={
+        "Content-Type": PASTE_IMAGE_KINDS.get(path.suffix, "application/octet-stream"),
+        "Cache-Control": "private, max-age=31536000, immutable",
     })
 
 
@@ -13435,36 +13499,13 @@ def _opening_image_step(session, images, opening: str, *, what: str = "opening i
     """
     done = {"ran": False}
     failed: List[str] = []
-    entry = harness_registry.registry().get(session.sdef.harness or "")
-    marker = (
-        re.compile(entry.image_paste_marker)
-        if entry and entry.image_paste_marker else None
-    )
 
     async def step() -> None:
         if done["ran"]:
             return
         done["ran"] = True
-        for img in images:
-            seen = _marker_count(session, marker) if marker else 0
-            delivered, _keys, reason = await _deliver_pasted_image(
-                session, img.path, img.media_type
-            )
-            if not delivered:
-                log.warning(
-                    "opening image %s for %r not handed over: %s",
-                    img.path, session.sdef.name, reason,
-                )
-                failed.append(f"- {img.path} ({reason})")
-            elif marker and not await _await_marker(session, marker, seen):
-                log.warning(
-                    "opening image %s for %r: no attachment placeholder "
-                    "within %.0fs; pasting the text anyway",
-                    img.path, session.sdef.name, IMAGE_ATTACH_TIMEOUT,
-                )
-        wait = _paste_settle["until"] - asyncio.get_running_loop().time()
-        if wait > 0:
-            await asyncio.sleep(wait)
+        for problem in await _paste_image_series(session, images, what=what):
+            failed.append(f"- {problem['path']} ({problem['reason']})")
 
     def text() -> str:
         parts = [opening] if opening else [
@@ -13584,6 +13625,124 @@ async def _deliver_pasted_image(session, path, media_type: str):
     return True, keys, ""
 
 
+def _staged_images(session, raw) -> List["opening_images.Image"]:
+    """The staged paste images a session-line send names, in order.
+
+    ``raw`` is the request's ``images``: file names this daemon wrote into the
+    session's ``pastes/`` folder (``POST .../paste-image?stage=1``). Anything
+    else is refused rather than resolved -- a name from a request must never
+    become a path this module opens.
+    """
+    if raw is None or raw == []:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(n, str) for n in raw):
+        raise ValueError("'images' must be a list of staged image names")
+    if len(raw) > PASTE_SEND_MAX_IMAGES:
+        raise ValueError(
+            f"one send carries at most {PASTE_SEND_MAX_IMAGES} images")
+    folder = paths.session_dir(session.sdef.name) / "pastes"
+    out: List["opening_images.Image"] = []
+    for name in raw:
+        if not PASTE_IMAGE_NAME.match(name):
+            raise ValueError(f"{name!r} is not a staged image of this session")
+        path = folder / name
+        if not path.is_file():
+            raise ValueError(f"no staged image {name!r} for this session "
+                             f"-- paste it again")
+        kind = PASTE_IMAGE_KINDS.get(path.suffix, "application/octet-stream")
+        out.append(opening_images.Image(path, kind))
+    return out
+
+
+def _image_records(images) -> List[dict]:
+    """The journal's record of the images a line carried: name, type, size.
+
+    The name is what the journal view fetches back from
+    ``GET /api/sessions/{name}/pastes/{file}``; the path is not stored, because
+    the folder follows the session and the file name is enough to find it.
+    """
+    out: List[dict] = []
+    for img in images:
+        try:
+            size = Path(img.path).stat().st_size
+        except OSError:
+            size = None
+        out.append({"name": Path(img.path).name, "type": img.media_type,
+                    "bytes": size})
+    return out
+
+
+async def _deliver_queued_images(session, records) -> List[dict]:
+    """Hand the images a queued line carried to a session that just came back.
+
+    Called by ``session_input.flush`` through a lazy import: that module owns
+    the queue and this one owns the clipboard, and importing api from
+    session_input at module load would close the circle.
+    """
+    folder = paths.session_dir(session.sdef.name) / "pastes"
+    images: List["opening_images.Image"] = []
+    for rec in records or []:
+        name = rec.get("name") if isinstance(rec, dict) else None
+        if not isinstance(name, str) or not PASTE_IMAGE_NAME.match(name):
+            continue
+        path = folder / name
+        if not path.is_file():
+            log.warning("queued image %s for %r is gone; the line goes without it",
+                        path, session.sdef.name)
+            continue
+        kind = rec.get("type") or PASTE_IMAGE_KINDS.get(
+            path.suffix, "application/octet-stream")
+        images.append(opening_images.Image(path, kind))
+    if not images:
+        return []
+    return await _paste_image_series(session, images, what="queued line images")
+
+
+async def _paste_image_series(session, images, *, what: str = "images"):
+    """Hand each image to the harness's composer, in order, and wait it out.
+
+    The shape an opening and a session-line send both need: the pictures are
+    attached before the text that goes behind them, and the settle window is
+    waited out after the last one so the harness has read the clipboard before
+    the text is typed. A harness that declares ``image_paste_marker`` is given
+    its timeout to show the attachment placeholder; the text goes on either
+    way, because a picture that did not attach is not a reason to lose the
+    line.
+
+    Returns one record per image that was not handed over:
+    ``{name, path, reason}``. The caller decides how to say it -- an opening
+    puts it in the delivered text, the session line in its send note.
+    """
+    entry = harness_registry.registry().get(session.sdef.harness or "")
+    marker = (
+        re.compile(entry.image_paste_marker)
+        if entry and entry.image_paste_marker else None
+    )
+    failed: List[dict] = []
+    for img in images:
+        seen = _marker_count(session, marker) if marker else 0
+        delivered, _keys, reason = await _deliver_pasted_image(
+            session, img.path, img.media_type
+        )
+        if not delivered:
+            log.warning(
+                "%s %s for %r not handed over: %s",
+                what, img.path, session.sdef.name, reason,
+            )
+            failed.append({"name": Path(img.path).name, "path": str(img.path),
+                           "reason": reason})
+        elif marker and not await _await_marker(session, marker, seen):
+            log.warning(
+                "%s %s for %r: no attachment placeholder within %.0fs; "
+                "going on without that evidence",
+                what, img.path, session.sdef.name, IMAGE_ATTACH_TIMEOUT,
+            )
+    wait = _paste_settle["until"] - asyncio.get_running_loop().time()
+    if wait > 0:
+        await asyncio.sleep(wait)
+    return failed
+
+
 def _keys_payload(session, nbytes: int, **extra) -> dict:
     out = {"ok": True, "bytes": nbytes}
     out.update(extra)
@@ -13624,13 +13783,23 @@ async def h_session_keys(request: web.Request) -> web.Response:
         if prior and (prior.get("status") == "sent"
                       or session_input.delivering(session.sdef.name, request_id)):
             return json_response(_keys_payload(session, 0, duplicate=True))
+    # Images the session line held for this send (claunch-wxmcw): each was
+    # staged by `POST .../paste-image?stage=1` and is handed to the composer
+    # here, right ahead of the text, so a picture pasted into the line lands
+    # with the words it was pasted for instead of attaching to whatever the
+    # session was doing at that moment. A send may be images alone.
+    try:
+        images = _staged_images(session, body.get("images"))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    image_records = _image_records(images)
     if request_id is not None and (
         session.exited or getattr(session, "held_at", None)
         or session_input.pending(session.sdef.name)
         or session_input.flushing(session.sdef.name)
     ):
         return _queue_session_input(request, session, body, request_id,
-                                    feedback)
+                                    feedback, images=image_records)
     paste = body.get("paste")
     if paste is not None:
         if not isinstance(paste, str):
@@ -13666,21 +13835,30 @@ async def h_session_keys(request: web.Request) -> web.Response:
                 return json_response(_keys_payload(session, 0, duplicate=True))
             session_input.write(session.sdef.name, "input_accepted",
                                 request_id=request_id, text=paste,
-                                status="accepted", pid=session.pid)
+                                status="accepted", pid=session.pid,
+                                images=image_records)
+        failed_images: List[dict] = []
+        if images:
+            failed_images = await _paste_image_series(
+                session, images, what="session line images"
+            )
         try:
             data = await session.paste(paste, enter=bool(body.get("enter")))
         except Exception:
             if request_id is not None:
                 session_input.write(session.sdef.name, "input_failed",
                                     request_id=request_id, text=paste,
-                                    status="failed", pid=session.pid)
+                                    status="failed", pid=session.pid,
+                                    images=image_records)
             raise
         if request_id is not None:
             session_input.write(session.sdef.name, "input_sent",
                                 request_id=request_id, text=paste,
-                                status="sent", pid=session.pid)
+                                status="sent", pid=session.pid,
+                                images=image_records)
         _apply_score_feedback(request, session, feedback)
-        return json_response(_keys_payload(session, len(data)))
+        return json_response(_keys_payload(session, len(data),
+                                           images_failed=failed_images))
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
@@ -13696,7 +13874,30 @@ async def h_session_keys(request: web.Request) -> web.Response:
             return json_response(_keys_payload(session, 0, duplicate=True))
         session_input.write(session.sdef.name, "input_accepted",
                             request_id=request_id, text=audit_text,
-                            status="accepted", pid=session.pid)
+                            status="accepted", pid=session.pid,
+                            images=image_records)
+    failed_images: List[dict] = []
+    if images:
+        # The attachments go in ahead of the line, so the same rule the text
+        # follows has to hold for them: not into a composer somebody is
+        # writing in, and with 'force' the operator's draft is submitted
+        # rather than typed over.
+        quiet = await session.await_keyboard_quiet(
+            terminal_only=True,
+            timeout=session_mod.FORCE_TYPING_GRACE if force else None,
+        )
+        if not quiet and session.draft_open():
+            if force:
+                await session.submit_open_draft()
+            else:
+                return json_error(
+                    409,
+                    f"session {session.sdef.name!r}: someone is typing there "
+                    f"right now — nothing was sent. Retry in a moment.",
+                )
+        failed_images = await _paste_image_series(
+            session, images, what="session line images"
+        )
     try:
         data = await session.send_keys(
             keys, literal=bool(body.get("literal")), force=force
@@ -13705,18 +13906,22 @@ async def h_session_keys(request: web.Request) -> web.Response:
         if request_id and audit_text is not None:
             session_input.write(session.sdef.name, "input_failed",
                                 request_id=request_id, text=audit_text,
-                                status="failed", pid=session.pid)
+                                status="failed", pid=session.pid,
+                                images=image_records)
         raise
     if request_id and audit_text is not None:
         session_input.write(session.sdef.name, "input_sent",
                             request_id=request_id, text=audit_text,
-                            status="sent", pid=session.pid)
+                            status="sent", pid=session.pid,
+                            images=image_records)
     _apply_score_feedback(request, session, feedback)
-    return json_response(_keys_payload(session, len(data)))
+    return json_response(_keys_payload(session, len(data),
+                                       images_failed=failed_images))
 
 
 def _queue_session_input(request, session, body: dict, request_id: str,
-                         feedback: str) -> web.Response:
+                         feedback: str, *, images: Optional[List[dict]] = None
+                         ) -> web.Response:
     """The session-line send for a session that has exited: record the line
     as ``queued`` in its input journal and answer 202. The manager types it
     when the session is launched again (``session_input.flush``).
@@ -13724,6 +13929,10 @@ def _queue_session_input(request, session, body: dict, request_id: str,
     Only the operator's session line queues (it always carries ``input_id``);
     a bare keys call to an exited session still fails, because a caller with
     no durable id has nothing to see the queued line by.
+
+    ``images`` are the staged images the line carried. They are recorded with
+    it and handed over by the flush, ahead of the text, so a line that waited
+    for a relaunch still arrives with its picture.
     """
     name = session.sdef.name
     if getattr(session, "archived_at", None):
@@ -13751,7 +13960,8 @@ def _queue_session_input(request, session, body: dict, request_id: str,
             request.app["manager"].wake_soon(name, by="input")
         return json_response({"ok": True, "bytes": 0, "duplicate": True,
                               "status": prior.get("status")})
-    session_input.queue(name, request_id=request_id, text=text)
+    session_input.queue(name, request_id=request_id, text=text,
+                        images=list(images or []))
     waiting = session_input.pending(name)
     # A respawn can land between reading the record and writing the line:
     # the new incarnation's launch-time flush found nothing, so start one.

@@ -29,7 +29,7 @@ import pytest
 
 from claude_launcher import store
 from claude_launcher.daemon import api as api_mod
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import paths, session_input
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon import session as session_mod
@@ -624,3 +624,186 @@ def test_the_packaged_harnesses_declare_the_key_they_read_an_image_with(
     from claude_launcher import harnesses as harness_registry
 
     assert harness_registry.registry().get(name).image_paste_keys == keys
+
+
+# ---- staging: the image waits for the line (claunch-wxmcw) --------------
+#
+# A paste into the session line used to be handed over at once, so a
+# screenshot attached to whatever the session was doing and the words about
+# it arrived as a separate action. Now the browser uploads it in staging form
+# (`?stage=1`), holds it on the line, and names it in the send; the daemon
+# attaches it ahead of the text, in the same request. The journal records it
+# with the line so the detail panel can show what was sent.
+
+
+def test_a_staged_upload_is_stored_and_handed_over_to_nothing(
+    home, tmp_path, monkeypatch
+):
+    delivered = []
+
+    async def spy(*args, **kwargs):
+        delivered.append(args)
+        return True, [], ""
+
+    monkeypatch.setattr(api_mod, "_deliver_pasted_image", spy)
+
+    async def body(client):
+        resp = await client.post(
+            "/api/sessions/s1/paste-image?stage=1", data=PNG,
+            headers={**BEARER, "Content-Type": "image/png"},
+        )
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        assert doc["staged"] is True
+        assert "delivered" not in doc and "keys" not in doc
+        assert api_mod.PASTE_IMAGE_NAME.match(doc["name"]), doc["name"]
+        assert Path(doc["path"]).name == doc["name"]
+        assert Path(doc["path"]).read_bytes() == PNG
+        assert Path(doc["path"]).parent == paths.session_dir("s1") / "pastes"
+        assert delivered == []
+
+    _run(tmp_path, body, image_paste_transport="path")
+
+
+def test_the_line_send_attaches_the_staged_images_ahead_of_the_text(
+    home, tmp_path, monkeypatch
+):
+    """One request carries both halves: the picture lands in the composer
+    first (no Enter — attaching must not submit), then the text and its
+    Enter. The journal row is the line, with the image it carried."""
+    events = []
+
+    async def fake_paste(self, text, *, enter=False):
+        events.append(("paste", str(text), enter))
+        return b""
+
+    async def fake_keys(self, keys, **kwargs):
+        events.append(("keys", list(keys)))
+        return b""
+
+    monkeypatch.setattr(session_mod.Session, "paste", fake_paste)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_keys)
+
+    async def body(client):
+        session = client.server.app["manager"].get("s1")
+        session.screen.bracketed_paste = True
+        up = await client.post(
+            "/api/sessions/s1/paste-image?stage=1", data=PNG,
+            headers={**BEARER, "Content-Type": "image/png"},
+        )
+        name = (await up.json())["name"]
+        events.clear()
+
+        resp = await client.post(
+            "/api/sessions/s1/keys", headers=BEARER,
+            json={"keys": ["look at this", "Enter"], "force": True,
+                  "input_id": "line-1", "images": [name]},
+        )
+        assert resp.status == 200, await resp.text()
+        assert (await resp.json())["images_failed"] == []
+
+        assert events[0][0] == "paste", events
+        assert events[0][2] is False, "attaching must not submit the composer"
+        assert str(events[0][1]).endswith(name), events[0]
+        assert events[1] == ("keys", ["look at this", "Enter"]), events
+
+        row = session_input.requests("s1")[-1]
+        assert row["status"] == "sent"
+        assert row["text"] == "look at this"
+        assert [i["name"] for i in row["images"]] == [name]
+        assert row["images"][0]["type"] == "image/png"
+        assert row["images"][0]["bytes"] == len(PNG)
+
+    _run(tmp_path, body, image_paste_transport="path")
+
+
+def test_a_send_naming_an_image_that_is_not_staged_is_refused(home, tmp_path):
+    """A name from a request never becomes a path this module opens: an
+    outside name, an unknown one and a well-formed one that was never stored
+    are all refused before anything is typed."""
+    async def body(client):
+        for bad in (["../../etc/passwd"],
+                    ["not-a-paste.png"],
+                    ["20260101-000000-abcdef.png"]):
+            resp = await client.post(
+                "/api/sessions/s1/keys", headers=BEARER,
+                json={"keys": ["x", "Enter"], "input_id": "line-1",
+                      "images": bad},
+            )
+            assert resp.status == 400, (bad, await resp.text())
+        # nothing was recorded for a refused send
+        resp = await client.get("/api/sessions/s1/input-journal",
+                                headers=BEARER)
+        assert (await resp.json())["requests"] == []
+
+    _run(tmp_path, body, image_paste_transport="path")
+
+
+def test_a_stored_paste_image_is_served_to_the_panel_and_nothing_else(
+    home, tmp_path
+):
+    """The journal shows what the line carried with a <img src>, which cannot
+    carry a bearer header — it rides the login cookie like every other
+    dashboard fetch. Only names this route writes are opened."""
+    async def body(client):
+        up = await client.post(
+            "/api/sessions/s1/paste-image?stage=1", data=PNG,
+            headers={**BEARER, "Content-Type": "image/png"},
+        )
+        name = (await up.json())["name"]
+        got = await client.get(f"/api/sessions/s1/pastes/{name}",
+                               headers=BEARER)
+        assert got.status == 200, await got.text()
+        assert got.headers["Content-Type"] == "image/png"
+        assert await got.read() == PNG
+
+        for bad in ("nope.png", "..%2F..%2Fsecret.png",
+                    "20260101-000000-abcdef.exe", "20260101-000000-ABCDEF.png"):
+            resp = await client.get(f"/api/sessions/s1/pastes/{bad}",
+                                    headers=BEARER)
+            assert resp.status == 404, (bad, resp.status)
+
+    _run(tmp_path, body, image_paste_transport="path")
+
+
+def test_a_queued_line_hands_its_images_over_before_the_text(
+    home, tmp_path, monkeypatch
+):
+    """A line sent to an ended session keeps its images in the queue, and the
+    flush that types it attaches them first — the picture belongs to the line,
+    not to the moment it was pasted."""
+    from unittest.mock import AsyncMock
+
+    _harness(image_paste_transport="path")
+    folder = paths.session_dir("s1") / "pastes"
+    folder.mkdir(parents=True, exist_ok=True)
+    image = folder / "20260101-000000-abcdef.png"
+    image.write_bytes(PNG)
+
+    events = []
+    session = SimpleNamespace(
+        sdef=SessionDef(name="s1", harness="py"),
+        exited=False,
+        pid=None,
+        screen=SimpleNamespace(bracketed_paste=True),
+        prepare_operator_input=AsyncMock(),
+        await_input_ready=AsyncMock(),
+        paste=AsyncMock(side_effect=lambda text, enter=False:
+                        events.append(("paste", str(text), enter))),
+        send_keys=AsyncMock(side_effect=lambda keys, **kw:
+                            events.append(("keys", list(keys)))),
+        capture=lambda *a, **k: [],
+    )
+    session_input.queue(
+        "s1", request_id="q1", text="look at this",
+        images=[{"name": image.name, "type": "image/png", "bytes": len(PNG)}],
+    )
+    asyncio.run(session_input.flush(session))
+
+    assert events[0][0] == "paste", events
+    assert events[0][1].endswith(image.name), events[0]
+    assert events[0][2] is False
+    assert events[1] == ("keys", ["look at this", "Enter"]), events
+    row = session_input.requests("s1")[-1]
+    assert row["status"] == "sent"
+    assert [i["name"] for i in row["images"]] == [image.name]
