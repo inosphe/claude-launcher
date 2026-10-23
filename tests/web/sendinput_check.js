@@ -200,6 +200,8 @@ ${stagedDecl[0]}
 ` + slice("clipboardImage") + `
 ` + slice("clipboardRefusal") + `
 ` + slice("pasteClipboardImage") + `
+` + slice("stageClipboardImage") + `
+` + slice("readClipboardImage") + `
 ` + slice("pastedImageFiles") + `
 ` + slice("onTermInputPaste") + `
 ` + slice("onTerminalPaste") + `
@@ -228,6 +230,7 @@ Object.assign(exports, {
   clearStagedImages,
   stagedFor,
   pasteClipboardImage,
+  stageClipboardImage,
   setHarnesses: (h) => { harnessDetails = h; },
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
   setSessions: (rows) => { sessionsCache = rows; },
@@ -529,31 +532,37 @@ async function main() {
         sent[0].body);
   check("the box is emptied for the next block", FIELD.value === "");
 
-  /* ---- Alt+V hands the clipboard image to the session ---- */
+  /* ---- Alt+V on the line holds the clipboard image for the send ----
+     The line has a send step, so its Alt+V attaches: the image is stored
+     with `?stage=1` and named by the Enter that sends the text. The
+     terminal's Alt+V still delivers at once — see the xterm checks below. */
   sent = [];
   reply = { ok: true, doc: { ok: true, path: "C:/state/sessions/coder4/pastes/x.png",
-                             bytes: 12, delivered: true, keys: ["M-v"], reason: "" } };
+                             name: "x.png", bytes: 12, staged: true } };
   ctx.setSession("coder4", false);
   FIELD.disabled = false;
   FIELD.value = "look at ";
   FIELD.selectionStart = FIELD.selectionEnd = 8;
   const blob = { type: "image/png", size: 12 };
   clipboard = { items: [imageItem("image/png", blob)] };
+  ctx.clearStagedImages("coder4");
   const altv = press("v", { altKey: true });
   await settle();
   check("Alt+V is taken from the browser", altv.prevented === true);
   check("exactly one upload", sent.length === 1, sent);
-  check("...to the session's paste-image route",
-        sent[0].path === "/api/sessions/coder4/paste-image", sent[0].path);
+  check("...to the staging form of the paste-image route",
+        sent[0].path === "/api/sessions/coder4/paste-image?stage=1", sent[0].path);
   check("...carrying the blob itself, typed as the image it is",
         sent[0].body === blob && sent[0].contentType === "image/png", sent[0]);
+  check("...handing nothing to the session before the line is sent",
+        !sent.some((r) => r.path.endsWith("/keys")), sent);
   check("what was already typed is left alone — no path goes in the line",
         FIELD.value === "look at ", FIELD.value);
-  check("...and the line says the image reached the session",
-        NOTE.textContent.includes("sent to the session"), NOTE.textContent);
-  check("...with no keystroke sent from the page: the daemon sends it, on the "
-        + "machine whose clipboard now holds the image",
-        !sent.some((r) => r.path.endsWith("/keys")), sent);
+  check("...and the line holds the image until then",
+        ctx.stagedFor("coder4").map((i) => i.name).join() === "x.png",
+        ctx.stagedFor("coder4"));
+  check("...saying the Enter that sends the line carries it",
+        /press Enter/.test(NOTE.textContent), NOTE.textContent);
 
   /* ---- an empty clipboard says so and uploads nothing ---- */
   sent = [];
@@ -577,6 +586,7 @@ async function main() {
   sent = [];
   FIELD.value = "";
   STAGED.children.length = 0;
+  ctx.clearStagedImages("coder4");
   reply = { ok: true, doc: { ok: true, path: "C:/state/pastes/a.png",
                              name: "a.png", bytes: 9, staged: true } };
   const pasted = { type: "image/png", size: 9 };
@@ -696,6 +706,8 @@ async function main() {
         down.pass === false && press2.pass === false && up.pass === false);
   check("...and uploads the browser's image once, on keydown",
         sent.length === 1 && sent[0].path === "/api/sessions/coder4/paste-image", sent);
+  check("...delivered, not staged — a terminal has no send step to wait for",
+        sent.length === 1 && !/\?stage=1/.test(sent[0].path), sent);
   check("...with the browser's own default taken", down.ev.prevented === true);
   const plainV = termKey("keydown", {});
   check("a plain v goes to the terminal", plainV.pass === true);

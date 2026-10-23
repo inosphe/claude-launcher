@@ -19096,8 +19096,11 @@ function onTermInputKeydown(ev) {
   if (ev.isComposing || ev.keyCode === 229) return;
   const key = ev.key;
   if (isAltV(ev)) {
+    // On the line, Alt+V is a way to attach an image, so it is held for the
+    // send like a pasted or picked one; the terminal's Alt+V still hands its
+    // image over at once (onTermKeyEvent), because a terminal has no send.
     ev.preventDefault();
-    pasteClipboardImage($("term-input-note"));
+    stageClipboardImage($("term-input-note"));
     return;
   }
   if (isCtrlJ(ev)) {
@@ -19378,7 +19381,13 @@ async function toggleLineSync() {
    the permission and a secure context — an http:// page opened from another
    PC is not one), an ordinary Ctrl+V carrying image files is handled on the
    paste event, which needs neither, and the image button opens a file
-   picker that takes several images at once. */
+   picker that takes several images at once.
+
+   On the session line all three hold the image for the line's send
+   (claunch-wxmcw): it is stored with `?stage=1` and named by the Enter that
+   sends the text, so the picture and the words reach the composer together.
+   On the terminal they still deliver at once — a terminal has no send step
+   of its own. */
 
 /* The media types the daemon's route stores (PASTE_IMAGE_TYPES in api.py),
    by file extension, for a picked file whose browser left `type` empty. */
@@ -19698,18 +19707,34 @@ function clipboardRefusal(err) {
 }
 
 async function pasteClipboardImage(note) {
+  const blob = await readClipboardImage(note);
+  if (!blob) return false;
+  return uploadPastedImage(blob, note);
+}
+
+/* The same clipboard read, held on the session line instead of handed over
+   (claunch-wxmcw): the line's own Alt+V goes this way. */
+async function stageClipboardImage(note) {
+  const blob = await readClipboardImage(note);
+  if (!blob) return false;
+  return (await stageImageFiles([blob], note)) > 0;
+}
+
+/* The image on the clipboard, or null with the note already saying why there
+   is none to be had. */
+async function readClipboardImage(note) {
   let blob = null;
   try {
     blob = await clipboardImage();
   } catch (err) {
     if (note) termInputNote(note, clipboardRefusal(err), true);
-    return false;
+    return null;
   }
   if (!blob) {
     if (note) termInputNote(note, "there is no image on this browser's clipboard", true);
-    return false;
+    return null;
   }
-  return uploadPastedImage(blob, note);
+  return blob;
 }
 
 /* The image files a paste carries. `items` is where a screenshot arrives;

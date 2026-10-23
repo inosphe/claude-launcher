@@ -819,12 +819,12 @@
                 aria-label="this browser's local line, kept read-only while remote-sync is on"></textarea>
       <textarea id="term-input-field" rows="1" data-expand-on-focus
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
-             title="Enter sends · Ctrl+J inserts a newline · Ctrl+V or 🖼 attaches an image to this line — it is sent with the line · Alt+V on the terminal hands the clipboard image over at once"
+             title="Enter sends · Ctrl+J inserts a newline · Ctrl+V, Alt+V or 🖼 attaches an image to this line — it is sent with the line · Alt+V on the terminal hands the clipboard image over at once"
              autocomplete="off" spellcheck="false"
              aria-label="type text and send it to this session"></textarea>
-      <!-- Image files, several at once: each goes the same way as an Alt+V
-           image (uploaded, put on the daemon's clipboard, handed over with the
-           harness's key), one after another. -->
+      <!-- Image files, several at once: each is stored by the daemon
+           (POST .../paste-image?stage=1) and held on the line with the ones
+           above, so they go out with its send. -->
       <button id="term-glossary-open" class="term-btn" type="button" title="용어집 검색 · 선택한 문구를 참조로 바꾸기">용어집</button>
       <button id="term-image-pick" class="term-btn" type="button"
               title="attach image files to this line (several at once) — they are sent with it"
