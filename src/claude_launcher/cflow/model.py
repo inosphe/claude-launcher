@@ -549,9 +549,20 @@ SCOPE_ANY = "any"
 SCOPE_ANCESTOR = "ancestor"
 #: ...or the sessions sharing its parent (roots of one mesh share the operator)...
 SCOPE_SIBLING = "sibling"
+#: ...or the sessions nobody in the mesh spawned — the roots the operator
+#: started. A run with a parent sees them as collateral, and no other scope
+#: names collateral; this is how a run whose own chain holds no one of that
+#: role still reaches the one that stands at the top...
+SCOPE_ROOT = "root"
 #: ...or what it spawned itself — the one scope that admits descendants.
 SCOPE_DESCENDANT = "descendant"
-SCOPES = (SCOPE_ANY, SCOPE_ANCESTOR, SCOPE_SIBLING, SCOPE_DESCENDANT)
+SCOPES = (
+    SCOPE_ANY,
+    SCOPE_ANCESTOR,
+    SCOPE_SIBLING,
+    SCOPE_ROOT,
+    SCOPE_DESCENDANT,
+)
 
 #: ``filter_roles.type``: admit only the listed roles...
 FILTER_WHITELIST = "whitelist"
@@ -2424,6 +2435,7 @@ def _parse_candidate(raw, where: str) -> Candidate:
             f"({SCOPE_ANY} = anyone reachable that this run did not spawn, "
             f"{SCOPE_ANCESTOR} = its own chain of command only, "
             f"{SCOPE_SIBLING} = the sessions sharing its parent, "
+            f"{SCOPE_ROOT} = the sessions with no parent in the mesh, "
             f"{SCOPE_DESCENDANT} = the sessions it spawned)"
         )
     connect = raw.get("connect", False)

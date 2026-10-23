@@ -1074,6 +1074,27 @@ def test_landing_review_asks_by_relation(tmp_path, monkeypatch, relation, label,
     assert st["status"] == "done" and st.get("outcome") == "held", st.get("outcome")
 
 
+def test_landing_leaders_third_group_is_the_mesh_root():
+    """claunch-jdre5: a worker parented under another worker sees the leader
+    the operator started as collateral — neither above it nor beside it. Both
+    leader groups then miss, the question falls to a person with no clock, and
+    the run waits indefinitely. ``root`` is the group that names that leader;
+    the order stays nearest first, so it is tried last."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    ask = doc["nodes"]["landing-review-leader"]["ask"]
+    assert [(c["role"], c["scope"]) for c in ask["from"]] == [
+        ("leader", "ancestor"),
+        ("leader", "sibling"),
+        ("leader", "root"),
+    ]
+    assert ask["otherwise"] == "human"
+    assert all(c["scope"] != "descendant" for c in ask["from"]), (
+        "a run must not stand up a session to answer its own landing question"
+    )
+
+
 def test_landing_review_question_reads_for_a_person_too():
     """claunch-gbw47: with no upper session the question falls through to a
     person, who asked which worker "너에게 딸린 워커" was and why it came to

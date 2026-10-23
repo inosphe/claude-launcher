@@ -152,15 +152,20 @@ meant to be paged.
   *sibling* (same parent — parentless roots of one mesh are siblings of each
   other) or *collateral* (none of those: an uncle, a cousin, a sibling's
   child). `scope: ancestor`, `sibling` and `descendant` each admit one
-  relation; the default `any` admits everything but descendants, collateral
-  included. Order the relations with groups, nearest-trusted first:
+  relation; `scope: root` admits the part of the collateral that stands at the
+  top — the sessions with no parent in the mesh; the default `any` admits
+  everything but descendants, collateral included. Order the relations with
+  groups, nearest-trusted first:
   `from: [{role: reviewer, scope: descendant}, {role: reviewer, scope:
   sibling}, {role: reviewer, scope: ancestor}, {role: leader, scope:
   ancestor}, {role: leader, scope: sibling}]`. Use `ancestor` (and, for a
   mesh's single leader, `sibling`) for authority decisions — shipping,
-  spending, releasing. Prefer named relations over `any` for competence
-  decisions too: `any` hands a question to a reviewer some other session
-  spawned for its own work.
+  spending, releasing. Add `{role: leader, scope: root}` after the sibling
+  group when the asking run can sit under a non-leader: the mesh's leader is
+  then collateral to it, so `ancestor` and `sibling` both miss it and the
+  question falls to a person with a leader in the mesh (claunch-jdre5).
+  Prefer named relations over `any` for competence decisions too: `any` hands
+  a question to a reviewer some other session spawned for its own work.
 - **A human is never an entry in `from`.** Nothing resolves or notifies them.
   An `ask:` with no `from` at all is exactly a human gate — which is what the
   deprecated `gate:` becomes.
