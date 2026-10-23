@@ -378,6 +378,67 @@ def test_a_child_with_its_own_pool_rotates_its_own(home):
     ] == [(k.token, k.use_count) for k in base_before.keys]
 
 
+def test_a_child_with_only_login_credentials_does_not_rotate_the_parent_pool(home):
+    # owner()'s chain is the stored token, then the login credentials. A
+    # login-only child has an own_token, so the parent's pool is inert for it
+    # and no rotation happens (claunch-wllke.6).
+    base = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    (child.config_dir / credentials.CREDENTIALS_FILENAME).write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "login-only-token",
+                    "expiresAt": 9999999999999,
+                    "scopes": ["user:profile"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    lineage.set_parent(child, "base")
+    before = profile_keys.load(base)
+
+    assert credentials.own_token(child) == "login-only-token"
+    assert profile_keys.owner(child) is None
+    assert profile_keys.select_for_launch(child) is None
+
+    after = profile_keys.load(base)
+    assert [(k.token, k.use_count) for k in after.keys] == [
+        (k.token, k.use_count) for k in before.keys
+    ]
+    assert after.cursor == before.cursor
+    assert credentials.stored_token(base) == "sk-CCCC2222DDDD"
+    assert credentials.stored_token(child) is None
+
+
+def test_a_grandparent_pool_is_rotated_when_the_parent_holds_nothing(home):
+    # The chain walk does not stop at an empty parent: the nearest ancestor
+    # with a token decides, and that ancestor's pool is the one that advances
+    # (claunch-wllke.6).
+    grand = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="grand")
+    parent = profile.create("parent")
+    child = profile.create("child")
+    lineage.set_parent(parent, "grand")
+    lineage.set_parent(child, "parent")
+
+    first = profile_keys.select_for_launch(child)
+    second = profile_keys.select_for_launch(child)
+
+    assert first.owner.name == "grand"
+    assert [first.key.token, second.key.token] == [
+        "sk-AAAA1111BBBB",
+        "sk-CCCC2222DDDD",
+    ]
+    # The grandparent's token file moved; the parent's and the child's did
+    # not, because neither owns a token.
+    assert credentials.stored_token(grand) == "sk-CCCC2222DDDD"
+    assert credentials.stored_token(parent) is None
+    assert credentials.stored_token(child) is None
+    assert profile_keys.load(parent) is None
+    assert profile_keys.load(child) is None
+
+
 # --- removal and CLI --------------------------------------------------------
 
 
