@@ -104,11 +104,22 @@ def _cmd_remove(args: argparse.Namespace) -> int:
 def _cmd_strategy(args: argparse.Namespace) -> int:
     p = profile_mod.require(args.name)
     if not args.strategy:
-        data = profile_keys.summary(p)
+        # The pool a launch of this profile reads, which for a child holding
+        # no token of its own is an ancestor's -- the same pool `keys list`
+        # reports. Asking for the profile's own pool said "has no key pool"
+        # about a child whose every launch rotates someone else's
+        # (claunch-wllke.5.1).
+        try:
+            data = profile_keys.view(p)
+        except profile_keys.KeysError as exc:
+            raise SystemExit(f"claunch: {exc}")
         if not data["pooled"]:
             print(f"profile {p.name!r} has no key pool; strategy applies once it holds keys")
-        else:
-            print(data["strategy"])
+            return 0
+        print(data["strategy"])
+        owner = data.get("owner")
+        if owner and owner != p.name:
+            print(f" pool: profile {owner!r} (inherited — every launch of {p.name!r} selects from it)")
         return 0
     try:
         pool = profile_keys.set_strategy(p, args.strategy)
