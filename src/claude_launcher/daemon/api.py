@@ -11423,7 +11423,9 @@ async def h_session_token_series(request: web.Request) -> web.Response:
     """The terminal overlay's chart: fresh input, cache read and cache write
     per time bucket over the conversation, with its compaction times
     (``?window=cap|full``, default ``cap`` = at most the last 12 hours; the
-    overlay's hover view asks for ``full``). See :func:`sessionstats.series`."""
+    overlay's hover view asks for ``full``) and the times the session swapped
+    its profile's token for a borrowed one or back (``swaps``). See
+    :func:`sessionstats.series`."""
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     window = request.query.get("window", "cap")
@@ -11442,6 +11444,14 @@ async def h_session_token_series(request: web.Request) -> web.Response:
             "window": window, "points": points})
     except statsworker.WorkerError as exc:
         return json_error(500, f"reading the transcript failed: {exc}")
+    if reading.get("points"):
+        # The daemon's own event history, not the transcript: the transcript
+        # does not say which account answered a request.
+        events = getattr(manager, "events", None)
+        reading["swaps"] = sessionstats.swap_marks(
+            events.rows(session) if events is not None else [],
+            getattr(sdef, "profile", "") or "",
+            reading.get("start") or 0, reading.get("until") or 0)
     return json_response({**reading, "reader": reader})
 
 

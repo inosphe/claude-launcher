@@ -480,6 +480,28 @@ def test_series_rejects_an_unknown_window(tmp_path):
         read_series(path, "week")
 
 
+def _borrow_event(when, **details):
+    return {"kind": "borrow", "at": when, "details": details}
+
+
+def test_swap_marks_are_the_borrow_events_inside_the_window():
+    rows = [
+        _borrow_event(at(2), previous="", current="opencode2"),
+        _borrow_event(at(4), previous="opencode2", current=""),
+        _borrow_event(at(5), previous="", current="", previous_null=False, null_token=True),
+        _borrow_event(at(20), previous="", current="late"),
+        {"kind": "restart-settings", "at": at(3), "details": {}},
+        _borrow_event("not a time", previous="", current="x"),
+    ]
+    got = sessionstats.swap_marks(rows, "opencode", _epoch(at(1)), _epoch(at(10)))
+    assert got == [
+        {"at": _epoch(at(2)), "from": "opencode", "to": "opencode2"},
+        {"at": _epoch(at(4)), "from": "opencode2", "to": "opencode"},
+        {"at": _epoch(at(5)), "from": "opencode", "to": "(none)"},
+    ]
+    assert sessionstats.swap_marks([], "opencode", 0, 1e12) == []
+
+
 def test_the_token_series_endpoint_reads_the_session(home, tmp_path):
     import asyncio
     import time
@@ -509,6 +531,13 @@ def test_the_token_series_endpoint_reads_the_session(home, tmp_path):
             assert body["available"] and len(body["points"]) == 8
             assert sum(p["cache_read"] for p in body["points"]) == 50
             assert len(body["compactions"]) == 1
+            assert body["swaps"] == []
+            mgr.events.rows(mgr._sessions["s1"]).append(
+                _borrow_event(at(0, 1), previous="", current="lender"))
+            resp = await client.get("/api/sessions/s1/token-series?window=full&points=8",
+                                    headers=bearer)
+            body = await resp.json()
+            assert [(m["from"], m["to"]) for m in body["swaps"]] == [("", "lender")]
             resp = await client.get("/api/sessions/s1/token-series?window=month",
                                     headers=bearer)
             assert resp.status == 400

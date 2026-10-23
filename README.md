@@ -1515,16 +1515,24 @@ finished call went underneath (model, its rate and age, then that call's
 latency with the window's mean and the cache share). The divider between them
 is drawn only when both are on screen.
 
-Under the throughput block and under the usage block the overlay draws a token
-timeline (claunch-0af4e): stacked areas of cached input, write and fresh input
-as running totals from the start of the window (the stack only rises; its top
-is the window's whole sum, claunch-0af4e.1), from the conversation's first
-request to now and at most the last twelve hours, with a dashed mark at every
-compaction. Hovering a chart grows that chart and shows the whole conversation,
-with an axis (the window's total), a legend and the running totals at the
-point under the pointer plus that bucket's own tokens; moving the pointer off it returns
-it to the small view (claunch-a27zc). The two charts draw the same
-session series; `GET /api/sessions/{name}/token-series` serves it.
+At the foot of the overlay, under the last block, it draws one token timeline
+(claunch-0af4e): stacked areas of write, fresh input and cached input (bottom
+to top) as running totals from the start of the window (the stack only rises;
+its top is the window's whole sum, claunch-0af4e.1), from the conversation's
+first request to now and at most the last twelve hours. The height axis is
+logarithmic from 1 token, because cached input is orders of magnitude larger
+than the other two and they were invisible on a linear axis; each layer's
+boundary is the log position of the running sum up to it, so a layer's
+thickness is a ratio and not a token count (claunch-0af4e.1.1). It is one chart because the
+series belongs to the session; under each block it drew the same chart twice
+(claunch-0af4e.1.1). A dashed red mark is a compaction; a solid cyan mark with
+a diamond head is a profile swap (the session was relaunched onto a borrowed
+token, onto another borrowed one, or back onto its own), named on hover with
+the profiles before and after. Hovering the chart grows it and shows the whole
+conversation, with the window's total as the label of the height axis (`log`, plus a rule at 1k, 1M and 1B below it), an axis
+row, a legend and the running totals at the point under the pointer plus that
+bucket's own tokens; moving the pointer off it returns it to the small view
+(claunch-a27zc). `GET /api/sessions/{name}/token-series` serves it.
 
 A call that failed is drawn where the rate would be (claunch-waakh.1): a
 non-2xx last call shows the upstream's own HTTP status (`HTTP 429`) in the rail
@@ -5061,7 +5069,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it; borrowed sessions also include a secret-free live `borrowed_auth` validation |
 | GET    | `/api/sessions/{name}/stats`   | the Stats page (`#/stats/<name>`): the current conversation's token usage in `?unit=hour\|day\|week` buckets (local time), and every input it received sorted by origin (typed by a person, claunch notice by header, mesh message by sender, opening task, harness) with estimated tokens, the requests each input triggered and the text it carried as context; `partial` while the transcript is still being read; read in the stats worker process, off the daemon's event loop (`reader`: `worker`, or `thread` when the worker cannot answer) |
-| GET    | `/api/sessions/{name}/token-series` | the terminal overlay's token timeline: `?window=cap\|full` (default `cap`: from the conversation's first request, at most the last 12 hours; `full`: the whole conversation) and `?points=` (default 120, at most 480) — per time bucket the fresh input, cache read and cache write tokens (output is not drawn), the span (`start`, `until`, `bucket_s`, epoch seconds) and the `compactions` inside it; `available: false` with a `reason` when there is no transcript; read in the stats worker like `/stats` |
+| GET    | `/api/sessions/{name}/token-series` | the terminal overlay's token timeline: `?window=cap\|full` (default `cap`: from the conversation's first request, at most the last 12 hours; `full`: the whole conversation) and `?points=` (default 120, at most 480) — per time bucket the fresh input, cache read and cache write tokens (output is not drawn), the span (`start`, `until`, `bucket_s`, epoch seconds) the `compactions` inside it and the `swaps` (borrow changes from the session's event history: `at`, `from`, `to`, with `(none)` for a `--null` session); `available: false` with a `reason` when there is no transcript; read in the stats worker like `/stats` |
 | GET    | `/api/stats/compare`           | the Stats page's compare mode (`#/compare/<a,b,c>`): `?sessions=a,b,c&unit=…` (at most 12) — per figure (requests, tokens, tokens per request, cache read share, active buckets, input and triggered shares by origin, ...) every session's value, the mean, median, sample standard deviation, min and max across the set, and each session's z-score and rank; the origin shares; and the sessions' tokens on one bucket timeline. Descriptive statistics only |
 | GET    | `/api/stats/overview`          | the Stats page's default reading (`#/stats`): `?window=today\|week\|month` (local days, today included), and `?killed=1` / `?archived=1` to keep the killed or archived sessions the page holds out by default (each box admits its own category; `?ended=1` still means both, which is the older spelling) — per session its usage in the window read from the metering ledger (fresh input, cache read, cache write, output, requests), split per provider (resolved from the upstream that answered each request), its per-day totals, and every provider/model change the ledger proves inside the window with its time, plus every profile change (`kind: "profile"`) the session's own event history records — a reborrow onto another profile's credentials leaves no provider change behind when both profiles reach the same upstream, so that axis comes from `session-events` rather than the ledger; plus the window totals, the cache share, per-provider totals, and `ledger_since` — the day metering starts, past which the ledger cannot speak. A session on an OAuth route (Anthropic's subscription, a Codex login) writes no ledger line: its window figures are read from its own transcript — the same `sessionstats` reading its detail panel shows — and the row carries `source: "transcript"` with its harness, and its `first_at` / `last_at` stay null because a transcript reading is bucketed by day — a bucket's start is a day boundary, not a time anything happened; when there is no transcript to read the row is `source: "none"` with no figure, never a zero. `counts` splits `metered`, `transcript`, `unmetered` and `transcript_skipped` (the per-request transcript cap), and `ended_excluded` breaks into `killed_excluded` / `archived_excluded`, the rows each box is holding out; `include_killed` / `include_archived` echo what the request asked for, and `partial` is true while a transcript reading is still being caught up. Read off the event loop (`daemon/statsboard.py`) |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |

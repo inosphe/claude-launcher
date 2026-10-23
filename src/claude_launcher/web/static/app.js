@@ -8348,15 +8348,17 @@ function tpsSparkline(series) {
    shows the whole conversation (window=full). Compactions are vertical marks.
    The overlay takes no pointer events, so only the charts switch them on. */
 const TERM_SERIES_TTL_MS = { cap: 30 * 1000, full: 15 * 1000 };
-/* The parts, bottom to top, with the colour and label each one is drawn in. */
+/* The parts, bottom to top, with the colour and label each one is drawn in:
+   the smallest on the bottom, so that on the log height axis each boundary
+   is a visible step (claunch-0af4e.1.1). */
 const TERM_SERIES_LAYERS = [
-  ["cache_read", "cached input", "#58a6ff"],
   ["cache_write", "write", "#e3b341"],
   ["input", "input", "#bc8cff"],
+  ["cache_read", "cached input", "#58a6ff"],
 ];
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
-/* The chart under the pointer: "tps", "usage", or false for none. */
+/* Whether the pointer is on the chart: its slot name, or false for none. */
 let termSeriesHover = false;
 
 function termSeriesRead(name, win, now = Date.now()) {
@@ -8427,7 +8429,11 @@ function termSeriesChart(data, zoom) {
   const cum = termSeriesCumulative(pts);
   const peak = Math.max(1, ...cum.map(termSeriesTotal));
   const xAt = (i) => (pts.length > 1 ? (i / (pts.length - 1)) * w : 0);
-  const yAt = (v) => h - 1 - (v / peak) * (h - 3);
+  /* Log height axis from 1 token: cached input dwarfs fresh input and write,
+     and on a linear axis the two thin parts were not visible. A boundary
+     under 1 token sits on the baseline. */
+  const logPeak = Math.log(Math.max(peak, 2));
+  const yAt = (v) => h - 1 - (v > 1 ? Math.log(v) / logPeak : 0) * (h - 3);
   const below = pts.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
     const above = cum.map((p, i) => below[i] + p[key]);
@@ -8457,17 +8463,71 @@ function termSeriesChart(data, zoom) {
     mark.setAttribute("y2", String(h));
     svg.appendChild(mark);
   }
-  box.appendChild(svg);
   const ago = (at) => `${fmtAge(Math.max(0, data.until - at))} ago`;
+  /* Where the session changed whose token it runs on (a borrow started,
+     changed or ended): a solid cyan line with a diamond on top, so it cannot
+     be read as the dashed red compaction line. The name of the swap is the
+     mark's tooltip. */
+  const swaps = (data.swaps || []).filter((m) => m.at >= data.start && m.at <= data.until);
+  for (const m of swaps) {
+    const x = ((m.at - data.start) / span) * w;
+    const mark = document.createElementNS(NS, "g");
+    mark.setAttribute("class", "term-series-swap");
+    const stem = document.createElementNS(NS, "line");
+    stem.setAttribute("x1", x.toFixed(1));
+    stem.setAttribute("x2", x.toFixed(1));
+    stem.setAttribute("y1", "0");
+    stem.setAttribute("y2", String(h));
+    const r = zoom ? 4 : 3;
+    const head = document.createElementNS(NS, "polygon");
+    head.setAttribute("points", [[x, 0], [x + r, r], [x, 2 * r], [x - r, r]]
+      .map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(" "));
+    const tip = document.createElementNS(NS, "title");
+    tip.textContent = `profile swap ${m.from} \u2192 ${m.to}, ${ago(m.at)}`;
+    mark.append(stem, head, tip);
+    svg.appendChild(mark);
+  }
+  if (zoom) {
+    /* The height axis: log scale, its maximum is the whole window's tokens;
+       a faint rule at every thousandth power below it. */
+    for (const [at, name] of [[1e3, "1k"], [1e6, "1M"], [1e9, "1B"]]) {
+      if (at >= peak || yAt(at) - yAt(peak) < 12) continue;
+      const tick = document.createElementNS(NS, "line");
+      tick.setAttribute("class", "term-series-ymax-rule");
+      tick.setAttribute("x1", "0");
+      tick.setAttribute("x2", String(w));
+      tick.setAttribute("y1", yAt(at).toFixed(1));
+      tick.setAttribute("y2", yAt(at).toFixed(1));
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("class", "term-series-ytick");
+      text.setAttribute("x", "2");
+      text.setAttribute("y", String(yAt(at) - 2));
+      text.textContent = name;
+      svg.append(tick, text);
+    }
+    const rule = document.createElementNS(NS, "line");
+    rule.setAttribute("class", "term-series-ymax-rule");
+    rule.setAttribute("x1", "0");
+    rule.setAttribute("x2", String(w));
+    rule.setAttribute("y1", yAt(peak).toFixed(1));
+    rule.setAttribute("y2", yAt(peak).toFixed(1));
+    const label = document.createElementNS(NS, "text");
+    label.setAttribute("class", "term-series-ymax");
+    label.setAttribute("x", "2");
+    label.setAttribute("y", String(yAt(peak) + 10));
+    label.textContent = `${usageShort(peak)} (log)`;
+    svg.append(rule, label);
+  }
+  box.appendChild(svg);
   const compactions = (data.compactions || []).length;
   const total = cum.length ? termSeriesTotal(cum[cum.length - 1]) : 0;
   box.title = `${usageShort(total)} tokens sent over ` +
     `${fmtAge(span)}` + (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
+    (swaps.length ? `; ${swaps.length} profile swap${swaps.length > 1 ? "s" : ""}` : "") +
     (zoom ? "" : "\nhover for the whole conversation");
   if (zoom) {
     const axis = el("div", "term-series-axis");
-    axis.append(el("span", "", `${ago(data.start)}`), el("span", "", `total ${usageShort(peak)}`),
-      el("span", "", "now"));
+    axis.append(el("span", "", `${ago(data.start)}`), el("span", "", "now"));
     const legend = el("div", "term-series-legend");
     for (const [, label, colour] of TERM_SERIES_LAYERS.slice().reverse()) {
       const item = el("span", "term-series-key", label);
@@ -8475,6 +8535,7 @@ function termSeriesChart(data, zoom) {
       legend.appendChild(item);
     }
     if (compactions) legend.appendChild(el("span", "term-series-key compaction", "compaction"));
+    if (swaps.length) legend.appendChild(el("span", "term-series-key swap", "profile swap"));
     const readout = el("div", "term-series-readout", " ");
     svg.addEventListener("mousemove", (ev) => {
       const rect = svg.getBoundingClientRect();
@@ -8771,13 +8832,15 @@ function renderTermTps() {
         }
       }
       const makeChart = parts.timeline ? termSeriesMaker(seriesSmall, seriesData, seriesHover) : null;
-      const usageChart = usageBox && makeChart ? makeChart("usage") : null;
+      /* One chart for the whole overlay, under the last block: the token
+         series belongs to the session, so drawing it under each block showed
+         the same chart twice. */
+      const chart = makeChart ? makeChart("series") : null;
       if (parts.usageOnly) {
-        overlay.replaceChildren(...[usageBox, usageChart].filter(Boolean));
+        overlay.replaceChildren(...[usageBox, chart].filter(Boolean));
         overlay.title = parts.usage.title;
         return;
       }
-      const tpsChart = makeChart ? makeChart("tps") : null;
       const lastHas = !parts.live || !!(parts.when || parts.metrics);
       const lastBox = lastHas ? el("div", "term-tps-last") : null;
       if (lastBox) {
@@ -8791,9 +8854,9 @@ function renderTermTps() {
         const liveBox = el("div", "term-tps-live");
         liveBox.appendChild(el("span", "term-tps-big", parts.big));
         liveBox.appendChild(tpsSparkline(parts.series));
-        overlay.replaceChildren(...[liveBox, lastBox, tpsChart, usageBox, usageChart].filter(Boolean));
+        overlay.replaceChildren(...[liveBox, lastBox, usageBox, chart].filter(Boolean));
       } else {
-        overlay.replaceChildren(...[lastBox, tpsChart, usageBox, usageChart].filter(Boolean));
+        overlay.replaceChildren(...[lastBox, usageBox, chart].filter(Boolean));
         overlay.title = parts.usage ? `${parts.title}\n\n${parts.usage.title}` : parts.title;
       }
     }

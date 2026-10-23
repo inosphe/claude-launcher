@@ -1,14 +1,15 @@
-/* The overlay's token timeline charts under a real pointer (claunch-a27zc).
+/* The overlay's token timeline chart under a real pointer (claunch-a27zc).
 
    termseries_check.js runs the hover logic on stub nodes; what it cannot show
    is what a browser does with a chart that is rebuilt and resized under the
    pointer. This runs the real termSeries* functions from app.js and the real
    style.css in Chromium, in an overlay laid out as renderTermTps lays it out
-   (throughput block, its chart, usage block, its chart), and drives it with
-   real mouse input. For each of the two charts:
+   (throughput block, usage block, the one chart), and drives it with real
+   mouse input:
 
-   - entering it grows that chart alone, and the zoomed chart lies under the
-     pointer (growing both moved the lower chart out from under it);
+   - entering it grows it, and the zoomed chart lies under the pointer;
+   - the zoomed chart labels its height axis with the maximum, and a profile
+     swap is a solid mark where a compaction is dashed (claunch-0af4e.1.1);
    - small moves inside it repaint nothing;
    - the overlay builds at all: app.js runs under "use strict", where a write
      to an SVG element's read-only className throws, and that throw aborted
@@ -40,11 +41,10 @@ if (constStart < 0 || constEnd < 0) throw new Error("cannot locate the series ta
 
 // The page below stands in for renderTermTps; hold it to the same order.
 const render = slice("renderTermTps");
-for (const slot of ["tps", "usage"]) {
-  assert.ok(render.includes(`makeChart("${slot}")`), `renderTermTps builds the ${slot} chart by its slot`);
-}
-assert.ok(/replaceChildren\(\.\.\.\[lastBox, tpsChart, usageBox, usageChart\]/.test(render),
-  "renderTermTps stacks the charts under their blocks");
+assert.equal(render.split("makeChart(").length - 1, 1, "renderTermTps builds one chart, not one per block");
+assert.ok(render.includes('makeChart("series")'), "renderTermTps builds the chart by its slot");
+assert.ok(/replaceChildren\(\.\.\.\[lastBox, usageBox, chart\]/.test(render),
+  "renderTermTps puts the chart under the last block");
 
 const page = `<!doctype html><html><head><style>${css}
 body { margin: 0; background: #000; }
@@ -64,6 +64,7 @@ ${["termSeriesTotal", "termSeriesCumulative", "termSeriesChart", "termSeriesPoin
 const series = (win) => ({
   available: true, window: win, start: 0, until: 3600, bucket_s: 120, requests: 30,
   compactions: [1800],
+  swaps: [{ at: 2400, from: "opencode", to: "opencode2" }],
   points: Array.from({ length: 30 }, (_, i) => ({ t: i * 120, input: 5, cache_read: 50 + i, cache_write: 8 })),
 });
 window.renders = 0;
@@ -75,7 +76,7 @@ function renderTermTps() {
   lastBox.appendChild(el("span", "term-tps-big", "42 tok/s"));
   const usageBox = el("div", "term-usage");
   usageBox.appendChild(el("div", "term-usage-row", "claude 5h 12% 7d 30%"));
-  overlay.replaceChildren(lastBox, makeChart("tps"), usageBox, makeChart("usage"));
+  overlay.replaceChildren(lastBox, usageBox, makeChart("series"));
 }
 renderTermTps();
 </script></body></html>`;
@@ -83,15 +84,15 @@ renderTermTps();
 (async () => {
   const browser = await chromium.launch();
   try {
-    for (const [index, slot] of [[0, "tps"], [1, "usage"]]) {
+    for (const [index, slot] of [[0, "series"]]) {
       for (const wiggle of [true, false]) {
         const p = await browser.newPage({ viewport: { width: 900, height: 700 } });
         const errors = [];
         p.on("pageerror", (err) => errors.push(err.message));
         await p.setContent(page);
         const drawn = await p.$$("#term-tps-overlay .term-series");
-        assert.deepEqual([drawn.length, errors], [2, []],
-          "the overlay draws both charts without an error (a throw here froze the overlay)");
+        assert.deepEqual([drawn.length, errors], [1, []],
+          "the overlay draws the chart without an error (a throw here froze the overlay)");
         const box = await drawn[index].boundingBox();
         const x = box.x + box.width / 2, y = box.y + box.height / 2;
         await p.mouse.move(10, 600);
@@ -100,10 +101,26 @@ renderTermTps();
         assert.equal(await p.evaluate(() => termSeriesHover), slot, `entering the ${slot} chart hovers it`);
         assert.deepEqual(
           await p.evaluate(() => [...document.querySelectorAll(".term-series")].map((n) => n.classList.contains("zoom"))),
-          slot === "tps" ? [true, false] : [false, true], `only the ${slot} chart grows`);
+          [true], `the ${slot} chart grows`);
         assert.ok(await p.evaluate(([px, py]) => !!document.elementFromPoint(px, py).closest(".term-series.zoom"), [x, y]),
           `the zoomed ${slot} chart lies under the pointer`);
         if (wiggle) {
+          const drawnMarks = await p.evaluate(() => {
+            const dash = (sel) => getComputedStyle(document.querySelector(sel)).strokeDasharray;
+            const label = document.querySelector(".term-series.zoom .term-series-ymax");
+            return {
+              max: label && label.textContent, labelInPlot: !!label && label.getBoundingClientRect().width > 0,
+              swapDash: dash(".term-series-swap line"), compactionDash: dash(".term-series-compaction"),
+              swapStroke: getComputedStyle(document.querySelector(".term-series-swap line")).stroke,
+              compactionStroke: getComputedStyle(document.querySelector(".term-series-compaction")).stroke,
+            };
+          });
+          assert.equal(drawnMarks.max, String(5 * 30 + 8 * 30 + [...Array(30).keys()].reduce((a, i) => a + 50 + i, 0)) + " (log)",
+            "the zoomed chart's height axis is labelled with its maximum");
+          assert.ok(drawnMarks.labelInPlot, "and the label is laid out");
+          assert.equal(drawnMarks.swapDash, "none", "a swap mark is solid");
+          assert.notEqual(drawnMarks.compactionDash, "none", "a compaction mark is dashed");
+          assert.notEqual(drawnMarks.swapStroke, drawnMarks.compactionStroke, "and the two differ in colour");
           const before = await p.evaluate(() => window.renders);
           for (let i = 0; i < 10; i++) { await p.mouse.move(x + (i % 2 ? 2 : -2), y); await p.waitForTimeout(15); }
           assert.equal(await p.evaluate(() => window.renders) - before, 0,
@@ -116,7 +133,7 @@ renderTermTps();
         assert.equal(await p.evaluate(() => termSeriesHover), false,
           `leaving the ${slot} chart${wiggle ? "" : " in one jump"} ends the hover`);
         assert.equal(await p.evaluate(() => document.querySelectorAll(".term-series.zoom").length), 0,
-          "and draws both charts small again");
+          "and draws the chart small again");
         await p.close();
       }
     }
