@@ -216,7 +216,19 @@ def save(profile: Profile, pool: Pool) -> None:
 
 
 def forget(profile: Profile) -> bool:
-    """Delete the pool file; return whether there was one."""
+    """Delete the pool file; return whether there was one.
+
+    ``<pool>.lock`` is left in place (claunch-wllke.1.2.1). It is an empty
+    owner-only file that holds no state, and unlinking it is the one thing
+    that can break the serialisation the rest of this module stands on: a
+    writer may already hold the file open and be waiting for its lock, so
+    removing the path lets that waiter lock the old inode while the next
+    writer creates and locks a new one -- two holders of one pool, which is
+    the lost update :func:`_pool_lock` exists to prevent. On Windows the
+    unlink fails outright while the descriptor is open. Nothing reads the
+    lock as "this profile has a pool": :func:`load` and :func:`owner` ask
+    :func:`path`, so an empty lock beside no pool file is inert.
+    """
     file = path(profile)
     if not file.is_file():
         return False

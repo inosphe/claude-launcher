@@ -452,6 +452,41 @@ def test_removing_the_last_key_removes_the_pool_and_token(home):
     assert credentials.stored_token(p) is None
 
 
+def test_forgetting_the_pool_keeps_the_lock_file_and_leaves_no_phantom_pool(home):
+    # Deleting <pool>.lock is what would break the lock: a writer waiting on
+    # the old inode and the next writer on a new one would both hold it
+    # (claunch-wllke.1.2.1). So the empty lock stays -- and it must never read
+    # as "this profile still has a pool", which is the other half of the bug.
+    p = _pooled("sk-AAAA1111BBBB")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+    assert lock.is_file()  # the pool's first write created it
+
+    assert profile_keys.forget(p) is True
+
+    assert not profile_keys.path(p).is_file()
+    assert lock.is_file()
+    assert profile_keys.load(p) is None
+    assert profile_keys.owner(p) is None
+    assert profile_keys.forget(p) is False  # nothing left to delete
+
+
+def test_clearing_the_token_drops_the_pool_and_the_lock_frees_again(home):
+    # `claunch keys set-token --clear` goes through credentials.clear_token,
+    # which forgets the pool without holding the pool lock: the leftover lock
+    # must not keep the next add() waiting for it (claunch-wllke.1.2.1).
+    p = _pooled("sk-AAAA1111BBBB")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+
+    removed = credentials.clear_token(p)
+
+    assert profile_keys.KEYS_FILENAME in removed
+    assert profile_keys.load(p) is None
+    assert lock.is_file()
+
+    key = profile_keys.add(p, "sk-CCCC2222DDDD")
+    assert [k.id for k in profile_keys.load(p).keys] == [key.id]
+
+
 def test_removing_the_selected_key_promotes_a_survivor(home):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
     selected = profile_keys.load(p).keys[1]

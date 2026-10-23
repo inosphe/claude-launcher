@@ -524,6 +524,13 @@ profile's next launch. `claunch keys list` reports that state
 (`.launcher-token names no key of this pool …`) rather than repairing it, since
 listing must not consume a rotation.
 
+Writes to the pool are serialised by `<pool>.lock`, and that file stays behind
+when the pool is removed (`keys remove` of the last key, `set-token --clear`).
+It is an empty `0600` file that holds no state: deleting it would let a writer
+that is already waiting for the lock keep the old file while the next writer
+locks a new one. Nothing reads it as "there is a pool" — `load()` and the
+inheritance chain ask for `.launcher-keys.json` itself.
+
 #### Pinning one session to one key
 
 The pool's strategy decides for a launch. A **session** can instead be pinned
