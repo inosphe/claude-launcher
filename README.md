@@ -1477,9 +1477,10 @@ is drawn only when both are on screen.
 Under the throughput block and under the usage block the overlay draws a token
 timeline (claunch-0af4e): stacked areas of cached input, write and fresh input
 per time bucket, from the conversation's first request to now and at most the
-last twelve hours, with a dashed mark at every compaction. Hovering either
-chart grows both and shows the whole conversation, with an axis, a legend and
-the figures of the bucket under the pointer. The two charts draw the same
+last twelve hours, with a dashed mark at every compaction. Hovering a chart
+grows that chart and shows the whole conversation, with an axis, a legend and
+the figures of the bucket under the pointer; moving the pointer off it returns
+it to the small view (claunch-a27zc). The two charts draw the same
 session series; `GET /api/sessions/{name}/token-series` serves it.
 
 A call that failed is drawn where the rate would be (claunch-waakh.1): a

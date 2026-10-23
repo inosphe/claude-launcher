@@ -8335,8 +8335,8 @@ function tpsSparkline(series) {
    input, cache read and cache write per time bucket (GET
    /api/sessions/<name>/token-series), drawn as stacked areas. The small chart
    shows the conversation from its first request, at most the last twelve
-   hours (window=cap); while the pointer is over a chart both charts grow and
-   show the whole conversation (window=full). Compactions are vertical marks.
+   hours (window=cap); while the pointer is over a chart that chart grows and
+   shows the whole conversation (window=full). Compactions are vertical marks.
    The overlay takes no pointer events, so only the charts switch them on. */
 const TERM_SERIES_TTL_MS = { cap: 30 * 1000, full: 15 * 1000 };
 /* The parts, bottom to top, with the colour and label each one is drawn in. */
@@ -8347,6 +8347,7 @@ const TERM_SERIES_LAYERS = [
 ];
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
+/* The chart under the pointer: "tps", "usage", or false for none. */
 let termSeriesHover = false;
 
 function termSeriesRead(name, win, now = Date.now()) {
@@ -8464,22 +8465,42 @@ function termSeriesChart(data, zoom) {
   return box;
 }
 
-/* Both charts of the overlay share one hover state: the pointer on either
-   grows both. A chart rebuilt under a stationary pointer keeps the state; it
-   ends on the chart's own mouseleave. */
-function termSeriesMaker(data, hover) {
-  const make = () => {
-    const box = termSeriesChart(data, hover);
+/* Only the chart under the pointer grows. It is anchored at its top-right
+   corner, so the zoomed chart covers the small one and stays under the
+   pointer; growing both moved the usage chart down by the height the
+   throughput chart gained, out from under the pointer (claunch-a27zc). A
+   chart rebuilt under a stationary pointer keeps the state; it ends on the
+   chart's own mouseleave, or on the first pointer move anywhere outside a
+   chart, which is what ends it when the chart the pointer entered was
+   replaced by a repaint: a removed node gets no mouseleave. Where the
+   pointer is comes from a hit test at the event's point, because the event
+   right after a repaint is aimed at the removed node's nearest remaining
+   ancestor (the overlay), not at the chart that now lies there. */
+function termSeriesPointerCheck(ev) {
+  if (!ev) return;
+  const at = typeof document.elementFromPoint === "function"
+    ? document.elementFromPoint(ev.clientX, ev.clientY) : ev.target;
+  if (at && typeof at.closest === "function" && at.closest(".term-series")) return;
+  termSeriesRelease();
+}
+
+function termSeriesRelease() {
+  if (!termSeriesHover) return;
+  termSeriesHover = false;
+  document.removeEventListener("mousemove", termSeriesPointerCheck, true);
+  if (typeof renderTermTps === "function") renderTermTps();
+}
+
+function termSeriesMaker(small, zoomed, hover) {
+  const make = (slot) => {
+    const box = termSeriesChart(hover === slot ? zoomed : small, hover === slot);
     box.addEventListener("mouseenter", () => {
-      if (termSeriesHover) return;
-      termSeriesHover = true;
+      if (termSeriesHover === slot) return;
+      termSeriesHover = slot;
+      document.addEventListener("mousemove", termSeriesPointerCheck, true);
       if (typeof renderTermTps === "function") renderTermTps();
     });
-    box.addEventListener("mouseleave", () => {
-      if (!termSeriesHover) return;
-      termSeriesHover = false;
-      if (typeof renderTermTps === "function") renderTermTps();
-    });
+    box.addEventListener("mouseleave", termSeriesRelease);
     return box;
   };
   return make;
@@ -8693,7 +8714,9 @@ function renderTermTps() {
        other live-view helpers: the node harnesses slice this function alone. */
     const seriesHover = typeof termSeriesHover !== "undefined" && termSeriesHover;
     const seriesData = parts && typeof termSeriesData === "function"
-      ? termSeriesData(currentName, seriesHover) : null;
+      ? termSeriesData(currentName, !!seriesHover) : null;
+    const seriesSmall = seriesHover && seriesData ? termSeriesData(currentName, false) || seriesData
+      : seriesData;
     if (parts && seriesData) {
       parts.timeline = `${seriesData.window}|${seriesData.until}|${seriesData.requests}|${seriesHover}`;
     }
@@ -8722,14 +8745,14 @@ function renderTermTps() {
           }
         }
       }
-      const makeChart = parts.timeline ? termSeriesMaker(seriesData, seriesHover) : null;
-      const usageChart = usageBox && makeChart ? makeChart() : null;
+      const makeChart = parts.timeline ? termSeriesMaker(seriesSmall, seriesData, seriesHover) : null;
+      const usageChart = usageBox && makeChart ? makeChart("usage") : null;
       if (parts.usageOnly) {
         overlay.replaceChildren(...[usageBox, usageChart].filter(Boolean));
         overlay.title = parts.usage.title;
         return;
       }
-      const tpsChart = makeChart ? makeChart() : null;
+      const tpsChart = makeChart ? makeChart("tps") : null;
       const lastHas = !parts.live || !!(parts.when || parts.metrics);
       const lastBox = lastHas ? el("div", "term-tps-last") : null;
       if (lastBox) {

@@ -700,6 +700,7 @@ BROWSER_CHECKS = [
         "seedmesh_browser.cjs",
         "stats_browser.cjs",
         "linkpanel_browser.cjs",
+        "termseries_browser.cjs",
 ]
 
 
