@@ -7277,6 +7277,19 @@ function termTimerSkip() {
            interval: read.remind.interval };
 }
 
+/* A native tooltip is dropped by the browser when its element's `title` is
+   written, even with the same text, and comes back after the hover delay.
+   These chips repaint every second, and toolbar.js re-labels `title` as
+   "<label> — <text>" on top of what is written here, so a plain
+   `box.title = text` each tick alternated the attribute between the two
+   forms and the tooltip flickered. The text last written is kept in
+   `dataset.tip`; the attribute is touched only when that text moves. */
+function setTipOnChange(box, text) {
+  if (box.dataset.tip === text && box.title) return;
+  box.dataset.tip = text;
+  box.title = text;
+}
+
 function paintTermTimer() {
   const box = $("term-timer");
   if (!box) return;
@@ -7292,6 +7305,7 @@ function paintTermTimer() {
     box.className = "term-btn timer-chip hidden";
     box.textContent = "";
     box.removeAttribute("title");
+    delete box.dataset.tip;
     box.disabled = false;
     return;
   }
@@ -7301,7 +7315,7 @@ function paintTermTimer() {
   // hold, which the toolbar answers with a full re-fit (claunch-i3es6).
   box.className = `term-btn timer-chip ${line.state}` +
     (hold && !hold.on ? " timer-paused" : "");
-  box.title = termTimerTitle(read.pick, line, hold);
+  setTipOnChange(box, termTimerTitle(read.pick, line, hold));
   // The two spans are kept and only their text moves: this repaints every
   // second, and rebuilding them each time was two mutations a second for
   // anything watching the page (claunch-v87).
@@ -7431,6 +7445,7 @@ function paintTermTimerSkip(skip) {
     box.className = "term-btn timer-skip hidden";
     box.textContent = "";
     box.removeAttribute("title");
+    delete box.dataset.tip;
     box.disabled = false;
     return;
   }
@@ -7440,7 +7455,7 @@ function paintTermTimerSkip(skip) {
   box.className = `term-btn timer-skip ${skip.state}`;
   // Repainted every second with the clock beside it; the glyph never moves.
   if (box.textContent !== "⏭") box.textContent = "⏭";
-  box.title = termTimerSkipTitle(skip);
+  setTipOnChange(box, termTimerSkipTitle(skip));
   box.disabled = termTimerSkipBusy;
   if (!box.dataset.wired) {
     box.dataset.wired = "1";

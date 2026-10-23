@@ -153,8 +153,10 @@
       const description = previous && el.title === previous.rendered ? previous.description : el.title;
       const rendered = description && description !== label ? `${label} — ${description}` : label;
       descriptions.set(el, { description, rendered });
-      el.title = rendered;
-      el.setAttribute("aria-label", rendered);
+      // Guarded: writing `title` drops a tooltip the pointer is waiting on,
+      // even with the same text.
+      if (el.title !== rendered) el.title = rendered;
+      if (el.getAttribute("aria-label") !== rendered) el.setAttribute("aria-label", rendered);
     }
     syncLifeTabstop();
   }
