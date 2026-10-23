@@ -47,6 +47,7 @@ day an operator thinks in, the same rule as ``observer.usage_date``).
 from __future__ import annotations
 
 import re
+import time
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -590,6 +591,60 @@ def summarize(main: StatsReader, sides: List[StatsReader], unit: str,
     }
 
 
+# -- timeline ---------------------------------------------------------------
+
+#: The terminal overlay's chart: how many buckets a series is cut into, and
+#: the longest span the small chart shows (the hover view shows the whole
+#: conversation).
+SERIES_POINTS = 120
+SERIES_CAP_S = 12 * 3600.0
+SERIES_WINDOWS = ("cap", "full")
+
+
+def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
+           points: int = SERIES_POINTS, now: Optional[float] = None) -> dict:
+    """Fresh input, cache read and cache write per time bucket, from the
+    first request of the conversation (at most :data:`SERIES_CAP_S` back for
+    ``window="cap"``) up to ``now``, plus the times of its compactions.
+
+    The span ends at ``now`` and not at the last request, so an idle session
+    shows its idle tail. Output tokens are left out: the chart draws what was
+    sent to the model.
+    """
+    if window not in SERIES_WINDOWS:
+        raise ValueError(f"window must be one of {', '.join(SERIES_WINDOWS)}")
+    points = max(2, min(int(points), 480))
+    end = time.time() if now is None else now
+    requests = sorted(main.requests + [r for s in sides for r in s.requests])
+    if not requests:
+        return {"window": window, "points": [], "compactions": [], "bucket_s": 0,
+                "since": None, "until": end}
+    first = requests[0][0]
+    start = first if window == "full" else max(first, end - SERIES_CAP_S)
+    end = max(end, requests[-1][0])
+    start = min(start, end - 60.0)
+    width = (end - start) / points
+    rows = [[start + i * width, 0, 0, 0] for i in range(points)]
+    for at, fresh, cache_read, cache_write, _out, _side in requests:
+        if at < start:
+            continue
+        row = rows[min(points - 1, int((at - start) / width))]
+        row[1] += fresh
+        row[2] += cache_read
+        row[3] += cache_write
+    return {
+        "window": window,
+        "since": first,
+        "until": end,
+        "start": start,
+        "bucket_s": width,
+        "points": [{"t": t, "input": a, "cache_read": b, "cache_write": c}
+                   for t, a, b, c in rows],
+        "compactions": [b for b in sorted(main.bounds) if start <= b <= end],
+        "requests": len(requests),
+    }
+
+
 # -- reading ----------------------------------------------------------------
 
 def read_file(path: Path, harness: str, unit: str = "day",
@@ -625,6 +680,50 @@ def read_file(path: Path, harness: str, unit: str = "day",
     finally:
         if own:
             spend.release()
+
+
+def read_series(path: Path, harness: str, window: str = "cap",
+                points: int = SERIES_POINTS,
+                spend: Optional[tokenusage.Budget] = None) -> Optional[dict]:
+    """The overlay chart's series of one transcript, or ``None`` when the
+    harness has no reader or the file cannot be read."""
+    cls = READERS.get(harness)
+    if cls is None:
+        return None
+    own = spend is None
+    if own:
+        spend = tokenusage.Budget(STATS_BUDGET)
+    try:
+        tokenusage._maybe_prune()
+        main = tokenusage._follow(path, cls, spend, NAMESPACE)
+        if main is None:
+            return None
+        followers = [main]
+        for sub in cls.subagent_files(path):
+            other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
+            if other is not None:
+                followers.append(other)
+        partial = any(f.behind or f.key in spend.late for f in followers)
+        out = {"harness": harness,
+               **series(main.reader, [f.reader for f in followers[1:]], window, points)}
+        if partial:
+            out["partial"] = True
+        return out
+    finally:
+        if own:
+            spend.release()
+
+
+def series_located(head: dict, path: Optional[Path], window: str = "cap",
+                   points: int = SERIES_POINTS) -> dict:
+    """The overlay chart's answer for a session :func:`locate` has found."""
+    if path is None:
+        return dict(head)
+    reading = read_series(Path(path), head["harness"], window, points)
+    if reading is None:
+        return {**head, "available": False,
+                "reason": "the transcript could not be read"}
+    return {"session": head["session"], "available": True, **reading}
 
 
 def locate(sdef) -> Tuple[dict, Optional[Path]]:

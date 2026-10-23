@@ -8314,6 +8314,159 @@ function tpsSparkline(series) {
   return svg;
 }
 
+/* ---- token timeline under each overlay block (claunch-0af4e) ----
+
+   One chart under the throughput block and one under the usage block: fresh
+   input, cache read and cache write per time bucket (GET
+   /api/sessions/<name>/token-series), drawn as stacked areas. The small chart
+   shows the conversation from its first request, at most the last twelve
+   hours (window=cap); while the pointer is over a chart both charts grow and
+   show the whole conversation (window=full). Compactions are vertical marks.
+   The overlay takes no pointer events, so only the charts switch them on. */
+const TERM_SERIES_TTL_MS = { cap: 30 * 1000, full: 15 * 1000 };
+/* The parts, bottom to top, with the colour and label each one is drawn in. */
+const TERM_SERIES_LAYERS = [
+  ["cache_read", "cached input", "#58a6ff"],
+  ["cache_write", "write", "#e3b341"],
+  ["input", "input", "#bc8cff"],
+];
+/* window -> {name, at, data, pending}; one session at a time. */
+const termSeriesReads = {};
+let termSeriesHover = false;
+
+function termSeriesRead(name, win, now = Date.now()) {
+  let read = termSeriesReads[win];
+  if (!read || read.name !== name) {
+    read = termSeriesReads[win] = { name, at: 0, data: null, pending: false };
+  }
+  if (!read.pending && now - read.at >= TERM_SERIES_TTL_MS[win]) {
+    read.pending = true;
+    read.at = now;
+    api(`/api/sessions/${encodeURIComponent(name)}/token-series?window=${win}`, { noBatch: true })
+      .then(async (resp) => {
+        const data = await resp.json();
+        read.data = resp.ok && data.available && Array.isArray(data.points) && data.points.length
+          ? data : null;
+      })
+      .catch(() => { read.data = null; })
+      .finally(() => {
+        read.pending = false;
+        read.at = Date.now();
+        if (typeof renderTermTps === "function") renderTermTps();
+      });
+  }
+  return read.data;
+}
+
+/* What the charts draw now: the whole conversation while hovered (the capped
+   one until it arrives), else the capped one. Null when the session has no
+   usage records. */
+function termSeriesData(name, hover) {
+  if (!name) return null;
+  const cap = termSeriesRead(name, "cap");
+  if (!hover) return cap;
+  return termSeriesRead(name, "full") || cap;
+}
+
+function termSeriesTotal(p) {
+  return p.cache_read + p.cache_write + p.input;
+}
+
+function termSeriesChart(data, zoom) {
+  const NS = "http://www.w3.org/2000/svg";
+  const w = zoom ? 320 : 120, h = zoom ? 96 : 26;
+  const box = el("div", "term-series" + (zoom ? " zoom" : ""));
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "term-series-chart");
+  svg.className = "term-series-chart";
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  const pts = data.points;
+  const peak = Math.max(1, ...pts.map(termSeriesTotal));
+  const xAt = (i) => (pts.length > 1 ? (i / (pts.length - 1)) * w : 0);
+  const yAt = (v) => h - 1 - (v / peak) * (h - 3);
+  const below = pts.map(() => 0);
+  for (const [key, , colour] of TERM_SERIES_LAYERS) {
+    const above = pts.map((p, i) => below[i] + p[key]);
+    const top = above.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`);
+    const base = below.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).reverse();
+    const area = document.createElementNS(NS, "polygon");
+    area.setAttribute("class", `term-series-area ${key}`);
+    area.setAttribute("points", top.concat(base).join(" "));
+    area.setAttribute("fill", colour);
+    area.setAttribute("fill-opacity", "0.55");
+    svg.appendChild(area);
+    const line = document.createElementNS(NS, "polyline");
+    line.setAttribute("class", `term-series-line ${key}`);
+    line.setAttribute("points", top.join(" "));
+    line.setAttribute("stroke", colour);
+    svg.appendChild(line);
+    above.forEach((v, i) => { below[i] = v; });
+  }
+  const span = Math.max(1, data.until - data.start);
+  for (const at of data.compactions || []) {
+    const x = (((at - data.start) / span) * w).toFixed(1);
+    const mark = document.createElementNS(NS, "line");
+    mark.setAttribute("class", "term-series-compaction");
+    mark.setAttribute("x1", x);
+    mark.setAttribute("x2", x);
+    mark.setAttribute("y1", "0");
+    mark.setAttribute("y2", String(h));
+    svg.appendChild(mark);
+  }
+  box.appendChild(svg);
+  const ago = (at) => `${fmtAge(Math.max(0, data.until - at))} ago`;
+  const compactions = (data.compactions || []).length;
+  box.title = `${usageShort(pts.reduce((n, p) => n + termSeriesTotal(p), 0))} tokens sent over ` +
+    `${fmtAge(span)}` + (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
+    (zoom ? "" : "\nhover for the whole conversation");
+  if (zoom) {
+    const axis = el("div", "term-series-axis");
+    axis.append(el("span", "", `${ago(data.start)}`), el("span", "", `peak ${usageShort(peak)}/${fmtAge(data.bucket_s)}`),
+      el("span", "", "now"));
+    const legend = el("div", "term-series-legend");
+    for (const [, label, colour] of TERM_SERIES_LAYERS.slice().reverse()) {
+      const item = el("span", "term-series-key", label);
+      item.style.setProperty("--key", colour);
+      legend.appendChild(item);
+    }
+    if (compactions) legend.appendChild(el("span", "term-series-key compaction", "compaction"));
+    const readout = el("div", "term-series-readout", " ");
+    svg.addEventListener("mousemove", (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+      const p = pts[Math.max(0, Math.min(pts.length - 1, Math.round(frac * (pts.length - 1))))];
+      readout.textContent = `${ago(p.t)}: in ${usageShort(p.input)} · cached ${usageShort(p.cache_read)}` +
+        ` · write ${usageShort(p.cache_write)}`;
+    });
+    svg.addEventListener("mouseleave", () => { readout.textContent = " "; });
+    box.append(axis, legend, readout);
+  }
+  return box;
+}
+
+/* Both charts of the overlay share one hover state: the pointer on either
+   grows both. A chart rebuilt under a stationary pointer keeps the state; it
+   ends on the chart's own mouseleave. */
+function termSeriesMaker(data, hover) {
+  const make = () => {
+    const box = termSeriesChart(data, hover);
+    box.addEventListener("mouseenter", () => {
+      if (termSeriesHover) return;
+      termSeriesHover = true;
+      if (typeof renderTermTps === "function") renderTermTps();
+    });
+    box.addEventListener("mouseleave", () => {
+      if (!termSeriesHover) return;
+      termSeriesHover = false;
+      if (typeof renderTermTps === "function") renderTermTps();
+    });
+    return box;
+  };
+  return make;
+}
+
 /* Started by the first paint that has an overlay to feed; each tick decides
    for itself whether there is anything to ask (pollTermLive). */
 function ensureTermLivePoll() {
@@ -8518,6 +8671,14 @@ function renderTermTps() {
       };
     }
     if (parts && usage) parts.usage = usage;
+    /* The timeline charts under the blocks (claunch-0af4e). Guarded like the
+       other live-view helpers: the node harnesses slice this function alone. */
+    const seriesHover = typeof termSeriesHover !== "undefined" && termSeriesHover;
+    const seriesData = parts && typeof termSeriesData === "function"
+      ? termSeriesData(currentName, seriesHover) : null;
+    if (parts && seriesData) {
+      parts.timeline = `${seriesData.window}|${seriesData.until}|${seriesData.requests}|${seriesHover}`;
+    }
     const key = parts ? JSON.stringify(parts) : null;
     if (parts && overlay._tpsKey !== key) {
       overlay._tpsKey = key;
@@ -8543,11 +8704,14 @@ function renderTermTps() {
           }
         }
       }
+      const makeChart = parts.timeline ? termSeriesMaker(seriesData, seriesHover) : null;
+      const usageChart = usageBox && makeChart ? makeChart() : null;
       if (parts.usageOnly) {
-        overlay.replaceChildren(usageBox);
+        overlay.replaceChildren(...[usageBox, usageChart].filter(Boolean));
         overlay.title = parts.usage.title;
         return;
       }
+      const tpsChart = makeChart ? makeChart() : null;
       const lastHas = !parts.live || !!(parts.when || parts.metrics);
       const lastBox = lastHas ? el("div", "term-tps-last") : null;
       if (lastBox) {
@@ -8561,9 +8725,9 @@ function renderTermTps() {
         const liveBox = el("div", "term-tps-live");
         liveBox.appendChild(el("span", "term-tps-big", parts.big));
         liveBox.appendChild(tpsSparkline(parts.series));
-        overlay.replaceChildren(...[liveBox, lastBox, usageBox].filter(Boolean));
+        overlay.replaceChildren(...[liveBox, lastBox, tpsChart, usageBox, usageChart].filter(Boolean));
       } else {
-        overlay.replaceChildren(...[lastBox, usageBox].filter(Boolean));
+        overlay.replaceChildren(...[lastBox, tpsChart, usageBox, usageChart].filter(Boolean));
         overlay.title = parts.usage ? `${parts.title}\n\n${parts.usage.title}` : parts.title;
       }
     }

@@ -84,6 +84,10 @@ def handle(request: dict) -> Any:
     if op == "read":
         return sessionstats.read_located(request["head"], request.get("path"),
                                          unit, zone)
+    if op == "series":
+        return sessionstats.series_located(
+            request["head"], request.get("path"),
+            request.get("window", "cap"), int(request.get("points", 120)))
     if op == "compare":
         readings = [sessionstats.read_located(i["head"], i.get("path"), unit, zone)
                     for i in request["items"]]

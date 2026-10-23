@@ -421,3 +421,98 @@ def test_the_stats_endpoint_reads_the_session(home, tmp_path):
             await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the overlay chart's series
+# --------------------------------------------------------------------------- #
+
+def _epoch(stamp: str) -> float:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+
+
+def read_series(path, window="cap", points=12, now=None):
+    main = tokenusage._Follower(path, sessionstats.ClaudeStats)
+    main.refresh(None)
+    return sessionstats.series(main.reader, [], window, points, now)
+
+
+def test_series_buckets_the_three_input_parts_and_marks_compactions(tmp_path):
+    path = write(tmp_path / "t.jsonl",
+                 reply("a", at(0), fresh=1, read=10, write=100, out=7),
+                 reply("b", at(0, 30), fresh=2, read=20, write=200),
+                 compaction(at(0, 45)),
+                 reply("c", at(1), fresh=4, read=40, write=400))
+    got = read_series(path, points=4, now=_epoch(at(1)))
+    parts = [(p["input"], p["cache_read"], p["cache_write"]) for p in got["points"]]
+    # Four 15-minute buckets from 00:00 to 01:00; the request at 01:00 sits
+    # in the last one. Output tokens are not drawn.
+    assert parts == [(1, 10, 100), (0, 0, 0), (2, 20, 200), (4, 40, 400)]
+    assert got["compactions"] == [_epoch(at(0, 45))]
+    assert got["bucket_s"] == 900 and got["requests"] == 3
+
+
+def test_series_cap_window_keeps_the_last_twelve_hours_and_full_keeps_all(tmp_path):
+    path = write(tmp_path / "t.jsonl",
+                 reply("a", at(0), read=5),
+                 compaction(at(1)),
+                 reply("b", at(20), read=7))
+    now = _epoch(at(21))
+    capped = read_series(path, "cap", now=now)
+    assert capped["start"] == now - sessionstats.SERIES_CAP_S
+    assert sum(p["cache_read"] for p in capped["points"]) == 7
+    assert capped["compactions"] == []          # the compaction is older than the cap
+    full = read_series(path, "full", now=now)
+    assert full["start"] == _epoch(at(0))
+    assert sum(p["cache_read"] for p in full["points"]) == 12
+    assert full["compactions"] == [_epoch(at(1))]
+
+
+def test_series_of_a_transcript_without_requests_has_no_points(tmp_path):
+    path = write(tmp_path / "t.jsonl", user("hello", at(0)))
+    got = read_series(path, now=_epoch(at(1)))
+    assert got["points"] == [] and got["compactions"] == []
+
+
+def test_series_rejects_an_unknown_window(tmp_path):
+    path = write(tmp_path / "t.jsonl", reply("a", at(0), read=5))
+    with pytest.raises(ValueError):
+        read_series(path, "week")
+
+
+def test_the_token_series_endpoint_reads_the_session(home, tmp_path):
+    import asyncio
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+    from claude_launcher.daemon.session import DeadSession
+
+    sdef = _claude_session(tmp_path, reply("a", at(0, 1), read=50, out=5),
+                           compaction(at(0, 2)))
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr._sessions["s1"] = DeadSession(sdef, exit_code=0)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.get("/api/sessions/s1/token-series?window=full&points=8",
+                                    headers=bearer)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["available"] and len(body["points"]) == 8
+            assert sum(p["cache_read"] for p in body["points"]) == 50
+            assert len(body["compactions"]) == 1
+            resp = await client.get("/api/sessions/s1/token-series?window=month",
+                                    headers=bearer)
+            assert resp.status == 400
+        finally:
+            await client.close()
+
+    asyncio.run(run())
