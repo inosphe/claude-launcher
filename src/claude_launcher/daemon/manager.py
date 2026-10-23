@@ -78,7 +78,10 @@ RESTORE_QUEUE = "restore-queue"
 #: clocks' ``-checks`` requests to a held driver), the CLI's cflow nudge
 #: (``/deliver``), and ``notice`` -- a delivery the daemon makes on its own
 #: (a session reminder, a window or QA nudge, a beads wind-down, a restart
-#: notice) that names itself with :func:`~.session.delivery_wake`. A
+#: notice) that names itself with :func:`~.session.delivery_wake`, and
+#: ``timer`` -- a report timer the agent set for itself, fired by the
+#: daemon's clock (daemon/agent_timers.py), which is the agent's own schedule
+#: but not a person at the keyboard. A
 #: session woken by one of these does not get
 #: :attr:`Session.resumed_by_human`, so a finished one-shot run's kill-on-end
 #: still ends it (claunch-u9m6z: s122 was woken by a mesh delivery and the
@@ -94,7 +97,7 @@ RESTORE_QUEUE = "restore-queue"
 #: (claunch-2ri1b).
 AUTOMATIC_WAKES = frozenset({
     RESTORE_QUEUE, "mesh", "cflow", "cflow2", "status-checks", "deliver",
-    "cflow-checks", "cflow2-checks", "notice",
+    "cflow-checks", "cflow2-checks", "notice", "timer",
 })
 
 

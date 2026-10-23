@@ -136,3 +136,14 @@ def cflow2_provider(ctx: Context) -> List[dict]:
     from . import cflow2_web
 
     return cflow2_web.session_timers(ctx.cwd, ctx.session)
+
+
+@register("agent")
+def agent_provider(ctx: Context) -> List[dict]:
+    """The report timers the session's agent set for itself
+    (``daemon/agent_timers.py``, the ``timer`` MCP tool). They belong to the
+    session rather than to a run or a directory, so they are read by name
+    alone -- a session with no cwd still has its timers."""
+    from . import agent_timers
+
+    return agent_timers.strip_timers(ctx.session)

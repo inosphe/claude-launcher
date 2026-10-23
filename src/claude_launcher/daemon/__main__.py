@@ -439,6 +439,16 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # A session's side runs end with it (docs/cflow-v2.md 2.9).
         manager.exit_hooks.append(cflow2_clock.session_exited)
     app["cflow2_clock"] = cflow2_clock
+    # Report timers an agent set for itself (daemon/agent_timers.py). The
+    # clock outlives the session's turns; the pause across this daemon's own
+    # downtime is accounted for inside start(). A session's real ending drops
+    # its timers; a hold or a pause keeps them, and a fire wakes the session.
+    from . import agent_timers as agent_timers_mod
+
+    agent_timer_clock = agent_timers_mod.TimerClock(manager)
+    agent_timer_clock.start()
+    manager.exit_hooks.append(agent_timers_mod.session_ended)
+    app["agent_timers"] = agent_timer_clock
     # Watching another session's cflow run (claunch-ijg51.1): the read tool's
     # HTTP side plus the delivery loop that reads watched journals.
     from . import cflow_watch as cflow_watch_mod

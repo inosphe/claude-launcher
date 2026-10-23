@@ -188,9 +188,19 @@ def session_progress_json() -> Path:
     return daemon_dir() / "session-progress.json"
 
 
+def sessions_root() -> Path:
+    """The directory every session's own directory lives under.
+
+    A reader that has no session name in hand -- the report timer clock's
+    ledger scan (daemon/agent_timers.py) is one -- walks this rather than
+    repeating the ``sessions/<name>`` layout that :func:`session_dir` owns.
+    """
+    return daemon_dir() / "sessions"
+
+
 def session_dir(name: str) -> Path:
     """Per-session directory holding its raw output log and metadata."""
-    return daemon_dir() / "sessions" / name
+    return sessions_root() / name
 
 
 def session_log(name: str) -> Path:

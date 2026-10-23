@@ -20726,6 +20726,7 @@ const TERM_TIMER_GLYPH = {
   wait: "⧗",
   pause: "↻",
   ask: "?",
+  timer: "⏱",    // a report timer the agent set for itself
 };
 const TERM_TIMER_GLYPH_DEFAULT = "⏱";
 
