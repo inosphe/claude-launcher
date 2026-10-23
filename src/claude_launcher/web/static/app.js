@@ -8372,17 +8372,12 @@ function tpsSparkline(series) {
    The overlay takes no pointer events, so only the charts switch them on. */
 const TERM_SERIES_TTL_MS = { cap: 30 * 1000, full: 15 * 1000 };
 /* The parts, bottom to top, with the colour and label each one is drawn in:
-   the smallest on the bottom, so that on the log height axis each boundary
-   is a visible step (claunch-0af4e.1.1). */
+   the smallest on the bottom, so that each boundary is a visible step. */
 const TERM_SERIES_LAYERS = [
   ["cache_write", "write", "#e3b341"],
   ["input", "input", "#bc8cff"],
   ["cache_read", "cached input", "#58a6ff"],
 ];
-/* The bottom of the log height axis, in tokens: a request smaller than this
-   sits on the baseline (claunch-e0e3n). One number, so 3000 or 10000 can be
-   tried against the same sessions. */
-const TERM_SERIES_FLOOR = 1000;
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
 /* Whether the pointer is on the chart: its slot name, or false for none. */
@@ -8448,37 +8443,60 @@ function termSeriesIndexAt(pts, at) {
   return lo - 0.5;
 }
 
-/* The height axis of one chart. The bottom is TERM_SERIES_FLOOR; the top is
-   the context window the daemon names in `limits.top`, so the same height
-   means the same count whatever the largest request was. A request larger
-   than the window pushes the top up to it, and a session that never reached
-   the floor is drawn from its smallest request up to its largest instead of
-   as a flat line under a window it never came near. Also the auto-compact
+/* The height axis of one chart. It is linear: 0 at the bottom, the context
+   window the daemon names in `limits.top` at the top, so the same height is
+   the same count whatever the session reached (claunch-e0e3n) and the area
+   under a line is the number of tokens it stands for (claunch-k5udr). A
+   request larger than the window pushes the top up to it; a session with no
+   named window is drawn from 0 to its largest request. Also the auto-compact
    thresholds to draw as horizontal lines: one per distinct value (the two
-   sides of a borrowed session often agree), none that fall outside the axis. */
+   sides of a borrowed session often agree), none that fall outside the axis,
+   and the round values to mark on the axis in between. */
 function termSeriesScale(pts, limits) {
   const totals = pts.map(termSeriesTotal);
   const peak = Math.max(1, ...totals);
   const named = limits && Number.isFinite(limits.top) && limits.top > 0 ? limits.top : 0;
-  let floor = TERM_SERIES_FLOOR;
-  let top = Math.max(named, peak);
-  let fixed = named >= peak && named > 0;
-  if (peak < floor) {
-    floor = Math.max(1, Math.min(...totals.filter((v) => v > 0), peak));
-    top = peak;
-    fixed = false;
-  }
-  top = Math.max(top, floor * 2);
-  const span = Math.log(top / floor);
-  const ratio = (v) => Math.log(Math.max(v, floor) / floor) / span;
+  const top = Math.max(named, peak);
+  const fixed = named >= peak && named > 0;
+  const ratio = (v) => Math.max(0, Math.min(v, top)) / top;
   const sides = ((limits && limits.sides) || [])
-    .filter((x) => x && Number.isFinite(x.compact) && x.compact > floor && x.compact <= top);
+    .filter((x) => x && Number.isFinite(x.compact) && x.compact > 0 && x.compact <= top);
   const lines = [];
   for (const x of sides) {
     const same = lines.find((l) => l.at === x.compact);
     if (same) same.labels.push(x.label); else lines.push({ at: x.compact, labels: [x.label] });
   }
-  return { peak, floor, top, fixed, ratio, compact: lines };
+  return { peak, top, fixed, ratio, compact: lines, ticks: termSeriesTicks(top) };
+}
+
+/* The values marked on a linear axis to `top`: the coarsest round step that
+   still leaves at least three steps, so a 1M window reads 0, 250k, 500k,
+   750k, 1M and a 200k one 0, 50k, 100k, 150k, 200k. Never finer than one
+   token, so a session of a few hundred tokens still reads whole numbers. */
+function termSeriesTicks(top) {
+  const decade = Math.pow(10, Math.floor(Math.log10(top)));
+  const steps = [];
+  for (const base of [decade / 100, decade / 10, decade, decade * 10]) {
+    for (const m of [1, 2, 2.5, 5]) {
+      const step = base * m;
+      if (step >= 1 && !steps.includes(step)) steps.push(step);
+    }
+  }
+  steps.sort((a, b) => a - b);
+  let step = steps[0];
+  for (const s of steps) { if (top / s >= 3) step = s; }
+  const out = [];
+  for (let i = 0; i * step <= top * (1 + 1e-9); i++) out.push(Number((i * step).toPrecision(12)));
+  return out;
+}
+
+/* A tick's label: 0, 250k, 1M, 1.5M. */
+function termSeriesTick(v) {
+  if (!(v > 0)) return "0";
+  for (const [size, unit] of [[1e9, "B"], [1e6, "M"], [1e3, "k"]]) {
+    if (v >= size) return `${Math.round((v / size) * 100) / 100}${unit}`;
+  }
+  return String(Math.round(v));
 }
 
 function termSeriesChart(data, zoom) {
@@ -8495,15 +8513,14 @@ function termSeriesChart(data, zoom) {
   svg.setAttribute("height", String(h));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   const pts = data.points;
-  const { peak, floor, top, fixed, ratio, compact } = termSeriesScale(pts, data.limits);
+  const { peak, top, fixed, ratio, compact, ticks } = termSeriesScale(pts, data.limits);
   /* One request is one step of the same width; a single request is drawn
      across the whole chart. */
   const drawn = pts.length === 1 ? [pts[0], pts[0]] : pts;
   const xAt = (i) => (i / (drawn.length - 1)) * w;
-  /* Log height axis from the floor (1k) to the top (the context window):
-     cached input dwarfs fresh input and write, and on a linear axis the two
-     thin parts were not visible. A boundary under the floor sits on the
-     baseline. */
+  /* Height on a linear axis from 0 to the top (the context window where the
+     daemon names one, else the largest context): the three parts of a
+     request are drawn at their real share of the tokens sent. */
   const yAt = (v) => h - 1 - ratio(v) * (h - 3);
   const below = drawn.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
@@ -8578,23 +8595,27 @@ function termSeriesChart(data, zoom) {
     svg.appendChild(mark);
   }
   if (zoom) {
-    /* The height axis: log scale from the floor to the top (the context
-       window where the daemon names one, else the largest context of the
-       window); a faint rule at every thousandth power between them. */
-    for (const [at, name] of [[1e3, "1k"], [1e6, "1M"], [1e9, "1B"]]) {
-      if (at < floor || at >= top || yAt(at) - yAt(top) < 12) continue;
-      const tick = document.createElementNS(NS, "line");
-      tick.setAttribute("class", "term-series-ymax-rule");
-      tick.setAttribute("x1", "0");
-      tick.setAttribute("x2", String(w));
-      tick.setAttribute("y1", yAt(at).toFixed(1));
-      tick.setAttribute("y2", yAt(at).toFixed(1));
+    /* The height axis: a faint rule and its label at every round value from
+       0 to the top (0, 250k, 500k, 750k on a 1M window), except at the top
+       itself, which the maximum's own rule and label carry. */
+    for (const at of ticks) {
+      if (at >= top) continue;
+      const y = yAt(at);
+      if (at > 0) {
+        const tick = document.createElementNS(NS, "line");
+        tick.setAttribute("class", "term-series-ymax-rule");
+        tick.setAttribute("x1", "0");
+        tick.setAttribute("x2", String(w));
+        tick.setAttribute("y1", y.toFixed(1));
+        tick.setAttribute("y2", y.toFixed(1));
+        svg.appendChild(tick);
+      }
       const text = document.createElementNS(NS, "text");
       text.setAttribute("class", "term-series-ytick");
       text.setAttribute("x", "2");
-      text.setAttribute("y", String(yAt(at) - 2));
-      text.textContent = name;
-      svg.append(tick, text);
+      text.setAttribute("y", String(Math.max(8, y - 2)));
+      text.textContent = termSeriesTick(at);
+      svg.appendChild(text);
     }
     const rule = document.createElementNS(NS, "line");
     rule.setAttribute("class", "term-series-ymax-rule");
@@ -8606,7 +8627,7 @@ function termSeriesChart(data, zoom) {
     label.setAttribute("class", "term-series-ymax");
     label.setAttribute("x", "2");
     label.setAttribute("y", String(yAt(top) + 10));
-    label.textContent = `${usageShort(top)} max (log${fixed ? ", context window" : ""})`;
+    label.textContent = `${termSeriesTick(top)} max${fixed ? ", context window" : ""}`;
     svg.append(rule, label);
     for (const line of compact) {
       const text = document.createElementNS(NS, "text");

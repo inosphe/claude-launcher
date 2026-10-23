@@ -1576,28 +1576,27 @@ and a point is the largest context of its group (the readout says how many
 requests it stands for). The readout names the request under the pointer and
 keeps doing so while the overlay repaints under a pointer that does not move
 (claunch-v5z9y). The overlay keeps its dark wash and its dark-theme text colours
-on the light page. The height axis is logarithmic from a floor of 1k tokens (a request below it
-sits on the baseline; a session that never reached 1k is drawn from its smallest
-request instead), because cached input is orders of magnitude larger than the
-other two and they were invisible on a linear axis. Its top is fixed at the
-model's context window (Claude without a declared window: 1M; Codex: the window
-it records; Pi: the spec's `context_window`; no window known: the largest
-context), so the same height is the same count whatever the session reached, and
-a horizontal amber line marks the auto-compact threshold (Claude's
+on the light page. The height axis is linear from 0 to the model's context
+window (Claude without a declared window: 1M; Codex: the window it records; Pi:
+the spec's `context_window`; no window known: the largest context), so the same
+height is the same count whatever the session reached, a layer's thickness is
+the share of the tokens it stands for, and the area under a line is the total
+sent (claunch-k5udr). A request larger than the window pushes the top up to it.
+A horizontal amber line marks the auto-compact threshold (Claude's
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, or the spec's `auto_compact_at`; Pi needs a
 `context_window` as well). A borrowed session draws the line of each account it
-can run on, labelled by profile, and one line where the two agree; each layer's boundary is the log position of the
-running sum up to it, so a layer's thickness is a ratio and not a token count
-(claunch-0af4e.1.1). On this axis the area under the line is not the total of
-tokens sent. It is one chart because the series belongs to the session; under
+can run on, labelled by profile, and one line where the two agree. It is one
+chart because the series belongs to the session; under
 each block it drew the same chart twice (claunch-0af4e.1.1). A solid cyan mark
 with a diamond head is a profile swap (the session was relaunched onto a
 borrowed token, onto another borrowed one, or back onto its own), named on
 hover with the profiles before and after. Hovering the chart grows it and shows
-the whole conversation, with the largest context as the label of the height
-axis (`max`, `log`, plus a rule at 1k, 1M and 1B below it), an axis row, a
-legend and the context of the request under the pointer; moving the pointer off
-it returns it to the small view (claunch-a27zc).
+the whole conversation, with the window as the label of the height axis
+(`max`, plus a rule and a label at every round step below it — 0, 250k, 500k,
+750k on a 1M window), an axis row, a legend and the context of the request
+under the pointer in a row of its own kept at a fixed height, so the chart
+stays where it is while that text changes; moving the pointer off it returns
+it to the small view (claunch-a27zc).
 `GET /api/sessions/{name}/token-series` serves it.
 
 A call that failed is drawn where the rate would be (claunch-waakh.1): a
