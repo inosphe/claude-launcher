@@ -15176,11 +15176,24 @@ function renderNewUsage() {
         name.className = "new-usage-key-name";
         name.textContent = key.label || key.masked || key.id;
         name.title = [key.masked, key.id].filter(Boolean).join(" · ");
+        // The masked token is drawn, not only hovered: it is how a reader tells
+        // two keys apart when the labels say nothing, and it stays masked.
+        const token = document.createElement("span");
+        token.className = "new-usage-key-token";
+        token.textContent = key.masked || "";
+        token.title = key.id || "";
         const use = document.createElement("span");
         use.className = "new-usage-key-use";
         use.textContent = newUsageKeySummary(key.usage, doc.unmeasurable) || "not measured";
         if (key.usage && key.usage.error) use.classList.add("bad");
-        li.append(mark, name, use);
+        // When the key was last spent — the second half of "which key is this",
+        // and the thing a pool's rotation is actually moving through.
+        const used = document.createElement("span");
+        used.className = "new-usage-key-used";
+        used.textContent = key.last_used_at
+          ? `used ${newUsageAge(key.last_used_at)}`
+          : "never used";
+        li.append(mark, name, token, use, used);
         if (pick === index && !key.next) {
           const now = document.createElement("span");
           now.className = "new-usage-key-now";

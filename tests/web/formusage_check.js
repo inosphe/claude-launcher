@@ -9,8 +9,10 @@
      nothing rather than an error);
    - the profile's own windows are drawn from the answer, in the same
      vocabulary the usage page uses (5h/7d/…, percent, reset countdown);
-   - a pool is listed one row per key, and the row the NEXT LAUNCH takes is
-     marked from the server's `next` — not guessed here;
+   - a pool is listed one row per key, each row carrying the masked token and
+     when that key was last spent ("never used" when it never was), and the
+     row the NEXT LAUNCH takes is marked from the server's `next` — not
+     guessed here;
    - the strategy select is offered only for a pool and enabled only when
      there are two or more keys to choose between, because that is the only
      case the choice changes anything;
@@ -215,9 +217,11 @@ async function main() {
       next: { key_id: "k-2", strategy: "rotation", fallback: null },
       keys: [
         { id: "k-1", label: "main", masked: "sk-A…1111", current: true,
-          next: false, usage: { windows: [windowLine("five_hour", 12)], error: null } },
+          next: false, last_used_at: Date.now() / 1000 - 120,
+          usage: { windows: [windowLine("five_hour", 12)], error: null } },
         { id: "k-2", label: "spare", masked: "sk-B…2222", current: false,
-          next: true, usage: { windows: [windowLine("five_hour", 80)], error: null } },
+          next: true, last_used_at: null,
+          usage: { windows: [windowLine("five_hour", 80)], error: null } },
       ],
     }),
   });
@@ -230,7 +234,13 @@ async function main() {
     keysBox.children[1].children[0].textContent, "next");
   check("a next row is lit", keysBox.children[1].className.includes("next"), true);
   check("a key row carries its own numbers",
-    keysBox.children[1].children[2].textContent, "5h 80%");
+    keysBox.children[1].children[3].textContent, "5h 80%");
+  check("the masked token is drawn on the row",
+    keysBox.children[1].children[2].textContent, "sk-B…2222");
+  check("a key never spent says so",
+    keysBox.children[1].children[4].textContent, "never used");
+  check("a key that was spent says when",
+    keysBox.children[0].children[4].textContent, "used 2m ago");
   check("the note names the next key and its strategy",
     note.textContent.includes("next launch takes spare (rotation)"), true);
   check("the strategy row is offered for a pool",
@@ -263,8 +273,8 @@ async function main() {
   check("no row claims to be the next launch's",
     [first.children[0].textContent, second.children[0].textContent], ["", ""]);
   check("the lowest row is marked as arithmetic on the numbers",
-    first.children[3] && first.children[3].textContent, "lowest now");
-  check("the higher row is not marked", second.children.length, 3);
+    first.children[5] && first.children[5].textContent, "lowest now");
+  check("the higher row is not marked", second.children.length, 5);
   check("the note says the pick happens at launch",
     note.textContent.includes("usage-min reads every key's usage"), true);
 

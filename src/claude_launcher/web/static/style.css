@@ -2219,7 +2219,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
 }
+.new-usage-key-token { flex: none; color: #6e7681; font-size: 11px; }
 .new-usage-key-use { flex: 1 1 auto; color: #7d8590; overflow-wrap: anywhere; }
+.new-usage-key-used { flex: none; color: #6e7681; font-size: 11px; }
 .new-usage-key-use.bad { color: #d29922; }
 .new-usage-key-now { flex: none; color: #58a6ff; font-size: 10px; }
 .new-usage-strategy { align-items: center; gap: 6px; }
