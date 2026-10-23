@@ -8366,6 +8366,13 @@ const TERM_SERIES_FLOOR = 1000;
 const termSeriesReads = {};
 /* Whether the pointer is on the chart: its slot name, or false for none. */
 let termSeriesHover = false;
+/* Where the pointer last lay on the zoomed plot, as a fraction of its width,
+   or null when it is not on it. The chart is rebuilt every second by the live
+   poll, and a rebuilt node has seen no mouse move, so the readout is filled
+   from this when it is built (claunch-v5z9y). A fraction and not a request
+   index: a request that arrives between two repaints moves the indices, and
+   the readout has to keep naming the request under the pointer. */
+let termSeriesPointerAt = null;
 
 function termSeriesRead(name, win, now = Date.now()) {
   let read = termSeriesReads[win];
@@ -8616,15 +8623,22 @@ function termSeriesChart(data, zoom) {
     if (compactions) legend.appendChild(el("span", "term-series-key compaction", "compaction"));
     if (swaps.length) legend.appendChild(el("span", "term-series-key swap", "profile swap"));
     const readout = el("div", "term-series-readout", " ");
-    svg.addEventListener("mousemove", (ev) => {
-      const rect = svg.getBoundingClientRect();
-      const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+    const show = (frac) => {
       const p = pts[Math.max(0, Math.min(pts.length - 1, Math.round(frac * (pts.length - 1))))];
       readout.textContent = `#${p.n} · ${ago(p.t)}: ${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}` +
         (p.count > 1 ? ` (largest of ${p.count} requests)` : "");
+    };
+    if (termSeriesPointerAt !== null) show(termSeriesPointerAt);
+    svg.addEventListener("mousemove", (ev) => {
+      const rect = svg.getBoundingClientRect();
+      termSeriesPointerAt = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+      show(termSeriesPointerAt);
     });
-    svg.addEventListener("mouseleave", () => { readout.textContent = " "; });
+    svg.addEventListener("mouseleave", () => {
+      termSeriesPointerAt = null;
+      readout.textContent = " ";
+    });
     box.append(axis, legend, readout);
   }
   return box;
@@ -8652,6 +8666,7 @@ function termSeriesPointerCheck(ev) {
 function termSeriesRelease() {
   if (!termSeriesHover) return;
   termSeriesHover = false;
+  termSeriesPointerAt = null;
   document.removeEventListener("mousemove", termSeriesPointerCheck, true);
   if (typeof renderTermTps === "function") renderTermTps();
 }

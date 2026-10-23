@@ -19,7 +19,13 @@
      every rebuild and froze the throughput numbers (claunch-a27zc.1);
    - entering and leaving in one jump, with no move inside the zoomed chart,
      still ends the hover. The pointer never entered the rebuilt chart, so
-     it gets no mouseleave, and before the fix the overlay stayed zoomed. */
+     it gets no mouseleave, and before the fix the overlay stayed zoomed;
+   - the readout under the pointer survives a repaint with no pointer move,
+     and is empty again once the pointer is off the plot (claunch-v5z9y);
+   - on the light page the overlay's text and marks are the colours the dark
+     page gives them: theme.js rewrites every colour in the overlay's own
+     rules for a light page, which put dark text on the overlay's dark wash
+     (claunch-v5z9y). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -27,6 +33,7 @@ const { chromium } = require("playwright");
 const STATIC = path.join(__dirname, "../../src/claude_launcher/web/static");
 const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
 const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
+const theme = fs.readFileSync(path.join(STATIC, "theme.js"), "utf8");
 
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);
@@ -52,7 +59,8 @@ assert.ok(/replaceChildren\(\.\.\.\[lastBox, usageBox, chart\]/.test(render),
 const page = `<!doctype html><html><head><style>${css}
 body { margin: 0; background: #000; }
 #term { position: relative; width: 900px; height: 700px; }
-</style></head><body><div id="term"><div id="term-tps-overlay"></div></div><script>
+#terminal { height: 100%; flex: none; }  /* the real panel is a flex child of the page */
+</style><script>${theme}</script></head><body><div id="term"><div id="terminal"><div id="term-tps-overlay"></div></div></div><script>
 "use strict";  // as app.js runs: an SVG className write throws only then (claunch-a27zc.1)
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -85,8 +93,12 @@ function renderTermTps() {
   const makeChart = termSeriesMaker(series("cap"), series("full"), termSeriesHover);
   const lastBox = el("div", "term-tps-last");
   lastBox.appendChild(el("span", "term-tps-big", "42 tok/s"));
+  lastBox.appendChild(el("span", "term-tps-small", "last call 3s ago"));
   const usageBox = el("div", "term-usage");
-  usageBox.appendChild(el("div", "term-usage-row", "claude 5h 12% 7d 30%"));
+  const usageRow = el("div", "term-usage-row");
+  usageRow.append(el("span", "term-usage-who", "claude"), el("span", "term-usage-item low", "5h 12%"),
+    el("span", "term-usage-item mid", "7d 60%"), el("span", "term-usage-item high", "7d 95%"));
+  usageBox.appendChild(usageRow);
   overlay.replaceChildren(lastBox, usageBox, makeChart("series"));
 }
 renderTermTps();
@@ -173,6 +185,98 @@ renderTermTps();
           "and draws the chart small again");
         await p.close();
       }
+    }
+    /* The readout under the pointer outlives a repaint (claunch-v5z9y). */
+    {
+      const p = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      await p.setContent(page);
+      const small = await (await p.$("#term-tps-overlay .term-series")).boundingBox();
+      await p.mouse.move(10, 600);
+      await p.mouse.move(small.x + small.width / 2, small.y + small.height / 2, { steps: 5 });
+      await p.waitForTimeout(100);
+      const plot = await (await p.$(".term-series.zoom .term-series-chart")).boundingBox();
+      await p.mouse.move(plot.x + plot.width * 0.5, plot.y + plot.height / 2, { steps: 4 });
+      const readout = () => p.evaluate(() => document.querySelector(".term-series-readout").textContent);
+      const shown = await readout();
+      assert.ok(/^#\d+ · /.test(shown), `the readout names the request under the pointer, got ${JSON.stringify(shown)}`);
+      const before = await p.evaluate(() => window.renders);
+      await p.evaluate(() => renderTermTps());
+      assert.equal(await p.evaluate(() => window.renders) - before, 1, "one repaint, with no pointer move");
+      assert.equal(await readout(), shown, "the readout is the same after the repaint");
+      await p.evaluate(() => { renderTermTps(); renderTermTps(); });
+      assert.equal(await readout(), shown, "and after more repaints");
+      /* Off the plot but inside the chart's box: the readout is cleared, and
+         a repaint does not bring it back. */
+      const legend = await (await p.$(".term-series.zoom .term-series-legend")).boundingBox();
+      await p.mouse.move(legend.x + 4, legend.y + legend.height / 2, { steps: 4 });
+      assert.equal((await readout()).trim(), "", "the readout is empty off the plot");
+      await p.evaluate(() => renderTermTps());
+      assert.equal((await readout()).trim(), "", "and stays empty after a repaint");
+      /* Back on the plot, then out of the chart: the state ends with it. */
+      await p.mouse.move(plot.x + plot.width * 0.25, plot.y + plot.height / 2, { steps: 4 });
+      assert.notEqual((await readout()).trim(), "", "the readout is back on the plot");
+      await p.mouse.move(20, 690, { steps: 10 });
+      await p.waitForTimeout(100);
+      assert.deepEqual(await p.evaluate(() => [termSeriesHover, termSeriesPointerAt]), [false, null],
+        "leaving the chart clears the pointer position with the hover");
+      await p.close();
+    }
+    /* The light page: the overlay reads as it does on the dark one. */
+    {
+      const p = await browser.newPage({ viewport: { width: 900, height: 700 } });
+      await p.setContent(page);
+      const small = await (await p.$("#term-tps-overlay .term-series")).boundingBox();
+      await p.mouse.move(10, 600);
+      await p.mouse.move(small.x + small.width / 2, small.y + small.height / 2, { steps: 5 });
+      await p.waitForTimeout(100);
+      const plot = await (await p.$(".term-series.zoom .term-series-chart")).boundingBox();
+      await p.mouse.move(plot.x + plot.width * 0.5, plot.y + plot.height / 2, { steps: 4 });
+      const TEXT = [
+        ["#term-tps-overlay", "color"], [".term-tps-big", "color"], [".term-tps-small", "color"],
+        [".term-usage-who", "color"], [".term-usage-item.low", "color"], [".term-usage-item.mid", "color"],
+        [".term-usage-item.high", "color"], [".term-series-ymax", "fill"], [".term-series-ytick", "fill"],
+        [".term-series-axis", "color"], [".term-series-legend", "color"], [".term-series-readout", "color"],
+      ];
+      const MARKS = [
+        ["#term-tps-overlay", "borderTopColor"], [".term-series", "borderTopColor"],
+        [".term-series-ymax", "stroke"], [".term-series-ytick", "stroke"],
+        [".term-series-ymax-rule", "stroke"], [".term-series-compaction", "stroke"],
+        [".term-series-swap line", "stroke"], [".term-series-swap polygon", "fill"],
+        [".term-series-swap polygon", "stroke"],
+      ];
+      const STATES = ["", "idle", "stale", "live", "err"];
+      const read = (theme) => p.evaluate(([theme, text, marks, states]) => {
+        window.claunchTheme.set(theme);
+        const out = {};
+        for (const state of states) {
+          const overlay = document.getElementById("term-tps-overlay");
+          overlay.className = state;
+          for (const [sel, prop] of [...text, ...marks, ["#term-tps-overlay", "borderTopColor"]]) {
+            const n = sel === "#term-tps-overlay" ? overlay : overlay.querySelector(sel);
+            out[`${state || "base"} ${sel} ${prop}`] = n ? getComputedStyle(n)[prop] : null;
+          }
+        }
+        return out;
+      }, [theme, TEXT, MARKS, STATES]);
+      const dark = await read("dark");
+      const light = await read("light");
+      assert.ok(Object.values(dark).filter((v) => v === null).length === 0, "every probed element is drawn");
+      const differs = Object.keys(dark).filter((k) => dark[k] !== light[k])
+        .map((k) => `${k}: dark ${dark[k]}, light ${light[k]}`);
+      assert.deepEqual(differs, [], "the overlay's colours are the same on the light page");
+      /* Text on the overlay's wash (the dark page's colour at 78%, over the
+         black behind it here) keeps a contrast a reader can use. */
+      const lum = (css) => {
+        const [r, g, b] = css.match(/[\d.]+/g).slice(0, 3).map(Number).map((v) => {
+          v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      const wash = lum("rgb(16, 17, 20)");
+      const low = TEXT.map(([sel, prop]) => [`base ${sel} ${prop}`, light[`base ${sel} ${prop}`]])
+        .map(([k, v]) => [k, (lum(v) + 0.05) / (wash + 0.05)]).filter(([, ratio]) => ratio < 4.5);
+      assert.deepEqual(low, [], "every text colour has a contrast of 4.5 or more against the wash");
+      await p.close();
     }
   } finally {
     await browser.close();

@@ -1573,7 +1573,10 @@ compaction and stands on that fall. Subagent requests run in their own context
 and are not drawn. The chart covers the conversation from its first request, at
 most the last twelve hours; past 600 requests consecutive requests are grouped
 and a point is the largest context of its group (the readout says how many
-requests it stands for). The height axis is logarithmic from a floor of 1k tokens (a request below it
+requests it stands for). The readout names the request under the pointer and
+keeps doing so while the overlay repaints under a pointer that does not move
+(claunch-v5z9y). The overlay keeps its dark wash and its dark-theme text colours
+on the light page. The height axis is logarithmic from a floor of 1k tokens (a request below it
 sits on the baseline; a session that never reached 1k is drawn from its smallest
 request instead), because cached input is orders of magnitude larger than the
 other two and they were invisible on a linear axis. Its top is fixed at the
