@@ -37,10 +37,12 @@ TOOLS = [
     {"name": "category_assign", "description":
      "Place items in the category tree: {node_id} puts them in an existing node (moving them "
      "from wherever they were; an item sits in one node). {new: {parent_id, label, aliases, "
-     "description}, reason} proposes a new category instead: a person accepts or rejects it on "
-     "the Category page, and until then the items wait in parent_id. An existing label or alias "
-     "is refused with the node that owns it -- assign to that node. Without 'items' it places "
-     "the session this job is about (and its issue).",
+     "description}, reason} creates a new category and places the items in it at once; pass "
+     "proposal: true to file it for review on the Category page instead (until then the items "
+     "wait in parent_id). An existing label or alias is refused with the node that owns it -- "
+     "assign to that node. Without 'items' it places the session this job is about (and its "
+     "issue). A request started from the session pane's 'Assign to tree' follows that pane's "
+     "'제안으로 등록' checkbox instead of this argument.",
      "inputSchema": {"type": "object", "properties": {
          "node_id": {"type": "string"},
          "new": {"type": "object", "properties": {
@@ -48,6 +50,9 @@ TOOLS = [
              "label": {"type": "string"},
              "aliases": {"type": "array", "items": {"type": "string"}},
              "description": {"type": "string"}}, "required": ["label"]},
+         "proposal": {"type": "boolean", "description":
+                      "file the new category for a person to review instead of creating it now "
+                      "(default false: create now)"},
          "reason": {"type": "string", "description": "why this category (required for a proposal)"},
          "items": _ITEMS}}},
 ]
@@ -69,7 +74,8 @@ def call_tool(name, args):
     if name == "category_assign":
         if not session:
             raise CategoryMcpError("category_assign needs a claunch session (CLAUNCH_SESSION)")
-        body = {k: args[k] for k in ("node_id", "new", "reason", "items") if args.get(k)}
+        body = {k: args[k] for k in ("node_id", "new", "proposal", "reason", "items")
+                if args.get(k)}
         return client.post("/api/category/agent-assign", {**body, "session": session})
     selection = {"workspace": args["workspace"]} if args.get("workspace") else {"cwd": os.getcwd()}
     # The registered session's cwd is authoritative for the default workspace.

@@ -169,6 +169,59 @@ def test_search_normalized_alias_substring_and_fuzzy(ws):
     assert c.search(ws, "") and c.search(ws, "!!!") == []
 
 
+def test_create_now_makes_the_node_and_places_the_items(ws):
+    web = node(ws, "web")
+    made = c.create_now(ws, {"label": "category tab", "parent_id": web["id"],
+                             "aliases": ["category pane"], "description": "the page"},
+                        [S("s1"), I("claunch-9")], "agent s1", "why")
+    assert made["path"] == ["web", "category tab"]
+    assert made["aliases"] == ["category pane"]
+    assert place(ws, S("s1"))["id"] == made["id"]
+    assert place(ws, I("claunch-9"))["id"] == made["id"]
+    # Nothing waits for a person: no proposal exists for these items.
+    assert c.proposals(ws) == []
+    assert c.where(ws, "session", "s1")["proposals"] == []
+    ops = [e["op"] for e in c.events(ws)]
+    assert ops[:2] == ["assign", "create"]   # newest first; "web" made the third
+    assert c.events(ws)[0]["detail"]["reason"] == "why"
+
+
+def test_create_now_refuses_a_spelling_that_names_a_node(ws):
+    web = node(ws, "Web UI", aliases=["dashboard"])
+    with pytest.raises(c.CategoryError) as exc:
+        c.create_now(ws, {"label": "web-ui"}, [S("s1")], "agent")
+    assert exc.value.status == 409
+    assert exc.value.extra["candidates"][0]["id"] == web["id"]
+    # Refused whole: no node, no placement.
+    assert [n["label"] for n in c.tree(ws)["nodes"]] == ["Web UI"]
+    assert place(ws, S("s1")) is None
+
+
+def test_a_job_keeps_the_proposal_choice_it_was_started_with(ws):
+    job = c.job_start(ws, "a", "inplace", proposal=True)
+    assert job["proposal"] is True
+    c.job_update(ws, "a", c.DONE)
+    assert c.job_start(ws, "a", "inplace")["proposal"] is False
+    assert c.job(ws, "a")["proposal"] is False
+
+
+def test_a_jobs_table_from_before_the_column_gains_it(ws):
+    import sqlite3
+
+    path = c.db_path(ws)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path))
+    db.executescript(
+        "CREATE TABLE jobs (session TEXT PRIMARY KEY, mode TEXT NOT NULL, fork TEXT, "
+        "state TEXT NOT NULL, note TEXT NOT NULL, result TEXT, "
+        "started_at TEXT NOT NULL, finished_at TEXT)")
+    db.execute("INSERT INTO jobs VALUES ('old','inplace',NULL,'done','',NULL,'2026-01-01',NULL)")
+    db.commit()
+    db.close()
+    assert c.job(ws, "old")["proposal"] is False
+    assert c.job_start(ws, "new", "inplace", proposal=True)["proposal"] is True
+
+
 def test_proposal_parks_items_and_accept_moves_them(ws):
     web = node(ws, "web")
     p = c.propose(ws, {"label": "category tab", "parent_id": web["id"], "reason": "new UI",

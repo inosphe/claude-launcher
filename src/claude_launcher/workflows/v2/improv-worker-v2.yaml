@@ -96,6 +96,9 @@ sides:
 #                            5분 기한·정리·재질문은 claunch-q4cqy.)
 #   end-hold              -> end-hold (keep-alive + delivery-hold)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
+#   (v2 전용)              -> category-tag, category-refresh
+#                            (워크스페이스 카테고리 자동 갱신 — intake 뒤·코딩 전과
+#                            wrapup 뒤, 제안이 아니라 즉시 반영. claunch-06fwj)
 #   (v2 전용)              -> end-watch(loop), self-improve(call — self-improve-common의
 #                            프로시저: review, discuss, align(ask-user), register)
 #                            (end-decision의 self-improve, claunch-c4e6f / .1)
@@ -447,6 +450,36 @@ rules:
       round-report는 wrapup 반환값만 받아 대화에만 있던 판단과 실패 경위를 보고서에
       실을 수 없었다.
     deliver: [work, review, targeted-test, rebase]
+
+# ── 카테고리 갱신 절차(claunch-06fwj) ──────────────────────────────────
+# 회차 앞(intake 뒤·코딩 전)과 wrapup 뒤의 두 노드가 같은 산문을 쓴다. 산문을
+# 두 자리에 적으면 갈리므로 조각 하나를 ${frag:...}로 전개한다.
+# 이 호출은 제안이 아니다: 사용자 결정(2026-10-23, claunch-06fwj)으로 에이전트의
+# `category_assign {new}`는 기본이 즉시 등록이고, 제안 큐는 사람이 체크박스로
+# 고를 때(`proposal: true`)만 쓴다. 겹치는 라벨은 여전히 409로 거절되므로 트리에
+# 한 키워드가 두 노드로 갈라지지는 않는다.
+fragments:
+  category-tag: |
+    이 세션과 그 이슈를 워크스페이스 카테고리 트리에 배치한다. 이 호출은
+    제안이 아니라 즉시 반영이다 — 새 카테고리를 만들 때 `proposal`을 주지
+    않는다(claunch-06fwj, 사용자 결정).
+    1. MCP `category_tree`로 이 워크스페이스의 트리와 어휘를 읽는다.
+       필요하면 `category_search`로 후보를 찾고, `category_items`로 그 노드에
+       이미 무엇이 있는지 본다.
+    2. 기존 노드 가운데 이번 회차의 목표를 가장 잘 나타내는, 가장 구체적인
+       노드를 고른다. 기존 라벨의 동의어는 새 노드가 아니라 그 노드다.
+    3. 맞는 노드가 없으면 가장 가까운 노드의 자식으로(가까운 것이 없으면
+       최상위로) 짧은 키워드 라벨·다른 표기의 별칭·한 줄 설명을 만들고
+       `category_assign {new: {parent_id, label, aliases, description},
+       reason}`으로 지금 만든다. 기존 라벨·별칭과 겹치면 도구가 409로 그
+       노드를 알려 준다 — 새 이름을 짓지 말고 그 노드에 배정한다.
+    4. `category_assign`을 정확히 한 번 부른다. `items`를 생략하면 이 세션과
+       그 이슈가 배치된다. 이번 회차에 만든 인수인계 이슈도 같은 주제면
+       `items`에 함께 넣는다.
+    5. 보고에 결과를 적는다: 배치된 경로, 새로 만든 라벨(있으면), 도구를 쓸 수
+       없었으면 그 사유. 카테고리는 회차를 막지 않는다 — 도구가 없거나
+       (「not configured」) 데몬에 닿지 않으면 한 줄로 사유를 적고
+       assigned=false로 보고한 뒤 다음 단계로 간다.
 
 nodes:
   # ── 회차 시작 ────────────────────────────────────────────────────────
@@ -3086,6 +3119,38 @@ nodes:
       ok: {tip: str, merge: str, target: str}
     effects: [fs.read]
 
+  # ── 카테고리 갱신(claunch-06fwj) ─────────────────────────────────────
+  category-tag:
+    title: 카테고리 배치 (코딩 전)
+    prompt: |
+      ${frag:category-tag}
+      이 호출은 회차 앞이다: intake(일감 귀속)가 끝났고 아직 코딩을 시작하지
+      않았다. 이번 회차의 목표가 트리에 드러나게 배치한다.
+    done_when: |
+      `category_assign`을 불렀고(또는 쓸 수 없었다는 사유를 적었고) 배치 경로·
+      새 라벨·사유 가운데 해당하는 값이 보고에 있다.
+    returns:
+      ok: {assigned: bool, path: "str?", created: "str?", note: str}
+    # 카테고리 트리는 저장소 밖의 워크스페이스 상태다 — 배치가 그것을 쓴다.
+    effects: [board.write]
+
+  category-refresh:
+    title: 카테고리 갱신 (wrapup)
+    prompt: |
+      ${frag:category-tag}
+      이 호출은 회차 마감 뒤다: wrapup이 정리·마감 코멘트·인수인계 이슈를 남긴
+      뒤이므로 이번 회차가 실제로 무엇이었는지가 가장 정확히 드러나는 시점이다.
+      트리를 다시 읽고, 이번 회차의 작업이 앞(category-tag)에서 고른 노드와
+      다른 주제가 되었으면 그 항목을 옮긴다. 같은 노드가 여전히 맞으면 다시
+      배정해도 된다(항목은 한 노드에만 있고 같은 노드 배정은 결과가 같다).
+    done_when: |
+      트리를 다시 읽은 뒤의 배치 경로(옮겼으면 새 경로)와, 옮기지 않은 이유
+      또는 도구를 쓸 수 없었던 사유가 보고에 있다.
+    returns:
+      ok: {assigned: bool, path: "str?", created: "str?", note: str}
+    # 카테고리 트리는 저장소 밖의 워크스페이스 상태다 — 배치가 그것을 쓴다.
+    effects: [board.write]
+
   # ── 회차 마감 ────────────────────────────────────────────────────────
   wrapup:
     title: 회차 마감·정리
@@ -4779,6 +4844,10 @@ procedures:
               - id: resolve
                 call: resolve-issue
                 bind: claim
+              # 코딩 전 카테고리 배치(claunch-06fwj): intake가 일감 귀속을
+              # 마쳤고 아직 작업을 시작하지 않은 자리다. 회차를 막지 않는다 —
+              # 결과(assigned=false와 사유)는 노드가 보고로 낸다.
+              - category-tag
               - id: workspace
                 call: workspace
               - branch-setup
@@ -4888,6 +4957,10 @@ procedures:
               landed: {break: batch}
               held: {break: batch}
       - wrapup
+      # wrapup 뒤 카테고리 재확인(claunch-06fwj): 회차가 실제로 무엇이었는지가
+      # 마감 기록까지 끝난 이 자리에서 가장 정확하다. 앞의 category-tag와 같은
+      # 절차 조각을 쓰고, 옮길 것이 없으면 같은 노드에 다시 배정한다.
+      - category-refresh
       - round-report
 
   settle:

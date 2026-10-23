@@ -27,12 +27,18 @@ let tree = {
   items: [
     {kind: 'session', ref: 's1', node_id: 'n1'},
     {kind: 'session', ref: 's2', node_id: 'n2'},
+    {kind: 'session', ref: 's10', node_id: 'n2'},
+    {kind: 'session', ref: 's11', node_id: 'n2'},
     {kind: 'issue', ref: 'i-1', node_id: 'n3'},
   ],
   unassigned: [{kind: 'session', ref: 's9'}],
   proposals: [{id: 'p1', parent_id: 'n1', label: 'panes', aliases: ['split'], description: '', reason: 'new UI',
                items: [{kind: 'session', ref: 's1', waiting_in: 'n1'}], proposed_by: 's1-cat1', created_at: '2026-10-18T00:00:00'}],
-  details: {'session:s1': {status: 'idle', note: 'tab work'}, 'issue:i-1': {title: 'An issue', status: 'open'}},
+  details: {'session:s1': {status: 'idle', life: 'running', note: 'tab work'},
+            'session:s2': {status: 'busy', life: 'running', note: ''},
+            'session:s10': {status: 'exited', life: 'killed', note: ''},
+            'session:s11': {status: 'exited', life: 'archived', note: ''},
+            'issue:i-1': {title: 'An issue', status: 'open'}},
 };
 let sessionView = {workspace: 'alpha', session: 's1', mode: 'fork', job: null,
   places: [{kind: 'session', ref: 's1', node: {path: ['web']}, proposals: []}]};
@@ -112,6 +118,23 @@ const last = () => calls[calls.length - 1];
   assert(all().some(n => n.tag === 'a' && n.textContent === 's1' && n.href === '#/s/s1'));
   assert(all().some(n => n.tag === 'a' && n.textContent === 'i-1' && n.href === '#/beads/i-1'));
 
+  // Session state comes from the daemon's partition: a live one shows what the
+  // screen reports, and the finished partitions stay hidden until asked.
+  const shown = (ref) => all().some(n => n.tag === 'a' && n.textContent === ref);
+  assert(all().some(n => n.textContent === 'running · idle'));
+  assert(all().some(n => n.textContent === 'running · busy'));
+  assert(!shown('s10') && !shown('s11'));
+  const filter = (key) => all().find(n => n.tag === 'input' && n.id === 'category-show-' + key);
+  const killBox = filter('killed'), archBox = filter('archived');
+  assert(killBox && archBox && !killBox.checked && !archBox.checked);
+  killBox.checked = true; killBox.onchange();
+  assert(shown('s10') && !shown('s11') && all().some(n => n.textContent === 'killed'));
+  archBox.checked = true; archBox.onchange();
+  assert(shown('s11') && all().some(n => n.textContent === 'archived'));
+  killBox.checked = false; killBox.onchange();
+  archBox.checked = false; archBox.onchange();
+  assert(!shown('s10') && !shown('s11'));
+
   // Two sessions inside "web": extract goes under web.
   pick('session s1 선택'); pick('session s2 선택');
   assert(!button('Extract…').disabled && !button('Merge…').disabled);
@@ -190,13 +213,31 @@ const last = () => calls[calls.length - 1];
   assert(all(host).some(n => n.textContent === 'web'));
   assert(all(host).some(n => n.tag === 'a' && n.href === '#/category/alpha'));
   assert(all(host).some(n => String(n.textContent).includes('quick-fork')));
+  // "제안으로 등록" starts off: the press creates a new category at once.
+  const propBox = all(host).find(n => n.tag === 'input' && n.id === 'category-proposal-opt');
+  assert(propBox && !propBox.checked);
+  assert(all(host).some(n => String(n.textContent).includes('제안으로 등록')));
   button('Assign to tree', host).onclick(); await settle();
-  assert(calls.some(c => c.url.pathname === '/api/sessions/s1/category/assign' && c.method === 'POST'));
+  const presses = () => calls.filter(c => c.url.pathname === '/api/sessions/s1/category/assign' && c.method === 'POST');
+  assert.strictEqual(presses().length, 1);
+  assert.deepStrictEqual(presses()[0].body, {proposal: false});
   const pressed = button('배정 진행 중…', host);
   assert(pressed && pressed.disabled);
   assert(all(host).some(n => n.textContent === '진행 중'));
   ctx.CategoryPane.unmount();
   assert.strictEqual(host.children.length, 0);
+
+  // Ticked: the new category is filed for review instead (a fresh pane starts
+  // with the box off, so this is the box being turned on).
+  sessionView = {...sessionView, job: null};
+  const host4 = new Element('div');
+  ctx.CategoryPane.mount(host4, 's1'); await settle();
+  const prop4 = all(host4).find(n => n.tag === 'input' && n.id === 'category-proposal-opt');
+  assert(prop4 && !prop4.checked);
+  prop4.checked = true; prop4.onchange();
+  button('Assign to tree', host4).onclick(); await settle();
+  assert.deepStrictEqual(presses()[1].body, {proposal: true});
+  ctx.CategoryPane.unmount();
 
   // An in-place job the session has not acted on can be requested again.
   sessionView = {...sessionView, mode: 'inplace', job: {mode: 'inplace', state: 'running', fork: null, started_at: '2026-10-18T01:02:03', note: ''}};
@@ -221,7 +262,7 @@ const last = () => calls[calls.length - 1];
   confirmAnswer = true;
   button('Assign to tree', host3).onclick(); await settle();
   assert.strictEqual(s2posts().length, 3);
-  assert.deepStrictEqual(s2posts()[2].body, {wake: true});
+  assert.deepStrictEqual(s2posts()[2].body, {wake: true, proposal: false});
   assert(button('배정 진행 중…', host3));
   ctx.CategoryPane.unmount();
   console.log('ok');

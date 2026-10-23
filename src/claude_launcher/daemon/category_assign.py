@@ -14,6 +14,12 @@ Any other harness gets the same job typed into the session itself
 (in-place); it calls ``category_assign`` and carries on with what it was
 doing.
 
+The pane's "제안으로 등록" checkbox decides what a *new* category becomes: kept
+off (the default), the node is created and the items are placed at once;
+checked, the job carries ``proposal`` and the new node is filed for review on
+the Category page as before. ``category_assign`` called outside a job (a
+workflow step) makes the same choice with its own ``proposal`` argument.
+
 An ended session is not refused (claunch-p2v4m.1): a held one is woken as
 opening its terminal would, and any other ended record (killed, paused, ...)
 answers 409 ``needs_wake`` until the person confirms with ``wake: true``,
@@ -71,7 +77,8 @@ def _describe(items) -> str:
     return ", ".join(f"{i['kind']} {i['ref']}" for i in items)
 
 
-def compose_task(*, origin: str, workspace: str, items: list, fork: Optional[str]) -> str:
+def compose_task(*, origin: str, workspace: str, items: list, fork: Optional[str],
+                 proposal: bool = False) -> str:
     """The job, typed into the fork (``fork`` set) or into the session itself."""
     who = (f"This session ({fork}) is a quick-fork copy of {origin}, made only for "
            f"this job. {origin}'s task, cflow run, board issues and mesh "
@@ -101,14 +108,23 @@ def compose_task(*, origin: str, workspace: str, items: list, fork: Optional[str
         "2. Pick the most specific existing node whose keyword names what this "
         "work is about. Reuse the existing vocabulary: a synonym of an existing "
         "label is that node, not a new one.",
-        "3. When no existing node fits, do not stretch one: propose a new child "
-        "of the closest node (or a top-level node when nothing is close) with a "
-        "short keyword label, aliases for its other spellings, and the reason. "
-        "A person reviews new categories; until then the items wait in the "
-        "parent you named.",
-        "4. Call 'category_assign' exactly once: {node_id} for an existing node, "
-        "or {new: {parent_id, label, aliases, description}, reason} for a "
-        "proposal. Leave 'items' out -- it defaults to the items above.",
+        ("3. When no existing node fits, do not stretch one: propose a new child "
+         "of the closest node (or a top-level node when nothing is close) with a "
+         "short keyword label, aliases for its other spellings, and the reason. "
+         "A person reviews new categories; until then the items wait in the "
+         "parent you named." if proposal else
+         "3. When no existing node fits, do not stretch one: create a new child "
+         "of the closest node (or a top-level node when nothing is close) with a "
+         "short keyword label, aliases for its other spellings, and a one-line "
+         "description. It is created at once -- a spelling that already names a "
+         "node is refused with that node, and you assign to it instead."),
+        ("4. Call 'category_assign' exactly once: {node_id} for an existing node, "
+         "or {new: {parent_id, label, aliases, description}, reason} for a "
+         "proposal -- the person asked for review, so pass proposal: true. "
+         "Leave 'items' out -- it defaults to the items above." if proposal else
+         "4. Call 'category_assign' exactly once: {node_id} for an existing node, "
+         "or {new: {parent_id, label, aliases, description}, reason} to create "
+         "the node now. Leave 'items' out -- it defaults to the items above."),
         end,
         "---",
     ])
@@ -124,6 +140,8 @@ def compose_result(*, fork: str, job: dict, text: str) -> str:
     ]
     if result.get("path"):
         lines.append("category: " + " / ".join(result["path"]))
+    if result.get("created"):
+        lines.append(f"created: {result['created']} (a new category, applied now)")
     if result.get("proposed"):
         lines.append(f"proposed: {result['proposed']} (a new category, waiting for review)")
     lines.append("note: this is information about your session; no action is needed.")
@@ -207,18 +225,22 @@ async def start(request: web.Request, name: str, body: Optional[dict] = None) ->
     session = await _awake(manager, session, bool((body or {}).get("wake")))
     refresh(manager, ws, name)
     items = items_for(session)
+    # The pane's "제안으로 등록": unchecked (the default) creates a new category
+    # at once, checked files it for review as before.
+    proposal = bool((body or {}).get("proposal"))
     if spawn_mod.can_fork(session.sdef.to_dict()):
         taken = {s.sdef.name for s in manager.list()}
         fork = handoff_mod.fork_name(name, taken, tag=TAG)
         try:
-            category.job_start(ws, name, "fork", fork)
+            category.job_start(ws, name, "fork", fork, proposal=proposal)
         except category.CategoryError as exc:
             raise AssignError(exc.status, str(exc)) from None
         try:
             await api.stage_quick_fork(
                 request, name,
                 {"name": fork, "task": compose_task(
-                    origin=name, workspace=ws.name, items=items, fork=fork)},
+                    origin=name, workspace=ws.name, items=items, fork=fork,
+                    proposal=proposal)},
                 tag=TAG, self_merge_allowed=True,
                 created_by=actors.with_reason(actors.from_request(request), "category-assign"),
             )
@@ -226,14 +248,16 @@ async def start(request: web.Request, name: str, body: Optional[dict] = None) ->
             category.job_update(ws, name, category.FAILED, str(exc))
             raise AssignError(exc.status, str(exc)) from None
         return {"mode": "fork", "fork": fork, "workspace": ws.name, "items": items,
-                "job": category.job(ws, name)}
+                "proposal": proposal, "job": category.job(ws, name)}
     try:
         # A request the session never acted on does not block the next press:
         # the new request replaces it and the block is typed again.
-        category.job_start(ws, name, "inplace", replace_inplace=True)
+        category.job_start(ws, name, "inplace", replace_inplace=True,
+                           proposal=proposal)
     except category.CategoryError as exc:
         raise AssignError(exc.status, str(exc)) from None
-    block = compose_task(origin=name, workspace=ws.name, items=items, fork=None)
+    block = compose_task(origin=name, workspace=ws.name, items=items, fork=None,
+                         proposal=proposal)
     try:
         delivered = bool(await asyncio.wait_for(session.deliver(block), _deliver_timeout()))
     except asyncio.TimeoutError:
@@ -242,7 +266,7 @@ async def start(request: web.Request, name: str, body: Optional[dict] = None) ->
         category.job_update(ws, name, category.FAILED, "the session did not take the request")
         raise AssignError(503, f"{name!r} did not take the request (its keyboard is busy); try again")
     return {"mode": "inplace", "fork": None, "workspace": ws.name, "items": items,
-            "job": category.job(ws, name)}
+            "proposal": proposal, "job": category.job(ws, name)}
 
 
 def agent_assign(manager, caller: str, body: dict) -> dict:
@@ -272,14 +296,27 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
             result = {"path": placed["node"]["path"], "node_id": placed["node"]["id"]}
         elif isinstance(body.get("new"), dict):
             new = dict(body["new"])
-            proposal = category.propose(
-                ws, {**new, "reason": new.get("reason") or reason, "items": items}, actor)
-            parent_path = []
-            if proposal.get("parent_id"):
-                where = category.where(ws, "session", origin.sdef.name)
-                parent_path = (where.get("node") or {}).get("path") or []
-            result = {"proposed": proposal["label"], "proposal_id": proposal["id"],
-                      "path": parent_path, "similar": [n["path"] for n in proposal["similar"]]}
+            # The job -- opened by "Assign to tree" -- records what the person
+            # asked for with its checkbox, and that decides. A direct call (a
+            # workflow step, a fork) has no such record unless the call itself
+            # carries `proposal`; without either, the node is created now.
+            wants_proposal = (bool(job.get("proposal")) if job
+                              else bool(body.get("proposal")))
+            if wants_proposal:
+                proposal = category.propose(
+                    ws, {**new, "reason": new.get("reason") or reason, "items": items}, actor)
+                parent_path = []
+                if proposal.get("parent_id"):
+                    where = category.where(ws, "session", origin.sdef.name)
+                    parent_path = (where.get("node") or {}).get("path") or []
+                result = {"proposed": proposal["label"], "proposal_id": proposal["id"],
+                          "path": parent_path,
+                          "similar": [n["path"] for n in proposal["similar"]]}
+            else:
+                node = category.create_now(
+                    ws, {**new, "reason": new.get("reason") or reason}, items, actor, reason)
+                result = {"created": node["label"], "node_id": node["id"],
+                          "path": node["path"]}
         else:
             raise AssignError(400, "give node_id (an existing category) or new {label, ...}")
     except category.CategoryError as exc:

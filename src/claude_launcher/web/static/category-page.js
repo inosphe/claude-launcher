@@ -49,6 +49,10 @@ function makeCategoryView({root, workspace: fixed = ""}) {
   let workspace = fixed, workspaces = [], data = null, events = [];
   let error = "", notice = "", busy = false, tab = "tree", seq = 0;
   let picked = new Set(), pickedNodes = new Set(), collapsed = new Set();
+  // Finished sessions are most of a long-lived tree and are not what the
+  // index is read for, so the page hides them until asked: one box per
+  // partition (daemon/session.py session_category).
+  let showKilled = false, showArchived = false;
   let form = null;   // {kind, ...}: the one inline form open, if any
   let proposalDrafts = {};
   const url = (path, params = {}) => path + (path.includes("?") ? "&" : "?") + new URLSearchParams({workspace, ...params});
@@ -166,6 +170,15 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return wrap;
   }
 
+  /* Sessions the page is hiding until their box is ticked. `life` is the
+     daemon's partition; a session the daemon no longer has a record of has
+     none and stays visible. */
+  function hiddenSession(item) {
+    if (item.kind !== "session") return false;
+    const life = ((data?.details || {})[categoryKey(item)] || {}).life;
+    return (life === "killed" && !showKilled) || (life === "archived" && !showArchived);
+  }
+
   function itemRow(item) {
     const key = categoryKey(item);
     const row = node("li", null, "category-item");
@@ -177,7 +190,15 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     link.href = item.kind === "session" ? "#/s/" + encodeURIComponent(item.ref) : "#/beads/" + encodeURIComponent(item.ref);
     row.append(box, node("span", item.kind === "session" ? "▶" : "◈", "category-kind"), link);
     if (item.kind === "session") {
-      if (info.status) row.append(node("span", info.status, "category-chip category-status-" + info.status));
+      // running carries what the screen reports (busy/idle/starting); the
+      // other partitions are the state itself.
+      if (info.life) {
+        const label = info.life === "running" && info.status && info.status !== "exited"
+          ? "running · " + info.status : info.life;
+        row.append(node("span", label, "category-chip category-status-" + info.life));
+      } else if (info.status) {
+        row.append(node("span", info.status, "category-chip category-status-" + info.status));
+      }
       if (info.note) row.append(node("span", info.note, "category-muted"));
     } else {
       if (info.status) row.append(node("span", info.status, "category-chip"));
@@ -255,6 +276,23 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return f;
   }
 
+  /* "show killed" / "show archived": one box each, both off by default. */
+  function filters() {
+    const bar = node("div", null, "category-filters");
+    const one = (key, label, on, set) => {
+      const box = node("input"); box.type = "checkbox"; box.checked = on;
+      box.id = "category-show-" + key;
+      box.onchange = () => { set(box.checked); render(); };
+      const wrap = node("label", null, "category-filter");
+      wrap.setAttribute("for", box.id);
+      wrap.append(box, node("span", label));
+      bar.append(wrap);
+    };
+    one("killed", "show killed", showKilled, (v) => { showKilled = v; });
+    one("archived", "show archived", showArchived, (v) => { showArchived = v; });
+    return bar;
+  }
+
   function treeView() {
     const box = node("section", null, "category-tree");
     const children = new Map(), itemsByNode = new Map();
@@ -266,16 +304,17 @@ function makeCategoryView({root, workspace: fixed = ""}) {
       children.get(parent).push(n);
     }
     for (const i of data?.items || []) {
+      if (hiddenSession(i)) continue;
       if (!itemsByNode.has(i.node_id)) itemsByNode.set(i.node_id, []);
       itemsByNode.get(i.node_id).push(i);
     }
-    box.append(toolbar());
+    box.append(toolbar(), filters());
     const top = children.get(null) || [];
     if (!top.length) box.append(node("p", "아직 카테고리가 없습니다. ‘New category…’로 만들거나, 세션 패널의 ‘Assign to tree’로 에이전트에게 배정을 요청하세요.", "category-empty"));
     const ul = node("ul", null, "category-roots");
     for (const n of top) ul.append(nodeBlock(n, children, itemsByNode));
     box.append(ul);
-    const loose = data?.unassigned || [];
+    const loose = (data?.unassigned || []).filter(i => !hiddenSession(i));
     if (loose.length) {
       const group = node("details", null, "category-loose");
       group.open = loose.some(i => picked.has(categoryKey(i)));
@@ -388,6 +427,9 @@ globalThis.CategoryPage = makeCategoryView({root: () => document.getElementById(
 function makeCategoryPane({root, session}) {
   const node = categoryNode;
   let view = null, error = "", busy = false, seq = 0, timer = null;
+  // "제안으로 등록": unchecked (default) creates a new category at once,
+  // checked files it for a person to review on the Category page.
+  let proposal = false;
   const base = "/api/sessions/" + encodeURIComponent(session) + "/category";
 
   async function load() {
@@ -411,12 +453,12 @@ function makeCategoryPane({root, session}) {
     if (busy) return;
     busy = true; error = ""; render();
     try {
-      try { await categoryRequest(base + "/assign", "POST"); }
+      try { await categoryRequest(base + "/assign", "POST", {proposal}); }
       catch (exc) {
         if (!exc.body?.needs_wake) throw exc;
         const life = exc.body.life || "killed";
         if (!globalThis.confirm(`${session}은(는) 종료된(${life}) 세션입니다. 깨워서 트리에 배정할까요?\n배정이 끝난 뒤 세션을 다시 종료하는 것은 직접 해야 합니다.`)) return;
-        await categoryRequest(base + "/assign", "POST", {wake: true});
+        await categoryRequest(base + "/assign", "POST", {wake: true, proposal});
       }
     }
     catch (exc) { error = exc.message; }
@@ -458,7 +500,12 @@ function makeCategoryPane({root, session}) {
     const resend = job?.mode === "inplace" && job.state === "running";
     const press = node("button", resend ? "다시 요청" : running() ? "배정 진행 중…" : "Assign to tree", "wf-btn category-primary");
     press.type = "button"; press.disabled = busy || (running() && !resend); press.onclick = assign;
-    shell.append(press, node("p", how, "category-muted"));
+    const opt = node("input"); opt.type = "checkbox"; opt.id = "category-proposal-opt";
+    opt.checked = proposal; opt.onchange = () => { proposal = opt.checked; };
+    const optLabel = node("label", null, "category-proposal-opt");
+    optLabel.setAttribute("for", opt.id);
+    optLabel.append(opt, node("span", "제안으로 등록 (새 카테고리를 사람이 검토)"));
+    shell.append(press, optLabel, node("p", how, "category-muted"));
     if (resend) shell.append(node("p", "이 세션이 아직 배정하지 않았습니다. 요청을 무시했다면 다시 요청할 수 있습니다.", "category-muted"));
     if (job) {
       const labels = {running: "진행 중", assigned: "배정됨 · merge 대기", done: "완료", failed: "실패"};
