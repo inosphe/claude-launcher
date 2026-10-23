@@ -236,6 +236,12 @@ def merge_entry(previous, entry) -> Dict[str, object]:
     a non-empty ``api_key`` drops ``api-key``; a save that names none keeps it,
     because the form still cannot clear what it never showed.
 
+    A blank ``api_key`` counts as naming none. The page never posts one -- a
+    blank input is left out rather than written as ``""`` -- so a blank here
+    comes from an API caller, and storing it would shadow the real key:
+    :func:`provider_spec.from_entry` prefers ``api_key``, so the launcher would
+    read nothing while the stored secret sat unread beside it.
+
     Removing any of these by hand is a ``~/.claunch.yaml`` edit.
     """
     new = copy.deepcopy(entry) if isinstance(entry, dict) else {}
@@ -257,7 +263,11 @@ def merge_entry(previous, entry) -> Dict[str, object]:
                 else:
                     merged[harness] = copy.deepcopy(values)
         out["harness_options"] = merged
-    if "api_key" not in new and old.get("api_key"):
+    if "api_key" in new and not _holds_secret(new.get("api_key")):
+        # A blank key is not a key: drop it so it cannot shadow the stored one
+        # (see the docstring). ``out.update(new)`` put it there.
+        out.pop("api_key", None)
+    if not _holds_secret(out.get("api_key")) and _holds_secret(old.get("api_key")):
         out["api_key"] = old["api_key"]
     if _holds_secret(new.get("api_key")) and LEGACY_CREDENTIAL_FIELD in out:
         # One secret, two spellings: the key this save wrote is the one the

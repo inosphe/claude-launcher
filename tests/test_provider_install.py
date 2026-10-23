@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from claude_launcher import provider_install, provider_presets, store
+from claude_launcher import provider_install, provider_presets, provider_spec, store
 from claude_launcher.daemon import api
 from claude_launcher.profile import create as create_profile
 
@@ -399,6 +399,43 @@ def test_a_save_that_names_no_key_keeps_the_legacy_hyphen_spelling(home):
     for entry in (_valid(), _valid(api_key="   ")):
         merged = provider_install.merge_entry(previous, entry)
         assert merged["api-key"] == "sk-legacy-secret"
+
+
+def test_a_blank_key_does_not_shadow_the_stored_one(home):
+    """An API caller's blank key means "no key", not "clear the stored one".
+
+    ``out.update(new)`` stores the blank verbatim and ``from_entry`` reads
+    ``api_key`` first, so the entry held the real key and the launcher read
+    nothing. The page cannot produce this save -- ``app.js`` leaves a blank
+    input out -- but the write path is reachable without the page.
+    """
+    previous = _valid(api_key="sk-stored")
+    for blank in ("", "   "):
+        merged = provider_install.merge_entry(previous, _valid(api_key=blank))
+        assert merged["api_key"] == "sk-stored"
+
+
+def test_a_blank_key_leaves_the_legacy_spelling_readable(home):
+    """With no ``api_key``, ``from_entry`` falls back to ``api-key``.
+
+    The entry this save used to produce held both spellings and read ``None``:
+    the blank shadowed the only copy of the secret.
+    """
+    previous = _valid(**{"api-key": "sk-legacy-secret"})
+    merged = provider_install.merge_entry(previous, _valid(api_key="   "))
+    assert "api_key" not in merged
+    assert merged["api-key"] == "sk-legacy-secret"
+    assert provider_spec.from_entry(merged, "demo").api_key == "sk-legacy-secret"
+
+
+def test_an_api_save_with_a_blank_key_leaves_one_spelling(home):
+    """The write path, not only the rule: save and read the file back."""
+    _store_raw("legacy", _valid(**{"api-key": "sk-legacy-secret"}))
+    provider_install.save("legacy", _valid(api_key="   "))
+    entry = store.load()["providers"]["legacy"]
+    assert "api_key" not in entry
+    assert entry["api-key"] == "sk-legacy-secret"
+    assert provider_spec.from_entry(entry, "legacy").api_key == "sk-legacy-secret"
 
 
 def test_a_save_that_names_a_key_leaves_the_legacy_env_block_alone(home):
