@@ -352,6 +352,32 @@ def adopt_single_token(profile: Profile) -> Optional[Pool]:
     return pool
 
 
+def can_adopt_single_token(profile: Profile) -> bool:
+    """Whether :func:`adopt_single_token` could start a pool for this profile.
+
+    The launcher token file is the only thing a pool starts from, so a
+    profile that authenticates through a ``/login`` ``.credentials.json`` has
+    nothing to adopt even though :func:`strategy_owner` names it: that walks
+    ``own_token``, which counts the login credential too. The difference is
+    what a caller has to check before promising that setting a strategy will
+    create a pool (claunch-wllke.5.1.1.1).
+    """
+    return load(profile) is not None or credentials.stored_token(profile) is not None
+
+
+def stored_key_advice(profile: Profile) -> str:
+    """The sentence both the refusal and the display give for the case above.
+
+    One string because the two drifted apart once already: the display said a
+    pool would be created where the set refused with this advice
+    (claunch-wllke.5.1.1.1).
+    """
+    return (
+        f"profile {profile.name!r} has no stored key; add one with "
+        f"'claunch keys add {profile.name}'"
+    )
+
+
 def add(profile: Profile, token: str, label: str = "") -> Key:
     """Append ``token`` to the pool and make it the effective token."""
     token = str(token or "").strip()
@@ -475,10 +501,7 @@ def set_strategy(profile: Profile, strategy: str) -> Pool:
     with pool_lock(source):
         pool = adopt_single_token(source)
         if pool is None:
-            raise KeysError(
-                f"profile {source.name!r} has no stored key; add one with "
-                f"'claunch keys add {source.name}'"
-            )
+            raise KeysError(stored_key_advice(source))
         pool.strategy = strategy
         save(source, pool)
         return pool
@@ -501,6 +524,14 @@ def strategy_owner(profile: Profile) -> Optional[Profile]:
     ``None`` means no profile in the chain holds a pool or a token, and the
     caller falls back to the profile itself: the error then names the profile
     that was asked about rather than an ancestor that does not exist.
+
+    Being named here does not make the set succeed. Both walks accept a
+    ``/login`` ``.credentials.json``, while :func:`adopt_single_token` starts a
+    pool from the launcher token file alone -- login credentials expire and
+    are Claude Code's own file. So a login-only profile is where a set lands
+    and still refuses, and a caller that says otherwise is promising a pool
+    nobody creates (:func:`can_adopt_single_token` is that check,
+    claunch-wllke.5.1.1.1).
     """
     return _token_source(profile)
 

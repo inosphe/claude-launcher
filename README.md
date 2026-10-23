@@ -541,10 +541,14 @@ of the child advances. `claunch keys strategy` on the child reports that pool's
 strategy for the same reason, and names the owner on a second line — and
 `claunch keys strategy <child> <strategy>` *sets* that same pool, naming the
 owner in its output, because that is the strategy the child's next launch
-obeys. Where the chain holds a single token and no pool yet, both forms answer
-about the same place: the display says that setting a strategy there adopts
-that token into a pool, and the set is what creates it. A profile that holds
-no key anywhere in its chain is refused with the same advice as before.
+obeys. Where the chain holds a single stored token and no pool yet, both forms
+answer about the same place: the display says that setting a strategy there
+adopts that token into a pool, and the set is what creates it. A profile that
+authenticates only through a `/login` `.credentials.json` has nothing to adopt
+(a pool starts from the launcher token file), so there the display gives the
+set's own advice — `claunch keys add <profile>` — instead of promising a pool.
+A profile that holds no key anywhere in its chain is refused with the same
+advice as before.
 
 Two keys in one pool never hold the same token: `claunch keys add` and
 `claunch set-token` (which replaces a key) both refuse a duplicate, so a

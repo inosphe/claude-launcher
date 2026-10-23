@@ -127,6 +127,17 @@ def _cmd_strategy(args: argparse.Namespace) -> int:
                     f"profile {p.name!r} has no key pool and no token; "
                     "strategy applies once it holds keys"
                 )
+            elif not profile_keys.can_adopt_single_token(target):
+                # The set would land there and then refuse: `strategy_owner`
+                # counts a /login `.credentials.json`, `adopt_single_token`
+                # starts a pool from the launcher token file alone. Printing
+                # the set's own advice here keeps the two forms from
+                # disagreeing on a shape the earlier wording got right
+                # (claunch-wllke.5.1.1.1).
+                print(
+                    f"profile {p.name!r} has no key pool yet, and setting a "
+                    f"strategy would refuse — {profile_keys.stored_key_advice(target)}"
+                )
             elif target.name == p.name:
                 print(
                     f"profile {p.name!r} has no key pool yet; setting a strategy "
