@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -414,6 +415,75 @@ def test_runner_run_advances_the_pool(home, monkeypatch):
     assert launched
     assert credentials.stored_token(p) == "sk-AAAA1111BBBB"
     assert profile_keys.load(p).keys[0].use_count == 1
+
+
+def test_concurrent_launches_each_take_their_own_step(home):
+    """One pool, several launches at once, no lost update (claunch-wllke.2).
+
+    Every launch reads the pool, picks, then writes the pool back. Without a
+    lock two launches read the same cursor, pick the same key, and the later
+    write erases the earlier one's use count — so the counts come out short of
+    the number of launches. Twelve real processes against a four-key pool must
+    leave twelve uses behind, three on each key.
+    """
+    import subprocess
+
+    tokens = [f"sk-K{i}AAAA1111BBBB" for i in range(4)]
+    _pooled(*tokens)
+
+    script = (
+        "from claude_launcher import profile, profile_keys\n"
+        "p = profile.require('work')\n"
+        "selection = profile_keys.select_for_launch(p)\n"
+        "print(selection.key.id)\n"
+    )
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(12)
+    ]
+    chosen = []
+    for proc in procs:
+        out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, err
+        chosen.append(out.strip())
+
+    pool = profile_keys.load(profile.require("work"))
+    assert len(chosen) == 12
+    assert sum(key.use_count for key in pool.keys) == 12
+    assert [key.use_count for key in pool.keys] == [3, 3, 3, 3]
+    assert set(chosen) == {key.id for key in pool.keys}
+
+
+def test_a_launch_refused_before_the_spawn_does_not_advance_the_pool(home, monkeypatch):
+    """A run that never happened must not spend a rotation step (claunch-wllke.3).
+
+    ``--provider`` is refused for a harness that is not the builtin claude
+    one, and that refusal lands before anything is spawned. The pool must be
+    exactly where it was: otherwise a mistyped flag quietly walks the
+    rotation to the next key and bumps the use count of a key that never ran.
+    """
+    from claude_launcher import harnesses, store
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"pyx": {"command": [sys.executable, "-u", "-c", "pass"]}}}
+        )
+    )
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    before = profile_keys.load(p)
+    monkeypatch.setattr(runner, "profile_harness", lambda prof: harnesses.get("pyx"))
+    monkeypatch.setattr(runner, "_spawn", lambda *a, **kw: pytest.fail("spawned"))
+    monkeypatch.setattr(runner, "require_compact_fits", lambda *a, **kw: None)
+
+    with pytest.raises(runner.RunnerError):
+        runner.run(p, provider="glm")
+
+    after = profile_keys.load(p)
+    assert after.cursor == before.cursor
+    assert [k.use_count for k in after.keys] == [k.use_count for k in before.keys]
 
 
 def test_runner_run_with_null_token_does_not_advance_the_pool(home, monkeypatch):
