@@ -14883,6 +14883,382 @@ function renderProfileHint() {
   }
   box.textContent = text;
   box.classList.toggle("hidden", !text);
+  // The usage block follows the same row and for the same reason: it answers
+  // "whose token, and what is left of it". Every path that moves the pair
+  // lands here, so this is the one place it has to be driven from.
+  renderNewUsage();
+}
+
+/* ---- what the selected credential reports, and what is left of it -------
+   claunch-yx2bd. The Profile row decides whose token a session spends, and
+   the form used to say nothing about what that token has left. On a profile
+   holding several keys it also hid the pool: which key the launch takes, and
+   which strategy picks it, could not be seen before creating the session.
+
+   /api/usage/keys answers all of that in one read. Everything here is drawn
+   from that document; the block stays hidden while no answer has arrived, so
+   a daemon that predates the route draws nothing instead of an error.
+
+   The strategy row is a PROFILE setting, not a field of this launch — it
+   decides the next key for every session of that profile (the launch path
+   reads it there), so the row says so and writes it the moment it changes.
+
+   The two markers on a key row mean different things and only one of them is
+   a promise: `next` is what the server computed for the next launch
+   (`profile_keys.peek`), while `lowest now` is arithmetic on the numbers
+   shown, for the usage strategies the server deliberately does not preview —
+   previewing one would spend an account read per key on a pick the launch
+   decides again anyway. */
+const NEW_USAGE_TTL_MS = 60000;
+const NEW_USAGE_WINDOW_LABELS = {
+  five_hour: "5h", seven_day: "7d", weekly: "week", monthly: "month",
+  monthly_spend: "month spend", credit: "credit",
+};
+const NEW_USAGE_STRATEGY_LABELS = {
+  rotation: "rotation (one key per launch, in order)",
+  "usage-min": "usage-min (lowest usage)",
+  "usage-max": "usage-max (highest usage)",
+  random: "random",
+};
+const newUsageState = {
+  // What `data` or `error` describes, and when it was read.
+  selector: "", data: null, error: "", at: 0,
+  // The selector whose read is in flight, and the read that owns the block:
+  // a slow answer for a profile the operator has already left must not paint
+  // over the one they picked next.
+  pending: "", seq: 0,
+  // A one-line answer to the last strategy write, and the profile it was
+  // about: it stays until the reader moves to another profile, because the
+  // read a save triggers would otherwise clear it before it was drawn.
+  flash: "", flashFor: "",
+};
+
+function newUsageAge(epochSeconds) {
+  const at = Number(epochSeconds) * 1000;
+  if (!Number.isFinite(at) || !at) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - at) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function newUsageWindowLabel(name) {
+  return NEW_USAGE_WINDOW_LABELS[name] || String(name || "window");
+}
+
+/* Peak utilization across a reading's windows: the number the pool's usage
+   strategies compare keyed readers on (usage.utilization_for_token). */
+function newUsagePeak(windows) {
+  const values = (windows || [])
+    .map((w) => Number(w && w.utilization))
+    .filter((v) => Number.isFinite(v));
+  return values.length ? Math.max(...values) : NaN;
+}
+
+function newUsageLevel(pct) {
+  if (!Number.isFinite(pct)) return "";
+  if (pct >= 90) return "high";
+  if (pct >= 70) return "mid";
+  return "low";
+}
+
+function newUsageMoney(value) {
+  const number = value === null || value === undefined || value === "" ? NaN : Number(value);
+  return Number.isFinite(number) ? `$${number.toFixed(2)}` : "";
+}
+
+function newUsageReset(resetsAt) {
+  const at = Date.parse(String(resetsAt || ""));
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.floor((at - Date.now()) / 60000);
+  if (minutes <= 0) return "resetting";
+  if (minutes < 60) return `resets in ${minutes}m`;
+  return `resets in ${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/* One window as a text summary — `5h 42.0% (resets in 2h05m)`. Used for both
+   the profile's own reading and each key's, so the two read the same way. */
+function newUsageWindowText(window) {
+  const label = newUsageWindowLabel(window && window.name);
+  const pct = Number(window && window.utilization);
+  const amount = newUsageMoney(window && window.used_dollars);
+  const limit = newUsageMoney(window && window.limit_dollars);
+  const left = newUsageMoney(window && window.remaining_dollars);
+  const parts = [];
+  // Spend without a limit has no percentage to show; the amount is the answer.
+  const amountOnly = !!amount && !limit;
+  parts.push(amountOnly ? amount : Number.isFinite(pct) ? `${pct.toFixed(0)}%` : "—");
+  if (limit) parts.push(`of ${limit}`);
+  if (left) parts.push(`${left} left`);
+  const reset = newUsageReset(window && window.resets_at);
+  if (reset) parts.push(reset);
+  if (window && window.status && !["ok", "allowed"].includes(String(window.status))) {
+    parts.push(String(window.status));
+  }
+  return `${label} ${parts.join(" · ")}`;
+}
+
+function newUsageWindowLine(window) {
+  const li = document.createElement("li");
+  li.className = "new-usage-window";
+  const pct = Number(window && window.utilization);
+  const level = newUsageLevel(pct);
+  const accent = document.createElement("span");
+  accent.className = `new-usage-pct ${level}`.trim();
+  accent.textContent = newUsageWindowText(window);
+  li.appendChild(accent);
+  if (Number.isFinite(pct)) {
+    const bar = document.createElement("span");
+    bar.className = `new-usage-bar ${level}`.trim();
+    const fill = document.createElement("i");
+    fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    bar.appendChild(fill);
+    li.appendChild(bar);
+    li.title = `${newUsageWindowLabel(window.name)}: ${pct.toFixed(1)}% used`;
+  }
+  return li;
+}
+
+function newUsageKeySummary(reading, unmeasurable) {
+  if (!reading) return "";
+  if (reading.error) return reading.error;
+  const windows = reading.windows || [];
+  if (!windows.length) return unmeasurable || "no windows";
+  return windows.map(newUsageWindowText).join("  ·  ");
+}
+
+/* The strategy select: one option per strategy the daemon accepts
+   (profile_keys.STRATEGIES), labelled with what it actually does. */
+function newUsageFillStrategies(select, strategies) {
+  const names = (strategies || []).filter(Boolean);
+  if (!names.length) return;
+  const before = [...select.options].map((o) => o.value).join(",");
+  if (before === names.join(",")) return;
+  select.innerHTML = "";
+  for (const name of names) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = NEW_USAGE_STRATEGY_LABELS[name] || name;
+    select.appendChild(option);
+  }
+}
+
+async function setNewKeyStrategy(profileName, selector, strategy) {
+  const st = newUsageState;
+  let resp, doc;
+  try {
+    resp = await api(
+      `/api/profiles/${encodeURIComponent(profileName)}/keys/strategy`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy }),
+      },
+    );
+    doc = await resp.json().catch(() => null);
+  } catch (e) {
+    resp = null;
+    doc = null;
+  }
+  if (!resp || !resp.ok) {
+    st.flash = (doc && doc.error) || "the daemon did not take that strategy";
+    st.flashFor = selector;
+    renderNewUsage();
+    return;
+  }
+  // The write lands on the profile's pool; the preview is re-read because
+  // `next` is a consequence of the strategy, not of the key list.
+  st.flash = `strategy saved: ${(doc && doc.strategy) || strategy}`;
+  st.flashFor = selector;
+  st.at = 0;
+  startNewUsageRead(selector, false);
+}
+
+function renderNewUsage() {
+  const box = $("new-usage");
+  if (!box) return;  // a page that predates the block still runs
+  const f = $("new-session");
+  if (!f || !f.profile) return;
+  const selector = newProfileSelector(f);
+  if (!selector) {
+    box.classList.add("hidden");
+    return;
+  }
+  // Only while the form is on screen. This read can spend one account request
+  // per key of a pool, and the dashboard boots (and refreshes profiles) long
+  // before anybody opens the form — a boot must not pay that for a page
+  // nobody is looking at. Both hosts call renderNewUsage when they open, so
+  // arriving at the form still asks.
+  if (typeof sessionFormHeld === "function" && !sessionFormHeld()) {
+    box.classList.add("hidden");
+    return;
+  }
+  const st = newUsageState;
+  // An acknowledgment belongs to the profile it was written on.
+  if (st.flash && st.flashFor !== selector) {
+    st.flash = "";
+    st.flashFor = "";
+  }
+  const fresh = st.selector === selector && Date.now() - st.at < NEW_USAGE_TTL_MS;
+  if (!fresh && st.pending !== selector) startNewUsageRead(selector, false);
+  const mine = st.selector === selector;
+  const doc = mine ? st.data : null;
+  const error = mine ? st.error : "";
+  const reading = st.pending === selector;
+  // Hidden until there is something to say. The block appears under the
+  // Profile row while the operator is using it, so the first read gets no
+  // "loading" box that would push the rows below it down and back up again;
+  // a refresh of a block that is already open keeps it open with "reading…".
+  if (!doc && !error) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+
+  const who = $("new-usage-who");
+  if (who) {
+    const owner = doc && doc.pooled && doc.owner && doc.owner !== doc.profile
+      ? ` (pool of ${doc.owner})` : "";
+    who.textContent = `Usage · ${(doc && doc.profile) || selector}${owner}`;
+  }
+  const when = $("new-usage-when");
+  if (when) {
+    const usage = doc && doc.usage;
+    when.textContent = usage
+      ? `${usage.cached ? "cached, read" : "read"} ${newUsageAge(usage.updated_at)}`
+      : "";
+  }
+  const refresh = $("new-usage-refresh");
+  if (refresh) {
+    refresh.disabled = reading;
+    refresh.textContent = reading ? "reading…" : "refresh";
+  }
+
+  // The profile's own reading — the effective token's quota.
+  const windowsBox = $("new-usage-windows");
+  const windows = (doc && doc.usage && doc.usage.windows) || [];
+  if (windowsBox) {
+    windowsBox.innerHTML = "";
+    for (const window of windows) windowsBox.appendChild(newUsageWindowLine(window));
+    windowsBox.classList.toggle("hidden", !windows.length);
+  }
+
+  // The pool, one row per key, when there is more than one to choose between.
+  const keysBox = $("new-usage-keys");
+  const keys = (doc && doc.keys) || [];
+  const multi = !!(doc && doc.pooled) && keys.length > 1;
+  const strategy = (doc && doc.strategy) || "rotation";
+  if (keysBox) {
+    keysBox.innerHTML = "";
+    keysBox.classList.toggle("hidden", !multi);
+    if (multi) {
+      // For a usage strategy the server does not preview a pick; the row the
+      // rule would take on the numbers below is marked as arithmetic instead.
+      const peaks = keys.map((k) => newUsagePeak(k.usage && k.usage.windows));
+      const measured = peaks.filter((p) => Number.isFinite(p));
+      let pick = null;
+      if (measured.length && strategy === "usage-min") {
+        pick = peaks.indexOf(Math.min(...measured));
+      } else if (measured.length && strategy === "usage-max") {
+        pick = peaks.indexOf(Math.max(...measured));
+      }
+      keys.forEach((key, index) => {
+        const li = document.createElement("li");
+        li.className = "new-usage-key" + (key.next ? " next" : "");
+        const mark = document.createElement("span");
+        mark.className = "new-usage-key-mark";
+        mark.textContent = key.next ? "next" : key.current ? "in use" : "";
+        const name = document.createElement("span");
+        name.className = "new-usage-key-name";
+        name.textContent = key.label || key.masked || key.id;
+        name.title = [key.masked, key.id].filter(Boolean).join(" · ");
+        const use = document.createElement("span");
+        use.className = "new-usage-key-use";
+        use.textContent = newUsageKeySummary(key.usage, doc.unmeasurable) || "not measured";
+        if (key.usage && key.usage.error) use.classList.add("bad");
+        li.append(mark, name, use);
+        if (pick === index && !key.next) {
+          const now = document.createElement("span");
+          now.className = "new-usage-key-now";
+          now.textContent = strategy === "usage-min" ? "lowest now" : "highest now";
+          now.title = "as of the last read — the launch reads again and decides there";
+          li.appendChild(now);
+        }
+        keysBox.appendChild(li);
+      });
+    }
+  }
+
+  // The strategy row is offered only for a real choice between keys.
+  const row = $("new-strategy-row");
+  const select = $("new-key-strategy");
+  if (row && select) {
+    row.classList.toggle("hidden", !(doc && doc.pooled));
+    if (doc && doc.pooled) {
+      newUsageFillStrategies(select, doc.strategies);
+      if (!reading) select.value = strategy;
+      select.disabled = !multi || reading;
+      select.title = multi
+        ? "picks the key for every launch of this profile — saved when changed"
+        : "a strategy applies once the pool holds two or more keys";
+    }
+  }
+
+  // The one line that explains what the reader is looking at, or why a part
+  // of it is missing.
+  const note = $("new-usage-note");
+  if (note) {
+    const notes = [];
+    if (st.flash && st.flashFor === selector) notes.push(st.flash);
+    if (error) notes.push(error);
+    if (doc) {
+      if (doc.next) {
+        const key = keys.find((k) => k.id === doc.next.key_id);
+        const name = key ? (key.label || key.masked || key.id) : doc.next.key_id;
+        notes.push(`next launch takes ${name} (${doc.next.strategy})`);
+        if (doc.next.fallback) notes.push(`fell back to rotation — ${doc.next.fallback}`);
+      } else if (doc.next_unknown) {
+        notes.push(`next key: ${doc.next_unknown}`);
+      }
+      if (!doc.pooled) {
+        notes.push(`one token — \`claunch keys add ${doc.profile}\` registers a pool`);
+      } else if (keys.length === 1) {
+        notes.push("1 key in the pool — a strategy applies with two or more");
+      }
+      if (doc.unmeasurable) notes.push(`keys cannot be compared: ${doc.unmeasurable}`);
+      if (doc.usage_error) notes.push(`usage unavailable: ${doc.usage_error}`);
+    }
+    note.textContent = notes.filter(Boolean).join(" · ");
+    note.classList.toggle("hidden", !note.textContent);
+  }
+}
+
+async function startNewUsageRead(selector, manual) {
+  const st = newUsageState;
+  const seq = ++st.seq;
+  st.pending = selector;
+  renderNewUsage();  // shows "reading…" on a block that is already open
+  let doc = null;
+  let message = "";
+  try {
+    const resp = await api(
+      `/api/usage/keys?profile=${encodeURIComponent(selector)}` +
+      (manual ? "&refresh=manual" : "&refresh=auto"),
+    );
+    doc = await resp.json().catch(() => null);
+    if (!resp.ok) message = (doc && doc.error) || `HTTP ${resp.status}`;
+  } catch (e) {
+    message = `could not reach the daemon (${(e && e.message) || e})`;
+  }
+  if (seq !== st.seq) return;  // a later read owns the block
+  st.pending = "";
+  st.selector = selector;
+  st.at = Date.now();
+  st.data = message ? null : doc;
+  st.error = message;
+  renderNewUsage();
 }
 
 /* The fold is shut on arrival, which is right for as long as everything
@@ -15771,6 +16147,26 @@ $("new-session").harness.addEventListener("change", () => {
   renderProfileHint();
 });
 $("new-session").null_token.addEventListener("change", syncForkAvailability);
+// The usage block's two controls (claunch-yx2bd). `refresh` forces the
+// account reads; the strategy row is a profile setting and is saved the
+// moment it changes, which the row itself says.
+if ($("new-usage-refresh")) {
+  $("new-usage-refresh").addEventListener("click", () => {
+    const f = $("new-session");
+    const selector = f ? newProfileSelector(f) : "";
+    if (selector) startNewUsageRead(selector, true);
+  });
+}
+if ($("new-key-strategy")) {
+  $("new-key-strategy").addEventListener("change", (ev) => {
+    const f = $("new-session");
+    const selector = f ? newProfileSelector(f) : "";
+    const doc = newUsageState.selector === selector ? newUsageState.data : null;
+    const profileName = (doc && doc.profile) || baseProfileName(selector);
+    if (!profileName) return;
+    setNewKeyStrategy(profileName, selector, ev.target.value);
+  });
+}
 
 /* Both ways of starting a session can spend a few seconds in the daemon
    while it prepares a checkout and starts the harness. Keep the control's
@@ -25755,6 +26151,10 @@ async function openNewSession(mesh) {
     Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
   ]);
   syncOnboardPickers();
+  // The usage readout is only asked for while the form is on screen
+  // (renderNewUsage's own rule), so opening the page is what starts it —
+  // boot's profile fill runs while the reader is somewhere else.
+  renderNewUsage();
 }
 
 /* The create form's mesh and workflow pickers. Both are lists the daemon
@@ -48271,6 +48671,8 @@ async function openSessionModal(opts = {}) {
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   spendSpawnSameDirectory(f, f._sessionView);
   syncSessionModalChrome();
+  // See openNewSession: the readout is asked for once the form is on screen.
+  renderNewUsage();
 }
 
 /* Give the form back. The node returns to `#new-view` before the overlay is

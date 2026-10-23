@@ -876,6 +876,10 @@ let hintParent = null;
 const hintCtx = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
   "let newProfileOptions = [], profileCompactProblems = {};\n" +
+  // The usage readout is drawn from the same row and by its own harness
+  // (formusage_check.js); here it is only a neighbour that must not throw
+  // when the hint is run on its own.
+  "function renderNewUsage() {}\n" +
   sliceFrom("function baseProfileName(") +
   sliceFrom("function spawnProfileSelector(") +
   sliceFrom("function newProfileUi(") +

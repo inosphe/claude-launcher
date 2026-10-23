@@ -341,6 +341,9 @@ function Option(label, value) {
   return Object.assign(document.createElement("option"),
                        { textContent: label, value });
 }
+// The usage readout both openers drive (claunch-yx2bd) has its own harness
+// (formusage_check.js); here it only has to exist.
+function renderNewUsage() { state.calls.push("usage"); }
 ` + slice("clampSpawnSize") + slice("spawnSizeRecall") + slice("spawnSizeApply")
   + slice("spawnSizeRemember")
   + slice("readParentMeshes")

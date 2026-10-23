@@ -2171,6 +2171,63 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
 }
 
+/* What the selected credential reports, and what is left of it
+   (claunch-yx2bd). A compact readout under the Profile row: the account's
+   windows, then — when the profile holds a pool — one row per key with the
+   one the next launch takes, and the strategy that picks it. Drawn by
+   renderNewUsage; hidden until an answer arrives, so it never stands in for
+   one. Colours are the page's own levels (green/amber/red) so a percentage
+   reads the way the usage page's do. */
+#new-usage {
+  margin: 0 0 8px; padding: 7px 9px;
+  border: 1px solid #262b33; border-radius: 6px; background: #0f1216;
+  font-size: 11.5px; line-height: 1.5; color: #9da5b0;
+}
+.new-usage-head { display: flex; align-items: center; gap: 8px; }
+.new-usage-who { color: #e6edf3; font-weight: 600; }
+.new-usage-when { color: #6e7681; }
+.new-usage-refresh {
+  margin-left: auto; padding: 1px 7px; border: 1px solid #30363d;
+  border-radius: 10px; background: #161b22; color: #8b949e;
+  font-size: 10.5px; cursor: pointer;
+}
+.new-usage-refresh:hover:not(:disabled) { border-color: #58a6ff; color: #e6edf3; }
+.new-usage-refresh:disabled { opacity: .6; cursor: default; }
+.new-usage-windows, .new-usage-keys { margin: 5px 0 0; padding: 0; list-style: none; }
+.new-usage-window { display: flex; align-items: center; gap: 8px; padding: 1px 0; }
+.new-usage-pct.low { color: #3fb950; }
+.new-usage-pct.mid { color: #d29922; }
+.new-usage-pct.high { color: #f85149; }
+.new-usage-bar {
+  flex: 1 1 60px; max-width: 140px; height: 4px; border-radius: 2px;
+  background: #21262d; overflow: hidden;
+}
+.new-usage-bar i { display: block; height: 100%; background: #3fb950; }
+.new-usage-bar.mid i { background: #d29922; }
+.new-usage-bar.high i { background: #f85149; }
+/* The key rows: what the next launch takes, which key is in the token file
+   now, and that key's own numbers. */
+.new-usage-keys { border-top: 1px solid #21262d; padding-top: 4px; }
+.new-usage-key { display: flex; align-items: baseline; gap: 7px; padding: 1px 0; }
+.new-usage-key.next { color: #e6edf3; }
+.new-usage-key-mark {
+  flex: none; min-width: 42px; color: #6e7681; font-size: 10px;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.new-usage-key.next .new-usage-key-mark { color: #3fb950; }
+.new-usage-key-name {
+  flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.new-usage-key-use { flex: 1 1 auto; color: #7d8590; overflow-wrap: anywhere; }
+.new-usage-key-use.bad { color: #d29922; }
+.new-usage-key-now { flex: none; color: #58a6ff; font-size: 10px; }
+.new-usage-strategy { align-items: center; gap: 6px; }
+#new-usage .new-usage-strategy { display: flex; margin: 6px 0 0; }
+.new-usage-strategy select { flex: 1 1 auto; min-width: 0; }
+.new-usage-strategy select:disabled { opacity: .55; }
+#new-usage-note { margin: 4px 0 0; font-size: 11px; line-height: 1.45; color: #7d8590; }
+
 /* What the session is FOR, fenced off from what it runs — the fields above
    describe the program, these describe the job. */
 #new-onboard {
