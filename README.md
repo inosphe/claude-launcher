@@ -939,19 +939,27 @@ draws the same entry as a form and writes it for you.
   profile's `set-token` secret. A failure is reported and never blocks the save —
   a key that is not on this machine yet is not a typo.
 - **Saving over an existing provider keeps what the form cannot draw.** The form
-  draws a fixed list of keys (`provider_install.FORM_FIELDS`); a stored entry
-  can carry more — `routing` and `dynamic` (written by `claunch routing set`),
-  `env`, `capabilities`, and the `harness_options` channels other than
-  `claude.model_tag`. Those are merged back from the stored entry, and the page
+  draws a fixed list of top-level keys (`provider_install.FORM_FIELDS`); a
+  stored entry can carry more. The listing's `kept` list is exactly
+  `set(entry) - set(FORM_FIELDS)` — the top-level keys no control renders:
+  `routing` and `dynamic` (written by `claunch routing set`), `env`,
+  `capabilities`. Those are merged back from the stored entry, and the page
   names them under the form. A control that does not exist cannot be cleared, so
   removing one of them is a `~/.claunch.yaml` edit.
+- **`harness_options` is merged a level deeper, and the page does not name its
+  channels.** The one leaf the form draws is `claude.model_tag`; the other
+  channels (`pi.settings` and the rest) survive a save that touched only the
+  tag. `harness_options` is itself one of `FORM_FIELDS`, so those channels are
+  not in `kept`: the page neither lists them nor drops them.
+  `harness_options.claude.env` is not sent to the page at all — the block can
+  hold `ANTHROPIC_AUTH_TOKEN`, and no control draws it — and the merge puts the
+  stored block back into a save that never named it.
 - **A credential is never sent to the browser.** The listing reports
   `api_key_set: true/false` on the provider's row, beside the entry rather than
   in it — the entry a row carries is exactly what the page posts back, so a
   display flag inside it would be refused as an unknown field. Leaving the key
   field empty keeps the stored key, typing one replaces it, and clearing it is a
-  `~/.claunch.yaml` edit. The values of `harness_options.claude.env` are
-  withheld for the same reason and put back by the merge.
+  `~/.claunch.yaml` edit.
 
 The page and its three routes (`GET /api/providers`, `POST /api/providers`,
 `POST /api/providers/check`) come from the daemon process, which runs the
