@@ -125,8 +125,10 @@ def _install_after_create(
 
     Either way the default is yes, unlike the repository's other
     confirmations. Those guard destructive steps (overwriting an edited file,
-    removing one); this asks for the step the operator came for, and adding
-    files to the profile it just made is not a loss.
+    removing one); this asks for the step the operator came for. On a plain
+    create that step only adds files to the profile made a moment ago, so it
+    loses nothing; a reinit names the files it rewrites and still defaults to
+    yes, because rewriting them is what the operator asked for.
     """
     if forced is None:
         if os.environ.get("CLAUNCH_SESSION"):

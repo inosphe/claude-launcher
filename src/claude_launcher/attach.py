@@ -500,7 +500,9 @@ async def _attach_async(
 
 def attach(client, name: str) -> int:
     """Attach the calling terminal to session ``name``; 0 on detach/exit."""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    # sys.stdin can be None outright (pythonw, some launchers), where
+    # isatty() raises AttributeError instead of reporting "not a terminal".
+    if sys.stdin is None or not (sys.stdin.isatty() and sys.stdout.isatty()):
         print(
             "error: attach needs an interactive terminal "
             "(use capture-pane/send-keys from scripts)",

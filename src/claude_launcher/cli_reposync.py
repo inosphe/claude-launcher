@@ -50,7 +50,9 @@ def _approve(card: dict, *, yes: bool, c) -> Tuple[Optional[dict], dict]:
     if not os.environ.get("CLAUNCH_SESSION"):
         if yes:
             return None, {"mode": "terminal", "yes": True}
-        if not sys.stdin.isatty():
+        # sys.stdin can be None outright (pythonw, some launchers); reaching
+        # for isatty() on it raises AttributeError instead of declining.
+        if sys.stdin is None or not sys.stdin.isatty():
             return {"status": "needs_approval", "why": "not a terminal -- pass --yes"}, {}
         answer = input(f"{card['summary']}\nproceed? [y/N] ").strip().lower()
         if answer in ("y", "yes"):

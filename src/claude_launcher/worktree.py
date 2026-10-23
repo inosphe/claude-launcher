@@ -1019,7 +1019,14 @@ def interactive() -> bool:
     if os.environ.get(SESSION_ENV):
         return False
     try:
-        return bool(sys.stdin.isatty() and sys.stderr.isatty())
+        # ``sys.stdin is None`` is checked here rather than left to the
+        # AttributeError below: that except exists for closed or replaced
+        # streams, and a missing stdin is a different fact about the process.
+        return bool(
+            sys.stdin is not None
+            and sys.stdin.isatty()
+            and sys.stderr.isatty()
+        )
     except (AttributeError, ValueError, OSError):
         # A closed or replaced stream (pytest's capture, a service manager)
         # is not a person either.
