@@ -74,6 +74,7 @@ from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
+from . import agent_timers
 from . import rail_superseded, session_timers, session_prs, session_procs
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
@@ -1216,6 +1217,9 @@ def build_app(
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_get("/api/sessions/{name}/window", h_session_window)
     r.add_get("/api/sessions/{name}/timers", h_session_timers)
+    # Creating the one kind the API owns: a report timer the agent set for
+    # itself (daemon/agent_timers.py). The GET above reads every source.
+    r.add_post("/api/sessions/{name}/timers", h_session_timer_add)
     r.add_get("/api/sessions/{name}/procs", h_session_procs)
     r.add_get("/api/sessions/{name}/rail-commits", h_session_rail_commits)
     r.add_post("/api/sessions/{name}/procs/{pid}/kill", h_session_proc_kill)
@@ -11840,6 +11844,30 @@ async def h_session_timers(request: web.Request) -> web.Response:
     data = await asyncio.to_thread(
         session_timers.collect, session.sdef.name, _session_cwd(session), app=request.app)
     return json_response(data)
+
+
+async def h_session_timer_add(request: web.Request) -> web.Response:
+    """Create a report timer for this session (daemon/agent_timers.py).
+
+    The daemon's clock owns it from here: it fires ``times`` times, one
+    ``every`` seconds apart, typing ``message`` into the session and waking
+    it if it is held or paused. The ``timer`` MCP tool
+    (claude_launcher/timer_mcp.py) is the caller this route exists for.
+    """
+    session = _session(request)
+    body = await _json_body(request)
+    try:
+        record = agent_timers.add(
+            session.sdef.name,
+            every=body.get("every"),
+            times=body.get("times"),
+            message=body.get("message"),
+            by=str(body.get("by") or session.sdef.name),
+        )
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response(
+        {"session": session.sdef.name, "timer": record}, status=201)
 
 
 async def h_session_procs(request: web.Request) -> web.Response:
