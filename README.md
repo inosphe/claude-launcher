@@ -53,9 +53,10 @@ prints a warning); `uv sync --extra test` rebuilds it on 3.14.
 The code runs on `3.14t`: the daemon, CLI and the targeted test modules pass
 there, and background threads no longer delay the event loop (8 threads
 ranking and scanning an index: loop lag p99 132 ms on 3.14, 0.6 ms on 3.14t,
-one measurement). The blocker is `zvec`: PyPI has no `cp314t` wheel and no
+one measurement on a loaded development machine, 2026-10-23; no script is kept in the
+repository). The blocker is `zvec`: PyPI has no `cp314t` wheel and no
 sdist for 0.7 or 0.8, so `uv sync` cannot resolve it for `3.14t`. It builds
-from source in about 9 minutes (cmake, a C++ toolchain, network for the
+from source in about 9 minutes on that machine (cmake, a C++ toolchain, network for the
 submodules):
 
 ```bash
