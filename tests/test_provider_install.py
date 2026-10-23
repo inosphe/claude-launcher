@@ -312,6 +312,26 @@ def test_the_listing_never_carries_the_key(home):
     assert row["entry"]["api_key_set"] is True
 
 
+def test_the_page_and_the_server_agree_on_which_keys_the_form_owns(home):
+    """``PROVIDER_FORM_FIELDS`` (app.js) and ``FORM_FIELDS`` (this module) are one list twice.
+
+    A key the page draws but the server does not count as drawn is kept stale
+    over the value the person just edited; a key the server counts as drawn but
+    the page never draws is deleted by a save. Neither shows up in a test of
+    either side alone -- the same mirror defect ``routing``/``dynamic`` were.
+    """
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "claude_launcher" / "web" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    block = source.split("const PROVIDER_FORM_FIELDS = [", 1)[1].split("];", 1)[0]
+    drawn = re.findall(r'\{ key: "([^"]+)"', block)
+    assert drawn, "PROVIDER_FORM_FIELDS moved or changed shape"
+    assert {key.split(".")[0] for key in drawn} == set(provider_install.FORM_FIELDS)
+
+
 def test_the_listing_names_the_keys_it_is_not_drawing(home):
     provider_install.save("demo", _valid(routing={"order": ["A"]}, dynamic=True))
     body = provider_install.listing()
