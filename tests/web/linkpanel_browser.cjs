@@ -75,6 +75,9 @@ const server = http.createServer((req, res) => {
     page.on('pageerror', (e) => errors.push(String(e)));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.evaluate(() => localStorage.clear());
+    // The page loads quietdom.js before anything else; the panel's 1 Hz
+    // render leans on its same-value guards.
+    await page.addScriptTag({ path: path.join(root, 'quietdom.js') });
     await page.addScriptTag({ content: world + logCode + panelCode });
     await page.evaluate(() => {
       linkLog('term.open', { session: 's7', via: 'channel', ch: 3 });
@@ -88,6 +91,27 @@ const server = http.createServer((req, res) => {
     await render();
     assert.equal(await box.isVisible(), false, 'panel starts closed');
     assert.match(await chip.getAttribute('class'), /\bok\b/);
+
+    // A chip the header fitter moved into its More menu keeps the fitter's
+    // class across a render, and an unchanged render writes nothing the
+    // fitter's MutationObserver would see (class, title): otherwise the
+    // header re-measures every second while the chip is overflowed.
+    const writes = await page.evaluate(async () => {
+      const chip = document.getElementById('term-conn');
+      chip.classList.add('toolbar-overflow');
+      const seen = [];
+      const watch = new MutationObserver((rs) => { for (const r of rs) seen.push(r.attributeName); });
+      watch.observe(chip, { attributes: true, attributeFilter: ['class', 'title'] });
+      renderLinkPanel();
+      renderLinkPanel();
+      await new Promise((done) => setTimeout(done, 0));
+      watch.disconnect();
+      const kept = chip.classList.contains('toolbar-overflow');
+      chip.classList.remove('toolbar-overflow');
+      return { seen, kept };
+    });
+    assert.equal(writes.kept, true, 'render keeps toolbar-overflow on the chip');
+    assert.deepEqual(writes.seen, [], 'an unchanged render writes no class or title');
 
     await chip.click();
     assert.equal(await box.isVisible(), true, 'the chip opens the panel');

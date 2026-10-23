@@ -19717,10 +19717,14 @@ function linkPanelText(now) {
 function renderLinkPanel() {
   const now = Date.now();
   const g = linkPanelGrade(now);
-  for (const [id, cls] of [["term-conn", "term-btn"], ["m-conn", "m-act"]]) {
+  for (const id of ["term-conn", "m-conn"]) {
     const chip = $(id);
     if (!chip) continue;
-    chip.className = `${cls} conn-chip ${g.grade}${linkPanelOpen ? " open" : ""}`;
+    // Only the grade and open classes are ours: toolbar.js puts its own
+    // (toolbar-overflow, compact) on the same button, and a whole-class write
+    // every second took them off and set its measuring pass going again.
+    for (const grade of ["ok", "warn", "down"]) chip.classList.toggle(grade, grade === g.grade);
+    chip.classList.toggle("open", linkPanelOpen);
     chip.title = `connection status (debug)${g.why ? ` — ${g.why}` : ""}`;
     chip.setAttribute("aria-expanded", linkPanelOpen ? "true" : "false");
   }
