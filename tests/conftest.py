@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import config, pytest_venv, test_window
+from claude_launcher import config, provider_presets, pytest_venv, test_window
 
 
 #: The daemon instance variables a runner or session exports. Cleared once,
@@ -202,6 +202,11 @@ def home(tmp_path, monkeypatch):
     # Cursor Agent reads MCP servers and skills from ~/.cursor regardless of
     # its profile home (see install.cursor_home) -- the same exposure.
     monkeypatch.setenv("CLAUNCH_CURSOR_HOME", str(tmp_path / ".cursor-home"))
+    # Provider presets ship inside the package. A test that writes one would
+    # edit the source tree it is running from -- and pass, and then the next
+    # full run would read a preset nobody committed. Directed at a throwaway
+    # directory, and empty, so the shipped set never leaks into a test.
+    monkeypatch.setenv(provider_presets.ENV_DIR, str(tmp_path / ".provider-presets"))
     # Metering fronts every API-key provider with a real proxy process; the
     # env-assembly tests would each start one against a made-up upstream.
     # Off by default here — the tests of the feature set it back to "1".

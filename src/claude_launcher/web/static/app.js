@@ -26873,6 +26873,10 @@ function openSettings(section) {
     refreshProfileSettings();
     return;
   }
+  if (wsSection === "providers") {
+    refreshProviders();
+    return;
+  }
   if (wsSection === "install") {
     refreshInstallOverview();
     refreshPromptPacks();
@@ -31818,6 +31822,7 @@ function settingsTabs() {
   for (const [section, label, href] of [
     ["", "General", "#/settings"],
     ["profiles", "Profiles", "#/settings/profiles"],
+    ["providers", "Providers", "#/settings/providers"],
     ["install", "Install", "#/settings/install"],
     ["vscode", "VS Code", "#/settings/vscode"],
   ]) {
@@ -32951,6 +32956,11 @@ function renderWorkspaces() {
   }
   if (wsSection === "vscode") {
     view.appendChild(vscodePanel());
+    refocusSettingsField(focused);
+    return;
+  }
+  if (wsSection === "providers") {
+    view.appendChild(providersPanel());
     refocusSettingsField(focused);
     return;
   }
@@ -35396,6 +35406,457 @@ function providerAffinityCard() {
   }
   card.appendChild(list);
   return card;
+}
+
+/* Installing a provider from the dashboard (Settings ▸ Providers,
+   #/settings/providers). The server half is claude_launcher.provider_install:
+   GET /api/providers is the listing, POST /api/providers validates and writes
+   ~/.claunch.yaml atomically, POST /api/providers/check makes one real call to
+   the backend. A preset is only a starting value for this form — one YAML file
+   per provider shipped in the package (src/claude_launcher/provider-presets/),
+   loaded and reported by the server — and every field stays editable after it
+   fills. Installing writes ~/.claunch.yaml, which is where the provider then
+   lives; presets themselves are not installed anywhere. */
+let providersState = {
+  data: null,        // the GET payload: providers, presets, profiles, fields
+  error: "",
+  draft: null,       // the form's values, kept across the page's re-renders
+  busy: "",          // "save" | "check" | ""
+  notice: "",        // green line after a save
+  check: null,       // the last connection check's answer
+};
+
+/*: The form's own fields, in the order they are drawn, grouped the way the
+   schema groups them. ``key`` is the config path the value lands on; ``kind``
+   decides the control (text, number, checkbox, select, or a models map). */
+const PROVIDER_FORM_FIELDS = [
+  { key: "endpoints.anthropic", label: "endpoints.anthropic",
+    note: "the Messages protocol — ANTHROPIC_BASE_URL for the claude harness" },
+  { key: "endpoints.openai", label: "endpoints.openai",
+    note: "the OpenAI protocol, including any /v1 — used by codex, pi and the shim" },
+  { key: "api_key", label: "api_key", kind: "secret",
+    note: "kept in this config file; leave empty to use a profile's set-token instead" },
+  { key: "models.default", label: "models.default", model: true },
+  { key: "models.small", label: "models.small", model: true },
+  { key: "models.large", label: "models.large", model: true },
+  { key: "models.xlarge", label: "models.xlarge", model: true,
+    note: "defaults to large" },
+  { key: "models.subagent", label: "models.subagent", model: true,
+    note: "defaults to small" },
+  { key: "context_window", label: "context_window", kind: "number" },
+  { key: "auto_compact_at", label: "auto_compact_at", kind: "number",
+    note: "must not exceed context_window" },
+  { key: "harness_options.claude.model_tag", label: "claude model_tag",
+    note: "the [1m] decoration claunch appends to model ids; leave empty for the automatic rule" },
+  { key: "anthropic_auth_header", label: "anthropic_auth_header", kind: "select",
+    choices: ["", "x-api-key", "authorization"],
+    note: "move the Messages credential out of Authorization" },
+  { key: "session_header", label: "session_header",
+    note: "a header name a backend requires a session id under" },
+  { key: "session_affinity", label: "session_affinity", kind: "checkbox",
+    note: "forward the session name as x-session-affinity (one-replica prompt caches)" },
+  { key: "allowed_harnesses", label: "allowed_harnesses", kind: "list",
+    note: "comma-separated; empty admits every harness" },
+  { key: "service", label: "service", note: "anthropic, custom, or a backend's own name" },
+  { key: "harness", label: "harness", note: "the harness this provider is meant for" },
+  { key: "reasoning_effort", label: "reasoning_effort", kind: "select",
+    choices: ["", "low", "medium", "high"] },
+  { key: "openai_reasoning_format", label: "openai_reasoning_format", kind: "select",
+    choices: ["", "deepseek", "openai"] },
+];
+
+/* ``options.kept`` names the keys of the loaded entry this form does not draw.
+   They are not deleted by a save (the server merges them back in) and the page
+   says so, because a person who edits everything they can see should not have
+   to guess what they could not. */
+/* The parts of a loaded entry no control draws, kept so a save can put them
+   back: routing, dynamic, env, capabilities, and the harness options other
+   than the one tag this form shows. Without this the form would be a lossy
+   round trip — it would report success and silently drop a routing rule. */
+function providerResidual(entry) {
+  const rest = JSON.parse(JSON.stringify(entry || {}));
+  /* ``api_key_set`` is how the listing says a key is stored; it is not a
+     provider field the server accepts, and sending it back rejects the save.
+     The server keeps it on the row rather than in the entry -- this is only
+     the page refusing to forward a display flag even if one arrives in it. */
+  delete rest.api_key_set;
+  const empty = (node) => !node || typeof node !== "object" || !Object.keys(node).length;
+  for (const field of PROVIDER_FORM_FIELDS) {
+    const parts = field.key.split(".");
+    if (parts.length === 1) { delete rest[parts[0]]; continue; }
+    const parent = parts.slice(0, -1)
+      .reduce((node, part) => (node && typeof node === "object" ? node[part] : undefined), rest);
+    if (parent && typeof parent === "object") delete parent[parts[parts.length - 1]];
+  }
+  // Drop only the containers the deletions emptied, so a provider that carries
+  // no harness options does not gain an empty `harness_options` on save.
+  const options = rest.harness_options;
+  if (options && typeof options === "object") {
+    for (const harness of Object.keys(options)) if (empty(options[harness])) delete options[harness];
+    if (empty(options)) delete rest.harness_options;
+  }
+  return rest;
+}
+
+function providerDraftFromEntry(entry, options) {
+  const draft = { name: "", profile: "", kept: [], api_key_set: false, residual: {} };
+  if (options && Array.isArray(options.kept)) draft.kept = options.kept.slice();
+  /* The flag is the row's (provider_install.listing puts it beside ``entry``),
+     not the entry's: an entry the page loaded is posted back, so a key that
+     travelled inside it would be posted back and refused as unknown. */
+  draft.api_key_set = !!(options && options.api_key_set === true);
+  draft.residual = providerResidual(entry);
+  for (const field of PROVIDER_FORM_FIELDS) draft[field.key] = "";
+  const text = (value) => (value === undefined || value === null ? "" : String(value));
+  draft["endpoints.anthropic"] = text((entry.endpoints || {}).anthropic);
+  draft["endpoints.openai"] = text((entry.endpoints || {}).openai);
+  for (const role of ["default", "small", "large", "xlarge", "subagent"]) {
+    draft[`models.${role}`] = text((entry.models || {})[role]);
+  }
+  draft.api_key = text(entry.api_key);
+  draft.context_window = text(entry.context_window);
+  draft.auto_compact_at = text(entry.auto_compact_at);
+  const claude = ((entry.harness_options || {}).claude) || {};
+  draft["harness_options.claude.model_tag"] = text(claude.model_tag);
+  // Editing a provider that already carries harness options: the tag is the one
+  // leaf this form draws, and clearing it has to mean something. Sent back
+  // explicitly (even empty) so the server's merge keeps the rest and clears
+  // this — see provider_install.merge_entry.
+  draft.had_options = Object.keys(entry.harness_options || {}).length > 0;
+  draft.anthropic_auth_header = text(entry.anthropic_auth_header);
+  draft.session_header = text(entry.session_header);
+  draft.session_affinity = entry.session_affinity === true;
+  draft.allowed_harnesses = Array.isArray(entry.allowed_harnesses)
+    ? entry.allowed_harnesses.join(", ")
+    : "";
+  draft.service = text(entry.service);
+  draft.harness = text(entry.harness);
+  draft.reasoning_effort = text(entry.reasoning_effort);
+  draft.openai_reasoning_format = text(entry.openai_reasoning_format);
+  return draft;
+}
+
+/* The draft back to a provider entry: only the fields that carry a value, so a
+   blank input leaves the key out rather than writing an empty string. */
+function providerEntryFromDraft(draft) {
+  // Start from what the form cannot draw so the round trip is lossless; the
+  // controls then set (or clear) the keys they own.
+  const entry = JSON.parse(JSON.stringify((draft && draft.residual) || {}));
+  const put = (path, value) => {
+    const parts = path.split(".");
+    let node = entry;
+    for (const part of parts.slice(0, -1)) {
+      if (!node[part] || typeof node[part] !== "object") node[part] = {};
+      node = node[part];
+    }
+    node[parts[parts.length - 1]] = value;
+  };
+  for (const field of PROVIDER_FORM_FIELDS) {
+    const raw = draft[field.key];
+    if (field.kind === "checkbox") {
+      if (raw) put(field.key, true);
+      continue;
+    }
+    if (field.kind === "list") {
+      const names = String(raw || "").split(",").map((n) => n.trim()).filter(Boolean);
+      if (names.length) put(field.key, names);
+      continue;
+    }
+    const value = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!value) continue;
+    if (field.kind === "number") {
+      const number = Number(value);
+      if (Number.isFinite(number)) put(field.key, number);
+      continue;
+    }
+    put(field.key, value);
+  }
+  if (draft.had_options) {
+    put("harness_options.claude.model_tag", draft["harness_options.claude.model_tag"] || "");
+  }
+  return entry;
+}
+
+async function refreshProviders() {
+  try {
+    const resp = await api("/api/providers");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    providersState.data = data;
+    providersState.error = "";
+    if (!providersState.draft) providersState.draft = providerDraftFromEntry({});
+  } catch (err) {
+    providersState.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+function providerFormRow(field, draft) {
+  const row = el("label", "provider-form-row");
+  const caption = el("span", "provider-form-label", field.label);
+  row.appendChild(caption);
+  let control;
+  if (field.kind === "checkbox") {
+    control = document.createElement("input");
+    control.type = "checkbox";
+    control.checked = !!draft[field.key];
+    control.addEventListener("change", () => { draft[field.key] = control.checked; });
+  } else if (field.kind === "select") {
+    control = document.createElement("select");
+    for (const choice of field.choices || []) {
+      const option = document.createElement("option");
+      option.value = choice;
+      option.textContent = choice || "(unset)";
+      control.appendChild(option);
+    }
+    control.value = draft[field.key] || "";
+    control.addEventListener("change", () => { draft[field.key] = control.value; });
+  } else {
+    control = document.createElement("input");
+    control.type = field.kind === "number" ? "number"
+      : field.kind === "secret" ? "password" : "text";
+    if (field.model) control.placeholder = "owner/model or a bare id";
+    control.value = draft[field.key] || "";
+    control.addEventListener("input", () => { draft[field.key] = control.value; });
+  }
+  control.disabled = providersState.busy !== "";
+  row.appendChild(control);
+  if (field.note) row.appendChild(el("span", "provider-form-note", field.note));
+  return row;
+}
+
+function providersPanel() {
+  const st = providersState;
+  const card = el("section", "ws-add provider-install");
+  const head = el("div", "gh-head");
+  head.appendChild(el("h3", null, "Providers"));
+  const refresh = el("button", "wf-btn clear", "Refresh");
+  refresh.type = "button";
+  refresh.addEventListener("click", refreshProviders);
+  head.appendChild(refresh);
+  card.appendChild(head);
+  card.appendChild(el("p", "wf-note",
+    "A provider is a backend in ~/.claunch.yaml: where it is, which models it " +
+    "serves, how much context they carry. Saving here writes that entry " +
+    "atomically — a refused entry changes nothing. Presets are starting values " +
+    "for this form, one YAML file per provider shipped with the package " +
+    "(the directory named below); a per-machine adjustment belongs in " +
+    "~/.claunch.yaml, not in the preset. Leave the form empty to fill it in."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.data) {
+    if (!st.error) card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  card.appendChild(el("p", "wf-note provider-preset-dir",
+    `presets: ${st.data.preset_dir}`));
+
+  // --- installed providers ------------------------------------------------
+  const installed = el("div", "provider-installed");
+  if (!st.data.providers.length) {
+    installed.appendChild(el("p", "wf-note", "no providers configured yet"));
+  }
+  for (const row of st.data.providers) {
+    const line = el("div", "provider-installed-row");
+    const load = el("button", "wf-btn clear provider-installed-name", row.name);
+    load.type = "button";
+    load.title = "load this provider into the form";
+    load.addEventListener("click", () => {
+      st.draft = providerDraftFromEntry(row.entry || {},
+                                        { kept: row.kept || [], api_key_set: row.api_key_set });
+      st.draft.name = row.name;
+      st.notice = "";
+      st.check = null;
+      renderWorkspaces();
+    });
+    line.appendChild(load);
+    const endpoints = (row.entry || {}).endpoints || {};
+    const bits = Object.entries(endpoints).map(([k, v]) => `${k}: ${v}`);
+    const model = ((row.entry || {}).models || {}).default;
+    if (model) bits.push(`default: ${model}`);
+    if (row.entry && row.entry.context_window) bits.push(`ctx ${row.entry.context_window}`);
+    line.appendChild(el("span", "provider-installed-facts", bits.join(" · ")));
+    for (const problem of row.problems || []) {
+      line.appendChild(el("span", "provider-installed-problem", problem));
+    }
+    installed.appendChild(line);
+  }
+  card.appendChild(installed);
+
+  // --- the form -----------------------------------------------------------
+  const draft = st.draft || (st.draft = providerDraftFromEntry({}));
+  const form = el("div", "provider-form");
+
+  const presetRow = el("label", "provider-form-row");
+  presetRow.appendChild(el("span", "provider-form-label", "preset"));
+  const presetSelect = document.createElement("select");
+  const scratch = document.createElement("option");
+  scratch.value = "";
+  scratch.textContent = "(start from scratch)";
+  presetSelect.appendChild(scratch);
+  for (const preset of st.data.presets) {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = preset.error
+      ? `${preset.label || preset.name} — ${preset.error}`
+      : (preset.label || preset.name);
+    option.disabled = !!preset.error;
+    presetSelect.appendChild(option);
+  }
+  presetSelect.value = draft.preset || "";
+  presetSelect.disabled = st.busy !== "";
+  presetSelect.addEventListener("change", () => {
+    const chosen = st.data.presets.find((p) => p.name === presetSelect.value);
+    draft.preset = presetSelect.value;
+    if (chosen && !chosen.error) {
+      const keptName = draft.name;
+      st.draft = providerDraftFromEntry(chosen.entry || {});
+      st.draft.name = keptName || chosen.name;
+      st.draft.preset = chosen.name;
+      st.notice = "";
+      st.check = null;
+      renderWorkspaces();
+    }
+  });
+  presetRow.appendChild(presetSelect);
+  if (!st.data.presets.length) {
+    presetRow.appendChild(el("span", "provider-form-note",
+      "no preset files — the form is the whole entry"));
+  }
+  form.appendChild(presetRow);
+
+  const nameRow = el("label", "provider-form-row");
+  nameRow.appendChild(el("span", "provider-form-label", "provider id"));
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "gateway";
+  nameInput.value = draft.name || "";
+  nameInput.disabled = st.busy !== "";
+  nameInput.addEventListener("input", () => { draft.name = nameInput.value; });
+  nameRow.appendChild(nameInput);
+  nameRow.appendChild(el("span", "provider-form-note",
+    "the key under providers: — letters, digits, dot, dash, underscore"));
+  form.appendChild(nameRow);
+
+  for (const field of PROVIDER_FORM_FIELDS) form.appendChild(providerFormRow(field, draft));
+
+  if (draft.api_key_set) {
+    form.appendChild(el("p", "wf-note provider-key-stored",
+      "a key is stored for this provider and is never sent to this page — " +
+      "leave api_key empty to keep it, type a new one to replace it"));
+  }
+  if (draft.kept && draft.kept.length) {
+    form.appendChild(el("p", "wf-note provider-kept",
+      `kept as they are (this form draws no control for them, so saving cannot ` +
+      `remove them): ${draft.kept.join(", ")}`));
+  }
+
+  const profileRow = el("label", "provider-form-row");
+  profileRow.appendChild(el("span", "provider-form-label", "pin to profile"));
+  const profileSelect = document.createElement("select");
+  const noProfile = document.createElement("option");
+  noProfile.value = "";
+  noProfile.textContent = "(no profile)";
+  profileSelect.appendChild(noProfile);
+  for (const profile of st.data.profiles) {
+    const option = document.createElement("option");
+    option.value = profile.name;
+    option.textContent = profile.provider
+      ? `${profile.name} — ${profile.provider}`
+      : profile.name;
+    profileSelect.appendChild(option);
+  }
+  profileSelect.value = draft.profile || "";
+  profileSelect.disabled = st.busy !== "";
+  profileSelect.addEventListener("change", () => { draft.profile = profileSelect.value; });
+  profileRow.appendChild(profileSelect);
+  profileRow.appendChild(el("span", "provider-form-note",
+    "optional: select this provider on that profile in the same write"));
+  form.appendChild(profileRow);
+
+  const actions = el("div", "provider-form-actions");
+  const check = el("button", "wf-btn clear", "Check connection");
+  check.type = "button";
+  check.disabled = st.busy !== "";
+  check.addEventListener("click", providersCheck);
+  actions.appendChild(check);
+  const save = el("button", "wf-btn approve", "Save provider");
+  save.type = "button";
+  save.disabled = st.busy !== "";
+  save.addEventListener("click", providersSave);
+  actions.appendChild(save);
+  if (st.busy) actions.appendChild(el("span", "wf-note", `${st.busy}…`));
+  form.appendChild(actions);
+
+  if (st.notice) form.appendChild(el("p", "provider-form-notice", st.notice));
+  if (st.check) {
+    const result = st.check;
+    const line = el("p", result.ok ? "provider-form-notice" : "error",
+      `${result.ok ? "connected" : "not connected"} — ${result.detail}` +
+      (result.elapsed_ms ? ` (${result.elapsed_ms} ms)` : ""));
+    if (result.url) line.appendChild(el("span", "provider-form-note", ` ${result.url}`));
+    form.appendChild(line);
+    form.appendChild(el("p", "wf-note",
+      result.authenticated
+        ? `checked with a credential (${result.token_source || "api_key"})`
+        : "checked without a credential — a backend that requires one will refuse this"));
+  }
+  card.appendChild(form);
+  return card;
+}
+
+async function providersSave() {
+  const st = providersState;
+  const draft = st.draft || {};
+  st.busy = "saving";
+  st.notice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: draft.name || "",
+        entry: providerEntryFromDraft(draft),
+        profile: draft.profile || null,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    st.data = data;
+    st.notice = `saved ${draft.name} — claunch providers shows it now`;
+    st.error = "";
+    st.check = null;
+  } catch (err) {
+    st.error = String(err);
+  }
+  st.busy = "";
+  renderWorkspaces();
+}
+
+async function providersCheck() {
+  const st = providersState;
+  const draft = st.draft || {};
+  st.busy = "checking";
+  st.check = null;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/providers/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        entry: providerEntryFromDraft(draft),
+        profile: draft.profile || null,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    st.check = data;
+    st.error = "";
+  } catch (err) {
+    st.error = String(err);
+  }
+  st.busy = "";
+  renderWorkspaces();
 }
 
 function promptPresetCard() {

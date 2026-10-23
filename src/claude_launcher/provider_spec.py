@@ -160,6 +160,34 @@ PROFILE_SPEC_FIELDS: Tuple[str, ...] = (
     "reasoning_effort",
 )
 HARNESS_OPTIONS_FIELD = "harness_options"
+#: Keys a ``providers.<name>`` entry may carry besides :data:`SPEC_FIELDS`.
+#: Each one is read by another module, not by this one, so their spellings and
+#: their rules live there: ``service`` (:mod:`providers`), ``harness`` and
+#: ``allowed_harnesses`` (:mod:`harness_policy`), and the three routing facts
+#: (:mod:`routing`). Listed here only so the install form can tell a typo from
+#: a field it does not know about (see :func:`unknown_fields`).
+PROVIDER_EXTRA_FIELDS: Tuple[str, ...] = (
+    "service",
+    "harness",
+    "allowed_harnesses",
+    # The four :mod:`routing` facts, spelled here rather than imported: this
+    # module is loaded by every reader and must not drag the routing shim's
+    # imports in behind it. ``tests/test_provider_install.py`` holds this list
+    # to the constants routing actually reads, so the two spellings cannot
+    # drift apart -- which is how ``routing`` and ``dynamic`` were missing
+    # from a first cut of this tuple while `claunch routing set` was writing
+    # them.
+    "anthropic_auth_header",
+    "session_header",
+    "session_affinity",
+    "routing",
+    "dynamic",
+)
+#: Pre-schema spellings an *existing* entry may still carry. A provider written
+#: by the install form never has them -- ``claunch migrate-config`` retires
+#: ``env`` -- but rejecting them would break every unmigrated config the form
+#: is asked to list.
+LEGACY_PROVIDER_FIELDS: Tuple[str, ...] = ("env", "api-key")
 #: cflow v2 capability overrides (docs/cflow-v2.md 6.2). Accepted on a
 #: provider, a profile, and as a channel of every ``harness_options.<h>``
 #: block; the spec only checks their shape -- ``cflow2.caps`` resolves them
@@ -349,6 +377,31 @@ def _str_map(value, what: str, allowed: Optional[Iterable[str]] = None) -> Dict[
         if text:
             out[name] = text
     return out
+
+
+def known_fields(*, profile: bool = False) -> Tuple[str, ...]:
+    """Every key :func:`from_entry` (and the modules beside it) read from an entry."""
+    if profile:
+        fields = PROFILE_SPEC_FIELDS
+    else:
+        fields = SPEC_FIELDS + PROVIDER_EXTRA_FIELDS + LEGACY_PROVIDER_FIELDS
+    return tuple(fields) + (HARNESS_OPTIONS_FIELD, CAPABILITIES_FIELD)
+
+
+def unknown_fields(entry, *, profile: bool = False) -> Tuple[str, ...]:
+    """Keys in ``entry`` that no module reads, sorted.
+
+    :func:`from_entry` ignores keys it does not own: the config file is shared
+    by several readers, and a key this one does not read is theirs. A *write*
+    has no such excuse -- ``endpionts`` or ``context_windows`` is a typo whose
+    only effect is a provider that silently falls back to plain Anthropic, with
+    no error anywhere. So the writer asks this first and refuses the entry
+    (:func:`claude_launcher.providers.validate_entry`).
+    """
+    if not isinstance(entry, dict):
+        return ()
+    known = set(known_fields(profile=profile))
+    return tuple(sorted(str(key) for key in entry if str(key) not in known))
 
 
 def parse_capabilities(value, what: str) -> Dict[str, object]:
