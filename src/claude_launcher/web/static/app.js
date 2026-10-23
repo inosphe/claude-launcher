@@ -8392,8 +8392,11 @@ function termSeriesChart(data, zoom) {
   const w = zoom ? 320 : 120, h = zoom ? 96 : 26;
   const box = el("div", "term-series" + (zoom ? " zoom" : ""));
   const svg = document.createElementNS(NS, "svg");
+  // setAttribute only: an SVG element's className is a read-only
+  // SVGAnimatedString, and assigning it throws under "use strict" -- which
+  // aborted every overlay rebuild once a series arrived and froze the
+  // throughput numbers above it (claunch-a27zc.1).
   svg.setAttribute("class", "term-series-chart");
-  svg.className = "term-series-chart";
   svg.setAttribute("width", String(w));
   svg.setAttribute("height", String(h));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);

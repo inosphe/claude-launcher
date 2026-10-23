@@ -56,7 +56,16 @@ function node(tag, cls, text) {
   };
   return n;
 }
-const document = { createElementNS: (_ns, tag) => node(tag) };
+const document = {
+  /* An SVG element's className is a read-only SVGAnimatedString: assigning
+     it throws under "use strict", as app.js runs (claunch-a27zc.1). */
+  createElementNS: (_ns, tag) => {
+    const n = node(tag);
+    delete n.className;
+    Object.defineProperty(n, "className", { get: () => ({ baseVal: n.attrs.class || "" }) });
+    return n;
+  },
+};
 const calls = [];
 let reply = null;
 const api = async (p, opts) => { calls.push([p, opts]); return reply; };
@@ -66,7 +75,7 @@ const renderTermTps = () => { renders++; };
 const ctx = {};
 new Function(
   "exports", "el", "document", "api", "renderTermTps", "fmtAge", "usageShort",
-  consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesChart",
+  '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesChart",
     "termSeriesMaker"].map(slice).join("\n") + `
 exports.read = termSeriesRead;
 exports.data = termSeriesData;
@@ -104,7 +113,7 @@ const series = (win, start = 1000) => ({
   check("the small chart has no axis or legend", small.kids.length, 1);
   const big = ctx.chart(series("full"), true);
   check("zoomed chart: svg, axis, legend, readout",
-        big.kids.map((k) => k.className),
+        big.kids.map((k) => k.attrs.class || k.className),
         ["term-series-chart", "term-series-axis", "term-series-legend", "term-series-readout"]);
   check("the legend names the parts and the compaction",
         big.kids[2].kids.map((k) => k.textContent), ["input", "write", "cached input", "compaction"]);
