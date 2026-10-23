@@ -1051,6 +1051,11 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    silences other people's messages and this only decides how long this
    session's own terminal lives. */
 #session-list .quiet-keepalive { color: #7d8590; border-color: #363c45; }
+/* A harness fault. Red, unlike every other pill here: they are silences
+   somebody chose, this one is a session that cannot continue until a person
+   acts. Amber would read as the run wanting the reader's keyboard
+   (.sess-cflow.gated), which is a different thing to do. */
+#session-list .quiet-fault { color: #f85149; border-color: #6e2b28; background: #241416; }
 /* The card itself, wherever it is drawn — the row's fold, the pane under
    the header, the detail panel's section. Box and type are common; only the
    rail's flex-placement below is specific to the list it lives in. */
