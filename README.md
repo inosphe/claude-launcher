@@ -493,11 +493,14 @@ Strategies:
 
 `usage-min`/`usage-max` read each key's own usage, so they only work where the
 launcher token *is* the account credential (a Claude provider key, a Kimi
-provider key, a Fireworks key). A harness whose usage belongs to its own login
-(`codex`, the `kimi` CLI) has nothing to compare per key: the strategy falls
-back to `rotation` for that launch and says so in `claunch keys select`. Each
-`usage-*` launch reads every key's usage, so expect one usage request per key
-(and for Claude setup-tokens, one minimal API call per key) at launch time.
+provider key, a Fireworks key, an OpenCode Go key). A harness whose usage
+belongs to its own login (`codex`, the `kimi` CLI) has nothing to compare per
+key: the strategy falls back to `rotation` for that launch and says so in
+`claunch keys select`, naming the reason from one table
+(`usage.LOGIN_SCOPED_READERS`; a reader with no per-key path at all is reported
+as such rather than as a login). Each `usage-*` launch reads every key's
+usage, so expect one usage request per key (and for Claude setup-tokens, one
+minimal API call per key) at launch time.
 
 Storage: the pool is `<profile>/.launcher-keys.json` (`0600`); `.launcher-token`
 stays the effective token. `claunch keys add` on a profile that still has a
@@ -507,7 +510,26 @@ token, and `claunch set-token NAME <value>` on a pooled profile replaces the
 selected key (`--key <id>` replaces another one and leaves the effective token
 alone). A child profile that holds no token of its own rotates its nearest
 ancestor's pool — the one whose token its launch injects; a child that holds
-its own token keeps it and rotates nothing.
+its own token keeps it and rotates nothing. `claunch keys list` on such a child
+shows that pool and names its owner (`pool: profile 'base' (inherited …)`)
+instead of claiming the child has none, because that is the pool every launch
+of the child advances.
+
+Two keys in one pool never hold the same token: `claunch keys add` and
+`claunch set-token` (which replaces a key) both refuse a duplicate, so a
+rotation cannot spend one account twice. `.launcher-token` is derived state —
+every launch rewrites it with the key it selected, so a token file that was
+deleted (or that names a key the pool no longer holds) is repaired by the
+profile's next launch. `claunch keys list` reports that state
+(`.launcher-token names no key of this pool …`) rather than repairing it, since
+listing must not consume a rotation.
+
+Writes to the pool are serialised by `<pool>.lock`, and that file stays behind
+when the pool is removed (`keys remove` of the last key, `set-token --clear`).
+It is an empty `0600` file that holds no state: deleting it would let a writer
+that is already waiting for the lock keep the old file while the next writer
+locks a new one. Nothing reads it as "there is a pool" — `load()` and the
+inheritance chain ask for `.launcher-keys.json` itself.
 
 #### Pinning one session to one key
 

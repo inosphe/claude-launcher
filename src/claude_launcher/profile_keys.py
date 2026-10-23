@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, Tuple
 
 from . import atomic, credentials
 from .profile import Profile
@@ -216,7 +216,19 @@ def save(profile: Profile, pool: Pool) -> None:
 
 
 def forget(profile: Profile) -> bool:
-    """Delete the pool file; return whether there was one."""
+    """Delete the pool file; return whether there was one.
+
+    ``<pool>.lock`` is left in place (claunch-wllke.1.2.1). It is an empty
+    owner-only file that holds no state, and unlinking it is the one thing
+    that can break the serialisation the rest of this module stands on: a
+    writer may already hold the file open and be waiting for its lock, so
+    removing the path lets that waiter lock the old inode while the next
+    writer creates and locks a new one -- two holders of one pool, which is
+    the lost update :func:`_pool_lock` exists to prevent. On Windows the
+    unlink fails outright while the descriptor is open. Nothing reads the
+    lock as "this profile has a pool": :func:`load` and :func:`owner` ask
+    :func:`path`, so an empty lock beside no pool file is inert.
+    """
     file = path(profile)
     if not file.is_file():
         return False
@@ -374,6 +386,11 @@ def remove(profile: Profile, ident: str) -> Key:
 def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
     """Replace one key's token in place (``set-token`` on a pooled profile).
 
+    Two keys hold the same token is a pool whose rotation spends the same
+    account twice and whose usage strategies compare a key with itself, so
+    this refuses it exactly as :func:`add` does -- the key being replaced is
+    the only one whose token may repeat (claunch-wllke.5).
+
     The effective token file is rewritten only when ``ident`` names the key
     the profile is currently on; replacing some other key leaves the token
     file alone, so it keeps naming the key the last launch actually used.
@@ -387,6 +404,12 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
             raise KeysError(f"profile {profile.name!r} has no key pool")
         current = _selected_index(pool)
         index = _index_of(pool, ident) if ident else current
+        if any(
+            other.token == token
+            for position, other in enumerate(pool.keys)
+            if position != index
+        ):
+            raise KeysError(f"profile {profile.name!r} already holds that key")
         old = pool.keys[index]
         key = Key(
             id=old.id,
@@ -477,11 +500,14 @@ def _selected_index(pool: Pool) -> int:
 def owner(profile: Profile) -> Optional[Profile]:
     """The profile whose token this launch reads, if it owns a key pool.
 
-    The chain walk matches ``lineage.injectable_token``: the profile's own
+    The chain walk follows ``lineage.injectable_token``: the profile's own
     stored token, its own login credentials, else the nearest ancestor that
-    has either. A pool on any other profile is inert for this launch -- it
-    would pick a key the launch never uses and would rewrite a token file
-    that belongs to a different profile (claunch-wllke).
+    has either. A pool counts as a token source of its own, because the launch
+    writes the selected key into the token file -- which is also what repairs
+    a deleted ``.launcher-token`` on the next launch (claunch-wllke.5). A pool
+    on any other profile is inert for this launch: it would pick a key the
+    launch never uses and would rewrite a token file that belongs to a
+    different profile (claunch-wllke).
     """
     source = _token_source(profile)
     if source is None or load(source) is None:
@@ -490,9 +516,19 @@ def owner(profile: Profile) -> Optional[Profile]:
 
 
 def _token_source(profile: Profile) -> Optional[Profile]:
-    """The profile whose token ``lineage`` would inject for this launch."""
+    """The profile whose token ``lineage`` would inject for this launch.
+
+    A pool counts even when the token file is missing: the pool is then the
+    only record of which tokens this profile has, and the launch writes the
+    selected one back into the file. Without this a deleted ``.launcher-token``
+    made the pool unreachable -- the profile read as tokenless, so no launch
+    ever selected from it and the pool stayed dead (claunch-wllke.5).
+    """
     for item in [profile, *_ancestors(profile)]:
-        if credentials.own_token(item) is not None:
+        # The pool file decides, not its contents: a pool that exists but
+        # cannot be read is an error the caller should see (load()'s rule),
+        # not a reason to walk past it and use an ancestor's token.
+        if credentials.own_token(item) is not None or path(item).is_file():
             return item
     return None
 
@@ -526,13 +562,19 @@ def _rotation_index(pool: Pool) -> int:
     return 0
 
 
-def _utilization_reader(source: Profile) -> Callable[[Key], Optional[float]]:
-    """A per-key usage lookup for the profile's provider, or one finding None.
+def _utilization_reader(
+    source: Profile,
+) -> Tuple[Callable[[Key], Optional[float]], Optional[str]]:
+    """A per-key usage lookup for the profile's provider, and why it may be blind.
 
     The reader is chosen once (it depends on the provider and harness, not on
-    the key) and then asked about each key's own token. Harnesses whose usage
-    belongs to a login rather than to a key answer ``None`` for every key,
-    which makes the caller fall back to rotation.
+    the key) and then asked about each key's own token. When the provider's
+    usage cannot be measured per key the lookup finds ``None`` for every key
+    -- which makes the caller fall back to rotation -- and the second value
+    carries the reason, quoted in the fallback note. The reason comes from
+    :func:`usage.unmeasurable_reason`, one table for every reader, so a
+    provider that is unmeasurable is named there rather than at each call
+    site (claunch-wllke.4).
     """
     # Local imports: usage imports runner, which imports this module, and
     # neither is needed until a launch actually asks for a usage strategy.
@@ -546,9 +588,13 @@ def _utilization_reader(source: Profile) -> Callable[[Key], Optional[float]]:
         profile_mod.ProfileError,
         providers.ProviderError,
         lineage.LineageError,
-    ):
+    ) as exc:
         # An unreadable setup is "cannot measure", not a failed launch.
-        return lambda key: None
+        return (lambda key: None), f"the profile's usage reader is not available ({exc})"
+
+    reason = usage.unmeasurable_reason(kind)
+    if reason is not None:
+        return (lambda key: None), reason
 
     def measure(key: Key) -> Optional[float]:
         try:
@@ -564,9 +610,7 @@ def _utilization_reader(source: Profile) -> Callable[[Key], Optional[float]]:
             # caller skips that key and, if none is measurable, rotates.
             return None
 
-    if kind not in ("anthropic", "kimi-provider", "fireworks-billing"):
-        return lambda key: None
-    return measure
+    return measure, None
 
 
 def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
@@ -577,7 +621,7 @@ def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
         index = random.randrange(len(pool.keys))
         return Selection(pool.keys[index], strategy, index, owner_profile)
     if strategy in ("usage-min", "usage-max"):
-        measure = _utilization_reader(source)
+        measure, unmeasurable = _utilization_reader(source)
         scored = []
         for position, key in enumerate(pool.keys):
             value = measure(key)
@@ -595,7 +639,8 @@ def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
             DEFAULT_STRATEGY,
             index,
             owner_profile,
-            fallback=f"no key's usage could be read ({strategy} needs a "
+            fallback=unmeasurable
+            or f"no key's usage could be read ({strategy} needs a "
             "key-based usage reader)",
         )
     index = _rotation_index(pool) if strategy == "rotation" else _selected_index(pool)
@@ -661,6 +706,13 @@ def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
 
 def select_for_launch(profile: Profile) -> Optional[Selection]:
     """Pick a key, make it the effective token and advance the pool.
+
+    The token file is written on every call, so a pool whose
+    ``.launcher-token`` was deleted is repaired by the profile's next launch:
+    the pool file is the durable record and the token file is derived from it.
+    Nothing reads the pool back into a token file ahead of a launch --
+    ``claunch keys list`` reports the missing file instead of consuming a
+    rotation to fix it (claunch-wllke.5).
 
     Returns ``None`` when no profile in the chain owns a pool, which is the
     pre-claunch-wllke behaviour: ``.launcher-token`` is simply left alone.

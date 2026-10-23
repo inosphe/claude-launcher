@@ -231,6 +231,96 @@ def test_utilization_for_token_returns_the_peak_window(home, monkeypatch):
     assert usage.utilization_for_token(p, "sk-ANY") == 61.0
 
 
+def test_an_opencode_go_key_is_measured_with_its_own_token(home, monkeypatch):
+    # claunch-wllke.4: the opencode-go reader landed in claunch-f5w4x.6, but
+    # this path did not know its kind and answered None for every key, so a
+    # usage strategy silently fell back to rotation on those profiles.
+    p = profile.create("work")
+    seen = []
+    report = usage.UsageReport(
+        windows=[
+            usage.UsageWindow(name="five_hour", utilization=41.0, resets_at=None)
+        ],
+        raw={},
+    )
+
+    def fake_fetch(prof, token):
+        seen.append(token)
+        return report
+
+    monkeypatch.setattr(usage, "reader", lambda prof: "opencode-go")
+    monkeypatch.setattr(usage, "_fetch_opencode_go", fake_fetch)
+
+    assert usage.utilization_for_token(p, "sk-OPENCODE1") == 41.0
+    assert seen == ["sk-OPENCODE1"]
+
+
+def test_every_keyed_reader_kind_has_a_branch_in_utilization_for_token(
+    home, monkeypatch
+):
+    # The table and the dispatch have to agree: a kind listed as keyed but
+    # missing from utilization_for_token's chain is exactly the opencode-go
+    # gap this round closed, and nothing else would catch the next one.
+    p = profile.create("work")
+    report = usage.UsageReport(
+        windows=[
+            usage.UsageWindow(name="five_hour", utilization=33.0, resets_at=None)
+        ],
+        raw={},
+    )
+    monkeypatch.setattr(usage, "_fetch_claude", lambda prof, token=None: report)
+    monkeypatch.setattr(usage, "_fetch_fireworks", lambda prof, token: report)
+    monkeypatch.setattr(usage, "_fetch_opencode_go", lambda prof, token: report)
+    monkeypatch.setattr(
+        usage, "_kimi_provider_context", lambda prof, token=None: ("a", "b")
+    )
+    monkeypatch.setattr(usage, "_fetch_kimi_provider", lambda prof, *ctx: report)
+
+    for kind in usage.KEYED_READERS:
+        monkeypatch.setattr(usage, "reader", lambda prof, kind=kind: kind)
+        assert usage.utilization_for_token(p, "sk-KEY") == 33.0, kind
+
+
+def test_the_reader_table_says_which_kinds_are_measured_per_key():
+    assert "opencode-go" in usage.KEYED_READERS
+    for kind in usage.KEYED_READERS:
+        assert usage.unmeasurable_reason(kind) is None
+    # A login-scoped reader quotes its own sentence…
+    assert usage.unmeasurable_reason("kimi-web-server") == (
+        usage.LOGIN_SCOPED_READERS["kimi-web-server"]
+    )
+    # …and a reader that merely lacks a per-key path says that instead, so the
+    # two "cannot measure" cases stay apart in the note.
+    assert "no per-key usage path" in usage.unmeasurable_reason("some-new-reader")
+
+
+def test_the_fallback_note_quotes_the_reader_table(home, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    monkeypatch.setattr(usage, "reader", lambda prof: "kimi-web-server")
+    profile_keys.set_strategy(p, "usage-min")
+
+    selection = profile_keys.select_for_launch(p)
+
+    assert selection.strategy == "rotation"
+    assert selection.fallback == usage.LOGIN_SCOPED_READERS["kimi-web-server"]
+
+
+def test_a_keyed_reader_selects_by_usage_instead_of_rotating(home, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    monkeypatch.setattr(usage, "reader", lambda prof: "opencode-go")
+    monkeypatch.setattr(
+        usage,
+        "utilization_for_token",
+        lambda prof, token: {"sk-AAAA1111BBBB": 80.0, "sk-CCCC2222DDDD": 20.0}[token],
+    )
+    profile_keys.set_strategy(p, "usage-min")
+
+    selection = profile_keys.select_for_launch(p)
+
+    assert selection.key.token == "sk-CCCC2222DDDD"
+    assert selection.fallback is None
+
+
 # --- inheritance ------------------------------------------------------------
 
 
@@ -288,6 +378,67 @@ def test_a_child_with_its_own_pool_rotates_its_own(home):
     ] == [(k.token, k.use_count) for k in base_before.keys]
 
 
+def test_a_child_with_only_login_credentials_does_not_rotate_the_parent_pool(home):
+    # owner()'s chain is the stored token, then the login credentials. A
+    # login-only child has an own_token, so the parent's pool is inert for it
+    # and no rotation happens (claunch-wllke.6).
+    base = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    (child.config_dir / credentials.CREDENTIALS_FILENAME).write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "login-only-token",
+                    "expiresAt": 9999999999999,
+                    "scopes": ["user:profile"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    lineage.set_parent(child, "base")
+    before = profile_keys.load(base)
+
+    assert credentials.own_token(child) == "login-only-token"
+    assert profile_keys.owner(child) is None
+    assert profile_keys.select_for_launch(child) is None
+
+    after = profile_keys.load(base)
+    assert [(k.token, k.use_count) for k in after.keys] == [
+        (k.token, k.use_count) for k in before.keys
+    ]
+    assert after.cursor == before.cursor
+    assert credentials.stored_token(base) == "sk-CCCC2222DDDD"
+    assert credentials.stored_token(child) is None
+
+
+def test_a_grandparent_pool_is_rotated_when_the_parent_holds_nothing(home):
+    # The chain walk does not stop at an empty parent: the nearest ancestor
+    # with a token decides, and that ancestor's pool is the one that advances
+    # (claunch-wllke.6).
+    grand = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="grand")
+    parent = profile.create("parent")
+    child = profile.create("child")
+    lineage.set_parent(parent, "grand")
+    lineage.set_parent(child, "parent")
+
+    first = profile_keys.select_for_launch(child)
+    second = profile_keys.select_for_launch(child)
+
+    assert first.owner.name == "grand"
+    assert [first.key.token, second.key.token] == [
+        "sk-AAAA1111BBBB",
+        "sk-CCCC2222DDDD",
+    ]
+    # The grandparent's token file moved; the parent's and the child's did
+    # not, because neither owns a token.
+    assert credentials.stored_token(grand) == "sk-CCCC2222DDDD"
+    assert credentials.stored_token(parent) is None
+    assert credentials.stored_token(child) is None
+    assert profile_keys.load(parent) is None
+    assert profile_keys.load(child) is None
+
+
 # --- removal and CLI --------------------------------------------------------
 
 
@@ -299,6 +450,41 @@ def test_removing_the_last_key_removes_the_pool_and_token(home):
 
     assert profile_keys.load(p) is None
     assert credentials.stored_token(p) is None
+
+
+def test_forgetting_the_pool_keeps_the_lock_file_and_leaves_no_phantom_pool(home):
+    # Deleting <pool>.lock is what would break the lock: a writer waiting on
+    # the old inode and the next writer on a new one would both hold it
+    # (claunch-wllke.1.2.1). So the empty lock stays -- and it must never read
+    # as "this profile still has a pool", which is the other half of the bug.
+    p = _pooled("sk-AAAA1111BBBB")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+    assert lock.is_file()  # the pool's first write created it
+
+    assert profile_keys.forget(p) is True
+
+    assert not profile_keys.path(p).is_file()
+    assert lock.is_file()
+    assert profile_keys.load(p) is None
+    assert profile_keys.owner(p) is None
+    assert profile_keys.forget(p) is False  # nothing left to delete
+
+
+def test_clearing_the_token_drops_the_pool_and_the_lock_frees_again(home):
+    # `claunch keys set-token --clear` goes through credentials.clear_token,
+    # which forgets the pool without holding the pool lock: the leftover lock
+    # must not keep the next add() waiting for it (claunch-wllke.1.2.1).
+    p = _pooled("sk-AAAA1111BBBB")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+
+    removed = credentials.clear_token(p)
+
+    assert profile_keys.KEYS_FILENAME in removed
+    assert profile_keys.load(p) is None
+    assert lock.is_file()
+
+    key = profile_keys.add(p, "sk-CCCC2222DDDD")
+    assert [k.id for k in profile_keys.load(p).keys] == [key.id]
 
 
 def test_removing_the_selected_key_promotes_a_survivor(home):
@@ -326,6 +512,36 @@ def test_remove_accepts_a_one_based_index(home):
 
     gone = profile_keys.remove(p, "1")
     assert gone.token == "sk-AAAA1111BBBB"
+
+
+def test_replace_refuses_a_token_another_key_holds(home):
+    # A second copy of a token makes the rotation spend one account twice and
+    # makes a usage strategy compare a key with itself (claunch-wllke.5).
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    first = profile_keys.load(p).keys[0]
+
+    with pytest.raises(profile_keys.KeysError, match="already holds that key"):
+        profile_keys.replace(p, "sk-CCCC2222DDDD", ident=first.id)
+
+    assert [k.token for k in profile_keys.load(p).keys] == [
+        "sk-AAAA1111BBBB",
+        "sk-CCCC2222DDDD",
+    ]
+
+
+def test_replace_may_restate_the_token_of_the_key_it_replaces(home):
+    # The rule is about *another* key: re-running set-token with the value a
+    # key already holds is a no-op, not a duplicate.
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    second = profile_keys.load(p).keys[1]
+
+    key = profile_keys.replace(p, "sk-CCCC2222DDDD", ident=second.id)
+
+    assert key.id == second.id
+    assert [k.token for k in profile_keys.load(p).keys] == [
+        "sk-AAAA1111BBBB",
+        "sk-CCCC2222DDDD",
+    ]
 
 
 def test_cli_add_list_and_strategy(home, capsys):
@@ -366,6 +582,40 @@ def test_cli_list_reports_a_single_token_profile(home, capsys):
     out = capsys.readouterr().out
     assert "holds one token (…LE)" in out
     assert "claunch keys add work" in out
+
+
+def test_keys_list_names_the_profile_whose_pool_a_child_rotates(home, capsys):
+    # The child holds no token, so its every launch selects from and advances
+    # the parent's pool. Listing the child's own (absent) pool would hide the
+    # keys that are actually in play (claunch-wllke.5).
+    _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "list", "child"]) == 0
+
+    out = capsys.readouterr().out
+    assert "2 keys, strategy rotation" in out
+    assert "pool: profile 'base' (inherited" in out
+    assert "sk-A…BBBB" in out
+
+
+def test_a_deleted_token_file_is_reported_and_repaired_by_the_next_launch(
+    home, capsys
+):
+    # The pool file is the durable record and .launcher-token is derived from
+    # it: listing reports the gap without consuming a rotation, and the next
+    # launch writes the key back (claunch-wllke.5).
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    (p.config_dir / credentials.TOKEN_FILENAME).unlink()
+
+    assert cli.main(["keys", "list", "work"]) == 0
+    out = capsys.readouterr().out
+    assert ".launcher-token names no key of this pool" in out
+    assert credentials.stored_token(p) is None
+
+    selection = profile_keys.select_for_launch(p)
+    assert credentials.stored_token(p) == selection.key.token
 
 
 def test_set_token_replaces_the_selected_key_in_a_pool(home, capsys):
@@ -420,6 +670,24 @@ def test_runner_run_advances_the_pool(home, monkeypatch):
     assert profile_keys.load(p).keys[0].use_count == 1
 
 
+def _checkout_src() -> Path:
+    """``src`` of the checkout this test file lives in, or a loud failure.
+
+    The baseline is read from this file, not from ``claude_launcher.__file__``
+    (claunch-wllke.1.1.1). The import location is not the tree under test: a
+    pytest started from a tool interpreter, or one whose ``PYTHONPATH`` names
+    site-packages first, imports the installed package, and a baseline taken
+    from that would bless "the child read site-packages, same as me".
+    """
+    src_root = Path(__file__).resolve().parents[1] / "src"
+    if not (src_root / "claude_launcher" / "__init__.py").is_file():
+        raise RuntimeError(
+            f"this test file is not inside a checkout with src/claude_launcher "
+            f"(looked for {src_root}); the gate cannot name the tree it measures"
+        )
+    return src_root
+
+
 def _child_env():
     """Environment for a child process that must import *this* checkout.
 
@@ -429,9 +697,10 @@ def _child_env():
     whatever is installed instead of the tree under test. A gate that measures
     a different tree than the one being reviewed is worse than no gate
     (claunch-wllke.1.1), so the path is set explicitly and the child reports
-    where it landed.
+    where it landed — against this checkout, never against whatever this
+    process happened to import (claunch-wllke.1.1.1).
     """
-    src_root = Path(claude_launcher.__file__).resolve().parent.parent
+    src_root = _checkout_src()
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(src_root)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
@@ -444,6 +713,26 @@ def _assert_child_read_the_checkout(reported: str, src_root: Path) -> None:
     assert where.is_relative_to(src_root), (
         f"the child imported {where}, not the tree under test {src_root}"
     )
+
+
+def test_the_child_assertion_does_not_trust_the_parents_import(home, monkeypatch, tmp_path):
+    # The hole this pins (claunch-wllke.1.1.1): the baseline used to come from
+    # claude_launcher.__file__, so a pytest that imported an installed package
+    # compared the child against that install and passed when the child read
+    # it -- green about a tree nobody edited. Pretend this process imported
+    # site-packages and check the child is still pointed at the checkout and
+    # judged against it.
+    installed = tmp_path / "site-packages" / "claude_launcher" / "__init__.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("")
+    monkeypatch.setattr(claude_launcher, "__file__", str(installed))
+
+    env, src_root = _child_env()
+
+    assert src_root == Path(__file__).resolve().parents[1] / "src"
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(src_root)
+    with pytest.raises(AssertionError, match="not the tree under test"):
+        _assert_child_read_the_checkout(str(installed), src_root)
 
 
 def test_concurrent_launches_each_take_their_own_step(home):
@@ -545,6 +834,111 @@ def test_concurrent_key_adds_keep_every_key(home):
     missing = [token for token in added if token not in tokens]
     assert not missing, f"lost {len(missing)} of {len(added)} concurrent adds: {missing}"
     assert sum(key.use_count for key in pool.keys) == 6
+
+
+def _run_children(scripts, env, src_root):
+    """Run one child per ``[script, *args]`` list; assert each read this tree."""
+    import subprocess
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        for args in scripts
+    ]
+    for proc in procs:
+        out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, err
+        _assert_child_read_the_checkout(out.strip().splitlines()[-1], src_root)
+
+
+def test_concurrent_removes_each_take_their_key_out(home):
+    """Every remover's write survives the others' (claunch-wllke.1.2.2).
+
+    ``remove`` is the same read-modify-write as ``add``: each process loads
+    the pool, drops one key, saves the whole object. Unlocked, the last writer
+    wins and the keys the others removed come back -- or, on the way out, a
+    key the last writer never saw stays behind. Four processes removing four
+    distinct keys must leave no pool at all.
+    """
+    _pooled(*[f"sk-R{i}AAAA1111BBBB" for i in range(4)])
+    ids = [key.id for key in profile_keys.load(profile.require("work")).keys]
+    script = (
+        "import sys\n"
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.remove(profile.require('work'), sys.argv[1])\n"
+        "print(m.__file__)\n"
+    )
+
+    env, src_root = _child_env()
+    _run_children([["-c", script, key_id] for key_id in ids], env, src_root)
+
+    assert profile_keys.load(profile.require("work")) is None
+    assert credentials.stored_token(profile.require("work")) is None
+
+
+def test_concurrent_replaces_keep_every_replacement(home):
+    """Four replacements, four survivors -- no key left on its old token.
+
+    ``replace`` loads the pool, rewrites one key's token and saves the whole
+    object, so an unlocked run lets the later save erase an earlier key's new
+    token and resurrect an old one (claunch-wllke.1.2.2).
+    """
+    _pooled(*[f"sk-O{i}AAAA1111BBBB" for i in range(4)])
+    keys = profile_keys.load(profile.require("work")).keys
+    replacements = {key.id: f"sk-N{i}BBBB2222CCCC" for i, key in enumerate(keys)}
+    script = (
+        "import sys\n"
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.replace(profile.require('work'), sys.argv[2], ident=sys.argv[1])\n"
+        "print(m.__file__)\n"
+    )
+
+    env, src_root = _child_env()
+    _run_children(
+        [["-c", script, key_id, token] for key_id, token in replacements.items()],
+        env,
+        src_root,
+    )
+
+    pool = profile_keys.load(profile.require("work"))
+    assert {key.token for key in pool.keys} == set(replacements.values())
+    assert [key.id for key in pool.keys] == list(replacements)
+
+
+def test_a_strategy_change_during_rotation_is_not_lost(home):
+    """Setting the strategy while launches rotate keeps both writes.
+
+    ``select_for_launch`` saves the pool it read, strategy and all. A launch
+    that read before the change and saved after it puts ``rotation`` back, so
+    the user's ``keys strategy`` silently reverts (claunch-wllke.1.2.2). With
+    the lock, every launch sees whichever strategy is in force and the use
+    counts still add up to the number of launches.
+    """
+    _pooled(*[f"sk-S{i}AAAA1111BBBB" for i in range(3)])
+    strategy_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.set_strategy(profile.require('work'), 'random')\n"
+        "print(m.__file__)\n"
+    )
+    launch_script = (
+        "import claude_launcher as m\n"
+        "from claude_launcher import profile, profile_keys\n"
+        "profile_keys.select_for_launch(profile.require('work'))\n"
+        "print(m.__file__)\n"
+    )
+
+    env, src_root = _child_env()
+    scripts = [["-c", strategy_script]] + [["-c", launch_script] for _ in range(8)]
+    _run_children(scripts, env, src_root)
+
+    pool = profile_keys.load(profile.require("work"))
+    assert pool.strategy == "random"
+    assert sum(key.use_count for key in pool.keys) == 8
 
 
 def test_a_pinned_key_is_matched_by_id_not_by_position(home):

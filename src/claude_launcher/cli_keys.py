@@ -19,7 +19,11 @@ from . import profile as profile_mod
 def _cmd_list(args: argparse.Namespace) -> int:
     p = profile_mod.require(args.name)
     try:
-        data = profile_keys.summary(p)
+        # The pool a launch of this profile reads, which for a child that
+        # holds no token of its own is an ancestor's (profile_keys.owner).
+        # Listing the child's own pool would show "no pool" for a profile
+        # whose every launch rotates someone else's (claunch-wllke.5).
+        data = profile_keys.view(p)
     except profile_keys.KeysError as exc:
         raise SystemExit(f"claunch: {exc}")
     if args.json:
@@ -35,6 +39,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
         else:
             print(f"profile {p.name!r} holds no token")
         return 0
+    owner = data.get("owner")
+    inherited = owner if owner and owner != p.name else None
     nxt = profile_keys.peek(p)
     head = f"profile {p.name!r}: {len(data['keys'])} keys, strategy {data['strategy']}"
     if nxt is not None:
@@ -42,6 +48,20 @@ def _cmd_list(args: argparse.Namespace) -> int:
             f" (fell back from {nxt.fallback})" if nxt.fallback else ""
         )
     print(head)
+    if inherited:
+        print(
+            f" pool: profile {inherited!r} (inherited — {p.name!r} holds no token "
+            "of its own, so every launch here selects from and advances that pool)"
+        )
+    if not any(key["current"] for key in data["keys"]):
+        # The pool is intact but the effective token file names no key in it
+        # (deleted, or left by an older single-token write). The next launch
+        # selects a key and writes it back; nothing here repairs it, because
+        # this command does not consume a rotation (claunch-wllke.5).
+        print(
+            f" note: {credentials.TOKEN_FILENAME} names no key of this pool — "
+            "the next launch selects one and writes it back"
+        )
     for key in data["keys"]:
         mark = "*" if key["current"] else " "
         used = (
