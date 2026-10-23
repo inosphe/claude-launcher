@@ -269,12 +269,19 @@ assert.strictEqual(C.clampSplit('x'), 64);
 // The payload carries SUMS per bucket; the drawing model turns them into a
 // rate (tokens/s over the bucket) so that column width x height is tokens
 // and the area under the curve is the window's total.
+//
+// The fixture is in the shape the daemon actually emits: `t`, `start` and
+// `until` are epoch SECONDS (`statsboard.Ledger.series` reads `time.time()`),
+// while the axis is milliseconds. Stubbing the payload in milliseconds let a
+// model that never converted pass here while the real page drew every bucket
+// at -307% -- an empty row (claunch-mlrga, found in review by s1697).
+const sec = (ms) => Math.round(ms / 1000);
 const payload = {
-  window: '24h', bucket_s: 300, start: now - 2 * H, until: now,
+  window: '24h', bucket_s: 300, start: sec(now - 2 * H), until: sec(now),
   points: [
-    { t: now - 2 * H, input: 100, cache_read: 2000, cache_write: 0, output: 0, total: 2100, requests: 2 },
-    { t: now - H, input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests: 0 },
-    { t: now - 300000, input: 10, cache_read: 20, cache_write: 30, output: 40, total: 100, requests: 1 },
+    { t: sec(now - 2 * H), input: 100, cache_read: 2000, cache_write: 0, output: 0, total: 2100, requests: 2 },
+    { t: sec(now - H), input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests: 0 },
+    { t: sec(now - 300000), input: 10, cache_read: 20, cache_write: 30, output: 40, total: 100, requests: 1 },
   ],
   totals: { input: 110, cache_read: 2020, cache_write: 30, output: 40, total: 2200, requests: 3 },
   cache_share: 2020 / 2200, sessions: 2, unmetered: 1, ledger_since: '2026-10-01',
@@ -283,6 +290,10 @@ let sm = C.buildSeriesModel(payload);
 assert.strictEqual(sm.width, 300);
 assert.strictEqual(sm.widthMs, 300000);
 assert.strictEqual(sm.points.length, 3);
+// The boundary: seconds from the wire, milliseconds on the axis.
+assert.strictEqual(sm.points[0].t, now - 2 * H, 'payload seconds are converted to the axis unit');
+assert.strictEqual(sm.start, now - 2 * H);
+assert.strictEqual(sm.until, now);
 assert.strictEqual(sm.points[0].rate, 2100 / 300);
 assert.strictEqual(sm.points[1].rate, 0, 'a padded bucket is a gap, not dropped');
 assert.strictEqual(sm.peak, 2100 / 300);
@@ -310,6 +321,17 @@ assert.ok(Math.abs(p0.left - 0) < 1e-9);
 assert.ok(Math.abs(p0.right - (300 / (2 * 3600)) * 100) < 1e-9);
 const p2 = C.seriesSpan(sm.points[2], sm, lin);
 assert.ok(Math.abs(p2.left - C.positionOf(now - 300000, lin)) < 1e-9);
+// Every bucket of a daemon-shaped payload lands inside the track -- a unit
+// mismatch would put them all left of it (the defect this asserts against).
+for (const p of sm.points) {
+  const span = C.seriesSpan(p, sm, lin);
+  assert.ok(span.left >= 0 && span.left <= 100, `bucket at ${p.t} is on the axis`);
+  assert.ok(span.right >= 0 && span.right <= 100, `bucket ending at ${span.right}% is on the axis`);
+}
+// The tooltip names the bucket's real instant, not 1970.
+const tip = C.seriesTip(sm.points[2]);
+assert.ok(tip.includes(String(new Date(now - 300000).getFullYear())), `tooltip time is the bucket's: ${tip}`);
+assert.ok(!tip.includes('1970'), 'a bucket in seconds would print 1970');
 // The last bucket is cut at `until`, not drawn a whole width past now.
 const clipped = { axisStart: now - 2 * H, t1: now, scale: 'linear' };
 assert.ok(C.seriesSpan(sm.points[2], sm, clipped).right <= 100);
@@ -338,7 +360,7 @@ assert.deepStrictEqual(Array.from(C.SERIES_PARTS, (p) => p[0]),
 assert.deepStrictEqual(Array.from(C.SERIES_PARTS, (p) => p[1]),
   ['fresh input', 'cache read', 'cache write', 'output']);
 const half = C.buildSeriesModel({ bucket_s: 60, points: [{ t: 0, total: 60 }],
-  until: 60000, start: 0 });
+  until: 60, start: 0 });
 assert.strictEqual(half.points[0].rate, 1);
 assert.strictEqual(half.widthMs, 60000);
 assert.ok(Math.abs(C.seriesSpan(half.points[0], half,
@@ -349,8 +371,8 @@ assert.ok(Math.abs(C.seriesSpan(half.points[0], half,
 // The rows print the figure the Stats page's table prints for the session: the
 // same payload carries it, so the column and the chart above it are one read.
 const rowsPayload = {
-  window: '24h', bucket_s: 300, start: now - 2 * H, until: now,
-  points: [{ t: now - 2 * H, total: 0 }],
+  window: '24h', bucket_s: 300, start: sec(now - 2 * H), until: sec(now),
+  points: [{ t: sec(now - 2 * H), total: 0 }],
   totals: { total: 0, requests: 0 },
   by_session: {
     a: { input: 10, cache_read: 20, cache_write: 0, output: 5, total: 35, requests: 2 },

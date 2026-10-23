@@ -70,9 +70,16 @@ const server = http.createServer((req, res) => {
     if (url.pathname === "/api/stats/series") {
       seriesAsked.push(Object.fromEntries(url.searchParams));
       // Two buckets of a five-minute series: busy two hours ago, quiet now.
-      const width = 300, start = now - 2 * 3600000;
+      // The payload is in the shape the daemon emits -- epoch SECONDS, as
+      // `statsboard.Ledger.series` reads `time.time()` -- while the page's
+      // axis is milliseconds. A fixture in milliseconds (as this one used to
+      // be) never crosses that boundary, so a model that forgot to convert
+      // drew every column at -307% and this harness still passed
+      // (claunch-mlrga, found in review by s1697).
+      const width = 300, startMs = now - 2 * 3600000;
+      const start = Math.round(startMs / 1000);
       const points = [];
-      for (let t = start; t <= now; t += width * 1000) {
+      for (let t = start; t <= Math.round(now / 1000); t += width) {
         const busy = t === start;
         points.push({ t, input: busy ? 100 : 0, cache_read: busy ? 2000 : 0,
                       cache_write: 0, output: busy ? 50 : 0,
@@ -80,7 +87,7 @@ const server = http.createServer((req, res) => {
       }
       return res.end(JSON.stringify({
         window: url.searchParams.get("window"), bucket_s: width,
-        start, until: now, points,
+        start, until: Math.round(now / 1000), points,
         totals: { input: 100, cache_read: 2000, cache_write: 0, output: 50,
                   total: 2150, requests: 2 },
         cache_share: 2000 / 2150, sessions: 3, unmetered: 1,
@@ -342,6 +349,12 @@ function assertTicksApart(ticks, where) {
       assert.ok(r.left >= geom.track.left - 2 && r.left + r.width <= geom.track.right + 2,
         "a column stays inside the track");
     }
+    // The busiest column starts where the session that spent it starts: the
+    // two use one axis, so a bucket left in seconds (which lands far left of
+    // the track) fails here rather than only in the loop above.
+    const busy = geom.rects.filter((r) => r.height > 4).sort((a, b) => a.left - b.left)[0];
+    assert.ok(busy && Math.abs(busy.left - geom.alpha.left) < 8,
+      `the busy bucket (${busy && busy.left}) starts with alpha's bar (${geom.alpha.left})`);
     const asked = seriesAsked[seriesAsked.length - 1];
     assert.equal(asked.window, "7d", "the page's range is the query's window");
     // The query follows the page's own two boxes, whatever state the earlier

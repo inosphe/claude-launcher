@@ -186,10 +186,20 @@ globalThis.ChartPage = (() => {
     if (!payload || !Array.isArray(payload.points) || !payload.points.length) return null;
     const width = Number(payload.bucket_s) || 0;
     if (!(width > 0)) return null;
+    // The endpoint emits epoch SECONDS (`statsboard.Ledger.series` reads
+    // `time.time()`), while every instant this page places on its axis --
+    // `model.axisStart`, `model.t1`, the session spans -- is in
+    // MILLISECONDS. Convert once, at the payload boundary: a bucket left in
+    // seconds lands at -300% and the row draws nothing (claunch-mlrga
+    // review, s1697).
+    const toMs = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n * 1000 : 0;
+    };
     const points = payload.points.map((p) => {
       const total = Number(p.total) || 0;
       return {
-        t: Number(p.t) || 0,
+        t: toMs(p.t),
         width,
         input: Number(p.input) || 0,
         cache_read: Number(p.cache_read) || 0,
@@ -221,8 +231,8 @@ globalThis.ChartPage = (() => {
       // `widthMs` is the same span in the axis's own unit, which the times
       // beside it are in.
       points, width, widthMs: width * 1000, peak,
-      start: Number(payload.start) || points[0].t,
-      until: Number(payload.until) ||
+      start: toMs(payload.start) || points[0].t,
+      until: toMs(payload.until) ||
         points[points.length - 1].t + width * 1000,
       totals: {
         total: Number(totals.total) || 0,
@@ -1415,6 +1425,6 @@ globalThis.ChartPage = (() => {
   return { open, stop, render, category, projectOf, spanOf, formatDuration,
            median, ticks, buildModel, barGeometry, roleOf, clampSplit,
            positionOf, axisTicks, cflowAge, cflowChangedAt,
-           buildSeriesModel, seriesSpan, formatTokens, formatRate,
+           buildSeriesModel, seriesSpan, seriesTip, formatTokens, formatRate,
            RANGES, STALL_MS, AXIS_CAP_MS, LOG_UNIT_MS, SERIES_PARTS };
 })();
