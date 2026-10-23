@@ -83,15 +83,25 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     assert(labelled.length >= 2,
       `a column too narrow for its labels moves controls into the menu, keeping the labels: ${JSON.stringify(rows)}`);
 
-    // Within each row -- labelled, then glyphs -- the menu only grows as the
-    // column narrows. Across the two it may empty: the glyph row holds
-    // controls the labelled row could not, and the peel starts over there.
+    // Within a row the menu takes more controls as the column narrows, but
+    // that is a trend, not a step function, and the assertion samples it. The
+    // peel goes from the right, where the least-used controls sit, so when a
+    // wide group has to leave it frees room for several narrow controls
+    // behind it and the count steps down: measured at 1px, 1734px holds 6
+    // (zoom, split, sims, category, qa, threads) and 1679px holds 4 (life out;
+    // zoom, split and sims back). Both states are minimal -- the check below
+    // holds every item in the menu to "the row cannot show it" -- so the menu
+    // holds what the priority order gives up, not a fixed count. The row kind
+    // itself never goes back: once the glyphs are on, no narrower column
+    // returns to the labelled row.
     const glyphs = rows.filter(r => r.compact);
     assert(glyphs.length > 0, `the glyph row still takes over once most of the row has left: ${JSON.stringify(rows)}`);
+    assert.equal(rows.findIndex(r => r.compact), rows.length - glyphs.length,
+      `the glyph row does not go back to labels as the column narrows: ${JSON.stringify(rows)}`);
     for (const band of [rows.filter(r => !r.compact), glyphs]) {
       for (let i = 1; i < band.length; i++) {
         assert(band[i].overflow >= band[i - 1].overflow,
-          `the menu only grows as the column narrows within a row: ${JSON.stringify(rows)}`);
+          `the menu takes more controls as the column narrows (sampled widths): ${JSON.stringify(rows)}`);
       }
     }
     for (const r of rows) assert.equal(r.overflowsBox, false, `the row still fits its box at ${r.at}px`);
