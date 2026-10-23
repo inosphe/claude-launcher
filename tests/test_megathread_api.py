@@ -741,3 +741,35 @@ def test_t24_the_preview_refuses_bad_input(tmp_path):
         assert settings["settings"]["draft_budget_used_tokens"] == 0
 
     run(tmp_path, scenario)
+
+
+def test_t25_a_preview_does_not_close_a_routing(tmp_path, monkeypatch):
+    """The other direction of t23, through the endpoint: ``POST /route`` used
+    to sum every ledger row, so a few previews spent the routing ceiling and
+    a real message came back 429 while no routing had spent anything
+    (claunch-vz96l review on d705569d)."""
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.9, tokens=200)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+    text = "x" * 60
+
+    async def scenario(req, manager, threads, megas):
+        a, b, mega = await two_member_cluster(req)
+        preview = await req("POST", "/api/megathreads/draft", {"topic": "무엇이든"})
+        assert preview["budget_used_tokens"] == 400  # two members, 200 each
+        res = await req("POST", f"/api/megathreads/{mega['id']}/route", {"text": text})
+        # Both members clear the threshold, so the user picks: what matters
+        # here is that the routing was not refused by the preview's spend.
+        assert res["verdict"] == "choose"
+        assert res["budget_used_tokens"] == 400  # this routing's own spend only
+        # The routing ceiling still bites, counting route rows alone.
+        refused = await req("POST", f"/api/megathreads/{mega['id']}/route",
+                            {"text": text}, status=429)
+        assert refused["used_tokens"] == 400
+        assert refused["limit_tokens"] == 1000
+        # And the previews are still on their own ledger.
+        assert megas.usage_tokens(kind="draft") == 400
+
+    run(tmp_path, scenario, cfg={**CFG, "megathread_max_chars": 300,
+                                 "megathread_jev_budget_tokens": 1000})

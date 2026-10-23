@@ -488,15 +488,18 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
             return web.json_response({
                 "verdict": "manual", "delivered": sent, "route": row,
                 "ledger_error": ledger_error,
-                "budget_used_tokens": await asyncio.to_thread(megas.usage_tokens),
+                "budget_used_tokens": await asyncio.to_thread(
+                    megas.usage_tokens, kind="route"),
             })
 
         async with cluster_lock(mid):
             # Budget: refuse before spending, not after. The estimate is rough
             # on purpose (a state is assembled per member), and over-counting
-            # only means the ceiling bites slightly early.
+            # only means the ceiling bites slightly early. Only ``route`` rows
+            # count here: the create form's previews have their own ceiling,
+            # and an abandoned topic must not close the way to a real message.
             if pol["budget_tokens"]:
-                used = await asyncio.to_thread(megas.usage_tokens)
+                used = await asyncio.to_thread(megas.usage_tokens, kind="route")
                 estimate = len(members) * (pol["max_chars"] // route_mod.CHARS_PER_TOKEN + 200) \
                     + len(text) // route_mod.CHARS_PER_TOKEN
                 if used + estimate > pol["budget_tokens"]:
@@ -523,9 +526,9 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                 # is whether any thread actually accepted the message; an
                 # exited session leaves a row but types nothing.
                 delivered=any(d.get("delivered") for d in delivered),
-                error="; ".join(f"{e['thread']}: {e['error']}"
+                error="; ".join(f"{e.get('thread') or e.get('session')}: {e['error']}"
                                 for e in judgment.get("errors") or [])[:500])
-            used = await asyncio.to_thread(megas.usage_tokens)
+            used = await asyncio.to_thread(megas.usage_tokens, kind="route")
         return web.json_response({
             **judgment,
             "delivered": delivered,

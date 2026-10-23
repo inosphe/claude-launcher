@@ -14,6 +14,8 @@ T5 a member whose call fails does not sink the others, and its call is still
 T6 policy reads the odds-ratio threshold and the budget, and falls back on a
    value that is not a finite number
 T7 a member whose thread is gone is that member's error, not the routing's
+T8 a preview failure names the session that failed even when neither session
+   has a thread (every unthreaded member shares thread "")
 """
 
 import asyncio
@@ -205,6 +207,32 @@ def test_t7_a_missing_thread_is_that_members_error_only():
     assert "KeyError" in out["errors"][0]["error"]
     # No state, no call, no spend for that member; the other call's 7 stand.
     assert out["tokens"] == 7
+
+
+def test_t8_a_preview_failure_names_the_session_that_failed():
+    async def ask(cfg, state, questions, model):
+        if state["session"]["name"] == "s2":
+            raise jev.JevError("HTTP 500")
+        return {"model": model, "usage": {"input_tokens": 5},
+                "answers": {P.QUESTION_ID: {"type": "choice", "choice": "mine",
+                                            "confidence": 0.95,
+                                            "probabilities": {"mine": 0.95, "not_mine": 0.05}}}}
+
+    class NoThreads:
+        """Every session is scored without a thread -- the preview's normal
+        case, and the one where every member's thread id is ""."""
+
+        def list(self, name, closed=False):
+            return {"threads": []}
+
+    out = asyncio.run(P.draft(FakeManager([FakeSession("s1"), FakeSession("s2")]),
+                              NoThreads(), ["s1", "s2"], "무엇을 함께 볼까", cfg={}, ask=ask))
+    rows = {r["session"]: r for r in out["members"]}
+    assert rows["s1"]["logit"] is not None and "error" not in rows["s1"]
+    # The failure is s2's own row. Reading it back by thread id used to land
+    # on s1, the first member that also had "".
+    assert rows["s2"]["logit"] is None and "HTTP 500" in rows["s2"]["error"]
+    assert out["recommended"] == ["s1"]
 
 
 def test_t6_policy_reads_the_threshold_and_budget():

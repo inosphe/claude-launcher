@@ -251,7 +251,8 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
    지금 필터를 통과한 세션(최대 40개, `DRAFT_MAX_CANDIDATES`)을 채점한다. 응답의 `recommended`가 체크로
    들어오고, 임계값을 넘은 세션에는 `추천 p(mine)` 표시가 붙는다. 사용자는 그 체크를 직접 고친 뒤
    `만들기`를 누른다 — 미리보기는 아무것도 만들지 않는다. 실패하면 사유와 `재시도` 버튼이 남고, 폼은
-   그대로 쓸 수 있다.
+   그대로 쓸 수 있다. 채점이 실패한 후보의 행은 `session`을 실어 돌아온다: 아직 열린 쓰레드가 없는
+   세션은 `thread`가 빈 문자열이라, thread id만으로는 어느 세션의 실패인지 가릴 수 없다.
 2. **정렬·필터**: 정렬은 활동/생성 × 최신/오래된 네 가지(`SORTS`), `부모-자식 위계` 체크박스는
    `parent`로 트리를 만들고 들여쓴다(부모가 목록에 없으면 루트). 필터는 프로젝트·메시·수명주기
    (`running · hold · paused · killed · delayed · failed · archived`, `session.py::session_category`와 같은

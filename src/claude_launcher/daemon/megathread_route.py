@@ -301,6 +301,23 @@ def scores(answer: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _failure(row: Dict[str, Any]) -> Dict[str, Any]:
+    """One failed member, named the way a caller can put it back.
+
+    The ``thread`` alone does not identify a member of the create form's
+    preview: a session with no open thread is scored with an empty id, so
+    every unthreaded session writes ``thread: ""`` and whoever reads these
+    rows back attributes every failure to the first such member. ``session``
+    is the identity that always exists; ``thread`` stays for the routing
+    ledger, which is keyed by it.
+    """
+    return {
+        "session": row.get("session") or "",
+        "thread": row.get("thread") or "",
+        "error": row.get("error"),
+    }
+
+
 def judge(results: List[Dict[str, Any]], threshold: float, *, top_n: int = TOP_N) -> Dict[str, Any]:
     """The verdict over every member's score.
 
@@ -319,7 +336,7 @@ def judge(results: List[Dict[str, Any]], threshold: float, *, top_n: int = TOP_N
     failed = [r for r in results if r.get("error")]
     if not scored:
         return {"verdict": "error", "threshold": threshold, "candidates": [], "options": [],
-                "errors": [{"thread": r["thread"], "error": r.get("error")} for r in failed]}
+                "errors": [_failure(r) for r in failed]}
     ranked = sorted(scored, key=lambda r: r["logit"], reverse=True)
     hits = [r for r in ranked if r["logit"] >= threshold]
     if len(hits) == 1 and not failed:
@@ -333,7 +350,7 @@ def judge(results: List[Dict[str, Any]], threshold: float, *, top_n: int = TOP_N
         "threshold": threshold,
         "candidates": ranked,
         "options": options,
-        "errors": [{"thread": r["thread"], "error": r.get("error")} for r in failed],
+        "errors": [_failure(r) for r in failed],
     }
 
 
@@ -509,7 +526,10 @@ async def draft(
         })
     for row in judgment.get("errors") or []:
         rows.append({
-            "session": next((m["session"] for m in members if m["thread"] == row.get("thread")), ""),
+            # The session travels on the error row now: looking it up by
+            # ``thread`` matched the first unthreaded session for every
+            # unthreaded failure (claunch review on d705569d).
+            "session": row.get("session") or "",
             "thread": row.get("thread") or "",
             "p_mine": None,
             "logit": None,
