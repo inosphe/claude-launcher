@@ -51,7 +51,10 @@ is how far the guest has read, the way ``agent_read`` is the owner's.
 :meth:`ThreadStore.list` reports the threads a session is a guest in apart
 from its own (``guest_threads``), each saying how many messages of the
 others it has not read (``unread``) and how many of the owner's came after
-its read position (``owner_unread``).
+its read position (``owner_unread``). A forked thread (claunch-uaxp8) is the
+one case where the owner and the guest are written together: the route opens
+a thread owned by the quick-fork it is about to start and seats the origin as
+its guest in one transaction (:meth:`ThreadStore.open`'s ``guest``).
 
 When a guest's session ends, :meth:`ThreadStore.drop_guest` takes it out of
 every thread it was in and writes a ``system`` notice in each, so the
@@ -545,16 +548,30 @@ class ThreadStore:
 
     # -- writes ------------------------------------------------------------
 
-    def open(self, actor: str, session: str, title, text=None, *, qa=None, images=None, files=None) -> dict:
+    def open(self, actor: str, session: str, title, text=None, *, qa=None, images=None, files=None,
+             guest=None) -> dict:
         """A new thread in ``session``, optionally with its first message
         (text, attached ``images`` and ``files``, any of them) and the QA question it is about
         (``qa``). A blank title is given the session's next default name
-        (``Thread #N``)."""
+        (``Thread #N``).
+
+        ``guest`` registers another session as the thread's guest in the same
+        transaction (claunch-uaxp8). It is what a forked thread needs: the
+        thread's owner does not exist when the request is made (it is the
+        quick-fork being staged), so the two rows that make the fork a
+        conversation -- the owner's thread and the origin's guest seat -- are
+        written together or not at all."""
         session = str(session or "").strip()
+        guest = str(guest or "").strip() or None
         if not session:
             raise ThreadError("session is required: the session the thread belongs to")
         if actor != USER and actor != session:
             raise Forbidden(f"session {actor} may open threads only in its own conversation, not in {session}")
+        if guest is not None:
+            if guest.startswith(OPERATOR_PREFIX):
+                raise ThreadError("an operator cannot be a thread's guest")
+            if guest == session:
+                raise ThreadError(f"{guest} owns the new thread; it cannot be its guest")
         title = _text(title, "title", MAX_TITLE, required=False)
         body = _text(text, "text", MAX_BODY, required=False)
         images = _images(images)
@@ -577,6 +594,11 @@ class ThreadStore:
                 "VALUES (?,?,?,?,?,?,?)",
                 (tid, session, title, _author(actor), qa, now, now),
             )
+            if guest is not None:
+                # ``invited_by`` as :meth:`invite` writes it: "user" for the
+                # dashboard, the opening session's name otherwise.
+                db.execute("INSERT INTO guests (thread, session, invited_by, invited_at) VALUES (?,?,?,?)",
+                           (tid, guest, actor, now))
             message = (self._append(db, self._row(db, tid), actor, body, images, files=files)
                        if body or images or files else None)
             row = self._row(db, tid)
@@ -1126,6 +1148,21 @@ class ThreadStore:
                 db.execute("DELETE FROM guests WHERE thread = ? AND session = ?", (row["id"], session))
                 left.append({**self._view(db, row), "guest": session})
         return left
+
+    def delete_thread(self, tid: str) -> None:
+        """Remove one thread with its messages and guests.
+
+        The rollback of a forked thread whose fork was then refused
+        (claunch-uaxp8): the thread is written before the copy exists, so a
+        refused copy has to take it away again. It removes exactly the thread
+        named -- not everything one session owns -- because a second fork
+        racing for the same name may have written another one there.
+        Raises :class:`NotFound` when it is already gone."""
+        with self._write() as db:
+            self._row(db, tid)
+            db.execute("DELETE FROM messages WHERE thread = ?", (tid,))
+            db.execute("DELETE FROM guests WHERE thread = ?", (tid,))
+            db.execute("DELETE FROM threads WHERE id = ?", (tid,))
 
     def delete_owner(self, owner: str) -> int:
         """Remove every thread and message of ``owner`` (an operator that was

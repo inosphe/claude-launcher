@@ -12515,6 +12515,33 @@ class QuickForkError(Exception):
         self.status = status
 
 
+def quick_fork_blocked(origin, parent: str) -> str:
+    """Why ``origin`` (the session named ``parent``) cannot be quick-forked:
+    the answer a 400 carries, or "" when it can.
+
+    One copy, because two routes ask it: :func:`stage_quick_fork` before it
+    forks, and the threads pane's fork mode (daemon/threads_api.py's
+    ``fork_blocked``, claunch-uaxp8) before it writes the thread the copy
+    would own. The offer and the refusal drifting apart is the failure this
+    keeps out -- a pane offering a fork the spawn then refuses, or a refusal
+    whose words do not match the checkbox's reason.
+    """
+    if getattr(origin, "exited", False):
+        return f"session {parent!r} has exited — an exited session cannot be quick-forked"
+    definition = {}
+    try:
+        definition = origin.sdef.to_dict()
+    except Exception:  # noqa: BLE001 -- a record too old or odd to describe
+        pass
+    if not spawn_mod.can_fork(definition):
+        return (
+            f"session {parent!r} has no conversation to copy: quick-fork needs "
+            "a Claude or Codex session whose conversation is on disk (its first turn "
+            "has landed)"
+        )
+    return ""
+
+
 async def stage_quick_fork(
     request: web.Request, parent: str, body: dict, *, tag: str = "qf",
     spawn_extra: Optional[dict] = None, before_launch=None,
@@ -12538,15 +12565,9 @@ async def stage_quick_fork(
         origin = manager.get(parent)
     except ManagerError as exc:
         raise QuickForkError(404, str(exc)) from None
-    if origin.exited:
-        raise QuickForkError(400, f"session {parent!r} has exited — an exited session cannot be quick-forked")
-    if not spawn_mod.can_fork(origin.sdef.to_dict()):
-        raise QuickForkError(
-            400,
-            f"session {parent!r} has no conversation to copy: quick-fork needs "
-            "a Claude or Codex session whose conversation is on disk (its first turn "
-            "has landed)",
-        )
+    why = quick_fork_blocked(origin, parent)
+    if why:
+        raise QuickForkError(400, why)
     name = str(body.get("name") or "").strip() or handoff_mod.fork_name(
         parent, {s.sdef.name for s in manager.list()}, tag=tag,
     )

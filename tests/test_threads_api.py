@@ -13,9 +13,16 @@ from claude_launcher.threads import store as S
 
 
 
+class FakeDef(SimpleNamespace):
+    """A session definition with the one method the fork check reads."""
+
+    def to_dict(self):
+        return {"name": self.name}
+
+
 class FakeSession:
     def __init__(self, name):
-        self.sdef = SimpleNamespace(name=name)
+        self.sdef = FakeDef(name=name)
         self.exited = False
         self.held_at = None
         self.delivered = []
@@ -41,6 +48,7 @@ class FakeManager:
         self.woken = []
         self.exit_hooks = []
         self.launch_hooks = []
+        self.spawn_blocked = []   # what spawn policy would refuse a child with
 
     def get(self, name):
         if name not in self.sessions:
@@ -53,6 +61,14 @@ class FakeManager:
             return False
         self.woken.append((name, by, deliver))
         return True
+
+    def list(self):
+        return list(self.sessions.values())
+
+    def spawn_capabilities(self, parent):
+        # What the daemon answers for a session with nothing in the way; a
+        # test that wants a refusal fills ``blocked_by``.
+        return {"can_spawn": not self.spawn_blocked, "blocked_by": list(self.spawn_blocked)}
 
 
 def run(tmp_path, scenario, names=("s1", "s2")):
@@ -685,3 +701,133 @@ def test_asking_in_an_unknown_thread_is_a_404_not_a_500(tmp_path):
                         status=404)
         assert "th-nope" in out["error"]
     run(tmp_path, scenario)
+
+
+# --------------------------------------------------------------------------- #
+# fork mode (claunch-uaxp8): the thread starts in a copy of the session's
+# conversation, the copy owns it, and the origin is seated as its guest.
+# --------------------------------------------------------------------------- #
+
+def test_fork_mode_opens_the_thread_in_a_copy_and_seats_the_origin_as_guest(tmp_path, monkeypatch):
+    """The user checks fork mode: a quick-fork `<origin>-qf<n>` is started, the
+    thread is written under the copy's name with the origin as its guest, the
+    first message is typed into the copy, and the answer names the copy so the
+    pane can follow it."""
+    from claude_launcher import spawn as spawn_mod
+    from claude_launcher.daemon import api as api_mod
+
+    monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: True)
+    seen = {}
+
+    async def scenario(req, mgr):
+        async def fake_stage(request, parent, body, **kw):
+            seen.update(body)
+            made = FakeSession(body["name"])
+            mgr.sessions[body["name"]] = made
+            return {"session": {"name": body["name"]}, "origin": parent,
+                    "marker": "--- forked from here ---",
+                    "forked_at": "2026-10-23T00:00:00+00:00"}
+
+        monkeypatch.setattr(api_mod, "stage_quick_fork", fake_stage)
+        res = await req("POST", "/api/threads",
+                        {"to": "s1", "title": "Design", "text": "why json?", "fork": True})
+        tid = res["thread"]["id"]
+        # The name is the quick-fork rule, and the fork is told what it owns.
+        assert seen["name"] == "s1-qf1"
+        assert tid in seen["task"], "the fork's opening names the thread it owns"
+        assert "copy of s1's conversation" in seen["task"] and "s1 is a guest" in seen["task"]
+        assert res["thread"]["session"] == "s1-qf1"
+        assert [g["session"] for g in res["thread"]["guests"]] == ["s1"]
+        assert res["fork"] == {**res["fork"], "session": "s1-qf1", "origin": "s1", "thread": tid}
+        # The message goes to the copy; the origin is not typed into.
+        assert res["delivered"] is True
+        assert "why json?" in mgr.sessions["s1-qf1"].delivered[-1]
+        assert mgr.sessions["s1"].delivered == []
+        # The origin lists it apart, as a guest thread; the copy owns it.
+        origin = await req("GET", "/api/threads?session=s1")
+        assert origin["threads"] == [] and [t["id"] for t in origin["guest_threads"]] == [tid]
+        copy = await req("GET", "/api/threads?session=s1-qf1")
+        assert [t["id"] for t in copy["threads"]] == [tid]
+    run(tmp_path, scenario, names=("s1",))
+
+
+def test_fork_mode_refuses_a_thread_about_a_qa_question(tmp_path, monkeypatch):
+    """A QA question belongs to the origin and the thread will belong to the
+    copy, so the two cannot be the same thread -- refused, nothing written."""
+    from claude_launcher import spawn as spawn_mod
+    from claude_launcher.daemon import api as api_mod
+
+    monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: True)
+    called = []
+
+    async def scenario(req, mgr):
+        async def fake_stage(request, parent, body, **kw):
+            called.append(body)
+            return {}
+
+        monkeypatch.setattr(api_mod, "stage_quick_fork", fake_stage)
+        out = await req("POST", "/api/threads",
+                        {"to": "s1", "title": "qa-12345678: plan", "qa": "qa-12345678", "fork": True},
+                        status=400)
+        assert "cannot be forked" in out["error"]
+        assert called == []
+        assert (await req("GET", "/api/threads?session=s1"))["threads"] == []
+    run(tmp_path, scenario, names=("s1",))
+
+
+def test_fork_mode_is_the_users_and_needs_a_forkable_live_session(tmp_path, monkeypatch):
+    """A session may not fork itself into a thread (that is deep_think's job),
+    an exited session cannot be copied, and a session with no conversation on
+    disk has nothing to copy -- each refused with its reason, nothing written."""
+    from claude_launcher import spawn as spawn_mod
+
+    async def scenario(req, mgr):
+        monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: True)
+        out = await req("POST", "/api/threads", {"session": "s1", "title": "x", "fork": True}, status=400)
+        assert "fork is the user's" in out["error"]
+
+        mgr.sessions["s1"].exited = True
+        out = await req("POST", "/api/threads", {"to": "s1", "title": "x", "fork": True}, status=400)
+        assert "exited" in out["error"]
+
+        mgr.sessions["s1"].exited = False
+        monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: False)
+        out = await req("POST", "/api/threads", {"to": "s1", "title": "x", "fork": True}, status=400)
+        assert "no conversation to copy" in out["error"]
+        assert (await req("GET", "/api/threads?session=s1"))["threads"] == []
+
+        mgr.spawn_blocked = ["spawning is disabled (spawn.enabled)"]
+        monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: True)
+        out = await req("POST", "/api/threads", {"to": "s1", "title": "x", "fork": True}, status=400)
+        assert "spawning is disabled" in out["error"]
+    run(tmp_path, scenario, names=("s1",))
+
+
+def test_a_refused_fork_leaves_no_thread_and_forkable_says_why(tmp_path, monkeypatch):
+    """The fork can still refuse after the thread is written (a name taken
+    between the two writes, a spawn gate): the thread goes with it, so a
+    refused fork never leaves a thread nobody owns."""
+    from claude_launcher import spawn as spawn_mod
+    from claude_launcher.daemon import api as api_mod
+
+    monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: True)
+
+    async def scenario(req, mgr):
+        async def fake_stage(request, parent, body, **kw):
+            raise api_mod.QuickForkError(403, "spawning is disabled (spawn.enabled)")
+
+        monkeypatch.setattr(api_mod, "stage_quick_fork", fake_stage)
+        out = await req("POST", "/api/threads", {"to": "s1", "title": "x", "fork": True}, status=403)
+        assert "spawning is disabled" in out["error"]
+        assert (await req("GET", "/api/threads?session=s1-qf1"))["threads"] == []
+
+        # The pane's checkbox asks the same question the route refuses on.
+        doc = await req("GET", "/api/threads/forkable?session=s1")
+        assert doc == {"session": "s1", "ok": True, "why": ""}
+        monkeypatch.setattr(spawn_mod, "can_fork", lambda definition: False)
+        doc = await req("GET", "/api/threads/forkable?session=s1")
+        assert doc["ok"] is False and "no conversation to copy" in doc["why"]
+        doc = await req("GET", "/api/threads/forkable?session=ghost")
+        assert doc["ok"] is False and "no session" in doc["why"]
+        await req("GET", "/api/threads/forkable", status=400)
+    run(tmp_path, scenario, names=("s1",))

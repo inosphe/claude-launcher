@@ -22,6 +22,9 @@ T12 the change stamp (claunch-8vofx): it moves on every change the threads
    ``since`` answer only ``unchanged``
 T13 mentions (claunch-p9wes.1.1): the ``@``-tokens of a body, in order and
    once each; an address is not one, and a trailing dot does not spoil one
+T14 a forked thread (claunch-uaxp8): ``open(guest=...)`` writes the owner's
+   thread and the origin's guest seat in one write, and ``delete_thread``
+   takes back exactly the thread named when the fork is refused
 """
 
 import pytest
@@ -596,3 +599,29 @@ def test_t13_mentions_are_the_at_tokens_of_a_body():
     assert S.parse_mentions("@ s1109") == []                            # a space ends the name
     assert S.parse_mentions("@") == [] and S.parse_mentions(None) == []
     assert S.parse_mentions("`@s2` 코드 안") == ["s2"]                   # no fence parsing: it is a token
+
+
+def test_t14_a_forked_thread_seats_its_guest_in_the_same_write(st):
+    """claunch-uaxp8: the owner of a forked thread does not exist yet when the
+    thread is written, so ``open(guest=...)`` writes the thread and the
+    origin's guest seat together; and the rollback of a refused fork takes
+    exactly the thread it wrote, not everything the owner has."""
+    res = st.open(S.USER, "s1-qf1", "Side topic", "why?", guest="s1")
+    tid = res["thread"]["id"]
+    assert [g["session"] for g in res["thread"]["guests"]] == ["s1"]
+    assert st.list("s1")["guest_threads"][0]["id"] == tid
+    assert [t["id"] for t in st.list("s1-qf1")["threads"]] == [tid]
+    # The invitations the store refuses are refused here too, before anything
+    # is written.
+    with pytest.raises(S.ThreadError):
+        st.open(S.USER, "s2", "own guest", guest="s2")
+    with pytest.raises(S.ThreadError):
+        st.open(S.USER, "s2", "operator guest", guest=S.operator_owner("op1"))
+    assert st.list("s2")["threads"] == []
+    # A second thread under the same owner survives the first one's rollback.
+    other = st.open(S.USER, "s1-qf1", "Kept")["thread"]["id"]
+    st.delete_thread(tid)
+    with pytest.raises(S.NotFound):
+        st.get(tid)
+    assert [t["id"] for t in st.list("s1-qf1")["threads"]] == [other]
+    assert st.list("s1")["guest_threads"] == []

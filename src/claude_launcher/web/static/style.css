@@ -8833,6 +8833,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    on the left, 시작 pushed to the right end. */
 .th-newform-foot { display: flex; align-items: center; gap: 6px; }
 .th-newform-foot .th-send { margin-left: auto; }
+/* Fork mode (claunch-uaxp8): the thread starts in a copy of this session's
+   conversation. The row reads as one line -- box, label -- and the reason it
+   is off folds underneath when the copy cannot be made. */
+.th-fork { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 12px;
+  color: #8b949e; cursor: pointer; }
+.th-fork:has(.th-fork-box:disabled) { cursor: not-allowed; opacity: 0.7; }
+.th-fork-box { margin: 0; accent-color: #58a6ff; }
+.th-fork-why { flex-basis: 100%; padding-left: 20px; font-size: 11px; color: #6e7681; }
 .th-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .th-item { padding: 6px 8px 6px 9px; border-radius: 6px; cursor: pointer; border-left: 3px solid transparent;
   transition: background 0.12s; }
