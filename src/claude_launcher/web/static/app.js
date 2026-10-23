@@ -6800,6 +6800,29 @@ function applyCflow2Badges() {
 function railQuietFlags(name) {
   const out = [];
   const s = (sessionsCache || []).find((x) => x.name === name);
+  /* A harness fault: the account, the credentials or the service stopped
+     this session, not the work (daemon/session_fault.py). It is the one
+     pill here that asks for a person: everything below is a silence
+     somebody chose, this is a session that cannot continue until they act.
+     The message itself is in the hover -- the row has no width for a
+     wrapped quota sentence, and the same text is what `session_faults`
+     answers with. */
+  if (s && s.fault && s.fault.active) {
+    const f = s.fault;
+    out.push({
+      cls: "quiet-fault",
+      glyph: "!",
+      text: f.label || f.kind || "fault",
+      title:
+        `session fault — ${f.label || f.kind} (${f.harness})` +
+        (f.code ? ` · API ${f.code}` : "") + "\n" +
+        `${f.message}\n` +
+        (f.reset ? `resets: ${f.reset}\n` : "") +
+        (f.action ? `what to do: ${f.action}\n` : "") +
+        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"} ` +
+        "unless the message is seen again.",
+    });
+  }
   // Exited rows are left out: a record with no terminal holds nothing back
   // (DeadSession.delivery_held), so a pill there would name a hold that is
   // not being applied.
@@ -9638,6 +9661,12 @@ function dotClassOf(s, status) {
 /* What the grade means for this session, in words, for the dot's title. */
 function dotTitle(s) {
   if (!s) return "";
+  // A fault outranks busy/idle in the tooltip: a session "busy" with a
+  // spinner while its harness has already refused the next request reads as
+  // working until this line says otherwise.
+  if (s.fault && s.fault.active) {
+    return `fault: ${s.fault.label || s.fault.kind} — ${s.fault.message}`;
+  }
   if (s.status === "exited" && s.delayed_at) {
     return `${restoreQueueText(s)} — starts by itself; opening it starts it now`;
   }

@@ -1,0 +1,172 @@
+# Session faults: the messages a harness prints when it is stopped by the
+# account, the credentials or the service rather than by the work
+# (claunch-pczoc). The daemon scans the bottom of a session's screen
+# (daemon/session_fault.py) and marks the session while a message here is
+# seen; the rail draws a red pill and the `session_faults` MCP tool lists it.
+#
+# This file is the extension point, and the reason it is data: the messages
+# are collected as they are observed on live terminals. Adding one is a
+# YAML entry plus a `sample` line -- no code change. `tests/test_session_fault.py`
+# matches every `sample` against its declared kind, so a pattern that stops
+# matching the real message fails the suite.
+#
+# Order inside a list is precedence: the first pattern that matches the
+# scanned window decides the kind. Put the specific wording before the
+# generic status-code fallback. `common` is tried before the harness's own
+# list, because a provider's message can be painted by any harness (the
+# Kimi 429 in the samples below was printed by a `claude` session).
+
+version: 1
+
+# The kinds a fault can have, and how long it stays on the rail after its
+# message was last seen. A message that names an absolute reset time
+# ("resets Oct 26, 9am (Asia/Seoul)") overrides the window with that time.
+kinds:
+  usage_limit:
+    label: usage limit
+    action: wait for the reset, or raise the plan
+    window: 86400
+  account_suspended:
+    label: account suspended
+    action: check the provider's billing and payment
+    window: 86400
+  rate_limit:
+    label: rate limit
+    action: wait for the rate window to pass
+    window: 900
+  auth:
+    label: login
+    action: run the harness's login again
+    window: 21600
+  api_status:
+    label: API error
+    action: check the provider's status; retry later
+    window: 1800
+  network:
+    label: network
+    action: check connectivity and DNS
+    window: 900
+  policy_blocked:
+    label: policy block
+    action: rephrase, or switch model
+    window: 3600
+
+common:
+  # Fireworks, 2026-10-23 (s1342): "API Error: 412 Account
+  # yusanghyun-uuplax3zp is suspended, possibly due to reaching the monthly
+  # spending limit or failure to pay past invoices." A suspended account is
+  # its own fault: waiting out a usage window does not bring it back.
+  - kind: account_suspended
+    pattern: |-
+      Account \S+ is suspended
+    sample: |-
+      API Error: 412 Account yusanghyun-uuplax3zp is suspended, possibly due to reaching the monthly spending limit or failure to pay past invoices. Please go to https://fireworks.ai/account/billing for more information.
+  # The status code alone, when the body says nothing more readable.
+  - kind: account_suspended
+    pattern: |-
+      API Error: 412\b
+  # Kimi / Anthropic subscriptions: "You've reached your weekly (7-day)
+  # usage limit. Your quota will reset when the current 7-day window ends."
+  - kind: usage_limit
+    pattern: |-
+      Your quota will reset when the current (?:5-hour|7-day) window ends
+    sample: |-
+      API Error: Request rejected (429) · You've reached your weekly (7-day) usage limit. Your quota will reset when the current 7-day window ends.
+  - kind: usage_limit
+    pattern: |-
+      You'?ve reached your (?:weekly|5-hour|7-day|daily) usage limit
+    sample: |-
+      API Error: Request rejected (429) · You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.
+  # A provider answering with a JSON error body, whatever harness painted it.
+  - kind: auth
+    pattern: |-
+      The API key you provided is invalid
+    sample: |-
+      401: {"message":"The API key you provided is invalid.","param":null,"code":"UNAUTHORIZED","type":"error"}
+  - kind: auth
+    pattern: |-
+      "code"\s*:\s*"UNAUTHORIZED"
+  - kind: rate_limit
+    pattern: |-
+      "code"\s*:\s*"rate_limit_error"|"type"\s*:\s*"rate_limit_error"
+  - kind: rate_limit
+    pattern: |-
+      Error: 429: .{0,160}"rate limit
+  - kind: network
+    pattern: |-
+      \b(?:ECONNREFUSED|ENOTFOUND|EAI_AGAIN)\b
+  - kind: network
+    pattern: |-
+      Error: Connection error
+
+harnesses:
+  claude:
+    # Claude Code's own wording when the subscription is exhausted. Observed
+    # in s15 (2026-10-23): "You've hit your weekly limit · resets Oct 26,
+    # 9am (Asia/Seoul)". The reset time is parsed out of this line.
+    - kind: usage_limit
+      pattern: |-
+        You'?ve hit your (?:weekly|5-hour|daily) limit
+      sample: |-
+        You've hit your weekly limit · resets Oct 26, 9am (Asia/Seoul)
+    # "●Please run /login · API Error: 401 Invalid bearer token"
+    - kind: auth
+      pattern: |-
+        Please run /login
+      sample: |-
+        ●Please run /login · API Error: 401 Invalid bearer token
+    - kind: auth
+      pattern: |-
+        API Error: 401[^\n]{0,160}
+      sample: |-
+        API Error: 401 Invalid bearer token
+    # "API Error: Opus 5.5's safeguards flagged this message"
+    - kind: policy_blocked
+      pattern: |-
+        safeguards flagged this message
+      sample: |-
+        API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+    # 429 without a quota sentence is a rate window, not an exhausted plan.
+    - kind: rate_limit
+      pattern: |-
+        Request rejected \(429\)
+    # "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)"
+    - kind: network
+      pattern: |-
+        Can't reach the API server
+      sample: |-
+        API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)
+    - kind: network
+      pattern: |-
+        Request timed out
+    # The generic status fallback: any "API Error: <code>", reached only when
+    # nothing above matched (401 is auth, 412 is the suspended account, 429
+    # is a rate window, policy refusals have their own wording). The code is
+    # reported in the fault's ``code`` field, so a new status needs no new
+    # pattern to be visible -- only a kind if it deserves its own reading.
+    - kind: api_status
+      pattern: |-
+        API Error: \d{3,}
+      sample: |-
+        API Error: 500 Internal Server Error
+
+  pi:
+    # "Use /login to log into a provider via OAuth or API key. See: ..."
+    - kind: auth
+      pattern: |-
+        Use /login to log into a provider
+      sample: |-
+        Use /login to log into a provider via OAuth or API key. See: /home/user/.pi/agent/install/releases/1.1.0/n...
+
+  # Nothing observed yet on this machine's Codex sessions (127 output logs
+  # searched, 2026-10-23). Its own error wording goes here when it is
+  # collected; until then only `common` applies.
+  codex: []
+
+  # The Kimi CLI's own wording was not in the collected logs -- the 429
+  # messages that name kimi.com were painted by `claude` sessions in the
+  # `common` list above.
+  kimi: []
+
+  agent: []
+  devin: []

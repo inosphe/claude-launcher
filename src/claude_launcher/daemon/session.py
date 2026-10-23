@@ -30,7 +30,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 from .. import atomic
 from .. import harnesses as harness_registry
 from .. import pytest_basetemp, wsl_reg_stub
-from . import compacting, keys as keys_mod, process_priority, progress
+from . import compacting, keys as keys_mod, process_priority, progress, session_fault
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
@@ -543,6 +543,14 @@ class Session:
         #: chunk in :meth:`_on_output`, read by the dashboard row as the
         #: session's ``compacting`` flag.
         self._compacting = compacting.Detector(sdef.harness)
+        #: Fault scanner (see :mod:`session_fault`): reads the bottom of the
+        #: rendered screen for harness messages that say the account, the
+        #: credentials or the service has stopped this session. Read by the
+        #: rail poll and the ``session_faults`` MCP tool.
+        self._fault = session_fault.Detector(sdef.harness)
+        #: Last screen fingerprint the fault scanner was allowed to read (see
+        #: :meth:`_sample_loop`); ``None`` before the first scan.
+        self._fault_hashes: Optional[Tuple[int, ...]] = None
         self._activity = ActivityDetector(sdef.harness)
         #: Takes ``777;claunch;progress;`` sequences out of the output before
         #: anything renders it (see :mod:`progress`); their bodies go to
@@ -1261,7 +1269,15 @@ class Session:
                 await asyncio.sleep(SAMPLE_INTERVAL)
                 if self.exited:
                     break
-                self.tracker.sample(self.screen.line_hashes(), time.monotonic())
+                hashes = self.screen.line_hashes()
+                self.tracker.sample(hashes, time.monotonic())
+                # Fault messages are read off the bottom of the rendered
+                # screen (see :mod:`session_fault`). Only a screen that
+                # moved can carry a new one, and the fingerprint is
+                # remembered only when the scan was actually allowed to
+                # run, so a throttled scan is retried on the next sample.
+                if hashes != self._fault_hashes and self._fault.scan(self.screen):
+                    self._fault_hashes = hashes
                 new = self._compute_status(self.idle_threshold)
                 if new != self._status:
                     self._status = new
@@ -1374,6 +1390,15 @@ class Session:
     # ------------------------------------------------------------------ #
     def status(self, threshold: Optional[float] = None) -> str:
         return self._compute_status(self.idle_threshold if threshold is None else threshold)
+
+    def fault(self) -> Optional[dict]:
+        """This session's last harness fault, with its ``active`` flag.
+
+        ``None`` when the harness never painted a fault message. An inactive
+        record is kept: the rail drops it, but a person asking "what went
+        wrong here" still gets the last message and its window.
+        """
+        return self._fault.view()
 
     def idle_since(self) -> Optional[float]:
         """Seconds the session has been idle (None when not idle).
@@ -2576,6 +2601,12 @@ class Session:
             # session's context — see :mod:`compacting`. Live sessions only:
             # a DeadSession has no stream for the notice to ride.
             "compacting": self._compacting.compacting,
+            # The last harness fault this session painted — an exhausted
+            # plan, a rejected login, an API/network error (see
+            # :mod:`session_fault`). ``None`` until one is seen; an expired
+            # record stays with ``active: false`` so the row can explain
+            # itself after the window closed.
+            "fault": self.fault(),
         }
 
 
@@ -2838,4 +2869,10 @@ class DeadSession:
             "ended_by": self.ended_by,
             "delivery_hold": self.delivery_held(),  # always False; see above
             "pending_deliveries": [],   # nothing is queued for a session that ended
+            # A record has no live screen to scan; a fault it showed before
+            # ending was a live session's reading, and it is not persisted.
+            "fault": None,
         }
+
+    def fault(self) -> Optional[dict]:
+        return None

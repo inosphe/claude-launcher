@@ -540,6 +540,24 @@ class ScreenState:
         cols = self._screen.columns
         return hash("".join(line[x].data for x in range(cols)).rstrip())
 
+    def tail_lines(self, count: int) -> List[str]:
+        """The last ``count`` rows of the visible grid, right-trimmed.
+
+        Materializes only those rows, where :meth:`render_screen` rebuilds
+        the whole grid: the fault scanner reads the bottom of the screen on
+        a clock, and the rows above it are not its question. Same cell-wise
+        read as :meth:`render_screen`, so a wide glyph's empty stub
+        contributes nothing.
+        """
+        screen = self._screen
+        cols = screen.columns
+        rows = screen.lines
+        start = max(0, rows - max(1, int(count)))
+        return [
+            "".join(screen.buffer[y][x].data for x in range(cols)).rstrip()
+            for y in range(start, rows)
+        ]
+
     def bottom_line(self) -> str:
         """The bottom row of the visible grid, right-trimmed.
 

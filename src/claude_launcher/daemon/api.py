@@ -706,6 +706,11 @@ def build_app(
     search_anything.install(app)
     from . import glossary_api
     glossary_api.install(app)
+    # Fleet read of session faults (daemon/session_fault_api.py,
+    # claunch-pczoc): which sessions the harness itself has stopped, read
+    # off each session's screen by daemon/session_fault.py.
+    from . import session_fault_api
+    session_fault_api.install(app)
     from . import spec_api
     spec_api.install(app)
     # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,
@@ -9739,7 +9744,7 @@ RAIL_FIELDS = {
     "moved_rows", "tool_calls",
     "exited_at", "archived_at", "paused_at", "held_at", "delivery_hold",
     "delayed_at", "failed_at", "restore_queue",
-    "pending_deliveries", "compacting",
+    "pending_deliveries", "compacting", "fault",
     "context", "branch", "briefing", "winddown", "session_reminder",
     # Whose conversation this session is a copy of, and the merge or
     # handoff the operator has already asked for. The header's

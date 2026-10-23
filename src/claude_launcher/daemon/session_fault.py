@@ -1,0 +1,416 @@
+"""Session faults: what a harness says when the account, not the work, stops it.
+
+A *session fault* is a message a harness paints when it cannot go on for a
+reason the agent cannot fix by working differently -- an exhausted usage
+plan, a rejected login, an API status error, a network outage, a policy
+refusal. It is not a task failure (a failing test, a tool error): it is the
+harness standing still until a person acts.
+
+The catalogue is data (:data:`CATALOG_RESOURCE`, ``session_faults.yaml``)
+keyed by harness and by fault kind, because the messages are collected as
+they are seen on live terminals. Adding one is a YAML entry plus a
+``sample`` line; :class:`Catalog` compiles them and :class:`Detector`
+matches them.
+
+Where the reading comes from
+----------------------------
+The *bottom of the rendered screen*, not the raw output stream. A message
+that stops a session stays where a person would look for it, while a phrase
+in the conversation (a commit subject, this module's own documentation)
+scrolls away. Two row shapes are skipped before matching: diff rows (a
+document that quotes a message must not fault the session that wrote it)
+and harness tool-call headers (``⏺ Bash(...)`` lines, where the command
+itself may quote one). This is a heuristic, and the doc says so: a false
+positive expires when its kind's window does.
+
+The lifetime is a kind's ``window`` unless the message names a reset time
+("resets Oct 26, 9am (Asia/Seoul)"), which is parsed with :mod:`zoneinfo`
+and becomes the deadline. A fault is *active* until that deadline; it is
+never cleared early by later output, because a recovery is not visible in
+the text that follows (a re-login prints nothing that says so).
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from importlib import resources
+from typing import Dict, List, Optional, Tuple
+from typing import Pattern as Regex
+from zoneinfo import ZoneInfo
+
+#: The packaged catalogue. The file, not this module, is where messages are
+#: added; see its header comment.
+CATALOG_RESOURCE = "session_faults.yaml"
+
+#: How many rows up from the bottom of the screen are read as the live
+#: region. A fault message is painted as the last thing before the terminal
+#: goes quiet, so it sits inside this window when it is scanned; 16 rows
+#: covers a wrapped quota sentence plus the turn summary under it.
+SCAN_ROWS = 16
+
+#: The shortest gap between two scans of one session. The session samples
+#: its screen every 0.4s for idle detection; running the catalogue on every
+#: sample would spend time on a screen that cannot have changed. One second
+#: still catches a message that is up for two or three samples.
+SCAN_INTERVAL = 1.0
+
+#: A row is skipped when it is a diff line: ``+ text``, ``- text``, or the
+#: line-numbered form a tool result uses (``  12 + text``). Writing a
+#: document that quotes a fault message must not fault the writer.
+_DIFF_ROW = re.compile(r"^\s*(?:\d+\s+)?[+-](?:\s|$)")
+
+#: A row is skipped when it is a harness tool-call header: ``⏺ Bash(rg ...)``.
+#: The command line can quote a message (searching for one, as the session
+#: that built this module did) without the harness being in a fault.
+_TOOL_ROW = re.compile(r"^\s*[⏺●]\s*[A-Za-z_][\w.-]*\(")
+
+#: The absolute form of a reset time: "resets Oct 26, 9am (Asia/Seoul)".
+_RESET_ABSOLUTE = re.compile(
+    r"resets?\s+(?:at\s+|on\s+)?"
+    r"(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+"
+    r"(?P<day>\d{1,2}),?\s+"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>[ap]m)?\s*"
+    r"\((?P<tz>[^)]+)\)",
+    re.IGNORECASE,
+)
+
+#: The relative form: "resets in 3h".
+_RESET_RELATIVE = re.compile(
+    r"resets?\s+in\s+(?P<count>\d+)\s*(?P<unit>[mhd])\b", re.IGNORECASE
+)
+
+#: The HTTP status in "API Error: 412 ...". Reported beside the kind so a
+#: status that has no pattern of its own is still visible, and a kind that
+#: stands for one code (412 -> account_suspended) says which it was.
+_STATUS_CODE = re.compile(r"API Error:\s*(\d{3})\b", re.IGNORECASE)
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+_UNIT_SECONDS = {"m": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+class CatalogError(Exception):
+    """The catalogue document is not usable; its message names the entry."""
+
+
+@dataclass(frozen=True)
+class Kind:
+    """One class of fault: how it reads, what a person can do, how long it lasts."""
+
+    name: str
+    label: str
+    action: str
+    window: float
+
+
+@dataclass(frozen=True)
+class Pattern:
+    """One message pattern, in catalogue order (which is precedence)."""
+
+    kind: str
+    regex: Regex
+    source: str
+    sample: str = ""
+
+
+class Catalog:
+    """A parsed ``session_faults.yaml``: kinds, common patterns, per-harness ones."""
+
+    def __init__(self, document: dict) -> None:
+        if not isinstance(document, dict):
+            raise CatalogError("session faults: the document must be a mapping")
+        version = document.get("version")
+        if version != 1:
+            raise CatalogError(f"session faults: unsupported version {version!r}")
+        self.kinds: Dict[str, Kind] = {}
+        raw_kinds = document.get("kinds")
+        if not isinstance(raw_kinds, dict) or not raw_kinds:
+            raise CatalogError("session faults: 'kinds' must be a non-empty mapping")
+        for name, row in raw_kinds.items():
+            if not isinstance(row, dict):
+                raise CatalogError(f"session faults: kind {name!r} must be a mapping")
+            try:
+                window = float(row.get("window"))
+            except (TypeError, ValueError):
+                raise CatalogError(f"session faults: kind {name!r} needs a numeric window")
+            if window <= 0:
+                raise CatalogError(f"session faults: kind {name!r} window must be positive")
+            self.kinds[str(name)] = Kind(
+                name=str(name),
+                label=str(row.get("label") or name),
+                action=str(row.get("action") or ""),
+                window=window,
+            )
+        self.common = self._patterns(document.get("common"), "common")
+        raw_harnesses = document.get("harnesses") or {}
+        if not isinstance(raw_harnesses, dict):
+            raise CatalogError("session faults: 'harnesses' must be a mapping")
+        self.harnesses: Dict[str, Tuple[Pattern, ...]] = {}
+        for harness, rows in raw_harnesses.items():
+            self.harnesses[str(harness)] = self._patterns(rows, f"harness {harness!r}")
+
+    def _patterns(self, rows, where: str) -> Tuple[Pattern, ...]:
+        if rows is None:
+            return ()
+        if not isinstance(rows, list):
+            raise CatalogError(f"session faults: {where} must be a list of patterns")
+        out: List[Pattern] = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise CatalogError(f"session faults: {where}[{index}] must be a mapping")
+            kind = str(row.get("kind") or "")
+            if kind not in self.kinds:
+                raise CatalogError(
+                    f"session faults: {where}[{index}] names unknown kind {kind!r}"
+                )
+            source = str(row.get("pattern") or "").strip()
+            if not source:
+                raise CatalogError(f"session faults: {where}[{index}] has no pattern")
+            try:
+                compiled = re.compile(source, re.IGNORECASE)
+            except re.error as exc:
+                raise CatalogError(
+                    f"session faults: {where}[{index}] does not compile: {exc}"
+                ) from exc
+            out.append(Pattern(
+                kind=kind,
+                regex=compiled,
+                source=source,
+                sample=str(row.get("sample") or "").strip(),
+            ))
+        return tuple(out)
+
+    def patterns_for(self, harness: str) -> Tuple[Pattern, ...]:
+        """The patterns tried for one harness: common first, then its own.
+
+        Common first is deliberate: a provider's quota sentence
+        ("You've reached your weekly usage limit") must win over a harness's
+        generic 429 fallback, whichever harness painted it.
+        """
+        return self.common + self.harnesses.get(harness, ())
+
+    def match(self, harness: str, text: str) -> Optional[Tuple[Kind, Pattern, re.Match]]:
+        """The first pattern that matches ``text``, with its kind."""
+        for pattern in self.patterns_for(harness):
+            found = pattern.regex.search(text)
+            if found is not None:
+                return self.kinds[pattern.kind], pattern, found
+        return None
+
+
+def load(text: str) -> Catalog:
+    """Parse a catalogue document. Tests and the packaged file both come here."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - PyYAML is a hard dependency
+        raise CatalogError(f"session faults: PyYAML is unavailable: {exc}") from exc
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise CatalogError(f"session faults: the YAML does not parse: {exc}") from exc
+    return Catalog(document)
+
+
+_default: Optional[Catalog] = None
+
+
+def default() -> Catalog:
+    """The packaged catalogue, parsed once per process."""
+    global _default
+    if _default is None:
+        text = resources.files("claude_launcher").joinpath(CATALOG_RESOURCE).read_text(
+            encoding="utf-8"
+        )
+        _default = load(text)
+    return _default
+
+
+# --------------------------------------------------------------------------- #
+# reset times
+# --------------------------------------------------------------------------- #
+def reset_hint(text: str) -> str:
+    """The human-readable reset phrase, as the harness wrote it ("" if none)."""
+    found = _RESET_ABSOLUTE.search(text)
+    if found:
+        return re.sub(r"^resets?\s+", "", found.group(0), flags=re.IGNORECASE).strip()
+    found = _RESET_RELATIVE.search(text)
+    return found.group(0) if found else ""
+
+
+def reset_deadline(text: str, now: Optional[float] = None) -> Optional[float]:
+    """Epoch seconds the message names as its reset, or ``None``.
+
+    Absolute times carry their zone ("resets Oct 26, 9am (Asia/Seoul)"), so
+    they are parsed with :mod:`zoneinfo`. A date that already passed by more
+    than six hours is read as next year's. An unknown zone, a missing minute
+    or an impossible date answers ``None`` and the kind's window is used
+    instead -- a message that cannot be read must not make a session fault
+    for longer than its window.
+    """
+    now = time.time() if now is None else now
+    found = _RESET_ABSOLUTE.search(text)
+    if found:
+        try:
+            zone = ZoneInfo(found.group("tz").strip())
+        except Exception:  # noqa: BLE001 - an unknown zone is a fallback, not a crash
+            return None
+        hour = int(found.group("hour")) % 12
+        if (found.group("ampm") or "").lower() == "pm":
+            hour += 12
+        minute = int(found.group("minute") or 0)
+        month = _MONTHS[found.group("month")[:3].lower()]
+        day = int(found.group("day"))
+        year = datetime.fromtimestamp(now, zone).year
+        for candidate_year in (year, year + 1):
+            try:
+                candidate = datetime(
+                    candidate_year, month, day, hour, minute, tzinfo=zone
+                )
+            except ValueError:
+                return None
+            stamp = candidate.timestamp()
+            if stamp > now - 6 * 3600:
+                return stamp
+        return None
+    found = _RESET_RELATIVE.search(text)
+    if found:
+        return now + int(found.group("count")) * _UNIT_SECONDS[found.group("unit").lower()]
+    return None
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+# --------------------------------------------------------------------------- #
+# the detector
+# --------------------------------------------------------------------------- #
+def _clean_row(row: str) -> bool:
+    """Whether a screen row may be read as harness message text."""
+    if not row.strip():
+        return False
+    if _DIFF_ROW.match(row) or _TOOL_ROW.match(row):
+        return False
+    return True
+
+
+def _message_from(text: str, rows: List[str], start: int, limit: int = 400) -> str:
+    """The matched row (and what follows it) as one readable line.
+
+    The match itself may be the middle of the sentence -- a pattern for
+    "weekly limit" starts there -- so the message kept for the tooltip and
+    the API begins at the row that contains the match rather than at the
+    pattern's first character. It is cut at ``limit`` characters; a wrapped
+    quota sentence is the case this exists for.
+    """
+    begin = 0
+    position = 0
+    for row in rows:
+        if position + len(row) >= start:
+            begin = position
+            break
+        position += len(row) + 1
+    return " ".join(text[begin: begin + limit].split())
+
+
+class Detector:
+    """One session's fault reading, computed from its rendered screen.
+
+    :meth:`scan` is called from the session's sample loop. It reads only the
+    bottom ``SCAN_ROWS`` rows, at most once per :data:`SCAN_INTERVAL`, and
+    keeps the last match as this session's fault until the kind's window (or
+    the message's own reset time) runs out.
+    """
+
+    def __init__(
+        self,
+        harness: str,
+        catalog: Optional[Catalog] = None,
+        clock=time.time,
+    ) -> None:
+        self.harness = harness
+        self._catalog = catalog if catalog is not None else default()
+        self._clock = clock
+        self._record: Optional[dict] = None
+        self._last_scan = 0.0
+
+    @property
+    def catalog(self) -> Catalog:
+        return self._catalog
+
+    def scan(self, screen, now: Optional[float] = None) -> bool:
+        """Read the bottom of ``screen``; False when this call was throttled.
+
+        The caller keeps its "screen unchanged" fingerprint only when this
+        answers True, so a scan skipped by :data:`SCAN_INTERVAL` is retried
+        on the next sample instead of waiting for the next screen change.
+        """
+        if not self._catalog.patterns_for(self.harness):
+            return True
+        now = self._clock() if now is None else now
+        if now - self._last_scan < SCAN_INTERVAL:
+            return False
+        self._last_scan = now
+        rows = [row for row in screen.tail_lines(SCAN_ROWS) if _clean_row(row)]
+        if not rows:
+            return True
+        text = " ".join(rows)
+        found = self._catalog.match(self.harness, text)
+        if found is None:
+            return True
+        kind, _pattern, match = found
+        message = _message_from(text, rows, match.start())
+        status = _STATUS_CODE.search(text)
+        hint = reset_hint(text)
+        deadline = reset_deadline(text, now)
+        until = deadline if deadline is not None else now + kind.window
+        previous = self._record
+        same = (
+            previous is not None
+            and previous["kind"] == kind.name
+            and previous["message"] == message
+        )
+        self._record = {
+            "harness": self.harness,
+            "kind": kind.name,
+            "label": kind.label,
+            "action": kind.action,
+            "message": message,
+            "code": status.group(1) if status else "",
+            "reset": hint,
+            "since": previous["since"] if same else now,
+            "last_seen": now,
+            "until": until,
+        }
+        return True
+
+    def view(self, now: Optional[float] = None) -> Optional[dict]:
+        """The last fault with its ``active`` flag (``None`` when never faulted)."""
+        if self._record is None:
+            return None
+        now = self._clock() if now is None else now
+        record = self._record
+        return {
+            "harness": record["harness"],
+            "kind": record["kind"],
+            "label": record["label"],
+            "action": record["action"],
+            "message": record["message"],
+            "code": record.get("code", ""),
+            "reset": record["reset"],
+            "since": _iso(record["since"]),
+            "last_seen": _iso(record["last_seen"]),
+            "until": _iso(record["until"]),
+            "active": now < record["until"],
+            "source": "screen",
+        }
+
+    def forget(self) -> None:
+        """Drop the record (a session redefined onto another harness, tests)."""
+        self._record = None
