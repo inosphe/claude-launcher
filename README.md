@@ -556,7 +556,10 @@ already running cannot save the pool back after it is gone. The lock file is an
 empty `0600` file that holds no state: deleting it would let a writer
 that is already waiting for the lock keep the old file while the next writer
 locks a new one. Nothing reads it as "there is a pool" — `load()` and the
-inheritance chain ask for `.launcher-keys.json` itself.
+inheritance chain ask for `.launcher-keys.json` itself. A profile that holds
+neither a pool nor a token gets no lock file either: `set-token --clear` there
+deletes nothing, so it skips the lock rather than leaving an empty file in a
+config directory that never had a key (`claunch-wllke.1.2.1.1.1`).
 
 #### Pinning one session to one key
 

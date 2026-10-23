@@ -487,6 +487,35 @@ def test_clearing_the_token_drops_the_pool_and_the_lock_frees_again(home):
     assert [k.id for k in profile_keys.load(p).keys] == [key.id]
 
 
+def test_clearing_a_profile_with_nothing_stored_leaves_no_lock_file(home):
+    # The lock lives at `<pool>.lock`, and taking it creates the file. A clear
+    # that deletes nothing has no deletion for a concurrent writer to save
+    # back, so it skips the lock rather than leaving an empty owner-only file
+    # in a config directory that never held a key (claunch-wllke.1.2.1.1.1).
+    p = profile.create("empty")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+
+    assert credentials.clear_token(p) == []
+
+    assert not lock.exists()
+    assert not profile_keys.path(p).exists()
+
+
+def test_clearing_a_lone_token_still_takes_the_lock(home):
+    # The skip above is only for a profile with nothing to delete: `add`
+    # adopts a lone token into a new pool, so a clear racing it takes the
+    # pool lock, and the empty lock stays behind for the reason pinned in
+    # claunch-wllke.1.2.1.
+    p = profile.create("solo")
+    credentials.save_token(p, "sk-SINGLE")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+
+    assert credentials.clear_token(p) == [credentials.TOKEN_FILENAME]
+
+    assert lock.is_file()
+    assert credentials.stored_token(p) is None
+
+
 def test_removing_the_selected_key_promotes_a_survivor(home):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
     selected = profile_keys.load(p).keys[1]

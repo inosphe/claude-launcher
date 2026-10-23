@@ -81,10 +81,32 @@ def clear_token(profile: Profile) -> List[str]:
     is what gets lost and the cleared pool returns (claunch-wllke.1.2.1.1).
     Holding it across the token files as well keeps one interleaving from
     leaving a token file that names a key the cleared pool no longer holds.
+
+    A profile that holds nothing at all is answered without taking that lock
+    (claunch-wllke.1.2.1.1.1). Taking it creates ``<pool>.lock`` beside the
+    pool, so a clear on a profile that never held a key left an empty
+    owner-only file in its config directory that reads as leftover state. The
+    check below covers exactly the files this function would delete, and when
+    none of them exists it deletes nothing -- which is what makes the skip
+    safe: the race the lock closes (claunch-wllke.1.2.1.1) is a *deletion*
+    lost to a writer that read the pool first, and a call that deletes nothing
+    has no deletion to lose. An ``add`` that creates the pool just after the
+    check is ordered after this clear, the same outcome as a clear that held
+    the lock and ran first. Every path that does delete still locks, token
+    files included: ``add`` adopts a lone token into a new pool, so a clear
+    that raced it would otherwise leave that token inside the pool it created.
     """
     # Local import: profile_keys reads this module's token path and saves
     # through it, so importing it at module scope would be a cycle.
     from . import profile_keys
+
+    candidates = [
+        profile.config_dir / TOKEN_FILENAME,
+        profile.config_dir / LEGACY_API_KEY_FILENAME,
+        profile_keys.path(profile),
+    ]
+    if not any(candidate.is_file() for candidate in candidates):
+        return []
 
     with profile_keys.pool_lock(profile):
         return clear_token_locked(profile)
