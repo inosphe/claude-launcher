@@ -150,6 +150,8 @@ new Function(
    sliceLet("newWorktreeFor"), sliceLet("newWorktreeGit"),
    sliceLet("newWorktreeFilter"), sliceLet("newWorktreeFromFilter"),
    sliceLine("WORKTREE_FROM_BRANCH_LIMIT"), sliceLet("pendingWorktreeMode"),
+   // A seeded checkout name waits for this same list (claunch-8x6v2).
+   sliceLet("pendingWorktreeSeed"),
    slice("cwdSplit"), slice("shortenPath"), slice("cwdShort"),
    slice("spawnParent"), slice("newSessionCwd"), slice("newWorktreeMode"),
    slice("worktreeTrunkBranch"), slice("syncWorktreeTrunkButton"),
@@ -194,6 +196,11 @@ new Function(
     // needs both ends: what was parked, and what is left after a sync.
     exports.park = (m) => { pendingWorktreeMode = m; };
     exports.parked = () => pendingWorktreeMode;
+    // A seeded checkout name (a spawn request's Manual form) is parked the
+    // same way and spent by the same sync, but answers NEW or REUSE from
+    // the list (claunch-8x6v2).
+    exports.seed = (n) => { pendingWorktreeSeed = n; };
+    exports.seeded = () => pendingWorktreeSeed;
     exports.pollRegistry = refreshWorkspaces;
     exports.setRegistry = (list) => { registry = list; };`].join("\n")
 )(ctx,
@@ -327,6 +334,24 @@ async function main() {
         [names(), form.worktree_existing.value], [["w-beta"], "w-beta"]);
   ctx.filter("");
   ctx.render();
+
+  /* -- a seeded checkout name: new or reuse, by the list ---------------- */
+  ctx.policy("lead", { may_choose: ["worktree"] });
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  form.worktree_mode.value = "";
+  form.worktree_name.value = "";
+  ctx.seed("w-beta");
+  ctx.sync();
+  check("a seeded name the repository already has is the REUSE answer",
+        [form.worktree_mode.value, form.worktree_existing.value, ctx.seeded()],
+        ["existing", "w-beta", ""]);
+  form.worktree_mode.value = "";
+  ctx.seed("kid-wt");
+  ctx.sync();
+  check("...and one it does not is a NEW checkout of that name",
+        [form.worktree_mode.value, form.worktree_name.value, ctx.seeded()],
+        ["new", "kid-wt", ""]);
 
   /* -- the trunk button names THIS repository's trunk -------------------- */
   form.worktree_rebase.disabled = false;
