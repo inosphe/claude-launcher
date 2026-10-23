@@ -236,14 +236,17 @@ LOCK_TIMEOUT = 5.0
 def _pool_lock(profile: Profile) -> Iterator[None]:
     """Serialise a pool's read-modify-write against other processes.
 
-    Two launches of the same pool are two processes (a session spawn in the
-    daemon, ``claunch run`` in a shell, both against one profile). Each reads
-    the pool, picks, then writes it back; without a lock the second writer
-    overwrites the first's cursor and use count, so two sessions can pick the
-    same key and the counts undercount (claunch-wllke.2). The file itself is
-    replaced atomically, so this is only ever a lost update, never a torn one.
+    Every write to the pool is a read-modify-write: the caller loads the file,
+    changes one thing, and saves the whole object back. The writers are
+    separate processes — a session spawn in the daemon, ``claunch run`` in a
+    shell, ``claunch keys add`` in another terminal — so without a lock the
+    later save overwrites everything the earlier one changed: a cursor that
+    skips a key, a use count that undercounts, a key that was just added
+    disappearing again (claunch-wllke.2, claunch-wllke.1.2). The file itself
+    is replaced atomically, so this is only ever a lost update, never a torn
+    one.
 
-    The lock is ``<pool>.lock`` beside the pool. On timeout the launch
+    The lock is ``<pool>.lock`` beside the pool. On timeout the caller
     proceeds unlocked with a warning: losing one update to a wedged holder is
     worse than losing the launch itself, but it is not silent.
     """
@@ -283,7 +286,7 @@ def _pool_lock(profile: Profile) -> Iterator[None]:
                 if time.monotonic() >= deadline:
                     log.warning(
                         "key pool lock %s.lock is held by another process; "
-                        "selecting without it",
+                        "writing the pool without it",
                         file,
                     )
                     break
@@ -326,43 +329,46 @@ def add(profile: Profile, token: str, label: str = "") -> Key:
     token = str(token or "").strip()
     if not token:
         raise KeysError("refusing to store an empty key")
-    pool = adopt_single_token(profile) or Pool()
-    if any(k.token == token for k in pool.keys):
-        raise KeysError(f"profile {profile.name!r} already holds that key")
-    key = Key(
-        id=_new_id([k.id for k in pool.keys]),
-        token=token,
-        label=str(label or "").strip(),
-        added_at=_now(),
-    )
-    pool.keys.append(key)
-    pool.cursor = key.id
-    save(profile, pool)
-    credentials.save_token(profile, token)
-    return key
+    with _pool_lock(profile):
+        pool = adopt_single_token(profile) or Pool()
+        if any(k.token == token for k in pool.keys):
+            raise KeysError(f"profile {profile.name!r} already holds that key")
+        key = Key(
+            id=_new_id([k.id for k in pool.keys]),
+            token=token,
+            label=str(label or "").strip(),
+            added_at=_now(),
+        )
+        pool.keys.append(key)
+        pool.cursor = key.id
+        save(profile, pool)
+        credentials.save_token(profile, token)
+        return key
 
 
 def remove(profile: Profile, ident: str) -> Key:
     """Remove the key named by id or 1-based index; promote a survivor."""
-    pool = load(profile)
-    if pool is None:
-        raise KeysError(f"profile {profile.name!r} has no key pool")
-    index = _index_of(pool, ident)
-    gone = pool.keys.pop(index)
-    if gone.id == pool.cursor:
-        pool.cursor = None
-    if not pool.keys:
-        forget(profile)
-        credentials.clear_token(profile)
+    with _pool_lock(profile):
+        pool = load(profile)
+        if pool is None:
+            raise KeysError(f"profile {profile.name!r} has no key pool")
+        index = _index_of(pool, ident)
+        gone = pool.keys.pop(index)
+        if gone.id == pool.cursor:
+            pool.cursor = None
+        if not pool.keys:
+            forget(profile)
+            credentials.clear_token(profile)
+            return gone
+        save(profile, pool)
+        # Keep the effective token one of the remaining keys, so the next
+        # launch does not run on a token the pool no longer lists -- but leave
+        # it alone while it is still listed: removing some other key is not a
+        # re-selection.
+        current = credentials.stored_token(profile)
+        if current not in {key.token for key in pool.keys}:
+            credentials.save_token(profile, pool.keys[0].token)
         return gone
-    save(profile, pool)
-    # Keep the effective token one of the remaining keys, so the next launch
-    # does not run on a token the pool no longer lists -- but leave it alone
-    # while it is still listed: removing some other key is not a re-selection.
-    current = credentials.stored_token(profile)
-    if current not in {key.token for key in pool.keys}:
-        credentials.save_token(profile, pool.keys[0].token)
-    return gone
 
 
 def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
@@ -375,29 +381,30 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
     token = str(token or "").strip()
     if not token:
         raise KeysError("refusing to store an empty key")
-    pool = load(profile)
-    if pool is None:
-        raise KeysError(f"profile {profile.name!r} has no key pool")
-    current = _selected_index(pool)
-    index = _index_of(pool, ident) if ident else current
-    old = pool.keys[index]
-    key = Key(
-        id=old.id,
-        token=token,
-        label=old.label,
-        added_at=old.added_at,
-        last_used_at=old.last_used_at,
-        use_count=old.use_count,
-    )
-    pool.keys[index] = key
-    save(profile, pool)
-    # Rewrite the effective token only when the key being replaced is the one
-    # the profile is currently on: editing another key is not a re-selection,
-    # and overwriting the token file would leave it naming a key the last
-    # launch did not use (the rule remove() follows).
-    if index == current:
-        credentials.save_token(profile, token)
-    return key
+    with _pool_lock(profile):
+        pool = load(profile)
+        if pool is None:
+            raise KeysError(f"profile {profile.name!r} has no key pool")
+        current = _selected_index(pool)
+        index = _index_of(pool, ident) if ident else current
+        old = pool.keys[index]
+        key = Key(
+            id=old.id,
+            token=token,
+            label=old.label,
+            added_at=old.added_at,
+            last_used_at=old.last_used_at,
+            use_count=old.use_count,
+        )
+        pool.keys[index] = key
+        save(profile, pool)
+        # Rewrite the effective token only when the key being replaced is the
+        # one the profile is currently on: editing another key is not a
+        # re-selection, and overwriting the token file would leave it naming a
+        # key the last launch did not use (the rule remove() follows).
+        if index == current:
+            credentials.save_token(profile, token)
+        return key
 
 
 def set_strategy(profile: Profile, strategy: str) -> Pool:
@@ -407,15 +414,16 @@ def set_strategy(profile: Profile, strategy: str) -> Pool:
         raise KeysError(
             f"unknown strategy {strategy!r} (expected one of {', '.join(STRATEGIES)})"
         )
-    pool = adopt_single_token(profile)
-    if pool is None:
-        raise KeysError(
-            f"profile {profile.name!r} has no stored key; add one with "
-            f"'claunch keys add {profile.name}'"
-        )
-    pool.strategy = strategy
-    save(profile, pool)
-    return pool
+    with _pool_lock(profile):
+        pool = adopt_single_token(profile)
+        if pool is None:
+            raise KeysError(
+                f"profile {profile.name!r} has no stored key; add one with "
+                f"'claunch keys add {profile.name}'"
+            )
+        pool.strategy = strategy
+        save(profile, pool)
+        return pool
 
 
 def _index_of(pool: Pool, ident: str) -> int:
@@ -429,7 +437,26 @@ def _index_of(pool: Pool, ident: str) -> int:
         number = 0
     if 1 <= number <= len(pool.keys):
         return number - 1
-    raise KeysError(
+    raise KeysError(_no_key(pool, text))
+
+
+def _index_of_id(pool: Pool, key_id: str) -> int:
+    """The position of the key whose id is exactly ``key_id``.
+
+    Unlike ``_index_of`` this never falls back to a 1-based index. A pin
+    (``SessionDef.key_id``) names the one key the user picked in the rail, so
+    a pool without that id means the pin is stale — not that the user meant
+    the second key (claunch-wllke.1.2).
+    """
+    text = str(key_id or "").strip()
+    for position, key in enumerate(pool.keys):
+        if key.id == text:
+            return position
+    raise KeysError(_no_key(pool, text))
+
+
+def _no_key(pool: Pool, text: str) -> str:
+    return (
         f"no key {text!r} in this pool (ids: "
         f"{', '.join(k.id for k in pool.keys)})"
     )
@@ -603,7 +630,8 @@ def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
     Returns ``None`` when nothing could be materialized: no pool in the
     profile's chain, or a pool that no longer holds ``key_id`` (the key was
     removed with ``claunch keys remove`` while a session was pinned to it).
-    The caller decides what a stale pin means.
+    The caller decides what a stale pin means. ``key_id`` is matched by id
+    only -- never as a 1-based position (claunch-wllke.1.2).
     """
     owner_profile = owner(profile)
     if owner_profile is None:
@@ -613,7 +641,7 @@ def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
         if pool is None or not pool.keys:
             return None
         try:
-            index = _index_of(pool, key_id)
+            index = _index_of_id(pool, key_id)
         except KeysError:
             return None
         used = pool.keys[index]
