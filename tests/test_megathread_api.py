@@ -556,11 +556,36 @@ def test_t19_the_rail_rows_carry_every_field_the_member_picker_reads():
     send (claunch-cn8v6, REVIEWED: changes). Reading the constant here is what
     keeps a future trim of the poll from doing that again: these are exactly
     the keys `sessionLine`, `matchesFilter` and `statusTone` read.
+
+    The list of keys is not retyped here: it is read off the page source, so
+    a future row that starts drawing a new field fails this test instead of
+    silently reading a key the poll does not send (a previous review named
+    exactly that hole in an earlier hand-written list).
     """
+    import pathlib
+    import re
+
     from claude_launcher.daemon.api import RAIL_FIELDS
 
-    picker_reads = {"name", "status", "progress", "issue", "branch", "note", "role", "kind"}
-    assert picker_reads <= RAIL_FIELDS, sorted(picker_reads - RAIL_FIELDS)
+    page = (pathlib.Path(__file__).resolve().parent.parent
+            / "src/claude_launcher/web/static/megathread-page.js").read_text(encoding="utf-8")
+    # The picker's model: the lifecycle partition through the filter choices.
+    # Everything before it is the ring; everything after is the composer.
+    start = page.index("const CATEGORIES")
+    end = page.index("function createHint(")
+    model = page[start:end]
+    # A session line is built from `s.<key>` / `row.<key>`; the two orderings
+    # read their key from SORTS, so those keys are named here.
+    reads = set(re.findall(r"\b(?:s|row)\.([a-z_][a-z0-9_]*)", model))
+    reads |= {"created_at", "last_activity_at"}
+    # `progress` is the object the rail sends; nothing below the picker reads
+    # into another object's fields, so every name found is a top-level key.
+    assert reads <= RAIL_FIELDS, sorted(reads - RAIL_FIELDS)
+    # And the direction that matters more: these are the fields a row draws,
+    # so a pole that stops sending one is a blank line on every row.
+    for key in ("name", "status", "role", "project", "parent", "briefing",
+                "created_at", "last_activity_at", "issue", "branch", "note"):
+        assert key in reads, f"the picker no longer draws {key!r}"
 
 
 def test_t20_a_mention_that_names_only_a_guest_is_delivered_to_that_guest(tmp_path, monkeypatch):

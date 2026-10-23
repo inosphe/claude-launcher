@@ -2659,6 +2659,9 @@ _LIVE_KEYS = (
     # read by the mega-thread router on every routing (claunch-v5nhp)
     "jev_model_megathread", "jev_model_qa_nudge",
     "megathread_threshold_ratio", "megathread_jev_budget_tokens",
+    # read by the create form's topic preview (claunch-vz96l), a separate
+    # ceiling over the same ledger
+    "megathread_draft_budget_tokens",
     "megathread_max_chars", "megathread_concurrency",
     # read at each session spawn
     "wsl_hide_reg_exe",

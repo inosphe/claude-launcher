@@ -29,7 +29,7 @@ claunch-v5nhp. 여러 세션의 쓰레드에 **한 번의 입력**으로 말하�
 mega(id, title, status, created_at, updated_at)
 members(mega, session, thread, added_by, added_at)      PK (mega, thread)
 routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
-       delivered, tokens, model, error)
+       delivered, tokens, model, error, kind)
 ```
 
 - `routes`가 회계 원장이다. `tokens`는 그 라우팅이 쓴 Jev 입력 토큰의 합이고, 예산은 이 표의 최근 24시간
@@ -45,6 +45,9 @@ routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
   `delivered: true`, `queued: false`다 — `queued`는 어느 터미널에도 타자되지 않았을 때만 참이다.
 - `verdict`: `auto`(한 멤버가 임계값 통과) / `choose`(둘 이상, 사용자 선택 대기) / `manual`(사용자가
   직접 고름) / `none`(아무도 통과 못 함) / `error`(모든 호출 실패).
+- `kind`: `route`(클러스터로 간 메시지) / `draft`(생성 폼의 주제 미리보기). `draft` 행은 클러스터가
+  없으므로 `mega`가 빈 문자열이고, 두 예산이 이 열로 갈린다. 스키마 2에서 더해졌고, 그 전에 쓰인
+  파일은 열을 얻으면서 기존 행이 전부 `route`로 남는다.
 
 ## 라우팅
 

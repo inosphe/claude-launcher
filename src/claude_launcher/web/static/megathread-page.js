@@ -553,7 +553,8 @@ globalThis.MegaThreadPage = (() => {
      the session believes it is doing, so it is drawn apart from the branch
      and issue instead of being joined into them. */
   function briefLine(session) {
-    const b = (session || {}).briefing;
+    const s = session || {};
+    const b = s.briefing;
     if (!b) return "";
     if (typeof b === "string") return String(b).trim();
     return String(b["one-line-job-description"] || b.now || b.goal || "").trim();
@@ -567,7 +568,7 @@ globalThis.MegaThreadPage = (() => {
     const s = session || {};
     const progress = s.progress && s.progress.text ? s.progress.text : "";
     const brief = briefLine(s);
-    return [s.name, s.role, s.identity, s.issue, s.branch, s.note, s.kind, progress,
+    return [s.name, s.role, s.issue, s.branch, s.note, s.kind, progress,
             s.project, brief]
       .filter(Boolean).join(" ").toLowerCase().includes(needle);
   }
