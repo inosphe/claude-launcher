@@ -5145,7 +5145,10 @@ async function refreshSessions(options) {
      // The mesh header's local/remote pick drops rows from the same cache.
      typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both",
      // And so does the state filter: only the rows it admits are drawn.
-     typeof sessionFilter === "undefined" ? null : sessionFilter],
+     typeof sessionFilter === "undefined" ? null : sessionFilter,
+     // The key pools the rows' chips are drawn from, read beside this poll
+     // rather than in it (keyPoolSignature).
+     typeof keyPoolSignature === "function" ? keyPoolSignature() : null],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -5444,6 +5447,7 @@ async function refreshSessions(options) {
     if (keptRow) {
       // Both decorations read state beside the record (the note editor that
       // is open, the briefing one-line), and both are idempotent.
+      if (typeof decorateKeyRow === "function") decorateKeyRow(keptRow, s);
       decorateBriefingRow(keptRow, s);
       decorateNoteRow(keptRow, s);
       decorateProgressRow(keptRow, s);
@@ -5757,7 +5761,8 @@ async function refreshSessions(options) {
     // and the name stacked a character per line (claunch-ku033).
     const actions = document.createElement("span");
     actions.className = "rail-actions";
-    actions.append(...(plus ? [plus] : []), ...(pin ? [pin] : []),
+    actions.append(...(plus ? [plus] : []),
+                   ...(pin ? [pin] : []),
                    ...(observePin ? [observePin] : []), info);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railCtxTokens ? [railCtxTokens] : []),
@@ -5768,6 +5773,10 @@ async function refreshSessions(options) {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
     li.addEventListener("keydown", (ev) => railCardKey(ev, s.name));
+    // The key chip, first among the buttons: it is the only one whose label
+    // says something about the row rather than offering an action, and it is
+    // drawn only for a session whose profile holds a pool (railKeyChip).
+    if (typeof decorateKeyRow === "function") decorateKeyRow(li, s);
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
     if (typeof decorateTalkRow === "function") decorateTalkRow(li, s.name);
@@ -44416,6 +44425,217 @@ function sessReborrow(data) {
   });
 
   return box;
+}
+
+/* ---- switching this session onto another key of its profile's pool ----
+   claunch-wllke.1. A profile may hold several launcher keys and a session
+   uses one at a time — whichever key the launch wrote into the profile's
+   token file. Switching is a definition change plus a restart (the session's
+   `key_id`), not an edit in place: the daemon stops the session and
+   relaunches it through the restore path, so the conversation is reopened
+   (--resume) and the pin then holds for every later restore too.
+
+   The pool is read once per profile and kept here: a rail of forty sessions
+   over four profiles must not ask forty times, and the chip has to be drawn
+   from data the row builder already has. It is invalidated when a switch
+   lands and re-read on a slow clock, so "another session rotated the pool"
+   eventually reaches the chips. */
+const keyPools = new Map();        // profile -> {at, data}
+const keyPoolPending = new Map();  // profile -> Promise
+
+function fetchKeyPool(profile, { fresh = false } = {}) {
+  if (!profile) return Promise.resolve(null);
+  if (!fresh) {
+    const pending = keyPoolPending.get(profile);
+    if (pending) return pending;
+  }
+  const req = api(`/api/profiles/${encodeURIComponent(profile)}/keys`)
+    .then(async (resp) => {
+      const data = await resp.json().catch(() => null);
+      const ok = resp.ok ? data : null;
+      keyPools.set(profile, { at: Date.now(), data: ok });
+      return ok;
+    })
+    .catch(() => {
+      keyPools.set(profile, { at: Date.now(), data: null });
+      return null;
+    })
+    .finally(() => keyPoolPending.delete(profile));
+  keyPoolPending.set(profile, req);
+  return req;
+}
+
+/* How old the pool's last read may be before the row asks again. Slow on
+   purpose: a rotation somewhere else is a fact about the next launch, not
+   something the rail must show within a poll. */
+const KEY_POOL_TTL_MS = 60000;
+
+/* The rail row's key chip, or null for a session whose profile holds no
+   pool — one key is not a choice, and a chip on every row would say the
+   opposite. Reads the cached pool only; when there is none yet it starts the
+   read and lets the next poll draw the chip, which is how the rest of the
+   rail's late helpers behave. */
+function railKeyChip(s) {
+  if (!s || !s.profile) return null;
+  const hit = keyPools.get(s.profile);
+  if (!hit) {
+    fetchKeyPool(s.profile).then((data) => {
+      if (data && data.pooled && typeof refreshSessions === "function") refreshSessions();
+    });
+    return null;
+  }
+  if (Date.now() - hit.at > KEY_POOL_TTL_MS) {
+    fetchKeyPool(s.profile, { fresh: true }).then((data) => {
+      if (typeof refreshSessions === "function") refreshSessions();
+    });
+  }
+  const pool = hit.data;
+  if (!pool || !pool.pooled || !(pool.keys || []).length) return null;
+  const keys = pool.keys;
+  const pinned = s.key_id ? keys.find((k) => k.id === s.key_id) : null;
+  const current = pinned || keys.find((k) => k.current) || keys[0];
+  const shown = current.label || current.masked;
+  const btn = document.createElement("button");
+  btn.className = "sess-key" + (pinned ? " on" : "");
+  btn.type = "button";
+  btn.dataset.name = s.name;
+  btn.textContent = "🔑";
+  const text = document.createElement("span");
+  text.className = "sess-key-label";
+  text.textContent = shown;
+  btn.appendChild(text);
+  btn.title = pinned
+    ? `pinned to key ${shown} — click to switch this session onto another key`
+    : `pool of ${pool.owner || s.profile}: next launch uses key ${shown} — `
+      + "click to switch it";
+  if (typeof btn.setAttribute === "function") {
+    btn.setAttribute("aria-label", `session key: ${shown}`);
+  }
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();   // the row itself attaches; this button does not
+    openKeyPicker(s.name, s.profile);
+  });
+  return btn;
+}
+
+/* What the rail's chips draw, folded into one short string for the list's
+   own signature. The pools are read beside the sessions poll, so nothing in
+   the poll's answer changes when one arrives — and a rail whose signature did
+   not change is not rebuilt at all, which would leave a first-rendered row
+   without its chip until some unrelated session moved (claunch-wllke.1). */
+function keyPoolSignature() {
+  const parts = [];
+  for (const [profile, hit] of keyPools) {
+    const data = hit && hit.data;
+    const keys = data && data.pooled
+      ? (data.keys || []).map((k) => k.id).join(",") : "-";
+    parts.push(`${profile}:${keys}`);
+  }
+  return parts.sort().join("|");
+}
+
+/* Put the row's chip where it belongs, on a row that was just built and on
+   one the poll reused. The row is reused whenever its signature did not
+   change, and the pool arriving is not part of that signature — so a chip
+   drawn only while building would never appear on a first-rendered row whose
+   pool was still uncached, and would stay behind after the pool was emptied
+   (claunch-wllke.1). Idempotent: it replaces a chip with a fresh one, or
+   removes it once the profile is known to hold no pool. */
+function decorateKeyRow(li, s) {
+  const actions = li && li.querySelector(".rail-actions");
+  if (!actions) return;
+  const existing = actions.querySelector(".sess-key");
+  const chip = railKeyChip(s);
+  if (chip) {
+    if (existing) existing.replaceWith(chip);
+    else actions.prepend(chip);
+    return;
+  }
+  const hit = s && s.profile ? keyPools.get(s.profile) : null;
+  if (existing && hit && (!hit.data || !hit.data.pooled)) existing.remove();
+}
+
+/* The floating modal. `showModal` is the page's one dialog (Escape, backdrop
+   and Cancel all answer null), and its radio group is exactly a key list —
+   so the picker is that dialog with the pool as its choices, instead of a
+   second modal implementation with its own dismissal bugs. */
+async function openKeyPicker(name, profile) {
+  const pool = await fetchKeyPool(profile, { fresh: true });
+  if (!pool) {
+    modalInfo(`Could not read the key pool`,
+      `The daemon did not answer with ${profile}'s keys. Nothing was changed.\n\n`
+      + "A profile without a key pool has only its one token — "
+      + "`claunch keys list " + profile + "` shows what the daemon holds.");
+    return;
+  }
+  if (!pool.pooled || !(pool.keys || []).length) {
+    modalInfo(`No key pool on ${profile}`,
+      `${profile} holds a single token, so there is nothing to switch between.\n\n`
+      + `Add keys with \`claunch keys add ${profile}\`; this modal lists them once `
+      + "the profile has a pool.");
+    return;
+  }
+  const session = (typeof sessionsCache !== "undefined" && sessionsCache || [])
+    .find((x) => x.name === name);
+  const pinnedTo = session && session.key_id;
+  const options = pool.keys.map((k) => ({
+    label: k.label || k.masked,
+    hint: [
+      k.current ? "the key this profile's token file holds now" : "",
+      k.id === pinnedTo ? "pinned to this session" : "",
+      k.use_count ? `used ${k.use_count}×` : "never used",
+    ].filter(Boolean).join(" · "),
+    value: { key_id: k.id },
+  }));
+  if (pinnedTo) {
+    options.push({
+      label: "No pin — let the pool's strategy pick",
+      hint: "the next launch takes the next key by the pool's strategy",
+      value: { key_id: null },
+    });
+  }
+  const picked = await showModal({
+    title: `Key for ${name}`,
+    body: `The pool of ${pool.owner || profile} (strategy: ${pool.strategy || "rotation"}).\n`
+      + "Switching restarts this session: the same name, the same conversation, "
+      + "the harness relaunched on the key you pick. Tokens are masked here — "
+      + "the modal never sees a plaintext one.",
+    choices: { options },
+    actions: [
+      { label: "Cancel", value: null },
+      { label: "Restart on this key", value: { go: true } },
+    ],
+  });
+  if (!picked || !picked.go) return;
+  let resp;
+  let doc = {};
+  try {
+    resp = await api(`/api/sessions/${encodeURIComponent(name)}/key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key_id: picked.key_id }),
+    });
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    modalInfo("Could not reach the daemon",
+      "Nothing was changed — the session is still on the key it had.");
+    return;
+  }
+  if (!resp.ok) {
+    modalInfo("The daemon refused the switch", doc.error || `HTTP ${resp.status}`);
+    return;
+  }
+  keyPools.delete(profile);   // the pool moved; the chips re-read it
+  fetchKeyPool(profile);
+  if (currentName === name) {
+    // The restart put a fresh PTY under the same name; a terminal attached to
+    // the old one is watching a socket that just died.
+    detach();
+    await refreshSessions();
+    attach(name);
+  } else {
+    refreshSessions();
+  }
 }
 
 /* ---- the reader's own note on this session -------------------------

@@ -3376,6 +3376,25 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   font-size: 13px; line-height: 1; padding: 2px 4px; cursor: pointer;
 }
 #session-list .sess-info:hover { color: #58a6ff; }
+/* The rail row's key chip (claunch-wllke.1): the launcher key this session's
+   next launch will use, and the way into the picker. Drawn only for a
+   session whose profile holds a key pool, so its presence is itself the
+   answer to "does this one have keys to switch". The label is the key's own
+   (its label, else its mask), kept to a short pill so a name that runs long
+   cannot push the row's buttons onto another line. */
+#session-list .sess-key {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  max-width: 96px; background: none; border: 1px solid #30363d;
+  border-radius: 9px; color: #8b949e; font-size: 10px; line-height: 1;
+  padding: 2px 6px; cursor: pointer;
+}
+#session-list .sess-key:hover { color: #58a6ff; border-color: #58a6ff; }
+/* Lit while the session is pinned to a key rather than following the pool. */
+#session-list .sess-key.on { color: #d29922; border-color: #9e6a03; }
+#session-list .sess-key .sess-key-label {
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: SFMono-Regular, Consolas, monospace;
+}
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }
@@ -5626,7 +5645,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   color: #d8dbe0; cursor: pointer;
 }
 .modal-choice input { margin-top: 3px; flex: none; }
-.modal-choice small { color: #6b7280; }
+/* The hint under the label, on its own line: run together, "second" and
+   "pinned to this session" read as one sentence about nothing. */
+.modal-choice small { display: block; color: #6b7280; margin-top: 2px; }
 #modal-actions { flex: none; display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 #modal-actions button {
   padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;

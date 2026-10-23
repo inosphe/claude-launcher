@@ -438,6 +438,7 @@ CHECKS = [
         "openingimages_check.js",
         "meshattach_check.js",
         "reborrow_check.js",
+        "sessionkey_check.js",
         "sessmigrate_check.js",
         "borrowform_check.js",
         "sessrun_check.js",
@@ -701,6 +702,7 @@ BROWSER_CHECKS = [
         "stats_browser.cjs",
         "linkpanel_browser.cjs",
         "termseries_browser.cjs",
+        "sessionkey_browser.cjs",
 ]
 
 

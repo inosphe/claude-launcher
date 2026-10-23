@@ -38,6 +38,7 @@ from .. import (
     lineage,
     metering,
     profile as profile_mod,
+    profile_keys,
     provider_install,
     provider_spec,
     providers,
@@ -868,6 +869,9 @@ def build_app(
     r.add_post("/api/daemon/restart-request/reject", h_restart_request_reject)
     r.add_post("/api/daemon/restart-request/extend", h_restart_request_extend)
     r.add_get("/api/profiles", h_profiles)
+    # The key pool a session's launch reads (claunch-wllke.1): the modal's
+    # list. Masks only — see h_profile_keys.
+    r.add_get("/api/profiles/{profile}/keys", h_profile_keys)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
@@ -1255,6 +1259,10 @@ def build_app(
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
     r.add_post("/api/sessions/{name}/reborrow", h_session_reborrow)
+    # Pin this session to one key of its profile's pool and restart it
+    # (claunch-wllke.1). `.../keys` above is keystrokes into the pty; this
+    # one is a launcher key.
+    r.add_post("/api/sessions/{name}/key", h_session_key)
     r.add_post(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
@@ -9712,6 +9720,9 @@ RAIL_FIELDS = {
     "name", "harness", "profile", "cwd", "args", "model", "effort",
     "tools", "restore", "conversation_id", "role", "parent", "borrow",
     "null_token", "issue", "keep_alive", "reminder_paused", "note",
+    # The pool key this session is pinned to, or absent. The rail draws the
+    # key chip from it and the modal preselects it (claunch-wllke.1).
+    "key_id",
     "reminder_note",
     "status",
     "score_goal", "user_reward", "user_penalty",
@@ -12957,6 +12968,66 @@ async def h_session_migrate(request: web.Request) -> web.Response:
             "children": children,
         }
     )
+
+
+async def h_profile_keys(request: web.Request) -> web.Response:
+    """The key pool a launch of this profile would select from.
+
+    ``{profile}`` is a profile selector as the create forms write it
+    (``name`` or ``name:harness``). The answer names the profile whose pool it
+    actually is — a profile that holds no token of its own rotates its
+    nearest ancestor's pool — and lists that pool's keys by id and label with
+    a masked token, plus which one is the effective token right now.
+
+    The plaintext token is never part of this answer. It exists to pick a key
+    with, not to read one out, and a modal in a browser is not where a stored
+    credential belongs.
+    """
+    try:
+        prof = profile_mod.require_selector(request.match_info["profile"])
+    except profile_mod.ProfileError as exc:
+        return json_error(400, str(exc))
+    try:
+        return json_response(profile_keys.view(prof))
+    except (profile_keys.KeysError, credentials.CredentialsError) as exc:
+        # An unreadable pool is reported as such rather than drawn as an
+        # empty one: "no keys" and "I cannot read the keys" lead an operator
+        # to opposite next steps.
+        return json_error(409, str(exc))
+
+
+async def h_session_key(request: web.Request) -> web.Response:
+    """Pin a session to one key of its profile's pool, and restart it.
+
+    Body: ``{"key_id": "k-ab12cd"}`` to pin that key, ``{"key_id": null}`` to
+    unpin and go back to the pool's strategy. The pin is
+    :meth:`SessionManager.set_key` — written to the definition, then the
+    session is stopped and relaunched through the restore path, so the
+    conversation is reopened (``--resume``) and the name, directory and
+    everything else are untouched. Because the pin lives in the definition,
+    the key survives daemon restarts and later restores: every launch of the
+    session writes that key into the profile's token file instead of taking
+    the pool's next one.
+
+    Operator-only, like reborrow: which key a session authenticates with is
+    the operator's arrangement, and switching it costs a restart.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    if "key_id" not in body:
+        return json_error(
+            400, "pass 'key_id' (a key id, or null to go back to the pool's strategy)"
+        )
+    key_id = body.get("key_id")
+    if key_id is not None and not isinstance(key_id, str):
+        return json_error(400, "'key_id' must be a key id string or null")
+    try:
+        session = await manager.set_key(
+            request.match_info["name"], (key_id or "").strip() or None
+        )
+    except ManagerError as exc:
+        return json_error(400, str(exc))
+    return json_response(session.info())
 
 
 async def h_session_reborrow(request: web.Request) -> web.Response:
