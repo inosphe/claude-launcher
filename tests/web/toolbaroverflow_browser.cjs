@@ -12,7 +12,10 @@
    and holds the order the other way: the labels stay while controls are left
    to move, the menu grows one item at a time as the column narrows, and the
    glyph row appears only once more than half of the controls would have had
-   to leave. */
+   to leave. It also holds the menu to what the row cannot show: once the
+   glyphs are on, a control that had left only to save the labels comes back
+   if it fits, so nothing sits in the menu that the row has room for (review
+   of claunch-8ntfx, s1565-rev). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -80,16 +83,54 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     assert(labelled.length >= 2,
       `a column too narrow for its labels moves controls into the menu, keeping the labels: ${JSON.stringify(rows)}`);
 
-    for (let i = 1; i < rows.length; i++) {
-      assert(rows[i].overflow >= rows[i - 1].overflow,
-        `the menu only grows as the column narrows: ${JSON.stringify(rows)}`);
-    }
-
+    // Within each row -- labelled, then glyphs -- the menu only grows as the
+    // column narrows. Across the two it may empty: the glyph row holds
+    // controls the labelled row could not, and the peel starts over there.
     const glyphs = rows.filter(r => r.compact);
-    assert(glyphs.length > 0, `the glyph row still takes over when the menu would hold most of the row: ${JSON.stringify(rows)}`);
-    assert(glyphs.every(r => r.overflow >= Math.floor(r.of / 2)),
-      `the labels are given up only once more than half of the controls would leave: ${JSON.stringify(rows)}`);
-    for (const r of glyphs) assert.equal(r.overflowsBox, false, `the row still fits its box at ${r.at}px`);
+    assert(glyphs.length > 0, `the glyph row still takes over once most of the row has left: ${JSON.stringify(rows)}`);
+    for (const band of [rows.filter(r => !r.compact), glyphs]) {
+      for (let i = 1; i < band.length; i++) {
+        assert(band[i].overflow >= band[i - 1].overflow,
+          `the menu only grows as the column narrows within a row: ${JSON.stringify(rows)}`);
+      }
+    }
+    for (const r of rows) assert.equal(r.overflowsBox, false, `the row still fits its box at ${r.at}px`);
+
+    // Minimality: no control sits in the menu that the row could show. Every
+    // one of them is put back, alone, and the row must then overflow -- that
+    // is the fitter's own criterion, measured synchronously so the refit does
+    // not undo the temporary class.
+    const leftover = [];
+    for (const w of [1100, 800, 600, 400]) {
+      await width(w);
+      await settle();
+      const check = await page.evaluate(() => {
+        const h = document.getElementById("term-header");
+        const more = document.getElementById("term-more");
+        const style = getComputedStyle(h);
+        const avail = h.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        const gap = parseFloat(style.columnGap);
+        const items = [...h.children].flatMap(el => el.classList.contains("term-actions") ? [...el.children] : [el])
+          .filter(el => el !== more && el.id !== "term-details"
+            && (el.classList.contains("toolbar-overflow") || getComputedStyle(el).display !== "none"));
+        const needed = () => {
+          const visible = items.filter(el => !el.classList.contains("toolbar-overflow"));
+          if (!more.classList.contains("hidden")) visible.push(more);
+          return visible.reduce((sum, el) => sum + el.getBoundingClientRect().width, 0)
+            + Math.max(0, visible.length - 1) * gap;
+        };
+        const back = [];
+        for (const item of items.filter(el => el.classList.contains("toolbar-overflow"))) {
+          item.classList.remove("toolbar-overflow");
+          if (needed() <= avail + 0.5) back.push(item.id || item.className);
+          item.classList.add("toolbar-overflow");
+        }
+        return { compact: h.classList.contains("term-compact"), avail, back };
+      });
+      if (check.back.length) leftover.push({ at: w, ...check });
+    }
+    assert.deepEqual(leftover, [],
+      `no control sits in the menu that the row could show: ${JSON.stringify(leftover)}`);
 
     // The regression pin: one pixel past the point where the labelled row
     // fits costs one control, not every label on the row. The old fitter
@@ -120,6 +161,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       assert.equal(new Set(seq).size, 1, `the row holds still at ${w}px: ${[...new Set(seq)].join("|")}`);
     }
 
-    console.log(`toolbaroverflow: labels kept to ⋯${Math.max(...labelled.map(r => r.overflow))} of ${edge.of}, glyphs from ${Math.min(...glyphs.map(r => r.at))}px`);
+    console.log(`toolbaroverflow: labels kept to ⋯${Math.max(...labelled.map(r => r.overflow))} of ${edge.of},`
+      + ` glyphs take over at ${Math.max(...glyphs.map(r => r.at))}px`);
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

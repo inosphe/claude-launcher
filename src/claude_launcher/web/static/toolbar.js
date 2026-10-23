@@ -189,8 +189,13 @@
     // that holds everything else is the worse of the two rows -- so at that
     // point the row gives up the labels instead and `term-compact` rebuilds
     // each labelled control as a fixed-width glyph (CSS), which frees far
-    // more width than the pixel or two that started this. Whatever still
-    // does not fit after that leaves the row too.
+    // more width than the pixel or two that started this.
+    //
+    // The peel starts over at that point: a control that left to save the
+    // labels may fit the row as a glyph, and a menu holding controls the row
+    // could show is the thing this order exists to avoid (review of
+    // claunch-8ntfx, s1565-rev). Only what the glyph row still cannot hold
+    // stays in the menu.
     const movable = items.filter(el => el.id !== "term-title");
     const labelsUntil = Math.floor(movable.length / 2);
     const leave = (item) => { item.classList.add("toolbar-overflow"); overflow.unshift(item); };
@@ -201,11 +206,25 @@
         if (fits() || overflow.length >= labelsUntil) break;
         leave(item);
       }
-      if (!fits()) header.classList.add("term-compact");
-      for (const item of movable) {
-        if (fits()) break;
-        if (!item.classList.contains("toolbar-overflow")) leave(item);
+      if (!fits()) {
+        header.classList.add("term-compact");
+        for (const item of movable) item.classList.remove("toolbar-overflow");
+        overflow = [];
+        for (const item of movable) {
+          if (fits()) break;
+          leave(item);
+        }
       }
+      // The peel is greedy and stops at the first width that fits, so a
+      // narrow control behind a wide one can be left in the menu with room to
+      // spare. Put each of them back in turn; the row only grows as they
+      // return, so one pass is enough to leave nothing the row could hold.
+      for (const item of overflow.slice()) {
+        item.classList.remove("toolbar-overflow");
+        if (fits()) overflow.splice(overflow.indexOf(item), 1);
+        else item.classList.add("toolbar-overflow");
+      }
+      if (!overflow.length) more.classList.add("hidden");
     }
     if (menu.matches(":popover-open")) {
       if (!overflow.length) menu.hidePopover();
