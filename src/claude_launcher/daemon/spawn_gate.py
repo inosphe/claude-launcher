@@ -172,8 +172,12 @@ def clean_reason(text) -> str:
     return reason
 
 
-#: The five rows a spawn card spells out (claunch-mgope), in display order.
-CARD_FIELDS = ("project", "profile", "workspace", "role", "workflow")
+#: The six rows a spawn card spells out (claunch-mgope, claunch-8x6v2), in
+#: display order. ``workspace`` and ``worktree`` are two rows on purpose: a
+#: workspace is a registered DIRECTORY, a worktree is a git CHECKOUT of the
+#: repository inside one, and one row carrying both ("alpha (new worktree)")
+#: read as if the workspace were the checkout.
+CARD_FIELDS = ("project", "profile", "workspace", "worktree", "role", "workflow")
 
 
 def _dir_label(path: str) -> str:
@@ -187,6 +191,44 @@ def _dir_label(path: str) -> str:
         return path
     sub = workspaces.subpath(owner, path)
     return f"{owner.name}/{sub}" if sub else owner.name
+
+
+def _worktree_row(spec: dict, *, top_level: bool, asked: Optional[dict]) -> dict:
+    """The checkout row: which git worktree the session would run in.
+
+    The row above (``workspace``) names the DIRECTORY; this one names the
+    CHECKOUT of the repository in it, and the two are separate answers.
+
+    - a top-level body's ``worktree: ""`` present means a NEW checkout with
+      the generated name (the root spec always carries the key);
+    - a child body's ``worktree: true`` means the same, because the child
+      has no name to build ``<parent>-<child>-<stamp>`` from before it is
+      staged;
+    - a non-empty string is that checkout — a new one of that name, or the
+      existing one it names, which is the daemon's call at create time;
+    - absent or empty on a child body means no checkout of its own: it runs
+      in the asker's working copy.
+
+    ``asked`` is the agent's own body when ``spec`` is the daemon's
+    completion of it, so a ``new`` the daemon added reads as inherited.
+    ``branch_from`` / ``rebase_onto`` ride here rather than as rows of their
+    own: they only qualify this one answer."""
+    raw = spec.get("worktree")
+    source = spec if asked is None else asked
+    if isinstance(raw, str) and raw.strip():
+        value = raw.strip()
+    elif raw is True or (top_level and "worktree" in spec):
+        value = "new (generated name)"
+    else:
+        # No checkout of its own: it runs in the asker's working copy. The
+        # blank row is that answer, the way an empty role or workflow reads.
+        return {"value": "", "inherited": False}
+    bits = [value]
+    if str(spec.get("branch_from") or "").strip():
+        bits.append(f"from {str(spec['branch_from']).strip()}")
+    if str(spec.get("rebase_onto") or "").strip():
+        bits.append(f"rebased onto {str(spec['rebase_onto']).strip()}")
+    return {"value": " ".join(bits), "inherited": "worktree" not in source}
 
 
 def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
@@ -244,10 +286,11 @@ def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
         where = row(_dir_label(home), not moved)
     else:
         where = row(_dir_label(str(asker.get("cwd") or "")) if asker.get("cwd") else "", True)
-    fresh = ("worktree" in spec) if top_level else bool(spec.get("worktree"))
-    if fresh and where["value"]:
-        where["value"] += " (new worktree)"
+    # The workspace row says only where: the checkout is the next row's
+    # question, and folding it in here read as "the workspace is the
+    # worktree" (claunch-8x6v2).
     facts["workspace"] = where
+    facts["worktree"] = _worktree_row(spec, top_level=top_level, asked=asked)
     facts["role"] = row(str(spec.get("role") or "").strip())
     flow = str(spec.get("workflow") or "").strip()
     facts["workflow"] = row("" if flow == "-" else flow)

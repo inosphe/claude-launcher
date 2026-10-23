@@ -466,9 +466,12 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
             assert {r["id"] for r in rows} == {one, two}
             # the card's rows ride on the listing, resolved against the asker
             assert rows[0]["facts"]["profile"] == {"value": "p", "inherited": False}
-            # a root body's empty worktree is a new checkout (claunch-mgope review)
-            assert rows[0]["facts"]["workspace"] == {"value": "/w/op (new worktree)",
+            # the directory and its checkout are two rows (claunch-8x6v2):
+            # here a root record, whose empty worktree is a new checkout
+            assert rows[0]["facts"]["workspace"] == {"value": "/w/op",
                                                      "inherited": True}
+            assert rows[0]["facts"]["worktree"] == {"value": "new (generated name)",
+                                                    "inherited": False}
             got = await (await client.get(f"/api/spawn-requests/{one}", headers=AUTH)).json()
             assert got["request"]["facts"]["workflow"]["value"] == "improv-worker-v2"
             assert "facts" not in gate.get(one), "the stored record keeps the spec only"
@@ -728,8 +731,11 @@ def test_card_facts_fill_a_childs_blanks_from_its_asker(home, tmp_path):
     assert list(facts) == list(spawn_gate.CARD_FIELDS)
     assert facts["project"] == {"value": "alpha", "inherited": True}
     assert facts["profile"] == {"value": "work", "inherited": True}
-    assert facts["workspace"] == {"value": "repo/.claude/worktrees/w1 (new worktree)",
+    # the workspace is the DIRECTORY the child would run in; the checkout it
+    # asked for is its own row (claunch-8x6v2)
+    assert facts["workspace"] == {"value": "repo/.claude/worktrees/w1",
                                   "inherited": True}
+    assert facts["worktree"] == {"value": "w1-kid", "inherited": False}
     assert facts["role"] == {"value": "worker", "inherited": False}
     assert facts["workflow"] == {"value": "improv-worker-v2", "inherited": False}
 
@@ -767,17 +773,48 @@ def test_card_facts_read_a_top_level_body(home, tmp_path):
     spec = {"profile": "work", "project": "alpha", "cwd": "/w/op", "worktree": "",
             "task": "t"}
     facts = spawn_gate.card_facts(spec, asker, top_level=True, asked={"task": "t"})
-    assert facts["workspace"] == {"value": "/w/op (new worktree)", "inherited": True}
+    assert facts["workspace"] == {"value": "/w/op", "inherited": True}
+    # a top-level body's present-but-empty worktree is a new checkout; the
+    # asker did not name one, so the daemon's own answer reads as inherited
+    assert facts["worktree"] == {"value": "new (generated name)", "inherited": True}
     assert facts["profile"] == {"value": "work", "inherited": True}
     assert facts["project"] == {"value": "alpha", "inherited": True}
     # what the agent named stays its own
     named = spawn_gate.card_facts(spec, asker, top_level=True,
-                                  asked={"task": "t", "project": "alpha"})
+                                  asked={"task": "t", "project": "alpha",
+                                         "worktree": ""})
     assert named["project"] == {"value": "alpha", "inherited": False}
     assert named["workspace"]["inherited"] is False
-    # a child body's empty worktree is no worktree
+    assert named["worktree"] == {"value": "new (generated name)", "inherited": False}
+    # a child body's empty worktree is no worktree of its own — it runs in
+    # the asker's working copy (not a second directory)
     child = spawn_gate.card_facts({"worktree": ""}, asker)
     assert child["workspace"] == {"value": "/w/op", "inherited": True}
+    assert child["worktree"] == {"value": "", "inherited": False}
+
+
+def test_card_facts_read_the_checkout_a_child_was_given(home, tmp_path):
+    from claude_launcher import workspaces
+
+    (tmp_path / "repo").mkdir()
+    workspaces.add(str(tmp_path / "repo"), "repo")
+    asker = {"profile": "work", "cwd": str(tmp_path / "repo"), "project": "alpha"}
+    # A named checkout with the branch it starts from: one row, each half of
+    # the answer visible (claunch-8x6v2).
+    facts = spawn_gate.card_facts({"workspace": "repo", "worktree": "kid-1",
+                                   "branch_from": "master"}, asker)
+    assert facts["workspace"] == {"value": "repo", "inherited": False}
+    assert facts["worktree"] == {"value": "kid-1 from master", "inherited": False}
+    # A reuse that is rebased: the other qualifier, never both from the
+    # daemon's point of view, but the row still says which is which.
+    reuse = spawn_gate.card_facts({"worktree": "old-1", "rebase_onto": "master"},
+                                  asker)
+    assert reuse["worktree"] == {"value": "old-1 rebased onto master",
+                                 "inherited": False}
+    # `true` is the generated name, which a child body can ask for before it
+    # has a name to build one from.
+    auto = spawn_gate.card_facts({"worktree": True}, asker)
+    assert auto["worktree"] == {"value": "new (generated name)", "inherited": False}
 
 
 def test_card_facts_resolve_a_harness_selector_and_a_shut_workspace_gate(home, tmp_path):

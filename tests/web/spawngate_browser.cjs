@@ -32,7 +32,7 @@ const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status:
   reason: 'it did this work', deadline: soon(), extensions: 1, fallback: SPEC,
   basis: { operator_name: 'Alpha' }, requested_at: new Date().toISOString() });
 const CHILD = { task: 'Write the parser tests\nall of them', role: 'worker', name: 'kid',
-  workflow: 'improv-worker-v2', project: 'alpha' };
+  workflow: 'improv-worker-v2', project: 'alpha', worktree: 'kid-wt', beads: false };
 // The daemon's resolution of what the child spec leaves to its asker
 // (claunch-mgope): profile and directory come from w1.
 const CHILD_FACTS = { project: { value: 'alpha', inherited: false }, profile: { value: 'p', inherited: true },
@@ -109,8 +109,11 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.match(spawnText, /reason: no running session does it/);
     assert.match(spawnText, /issue alpha-7 — Fix the login bug/);
     // No `facts` on the record (an older daemon): the spec's own values.
+    // The directory and the checkout are two rows (claunch-8x6v2): the
+    // workspace is where, the worktree is which checkout of it.
     assert.deepEqual(await factRows(spawnCard), [['project', 'alpha'], ['profile', 'p'],
-      ['workspace', '/repo/alpha (new worktree)'], ['role', '—'], ['workflow', 'improv-worker-v2']]);
+      ['workspace', '/repo/alpha'], ['worktree', 'new (generated name)'],
+      ['role', '—'], ['workflow', 'improv-worker-v2']]);
     assert.match(spawnText, /no answer in 4:3\d: no top-level session — created as op1's child instead/);
     const buttons = async card => (await card.locator('.gate-actions button').allInnerTexts()).map(t => t.trim());
     assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
@@ -125,7 +128,8 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.match(childText, /child session requested under w1/);
     assert.match(childText, /name kid — Write the parser tests/);
     assert.deepEqual(await factRows(childCard), [['project', 'alpha'], ['profile', 'p (inherited from w1)'],
-      ['workspace', 'alpha (inherited from w1)'], ['role', 'worker'], ['workflow', 'improv-worker-v2']]);
+      ['workspace', 'alpha (inherited from w1)'], ['worktree', 'kid-wt'],
+      ['role', 'worker'], ['workflow', 'improv-worker-v2']]);
     assert.match(childText, /auto-approves in 4:3\d — created as asked/);
     assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
     assert.equal(await page.evaluate(() => gatePending.spawn.length), 4, 'the bell counts all four');
@@ -156,11 +160,19 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     await resumeCard.waitFor({ state: 'detached' });
     assert.deepEqual(posts.at(-1), ['bbb222', 'spawn']);
 
-    // Manual: the New session tab, filled with the request
+    // Manual: the New session tab, filled with the request. What the browser
+    // remembered is standing on the form first (the draft/recall a page load
+    // restores); the request's own answers have to land over it
+    // (claunch-8x6v2).
     await page.evaluate(() => {
       const f = $('new-session');
       f.project.appendChild(new Option('alpha', 'alpha'));
       f.profile.appendChild(new Option('p', 'p'));
+      f.project.appendChild(new Option('beta', 'beta'));
+      f.profile.appendChild(new Option('draft-p', 'draft-p'));
+      f.task.value = "the browser's last task";
+      f.project.value = 'beta';
+      f.profile.value = 'draft-p';
     });
     await spawnCard.getByRole('button', { name: 'Manual' }).click();
     await page.waitForFunction(() => typeof sessionModal === 'object' && sessionModal
@@ -172,9 +184,11 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       parent: ($('new-session').parent || {}).value || '',
       project: $('new-session').project.value,
       profile: $('new-session').profile.value,
+      worktree: $('new-session').worktree_mode.value,
       overlay: !$('modal-overlay').classList.contains('hidden'),
     }));
-    assert.deepEqual(form, { tab: 'new', task: SPEC.task, parent: '', project: 'alpha', profile: 'p', overlay: true });
+    assert.deepEqual(form, { tab: 'new', task: SPEC.task, parent: '', project: 'alpha',
+      profile: 'p', worktree: 'new', overlay: true });
     await spawnCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-manual.png') });
@@ -185,6 +199,11 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     // the other requests' cards stayed up through the first Manual
     await page.evaluate(() => {
       sessionsCache = [{ name: 'w1', status: 'idle', harness: 'claude', profile: 'p', cwd: '/repo/alpha' }];
+      const f = $('new-session');
+      // the browser's remembered answers again, and the request has to win
+      f.task.value = "the browser's last task";
+      f.name.value = 'browser-kid';
+      f.worktree_name.value = 'browser-wt';
     });
     await childCard.getByRole('button', { name: 'Manual' }).click();
     await page.waitForFunction(() => typeof sessionModal === 'object' && sessionModal
@@ -195,8 +214,11 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       task: $('new-session').task.value,
       name: $('new-session').name.value,
       parent: sessionFormView().parent || '',
+      worktreeName: $('new-session').worktree_name.value,
+      beads: $('new-session').beads.value,
     }));
-    assert.deepEqual(child, { tab: 'spawn', task: CHILD.task, name: 'kid', parent: 'w1' });
+    assert.deepEqual(child, { tab: 'spawn', task: CHILD.task, name: 'kid', parent: 'w1',
+      worktreeName: 'kid-wt', beads: 'none' });
     await childCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-child-manual.png') });

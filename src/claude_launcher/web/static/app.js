@@ -11871,7 +11871,11 @@ function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
     relabelModelOptions(f.model, choices, ids);
     f._modelLabelKey = labelKey;
   }
-  if (parent) applySpawnModelRecall(f);
+  // A Model the caller seeded (a spawn request's own answer) outranks the
+  // browser's memory of this parent's last pick, so it goes on after the
+  // rebuild and before the recall (claunch-8x6v2).
+  if (f._modelPreset !== undefined) applySeededChoice(f, f.model, "_modelPreset");
+  else if (parent) applySpawnModelRecall(f);
   const row = $("new-model-row");
   if (row) row.classList.toggle("hidden", !choices.length);
   if (f.effort) {
@@ -11894,9 +11898,31 @@ function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
       f.effort.value = inheritedEffort;
       f._effortFor = effortKey;
     }
+    if (f._effortPreset !== undefined) applySeededChoice(f, f.effort, "_effortPreset");
     const effortRow = $("new-effort-row");
     if (effortRow) effortRow.classList.toggle("hidden", !efforts.length);
   }
+}
+
+/* Put a seed's answer on a select the form rebuilds for the harness.
+   The preset stands until the operator answers that row (then it is
+   dropped) or the box closes: the page re-syncs this form every two
+   seconds and rebuilds the list for the harness, so an answer that lasted
+   one pass would be lost to the next rebuild. A value the list does not
+   offer is added, not dropped — the request named it, and the daemon is
+   the one with the standing to refuse it. */
+function applySeededChoice(f, select, presetKey) {
+  const want = String(f[presetKey] ?? "");
+  if (!select) return;
+  // A row the operator has answered is theirs: the seed lets go of it for
+  // the rest of this opening rather than winning the next rebuild.
+  if (f._answeredRows && f._answeredRows.has(select)) {
+    delete f[presetKey];
+    return;
+  }
+  if (select.disabled || !want) return;
+  ensureOption(select, want);
+  if (select.value !== want) select.value = want;
 }
 
 /* ---- Codex's harness-specific runtime panel ----------------------------
@@ -12721,6 +12747,12 @@ const WORKTREE_FROM_BRANCH_LIMIT = 30;
    an answer standing on a row the policy shut. */
 let pendingWorktreeMode = "";
 
+/* A checkout name a seed (a spawn request's Manual form) asked for, held
+   until the checkout list arrives: the same name answers "cut one" on a
+   repository that does not have it and "reuse it" on one that does, and
+   only that list can tell the two apart. (claunch-8x6v2) */
+let pendingWorktreeSeed = "";
+
 function newWorktreeMode() {
   const f = $("new-session");
   const picked = f && f.worktree_mode;
@@ -13015,6 +13047,24 @@ function syncNewWorktree() {
   if (!f || !box) return;
   const parent = spawnParent();
   const usable = worktreeRowUsable();
+  // A seeded checkout name, once the list describes this directory
+  // (newWorktreeGit.for is stamped by refreshNewWorktree when the read
+  // lands): a name the repository already has is the REUSE answer, and a
+  // name it does not is a NEW one of that name.
+  if (pendingWorktreeSeed && usable && newWorktreeGit.for) {
+    const name = pendingWorktreeSeed;
+    pendingWorktreeSeed = "";
+    if ((newWorktreeGit.worktrees || []).includes(name)) {
+      renderWorktreeOptions();
+      if ([...f.worktree_existing.options].some((o) => o.value === name)) {
+        f.worktree_mode.value = "existing";
+        f.worktree_existing.value = name;
+      }
+    } else {
+      f.worktree_mode.value = "new";
+      f.worktree_name.value = name;
+    }
+  }
   if (pendingWorktreeMode && usable) {
     // The remembered answer, applied on the first sync that can carry it.
     // "existing" carries no checkout of its own: a directory offering none
@@ -46531,6 +46581,10 @@ function saveNewFormDraft() {
   if (newFormDraftRestoring) return;
   const f = $("new-session");
   if (!f || sessionFormView().mode !== "new") return;
+  // The seed's own writes are the request's answers, not the operator's:
+  // recording them would make the next New session open on whatever the
+  // last spawn request asked for (claunch-8x6v2).
+  if (f._seeding) return;
   const draft = readNewFormDraft() || {};
   for (const name of NEW_FORM_DRAFT_FIELDS) {
     const answer = newFormDraftAnswer(f.elements[name]);
@@ -47168,8 +47222,28 @@ function applySessionModalSeed(f, seed) {
     newInputsFor = null;
     if (typeof syncCflowInputs === "function") syncCflowInputs();
   }
+  if (seed.context !== undefined && f.context && !answered(f.context)) {
+    f.context.value = seed.context || "";
+  }
   if (seed.worktree !== undefined && f.worktree_mode && !answered("worktree_mode")) {
+    // A mode the recall parked is a browser answer; the request's own
+    // answer takes the row now, so the parked one must not land on the next
+    // sync (syncNewWorktree spends it).
+    pendingWorktreeMode = "";
     f.worktree_mode.value = seed.worktree ? "new" : "";
+    if (seed.worktree_name && f.worktree_name) {
+      f.worktree_name.value = seed.worktree_name;
+      // Whether that name answers NEW or REUSE is the checkout list's call,
+      // and the list lands after this form opens (syncNewWorktree).
+      pendingWorktreeSeed = seed.worktree_name;
+    }
+    if (seed.branch_from && f.worktree_from) {
+      ensureOption(f.worktree_from, seed.branch_from);
+      f.worktree_from.value = seed.branch_from;
+    }
+    if (seed.rebase_onto && f.worktree_rebase) {
+      f.worktree_rebase.value = seed.rebase_onto;
+    }
     syncNewWorktree();
   }
   // The project and profile a request named (an operator's spawn request,
@@ -47194,6 +47268,23 @@ function applySessionModalSeed(f, seed) {
       f._seeding = wasSeeding;
     }
   }
+  // The harness a request named, before the two rows it decides: a model
+  // alias or an effort level means nothing to another harness. The row's own
+  // change redraws them, which is why the seed goes on through it rather than
+  // by assignment alone.
+  if (seed.harness !== undefined && f.harness && !answered(f.harness)) {
+    ensureOption(f.harness, seed.harness);
+    if (f.harness.value !== seed.harness) {
+      f.harness.value = seed.harness;
+      const wasSeeding = !!f._seeding;
+      f._seeding = true;
+      try {
+        f.harness.dispatchEvent(new Event("change", { bubbles: true }));
+      } finally {
+        f._seeding = wasSeeding;
+      }
+    }
+  }
   // Where it works, from either spelling: a registry NAME (what an issue
   // records) or the path the picker's values actually are. The name is
   // resolved against the workspace list, so a seed that arrives before that
@@ -47208,6 +47299,32 @@ function applySessionModalSeed(f, seed) {
       // seed's — the same work the row's own change does.
       applySessionCwdChange();
     }
+  }
+  // The board answer, including the two "no issue" ones an agent may send
+  // (false = wait for instructions, "none-auto" = pick one itself). A
+  // request that said "no issue" must not open on the browser's last
+  // answer, which would put the created session on a board it was told to
+  // leave alone.
+  if (seed.beads !== undefined && f.beads && !answered("beads")) {
+    const want = seed.beads === false ? "none"
+      : seed.beads === "existing-pending" ? "existing"
+      : String(seed.beads);
+    const radio = [...f.beads].find((r) => r.value === want && !r.disabled);
+    if (radio) {
+      radio.checked = true;
+      // The form's own write: the row's change does the folding work below
+      // it, and it must not be read as the operator answering the row.
+      const wasSeeding = !!f._seeding;
+      f._seeding = true;
+      try {
+        radio.dispatchEvent(new Event("change", { bubbles: true }));
+      } finally {
+        f._seeding = wasSeeding;
+      }
+    }
+  }
+  if (seed.issue_text !== undefined && f.issue_text && !answered(f.issue_text)) {
+    f.issue_text.value = seed.issue_text || "";
   }
   // An issue that already exists, picked rather than minted. The radio is
   // set first, because the picker's row is folded under any other answer
@@ -47224,7 +47341,18 @@ function applySessionModalSeed(f, seed) {
   if (seed.null_token !== undefined && !answered(f.null_token)) {
     f.null_token.checked = !!seed.null_token;
   }
-  if (seed.model !== undefined) f._modelPreset = seed.model;
+  // The Model and Reasoning effort rows are rebuilt for the harness long
+  // after this seed runs, so their answers are parked and spent by that
+  // rebuild (applySeededChoice), which is also where the browser's own
+  // model recall runs — the seed has to be there to outrank it.
+  if (seed.model !== undefined && !answered(f.model)) {
+    f._modelPreset = String(seed.model || "");
+    applySeededChoice(f, f.model, "_modelPreset");
+  }
+  if (seed.effort !== undefined && !answered(f.effort)) {
+    f._effortPreset = String(seed.effort || "");
+    applySeededChoice(f, f.effort, "_effortPreset");
+  }
   if (seed.prompt_packs !== undefined && !answered("prompt_pack_*")) {
     pendingSeedPacks = [...(seed.prompt_packs || [])];
     applyPendingPackSeed();
@@ -47585,8 +47713,14 @@ async function openSessionModal(opts = {}) {
   refreshParentChoices();
   setSessionModalTab(tab);
   promptPackFormOpened();
+  // What the browser remembers is the BASE and the caller's seed is the
+  // newer word (claunch-8x6v2): fill the draft/recall first, then let the
+  // seed write over it. Skipping the recall on a seeded opening — which is
+  // what a spawn request's Manual does — left every row the seed did not
+  // name on whatever the page already held, so the request's own values
+  // showed up as the browser's last ones.
+  applySessionModalRecall(f);
   if (opts.seed) applySessionModalSeed(f, opts.seed);
-  else applySessionModalRecall(f);
   refreshScoreGoalDefault(f);
   // The worktree list is not waited for. /api/git runs four git processes
   // over the parent's checkout, and on a repository this machine has been
@@ -47627,6 +47761,14 @@ function sessionModalClose(opts = {}) {
   // A remembered answer the row never became able to carry is dropped with
   // the box: the next opening asks the recall again.
   pendingWorktreeMode = "";
+  pendingWorktreeSeed = "";
+  // A seeded Model / Reasoning effort the row never took is this opening's
+  // answer, not the page's: the next opening starts from the recall again.
+  const seededForm = $("new-session");
+  if (seededForm) {
+    delete seededForm._modelPreset;
+    delete seededForm._effortPreset;
+  }
   pendingSeedPacks = null;
   pendingSeedInputs = null;
   $("new-session-actions").removeChild(sessionModal.cancelBtn);
@@ -55448,21 +55590,45 @@ function spawnGateSpecText(spec) {
   return head && task ? `${head} — ${task}` : head || task;
 }
 
-const SPAWN_GATE_FACTS = ["project", "profile", "workspace", "role", "workflow"];
+// workspace (the registered directory) and worktree (the git checkout in
+// it) are separate rows: claunch-8x6v2, where one row read as both.
+const SPAWN_GATE_FACTS = ["project", "profile", "workspace", "worktree", "role", "workflow"];
 
-/* The five things the session would run as, one labelled row each
-   (claunch-mgope). The daemon's `facts` resolve what the spec leaves to
-   the asker and mark those rows inherited; a record without them (an
-   older daemon) shows the spec's own values. */
+/* A row's answer read off the spec itself, for a record from an older
+   daemon that sends no `facts`. Mirrors spawn_gate.card_facts: `workspace`
+   is the DIRECTORY (a registered workspace name, or the path), `worktree`
+   is the CHECKOUT inside it — a name, "new (generated name)", or empty for
+   none. They are two rows because one row carrying both read as if the
+   workspace were the worktree (claunch-8x6v2). */
+function spawnGateSpecFact(rec, spec, key) {
+  if (key === "workspace") return String(spec.workspace || spec.cwd || "");
+  if (key === "worktree") {
+    const raw = spec.worktree;
+    let value = "";
+    // A top-level body's present-but-empty worktree is a new checkout, and
+    // a child body's `true` says the same with the name left to the daemon.
+    if (typeof raw === "string" && raw.trim()) value = raw.trim();
+    else if (raw === true || (rec.scope !== "child" && "worktree" in spec)) {
+      value = "new (generated name)";
+    }
+    const bits = value ? [value] : [];
+    if (bits.length && spec.branch_from) bits.push(`from ${spec.branch_from}`);
+    if (bits.length && spec.rebase_onto) bits.push(`rebased onto ${spec.rebase_onto}`);
+    return bits.join(" ");
+  }
+  return spec[key] === "-" ? "" : String(spec[key] || "");
+}
+
+/* The six things the session would run as, one labelled row each
+   (claunch-mgope, claunch-8x6v2). The daemon's `facts` resolve what the
+   spec leaves to the asker and mark those rows inherited; a record without
+   them (an older daemon) shows the spec's own values. */
 function spawnGateFacts(rec, spec) {
   const facts = rec.facts || {};
   const box = el("div", "notice-sub gate-facts");
   for (const key of SPAWN_GATE_FACTS) {
-    let own = String(spec[key] || (key === "workspace" ? spec.cwd || "" : ""));
-    // A top-level body's present-but-empty worktree is a new checkout.
-    const fresh = rec.scope === "child" ? !!spec.worktree : "worktree" in spec;
-    if (key === "workspace" && own && fresh) own += " (new worktree)";
-    const fact = facts[key] || { value: own === "-" ? "" : own, inherited: false };
+    const own = spawnGateSpecFact(rec, spec, key);
+    const fact = facts[key] || { value: own, inherited: false };
     box.appendChild(el("span", "gate-fact-key", key));
     const val = el("span", "gate-fact-val", fact.value || "—");
     if (fact.inherited) {
@@ -55532,40 +55698,80 @@ async function spawnGatePost(rec, verb, btn, body) {
   return settled;
 }
 
-/* Manual: the form, filled with the request's spec. A top-level request
-   opens the New session tab; a child request opens the spawn child tab
-   with the asker as the parent, where the person edits name, role,
-   project, workspace, workflow and profile before creating it. */
+/* Manual: the form, filled with the request's spec — every answer it
+   carries, over what the browser remembers. A top-level request opens the
+   New session tab; a child request opens the spawn child tab with the asker
+   as the parent. The person edits it from there and creates it. */
 async function spawnGateManual(rec) {
   const spec = rec.spec || {};
-  const seed = { name: spec.name || "", task: spec.task || "" };
-  if (spec.project) seed.project = spec.project;
-  if (spec.profile) seed.profile = spec.profile;
-  if (spec.workflow) {
-    seed.workflow = spec.workflow === "-" ? "" : spec.workflow;
-    if (/-v2$/.test(spec.workflow)) seed.workflow_version = 2;
-  }
-  if (spec.cflow_inputs) seed.cflow_inputs = spec.cflow_inputs;
-  if (spec.issue) seed.issue = spec.issue;
+  const seed = spawnRequestSeed(spec, rec);
   if (rec.scope === "child") {
-    if (spec.mesh !== undefined) seed.mesh = spec.mesh === "-" ? "" : spec.mesh;
-    if (spec.role) seed.role = spec.role;
-    if (spec.subroles) seed.subroles = spec.subroles;
-    if (spec.worktree) seed.worktree = "new";
-    if (spec.workspace) seed.workspace = spec.workspace;
-    if (spec.cwd) seed.cwd = spec.cwd;
-    if (spec.prompt_packs) seed.prompt_packs = spec.prompt_packs;
     await openSessionModal({
       tab: "spawn", parent: rec.session, seed, spawnRequest: rec.id,
     });
     return;
   }
-  if (spec.worktree !== undefined) seed.worktree = "new";
-  if (spec.cwd) seed.cwd = spec.cwd;
   await openSessionModal({
     tab: "new", seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
     spawnRequest: rec.id,
   });
+}
+
+/* The request's spec as a form seed: EVERY answer the spec carries, not the
+   handful the first version spelled out (claunch-8x6v2). A row this leaves
+   empty is one the request did not answer, and openSessionModal fills those
+   from what the browser remembers — the request's own values would then be
+   missing exactly where the person was looking. */
+function spawnRequestSeed(spec, rec) {
+  const seed = {};
+  const put = (key, value) => {
+    if (value !== undefined && value !== null && value !== "") seed[key] = value;
+  };
+  // Name and task are seeded even when the request left them empty: an
+  // anonymous request means "name it for me" and an empty task means the
+  // job is defined in the issue or elsewhere — neither is the browser's
+  // last session's answer, which is what the form would otherwise carry.
+  seed.name = spec.name || "";
+  seed.task = spec.task || "";
+  if (spec.context !== undefined) seed.context = spec.context || "";
+  put("issue", spec.issue);
+  put("issue_text", spec.issue_text);
+  if (spec.beads !== undefined) seed.beads = spec.beads;
+  put("project", spec.project);
+  put("profile", spec.profile);
+  put("harness", spec.harness);
+  put("model", spec.model);
+  put("effort", spec.effort);
+  if (Array.isArray(spec.args) && spec.args.length) seed.args = spec.args;
+  if (spec.null_token !== undefined) seed.null_token = !!spec.null_token;
+  if (spec.workflow) {
+    seed.workflow = spec.workflow === "-" ? "" : spec.workflow;
+    if (/-v2$/.test(spec.workflow)) seed.workflow_version = 2;
+  }
+  if (spec.cflow_inputs) seed.cflow_inputs = spec.cflow_inputs;
+  if (spec.prompt_packs) seed.prompt_packs = spec.prompt_packs;
+  if (spec.workspace) seed.workspace = spec.workspace;
+  if (spec.cwd) seed.cwd = spec.cwd;
+  if (rec.scope === "child") {
+    if (spec.mesh !== undefined) seed.mesh = spec.mesh === "-" ? "" : spec.mesh;
+    put("role", spec.role);
+    if (spec.subroles) seed.subroles = spec.subroles;
+  }
+  if (spec.worktree !== undefined) {
+    // A string names the checkout — and on a CHILD body the empty string
+    // means "none of its own", while a top-level body writes the same empty
+    // string for "a new one, name generated" because the child's name is
+    // not known yet. `true` asks for the generated name outright.
+    const kids = rec.scope === "child";
+    const named = typeof spec.worktree === "string" ? spec.worktree.trim() : "";
+    seed.worktree = spec.worktree === true
+      || (!kids && typeof spec.worktree === "string")
+      || !!named;
+    if (named) seed.worktree_name = named;
+  }
+  put("branch_from", spec.branch_from);
+  put("rebase_onto", spec.rebase_onto);
+  return seed;
 }
 
 /* The form's create, reported back to the request it was made for. */

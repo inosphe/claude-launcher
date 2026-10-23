@@ -302,7 +302,13 @@ TOOLS = [
             "'reviewer' child is not gated: it is created at once. 'root' asks "
             "for a TOP-LEVEL session instead of a child (your profile and "
             "project, the project's default workspace, a fresh worktree); "
-            "unanswered, it is created as your child."
+            "unanswered, it is created as your child. "
+            "WHERE IT RUNS: 'workspace' names a registered DIRECTORY; a "
+            "'worktree' is a git CHECKOUT of the repository in that directory, "
+            "on a branch of its own. They are different answers and can be "
+            "asked together — the checkout is cut inside the workspace, so "
+            "moving a child to another repository AND giving it its own branch "
+            "is 'workspace' plus 'worktree', never one in place of the other."
         ),
         "inputSchema": {
             "type": "object",
@@ -316,7 +322,10 @@ TOOLS = [
                     "description": (
                         "ask for a top-level session (no parent) instead of a "
                         "child; the person approves it, and with no answer it "
-                        "is created as your child"
+                        "is created as your child. A root ask runs on YOUR "
+                        "profile (its harness and model): it does not carry "
+                        "'harness', 'model', 'effort' or 'args', and its "
+                        "worktree is always a fresh one, not a name you pick"
                     ),
                 },
                 "reason": {
@@ -521,31 +530,35 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "file the child under a project other than yours "
-                        "('children' lists them). With no 'workspace', 'cwd' "
-                        "or 'worktree' beside it, the child starts in that "
+                        "('children' lists them). With no 'workspace' or "
+                        "'worktree' beside it, the child starts in that "
                         "project's default workspace when it has one"
                     ),
                 },
                 "workspace": {
                     "type": "string",
                     "description": (
-                        "put the child in a different directory: one of the "
+                        "the DIRECTORY the child runs in: one of the "
                         "registered workspaces 'children' lists. A name, not "
                         "a path — an unregistered directory is refused, and "
                         "if nothing is registered there is nowhere to send it "
-                        "and yours is inherited"
+                        "and yours is inherited. This moves the child; it "
+                        "does not give it a branch of its own — that is "
+                        "'worktree'"
                     ),
                 },
                 "worktree": {
                     "type": "string",
                     "description": (
-                        "give the child a git worktree of ITS OWN, named: a "
-                        "second checkout of the repository you are in, on its "
-                        "own branch. Use it whenever you spawn more than one "
-                        "child that will edit code — two agents in one "
-                        "checkout overwrite each other's edits mid-edit. "
+                        "the git CHECKOUT the child works in, named: a second "
+                        "checkout of the repository in its directory (its "
+                        "'workspace', or your own when that is not moved), on "
+                        "a branch of its own. Use it whenever you spawn more "
+                        "than one child that will edit code — two agents in "
+                        "one checkout overwrite each other's edits mid-edit. "
                         "Naming one that already exists returns to that "
-                        "checkout with its branch and work intact"
+                        "checkout with its branch and work intact; a name the "
+                        "repository does not have is cut new"
                     ),
                 },
                 "rebase_onto": {
@@ -594,7 +607,9 @@ TOOLS = [
         "description": (
             "The sessions you spawned (and theirs), plus how many more you "
             "may spawn, which fields you are allowed to choose, the "
-            "registered workspaces you may send a child to, and "
+            "registered workspaces (directories) you may send a child to — a "
+            "worktree is a checkout inside one, not another name for it, and "
+            "spawn asks for it separately — and "
             "'child_cflow' — the workflow your next child starts on if you "
             "spawn without naming one ('' = none). Call this before spawning "
             "rather than provoking a refusal. 'blocked_by' is what actually "
