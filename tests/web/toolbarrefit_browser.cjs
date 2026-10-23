@@ -10,11 +10,21 @@
    the call before it had just written a class).
 
    The countdown cannot move a width: it is digits in a `tabular-nums` run, at
-   the same length. So the property this holds is twofold — that tick is now
-   read once instead of once per item, AND the row still re-fits when the
-   text can matter (a digit count changes, or a character that is not a
-   digit). A guard that only ever answered "no refit" would pass the first
-   half and break the header; the second half is why both are here.
+   the same length. So the property this holds is twofold — that tick costs no
+   measurement at all, AND the row still re-fits when the text can matter (a
+   digit count changes, or a character that is not a digit). A guard that only
+   ever answered "no refit" would pass the first half and break the header; the
+   second half is why both are here.
+
+   The zero is claunch-xy9s0: with the proof in hand `sameWidths` used to read
+   one rect anyway, to compare the touched item against the width the last fit
+   recorded, and that read forced a style and a layout of the header on every
+   tick (1 read/tick in a 2026-10-23 trace of the dashboard, once per second
+   for as long as a session is on screen). The proof says the width did not
+   move, so there is nothing left to read. The row is checked in both states
+   that reach that code — compact and overflowing (the fixture's own header),
+   and a row that fits — because the fit-to-a-share case is the one where a
+   text change can matter without the item's own width moving.
 
    Numbers rather than a stopwatch: counts are deterministic for a given DOM,
    where milliseconds on a loaded runner are not. */
@@ -115,8 +125,8 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       const run = await repaint(width, COUNTDOWN);
       assert.equal(errors.length, 0, `page errors: ${errors.join(" | ")}`);
       const worst = Math.max(...run.reads.slice(1));
-      assert.ok(worst <= 2,
-        `a countdown tick must not re-measure the row at ${width}px ` +
+      assert.equal(worst, 0,
+        `a countdown tick must not measure the row at ${width}px ` +
         `(${run.reads.join(",")} rect reads)`);
       assert.deepEqual(run.after, { cls: run.cls, overflow: run.overflow },
         `a countdown cannot change what fits at ${width}px`);
@@ -145,8 +155,41 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     assert.ok(relabelled > 10,
       `a text change that is not a digit swap must re-fit (${relabelled} rect reads)`);
 
+    /* To the other state that reaches sameWidths: a row that fits, where no
+       control has gone into the More menu and the header is not compact, so
+       an item's width is its content's. The countdown is covered there too;
+       a relabel, which can move that width, still has to re-fit. */
+    await page.locator("#layout").evaluate((el) => { el.style.width = "1920px"; });
+    await settle();
+    await page.evaluate(() => {
+      const h = document.getElementById("term-header");
+      for (const el of [...h.children]) {
+        if (el.id === "term-more") continue;
+        if (el.id === "term-title" || (el.querySelector && el.querySelector("#term-timer"))) continue;
+        el.classList.add("hidden");
+      }
+    });
+    await settle();
+    const fitting = await page.evaluate(() => {
+      const h = document.getElementById("term-header");
+      return { compact: h.classList.contains("term-compact"),
+               overflow: h.querySelectorAll(".toolbar-overflow").length };
+    });
+    assert.deepEqual(fitting, { compact: false, overflow: 0 },
+      "the fitting-row case needs a header that fits, not one refitted into compact");
+    const fitted = await repaint(1920, COUNTDOWN);
+    assert.equal(Math.max(...fitted.reads.slice(1)), 0,
+      `a countdown tick must not measure a row that fits ` +
+      `(${fitted.reads.join(",")} rect reads)`);
+    assert.deepEqual(fitted.after, { cls: fitted.cls, overflow: fitted.overflow },
+      "a countdown cannot change what fits on a row that fits");
+    const refitted = await repaint(1920, ["Ⅱ role reminder in 7:10", "Ⅱ role reminder at 7:10"]);
+    assert.ok(refitted.reads[1] > 10,
+      `a relabel on a row that fits must re-fit (${refitted.reads.join(",")} rect reads)`);
+
     console.log(`toolbarrefit_browser: ok (${COUNTDOWN.length} countdown ticks, ` +
-                `≤2 rect reads each; a longer countdown re-fits with ${grew.reads[1]})`);
+                `0 rect reads each on compact and fitting rows; a longer countdown ` +
+                `re-fits with ${grew.reads[1]}, a relabel with ${relabelled})`);
   } finally {
     await browser.close();
   }
