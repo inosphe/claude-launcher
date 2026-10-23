@@ -18059,7 +18059,14 @@ async function sendKeyLine(field, btn, note) {
   const draftText = field.value;
   let text = draftText.trim();
   const target = currentName;
-  if (!text || !target || field.disabled) return false;
+  // Images the line holds go with it (claunch-wxmcw). A line may be images
+  // alone: the send then carries the pictures and the Enter that submits
+  // them, with no text in front. Guarded like clearSentLine below: the
+  // harnesses that slice this function in isolation carry only the parts
+  // their own subject needs, and one with no bar holds no images.
+  const staged = (typeof stagedFor === "function" && target)
+    ? stagedFor(target).map((img) => img.name) : [];
+  if ((!text && !staged.length) || !target || field.disabled) return false;
   const epoch = (field.sendEpoch || 0) + 1;
   field.sendEpoch = epoch;
   field.sendPending = epoch;
@@ -18090,6 +18097,9 @@ async function sendKeyLine(field, btn, note) {
     const body = text.includes("\n")
       ? { paste: text, enter: true, force: true, input_id: inputId, feedback }
       : { keys: [text, "Enter"], force: true, input_id: inputId, feedback };
+    // The staged image names ride the same call, so the daemon attaches them
+    // ahead of the text and one request owns both halves of the message.
+    if (staged.length) body.images = staged;
     const resp = await api(
       `/api/sessions/${encodeURIComponent(target)}/keys`,
       { method: "POST",
@@ -18105,6 +18115,9 @@ async function sendKeyLine(field, btn, note) {
       if (typeof clearSentLine === "function") clearSentLine(field, draftText);
       else { field.value = ""; autogrowTermInput(field); }
       globalThis.GlossaryComposer?.reset();
+      if (staged.length && typeof clearStagedImages === "function") {
+        clearStagedImages(target);
+      }
       termInputNote(note,
         `queued (${doc.position || 1} waiting) — typed when this session ` +
         "is resumed; withdraw it from the session input journal");
@@ -18118,6 +18131,9 @@ async function sendKeyLine(field, btn, note) {
       if (typeof clearSentLine === "function") clearSentLine(field, draftText);
       else { field.value = ""; autogrowTermInput(field); }
       globalThis.GlossaryComposer?.reset();
+      if (staged.length && typeof clearStagedImages === "function") {
+        clearStagedImages(target);
+      }
       if (doc.score_goal) {
         const session = sessionsCache.find((s) => s.name === currentName);
         if (session) {
@@ -18127,6 +18143,16 @@ async function sendKeyLine(field, btn, note) {
       }
       setScoreFeedbackChoice("none");
       renderScoreGoal();
+      const missed = doc.images_failed || [];
+      if (missed.length) {
+        // The line landed; the picture did not. Said on the spot, because the
+        // file is still on this machine and the next line can carry it again.
+        const first = missed[0];
+        termInputNote(note,
+          `the line was sent, but ${missed.length} image` +
+          `${missed.length === 1 ? " was" : "s were"} not handed over — ` +
+          `${first.name}: ${first.reason}`, true);
+      }
       return true;
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
@@ -18345,6 +18371,9 @@ function resetTermInputAttachment() {
 
 function refreshTermInput() {
   if (typeof renderScoreGoal === "function") renderScoreGoal();
+  // The images held for the send belong to the attached session, so a switch
+  // shows that session's chips (or none) rather than the previous one's.
+  if (typeof renderStagedImages === "function") renderStagedImages();
   const field = $("term-input-field");
   const note = $("term-input-note");
   const btn = $("term-input-send");
@@ -18407,6 +18436,16 @@ function syncSessionLine() {
   const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
   if ($("term-input"))
     $("term-input").classList.toggle("hidden", !(currentName && sessionLineOnPage(page)));
+  // The strip of images the line holds is a sibling of the bar, not a child
+  // (it is its own row), so it follows the bar's visibility here rather than
+  // inheriting it. Guarded like the bar: a harness booting a partial DOM has
+  // no reason to carry the strip either.
+  const staged = $("term-image-staged");
+  if (staged) {
+    const held = typeof stagedFor === "function" ? stagedFor(currentName) : [];
+    const onLine = !!(currentName && sessionLineOnPage(page));
+    staged.classList.toggle("hidden", !onLine || !held.length);
+  }
   syncTermHeader();
   renderTermPresetButtons();
 }
@@ -19440,6 +19479,187 @@ async function sendImageFiles(files, note) {
   return sentCount;
 }
 
+/* ---- images the session line holds until it is sent (claunch-wxmcw) ----
+   A paste into the session line used to be handed to the session the moment
+   it landed: the image attached to whatever the session was doing then, and
+   the text explaining it arrived afterwards as a separate action. What a
+   person means by pasting a screenshot into the line is one message, so the
+   picture waits here — a chip above the bar — and goes with the text when
+   Enter is pressed. A send with no image is one paste, as before; with one
+   it is two (the image, then the text) and one Enter.
+
+   The image is uploaded on paste, not on send: the daemon stores it in the
+   session's own folder and answers its name, so the send carries names
+   rather than bytes and a large screenshot does not make Enter wait. The
+   `?stage=1` on the upload is the whole difference — the daemon hands over
+   nothing for it.
+
+   Held per session, because the line is per session: switching the attached
+   session shows that session's chips, and a chip is only ever sent to the
+   session it was pasted on. */
+
+/* session name -> [{name, path, type, bytes, url, label}], oldest first.
+   `url` is this browser's object URL for the picked file (the thumbnail);
+   `name` is the daemon's stored name, which is what a send names. */
+const stagedImages = new Map();
+
+function stagedFor(name) {
+  return (name && stagedImages.get(name)) || [];
+}
+
+function renderStagedImages() {
+  const box = $("term-image-staged");
+  if (!box) return;
+  const list = stagedFor(currentName);
+  // Shown only where the session line is on screen: the strip belongs to the
+  // bar above it, and a page that hides the bar (another session's
+  // transcript) must not leave its images floating.
+  const onLine = typeof sessionLineOnPage === "function"
+    ? sessionLineOnPage(typeof currentPage === "undefined" ? "terminal" : currentPage)
+    : true;
+  // The state poll repaints this every couple of seconds; redrawing the same
+  // chips each time is a mutation burst over a strip nobody changed
+  // (claunch-v87, the input journal's lesson). Redraw only when what it shows
+  // would differ.
+  const sig = `${currentName || ""}|${onLine ? 1 : 0}|` +
+    list.map((img) => img.name).join(",");
+  if (box.dataset && box.dataset.stagedSig === sig) return;
+  if (box.dataset) box.dataset.stagedSig = sig;
+  box.textContent = "";
+  box.classList.toggle("hidden", !list.length || !onLine);
+  if (!list.length) return;
+  box.appendChild(el("span", "term-staged-label",
+    `${list.length} image${list.length === 1 ? "" : "s"} attached to the next line`));
+  for (const img of list) {
+    const chip = el("span", "term-staged-chip");
+    chip.title = `${img.label || "image"} — sent with the line, not before it`;
+    if (img.url) {
+      const thumb = el("img", "term-staged-thumb");
+      thumb.src = img.url;
+      thumb.alt = "";
+      chip.appendChild(thumb);
+    }
+    chip.appendChild(el("span", "term-staged-name", img.label || "image"));
+    const remove = el("button", "term-staged-remove", "×");
+    remove.type = "button";
+    remove.title = "remove this image from the line";
+    remove.setAttribute && remove.setAttribute("aria-label", "remove this image");
+    remove.addEventListener("click", () => {
+      const left = stagedFor(currentName).filter((it) => it !== img);
+      setStagedImages(currentName, left);
+      if (img.url && typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(img.url);
+      }
+    });
+    chip.appendChild(remove);
+    box.appendChild(chip);
+  }
+}
+
+function setStagedImages(name, list) {
+  if (!name) return;
+  if (list.length) stagedImages.set(name, list);
+  else stagedImages.delete(name);
+  if (name === currentName) renderStagedImages();
+}
+
+/* One upload that stores and hands over nothing. Answers {ok, image} or
+   {ok: false, message}; the caller decides where the words go, because a
+   batch reports once. */
+async function stageImage(blob) {
+  const target = currentName;
+  if (!target) return { ok: false, message: "no session is attached" };
+  const kind = imageKindOf(blob);
+  let resp;
+  try {
+    resp = await api(
+      `/api/sessions/${encodeURIComponent(target)}/paste-image?stage=1`,
+      { method: "POST", headers: { "Content-Type": kind }, body: blob }
+    );
+  } catch {
+    return { ok: false, message: "nothing was stored — the daemon is unreachable" };
+  }
+  const doc = await resp.json().catch(() => null);
+  if (!doc) {
+    return {
+      ok: false,
+      message: resp.redirected
+        ? "the relay sent the upload to its login page — reload the page and sign in again"
+        : `the upload was answered with HTTP ${resp.status} and no answer from the daemon`,
+    };
+  }
+  if (!resp.ok || !doc.name) {
+    return { ok: false, message: doc.error || "the image was not stored" };
+  }
+  let url = "";
+  try {
+    if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+      url = URL.createObjectURL(blob);
+    }
+  } catch { url = ""; }
+  return {
+    ok: true,
+    image: {
+      name: doc.name, path: doc.path, type: kind, bytes: doc.bytes,
+      url, label: blob.name || "",
+    },
+  };
+}
+
+/* Several files, in the order given, appended to what the line already holds.
+   Files that are not images are left out and counted, not uploaded to be
+   refused. */
+async function stageImageFiles(files, note) {
+  const target = currentName;
+  const list = Array.from(files || []);
+  const images = list.filter((f) => imageKindOf(f).startsWith("image/"));
+  const skipped = list.length - images.length;
+  if (!target) {
+    if (note) termInputNote(note, "no session is attached", true);
+    return 0;
+  }
+  if (!images.length) {
+    if (note) termInputNote(note, list.length
+      ? "none of those files is an image" : "no image was given", true);
+    return 0;
+  }
+  const held = stagedFor(target).slice();
+  let added = 0;
+  let firstFailure = "";
+  for (let i = 0; i < images.length; i++) {
+    if (note) termInputNote(note, `attaching image ${i + 1} of ${images.length}…`);
+    const res = await stageImage(images[i]);
+    if (res.ok) { held.push(res.image); added++; }
+    else if (!firstFailure) {
+      const label = images[i].name ? `${images[i].name}: ` : "";
+      firstFailure = label + res.message;
+    }
+  }
+  if (target === currentName) setStagedImages(target, held);
+  let message = added
+    ? `${added} image${added === 1 ? "" : "s"} attached — press Enter to send ` +
+      `${added === 1 ? "it" : "them"} with the line`
+    : "no image was attached";
+  if (skipped) message += ` (${skipped} file${skipped === 1 ? "" : "s"} not an image, left out)`;
+  if (firstFailure) message += ` — ${firstFailure}`;
+  if (note) termInputNote(note, message, added !== images.length || skipped > 0);
+  const field = $("term-input-field");
+  if (field) field.focus();
+  return added;
+}
+
+/* The send landed (or was recorded for a relaunch): the line no longer holds
+   these images, so neither does the bar. Their object URLs go with them. */
+function clearStagedImages(name) {
+  const list = stagedFor(name);
+  for (const img of list) {
+    if (img.url && typeof URL.revokeObjectURL === "function") {
+      try { URL.revokeObjectURL(img.url); } catch { /* already gone */ }
+    }
+  }
+  setStagedImages(name, []);
+}
+
 /* The image on the clipboard right now, or null. A browser that cannot read
    the clipboard at all throws ClipboardUnavailable: that is not "no image",
    and saying "no image" to someone looking at one on their clipboard sends
@@ -19508,16 +19728,18 @@ function pastedImageFiles(data) {
   return Array.from(data.files || []).filter((f) => imageKindOf(f).startsWith("image/"));
 }
 
-/* An ordinary paste carrying images. The text of a mixed paste is left to
-   the browser; only the images are taken, and only then is the event taken
-   from it. */
+/* An ordinary paste carrying images, into the session line: the images are
+   held for the send (see "images the session line holds") and the event is
+   taken from the browser so it does not also try to insert the files. The
+   line's text paste is untouched — a paste with no image never reaches this
+   function's `files` check. */
 function onTermInputPaste(ev) {
   const field = ev.currentTarget || ev.target;
   if (!field || field.disabled) return;
   const files = pastedImageFiles(ev.clipboardData);
   if (!files.length) return;
   ev.preventDefault();
-  sendImageFiles(files, $("term-input-note"));
+  stageImageFiles(files, $("term-input-note"));
 }
 
 /* The same paste, landing on the terminal instead of the line. Taken in the
@@ -19577,7 +19799,9 @@ function onImagePickerChange(ev) {
   const files = Array.from(input.files || []);
   input.value = "";
   if (!files.length) return;
-  sendImageFiles(files, $("term-input-note"));
+  // 🖼 is on the session line, so the files it picks are held for the send
+  // exactly like a pasted one.
+  stageImageFiles(files, $("term-input-note"));
 }
 
 /* The 📎 button (claunch-5gpcf): files of any kind, uploaded one after
@@ -44394,6 +44618,26 @@ function sessInputJournalRow(box, name, entry) {
   badge.title = SESS_INPUT_STATUS_TITLE[status] || status;
   row.appendChild(badge);
   row.appendChild(el("span", "sess-input-text", `  ${entry.text || ""}`));
+  // The images the line carried (claunch-wxmcw), beside its text: what was
+  // pasted into the line is part of what was said, and a journal that showed
+  // only the words would read as a line sent without them.
+  const images = Array.isArray(entry.images) ? entry.images : [];
+  for (const img of images) {
+    if (!img || !img.name) continue;
+    const src = `/api/sessions/${encodeURIComponent(name)}/pastes/` +
+      encodeURIComponent(img.name);
+    const link = el("a", "sess-input-image-link");
+    link.href = src;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = `${img.name} — click to open` +
+      (img.bytes ? ` (${humanSize(img.bytes)})` : "");
+    const pic = el("img", "sess-input-image");
+    pic.src = src;
+    pic.alt = img.name;
+    link.appendChild(pic);
+    row.appendChild(link);
+  }
   if (status === "queued" && entry.request_id) {
     const cancel = el("button", "term-btn sess-input-cancel", "withdraw");
     cancel.type = "button";

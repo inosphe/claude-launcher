@@ -780,11 +780,18 @@
          a line that carries a newline is sent as ONE bracketed paste instead
          (POST .../keys with `paste`), which is what keeps the block from
          being submitted a line at a time under any harness.
-         Alt+V is the third key it answers: the clipboard's image is uploaded
-         (POST .../paste-image), then the daemon stores it and delivers a
-         file path or clipboard keystroke according to the harness's
-         declared transport. Nothing is typed into the web input line.
+         Images pasted or picked into this line are held for its send
+         (claunch-wxmcw): each is stored by the daemon (POST .../paste-image
+         ?stage=1) and shown as a chip above the bar, and the Enter that sends
+         the line names them, so the daemon attaches them ahead of the text.
+         A paste from the terminal itself (Alt+V, or an image dropped on the
+         terminal) is still handed over at once — the terminal has no send.
          Hidden with the terminal; only live while one is attached. -->
+    <!-- The images this line holds until it is sent: one chip each, with its
+         thumbnail and a × to drop it. Empty and hidden otherwise, so an
+         ordinary line is the bar exactly as it was. -->
+    <div id="term-image-staged" class="hidden" role="group"
+         aria-label="images attached to the next line"></div>
     <form id="term-input" class="hidden" autocomplete="off">
       <button id="term-clipboard-toggle" class="term-btn" type="button"
               aria-expanded="false" aria-controls="term-clipboard-menu">Clipboard</button>
@@ -812,7 +819,7 @@
                 aria-label="this browser's local line, kept read-only while remote-sync is on"></textarea>
       <textarea id="term-input-field" rows="1" data-expand-on-focus
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
-             title="Enter sends · Ctrl+J inserts a newline · Alt+V or Ctrl+V hands the clipboard image to the session · 🖼 attaches image files"
+             title="Enter sends · Ctrl+J inserts a newline · Ctrl+V or 🖼 attaches an image to this line — it is sent with the line · Alt+V on the terminal hands the clipboard image over at once"
              autocomplete="off" spellcheck="false"
              aria-label="type text and send it to this session"></textarea>
       <!-- Image files, several at once: each goes the same way as an Alt+V
@@ -820,8 +827,8 @@
            harness's key), one after another. -->
       <button id="term-glossary-open" class="term-btn" type="button" title="용어집 검색 · 선택한 문구를 참조로 바꾸기">용어집</button>
       <button id="term-image-pick" class="term-btn" type="button"
-              title="attach image files to this session (several at once)"
-              aria-label="attach image files to this session">🖼</button>
+              title="attach image files to this line (several at once) — they are sent with it"
+              aria-label="attach image files to this line">🖼</button>
       <input id="term-image-file" type="file" hidden multiple
              accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp">
       <!-- Files of any kind (claunch-5gpcf): each is uploaded into the

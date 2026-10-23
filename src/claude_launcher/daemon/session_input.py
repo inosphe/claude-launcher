@@ -52,7 +52,8 @@ def path(name: str):
 
 
 def _write(name: str, event: str, *, request_id: str, text: str,
-           status: str, pid: Optional[int] = None, origin: str = "") -> dict:
+           status: str, pid: Optional[int] = None, origin: str = "",
+           images: Optional[List[dict]] = None) -> dict:
     data = {"request_id": request_id, "text": text, "status": status}
     if pid is not None:
         data["pid"] = pid
@@ -60,14 +61,21 @@ def _write(name: str, event: str, *, request_id: str, text: str,
         # Who typed it, when it was not this daemon's own operator: a
         # linked peer's session line (daemon/shadow.py) is ``peer:<machine>``.
         data["origin"] = origin
+    if images:
+        # The images the line carried (claunch-wxmcw): name, media type and
+        # size of each file in the session's ``pastes/`` folder, in the order
+        # they were attached. The detail panel shows them beside the text, and
+        # a queued line's flush hands them over before the text.
+        data["images"] = images
     return journal.append(path(name), event, data, at=_now())
 
 
 def write(name: str, event: str, *, request_id: str, text: str,
-          status: str, pid: Optional[int] = None, origin: str = "") -> dict:
+          status: str, pid: Optional[int] = None, origin: str = "",
+          images: Optional[List[dict]] = None) -> dict:
     with _lock:
         return _write(name, event, request_id=request_id, text=text,
-                      status=status, pid=pid, origin=origin)
+                      status=status, pid=pid, origin=origin, images=images)
 
 
 def read(name: str, *, limit: int = 50) -> List[dict]:
@@ -97,10 +105,16 @@ def _requests(entries: List[dict]) -> List[dict]:
         row = rows.get(rid)
         if row is None:
             row = rows[rid] = {"request_id": rid,
-                               "submitted_at": entry.get("at")}
+                               "submitted_at": entry.get("at"),
+                               "images": []}
         row.update({"text": entry.get("text", ""),
                     "status": entry.get("status"),
                     "at": entry.get("at")})
+        # The images ride the first event that names them and every later one
+        # that does; an event without them (a cancel, a failure raised before
+        # the line was built) leaves what the line carried in place.
+        if entry.get("images"):
+            row["images"] = entry["images"]
     return list(rows.values())
 
 
@@ -122,10 +136,11 @@ def pending(name: str) -> List[dict]:
     return [r for r in _requests(entries) if r["status"] == QUEUED]
 
 
-def queue(name: str, *, request_id: str, text: str) -> dict:
+def queue(name: str, *, request_id: str, text: str,
+          images: Optional[List[dict]] = None) -> dict:
     """Record a line for a session that cannot take it now."""
     return write(name, "input_queued", request_id=request_id, text=text,
-                 status=QUEUED)
+                 status=QUEUED, images=images)
 
 
 def _transition(name: str, request_id: str, event: str,
@@ -142,7 +157,8 @@ def _transition(name: str, request_id: str, event: str,
                 if row["status"] != QUEUED:
                     return None
                 return _write(name, event, request_id=request_id,
-                              text=row["text"], status=status)
+                              text=row["text"], status=status,
+                              images=row.get("images"))
     return None
 
 
@@ -198,16 +214,23 @@ async def flush(session) -> int:
             _active_requests.add((name, rid))
             try:
                 await session.prepare_operator_input()
+                if row.get("images"):
+                    # The clipboard and its lock live in the api module, which
+                    # imports this one; imported here, at call time, so the
+                    # two are not a cycle at load.
+                    from . import api as api_mod
+                    await api_mod._deliver_queued_images(session, row["images"])
                 await type_line(session, row["text"])
             except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write
                 log.info("queued input %s for %r failed: %s", rid, name, exc)
                 write(name, "input_failed", request_id=rid, text=row["text"],
-                      status="failed", pid=session.pid)
+                      status="failed", pid=session.pid,
+                      images=row.get("images"))
                 break
             finally:
                 _active_requests.discard((name, rid))
             write(name, "input_sent", request_id=rid, text=row["text"],
-                  status="sent", pid=session.pid)
+                  status="sent", pid=session.pid, images=row.get("images"))
             sent += 1
     return sent
 
