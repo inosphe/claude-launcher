@@ -38,6 +38,7 @@ from .. import (
     lineage,
     metering,
     profile as profile_mod,
+    provider_install,
     provider_spec,
     providers,
     quickjob,
@@ -870,6 +871,13 @@ def build_app(
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
+    # Installing a provider from Settings (claude_launcher.provider_install):
+    # the listing (installed providers, the preset files, profiles), one save
+    # that validates before it writes, and one connection check that reports
+    # without ever blocking the save.
+    r.add_get("/api/providers", h_providers)
+    r.add_post("/api/providers", h_providers_save)
+    r.add_post("/api/providers/check", h_providers_check)
     r.add_get("/api/install", h_install_overview)
     r.add_get("/api/install/plan", h_install_plan)
     r.add_post("/api/install/apply", h_install_apply)
@@ -7082,6 +7090,88 @@ async def h_model_prices_set(request: web.Request) -> web.Response:
         return json_response(_model_prices())
     except store.StoreError as exc:
         return json_error(500, str(exc))
+
+
+async def h_providers(request: web.Request) -> web.Response:
+    """Everything Settings ▸ Providers draws: the installed providers with the
+    problems each one has, the preset files, the profiles that select one."""
+    try:
+        return json_response(provider_install.listing())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_providers_save(request: web.Request) -> web.Response:
+    """Create or replace ``providers.<name>`` from the install form.
+
+    Validated before anything is written (:func:`provider_install.save`), so a
+    400 leaves ``~/.claunch.yaml`` byte-identical — the answer is the reason,
+    not a half-written entry. With ``profile``, the selection is written in the
+    same atomic save, so the two cannot disagree. Answers with the fresh
+    listing, which is what the page redraws from.
+    """
+    body = await _json_body(request)
+    entry = body.get("entry")
+    if not isinstance(entry, dict):
+        return json_error(400, "'entry' must be an object of provider fields")
+    profile = body.get("profile") or None
+    if profile is not None and not isinstance(profile, str):
+        return json_error(400, "'profile' must be a profile name or null")
+    try:
+        provider_install.save(body.get("name"), entry, profile=profile)
+    except provider_install.InstallError as exc:
+        return json_error(400, str(exc))
+    except ProfileError as exc:
+        return json_error(400, str(exc))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    return json_response(provider_install.listing())
+
+
+async def h_providers_check(request: web.Request) -> web.Response:
+    """One real call to the backend the form describes (or a stored provider).
+
+    The probe answers; it never decides. A refusal here is information for the
+    person saving the entry, so the status is 200 with ``ok: false`` and the
+    scheme/timeout case carries the same shape.
+    """
+    body = await _json_body(request)
+    entry = body.get("entry")
+    profile = body.get("profile") or None
+    if profile is not None and not isinstance(profile, str):
+        return json_error(400, "'profile' must be a profile name or null")
+    if not isinstance(entry, dict) or not entry:
+        name = body.get("name")
+        if not name:
+            return json_error(400, "pass 'entry' (the form's values) or 'name'")
+        try:
+            entry = providers.entries().get(str(name))
+        except store.StoreError as exc:
+            return json_error(500, str(exc))
+        if not entry:
+            return json_error(404, f"unknown provider {name!r}")
+    api_key = str(entry.get("api_key") or "").strip() or None
+    token_source = "provider api_key" if api_key else ""
+    if not api_key and profile:
+        # A profile's set-token secret is the usual place a provider's key
+        # lives; the probe uses it the way a launch would, and says so.
+        try:
+            candidate = profile_mod.resolve(profile)
+            api_key = (
+                credentials.own_token(candidate)
+                or credentials.access_token(candidate)
+            )
+            if api_key:
+                token_source = f"profile {profile} token"
+        except (ProfileError, credentials.CredentialsError, OSError):
+            # No token on this machine is not an error here: the check goes
+            # out unauthenticated and says so, which is the answer the person
+            # needs before they save.
+            api_key = None
+    result = await provider_install.probe(entry, api_key)
+    result["authenticated"] = bool(api_key)
+    result["token_source"] = token_source
+    return json_response(result)
 
 
 async def h_quickjob_get(request: web.Request) -> web.Response:
