@@ -169,6 +169,12 @@ def add(session: str, *, every: Any, times: Any, message: Any,
         }
         rows.append(record)
         _save(session, rows)
+        # The daemon is alive at this moment, and this timer's schedule is
+        # anchored to it. Without this beat a daemon that had no timers for
+        # hours would still carry the heartbeat from before them, and the
+        # next boot would bill that idle time as downtime (claunch-lvrcp
+        # review: a timer made 15 s before a stop moved by hours).
+        _beat(now)
     log.info("agent timer %s for %r: every %gs x%d", record["id"], session,
              every_s, int(times_i))
     return dict(record)
@@ -226,6 +232,25 @@ def _last_beat() -> Optional[float]:
         return None
 
 
+def _shift_for(row: dict, paused: float, now: float) -> float:
+    """How much of ``paused`` this one timer sat through.
+
+    A timer cannot have been paused for longer than it has existed, and the
+    heartbeat can be stale for reasons other than a stopped daemon -- a beat
+    that could not be written, a ledger copied in beside it. Without this
+    bound such a beat bills the daemon's own running time as downtime and
+    pushes the first fire hours late, which is the failure this pause
+    accounting exists to prevent (claunch-lvrcp review). The bound only makes
+    the shift smaller, never larger; a row with no ``created_at`` keeps the
+    measured pause.
+    """
+    try:
+        created = float(row.get("created_at"))
+    except (TypeError, ValueError):
+        return paused
+    return max(0.0, min(paused, now - created))
+
+
 def resume_after_pause(now: Optional[float] = None) -> float:
     """Move every timer's ``next_due`` past the daemon's downtime.
 
@@ -233,6 +258,11 @@ def resume_after_pause(now: Optional[float] = None) -> float:
     been created yet, or the last daemon never ran a pass). The interval the
     daemon was down does not count toward any timer, which is what "paused
     while the daemon is not running" means in practice.
+
+    The heartbeat is written at every pass while timers exist, at boot, and
+    when a timer is created (:func:`add`), so the measured pause stays near
+    the real downtime; each timer is then shifted by no more than its own
+    lifetime (:func:`_shift_for`).
     """
     now = time.time() if now is None else float(now)
     last = _last_beat()
@@ -248,7 +278,8 @@ def resume_after_pause(now: Optional[float] = None) -> float:
             if not rows:
                 continue
             for row in rows:
-                row["next_due"] = float(row.get("next_due") or now) + paused
+                row["next_due"] = (float(row.get("next_due") or now)
+                                   + _shift_for(row, paused, now))
             _save(name, rows)
             shifted += len(rows)
         # The boot's own moment is alive: recording it here makes a second
@@ -409,9 +440,15 @@ class TimerClock:
     async def _deliver(self, name: str, records: List[dict]) -> None:
         session = await self._wake(name)
         if session is None:
+            # The fire was already counted and rescheduled by the pass that
+            # produced it, so this one is spent: what is lost is this message,
+            # not the schedule. A killed session's ledger goes with it
+            # (:func:`session_ended`), so this is a transient state -- a
+            # relaunch that failed -- and the next interval is tried.
             log.info(
                 "agent timer fired for %r, but the session has no process to "
-                "type into; leaving the timer for the next pass", name)
+                "type into; this fire is consumed and the next interval is "
+                "tried", name)
             return
         for record in records:
             try:

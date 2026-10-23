@@ -127,8 +127,6 @@ def test_resume_after_pause_shifts_every_timer_by_the_downtime(home):
     at.add("s1", every=600, times=3, message="go", now=1000.0)
     at.add("s2", every=600, times=3, message="go", now=1000.0)
 
-    assert at.resume_after_pause(now=5000.0) == 0.0     # no heartbeat yet
-
     at._beat(1010.0)                                   # clock was alive here
     paused = at.resume_after_pause(now=1110.0)
     assert paused == 100.0
@@ -138,6 +136,43 @@ def test_resume_after_pause_shifts_every_timer_by_the_downtime(home):
     assert at.load("s2")[0]["next_due"] == 1600.0 + 100.0
     at.resume_after_pause(now=1110.0)                  # idempotent at the same clock
     assert at.load("s1")[0]["next_due"] == 1700.0
+
+
+def test_creating_a_timer_is_a_live_moment_for_the_heartbeat(home):
+    at._beat(1010.0)
+    at.add("s1", every=600, times=3, message="go", now=20000.0)
+    assert at._last_beat() == 20000.0
+
+
+def test_a_new_timer_is_not_billed_for_the_daemons_idle_time(home):
+    """claunch-lvrcp review: the heartbeat stopped while no timer existed.
+
+    A daemon up for hours without a timer carries a heartbeat from hours ago;
+    a timer made 15 s before the stop must be paused for its own short life,
+    not for the whole idle stretch (which pushed its first fire out by hours).
+    """
+    at._beat(1010.0)                                   # the last pass, long ago
+    at.add("s1", every=600, times=3, message="go", now=20000.0)
+    assert at.load("s1")[0]["next_due"] == 20600.0
+
+    paused = at.resume_after_pause(now=30000.0)        # down from 20005 to 30000
+    assert paused == 10000.0
+    assert at.load("s1")[0]["next_due"] == 30600.0
+
+
+def test_a_timer_never_shifts_more_than_it_has_existed(home):
+    """The bound the fix rests on: a stale beat cannot bill a timer for time
+    before it existed. The ledger here is written without the creation beat
+    (:func:`agent_timers.add` writes one), so only the clamp can hold."""
+    at._save("s1", [{
+        "id": "t-old", "every": 600.0, "times": 3, "fires": 0,
+        "message": "go", "created_at": 20000.0, "next_due": 20600.0,
+        "created_by": "s1",
+    }])
+    at._beat(1010.0)
+
+    assert at.resume_after_pause(now=30000.0) == 28990.0   # measured, as before
+    assert at.load("s1")[0]["next_due"] == 30600.0         # but only 10000 moved
 
 
 def test_an_unreadable_heartbeat_files_no_shift(home):
