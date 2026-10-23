@@ -70,7 +70,7 @@ function el(tag, cls, text) {
 }
 const fmtAge = (s) => Math.round(s / 60) + "m", usageShort = (n) => String(n);
 ${src.slice(constStart, constEnd)}
-${["termSeriesTotal", "termSeriesIndexAt", "termSeriesScale", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
+${["termSeriesTotal", "termSeriesIndexAt", "termSeriesScale", "termSeriesTicks", "termSeriesTick", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
     "termSeriesMaker"].map(slice).join("\n")}
 /* 30 requests, one every 120 s; the context grows to request 15, is
    compacted at 1800 s (the summary is the next request's context) and grows
@@ -138,7 +138,7 @@ renderTermTps();
               compactionStroke: getComputedStyle(document.querySelector(".term-series-compaction")).stroke,
             };
           });
-          assert.equal(drawnMarks.max, "1000000 max (log, context window)",
+          assert.equal(drawnMarks.max, "1M max, context window",
             "the zoomed chart's height axis is labelled with the window it tops out at");
           const compact = await p.evaluate(() => {
             const plot = document.querySelector(".term-series.zoom .term-series-chart").getBoundingClientRect();
@@ -205,6 +205,36 @@ renderTermTps();
       assert.equal(await readout(), shown, "the readout is the same after the repaint");
       await p.evaluate(() => { renderTermTps(); renderTermTps(); });
       assert.equal(await readout(), shown, "and after more repaints");
+      /* The chart does not move under the readout (claunch-k5udr). The
+         overlay is right-anchored, so a wider readout used to widen the box
+         the plot is laid out in and shift the plot left, out from under a
+         pointer that had not moved; that reach cleared the readout, shrank
+         the box and shifted the plot back. A longer readout must leave the
+         plot's box alone, and crossing the whole plot must keep the readout
+         filled at every step. */
+      const box = () => p.evaluate(() => {
+        const r = document.querySelector(".term-series.zoom .term-series-chart").getBoundingClientRect();
+        return [r.x, r.y, r.width, r.height].join();
+      });
+      const still = await box();
+      const widened = await p.evaluate(() => {
+        const readout = document.querySelector(".term-series-readout");
+        const was = readout.textContent;
+        readout.textContent = `${was} (largest of 12345 requests)`;
+        const r = document.querySelector(".term-series.zoom .term-series-chart").getBoundingClientRect();
+        return [r.x, r.y, r.width, r.height].join();
+      });
+      assert.equal(widened, still, "a longer readout leaves the plot exactly where it was");
+      const sweep = [];
+      for (const frac of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+        await p.mouse.move(plot.x + plot.width * frac, plot.y + plot.height / 2, { steps: 2 });
+        await p.waitForTimeout(30);
+        sweep.push([await readout(), await box()]);
+      }
+      assert.ok(sweep.every(([text]) => text.trim().startsWith("#")),
+        `the readout stays filled across the whole plot, got ${JSON.stringify(sweep.map(([t]) => t))}`);
+      assert.equal(new Set(sweep.map(([, b]) => b)).size, 1,
+        `the plot does not move as the pointer crosses it, got ${JSON.stringify(sweep.map(([, b]) => b))}`);
       /* Off the plot but inside the chart's box: the readout is cleared, and
          a repaint does not bring it back. */
       const legend = await (await p.$(".term-series.zoom .term-series-legend")).boundingBox();
