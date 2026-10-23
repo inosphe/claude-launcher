@@ -1,5 +1,8 @@
 /* Keep the session controls on one line at the actual column width. Original
- * controls retain their text and handlers; CSS supplies the compact glyphs. */
+ * controls retain their text and handlers. A column that is too narrow first
+ * moves controls off the row into the overflow menu, one at a time from the
+ * right, with their labels; CSS supplies the compact glyphs, which are used
+ * only once no control is left to move. */
 (() => {
   const header = document.getElementById("term-header");
   if (!header) return;
@@ -178,14 +181,30 @@
         + Math.max(0, visible.length - 1) * parseFloat(style.columnGap);
       return needed <= available + 0.5;
     };
-    if (!fits()) header.classList.add("term-compact");
+    // The controls leave the row one at a time, from the right, keeping their
+    // labels: a column a pixel too narrow costs one control instead of every
+    // label on the row (claunch-8ntfx). Labels are worth keeping only while
+    // they are most of what the row shows. Once more than half of the
+    // controls have had to leave, a labelled button or two beside a menu
+    // that holds everything else is the worse of the two rows -- so at that
+    // point the row gives up the labels instead and `term-compact` rebuilds
+    // each labelled control as a fixed-width glyph (CSS), which frees far
+    // more width than the pixel or two that started this. Whatever still
+    // does not fit after that leaves the row too.
+    const movable = items.filter(el => el.id !== "term-title");
+    const labelsUntil = Math.floor(movable.length / 2);
+    const leave = (item) => { item.classList.add("toolbar-overflow"); overflow.unshift(item); };
     if (!fits()) {
       more.classList.remove("hidden");
-      for (const item of [...items].reverse()) {
+      movable.reverse();
+      for (const item of movable) {
+        if (fits() || overflow.length >= labelsUntil) break;
+        leave(item);
+      }
+      if (!fits()) header.classList.add("term-compact");
+      for (const item of movable) {
         if (fits()) break;
-        if (item.id === "term-title") continue;
-        item.classList.add("toolbar-overflow");
-        overflow.unshift(item);
+        if (!item.classList.contains("toolbar-overflow")) leave(item);
       }
     }
     if (menu.matches(":popover-open")) {
