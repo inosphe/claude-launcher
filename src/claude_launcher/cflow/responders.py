@@ -40,9 +40,18 @@ session, read off the spawn tree the daemon publishes (each member's
   the operator started, and they are siblings of one another: they share the
   one parent that is not a session;
 - *collateral* — none of those: an uncle, a cousin, a sibling's child. No
-  scope but ``any`` names them. A reviewer another worker spawned for its own
-  work is that worker's, and a narrower scope must never hand it somebody
-  else's question.
+  scope but ``any`` names them — and ``root`` names the one part of them that
+  stands at the top: a run with a parent of its own sees every root as
+  collateral, which is why a leader that sits at the root of the mesh was
+  unreachable from a worker parented under another worker (claunch-jdre5). A
+  reviewer another worker spawned for its own work is that worker's, and a
+  narrower scope must never hand it somebody else's question.
+
+``scope: root`` is the roots of the mesh whatever their relation, and it is
+sound for the same reason ``sibling`` is: a run cannot spawn a root and
+cannot make itself one. What it does not do is climb: a root is named only
+when it holds no parent itself, so a mesh whose leader sits *below* a root
+is still reached by ``ancestor`` or not at all.
 
 **An edge may be made, never widened past the roster.** A candidate that
 declares ``connect: true`` turns "holds the role but is not wired to this run"
@@ -171,6 +180,11 @@ class Pool:
     ancestors: List[str] = field(default_factory=list)
     #: Handles sharing its parent — or, when it has none, the other roots.
     siblings: Set[str] = field(default_factory=set)
+    #: Handles with no parent in the roster — the sessions the operator
+    #: started. A run with a parent sees these as collateral, so only
+    #: ``scope: root`` names them; ``siblings`` already holds them when the
+    #: asking session is a root itself.
+    roots: Set[str] = field(default_factory=set)
     #: Depth below the asking session, per descendant (child = 1), so a
     #: ``descendant`` group lists its own children before theirs.
     generation: Dict[str, int] = field(default_factory=dict)
@@ -215,6 +229,12 @@ class Pool:
             )
         if scope == model.SCOPE_SIBLING:
             return sorted(h for h in self.siblings if h in self.members)
+        if scope == model.SCOPE_ROOT:
+            return sorted(
+                h
+                for h in self.roots
+                if h in self.members and h not in self.descendants
+            )
         return [h for h in sorted(self.members) if h not in self.descendants]
 
     def eligible(self, candidate: model.Candidate) -> List[Responder]:
@@ -336,6 +356,7 @@ class Pool:
             where = {
                 model.SCOPE_ANCESTOR: f"no session above {who}",
                 model.SCOPE_SIBLING: f"no sibling of {who}",
+                model.SCOPE_ROOT: "no root session",
                 model.SCOPE_DESCENDANT: f"no session {who} spawned",
             }[candidate.scope]
             inside = self.in_scope(candidate.scope)
@@ -463,6 +484,7 @@ def _pool_from(info: dict, session: str) -> Pool:
         descendants=_descendants(raw, me),
         ancestors=_ancestors(raw, me),
         siblings=_siblings(raw, me),
+        roots=_roots(raw, me),
         generation=_generations(raw, me),
         problem="",
     )
@@ -561,6 +583,18 @@ def _siblings(members: Dict[str, dict], me: str) -> Set[str]:
         return set()
     mine = _parent_of(members, me)
     return {h for h in members if h != me and _parent_of(members, h) == mine}
+
+
+def _roots(members: Dict[str, dict], me: str) -> Set[str]:
+    """Handles with no parent in this roster, ``me`` aside — the sessions the
+    operator started.
+
+    Read off the same :func:`_parent_of` the upward walk uses, so a parent
+    that is not enrolled makes a root here exactly where it ends the chain
+    there. A root asking a root-scoped question sees the other roots — the
+    set its ``sibling`` scope names.
+    """
+    return {h for h in members if h != me and _parent_of(members, h) == ""}
 
 
 def _generations(members: Dict[str, dict], me: str) -> Dict[str, int]:

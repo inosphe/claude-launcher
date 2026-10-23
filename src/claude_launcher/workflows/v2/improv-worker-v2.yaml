@@ -2335,11 +2335,18 @@ nodes:
     # 아니라 리더의 착지 큐로 가므로(integration-request의 leader:landing),
     # 그 요청을 올릴지 묻는 질문도 부모 워커를 건너뛰고 리더에게 간다
     # (claunch-yq80p.12). 리더가 없거나 30분 안에 답이 없으면 사람 앞에 선다.
+    # 셋째 그룹이 root인 이유(claunch-jdre5): 부모가 리더가 아닌 워커(예: 다른
+    # 워커 아래에 선 워커)에게는 루트에 선 리더가 ancestor도 sibling도 아니고
+    # collateral이다. 그 편성에서 앞의 두 그룹이 모두 비면 리더가 메시에 있는데도
+    # 사람 앞에 서고, 그 ask에는 기한이 없어 런이 무기한 대기한다. root는 메시에
+    # 부모가 없는 세션 — 운영자가 직접 띄운 세션 — 만 받으므로 후보가 넓어지지
+    # 않고, 순서는 그대로 사슬 → 형제 → 루트다(가까운 쪽이 먼저 답한다).
     ask:
       prompt: *landing_review_ask
       from:
         - {role: leader, scope: ancestor}
         - {role: leader, scope: sibling}
+        - {role: leader, scope: root}
       otherwise: human
       timeout: 1800
       options: *landing_review_options

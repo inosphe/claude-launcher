@@ -5636,7 +5636,11 @@ Three things make this an approval rather than a formality:
   neither spawn a sibling nor wire itself to one (`connect` requires
   authority *over* both ends), so a sibling reviewer is as trustworthy as an
   ancestor — and is the common shape. `scope: ancestor` narrows to the chain
-  of command when a workflow wants only that.
+  of command when a workflow wants only that. `scope: root` names the
+  sessions with no parent in the mesh — the ones the operator started —
+  which are collateral to a run that has a parent of its own, and are
+  therefore how a run sitting under a non-leader still reaches the leader
+  (claunch-jdre5).
 - **The answer set is closed** — the declared options plus `abstain` — so
   nothing is parsed out of an LLM's prose.
 - **Nothing fails open.** No daemon, no mesh membership, an ambiguous mesh, a

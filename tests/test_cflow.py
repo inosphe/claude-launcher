@@ -1639,14 +1639,69 @@ def test_the_leader_is_an_ancestor_or_a_sibling(monkeypatch):
     assert hit == []  # its sibling is a reviewer, and the leader is above it
 
 
+def test_a_root_scope_reaches_the_leader_a_parented_run_cannot(monkeypatch):
+    """claunch-jdre5: the mesh's leader can be collateral to the asking run.
+
+    ``rev763`` sits under ``w749``, a worker, so the leader the operator
+    started is neither above it nor beside it. Both leader groups missed, the
+    landing question fell to a person with a leader in the mesh, and the ask
+    it fell to has no clock. ``root`` is the group that names the leader
+    there.
+    """
+    _roster(monkeypatch, FAMILY)
+    mine = responders.pool(session="rev763")
+    assert mine.ancestors == ["w749"] and mine.siblings == set()
+    assert mine.roots == {"lead", "me", "w749"}
+    assert mine.relation("lead") == "collateral"
+
+    assert mine.match(_candidate("leader", model.SCOPE_ANCESTOR))[0] == []
+    assert mine.match(_candidate("leader", model.SCOPE_SIBLING))[0] == []
+    hit, reason = mine.match(_candidate("leader", model.SCOPE_ROOT))
+    assert reason is None and [r.handle for r in hit] == ["lead"]
+
+
+def test_a_root_scope_that_finds_no_leader_says_which_roots_it_saw(monkeypatch):
+    """The miss names the roots, so a person reads what was actually tried."""
+    _roster(monkeypatch, FAMILY)
+    _, reason = responders.pool(session="lead").match(
+        _candidate("leader", model.SCOPE_ROOT)
+    )
+    assert "no root session in mesh 'fam' holds that role" in reason
+    assert "found me (worker), w749 (worker)" in reason
+
+
+def test_a_root_scope_leaves_every_other_scope_alone(monkeypatch):
+    """Roots stay siblings of a root and collateral to everybody else.
+
+    The new group names the sessions with no parent in the mesh and nothing
+    else. That set can include an ancestor (a parent that is itself a root),
+    which is the same session ``ancestor`` already reaches; it can never
+    include a descendant, which is the one thing a run may have made itself.
+    """
+    _roster(monkeypatch, FAMILY)
+    root = responders.pool(session="me")
+    assert root.in_scope(model.SCOPE_ROOT) == ["lead", "w749"]
+    assert set(root.in_scope(model.SCOPE_ROOT)) == root.siblings
+    assert root.relation("lead") == "sibling"  # unchanged for a root
+
+    for handle in ("lead", "me", "w749", "w752", "rev764", "rev763", "kid",
+                   "myrev", "grandrev"):
+        found = responders.pool(session=handle)
+        named = set(found.in_scope(model.SCOPE_ROOT))
+        assert named == found.roots - found.descendants, handle
+        assert not named & found.descendants, handle
+        assert named <= set(found.in_scope(model.SCOPE_ANY)), handle
+
+
 def test_the_new_scopes_parse():
-    for scope in ("sibling", "descendant"):
+    for scope in ("sibling", "root", "descendant"):
         cand = model._parse_candidate({"role": "reviewer", "scope": scope}, "x")
         assert cand.scope == scope
         assert cand.describe() == f"reviewer ({scope})"
     with pytest.raises(model.WorkflowError) as err:
         model._parse_candidate({"role": "reviewer", "scope": "cousin"}, "x")
     assert "sibling = the sessions sharing its parent" in str(err.value)
+    assert "root = the sessions with no parent in the mesh" in str(err.value)
 
 
 #: improv-worker's peer-review order, on a flow small enough to read: the
