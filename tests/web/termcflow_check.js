@@ -207,8 +207,9 @@ function localStamp(s) { return String(s); }
   new Function(
     "exports", "pageEl",
     stub
-    + ["scopeSession", "sessionCategory", "gateWakeNote", "cf2Card", "cf2Section",
-       "cf2ReasonInput", "cf2LimitPresses", "renderCflow2Into"].map(slice).join("\n")
+    + ["scopeSession", "sessionCategory", "gateWakeNote", "cf2Card", "cf2AskKind",
+       "cf2Section", "cf2ReasonInput", "cf2LimitPresses", "renderCflow2Into"]
+      .map(slice).join("\n")
     + `
 Object.assign(exports, {
   renderCflow2Into,

@@ -6,7 +6,12 @@
    text as heading + markdown, the options table as one card per option
    (short columns as tags, prose ones as labelled markdown), and the
    recommendation as data -- data-value / data-recommended on the cards and
-   the 권장 chip drawn from that -- with no code per question type. */
+   the 권장 chip drawn from that -- with no code per question type.
+
+   Also pinned: the kind chip an ask card wears (cf2AskKind, claunch-uvo5p.1).
+   Every ask without a structured question used to be drawn as "approval",
+   including a decision ask whose options are request/hold -- the card said
+   APPROVAL over a question that has no yes/no in it. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -46,10 +51,10 @@ function sliceConst(name) {
 const fns = new Function("document", "mdInto",
   [slice("el"), slice("cf2QuestionView"), sliceConst("CF2_ANSWER_MEANINGS"),
    slice("cf2AnswerLegend"), slice("cf2AskLegendItems"), slice("cf2LimitPresses"),
-   slice("cf2AnswerHeld")].join("\n") +
+   slice("cf2AnswerHeld"), slice("cf2AskKind")].join("\n") +
   "\nreturn { cf2QuestionView, cf2AnswerLegend, cf2AskLegendItems, cf2LimitPresses," +
-  " cf2AnswerHeld };")(document, mdInto);
-const { cf2QuestionView } = fns;
+  " cf2AnswerHeld, cf2AskKind };")(document, mdInto);
+const { cf2QuestionView, cf2AskKind } = fns;
 
 let failures = 0;
 function check(what, got, want) {
@@ -157,6 +162,21 @@ check("the ask card holds its press on cf2AnswerHeld before confirm and post",
       true);
 check("the ask card draws its legend from cf2AskLegendItems",
       askCard.includes("cf2AnswerLegend(cf2AskLegendItems(opts, !!q))"), true);
+
+/* ---- the kind chip (claunch-uvo5p.1) ----
+   The chip names what answering the ask does: a brief ask draws its
+   question, a decision carries its own options (request/hold), an approval
+   only enter/decline. */
+check("a brief ask is drawn as its question",
+      cf2AskKind({ question: { sections: [] }, kind: "decision" }), "question");
+check("a decision ask is not drawn as an approval",
+      cf2AskKind({ kind: "decision", prompt: "…",
+                   options: [{ name: "request" }, { name: "hold" }] }), "decision");
+check("a plain approval keeps its chip", cf2AskKind({ kind: "approval" }), "approval");
+check("an ask with no kind is an approval", cf2AskKind({ prompt: "…" }), "approval");
+check("no ask at all is an approval", cf2AskKind(null), "approval");
+check("the run page's ask card takes its kind from cf2AskKind",
+      askCard.includes("cf2Card(cf2AskKind(a)"), true);
 const limitSrc = src.slice(src.indexOf("const limitCard = "),
                            src.indexOf("for (const lim of run.loop_limits"));
 check("the limit card labels its presses and legend from cf2LimitPresses",

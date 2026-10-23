@@ -40065,6 +40065,16 @@ function cf2Card(kind, title, sub) {
   return card;
 }
 
+/* The kind chip an ask card wears (claunch-uvo5p.1). A brief ask draws its
+   structured question; every other ask is named by what answering it does.
+   The record's `kind` says which: a decision carries options of its own
+   (request/hold), an approval only enter/decline. Drawing "approval" over a
+   decision sends the reader looking for a yes/no that is not there. */
+function cf2AskKind(a) {
+  if (a && a.question) return "question";
+  return a && a.kind === "decision" ? "decision" : "approval";
+}
+
 /* The node pane: a clicked chart node in full, on the right edge of the
    view, closed with its x (or Esc). What the run page has for the node from
    the chart is drawn at once; the rest -- the prompt, done_when, returns,
@@ -41099,7 +41109,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   for (const a of run.asks || []) {
     const q = a.question || null;
-    const card = cf2Card(q ? "question" : "approval", a.label || a.node, a.title || "");
+    const card = cf2Card(cf2AskKind(a), a.label || a.node, a.title || "");
     if (q) {
       // a brief ask (docs/cflow-v2.md 2.10): the sections come from the
       // question type, in its order -- no per-type code here
