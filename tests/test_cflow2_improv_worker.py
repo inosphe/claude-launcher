@@ -2095,6 +2095,29 @@ def test_the_request_nudge_is_sent_after_the_routing_result():
         assert anchor in nudge, f"landing-nudge lost {anchor!r}"
 
 
+def test_a_long_landing_wait_alerts_the_user_by_thread_before_the_loop_limit():
+    """s29-qf1 sat in the await/landing-nudge loop for 25 rounds (about four
+    hours) with the request NOT queued: terminal text and issue comments raise
+    no notification, and flow_nudge is refused while the run owes a person
+    nothing. landing-nudge tells the worker to open or answer a thread at fixed
+    points; the shared pack carries the general rule."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    node = doc["nodes"]["landing-nudge"]
+    nudge = _flat(node["prompt"])
+    for anchor in ("사용자 알림", "`thread_reply`", "`thread_open`",
+                   "3번째 재촉", "6번째 재촉마다", "`flow_nudge`", "loop_limit",
+                   "`owed`"):
+        assert anchor in nudge, f"landing-nudge lost {anchor!r}"
+    assert "사용자 알림」의 스레드로" in nudge, "NOT queued must point at the thread notice"
+    assert "알린 스레드 id" in _flat(node["done_when"])
+    common = _flat((V2.parents[2] / "prompt_packs" / "common.md").read_text(encoding="utf-8"))
+    for anchor in ("같은 대기 단계를 반복할 때", "`thread_reply`", "`thread_open`",
+                   "`flow_nudge`", "대기 한도에 닿기 전에"):
+        assert anchor in common, f"common.md lost {anchor!r}"
+
+
 # -- claunch-77cu6: the targeted-test self-gate and a skip that reaches the request
 
 
