@@ -44,11 +44,20 @@ def _save_secret(path, value: str, what: str) -> None:
     value = value.strip()
     if not value:
         raise CredentialsError(f"refusing to store an empty {what}")
-    path.write_text(value + "\n", encoding="utf-8")
-    try:
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best effort on Windows)
-    except OSError:
-        pass
+    # Written beside the target and renamed into place: a truncate-and-write
+    # leaves the file empty for the moment between the two, and a concurrent
+    # reader -- a second launch resolving this profile's token, which is what
+    # a key pool does on every launch -- reads that empty file as "no token"
+    # and falls through the inheritance chain (claunch-wllke.2, measured as a
+    # launch that found no pool to pick from).
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with atomic.scratch(path) as tmp:
+        tmp.write_text(value + "\n", encoding="utf-8")
+        try:
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best effort on Windows)
+        except OSError:
+            pass
+        atomic.replace(tmp, path)
 
 
 def save_token(profile: Profile, token: str) -> None:
