@@ -1192,14 +1192,27 @@ class _StillScreenSession(_FakeSession):
         return self.still
 
 
+class _RunningTask:
+    """Stands in for the service's task loop so `running` reads true.
+
+    `status()` answers "stopped" before it looks at anything else, so a test
+    that never starts the loop reads that value whatever the rest of the
+    code does -- an assertion against it can never fail.
+    """
+
+    def done(self) -> bool:
+        return False
+
+
 def test_a_still_screen_does_not_hold_a_due_reminder(proj):
     """claunch-pumne.1: the screen-stillness hold is gone.
 
     Raising the reminder on "the screen has not moved for N seconds" reads
     ordinary work as a parked turn -- 15 quiet seconds happen inside any
     long command -- so it was rolled back. The session here is busy and has
-    drawn nothing for an hour; both the delivery and the header state must
-    behave exactly as they do for a session whose screen is moving.
+    drawn nothing for an hour; the reminder it is due must be delivered.
+    The header half of the same rule is the next test -- kept separate so
+    this assertion cannot fire first and hide it.
     """
     sess = _StillScreenSession("w1", str(proj))
     service = session_reminder.SessionReminderService(
@@ -1211,12 +1224,27 @@ def test_a_still_screen_does_not_hold_a_due_reminder(proj):
     asyncio.run(service.tick(1601.0))
     assert len(sess.delivered) == 1
 
-    # The header never says the session is stuck: the `stalled` state the
-    # rollback removed must not come back under another name either. (The
-    # state is "stopped" here only because this test never starts the
-    # service's task loop; what matters is that stillness is not a state.)
-    state = service.status("w1", now=1601.0, cfg=cfg)["role"]["state"]
-    assert state not in ("stalled", "held")
+
+def test_a_still_screen_never_reads_as_a_stalled_header(proj):
+    """claunch-pumne.1: `stalled` is not a state the header can report.
+
+    The reading is taken one interval after the delivery, where a busy
+    session reads "due" -- and where the removed hold used to read
+    "stalled". The service's task loop is not started here, so it is stood
+    in for: `status()` answers "stopped" before anything else otherwise,
+    and the assertion below could never fail (review on 4e58909b).
+    """
+    sess = _StillScreenSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    cfg = {"role_reminder": True, "role_reminder_interval": 600.0}
+
+    asyncio.run(service.tick(1000.0))       # first sight arms the role source
+    asyncio.run(service.tick(1601.0))
+    service._task = _RunningTask()
+    state = service.status("w1", now=2201.0, cfg=cfg)["role"]["state"]
+    assert state == "due"
 
 
 def test_role_source_skips_repeats_when_session_has_not_moved(proj):
