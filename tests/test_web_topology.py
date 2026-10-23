@@ -527,6 +527,7 @@ CHECKS = [
         "ctxsize_check.js",
         "tps_check.js",
         "termusage_check.js",
+        "termseries_check.js",
         "usage_check.js",
         "railctx_check.js",
         "ctxpoll_check.js",
