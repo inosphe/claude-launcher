@@ -645,6 +645,39 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
     }
 
 
+def swap_marks(rows: List[dict], profile: str, start: float, end: float) -> List[dict]:
+    """The times a session changed whose token it runs on, for the chart.
+
+    ``rows`` is the session's event history (``session_events``): each
+    ``borrow`` event is one relaunch onto another answer to "whose token" and
+    carries the borrowed profile before and after (empty = the session's own
+    ``profile``) and the ``--null`` flag. Times are epoch seconds inside
+    ``[start, end]``, oldest first. A history that predates the event simply
+    yields none.
+    """
+    marks = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("kind") != "borrow":
+            continue
+        at = _event_epoch(row.get("at"))
+        if at is None or not start <= at <= end:
+            continue
+        d = row.get("details") if isinstance(row.get("details"), dict) else {}
+        marks.append({
+            "at": at,
+            "from": ("(none)" if d.get("previous_null") else d.get("previous") or profile),
+            "to": ("(none)" if d.get("null_token") else d.get("current") or profile),
+        })
+    return sorted(marks, key=lambda m: m["at"])
+
+
+def _event_epoch(value) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 # -- reading ----------------------------------------------------------------
 
 def read_file(path: Path, harness: str, unit: str = "day",

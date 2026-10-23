@@ -1,16 +1,19 @@
-/* The token timeline under each overlay block (claunch-0af4e), run against
+/* The token timeline at the foot of the overlay (claunch-0af4e), run against
    the real functions from app.js.
 
    What has to hold:
      drawn      -- one stacked area and line per part (cached input, write,
-                   input), a dashed mark per compaction at its time, and the
-                   zoomed chart adds the axis, legend and readout.
+                   input), a dashed mark per compaction at its time, a solid
+                   diamond-headed mark per profile swap (claunch-0af4e.1.1),
+                   and the zoomed chart adds the height axis' maximum, the
+                   axis, legend and readout.
      read       -- /api/sessions/<name>/token-series is asked out of the batch,
                    once per TTL and window; the hover view asks for window=full
                    and draws the capped series until it arrives.
      nothing    -- an unavailable answer or one without points draws nothing.
-     overlay    -- both blocks get a chart, hovering one grows that one alone
-                   to the zoomed view and leaving restores the small one.
+     overlay    -- one chart for the whole overlay (the same session series
+                   under both blocks drew it twice), hovering it grows it to
+                   the zoomed view and leaving restores the small one.
      release    -- the hover also ends on a pointer move outside every chart,
                    so a chart replaced by a repaint (no mouseleave) or moved
                    out from under the pointer by the zoom cannot keep the
@@ -120,6 +123,7 @@ const series = (win, start = 1000) => ({
   available: true, window: win, start, until: start + 400, bucket_s: 100, requests: 3,
   points: [0, 1, 2, 3].map((i) => ({ t: start + i * 100, input: 1, cache_read: 10 * (i + 1), cache_write: 2 })),
   compactions: [start + 200],
+  swaps: [{ at: start + 300, from: "opencode", to: "opencode2" }],
 });
 
 (async () => {
@@ -130,15 +134,33 @@ const series = (win, start = 1000) => ({
         svg.kids.map((k) => k.attrs.class),
         ["term-series-area cache_read", "term-series-line cache_read",
          "term-series-area cache_write", "term-series-line cache_write",
-         "term-series-area input", "term-series-line input", "term-series-compaction"]);
+         "term-series-area input", "term-series-line input", "term-series-compaction",
+         "term-series-swap"]);
   check("the compaction sits halfway along a 120px chart", svg.kids[6].attrs.x1, "60.0");
+  const swap = svg.kids[7];
+  check("the swap sits three quarters along, as a stem, a diamond head and a name",
+        [swap.kids.map((k) => k.tag), swap.kids[0].attrs.x1, swap.kids[0].attrs.y2],
+        [["line", "polygon", "title"], "90.0", "26"]);
+  check("the swap mark is solid where the compaction mark is dashed (own class, not the compaction's)",
+        [swap.attrs.class, swap.kids[0].attrs.class], ["term-series-swap", undefined]);
+  check("the swap names the profiles and when", swap.kids[2].textContent,
+        "profile swap opencode \u2192 opencode2, 1m ago");
+  check("the small chart draws no height label", svg.kids.some((k) => k.attrs.class === "term-series-ymax"), false);
   check("the small chart has no axis or legend", small.kids.length, 1);
   const big = ctx.chart(series("full"), true);
   check("zoomed chart: svg, axis, legend, readout",
         big.kids.map((k) => k.attrs.class || k.className),
         ["term-series-chart", "term-series-axis", "term-series-legend", "term-series-readout"]);
-  check("the legend names the parts and the compaction",
-        big.kids[2].kids.map((k) => k.textContent), ["input", "write", "cached input", "compaction"]);
+  check("the legend names the parts, the compaction and the swap",
+        big.kids[2].kids.map((k) => k.textContent),
+        ["input", "write", "cached input", "compaction", "profile swap"]);
+  const zsvg = big.kids[0];
+  const ymax = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax");
+  check("the zoomed chart labels its height axis with the maximum",
+        ymax.map((k) => k.textContent), ["112"]);
+  const rule = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax-rule");
+  check("the maximum has a rule at the top of the plot, level with the stack's top",
+        [rule.length, rule[0].attrs.y1], [1, "2.0"]);
   big.kids[0].handlers.mousemove({ clientX: 100 });
   check("the readout names the bucket under the pointer",
         big.kids[3].textContent, "1m ago: in 4 · cached 100 · write 8 (+43 in 1m)");
@@ -158,10 +180,14 @@ const series = (win, start = 1000) => ({
         ys.every((y, i) => i === 0 || y <= ys[i - 1]), true);
   check("the last point is the window's whole sum at the chart's top edge",
         ys[ys.length - 1] < ys[0] && ys[ys.length - 1] === 2, true);
-  check("the axis names the total, not a per-bucket peak",
-        big.kids[1].kids.map((k) => k.textContent)[1], "total 112");
-  check("the tooltip counts the whole window",
-        small.title.startsWith("112 tokens sent over"), true);
+  check("the axis row has the span start and now only; the height label is in the chart",
+        big.kids[1].kids.map((k) => k.textContent), ["6m ago", "now"]);
+  check("the tooltip counts the whole window and the swap",
+        [small.title.startsWith("112 tokens sent over"), small.title.includes("1 profile swap")],
+        [true, true]);
+  const bare = ctx.chart({ ...series("cap"), swaps: undefined, compactions: [] }, false);
+  check("a series without swap records draws no swap mark",
+        bare.kids[0].kids.some((k) => k.attrs.class === "term-series-swap"), false);
 
   // Reading.
   reply = answer(series("cap"));
@@ -189,37 +215,35 @@ const series = (win, start = 1000) => ({
   await settle(); await settle();
   check("an unavailable answer draws nothing", ctx.data("s2", false), null);
 
-  // Hover: only the chart under the pointer grows.
+  // Hover: the chart grows under the pointer.
   ctx.hover(false);
   const make = ctx.maker(series("cap"), series("full"), false);
-  const a = make("tps"), b = make("usage");
-  check("unhovered, both charts are small and capped",
-        [a.className, b.className], ["term-series", "term-series"]);
+  const b = make("series");
+  check("unhovered, the chart is small and capped", b.className, "term-series");
   const before = renders;
   b.handlers.mouseenter();
-  check("entering a chart names it as the hovered one and repaints",
-        [ctx.hovered(), renders - before], ["usage", 1]);
+  check("entering the chart names it as the hovered one and repaints",
+        [ctx.hovered(), renders - before], ["series", 1]);
   b.handlers.mouseenter();
   check("a second enter on it changes nothing", renders - before, 1);
   check("the hover watches pointer moves on the document",
         docListeners.map(([ev, , c]) => [ev, c]), [["mousemove", true]]);
-  const repaint = ctx.maker(series("cap"), series("full"), "usage");
-  const tpsSmall = repaint("tps"), usageBig = repaint("usage");
-  check("the repaint grows the hovered chart alone, with the whole conversation",
-        [tpsSmall.className, usageBig.className, usageBig.kids.length],
-        ["term-series", "term-series zoom", 4]);
+  const repaint = ctx.maker(series("cap"), series("full"), "series");
+  const grown = repaint("series");
+  check("the repaint grows the hovered chart, with the whole conversation",
+        [grown.className, grown.kids.length], ["term-series zoom", 4]);
   b.handlers.mouseleave();
   check("leaving switches it off and repaints", [ctx.hovered(), renders - before], [false, 2]);
   check("and stops watching", docListeners.length, 0);
 
   // The chart the pointer entered is replaced by a repaint: the new one never
   // got a mouseenter, so its mouseleave cannot be relied on.
-  const c = make("tps");
+  const c = make("series");
   c.handlers.mouseenter();
-  const zoomed = ctx.maker(series("cap"), series("full"), "tps")("tps");
+  const zoomed = ctx.maker(series("cap"), series("full"), "series")("series");
   const mid = renders;
   moveOn(true);
-  check("a move over a chart keeps the zoomed view", [ctx.hovered(), renders - mid], ["tps", 0]);
+  check("a move over a chart keeps the zoomed view", [ctx.hovered(), renders - mid], ["series", 0]);
   moveOn(false);
   check("a move outside every chart ends it and repaints",
         [ctx.hovered(), renders - mid, docListeners.length], [false, 1, 0]);

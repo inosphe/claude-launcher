@@ -9296,10 +9296,11 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-chip-x:hover { color: #ff7b72; }
 .mt-add-session { background: #0d1117; color: #c6cdd5; border: 1px solid #30363d; border-radius: 5px; font-size: 11px; padding: 2px 4px; }
 
-/* The token timeline under each overlay block (claunch-0af4e): stacked areas
-   of cached input, write and input per time bucket, compactions as dashed
-   marks. The overlay itself takes no pointer events; the chart switches them
-   on so hovering it can grow both charts to the whole conversation. */
+/* The token timeline at the foot of the overlay (claunch-0af4e): stacked
+   running totals of cached input, write and input, compactions as dashed red
+   marks and profile swaps as solid cyan ones with a diamond head. The overlay
+   itself takes no pointer events; the chart switches them on so hovering it
+   can grow it to the whole conversation. */
 #term-tps-overlay .term-series {
   pointer-events: auto; cursor: default;
   margin-top: 2px; padding-top: 3px;
@@ -9310,6 +9311,15 @@ a.category-ref:hover { text-decoration: underline; }
 #term-tps-overlay .term-series-line { fill: none; stroke-width: 1; stroke-linejoin: round; }
 #term-tps-overlay .term-series-compaction {
   stroke: #ff7b72; stroke-width: 1; stroke-dasharray: 2 2;
+}
+#term-tps-overlay .term-series-swap line { stroke: #39c5cf; stroke-width: 1; }
+#term-tps-overlay .term-series-swap polygon { fill: #39c5cf; stroke: #0d1117; stroke-width: 0.5; }
+#term-tps-overlay .term-series-ymax-rule {
+  stroke: rgba(139, 148, 158, 0.45); stroke-width: 1; stroke-dasharray: 1 3;
+}
+#term-tps-overlay .term-series-ymax {
+  fill: #c9d1d9; font-size: 10px; paint-order: stroke;
+  stroke: rgba(13, 17, 23, 0.85); stroke-width: 3px; stroke-linejoin: round;
 }
 #term-tps-overlay .term-series-axis {
   display: flex; justify-content: space-between; gap: 8px;
@@ -9325,6 +9335,10 @@ a.category-ref:hover { text-decoration: underline; }
 }
 #term-tps-overlay .term-series-key.compaction::before {
   background: none; width: 0; height: 8px; border-left: 1px dashed #ff7b72; border-radius: 0;
+}
+#term-tps-overlay .term-series-key.swap::before {
+  background: #39c5cf; width: 6px; height: 6px; margin-right: 5px; border-radius: 0;
+  transform: rotate(45deg);
 }
 #term-tps-overlay .term-series-readout {
   font-size: 10px; line-height: 12px; color: #c9d1d9; min-height: 12px; white-space: nowrap;
