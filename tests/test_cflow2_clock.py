@@ -51,9 +51,10 @@ def _no_dispatcher():
     executors.register(None)
 
 
-def _start(cwd, src, caps=None, scope="own", now=T0):
+def _start(cwd, src, caps=None, scope="own", now=T0, driver=None):
     chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent(src))
-    return runtime.start(chart, cwd=str(cwd), scope=scope, caps=caps or {}, now=now)
+    return runtime.start(chart, cwd=str(cwd), scope=scope, caps=caps or {}, now=now,
+                         driver=driver)
 
 
 def _events(cwd, name, scope="own"):
@@ -491,11 +492,6 @@ def test_a_delegation_that_is_not_the_drivers_wait_is_not_counted(row):
     assert cflow2_clock._waits_on_driver({"delegations": [row]}) is False
 
 
-def moved_waiting_line(payload):
-    return [line for line in cflow2_clock.moved_block("own", payload).splitlines()
-            if line.startswith("waiting on you:")][0]
-
-
 def test_an_idle_driver_is_renudged_while_a_subagent_delegation_waits(tmp_path, monkeypatch):
     """s1599 sat five hours at a report delegation that had fallen back to a
     sub-agent: no task, no choice, and so no clock ever counted it."""
@@ -559,6 +555,23 @@ def test_a_spawn_refusal_tells_the_driver_it_runs_the_brief_itself(tmp_path, mon
     assert "the daemon API is not reachable" in text
     assert "flow_delegate" in text
     assert not [n for n in clock.scan() if n[1] == "own"]   # once per fallback
+
+
+def test_the_fallback_notice_goes_to_the_driver_not_the_scope_name(tmp_path, monkeypatch):
+    """The run's driver is who carries the brief; the scope is only the daemon
+    slot the run sits in, and a child session driving a run whose scope names
+    the parent's slot is a different name (claunch-emft6)."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+    def spawn(parent_name, body):
+        raise cflow2_exec.SpawnRefused("the daemon API is not reachable")
+
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), spawn=spawn)
+    clock.scan()
+    _start(tmp_path, SESSION, caps=SESSION_CAPS, driver="driver-x")
+    notices = clock.scan()
+    assert [n[1] for n in notices] == ["driver-x"]
+    assert "child session -> sub-agent" in notices[0][2]
 
 
 def test_session_spawn_refused_falls_back_to_next_executor(tmp_path):
