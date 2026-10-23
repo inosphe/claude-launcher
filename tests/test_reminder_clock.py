@@ -1906,6 +1906,14 @@ body:
   seq: [a, b]
 """
 
+V2_SUBAGENT = """cflow: 2
+name: v2sub
+nodes:
+  report: {title: Report, prompt: write the report,
+           executor: [subagent], returns: {ok: {path: str}}}
+body: report
+"""
+
 V2_USER_PICK = """cflow: 2
 name: v2pick
 nodes:
@@ -1952,6 +1960,28 @@ def test_a_v2_run_waiting_on_its_driver_is_reminded(proj):
     runtime.report("a", cwd=cwd, scope="w1")
     assert clock.scan(t + 1900) == []
     assert "write the docs" in clock.scan(t + 1900 + 601)[0][2]
+
+
+def test_a_v2_run_waiting_on_a_subagent_delegation_is_reminded(proj):
+    """claunch-7u8as: a sub-agent delegation is neither a task nor a choice,
+    but it is the driver's own work -- and the block names it instead of
+    printing an empty "waiting on you:" line."""
+    from claude_launcher.cflow2 import frontend, runtime
+
+    cwd = str(proj)
+    runtime.start(frontend.compile_text(V2_SUBAGENT), cwd=cwd, scope="w1",
+                  caps={"subagent.spawn": True, "mcp.claunch": True})
+    assert runtime.status(cwd=cwd, scope="w1", tick=False)["delegations"][0]["executor"] \
+        == "subagent"
+    sess = _ActivitySession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    assert clock.scan(t) == []                       # armed, not fired
+    due = clock.scan(t + 601)
+    assert [(c, s, k) for c, s, _, k in due] == [(cwd, "w1", "reminder")]
+    text = due[0][2]
+    assert "waiting on you: report" in text
+    assert "flow_status" in text
 
 
 def test_a_v2_run_parked_on_a_users_choice_is_not_reminded(proj):
