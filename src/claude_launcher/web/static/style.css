@@ -7729,6 +7729,8 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
 .chart-row:not(.chart-axis) { cursor: pointer; }
 .chart-row:not(.chart-axis):hover { background: #161b22; }
+/* The token series row is a chart, not a pick: no pointer, no hover. */
+.chart-row.chart-series-row, .chart-row.chart-series-row:hover { cursor: default; background: none; }
 .chart-row.selected, .chart-row.selected:hover { background: #1f2d3d; box-shadow: inset 3px 0 0 #388bfd; }
 .chart-row:focus-visible { outline: 1px solid #388bfd; outline-offset: -1px; }
 .chart-axis { position: sticky; top: 0; z-index: 3; background: #0d1117; color: #8b949e; font-size: 11px; min-height: 26px; border-bottom: 1px solid #30363d; }
@@ -7766,6 +7768,36 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-flow.stalled .chart-flow-age { color: #d29922; }
 .chart-flow.stalled .chart-flow-text { color: #d29922; }
 .chart-empty { padding: 16px 2px; }
+/* Token usage over the same window (claunch-x15q5): the four figures the
+   Stats page's overview reports, then the series as a row of the timeline
+   grid so its buckets share the bars' axis. */
+.chart-usage { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #30363d; border-radius: 8px; background: #161b22; }
+.chart-usage-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.chart-usage-head h3 { margin: 0; font-size: 13px; font-weight: 600; color: #e6edf3; }
+.chart-usage-empty { margin: 6px 0 0; }
+.chart-usage-stats { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.chart-usage-stat { display: flex; flex-direction: column; min-width: 84px; padding: 4px 9px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+.chart-usage-value { font-size: 15px; font-weight: 600; color: #e6edf3; font-variant-numeric: tabular-nums; }
+.chart-usage-label { font-size: 10px; color: #8b949e; }
+.chart-usage-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 6px; font-size: 11px; color: #c9d1d9; }
+.chart-usage-legend-item { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.chart-usage-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.chart-usage-swatch.in { background: #db6d28; }
+.chart-usage-swatch.cr { background: #316dca; }
+.chart-usage-swatch.cw { background: #a371f7; }
+.chart-usage-swatch.out { background: #3fb950; }
+.chart-usage-foot { margin-top: 4px; }
+/* The series row: a normal row of the timeline grid, its track holding the
+   SVG instead of a bar, so its columns land on the same instants. */
+.chart-series-row { align-items: end; }
+.chart-series-row .chart-track { height: 86px; background: transparent; border-radius: 0; border-bottom: 1px solid #30363d; }
+.chart-series-swatch { flex: none; width: 8px; height: 8px; border-radius: 2px; background: #58a6ff; }
+.chart-series { display: block; width: 100%; height: 86px; }
+.chart-series-area { stroke: none; opacity: 0.7; }
+.chart-series-area.in { fill: #db6d28; }
+.chart-series-area.cr { fill: #316dca; }
+.chart-series-area.cw { fill: #a371f7; }
+.chart-series-area.out { fill: #3fb950; }
 /* Two columns: the timeline (.chart-main) and the picked row's detail
    (.chart-detail), with a draggable divider whose place is --chart-left. */
 .chart-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, var(--chart-left, 64%)) 6px minmax(0, 1fr); }

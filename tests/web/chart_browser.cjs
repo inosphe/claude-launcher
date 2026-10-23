@@ -17,7 +17,9 @@
      7. clicking a row highlights it and fills the detail column on the
         right, and clicking it again clears both;
      8. dragging the divider resizes the two columns, and the new split
-        survives a reload. */
+        survives a reload;
+     9. the token usage block shows the window's figures and a series row whose
+        columns sit on the bars' axis (claunch-x15q5). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -46,6 +48,7 @@ const RAIL = {
            entered_at: (now - 60000) / 1000 },
 };
 let archivedAsked = 0;
+const seriesAsked = [];
 
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
 const server = http.createServer((req, res) => {
@@ -60,6 +63,26 @@ const server = http.createServer((req, res) => {
     if (url.pathname === "/api/cflow2/rail") {
       return res.end(JSON.stringify({ rows: RAIL }));
     }
+    if (url.pathname === "/api/stats/series") {
+      seriesAsked.push(Object.fromEntries(url.searchParams));
+      // Two buckets of a five-minute series: busy two hours ago, quiet now.
+      const width = 300, start = now - 2 * 3600000;
+      const points = [];
+      for (let t = start; t <= now; t += width * 1000) {
+        const busy = t === start;
+        points.push({ t, input: busy ? 100 : 0, cache_read: busy ? 2000 : 0,
+                      cache_write: 0, output: busy ? 50 : 0,
+                      total: busy ? 2150 : 0, requests: busy ? 2 : 0 });
+      }
+      return res.end(JSON.stringify({
+        window: url.searchParams.get("window"), bucket_s: width,
+        start, until: now, points,
+        totals: { input: 100, cache_read: 2000, cache_write: 0, output: 50,
+                  total: 2150, requests: 2 },
+        cache_share: 2000 / 2150, sessions: 3, unmetered: 0,
+        ledger_since: "2026-10-01",
+      }));
+    }
     res.statusCode = 404;
     return res.end("{}");
   }
@@ -72,7 +95,7 @@ const server = http.createServer((req, res) => {
   } catch { res.statusCode = 404; res.end(); }
 });
 
-const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis) .chart-name-text",
+const rowNames = (page) => page.$$eval("#chart-view .chart-row:not(.chart-axis):not(.chart-series-row) .chart-name-text",
   (els) => els.map((e) => e.textContent).sort());
 
 /* The axis labels a viewer can read, left to right, with the column's edges. */
@@ -109,7 +132,7 @@ function assertTicksApart(ticks, where) {
     page.on("pageerror", (e) => errors.push(String(e)));
     await page.goto(`http://127.0.0.1:${port}/#/chart`);
     await page.waitForFunction(() =>
-      document.querySelectorAll("#chart-view .chart-row:not(.chart-axis)").length >= 3, null, { timeout: 15000 });
+      document.querySelectorAll("#chart-view .chart-row:not(.chart-axis):not(.chart-series-row)").length >= 3, null, { timeout: 15000 });
 
     // 1. Chart sits right after Stats in the nav.
     const pages = await page.$$eval("#rail-nav a", (as) => as.map((a) => a.dataset.page));
@@ -117,7 +140,7 @@ function assertTicksApart(ticks, where) {
 
     // 2. One row per current session, a bar inside its track, a lifetime.
     assert.deepEqual(await rowNames(page), ["alpha", "beta", "gamma"]);
-    const bars = await page.$$eval("#chart-view .chart-row:not(.chart-axis)", (rows) => rows.map((r) => {
+    const bars = await page.$$eval("#chart-view .chart-row:not(.chart-axis):not(.chart-series-row)", (rows) => rows.map((r) => {
       const t = r.querySelector(".chart-track").getBoundingClientRect();
       const b = r.querySelector(".chart-bar").getBoundingClientRect();
       return { inside: b.left >= t.left - 0.5 && b.right <= t.right + 0.5 && b.width > 0,
@@ -132,7 +155,7 @@ function assertTicksApart(ticks, where) {
     // is not, and a session without a run shows no age.
     await page.waitForFunction(() =>
       document.querySelectorAll("#chart-view .chart-flow-age").length >= 2, null, { timeout: 15000 });
-    const flowRows = await page.$$eval("#chart-view .chart-row:not(.chart-axis)", (rows) => rows.map((r) => {
+    const flowRows = await page.$$eval("#chart-view .chart-row:not(.chart-axis):not(.chart-series-row)", (rows) => rows.map((r) => {
       const f = r.querySelector(".chart-flow");
       return {
         name: r.querySelector(".chart-name-text").textContent,
@@ -216,7 +239,7 @@ function assertTicksApart(ticks, where) {
 
     // 6. Every row names a role.
     await (await page.$$("#chart-view .chart-select select"))[1].selectOption("");
-    const roles = await page.$$eval("#chart-view .chart-row:not(.chart-axis)", (rows) =>
+    const roles = await page.$$eval("#chart-view .chart-row:not(.chart-axis):not(.chart-series-row)", (rows) =>
       Object.fromEntries(rows.map((r) => [r.querySelector(".chart-name-text").textContent,
                                           r.querySelector(".chart-role").textContent])));
     assert.equal(roles.alpha, "worker");
@@ -265,6 +288,51 @@ function assertTicksApart(ticks, where) {
     await page.reload();
     await page.waitForSelector("#chart-view .chart-main");
     assert.ok(Math.abs((await width()) - after) < 12, "split kept across a reload");
+
+    // 9. The token usage block: the window's figures, the four parts named,
+    // a series row drawn on the timeline's own axis, and the query the
+    // page's picks make.
+    await page.waitForSelector("#chart-view .chart-usage");
+    await page.waitForFunction(() =>
+      document.querySelectorAll("#chart-view .chart-series-row rect.chart-series-area").length > 0,
+      null, { timeout: 15000 });
+    const usage = await page.$eval("#chart-view .chart-usage", (b) => ({
+      text: b.textContent,
+      stats: Array.from(b.querySelectorAll(".chart-usage-stat"),
+        (s) => s.querySelector(".chart-usage-label").textContent + "=" +
+               s.querySelector(".chart-usage-value").textContent),
+      legend: Array.from(b.querySelectorAll(".chart-usage-legend-item"), (e) => e.textContent),
+    }));
+    assert.ok(usage.stats.includes("총 토큰=2.15k"), usage.stats.join(" | "));
+    assert.ok(usage.stats.includes("요청=2"), usage.stats.join(" | "));
+    assert.ok(usage.stats.some((s) => s.startsWith("캐시 비중=93.0%")), usage.stats.join(" | "));
+    assert.ok(usage.legend.some((l) => l.startsWith("cache read 2.00k")), usage.legend.join(" | "));
+    assert.ok(usage.legend.some((l) => l.startsWith("output 50")), usage.legend.join(" | "));
+    assert.match(usage.text, /버킷/);
+    // The series row's columns land on the same instants the bars do: the
+    // busy bucket, two hours back, sits where a session created then starts.
+    const geom = await page.evaluate(() => {
+      const track = document.querySelector("#chart-view .chart-series-row .chart-track")
+        .getBoundingClientRect();
+      const rects = Array.from(
+        document.querySelectorAll("#chart-view .chart-series-row rect.chart-series-area"),
+        (r) => { const b = r.getBoundingClientRect();
+                 return { left: b.left, width: b.width, height: b.height }; });
+      const alpha = document.querySelector("#chart-view .chart-row[data-name='alpha'] .chart-bar")
+        .getBoundingClientRect();
+      return { track, rects, alpha };
+    });
+    assert.ok(geom.rects.some((r) => r.height > 4), "the busy bucket has a height");
+    assert.ok(geom.rects.some((r) => r.height < 1 || r.width < 1) ||
+      geom.rects.length < 24, "quiet buckets draw nothing");
+    for (const r of geom.rects) {
+      assert.ok(r.left >= geom.track.left - 2 && r.left + r.width <= geom.track.right + 2,
+        "a column stays inside the track");
+    }
+    const asked = seriesAsked[seriesAsked.length - 1];
+    assert.equal(asked.window, "7d", "the page's range is the query's window");
+    assert.equal(asked.killed, "1");
+    assert.equal(asked.archived, "0");
 
     assert.deepEqual(errors, []);
     console.log("ok");

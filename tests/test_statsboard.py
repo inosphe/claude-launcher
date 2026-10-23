@@ -982,3 +982,181 @@ def test_the_endpoint_wiring_hands_each_meta_its_event_history(tmp_path, ledger,
     payload = api._stats_overview(
         SimpleNamespace(list=lambda: [Double("wired")]), "today", False, ledger)
     assert payload["sessions"][0]["switches"] == []
+
+
+# --------------------------------------------------------------------------- #
+# the fleet's time series (claunch-x15q5)
+# --------------------------------------------------------------------------- #
+def test_the_series_keeps_every_component_apart_per_bucket(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [
+        record("s1", hour=9, minute=0, fresh=10, cached=100, written=1, output=5),
+        record("s1", hour=9, minute=2, fresh=20, cached=200, written=2, output=7),
+        record("s1", hour=9, minute=40, fresh=1, cached=2, written=0, output=3),
+    ])
+    ledger.refresh(NOW)
+    out = ledger.series("24h", sessions=[meta("s1")], now=NOW)
+    assert out["bucket_s"] == statsboard.SERIES_BIN_S
+    # Nine o'clock holds the first two; nine-forty is a bin of its own.
+    at9 = [p for p in out["points"] if datetime.fromtimestamp(p["t"], KST).hour == 9]
+    assert at9[0]["input"] == 30 and at9[0]["cache_read"] == 300
+    assert at9[0]["cache_write"] == 3 and at9[0]["output"] == 12
+    assert at9[0]["total"] == 30 + 300 + 3 + 12
+    assert at9[0]["requests"] == 2
+    assert sum(p["requests"] for p in out["points"]) == 3
+    # The totals are the sums of the points, so the area drawn from them is
+    # the window's total and not an average of it.
+    assert out["totals"]["total"] == 10 + 100 + 1 + 5 + 20 + 200 + 2 + 7 + 1 + 2 + 0 + 3
+
+
+def test_the_series_window_leaves_older_records_out(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [
+        record("s1", day=20, hour=9, fresh=5),
+        record("s1", day=21, hour=9, fresh=7),
+    ])
+    ledger.refresh(NOW)
+    day = ledger.series("24h", sessions=[meta("s1")], now=NOW)
+    assert day["totals"]["input"] == 7
+    assert day["start"] <= day["points"][0]["t"] <= NOW
+    week = ledger.series("7d", sessions=[meta("s1")], now=NOW)
+    assert week["totals"]["input"] == 12
+
+
+def test_the_series_bucket_widens_so_one_answer_is_one_screen(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [record("s1", hour=9)])
+    ledger.refresh(NOW)
+    widths = []
+    for window in ("24h", "7d", "30d"):
+        out = ledger.series(window, sessions=[meta("s1")], now=NOW)
+        assert len(out["points"]) <= statsboard.SERIES_MAX_POINTS, window
+        assert out["bucket_s"] >= statsboard.SERIES_BIN_S
+        assert out["bucket_s"] % statsboard.SERIES_BIN_S == 0
+        assert out["start"] % out["bucket_s"] == 0, "buckets stay on one grid"
+        widths.append(out["bucket_s"])
+    # A wider window needs a wider bucket to keep to one screen.
+    assert widths == sorted(widths) and widths[0] < widths[-1], widths
+    assert ledger.series("24h", sessions=[meta("s1")], now=NOW)["bucket_s"] \
+        == statsboard.SERIES_BIN_S
+
+
+def test_the_series_leaves_out_what_the_rows_leave_out(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [
+        record("live", hour=9, fresh=1),
+        record("dead", hour=9, fresh=100),
+        record("put", hour=9, fresh=1000),
+    ])
+    ledger.refresh(NOW)
+    metas = [meta("live"), meta("dead", category="killed"),
+             meta("put", category="archived")]
+    out = ledger.series("24h", sessions=metas, now=NOW)
+    assert out["totals"]["input"] == 1
+    killed = ledger.series("24h", sessions=metas, now=NOW, include_killed=True)
+    assert killed["totals"]["input"] == 101
+    both = ledger.series("24h", sessions=metas, now=NOW,
+                         include_killed=True, include_archived=True)
+    assert both["totals"]["input"] == 1101
+    assert both["sessions"] == 3
+
+
+def test_the_series_narrows_to_one_project(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [
+        record("a", hour=9, fresh=3), record("b", hour=9, fresh=5)])
+    ledger.refresh(NOW)
+    other = dict(meta("b"), project="elsewhere")
+    out = ledger.series("24h", sessions=[meta("a"), other], now=NOW,
+                        project="claunch")
+    assert out["totals"]["input"] == 3
+    assert out["sessions"] == 1
+
+
+def test_the_series_says_unmetered_rather_than_drawing_zero(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [record("a", hour=9, fresh=3)])
+    ledger.refresh(NOW)
+    out = ledger.series("24h", sessions=[meta("a"), meta("oauth")], now=NOW)
+    assert out["totals"]["input"] == 3
+    assert out["sessions"] == 1
+    assert out["unmetered"] == 1
+
+
+def test_the_series_refuses_an_unknown_window(tmp_path, ledger):
+    with pytest.raises(ValueError):
+        ledger.series("year", sessions=[], now=NOW)
+
+
+def test_an_empty_series_still_answers_a_window(tmp_path, ledger):
+    ledger.refresh(NOW)
+    out = ledger.series("7d", sessions=[], now=NOW)
+    assert out["totals"]["total"] == 0
+    assert out["cache_share"] is None
+    assert 1 <= len(out["points"]) <= statsboard.SERIES_MAX_POINTS
+
+
+def test_the_series_endpoint_answers_and_refuses_an_unknown_window(
+        home, tmp_path, monkeypatch):
+    import asyncio
+    import functools
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher import config
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+    from claude_launcher.daemon.session import DeadSession
+
+    monkeypatch.setattr(statsboard.Ledger, "series",
+                        functools.partial(statsboard.Ledger.series, now=NOW))
+    records = config.launcher_home() / "metering"
+    write_ledger(records, [record("live", hour=9, upstream=FIREWORKS)])
+    live = SessionDef(name="live", harness="claude", cwd=str(tmp_path))
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr._sessions["live"] = DeadSession(live, exit_code=None)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(),
+                        mesh=MeshManager(mgr))
+        app["stats_ledger"] = statsboard.Ledger(zone=KST)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            resp = await client.get("/api/stats/series?window=24h&killed=1",
+                                    headers=bearer)
+            body = await resp.json()
+            assert resp.status == 200, body
+            assert body["window"] == "24h"
+            assert body["bucket_s"] == statsboard.SERIES_BIN_S
+            # record()'s defaults: 10 fresh + 100 cache read + 5 output.
+            assert body["totals"]["total"] == 115
+            assert body["totals"]["requests"] == 1
+            assert body["sessions"] == 1
+            assert body["points"], "a window always has its buckets"
+
+            resp = await client.get("/api/stats/series?window=fortnight",
+                                    headers=bearer)
+            body = await resp.json()
+            assert resp.status == 400
+            assert "window must be one of" in body["error"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_page_and_the_series_agree_on_the_range_keys():
+    """The Chart page sends its own range key as `?window`; a key the daemon
+    does not know is a 400 the page draws as a failed read. Reading the page's
+    own RANGES is what keeps the two lists from drifting (claunch-x15q5)."""
+    import re
+    from pathlib import Path
+
+    page = (Path(__file__).resolve().parents[1]
+            / "src" / "claude_launcher" / "web" / "static" / "chart-page.js")
+    text = page.read_text(encoding="utf-8")
+    block = text.split("const RANGES = [", 1)[1].split("];", 1)[0]
+    keys = re.findall(r'\[\s*"([^"]+)"', block)
+    assert keys, "chart-page.js RANGES has no keys"
+    assert sorted(keys) == sorted(statsboard.SERIES_WINDOWS), (
+        f"the page offers {keys}, the daemon knows "
+        f"{sorted(statsboard.SERIES_WINDOWS)}")
