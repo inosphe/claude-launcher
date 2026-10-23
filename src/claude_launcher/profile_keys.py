@@ -487,10 +487,20 @@ def set_strategy(profile: Profile, strategy: str) -> Pool:
 def strategy_owner(profile: Profile) -> Optional[Profile]:
     """The profile whose pool :func:`set_strategy` reads and writes.
 
-    ``None`` when no profile in the chain holds a pool or a token, which is
-    the same answer :func:`owner` gives and the reason the caller falls back
-    to the profile itself: the error then names the profile that was asked
-    about rather than an ancestor that does not exist.
+    This answers one step earlier than :func:`owner`. ``owner`` names a
+    profile only where a pool file already exists, because a *launch* can
+    select no further than that. This one also names a profile whose only
+    credential is a single token: that is where ``set_strategy`` writes, and
+    :func:`adopt_single_token` turns the token into the pool's first key on
+    the way. The two coincide wherever a pool exists, so the difference shows
+    up exactly on a chain with a lone token and no pool -- which is why the
+    display half of ``claunch keys strategy`` has to say what a set would
+    create there rather than only that there is no pool yet
+    (claunch-wllke.5.1.1.1).
+
+    ``None`` means no profile in the chain holds a pool or a token, and the
+    caller falls back to the profile itself: the error then names the profile
+    that was asked about rather than an ancestor that does not exist.
     """
     return _token_source(profile)
 

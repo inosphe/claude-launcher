@@ -659,6 +659,55 @@ def test_keys_strategy_still_says_so_when_no_pool_is_in_reach(home, capsys):
     assert "has no key pool" in capsys.readouterr().out
 
 
+def test_keys_strategy_names_the_pool_a_set_would_create(home, capsys):
+    # The display half asks view(), which reports only a pool that exists; the
+    # set half lands on strategy_owner, which adopts a lone token into one. On
+    # a chain whose only credential is a single token the two forms disagreed
+    # about the same profile -- the display denied a pool the set then created
+    # (claunch-wllke.5.1.1.1). The display now names that destination, and the
+    # set is checked to land where it said.
+    base = profile.create("base")
+    credentials.save_token(base, "sk-AAAA1111BBBB")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "strategy", "child"]) == 0
+
+    said = capsys.readouterr().out
+    assert "has no key pool yet" in said
+    assert "profile 'base'" in said
+
+    assert cli.main(["keys", "strategy", "child", "usage-min"]) == 0
+    capsys.readouterr()
+
+    assert profile_keys.load(base).strategy == "usage-min"
+    assert not profile_keys.path(child).exists()
+    # What the display promised is where the set landed: one pool, one owner.
+    assert profile_keys.view(child)["owner"] == "base"
+    assert cli.main(["keys", "strategy", "child"]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "usage-min"
+
+
+def test_keys_strategy_says_the_pool_would_be_created_here(home, capsys):
+    # The same sentence for the nearer case: the lone token is the profile's
+    # own, so the pool a set creates is its own and no ancestor is named
+    # (claunch-wllke.5.1.1.1).
+    solo = profile.create("solo")
+    credentials.save_token(solo, "sk-AAAA1111BBBB")
+
+    assert cli.main(["keys", "strategy", "solo"]) == 0
+
+    said = capsys.readouterr().out
+    assert "has no key pool yet" in said
+    assert "into a pool here" in said
+
+    assert cli.main(["keys", "strategy", "solo", "random"]) == 0
+
+    pool = profile_keys.load(solo)
+    assert pool.strategy == "random"
+    assert len(pool.keys) == 1
+
+
 def test_setting_a_childs_strategy_writes_the_pool_its_launches_read(home):
     # The display half already answered from the inherited pool
     # (claunch-wllke.5.1), while the set half wrote the child's own absent
