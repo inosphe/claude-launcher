@@ -1188,6 +1188,7 @@ def build_app(
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/stats", h_session_stats)
+    r.add_get("/api/sessions/{name}/token-series", h_session_token_series)
     r.add_get("/api/stats/compare", h_stats_compare)
     r.add_get("/api/stats/overview", h_stats_overview)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
@@ -11247,6 +11248,32 @@ async def h_session_stats(request: web.Request) -> web.Response:
         reading, reader = await _stats_call(request.app, {
             "op": "read", "head": head,
             "path": str(path) if path is not None else None, "unit": unit})
+    except statsworker.WorkerError as exc:
+        return json_error(500, f"reading the transcript failed: {exc}")
+    return json_response({**reading, "reader": reader})
+
+
+async def h_session_token_series(request: web.Request) -> web.Response:
+    """The terminal overlay's chart: fresh input, cache read and cache write
+    per time bucket over the conversation, with its compaction times
+    (``?window=cap|full``, default ``cap`` = at most the last 12 hours; the
+    overlay's hover view asks for ``full``). See :func:`sessionstats.series`."""
+    manager: SessionManager = request.app["manager"]
+    session = manager.get(request.match_info["name"])
+    window = request.query.get("window", "cap")
+    if window not in sessionstats.SERIES_WINDOWS:
+        return json_error(400, f"window must be one of: {', '.join(sessionstats.SERIES_WINDOWS)}")
+    try:
+        points = int(request.query.get("points", sessionstats.SERIES_POINTS))
+    except ValueError:
+        return json_error(400, "points must be an integer")
+    sdef = getattr(session, "sdef", None)
+    head, path = await asyncio.to_thread(sessionstats.locate, sdef)
+    try:
+        reading, reader = await _stats_call(request.app, {
+            "op": "series", "head": head,
+            "path": str(path) if path is not None else None,
+            "window": window, "points": points})
     except statsworker.WorkerError as exc:
         return json_error(500, f"reading the transcript failed: {exc}")
     return json_response({**reading, "reader": reader})
