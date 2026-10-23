@@ -45386,10 +45386,12 @@ const keyPoolPending = new Map();  // profile -> Promise
 
 function fetchKeyPool(profile, { fresh = false } = {}) {
   if (!profile) return Promise.resolve(null);
-  if (!fresh) {
-    const pending = keyPoolPending.get(profile);
-    if (pending) return pending;
-  }
+  // `fresh` asks for a read, not for a second one. The rail asks once per
+  // row, and a pool past its clock is past it for every row of that profile,
+  // so bypassing the pending map answered the same question once per row --
+  // and every answer started a whole pass (claunch-rw7tw.1).
+  const pending = keyPoolPending.get(profile);
+  if (pending) return pending;
   const req = api(`/api/profiles/${encodeURIComponent(profile)}/keys`)
     .then(async (resp) => {
       const data = await resp.json().catch(() => null);
@@ -45416,19 +45418,37 @@ const KEY_POOL_TTL_MS = 60000;
    opposite. Reads the cached pool only; when there is none yet it starts the
    read and lets the next poll draw the chip, which is how the rest of the
    rail's late helpers behave. */
+/* One redraw per turn, however many rows ask for it (claunch-rw7tw.1).
+
+   A row's key chip starts its pool read while that row is being built and
+   asks for a redraw when the read lands. Asked per row, a 214-row rail left
+   one whole pass open per row: the trace shows 213 of them at once, all
+   waiting on the same batched /api/sessions read, and when that read settled
+   every one of them re-parsed the same body and re-merged the fleet in a
+   single task measured at 3,430 ms. What those callers need is that the rail
+   is redrawn once after their reads land, so the requests arriving in one
+   turn collapse into one deferred pass. */
+let sessionsRefreshQueued = false;
+function requestSessionsRefresh() {
+  if (sessionsRefreshQueued) return;
+  sessionsRefreshQueued = true;
+  setTimeout(() => {
+    sessionsRefreshQueued = false;
+    if (typeof refreshSessions === "function") refreshSessions();
+  }, 0);
+}
+
 function railKeyChip(s) {
   if (!s || !s.profile) return null;
   const hit = keyPools.get(s.profile);
   if (!hit) {
     fetchKeyPool(s.profile).then((data) => {
-      if (data && data.pooled && typeof refreshSessions === "function") refreshSessions();
+      if (data && data.pooled) requestSessionsRefresh();
     });
     return null;
   }
   if (Date.now() - hit.at > KEY_POOL_TTL_MS) {
-    fetchKeyPool(s.profile, { fresh: true }).then((data) => {
-      if (typeof refreshSessions === "function") refreshSessions();
-    });
+    fetchKeyPool(s.profile, { fresh: true }).then(() => requestSessionsRefresh());
   }
   const pool = hit.data;
   if (!pool || !pool.pooled || !(pool.keys || []).length) return null;

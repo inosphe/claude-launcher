@@ -89,10 +89,19 @@ function keyPoolTtlTable() {
   return src.slice(start, src.indexOf(";", start) + 1);
 }
 
+/* The chip asks for a redraw through the collapser, not through the pass
+   itself (claunch-rw7tw.1): one row asking is one row asking, and a whole
+   pass per row is the storm that trace found. */
+const requestSessionsRefresh = new Function(
+  "setTimeout", "refreshSessions", "sessionsRefreshQueued",
+  slice("requestSessionsRefresh") + "; return requestSessionsRefresh;"
+)(setTimeout, poolEnv.refreshSessions, false);
+
 const railKeyChip = new Function(
-  "keyPools", "document", "fetchKeyPool", "refreshSessions", "openKeyPicker",
+  "keyPools", "document", "fetchKeyPool", "requestSessionsRefresh",
+  "openKeyPicker",
   keyPoolTtlTable() + "\n" + slice("railKeyChip") + "; return railKeyChip;"
-)(keyPools, document, fetchKeyPool, poolEnv.refreshSessions,
+)(keyPools, document, fetchKeyPool, requestSessionsRefresh,
   poolEnv.openKeyPicker);
 
 const session = (over = {}) =>
@@ -138,14 +147,21 @@ check("a pinned session shows its key", pinnedChip
   && pinnedChip.children[0].textContent === "sk-A…BBBB");
 check("a pinned session is lit", pinnedChip && pinnedChip.className.includes("on"));
 
-// A stale cache re-reads on a slow clock, and keeps drawing from what it had.
-const stale = { at: Date.now() - 120000, data: two };
-keyPools.set("work:claude", stale);
-fetches.length = 0;
-const staleChip = railKeyChip(session());
-check("a stale pool still draws", !!staleChip);
-check("a stale pool re-reads once", fetches.length === 1
-  && fetches[0] === "/api/profiles/work%3Aclaude/keys", fetches[0]);
+/* The read the uncached row started settles long before the next poll, so
+   its chain is allowed to run first: the stale case below is a cache ON a
+   settled read, not a read still in flight (the two are different questions
+   -- a fresh ask joins a read in flight, which railkeypool_check holds). */
+async function stalePoolReReads() {
+  for (let i = 0; i < 20 && keyPoolPending.size; i++) await Promise.resolve();
+  // A stale cache re-reads on a slow clock, and keeps drawing from what it had.
+  const stale = { at: Date.now() - 120000, data: two };
+  keyPools.set("work:claude", stale);
+  fetches.length = 0;
+  const staleChip = railKeyChip(session());
+  check("a stale pool still draws", !!staleChip);
+  check("a stale pool re-reads once", fetches.length === 1
+    && fetches[0] === "/api/profiles/work%3Aclaude/keys", fetches[0]);
+}
 
 /* ---- the picker ---- */
 let posted = null;
@@ -172,6 +188,7 @@ const openKeyPicker = new Function(
 )(...Object.values(pickEnv));
 
 (async () => {
+  await stalePoolReReads();
   // Cancel: nothing is sent.
   pickEnv.answer = null;
   await openKeyPicker("s1", "work:claude");
