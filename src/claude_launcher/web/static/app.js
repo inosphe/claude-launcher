@@ -8330,17 +8330,17 @@ function ensureTermLivePoll() {
    costs no extra account reads and shows the clock's reading within five
    minutes of it.
 
-   Every harness with a usage reader is asked: claude (Anthropic, or Kimi as
-   its provider), codex and kimi (usage.reader). The labels come from the
-   normalized window names, whatever the source: five_hour 5h, seven_day 7d,
-   weekly wk; a codex bucket prefix (`<limit>.five_hour`) stays in front of
-   the label. A session that borrows another profile's token (s.borrow) runs
+   Every harness with a usage reader is asked: claude (Anthropic, or Kimi or
+   OpenCode Go as its provider), codex and kimi (usage.reader). The labels
+   come from the normalized window names, whatever the source: five_hour 5h,
+   seven_day 7d, weekly wk, monthly mo; a codex bucket prefix
+   (`<limit>.five_hour`) stays in front of the label. A session that borrows another profile's token (s.borrow) runs
    on the lender's account, so it gets two lines, its own profile's and the
    lender's (claunch-f5w4x.4), each named; a side that cannot be read is left
    out. */
 const TERM_USAGE_TTL_MS = 5 * 60 * 1000;
 const TERM_USAGE_HARNESSES = new Set(["claude", "codex", "kimi"]);
-const TERM_USAGE_LABELS = [["five_hour", "5h"], ["seven_day", "7d"], ["weekly", "wk"]];
+const TERM_USAGE_LABELS = [["five_hour", "5h"], ["seven_day", "7d"], ["weekly", "wk"], ["monthly", "mo"]];
 /* profile selector -> {at, data, pending}: one read per selector, whichever
    session of it is on screen. */
 const termUsageReads = new Map();

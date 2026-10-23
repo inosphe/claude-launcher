@@ -386,6 +386,61 @@ def test_claude_provider_uses_anthropic_usage_api(home, monkeypatch):
     assert report.source == "oauth-usage"
 
 
+def _opencode_go_profile(name="oc", base="https://opencode.ai/zen/go"):
+    p = profile.create(name)
+    entry = {"endpoints": {"anthropic": base}, "anthropic_auth_header": "x-api-key"}
+    store.update(lambda doc: doc.update({"providers": {"opencode": entry}}))
+    providers.set_profile_selection(p, "opencode")
+    credentials.save_token(p, "oc-secret")
+    return p
+
+
+_GO_USAGE = {"usage": {
+    "rolling": {"status": "ok", "percent": 41, "resetsAt": "2026-10-23T02:13:19.000Z"},
+    "weekly": {"status": "ok", "percent": 17, "resetsAt": "2026-10-26T00:00:00.000Z"},
+    "monthly": {"status": "limited", "percent": 100, "resetsAt": "2026-11-22T01:54:34.000Z"},
+}}
+
+
+def test_opencode_go_provider_reads_its_plan_windows(home, monkeypatch):
+    p = _opencode_go_profile()
+    reached = []
+
+    def fake_urlopen(req, timeout):
+        reached.append(req.full_url)
+        assert req.get_header("Authorization") == "Bearer oc-secret"
+        return _FakeResponse(json.dumps(_GO_USAGE).encode())
+
+    monkeypatch.setattr(usage.urllib.request, "urlopen", fake_urlopen)
+    selected = usage.resolve_target(p)
+
+    assert usage.reader(selected) == "opencode-go"
+    report = usage.fetch(selected)
+    assert reached == ["https://opencode.ai/zen/go/v1/usage"]
+    assert report.source == "opencode-go"
+    assert [(w.name, w.utilization, w.resets_at, w.status) for w in report.windows] == [
+        ("five_hour", 41.0, "2026-10-23T02:13:19.000Z", "ok"),
+        ("weekly", 17.0, "2026-10-26T00:00:00.000Z", "ok"),
+        ("monthly", 100.0, "2026-11-22T01:54:34.000Z", "limited"),
+    ]
+
+
+def test_opencode_go_reply_without_windows_is_an_error(home, monkeypatch):
+    p = _opencode_go_profile()
+    monkeypatch.setattr(
+        usage.urllib.request, "urlopen",
+        lambda req, timeout: _FakeResponse(json.dumps({"usage": {}}).encode()),
+    )
+    with pytest.raises(usage.UsageError, match="unexpected OpenCode Go usage response"):
+        usage.fetch(usage.resolve_target(p))
+
+
+def test_opencode_endpoint_other_than_go_has_no_reader(home):
+    p = _opencode_go_profile(base="https://opencode.ai/zen")
+    with pytest.raises(usage.UsageError, match="Anthropic service provider"):
+        usage.reader(usage.resolve_target(p))
+
+
 def _fireworks_profile(name="fw", credit=None):
     p = profile.create(name)
     entry = {"env": {"ANTHROPIC_BASE_URL": "https://api.fireworks.ai/inference"}}

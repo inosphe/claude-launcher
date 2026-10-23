@@ -46,6 +46,9 @@
   const CHART_WINDOWS = [
     ["five_hour", "5h", "#388bfd"],
     ["seven_day", "7d", "#db6d28"],
+    // Calendar-week and plan-month windows (Kimi, OpenCode Go).
+    ["weekly", "week", "#a371f7"],
+    ["monthly", "month", "#1f9e89"],
   ];
   // A source that reports dollars and no percentage window (Fireworks,
   // claunch-f5w4x.5) is charted in dollars: per window the field drawn.
@@ -218,7 +221,7 @@
     const box = node("div", "profile-usage-chart");
     if (!series.length) {
       box.append(node("p", "wf-note", samples.length
-        ? "This source reports no 5h, 7d or dollar window to chart."
+        ? "This source reports no 5h, 7d, week, month or dollar window to chart."
         : "No samples in this range yet."));
       return box;
     }

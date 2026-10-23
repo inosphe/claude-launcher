@@ -158,6 +158,11 @@ const anthropic = {
         ctx.parts(kimi).items.map((i) => `${i.label} ${i.pct}`), ["5h 0", "wk 100"]);
   check("a kimi-harness reading draws the same windows",
         ctx.parts({ ...kimi, source: "kimi-web-server", harness: "kimi" }).items.length, 2);
+  const go = { profile: "opencode", harness: "claude", source: "opencode-go",
+    windows: [{ name: "five_hour", utilization: 41 }, { name: "weekly", utilization: 17 },
+              { name: "monthly", utilization: 8 }] };
+  check("an OpenCode Go reading draws 5h, wk and mo",
+        ctx.parts(go).items.map((i) => `${i.label} ${i.pct}`), ["5h 41", "wk 17", "mo 8"]);
   check("a codex bucket keeps its prefix in front of the label",
         ctx.parts({ profile: "c", windows: [{ name: "gpt.five_hour", utilization: 5 }] }).items[0].label,
         "gpt 5h");
