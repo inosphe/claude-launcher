@@ -186,8 +186,13 @@ def _windows_from_headers(headers: dict) -> List[UsageWindow]:
     return windows
 
 
-def _fetch_claude(profile: Profile) -> UsageReport:
-    """Claude usage (token may be inherited from a parent)."""
+def _fetch_claude(profile: Profile, token: Optional[str] = None) -> UsageReport:
+    """Claude usage (token may be inherited from a parent).
+
+    ``token`` asks about one stored key instead of the profile's effective
+    token (claunch-wllke); such a key is a launcher setup-token or API key and
+    carries no ``user:profile`` scope.
+    """
     provider = providers.resolve_name(profile)
     if not providers.uses_anthropic_oauth(provider):
         raise UsageError(
@@ -195,7 +200,10 @@ def _fetch_claude(profile: Profile) -> UsageReport:
             f"provider; profile {profile.selector!r} selects provider {provider!r} "
             f"(service {providers.service(provider)!r})"
         )
-    token, profile_scoped = lineage.resolve_token(profile)
+    if token is None:
+        token, profile_scoped = lineage.resolve_token(profile)
+    else:
+        profile_scoped = False
     if not token:
         raise credentials.CredentialsError(
             f"no token for profile {profile.name!r}; run 'claunch login {profile.name}' first"
@@ -316,8 +324,15 @@ def _kimi_windows(payload: dict) -> List[UsageWindow]:
     return windows
 
 
-def _kimi_provider_context(profile: Profile) -> Optional[tuple[str, str]]:
-    """Return the managed Kimi usage URL and effective bearer credential."""
+def _kimi_provider_context(
+    profile: Profile, token: Optional[str] = None
+) -> Optional[tuple[str, str]]:
+    """Return the managed Kimi usage URL and effective bearer credential.
+
+    ``token`` reads the endpoint for one stored key instead of the profile's
+    effective token (claunch-wllke). The endpoint decision does not depend on
+    the credential, so it is made the same way in both cases.
+    """
     provider = providers.resolve_name(profile)
     if provider == providers.DEFAULT_PROVIDER:
         return None
@@ -336,11 +351,12 @@ def _kimi_provider_context(profile: Profile) -> Optional[tuple[str, str]]:
         or parsed.fragment
     ):
         return None
-    env = runner.child_env(profile, with_token=True, base_env={})
-    token = str(
-        env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or ""
-    ).strip()
-    return _KIMI_CODE_USAGE_URL, token
+    if token is None:
+        env = runner.child_env(profile, with_token=True, base_env={})
+        token = str(
+            env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or ""
+        )
+    return _KIMI_CODE_USAGE_URL, str(token).strip()
 
 
 def _api_error_message(body: bytes) -> str:
@@ -416,9 +432,15 @@ def _fetch_kimi_provider(profile: Profile, url: str, token: str) -> UsageReport:
     )
 
 
-def _fireworks_context(profile: Profile) -> Optional[str]:
+def _fireworks_context(
+    profile: Profile, token: Optional[str] = None
+) -> Optional[str]:
     """The bearer credential of a profile whose provider is Fireworks, or
-    ``None`` when its provider is another backend."""
+    ``None`` when its provider is another backend.
+
+    ``token`` returns that stored key instead of the profile's effective token
+    (claunch-wllke), after the same backend check.
+    """
     provider = providers.resolve_name(profile)
     if provider == providers.DEFAULT_PROVIDER:
         return None
@@ -431,6 +453,8 @@ def _fireworks_context(profile: Profile) -> Optional[str]:
         return None
     if parsed.scheme.lower() != "https" or parsed.netloc.lower() not in _FIREWORKS_HOSTS:
         return None
+    if token is not None:
+        return str(token).strip()
     env = runner.child_env(profile, with_token=True, base_env={})
     return str(env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or "").strip()
 
@@ -942,3 +966,35 @@ def fetch(profile: Profile) -> UsageReport:
     if kind == "codex-app-server":
         return _fetch_codex(profile, entry)
     return _fetch_kimi(profile, entry)
+
+
+def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
+    """Peak utilization this one key shows (0-100), or ``None`` if unmeasurable.
+
+    The key pool's usage strategies compare keys. That is only meaningful
+    where the launcher token *is* the account's credential, so the readers
+    that go through a harness login (``codex-app-server``,
+    ``kimi-web-server``) answer ``None``: their usage belongs to the login,
+    not to a key, and rotating keys cannot spread it.
+    """
+    token = str(token or "").strip()
+    if not token:
+        return None
+    kind = reader(profile)
+    if kind == "anthropic":
+        report = _fetch_claude(profile, token=token)
+    elif kind == "kimi-provider":
+        context = _kimi_provider_context(profile, token=token)
+        if context is None:
+            return None
+        report = _fetch_kimi_provider(profile, *context)
+    elif kind == "fireworks-billing":
+        report = _fetch_fireworks(profile, token)
+    else:
+        return None
+    values = [
+        window.utilization
+        for window in report.windows
+        if isinstance(window.utilization, (int, float))
+    ]
+    return max(values) if values else None

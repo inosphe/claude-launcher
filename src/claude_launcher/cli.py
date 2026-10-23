@@ -25,6 +25,7 @@ from . import (
     cli_cflow2,
     cli_connections,
     cli_gate,
+    cli_keys,
     cli_loops,
     cli_mesh,
     cli_operators,
@@ -55,6 +56,7 @@ from . import (
     provider_spec,
     plugins as plugins_mod,
     profile,
+    profile_keys,
     prompt_input,
     providers,
     routing,
@@ -541,6 +543,20 @@ def _cmd_set_token(args: argparse.Namespace) -> int:
     token = args.token
     if not token:
         token = stdio.read_stdin_line()
+    # A profile with a key pool keeps `set-token` meaning "set the token this
+    # profile uses": it replaces the selected key's value in place instead of
+    # writing a token the pool does not list (claunch-wllke).
+    try:
+        pool = profile_keys.load(p)
+        if pool is not None:
+            key = profile_keys.replace(p, token, getattr(args, "key", None))
+            print(
+                f"replaced key {key.id} for profile {p.name!r} "
+                f"({len(pool.keys)} keys; select another with 'claunch keys list')"
+            )
+            return 0
+    except profile_keys.KeysError as exc:
+        raise CredentialsError(str(exc)) from exc
     credentials.save_token(p, token)
     print(f"stored token for profile {p.name!r}")
     return 0
@@ -1515,7 +1531,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument(
         "--clear",
         action="store_true",
-        help="delete the stored token (a parent's token is inherited again)",
+        help="delete the stored token and any key pool (a parent's token is inherited again)",
+    )
+    p_set.add_argument(
+        "--key",
+        default=None,
+        metavar="ID",
+        help="on a profile with a key pool, replace this key instead of the "
+        "currently selected one (see 'claunch keys list')",
     )
     p_set.set_defaults(func=_cmd_set_token)
 
@@ -1824,6 +1847,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_reposync.register(sub)
     cli_project.register(sub)
     cli_beads.register(sub)
+    cli_keys.register(sub)
     cli_search.register(sub)
     cli_transcript.register(sub)
     cli_plugins.register(sub)
