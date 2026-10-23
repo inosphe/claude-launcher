@@ -451,6 +451,39 @@ def test_a_profile_switch_outside_the_window_is_left_out(tmp_path, ledger):
     assert payload["sessions"][0]["switches"] == []
 
 
+def test_the_event_store_hands_a_reborrow_to_the_meta(tmp_path):
+    """``session_meta`` reads the store it is given, by name.
+
+    The three tests above hand ``profile_switches``' output straight to the
+    meta, so they would stay green if the store and the meta were never
+    connected. This one writes through the real ``Events`` store a reborrow
+    would leave behind (``manager.reborrow``) and asks ``session_meta`` for
+    the row: drop the ``events`` argument at the call site and the switch
+    disappears here.
+    """
+    from claude_launcher.daemon.session_events import Events
+
+    session = SimpleNamespace(
+        sdef=SimpleNamespace(name="reb", harness="claude", profile="ds4"),
+        created_at="2026-10-21T00:00:00+00:00",
+        exited=True,
+        status=lambda: "exited",
+        last_activity_at=lambda: "2026-10-21T02:00:00+00:00",
+    )
+    events = Events(tmp_path)
+    events.record(session, "borrow", "세션 인증 프로파일 변경",
+                  previous=None, current="kimi",
+                  previous_null=False, null_token=False)
+
+    wired = statsboard.session_meta(session, events)
+    assert [(s["from"], s["to"], s["kind"]) for s in wired["profile_switches"]] == [
+        ("own", "kimi", "profile"),
+    ]
+    # Without the store the meta has nothing to report -- which is what makes
+    # the call site's argument load-bearing rather than decorative.
+    assert statsboard.session_meta(session)["profile_switches"] == []
+
+
 def test_the_two_ended_boxes_are_independent(tmp_path, ledger):
     """``include_killed`` and ``include_archived`` each admit their own
     category, and the counts say how many of each the table holds out."""
@@ -895,3 +928,57 @@ def test_the_endpoint_wiring_hands_the_overview_the_transcript_source(tmp_path, 
     row = payload["sessions"][0]
     assert row["source"] == "transcript" and row["total"] == 1020
     assert row["harness"] == "codex"
+
+
+def test_the_endpoint_wiring_hands_each_meta_its_event_history(tmp_path, ledger,
+                                                               monkeypatch):
+    """``_stats_overview`` passes ``manager.events`` into ``session_meta``.
+
+    The unit tests above can hand a meta its switches directly; only this
+    call site connects the daemon's event store to the row the page draws.
+    A manager with no ``events`` attribute (an older double, or a daemon
+    whose store failed to open) must still build a payload -- that fallback
+    is the other half of what this pins.
+    """
+    from claude_launcher.daemon import api
+    from claude_launcher.daemon.session_events import Events
+
+    monkeypatch.setattr(statsboard, "overview",
+                        functools.partial(statsboard.overview, now=NOW, zone=KST))
+    accessed = "2026-10-21T03:00:00+09:00"
+
+    class Double:
+        exited = False
+        created_at = "2026-10-20T00:00:00+00:00"
+
+        def __init__(self, name):
+            self.sdef = SimpleNamespace(name=name, harness="claude",
+                                        profile="ds4")
+
+        def status(self):
+            return "busy"
+
+        def last_activity_at(self):
+            return accessed
+
+    write_ledger(tmp_path / "metering", [record("wired", hour=9)])
+    ledger.refresh(NOW)
+    session = Double("wired")
+    events = Events(tmp_path)
+    events.record(session, "borrow", "세션 인증 프로파일 변경",
+                  previous=None, current="kimi",
+                  previous_null=False, null_token=False)
+
+    payload = api._stats_overview(
+        SimpleNamespace(list=lambda: [session], events=events),
+        "today", False, ledger)
+    row = payload["sessions"][0]
+    assert row["session"] == "wired"
+    assert [(s["kind"], s["from"], s["to"]) for s in row["switches"]] == [
+        ("profile", "own", "kimi"),
+    ]
+
+    # A manager double without the store must not fail the route.
+    payload = api._stats_overview(
+        SimpleNamespace(list=lambda: [Double("wired")]), "today", False, ledger)
+    assert payload["sessions"][0]["switches"] == []
