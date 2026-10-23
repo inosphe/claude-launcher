@@ -741,28 +741,21 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         """Why a thread cannot be started in a quick-fork of ``name``: "" when
         it can (claunch-uaxp8).
 
-        The same facts :func:`daemon.api.stage_quick_fork` refuses on, asked
-        *before* the thread is written so a refusal costs neither a thread nor
-        a fork. The pane's checkbox asks the same question through
-        ``GET /api/threads/forkable``; one function answers both, so the offer
-        and the refusal cannot disagree.
+        The same facts :func:`daemon.api.stage_quick_fork` refuses on -- its
+        own words, through ``api.quick_fork_blocked``, so the offer and the
+        refusal cannot drift apart -- asked *before* the thread is written so
+        a refusal costs neither a thread nor a fork. The pane's checkbox asks
+        the same question through ``GET /api/threads/forkable``.
         """
-        from .. import spawn as spawn_mod
+        from . import api as api_mod
 
         try:
             session = manager.get(name)
         except Exception:  # noqa: BLE001 -- no such session
             return f"no session {name!r} on this daemon"
-        definition = {"name": name}
-        try:
-            definition = session.sdef.to_dict()
-        except Exception:  # noqa: BLE001 -- a record old or strange enough to have no dict
-            pass
-        if getattr(session, "exited", False):
-            return f"session {name!r} has exited: an exited session cannot be quick-forked"
-        if not spawn_mod.can_fork(definition):
-            return (f"session {name!r} has no conversation to copy: a fork needs a Claude or Codex "
-                    "session whose first turn has landed")
+        why = api_mod.quick_fork_blocked(session, name)
+        if why:
+            return why
         try:
             report = manager.spawn_capabilities(name)
         except Exception:  # noqa: BLE001 -- the report is advice; the spawn gate is the authority
