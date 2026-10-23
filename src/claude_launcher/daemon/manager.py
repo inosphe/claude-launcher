@@ -32,7 +32,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from .. import borrowing, harnesses as harness_registry, profile as profile_mod
+from .. import borrowing, credentials, harnesses as harness_registry
+from .. import profile as profile_mod
+from .. import profile_keys
 from .. import spawn as spawn_mod
 from .. import transcripts
 from .. import auto_compact as auto_compact_mod
@@ -2721,6 +2723,73 @@ class SessionManager:
                 previous_disable_artifact_tool=old.disable_artifact_tool,
                 disable_artifact_tool=artifact_tool,
             )
+        return relaunched
+
+    async def set_key(self, name: str, key_id: Optional[str]) -> Session:
+        """Restart a session pinned to one key of the pool it launches from.
+
+        :meth:`redefine` for the key half of a definition, the way
+        :meth:`reborrow` is for the auth half: the pin is written to the
+        definition, so it holds across daemon restarts exactly like one made
+        at creation, and the relaunch goes through the restore path — the
+        same name, the same conversation (``--resume``), nothing to carry.
+
+        ``key_id`` must be a key of the pool the session's launch actually
+        reads (``profile_keys.owner`` — a child holding no token of its own
+        pins a key of its nearest ancestor's pool). ``None`` unpins, and the
+        pool's strategy picks from the next launch on.
+
+        Refused while nothing has been stopped: a session with no profile, a
+        ``--null`` session (no token is injected, so there is no key to
+        switch), a borrowing session (the token comes from the lender), a
+        profile chain with no pool, an unknown key, and a no-op.
+        """
+        session = self.get(name)
+        old = session.sdef
+        if not old.profile:
+            raise ManagerError(
+                f"session {name!r} has no profile, so it reads no key pool"
+            )
+        try:
+            prof = profile_mod.require_selector(old.profile)
+        except profile_mod.ProfileError as exc:
+            raise ManagerError(str(exc)) from exc
+        if old.null_token:
+            raise ManagerError(
+                f"session {name!r} runs with no token (--null); there is no key "
+                "to switch"
+            )
+        if old.borrow:
+            raise ManagerError(
+                f"session {name!r} borrows {old.borrow!r}'s token; its own "
+                "profile's keys are not what this session authenticates with"
+            )
+        try:
+            view = profile_keys.view(prof)
+        except (profile_keys.KeysError, credentials.CredentialsError) as exc:
+            raise ManagerError(str(exc)) from exc
+        if view.get("owner") is None:
+            raise ManagerError(
+                f"profile {prof.name!r} holds no key pool; a session can only "
+                "be pinned to a key when the profile it launches on has one"
+            )
+        ids = [str(item.get("id")) for item in view.get("keys") or []]
+        if key_id is not None and key_id not in ids:
+            raise ManagerError(
+                f"no key {key_id!r} in the pool of profile {view['owner']!r} "
+                f"(ids: {', '.join(ids)})"
+            )
+        if key_id == old.key_id:
+            raise ManagerError(
+                f"session {name!r} is already pinned to that key"
+                if key_id
+                else f"session {name!r} is not pinned to a key — nothing to clear"
+            )
+        relaunched = await self.redefine(name, key_id=key_id)
+        self.events.record(
+            relaunched, "key", "세션 키 전환",
+            profile=view["owner"], previous=old.key_id, current=key_id,
+        )
         return relaunched
 
     async def skip_permissions(self, name: str, skip: bool) -> Session:

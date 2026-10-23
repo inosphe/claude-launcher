@@ -31,18 +31,23 @@ use it.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import random
 import secrets
 import stat
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from . import atomic, credentials
 from .profile import Profile
+
+log = logging.getLogger(__name__)
 
 #: The pool file, beside the token it feeds.
 KEYS_FILENAME = ".launcher-keys.json"
@@ -217,6 +222,78 @@ def forget(profile: Profile) -> bool:
         return False
     file.unlink()
     return True
+
+
+# --- the write lock ---------------------------------------------------------
+
+#: How long a launch waits for another process's pool write before going
+#: ahead unlocked. A launch's read-modify-write is milliseconds, so this is
+#: only ever reached by a wedged or killed holder.
+LOCK_TIMEOUT = 5.0
+
+
+@contextlib.contextmanager
+def _pool_lock(profile: Profile) -> Iterator[None]:
+    """Serialise a pool's read-modify-write against other processes.
+
+    Two launches of the same pool are two processes (a session spawn in the
+    daemon, ``claunch run`` in a shell, both against one profile). Each reads
+    the pool, picks, then writes it back; without a lock the second writer
+    overwrites the first's cursor and use count, so two sessions can pick the
+    same key and the counts undercount (claunch-wllke.2). The file itself is
+    replaced atomically, so this is only ever a lost update, never a torn one.
+
+    The lock is ``<pool>.lock`` beside the pool. On timeout the launch
+    proceeds unlocked with a warning: losing one update to a wedged holder is
+    worse than losing the launch itself, but it is not silent.
+    """
+    file = path(profile)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(file) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    held = False
+    try:
+        try:
+            import msvcrt  # type: ignore[import-not-found]
+        except ImportError:
+            msvcrt = None  # type: ignore[assignment]
+        if msvcrt is not None:
+
+            def take() -> None:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+            def drop() -> None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def take() -> None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def drop() -> None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while True:
+            try:
+                take()
+                held = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    log.warning(
+                        "key pool lock %s.lock is held by another process; "
+                        "selecting without it",
+                        file,
+                    )
+                    break
+                time.sleep(0.02)
+        yield
+    finally:
+        if held:
+            with contextlib.suppress(OSError):
+                drop()
+        os.close(fd)
 
 
 # --- editing the pool -------------------------------------------------------
@@ -509,6 +586,51 @@ def peek(profile: Profile) -> Optional[Selection]:
     return _pick(pool, profile, owner_profile)
 
 
+def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
+    """Write the named key into the token file without consuming a rotation.
+
+    A session that pinned a key (``SessionDef.key_id``, claunch-wllke.1) calls
+    this on *every* launch, restores included. The token file is shared by
+    every launch of the pool, so between two launches of the pinned session
+    another launch may have put its own key there; the pin is re-applied
+    rather than assumed to still hold.
+
+    This is not a rotation: the cursor stays where the last strategy pick left
+    it, so unpinning resumes from that point instead of jumping. The key's
+    ``use_count`` and ``last_used_at`` do move — they count launches, and this
+    was one.
+
+    Returns ``None`` when nothing could be materialized: no pool in the
+    profile's chain, or a pool that no longer holds ``key_id`` (the key was
+    removed with ``claunch keys remove`` while a session was pinned to it).
+    The caller decides what a stale pin means.
+    """
+    owner_profile = owner(profile)
+    if owner_profile is None:
+        return None
+    with _pool_lock(owner_profile):
+        pool = load(owner_profile)
+        if pool is None or not pool.keys:
+            return None
+        try:
+            index = _index_of(pool, key_id)
+        except KeysError:
+            return None
+        used = pool.keys[index]
+        stamp = _now()
+        pool.keys[index] = Key(
+            id=used.id,
+            token=used.token,
+            label=used.label,
+            added_at=used.added_at,
+            last_used_at=stamp,
+            use_count=used.use_count + 1,
+        )
+        save(owner_profile, pool)
+        credentials.save_token(owner_profile, used.token)
+        return Selection(used, pool.strategy, index, owner_profile)
+
+
 def select_for_launch(profile: Profile) -> Optional[Selection]:
     """Pick a key, make it the effective token and advance the pool.
 
@@ -518,25 +640,51 @@ def select_for_launch(profile: Profile) -> Optional[Selection]:
     owner_profile = owner(profile)
     if owner_profile is None:
         return None
-    pool = load(owner_profile)
-    if pool is None or not pool.keys:
-        return None
-    selection = _pick(pool, profile, owner_profile)
-    index = selection.index
-    used = pool.keys[index]
-    stamp = _now()
-    pool.keys[index] = Key(
-        id=used.id,
-        token=used.token,
-        label=used.label,
-        added_at=used.added_at,
-        last_used_at=stamp,
-        use_count=used.use_count + 1,
-    )
-    pool.cursor = used.id
-    save(owner_profile, pool)
-    credentials.save_token(owner_profile, used.token)
-    return selection
+    # The whole read-pick-write under the pool's lock: two launches that read
+    # the same cursor would otherwise pick the same key and one cursor update
+    # would be lost (claunch-wllke.2).
+    with _pool_lock(owner_profile):
+        pool = load(owner_profile)
+        if pool is None or not pool.keys:
+            return None
+        selection = _pick(pool, profile, owner_profile)
+        index = selection.index
+        used = pool.keys[index]
+        stamp = _now()
+        pool.keys[index] = Key(
+            id=used.id,
+            token=used.token,
+            label=used.label,
+            added_at=used.added_at,
+            last_used_at=stamp,
+            use_count=used.use_count + 1,
+        )
+        pool.cursor = used.id
+        save(owner_profile, pool)
+        credentials.save_token(owner_profile, used.token)
+        return selection
+
+
+def view(profile: Profile) -> dict:
+    """The pool a launch of ``profile`` would select from, for the API.
+
+    ``summary`` answers about one profile's own pool; this answers about the
+    pool a launch actually reads, which for a child holding no token of its
+    own is its nearest ancestor's (see :func:`owner`). The modal lists the
+    keys the session's next launch would use, so it asks this one
+    (claunch-wllke.1).
+
+    ``owner`` is the profile whose pool it is, or ``None`` when no profile in
+    the chain has one. Masks only: the plaintext token never leaves the
+    daemon through this route.
+    """
+    source = owner(profile)
+    if source is None:
+        return {"profile": profile.name, "owner": None, "pooled": False, "keys": []}
+    data = summary(source)
+    data["profile"] = profile.name
+    data["owner"] = source.name
+    return data
 
 
 def summary(profile: Profile) -> dict:

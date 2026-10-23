@@ -509,6 +509,27 @@ alone). A child profile that holds no token of its own rotates its nearest
 ancestor's pool — the one whose token its launch injects; a child that holds
 its own token keeps it and rotates nothing.
 
+#### Pinning one session to one key
+
+The pool's strategy decides for a launch. A **session** can instead be pinned
+to one key of that pool, from the dashboard: the session rail row carries a
+`🔑 <label>` chip when (and only when) its profile holds a pool, and clicking
+it opens a modal listing the keys, masked, with the one in use marked. Picking
+another key restarts that session on it — the same name, the same
+conversation (`--resume`), the harness relaunched on the new key.
+
+The pin is part of the session's definition (`key_id`), so it holds across
+daemon restarts and every later restore writes that key into the profile's
+token file rather than taking the pool's next one; pinning one session does
+not consume another session's rotation. `No pin` in the same modal clears it,
+and the strategy picks from the next launch on. Keys themselves are still
+edited only with `claunch keys` — the modal picks, it does not edit.
+
+The two routes behind it, for scripts: `GET /api/profiles/<profile>/keys`
+(id, label, masked token, strategy, which is current — never a plaintext
+token) and `POST /api/sessions/<session>/key {"key_id": "k-…"}` (or
+`{"key_id": null}` to unpin), which answers with the restarted session.
+
 `get-token` prints it back out on stdout — the value alone, so it pipes cleanly:
 
 ```bash

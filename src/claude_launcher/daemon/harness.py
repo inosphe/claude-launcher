@@ -171,6 +171,14 @@ class SessionDef:
     #: any inherited ``CLAUDE_CODE_OAUTH_TOKEN`` is cleared, so claude starts
     #: unauthenticated (log in with /login). claude harness only.
     null_token: bool = False
+    #: The pool key this session is pinned to (``profile_keys``, the key pool a
+    #: multi-key profile holds). When set, every launch — the first spawn and
+    #: each restore — puts *that* key in the profile's token file instead of
+    #: letting the pool's strategy pick, so the session keeps the key the
+    #: operator switched it to no matter what other launches did in between.
+    #: The pin is part of the definition, so it survives daemon restarts like
+    #: the rest of it; ``None`` (the common case) means the strategy picks.
+    key_id: Optional[str] = None
     #: Hide Claude Code's built-in Artifact tool for this session. Persisted
     #: in the definition so both daemon restore and an operator reborrow keep
     #: the same tool surface.
@@ -327,6 +335,9 @@ class SessionDef:
             "identity": self.identity,
             "borrow": self.borrow,
             "null_token": self.null_token,
+            # Absent unless pinned, like the other optional fields: the common
+            # record on disk is unchanged by this one.
+            **({"key_id": self.key_id} if self.key_id else {}),
             "task": self.task,
             "issue": self.issue,
             "keep_alive": self.keep_alive,
@@ -401,6 +412,7 @@ class SessionDef:
             identity=str(data.get("identity") or "").strip() or None,
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),
+            key_id=str(data.get("key_id") or "").strip() or None,
             disable_artifact_tool=bool(data.get("disable_artifact_tool")),
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,
@@ -1100,9 +1112,33 @@ def build_command(
     # A new session is a launch, so a profile holding several keys advances
     # its strategy here (claunch-wllke). A restore reopens the same work and
     # keeps the key it was already using; a null-token session never uses one.
-    if prof is not None and not sdef.null_token and not restoring and borrow_prof is None:
+    #
+    # A session pinned to a key (``SessionDef.key_id``) is the exception in
+    # both directions: its key is written to the token file on every launch,
+    # restores included, and the rotation is not advanced. The token file is
+    # shared by every launch of the pool, so a restore that simply trusted it
+    # would come back on whichever key somebody else's session picked last.
+    if prof is not None and not sdef.null_token and borrow_prof is None:
         try:
-            profile_keys.select_for_launch(prof)
+            if sdef.key_id:
+                if profile_keys.materialize(prof, sdef.key_id) is None:
+                    # The pinned key is gone from the pool (removed with
+                    # `claunch keys remove` while this session was pinned to
+                    # it). A stale pin must not cost the session its process,
+                    # so a new launch falls back to the strategy; a restore
+                    # leaves the token file as it is, which is what every
+                    # restore did before keys were pinnable.
+                    log.warning(
+                        "session %r is pinned to key %r, which the key pool of "
+                        "profile %r no longer holds; %s",
+                        sdef.name, sdef.key_id, prof.name,
+                        "falling back to the pool's strategy"
+                        if not restoring else "leaving the effective token alone",
+                    )
+                    if not restoring:
+                        profile_keys.select_for_launch(prof)
+            elif not restoring:
+                profile_keys.select_for_launch(prof)
         except profile_keys.KeysError as exc:
             raise HarnessError(str(exc)) from exc
     if sdef.harness == CLAUDE_HARNESS:

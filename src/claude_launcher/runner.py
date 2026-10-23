@@ -787,6 +787,29 @@ def login(profile: Profile) -> int:
     return code
 
 
+def _advance_pool(
+    profile: Profile, *, borrow: Optional[Profile], null_token: bool
+) -> None:
+    """Spend this launch's rotation step on ``profile``'s key pool.
+
+    Called immediately before a spawn, and only there: every refusal above it
+    (a harness that does not take the flag, a provider that cannot be
+    resolved, a profile whose context will not fit) ends the run without
+    having touched the pool, so a launch that never happened does not move
+    the cursor or bump ``use_count`` (claunch-wllke.3).
+
+    A borrow authenticates with the lender's token and a null-token run
+    injects none, so neither of those spends a step of the profile's own
+    rotation.
+    """
+    if borrow is not None or null_token:
+        return
+    try:
+        profile_keys.select_for_launch(profile)
+    except profile_keys.KeysError as exc:
+        raise RunnerError(str(exc)) from exc
+
+
 def run(
     profile: Profile,
     args: Sequence[str] = (),
@@ -813,14 +836,6 @@ def run(
     require_compact_fits(
         profile, provider or providers.resolve_name(borrow if borrow is not None else profile)
     )
-    # This run is a launch: a profile holding several keys advances its
-    # strategy here (claunch-wllke). A borrow uses the lender's current key
-    # and a null-token run uses none, so neither consumes a rotation step.
-    if borrow is None and not null_token:
-        try:
-            profile_keys.select_for_launch(profile)
-        except profile_keys.KeysError as exc:
-            raise RunnerError(str(exc)) from exc
     if not harness.builtin:
         if borrow is not None and not harness.borrowable:
             raise RunnerError(borrowing.capability(harness)["message"])
@@ -836,6 +851,10 @@ def run(
                 f"{', '.join(incompatible)} only applies to the claude harness; "
                 f"profile {profile.selector!r} selects {harness.name!r}"
             )
+        # The pool advances here, not at the top: everything above can refuse
+        # the run, and a launch that never happens must not spend a rotation
+        # step (claunch-wllke.3).
+        _advance_pool(profile, borrow=borrow, null_token=null_token)
         return _plain_spawn(
             profile, harness, list(args), cwd=cwd, borrow=borrow, tools=tools
         )
@@ -874,6 +893,7 @@ def run(
                 f"log in with /login, or run 'claunch login {borrow.name}' first",
                 file=sys.stderr,
             )
+    _advance_pool(profile, borrow=borrow, null_token=null_token)
     return _spawn(
         profile,
         list(args),
