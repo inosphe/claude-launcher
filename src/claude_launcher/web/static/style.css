@@ -109,6 +109,26 @@ option:disabled { color: #6b7280; }
 #terminal, .xterm {
   --term-page: #14161a;   /* the dark page background (body) */
   --term-border: #30363d; /* hairline borders */
+  /* The throughput overlay's text and marks, as the dark theme draws them
+     (#term-tps-overlay and the .term-tps-* / .term-usage-* / .term-series-*
+     rules below). The overlay stays on a dark wash in both themes, so these
+     are the colours it reads in. */
+  --term-tps: #e3b341;          /* the overlay's own colour, and usage "mid" */
+  --term-tps-live: #3fb950;
+  --term-tps-stale: #7d8590;
+  --term-tps-idle: #6e7681;
+  --term-tps-err: #ff7b72;      /* also usage "high" and the compaction mark */
+  --term-border-live: #238636;
+  --term-border-stale: #21262d;
+  --term-border-err: #6e2a2a;
+  --term-muted: #8b949e;        /* secondary text, usage "low" */
+  --term-strong: #c9d1d9;       /* primary text of the chart's labels */
+  --term-line-idle: #484f58;
+  --term-rule: rgba(139, 148, 158, 0.45);
+  --term-divider: rgba(139, 148, 158, 0.28);
+  --term-halo: rgba(13, 17, 23, 0.85);  /* behind chart labels */
+  --term-swap: #39c5cf;
+  --term-swap-edge: #0d1117;
 }
 html[data-theme="light"] #terminal { background: var(--term-page); }
 html[data-theme="light"] .xterm {
@@ -123,6 +143,49 @@ html[data-theme="light"] .xterm {
 html[data-theme="light"] #term-tps-overlay {
   background: color-mix(in srgb, var(--term-page) 78%, transparent);
 }
+/* The same overlay's text and marks (claunch-v5z9y). The wash above is
+   pinned dark, but every colour in the overlay's own rules is rewritten for
+   the light page, which puts dark text on that dark wash. Each rule here
+   names the colour the dark theme draws, as a custom property: a var() has
+   no colour token in it, so the rewrite leaves it alone. The order of the
+   state rules is the order of the rules they stand in for (.idle, .stale,
+   .live, .err), as their specificity is equal. */
+html[data-theme="light"] #term-tps-overlay {
+  color: var(--term-tps); border-color: var(--term-border);
+}
+html[data-theme="light"] #term-tps-overlay.idle { color: var(--term-tps-idle); }
+html[data-theme="light"] #term-tps-overlay.stale {
+  color: var(--term-tps-stale); border-color: var(--term-border-stale);
+}
+html[data-theme="light"] #term-tps-overlay.live {
+  color: var(--term-tps-live); border-color: var(--term-border-live);
+}
+html[data-theme="light"] #term-tps-overlay.err {
+  color: var(--term-tps-err); border-color: var(--term-border-err);
+}
+html[data-theme="light"] #term-tps-overlay .term-tps-small,
+html[data-theme="light"] #term-tps-overlay .term-usage-item.low,
+html[data-theme="light"] #term-tps-overlay .term-series-axis { color: var(--term-muted); }
+html[data-theme="light"] #term-tps-overlay .term-usage-who,
+html[data-theme="light"] #term-tps-overlay .term-series-legend,
+html[data-theme="light"] #term-tps-overlay .term-series-readout { color: var(--term-strong); }
+html[data-theme="light"] #term-tps-overlay .term-usage-item.mid { color: var(--term-tps); }
+html[data-theme="light"] #term-tps-overlay .term-usage-item.high { color: var(--term-tps-err); }
+html[data-theme="light"] #term-tps-overlay.idle .term-tps-chart polyline { stroke: var(--term-line-idle); }
+html[data-theme="light"] #term-tps-overlay .term-tps-live + .term-tps-last,
+html[data-theme="light"] #term-tps-overlay .term-tps-live + .term-usage,
+html[data-theme="light"] #term-tps-overlay .term-tps-last + .term-usage,
+html[data-theme="light"] #term-tps-overlay .term-series { border-top-color: var(--term-divider); }
+html[data-theme="light"] #term-tps-overlay .term-series-compaction { stroke: var(--term-tps-err); }
+html[data-theme="light"] #term-tps-overlay .term-series-swap line { stroke: var(--term-swap); }
+html[data-theme="light"] #term-tps-overlay .term-series-swap polygon {
+  fill: var(--term-swap); stroke: var(--term-swap-edge);
+}
+html[data-theme="light"] #term-tps-overlay .term-series-ymax-rule { stroke: var(--term-rule); }
+html[data-theme="light"] #term-tps-overlay .term-series-ytick { fill: var(--term-muted); stroke: var(--term-halo); }
+html[data-theme="light"] #term-tps-overlay .term-series-ymax { fill: var(--term-strong); stroke: var(--term-halo); }
+html[data-theme="light"] #term-tps-overlay .term-series-key.compaction::before { border-left-color: var(--term-tps-err); }
+html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { background: var(--term-swap); }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
