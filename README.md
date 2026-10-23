@@ -1516,16 +1516,20 @@ latency with the window's mean and the cache share). The divider between them
 is drawn only when both are on screen.
 
 At the foot of the overlay, under the last block, it draws one token timeline
-(claunch-0af4e): stacked areas of cached input, write and fresh input as
-running totals from the start of the window (the stack only rises; its top is
-the window's whole sum, claunch-0af4e.1), from the conversation's first
-request to now and at most the last twelve hours. It is one chart because the
+(claunch-0af4e): stacked areas of write, fresh input and cached input (bottom
+to top) as running totals from the start of the window (the stack only rises;
+its top is the window's whole sum, claunch-0af4e.1), from the conversation's
+first request to now and at most the last twelve hours. The height axis is
+logarithmic from 1 token, because cached input is orders of magnitude larger
+than the other two and they were invisible on a linear axis; each layer's
+boundary is the log position of the running sum up to it, so a layer's
+thickness is a ratio and not a token count (claunch-0af4e.1.1). It is one chart because the
 series belongs to the session; under each block it drew the same chart twice
 (claunch-0af4e.1.1). A dashed red mark is a compaction; a solid cyan mark with
 a diamond head is a profile swap (the session was relaunched onto a borrowed
 token, onto another borrowed one, or back onto its own), named on hover with
 the profiles before and after. Hovering the chart grows it and shows the whole
-conversation, with the window's total as the label of the height axis, an axis
+conversation, with the window's total as the label of the height axis (`log`, plus a rule at 1k, 1M and 1B below it), an axis
 row, a legend and the running totals at the point under the pointer plus that
 bucket's own tokens; moving the pointer off it returns it to the small view
 (claunch-a27zc). `GET /api/sessions/{name}/token-series` serves it.

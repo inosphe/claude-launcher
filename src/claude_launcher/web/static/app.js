@@ -8348,11 +8348,13 @@ function tpsSparkline(series) {
    shows the whole conversation (window=full). Compactions are vertical marks.
    The overlay takes no pointer events, so only the charts switch them on. */
 const TERM_SERIES_TTL_MS = { cap: 30 * 1000, full: 15 * 1000 };
-/* The parts, bottom to top, with the colour and label each one is drawn in. */
+/* The parts, bottom to top, with the colour and label each one is drawn in:
+   the smallest on the bottom, so that on the log height axis each boundary
+   is a visible step (claunch-0af4e.1.1). */
 const TERM_SERIES_LAYERS = [
-  ["cache_read", "cached input", "#58a6ff"],
   ["cache_write", "write", "#e3b341"],
   ["input", "input", "#bc8cff"],
+  ["cache_read", "cached input", "#58a6ff"],
 ];
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
@@ -8427,7 +8429,11 @@ function termSeriesChart(data, zoom) {
   const cum = termSeriesCumulative(pts);
   const peak = Math.max(1, ...cum.map(termSeriesTotal));
   const xAt = (i) => (pts.length > 1 ? (i / (pts.length - 1)) * w : 0);
-  const yAt = (v) => h - 1 - (v / peak) * (h - 3);
+  /* Log height axis from 1 token: cached input dwarfs fresh input and write,
+     and on a linear axis the two thin parts were not visible. A boundary
+     under 1 token sits on the baseline. */
+  const logPeak = Math.log(Math.max(peak, 2));
+  const yAt = (v) => h - 1 - (v > 1 ? Math.log(v) / logPeak : 0) * (h - 3);
   const below = pts.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
     const above = cum.map((p, i) => below[i] + p[key]);
@@ -8482,7 +8488,23 @@ function termSeriesChart(data, zoom) {
     svg.appendChild(mark);
   }
   if (zoom) {
-    /* The height axis: its maximum is the whole window's tokens. */
+    /* The height axis: log scale, its maximum is the whole window's tokens;
+       a faint rule at every thousandth power below it. */
+    for (const [at, name] of [[1e3, "1k"], [1e6, "1M"], [1e9, "1B"]]) {
+      if (at >= peak || yAt(at) - yAt(peak) < 12) continue;
+      const tick = document.createElementNS(NS, "line");
+      tick.setAttribute("class", "term-series-ymax-rule");
+      tick.setAttribute("x1", "0");
+      tick.setAttribute("x2", String(w));
+      tick.setAttribute("y1", yAt(at).toFixed(1));
+      tick.setAttribute("y2", yAt(at).toFixed(1));
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("class", "term-series-ytick");
+      text.setAttribute("x", "2");
+      text.setAttribute("y", String(yAt(at) - 2));
+      text.textContent = name;
+      svg.append(tick, text);
+    }
     const rule = document.createElementNS(NS, "line");
     rule.setAttribute("class", "term-series-ymax-rule");
     rule.setAttribute("x1", "0");
@@ -8493,7 +8515,7 @@ function termSeriesChart(data, zoom) {
     label.setAttribute("class", "term-series-ymax");
     label.setAttribute("x", "2");
     label.setAttribute("y", String(yAt(peak) + 10));
-    label.textContent = usageShort(peak);
+    label.textContent = `${usageShort(peak)} (log)`;
     svg.append(rule, label);
   }
   box.appendChild(svg);

@@ -132,9 +132,9 @@ const series = (win, start = 1000) => ({
   const svg = small.kids[0];
   check("small chart: an area and a line per part, then one compaction mark",
         svg.kids.map((k) => k.attrs.class),
-        ["term-series-area cache_read", "term-series-line cache_read",
-         "term-series-area cache_write", "term-series-line cache_write",
-         "term-series-area input", "term-series-line input", "term-series-compaction",
+        ["term-series-area cache_write", "term-series-line cache_write",
+         "term-series-area input", "term-series-line input",
+         "term-series-area cache_read", "term-series-line cache_read", "term-series-compaction",
          "term-series-swap"]);
   check("the compaction sits halfway along a 120px chart", svg.kids[6].attrs.x1, "60.0");
   const swap = svg.kids[7];
@@ -153,11 +153,11 @@ const series = (win, start = 1000) => ({
         ["term-series-chart", "term-series-axis", "term-series-legend", "term-series-readout"]);
   check("the legend names the parts, the compaction and the swap",
         big.kids[2].kids.map((k) => k.textContent),
-        ["input", "write", "cached input", "compaction", "profile swap"]);
+        ["cached input", "input", "write", "compaction", "profile swap"]);
   const zsvg = big.kids[0];
   const ymax = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax");
   check("the zoomed chart labels its height axis with the maximum",
-        ymax.map((k) => k.textContent), ["112"]);
+        ymax.map((k) => k.textContent), ["112 (log)"]);
   const rule = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax-rule");
   check("the maximum has a rule at the top of the plot, level with the stack's top",
         [rule.length, rule[0].attrs.y1], [1, "2.0"]);
@@ -173,13 +173,28 @@ const series = (win, start = 1000) => ({
   check("the stack's top never falls",
         run.every((p, i) => i === 0 || (p.input + p.cache_read + p.cache_write) >=
                             (run[i - 1].input + run[i - 1].cache_read + run[i - 1].cache_write)), true);
-  const tops = (svgEl) => svgEl.kids.filter((k) => k.attrs.class === "term-series-line input")[0]
+  const edge = (svgEl, part) => svgEl.kids.filter((k) => k.attrs.class === `term-series-line ${part}`)[0]
     .attrs.points.split(" ").map((pt) => Number(pt.split(",")[1]));
+  const tops = (svgEl) => edge(svgEl, "cache_read");
   const ys = tops(svg);
   check("the drawn top edge rises left to right (smaller y is higher)",
         ys.every((y, i) => i === 0 || y <= ys[i - 1]), true);
   check("the last point is the window's whole sum at the chart's top edge",
         ys[ys.length - 1] < ys[0] && ys[ys.length - 1] === 2, true);
+  // Log height axis: write at the bottom, input above it, cached input on top.
+  const logY = (v, h = 26, peak = 112) => Number((h - 1 - (v > 1 ? Math.log(v) / Math.log(peak) : 0) * (h - 3)).toFixed(1));
+  check("the stack's boundaries are on a log axis, last bucket: write 8, +input 12, +cached 112",
+        [edge(svg, "cache_write"), edge(svg, "input"), edge(svg, "cache_read")].map((e) => e[e.length - 1]),
+        [logY(8), logY(12), logY(112)]);
+  check("write is lowest, input above it, cached input highest",
+        logY(8) > logY(12) && logY(12) > logY(112), true);
+  const huge = ctx.chart({ ...series("full"), points: [0, 1, 2, 3].map((i) => ({
+    t: 1000 + i * 100, input: 1e5 * (i + 1), cache_read: 2e8 * (i + 1), cache_write: 3e3 })) }, true);
+  check("the zoomed log axis has a rule and a label at 1k and 1M, none at 1B above the maximum",
+        huge.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").map((k) => k.textContent),
+        ["1k", "1M"]);
+  check("a small axis has no decade rules (112 is under 1k)",
+        big.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").length, 0);
   check("the axis row has the span start and now only; the height label is in the chart",
         big.kids[1].kids.map((k) => k.textContent), ["6m ago", "now"]);
   check("the tooltip counts the whole window and the swap",

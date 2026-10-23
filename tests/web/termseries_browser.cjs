@@ -115,7 +115,7 @@ renderTermTps();
               compactionStroke: getComputedStyle(document.querySelector(".term-series-compaction")).stroke,
             };
           });
-          assert.equal(drawnMarks.max, String(5 * 30 + 8 * 30 + [...Array(30).keys()].reduce((a, i) => a + 50 + i, 0)),
+          assert.equal(drawnMarks.max, String(5 * 30 + 8 * 30 + [...Array(30).keys()].reduce((a, i) => a + 50 + i, 0)) + " (log)",
             "the zoomed chart's height axis is labelled with its maximum");
           assert.ok(drawnMarks.labelInPlot, "and the label is laid out");
           assert.equal(drawnMarks.swapDash, "none", "a swap mark is solid");
