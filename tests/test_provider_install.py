@@ -314,6 +314,71 @@ def test_the_listing_never_carries_the_key(home):
     assert "api_key_set" not in row["entry"]
 
 
+def _store_raw(name, entry):
+    """Put ``entry`` in the config file as written, skipping the form's own checks.
+
+    An unmigrated config is not something :func:`provider_install.save` can
+    produce, so the legacy spellings are planted the way a person typed them.
+    """
+    doc = store.load()
+    section = dict(doc.get("providers") or {})
+    section[name] = entry
+    doc["providers"] = section
+    store.save(doc)
+
+
+def test_the_listing_never_carries_the_legacy_hyphen_key(home):
+    """``api-key`` is the pre-schema spelling of ``api_key``; it is the same secret.
+
+    ``provider_spec.from_entry`` reads either, so an unmigrated config can hold
+    the credential under the hyphen. ``_public_entry`` used to drop only the
+    underscore spelling, which sent the value to the browser and listed
+    ``api-key`` among the keys the form leaves alone.
+    """
+    _store_raw("legacy", _valid(**{"api-key": "sk-legacy-secret"}))
+    body = provider_install.listing()
+    assert "sk-legacy-secret" not in json.dumps(body)
+    row = body["providers"][0]
+    assert "api-key" not in row["entry"]
+    assert row["api_key_set"] is True
+    # The name is still reported (kept = set(entry) - set(FORM_FIELDS)), so the
+    # page can say a key it does not draw is being preserved; only the value is
+    # withheld. The README's enumeration of ``kept`` says the same.
+    assert "api-key" in row["kept"]
+
+
+def test_the_listing_never_carries_the_legacy_env_token(home):
+    """The pre-schema ``env`` block carries the token under Claude's own name."""
+    _store_raw(
+        "legacy",
+        _valid(env={"ANTHROPIC_AUTH_TOKEN": "sk-env-token", "ANTHROPIC_BASE_URL": "x"}),
+    )
+    body = provider_install.listing()
+    assert "sk-env-token" not in json.dumps(body)
+    row = body["providers"][0]
+    assert "env" not in row["entry"]
+    assert row["api_key_set"] is True
+
+
+def test_a_save_over_a_legacy_credential_keeps_it(home):
+    """Withholding the legacy spellings costs the round trip nothing."""
+    _store_raw(
+        "legacy",
+        _valid(**{"api-key": "sk-legacy-secret", "env": {"ANTHROPIC_AUTH_TOKEN": "t"}}),
+    )
+    posted = json.loads(json.dumps(provider_install.listing()["providers"][0]["entry"]))
+    assert provider_install.validate("legacy", posted) == []
+    provider_install.save("legacy", posted)
+    entry = store.load()["providers"]["legacy"]
+    assert entry["api-key"] == "sk-legacy-secret"
+    assert entry["env"] == {"ANTHROPIC_AUTH_TOKEN": "t"}
+
+
+def test_an_entry_with_no_credential_reports_none_stored(home):
+    provider_install.save("demo", _valid())
+    assert provider_install.listing()["providers"][0]["api_key_set"] is False
+
+
 def test_the_listing_does_not_ship_the_harness_environment(home):
     """``harness_options.claude.env`` can hold a token; the page draws no control for it.
 
