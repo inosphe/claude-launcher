@@ -1216,9 +1216,64 @@ def test_the_resolved_issue_is_bound_to_data_claim():
     chart = _chart()
     assert chart.data["claim"] == {"issue": None, "how": None}
     bound = [n for n in chart.nodes.values() if getattr(n, "bind", None) == "claim"]
-    assert [n.label for n in bound] == ["resolve"]
+    # claunch-jx4xx: the second binder is the defensive gate before the landing
+    # request, which fills the record when the round reaches it unbound
+    assert [n.label for n in bound] == ["resolve", "late-issue"]
     # the record has the procedure's return shape
     assert 'ok: {issue: "str?", how: str}' in V2.read_text(encoding="utf-8")
+
+
+def _then_nodes(option):
+    then = option["then"]
+    return then if isinstance(then, list) else [then]
+
+
+def test_resolve_issue_mints_an_issue_when_none_is_bound():
+    """claunch-jx4xx: a round that left resolve-issue without an issue could
+    not be queued for landing (NOT queued, claunch-b7bvt). Every branch but
+    the user's explicit none now ends with an issue id."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    options = doc["procedures"]["resolve-issue"]["body"]["choose"]["options"]
+    wait = _then_nodes(options["no-issue-wait"])
+    assert wait[0] == "issue-create"
+    assert wait[1]["value"]["issue"] == "$result['issue-create'].value.issue"
+    claimed = options["claimed"]["then"]["cond"]
+    assert claimed[0]["if"] == "$result['intake-issue'].value.issue == null"
+    assert "issue-create" in claimed[0]["then"]
+    auto = options["no-issue-auto"]["then"]
+    assert auto[0] == "issue-auto"
+    assert auto[1]["cond"][0]["if"] == "$result['issue-auto'].value.issue == null"
+    assert "issue-create" in auto[1]["cond"][0]["then"]
+    # the explicit consent path stays issue-less
+    none = options["unclaimed"]["then"][-1]["cases"]["none"]
+    assert none["value"] == {"how": "none"}
+
+
+def test_the_landing_request_is_gated_on_a_bound_issue():
+    """claunch-jx4xx: the gate runs just before integration-request, only when
+    the round has no issue and the user did not say none, and it rebinds claim."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    gate = _find_id(doc["procedures"], "issue-gate")
+    assert gate["cond"][0]["if"] == "$data.claim.issue == null and $data.claim.how != 'none'"
+    late = gate["cond"][0]["then"]
+    assert late["call"] == "ensure-issue" and late["bind"] == "claim"
+    assert doc["procedures"]["ensure-issue"]["returns"]["ok"] == {"issue": "str", "how": "str"}
+    def sequence_with_gate(tree):
+        if isinstance(tree, dict):
+            tree = list(tree.values())
+        if isinstance(tree, list):
+            if any(isinstance(n, dict) and n.get("id") == "issue-gate" for n in tree):
+                return tree
+            for sub in tree:
+                got = sequence_with_gate(sub)
+                if got is not None:
+                    return got
+        return None
+
+    seq = sequence_with_gate(doc["procedures"])
+    assert seq is not None
+    labels = [n.get("id") if isinstance(n, dict) else n for n in seq]
+    assert labels.index("issue-gate") + 1 == labels.index("integration-request")
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
