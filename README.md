@@ -3360,6 +3360,43 @@ stops holding it; on-demand packs are not held. Routes:
 `GET /api/sessions/{name}/packs` (the view; `?pack=<id>` for one block),
 `POST` with `{"pack": "<id>"}` to send, `DELETE ?pack=<id>` to drop.
 
+### Handing a session its opening again
+
+A session's opening — the prompt packs, the task, and the machine-generated
+blocks for a parent, a mesh join, a cflow run and a board issue — is composed
+once and typed into the harness once, at creation. Nothing replays it. When
+that one delivery does not land (the TUI was not reading yet, or the paste's
+separately written Enter was swallowed) the agent sits with no idea what it
+exists for, and nothing in the dashboard offered to hand the block over again.
+
+The detail panel's **Opening task** section now carries two buttons under the
+task (`web/static/app.js` `sessOpeningActions`, `daemon/session_opening.py`):
+
+- **Re-inject opening** sends the same text through `Session.deliver` with
+  `force` — the press is a person's, and waiting for a clear composer is the
+  wrong wait when the opening is exactly what never arrived. An unsent line
+  in the composer is submitted first, never typed over. Images the opening
+  carried are not re-sent; the receipt says how many there were.
+- **Copy opening** puts the same text on this computer's clipboard: paste it
+  into the terminal by hand when the daemon's delivery is what keeps failing,
+  or read it while working out why it did not land.
+
+One text backs both buttons, so they cannot drift. The daemon records the
+block it is about to hand over in `<session dir>/opening.json` at creation
+(text, time, image count); a session created before that record existed
+answers `recomposed` instead — built from its definition's score-goal line,
+recorded prompt packs and opening task — and both the panel and the reply say
+so, because a reconstruction is not evidence of what the session received.
+Nothing is written to the session definition by either call.
+
+Routes: `GET /api/sessions/{name}/opening` returns `{source, text, chars,
+images, recorded_at, transport}` (`source` is `recorded`, `recomposed` or
+`none`; `transport: "argv"` means the harness took the opening as a
+command-line argument, so re-injecting types a second copy and the panel asks
+first); `POST` delivers the same block and answers `{ok, delivered, source,
+chars, images, reason}`, with `reason` saying why when it did not land (not
+running, or no delivery was confirmed within 90s).
+
 Two settings sit under the matrix, stored in `~/.claunch.yaml` under
 `prompt_packs`:
 
@@ -5114,6 +5151,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/uploads?name=NAME` | the body IS a file of any kind (claunch-5gpcf), streamed to disk up to `daemon.upload_max_bytes` (default 2 GiB). Staged under `<daemon dir>/uploads/<id>/` for 24 h and answered `{id, name, bytes, max_bytes}`; a create request names ids in `opening_files` (moved to `<session dir>/uploads/`, the opening ends with one `[claunch attachment] <name> (<size>) <path>` line per file), a thread post in `files` (kept 30 days) |
 | POST   | `/api/sessions/{name}/uploads?name=NAME` | the session line's 📎: the body IS a file, written straight into `<session dir>/uploads/<id>/`; answered with its `path` and the `line` the page puts in the session line. Nothing is typed into the session |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
+| GET/POST | `/api/sessions/{name}/opening` | the block this session was created with: GET returns `{source, text, chars, images, recorded_at, transport}` (`recorded` = the text handed over at creation, `recomposed` = rebuilt from the definition for a session older than the record, `none`; `transport: "argv"` = the harness took it as an argument, so a re-inject is a second copy and the panel confirms first), POST types the same text in again with `force` and answers `{ok, delivered, source, chars, images, reason}` — the detail panel's **Re-inject opening** / **Copy opening** buttons (`daemon/session_opening.py`) |
 | GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, `blockers` -- what would stop the push -- and `monitor_available` (whether `improv-worker-pr-monitor` is declared for that directory) |
 | POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` (needs `report`, and an opened PR) spawns a report-only child on `improv-worker-pr-monitor` with the depth/child caps lifted, answered as `monitor: {session, workflow, run_started}` or a `monitor:` warning. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |

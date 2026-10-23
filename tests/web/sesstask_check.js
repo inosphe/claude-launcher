@@ -80,12 +80,18 @@ function el(tag, cls, text) {
 
 const ctx = {};
 let redraws = 0;
-new Function("exports", "document", "el", "refreshSession",
+/* The section draws the opening's Re-inject / Copy buttons under the task
+   (`sessOpeningActions`). They are not this harness's subject -- their own is
+   openinginject_check.js -- so they go in as one marker node, which is also
+   what proves the call is guarded by the session name: a nameless row gets
+   no marker here. */
+function sessOpeningActionsStub() { return el("div", "sess-opening-actions"); }
+new Function("exports", "document", "el", "refreshSession", "sessOpeningActions",
   slice("taskIsLong") + slice("sessTask") + `
 const sessTaskOpen = new Set();
 Object.assign(exports, {
   task: sessTask, long: taskIsLong, open: sessTaskOpen,
-});`)(ctx, document, el, () => { redraws++; });
+});`)(ctx, document, el, () => { redraws++; }, sessOpeningActionsStub);
 
 let failures = 0;
 function check(what, got, want) {
@@ -140,6 +146,14 @@ for (const [what, s] of [["no task field", { name: "s2" }],
   check(`-- ${what} does not claim anything about the session's work`,
         /did nothing|no work|idle/.test(box.words()), false);
 }
+
+/* ---- the opening buttons belong to a named session --------------------- */
+/* They address the daemon by session name, so the section draws them only
+   where there is one; their own harness is openinginject_check.js. */
+check("a named session's task carries the opening actions",
+      ctx.task({ name: "s5", task: SHORT }).find("sess-opening-actions").length, 1);
+check("a nameless row does not",
+      ctx.task({ task: SHORT }).find("sess-opening-actions").length, 0);
 
 /* ---- long enough to fold ----------------------------------------------- */
 check("eight lines is not long", ctx.long("a\nb\nc\nd\ne\nf\ng\nh"), false);

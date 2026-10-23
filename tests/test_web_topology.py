@@ -594,6 +594,7 @@ CHECKS = [
         "sesscommits_check.js",
         "vscode_check.js",
         "sesstask_check.js",
+        "openinginject_check.js",
         "sessprompts_check.js",
         "railprofile_check.js",
         "railactors_check.js",

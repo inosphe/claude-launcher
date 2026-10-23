@@ -107,7 +107,7 @@ from . import spawn_gate
 from . import reposync_agent
 from . import host_code, restart_gate
 from . import restart_notice
-from .harness import PI_HARNESS, HarnessError, SessionDef, check_kind
+from .harness import PI_HARNESS, HarnessError, SessionDef, carries_opening, check_kind
 from . import score_goal
 from .manager import MAX_NOTE, ManagerError, SessionManager
 from . import mesh as mesh_mod
@@ -116,6 +116,7 @@ from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
 from . import ws as ws_mod
 from . import shadow as shadow_mod
+from . import session_opening
 
 #: Prefix of the login cookie. The full name carries a digest of this
 #: daemon's token (``cookie_name``): browsers scope cookies by host, not by
@@ -1301,6 +1302,8 @@ def build_app(
     r.add_get("/api/sessions/{name}/packs", h_session_packs)
     r.add_post("/api/sessions/{name}/packs", h_session_packs)
     r.add_delete("/api/sessions/{name}/packs", h_session_packs)
+    r.add_get("/api/sessions/{name}/opening", h_session_opening)
+    r.add_post("/api/sessions/{name}/opening", h_session_opening)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
     # (see SessionManager.repin_conversation).
@@ -10618,6 +10621,15 @@ async def _onboard_and_launch(
         opening = (opening + "\n\n" if opening else "") + uploads.block(files)
         report["opening_files"] = [str(f.path) for f in files]
     images = opening_images.claim(image_ids, name)
+    # Keep the block before it goes out: the panel's "re-inject" hands over
+    # exactly this text when a start did not land (daemon/session_opening.py),
+    # and a copy made after the launch could miss a create that died mid-way.
+    # A record that cannot be written is not a reason to refuse the session —
+    # it costs the panel its re-inject, not the agent its job.
+    try:
+        session_opening.record(name, opening, images=len(images))
+    except OSError:
+        log.warning("could not record the opening of %r", name, exc_info=True)
     try:
         # An opening with images is typed in, never put on the command line:
         # the images go into the composer first and the text is submitted
@@ -14200,6 +14212,81 @@ async def h_session_packs(request: web.Request) -> web.Response:
     keep = text if how in (session_packs.MCP, session_packs.OTHER) else None
     await asyncio.to_thread(session_packs.record_sent, name, row, keep)
     return json_response({"ok": True, "session": name, **row})
+
+
+#: How long a re-injection waits for the terminal to take the block. A session
+#: that has been up latches input readiness, so what remains is the composer's
+#: grace (``FORCE_TYPING_GRACE``) and the paste; the bound exists so a harness
+#: that never reads answers the panel instead of holding the request open.
+OPENING_DELIVER_TIMEOUT = 90.0
+
+
+async def h_session_opening(request: web.Request) -> web.Response:
+    """The opening this session was created with: read it, or type it in again.
+
+    A session's opening is handed over once, at creation, and is never
+    replayed (``SessionDef.task`` says so in its own comment). When that one
+    delivery does not land -- the harness was not reading yet, or the paste's
+    Enter was swallowed -- the agent sits with no idea what it exists for and
+    nothing in the dashboard offers to hand it over again. This is that offer:
+    the block the daemon actually composed (``daemon/session_opening.py``),
+    not a description of it.
+
+    GET returns the text and where it came from: ``recorded`` is the bytes
+    handed over at creation; ``recomposed`` is a session older than the record
+    (its prompt packs and opening task, and nothing that no record can
+    rebuild); ``none`` is a session with no opening at all. ``transport``
+    says how the original travelled -- ``argv`` means the harness took it as
+    a command-line argument and there was never a paste to lose, so a second
+    hand-over is a second copy and the panel asks before sending one.
+    POST delivers the same text with ``force`` -- the press is a person's, and
+    a start that never landed is the case where waiting for a clear composer
+    can mean waiting forever. Nothing is written to the definition by either
+    call.
+    """
+    session = _session(request)
+    name = session.sdef.name
+    found = await asyncio.to_thread(session_opening.view, name, session.sdef)
+    body = {
+        "session": name,
+        "source": found["source"],
+        "chars": found["chars"],
+        "images": found["images"],
+        "recorded_at": found["at"],
+        # How the opening actually travelled: a harness that takes it as an
+        # argument never had a paste to lose, and handing it over again types
+        # a second copy. Read off the argv the session started with, like
+        # onboard.open_with does, so a block that did not fit the command line
+        # reads as ``typed`` -- which is what it was.
+        "transport": (
+            "argv" if carries_opening(getattr(session, "argv", None) or [],
+                                       found["text"]) else "typed"
+        ),
+    }
+    if request.method == "GET":
+        return json_response({**body, "text": found["text"]})
+    if not found["text"].strip():
+        return json_response({**body, "ok": True, "delivered": False, "empty": True,
+                              "reason": "this session has no opening to hand over"})
+    if session.exited:
+        return json_response({**body, "ok": False, "delivered": False,
+                              "reason": "the session is not running"})
+    try:
+        delivered = await asyncio.wait_for(
+            session.deliver(found["text"], force=True),
+            timeout=OPENING_DELIVER_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        # `deliver` can be cancelled mid-paste, so this says what was NOT
+        # confirmed rather than what was not written: the caller may have to
+        # look at the terminal before pressing again.
+        return json_response(
+            {**body, "ok": True, "delivered": False, "reason":
+             f"no delivery was confirmed within {OPENING_DELIVER_TIMEOUT:.0f}s"})
+    return json_response({
+        **body, "ok": True, "delivered": bool(delivered),
+        "reason": "" if delivered else "the session did not take it: it is not reading input",
+    })
 
 
 async def h_session_conversation(request: web.Request) -> web.Response:
