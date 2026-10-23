@@ -5377,7 +5377,16 @@ async function refreshSessions(options) {
   const drawSeq = (refreshSessions._drawSeq = (refreshSessions._drawSeq || 0) + 1);
   const superseded = () => drawSeq !== refreshSessions._drawSeq;
   const abandonDraw = () => {
-    if (list) list._sessionsSignature = null;
+    // Only an unsigned half-drawn list of this pass's own run is cleared. A
+    // newer pass may have run to its end while this one was suspended -- a
+    // short filter's rebuild finishes in its own turn -- and its signature
+    // describes the list as it now stands. That holds even when one more pass
+    // has started since without signing (an in-place pass, `changed === false`):
+    // the signature is still newer than the one being abandoned, so the test is
+    // against THIS pass's number, not against the newest (claunch-rw7tw).
+    if (list && !(list._sessionsSigSeq > drawSeq)) {
+      list._sessionsSignature = null;
+    }
     // The rebuild this pass owed the rail is still owed: `releaseRail`
     // and the typing quiet timer both redraw on this flag.
     if (typeof railRedrawPending !== "undefined") railRedrawPending = true;
@@ -5848,8 +5857,13 @@ async function refreshSessions(options) {
     countRow();
   }
   // The list is whole now, so this pass's signature describes it (see where
-  // it used to be written, above the loop).
-  if (rebuild) list._sessionsSignature = signature;
+  // it used to be written, above the loop). `_sessionsSigSeq` records which
+  // pass signed it: a pass that is superseded later must not clear a signature
+  // written after it (abandonDraw).
+  if (rebuild) {
+    list._sessionsSignature = signature;
+    list._sessionsSigSeq = drawSeq;
+  }
   // What this poll did not draw: every container keeps the nodes placed into
   // it and loses the rest. A group the poll dropped goes with its parent's
   // tail, and a row that moved under another heading has already left.
