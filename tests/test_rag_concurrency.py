@@ -82,3 +82,40 @@ def test_readers_and_a_writer_share_one_index(tmp_path):
     assert ranked and all(doc_id in index.ids() for doc_id, _ in ranked)
     index.save()
     index.close()
+
+
+def test_close_waits_for_a_put_in_flight(tmp_path):
+    """Shutdown cancels the sync task but not its worker; close() must not
+    release the collection under a put that is inside ``upsert``."""
+    index = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=8)
+    index.load()
+    index.put(rag.Doc("seed", "h", ["seed"], {"title": "seed"}), [_vec(0)])
+
+    inside = threading.Event()
+    release = threading.Event()
+    real = index._col
+
+    class Slow:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def upsert(self, rows):
+            inside.set()
+            assert release.wait(10)
+            return real.upsert(rows)
+
+    index._col = Slow()
+    writer = threading.Thread(
+        target=lambda: index.put(rag.Doc("d1", "h1", ["d1"], {"title": "d1"}), [_vec(1)]),
+        daemon=True)
+    writer.start()
+    assert inside.wait(10)
+    closer = threading.Thread(target=lambda: (index.save(), index.close()), daemon=True)
+    closer.start()
+    closer.join(0.5)
+    assert closer.is_alive(), "close ran beside a write in flight"
+    release.set()
+    writer.join(10)
+    closer.join(10)
+    assert not writer.is_alive() and not closer.is_alive()
+    assert "d1" in index.ids()

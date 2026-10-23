@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -445,6 +446,15 @@ def vector_id(doc_id: str, chunk: int) -> str:
     return hashlib.blake2b(key, digest_size=16).hexdigest()
 
 
+def _writing(fn):
+    """Run a VectorIndex method that writes or releases the collection under ``_write``."""
+    @functools.wraps(fn)
+    def run(self, *args, **kwargs):
+        with self._write:
+            return fn(self, *args, **kwargs)
+    return run
+
+
 class VectorIndex:
     """One corpus's vectors, held in a zvec collection.
 
@@ -473,12 +483,18 @@ class VectorIndex:
         self._loaded = False
         self._lock: Optional[asyncio.Lock] = None
         self._col = None
-        #: Guards ``entries`` and the collection handle. A sync writes from a
+        #: Guards ``entries``, ``updated_at`` and the collection handle swap. A sync writes from a
         #: worker thread (``put``/``drop``/``refresh_meta``) while the event
         #: loop and other workers read, and on a free-threaded build those
         #: run in parallel. Held only around Python-side state, never across
         #: a zvec call that does I/O, except the one-time open.
         self._mutex = threading.RLock()
+        #: Serialises everything that writes, flushes or closes the collection
+        #: (``put``/``drop``/``refresh_meta``/``clear``/``save``/``close``).
+        #: A sync writes from a worker thread that a cancelled task cannot
+        #: stop, so shutdown's ``save``/``close`` wait here for the write in
+        #: flight rather than run beside a zvec upsert. Readers do not take it.
+        self._write = threading.RLock()
 
     # -- readers that are safe beside a writer ------------------------------ #
     def ids(self) -> Set[str]:
@@ -598,6 +614,7 @@ class VectorIndex:
             self.keywords.put(doc_id, entry.meta)
         self.updated_at = data.get("updated_at")
 
+    @_writing
     def save(self) -> None:
         """Write the sidecar and flush the collection.
 
@@ -624,6 +641,7 @@ class VectorIndex:
             with contextlib.suppress(Exception):
                 self._col.flush()
 
+    @_writing
     def close(self) -> None:
         """Release the collection's lock on its directory.
 
@@ -632,11 +650,12 @@ class VectorIndex:
         holds it. Anything that replaces an index (a changed model, a test
         reading back what it wrote) closes the old one first.
         """
-        col, self._col = self._col, None
+        with self._mutex:
+            col, self._col = self._col, None
+            self._loaded = False
         if col is not None:
             with contextlib.suppress(Exception):
                 col.close()
-        self._loaded = False
 
     async def save_soon(self) -> None:
         """:meth:`save`, in a worker thread.
@@ -659,19 +678,22 @@ class VectorIndex:
         gone = [doc_id for doc_id in have if doc_id not in wanted]
         return stale, gone
 
+    @_writing
     def clear(self) -> None:
         """Drop every document -- what a forced reindex starts from."""
         col = self._open(create=False)
         if col is not None:
+            with self._mutex:
+                self._col = None
             with contextlib.suppress(Exception):
                 col.destroy()
-            self._col = None
         with self._mutex:
             self.entries.clear()
             self.keywords = search_keywords.KeywordIndex()
             self._loaded = True
             self.updated_at = _now_iso()
 
+    @_writing
     def put(self, doc: Doc, vecs: List[array]) -> None:
         if not vecs:
             return
@@ -706,6 +728,7 @@ class VectorIndex:
             self.updated_at = _now_iso()
         self.keywords.put(doc.id, meta)
 
+    @_writing
     def refresh_meta(self, doc: Doc) -> None:
         """Carry changed display fields (status, assignee) for an entry whose
         text -- and so whose vectors -- did not change."""
@@ -724,6 +747,7 @@ class VectorIndex:
             self.entries[doc.id] = Entry(entry.hash, entry.chunks, dict(doc.meta))
         self.keywords.put(doc.id, doc.meta)
 
+    @_writing
     def drop(self, doc_id: str) -> None:
         entry = self.entries.get(doc_id)
         if entry is None:
@@ -1131,7 +1155,9 @@ class RagService:
             # rather than handed to a thread: a cancelled coroutine cannot
             # wait for one, and an embedding pass costs minutes of endpoint
             # calls that would otherwise be repeated by the next daemon.
-            # The loop has nothing left to serve at this point.
+            # The loop has nothing left to serve at this point. A worker still
+            # inside put() cannot be stopped; save() and close() take the
+            # index's write lock and so wait for that one document.
             index = self._indexes.get(self._key(kind, root))
             if index is not None:
                 index.save()
