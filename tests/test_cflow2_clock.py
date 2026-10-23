@@ -200,6 +200,9 @@ def test_monitor_within_satisfied(tmp_path):
 
 
 def test_subagent_budget_timeout_notifies_driver(tmp_path):
+    # The recipient is the run's driver, not the slot's name: when the two
+    # differ (a child session driving a run whose scope names the parent's
+    # slot) the notice would otherwise be dropped by _deliver (claunch-uvjrw).
     _start(tmp_path, """
         nodes:
           t: {prompt: T, returns: {ok: {}, timeout: {}}, executor: [subagent], budget: {seconds: 5}}
@@ -207,12 +210,13 @@ def test_subagent_budget_timeout_notifies_driver(tmp_path):
         body:
           try: t
           catch: {timeout: after}
-    """, caps={"subagent.spawn": True, "mcp.claunch": True})
+    """, caps={"subagent.spawn": True, "mcp.claunch": True}, driver="driver-x")
     sess = FakeSession("own", str(tmp_path))
     clock = _clock(FakeManager(sess))
     assert clock.scan(now=T0 + 3) == []
     notices = clock.scan(now=T0 + 6)
-    assert len(notices) == 1 and "budget" in notices[0][2] and notices[0][1] == "own"
+    assert len(notices) == 1 and "budget" in notices[0][2]
+    assert notices[0][1] == "driver-x"
     st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
     assert st["delegations"][0]["status"] == "timeout"
     assert [t["label"] for t in st["tasks"]] == ["after"]
@@ -574,6 +578,35 @@ def test_the_fallback_notice_goes_to_the_driver_not_the_scope_name(tmp_path, mon
     assert "child session -> sub-agent" in notices[0][2]
 
 
+def test_the_ask_notice_goes_to_the_driver_not_the_scope_name(tmp_path, monkeypatch):
+    """An ask that fell back to the run's own session is typed into its
+    driver. A notice addressed to the scope slot is dropped by ``_deliver``
+    when the two names differ (claunch-uvjrw)."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))))
+    clock.scan()
+    _start(tmp_path, SESSION, caps=SESSION_CAPS, driver="driver-x")
+    monkeypatch.setattr(cflow2_clock.asks, "tick",
+                        lambda **kw: ["[cflow2] ask ask2-1 fell back to you"])
+    notices = clock.scan()
+    fell = [n for n in notices if "ask2-1" in n[2]]
+    assert [n[1] for n in fell] == ["driver-x"]
+
+
+def test_the_monitor_notice_goes_to_the_driver_not_the_scope_name(tmp_path):
+    """A monitor violation notice has the same recipient as every other
+    notice of the pass: the driver, not the slot (claunch-uvjrw)."""
+    _start(tmp_path, MON % "halt", driver="driver-x")
+    value = {"v": "abc"}
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))),
+                   probe_runner=lambda cmd, cwd: (0, value["v"] + "\n"))
+    assert clock.scan(now=T0 + 1) == []
+    value["v"] = "zzz"
+    notices = clock.scan(now=T0 + 62)
+    assert len(notices) == 1 and "tip-unmoved" in notices[0][2]
+    assert notices[0][1] == "driver-x"
+
+
 def test_session_spawn_refused_falls_back_to_next_executor(tmp_path):
     def spawn(parent_name, body):
         raise cflow2_exec.SpawnRefused("spawn policy: max_children reached")
@@ -663,10 +696,12 @@ def test_session_budget_timeout_tells_child(tmp_path):
         nodes:
           t: {prompt: T, executor: [session], budget: {seconds: 10}}
         body: t
-    """, caps={"session.spawn": True, "mcp.claunch": True})
+    """, caps={"session.spawn": True, "mcp.claunch": True}, driver="driver-x")
     clock.scan(now=T0)
     notices = clock.scan(now=T0 + 20)
-    assert {n[1] for n in notices} == {"own", "kid"}
+    # The driver hears about the budget it ran out of; the child hears that
+    # it is not to submit. Neither is addressed to the scope slot (claunch-uvjrw).
+    assert {n[1] for n in notices} == {"driver-x", "kid"}
 
 
 def test_in_process_dispatcher_leaves_it_queued(tmp_path):
