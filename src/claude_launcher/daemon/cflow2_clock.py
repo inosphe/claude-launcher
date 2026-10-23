@@ -712,12 +712,19 @@ class Cflow2Clock:
         # same closed delegation again.
         self._open_delegations[(cwd, scope)] = _open_delegations(first)
         self._claim_restarts(cwd, scope, now, notices)
+        # Every notice this pass types goes to the run's driver, and the scope
+        # slot's name is only the fallback — the same recipient the notices
+        # above use. A child session driving a run whose scope names the
+        # parent's slot is a different name, and a notice addressed to the
+        # slot is dropped by _deliver without a trace (claunch-uvjrw,
+        # claunch-emft6).
+        driver = str(payload.get("driver") or "") or _name(scope)
         for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
                               deliver_fn=self.ask_deliver):
-            notices.append((cwd, _name(scope), text))
+            notices.append((cwd, driver, text))
         for v in runtime.monitors_tick(now, probe, cwd=cwd, scope=scope):
             if v["action"] in (runtime.MON_NOTIFY, runtime.MON_HALT):
-                notices.append((cwd, _name(scope), monitor_block(scope, v)))
+                notices.append((cwd, driver, monitor_block(scope, v)))
         self._watch_collections(cwd, scope, now)
         self._watch_lost(cwd, scope)
         state = st.load_state()
@@ -735,9 +742,10 @@ class Cflow2Clock:
             if ex in ir.REMOVED_EXECUTORS:
                 self._removed(cwd, scope, did, rec)
             elif ex == ir.EXEC_SESSION:
-                self._session(cwd, scope, did, rec, clock_now, notices, halted)
+                self._session(cwd, scope, did, rec, clock_now, notices, halted,
+                              driver=driver)
             elif ex == ir.EXEC_SUBAGENT:
-                self._budget(cwd, scope, did, rec, clock_now, notices)
+                self._budget(cwd, scope, did, rec, clock_now, notices, driver=driver)
 
     def _delegation_closed(self, cwd: str, scope: str, state: Dict[str, Any]) -> bool:
         """Whether a delegation open at the end of the last pass is closed now.
@@ -970,7 +978,8 @@ class Cflow2Clock:
                 cwd=cwd, scope=scope)
 
     def _session(self, cwd: str, scope: str, did: str, rec: dict, now: float,
-                 notices: List[Notice], halted: bool = False) -> None:
+                 notices: List[Notice], halted: bool = False,
+                 driver: str = "") -> None:
         status = rec.get("status")
         st = cstore.RunStore(cwd, scope)
         if status == "queued":
@@ -1038,7 +1047,7 @@ class Cflow2Clock:
                 event={"event": "fallback", "cause": "session spawn interrupted before a "
                        "child was recorded", "route": "requeue", "decision": "executor"})
             return
-        if self._budget(cwd, scope, did, rec, now, notices):
+        if self._budget(cwd, scope, did, rec, now, notices, driver=driver):
             return
         if self._child_receipt(cwd, scope, did, rec, notices):
             return
@@ -1159,8 +1168,12 @@ class Cflow2Clock:
                     path.unlink()
 
     def _budget(self, cwd: str, scope: str, did: str, rec: dict, now: float,
-                notices: List[Notice]) -> bool:
-        """End a subagent/session delegation past its ``budget.seconds``."""
+                notices: List[Notice], driver: str = "") -> bool:
+        """End a subagent/session delegation past its ``budget.seconds``.
+
+        ``driver`` is the run's driver, resolved by the caller: the notice
+        goes there, and ``_name(scope)`` only when that is empty
+        (claunch-uvjrw)."""
         seconds = ((rec.get("route") or {}).get("budget") or {}).get("seconds")
         if not seconds:
             return False
@@ -1172,7 +1185,7 @@ class Cflow2Clock:
             did, f"budget.seconds {float(seconds):g} ran out ({ex} delegation)",
             outcome=ir.OUTCOME_TIMEOUT, detail={"seconds": seconds}, cwd=cwd, scope=scope)
         label = rec.get("label") or rec.get("node")
-        notices.append((cwd, _name(scope), (
+        notices.append((cwd, driver or _name(scope), (
             f"[cflow2] delegation {did} ({label}, {ex}) ran past its budget of "
             f"{float(seconds):g}s and has been ended with outcome 'timeout'. Stop the "
             f"{'sub-agent' if ex == ir.EXEC_SUBAGENT else 'child session'} working on it; "
