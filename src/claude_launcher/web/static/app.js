@@ -5163,7 +5163,11 @@ async function refreshSessions(options) {
   const keyCardHeld = rebuild && typeof railFocusedCardName === "function"
     ? railFocusedCardName() : null;
   railRedrawPending = changed && !rebuild;
-  if (rebuild) list._sessionsSignature = signature;
+  // The signature is written where the draw loop ends, not here (claunch-rw7tw):
+  // a pass that suspends and is then superseded leaves the rail half drawn, and
+  // a signature written on the way in would tell the next poll that a list in
+  // that state is current -- so it would rebuild nothing and the rest of the
+  // fleet would stay off the rail until some record happened to change.
   // The rail is its own scroll container (`#session-list { overflow-y: auto }`
   // in style.css), so the teardown below empties the very element the reader
   // is scrolled inside: the content height drops to zero, the browser clamps
@@ -5341,7 +5345,64 @@ async function refreshSessions(options) {
     }
     return true;
   };
-  for (const row of rows) {
+  /* The draw is sliced across event-loop turns (claunch-rw7tw).
+     A fleet of two thousand records built in one task put the whole rebuild
+     -- every row's nodes, every decoration, every gauge -- into a single
+     task: the operator's trace shows one RunTask of 8,251 ms on the renderer
+     main thread, with 100% CPU from 6.9 s to 15.2 s and nothing painted and
+     no input handled in between. Nothing here is cheaper for being sliced;
+     what the slice buys is that the browser can paint and answer between
+     parts of it. A pass yields once it has spent its budget and continues in
+     a later task; the rows at the top of the rail (the ones on screen) are
+     built in the first two or three turns.
+     Small rails are left alone (RAIL_SLICE_MIN_ROWS): at a measured 0.2-0.4 ms
+     a row, a hundred rows is one short task already, and deferring it would
+     only delay the lines the reader is looking at -- while a rail of a few
+     dozen rows also finishes inside the harnesses' synchronous pass, which is
+     the contract they were written against. Past that size the pass is a long
+     task by construction and is sliced.
+     A newer pass -- the next poll, a filter pick, a project pick -- takes the
+     sequence number and this one stops where it is: the new pass harvests
+     whatever the list holds and builds on it, which is the same contract the
+     in-place redraw above already has with the DOM. A pass that stops early
+     leaves the list unsigned (the signature is written at the end of the
+     loop), so the next poll sees a half-drawn rail as a rebuild it owes. */
+  const RAIL_SLICE_MIN_ROWS = 128;
+  const sliceNow = () => (typeof performance !== "undefined"
+    && typeof performance.now === "function" ? performance.now() : Date.now());
+  const sliceMs = refreshSessions._sliceMs || 8;
+  const sliceYield = () => (typeof setTimeout === "function"
+    ? new Promise((resolve) => setTimeout(resolve, 0))
+    : Promise.resolve());
+  const drawSeq = (refreshSessions._drawSeq = (refreshSessions._drawSeq || 0) + 1);
+  const superseded = () => drawSeq !== refreshSessions._drawSeq;
+  const abandonDraw = () => {
+    // Only an unsigned half-drawn list of this pass's own run is cleared. A
+    // newer pass may have run to its end while this one was suspended -- a
+    // short filter's rebuild finishes in its own turn -- and its signature
+    // describes the list as it now stands. That holds even when one more pass
+    // has started since without signing (an in-place pass, `changed === false`):
+    // the signature is still newer than the one being abandoned, so the test is
+    // against THIS pass's number, not against the newest (claunch-rw7tw).
+    if (list && !(list._sessionsSigSeq > drawSeq)) {
+      list._sessionsSignature = null;
+    }
+    // The rebuild this pass owed the rail is still owed: `releaseRail`
+    // and the typing quiet timer both redraw on this flag.
+    if (typeof railRedrawPending !== "undefined") railRedrawPending = true;
+  };
+  const sliceIt = rows.length > RAIL_SLICE_MIN_ROWS;
+  let sliceStart = sliceNow();
+  for (let rowAt = 0; rowAt < rows.length; rowAt++) {
+    const row = rows[rowAt];
+    if (sliceIt && sliceNow() - sliceStart >= sliceMs) {
+      await sliceYield();
+      if (superseded()) return abandonDraw();
+      // A press that began while this pass was suspended keeps the rows it
+      // started on; the redraw is owed to the moment the press ends.
+      if (typeof railHeld === "function" && railHeld()) return abandonDraw();
+      sliceStart = sliceNow();
+    }
     if (!drawnByFilter(row)) continue;
     if (row.type === "ungroup") {
       groupBodies.length = 0;
@@ -5794,6 +5855,14 @@ async function refreshSessions(options) {
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     place(parent, li);
     countRow();
+  }
+  // The list is whole now, so this pass's signature describes it (see where
+  // it used to be written, above the loop). `_sessionsSigSeq` records which
+  // pass signed it: a pass that is superseded later must not clear a signature
+  // written after it (abandonDraw).
+  if (rebuild) {
+    list._sessionsSignature = signature;
+    list._sessionsSigSeq = drawSeq;
   }
   // What this poll did not draw: every container keeps the nodes placed into
   // it and loses the rest. A group the poll dropped goes with its parent's
@@ -7761,13 +7830,15 @@ function ctxSentence(s) {
   // again. The count is keyed on the number, which survives that re-parse —
   // and two rows on the same count share one formatting, which is right for
   // the same reason. Bounded, because a tab is open for days and this
-  // outlives the rows it was built for: past the cap the whole map goes,
-  // which costs one re-format pass and never grows without bound.
+  // outlives the rows it was built for: past the cap the oldest entry goes,
+  // one at a time. Dropping the whole map there instead cost a full re-format
+  // of the fleet on a large rail, and a fleet larger than the cap then paid
+  // it on every pass (claunch-rw7tw: 1,965 rows against a 512-entry cap).
   const cache = ctxSentence._byTokens || (ctxSentence._byTokens = new Map());
   let count = cache.get(c.tokens);
   if (count === undefined) {
     count = c.tokens.toLocaleString();
-    if (cache.size >= 512) cache.clear();
+    if (cache.size >= 4096) cache.delete(cache.keys().next().value);
     cache.set(c.tokens, count);
   }
   const parts = [`context ${count} tokens`];
@@ -7813,7 +7884,9 @@ function ctxBreakdown(c) {
       : "no percentage: the context limit is not recorded anywhere and " +
         "differs by model",
   ].join("\n");
-  if (cache.size >= 512) cache.clear();
+  // Oldest out, not the whole map: see the note on ctxSentence's count above
+  // (claunch-rw7tw — a fleet larger than the cap cleared it every pass).
+  if (cache.size >= 4096) cache.delete(cache.keys().next().value);
   cache.set(key, text);
   return text;
 }
@@ -9915,11 +9988,24 @@ function refreshRailSeen(list) {
     }
     return old;
   };
-  for (const li of list.querySelectorAll("li[data-name]")) {
+  /* Sliced like the rebuild above (claunch-rw7tw). On a fleet of ~2,000 rows
+     this pass measured 429 ms of self time inside the same 8-second task --
+     every row looked up with querySelector, its keys serialized, its lines
+     rebuilt when they read differently. The work is the same either way; what
+     the slice buys is that the rail is painted and clickable between parts of
+     it. A newer pass cancels this one through the sequence number: the pass
+     is idempotent (each line is swapped only where it reads differently), so
+     the newer pass simply does the rows this one had not reached. */
+  const nodes = list.querySelectorAll("li[data-name]");
+  const railSeenTick = () => (typeof performance !== "undefined"
+    && typeof performance.now === "function" ? performance.now() : Date.now());
+  const railSeenSliceMs = refreshRailSeen._sliceMs || 6;
+  const railSeenSeq = (refreshRailSeen._seq = (refreshRailSeen._seq || 0) + 1);
+  const step = (li) => {
     const s = byName.get(li.dataset.name);
     const old = typeof li.querySelector === "function"
       ? li.querySelector(".rail-seen") : null;
-    if (!s || !old || typeof old.replaceWith !== "function") continue;
+    if (!s || !old || typeof old.replaceWith !== "function") return;
     // Swapped only when it reads differently: the ages move by the minute,
     // and a swap on every tick was a mutation per row per poll (claunch-v87).
     const sk = seenKey(s);
@@ -10013,7 +10099,28 @@ function refreshRailSeen(list) {
       if (li.title !== rowTitle) li.title = rowTitle;
       if (name.title !== nameTitle) name.title = nameTitle;
     }
-  }
+  };
+  const rowsSeen = typeof Array.from === "function" ? Array.from(nodes) : [];
+  // Same size rule as the rebuild: a short rail finishes in this task, so the
+  // harnesses see the pass complete where they always did.
+  const RAIL_SEEN_MIN_ROWS = 128;
+  const sliceIt = rowsSeen.length > RAIL_SEEN_MIN_ROWS;
+  const drive = (from) => {
+    const started = railSeenTick();
+    for (let i = from; i < rowsSeen.length; i++) {
+      step(rowsSeen[i]);
+      if (sliceIt && railSeenTick() - started >= railSeenSliceMs) {
+        // A stubbed timer (the node harnesses) still has to finish the pass,
+        // so it runs the rest here rather than dropping it.
+        if (typeof setTimeout !== "function") { drive(i + 1); return; }
+        setTimeout(() => {
+          if (refreshRailSeen._seq === railSeenSeq) drive(i + 1);
+        }, 0);
+        return;
+      }
+    }
+  };
+  drive(0);
 }
 
 /* ------------------------------------------------------------------ */
