@@ -537,7 +537,8 @@ ancestor's pool — the one whose token its launch injects; a child that holds
 its own token keeps it and rotates nothing. `claunch keys list` on such a child
 shows that pool and names its owner (`pool: profile 'base' (inherited …)`)
 instead of claiming the child has none, because that is the pool every launch
-of the child advances.
+of the child advances. `claunch keys strategy` on the child reports that pool's
+strategy for the same reason, and names the owner on a second line.
 
 Two keys in one pool never hold the same token: `claunch keys add` and
 `claunch set-token` (which replaces a key) both refuse a duplicate, so a
@@ -550,7 +551,9 @@ listing must not consume a rotation.
 
 Writes to the pool are serialised by `<pool>.lock`, and that file stays behind
 when the pool is removed (`keys remove` of the last key, `set-token --clear`).
-It is an empty `0600` file that holds no state: deleting it would let a writer
+The removal takes the same lock as the writes, so a launch or an `add` that was
+already running cannot save the pool back after it is gone. The lock file is an
+empty `0600` file that holds no state: deleting it would let a writer
 that is already waiting for the lock keep the old file while the next writer
 locks a new one. Nothing reads it as "there is a pool" — `load()` and the
 inheritance chain ask for `.launcher-keys.json` itself.

@@ -600,6 +600,36 @@ def test_keys_list_names_the_profile_whose_pool_a_child_rotates(home, capsys):
     assert "sk-A…BBBB" in out
 
 
+def test_keys_strategy_reports_the_pool_a_launch_of_the_child_reads(home, capsys):
+    # `keys strategy <child>` answered from the child's own pool, so a child
+    # that holds no token — and therefore rotates its parent's pool on every
+    # launch — was told it has no key pool at all, while `keys list` showed
+    # that pool (claunch-wllke.5.1). The strategy printed is the one the
+    # child's next launch obeys.
+    _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base", strategy="usage-min")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "strategy", "child"]) == 0
+
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert lines[0] == "usage-min"
+    assert "pool: profile 'base' (inherited" in out
+    assert "has no key pool" not in out
+
+
+def test_keys_strategy_still_says_so_when_no_pool_is_in_reach(home, capsys):
+    # A profile with no pool in its chain keeps the old wording: there is no
+    # strategy to report, and the next launch uses whatever single token the
+    # inheritance chain finds (claunch-wllke.5.1).
+    profile.create("solo")
+
+    assert cli.main(["keys", "strategy", "solo"]) == 0
+
+    assert "has no key pool" in capsys.readouterr().out
+
+
 def test_a_deleted_token_file_is_reported_and_repaired_by_the_next_launch(
     home, capsys
 ):
