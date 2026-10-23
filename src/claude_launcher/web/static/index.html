@@ -67,6 +67,12 @@
          which the badge beside it cannot: that one reports the session, and
          the session runs on happily while this phone cannot see it. -->
     <button id="m-link" class="m-act link-chip hidden" type="button"></button>
+    <!-- Mirror of the header's link-panel button, for the same reason. -->
+    <button id="m-conn" class="m-act conn-chip ok" type="button"
+            aria-expanded="false" aria-controls="conn-panel"
+            title="connection status (debug)">⇄</button>
+    <button id="m-force" class="m-act force-chip" type="button"
+            title="force reconnect without reloading">↻</button>
     <!-- Mirror of the header's take-size button: the header goes down on a
          phone, and a phone is as likely as any window to be the second
          viewer of a session. -->
@@ -519,6 +525,21 @@
            reason it is a button — the automatic retries are bounded, and after
            they are spent this is how a person says "now". -->
       <button id="term-link" class="term-btn link-chip hidden" type="button"></button>
+      <!-- Always up: the page's own reading of its control socket and this
+           terminal's link as a coloured dot, and the way into the link panel
+           (renderLinkPanel) with the raw state behind that reading and the
+           tail of the link log. The chip above appears only once the page
+           knows it is down; this one is for the times it does not. -->
+      <button id="term-conn" class="term-btn conn-chip ok" type="button"
+              aria-expanded="false" aria-controls="conn-panel"
+              title="connection status (debug)">⇄ link</button>
+      <!-- Force reconnect (forceReconnect): logs what the page believed,
+           renews the login cookie, and reopens the control socket and this
+           terminal's link, all without a reload. Up whether or not the page
+           thinks anything is wrong, because the freezes it is for are the
+           ones the page did not notice. -->
+      <button id="term-force" class="term-btn force-chip" type="button"
+              title="force reconnect: reopen the control socket and this terminal's link without reloading">↻</button>
       <!-- Up only while this viewer is scrolled back into history: the session
            is still running underneath, and this is the reason its terminal is
            not advancing. -->
@@ -1617,6 +1638,28 @@
     </div>
     <div id="notice-panel-body"></div>
   </aside>
+</div>
+
+<!-- The link panel: floats over the page, dragged by its title bar, and
+     stays open while the person keeps working, so it can be watched through
+     a freeze. Filled by renderLinkPanel() once a second while open. -->
+<div id="conn-panel" class="conn-panel hidden" role="dialog" aria-label="connection status">
+  <div id="conn-panel-head" class="conn-panel-head">
+    <span class="conn-panel-title">connection</span>
+    <span id="conn-panel-grade" class="conn-panel-grade"></span>
+    <button id="conn-panel-close" class="conn-panel-x" type="button" title="close (Esc)">×</button>
+  </div>
+  <div class="conn-panel-actions">
+    <button id="conn-panel-reconnect" type="button"
+            title="reopen the control socket and this terminal's link without reloading">force reconnect</button>
+    <button id="conn-panel-copy" type="button"
+            title="copy this panel and the whole link log as text">copy</button>
+    <button id="conn-panel-download" type="button"
+            title="save the link log as a file">download log</button>
+  </div>
+  <table class="conn-panel-rows"><tbody id="conn-panel-rows"></tbody></table>
+  <div class="conn-panel-loghead">link log <span id="conn-panel-logcount"></span></div>
+  <pre id="conn-panel-log" class="conn-panel-log"></pre>
 </div>
 
 <script src="static/quietdom.js"></script>

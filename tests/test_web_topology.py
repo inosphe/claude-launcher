@@ -695,6 +695,7 @@ BROWSER_CHECKS = [
         "filldefault_browser.cjs",
         "seedmesh_browser.cjs",
         "stats_browser.cjs",
+        "linkpanel_browser.cjs",
 ]
 
 
