@@ -562,6 +562,8 @@ def test_the_token_series_endpoint_reads_the_session(home, tmp_path):
             assert [(p["n"], p["cache_read"]) for p in body["points"]] == [(1, 50)]
             assert len(body["compactions"]) == 1
             assert body["swaps"] == []
+            assert body["limits"]["top"] == ctxsize.SERIES_DOMAIN
+            assert [x["label"] for x in body["limits"]["sides"]] == [""]
             mgr.events.rows(mgr._sessions["s1"]).append(
                 _borrow_event(at(0, 1), previous="", current="lender"))
             resp = await client.get("/api/sessions/s1/token-series?window=full&points=8",
@@ -575,3 +577,55 @@ def test_the_token_series_endpoint_reads_the_session(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+# the chart's height axis: window and auto-compact threshold per side (claunch-e0e3n)
+
+def _limits(monkeypatch, harness, by_side, borrow="", reading=None):
+    """``series_limits`` for a session whose sides resolve to ``by_side``,
+    keyed on the borrow the resolver is asked about ('' = the own profile)."""
+    monkeypatch.setattr(ctxsize, "declared_context_window",
+                        lambda s: by_side[str(s.borrow or "")][0])
+    monkeypatch.setattr(ctxsize, "compact_window_of",
+                        lambda s: by_side[str(s.borrow or "")][1])
+    sdef = SessionDef(name="s1", harness=harness, profile="work", borrow=borrow)
+    return ctxsize.series_limits(sdef, reading)
+
+
+def test_series_limits_of_an_own_profile_is_one_side(monkeypatch):
+    got = _limits(monkeypatch, "claude", {"": (1_000_000, 900_000)})
+    assert got == {"sides": [{"label": "work", "window": 1_000_000, "compact": 900_000}],
+                   "top": 1_000_000}
+
+
+def test_series_limits_of_a_borrowed_session_has_both_sides_and_the_larger_top(monkeypatch):
+    got = _limits(monkeypatch, "claude",
+                  {"": (1_000_000, 900_000), "lender": (200_000, 150_000)}, borrow="lender")
+    assert got["sides"] == [
+        {"label": "work", "window": 1_000_000, "compact": 900_000},
+        {"label": "lender", "window": 200_000, "compact": 150_000}]
+    assert got["top"] == 1_000_000
+
+
+def test_series_limits_claude_without_a_declared_window_tops_at_the_gauge_domain(monkeypatch):
+    got = _limits(monkeypatch, "claude", {"": (None, None)})
+    assert got["top"] == ctxsize.SERIES_DOMAIN
+    assert got["sides"][0]["compact"] is None
+
+
+def test_series_limits_pi_uses_the_declared_window_and_threshold(monkeypatch):
+    got = _limits(monkeypatch, "pi", {"": (400_000, 360_000)})
+    assert got["top"] == 400_000
+    assert got["sides"][0]["compact"] == 360_000
+
+
+def test_series_limits_pi_without_a_window_has_no_top_and_no_threshold(monkeypatch):
+    got = _limits(monkeypatch, "pi", {"": (None, 360_000)})
+    assert got["top"] is None
+    assert got["sides"][0]["compact"] is None
+
+
+def test_series_limits_codex_takes_the_recorded_window(monkeypatch):
+    got = _limits(monkeypatch, "codex", {"": (None, 250_000)},
+                  reading={"model_context_window": 272_000})
+    assert got["top"] == 272_000 and got["sides"][0]["window"] == 272_000

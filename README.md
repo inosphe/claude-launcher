@@ -1573,9 +1573,17 @@ compaction and stands on that fall. Subagent requests run in their own context
 and are not drawn. The chart covers the conversation from its first request, at
 most the last twelve hours; past 600 requests consecutive requests are grouped
 and a point is the largest context of its group (the readout says how many
-requests it stands for). The height axis is logarithmic from 1 token, because
-cached input is orders of magnitude larger than the other two and they were
-invisible on a linear axis; each layer's boundary is the log position of the
+requests it stands for). The height axis is logarithmic from a floor of 1k tokens (a request below it
+sits on the baseline; a session that never reached 1k is drawn from its smallest
+request instead), because cached input is orders of magnitude larger than the
+other two and they were invisible on a linear axis. Its top is fixed at the
+model's context window (Claude without a declared window: 1M; Codex: the window
+it records; Pi: the spec's `context_window`; no window known: the largest
+context), so the same height is the same count whatever the session reached, and
+a horizontal amber line marks the auto-compact threshold (Claude's
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, or the spec's `auto_compact_at`; Pi needs a
+`context_window` as well). A borrowed session draws the line of each account it
+can run on, labelled by profile, and one line where the two agree; each layer's boundary is the log position of the
 running sum up to it, so a layer's thickness is a ratio and not a token count
 (claunch-0af4e.1.1). On this axis the area under the line is not the total of
 tokens sent. It is one chart because the series belongs to the session; under

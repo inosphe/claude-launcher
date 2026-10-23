@@ -11466,6 +11466,9 @@ async def h_session_token_series(request: web.Request) -> web.Response:
             events.rows(session) if events is not None else [],
             getattr(sdef, "profile", "") or "",
             reading.get("start") or 0, reading.get("until") or 0)
+    if reading.get("points"):
+        reading["limits"] = await asyncio.to_thread(
+            lambda: ctxsize.series_limits(sdef, ctxsize.for_session(sdef)))
     return json_response({**reading, "reader": reader})
 
 
