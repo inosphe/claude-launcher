@@ -170,9 +170,18 @@ PROVIDER_EXTRA_FIELDS: Tuple[str, ...] = (
     "service",
     "harness",
     "allowed_harnesses",
+    # The four :mod:`routing` facts, spelled here rather than imported: this
+    # module is loaded by every reader and must not drag the routing shim's
+    # imports in behind it. ``tests/test_provider_install.py`` holds this list
+    # to the constants routing actually reads, so the two spellings cannot
+    # drift apart -- which is how ``routing`` and ``dynamic`` were missing
+    # from a first cut of this tuple while `claunch routing set` was writing
+    # them.
     "anthropic_auth_header",
     "session_header",
     "session_affinity",
+    "routing",
+    "dynamic",
 )
 #: Pre-schema spellings an *existing* entry may still carry. A provider written
 #: by the install form never has them -- ``claunch migrate-config`` retires

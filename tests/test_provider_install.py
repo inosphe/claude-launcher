@@ -134,6 +134,38 @@ def test_the_launchers_own_providers_cannot_be_shadowed(home):
     assert any("default" in p for p in problems)
 
 
+def test_the_known_field_list_covers_every_key_routing_writes(home):
+    """The mirror guard: provider_spec spells these literals, routing owns them.
+
+    A provider carrying one of these keys must not be reported as having an
+    unknown field -- the install page lists every entry it finds, and a false
+    "unknown field(s): routing" on a working provider would read as a broken
+    config. The first cut of PROVIDER_EXTRA_FIELDS was missing `routing` and
+    `dynamic` for exactly this reason; this fails if a later one is missed.
+    """
+    from claude_launcher import routing
+
+    from claude_launcher.provider_spec import known_fields
+
+    known = set(known_fields())
+    for key in (
+        routing.SPEC_KEY,
+        routing.AFFINITY_KEY,
+        routing.SESSION_HEADER_KEY,
+        routing.ANTHROPIC_AUTH_KEY,
+        routing.DYNAMIC_KEY,
+    ):
+        assert key in known, f"routing writes providers.<name>.{key}, the field list does not know it"
+
+
+def test_a_provider_with_a_routing_spec_is_not_reported_as_broken(home):
+    entry = _valid(routing={"order": ["CoreWeave"]}, dynamic=True)
+    assert provider_install.validate("demo", entry) == []
+    provider_install.save("demo", entry)
+    rows = provider_install.listing()["providers"]
+    assert rows[0]["problems"] == []
+
+
 def test_the_facts_other_modules_own_are_checked_by_them(home):
     """session_affinity/session_header/allowed_harnesses are not re-implemented here."""
     problems = provider_install.validate("demo", _valid(session_affinity="yes"))
