@@ -811,6 +811,47 @@ rejects any other key at load time:
 | `codex` | `env`, `config` (each key becomes `-c key=value`, strings quoted) |
 | `pi` | `env`, `settings` (dotted keys merged into the profile's `pi/settings.json`), `tools` (`{full_read: false}` switches a claunch builtin tool off) |
 
+### A gateway that serves both protocols (OpenGateway)
+
+A gateway can answer on both protocols from one host, so a single provider
+entry serves the `claude` harness (Anthropic Messages) and the `pi` harness
+(OpenAI Chat Completions). OpenGateway is the backend this was verified
+against; its catalog is public (`GET https://apis.opengateway.ai/v1/models`,
+no authentication) and names models `owner/model`:
+
+```yaml
+providers:
+  opengateway:
+    endpoints:
+      anthropic: https://apis.opengateway.ai      # Claude Code appends /v1/messages
+      openai:    https://apis.opengateway.ai/v1   # Pi appends /chat/completions
+    models:
+      default: deepseek/deepseek-v4.1-flash-ultrafast
+      small:   deepseek/deepseek-v4.1-flash-ultrafast
+      large:   deepseek/deepseek-v4.1-flash-ultrafast
+    context_window: 1000000
+
+profiles:
+  opengateway:
+    provider: opengateway
+```
+
+- `endpoints.anthropic` stops at the host: the `/v1/messages` path belongs to
+  the harness, as with every Anthropic-protocol backend.
+- Authentication is `Authorization: Bearer <key>`. A profile's `set-token`
+  secret reaches it as `ANTHROPIC_AUTH_TOKEN`, so no `api_key:` is needed in
+  the file. The same key is accepted as `x-api-key` too, so
+  `anthropic_auth_header` stays unset.
+- `context_window: 1000000` puts `[1m]` on every model id the launcher exports,
+  and the id that reaches this backend is undecorated: the launcher writes the
+  tag into `ANTHROPIC_MODEL` and does not rewrite request bodies, while the
+  throughput record of the verification run shows
+  `deepseek/deepseek-v4.1-flash-ultrafast` on `/v1/messages` with status 200.
+  The same id with `[1m]` on the wire answers 404 `not_found_error`, so keep
+  the `models:` values undecorated.
+- Claude Code prints `[claude-code:unrecognized_model]` for an id it does not
+  know. The request still reaches the backend; it is a notice, not a failure.
+
 ### `models` roles vs. raw `ANTHROPIC_*` variables
 
 A provider or profile that declares `models` does **not** need the matching
