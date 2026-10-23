@@ -34703,6 +34703,7 @@ function megaThreadCard() {
   const draft = megaThreadDraft || (megaThreadDraft = {
     model: s.model_pin || "",
     budget_tokens: String(s.budget_tokens),
+    draft_budget_tokens: String(s.draft_budget_tokens),
     threshold_ratio: String(s.threshold_ratio),
     max_chars: String(s.max_chars),
     concurrency: String(s.concurrency),
@@ -34725,6 +34726,12 @@ function megaThreadCard() {
     { placeholder: "jev-latest" });
   field("mega-thread-budget", "Budget: input tokens per rolling 24h (0 = no cap)",
     "budget_tokens", "number", { min: "0", step: "100000" });
+  // The create form's topic preview spends Jev too, and it runs before any
+  // cluster exists (claunch-vz96l). Its ceiling is separate on purpose: a
+  // preview the user abandons must not be able to stop real messages.
+  field("mega-thread-draft-budget",
+    "Preview budget: the same, for the create form's Jev topic preview",
+    "draft_budget_tokens", "number", { min: "0", step: "100000" });
   field("mega-thread-ratio", "A member takes the message alone when p(mine) is this many times p(not_mine)",
     "threshold_ratio", "number", { min: "1", step: "0.5" });
   field("mega-thread-maxchars", "Characters of one member's prompt", "max_chars", "number",
@@ -34736,6 +34743,12 @@ function megaThreadCard() {
   form.appendChild(el("p", "wf-note",
     `Used in the last 24h: ${used.toLocaleString()} tokens` +
     (left === null || left === undefined ? " (no cap)" : `, ${left.toLocaleString()} left`)));
+  const draftUsed = s.draft_budget_used_tokens || 0;
+  const draftLeft = s.draft_budget_remaining_tokens;
+  form.appendChild(el("p", "wf-note",
+    `Previews used in the last 24h: ${draftUsed.toLocaleString()} tokens` +
+    (draftLeft === null || draftLeft === undefined
+      ? " (no cap)" : `, ${draftLeft.toLocaleString()} left`)));
   form.appendChild(el("p", "wf-note",
     s.key_set
       ? `Jev key: ${s.key_source === "file" ? "the saved key file" : s.key_source}.`
@@ -34749,6 +34762,7 @@ function megaThreadCard() {
     saveMegaThread({
       model: draft.model.trim(),
       budget_tokens: Number(draft.budget_tokens),
+      draft_budget_tokens: Number(draft.draft_budget_tokens),
       threshold_ratio: Number(draft.threshold_ratio),
       max_chars: Number(draft.max_chars),
       concurrency: Number(draft.concurrency),

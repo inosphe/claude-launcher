@@ -60,6 +60,26 @@ CRITERIA = {
     ),
 }
 
+#: The create form's Jev preview asks the same two options about a topic
+#: instead of a message. The option ids stay ``mine``/``not_mine`` so one
+#: scorer (``scores``) and one judge (``judge``) read both answers; only the
+#: sentence the model is asked changes.
+DRAFT_INSTRUCTIONS = (
+    "The user is creating a mega thread: one input box that will reach several "
+    "AI sessions, each with its own conversation thread. The user typed the "
+    "topic below. Decide whether THIS session belongs in that mega thread."
+)
+DRAFT_CRITERIA = {
+    MINE: (
+        "The topic is this session's subject or would be answered by the work "
+        "this session is doing now (its task, issue, branch, briefing)."
+    ),
+    NOT_MINE: (
+        "The topic is another session's work, already finished here, or too "
+        "general to say this session is one of its places."
+    ),
+}
+
 #: What one member's prompt may carry. The Jev default is 32k tokens for the
 #: state plus the question and 64k for the whole request; these caps keep a
 #: ten-member routing in the low thousands of tokens.
@@ -180,7 +200,14 @@ def briefing_text(name: str, sdef) -> str:
 
 
 def thread_state(threads, tid: str) -> Dict[str, Any]:
-    """The tail of one member thread: title, status and the last messages."""
+    """The tail of one member thread: title, status and the last messages.
+
+    A draft scores a session that may have no thread yet (the create form
+    previews before any cluster exists), and an empty id is that session: the
+    document says so rather than raising on a lookup of ``""``.
+    """
+    if not tid:
+        return {"title": "", "status": "open", "messages": []}
     thread = threads.get(tid)
     try:
         messages = threads.tail(tid, limit=THREAD_MESSAGES)
@@ -199,6 +226,11 @@ def thread_state(threads, tid: str) -> Dict[str, Any]:
 
 def questions() -> Dict[str, dict]:
     return {QUESTION_ID: {"type": "choice", "instructions": INSTRUCTIONS, "criteria": dict(CRITERIA)}}
+
+
+def draft_questions() -> Dict[str, dict]:
+    return {QUESTION_ID: {"type": "choice", "instructions": DRAFT_INSTRUCTIONS,
+                          "criteria": dict(DRAFT_CRITERIA)}}
 
 
 def build_state(manager, threads, member: Dict[str, Any], text: str, *,
@@ -339,6 +371,10 @@ def policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "max_chars": int(num("megathread_max_chars", 12000)),
         "concurrency": max(1, int(num("megathread_concurrency", 8))),
         "budget_tokens": max(0, int(num("megathread_jev_budget_tokens", 10_000_000))),
+        # The create form's preview has its own rolling ceiling: a topic the
+        # user types and abandons spends real tokens, and charging them to the
+        # routing budget would let a few previews stop real messages.
+        "draft_budget_tokens": max(0, int(num("megathread_draft_budget_tokens", 2_000_000))),
         "model": jev.model_for(cfg, "megathread"),
     }
 
@@ -354,16 +390,22 @@ async def default_ask(cfg: Dict[str, Any], state: Dict[str, Any], qs: Dict[str, 
 async def evaluate(
     manager, threads, members: List[Dict[str, Any]], text: str, *,
     cfg: Dict[str, Any], ask: Optional[Any] = None,
+    qs_factory: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Ask Jev about every member concurrently and judge the answers.
 
     ``ask`` is the Jev call, injected by tests; it takes
     ``(cfg, state, questions, model)`` and returns a response document.
+    ``qs_factory`` is the question set to ask (``questions`` here,
+    ``draft_questions`` for the create form's preview): the machinery below
+    -- one document per member, one call, one judgment -- is the same for a
+    message and for a topic.
     """
     pol = policy(cfg)
     call = ask or default_ask
     model = pol["model"]
     semaphore = asyncio.Semaphore(pol["concurrency"])
+    build_questions = qs_factory or questions
 
     async def one(member: Dict[str, Any]) -> Dict[str, Any]:
         """One member's answer. Every failure is that member's own: a thread
@@ -373,7 +415,7 @@ async def evaluate(
         the whole spend even when part of it failed, and the budget is not
         charged for calls the log cannot see.
         """
-        qs = questions()
+        qs = build_questions()
         try:
             state = build_state(manager, threads, member, text, max_chars=pol["max_chars"])
             estimate = estimate_tokens(state, qs)
@@ -406,3 +448,83 @@ async def evaluate(
     judgment["tokens"] = sum(int(r.get("tokens") or 0) for r in results)
     judgment["model"] = model
     return judgment
+
+
+# --------------------------------------------------------------------------- #
+# the create form's preview
+# --------------------------------------------------------------------------- #
+def draft_members(threads, sessions: List[str]) -> List[Dict[str, Any]]:
+    """``(session, thread)`` pairs to score for a topic, without writing.
+
+    A session joins a mega thread with its most recent open thread, or with a
+    thread the daemon opens for it (``megathread_api.open_thread``). The
+    preview must not open anything -- a topic the user abandons would leave
+    threads behind -- so a session with no open thread is scored with an
+    empty id, and ``thread_state`` reads that as "no thread yet".
+    """
+    out = []
+    for name in sessions:
+        name = str(name or "").strip()
+        if not name:
+            continue
+        tid = ""
+        try:
+            listing = threads.list(name, closed=False)
+            if listing["threads"]:
+                tid = str(listing["threads"][0]["id"])
+        except Exception:  # noqa: BLE001 -- a session with no readable threads
+            tid = ""
+        out.append({"session": name, "thread": tid})
+    return out
+
+
+async def draft(
+    manager, threads, sessions: List[str], topic: str, *,
+    cfg: Dict[str, Any], ask: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Which of ``sessions`` the topic belongs to.
+
+    Same judgment as a routing, asked before a cluster exists: every
+    candidate is scored, and the ones over the threshold come back marked
+    ``recommended``. The caller shows the list, the user edits it, and only
+    then is a cluster created -- so nothing here writes a thread, a member or
+    a delivery.
+    """
+    members = draft_members(threads, sessions)
+    judgment = await evaluate(
+        manager, threads, members, topic, cfg=cfg, ask=ask, qs_factory=draft_questions,
+    )
+    threshold = float(judgment.get("threshold") or 0.0)
+    rows = []
+    for row in judgment.get("candidates") or []:
+        rows.append({
+            "session": row.get("session"),
+            "thread": row.get("thread") or "",
+            "p_mine": row.get("p_mine"),
+            "logit": row.get("logit"),
+            # Only a scored member can be recommended: a failed call says
+            # nothing about the topic, and ticking it on the user's behalf
+            # would put an unasked session in the cluster.
+            "recommended": row.get("logit") is not None and float(row["logit"]) >= threshold,
+        })
+    for row in judgment.get("errors") or []:
+        rows.append({
+            "session": next((m["session"] for m in members if m["thread"] == row.get("thread")), ""),
+            "thread": row.get("thread") or "",
+            "p_mine": None,
+            "logit": None,
+            "recommended": False,
+            "error": row.get("error"),
+        })
+    rows.sort(key=lambda r: (r["logit"] is None, -(r["logit"] or 0.0)))
+    return {
+        "threshold": threshold,
+        "model": judgment.get("model"),
+        "tokens": judgment.get("tokens") or 0,
+        "members": rows,
+        "recommended": [r["session"] for r in rows if r["recommended"]],
+        # How many sessions were scored. Not `candidates`: in a routing that
+        # word is the scored rows themselves, and one name for two shapes is
+        # how a reader ends up iterating a number.
+        "scored": len(members),
+    }

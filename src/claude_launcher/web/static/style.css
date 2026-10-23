@@ -9349,8 +9349,15 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-compose.mt-shut { opacity: 0.55; }
 .mt-cluster-title { font-size: 13px; }
 .mt-cluster-sub { font-size: 11px; color: #8b949e; }
+/* The create panel (claunch-vz96l). It replaces an inline 240px column whose
+   list was 200px tall: the reader could see six sessions at a time and could
+   not tell two of them apart. The panel takes the page, and the list takes
+   whatever height is left between the controls and the footer. */
 .mt-new { margin-top: 12px; padding-top: 10px; border-top: 1px solid #2a2e36; display: flex; flex-direction: column; gap: 6px; }
 .mt-new input[type="text"], .mt-new input[type="search"] { background: #0d1117; color: #d8dbe0; border: 1px solid #30363d; border-radius: 5px; padding: 5px 7px; }
+.mt-list-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.mt-list-head h2 { flex: 1 1 auto; }
+.mt-new-open { font-size: 11px; padding: 3px 8px; }
 /* The picker: filter, count and clear above the list; the list scrolls on its
    own so the create button never moves off the bottom of the aside. */
 .mt-new-tools { display: flex; align-items: center; gap: 6px; }
@@ -9359,10 +9366,18 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-new-clear { background: none; border: 1px solid #30363d; border-radius: 5px; color: #c6cdd5; font-size: 11px; padding: 3px 6px; cursor: pointer; }
 .mt-new-clear:disabled { opacity: 0.4; cursor: default; }
 .mt-new-sessions { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #c6cdd5; }
-.mt-new-session-row { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 2px 6px; border-radius: 5px; cursor: pointer; }
+.mt-new-session-row { display: flex; align-items: flex-start; gap: 7px; min-height: 32px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
 .mt-new-session-row:hover { background: #22262d; }
 .mt-new-session-row.on { background: #16263a; }
-.mt-new-name { font-size: 12px; color: #d8dbe0; white-space: nowrap; }
+.mt-new-session-row input[type="checkbox"] { margin-top: 3px; flex: 0 0 auto; }
+.mt-new-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.mt-new-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.mt-new-name { font-size: 12px; color: #d8dbe0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mt-new-meta { font-size: 11px; color: #a9b4c0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-new-brief { font-size: 11px; color: #7d8796; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-new-cat { font-size: 10px; color: #8b949e; border: 1px solid #30363d; border-radius: 9px; padding: 0 5px; white-space: nowrap; }
+.mt-new-flag { font-size: 10px; color: #3fb950; border: 1px solid #1f6f3f; border-radius: 9px; padding: 0 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mt-new-flag.weak { color: #8b949e; border-color: #30363d; }
 .mt-new-line { flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-new-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #30363d; }
 .mt-new-dot.live { background: #3fb950; }
@@ -9371,6 +9386,49 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-new-hint.warn { color: #d29922; }
 .mt-new-hint.ok { color: #3fb950; }
 .mt-new-create { width: 100%; }
+
+/* The panel itself: a dialog over the page, sized to the viewport rather than
+   to the aside, with the list scrolling between two fixed rails. */
+.mt-create-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(1, 4, 9, 0.72);
+  display: flex; align-items: center; justify-content: center; padding: 24px; }
+.mt-create-card { display: flex; flex-direction: column; gap: 10px; width: min(980px, 96vw);
+  height: min(86vh, 900px); background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(1, 4, 9, 0.7); padding: 14px 16px; min-height: 0; }
+.mt-create-head { display: flex; align-items: center; gap: 10px; }
+.mt-create-head h2 { flex: 1 1 auto; margin: 0; font-size: 15px; color: #d8dbe0; }
+.mt-create-close { background: none; border: none; color: #8b949e; font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.mt-create-close:hover { color: #ff7b72; }
+.mt-create-top { display: flex; flex-direction: column; gap: 8px; }
+.mt-create-title { background: #161b22; color: #d8dbe0; border: 1px solid #30363d; border-radius: 6px;
+  padding: 8px 10px; font: inherit; font-size: 14px; }
+.mt-create-topic { display: flex; gap: 8px; align-items: stretch; }
+.mt-create-topic-input { flex: 1 1 auto; min-width: 0; background: #161b22; color: #d8dbe0;
+  border: 1px solid #30363d; border-radius: 6px; padding: 7px 10px; font: inherit; }
+.mt-create-draft, .mt-create-retry { white-space: nowrap; }
+.mt-create-draft-note { margin: 0; font-size: 11px; color: #8b949e; min-height: 14px; }
+.mt-create-draft-note.ok { color: #3fb950; }
+.mt-create-draft-note.bad { color: #f85149; }
+.mt-create-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mt-create-controls select { background: #161b22; color: #d8dbe0; border: 1px solid #30363d;
+  border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
+.mt-create-controls .mt-new-filter { flex: 1 1 220px; }
+.mt-create-tree { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #c6cdd5; cursor: pointer; }
+.mt-create-statuses { display: flex; flex-wrap: wrap; gap: 5px; }
+.mt-create-status { background: none; border: 1px solid #30363d; border-radius: 11px; color: #8b949e;
+  font-size: 11px; padding: 2px 9px; cursor: pointer; }
+.mt-create-status.on { border-color: #58a6ff; color: #d8dbe0; background: #16263a; }
+.mt-create-status-all { margin-left: auto; }
+.mt-create-list { flex: 1 1 auto; max-height: none; min-height: 0; overflow-y: auto;
+  border: 1px solid #21262d; border-radius: 8px; padding: 4px; background: #0b0f14; }
+.mt-cat-archived { opacity: 0.55; }
+.mt-cat-hold .mt-new-name, .mt-cat-paused .mt-new-name, .mt-cat-killed .mt-new-name { color: #a9b4c0; }
+.mt-create-foot { display: flex; align-items: center; gap: 10px; }
+.mt-create-foot .mt-new-hint { flex: 1 1 auto; }
+.mt-create-foot .mt-new-create { width: auto; min-width: 140px; }
+@media (max-width: 700px) {
+  .mt-create-overlay { padding: 0; }
+  .mt-create-card { width: 100vw; height: 100vh; border-radius: 0; }
+}
 .mt-stage { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; padding: 4px 6px; }
 .mt-head { display: flex; align-items: baseline; gap: 10px; }
 .mt-head h2 { font-size: 15px; margin: 0; color: #d8dbe0; }

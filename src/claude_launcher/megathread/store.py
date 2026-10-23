@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MAX_TITLE = 200
 MAX_BODY = 20_000
@@ -52,6 +52,14 @@ STATUSES = ("open", "closed")
 #: ``manual`` the user typed the picks themselves, ``none`` nobody cleared
 #: the threshold, ``error`` every Jev call failed.
 VERDICTS = ("auto", "choose", "manual", "none", "error")
+
+#: What wrote a ``routes`` row. ``route`` is a message that went through a
+#: cluster; ``draft`` is a topic scored before any cluster exists (the create
+#: form's Jev preview), whose row carries no cluster (``mega`` is empty). The
+#: two are kept in one table because the column this table already has --
+#: ``tokens`` -- is the accounting for both, and a second ledger would let the
+#: same spend be counted twice or not at all.
+KINDS = ("route", "draft")
 
 
 class MegaError(Exception):
@@ -95,10 +103,19 @@ CREATE TABLE IF NOT EXISTS routes (
     delivered INTEGER NOT NULL DEFAULT 0,
     tokens INTEGER NOT NULL DEFAULT 0,
     model TEXT,
-    error TEXT
+    error TEXT,
+    kind TEXT NOT NULL DEFAULT 'route'
 );
 CREATE INDEX IF NOT EXISTS routes_mega ON routes(mega, seq);
 """
+
+#: Applied on top of ``_SCHEMA`` to a file written by an older build. A
+#: ``CREATE TABLE IF NOT EXISTS`` cannot add a column to an existing table, so
+#: schema 2 (draft rows, ``kind``) needs its own statement. Each entry runs
+#: only when ``PRAGMA user_version`` is below the version it belongs to.
+_MIGRATIONS = {
+    2: ("ALTER TABLE routes ADD COLUMN kind TEXT NOT NULL DEFAULT 'route'",),
+}
 
 
 def _now() -> str:
@@ -125,6 +142,19 @@ class MegaThreadStore:
             if version > SCHEMA_VERSION:
                 raise MegaError(f"{self.path} has schema version {version}; this claunch knows {SCHEMA_VERSION}")
             db.executescript(_SCHEMA)
+            for target in sorted(_MIGRATIONS):
+                if version >= target:
+                    continue
+                for statement in _MIGRATIONS[target]:
+                    try:
+                        db.execute(statement)
+                    except sqlite3.OperationalError as exc:
+                        # A file written by the version this column belongs to
+                        # runs the statement first (``CREATE TABLE`` already had
+                        # it), and SQLite refuses the duplicate column. The
+                        # column being there is the outcome we want either way.
+                        if "duplicate column name" not in str(exc).lower():
+                            raise
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager
@@ -204,6 +234,7 @@ class MegaThreadStore:
             "tokens": int(row["tokens"] or 0),
             "model": row["model"],
             "error": row["error"],
+            "kind": row["kind"] if "kind" in row.keys() else "route",
         }
 
     # -- clusters ----------------------------------------------------------
@@ -327,24 +358,36 @@ class MegaThreadStore:
         self, mid: str, body: str, *, verdict: str, threshold: float,
         candidates: Optional[list] = None, chosen: Optional[list] = None,
         tokens: int = 0, model: str = "", delivered: bool = False,
-        error: str = "",
+        error: str = "", kind: str = "route",
     ) -> dict:
+        """Write one row of the ledger.
+
+        ``kind='draft'`` is a scoring of a topic before any cluster exists:
+        nothing is delivered and there is no cluster to stamp, so ``mid`` is
+        empty and the row is only accounting. A routing (``kind='route'``)
+        still requires its cluster, and touching it keeps the cluster's
+        ``updated_at`` moving.
+        """
         if verdict not in VERDICTS:
             raise MegaError(f"verdict is one of {', '.join(VERDICTS)}")
+        if kind not in KINDS:
+            raise MegaError(f"kind is one of {', '.join(KINDS)}")
         text = _text(body, MAX_BODY)
         if not text:
             raise MegaError("a routed message has text")
         with self._write() as db:
-            self._row(db, mid)
+            if kind == "route":
+                self._row(db, mid)
             cur = db.execute(
                 "INSERT INTO routes (mega, body, at, verdict, threshold, candidates, chosen,"
-                " delivered, tokens, model, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (mid, text, _now(), verdict, float(threshold),
+                " delivered, tokens, model, error, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (mid if kind == "route" else "", text, _now(), verdict, float(threshold),
                  json.dumps(candidates or [], ensure_ascii=False),
                  json.dumps([str(t) for t in (chosen or [])], ensure_ascii=False),
-                 1 if delivered else 0, int(tokens or 0), model or "", error or None),
+                 1 if delivered else 0, int(tokens or 0), model or "", error or None, kind),
             )
-            db.execute("UPDATE mega SET updated_at = ? WHERE id = ?", (_now(), mid))
+            if kind == "route":
+                db.execute("UPDATE mega SET updated_at = ? WHERE id = ?", (_now(), mid))
             row = db.execute("SELECT * FROM routes WHERE seq = ?", (cur.lastrowid,)).fetchone()
             return self._route(row)
 
@@ -360,21 +403,32 @@ class MegaThreadStore:
             ).fetchall()
         return {"routes": [self._route(r) for r in rows], "total": len(rows)}
 
-    def usage_tokens(self, *, hours: float = BUDGET_HOURS, mega: Optional[str] = None) -> int:
-        """Input tokens spent on routing in the last ``hours``.
+    def usage_tokens(self, *, hours: float = BUDGET_HOURS, mega: Optional[str] = None,
+                     kind: Optional[str] = None) -> int:
+        """Input tokens spent in the last ``hours``.
 
         Decimals are compared as ISO-8601 UTC strings, which sort in time
         order for the fixed format :func:`_now` writes.
+
+        ``kind`` splits the two budgets: a routing is charged to
+        ``megathread_jev_budget_tokens`` and a draft to
+        ``megathread_draft_budget_tokens``, and neither may count the other's
+        spend. Absent, the sum is the whole ledger.
         """
         try:
             hours = max(0.0, float(hours))
         except (TypeError, ValueError):
             raise MegaError("hours is a number") from None
+        if kind is not None and kind not in KINDS:
+            raise MegaError(f"kind is one of {', '.join(KINDS)}")
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
         sql = "SELECT COALESCE(SUM(tokens), 0) FROM routes WHERE at >= ?"
         args: list = [since]
         if mega:
             sql += " AND mega = ?"
             args.append(str(mega))
+        if kind:
+            sql += " AND kind = ?"
+            args.append(str(kind))
         with self._connect() as db:
             return int(db.execute(sql, args).fetchone()[0])

@@ -75,6 +75,10 @@ class FakeManager:
         self.sessions = {s.sdef.name: s for s in sessions}
         self.exit_hooks = []
 
+    def list(self):
+        """The registry, as the draft endpoint reads the whole fleet."""
+        return list(self.sessions.values())
+
     def get(self, name):
         if name not in self.sessions:
             raise KeyError(name)
@@ -616,3 +620,99 @@ def test_t21_an_exited_guest_beside_a_live_owner_leaves_the_row_delivered(tmp_pa
         assert megas.routes(mega["id"])["routes"][0]["delivered"] is True
 
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+# --------------------------------------------------------------------------- #
+# the create form's topic preview (claunch-vz96l)
+# --------------------------------------------------------------------------- #
+def test_t22_a_topic_preview_scores_the_fleet_and_writes_nothing(tmp_path, monkeypatch):
+    """The preview answers "which sessions is this topic for" before any
+    cluster exists: it must not open a thread, add a member, or type into a
+    session, and its spend lands on the draft ledger."""
+    seen = []
+
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        seen.append((questions, state["session"]["name"]))
+        return jev_answer(0.95 if state["session"]["name"] == "s1" else 0.05)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+
+    async def scenario(req, manager, threads, megas):
+        res = await req("POST", "/api/megathreads/draft", {"topic": "로그 형식 정리"})
+        # The draft question, not the routing one.
+        assert seen and seen[0][0][megathread_route.QUESTION_ID]["instructions"] \
+            == megathread_route.DRAFT_INSTRUCTIONS
+        assert sorted(name for _qs, name in seen) == ["s1", "s2"]
+        assert res["recommended"] == ["s1"]
+        assert res["scored"] == 2
+        scores = {m["session"]: m for m in res["members"]}
+        assert scores["s1"]["recommended"] is True and scores["s1"]["logit"] > 0
+        assert scores["s2"]["recommended"] is False
+        assert scores["s1"]["thread"] == "", "a session with no thread is scored, not given one"
+
+        # Nothing was created and nothing was typed.
+        assert manager.sessions["s1"].delivered == []
+        assert manager.sessions["s2"].delivered == []
+        assert threads.list("s1", closed=False)["threads"] == []
+        assert megas.list()["megathreads"] == []
+        # The ledger row is the only thing written, and it is a draft.
+        assert megas.usage_tokens(kind="draft") == 200
+        assert megas.usage_tokens(kind="route") == 0
+        assert res["budget_used_tokens"] == 200
+        assert res["ledger_error"] is None
+
+    run(tmp_path, scenario)
+
+
+def test_t23_the_preview_has_its_own_budget(tmp_path, monkeypatch):
+    """A routing's spend must not close the preview, and a preview's must not
+    close a routing: they are two ceilings over one ledger."""
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.9)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+
+    async def scenario(req, manager, threads, megas):
+        # The routing budget is already spent in full.
+        await req("POST", "/api/threads", {"to": "s1", "title": "a"})
+        mega = (await req("POST", "/api/megathreads",
+                          {"title": "m", "members": [{"session": "s1"}]}))["mega"]
+        megas.record_route(mega["id"], "spent", verdict="auto", threshold=2.197,
+                           tokens=1000)
+        # The preview still runs...
+        res = await req("POST", "/api/megathreads/draft", {"topic": "무엇이든"})
+        assert res["recommended"] == ["s1", "s2"]
+        assert res["budget_used_tokens"] == 200
+        # ...until its own ceiling is reached (the estimate is one capped
+        # state per candidate, which is why the ceiling is not tiny).
+        megas.record_route("", "spent on previews", kind="draft", verdict="none",
+                           threshold=2.197, tokens=19_000)
+        code, data = await req.raw("POST", "/api/megathreads/draft", {"topic": "또"})
+        assert code == 429, data
+        assert data["limit_tokens"] == 20_000 and data["used_tokens"] == 19_200
+        # And the routing budget did not move because of the previews.
+        assert megas.usage_tokens(kind="route") == 1000
+
+    run(tmp_path, scenario,
+        cfg={**CFG, "megathread_jev_budget_tokens": 1000,
+             "megathread_draft_budget_tokens": 20_000})
+
+
+def test_t24_the_preview_refuses_bad_input(tmp_path):
+    async def scenario(req, manager, threads, megas):
+        await req("POST", "/api/megathreads/draft", {}, status=400)
+        await req("POST", "/api/megathreads/draft", {"topic": "   "}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": ["s1", "s9"]}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": "s1"}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": []}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": [f"s{i}" for i in range(41)]}, status=400)
+        # The settings endpoint reports the preview's own rolling usage.
+        settings = await req("GET", "/api/megathreads/settings")
+        assert settings["settings"]["draft_budget_tokens"] == 2_000_000
+        assert settings["settings"]["draft_budget_used_tokens"] == 0
+
+    run(tmp_path, scenario)

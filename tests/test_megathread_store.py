@@ -7,7 +7,13 @@ T3 a session that ends leaves every cluster
 T4 the routing log keeps the verdict, every member's score and the tokens;
    the 24-hour usage is the sum over that window
 T5 bad input: empty title, unknown cluster, unknown verdict, empty text
+T6 a draft row is accounting without a cluster, and the two budgets do not
+   count each other's spend (claunch-vz96l)
+T7 a file written before `kind` existed upgrades in place and files its rows
+   as routings (claunch-vz96l)
 """
+
+import sqlite3
 
 import pytest
 
@@ -87,3 +93,59 @@ def test_t5_validation(st):
         st.record_route(mega["id"], "x", verdict="maybe", threshold=1.0)
     with pytest.raises(S.MegaError):
         st.add_member(mega["id"], "", "th-a")
+
+
+def test_t6_a_draft_row_is_accounting_without_a_cluster(st):
+    """claunch-vz96l: the create form's preview spends Jev before any cluster
+    exists. Its row has no cluster to stamp and must not be counted against
+    the routing budget -- the two ceilings are separate on purpose."""
+    mega = st.create("m")
+    st.record_route(mega["id"], "a message", verdict="auto", threshold=2.197, tokens=900)
+    row = st.record_route("", "a topic", kind="draft", verdict="none", threshold=2.197,
+                          tokens=420, model="jev-latest")
+    assert row["kind"] == "draft" and row["mega"] == ""
+    assert row["candidates"] == [] and row["chosen"] == [] and row["delivered"] is False
+    assert st.usage_tokens(kind="route") == 900
+    assert st.usage_tokens(kind="draft") == 420
+    assert st.usage_tokens() == 1320, "no kind is the whole ledger"
+    # A draft does not need a cluster to exist...
+    assert st.record_route("", "another topic", kind="draft", verdict="none",
+                           threshold=2.197, tokens=10)["tokens"] == 10
+    # ...but a routing still does, and an unknown kind is refused.
+    with pytest.raises(S.NotFound):
+        st.record_route("mt-nope", "x", verdict="auto", threshold=1.0)
+    with pytest.raises(S.MegaError):
+        st.record_route("", "x", kind="something", verdict="auto", threshold=1.0)
+    with pytest.raises(S.MegaError):
+        st.usage_tokens(kind="something")
+
+
+def test_t7_a_v1_file_reaches_schema_2_without_losing_its_rows(tmp_path):
+    """An operator's daemon has a ``routes`` table written before ``kind``
+    existed. The upgrade adds the column and files every old row as a
+    routing, so the routing budget keeps counting what it already counted."""
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(str(path))
+    db.executescript(
+        "CREATE TABLE mega (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,"
+        " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+        "CREATE TABLE members (mega TEXT NOT NULL, session TEXT NOT NULL, thread TEXT NOT NULL,"
+        " added_by TEXT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY (mega, thread));"
+        "CREATE TABLE routes (seq INTEGER PRIMARY KEY AUTOINCREMENT, mega TEXT NOT NULL,"
+        " body TEXT NOT NULL, at TEXT NOT NULL, verdict TEXT NOT NULL, threshold REAL NOT NULL,"
+        " candidates TEXT, chosen TEXT, delivered INTEGER NOT NULL DEFAULT 0,"
+        " tokens INTEGER NOT NULL DEFAULT 0, model TEXT, error TEXT);"
+        "PRAGMA user_version = 1;"
+    )
+    db.execute("INSERT INTO mega VALUES ('mt-old', 'before', 'open', '2026-01-01', '2026-01-01')")
+    db.execute("INSERT INTO routes (mega, body, at, verdict, threshold, tokens)"
+               " VALUES ('mt-old', 'an old routing', '2099-01-01T00:00:00+00:00', 'auto', 2.197, 777)")
+    db.commit()
+    db.close()
+
+    st = S.MegaThreadStore(path)
+    assert st.get("mt-old")["title"] == "before"
+    assert st.usage_tokens(kind="route") == 777, "an old row is a routing"
+    assert st.usage_tokens(kind="draft") == 0
+    row = st.record_route("", "a topic", kind="draft", verdict="none", threshold=2.197, tokens=5)
+    assert row["kind"] == "draft"

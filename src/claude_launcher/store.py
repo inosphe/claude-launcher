@@ -545,6 +545,12 @@ DAEMON_DEFAULTS = {
     # The router compares ln(p_mine) - ln(p_not_mine) against ln(ratio).
     "megathread_threshold_ratio": 9.0,
     "megathread_jev_budget_tokens": 10_000_000,
+    # The create form's topic preview (daemon/megathread_route.draft) spends
+    # Jev on its own ceiling: it is a convenience the user may run and abandon
+    # repeatedly, and charging that to the routing budget would let a few
+    # previews stop real messages from reaching anyone. Measured over the same
+    # rolling 24h window, over the `draft` rows of the same ledger.
+    "megathread_draft_budget_tokens": 2_000_000,
     "megathread_max_chars": 12_000,
     "megathread_concurrency": 8,
     # The measurement window (daemon/window.py): how many test runs of each
