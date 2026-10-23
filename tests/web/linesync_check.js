@@ -102,12 +102,15 @@ ${clientDecl[0]}
 ${lineDecl[0]}
 let lineSyncComposing = false;
 let sessionEnded = false;
+let sessionEndedBy = null;
 let snapshotName = null;
 let attachedPid = null;
+let termInputVerdictKey = null;
 ` + [
     "autogrowTermInput", "termInputNote", "sendKeyLine", "lineSyncShared",
     "resetLineSync", "loadLineSync", "setLineText", "applyLineSync",
-    "termInputQueueNote", "termInputEnded", "renderTermInputField",
+    "termInputQueueNote", "termInputEnded", "termInputEndedWhy",
+    "termInputLogVerdict", "renderTermInputField",
     "renderLineSync", "pushLineSync", "clearSentLine", "toggleLineSync",
   ].map(slice).join("\n") + `
 exports.LINE_SYNC_CLIENT = LINE_SYNC_CLIENT;

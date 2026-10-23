@@ -49,16 +49,22 @@ const FIELD = {
 const $ = (id) => (id === "term-input-field" ? FIELD : null);
 
 const ctx = {};
+const logged = [];
 new Function(
-  "exports", "$",
+  "exports", "$", "logged",
   `let currentName = null, sessionEnded = false, snapshotName = null;
-let attachedPid = null;
+let sessionEndedBy = null, sessionEndedAt = null;
+let attachedPid = null, attachedBoot = null;
 let sessionsCache = [];
 let lineSync = { session: null, mode: "local" };
-` + ["lineSyncShared", "termInputQueueNote", "termInputEnded",
+let termInputVerdictKey = null;
+function linkLog(kind, detail) { logged.push({ k: kind, ...(detail || {}) }); }
+` + ["lineSyncShared", "termInputQueueNote", "termInputEnded", "termInputEndedWhy",
+     "termInputLogVerdict", "noteSessionEnded", "shimEnded",
      "renderTermInputField", "renderTermInputState"].map(slice).join("\n") + `
 Object.assign(exports, {
-  termInputEnded, renderTermInputState,
+  termInputEnded, renderTermInputState, noteSessionEnded, shimEnded,
+  origin: () => ({ by: sessionEndedBy, at: sessionEndedAt }),
   set: (o) => {
     if ("name" in o) currentName = o.name;
     if ("ended" in o) sessionEnded = o.ended;
@@ -68,7 +74,7 @@ Object.assign(exports, {
     if ("shared" in o) lineSync = { session: currentName, mode: o.shared ? "remote" : "local" };
   },
 });`
-)(ctx, $);
+)(ctx, $, logged);
 
 const ENDED = /^session ended/;
 function paint(state) {
@@ -137,6 +143,85 @@ check("only the current session's record counts",
         { name: "s2", status: "busy", pid: 999 },
         { name: "s1", status: "exited", pid: 100 }] })),
       FIELD.placeholder);
+
+/* --- the link log says which branch held the notice (claunch-ink90.1) --- */
+/* The reports this answers are "session ended over a running session" after
+   the fact: the log, not the screen, has to say which telling set the flag
+   and which branch of termInputEnded kept the notice up. */
+const verdicts = () => logged.filter((e) => e.k === "input.verdict");
+logged.length = 0;
+ctx.set({ name: "s9", ended: true, pid: 500, snapshot: null,
+          rows: [{ name: "s9", status: "busy", pid: 500 }] });
+ctx.renderTermInputState();
+ctx.renderTermInputState();
+ctx.renderTermInputState();
+check("a held notice is logged with the branch that held it",
+      verdicts().length === 1 && verdicts()[0].why === "record running, same pid"
+        && verdicts()[0].ended === true && verdicts()[0].pid === 500
+        && verdicts()[0].attached === 500 && verdicts()[0].status === "busy",
+      verdicts());
+ctx.set({ rows: [{ name: "s9", status: "idle" }] });
+ctx.renderTermInputState();
+check("a record without a pid is its own branch",
+      verdicts().length === 2 && verdicts()[1].why === "record running, no pid", verdicts());
+ctx.set({ rows: [{ name: "s9", status: "busy", pid: 501 }] });
+ctx.renderTermInputState();
+check("the release is logged too, with the record's new pid",
+      verdicts().length === 3 && verdicts()[2].ended === false
+        && verdicts()[2].why === "record running, new pid" && verdicts()[2].pid === 501,
+      verdicts());
+ctx.set({ rows: [] });
+ctx.renderTermInputState();
+check("no record is its own branch",
+      verdicts().length === 4 && verdicts()[3].why === "no record", verdicts());
+ctx.set({ ended: false, rows: [{ name: "s9", status: "busy", pid: 501 }] });
+const before4 = verdicts().length;
+ctx.renderTermInputState();
+ctx.renderTermInputState();
+check("a live socket writes no verdict", verdicts().length === before4, verdicts());
+
+/* The telling that set the flag, and a repeat that does not move it. */
+logged.length = 0;
+ctx.set({ ended: false, pid: 600 });
+ctx.noteSessionEnded("init", { status: "exited", code: 0 });
+check("the first telling records its origin", ctx.origin().by === "init"
+      && Number.isFinite(ctx.origin().at), ctx.origin());
+check("and logs it with the socket's pid",
+      logged.length === 1 && logged[0].k === "term.ended" && logged[0].by === "init"
+        && logged[0].pid === 600 && logged[0].session === "s9" && logged[0].status === "exited",
+      logged);
+ctx.set({ ended: true });
+ctx.noteSessionEnded("exit", { code: 0, again: true });
+check("a repeated telling is logged but keeps the first origin",
+      ctx.origin().by === "init" && logged.length === 2 && logged[1].by === "exit"
+        && logged[1].again === true, [ctx.origin(), logged]);
+
+/* A parked terminal keeps the origin on its own state for restoreTerminal. */
+logged.length = 0;
+const parked = { name: "s8", pid: 700, boot: "b1", exited: false };
+ctx.shimEnded(parked, "exit", { code: 1 });
+ctx.shimEnded(parked, "init", { status: "exited" });
+check("a parked terminal records the first origin",
+      parked.exited === true && parked.endedBy === "exit" && Number.isFinite(parked.endedAt),
+      parked);
+check("and logs every telling as parked",
+      logged.length === 2 && logged.every((e) => e.k === "term.ended" && e.parked === true
+        && e.session === "s8" && e.pid === 700), logged);
+
+/* Every place that sets the flag names its origin. */
+for (const [fn, re] of [
+  ["endSession", /noteSessionEnded\(by,/],
+  ["snapshotAttach", /noteSessionEnded\("snapshot"\)/],
+  ["restoreTerminal", /sessionEndedBy = b\.exited/],
+  ["shimFrame", /shimEnded\(b, "init"[\s\S]*shimEnded\(b, "exit"/],
+]) {
+  check(`${fn} records what ended the session`, re.test(slice(fn)));
+}
+check("the init frame is logged with pid, boot and exited",
+      /linkLog\("term\.init", \{[^}]*pid: attachedPid[^}]*exited: !!msg\.exited/.test(src));
+check("an init that says exited ends the session as \"init\"",
+      /if \(msg\.exited\) endSession\("init"/.test(src));
+check("an exit frame ends the session as \"exit\"", /endSession\("exit"/.test(src));
 
 /* --- the poll repaints the line, on screen or not ----------------------- */
 /* refreshSessions is too wide to slice into a stub world (its rail rebuild
