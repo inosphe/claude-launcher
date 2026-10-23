@@ -16,10 +16,19 @@
       the worktree. They are two rows now: `workspace` is the registered
       directory, `worktree` is the git checkout inside it.
 
+   3. The seed writes rows by firing the form's own change events, and the
+      form saves its draft on every change — so the request's answers became
+      the operator's standing answers. `saveNewFormDraft` now returns while
+      `_seeding` is set. The last section exercises that guard on the sliced
+      function (stub form, stub localStorage), so it fails when the guard is
+      removed.
+
    Runs the real functions sliced out of app.js, like the other *_check.js
    harnesses: a stub DOM is unnecessary for `spawnRequestSeed` and
    `spawnGateSpecFact`, which are pure, and the ordering claim is checked on
-   the source because the alternative is a Playwright run. */
+   the source because the alternative is a Playwright run. The draft guard
+   needs a form and a localStorage, so those two are stubbed and the real
+   `saveNewFormDraft` runs against them — no browser involved. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -151,6 +160,53 @@ if (recallAt < 0 || seedAt < 0 || recallAt > seedAt) {
                 "and apply the caller's seed over them " +
                 `(recall@${recallAt}, seed@${seedAt})`);
 }
+
+/* ---- the `_seeding` draft guard, on the real function ------------------ */
+/* Two writes of the same row, differing only in `_seeding`: the seed's own
+   change event must not reach the draft, and the operator's next change
+   must. Everything `saveNewFormDraft` touches is stubbed here — the form,
+   the route it checks, and the storage it reads and writes — so the checks
+   are the guard and nothing else. */
+const store = new Map();
+const BASE = "/";
+const NEW_FORM_DRAFT_KEY = `claunch_new_form:${BASE}`;
+const NEW_FORM_DRAFT_FIELDS = constant("NEW_FORM_DRAFT_FIELDS");
+const localStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => { store.set(k, String(v)); },
+};
+let newFormDraftRestoring = false;
+
+const readNewFormDraft = eval(`(${slice("readNewFormDraft")})`);
+const newFormDraftAnswer = eval(`(${slice("newFormDraftAnswer")})`);
+const saveNewFormDraft = eval(`(${slice("saveNewFormDraft")})`);
+
+const form = { _seeding: false, elements: {} };
+for (const name of NEW_FORM_DRAFT_FIELDS) {
+  form.elements[name] = {
+    tagName: "SELECT", type: "select-one", disabled: false, value: "", options: [],
+  };
+}
+const $ = (id) => (id === "new-session" ? form : null);
+const sessionFormView = () => ({ mode: "new" });
+
+/* The operator's standing answers, as a previous session left them. The
+   target row is seeded to a value the draft does not hold, so a leak is
+   visible in the draft itself rather than in a pass that agrees anyway. */
+store.set(NEW_FORM_DRAFT_KEY, JSON.stringify({ model: "browser-choice" }));
+const draftBefore = readNewFormDraft();
+
+form.elements.model.value = "seed-choice";
+form._seeding = true;
+saveNewFormDraft();
+check("the seed's own change leaves the draft as the browser left it",
+      readNewFormDraft(), draftBefore);
+
+form._seeding = false;
+form.elements.model.value = "operator-choice";
+saveNewFormDraft();
+check("the operator's change after seeding reaches the draft",
+      (readNewFormDraft() || {}).model, "operator-choice");
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
