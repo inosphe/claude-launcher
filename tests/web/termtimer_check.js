@@ -124,7 +124,7 @@ new Function(
    slice("renderTermTimer"), slice("termTimerHold"), slice("termTimerTitle"),
    table("TERM_TIMER_SKIPPABLE"), slice("termTimerSkip"),
    slice("termTimerSkipTitle"), slice("paintTermTimerSkip"),
-   slice("paintTermTimer"),
+   slice("paintTermTimer"), slice("setTipOnChange"),
    // slice() cuts from the `function` keyword, so the modifier in front of
    // it has to be put back — and asserting it was there is the point: the
    // click writes to the daemon, and a synchronous version of it could not.
@@ -341,6 +341,21 @@ ctx.paint();
 check("...and past its deadline it becomes due, not negative time",
       [chip.classList.contains("due"), chip.kids.map((k) => k.text)[1]],
       [true, "cflow reminder due now"]);
+
+/* ---- the tooltip is not rewritten on every repaint ------------------- */
+/* toolbar.js re-labels `title` as "<label> — <text>"; a repaint that wrote the
+   raw text back each second flipped the attribute twice a second and the
+   native tooltip flickered. A repaint with the same text must leave whatever
+   toolbar.js put there alone. */
+ctx.setWorld("s19", [mine]);
+ctx.render();
+ctx.paint();
+chip.title = "◷ — " + chip.title;   // what toolbar.js does after the paint
+const relabelled = chip.title;
+ctx.age(1);
+ctx.paint();
+check("a repaint with the same tooltip text leaves the relabelled title alone",
+      chip.title, relabelled);
 
 /* ---- a reading belongs to the session it was taken for ---------------- */
 /* Walking to another terminal repaints long before the poll comes round.
