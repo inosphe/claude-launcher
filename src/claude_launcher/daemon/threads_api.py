@@ -3,7 +3,8 @@ user and a session, held in the session's threads pane.
 
   GET  /api/threads?session=<name>[&closed=0]    one session's threads
   GET  /api/threads/rail                         per session: open, agent_seq, replies
-  POST /api/threads                              open    {session | to, title?, text?, qa?}
+  GET  /api/threads/forkable?session=<name>      can a thread be started in a fork? {ok, why}
+  POST /api/threads                              open    {session | to, title?, text?, qa?, fork?}
   GET  /api/threads/{id}[?after=&limit=&reader=] the thread and its messages
   POST /api/threads/{id}/messages                post    {session?, text, ask_qa?}
   POST /api/threads/{id}/asks                    ask     {session, text, type?, choices?} (thread_ask)
@@ -90,6 +91,18 @@ named; the author never receives its own message, and a name that is not a
 participant of the thread is reported back as ``unknown_mentions`` instead
 of delivered (daemon/threads_api.session_mentions, threads/store.py
 ``parse_mentions``).
+
+Fork mode (claunch-uaxp8). ``fork: true`` on open starts the thread in a
+COPY of the session's conversation: the daemon quick-forks the session
+(:func:`daemon.api.stage_quick_fork`) and the copy owns the thread, with the
+original session seated as its guest in the same store write. The fork's
+name is the usual ``<origin>-qf<n>`` and the fork's opening task names the
+thread, so the copy knows why it exists. The first message is typed into the
+copy, not the origin. A fork is the user's press only -- an agent opening a
+thread for itself has ``deep_think`` -- and it refuses a ``qa`` link: the
+question belongs to the origin and the thread will belong to the copy. The
+pane redirects to the copy, which is where the conversation now lives; its
+checkbox is drawn from ``GET /api/threads/forkable``.
 
 Asks (claunch-etw0s). The agent's ``thread_ask`` MCP tool posts a simple
 question into one of its threads -- kind 'ask', type 'approve' | 'choice' |
@@ -724,6 +737,83 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                               status=q.get("status") or None, since=q.get("since") or None)
         return err or web.json_response(res)
 
+    def fork_blocked(name: str) -> str:
+        """Why a thread cannot be started in a quick-fork of ``name``: "" when
+        it can (claunch-uaxp8).
+
+        The same facts :func:`daemon.api.stage_quick_fork` refuses on, asked
+        *before* the thread is written so a refusal costs neither a thread nor
+        a fork. The pane's checkbox asks the same question through
+        ``GET /api/threads/forkable``; one function answers both, so the offer
+        and the refusal cannot disagree.
+        """
+        from .. import spawn as spawn_mod
+
+        try:
+            session = manager.get(name)
+        except Exception:  # noqa: BLE001 -- no such session
+            return f"no session {name!r} on this daemon"
+        definition = {"name": name}
+        try:
+            definition = session.sdef.to_dict()
+        except Exception:  # noqa: BLE001 -- a record old or strange enough to have no dict
+            pass
+        if getattr(session, "exited", False):
+            return f"session {name!r} has exited: an exited session cannot be quick-forked"
+        if not spawn_mod.can_fork(definition):
+            return (f"session {name!r} has no conversation to copy: a fork needs a Claude or Codex "
+                    "session whose first turn has landed")
+        try:
+            report = manager.spawn_capabilities(name)
+        except Exception:  # noqa: BLE001 -- the report is advice; the spawn gate is the authority
+            report = {}
+        blocked = list(report.get("blocked_by") or [])
+        return "; ".join(blocked)
+
+    async def open_forked(request, target: str, body: dict, images, files):
+        """Open a thread owned by a quick-fork of ``target``, with ``target``
+        as its guest (claunch-uaxp8). ``(res, error_response)``.
+
+        The thread is written FIRST, under the name the fork will carry: the
+        owner must exist in the store before the session does, because the
+        fork's opening task names the thread. The name is chosen from the
+        sessions this daemon knows and handed to the spawn, so a takeover of
+        the same name is refused there (409) rather than reused. When the fork
+        refuses, the thread written for it goes too -- by id, so a second fork
+        that raced for the same name keeps its own.
+        """
+        from . import api as api_mod, handoff as handoff_mod
+
+        name = handoff_mod.fork_name(target, {s.sdef.name for s in manager.list()})
+        res, err = await call(threads.open, thread_store.USER, name, body.get("title"), body.get("text"),
+                              images=images, files=files, guest=target)
+        if err:
+            return None, err
+        tid = res["thread"]["id"]
+        task = (
+            f"You own thread {tid}: it was opened in fork mode, so this session is a copy of "
+            f"{target}'s conversation made for it. The user's messages arrive as "
+            f"'[claunch thread {tid}]' blocks -- answer them with thread_reply. "
+            f"{target} is a guest in this thread."
+        )
+        try:
+            forked = await api_mod.stage_quick_fork(request, target, {"name": name, "task": task})
+        except api_mod.QuickForkError as exc:
+            await asyncio.to_thread(threads.delete_thread, tid)
+            return None, web.json_response({"error": str(exc)}, status=exc.status)
+        except Exception:
+            # Every refusal stage_quick_fork knows is a QuickForkError above;
+            # anything else is the daemon breaking, and the thread it opened
+            # must not outlive that. The fork itself is left alone: killing a
+            # half-staged copy is not this route's decision to make.
+            await asyncio.to_thread(threads.delete_thread, tid)
+            raise
+        res["fork"] = {"session": name, "origin": target, "thread": tid,
+                       "marker": forked.get("marker"), "forked_at": forked.get("forked_at")}
+        if forked.get("warnings"):
+            res["fork"]["warnings"] = forked["warnings"]
+        return res, None
+
     async def h_open(request):
         body = await body_of(request)
         actor = actor_of(body)
@@ -732,8 +822,27 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return web.json_response({"error": "to is required: the session the thread is with"}, status=400)
         if not known(target):
             return web.json_response({"error": f"no session {target!r} on this daemon"}, status=404)
+        forking = body.get("fork") in (True, "true", "1", 1)
         qid = body.get("qa")
-        if qid:
+        if forking:
+            # A fork hands the thread to a session that does not exist yet.
+            # Two things the plain route allows are refused here: an agent
+            # opening it (that would move the thread out of its own pane, and
+            # a quick fork of itself is deep_think's job), and a QA link (the
+            # question belongs to the origin; the thread will belong to the
+            # copy). Neither is dropped silently.
+            if actor != thread_store.USER:
+                return web.json_response(
+                    {"error": "fork is the user's: a session opens threads in its own conversation, "
+                              "it does not copy itself into one"}, status=400)
+            if qid:
+                return web.json_response(
+                    {"error": f"a thread about QA question {qid} cannot be forked: the question "
+                              f"belongs to {target} and the thread would belong to the copy"}, status=400)
+            why = await asyncio.to_thread(fork_blocked, target)
+            if why:
+                return web.json_response({"error": why}, status=400)
+        elif qid:
             q = await asyncio.to_thread(question_of, str(qid))
             if q is None:
                 return web.json_response({"error": f"no QA question {qid!r}"}, status=404)
@@ -749,17 +858,32 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         images, files, err = await keep_attachments(body)
         if err:
             return err
-        res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid,
-                              images=images, files=files)
+        if forking:
+            res, err = await open_forked(request, target, body, images, files)
+        else:
+            res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid,
+                                  images=images, files=files)
         if err:
             await unkeep_attachments(images, files)
             return err
-        await asyncio.to_thread(link, [res["thread"]], target)
+        # A forked thread's owner is the copy, not the session the request
+        # named: the link and the typed block follow the owner.
+        owner = (res.get("fork") or {}).get("session") or target
+        await asyncio.to_thread(link, [res["thread"]], owner)
         if actor == thread_store.USER and res["message"]:
             mentions = await asyncio.to_thread(mentions_in, res["thread"], res["message"])
-            tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True, mentions=mentions),
+            tell(res, owner, user_wrote_text(res["thread"], res["message"], opened=True, mentions=mentions),
                  notice=notice_id(res["thread"], res["message"]), thread=res["thread"]["id"])
         return web.json_response(res)
+
+    async def h_forkable(request):
+        """Whether a thread may be started in a fork of this session, and why
+        not -- what the pane's checkbox is drawn from (claunch-uaxp8)."""
+        session = request.query.get("session") or ""
+        if not session:
+            return web.json_response({"error": "session is required"}, status=400)
+        why = await asyncio.to_thread(fork_blocked, session)
+        return web.json_response({"session": session, "ok": not why, "why": why})
 
     async def h_read(request):
         q = request.query
@@ -957,6 +1081,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_get("/api/threads/rail", h_rail)
     r.add_get("/api/threads/history", h_history)
     r.add_get("/api/threads/index", h_index)
+    r.add_get("/api/threads/forkable", h_forkable)
     r.add_post("/api/threads", h_open)
     r.add_get("/api/threads/{id}", h_read)
     r.add_post("/api/threads/{id}/messages", h_post)
