@@ -264,4 +264,155 @@ assert.strictEqual(C.clampSplit(10), 30);
 assert.strictEqual(C.clampSplit(95), 82);
 assert.strictEqual(C.clampSplit(50), 50);
 assert.strictEqual(C.clampSplit('x'), 64);
+
+// ---- token series (claunch-x15q5) -----------------------------------------
+// The payload carries SUMS per bucket; the drawing model turns them into a
+// rate (tokens/s over the bucket) so that column width x height is tokens
+// and the area under the curve is the window's total.
+//
+// The fixture is in the shape the daemon actually emits: `t`, `start` and
+// `until` are epoch SECONDS (`statsboard.Ledger.series` reads `time.time()`),
+// while the axis is milliseconds. Stubbing the payload in milliseconds let a
+// model that never converted pass here while the real page drew every bucket
+// at -307% -- an empty row (claunch-mlrga, found in review by s1697).
+const sec = (ms) => Math.round(ms / 1000);
+const payload = {
+  window: '24h', bucket_s: 300, start: sec(now - 2 * H), until: sec(now),
+  points: [
+    { t: sec(now - 2 * H), input: 100, cache_read: 2000, cache_write: 0, output: 0, total: 2100, requests: 2 },
+    { t: sec(now - H), input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests: 0 },
+    { t: sec(now - 300000), input: 10, cache_read: 20, cache_write: 30, output: 40, total: 100, requests: 1 },
+  ],
+  totals: { input: 110, cache_read: 2020, cache_write: 30, output: 40, total: 2200, requests: 3 },
+  cache_share: 2020 / 2200, sessions: 2, unmetered: 1, ledger_since: '2026-10-01',
+};
+let sm = C.buildSeriesModel(payload);
+assert.strictEqual(sm.width, 300);
+assert.strictEqual(sm.widthMs, 300000);
+assert.strictEqual(sm.points.length, 3);
+// The boundary: seconds from the wire, milliseconds on the axis.
+assert.strictEqual(sm.points[0].t, now - 2 * H, 'payload seconds are converted to the axis unit');
+assert.strictEqual(sm.start, now - 2 * H);
+assert.strictEqual(sm.until, now);
+assert.strictEqual(sm.points[0].rate, 2100 / 300);
+assert.strictEqual(sm.points[1].rate, 0, 'a padded bucket is a gap, not dropped');
+assert.strictEqual(sm.peak, 2100 / 300);
+assert.strictEqual(sm.totals.total, 2200);
+assert.strictEqual(sm.totals.requests, 3);
+assert.strictEqual(sm.sessions, 2);
+assert.strictEqual(sm.unmetered, 1);
+assert.ok(Math.abs(sm.cacheShare - 2020 / 2200) < 1e-12);
+
+// The rate is what makes the area the total: each column's area on the
+// timeline is (bucket's span on the axis) x (its rate), and summed over a
+// linear axis that is the tokens spent -- the property the ticket asked for.
+const lin = { axisStart: now - 2 * H, t1: now, scale: 'linear' };
+let area = 0;
+for (const p of sm.points) {
+  const span = C.seriesSpan(p, sm, lin);
+  area += ((span.right - span.left) / 100) * ((sm.until - sm.start) / 1000) * p.rate;
+
+}
+assert.ok(Math.abs(area - sm.totals.total) < 1, `area ${area} is the total ${sm.totals.total}`);
+
+// The span sits on the same axis the session bars use.
+const p0 = C.seriesSpan(sm.points[0], sm, lin);
+assert.ok(Math.abs(p0.left - 0) < 1e-9);
+assert.ok(Math.abs(p0.right - (300 / (2 * 3600)) * 100) < 1e-9);
+const p2 = C.seriesSpan(sm.points[2], sm, lin);
+assert.ok(Math.abs(p2.left - C.positionOf(now - 300000, lin)) < 1e-9);
+// Every bucket of a daemon-shaped payload lands inside the track -- a unit
+// mismatch would put them all left of it (the defect this asserts against).
+for (const p of sm.points) {
+  const span = C.seriesSpan(p, sm, lin);
+  assert.ok(span.left >= 0 && span.left <= 100, `bucket at ${p.t} is on the axis`);
+  assert.ok(span.right >= 0 && span.right <= 100, `bucket ending at ${span.right}% is on the axis`);
+}
+// The tooltip names the bucket's real instant, not 1970.
+const tip = C.seriesTip(sm.points[2]);
+assert.ok(tip.includes(String(new Date(now - 300000).getFullYear())), `tooltip time is the bucket's: ${tip}`);
+assert.ok(!tip.includes('1970'), 'a bucket in seconds would print 1970');
+// The last bucket is cut at `until`, not drawn a whole width past now.
+const clipped = { axisStart: now - 2 * H, t1: now, scale: 'linear' };
+assert.ok(C.seriesSpan(sm.points[2], sm, clipped).right <= 100);
+
+// Junk and absence are null, never a chart of zeros.
+assert.strictEqual(C.buildSeriesModel(null), null);
+assert.strictEqual(C.buildSeriesModel({}), null);
+assert.strictEqual(C.buildSeriesModel({ points: [] }), null);
+assert.strictEqual(C.buildSeriesModel({ points: [{ t: now, total: 5 }] }), null, 'no bucket width, no model');
+
+// Token shorthand matches app.js usageShort's three-significant-figure rule.
+assert.strictEqual(C.formatTokens(999), '999');
+assert.strictEqual(C.formatTokens(1234), '1.23k', 'under 10k keeps two decimals, as usageShort does');
+assert.strictEqual(C.formatTokens(45000), '45.0k');
+assert.strictEqual(C.formatTokens(1200000), '1.20M');
+assert.strictEqual(C.formatTokens(3660000000), '3.66B');
+assert.strictEqual(C.formatRate(0), '0 tok/s');
+assert.strictEqual(C.formatRate(12.5), '13 tok/s', 'whole tokens, as usageShort rounds them');
+assert.deepStrictEqual(Array.from(C.SERIES_PARTS, (p) => p[0]),
+  ['input', 'cache_read', 'cache_write', 'output']);
+
+
+// The chart's own four parts in the order the Stats page stacks them, and the
+// bar geometry the axes feed (a chart that asked seriesSpan for a bucket
+// width in milliseconds must not get one in seconds).
+assert.deepStrictEqual(Array.from(C.SERIES_PARTS, (p) => p[1]),
+  ['fresh input', 'cache read', 'cache write', 'output']);
+const half = C.buildSeriesModel({ bucket_s: 60, points: [{ t: 0, total: 60 }],
+  until: 60, start: 0 });
+assert.strictEqual(half.points[0].rate, 1);
+assert.strictEqual(half.widthMs, 60000);
+assert.ok(Math.abs(C.seriesSpan(half.points[0], half,
+  { axisStart: 0, t1: 60000, scale: 'linear' }).right - 100) < 1e-9,
+  'a 60s bucket of a 60s axis spans all of it');
+
+// ---- per-session tokens on the rows (claunch-mlrga) -----------------------
+// The rows print the figure the Stats page's table prints for the session: the
+// same payload carries it, so the column and the chart above it are one read.
+const rowsPayload = {
+  window: '24h', bucket_s: 300, start: sec(now - 2 * H), until: sec(now),
+  points: [{ t: sec(now - 2 * H), total: 0 }],
+  totals: { total: 0, requests: 0 },
+  by_session: {
+    a: { input: 10, cache_read: 20, cache_write: 0, output: 5, total: 35, requests: 2 },
+    b: { input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests: 0 },
+    junk: null,
+  },
+};
+const rm = C.buildSeriesModel(rowsPayload);
+assert.strictEqual(rm.bySession.get('a').total, 35);
+assert.strictEqual(rm.bySession.get('a').requests, 2);
+assert.strictEqual(rm.bySession.get('b').total, 0,
+  'a measured session with nothing in the window is a zero');
+assert.ok(!rm.bySession.has('junk'), 'a malformed entry is dropped, not half-read');
+assert.ok(!rm.bySession.has('oauth'), 'a session the ledger never saw is absent, not zero');
+// The total falls back to the four parts when the payload omits it.
+const partsOnly = C.buildSeriesModel({ bucket_s: 60, points: [{ t: 0, total: 60 }],
+  by_session: { c: { input: 1, cache_read: 2, output: 3 } } });
+assert.strictEqual(partsOnly.bySession.get('c').total, 6);
+
+// buildModel carries each row's figure, counts what it could not read apart
+// from what was never measured, and sums only the rows it is showing.
+const tokenMap = { a: { total: 35, requests: 2 }, b: { total: 0, requests: 0 } };
+const tm = C.buildModel(sessions, { now, range: 'all',
+  tokensOf: (n) => (n in tokenMap ? tokenMap[n] : null) });
+const byName = (m, n) => m.rows.find((r) => r.name === n);
+assert.strictEqual(byName(tm, 'a').tokens.total, 35);
+assert.deepStrictEqual(Object.assign({}, tm.summary.tokens),
+  { total: 35, requests: 2, metered: 2, unmetered: 2, unread: 0 });
+// The sort a reader uses to find the biggest spender.
+assert.deepStrictEqual(Array.from(C.buildModel(sessions, { now, range: 'all',
+  sort: 'tokens', tokensOf: (n) => (n in tokenMap ? tokenMap[n] : null) }).rows,
+  (r) => r.name), ['a', 'b', 'c', 'e']);
+// A tie falls back to the name, so the order is stable between polls.
+assert.deepStrictEqual(Array.from(C.buildModel(sessions, { now, range: 'all',
+  sort: 'tokens', tokensOf: () => ({ total: 5 }) }).rows, (r) => r.name),
+  ['a', 'b', 'c', 'e']);
+// No series read at all is "not read yet" (blank cells), not "unmetered".
+const unread = C.buildModel(sessions, { now, range: 'all' });
+assert.strictEqual(unread.rows[0].tokens, undefined);
+assert.deepStrictEqual(Object.assign({}, unread.summary.tokens),
+  { total: 0, requests: 0, metered: 0, unmetered: 0, unread: unread.rows.length });
+
 console.log('ok');

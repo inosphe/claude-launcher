@@ -1212,6 +1212,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/token-series", h_session_token_series)
     r.add_get("/api/stats/compare", h_stats_compare)
     r.add_get("/api/stats/overview", h_stats_overview)
+    r.add_get("/api/stats/series", h_stats_series)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
                  h_session_input_cancel)
@@ -11537,6 +11538,48 @@ async def h_stats_overview(request: web.Request) -> web.Response:
             include_killed, include_archived)
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats overview: %s", exc, exc_info=True)
+        return json_error(500, f"reading the usage ledger failed: {exc}")
+    return json_response(payload)
+
+
+async def h_stats_series(request: web.Request) -> web.Response:
+    """The fleet's token use over time, for the Chart page
+    (``?window=24h|7d|30d|all``, and ``?project=`` and the page's
+    ``killed``/``archived`` boxes to narrow it the way its rows are narrowed).
+
+    Each point carries the four components' sums for one bucket, so drawing
+    ``total / bucket_s`` as a rate and integrating over the axis gives the
+    window's total -- the same reading the terminal overlay's throughput
+    line gives for a single call. :meth:`statsboard.Ledger.series` chooses
+    the bucket width from the window so one answer is one screen."""
+    manager: SessionManager = request.app["manager"]
+    window = request.query.get("window", "7d")
+    if window not in statsboard.SERIES_WINDOWS:
+        return json_error(
+            400, f"window must be one of: {', '.join(statsboard.SERIES_WINDOWS)}")
+
+    def _flag(name):
+        raw = request.query.get(name)
+        return None if raw is None else raw in ("1", "true", "yes")
+
+    ledger = request.app.get("stats_ledger")
+    if ledger is None:
+        ledger = statsboard.Ledger()
+    events = getattr(manager, "events", None)
+    project = str(request.query.get("project") or "").strip()
+
+    def build() -> dict:
+        metas = [statsboard.session_meta(s, events) for s in manager.list()]
+        ledger.labels = dict(statsboard.provider_labels())
+        ledger.refresh()
+        return ledger.series(window, sessions=metas, project=project,
+                             include_killed=bool(_flag("killed")),
+                             include_archived=bool(_flag("archived")))
+
+    try:
+        payload = await asyncio.to_thread(build)
+    except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
+        log.warning("stats series: %s", exc, exc_info=True)
         return json_error(500, f"reading the usage ledger failed: {exc}")
     return json_response(payload)
 

@@ -43,6 +43,7 @@ what the mark means. ``borrow`` beside it is the value in force now.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -82,6 +83,30 @@ MAX_SWITCHES = 40
 TAIL_MAX = 64
 
 UNIT = "day"
+
+#: The bin the ledger accumulates for the fleet's time series, in seconds.
+#: Every kept record lands in one; a five-minute bin is the finest the
+#: Chart page draws, and a coarser request bin is a whole number of these.
+SERIES_BIN_S = 300
+
+#: The bucket widths the Chart page's series may use, narrowest first. The
+#: page asks for a window; the width is chosen here so that one screen is at
+#: most :data:`SERIES_MAX_POINTS` points whatever the window or the ledger's
+#: depth.
+SERIES_BUCKETS = (300, 900, 1800, 3600, 10800, 21600, 43200, 86400)
+
+#: The most points one series answer carries: one 5-minute point across the
+#: 24-hour window (288 of them, plus the one the alignment to the bucket grid
+#: can add -- hence the slack over 288). The page draws every point it is
+#: given, and that many still read at one screen's width.
+SERIES_MAX_POINTS = 290
+
+#: The Chart page's range keys and the seconds each one spans; ``all`` is
+#: however far back the ledger goes. The page has its own copy of these
+#: labels, and the two are checked against each other by a test.
+SERIES_WINDOWS: Dict[str, Optional[int]] = {
+    "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, "all": None,
+}
 
 #: The two ways a session can be over. Each has its own box on the page: a
 #: killed session was ended early, an archived one was put away after its
@@ -410,6 +435,10 @@ class Ledger:
         model = str(record.get("model") or "")
         row = self.sessions.setdefault(name, {
             "days": {}, "first": at, "last": at, "tail": {},
+            # SERIES_BIN_S bin start (epoch s) -> [fresh, read, write, out,
+            # requests]. The per-day map cannot answer finer than a day, and
+            # the Chart page's series needs a shape over time (claunch-x15q5).
+            "bins": {},
         })
         bucket = row["days"].setdefault(day, {}).setdefault(provider, {
             "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
@@ -422,6 +451,11 @@ class Ledger:
         bucket["last"] = max(bucket["last"], at)
         row["first"] = min(row["first"], at)
         row["last"] = max(row["last"], at)
+        slot = row["bins"].setdefault(int(at // SERIES_BIN_S) * SERIES_BIN_S,
+                                      [0, 0, 0, 0, 0])
+        for i, value in enumerate(parts):
+            slot[i] += value
+        slot[4] += 1
         # One provider's changes are one deque: the order inside it is the
         # order they happened in (a file is append-only), while the order
         # *between* deques is not known until the times are sorted. Only a
@@ -446,6 +480,8 @@ class Ledger:
             days = row["days"]
             for day in [d for d in days if d < oldest]:
                 del days[day]
+            for b in [b for b in (row.get("bins") or {}) if b < cutoff]:
+                del row["bins"][b]
             for provider, tail in list((row.get("tail") or {}).items()):
                 kept = [e for e in (tail.get("changes") or []) if e[0] >= cutoff]
                 last = tail.get("last")
@@ -579,6 +615,132 @@ class Ledger:
                 "switches": switches,
             }
         return out
+
+    # -- the time series ---------------------------------------------------
+    def series(self, window: str = "7d", *, sessions: Iterable[dict] = (),
+               project: str = "", include_killed: bool = False,
+               include_archived: bool = False,
+               now: Optional[float] = None) -> dict:
+        """The fleet's token use over time, for the Chart page's series.
+
+        One point per bucket of :data:`SERIES_BUCKETS` chosen for the window,
+        each carrying the four components' **sums** in that bucket and the
+        requests that produced them. The sums are what the reader is owed:
+        drawn as a rate (``total / bucket_s``) the area under the curve is
+        the window's total, which is the same reading the session overlay's
+        throughput line gives for one call (claunch-x15q5).
+
+        ``sessions`` is the metadata :func:`session_meta` builds, filtered the
+        way the page filters it: ``project`` ("" = every project) and the two
+        ended-category boxes. A session the ledger has no record of
+        contributes nothing and is counted in ``unmetered`` rather than
+        drawn as zero, the same rule the overview's rows follow.
+
+        ``by_session`` carries the same four components per session over the
+        same window and the same filters, so a row on the Chart page can print
+        the figure the Stats page's table prints for it without a second read:
+        the two are one pass over one set of bins. A wanted session the ledger
+        cannot speak for is absent from the map (the page draws ``-`` there,
+        never a zero -- the overview's rule, claunch-ha2s9).
+
+        Buckets are aligned to multiples of their own width since the epoch,
+        so a poll draws the same boundaries as the poll before it, and the
+        bucket at the right edge is the one in progress (``until`` says when
+        it was cut, and the page draws it to there).
+        """
+        if window not in SERIES_WINDOWS:
+            raise ValueError(
+                f"window must be one of: {', '.join(SERIES_WINDOWS)}")
+        now = time.time() if now is None else now
+        wanted = set()
+        for item in sessions:
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            if project and str(item.get("project") or "").strip() != project:
+                continue
+            if _hidden(str(item.get("category") or ""),
+                       include_killed, include_archived):
+                continue
+            wanted.add(name)
+        # The ledger's own names are not added: a record whose session the
+        # store no longer lists cannot be told killed from archived, so the
+        # page's two boxes have nothing to act on. What the series draws is
+        # what the rows beside it draw.
+        unmetered = 0
+        bins = [(b, name) for name in wanted
+                for b in (self.sessions.get(name, {}).get("bins") or {})]
+        span = SERIES_WINDOWS[window]
+        if span is None:
+            start = min((b for b, _ in bins), default=None)
+            start = now - 86400 if start is None else float(start)
+        else:
+            start = now - span
+        start = min(start, now - 60.0)
+        # The narrowest width that keeps the aligned grid within one screen.
+        # A bucket is aligned to a multiple of its own width (so every poll
+        # draws the same boundaries), which moves `start` back by up to one
+        # width -- the count is therefore taken after aligning, not from the
+        # unaligned span, or a 24-hour window came back one point long.
+        width = SERIES_BUCKETS[-1]
+        for candidate in SERIES_BUCKETS:
+            aligned = math.floor(start / candidate) * candidate
+            if math.ceil((now - aligned) / candidate) <= SERIES_MAX_POINTS:
+                width = candidate
+                break
+        start = math.floor(start / width) * width
+        count = max(1, math.ceil((now - start) / width))
+        points = [{"t": start + i * width, "input": 0, "cache_read": 0,
+                   "cache_write": 0, "output": 0, "total": 0, "requests": 0}
+                  for i in range(count)]
+        # Per session, the same four components over the same buckets: the
+        # Chart page's rows carry the figure the Stats table carries for the
+        # session, and one pass over `bins` answers both. A session the ledger
+        # has seen starts at zero -- measured, and it spent nothing in this
+        # window -- while one it has never seen stays out of the map, which is
+        # how the page tells "nothing here" from "not measured here".
+        by_session: Dict[str, dict] = {
+            name: {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                   "total": 0, "requests": 0}
+            for name in wanted if name in self.sessions
+        }
+        for at, name in bins:
+            if at < start or at >= start + count * width:
+                continue
+            slot = points[int((at - start) // width)]
+            acc = self.sessions[name]["bins"][at]
+            slot["input"] += acc[0]
+            slot["cache_read"] += acc[1]
+            slot["cache_write"] += acc[2]
+            slot["output"] += acc[3]
+            slot["requests"] += acc[4]
+            slot["total"] += acc[0] + acc[1] + acc[2] + acc[3]
+            row = by_session[name]
+            for i, key in enumerate(("input", "cache_read", "cache_write",
+                                     "output")):
+                row[key] += acc[i]
+            row["total"] += acc[0] + acc[1] + acc[2] + acc[3]
+            row["requests"] += acc[4]
+        totals = {key: sum(p[key] for p in points) for key in
+                  ("input", "cache_read", "cache_write", "output",
+                   "total", "requests")}
+        for name in wanted:
+            if name not in self.sessions:
+                unmetered += 1
+        return {
+            "window": window,
+            "bucket_s": width,
+            "start": start,
+            "until": now,
+            "points": points,
+            "totals": totals,
+            "by_session": by_session,
+            "cache_share": (totals["cache_read"] / totals["total"]
+                            if totals["total"] else None),
+            "sessions": len(wanted) - unmetered,
+            "unmetered": unmetered,
+            "ledger_since": self.earliest_day(),
+        }
 
 
 def window_start_epoch(since_day: str, zone: tzinfo) -> float:
