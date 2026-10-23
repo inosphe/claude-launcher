@@ -198,7 +198,9 @@ async function main() {
   check("a window reads like the usage page's",
     windowsBox.children[0].children[0].textContent, "5h 12%");
   check("a single token has no key list", keysBox.classList.contains("hidden"), true);
-  check("a single token has no strategy row", strategyRow.classList.contains("hidden"), true);
+  check("the strategy row is still on the form for a single token",
+    strategyRow.classList.contains("hidden"), false);
+  check("...and it cannot pick a strategy", select.disabled, true);
   check("the note names how to get a pool", /one token/.test(note.textContent), true);
   check("the note stays visible", note.classList.contains("hidden"), false);
   check("no window error is shown", note.textContent.includes("usage unavailable"), false);

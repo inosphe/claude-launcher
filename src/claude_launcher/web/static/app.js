@@ -14978,8 +14978,10 @@ function newUsageReset(resetsAt) {
   return `resets in ${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/* One window as a text summary — `5h 42.0% (resets in 2h05m)`. Used for both
-   the profile's own reading and each key's, so the two read the same way. */
+/* One window as a text summary — `5h 42% · resets in 2h05m`. Used for both
+   the profile's own reading and each key's, so the two read the same way.
+   Whole percents: the usage page has a scanner's precision because it charts
+   the number, and a pool row has room for one phrase. */
 function newUsageWindowText(window) {
   const label = newUsageWindowLabel(window && window.name);
   const pct = Number(window && window.utilization);
@@ -15191,18 +15193,24 @@ function renderNewUsage() {
     }
   }
 
-  // The strategy row is offered only for a real choice between keys.
+  // The strategy row stays on the face of the form and is greyed rather than
+  // removed: what picks the key is part of the answer this block exists for,
+  // and a row that disappears on a single-token profile leaves the reader
+  // unable to tell "there is no choice here" from "this daemon has no
+  // strategies". The select is enabled only when the choice means something.
   const row = $("new-strategy-row");
   const select = $("new-key-strategy");
   if (row && select) {
-    row.classList.toggle("hidden", !(doc && doc.pooled));
-    if (doc && doc.pooled) {
+    row.classList.toggle("hidden", !doc);
+    if (doc) {
       newUsageFillStrategies(select, doc.strategies);
-      if (!reading) select.value = strategy;
+      if (!reading) select.value = doc.strategy || "rotation";
       select.disabled = !multi || reading;
       select.title = multi
         ? "picks the key for every launch of this profile — saved when changed"
-        : "a strategy applies once the pool holds two or more keys";
+        : doc.pooled
+          ? "a strategy applies once the pool holds two or more keys"
+          : "this profile holds one token, so there is no key to pick";
     }
   }
 
