@@ -6968,7 +6968,7 @@ function fmtCountdown(sec) {
    the question actually being asked: not "is this configured" but "why is
    nothing happening". */
 const RAIL_TIMER_RANK = {
-  due: 0, counting: 1, stalled: 2, held: 2, waiting: 3, watching: 4,
+  due: 0, counting: 1, held: 2, waiting: 3, watching: 4,
   arming: 5, stopped: 6, blocked: 7, paused: 8, off: 9,
 };
 
@@ -7025,7 +7025,7 @@ function railTimerPick(run, nowMs) {
 }
 
 const RAIL_TIMER_GLYPH = {
-  due: "!", counting: "⏱", stalled: "⏸", held: "⏸", waiting: "⏸",
+  due: "!", counting: "⏱", held: "⏸", waiting: "⏸",
   watching: "◎", arming: "⏱", blocked: "⏸", paused: "○", off: "○",
   stopped: "⚠",
 };
@@ -7052,7 +7052,6 @@ function railTimerLine(pick, elapsed = 0) {
   let text;
   if (state === "counting") text = `${name} in ${fmtCountdown(due)}`;
   else if (state === "due") text = `${name} due now`;
-  else if (state === "stalled") text = `${name} held — no new line for a while`;
   else if (state === "held") text = `${name} held — session stopped`;
   else if (state === "waiting") text = `${name} armed — session working`;
   else if (state === "watching") text = `watching: ${pick.awaits || "a signal"}`;
@@ -7234,13 +7233,12 @@ function termTimerHold() {
 
 /* The reminder states in which a skip has something to skip.
 
-   All four are the same fact seen at four moments: this clock is holding a
+   All three are the same fact seen at three moments: this clock is holding a
    live timer for this run and the next thing it does is type. `counting` is
-   before, `due` is at, `held` is after (due, and waiting for the session to
-   be working again) and `stalled` is the same wait for a session that IS
-   working without drawing a new line (cflow_clock.REMINDER_STALL). The two
-   waiting states are where a skip is worth the most: a held reminder is
-   retried EVERY poll, so it lands the instant the terminal moves.
+   before, `due` is at, and `held` is after — due, and waiting only for the
+   session to be working again, which makes it the state where a skip is
+   worth the most: a held reminder is retried EVERY poll, so it lands the
+   instant the agent starts its next turn.
 
    The rest are not "not yet", they are nothing to skip, and offering the
    button on them would be a promise the daemon cannot keep. `arming` has no
@@ -7248,7 +7246,7 @@ function termTimerHold() {
    interval of zero and speaks only when its probe changes; `off`, `blocked`
    and `stopped` are the three ways the clock is already silent — and on
    those the honest control is the switch beside it, or nothing. */
-const TERM_TIMER_SKIPPABLE = { counting: 1, due: 1, held: 1, stalled: 1 };
+const TERM_TIMER_SKIPPABLE = { counting: 1, due: 1, held: 1 };
 
 /* The run whose next reminder this press would skip, or null when there is
    none to skip.

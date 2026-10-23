@@ -2589,10 +2589,6 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .timer-chip .tt-glyph { flex: none; font-size: 12px; line-height: 1; }
 .timer-chip .tt-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .timer-chip.due { color: #d29922; border-color: #4d3800; }
-/* Due, and waiting like `.held` — for a session that is working without
-   drawing a new line rather than one that stopped (daemon/cflow_clock
-   REMINDER_STALL). Same quiet purple: both mean "nothing is coming yet". */
-.timer-chip.stalled { color: #a371f7; border-color: #3c2e5c; }
 .timer-chip.held { color: #a371f7; border-color: #3c2e5c; }
 .timer-chip.off { color: #6e7681; }
 .timer-chip.paused { color: #6e7681; border-color: #30363d; }
