@@ -702,6 +702,62 @@ def _ended(category: str) -> bool:
     return category in ENDED_CATEGORIES
 
 
+def _profile_label(borrow, null_token) -> str:
+    """How the page names the credentials a session was running on."""
+    if null_token:
+        return "null"
+    return str(borrow or "").strip() or "own"
+
+
+def profile_switches(events) -> List[dict]:
+    """The profile changes a session's own event history records.
+
+    ``SessionManager.events`` writes a ``borrow`` event whenever a reborrow
+    moves a session onto another profile's credentials, or clears the borrow;
+    its details carry ``previous``/``current`` and the null-token pair. The
+    metering ledger cannot see that: a reborrow whose two profiles reach the
+    same upstream leaves no provider change behind, so a switch list built
+    from the ledger alone says nothing happened.
+
+    Entries come back in the ledger's switch shape -- ``kind: "profile"``,
+    with the profile names in ``from``/``to`` -- so the page draws one list.
+    The ``at`` here is the event's own stamp; the overview re-renders it in
+    the page's zone.
+    """
+    out = []
+    for event in events or ():
+        if not isinstance(event, dict) or event.get("kind") != "borrow":
+            continue
+        details = event.get("details")
+        if not isinstance(details, dict):
+            continue
+        before = _profile_label(details.get("previous"),
+                                details.get("previous_null"))
+        after = _profile_label(details.get("current"),
+                               details.get("null_token"))
+        if before == after:
+            continue
+        at = _epoch(event.get("at"))
+        if at is None:
+            continue
+        out.append({"at": event.get("at"), "at_epoch": at,
+                    "kind": "profile", "from": before, "to": after,
+                    "from_model": "", "to_model": ""})
+    return out
+
+
+def _switches_in_window(item: dict, since_epoch: float,
+                        zone: tzinfo) -> List[dict]:
+    """``profile_switches`` of one meta, cut to the window and re-stamped."""
+    out = []
+    for entry in item.get("profile_switches") or ():
+        at = entry.get("at_epoch")
+        if at is None or at < since_epoch:
+            continue
+        out.append({**entry, "at": _iso(at, zone)})
+    return out
+
+
 def _hidden(category: str, include_killed: bool, include_archived: bool) -> bool:
     """Whether a session in ``category`` is left out of the table.
 
@@ -886,6 +942,17 @@ def overview(*, window: str = "today", include_ended: bool = False,
         rows.append(row)
         unmetered += 1
 
+    # The ledger proves the provider and model changes; only the session's own
+    # event history proves a reborrow. One list, in time order, so a reader
+    # sees both kinds of change where they happened.
+    for row in rows:
+        extra = _switches_in_window(meta.get(row["session"]) or {}, start, zone)
+        if not extra:
+            continue
+        merged = sorted(list(row.get("switches") or []) + extra,
+                        key=lambda s: s.get("at_epoch") or 0)
+        row["switches"] = merged[-MAX_SWITCHES:]
+
     rows.sort(key=lambda r: (-(r["total"] or 0), r["session"]))
 
     by_provider: Dict[str, dict] = {}
@@ -933,12 +1000,16 @@ def overview(*, window: str = "today", include_ended: bool = False,
     }
 
 
-def session_meta(session) -> dict:
+def session_meta(session, events=None) -> dict:
     """One ``Session`` reduced to what a row (and the filters) read.
 
     Deliberately small: the overview asks this of every session on the
     machine, and ``Session.info()`` carries a definition, a briefing and
     environment that no table column uses.
+
+    ``events`` is the daemon's per-session event history
+    (``SessionManager.events``); given it, the meta carries the profile
+    changes a reborrow left behind, which the metering ledger cannot prove.
     """
     sdef = getattr(session, "sdef", None)
     name = getattr(sdef, "name", "") or ""
@@ -954,6 +1025,12 @@ def session_meta(session) -> dict:
         activity = session.last_activity_at()
     except Exception:  # noqa: BLE001
         activity = None
+    seen_events = []
+    if events is not None:
+        try:
+            seen_events = events.rows(session)
+        except Exception:  # noqa: BLE001 - a double without the store is not a 500
+            seen_events = []
     return {
         "name": name,
         "harness": getattr(sdef, "harness", "") or "",
@@ -969,6 +1046,8 @@ def session_meta(session) -> dict:
         # The definition itself, for the transcript reader: an OAuth session's
         # figures are read from the conversation this points at.
         "sdef": sdef,
+        # Profile changes the session's own event history records (reborrow).
+        "profile_switches": profile_switches(seen_events),
         "exited_at": getattr(session, "exited_at", None),
         "paused_at": getattr(session, "paused_at", None),
         "held_at": getattr(session, "held_at", None),

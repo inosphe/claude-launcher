@@ -140,7 +140,7 @@ new Function(
   + constant("USAGE_PARTS") + constant("STATS_UNITS")
   + constant("STATS_WINDOWS") + constant("STATS_CATEGORIES")
   + constant("STATS_METHOD") + constant("STATS_WINDOW_METHOD")
-  + constant("STATS_PALETTE")
+  + constant("STATS_PALETTE") + constant("STATS_SWITCH_KINDS")
   + slice("usageShort") + slice("profileHarnessLabel")
   + ["openStatsPage", "stopStatsPoll", "statsSchedule",
      "refreshStats", "refreshStatsOverview", "refreshStatsDetail",
@@ -251,14 +251,22 @@ const overview = {
   sessions: [
     sessionRow({}),
     sessionRow({
-      session: "s2", provider: "kimi", borrow: "ds4", switches: [],
+      session: "s2", provider: "kimi", borrow: "ds4", switches: [
+        { at: "2026-10-21T10:00:00+09:00", kind: "profile", from: "own",
+          to: "ds4", from_model: "", to_model: "" },
+      ],
       providers: [{ provider: "kimi", input: 10, cache_read: 90, cache_write: 0,
                     output: 0, total: 100, requests: 1 }],
       total: 100, requests: 1, days: { "2026-10-21": 100 },
     }),
     sessionRow({
       session: "oauth", source: "none", provider: "claude", model: "",
-      providers: [], total: 0, requests: 0, days: {}, switches: [],
+      providers: [], total: 0, requests: 0, days: {}, switches: [
+        { at: "2026-10-21T10:00:00+09:00", kind: "profile", from: "own",
+          to: "kimi", from_model: "", to_model: "" },
+        { at: "2026-10-21T11:00:00+09:00", kind: "provider", from: "claude",
+          to: "kimi", from_model: "c1", to_model: "k3" },
+      ],
       profile: "nc:claude", issue: "", declared_provider: "claude",
     }),
   ],
@@ -321,6 +329,12 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         rows[1].words().includes("borrow ds4"), rows[1].words());
   check("a session answered by another provider in the window is marked",
         rows[0].words().includes("⇄ provider"), rows[0].words());
+  // A reborrow the ledger cannot prove (both profiles on one upstream) still
+  // reaches the switch list, and the badge names every axis that moved.
+  check("a profile change alone is marked on its row",
+        rows[1].words().includes("⇄ profile"), rows[1].words());
+  check("a row that changed profile and provider names both",
+        rows[2].words().includes("⇄ profile + provider"), rows[2].words());
   check("the provider strip counts the sessions and their tokens",
         withClass("stats-provider").length === 3 &&
         withClass("stats-provider").map((b) => b.dataset.provider).join() ===

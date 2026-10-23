@@ -384,6 +384,73 @@ def test_killed_and_archived_sessions_are_left_out_unless_asked_for(tmp_path, le
     assert everything["counts"]["ended_excluded"] == 0
 
 
+def test_a_reborrow_becomes_a_profile_switch_on_the_row(tmp_path, ledger):
+    """The ledger cannot see a reborrow, so its event history answers.
+
+    A session moved from its own credentials onto another profile's reaches a
+    different upstream only sometimes; when both profiles answer through the
+    same one, the ledger's provider/model sequence never changes and the switch
+    list used to say nothing happened. The daemon's own event history records
+    the change either way.
+    """
+    write_ledger(tmp_path / "metering", [record("moved", hour=9)])
+    ledger.refresh(NOW)
+    at = "2026-10-21T10:30:00+09:00"
+    item = meta("moved")
+    item["profile_switches"] = statsboard.profile_switches([
+        {"kind": "borrow", "at": at,
+         "details": {"previous": None, "current": "kimi",
+                     "previous_null": False, "null_token": False}},
+    ])
+    payload = statsboard.overview(window="today", now=NOW, zone=KST,
+                                  sessions=[item], ledger=ledger, labels={})
+    row = payload["sessions"][0]
+    assert [s["kind"] for s in row["switches"]] == ["profile"]
+    switch = row["switches"][0]
+    assert (switch["from"], switch["to"]) == ("own", "kimi")
+    assert switch["at"] == at
+    # A display-only axis: the figures are the ledger's, unchanged.
+    assert row["total"] == 115 and row["source"] == "ledger"
+
+
+def test_a_borrow_event_that_changes_nothing_is_not_a_switch():
+    """Re-recording the same credentials is not a change."""
+    rows = [
+        {"kind": "borrow", "at": "2026-10-21T10:30:00+09:00",
+         "details": {"previous": "kimi", "current": "kimi",
+                     "previous_null": False, "null_token": False}},
+        {"kind": "kill", "at": "2026-10-21T10:31:00+09:00", "details": {}},
+        # Clearing a borrow is a change: the session is back on its own token.
+        {"kind": "borrow", "at": "2026-10-21T11:00:00+09:00",
+         "details": {"previous": "kimi", "current": None,
+                     "previous_null": False, "null_token": False}},
+        {"kind": "borrow", "at": "2026-10-21T12:00:00+09:00",
+         "details": {"previous": None, "current": None,
+                     "previous_null": False, "null_token": True}},
+    ]
+    switches = statsboard.profile_switches(rows)
+    assert [(s["from"], s["to"]) for s in switches] == [
+        ("kimi", "own"),        # cleared the borrow
+        ("own", "null"),        # moved onto no token at all
+    ]
+    assert all(s["kind"] == "profile" for s in switches)
+
+
+def test_a_profile_switch_outside_the_window_is_left_out(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [record("moved", hour=9)])
+    ledger.refresh(NOW)
+    item = meta("moved")
+    item["profile_switches"] = statsboard.profile_switches([
+        # yesterday, KST -- outside `today`
+        {"kind": "borrow", "at": "2026-10-20T10:30:00+09:00",
+         "details": {"previous": None, "current": "kimi",
+                     "previous_null": False, "null_token": False}},
+    ])
+    payload = statsboard.overview(window="today", now=NOW, zone=KST,
+                                  sessions=[item], ledger=ledger, labels={})
+    assert payload["sessions"][0]["switches"] == []
+
+
 def test_the_two_ended_boxes_are_independent(tmp_path, ledger):
     """``include_killed`` and ``include_archived`` each admit their own
     category, and the counts say how many of each the table holds out."""
