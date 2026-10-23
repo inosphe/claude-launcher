@@ -1732,32 +1732,58 @@ def test_install_supersedes_the_split_servers(tmp_path, home):
     assert set(doc["mcpServers"]) == {"claunch", "other"}
 
 
-def test_merged_server_offers_both_toolsets():
-    from claude_launcher import (
-        mcp_server, mesh_mcp, status_checks_mcp, wait_mcp, window_mcp, observer_mcp,
-        operator_v2_mcp, search_mcp, glossary_mcp, category_mcp, reposync_mcp, sim_mcp, artifact_cleanup_mcp, qa_mcp,
-        threads_mcp, shell_mcp, prompt_packs_mcp, webdebug_mcp, cflow_watch_mcp,
-        timer_mcp, session_fault_mcp,
+def _server_modules(namespace):
+    """The modules bound in ``namespace`` that are homes of an MCP server.
+
+    Derived, not listed. This test used to carry a hand-kept list of every
+    server module, and adding a server then failed the suite until the new
+    name was typed into that list as well -- the change was correct and the
+    test said otherwise (claunch-pczoc.1). A module is a server's home when
+    it exports a ``SERVER`` built by :mod:`mcp_rpc`; :func:`_unregistered`
+    then keeps the guard the hand-kept list used to provide.
+    """
+    import types
+
+    from claude_launcher import mcp_rpc
+
+    return {
+        name: module
+        for name, module in vars(namespace).items()
+        if isinstance(module, types.ModuleType)
+        and isinstance(getattr(module, "SERVER", None), mcp_rpc.Server)
+    }
+
+
+def _unregistered(modules, servers):
+    """Names of server modules whose server is not one of ``servers``.
+
+    The failure this catches: a new ``*_mcp`` module is imported by
+    ``mcp_server`` but never added to ``mcp_server.SERVERS``, so its tools
+    never reach the one server the host spawns.
+    """
+    known = {id(server) for server in servers}
+    return sorted(
+        name for name, module in modules.items() if id(module.SERVER) not in known
     )
+
+
+def test_merged_server_offers_both_toolsets():
+    from claude_launcher import mcp_server
     from claude_launcher.cflow import mcp as cflow_mcp
-    from claude_launcher.cflow2 import mcp as cflow2_mcp
+
+    modules = _server_modules(mcp_server)
+    # A server imported here but missing from SERVERS never reaches the host.
+    assert _unregistered(modules, mcp_server.SERVERS) == []
+    home = {id(module.SERVER): module for module in modules.values()}
+    assert set(home) == {id(server) for server in mcp_server.SERVERS}, (
+        "every server in SERVERS must be a module SERVER bound in mcp_server"
+    )
 
     names = [t["name"] for t in mcp_server.TOOLS]
-    assert names == [t["name"] for t in cflow_mcp.TOOLS] + [
-        t["name"] for t in mesh_mcp.TOOLS
-    ] + [t["name"] for t in status_checks_mcp.TOOLS] + [
-        t["name"] for t in window_mcp.TOOLS
-    ] + [t["name"] for t in wait_mcp.TOOLS] + [t["name"] for t in observer_mcp.TOOLS] \
-        + [t["name"] for t in operator_v2_mcp.TOOLS] + [t["name"] for t in search_mcp.TOOLS] + [t["name"] for t in glossary_mcp.TOOLS] \
-        + [t["name"] for t in category_mcp.TOOLS] \
-        + [t["name"] for t in sim_mcp.TOOLS] + [t["name"] for t in cflow2_mcp.TOOLS] + [t["name"] for t in cflow_watch_mcp.TOOLS] \
-        + [t["name"] for t in reposync_mcp.TOOLS] \
-        + [t["name"] for t in artifact_cleanup_mcp.TOOLS] + [t["name"] for t in qa_mcp.TOOLS] \
-        + [t["name"] for t in threads_mcp.TOOLS] + [t["name"] for t in shell_mcp.TOOLS] \
-        + [t["name"] for t in prompt_packs_mcp.TOOLS] \
-        + [t["name"] for t in webdebug_mcp.TOOLS] \
-        + [t["name"] for t in timer_mcp.TOOLS] \
-        + [t["name"] for t in session_fault_mcp.TOOLS]
+    expected = [
+        t["name"] for server in mcp_server.SERVERS for t in home[id(server)].TOOLS
+    ]
+    assert names == expected
     assert len(set(names)) == len(names)  # merge() guards this too
     listed = mcp_server.SERVER.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -1774,6 +1800,22 @@ def test_merged_server_offers_both_toolsets():
             assert tool["description"].startswith(cflow_mcp.AGENT_AUTHORITY + "\n\n")
         else:
             assert cflow_mcp.AGENT_AUTHORITY not in tool["description"]
+
+
+def test_a_server_bound_but_not_merged_is_reported():
+    """The guard the hand-kept list used to provide, checked directly.
+
+    Without this, ``_unregistered`` could regress to always answering ``[]``
+    and the test above would keep passing while catching nothing.
+    """
+    import types
+
+    bound = types.ModuleType("claude_launcher.example_mcp")
+    bound.SERVER = object()
+    merged = object()
+
+    assert _unregistered({"example_mcp": bound}, [merged]) == ["example_mcp"]
+    assert _unregistered({"example_mcp": bound}, [bound.SERVER]) == []
 
 
 def test_merged_server_routes_errors_to_the_owning_half(home, monkeypatch):
