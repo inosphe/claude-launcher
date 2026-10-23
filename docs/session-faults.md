@@ -93,6 +93,8 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
   새로 감지되지 않는다.
 - 데몬이 재시작되면 detector가 새로 만들어지므로 fault 기록은 사라진다.
   (compacting 감지와 같은 규칙이다.)
+- 세션이 종료되면 그 기록(`DeadSession`)은 화면이 없어 fault를 답하지 않는다.
+  fault는 살아 있는 세션의 판독이다.
 - 복구를 문구로 알 수 없어서, 조기 해제는 하지 않는다. 만료는 window 또는
   메시지가 적은 리셋 시각이 정한다.
 - `background_render: false`인 하네스(pi)는 아무도 붙어 있지 않을 때 화면을
