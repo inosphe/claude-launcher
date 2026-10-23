@@ -456,6 +456,111 @@ def test_a_finished_run_drops_its_renudge_baseline(tmp_path, monkeypatch):
     assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
 
 
+# -- a sub-agent delegation is the driver's own work (claunch-7u8as) ---------
+
+SUBAGENT_RUN = """
+    nodes:
+      t: {prompt: T, returns: {ok: {}}, executor: [subagent]}
+    body: t
+"""
+
+SUBAGENT_CAPS = {"subagent.spawn": True, "mcp.claunch": True}
+
+
+def moved_waiting_line(payload):
+    return [line for line in cflow2_clock.moved_block("own", payload).splitlines()
+            if line.startswith("waiting on you:")][0]
+
+
+def test_a_pending_subagent_delegation_waits_on_its_driver():
+    """A sub-agent delegation is neither a task nor a choice, but it is work
+    only the driver can do: it sits at ``pending`` until ``flow_delegate``."""
+    pending = {"delegations": [{"id": "d1", "label": "report",
+                                "executor": "subagent", "status": "pending"}]}
+    assert cflow2_clock._waits_on_driver(pending) is True
+    assert moved_waiting_line(pending) == "waiting on you: report"
+
+
+@pytest.mark.parametrize("row", [
+    {"executor": "subagent", "status": "returned"},       # the driver submitted it
+    {"executor": "session", "status": "running"},         # a child is working on it
+    {"executor": "session", "status": "queued"},          # about to be spawned
+    {"executor": "subagent", "status": "pending", "held": True},  # a person must resume
+])
+def test_a_delegation_that_is_not_the_drivers_wait_is_not_counted(row):
+    assert cflow2_clock._waits_on_driver({"delegations": [row]}) is False
+
+
+def moved_waiting_line(payload):
+    return [line for line in cflow2_clock.moved_block("own", payload).splitlines()
+            if line.startswith("waiting on you:")][0]
+
+
+def test_an_idle_driver_is_renudged_while_a_subagent_delegation_waits(tmp_path, monkeypatch):
+    """s1599 sat five hours at a report delegation that had fallen back to a
+    sub-agent: no task, no choice, and so no clock ever counted it."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, SUBAGENT_RUN, caps=SUBAGENT_CAPS)
+    clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
+                   renudge_interval=600.0)
+    assert clock.scan(now=T0) == []            # the delegation begins: baseline only
+    notices = clock.scan(now=T0 + 601)
+    assert len(notices) == 1
+    cwd, name, text = notices[0]
+    assert cwd == str(tmp_path) and name == "own"
+    assert "waiting on you: t" in text
+    assert cflow2_clock.WHY_NUDGE in text
+
+
+def test_a_busy_driver_is_not_renudged_for_a_subagent_delegation(tmp_path, monkeypatch):
+    """The busy rule is the one the choose path already had: a driver mid-turn
+    reaches the run itself, and the interval is not spent."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, SUBAGENT_RUN, caps=SUBAGENT_CAPS)
+    session = StatusSession("own", str(tmp_path), status="busy")
+    clock = _clock(FakeManager(session), renudge_interval=600.0)
+    clock.scan(now=T0)
+    assert clock.scan(now=T0 + 601) == []
+    session._status = "idle"
+    notices = clock.scan(now=T0 + 602)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
+def test_a_submitted_subagent_delegation_stops_its_renudge(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, SUBAGENT_RUN, caps=SUBAGENT_CAPS)
+    clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
+                   renudge_interval=600.0)
+    clock.scan(now=T0)
+    assert len(clock.scan(now=T0 + 601)) == 1
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    runtime.delegate_submit(st["delegations"][0]["id"], "ok", {},
+                            cwd=str(tmp_path), scope="own", now=T0 + 602)
+    assert runtime.status(cwd=str(tmp_path), scope="own",
+                          tick=False)["status"] == "done"
+    assert clock.scan(now=T0 + 1203) == []
+
+
+def test_a_spawn_refusal_tells_the_driver_it_runs_the_brief_itself(tmp_path, monkeypatch):
+    """The fallback is in the journal, and a journal is not a wake-up: the
+    notice is the line that makes the driver pick the brief up (claunch-7u8as)."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+    def spawn(parent_name, body):
+        raise cflow2_exec.SpawnRefused("the daemon API is not reachable")
+
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), spawn=spawn)
+    clock.scan()
+    _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    own = [n for n in clock.scan() if n[1] == "own"]
+    assert len(own) == 1
+    text = own[0][2]
+    assert "child session -> sub-agent" in text
+    assert "the daemon API is not reachable" in text
+    assert "flow_delegate" in text
+    assert not [n for n in clock.scan() if n[1] == "own"]   # once per fallback
+
+
 def test_session_spawn_refused_falls_back_to_next_executor(tmp_path):
     def spawn(parent_name, body):
         raise cflow2_exec.SpawnRefused("spawn policy: max_children reached")

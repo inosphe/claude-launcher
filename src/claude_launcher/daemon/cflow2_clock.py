@@ -744,11 +744,19 @@ class Cflow2Clock:
 
         ``state`` is read before this pass moves anything, so a delegation
         this pass closes (a child receipt submitted below) is seen by the next
-        one. The first pass over a slot has nothing to compare and says no."""
+        one. The first pass over a slot has nothing to compare and says no.
+
+        An id that is still open counts as open even when its executor changed:
+        a session delegation whose spawn was refused is rerouted to a sub-agent
+        and stays ``pending``, and announcing that as "a delegated node
+        returned" tells the driver the opposite of what happened
+        (claunch-7u8as)."""
         before = self._open_delegations.get((cwd, scope))
         if not before:
             return False
-        return bool(before - _open_delegations(state))
+        open_now = {did for did, rec in (state.get("delegations") or {}).items()
+                    if rec.get("status") in runtime.OPEN_DELEGATION}
+        return bool(before - open_now)
 
     # -- driver re-nudge (claunch-slia4.1) ------------------------------------
 
@@ -989,6 +997,14 @@ class Cflow2Clock:
                     runner=runner, lost=lambda marker: self._remember_lost(st, did, marker))
                 with self._lock:
                     self.results.append(result)
+                # The fallback is journaled by the runtime, but a journal is
+                # not a wake-up: before this notice the driver learned nothing
+                # and the run sat on a delegation only it can run (claunch-7u8as).
+                if (result.get("result") == "rerouted"
+                        and result.get("executor") == ir.EXEC_SUBAGENT):
+                    notices.append((cwd, _name(scope), fallback_block(
+                        scope, did, rec.get("label") or rec.get("node") or did,
+                        str(result.get("error") or ""))))
             return
         if status != "running":
             return
@@ -1217,12 +1233,29 @@ WHY_NUDGE = ("the run is still waiting on you -- the clock re-nudges a waiting "
              "driver on an interval (claunch-slia4.1)")
 
 
+def _driver_runs(entry: Dict[str, Any]) -> bool:
+    """A delegation the driver itself has to carry out: an open sub-agent one.
+
+    A session delegation has a child working on it and an inline one was
+    expanded in place, so neither waits on the driver (that is exactly the
+    filter :func:`_open_delegations` keeps). A sub-agent delegation sits at
+    ``pending`` until the driver runs its brief with ``flow_delegate``; a
+    held one has its result waiting on a person, so it is not a wait either.
+    """
+    return (entry.get("executor") == ir.EXEC_SUBAGENT
+            and entry.get("status") in runtime.OPEN_DELEGATION
+            and not entry.get("held"))
+
+
 def _waits_on_driver(payload: Dict[str, Any]) -> bool:
-    """The run now needs its driver: an active task or an agent's choice."""
+    """The run now needs its driver: an active task, an agent's choice, or a
+    sub-agent delegation only the driver can run (claunch-7u8as)."""
     if payload.get("tasks"):
         return True
-    return any(c.get("chooser") == ir.CHOOSER_AGENT and not c.get("held")
-               for c in payload.get("choices") or [])
+    if any(c.get("chooser") == ir.CHOOSER_AGENT and not c.get("held")
+           for c in payload.get("choices") or []):
+        return True
+    return any(_driver_runs(d) for d in payload.get("delegations") or [])
 
 
 def moved_block(scope: str, payload: Dict[str, Any], why: str = WHY_CLOCK) -> str:
@@ -1231,12 +1264,33 @@ def moved_block(scope: str, payload: Dict[str, Any], why: str = WHY_CLOCK) -> st
     at = [t.get("label") or t.get("instance") for t in payload.get("tasks") or []]
     at += [c.get("label") or c.get("instance") for c in payload.get("choices") or []
            if c.get("chooser") == ir.CHOOSER_AGENT and not c.get("held")]
+    at += [d.get("label") or d.get("node") or d.get("id")
+           for d in payload.get("delegations") or [] if _driver_runs(d)]
     return "\n".join([
         "---",
         "# claunch cflow2: the run moved -- machine-generated, not typed by the user",
         f"run: {scope} ({payload.get('workflow')}, {payload.get('run')})",
         f"waiting on you: {', '.join(str(a) for a in at)}",
         f"protocol: the run moved on its own ({why}). Call flow_status and continue.",
+        "---"])
+
+
+def fallback_block(scope: str, delegation: str, label: str, cause: str) -> str:
+    """The one line a driver needs when its delegation's child could not be
+    spawned and the node fell back to a sub-agent: that brief is now its own
+    work, and nothing else will tell it (claunch-7u8as)."""
+    if len(cause) > 200:
+        cause = cause[:197] + "..."
+    return "\n".join([
+        "---",
+        "# claunch cflow2: a delegation fell back to a sub-agent -- "
+        "machine-generated, not typed by the user",
+        f"run: {scope}",
+        f"delegation: {delegation} ({label})",
+        f"fallback: child session -> sub-agent ({cause})",
+        "protocol: the child session could not be spawned, so this delegation's brief "
+        "is yours to run. Call flow_status, then flow_delegate for its brief and "
+        "submit the result.",
         "---"])
 
 
