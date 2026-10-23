@@ -43,7 +43,17 @@ def _actor(request):
 
 
 async def _details(app, ws, items):
-    """``{"session:<name>": {...}, "issue:<id>": {...}}`` for display."""
+    """``{"session:<name>": {...}, "issue:<id>": {...}}`` for display.
+
+    A session's ``life`` is the partition the rail filters by
+    (:func:`daemon.session.session_category`: running, hold, delayed, failed,
+    paused, killed, archived) and ``status`` is what a live screen reads
+    (busy, idle, starting). The page shows ``running · busy`` for the live
+    ones and ``killed``/``archived`` for records that are done -- the two
+    filters on the page are built on ``life``.
+    """
+    from .session import session_category  # local: session imports late
+
     out = {}
     manager = app.get("manager")
     for item in items:
@@ -52,10 +62,13 @@ async def _details(app, ws, items):
         try:
             s = manager.get(item["ref"])
         except Exception:
-            out["session:" + item["ref"]] = {"status": "gone"}
+            out["session:" + item["ref"]] = {"status": "gone", "life": "gone"}
             continue
         out["session:" + item["ref"]] = {
             "status": s.status() if hasattr(s, "status") else "",
+            # A live session carries `exited`; a record with none is not one
+            # this daemon can partition, so it shows no state chip.
+            "life": session_category(s) if hasattr(s, "exited") else "",
             "note": getattr(s.sdef, "note", None) or "",
             "role": getattr(s.sdef, "role", None) or "",
             "issue": getattr(s.sdef, "issue", None) or "",

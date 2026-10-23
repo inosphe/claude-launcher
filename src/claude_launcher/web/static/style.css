@@ -9267,6 +9267,15 @@ a.category-ref:hover { text-decoration: underline; }
 .category-chip { font-size: 11px; border: 1px solid var(--cat-border); border-radius: 4px; padding: 0 5px; color: #c9d1d9; }
 .category-status-running { color: #3fb950; border-color: #238636; }
 .category-status-gone, .category-status-exited { color: #6e7681; }
+.category-status-hold, .category-status-delayed { color: #d29922; border-color: #9e6a03; }
+.category-status-paused { color: #bc8cff; border-color: #8957e5; }
+.category-status-failed { color: #ff7b72; border-color: #da3633; }
+.category-status-killed, .category-status-archived { color: #6e7681; border-color: #30363d; }
+.category-filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+.category-filter { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--cat-muted); cursor: pointer; }
+.category-filter input { margin: 0; }
+.category-proposal-opt { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--cat-muted); margin-top: 6px; cursor: pointer; }
+.category-proposal-opt input { margin: 0; }
 .category-loose { margin-top: 14px; }
 .category-loose summary { cursor: pointer; color: var(--cat-muted); }
 .category-card { background: var(--cat-panel); border: 1px solid var(--cat-border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }

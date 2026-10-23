@@ -9,10 +9,14 @@ Sessions and issues are *items*. An item sits in at most one node (claunch-
 p2v4m, decided by the user): extract and merge move items, they never copy.
 
 A person changes the tree directly. An agent may assign items to existing
-nodes, but a new node it wants is a *proposal* that a person accepts or
-rejects on the Category page. Until then the proposal's items wait in the
+nodes, and the new node it wants is created at once (:func:`create_now`).
+A person who wants to review it first asks for the older path instead: the
+new node is filed as a *proposal* (:func:`propose`) and the person accepts or
+rejects it on the Category page. Until then the proposal's items wait in the
 proposal's parent node (or stay where they were when the proposal is for a
-top-level node); accepting moves the ones still waiting there.
+top-level node); accepting moves the ones still waiting there. The choice is
+per request -- the "Assign to tree" pane's proposal checkbox and
+``category_assign``'s ``proposal`` argument -- and the default is to create.
 """
 from __future__ import annotations
 
@@ -97,6 +101,11 @@ def connection(ws):
                     actor TEXT NOT NULL, op TEXT NOT NULL, detail TEXT NOT NULL
                 );
             """)
+            # A job carries the choice made when it was requested: create the
+            # new category at once (0) or file it as a proposal for a person
+            # (1). Tables made before the column existed get it here.
+            if "proposal" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN proposal INTEGER NOT NULL DEFAULT 0")
             with db:
                 yield db
         finally:
@@ -589,6 +598,35 @@ def similar(ws, label, limit=5):
     return sorted(out, key=lambda n: -n["score"])[:limit]
 
 
+def create_now(ws, body, items, actor="", reason=""):
+    """Create the category and place ``items`` in it at once -- no review card.
+
+    This is the agent's default (``category_assign`` without ``proposal``),
+    and what the pane asks for while its "제안으로 등록" box is unchecked. A
+    spelling that already names a node is still refused (409, the owners as
+    candidates), so the tree keeps one node per keyword; the caller assigns
+    to that node instead of inventing a synonym. ``reason`` is kept on the
+    placement, as :func:`assign` keeps it.
+    """
+    if not isinstance(body, dict):
+        raise CategoryError("body must be an object")
+    label = _label(body.get("label"))
+    aliases = _aliases(body.get("aliases"), label)
+    description = _text(body.get("description"), "description", 2000)
+    reason = _text(reason or body.get("reason"), "reason", 2000)
+    placed = _items(items)
+    with connection(ws) as db:
+        db.execute("BEGIN IMMEDIATE")
+        node = _insert_node(db, _parent_arg(body.get("parent_id")), label, aliases,
+                            description, actor)
+        for kind, ref in placed:
+            _place(db, kind, ref, node["id"], actor, reason)
+        if placed:
+            _event(db, actor, "assign", node=node["id"],
+                   items=[{"kind": k, "ref": r} for k, r in placed], reason=reason)
+        return {**node, "path": _path(db, node["id"])}
+
+
 def propose(ws, body, proposed_by=""):
     """File a new category for a person to review.
 
@@ -709,6 +747,7 @@ def _job(row):
         return None
     out = dict(row)
     out["result"] = json.loads(out["result"]) if out["result"] else None
+    out["proposal"] = bool(out.get("proposal"))
     return out
 
 
@@ -723,10 +762,12 @@ def job_for_fork(ws, fork):
                                (fork, RUNNING, ASSIGNED)).fetchone())
 
 
-def job_start(ws, session, mode, fork=None, replace_inplace=False):
+def job_start(ws, session, mode, fork=None, replace_inplace=False, proposal=False):
     """Open a job; 409 while the session already has one running.
     ``replace_inplace`` lets a new request replace a RUNNING in-place job
-    (one the session itself was asked to do and has not done yet)."""
+    (one the session itself was asked to do and has not done yet).
+    ``proposal`` is what the person asked for: file a new category for review
+    instead of creating it (the pane's "제안으로 등록" checkbox)."""
     with connection(ws) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT * FROM jobs WHERE session=?", (session,)).fetchone()
@@ -736,8 +777,9 @@ def job_start(ws, session, mode, fork=None, replace_inplace=False):
             raise CategoryError(f"{session} already has a category assignment running"
                                 + (f" ({row['fork']})" if row["fork"] else ""), 409,
                                 job=_job(row))
-        db.execute("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,NULL,?,NULL)",
-                   (session, mode, fork, RUNNING, "", _now()))
+        db.execute("INSERT OR REPLACE INTO jobs (session, mode, fork, state, note, "
+                   "result, started_at, finished_at, proposal) VALUES (?,?,?,?,?,NULL,?,NULL,?)",
+                   (session, mode, fork, RUNNING, "", _now(), 1 if proposal else 0))
         return _job(db.execute("SELECT * FROM jobs WHERE session=?", (session,)).fetchone())
 
 

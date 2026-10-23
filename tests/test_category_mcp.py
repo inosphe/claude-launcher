@@ -55,6 +55,16 @@ def test_assign_posts_as_the_calling_session(client, monkeypatch):
     assert client.calls[1][2]["new"] == {"label": "tabs"}
 
 
+def test_the_proposal_flag_is_forwarded_and_off_by_default(client, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1-cat1")
+    category_mcp.call_tool("category_assign", {"new": {"label": "tabs"}, "reason": "r",
+                                               "proposal": True})
+    assert client.calls[0][2]["proposal"] is True
+    # Omitted: the daemon creates the node now (no review card).
+    category_mcp.call_tool("category_assign", {"new": {"label": "panes"}, "reason": "r"})
+    assert "proposal" not in client.calls[1][2]
+
+
 def test_assign_outside_a_session_and_unknown_tools_are_refused(client, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     with pytest.raises(category_mcp.CategoryMcpError):

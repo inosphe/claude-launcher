@@ -126,14 +126,49 @@ def test_without_a_conversation_to_copy_the_job_runs_in_place(home, tmp_path, ty
         assert doc["mode"] == "inplace" and doc["fork"] is None
         assert [s.sdef.name for s in mgr.list()] == ["a"]
         assert _typed_to(typed, "a")[-1].startswith("---\n# claunch category: ASSIGN TO TREE")
+        # The pane's "제안으로 등록" is off by default: the new category is
+        # created now and the items go in it, with nothing left for review.
         out = await _call(client, "POST", "/api/category/agent-assign", {
             "session": "a", "reason": "restart gate work",
             "new": {"parent_id": root["id"], "label": "restart gate", "aliases": ["재기동 게이트"]}})
-        assert out["proposed"] == "restart gate" and out["path"] == ["daemon"]
+        assert out["created"] == "restart gate" and out["path"] == ["daemon", "restart gate"]
         assert category.job(ws, "a")["state"] == category.DONE
+        assert category.proposals(ws) == []
+        made = out["node_id"]
+        assert category.where(ws, "session", "a")["node"]["id"] == made
+        assert category.where(ws, "issue", "claunch-x1")["node"]["id"] == made
+
+    _run(scenario, tmp_path)
+
+
+def test_the_proposal_box_files_the_new_category_for_review(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        root = category.create_node(ws, {"label": "daemon"}, "user")
+        doc = await _call(client, "POST", "/api/sessions/a/category/assign", {"proposal": True})
+        assert doc["proposal"] is True
+        assert category.job(ws, "a")["proposal"] is True
+        assert "proposal: true" in _typed_to(typed, "a")[-1]
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "restart gate work",
+            "new": {"parent_id": root["id"], "label": "restart gate"}})
+        assert out["proposed"] == "restart gate" and out["path"] == ["daemon"]
         (proposal,) = category.proposals(ws)
         assert {i["ref"] for i in proposal["items"]} == {"a", "claunch-x1"}
+        # Until a person accepts, the items wait in the parent.
         assert category.where(ws, "session", "a")["node"]["id"] == root["id"]
+
+    _run(scenario, tmp_path)
+
+
+def test_a_call_outside_a_job_uses_its_own_proposal_argument(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r", "proposal": True,
+            "new": {"label": "restart gate"}})
+        assert out["proposed"] == "restart gate"
+        assert [p["label"] for p in category.proposals(ws)] == ["restart gate"]
 
     _run(scenario, tmp_path)
 
@@ -230,7 +265,7 @@ def test_tree_routes_edit_extract_merge_and_review(home, tmp_path):
 
     workspaces.add(str(tmp_path), "alpha")
     sessions = {"s1": SimpleNamespace(sdef=SimpleNamespace(note="tab work", role="worker", issue="i-1"),
-                                      status=lambda: "idle")}
+                                      status=lambda: "idle", exited=False)}
 
     def get(name):
         if name not in sessions:
@@ -256,9 +291,10 @@ def test_tree_routes_edit_extract_merge_and_review(home, tmp_path):
                 {"kind": "session", "ref": "s1"}, {"kind": "session", "ref": "gone"}]})
             tree = await req("GET", "/api/category")
             assert {tuple(n["path"]) for n in tree["nodes"]} == {("web",), ("web", "tabs")}
-            assert tree["details"]["session:s1"] == {"status": "idle", "note": "tab work",
+            assert tree["details"]["session:s1"] == {"status": "idle", "life": "running",
+                                                     "note": "tab work",
                                                      "role": "worker", "issue": "i-1"}
-            assert tree["details"]["session:gone"] == {"status": "gone"}
+            assert tree["details"]["session:gone"] == {"status": "gone", "life": "gone"}
             assert (await req("GET", "/api/category/search?q=tab"))["nodes"][0]["id"] == tabs["id"]
             out = await req("POST", "/api/category/extract", {
                 "node_id": web_["id"], "items": [{"kind": "session", "ref": "s1"}], "label": "routing"})
@@ -310,5 +346,44 @@ def test_tree_lists_the_workspace_sessions_not_yet_placed(home, tmp_path):
             doc = await (await client.get("/api/category?workspace=alpha")).json()
         assert doc["unassigned"] == [{"kind": "session", "ref": "loose"}]
         assert doc["details"]["session:loose"]["status"] == "idle"
+        assert doc["details"]["session:loose"]["life"] == "running"
+
+    asyncio.run(scenario())
+
+
+def test_tree_details_carry_the_session_partition(home, tmp_path):
+    """The page's status chips and its show killed/archived boxes read `life`."""
+    from types import SimpleNamespace
+
+    (tmp_path / "repo").mkdir()
+    workspaces.add(str(tmp_path / "repo"), "alpha")
+
+    def sess(name, **kw):
+        state = dict(exited=False, archived_at=None, held_at=None, delayed_at=None,
+                     failed_at=None, paused_at=None)
+        state.update(kw)
+        return SimpleNamespace(sdef=SimpleNamespace(name=name, cwd=str(tmp_path / "repo"),
+                                                    note="", role="", issue=""),
+                               status=lambda: "idle", **state)
+
+    sessions = [sess("live"), sess("dead", exited=True),
+                sess("old", exited=True, archived_at="2026-10-01T00:00:00")]
+    by_name = {s.sdef.name: s for s in sessions}
+
+    async def scenario():
+        app = web.Application()
+        app["manager"] = SimpleNamespace(get=lambda n: by_name[n],
+                                         list=lambda: [s for s in sessions if not s.exited])
+        category_api.install(app)
+        ws = category.workspace("alpha")
+        node = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": s.sdef.name} for s in sessions],
+                        node["id"], "user")
+        async with TestClient(TestServer(app)) as client:
+            doc = await (await client.get("/api/category?workspace=alpha")).json()
+        assert [doc["details"]["session:" + n]["life"] for n in ("live", "dead", "old")] == \
+            ["running", "killed", "archived"]
+        # A finished record still reports what the session screen last said.
+        assert doc["details"]["session:dead"]["status"] == "idle"
 
     asyncio.run(scenario())
