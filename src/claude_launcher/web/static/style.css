@@ -7720,13 +7720,14 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-stat.flow-yours { border-left: 3px solid #f0883e; }
 .chart-stat.flow-running { border-left: 3px solid #a371f7; }
 .chart-stat.flow-stall { border-left: 3px solid #d29922; }
+.chart-stat.chart-token-stat { border-left: 3px solid #58a6ff; }
 /* The timeline column (.chart-main) scrolls both ways: the axis is wider than
    one screen when the fleet is old (chart-page.js AXIS_CAP_MS), and the axis
    header, the name column and the cflow column stay in view while the bars
    scroll under them. */
 .chart-hint { margin: -4px 0 8px; }
 .chart-grid { display: flex; flex-direction: column; font-size: 12px; min-width: 640px; }
-.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
+.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px 78px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
 .chart-row:not(.chart-axis) { cursor: pointer; }
 .chart-row:not(.chart-axis):hover { background: #161b22; }
 /* The token series row is a chart, not a pick: no pointer, no hover. */
@@ -7751,16 +7752,24 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .cat-killed.chart-bar, .cat-killed.chart-dot { background: #f85149; }
 .cat-archived.chart-bar, .cat-archived.chart-dot { background: #6e7681; }
 .chart-life { text-align: right; color: #c9d1d9; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The session's tokens in the window: the figure the Stats page's table
+   prints for it (claunch-mlrga). A session the ledger cannot speak for is a
+   dash, never a zero. */
+.chart-tokens { text-align: right; color: #c9d1d9; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chart-tokens.chart-muted { color: #8b949e; }
 .chart-flow { display: flex; align-items: center; gap: 5px; min-width: 0; color: #c9d1d9; }
 /* Pinned ends: the session and what its run is doing while the bars move. */
-.chart-name, .chart-life, .chart-flow { background: #0d1117; }
+.chart-name, .chart-life, .chart-tokens, .chart-flow { background: #0d1117; }
 .chart-name { position: sticky; left: 0; z-index: 2; }
-.chart-life, .chart-flow { position: sticky; z-index: 2; }
-.chart-life { right: 220px; }
+.chart-life, .chart-tokens, .chart-flow { position: sticky; z-index: 2; }
+.chart-life { right: 318px; }
+.chart-tokens { right: 230px; }
 .chart-flow { right: 0; }
-.chart-axis .chart-name, .chart-axis .chart-life, .chart-axis .chart-flow { z-index: 4; }
+.chart-axis .chart-name, .chart-axis .chart-life, .chart-axis .chart-tokens,
+.chart-axis .chart-flow { z-index: 4; }
 .chart-row:not(.chart-axis):hover .chart-name,
 .chart-row:not(.chart-axis):hover .chart-life,
+.chart-row:not(.chart-axis):hover .chart-tokens,
 .chart-row:not(.chart-axis):hover .chart-flow { background: #161b22; }
 .chart-flow-ver { flex: none; font-size: 10px; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 0 3px; }
 .chart-flow-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -7816,6 +7825,10 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-detail-list dd { margin: 0; overflow-wrap: anywhere; }
 .chart-detail-list .chart-flow { flex-wrap: wrap; }
 .chart-detail-meshes { margin: 0; padding: 0; list-style: none; }
+/* The picked session's window tokens: the total, then the four parts
+   (claunch-mlrga). Same parts the usage legend names above the timeline. */
+.chart-detail-token-value { font-variant-numeric: tabular-nums; }
+.chart-detail-tokens { margin: 3px 0 0; padding-left: 16px; color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart-detail-open { color: #58a6ff; text-decoration: none; }
 .chart-detail-open:hover { text-decoration: underline; }
 @media (max-width: 760px) {

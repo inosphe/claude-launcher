@@ -175,7 +175,13 @@ globalThis.ChartPage = (() => {
      busiest rate (the height axis, which starts at zero because the area is
      the quantity). Points the payload pads with zeros keep their place on
      the axis: a quiet hour is a gap at the baseline, not a straight line
-     between the calls on either side of it. */
+     between the calls on either side of it.
+
+     ``bySession`` carries the same four components per session over the same
+     window and the same filters, which is what a row prints in its token
+     column -- the figure the Stats page's table prints for that session, from
+     the same read. A session the ledger cannot speak for is absent from the
+     map, and the row draws a dash rather than a zero. */
   function buildSeriesModel(payload) {
     if (!payload || !Array.isArray(payload.points) || !payload.points.length) return null;
     const width = Number(payload.bucket_s) || 0;
@@ -196,6 +202,20 @@ globalThis.ChartPage = (() => {
     });
     const peak = Math.max(0, ...points.map((p) => p.rate));
     const totals = payload.totals || {};
+    const bySession = new Map();
+    const raw = payload.by_session && typeof payload.by_session === "object"
+      ? payload.by_session : {};
+    for (const [name, value] of Object.entries(raw)) {
+      if (!name || !value || typeof value !== "object") continue;
+      const parts = {};
+      for (const key of ["input", "cache_read", "cache_write", "output"]) {
+        parts[key] = Number(value[key]) || 0;
+      }
+      parts.requests = Number(value.requests) || 0;
+      parts.total = Number(value.total) || (parts.input + parts.cache_read +
+        parts.cache_write + parts.output);
+      bySession.set(name, parts);
+    }
     return {
       // `width` is the payload's seconds (it divides the sums into a rate);
       // `widthMs` is the same span in the axis's own unit, which the times
@@ -212,6 +232,7 @@ globalThis.ChartPage = (() => {
         cache_write: Number(totals.cache_write) || 0,
         output: Number(totals.output) || 0,
       },
+      bySession,
       cacheShare: Number.isFinite(payload.cache_share) ? payload.cache_share : null,
       sessions: Number(payload.sessions) || 0,
       unmetered: Number(payload.unmetered) || 0,
@@ -237,9 +258,12 @@ globalThis.ChartPage = (() => {
      groupValue(group, s) -> the group a record is filed under, groupPick
      ("" = every group), range (a RANGES key), archived (include archived
      records), excludeKilled (drop killed records), sort ("created" |
-     "lifetime"), cflowOf(name) -> {state,
+     "lifetime" | "tokens"), cflowOf(name) -> {state,
      label, version} or null, meshesOf(name) -> the session's mesh
-     memberships (for its role).
+     memberships (for its role), tokensOf(name) -> the session's usage in the
+     window ({total, requests, input, cache_read, cache_write, output}), null
+     when the ledger has no record for it, or undefined when no series has
+     been read yet.
 
      A record is kept when its bar overlaps the range window. The axis runs
      from the window's start (or, for "all", the earliest kept creation) to
@@ -253,6 +277,7 @@ globalThis.ChartPage = (() => {
     const groupValue = opts.groupValue || (() => "");
     const cflowOf = opts.cflowOf || (() => null);
     const meshesOf = opts.meshesOf || (() => []);
+    const tokensOf = opts.tokensOf || (() => undefined);
     const base = [];
     for (const s of sessions || []) {
       if (!s || !s.name) continue;
@@ -270,6 +295,7 @@ globalThis.ChartPage = (() => {
         group: g, meshes,
         role: roleOf(s, meshes, group === "mesh" ? g : ""),
         cflow: cflowOf(s.name),
+        tokens: tokensOf(s.name),
       });
     }
     const groupCounts = new Map();
@@ -281,9 +307,12 @@ globalThis.ChartPage = (() => {
     const pick = group && opts.groupPick && groupCounts.has(opts.groupPick)
       ? opts.groupPick : "";
     const rows = pick ? base.filter((r) => r.group === pick) : base;
+    const spent = (r) => (r.tokens && Number(r.tokens.total)) || 0;
     rows.sort(opts.sort === "lifetime"
       ? (a, b) => b.lifetime - a.lifetime || a.name.localeCompare(b.name)
-      : (a, b) => b.span.start - a.span.start || a.name.localeCompare(b.name));
+      : opts.sort === "tokens"
+        ? (a, b) => spent(b) - spent(a) || a.name.localeCompare(b.name)
+        : (a, b) => b.span.start - a.span.start || a.name.localeCompare(b.name));
     if (group && !pick) {
       // Stable: within a group the chosen order holds.
       rows.sort((a, b) => a.group.localeCompare(b.group));
@@ -295,6 +324,7 @@ globalThis.ChartPage = (() => {
     if (!(now > t0)) t0 = now - 3600000;
     const counts = Object.fromEntries(CATEGORIES.map((c) => [c, 0]));
     const flow = { running: 0, yours: 0, other: 0, none: 0, stalled: 0 };
+    let tokens = 0, requests = 0, metered = 0, unmetered = 0, unread = 0;
     for (const r of rows) {
       counts[r.category]++;
       if (!r.cflow) flow.none++;
@@ -303,6 +333,13 @@ globalThis.ChartPage = (() => {
                r.cflow.state === "peer") flow.running++;
       else flow.other++;
       if (cflowAge(r.cflow, now).stalled) flow.stalled++;
+      if (r.tokens === undefined) unread++;
+      else if (r.tokens === null) unmetered++;
+      else {
+        metered++;
+        tokens += spent(r);
+        requests += Number(r.tokens.requests) || 0;
+      }
     }
     /* What one screen width holds, per scale (claunch-c2emv). Both scales
        place every time against the same window t0..t1 -- that is what the
@@ -323,6 +360,11 @@ globalThis.ChartPage = (() => {
         total: rows.length, counts, flow,
         medianLifetime: median(rows.map((r) => r.lifetime)),
         alive: rows.filter((r) => r.span.alive).length,
+        // The rows' own figures: the sum of what their token column prints,
+        // so the summary and the column cannot disagree. `unmetered` rows
+        // (the ledger has no record) and `unread` (no series yet) are counted
+        // apart from each other and from that sum.
+        tokens: { total: tokens, requests, metered, unmetered, unread },
       },
     };
   }
@@ -551,6 +593,29 @@ globalThis.ChartPage = (() => {
       });
   }
 
+  /* The drawing model of the payload in hand, built once per payload: the
+     rows ask it for one session each, and rebuilding it per row would walk
+     every bucket per row. */
+  let seriesModelCache = null;
+  function currentSeries() {
+    if (!seriesPayload) return null;
+    if (!seriesModelCache || seriesModelCache.payload !== seriesPayload) {
+      seriesModelCache = { payload: seriesPayload,
+                           model: buildSeriesModel(seriesPayload) };
+    }
+    return seriesModelCache.model;
+  }
+
+  /* One session's usage in the window, as its row's token column prints it.
+     undefined when no series has been read at all (the column is blank until
+     it is), null when the ledger has no record for the session (a dash -- it
+     is not a zero), else the four components' sums and the request count. */
+  function seriesTokens(name) {
+    const smodel = currentSeries();
+    if (!smodel) return undefined;
+    return smodel.bySession.get(name) || null;
+  }
+
   async function loadArchived() {
     if (archivedLoading || typeof api !== "function") return;
     archivedLoading = true; archivedError = "";
@@ -623,7 +688,8 @@ globalThis.ChartPage = (() => {
       (v) => set({ range: v })));
     bar.appendChild(seg("Scale", [["log", "로그"], ["linear", "선형"]], state.scale,
       (v) => set({ scale: v })));
-    bar.appendChild(seg("Sort", [["created", "생성 순"], ["lifetime", "생존 시간 순"]],
+    bar.appendChild(seg("Sort", [["created", "생성 순"], ["lifetime", "생존 시간 순"],
+                                 ["tokens", "토큰 순"]],
       state.sort, (v) => set({ sort: v })));
     const arch = node("label", "chart-check");
     const box = node("input");
@@ -659,7 +725,11 @@ globalThis.ChartPage = (() => {
     head.appendChild(node("span", "chart-muted",
       smodel
         ? `${formatBucketWidth(smodel.width)} 버킷 · 계측 세션 ${smodel.sessions}` +
-          (smodel.unmetered ? ` · 계측 없음 ${smodel.unmetered}` : "")
+          (smodel.unmetered ? ` · 계측 없음 ${smodel.unmetered}` : "") +
+          // The ledger starts when metering was switched on: a window reaching
+          // past that date is not a window the figures can cover, and saying
+          // so is how "nobody measured" stays apart from "spent nothing".
+          (smodel.ledgerSince ? ` · 원장 ${smodel.ledgerSince}부터` : "")
         : ""));
     box.appendChild(head);
     if (error) {
@@ -704,7 +774,8 @@ globalThis.ChartPage = (() => {
      under the session bars' instants (both use positionOf on the same model):
      a session's bar and the tokens it was spending line up vertically, which
      is the reading the ticket asked for. The row carries its own name cell
-     and lifetime cell so the grid columns keep their widths. */
+     and lifetime cell so the grid columns keep their widths; its token cell
+     is the fleet's total, the sum of the columns above it. */
   function seriesRow(model, smodel) {
     const row = node("div", "chart-row chart-series-row");
     const name = node("div", "chart-name");
@@ -715,6 +786,9 @@ globalThis.ChartPage = (() => {
     track.appendChild(seriesChart(model, smodel));
     row.appendChild(track);
     row.appendChild(node("div", "chart-life", ""));
+    const total = node("div", "chart-tokens", formatTokens(smodel.totals.total));
+    total.title = "이 창의 함대 전체 토큰 (아래 행들의 합)";
+    row.appendChild(total);
     row.appendChild(node("div", "chart-flow chart-muted",
       smodel.peak > 0 ? formatRate(smodel.peak) : "—"));
     row.title = `토큰 사용량 시계열 · ${formatBucketWidth(smodel.width)} 버킷\n` +
@@ -822,6 +896,19 @@ globalThis.ChartPage = (() => {
     return Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : "—";
   }
 
+  /* One session's usage as hover text, in the four parts the Stats page
+     splits it into. Empty for a session with no figures, so a caller can
+     drop the line rather than print "0". */
+  function tokenTip(tokens) {
+    if (!tokens) return "";
+    const lines = [`토큰(창): ${formatTokens(tokens.total)} tokens` +
+      (tokens.requests ? ` · 요청 ${tokens.requests.toLocaleString()}` : "")];
+    for (const [key, label] of SERIES_PARTS) {
+      if (tokens[key]) lines.push(`  ${label} ${formatTokens(tokens[key])}`);
+    }
+    return lines.join("\n");
+  }
+
   function summary(model) {
     const s = model.summary;
     const box = node("div", "chart-summary");
@@ -838,6 +925,23 @@ globalThis.ChartPage = (() => {
       stat(CATEGORY_LABEL[c], s.counts[c], `cat-${c}`);
     }
     stat("생존 시간 중앙값", s.medianLifetime === null ? "—" : formatDuration(s.medianLifetime));
+    // The rows' own token figures, summed: the same read the usage block
+    // above prints, so a reader can check one against the other. Sessions the
+    // ledger cannot speak for are named apart rather than folded in as zero.
+    if (s.tokens.metered || s.tokens.unmetered) {
+      const stat0 = node("div", "chart-stat chart-token-stat");
+      stat0.appendChild(node("span", "chart-stat-value",
+        s.tokens.metered ? formatTokens(s.tokens.total) : "—"));
+      stat0.appendChild(node("span", "chart-stat-label",
+        "토큰" + (s.tokens.unmetered ? ` · 계측 없음 ${s.tokens.unmetered}` : "")));
+      stat0.title = s.tokens.metered
+        ? `이 창에서 이 행들이 쓴 토큰 ${s.tokens.total.toLocaleString()}` +
+          ` · 요청 ${s.tokens.requests.toLocaleString()}` +
+          (s.tokens.unmetered
+            ? `\n계측 기록이 없는 세션 ${s.tokens.unmetered}개는 합계에서 빠진다` : "")
+        : "이 창의 행 가운데 계측 기록이 있는 세션이 없다";
+      box.appendChild(stat0);
+    }
     stat("cflow 진행", s.flow.running, "flow-running");
     stat("사람 대기", s.flow.yours, "flow-yours");
     stat("정지 의심", s.flow.stalled, "flow-stall");
@@ -899,6 +1003,9 @@ globalThis.ChartPage = (() => {
     row.appendChild(node("div", "chart-name", "session"));
     row.appendChild(node("div", "chart-track"));
     row.appendChild(node("div", "chart-life", "생존"));
+    const tokens = node("div", "chart-tokens", "토큰");
+    tokens.title = "선택한 범위 안에서 그 세션이 쓴 토큰 (Stats 페이지의 같은 값)";
+    row.appendChild(tokens);
     row.appendChild(node("div", "chart-flow", "cflow"));
     return row;
   }
@@ -971,14 +1078,34 @@ globalThis.ChartPage = (() => {
       `생성: ${formatTime(r.span.start)}`,
       r.span.alive ? "종료: (실행 중)" : `종료: ${formatTime(r.span.end)}`,
       `생존 시간: ${formatDuration(r.lifetime)}`,
+      tokenTip(r.tokens),
       r.cflow ? `cflow ${r.cflow.version}: ${r.cflow.label}` +
         (change.elapsed !== null ? ` · 마지막 갱신 ${formatDuration(change.elapsed)} 전` : "")
         : "cflow: 없음",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
     track.appendChild(bar);
     row.appendChild(track);
 
     row.appendChild(node("div", "chart-life", formatDuration(r.lifetime)));
+
+    /* The window's tokens, the figure the Stats page's table prints for this
+       session. A session the ledger cannot speak for (an OAuth route writes
+       no metering line) shows a dash, never a zero -- "not measured here" and
+       "spent nothing" are different answers (claunch-ha2s9). */
+    const tokenCell = node("div", "chart-tokens");
+    if (r.tokens === undefined) {
+      // No series read yet: an empty cell, not a dash that would claim
+      // "unmetered" before anything was asked.
+      tokenCell.className = "chart-tokens chart-muted";
+    } else if (r.tokens === null) {
+      tokenCell.className = "chart-tokens chart-muted";
+      tokenCell.textContent = "—";
+      tokenCell.title = "계측 원장에 이 세션의 기록이 없다 (OAuth 경로는 원장 줄을 쓰지 않는다)";
+    } else {
+      tokenCell.textContent = formatTokens(r.tokens.total);
+      tokenCell.title = tokenTip(r.tokens);
+    }
+    row.appendChild(tokenCell);
 
     const age = cflowAge(r.cflow, model.now);
     const flow = node("div", `chart-flow${age.stalled ? " stalled" : ""}`);
@@ -1058,6 +1185,31 @@ globalThis.ChartPage = (() => {
     item("생성", r.span.start === null ? "" : formatTime(r.span.start));
     item("종료", r.span.alive ? "(실행 중)" : r.span.end === null ? "" : formatTime(r.span.end));
     item("생존 시간", r.lifetime === null ? "" : formatDuration(r.lifetime));
+    /* The window's token use, the figure the Stats page's detail panel
+       reports for the same window, from the same ledger read. The four parts
+       are listed beside the total the way that panel lists them, so a reader
+       can tell a cache-heavy session from a fresh-input one. */
+    const tokens = r.tokens !== undefined ? r.tokens : seriesTokens(r.name);
+    if (tokens) {
+      const parts = node("ul", "chart-detail-tokens");
+      for (const [key, label] of SERIES_PARTS) {
+        if (!tokens[key]) continue;
+        parts.appendChild(node("li", null, `${label} ${formatTokens(tokens[key])}`));
+      }
+      const value = node("div", "chart-detail-token-value");
+      value.appendChild(node("strong", null, formatTokens(tokens.total)));
+      if (tokens.requests) {
+        value.appendChild(node("span", "chart-muted",
+          ` · 요청 ${tokens.requests.toLocaleString()}`));
+      }
+      // node() takes text, not children: build the wrapper and append.
+      const wrap = node("div", null);
+      wrap.appendChild(value);
+      if (parts.childElementCount) wrap.appendChild(parts);
+      item("토큰(창)", wrap);
+    } else if (tokens === null) {
+      item("토큰(창)", node("span", "chart-muted", "— 계측 원장에 기록이 없다"));
+    }
     item("프로젝트", projectOf(s));
     item("workspace", s.cwd || "");
     item("parent", s.parent && s.parent !== s.name ? s.parent : "");
@@ -1158,13 +1310,20 @@ globalThis.ChartPage = (() => {
     const prevScroll = root.querySelector(".chart-main");
     const prevLeft = prevScroll ? prevScroll.scrollLeft : null;
     const prevPct = prevScroll ? prevScroll.dataset.widthpct : null;
+    // The fleet's token use over the same window and the same picks
+    // (claunch-x15q5) is read before the rows are built: the rows print their
+    // own figures from the same payload, so the column and the chart cannot
+    // come from two different reads. A request that has to go out leaves the
+    // rows' token cells blank until it answers (REDRAW_MS at the latest).
+    readSeries();
+    const smodel = currentSeries();
     const sessions = liveSessions();
     const model = buildModel(sessions, {
       now: Date.now(), project: currentProjectPick(), group: state.group,
       groupValue: appGroupValue, groupPick: state.groupPick, range: state.range,
       archived: state.archived, excludeKilled: state.excludeKilled,
       sort: state.sort, cflowOf: appCflowOf,
-      meshesOf: appMeshesOf, scale: state.scale,
+      meshesOf: appMeshesOf, scale: state.scale, tokensOf: seriesTokens,
     });
     root.innerHTML = "";
     const head = node("div", "wf-head");
@@ -1175,12 +1334,6 @@ globalThis.ChartPage = (() => {
     root.appendChild(toolbar(sessions, model));
     if (archivedError) root.appendChild(node("p", "chart-error", `archived 읽기 실패: ${archivedError}`));
     root.appendChild(summary(model));
-    // The fleet's token use over the same window and the same picks
-    // (claunch-x15q5). Read before the rows are built so a redraw draws the
-    // answer already in hand; the fetch's completion is picked up by the
-    // next redraw (REDRAW_MS) rather than repainting from inside a fetch.
-    readSeries();
-    const smodel = buildSeriesModel(seriesPayload);
     root.appendChild(usageBlock(model, smodel, seriesRead.error));
     if (model.axisWidthPct > 100) {
       root.appendChild(node("p", "chart-muted chart-hint",

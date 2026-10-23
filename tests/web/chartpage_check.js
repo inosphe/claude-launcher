@@ -345,4 +345,52 @@ assert.ok(Math.abs(C.seriesSpan(half.points[0], half,
   { axisStart: 0, t1: 60000, scale: 'linear' }).right - 100) < 1e-9,
   'a 60s bucket of a 60s axis spans all of it');
 
+// ---- per-session tokens on the rows (claunch-mlrga) -----------------------
+// The rows print the figure the Stats page's table prints for the session: the
+// same payload carries it, so the column and the chart above it are one read.
+const rowsPayload = {
+  window: '24h', bucket_s: 300, start: now - 2 * H, until: now,
+  points: [{ t: now - 2 * H, total: 0 }],
+  totals: { total: 0, requests: 0 },
+  by_session: {
+    a: { input: 10, cache_read: 20, cache_write: 0, output: 5, total: 35, requests: 2 },
+    b: { input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests: 0 },
+    junk: null,
+  },
+};
+const rm = C.buildSeriesModel(rowsPayload);
+assert.strictEqual(rm.bySession.get('a').total, 35);
+assert.strictEqual(rm.bySession.get('a').requests, 2);
+assert.strictEqual(rm.bySession.get('b').total, 0,
+  'a measured session with nothing in the window is a zero');
+assert.ok(!rm.bySession.has('junk'), 'a malformed entry is dropped, not half-read');
+assert.ok(!rm.bySession.has('oauth'), 'a session the ledger never saw is absent, not zero');
+// The total falls back to the four parts when the payload omits it.
+const partsOnly = C.buildSeriesModel({ bucket_s: 60, points: [{ t: 0, total: 60 }],
+  by_session: { c: { input: 1, cache_read: 2, output: 3 } } });
+assert.strictEqual(partsOnly.bySession.get('c').total, 6);
+
+// buildModel carries each row's figure, counts what it could not read apart
+// from what was never measured, and sums only the rows it is showing.
+const tokenMap = { a: { total: 35, requests: 2 }, b: { total: 0, requests: 0 } };
+const tm = C.buildModel(sessions, { now, range: 'all',
+  tokensOf: (n) => (n in tokenMap ? tokenMap[n] : null) });
+const byName = (m, n) => m.rows.find((r) => r.name === n);
+assert.strictEqual(byName(tm, 'a').tokens.total, 35);
+assert.deepStrictEqual(Object.assign({}, tm.summary.tokens),
+  { total: 35, requests: 2, metered: 2, unmetered: 2, unread: 0 });
+// The sort a reader uses to find the biggest spender.
+assert.deepStrictEqual(Array.from(C.buildModel(sessions, { now, range: 'all',
+  sort: 'tokens', tokensOf: (n) => (n in tokenMap ? tokenMap[n] : null) }).rows,
+  (r) => r.name), ['a', 'b', 'c', 'e']);
+// A tie falls back to the name, so the order is stable between polls.
+assert.deepStrictEqual(Array.from(C.buildModel(sessions, { now, range: 'all',
+  sort: 'tokens', tokensOf: () => ({ total: 5 }) }).rows, (r) => r.name),
+  ['a', 'b', 'c', 'e']);
+// No series read at all is "not read yet" (blank cells), not "unmetered".
+const unread = C.buildModel(sessions, { now, range: 'all' });
+assert.strictEqual(unread.rows[0].tokens, undefined);
+assert.deepStrictEqual(Object.assign({}, unread.summary.tokens),
+  { total: 0, requests: 0, metered: 0, unmetered: 0, unread: unread.rows.length });
+
 console.log('ok');

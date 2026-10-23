@@ -623,7 +623,7 @@ class Ledger:
                now: Optional[float] = None) -> dict:
         """The fleet's token use over time, for the Chart page's series.
 
-        One point per bucket of :data:`SERIES_BINS` chosen for the window,
+        One point per bucket of :data:`SERIES_BUCKETS` chosen for the window,
         each carrying the four components' **sums** in that bucket and the
         requests that produced them. The sums are what the reader is owed:
         drawn as a rate (``total / bucket_s``) the area under the curve is
@@ -635,6 +635,13 @@ class Ledger:
         ended-category boxes. A session the ledger has no record of
         contributes nothing and is counted in ``unmetered`` rather than
         drawn as zero, the same rule the overview's rows follow.
+
+        ``by_session`` carries the same four components per session over the
+        same window and the same filters, so a row on the Chart page can print
+        the figure the Stats page's table prints for it without a second read:
+        the two are one pass over one set of bins. A wanted session the ledger
+        cannot speak for is absent from the map (the page draws ``-`` there,
+        never a zero -- the overview's rule, claunch-ha2s9).
 
         Buckets are aligned to multiples of their own width since the epoch,
         so a poll draws the same boundaries as the poll before it, and the
@@ -686,6 +693,17 @@ class Ledger:
         points = [{"t": start + i * width, "input": 0, "cache_read": 0,
                    "cache_write": 0, "output": 0, "total": 0, "requests": 0}
                   for i in range(count)]
+        # Per session, the same four components over the same buckets: the
+        # Chart page's rows carry the figure the Stats table carries for the
+        # session, and one pass over `bins` answers both. A session the ledger
+        # has seen starts at zero -- measured, and it spent nothing in this
+        # window -- while one it has never seen stays out of the map, which is
+        # how the page tells "nothing here" from "not measured here".
+        by_session: Dict[str, dict] = {
+            name: {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                   "total": 0, "requests": 0}
+            for name in wanted if name in self.sessions
+        }
         for at, name in bins:
             if at < start or at >= start + count * width:
                 continue
@@ -697,6 +715,12 @@ class Ledger:
             slot["output"] += acc[3]
             slot["requests"] += acc[4]
             slot["total"] += acc[0] + acc[1] + acc[2] + acc[3]
+            row = by_session[name]
+            for i, key in enumerate(("input", "cache_read", "cache_write",
+                                     "output")):
+                row[key] += acc[i]
+            row["total"] += acc[0] + acc[1] + acc[2] + acc[3]
+            row["requests"] += acc[4]
         totals = {key: sum(p[key] for p in points) for key in
                   ("input", "cache_read", "cache_write", "output",
                    "total", "requests")}
@@ -710,6 +734,7 @@ class Ledger:
             "until": now,
             "points": points,
             "totals": totals,
+            "by_session": by_session,
             "cache_share": (totals["cache_read"] / totals["total"]
                             if totals["total"] else None),
             "sessions": len(wanted) - unmetered,

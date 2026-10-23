@@ -1077,6 +1077,68 @@ def test_the_series_says_unmetered_rather_than_drawing_zero(tmp_path, ledger):
     assert out["unmetered"] == 1
 
 
+def test_the_series_carries_each_session_s_totals(tmp_path, ledger):
+    """The rows on the Chart page print a session's own figure; it comes from
+    this same pass, so a row and the chart under it cannot disagree
+    (claunch-mlrga). A session the ledger cannot speak for is absent from the
+    map, not present with zeros."""
+    write_ledger(tmp_path / "metering", [
+        record("s1", hour=9, minute=0, fresh=10, cached=100, written=1, output=5),
+        record("s1", hour=9, minute=2, fresh=20, cached=200, written=2, output=7),
+        record("s2", hour=9, minute=5, fresh=3, cached=30, written=0, output=4),
+    ])
+    ledger.refresh(NOW)
+    out = ledger.series("24h", sessions=[meta("s1"), meta("s2"), meta("oauth")],
+                        now=NOW)
+    assert set(out["by_session"]) == {"s1", "s2"}, "an unmetered row is absent"
+    s1 = out["by_session"]["s1"]
+    assert (s1["input"], s1["cache_read"], s1["cache_write"], s1["output"]) == (
+        30, 300, 3, 12)
+    assert s1["requests"] == 2
+    assert s1["total"] == 30 + 300 + 3 + 12
+    s2 = out["by_session"]["s2"]
+    assert (s2["total"], s2["requests"]) == (3 + 30 + 0 + 4, 1)
+    # The rows sum to the fleet total the chart's area integrates to.
+    assert sum(v["total"] for v in out["by_session"].values()) \
+        == out["totals"]["total"]
+    assert sum(v["requests"] for v in out["by_session"].values()) \
+        == out["totals"]["requests"]
+    # The map follows the window and the page's own filters, as the points do.
+    week = ledger.series("7d", sessions=[meta("s1")], now=NOW)
+    assert week["by_session"]["s1"]["total"] == s1["total"]
+    killed = ledger.series("24h", sessions=[meta("s1", category="killed")],
+                           now=NOW)
+    assert killed["by_session"] == {} and killed["unmetered"] == 0
+    kept = ledger.series("24h", sessions=[meta("s1", category="killed")],
+                         now=NOW, include_killed=True)
+    assert kept["by_session"]["s1"]["total"] == s1["total"]
+    # A session the ledger has, with nothing inside this window, is a zero
+    # rather than an absence: it was measured, and it spent nothing here.
+    write_ledger(tmp_path / "metering",
+                 [record("old", day=20, hour=9, fresh=1)], name="older.jsonl")
+    ledger.refresh(NOW)
+    day = ledger.series("24h", sessions=[meta("s1"), meta("old"), meta("oauth")],
+                        now=NOW)
+    assert "old" in day["by_session"], "a measured session is a zero, not a dash"
+    assert day["by_session"]["old"]["total"] == 0
+    assert "oauth" not in day["by_session"]
+    assert day["unmetered"] == 1
+
+
+def test_the_series_totals_cover_only_their_window(tmp_path, ledger):
+    """A record outside the window must not reach the row's figure: the
+    column and the chart both speak about the same span."""
+    write_ledger(tmp_path / "metering", [
+        record("s1", day=20, hour=9, fresh=100),
+        record("s1", day=21, hour=9, fresh=7),
+    ])
+    ledger.refresh(NOW)
+    day = ledger.series("24h", sessions=[meta("s1")], now=NOW)
+    assert day["by_session"]["s1"]["input"] == 7
+    week = ledger.series("7d", sessions=[meta("s1")], now=NOW)
+    assert week["by_session"]["s1"]["input"] == 107
+
+
 def test_the_series_refuses_an_unknown_window(tmp_path, ledger):
     with pytest.raises(ValueError):
         ledger.series("year", sessions=[], now=NOW)
