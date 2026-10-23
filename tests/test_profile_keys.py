@@ -338,6 +338,21 @@ def test_set_token_replaces_the_selected_key_in_a_pool(home, capsys):
     assert credentials.stored_token(p) == "sk-NEWNEWNEW1"
 
 
+def test_set_token_with_key_leaves_the_effective_token_alone(home, capsys):
+    # ``add`` leaves the cursor on the last key, so key 1 is the one the
+    # profile is *not* running on (claunch-wllke).
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    first = profile_keys.load(p).keys[0]
+
+    assert cli.main(["set-token", "work", "sk-NEWNEWNEW1", "--key", first.id]) == 0
+
+    capsys.readouterr()
+    pool = profile_keys.load(p)
+    assert [k.token for k in pool.keys] == ["sk-NEWNEWNEW1", "sk-CCCC2222DDDD"]
+    assert pool.cursor == pool.keys[1].id
+    assert credentials.stored_token(p) == "sk-CCCC2222DDDD"
+
+
 def test_clear_removes_the_pool_too(home):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
 

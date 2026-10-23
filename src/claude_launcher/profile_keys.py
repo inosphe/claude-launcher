@@ -286,14 +286,20 @@ def remove(profile: Profile, ident: str) -> Key:
 
 
 def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
-    """Replace one key's token in place (``set-token`` on a pooled profile)."""
+    """Replace one key's token in place (``set-token`` on a pooled profile).
+
+    The effective token file is rewritten only when ``ident`` names the key
+    the profile is currently on; replacing some other key leaves the token
+    file alone, so it keeps naming the key the last launch actually used.
+    """
     token = str(token or "").strip()
     if not token:
         raise KeysError("refusing to store an empty key")
     pool = load(profile)
     if pool is None:
         raise KeysError(f"profile {profile.name!r} has no key pool")
-    index = _index_of(pool, ident) if ident else _selected_index(pool)
+    current = _selected_index(pool)
+    index = _index_of(pool, ident) if ident else current
     old = pool.keys[index]
     key = Key(
         id=old.id,
@@ -305,7 +311,12 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
     )
     pool.keys[index] = key
     save(profile, pool)
-    credentials.save_token(profile, token)
+    # Rewrite the effective token only when the key being replaced is the one
+    # the profile is currently on: editing another key is not a re-selection,
+    # and overwriting the token file would leave it naming a key the last
+    # launch did not use (the rule remove() follows).
+    if index == current:
+        credentials.save_token(profile, token)
     return key
 
 
