@@ -3,10 +3,12 @@
 
    What has to hold:
      drawn      -- one stacked area and line per part (cached input, write,
-                   input), a dashed mark per compaction at its time, a solid
-                   diamond-headed mark per profile swap (claunch-0af4e.1.1),
-                   and the zoomed chart adds the height axis' maximum, the
-                   axis, legend and readout.
+                   input), one value per request on an axis of request order
+                   (claunch-0af4e.1.2), a dashed mark per compaction on the
+                   step down it causes, a solid diamond-headed mark per
+                   profile swap (claunch-0af4e.1.1), and the zoomed chart adds
+                   the height axis' maximum, the axis (request numbers with
+                   their times), legend and readout.
      read       -- /api/sessions/<name>/token-series is asked out of the batch,
                    once per TTL and window; the hover view asks for window=full
                    and draws the capped series until it arrives.
@@ -99,12 +101,12 @@ const renderTermTps = () => { renders++; };
 const ctx = {};
 new Function(
   "exports", "el", "document", "api", "renderTermTps", "fmtAge", "usageShort",
-  '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesCumulative", "termSeriesChart",
+  '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesIndexAt", "termSeriesChart",
     "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker"].map(slice).join("\n") + `
 exports.read = termSeriesRead;
 exports.data = termSeriesData;
 exports.chart = termSeriesChart;
-exports.cumulative = termSeriesCumulative;
+exports.indexAt = termSeriesIndexAt;
 exports.maker = termSeriesMaker;
 exports.reads = termSeriesReads;
 exports.hover = (v) => { termSeriesHover = v; };
@@ -119,11 +121,15 @@ function check(label, actual, expected) {
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const answer = (data, ok = true) => ({ ok, status: ok ? 200 : 400, json: async () => data });
+/* Four requests whose contexts are 13, 33, 10 and 44: the compaction at
+   start+150 comes between the second and the third, which is the fall. */
+const CONTEXTS = [[1, 10, 2], [1, 30, 2], [1, 5, 4], [2, 40, 2]];
 const series = (win, start = 1000) => ({
-  available: true, window: win, start, until: start + 400, bucket_s: 100, requests: 3,
-  points: [0, 1, 2, 3].map((i) => ({ t: start + i * 100, input: 1, cache_read: 10 * (i + 1), cache_write: 2 })),
-  compactions: [start + 200],
-  swaps: [{ at: start + 300, from: "opencode", to: "opencode2" }],
+  available: true, window: win, start, until: start + 400, requests: 4, count: 4,
+  points: CONTEXTS.map(([input, cache_read, cache_write], i) =>
+    ({ t: start + i * 100, n: i + 1, count: 1, input, cache_read, cache_write })),
+  compactions: [start + 150],
+  swaps: [{ at: start + 250, from: "opencode", to: "opencode2" }],
 });
 
 (async () => {
@@ -136,15 +142,16 @@ const series = (win, start = 1000) => ({
          "term-series-area input", "term-series-line input",
          "term-series-area cache_read", "term-series-line cache_read", "term-series-compaction",
          "term-series-swap"]);
-  check("the compaction sits halfway along a 120px chart", svg.kids[6].attrs.x1, "60.0");
+  check("the compaction sits between request 2 and 3 (a step of 40px each on a 120px chart)",
+        svg.kids[6].attrs.x1, "60.0");
   const swap = svg.kids[7];
-  check("the swap sits three quarters along, as a stem, a diamond head and a name",
+  check("the swap sits between request 3 and 4, as a stem, a diamond head and a name",
         [swap.kids.map((k) => k.tag), swap.kids[0].attrs.x1, swap.kids[0].attrs.y2],
-        [["line", "polygon", "title"], "90.0", "26"]);
+        [["line", "polygon", "title"], "100.0", "26"]);
   check("the swap mark is solid where the compaction mark is dashed (own class, not the compaction's)",
         [swap.attrs.class, swap.kids[0].attrs.class], ["term-series-swap", undefined]);
   check("the swap names the profiles and when", swap.kids[2].textContent,
-        "profile swap opencode \u2192 opencode2, 1m ago");
+        "profile swap opencode \u2192 opencode2, 2m ago");
   check("the small chart draws no height label", svg.kids.some((k) => k.attrs.class === "term-series-ymax"), false);
   check("the small chart has no axis or legend", small.kids.length, 1);
   const big = ctx.chart(series("full"), true);
@@ -157,49 +164,57 @@ const series = (win, start = 1000) => ({
   const zsvg = big.kids[0];
   const ymax = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax");
   check("the zoomed chart labels its height axis with the maximum",
-        ymax.map((k) => k.textContent), ["112 (log)"]);
+        ymax.map((k) => k.textContent), ["44 max (log)"]);
   const rule = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax-rule");
-  check("the maximum has a rule at the top of the plot, level with the stack's top",
+  check("the maximum has a rule at the top of the plot, level with the largest context",
         [rule.length, rule[0].attrs.y1], [1, "2.0"]);
   big.kids[0].handlers.mousemove({ clientX: 100 });
-  check("the readout names the bucket under the pointer",
-        big.kids[3].textContent, "1m ago: in 4 · cached 100 · write 8 (+43 in 1m)");
+  check("the readout names the request under the pointer, with its time and context",
+        big.kids[3].textContent, "#4 · 1m ago: 44 = in 2 · cached 40 · write 2");
+  big.kids[0].handlers.mousemove({ clientX: 0 });
+  check("the first request is under the left edge", big.kids[3].textContent.startsWith("#1 · 6m ago: 13 ="), true);
+  const grouped = ctx.chart({ ...series("full"), points: series("full").points.map((p) => ({ ...p, count: 5 })) }, true);
+  grouped.kids[0].handlers.mousemove({ clientX: 100 });
+  check("a point that stands for several requests says so",
+        grouped.kids[3].textContent.endsWith("(largest of 5 requests)"), true);
 
-  // Cumulative: running totals per part, so the stack only ever rises.
-  const run = ctx.cumulative(series("cap").points);
-  check("each part is a running total from the first bucket",
-        run.map((p) => [p.input, p.cache_read, p.cache_write]),
-        [[1, 10, 2], [2, 30, 4], [3, 60, 6], [4, 100, 8]]);
-  check("the stack's top never falls",
-        run.every((p, i) => i === 0 || (p.input + p.cache_read + p.cache_write) >=
-                            (run[i - 1].input + run[i - 1].cache_read + run[i - 1].cache_write)), true);
+  // Request order: one value per request, so a compaction is a fall.
   const edge = (svgEl, part) => svgEl.kids.filter((k) => k.attrs.class === `term-series-line ${part}`)[0]
     .attrs.points.split(" ").map((pt) => Number(pt.split(",")[1]));
   const tops = (svgEl) => edge(svgEl, "cache_read");
   const ys = tops(svg);
-  check("the drawn top edge rises left to right (smaller y is higher)",
-        ys.every((y, i) => i === 0 || y <= ys[i - 1]), true);
-  check("the last point is the window's whole sum at the chart's top edge",
-        ys[ys.length - 1] < ys[0] && ys[ys.length - 1] === 2, true);
+  check("the top edge has one point per request", ys.length, 4);
+  check("the context falls after the compaction (larger y is lower) and then rises again",
+        [ys[2] > ys[1], ys[3] < ys[2]], [true, true]);
+  check("the largest context is at the chart's top edge", ys[3] === 2 && ys.every((y) => y >= 2), true);
   // Log height axis: write at the bottom, input above it, cached input on top.
-  const logY = (v, h = 26, peak = 112) => Number((h - 1 - (v > 1 ? Math.log(v) / Math.log(peak) : 0) * (h - 3)).toFixed(1));
-  check("the stack's boundaries are on a log axis, last bucket: write 8, +input 12, +cached 112",
+  const logY = (v, h = 26, peak = 44) => Number((h - 1 - (v > 1 ? Math.log(v) / Math.log(peak) : 0) * (h - 3)).toFixed(1));
+  check("the stack's boundaries are on a log axis, last request: write 2, +input 4, +cached 44",
         [edge(svg, "cache_write"), edge(svg, "input"), edge(svg, "cache_read")].map((e) => e[e.length - 1]),
-        [logY(8), logY(12), logY(112)]);
+        [logY(2), logY(4), logY(44)]);
   check("write is lowest, input above it, cached input highest",
-        logY(8) > logY(12) && logY(12) > logY(112), true);
+        logY(2) > logY(4) && logY(4) > logY(44), true);
   const huge = ctx.chart({ ...series("full"), points: [0, 1, 2, 3].map((i) => ({
-    t: 1000 + i * 100, input: 1e5 * (i + 1), cache_read: 2e8 * (i + 1), cache_write: 3e3 })) }, true);
+    t: 1000 + i * 100, n: i + 1, count: 1, input: 1e5 * (i + 1), cache_read: 2e8 * (i + 1), cache_write: 3e3 })) }, true);
   check("the zoomed log axis has a rule and a label at 1k and 1M, none at 1B above the maximum",
         huge.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").map((k) => k.textContent),
         ["1k", "1M"]);
-  check("a small axis has no decade rules (112 is under 1k)",
+  check("a small axis has no decade rules (44 is under 1k)",
         big.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").length, 0);
-  check("the axis row has the span start and now only; the height label is in the chart",
-        big.kids[1].kids.map((k) => k.textContent), ["6m ago", "now"]);
-  check("the tooltip counts the whole window and the swap",
-        [small.title.startsWith("112 tokens sent over"), small.title.includes("1 profile swap")],
-        [true, true]);
+  check("the axis row names the first, the middle and the last request with their times",
+        big.kids[1].kids.map((k) => k.textContent), ["#1 · 6m ago", "#3 · 3m ago", "#4 · 1m ago"]);
+  check("the tooltip counts the requests, names the last and largest context and the swap",
+        [small.title.startsWith("context of 4 requests over 6m; last 44, largest 44"),
+         small.title.includes("1 profile swap"), small.title.includes("1 compaction")],
+        [true, true, true]);
+  const lone = ctx.chart({ ...series("cap"), points: [series("cap").points[0]], compactions: [], swaps: [] }, true);
+  check("a single request is drawn across the chart, its axis names it once",
+        [lone.kids[0].kids[1].attrs.points.split(" ").length, lone.kids[1].kids.map((k) => k.textContent)],
+        [2, ["#1 · 6m ago"]]);
+  const ps = series("cap").points;
+  check("a time maps to a place between the requests around it",
+        [ctx.indexAt(ps, 500), ctx.indexAt(ps, 1000), ctx.indexAt(ps, 1150), ctx.indexAt(ps, 1250), ctx.indexAt(ps, 9999)],
+        [0, 0, 1.5, 2.5, 3]);
   const bare = ctx.chart({ ...series("cap"), swaps: undefined, compactions: [] }, false);
   check("a series without swap records draws no swap mark",
         bare.kids[0].kids.some((k) => k.attrs.class === "term-series-swap"), false);

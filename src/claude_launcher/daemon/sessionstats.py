@@ -593,55 +593,64 @@ def summarize(main: StatsReader, sides: List[StatsReader], unit: str,
 
 # -- timeline ---------------------------------------------------------------
 
-#: The terminal overlay's chart: how many buckets a series is cut into, and
-#: the longest span the small chart shows (the hover view shows the whole
+#: The terminal overlay's chart: how many requests it draws at most, and the
+#: longest span the small chart shows (the hover view shows the whole
 #: conversation).
-SERIES_POINTS = 120
+SERIES_POINTS = 600
+SERIES_POINTS_MAX = 2000
 SERIES_CAP_S = 12 * 3600.0
 SERIES_WINDOWS = ("cap", "full")
 
 
 def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
            points: int = SERIES_POINTS, now: Optional[float] = None) -> dict:
-    """Fresh input, cache read and cache write per time bucket, from the
-    first request of the conversation (at most :data:`SERIES_CAP_S` back for
+    """The context size of each request of the conversation, in request order,
+    from its first request (at most :data:`SERIES_CAP_S` back for
     ``window="cap"``) up to ``now``, plus the times of its compactions.
 
-    The span ends at ``now`` and not at the last request, so an idle session
-    shows its idle tail. Output tokens are left out: the chart draws what was
-    sent to the model.
+    A request's context is what it sent to the model: fresh input, cache read
+    and cache write added. Subagent requests run in their own context and are
+    left out (``sides`` is accepted for the callers that pass the followers),
+    as is the output. After a compaction the next request's context is the
+    summary, so the series falls there.
+
+    Each point is one request (``n`` = its number from the start of the
+    conversation). Past ``points`` requests, consecutive requests are grouped
+    and a point is the largest of its group, so a fall stays a fall; ``count``
+    says how many requests a point stands for. ``until`` is ``now``, so the
+    idle time since the last request is known to the caller.
     """
     if window not in SERIES_WINDOWS:
         raise ValueError(f"window must be one of {', '.join(SERIES_WINDOWS)}")
-    points = max(2, min(int(points), 480))
+    points = max(2, min(int(points), SERIES_POINTS_MAX))
     end = time.time() if now is None else now
-    requests = sorted(main.requests + [r for s in sides for r in s.requests])
+    requests = sorted(r for r in main.requests if not r[5])
     if not requests:
-        return {"window": window, "points": [], "compactions": [], "bucket_s": 0,
+        return {"window": window, "points": [], "compactions": [], "count": 0,
                 "since": None, "until": end}
     first = requests[0][0]
     start = first if window == "full" else max(first, end - SERIES_CAP_S)
     end = max(end, requests[-1][0])
     start = min(start, end - 60.0)
-    width = (end - start) / points
-    rows = [[start + i * width, 0, 0, 0] for i in range(points)]
-    for at, fresh, cache_read, cache_write, _out, _side in requests:
-        if at < start:
-            continue
-        row = rows[min(points - 1, int((at - start) / width))]
-        row[1] += fresh
-        row[2] += cache_read
-        row[3] += cache_write
+    numbered = [(n, r) for n, r in enumerate(requests, 1) if r[0] >= start]
+    step = max(1, -(-len(numbered) // points))
+    rows = []
+    for i in range(0, len(numbered), step):
+        group = numbered[i:i + step]
+        n, (at, fresh, cache_read, cache_write, _out, _side) = max(
+            group, key=lambda g: g[1][1] + g[1][2] + g[1][3])
+        rows.append({"t": group[0][1][0], "n": group[0][0], "count": len(group),
+                     "input": fresh, "cache_read": cache_read,
+                     "cache_write": cache_write})
     return {
         "window": window,
         "since": first,
         "until": end,
         "start": start,
-        "bucket_s": width,
-        "points": [{"t": t, "input": a, "cache_read": b, "cache_write": c}
-                   for t, a, b, c in rows],
+        "points": rows,
         "compactions": [b for b in sorted(main.bounds) if start <= b <= end],
         "requests": len(requests),
+        "count": len(numbered),
     }
 
 

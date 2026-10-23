@@ -437,19 +437,47 @@ def read_series(path, window="cap", points=12, now=None):
     return sessionstats.series(main.reader, [], window, points, now)
 
 
-def test_series_buckets_the_three_input_parts_and_marks_compactions(tmp_path):
+def test_series_is_the_context_of_each_request_in_order_and_marks_compactions(tmp_path):
     path = write(tmp_path / "t.jsonl",
                  reply("a", at(0), fresh=1, read=10, write=100, out=7),
                  reply("b", at(0, 30), fresh=2, read=20, write=200),
                  compaction(at(0, 45)),
-                 reply("c", at(1), fresh=4, read=40, write=400))
-    got = read_series(path, points=4, now=_epoch(at(1)))
-    parts = [(p["input"], p["cache_read"], p["cache_write"]) for p in got["points"]]
-    # Four 15-minute buckets from 00:00 to 01:00; the request at 01:00 sits
-    # in the last one. Output tokens are not drawn.
-    assert parts == [(1, 10, 100), (0, 0, 0), (2, 20, 200), (4, 40, 400)]
+                 reply("c", at(1), fresh=4, read=5, write=40))
+    got = read_series(path, now=_epoch(at(1)))
+    parts = [(p["n"], p["input"], p["cache_read"], p["cache_write"], p["count"])
+             for p in got["points"]]
+    # One point per request, in order, whatever the time between them; output
+    # tokens are not drawn. The request after the compaction is the summary:
+    # its context is smaller than the one before (the fall the chart shows).
+    assert parts == [(1, 1, 10, 100, 1), (2, 2, 20, 200, 1), (3, 4, 5, 40, 1)]
+    assert [p["t"] for p in got["points"]] == [_epoch(at(0)), _epoch(at(0, 30)), _epoch(at(1))]
     assert got["compactions"] == [_epoch(at(0, 45))]
-    assert got["bucket_s"] == 900 and got["requests"] == 3
+    assert got["requests"] == 3 and got["count"] == 3
+    totals = [p["input"] + p["cache_read"] + p["cache_write"] for p in got["points"]]
+    assert totals[2] < totals[1]
+
+
+def test_series_leaves_subagent_requests_out_of_the_context(tmp_path):
+    path = write(tmp_path / "t.jsonl",
+                 reply("a", at(0), read=10),
+                 reply("s", at(0, 10), read=999, side=True),
+                 reply("b", at(0, 20), read=20))
+    got = read_series(path, now=_epoch(at(1)))
+    assert [p["cache_read"] for p in got["points"]] == [10, 20]
+    assert got["requests"] == 2
+
+
+def test_series_groups_requests_past_the_point_limit_and_keeps_the_largest(tmp_path):
+    reads = [10, 50, 30, 5, 6, 7, 90]      # a fall at the fourth request
+    path = write(tmp_path / "t.jsonl",
+                 *[reply(f"r{i}", at(0, i), read=v) for i, v in enumerate(reads)])
+    got = read_series(path, points=3, now=_epoch(at(1)))
+    # Seven requests in groups of three: the largest of each group is drawn,
+    # numbered and timed by the group's first request.
+    assert [(p["n"], p["count"], p["cache_read"]) for p in got["points"]] == [
+        (1, 3, 50), (4, 3, 7), (7, 1, 90)]
+    assert [p["t"] for p in got["points"]] == [_epoch(at(0, 0)), _epoch(at(0, 3)), _epoch(at(0, 6))]
+    assert got["requests"] == 7 and got["count"] == 7
 
 
 def test_series_cap_window_keeps_the_last_twelve_hours_and_full_keeps_all(tmp_path):
@@ -460,11 +488,13 @@ def test_series_cap_window_keeps_the_last_twelve_hours_and_full_keeps_all(tmp_pa
     now = _epoch(at(21))
     capped = read_series(path, "cap", now=now)
     assert capped["start"] == now - sessionstats.SERIES_CAP_S
-    assert sum(p["cache_read"] for p in capped["points"]) == 7
+    # The request keeps its number from the start of the conversation.
+    assert [(p["n"], p["cache_read"]) for p in capped["points"]] == [(2, 7)]
     assert capped["compactions"] == []          # the compaction is older than the cap
+    assert capped["requests"] == 2 and capped["count"] == 1
     full = read_series(path, "full", now=now)
     assert full["start"] == _epoch(at(0))
-    assert sum(p["cache_read"] for p in full["points"]) == 12
+    assert [(p["n"], p["cache_read"]) for p in full["points"]] == [(1, 5), (2, 7)]
     assert full["compactions"] == [_epoch(at(1))]
 
 
@@ -528,8 +558,8 @@ def test_the_token_series_endpoint_reads_the_session(home, tmp_path):
                                     headers=bearer)
             assert resp.status == 200
             body = await resp.json()
-            assert body["available"] and len(body["points"]) == 8
-            assert sum(p["cache_read"] for p in body["points"]) == 50
+            assert body["available"] and len(body["points"]) == 1
+            assert [(p["n"], p["cache_read"]) for p in body["points"]] == [(1, 50)]
             assert len(body["compactions"]) == 1
             assert body["swaps"] == []
             mgr.events.rows(mgr._sessions["s1"]).append(
