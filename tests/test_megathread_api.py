@@ -75,6 +75,10 @@ class FakeManager:
         self.sessions = {s.sdef.name: s for s in sessions}
         self.exit_hooks = []
 
+    def list(self):
+        """The registry, as the draft endpoint reads the whole fleet."""
+        return list(self.sessions.values())
+
     def get(self, name):
         if name not in self.sessions:
             raise KeyError(name)
@@ -552,11 +556,36 @@ def test_t19_the_rail_rows_carry_every_field_the_member_picker_reads():
     send (claunch-cn8v6, REVIEWED: changes). Reading the constant here is what
     keeps a future trim of the poll from doing that again: these are exactly
     the keys `sessionLine`, `matchesFilter` and `statusTone` read.
+
+    The list of keys is not retyped here: it is read off the page source, so
+    a future row that starts drawing a new field fails this test instead of
+    silently reading a key the poll does not send (a previous review named
+    exactly that hole in an earlier hand-written list).
     """
+    import pathlib
+    import re
+
     from claude_launcher.daemon.api import RAIL_FIELDS
 
-    picker_reads = {"name", "status", "progress", "issue", "branch", "note", "role", "kind"}
-    assert picker_reads <= RAIL_FIELDS, sorted(picker_reads - RAIL_FIELDS)
+    page = (pathlib.Path(__file__).resolve().parent.parent
+            / "src/claude_launcher/web/static/megathread-page.js").read_text(encoding="utf-8")
+    # The picker's model: the lifecycle partition through the filter choices.
+    # Everything before it is the ring; everything after is the composer.
+    start = page.index("const CATEGORIES")
+    end = page.index("function createHint(")
+    model = page[start:end]
+    # A session line is built from `s.<key>` / `row.<key>`; the two orderings
+    # read their key from SORTS, so those keys are named here.
+    reads = set(re.findall(r"\b(?:s|row)\.([a-z_][a-z0-9_]*)", model))
+    reads |= {"created_at", "last_activity_at"}
+    # `progress` is the object the rail sends; nothing below the picker reads
+    # into another object's fields, so every name found is a top-level key.
+    assert reads <= RAIL_FIELDS, sorted(reads - RAIL_FIELDS)
+    # And the direction that matters more: these are the fields a row draws,
+    # so a pole that stops sending one is a blank line on every row.
+    for key in ("name", "status", "role", "project", "parent", "briefing",
+                "created_at", "last_activity_at", "issue", "branch", "note"):
+        assert key in reads, f"the picker no longer draws {key!r}"
 
 
 def test_t20_a_mention_that_names_only_a_guest_is_delivered_to_that_guest(tmp_path, monkeypatch):
@@ -616,3 +645,131 @@ def test_t21_an_exited_guest_beside_a_live_owner_leaves_the_row_delivered(tmp_pa
         assert megas.routes(mega["id"])["routes"][0]["delivered"] is True
 
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+# --------------------------------------------------------------------------- #
+# the create form's topic preview (claunch-vz96l)
+# --------------------------------------------------------------------------- #
+def test_t22_a_topic_preview_scores_the_fleet_and_writes_nothing(tmp_path, monkeypatch):
+    """The preview answers "which sessions is this topic for" before any
+    cluster exists: it must not open a thread, add a member, or type into a
+    session, and its spend lands on the draft ledger."""
+    seen = []
+
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        seen.append((questions, state["session"]["name"]))
+        return jev_answer(0.95 if state["session"]["name"] == "s1" else 0.05)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+
+    async def scenario(req, manager, threads, megas):
+        res = await req("POST", "/api/megathreads/draft", {"topic": "로그 형식 정리"})
+        # The draft question, not the routing one.
+        assert seen and seen[0][0][megathread_route.QUESTION_ID]["instructions"] \
+            == megathread_route.DRAFT_INSTRUCTIONS
+        assert sorted(name for _qs, name in seen) == ["s1", "s2"]
+        assert res["recommended"] == ["s1"]
+        assert res["scored"] == 2
+        scores = {m["session"]: m for m in res["members"]}
+        assert scores["s1"]["recommended"] is True and scores["s1"]["logit"] > 0
+        assert scores["s2"]["recommended"] is False
+        assert scores["s1"]["thread"] == "", "a session with no thread is scored, not given one"
+
+        # Nothing was created and nothing was typed.
+        assert manager.sessions["s1"].delivered == []
+        assert manager.sessions["s2"].delivered == []
+        assert threads.list("s1", closed=False)["threads"] == []
+        assert megas.list()["megathreads"] == []
+        # The ledger row is the only thing written, and it is a draft.
+        assert megas.usage_tokens(kind="draft") == 200
+        assert megas.usage_tokens(kind="route") == 0
+        assert res["budget_used_tokens"] == 200
+        assert res["ledger_error"] is None
+
+    run(tmp_path, scenario)
+
+
+def test_t23_the_preview_has_its_own_budget(tmp_path, monkeypatch):
+    """A routing's spend must not close the preview, and a preview's must not
+    close a routing: they are two ceilings over one ledger."""
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.9)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+
+    async def scenario(req, manager, threads, megas):
+        # The routing budget is already spent in full.
+        await req("POST", "/api/threads", {"to": "s1", "title": "a"})
+        mega = (await req("POST", "/api/megathreads",
+                          {"title": "m", "members": [{"session": "s1"}]}))["mega"]
+        megas.record_route(mega["id"], "spent", verdict="auto", threshold=2.197,
+                           tokens=1000)
+        # The preview still runs...
+        res = await req("POST", "/api/megathreads/draft", {"topic": "무엇이든"})
+        assert res["recommended"] == ["s1", "s2"]
+        assert res["budget_used_tokens"] == 200
+        # ...until its own ceiling is reached (the estimate is one capped
+        # state per candidate, which is why the ceiling is not tiny).
+        megas.record_route("", "spent on previews", kind="draft", verdict="none",
+                           threshold=2.197, tokens=19_000)
+        code, data = await req.raw("POST", "/api/megathreads/draft", {"topic": "또"})
+        assert code == 429, data
+        assert data["limit_tokens"] == 20_000 and data["used_tokens"] == 19_200
+        # And the routing budget did not move because of the previews.
+        assert megas.usage_tokens(kind="route") == 1000
+
+    run(tmp_path, scenario,
+        cfg={**CFG, "megathread_jev_budget_tokens": 1000,
+             "megathread_draft_budget_tokens": 20_000})
+
+
+def test_t24_the_preview_refuses_bad_input(tmp_path):
+    async def scenario(req, manager, threads, megas):
+        await req("POST", "/api/megathreads/draft", {}, status=400)
+        await req("POST", "/api/megathreads/draft", {"topic": "   "}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": ["s1", "s9"]}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": "s1"}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": []}, status=400)
+        await req("POST", "/api/megathreads/draft",
+                  {"topic": "x", "sessions": [f"s{i}" for i in range(41)]}, status=400)
+        # The settings endpoint reports the preview's own rolling usage.
+        settings = await req("GET", "/api/megathreads/settings")
+        assert settings["settings"]["draft_budget_tokens"] == 2_000_000
+        assert settings["settings"]["draft_budget_used_tokens"] == 0
+
+    run(tmp_path, scenario)
+
+
+def test_t25_a_preview_does_not_close_a_routing(tmp_path, monkeypatch):
+    """The other direction of t23, through the endpoint: ``POST /route`` used
+    to sum every ledger row, so a few previews spent the routing ceiling and
+    a real message came back 429 while no routing had spent anything
+    (claunch-vz96l review on d705569d)."""
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        return jev_answer(0.9, tokens=200)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+    text = "x" * 60
+
+    async def scenario(req, manager, threads, megas):
+        a, b, mega = await two_member_cluster(req)
+        preview = await req("POST", "/api/megathreads/draft", {"topic": "무엇이든"})
+        assert preview["budget_used_tokens"] == 400  # two members, 200 each
+        res = await req("POST", f"/api/megathreads/{mega['id']}/route", {"text": text})
+        # Both members clear the threshold, so the user picks: what matters
+        # here is that the routing was not refused by the preview's spend.
+        assert res["verdict"] == "choose"
+        assert res["budget_used_tokens"] == 400  # this routing's own spend only
+        # The routing ceiling still bites, counting route rows alone.
+        refused = await req("POST", f"/api/megathreads/{mega['id']}/route",
+                            {"text": text}, status=429)
+        assert refused["used_tokens"] == 400
+        assert refused["limit_tokens"] == 1000
+        # And the previews are still on their own ledger.
+        assert megas.usage_tokens(kind="draft") == 400
+
+    run(tmp_path, scenario, cfg={**CFG, "megathread_max_chars": 300,
+                                 "megathread_jev_budget_tokens": 1000})

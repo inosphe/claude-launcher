@@ -42,6 +42,14 @@ from . import jev, megathread_route as route_mod, paths
 
 log = logging.getLogger(__name__)
 
+#: How many sessions one preview may score. Each candidate is one Jev call,
+#: so the cap is a spend cap: a machine carrying a thousand session records
+#: would otherwise turn one click into a thousand requests. The page sends
+#: its own shortened list when the reader has narrowed the picker; this is
+#: the ceiling for the "score everything I can see" case, newest activity
+#: first.
+DRAFT_MAX_CANDIDATES = 40
+
 
 def _cfg() -> dict:
     return store_mod.daemon_config()
@@ -200,13 +208,17 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
     async def h_settings(request: web.Request) -> web.Response:
         cfg = await asyncio.to_thread(_cfg)
         pol = route_mod.policy(cfg)
-        used = await asyncio.to_thread(megas.usage_tokens)
+        used = await asyncio.to_thread(megas.usage_tokens, kind="route")
+        draft_used = await asyncio.to_thread(megas.usage_tokens, kind="draft")
         key, source = jev.resolve_key(cfg)
         return web.json_response({"settings": {
             **pol,
             "model_pin": str(cfg.get("jev_model_megathread") or ""),
             "budget_used_tokens": used,
             "budget_remaining_tokens": max(0, pol["budget_tokens"] - used) if pol["budget_tokens"] else None,
+            "draft_budget_used_tokens": draft_used,
+            "draft_budget_remaining_tokens": (max(0, pol["draft_budget_tokens"] - draft_used)
+                                              if pol["draft_budget_tokens"] else None),
             "key_set": bool(key),
             "key_source": source,
         }})
@@ -216,6 +228,7 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
         numbers = {
             "threshold_ratio": ("megathread_threshold_ratio", 1.0, None),
             "budget_tokens": ("megathread_jev_budget_tokens", 0.0, None),
+            "draft_budget_tokens": ("megathread_draft_budget_tokens", 0.0, None),
             "max_chars": ("megathread_max_chars", 200.0, 60000.0),
             "concurrency": ("megathread_concurrency", 1.0, 32.0),
         }
@@ -325,6 +338,108 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                             "error": str(exc)})
         return out
 
+    # -- the create form's preview -----------------------------------------
+    def draft_candidates() -> list:
+        """Every session a preview may score: the live fleet, newest
+        activity first, capped at :data:`DRAFT_MAX_CANDIDATES`.
+
+        Archived records are left out -- nobody is putting a retired session
+        into a new conversation -- and so is nothing else: a hold or a killed
+        record is still a place a thread can be written to, and the reader
+        sees its state in the picker before ticking it.
+        """
+        rows = []
+        for session in manager.list():
+            if getattr(session, "archived_at", None):
+                continue
+            try:
+                info = session.info() or {}
+            except Exception:  # noqa: BLE001 -- a record that will not answer
+                info = {}
+            rows.append({
+                "name": session.sdef.name,
+                "at": str(info.get("last_activity_at") or info.get("created_at") or ""),
+            })
+        rows.sort(key=lambda r: r["at"], reverse=True)
+        return [r["name"] for r in rows[:DRAFT_MAX_CANDIDATES]]
+
+    async def h_draft(request: web.Request) -> web.Response:
+        """Score a topic against sessions; write nothing but the ledger row.
+
+        The create form asks which sessions a topic belongs to before the
+        cluster exists, so this endpoint opens no thread and adds no member.
+        It spends Jev input tokens, and it is charged to its own rolling
+        budget (``megathread_draft_budget_tokens``) rather than to the
+        routing budget: a preview the user abandons must not eat the ceiling
+        that decides whether a real message reaches anyone.
+        """
+        body = await _body(request)
+        topic = str(body.get("topic") or "").strip()
+        if not topic:
+            return web.json_response({"error": "topic is required"}, status=400)
+        wanted = body.get("sessions")
+        if wanted is None:
+            sessions = await asyncio.to_thread(draft_candidates)
+        elif isinstance(wanted, list):
+            sessions = []
+            for entry in wanted:
+                name = str(entry or "").strip()
+                if name and name not in sessions:
+                    sessions.append(name)
+            missing = [name for name in sessions if not known(name)]
+            if missing:
+                return web.json_response(
+                    {"error": f"no such session: {', '.join(missing)}"}, status=400)
+            if len(sessions) > DRAFT_MAX_CANDIDATES:
+                return web.json_response(
+                    {"error": f"at most {DRAFT_MAX_CANDIDATES} sessions per preview"},
+                    status=400)
+        else:
+            return web.json_response({"error": "'sessions' is a list of names"}, status=400)
+        if not sessions:
+            return web.json_response({"error": "no sessions to score"}, status=400)
+
+        cfg = await asyncio.to_thread(_cfg)
+        pol = route_mod.policy(cfg)
+        limit = pol["draft_budget_tokens"]
+        if limit:
+            used = await asyncio.to_thread(megas.usage_tokens, kind="draft")
+            estimate = len(sessions) * (pol["max_chars"] // route_mod.CHARS_PER_TOKEN + 200) \
+                + len(topic) // route_mod.CHARS_PER_TOKEN
+            if used + estimate > limit:
+                exc = route_mod.BudgetExceeded(used, limit, estimate)
+                return web.json_response(
+                    {"error": str(exc), "used_tokens": used, "limit_tokens": limit,
+                     "estimated_tokens": estimate}, status=429)
+
+        result = await route_mod.draft(manager, threads, sessions, topic, cfg=cfg)
+        ledger_error = None
+        try:
+            await asyncio.to_thread(
+                megas.record_route, "", topic, kind="draft",
+                verdict="choose" if result["recommended"] else "none",
+                threshold=result["threshold"],
+                candidates=result["members"],
+                # A preview delivers nothing, so there is no chosen set: the
+                # user has not decided yet, and the log must not read as if
+                # the recommended members had been written to.
+                chosen=[],
+                tokens=result.get("tokens") or 0,
+                model=result.get("model") or pol["model"],
+                error="; ".join(f"{m['session']}: {m['error']}"
+                                for m in result["members"] if m.get("error"))[:500],
+            )
+        except Exception as exc:  # noqa: BLE001 -- the preview still stands
+            log.exception("megathread: could not log the draft preview")
+            ledger_error = str(exc)
+        used = await asyncio.to_thread(megas.usage_tokens, kind="draft")
+        return web.json_response({
+            **result,
+            "ledger_error": ledger_error,
+            "budget_used_tokens": used,
+            "budget_remaining_tokens": max(0, limit - used) if limit else None,
+        })
+
     async def h_route(request: web.Request) -> web.Response:
         mid = request.match_info["id"]
         body = await _body(request)
@@ -373,15 +488,18 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
             return web.json_response({
                 "verdict": "manual", "delivered": sent, "route": row,
                 "ledger_error": ledger_error,
-                "budget_used_tokens": await asyncio.to_thread(megas.usage_tokens),
+                "budget_used_tokens": await asyncio.to_thread(
+                    megas.usage_tokens, kind="route"),
             })
 
         async with cluster_lock(mid):
             # Budget: refuse before spending, not after. The estimate is rough
             # on purpose (a state is assembled per member), and over-counting
-            # only means the ceiling bites slightly early.
+            # only means the ceiling bites slightly early. Only ``route`` rows
+            # count here: the create form's previews have their own ceiling,
+            # and an abandoned topic must not close the way to a real message.
             if pol["budget_tokens"]:
-                used = await asyncio.to_thread(megas.usage_tokens)
+                used = await asyncio.to_thread(megas.usage_tokens, kind="route")
                 estimate = len(members) * (pol["max_chars"] // route_mod.CHARS_PER_TOKEN + 200) \
                     + len(text) // route_mod.CHARS_PER_TOKEN
                 if used + estimate > pol["budget_tokens"]:
@@ -408,9 +526,9 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                 # is whether any thread actually accepted the message; an
                 # exited session leaves a row but types nothing.
                 delivered=any(d.get("delivered") for d in delivered),
-                error="; ".join(f"{e['thread']}: {e['error']}"
+                error="; ".join(f"{e.get('thread') or e.get('session')}: {e['error']}"
                                 for e in judgment.get("errors") or [])[:500])
-            used = await asyncio.to_thread(megas.usage_tokens)
+            used = await asyncio.to_thread(megas.usage_tokens, kind="route")
         return web.json_response({
             **judgment,
             "delivered": delivered,
@@ -433,6 +551,9 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
     r.add_post("/api/megathreads", h_create)
     r.add_get("/api/megathreads/settings", h_settings)
     r.add_put("/api/megathreads/settings", h_put_settings)
+    # The preview's retry is a second POST of the same body: a separate
+    # route would be the same handler under another name.
+    r.add_post("/api/megathreads/draft", h_draft)
     r.add_get("/api/megathreads/{id}", h_get)
     r.add_get("/api/megathreads/{id}/routes", h_routes)
     r.add_post("/api/megathreads/{id}/status", h_status)

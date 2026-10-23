@@ -42,6 +42,7 @@ const CANDIDATES = [
   { session: "s2", thread: "th-b", p_mine: 0.9, p_not_mine: 0.1, logit: 2.2, choice: "mine", confidence: 0.9 },
 ];
 const posted = [];
+const drafts = [];
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
@@ -49,11 +50,47 @@ const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
     if (url.pathname === "/api/batch") { res.statusCode = 404; return res.end("{}"); }
     if (url.pathname === "/api/sessions") {
-      // The fields the rail poll really sends: branch and issue, no `task`.
+      // The fields the rail poll really sends: branch and issue, no `task`,
+      // and the two activity stamps the picker sorts by. `role` is left out
+      // on purpose — the real rail sends it empty on every live row
+      // (claunch-cn8v6), and the roster below is where it comes from.
       return res.end(JSON.stringify({ sessions: [
-        { name: "s1", status: "idle", branch: "s1-log-format" },
-        { name: "s2", status: "busy", issue: "claunch-cn8v6", branch: "s2-deploy" },
+        { name: "s1", status: "idle", branch: "s1-log-format", project: "claunch",
+          created_at: "2026-01-01T00:00:00Z", last_activity_at: "2026-01-02T00:00:00Z",
+          briefing: { "one-line-job-description": "로그 형식을 정한다" } },
+        { name: "s2", status: "exited", paused_at: "2026-01-03T00:00:00Z",
+          issue: "claunch-cn8v6", branch: "s2-deploy", project: "claunch",
+          created_at: "2026-01-02T00:00:00Z", last_activity_at: "2026-01-03T00:00:00Z" },
       ] }));
+    }
+    // The two joins the picker makes: the mesh roster (role + mesh) and the
+    // v2 run each session drives.
+    if (url.pathname === "/api/mesh") {
+      return res.end(JSON.stringify({ meshes: [{
+        name: "claunch", project: "claunch",
+        members: [{ session: "s1", role: "worker" }, { session: "s2", role: "reviewer" }],
+      }] }));
+    }
+    if (url.pathname === "/api/cflow2/rail") {
+      return res.end(JSON.stringify({ rows: {
+        s2: { workflow: "improv-worker-v2", status: "running", current: ["work"], gated: false },
+      } }));
+    }
+    if (url.pathname === "/api/megathreads/draft" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => body += chunk);
+      req.on("end", () => {
+        drafts.push(JSON.parse(body || "{}"));
+        return res.end(JSON.stringify({
+          threshold: 2.197, model: "jev-latest", tokens: 420, scored: 2,
+          members: [
+            { session: "s2", thread: "", p_mine: 0.93, logit: 2.6, recommended: true },
+            { session: "s1", thread: "", p_mine: 0.12, logit: -1.9, recommended: false },
+          ],
+          recommended: ["s2"], budget_used_tokens: 420, budget_remaining_tokens: 1999580,
+        }));
+      });
+      return;
     }
     if (url.pathname === "/api/megathreads") {
       return res.end(JSON.stringify({ megathreads: [MEGA], total: 1 }));
@@ -124,38 +161,84 @@ const server = http.createServer((req, res) => {
     const joinable = await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.map((e) => e.value));
     assert.deepEqual(joinable.sort(), ["s1", "s2"]);
 
-    // 2b. The member picker filters, counts the ticks, and says what the
-    //     create button will do instead of going quiet.
-    const pickerNames = () => page.$$eval("#megathreads-view .mt-new-session-row .mt-new-name",
+    // 2b. The create panel opens over the page, and its picker filters,
+    //     sorts, counts the ticks and says what the create button will do
+    //     instead of going quiet.
+    await page.click("#megathreads-view .mt-new-open");
+    await page.waitForSelector("#megathreads-view .mt-create-card");
+    const picker = "#megathreads-view .mt-create-card";
+    const pickerNames = () => page.$$eval(`${picker} .mt-new-session-row .mt-new-name`,
       (els) => els.map((e) => e.textContent));
-    assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"], "every session is offered");
-    // The row's second line comes from fields the daemon really sends
-    // (branch, issue): `task` is not in the rail poll, so a fixture that
-    // hands it over would pass while every live row stayed blank.
-    const pickerLines = await page.$$eval("#megathreads-view .mt-new-session-row .mt-new-line",
+    // Newest activity first: s2 (01-03) before s1 (01-02).
+    assert.deepEqual(await pickerNames(), ["s2", "s1"], "the default order is the newest activity");
+    // The second line comes from fields the daemon really sends (branch,
+    // issue): `task` is not in the rail poll, so a fixture that hands it
+    // over would pass while every live row stayed blank.
+    const pickerLines = await page.$$eval(`${picker} .mt-new-session-row .mt-new-line`,
       (els) => els.map((e) => e.textContent));
-    assert.deepEqual(pickerLines, ["s1-log-format", "claunch-cn8v6 · s2-deploy"],
+    assert.deepEqual(pickerLines, ["claunch-cn8v6 · s2-deploy", "s1-log-format"],
       `each row says what the session is on: ${JSON.stringify(pickerLines)}`);
-    await page.fill("#megathreads-view .mt-new-filter", "s2-deploy");
-    assert.deepEqual(await pickerNames(), ["s2"], "the branch is searchable");
-    await page.fill("#megathreads-view .mt-new-filter", "s2");
-    assert.deepEqual(await pickerNames(), ["s2"], "the filter narrows the list");
-    await page.fill("#megathreads-view .mt-new-filter", "no such session");
-    assert.equal((await pickerNames()).length, 0);
-    assert.ok((await page.textContent("#megathreads-view .mt-new-sessions")).includes("거른 결과가 없습니다"));
-    await page.fill("#megathreads-view .mt-new-filter", "");
+    // The joins: role and mesh from the roster, the run from the cflow rail,
+    // the briefing digest from the record.
+    const metas = await page.$$eval(`${picker} .mt-new-session-row .mt-new-meta`,
+      (els) => els.map((e) => e.textContent));
+    assert.ok(metas[0].includes("reviewer") && metas[0].includes("claunch"), metas[0]);
+    assert.ok(metas[0].includes("improv-worker-v2"), `the running cflow is on the row: ${metas[0]}`);
+    const briefs = await page.$$eval(`${picker} .mt-new-session-row .mt-new-brief`,
+      (els) => els.map((e) => e.textContent));
+    assert.deepEqual(briefs, ["로그 형식을 정한다"], "the briefing digest is its own line");
+
+    // The lifecycle filter: s2 is paused, so only it survives.
+    await page.click(`${picker} .mt-create-status[data-category="paused"]`);
+    assert.deepEqual(await pickerNames(), ["s2"]);
+    await page.click(`${picker} .mt-create-status[data-category="paused"]`);
     assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"]);
-    await page.check('#megathreads-view .mt-new-session[value="s2"]');
-    assert.equal(await page.textContent("#megathreads-view .mt-new-count"), "1개 선택");
-    assert.equal(await page.isDisabled("#megathreads-view .mt-new-clear"), false, "clear is live once a row is ticked");
-    await page.fill("#megathreads-view .mt-new input[type=text]", "two of you");
-    assert.equal(await page.textContent("#megathreads-view .mt-new-hint"), "1명으로 만듭니다");
-    assert.equal(await page.isDisabled("#megathreads-view .mt-new-create"), false);
-    await page.click("#megathreads-view .mt-new-clear");
-    assert.equal(await page.textContent("#megathreads-view .mt-new-count"), "0개 선택");
-    assert.ok((await page.textContent("#megathreads-view .mt-new-hint")).includes("빈"),
+
+    // The sort control: oldest activity first reverses the list.
+    await page.selectOption(`${picker} .mt-create-sort`, "activity-asc");
+    assert.deepEqual(await pickerNames(), ["s1", "s2"]);
+    await page.selectOption(`${picker} .mt-create-sort`, "activity-desc");
+
+    await page.fill(`${picker} .mt-new-filter`, "s2-deploy");
+    assert.deepEqual(await pickerNames(), ["s2"], "the branch is searchable");
+    await page.fill(`${picker} .mt-new-filter`, "s2");
+    assert.deepEqual(await pickerNames(), ["s2"], "the filter narrows the list");
+    await page.fill(`${picker} .mt-new-filter`, "no such session");
+    assert.equal((await pickerNames()).length, 0);
+    assert.ok((await page.textContent(`${picker} .mt-new-sessions`)).includes("거른 결과가 없습니다"));
+    await page.fill(`${picker} .mt-new-filter`, "");
+    assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"]);
+
+    // The Jev preview: type a topic, ask, and the recommended member comes
+    // back ticked and flagged. The user edits from there.
+    await page.fill(`${picker} .mt-create-topic-input`, "배포 로그 형식");
+    await page.click(`${picker} .mt-create-draft`);
+    await page.waitForSelector(`${picker} .mt-new-flag`);
+    assert.equal(drafts.length, 1, "one preview request");
+    assert.equal(drafts[0].topic, "배포 로그 형식");
+    assert.deepEqual(drafts[0].sessions.sort(), ["s1", "s2"], "the preview scores what is on screen");
+    assert.equal(await page.textContent(`${picker} .mt-new-count`), "1개 선택",
+      "the recommendation arrives ticked");
+    const flags = await page.$$eval(`${picker} .mt-new-flag`, (els) => els.map((e) => e.textContent));
+    assert.equal(flags.length, 1, "only the scored recommendation is flagged");
+    assert.ok(flags[0].includes("추천"));
+    assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("1명을 추천"),
+      "the panel says what the preview found");
+
+    await page.check(`${picker} .mt-new-session[value="s1"]`);
+    assert.equal(await page.textContent(`${picker} .mt-new-count`), "2개 선택");
+    assert.equal(await page.isDisabled(`${picker} .mt-new-clear`), false, "clear is live once a row is ticked");
+    await page.fill(`${picker} .mt-create-title`, "two of you");
+    assert.equal(await page.textContent(`${picker} .mt-new-hint`), "2명으로 만듭니다");
+    assert.equal(await page.isDisabled(`${picker} .mt-new-create`), false);
+    await page.click(`${picker} .mt-new-clear`);
+    assert.equal(await page.textContent(`${picker} .mt-new-count`), "0개 선택");
+    assert.ok((await page.textContent(`${picker} .mt-new-hint`)).includes("빈"),
       "an empty pick is warned about");
-    assert.equal(await page.isDisabled("#megathreads-view .mt-new-clear"), true);
+    assert.equal(await page.isDisabled(`${picker} .mt-new-clear`), true);
+    await page.click(`${picker} .mt-create-close`);
+    assert.equal(await page.$$eval("#megathreads-view .mt-create-card", (els) => els.length), 0,
+      "the panel closes");
 
     // 3. An ambiguous answer offers both members with their scores.
     await page.fill("#megathreads-view .mt-compose textarea", "both of you, the log line and the deploy");

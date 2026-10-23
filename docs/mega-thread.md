@@ -29,7 +29,7 @@ claunch-v5nhp. 여러 세션의 쓰레드에 **한 번의 입력**으로 말하�
 mega(id, title, status, created_at, updated_at)
 members(mega, session, thread, added_by, added_at)      PK (mega, thread)
 routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
-       delivered, tokens, model, error)
+       delivered, tokens, model, error, kind)
 ```
 
 - `routes`가 회계 원장이다. `tokens`는 그 라우팅이 쓴 Jev 입력 토큰의 합이고, 예산은 이 표의 최근 24시간
@@ -45,6 +45,9 @@ routes(seq, mega, body, at, verdict, threshold, candidates, chosen,
   `delivered: true`, `queued: false`다 — `queued`는 어느 터미널에도 타자되지 않았을 때만 참이다.
 - `verdict`: `auto`(한 멤버가 임계값 통과) / `choose`(둘 이상, 사용자 선택 대기) / `manual`(사용자가
   직접 고름) / `none`(아무도 통과 못 함) / `error`(모든 호출 실패).
+- `kind`: `route`(클러스터로 간 메시지) / `draft`(생성 폼의 주제 미리보기). `draft` 행은 클러스터가
+  없으므로 `mega`가 빈 문자열이고, 두 예산이 이 열로 갈린다. 스키마 2에서 더해졌고, 그 전에 쓰인
+  파일은 열을 얻으면서 기존 행이 전부 `route`로 남는다.
 
 ## 라우팅
 
@@ -136,6 +139,7 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 |---|---|---|
 | `megathread_threshold_ratio` | `9.0` | `mine`이 `not_mine`보다 몇 배 높아야 단독 라우팅인가 |
 | `megathread_jev_budget_tokens` | `10000000` | 최근 24시간 입력 토큰 상한. 0이면 무제한 |
+| `megathread_draft_budget_tokens` | `2000000` | 같지만 생성 폼의 주제 미리보기 몫. 0이면 무제한 |
 | `megathread_max_chars` | `12000` | 멤버 한 명의 state 길이 상한 |
 | `megathread_concurrency` | `8` | 동시에 보내는 Jev 호출 수 |
 | `jev_model` | `jev-latest` | 모든 기능의 기본 모델 |
@@ -155,6 +159,7 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 |---|---|---|
 | `GET` | `/api/megathreads?closed=` | 클러스터 목록 |
 | `POST` | `/api/megathreads` | `{title, members?: [{session, thread?}]}` 생성 |
+| `POST` | `/api/megathreads/draft` | `{topic, sessions?}` 주제를 세션들에 채점해 추천 목록을 돌려준다. 아무것도 만들지 않는다 |
 | `GET` | `/api/megathreads/{id}` | 멤버별 세션 상태·쓰레드 제목·안 읽은 수 |
 | `POST` | `/api/megathreads/{id}/status` | `{status: open\|closed}` 닫기·다시 열기. 다른 값은 400, 없는 클러스터는 404 |
 | `POST` | `/api/megathreads/{id}/members` | `{session, thread?}` 입장. 쓰레드가 없으면 그 세션의 최근 열린 쓰레드, 그것도 없으면 새로 연다 |
@@ -170,11 +175,13 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
   내리지 않음, state 조립(메시지 포함), 모델 전달, 실패 멤버의 토큰 계상, 삭제된 쓰레드가 다른 멤버를
   깨뜨리지 않음, 정책 기본값과 NaN 폴백.
 - `tests/test_megathread_api.py` — 입장 시 쓰레드 생성, 소유권 거절, 단독 라우팅이 **한 멤버에게만**
+  (그 밖에 주제 미리보기: 추천 목록, 아무것도 만들지 않음, 예산 분리, 잘못된 입력 거절)
   전달되는지, 비선택 쓰레드에 메시지 행이 없는지, 선택 후 전달과 중복 id, `none`/`error`에 전달 0건,
   예산 경계와 동시 라우팅 직렬화, `closed` 409, 닫기·다시 열기와 잘못된 status 400, NaN 거절,
   설정 조회·수정, 원장 실패가 전달을 500으로 바꾸지 않음.
-- `tests/web/megathread_check.js` — 링 배치·선 굵기·판정별 행과 문구·전송 본문·SVG 노드 수, 그리고
-  페이지가 주소·레일·`VIEWS`·라우터에 배선됐는지.
+- `tests/web/megathread_check.js` — 링 배치·선 굵기·판정별 행과 문구·전송 본문·SVG 노드 수, 생성 패널의
+  모델(수명주기 7구간, 정렬 4종, 부모-자식 위계, 프로젝트·메시·상태 필터, 행의 role/cflow/브리핑 조인),
+  그리고 페이지가 주소·레일·`VIEWS`·라우터에 배선됐는지.
 - 회귀: `tests/test_threads_store.py`, `tests/test_threads_api.py`, `tests/test_threads_mcp.py`,
   `tests/test_qa_nudge.py`, `tests/test_web_topology.py`.
 
@@ -213,8 +220,8 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 
 세 열이다.
 
-1. **왼쪽**: 클러스터 목록과 `새 mega thread`(제목 + 세션 체크박스). 만든 클러스터는 `#/megathreads/<id>`로
-   열린다.
+1. **왼쪽**: 클러스터 목록과 `＋ 새 mega thread`(생성 패널을 연다). 만든 클러스터는 `#/megathreads/<id>`로
+   열린다. 생성 패널은 아래 「생성 패널」.
 2. **가운데**: 원탁 SVG. 사용자 노드가 중심이고, 멤버 `(세션, 쓰레드)`가 링에 놓인다. 마지막 라우팅의
    logit이 중심에서 각 노드로 가는 선의 굵기다. 임계값을 넘은 노드는 초록, 0 이상은 노랑, 그 아래는 회색이며
    종료된 세션은 흐리게 그린다. 노드를 누르면 그 세션의 터미널로 간다.
@@ -234,6 +241,28 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 
 페이지가 열려 있는 동안 5초마다 목록·멤버·로그를 다시 읽는다. 라우터가 다른 페이지로 옮길 때
 `MegaThreadPage.stop()`이 폴링을 멈춘다.
+
+### 생성 패널 (claunch-vz96l)
+
+`＋ 새 mega thread`가 페이지 위에 패널(최대 980px × 86vh)을 연다. 예전에는 240px짜리 aside 안에
+200px 목록이 있어 여섯 줄만 보였고, 이름만으로는 세션을 구분할 수 없었다. 패널은 세 부분이다.
+
+1. **제목과 주제**: 제목은 필수다. 주제를 적고 `Jev로 멤버 추천`을 누르면 `POST /api/megathreads/draft`가
+   지금 필터를 통과한 세션(최대 40개, `DRAFT_MAX_CANDIDATES`)을 채점한다. 응답의 `recommended`가 체크로
+   들어오고, 임계값을 넘은 세션에는 `추천 p(mine)` 표시가 붙는다. 사용자는 그 체크를 직접 고친 뒤
+   `만들기`를 누른다 — 미리보기는 아무것도 만들지 않는다. 실패하면 사유와 `재시도` 버튼이 남고, 폼은
+   그대로 쓸 수 있다. 채점이 실패한 후보의 행은 `session`을 실어 돌아온다: 아직 열린 쓰레드가 없는
+   세션은 `thread`가 빈 문자열이라, thread id만으로는 어느 세션의 실패인지 가릴 수 없다.
+2. **정렬·필터**: 정렬은 활동/생성 × 최신/오래된 네 가지(`SORTS`), `부모-자식 위계` 체크박스는
+   `parent`로 트리를 만들고 들여쓴다(부모가 목록에 없으면 루트). 필터는 프로젝트·메시·수명주기
+   (`running · hold · paused · killed · delayed · failed · archived`, `session.py::session_category`와 같은
+   규칙)와 부분 일치 검색이다.
+3. **목록**: 행마다 이름, role(메시 로스터), 메시 이름, cflow2 런(workflow · status · 현재 노드), 프로젝트,
+   이슈·브랜치·note, 한 줄 브리핑. 값이 없는 줄은 그리지 않는다.
+
+세션 목록은 `/api/sessions?view=rail`(레코드) + `/api/mesh?view=rail`(role·메시) + `/api/cflow2/rail`
+(cflow2 런)을 세션 이름으로 조인해 만든다. 레일 자체의 `role`은 살아 있는 행에서 비어 있어
+(claunch-cn8v6 실측 0/26) 로스터가 유일한 출처다. 두 조인은 실패해도 목록을 막지 않는다.
 
 ### 좌하단 nav
 

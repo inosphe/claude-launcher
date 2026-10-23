@@ -5333,7 +5333,8 @@ Daemon settings live under `daemon:` in `~/.claunch.yaml`
 `role_reminder_interval`, `prompt_pack_reminder`,
 `prompt_pack_reminder_interval`, `resume_nudge`, `jev_model`,
 `jev_model_qa_nudge`, `jev_model_megathread`, `megathread_threshold_ratio`,
-`megathread_jev_budget_tokens`, `megathread_max_chars`,
+`megathread_jev_budget_tokens`, `megathread_draft_budget_tokens`,
+`megathread_max_chars`,
 `megathread_concurrency`); runtime
 state (pid/port file, auth token, session logs) stays machine-local under
 `~/.claude-launcher/daemon/`.

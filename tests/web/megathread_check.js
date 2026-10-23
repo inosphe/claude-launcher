@@ -28,16 +28,24 @@ function slice(name) {
 const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
   "shortTitle", "verdictLine", "deliveryLine", "ledgerLine", "isOpen", "statusLabel",
   "statusTone", "sessionLine", "matchesFilter", "pickerRows", "createHint",
-  "pct", "logitText", "esc", "ring"];
+  "pct", "logitText", "esc", "ring",
+  // the create panel's model (claunch-vz96l)
+  "sessionCategory", "metaLine", "briefLine", "sortRows", "hierarchyOrder",
+  "keepsRow", "filterChoices"];
 const ctx = {};
 vm.createContext(ctx);
 // ringLayout's defaults read the page's own stage constants; take them from
 // the source rather than repeating their values here (a drift would otherwise
 // pass this check while the ring drew somewhere else).
-const CONSTS = ["STAGE_W", "STAGE_H", "RING_RX", "RING_RY"].map((name) => {
+const CONST_NAMES = ["STAGE_W", "STAGE_H", "RING_RX", "RING_RY", "CATEGORIES", "SORTS",
+  "CATEGORY_KO"];
+const CONSTS = CONST_NAMES.map((name) => {
   const found = src.match(new RegExp(`const ${name} = ([^;]+);`));
   if (!found) throw new Error(`cannot locate const ${name} in megathread-page.js`);
-  return `const ${name} = ${found[1]};`;
+  // A `const` in a vm script is scoped to the script, not to the context, so
+  // the check below reads it off this explicit assignment rather than
+  // pretending it became a global.
+  return `const ${name} = ${found[1]};\nglobalThis.${name} = ${name};`;
 });
 vm.runInContext(CONSTS.concat(NAMES.map(slice)).join("\n"), ctx);
 /* Values built inside the vm carry that realm's prototypes, which strict
@@ -159,15 +167,111 @@ assert.equal(ctx.matchesFilter(roster[2], "deploy"), true, "a note or branch mat
 assert.equal(ctx.matchesFilter(roster[2], "claunch-xyz"), true);
 assert.equal(ctx.matchesFilter(roster[0], "s1"), false);
 
-const picked = plain(ctx.pickerRows(roster, "", ["s2"]));
-assert.deepEqual(picked.map((r) => r.name), ["s1", "s2", "s3"], "rows are sorted by name");
+const picked = plain(ctx.pickerRows(roster, { picked: ["s2"] }));
+assert.deepEqual(picked.map((r) => r.name), ["s1", "s2", "s3"],
+  "no readings on any row: the name breaks the tie");
 assert.deepEqual(picked.map((r) => r.checked), [false, true, false], "a tick survives the next repaint");
 assert.equal(picked[0].line, "worker · s1-log-format");
 assert.equal(picked[1].tone, "gone");
 assert.equal(picked[2].tone, "live");
-assert.deepEqual(plain(ctx.pickerRows(roster, "deploy", [])).map((r) => r.name), ["s3"]);
-assert.deepEqual(plain(ctx.pickerRows(roster, "nothing here", [])), []);
-assert.deepEqual(plain(ctx.pickerRows(null, "", null)), []);
+assert.deepEqual(plain(ctx.pickerRows(roster, { query: "deploy" })).map((r) => r.name), ["s3"]);
+assert.deepEqual(plain(ctx.pickerRows(roster, { query: "nothing here" })), []);
+assert.deepEqual(plain(ctx.pickerRows(null, {})), []);
+
+/* ---- the lifecycle partition (claunch-vz96l) ---------------------------
+   Seven categories, by the rule daemon/session.py::session_category uses:
+   archived first, then an exited record's marker (hold/delayed, failed,
+   paused, killed), and running for everything still up. */
+assert.equal(ctx.sessionCategory({ status: "idle" }), "running");
+assert.equal(ctx.sessionCategory({ status: "starting" }), "running");
+assert.equal(ctx.sessionCategory({ status: "exited" }), "killed");
+assert.equal(ctx.sessionCategory({ status: "exited", exited_at: "x" }), "killed");
+assert.equal(ctx.sessionCategory({ status: "exited", paused_at: "x" }), "paused");
+assert.equal(ctx.sessionCategory({ status: "exited", held_at: "x" }), "hold");
+assert.equal(ctx.sessionCategory({ status: "exited", held_at: "x", delayed_at: "y" }), "delayed");
+assert.equal(ctx.sessionCategory({ status: "exited", failed_at: "x" }), "failed");
+assert.equal(ctx.sessionCategory({ status: "exited", archived_at: "x" }), "archived",
+  "an archived record is archived however it ended");
+assert.equal(ctx.sessionCategory({ status: "idle", archived_at: "x" }), "archived");
+assert.deepEqual(Array.from(ctx.CATEGORIES),
+  ["running", "hold", "paused", "killed", "delayed", "failed", "archived"],
+  "the filter offers the same seven the partition defines");
+
+/* ---- ordering ---------------------------------------------------------
+   The two axes the session list offers, each both ways. A row with no
+   reading sorts last in the newest-first order rather than heading it. */
+const timed = [
+  { name: "b", created_at: "2026-01-02T00:00:00Z", last_activity_at: "2026-01-05T00:00:00Z" },
+  { name: "a", created_at: "2026-01-01T00:00:00Z", last_activity_at: "2026-01-09T00:00:00Z" },
+  { name: "c", created_at: "2026-01-03T00:00:00Z" },
+];
+assert.deepEqual(plain(ctx.sortRows(timed, "activity-desc")).map((r) => r.name), ["a", "b", "c"]);
+assert.deepEqual(plain(ctx.sortRows(timed, "activity-asc")).map((r) => r.name), ["b", "a", "c"]);
+assert.deepEqual(plain(ctx.sortRows(timed, "created-asc")).map((r) => r.name), ["a", "b", "c"]);
+assert.deepEqual(plain(ctx.sortRows(timed, "created-desc")).map((r) => r.name), ["c", "b", "a"]);
+assert.deepEqual(plain(ctx.sortRows(timed, "nonsense")).map((r) => r.name), ["a", "b", "c"],
+  "an unknown key falls back to the default order, not to whatever the daemon sent");
+
+/* ---- the parent/child tree -------------------------------------------- */
+const tree = [
+  { name: "kid", parent: "root" },
+  { name: "root" },
+  { name: "other" },
+];
+const ordered = plain(ctx.hierarchyOrder(tree));
+assert.deepEqual(ordered.map((e) => e.row.name), ["root", "kid", "other"]);
+assert.deepEqual(ordered.map((e) => e.depth), [0, 1, 0]);
+const orphan = plain(ctx.hierarchyOrder([{ name: "x", parent: "gone" }]));
+assert.deepEqual(orphan.map((e) => [e.row.name, e.depth]), [["x", 0]],
+  "a parent that is not in the list leaves the row a root");
+const cycle = plain(ctx.hierarchyOrder([{ name: "a", parent: "b" }, { name: "b", parent: "a" }]));
+assert.equal(cycle.length, 2, "a cycle cannot make a row disappear");
+
+/* ---- the filters -------------------------------------------------------
+   Project, mesh and lifecycle are separate axes, and an empty one keeps
+   everything. The mesh filter has to tell "in no mesh" apart from "any". */
+const fleet = [
+  { name: "s1", project: "p", status: "idle", last_activity_at: "2026-01-02T00:00:00Z" },
+  { name: "s2", project: "q", status: "exited", paused_at: "x", last_activity_at: "2026-01-03T00:00:00Z" },
+  { name: "s3", status: "exited", archived_at: "x" },
+];
+const meshOf = { s1: { mesh: "m1", role: "worker" }, s2: { mesh: "m2", role: "reviewer" } };
+assert.deepEqual(plain(ctx.pickerRows(fleet, { project: "p" })).map((r) => r.name), ["s1"]);
+assert.deepEqual(plain(ctx.pickerRows(fleet, { mesh: "m1", meshOf })).map((r) => r.name), ["s1"]);
+assert.deepEqual(plain(ctx.pickerRows(fleet, { mesh: "-", meshOf })).map((r) => r.name), ["s3"],
+  "'메시 없음' is the sessions in no mesh");
+assert.deepEqual(plain(ctx.pickerRows(fleet, { statuses: new Set(["archived"]) })).map((r) => r.name), ["s3"]);
+assert.deepEqual(plain(ctx.pickerRows(fleet, { statuses: new Set(["paused"]) })).map((r) => r.name), ["s2"]);
+assert.deepEqual(plain(ctx.pickerRows(fleet, { statuses: new Set() })).map((r) => r.name),
+  ["s2", "s1", "s3"], "an empty status set keeps everything (default order: newest activity)");
+assert.deepEqual(plain(ctx.pickerRows(fleet, { sort: "created-asc", hierarchy: true }))
+  .map((r) => r.name), ["s1", "s2", "s3"],
+  "no row has a created_at, so the name breaks every tie");
+
+/* ---- what a row says about the session ---------------------------------
+   role comes from the mesh roster (the rail's own `role` is empty on every
+   live row), cflow from /api/cflow2/rail, and the briefing digest from the
+   rail. Each is optional: a daemon that does not answer one still lists
+   the session. */
+const rich = {
+  name: "s9", project: "claunch", issue: "claunch-abc", branch: "s9-work",
+  briefing: { "one-line-job-description": "정렬 UI를 만든다" },
+};
+const meta = ctx.metaLine(rich, { s9: { mesh: "claunch", role: "worker" } },
+  { s9: { workflow: "improv-worker-v2", status: "running", current: ["work"] } });
+assert.ok(meta.includes("worker"), "the roster's role is on the row");
+assert.ok(meta.includes("claunch"), "the project and the mesh are on the row");
+assert.ok(meta.includes("improv-worker-v2") && meta.includes("work"), "the cflow run is on the row");
+assert.equal(ctx.metaLine({ name: "s9" }, {}, {}), "", "no joins, no line — not a row of separators");
+assert.equal(ctx.briefLine(rich), "정렬 UI를 만든다");
+assert.equal(ctx.briefLine({ briefing: "a string digest" }), "a string digest");
+assert.equal(ctx.briefLine({}), "");
+
+const choices = plain(ctx.filterChoices(
+  [{ project: "b" }, { project: "a" }, { project: "a" }, {}],
+  { s1: { mesh: "m2" }, s2: { mesh: "m1" } }));
+assert.deepEqual(choices.projects, ["a", "b"]);
+assert.deepEqual(choices.meshes, ["m1", "m2"]);
 
 // The line above the button says why it is off instead of staying silent.
 assert.equal(ctx.createHint("", 2), "제목을 입력하세요");
@@ -199,7 +303,12 @@ assert.ok(styles.includes("#megathreads-view"), "the page has styles");
 assert.ok(/--rail-nav-rows:\s*\d+/.test(styles), "the rail's hover cap is a named count");
 // The picker's parts have to exist in the stylesheet too, or the class names
 // above name nothing a reader can see.
-for (const cls of [".mt-new-filter", ".mt-new-count", ".mt-new-session-row.on", ".mt-new-dot.live"]) {
+for (const cls of [".mt-new-filter", ".mt-new-count", ".mt-new-session-row.on", ".mt-new-dot.live",
+  // the create panel (claunch-vz96l): the dialog, its two rails and the
+  // controls that are new with it
+  ".mt-create-overlay", ".mt-create-card", ".mt-create-list", ".mt-create-controls",
+  ".mt-create-status.on", ".mt-create-draft", ".mt-create-retry", ".mt-new-flag",
+  ".mt-new-meta", ".mt-new-brief"]) {
   assert.ok(styles.includes(cls), `the picker draws ${cls}`);
 }
 
