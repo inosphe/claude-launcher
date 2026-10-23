@@ -222,9 +222,19 @@ def merge_entry(previous, entry) -> Dict[str, object]:
       ``api_key_set`` instead). An entry without one therefore means "leave
       the stored key alone", not "remove it".
 
-    The pre-schema spellings of the credential, ``api-key`` and ``env``, need
-    no case of their own: neither is a :data:`FORM_FIELDS` member, so the rule
-    above already keeps them, and neither is sent for the form to post back.
+    The pre-schema ``env`` block needs no case of its own: it is not a
+    :data:`FORM_FIELDS` member, so the rule above keeps it, and it is not sent
+    for the form to post back.
+
+    The pre-schema ``api-key`` does need one, and gets exactly one. It is kept
+    by the rule above like any other undrawn key -- but when the same save
+    carries a new ``api_key``, keeping it would leave the entry holding the old
+    secret under one spelling and the new one under another.
+    :func:`provider_spec.from_entry` prefers ``api_key``, so the copy left
+    behind is unread and permanent: "typing a key replaces the stored one" was
+    true of what the launcher used and false of the file. So a save that names
+    a non-empty ``api_key`` drops ``api-key``; a save that names none keeps it,
+    because the form still cannot clear what it never showed.
 
     Removing any of these by hand is a ``~/.claunch.yaml`` edit.
     """
@@ -249,6 +259,11 @@ def merge_entry(previous, entry) -> Dict[str, object]:
         out["harness_options"] = merged
     if "api_key" not in new and old.get("api_key"):
         out["api_key"] = old["api_key"]
+    if _holds_secret(new.get("api_key")) and LEGACY_CREDENTIAL_FIELD in out:
+        # One secret, two spellings: the key this save wrote is the one the
+        # launcher will read (``provider_spec.from_entry`` prefers ``api_key``),
+        # so the pre-schema copy is not preserved -- it is superseded.
+        out.pop(LEGACY_CREDENTIAL_FIELD, None)
     return out
 
 
@@ -303,12 +318,15 @@ def _pin(doc: dict, profile: str, provider: str) -> Profile:
     return target
 
 
+#: The pre-schema spelling of ``api_key``, still carried by an unmigrated entry
+#: (:data:`provider_spec.LEGACY_PROVIDER_FIELDS`). It names the same secret.
+LEGACY_CREDENTIAL_FIELD = "api-key"
+
 #: Top-level spellings a stored credential can take. ``api_key`` is the schema
-#: field the form draws; ``api-key`` is the pre-schema spelling an unmigrated
-#: entry still carries (:data:`provider_spec.LEGACY_PROVIDER_FIELDS`). Both name
-#: the same secret -- :func:`provider_spec.from_entry` reads one as the other --
-#: so both are treated as one.
-CREDENTIAL_FIELDS: Tuple[str, ...] = ("api_key", "api-key")
+#: field the form draws; :data:`LEGACY_CREDENTIAL_FIELD` is the older one. Both
+#: name the same secret -- :func:`provider_spec.from_entry` reads one as the
+#: other -- so both are treated as one.
+CREDENTIAL_FIELDS: Tuple[str, ...] = ("api_key", LEGACY_CREDENTIAL_FIELD)
 
 #: The pre-schema ``env`` block. ``claunch migrate-config`` retires it, but a
 #: config that has not been migrated still carries one, and its
@@ -317,15 +335,20 @@ CREDENTIAL_FIELDS: Tuple[str, ...] = ("api_key", "api-key")
 LEGACY_ENV_FIELD = "env"
 
 
+def _holds_secret(value) -> bool:
+    """Whether a credential field carries something rather than nothing."""
+    return bool(str(value or "").strip())
+
+
 def _stored_credential(entry) -> bool:
     """Whether the stored entry holds a credential, under any spelling above."""
     if not isinstance(entry, dict):
         return False
-    if any(str(entry.get(key) or "").strip() for key in CREDENTIAL_FIELDS):
+    if any(_holds_secret(entry.get(key)) for key in CREDENTIAL_FIELDS):
         return True
     legacy = entry.get(LEGACY_ENV_FIELD)
     if isinstance(legacy, dict):
-        return bool(str(legacy.get(provider_spec.CLAUDE_AUTH_TOKEN) or "").strip())
+        return _holds_secret(legacy.get(provider_spec.CLAUDE_AUTH_TOKEN))
     return False
 
 

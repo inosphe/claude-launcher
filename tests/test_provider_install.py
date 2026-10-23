@@ -374,6 +374,52 @@ def test_a_save_over_a_legacy_credential_keeps_it(home):
     assert entry["env"] == {"ANTHROPIC_AUTH_TOKEN": "t"}
 
 
+def test_a_new_key_drops_the_legacy_hyphen_spelling(home):
+    """One secret, two spellings: a save that writes ``api_key`` stores one copy.
+
+    ``provider_spec.from_entry`` prefers ``api_key``, so the ``api-key`` such a
+    save used to keep was never read again -- replaced as far as the launcher is
+    concerned and still on disk as a second copy of the secret.
+    """
+    previous = _valid(**{"api-key": "sk-legacy-secret"})
+    merged = provider_install.merge_entry(previous, _valid(api_key="sk-typed"))
+    assert "api-key" not in merged
+    assert merged["api_key"] == "sk-typed"
+
+
+def test_a_save_that_names_no_key_keeps_the_legacy_hyphen_spelling(home):
+    """The preservation rule still stands -- this narrows it, it does not remove it.
+
+    The form never shows ``api-key``, and a control that does not exist cannot
+    be cleared, so a save that names no key must leave the stored one alone.
+    """
+    previous = _valid(**{"api-key": "sk-legacy-secret"})
+    # ``app.js`` omits a blank input rather than posting an empty string; a
+    # whitespace value is not a key either, so neither case supersedes anything.
+    for entry in (_valid(), _valid(api_key="   ")):
+        merged = provider_install.merge_entry(previous, entry)
+        assert merged["api-key"] == "sk-legacy-secret"
+
+
+def test_a_save_that_names_a_key_leaves_the_legacy_env_block_alone(home):
+    """``env`` is not this credential's spelling -- it can hold other variables."""
+    previous = _valid(env={"ANTHROPIC_AUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "x"})
+    merged = provider_install.merge_entry(previous, _valid(api_key="sk-typed"))
+    assert merged["env"] == {"ANTHROPIC_AUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "x"}
+
+
+def test_the_page_round_trip_leaves_one_copy_of_the_secret(home):
+    """The form's save over an unmigrated entry is where the two copies met."""
+    _store_raw("legacy", _valid(**{"api-key": "sk-legacy-secret"}))
+    posted = json.loads(json.dumps(provider_install.listing()["providers"][0]["entry"]))
+    posted["api_key"] = "sk-typed"
+    assert provider_install.validate("legacy", posted) == []
+    provider_install.save("legacy", posted)
+    entry = store.load()["providers"]["legacy"]
+    assert "api-key" not in entry
+    assert entry["api_key"] == "sk-typed"
+
+
 def test_an_entry_with_no_credential_reports_none_stored(home):
     provider_install.save("demo", _valid())
     assert provider_install.listing()["providers"][0]["api_key_set"] is False

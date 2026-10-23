@@ -946,7 +946,9 @@ draws the same entry as a form and writes it for you.
   and the two pre-schema spellings an unmigrated config may still carry, `env`
   and `api-key`. Those are merged back from the stored entry, and the page
   names them under the form. A control that does not exist cannot be cleared, so
-  removing one of them is a `~/.claunch.yaml` edit.
+  removing one of them is a `~/.claunch.yaml` edit. One exception: a save that
+  types a new `api_key` stores that key alone and drops the stored `api-key`
+  (below) — the two are one secret under two names.
 - **`harness_options` is merged a level deeper, and the page does not name its
   channels.** The one leaf the form draws is `claude.model_tag`; the other
   channels (`pi.settings` and the rest) survive a save that touched only the
@@ -964,7 +966,14 @@ draws the same entry as a form and writes it for you.
   exactly what the page posts back, so a display flag inside it would be refused
   as an unknown field; the flag is true when any of those spellings holds a
   value. Leaving the key field empty keeps the stored key, typing one replaces
-  it, and clearing it is a `~/.claunch.yaml` edit.
+  it, and clearing it is a `~/.claunch.yaml` edit. **Typing a key also drops a
+  stored pre-schema `api-key`.** The two spellings are one secret and
+  `provider_spec.from_entry` prefers `api_key`, so keeping the old copy would
+  leave a replaced secret in the file with nothing reading it — a save that
+  names a non-empty key therefore stores `api_key` alone. A save that names no
+  key leaves `api-key` where it is, because the form still cannot clear what it
+  never showed. The pre-schema `env` block is not touched by either case: it
+  can hold variables that are not this credential.
 
 The page and its three routes (`GET /api/providers`, `POST /api/providers`,
 `POST /api/providers/check`) come from the daemon process, which runs the
