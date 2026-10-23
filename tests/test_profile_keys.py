@@ -670,6 +670,24 @@ def test_runner_run_advances_the_pool(home, monkeypatch):
     assert profile_keys.load(p).keys[0].use_count == 1
 
 
+def _checkout_src() -> Path:
+    """``src`` of the checkout this test file lives in, or a loud failure.
+
+    The baseline is read from this file, not from ``claude_launcher.__file__``
+    (claunch-wllke.1.1.1). The import location is not the tree under test: a
+    pytest started from a tool interpreter, or one whose ``PYTHONPATH`` names
+    site-packages first, imports the installed package, and a baseline taken
+    from that would bless "the child read site-packages, same as me".
+    """
+    src_root = Path(__file__).resolve().parents[1] / "src"
+    if not (src_root / "claude_launcher" / "__init__.py").is_file():
+        raise RuntimeError(
+            f"this test file is not inside a checkout with src/claude_launcher "
+            f"(looked for {src_root}); the gate cannot name the tree it measures"
+        )
+    return src_root
+
+
 def _child_env():
     """Environment for a child process that must import *this* checkout.
 
@@ -679,9 +697,10 @@ def _child_env():
     whatever is installed instead of the tree under test. A gate that measures
     a different tree than the one being reviewed is worse than no gate
     (claunch-wllke.1.1), so the path is set explicitly and the child reports
-    where it landed.
+    where it landed — against this checkout, never against whatever this
+    process happened to import (claunch-wllke.1.1.1).
     """
-    src_root = Path(claude_launcher.__file__).resolve().parent.parent
+    src_root = _checkout_src()
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(src_root)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
@@ -694,6 +713,26 @@ def _assert_child_read_the_checkout(reported: str, src_root: Path) -> None:
     assert where.is_relative_to(src_root), (
         f"the child imported {where}, not the tree under test {src_root}"
     )
+
+
+def test_the_child_assertion_does_not_trust_the_parents_import(home, monkeypatch, tmp_path):
+    # The hole this pins (claunch-wllke.1.1.1): the baseline used to come from
+    # claude_launcher.__file__, so a pytest that imported an installed package
+    # compared the child against that install and passed when the child read
+    # it -- green about a tree nobody edited. Pretend this process imported
+    # site-packages and check the child is still pointed at the checkout and
+    # judged against it.
+    installed = tmp_path / "site-packages" / "claude_launcher" / "__init__.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("")
+    monkeypatch.setattr(claude_launcher, "__file__", str(installed))
+
+    env, src_root = _child_env()
+
+    assert src_root == Path(__file__).resolve().parents[1] / "src"
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(src_root)
+    with pytest.raises(AssertionError, match="not the tree under test"):
+        _assert_child_read_the_checkout(str(installed), src_root)
 
 
 def test_concurrent_launches_each_take_their_own_step(home):
