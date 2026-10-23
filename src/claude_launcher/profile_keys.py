@@ -277,8 +277,11 @@ def remove(profile: Profile, ident: str) -> Key:
         return gone
     save(profile, pool)
     # Keep the effective token one of the remaining keys, so the next launch
-    # does not run on a token the pool no longer lists.
-    credentials.save_token(profile, pool.keys[0].token)
+    # does not run on a token the pool no longer lists -- but leave it alone
+    # while it is still listed: removing some other key is not a re-selection.
+    current = credentials.stored_token(profile)
+    if current not in {key.token for key in pool.keys}:
+        credentials.save_token(profile, pool.keys[0].token)
     return gone
 
 

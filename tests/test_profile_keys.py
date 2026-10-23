@@ -269,6 +269,14 @@ def test_removing_the_selected_key_promotes_a_survivor(home):
     assert credentials.stored_token(p) == "sk-AAAA1111BBBB"
 
 
+def test_removing_another_key_leaves_the_effective_token_alone(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    # The second key was added last and is the effective token.
+    profile_keys.remove(p, profile_keys.load(p).keys[0].id)
+
+    assert credentials.stored_token(p) == "sk-CCCC2222DDDD"
+
+
 def test_remove_accepts_a_one_based_index(home):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
 
