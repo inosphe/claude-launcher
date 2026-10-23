@@ -7119,6 +7119,9 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   padding: 0 5px; color: #d29922; border: 1px solid #3a2f14;
   border-radius: 8px; font-size: 10px;
 }
+/* A profile change comes from the session's own history, not the ledger, so it
+   is drawn in the borrow badge's colour rather than the switch's. */
+.stats-switch.profile .stats-switch-kind { color: #58a6ff; border-color: #1f3a5f; }
 .stats-switch-model { color: #8b949e; }
 .stats-providers { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
 .stats-provider {

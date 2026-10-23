@@ -30386,6 +30386,11 @@ let statsProvider = "";       // "" every provider, else one label
 const STATS_COMPARE_MAX = 12;
 
 const STATS_UNITS = [["hour", "Hourly"], ["day", "Daily"], ["week", "Weekly"]];
+/* The axes a session's switch list can report, in the order a badge names
+   them. `profile` is a reborrow (the credentials moved to another profile),
+   which only the session's own event history proves; `provider`/`model` come
+   from the metering ledger. */
+const STATS_SWITCH_KINDS = ["profile", "provider", "model"];
 const STATS_WINDOWS = [["today", "Today"], ["week", "7 days"], ["month", "30 days"]];
 const STATS_CATEGORIES = [
   ["human", "human", "typed at the terminal"],
@@ -30906,11 +30911,15 @@ function statsOverviewTable(d) {
       name.appendChild(badge);
     }
     if ((r.switches || []).length) {
-      const changed = r.switches.filter((s) => s.kind === "provider");
+      // Which axes moved: the ledger proves provider/model changes, the
+      // session's own history proves profile changes (a reborrow).
+      const kinds = new Set((r.switches || []).map((s) => s.kind));
+      const changed = STATS_SWITCH_KINDS.filter((k) => kinds.has(k))
+        .map((k) => k);
       const badge = el("span", "stats-badge stats-switch-badge",
-        changed.length ? "⇄ provider" : "⇄ model");
-      badge.title = "answered by more than one " +
-        (changed.length ? "provider" : "model") + " inside this window";
+        `⇄ ${changed.join(" + ")}`);
+      badge.title = "this session changed " + changed.join(", ") +
+        " inside this window";
       name.appendChild(badge);
     }
     if (r.source === "transcript") {
@@ -30974,20 +30983,21 @@ function statsOverviewRow(name) {
     .find((r) => r.session === name) || null;
 }
 
-/* Where the provider (or the model) that answered changed, from the ledger's
-   own record of each request. A session's *current* borrow rides its row;
-   its history does not exist anywhere the daemon keeps, so what is drawn
-   here is what the upstreams prove, and the line says so. */
+/* Where the profile, the provider or the model that answered changed.
+   Profile changes come from the session's own event history (a reborrow, which
+   the ledger cannot see when both profiles reach the same upstream); provider
+   and model changes come from the ledger's record of each request. Both are
+   drawn as one list, in the order they happened. */
 function statsSwitchList(row) {
   const box = el("div", "stats-switches");
   const switches = row.switches || [];
   if (!switches.length) {
     box.appendChild(el("p", "wf-note",
-      "no provider or model change recorded inside this window"));
+      "no profile, provider or model change recorded inside this window"));
     return box;
   }
   for (const s of switches) {
-    const line = el("div", "stats-switch");
+    const line = el("div", `stats-switch ${s.kind || "model"}`);
     line.appendChild(el("span", "stats-switch-at",
       String(s.at || "").slice(5, 16).replace("T", " ")));
     line.appendChild(el("span", "stats-switch-kind", s.kind));
@@ -30996,6 +31006,10 @@ function statsSwitchList(row) {
       if (s.to_model) line.appendChild(el("span", "stats-switch-model", s.to_model));
       line.title = "the backend that answered changed; a reborrow onto " +
         "another profile's credentials does this";
+    } else if (s.kind === "profile") {
+      line.appendChild(el("span", null, `${s.from} → ${s.to}`));
+      line.title = "the session was restarted on another profile's " +
+        "credentials (a reborrow); its current borrow rides the row";
     } else {
       line.appendChild(el("span", null, `${s.from_model} → ${s.to_model}`));
       line.title = "the model that answered changed within one provider";

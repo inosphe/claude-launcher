@@ -11447,7 +11447,8 @@ def _stats_overview(manager: "SessionManager", window: str,
     the loop for. The transcript reading for OAuth sessions runs in this same
     thread for that reason.
     """
-    metas = [statsboard.session_meta(s) for s in manager.list()]
+    events = getattr(manager, "events", None)
+    metas = [statsboard.session_meta(s, events) for s in manager.list()]
     extra = {}
     if include_killed is not None:
         extra["include_killed"] = include_killed
