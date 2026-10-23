@@ -231,6 +231,96 @@ def test_utilization_for_token_returns_the_peak_window(home, monkeypatch):
     assert usage.utilization_for_token(p, "sk-ANY") == 61.0
 
 
+def test_an_opencode_go_key_is_measured_with_its_own_token(home, monkeypatch):
+    # claunch-wllke.4: the opencode-go reader landed in claunch-f5w4x.6, but
+    # this path did not know its kind and answered None for every key, so a
+    # usage strategy silently fell back to rotation on those profiles.
+    p = profile.create("work")
+    seen = []
+    report = usage.UsageReport(
+        windows=[
+            usage.UsageWindow(name="five_hour", utilization=41.0, resets_at=None)
+        ],
+        raw={},
+    )
+
+    def fake_fetch(prof, token):
+        seen.append(token)
+        return report
+
+    monkeypatch.setattr(usage, "reader", lambda prof: "opencode-go")
+    monkeypatch.setattr(usage, "_fetch_opencode_go", fake_fetch)
+
+    assert usage.utilization_for_token(p, "sk-OPENCODE1") == 41.0
+    assert seen == ["sk-OPENCODE1"]
+
+
+def test_every_keyed_reader_kind_has_a_branch_in_utilization_for_token(
+    home, monkeypatch
+):
+    # The table and the dispatch have to agree: a kind listed as keyed but
+    # missing from utilization_for_token's chain is exactly the opencode-go
+    # gap this round closed, and nothing else would catch the next one.
+    p = profile.create("work")
+    report = usage.UsageReport(
+        windows=[
+            usage.UsageWindow(name="five_hour", utilization=33.0, resets_at=None)
+        ],
+        raw={},
+    )
+    monkeypatch.setattr(usage, "_fetch_claude", lambda prof, token=None: report)
+    monkeypatch.setattr(usage, "_fetch_fireworks", lambda prof, token: report)
+    monkeypatch.setattr(usage, "_fetch_opencode_go", lambda prof, token: report)
+    monkeypatch.setattr(
+        usage, "_kimi_provider_context", lambda prof, token=None: ("a", "b")
+    )
+    monkeypatch.setattr(usage, "_fetch_kimi_provider", lambda prof, *ctx: report)
+
+    for kind in usage.KEYED_READERS:
+        monkeypatch.setattr(usage, "reader", lambda prof, kind=kind: kind)
+        assert usage.utilization_for_token(p, "sk-KEY") == 33.0, kind
+
+
+def test_the_reader_table_says_which_kinds_are_measured_per_key():
+    assert "opencode-go" in usage.KEYED_READERS
+    for kind in usage.KEYED_READERS:
+        assert usage.unmeasurable_reason(kind) is None
+    # A login-scoped reader quotes its own sentence…
+    assert usage.unmeasurable_reason("kimi-web-server") == (
+        usage.LOGIN_SCOPED_READERS["kimi-web-server"]
+    )
+    # …and a reader that merely lacks a per-key path says that instead, so the
+    # two "cannot measure" cases stay apart in the note.
+    assert "no per-key usage path" in usage.unmeasurable_reason("some-new-reader")
+
+
+def test_the_fallback_note_quotes_the_reader_table(home, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    monkeypatch.setattr(usage, "reader", lambda prof: "kimi-web-server")
+    profile_keys.set_strategy(p, "usage-min")
+
+    selection = profile_keys.select_for_launch(p)
+
+    assert selection.strategy == "rotation"
+    assert selection.fallback == usage.LOGIN_SCOPED_READERS["kimi-web-server"]
+
+
+def test_a_keyed_reader_selects_by_usage_instead_of_rotating(home, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    monkeypatch.setattr(usage, "reader", lambda prof: "opencode-go")
+    monkeypatch.setattr(
+        usage,
+        "utilization_for_token",
+        lambda prof, token: {"sk-AAAA1111BBBB": 80.0, "sk-CCCC2222DDDD": 20.0}[token],
+    )
+    profile_keys.set_strategy(p, "usage-min")
+
+    selection = profile_keys.select_for_launch(p)
+
+    assert selection.key.token == "sk-CCCC2222DDDD"
+    assert selection.fallback is None
+
+
 # --- inheritance ------------------------------------------------------------
 
 

@@ -1066,14 +1066,45 @@ def fetch(profile: Profile) -> UsageReport:
     return _fetch_kimi(profile, entry)
 
 
+#: Readers that measure usage *per key*: the token the pool holds is the
+#: credential the endpoint authenticates, so spreading launches over several
+#: keys spreads the usage the strategy compares.
+KEYED_READERS = ("anthropic", "kimi-provider", "fireworks-billing", "opencode-go")
+
+#: Readers whose usage belongs to the harness login, with the sentence a
+#: usage strategy quotes when it falls back to rotation. Rotating keys cannot
+#: spread a login's usage, so there is nothing to compare per key.
+LOGIN_SCOPED_READERS = {
+    "codex-app-server": "the codex harness reports usage for its login, not for a key",
+    "kimi-web-server": "the kimi harness reports usage for its login, not for a key",
+}
+
+
+def unmeasurable_reason(kind: str) -> Optional[str]:
+    """Why a usage strategy cannot compare this reader's keys, or ``None``.
+
+    The key pool asks this before measuring anything, so the reason a profile
+    falls back to rotation lives in one table instead of in a tuple literal at
+    each call site. A reader that exists but has no per-key path yet reports
+    as much -- the same unmeasurable answer, a different sentence to the user
+    (claunch-wllke.4).
+    """
+    if kind in KEYED_READERS:
+        return None
+    if kind in LOGIN_SCOPED_READERS:
+        return LOGIN_SCOPED_READERS[kind]
+    return f"the {kind!r} reader has no per-key usage path"
+
+
 def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
     """Peak utilization this one key shows (0-100), or ``None`` if unmeasurable.
 
-    The key pool's usage strategies compare keys. That is only meaningful
-    where the launcher token *is* the account's credential, so the readers
-    that go through a harness login (``codex-app-server``,
-    ``kimi-web-server``) answer ``None``: their usage belongs to the login,
-    not to a key, and rotating keys cannot spread it.
+    The key pool's usage strategies compare keys. That is only meaningful for
+    the readers in :data:`KEYED_READERS`, where the launcher token *is* the
+    account's credential and the token passed here is the one the request
+    authenticates with. The login-scoped readers in
+    :data:`LOGIN_SCOPED_READERS` answer ``None``: their usage belongs to the
+    login, not to a key, and rotating keys cannot spread it.
     """
     token = str(token or "").strip()
     if not token:
@@ -1088,6 +1119,8 @@ def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
         report = _fetch_kimi_provider(profile, *context)
     elif kind == "fireworks-billing":
         report = _fetch_fireworks(profile, token)
+    elif kind == "opencode-go":
+        report = _fetch_opencode_go(profile, token)
     else:
         return None
     values = [

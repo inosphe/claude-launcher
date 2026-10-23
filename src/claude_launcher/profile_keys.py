@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, Tuple
 
 from . import atomic, credentials
 from .profile import Profile
@@ -526,13 +526,19 @@ def _rotation_index(pool: Pool) -> int:
     return 0
 
 
-def _utilization_reader(source: Profile) -> Callable[[Key], Optional[float]]:
-    """A per-key usage lookup for the profile's provider, or one finding None.
+def _utilization_reader(
+    source: Profile,
+) -> Tuple[Callable[[Key], Optional[float]], Optional[str]]:
+    """A per-key usage lookup for the profile's provider, and why it may be blind.
 
     The reader is chosen once (it depends on the provider and harness, not on
-    the key) and then asked about each key's own token. Harnesses whose usage
-    belongs to a login rather than to a key answer ``None`` for every key,
-    which makes the caller fall back to rotation.
+    the key) and then asked about each key's own token. When the provider's
+    usage cannot be measured per key the lookup finds ``None`` for every key
+    -- which makes the caller fall back to rotation -- and the second value
+    carries the reason, quoted in the fallback note. The reason comes from
+    :func:`usage.unmeasurable_reason`, one table for every reader, so a
+    provider that is unmeasurable is named there rather than at each call
+    site (claunch-wllke.4).
     """
     # Local imports: usage imports runner, which imports this module, and
     # neither is needed until a launch actually asks for a usage strategy.
@@ -546,9 +552,13 @@ def _utilization_reader(source: Profile) -> Callable[[Key], Optional[float]]:
         profile_mod.ProfileError,
         providers.ProviderError,
         lineage.LineageError,
-    ):
+    ) as exc:
         # An unreadable setup is "cannot measure", not a failed launch.
-        return lambda key: None
+        return (lambda key: None), f"the profile's usage reader is not available ({exc})"
+
+    reason = usage.unmeasurable_reason(kind)
+    if reason is not None:
+        return (lambda key: None), reason
 
     def measure(key: Key) -> Optional[float]:
         try:
@@ -564,9 +574,7 @@ def _utilization_reader(source: Profile) -> Callable[[Key], Optional[float]]:
             # caller skips that key and, if none is measurable, rotates.
             return None
 
-    if kind not in ("anthropic", "kimi-provider", "fireworks-billing"):
-        return lambda key: None
-    return measure
+    return measure, None
 
 
 def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
@@ -577,7 +585,7 @@ def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
         index = random.randrange(len(pool.keys))
         return Selection(pool.keys[index], strategy, index, owner_profile)
     if strategy in ("usage-min", "usage-max"):
-        measure = _utilization_reader(source)
+        measure, unmeasurable = _utilization_reader(source)
         scored = []
         for position, key in enumerate(pool.keys):
             value = measure(key)
@@ -595,7 +603,8 @@ def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
             DEFAULT_STRATEGY,
             index,
             owner_profile,
-            fallback=f"no key's usage could be read ({strategy} needs a "
+            fallback=unmeasurable
+            or f"no key's usage could be read ({strategy} needs a "
             "key-based usage reader)",
         )
     index = _rotation_index(pool) if strategy == "rotation" else _selected_index(pool)
