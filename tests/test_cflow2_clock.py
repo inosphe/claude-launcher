@@ -492,11 +492,6 @@ def test_a_delegation_that_is_not_the_drivers_wait_is_not_counted(row):
     assert cflow2_clock._waits_on_driver({"delegations": [row]}) is False
 
 
-def moved_waiting_line(payload):
-    return [line for line in cflow2_clock.moved_block("own", payload).splitlines()
-            if line.startswith("waiting on you:")][0]
-
-
 def test_an_idle_driver_is_renudged_while_a_subagent_delegation_waits(tmp_path, monkeypatch):
     """s1599 sat five hours at a report delegation that had fallen back to a
     sub-agent: no task, no choice, and so no clock ever counted it."""
