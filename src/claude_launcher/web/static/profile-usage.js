@@ -37,6 +37,7 @@
     "kimi-managed-usage": "via Kimi Code usage API",
     "kimi-web-server": "via Kimi Code local server",
     "fireworks-billing": "via Fireworks billing API",
+    "opencode-go": "via OpenCode Go usage API",
   };
   // Statuses `claunch usage` leaves out: the ones that say nothing is wrong.
   const QUIET_STATUSES = new Set(["allowed", "ok"]);
