@@ -126,6 +126,15 @@ def _cmd_strategy(args: argparse.Namespace) -> int:
     except profile_keys.KeysError as exc:
         raise SystemExit(f"claunch: {exc}")
     print(f"profile {p.name!r}: strategy {pool.strategy} ({len(pool.keys)} keys)")
+    # The set path writes the same pool the display path reads, so on an
+    # inherited child it is the ancestor's file that changed -- the caller
+    # has to be told, the way `keys list` names the owner (claunch-wllke.5.1.1).
+    owner = profile_keys.strategy_owner(p)
+    if owner is not None and owner.name != p.name:
+        print(
+            f" pool: profile {owner.name!r} (inherited — every launch of {p.name!r}"
+            f" selects from it)"
+        )
     return 0
 
 

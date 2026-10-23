@@ -449,22 +449,50 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
 
 
 def set_strategy(profile: Profile, strategy: str) -> Pool:
-    """Set the pool's strategy; ``rotation`` starts from the current key."""
+    """Set the strategy of the pool this profile's launches select from.
+
+    The pool is the one :func:`strategy_owner` names: the profile's own, or
+    the nearest ancestor's while the profile holds no token of its own. The
+    display half of the same command already reads that pool
+    (claunch-wllke.5.1), so writing the profile's own (absent) pool here made
+    one command answer about two different pools -- the child was told which
+    strategy it obeys and then refused a change to it, with advice to add a
+    key the child does not need (claunch-wllke.5.1.1).
+
+    This is not the ancestor rotation the module docstring forbids: that rule
+    is about a *launch* advancing a cursor on a pool whose key it never reads.
+    Setting is an explicit command that names the profile, and it lands on the
+    pool that profile's launches actually select from. Callers that print the
+    result should name ``strategy_owner(profile)`` when it is not the profile
+    itself, because another profile's file is what changed.
+    """
     strategy = str(strategy or "").strip().lower()
     if strategy not in STRATEGIES:
         raise KeysError(
             f"unknown strategy {strategy!r} (expected one of {', '.join(STRATEGIES)})"
         )
-    with pool_lock(profile):
-        pool = adopt_single_token(profile)
+    source = strategy_owner(profile) or profile
+    with pool_lock(source):
+        pool = adopt_single_token(source)
         if pool is None:
             raise KeysError(
-                f"profile {profile.name!r} has no stored key; add one with "
-                f"'claunch keys add {profile.name}'"
+                f"profile {source.name!r} has no stored key; add one with "
+                f"'claunch keys add {source.name}'"
             )
         pool.strategy = strategy
-        save(profile, pool)
+        save(source, pool)
         return pool
+
+
+def strategy_owner(profile: Profile) -> Optional[Profile]:
+    """The profile whose pool :func:`set_strategy` reads and writes.
+
+    ``None`` when no profile in the chain holds a pool or a token, which is
+    the same answer :func:`owner` gives and the reason the caller falls back
+    to the profile itself: the error then names the profile that was asked
+    about rather than an ancestor that does not exist.
+    """
+    return _token_source(profile)
 
 
 def _index_of(pool: Pool, ident: str) -> int:

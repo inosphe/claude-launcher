@@ -487,6 +487,35 @@ def test_clearing_the_token_drops_the_pool_and_the_lock_frees_again(home):
     assert [k.id for k in profile_keys.load(p).keys] == [key.id]
 
 
+def test_clearing_a_profile_with_nothing_stored_leaves_no_lock_file(home):
+    # The lock lives at `<pool>.lock`, and taking it creates the file. A clear
+    # that deletes nothing has no deletion for a concurrent writer to save
+    # back, so it skips the lock rather than leaving an empty owner-only file
+    # in a config directory that never held a key (claunch-wllke.1.2.1.1.1).
+    p = profile.create("empty")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+
+    assert credentials.clear_token(p) == []
+
+    assert not lock.exists()
+    assert not profile_keys.path(p).exists()
+
+
+def test_clearing_a_lone_token_still_takes_the_lock(home):
+    # The skip above is only for a profile with nothing to delete: `add`
+    # adopts a lone token into a new pool, so a clear racing it takes the
+    # pool lock, and the empty lock stays behind for the reason pinned in
+    # claunch-wllke.1.2.1.
+    p = profile.create("solo")
+    credentials.save_token(p, "sk-SINGLE")
+    lock = Path(str(profile_keys.path(p)) + ".lock")
+
+    assert credentials.clear_token(p) == [credentials.TOKEN_FILENAME]
+
+    assert lock.is_file()
+    assert credentials.stored_token(p) is None
+
+
 def test_removing_the_selected_key_promotes_a_survivor(home):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
     selected = profile_keys.load(p).keys[1]
@@ -628,6 +657,64 @@ def test_keys_strategy_still_says_so_when_no_pool_is_in_reach(home, capsys):
     assert cli.main(["keys", "strategy", "solo"]) == 0
 
     assert "has no key pool" in capsys.readouterr().out
+
+
+def test_setting_a_childs_strategy_writes_the_pool_its_launches_read(home):
+    # The display half already answered from the inherited pool
+    # (claunch-wllke.5.1), while the set half wrote the child's own absent
+    # pool and failed with advice to add a key the child does not need
+    # (claunch-wllke.5.1.1). One command, one pool: the strategy the child is
+    # shown is the strategy it can change, and the child's next launch obeys
+    # the new value.
+    base = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="base")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "strategy", "child", "usage-min"]) == 0
+
+    assert profile_keys.load(base).strategy == "usage-min"
+    assert not profile_keys.path(child).exists()
+    assert profile_keys.view(child)["strategy"] == "usage-min"
+    assert profile_keys.view(child)["owner"] == "base"
+
+
+def test_setting_a_childs_strategy_names_the_pool_it_changed(home, capsys):
+    # Setting from a child edits the ancestor's file, so the output has to say
+    # whose pool it was -- the same owner line `keys list` and the display
+    # half print (claunch-wllke.5.1.1).
+    _pooled("sk-AAAA1111BBBB", name="base")
+    child = profile.create("child")
+    lineage.set_parent(child, "base")
+
+    assert cli.main(["keys", "strategy", "child", "random"]) == 0
+
+    out = capsys.readouterr().out
+    assert "strategy random" in out
+    assert "pool: profile 'base' (inherited" in out
+
+
+def test_setting_a_pooled_profiles_strategy_names_no_other_profile(home, capsys):
+    # The owner line is for inherited pools only; printing it on every set
+    # would make the ordinary case look like it changed someone else's file.
+    _pooled("sk-AAAA1111BBBB", name="work")
+
+    assert cli.main(["keys", "strategy", "work", "usage-max"]) == 0
+
+    out = capsys.readouterr().out
+    assert "strategy usage-max" in out
+    assert "pool:" not in out
+
+
+def test_setting_a_strategy_with_no_key_in_reach_names_the_profile_asked_about(home):
+    # Resolution falls back to the profile itself when nothing in the chain
+    # holds a pool or a token, so the error keeps naming the profile the
+    # caller typed rather than an ancestor that does not exist.
+    profile.create("solo")
+
+    with pytest.raises(profile_keys.KeysError) as exc:
+        profile_keys.set_strategy(profile.require("solo"), "random")
+
+    assert "profile 'solo' has no stored key" in str(exc.value)
 
 
 def test_a_deleted_token_file_is_reported_and_repaired_by_the_next_launch(
