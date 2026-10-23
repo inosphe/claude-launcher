@@ -43147,7 +43147,11 @@ function sessGroupHead(id) {
 
    Empty is drawn rather than hidden. A session a person opened by hand has no
    task and that is the ordinary case, so a section that appeared only
-   sometimes would read as one that failed to load. */
+   sometimes would read as one that failed to load.
+
+   Under the text, two buttons that hand the whole opening over again — for a
+   session whose first delivery never landed (sessOpeningActions below). They
+   are drawn even when the task is empty: an opening is more than its task. */
 const sessTaskOpen = new Set();   // session names whose task is unfolded
 
 /* Long enough to be worth folding. Lines first, characters as the backstop
@@ -43162,35 +43166,203 @@ function sessTask(s) {
   const head = el("h3", null, "Opening task");
   head.title =
     "what this session was opened with, recorded at creation — the live " +
-    "copy was typed in once, on its first spawn, and is never replayed";
+    "copy was typed in once, on its first spawn; the buttons below hand the " +
+    "whole opening over again on request";
   box.appendChild(head);
   const text = String(s.task || "");
+  const name = s.name || "";
   if (!text.trim()) {
     box.appendChild(el(
       "p", "wf-note",
       "no opening task recorded — a session opened by hand often has none"
     ));
-    return box;
+  } else {
+    const open = sessTaskOpen.has(name);
+    const long = taskIsLong(text);
+    box.appendChild(el(
+      "pre", "sess-task-text" + (long && !open ? " clipped" : ""), text
+    ));
+    if (long) {
+      const more = el("button", "wf-btn option sess-task-more",
+                      open ? "Show less" : "Show all");
+      more.title = open
+        ? "fold it back to its first lines"
+        : `the whole task — ${text.split("\n").length} lines`;
+      more.addEventListener("click", () => {
+        if (open) sessTaskOpen.delete(name);
+        else sessTaskOpen.add(name);
+        refreshSession();   // redraw now, not at the poll's leisure
+      });
+      box.appendChild(more);
+    }
   }
+  if (name) box.appendChild(sessOpeningActions(s));
+  return box;
+}
+
+/* ---- handing the opening over again ----------------------------------
+
+   A session's opening is composed once and typed in once (onboard.open_with),
+   and nothing replays it. That is the right trade for a start that lands and
+   the wrong one for the failure this section exists for: a harness that was
+   not reading yet, or a paste whose separately written Enter was swallowed,
+   leaves the agent with no idea what it exists for — and the person looking
+   at this panel is looking at exactly the task that never arrived.
+
+   "Re-inject" asks the daemon to type the recorded opening in again
+   (POST /api/sessions/<name>/opening). The text is the daemon's record
+   (daemon/session_opening.py), not something this file assembles: it is the
+   block that was handed to the harness at creation, with the blocks no
+   browser could rebuild — the parent frame, the mesh briefing, the cflow run
+   block, the board line. A session older than that record answers
+   `recomposed`, and the line under the buttons says so: a reconstruction
+   presented as the original would be read as evidence of what the session
+   received.
+
+   "Copy" puts the same text on this computer's clipboard, which is what the
+   button is for when the daemon's delivery is the thing that fails: paste it
+   into the terminal by hand, or read it while working out why it did not
+   land. What the two buttons hand over is one text, so they cannot drift.
+
+   The outcome line and the in-flight set live outside the panel, per session:
+   the 2s poll rebuilds every node here, and a rebuild mid-request would hand
+   the reader a live button while the first press is still in flight. */
+const sessOpeningNote = new Map();   // session name -> {text, cls}
+const sessOpeningBusy = new Set();   // session names with a request in flight
+
+/* Where the text the daemon answered with came from, in the reader's words. */
+function openingSourceWord(source) {
+  if (source === "recorded") return "recorded at creation";
+  if (source === "recomposed") return "rebuilt from the session record, not the original";
+  return "no opening recorded";
+}
+
+function sessOpeningActions(s) {
   const name = s.name || "";
-  const open = sessTaskOpen.has(name);
-  const long = taskIsLong(text);
-  box.appendChild(el(
-    "pre", "sess-task-text" + (long && !open ? " clipped" : ""), text
-  ));
-  if (long) {
-    const more = el("button", "wf-btn option sess-task-more",
-                    open ? "Show less" : "Show all");
-    more.title = open
-      ? "fold it back to its first lines"
-      : `the whole task — ${text.split("\n").length} lines`;
-    more.addEventListener("click", () => {
-      if (open) sessTaskOpen.delete(name);
-      else sessTaskOpen.add(name);
-      refreshSession();   // redraw now, not at the poll's leisure
-    });
-    box.appendChild(more);
-  }
+  const box = el("div", "sess-opening-actions");
+  const note = sessOpeningNote.get(name);
+  const status = el("p", "wf-note sess-opening-status",
+    note ? "" : "Re-inject types the opening into this session's terminal " +
+    "again; Copy puts the same text on the clipboard.");
+  // The marker class stays on every paint: the panel is rebuilt from scratch
+  // on the next poll, and the checks (and the reader's eye) find this line by
+  // it -- replacing the class list with the outcome's tone would lose it.
+  const paint = (text, cls) => {
+    status.textContent = text;
+    status.className = `${cls || "wf-note"} sess-opening-status`;
+  };
+  if (note) paint(note.text, note.cls);
+  const say = (text, cls) => {
+    sessOpeningNote.set(name, { text, cls: cls || "wf-note" });
+    paint(text, cls);
+  };
+  const busy = sessOpeningBusy.has(name);
+
+  // Both buttons talk to the same route; GET reads the text, POST types it.
+  // The daemon labels the source on both, and the label rides the outcome
+  // line, because "sent the recorded opening" and "sent a reconstruction" are
+  // different claims about what the session now knows.
+  const inject = el("button", "wf-btn approve sess-opening-inject", "Re-inject opening");
+  inject.type = "button";
+  inject.disabled = busy;
+  inject.title =
+    "type this session's opening into its terminal again — the prompt " +
+    "packs, the task and the machine-generated blocks, as the daemon " +
+    "composed them at creation. For a session whose one delivery never " +
+    "landed. An unsent line in the composer is submitted first, never typed " +
+    "over, and images the opening carried are not re-sent.";
+  inject.addEventListener("click", async () => {
+    if (sessOpeningBusy.has(name)) return;
+    sessOpeningBusy.add(name);
+    inject.disabled = true;
+    say("reading the opening…");
+    try {
+      // Read first, then send. The GET says where the text came from and
+      // whether the original rode the command line (`transport: "argv"`):
+      // that one was given without a keystroke, so a re-inject types a
+      // SECOND copy and has to be asked for, not assumed.
+      const read = await api(`/api/sessions/${encodeURIComponent(name)}/opening`);
+      const doc = await read.json().catch(() => ({}));
+      if (!read.ok) {
+        say(doc.error || `HTTP ${read.status}`, "wf-warning");
+        return;
+      }
+      if (!String(doc.text || "").trim()) {
+        say("this session has no opening to hand over", "wf-warning");
+        return;
+      }
+      if (doc.transport === "argv" && !confirm(
+          `${name}'s opening went in on its command line — the harness took ` +
+          "it as an argument, not as a keystroke. Typing it in now puts a " +
+          "second copy in the terminal. Do that anyway?")) {
+        say("cancelled — nothing was sent");
+        return;
+      }
+      say("handing the opening over…");
+      const resp = await api(
+        `/api/sessions/${encodeURIComponent(name)}/opening`, { method: "POST" });
+      const sent = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        say(sent.error || `HTTP ${resp.status}`, "wf-warning");
+      } else if (sent.delivered) {
+        say(`handed over ${sent.chars} characters (${openingSourceWord(sent.source)})` +
+            (sent.images ? ` · ${sent.images} image(s) not re-sent` : ""));
+      } else {
+        say(`not delivered: ${sent.reason || "the terminal did not take it"}`,
+            "wf-warning");
+      }
+    } catch {
+      say("could not reach the daemon — nothing was sent", "wf-warning");
+    } finally {
+      sessOpeningBusy.delete(name);
+      inject.disabled = false;
+    }
+  });
+
+  const copy = el("button", "wf-btn sess-opening-copy", "Copy opening");
+  copy.type = "button";
+  copy.disabled = busy;
+  copy.title =
+    "put the same text on this computer's clipboard — to paste into the " +
+    "terminal by hand when the daemon's delivery is what keeps failing, or " +
+    "to read while working out why the opening did not land";
+  copy.addEventListener("click", async () => {
+    if (sessOpeningBusy.has(name)) return;
+    sessOpeningBusy.add(name);
+    copy.disabled = true;
+    say("reading the opening…");
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}/opening`);
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+        return;
+      }
+      const text = String(doc.text || "");
+      if (!text.trim()) {
+        say("this session has no opening to copy", "wf-warning");
+        return;
+      }
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        say("this browser gives the page no clipboard — open the dashboard " +
+            "over https or on localhost", "wf-warning");
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      say(`copied ${text.length} characters (${openingSourceWord(doc.source)})` +
+          (doc.images ? ` · ${doc.images} image(s) not in the text` : ""));
+    } catch (err) {
+      say(`could not copy: ${err && err.message ? err.message : "clipboard unavailable"}`,
+          "wf-warning");
+    } finally {
+      sessOpeningBusy.delete(name);
+      copy.disabled = false;
+    }
+  });
+
+  const row = el("div", "sess-opening-buttons");
+  row.append(inject, copy);
+  box.append(row, status);
   return box;
 }
 

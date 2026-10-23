@@ -184,11 +184,15 @@ class SessionDef:
     #: the same tool surface.
     disable_artifact_tool: bool = False
     #: The opening task, kept as a *record*. The live copy went in exactly
-    #: once, on the first spawn (:func:`build_command`'s ``opening``), and is
-    #: never replayed — this field changes nothing about that. It exists so a
-    #: re-briefing can restate what the session was asked to do after its
-    #: context is compacted or cleared (see :mod:`rebrief`), which was the one
-    #: piece of a session's setup that nothing could reconstruct.
+    #: once, on the first spawn (:func:`build_command`'s ``opening``), and
+    #: nothing replays it on its own — this field changes nothing about that.
+    #: The one replay there is, is a person's: the detail panel's Re-inject
+    #: button sends the block recorded at creation, task and packs together
+    #: (:mod:`daemon.session_opening`), because a start that never landed
+    #: leaves the agent with nothing. The field itself exists so a re-briefing
+    #: can restate what the session was asked to do after its context is
+    #: compacted or cleared (see :mod:`rebrief`), which was the one piece of a
+    #: session's setup that nothing could reconstruct.
     task: Optional[str] = None
     #: The beads issue this session is for, by id — the exact half of the
     #: session↔board link (see :mod:`daemon.beads`; the other half is who the

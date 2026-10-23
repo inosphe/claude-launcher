@@ -3754,6 +3754,14 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   mask-image: linear-gradient(#000 8.5em, transparent);
 }
 .sess-task-more { margin: 8px 0 0; }
+/* Re-inject / Copy, under the task they hand over: one row of buttons and the
+   outcome line beneath them. The line is the whole receipt — which text went
+   out (the record or a reconstruction), how much of it, and what went wrong
+   when it did not — so it sits under the buttons rather than in a tooltip. */
+.sess-opening-actions { margin-top: 10px; }
+.sess-opening-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.sess-opening-buttons .wf-btn { margin-right: 0; }
+.sess-opening-status { margin: 8px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
 /* The prompt packs: one chip per pack, and the open one's detail under the
    row. The chips are the mesh chips' shape, buttons rather than links. */
 .sess-pack-chips { display: flex; flex-wrap: wrap; gap: 6px; }
