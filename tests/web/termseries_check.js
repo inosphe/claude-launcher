@@ -9,8 +9,12 @@
                    once per TTL and window; the hover view asks for window=full
                    and draws the capped series until it arrives.
      nothing    -- an unavailable answer or one without points draws nothing.
-     overlay    -- both blocks get a chart, hovering one switches both to the
-                   zoomed view and leaving restores the small one. */
+     overlay    -- both blocks get a chart, hovering one grows that one alone
+                   to the zoomed view and leaving restores the small one.
+     release    -- the hover also ends on a pointer move outside every chart,
+                   so a chart replaced by a repaint (no mouseleave) or moved
+                   out from under the pointer by the zoom cannot keep the
+                   zoomed view on (claunch-a27zc). */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -56,7 +60,33 @@ function node(tag, cls, text) {
   };
   return n;
 }
-const document = { createElementNS: (_ns, tag) => node(tag) };
+const docListeners = [];
+const document = {
+  /* An SVG element's className is a read-only SVGAnimatedString: assigning
+     it throws under "use strict", as app.js runs (claunch-a27zc.1). */
+  createElementNS: (_ns, tag) => {
+    const n = node(tag);
+    delete n.className;
+    Object.defineProperty(n, "className", { get: () => ({ baseVal: n.attrs.class || "" }) });
+    return n;
+  },
+  addEventListener(ev, fn, capture) { docListeners.push([ev, fn, capture]); },
+  removeEventListener(ev, fn, capture) {
+    const i = docListeners.findIndex(([e, f, c]) => e === ev && f === fn && c === capture);
+    if (i >= 0) docListeners.splice(i, 1);
+  },
+};
+/* What lies under the pointer is a hit test; the event's own target is the
+   overlay, as a real browser aims the move right after a repaint. */
+let underPointer = null;
+document.elementFromPoint = () => underPointer;
+const overlayNode = { closest: () => null };
+const moveOn = (inChart) => {
+  underPointer = { closest: (sel) => (inChart && sel === ".term-series" ? {} : null) };
+  for (const [ev, fn] of docListeners.slice()) {
+    if (ev === "mousemove") fn({ target: overlayNode, clientX: 5, clientY: 5 });
+  }
+};
 const calls = [];
 let reply = null;
 const api = async (p, opts) => { calls.push([p, opts]); return reply; };
@@ -66,8 +96,8 @@ const renderTermTps = () => { renders++; };
 const ctx = {};
 new Function(
   "exports", "el", "document", "api", "renderTermTps", "fmtAge", "usageShort",
-  consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesChart",
-    "termSeriesMaker"].map(slice).join("\n") + `
+  '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesChart",
+    "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker"].map(slice).join("\n") + `
 exports.read = termSeriesRead;
 exports.data = termSeriesData;
 exports.chart = termSeriesChart;
@@ -104,7 +134,7 @@ const series = (win, start = 1000) => ({
   check("the small chart has no axis or legend", small.kids.length, 1);
   const big = ctx.chart(series("full"), true);
   check("zoomed chart: svg, axis, legend, readout",
-        big.kids.map((k) => k.className),
+        big.kids.map((k) => k.attrs.class || k.className),
         ["term-series-chart", "term-series-axis", "term-series-legend", "term-series-readout"]);
   check("the legend names the parts and the compaction",
         big.kids[2].kids.map((k) => k.textContent), ["input", "write", "cached input", "compaction"]);
@@ -138,18 +168,43 @@ const series = (win, start = 1000) => ({
   await settle(); await settle();
   check("an unavailable answer draws nothing", ctx.data("s2", false), null);
 
-  // Hover state shared by the charts.
+  // Hover: only the chart under the pointer grows.
   ctx.hover(false);
-  const make = ctx.maker(series("cap"), false);
-  const a = make(), b = make();
+  const make = ctx.maker(series("cap"), series("full"), false);
+  const a = make("tps"), b = make("usage");
+  check("unhovered, both charts are small and capped",
+        [a.className, b.className], ["term-series", "term-series"]);
   const before = renders;
-  a.handlers.mouseenter();
-  check("entering a chart switches the hover on and repaints",
-        [ctx.hovered(), renders - before], [true, 1]);
   b.handlers.mouseenter();
-  check("a second enter changes nothing", renders - before, 1);
-  a.handlers.mouseleave();
+  check("entering a chart names it as the hovered one and repaints",
+        [ctx.hovered(), renders - before], ["usage", 1]);
+  b.handlers.mouseenter();
+  check("a second enter on it changes nothing", renders - before, 1);
+  check("the hover watches pointer moves on the document",
+        docListeners.map(([ev, , c]) => [ev, c]), [["mousemove", true]]);
+  const repaint = ctx.maker(series("cap"), series("full"), "usage");
+  const tpsSmall = repaint("tps"), usageBig = repaint("usage");
+  check("the repaint grows the hovered chart alone, with the whole conversation",
+        [tpsSmall.className, usageBig.className, usageBig.kids.length],
+        ["term-series", "term-series zoom", 4]);
+  b.handlers.mouseleave();
   check("leaving switches it off and repaints", [ctx.hovered(), renders - before], [false, 2]);
+  check("and stops watching", docListeners.length, 0);
+
+  // The chart the pointer entered is replaced by a repaint: the new one never
+  // got a mouseenter, so its mouseleave cannot be relied on.
+  const c = make("tps");
+  c.handlers.mouseenter();
+  const zoomed = ctx.maker(series("cap"), series("full"), "tps")("tps");
+  const mid = renders;
+  moveOn(true);
+  check("a move over a chart keeps the zoomed view", [ctx.hovered(), renders - mid], ["tps", 0]);
+  moveOn(false);
+  check("a move outside every chart ends it and repaints",
+        [ctx.hovered(), renders - mid, docListeners.length], [false, 1, 0]);
+  c.handlers.mouseleave();
+  zoomed.handlers.mouseleave();
+  check("a late mouseleave after that changes nothing", renders - mid, 1);
 
   if (failures) { console.error(`${failures} failure(s)`); process.exit(1); }
   console.log("termseries_check: ok");
