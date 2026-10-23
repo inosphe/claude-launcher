@@ -84,9 +84,27 @@ globalThis.ArtifactsPage = (() => {
       !!cleanup.scheduled || (cleanup.receipts || []).length > 0;
   }
 
-  function visibleSessions(data, query, showEmpty = false) {
+  /* The reader's two category filters, each its own checkbox: a fleet keeps
+     hundreds of killed and archived sessions in the registry, and someone
+     chasing live disk usage should not have to scroll past them. Both are off
+     by default, so the page opens on the same list it always showed. */
+  function excluded(session, options) {
+    const opts = options || {};
+    if (opts.excludeKilled && session.category === "killed") return true;
+    if (opts.excludeArchived && session.category === "archived") return true;
+    return false;
+  }
+
+  function visibleSessions(data, query, showEmpty = false, options = {}) {
     return sortedSessions(data && data.sessions)
+      .filter(s => !excluded(s, options))
       .filter(s => (showEmpty || hasContent(s)) && matches(s, query));
+  }
+
+  /* How many sessions the category filters took away, for the line that says
+     so -- a filter that hides rows silently reads as "none exist". */
+  function hiddenByCategory(data, options) {
+    return sortedSessions(data && data.sessions).filter(s => excluded(s, options)).length;
   }
 
   /* The paths the daemon would walk for this listing -- the same set its
@@ -111,13 +129,31 @@ globalThis.ArtifactsPage = (() => {
   }
 
   let data = null, error = "", loading = false, notice = "";
-  let query = "", showEmpty = false, sequence = 0, pollTimer = null, asked = false;
+  let query = "", showEmpty = false, sequence = 0, pollTimer = null;
+  // The category filters outlive a visit: leaving the page and coming back
+  // keeps the list the reader narrowed down. Only a full page reload clears
+  // them -- `stop` (which runs on every route change) leaves them alone.
+  let excludeKilled = false, excludeArchived = false;
+  // A walk the reader asked for, and the timer that watches it. Nothing here
+  // starts on its own: the page used to re-render itself on open and while a
+  // walk ran, which made reading impossible and hid a failing tree behind a
+  // loop (the reader reported both).
+  let measuring = false;
 
   function view() { return document.getElementById("artifacts-view"); }
 
   function schedulePoll(ms) {
     if (pollTimer) clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => { pollTimer = null; load(); }, ms);
+    pollTimer = setTimeout(() => { pollTimer = null; tick(); }, ms);
+  }
+
+  /* The measure job as the bar reads it: how many paths it set out to walk
+     and how many have answered. */
+  function progress(source) {
+    const job = (source && source.job) || {};
+    const total = Number(job.total) || 0;
+    const done = Math.min(total, Number(job.done) || 0);
+    return { total, done, started: !!job.started, finished: !!job.finished };
   }
 
   async function load() {
@@ -136,14 +172,35 @@ globalThis.ArtifactsPage = (() => {
     } finally {
       if (seq !== sequence) return;
       loading = false; render();
-      const running = (data && data.running) || [];
-      if (running.length) schedulePoll(1500);
-      else if (!asked && unmeasured(data).length) {
-        // One automatic walk per visit; a later one is the reader's press so
-        // an unreadable tree cannot turn the page into a polling loop.
-        asked = true;
-        requestMeasure({});
+    }
+  }
+
+  /* One poll of the walk the reader started. It refreshes the bar in place --
+     rebuilding the list under the reader's cursor is the flicker they saw. */
+  async function tick() {
+    if (!measuring) return;
+    const seq = ++sequence;
+    try {
+      const response = await api("/api/artifacts");
+      const body = await response.json();
+      if (seq !== sequence || !measuring) return;
+      if (!response.ok) throw Error(body.error || `HTTP ${response.status}`);
+      data = body; error = "";
+      const state = progress(body);
+      const running = (body.running || []).length;
+      if (state.finished || (!running && state.done >= state.total)) {
+        measuring = false;
+        notice = `측정 완료 · ${state.done}개 경로`;
+        render();
+        return;
       }
+      updateProgress();
+      schedulePoll(700);
+    } catch (exc) {
+      if (seq !== sequence) return;
+      measuring = false;
+      error = String(exc.message || exc);
+      render();
     }
   }
 
@@ -155,11 +212,14 @@ globalThis.ArtifactsPage = (() => {
       });
       const answer = await response.json();
       if (!response.ok) throw Error(answer.error || `HTTP ${response.status}`);
-      notice = answer.paths ? `측정 시작 · ${answer.paths}개 경로` : "측정할 경로가 없다";
+      if (!answer.paths) { notice = "측정할 경로가 없다"; render(); return; }
+      notice = `측정 시작 · ${answer.paths}개 경로`;
+      measuring = true;
       render();
-      schedulePoll(900);
+      schedulePoll(500);
     } catch (exc) {
       notice = `측정 실패: ${exc.message || exc}`;
+      measuring = false;
       render();
     }
   }
@@ -267,6 +327,36 @@ globalThis.ArtifactsPage = (() => {
     return card;
   }
 
+  function progressText(state) {
+    const pct = state.total ? Math.round((state.done / state.total) * 100) : 0;
+    return `측정 중 ${state.done}/${state.total} (${pct}%)`;
+  }
+
+  function progressBar(source) {
+    const state = progress(source);
+    const bar = node("div", "ar-progress");
+    const track = node("div", "ar-progress-track");
+    const fill = node("div", "ar-progress-fill");
+    fill.style.width = `${state.total ? Math.round((state.done / state.total) * 100) : 0}%`;
+    track.appendChild(fill);
+    bar.appendChild(track);
+    bar.appendChild(node("span", "ar-progress-text", progressText(state)));
+    return bar;
+  }
+
+  /* While a walk runs only the bar moves; the list below is left alone so the
+     reader's place and selection survive the poll. */
+  function updateProgress() {
+    const root = view();
+    const bar = root && root.querySelector(".ar-progress");
+    if (!bar || !data) return;
+    const state = progress(data);
+    const fill = bar.querySelector(".ar-progress-fill");
+    if (fill) fill.style.width = `${state.total ? Math.round((state.done / state.total) * 100) : 0}%`;
+    const text = bar.querySelector(".ar-progress-text");
+    if (text) text.textContent = progressText(state);
+  }
+
   function render() {
     const root = view();
     if (!root || root.classList.contains("hidden")) return;
@@ -289,6 +379,7 @@ globalThis.ArtifactsPage = (() => {
 
     if (notice) root.appendChild(node("p", "wt-notice", notice));
     if (error) root.appendChild(node("p", "wt-error", `읽기 실패: ${error}`));
+    if (measuring) root.appendChild(progressBar(data));
     if (!data) {
       if (loading) root.appendChild(node("p", "ar-muted", "읽는 중…"));
       root.scrollTop = top;
@@ -324,6 +415,24 @@ globalThis.ArtifactsPage = (() => {
     includeEmpty.append(box, document.createTextNode(" 빈 세션 포함"));
     includeEmpty.title = "스크래치가 비어 있고 정리 기록도 없는 세션까지 표시한다";
     bar.appendChild(includeEmpty);
+
+    const noKilled = node("label", "ar-check");
+    const killedBox = node("input");
+    killedBox.type = "checkbox";
+    killedBox.checked = excludeKilled;
+    killedBox.onchange = () => { excludeKilled = killedBox.checked; renderBody(); };
+    noKilled.append(killedBox, document.createTextNode(" killed 제외"));
+    noKilled.title = "killed로 끝난 세션을 목록에서 뺀다";
+    bar.appendChild(noKilled);
+
+    const noArchived = node("label", "ar-check");
+    const archivedBox = node("input");
+    archivedBox.type = "checkbox";
+    archivedBox.checked = excludeArchived;
+    archivedBox.onchange = () => { excludeArchived = archivedBox.checked; renderBody(); };
+    noArchived.append(archivedBox, document.createTextNode(" archived 제외"));
+    noArchived.title = "archived된 세션을 목록에서 뺀다";
+    bar.appendChild(noArchived);
     if (unmeasured(data).length) {
       bar.appendChild(node("span", "ar-muted", `미측정 ${unmeasured(data).length}개 경로`));
     }
@@ -341,13 +450,21 @@ globalThis.ArtifactsPage = (() => {
     if (!body) return;
     body.innerHTML = "";
     if (!data) return;
-    const sessions = visibleSessions(data, query, showEmpty);
+    const options = { excludeKilled, excludeArchived };
+    const sessions = visibleSessions(data, query, showEmpty, options);
     const total = (data.sessions || []).length;
     for (const session of sessions) body.appendChild(sessionCard(session));
-    if (!sessions.length) body.appendChild(node("p", "ar-muted", "표시할 세션이 없다."));
-    else if (sessions.length < total) {
+    const filtered = hiddenByCategory(data, options);
+    if (!sessions.length) {
       body.appendChild(node("p", "ar-muted",
-        `세션 ${total}개 중 ${total - sessions.length}개는 스크래치가 비어 있어 숨겼다.`));
+        filtered ? `표시할 세션이 없다 — killed/archived 제외로 ${filtered}개를 뺐다.`
+          : "표시할 세션이 없다."));
+    } else if (sessions.length < total) {
+      const parts = [];
+      if (filtered) parts.push(`killed/archived 제외 ${filtered}개`);
+      if (!showEmpty) parts.push("스크래치가 비어 있는 세션");
+      body.appendChild(node("p", "ar-muted",
+        `세션 ${total}개 중 ${total - sessions.length}개를 숨겼다 (${parts.join(", ")}).`));
     }
 
     const q = query.trim().toLowerCase();
@@ -370,7 +487,9 @@ globalThis.ArtifactsPage = (() => {
   }
 
   function open() {
-    notice = ""; asked = false;
+    // No automatic walk and no polling on open: the list is read once and the
+    // reader presses 측정 when they want sizes.
+    notice = "";
     render();
     load();
   }
@@ -378,9 +497,10 @@ globalThis.ArtifactsPage = (() => {
   function stop() {
     sequence++;
     loading = false;
+    measuring = false;
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
   return { open, stop, formatBytes, age, sortedSessions, visibleSessions,
-    unmeasured, measurable, hasContent };
+    hiddenByCategory, progress, unmeasured, measurable, hasContent };
 })();
