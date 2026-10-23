@@ -551,6 +551,7 @@ CHECKS = [
         "ragsearch_check.js",
         "relaysettings_check.js",
         "profilesettings_check.js",
+        "providerinstall_check.js",
         "settingsworkspaces_check.js",
         "simdefaults_check.js",
         "rolewf_settings_check.js",

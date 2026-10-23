@@ -117,7 +117,7 @@ assert.equal(settingsView.children.some((c) => c.cls === "ws-list"), false,
              "the Registered list left General");
 // Settings' tab strip no longer offers a Workspaces tab.
 const tabs = settingsView.children.find((c) => c.cls.includes("settings-tabs"));
-assert.deepEqual(tabs.children.map((t) => t.text), ["General", "Profiles", "Install", "VS Code"]);
+assert.deepEqual(tabs.children.map((t) => t.text), ["General", "Profiles", "Providers", "Install", "VS Code"]);
 assert.deepEqual(tabs.children.filter((t) => t.cls.includes("on")).map((t) => t.text),
                  ["General"]);
 // An open Sync panel is drawn right under its workspace's row, and only that one.

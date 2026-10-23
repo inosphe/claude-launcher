@@ -852,6 +852,51 @@ profiles:
 - Claude Code prints `[claude-code:unrecognized_model]` for an id it does not
   know. The request still reaches the backend; it is a notice, not a failure.
 
+### Installing one from the dashboard (Settings ▸ Providers)
+
+`~/.claunch.yaml` is still the file a provider lives in, but it does not have to
+be typed there: the dashboard's **Settings ▸ Providers** tab (`#/settings/providers`)
+draws the same entry as a form and writes it for you.
+
+- **Every field is editable, a preset only fills the form.** Pick a preset, change
+  anything, save. A preset is a starting value, not a sealed profile.
+- **Presets are one YAML file per provider** in
+  `~/.claude-launcher/provider-presets/<name>.yaml` (the directory the page prints).
+  Edit them by hand; a file that does not parse is marked in the picker and the
+  others still load.
+
+  ```yaml
+  # ~/.claude-launcher/provider-presets/gateway.yaml
+  label: Example gateway        # optional, shown in the picker
+  note: serves both protocols   # optional
+  provider:                     # the entry itself — the block you would have typed
+    endpoints:
+      anthropic: https://apis.example.com
+      openai: https://apis.example.com/v1
+    models: {default: some/model}
+    context_window: 200000
+  ```
+
+  A bare entry (the `provider:` wrapper left off) is accepted too, since that is
+  what copying the block out of `~/.claunch.yaml` produces.
+- **A refusal writes nothing.** The entry is parsed with the same reader every
+  launch uses and the extra keys are checked by the modules that consume them
+  (`session_affinity`/`session_header`/`anthropic_auth_header` by the routing
+  shim, `harness`/`allowed_harnesses` by the harness policy). A typo'd field name,
+  no endpoint, a non-http endpoint, or `auto_compact_at` above `context_window`
+  comes back as the reason, and the file keeps its bytes. The save itself is one
+  atomic replace, and pinning a profile to the new provider goes in the same write.
+- **Check connection** makes one real call: `GET <openai>/models` when the entry
+  has an OpenAI endpoint, otherwise one `POST <anthropic>/v1/messages` with
+  `max_tokens: 1`. The credential is the entry's `api_key`, or the pinned
+  profile's `set-token` secret. A failure is reported and never blocks the save —
+  a key that is not on this machine yet is not a typo.
+
+The page and its three routes (`GET /api/providers`, `POST /api/providers`,
+`POST /api/providers/check`) come from the daemon process, which runs the
+*installed* package: after upgrading claunch the tab appears on the next daemon
+restart (`claunch daemon restart`, the operator's command).
+
 ### `models` roles vs. raw `ANTHROPIC_*` variables
 
 A provider or profile that declares `models` does **not** need the matching
