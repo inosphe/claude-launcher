@@ -8340,12 +8340,14 @@ function tpsSparkline(series) {
 
 /* ---- token timeline under each overlay block (claunch-0af4e) ----
 
-   One chart under the throughput block and one under the usage block: fresh
-   input, cache read and cache write per time bucket (GET
-   /api/sessions/<name>/token-series), drawn as stacked areas. The small chart
-   shows the conversation from its first request, at most the last twelve
-   hours (window=cap); while the pointer is over a chart that chart grows and
-   shows the whole conversation (window=full). Compactions are vertical marks.
+   One chart at the foot of the overlay: the context size of each request,
+   fresh input, cache read and cache write stacked (GET
+   /api/sessions/<name>/token-series), one value per request on an axis of
+   request order (every request the same width; the time of a request is in
+   the tick labels and the readout). The small chart shows the conversation
+   from its first request, at most the last twelve hours (window=cap); while
+   the pointer is over the chart it grows and shows the whole conversation
+   (window=full). A compaction is a vertical mark where the context falls.
    The overlay takes no pointer events, so only the charts switch them on. */
 const TERM_SERIES_TTL_MS = { cap: 30 * 1000, full: 15 * 1000 };
 /* The parts, bottom to top, with the colour and label each one is drawn in:
@@ -8399,17 +8401,19 @@ function termSeriesTotal(p) {
   return p.cache_read + p.cache_write + p.input;
 }
 
-/* The points as running totals from the first bucket of the window: each
-   part keeps its own sum, so the stack's top is the whole window's tokens at
-   that moment and never falls (claunch-0af4e.1). */
-function termSeriesCumulative(pts) {
-  let cache_read = 0, cache_write = 0, input = 0;
-  return pts.map((p) => {
-    cache_read += p.cache_read;
-    cache_write += p.cache_write;
-    input += p.input;
-    return { t: p.t, cache_read, cache_write, input };
-  });
+/* Where a time falls on the request-order axis, as an index into the points:
+   between the last request before it and the first one after it, so a
+   compaction (which is written before the request that carries the summary)
+   sits on the step down. */
+function termSeriesIndexAt(pts, at) {
+  let lo = 0, hi = pts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid].t < at) lo = mid + 1; else hi = mid;
+  }
+  if (lo === 0) return 0;
+  if (lo >= pts.length) return pts.length - 1;
+  return lo - 0.5;
 }
 
 function termSeriesChart(data, zoom) {
@@ -8426,17 +8430,19 @@ function termSeriesChart(data, zoom) {
   svg.setAttribute("height", String(h));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   const pts = data.points;
-  const cum = termSeriesCumulative(pts);
-  const peak = Math.max(1, ...cum.map(termSeriesTotal));
-  const xAt = (i) => (pts.length > 1 ? (i / (pts.length - 1)) * w : 0);
+  const peak = Math.max(1, ...pts.map(termSeriesTotal));
+  /* One request is one step of the same width; a single request is drawn
+     across the whole chart. */
+  const drawn = pts.length === 1 ? [pts[0], pts[0]] : pts;
+  const xAt = (i) => (i / (drawn.length - 1)) * w;
   /* Log height axis from 1 token: cached input dwarfs fresh input and write,
      and on a linear axis the two thin parts were not visible. A boundary
      under 1 token sits on the baseline. */
   const logPeak = Math.log(Math.max(peak, 2));
   const yAt = (v) => h - 1 - (v > 1 ? Math.log(v) / logPeak : 0) * (h - 3);
-  const below = pts.map(() => 0);
+  const below = drawn.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
-    const above = cum.map((p, i) => below[i] + p[key]);
+    const above = drawn.map((p, i) => below[i] + p[key]);
     const top = above.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`);
     const base = below.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).reverse();
     const area = document.createElementNS(NS, "polygon");
@@ -8453,8 +8459,9 @@ function termSeriesChart(data, zoom) {
     above.forEach((v, i) => { below[i] = v; });
   }
   const span = Math.max(1, data.until - data.start);
+  const xOfTime = (at) => xAt(termSeriesIndexAt(drawn, at));
   for (const at of data.compactions || []) {
-    const x = (((at - data.start) / span) * w).toFixed(1);
+    const x = xOfTime(at).toFixed(1);
     const mark = document.createElementNS(NS, "line");
     mark.setAttribute("class", "term-series-compaction");
     mark.setAttribute("x1", x);
@@ -8470,7 +8477,7 @@ function termSeriesChart(data, zoom) {
      mark's tooltip. */
   const swaps = (data.swaps || []).filter((m) => m.at >= data.start && m.at <= data.until);
   for (const m of swaps) {
-    const x = ((m.at - data.start) / span) * w;
+    const x = xOfTime(m.at);
     const mark = document.createElementNS(NS, "g");
     mark.setAttribute("class", "term-series-swap");
     const stem = document.createElementNS(NS, "line");
@@ -8488,8 +8495,8 @@ function termSeriesChart(data, zoom) {
     svg.appendChild(mark);
   }
   if (zoom) {
-    /* The height axis: log scale, its maximum is the whole window's tokens;
-       a faint rule at every thousandth power below it. */
+    /* The height axis: log scale, its maximum is the largest context of the
+       window; a faint rule at every thousandth power below it. */
     for (const [at, name] of [[1e3, "1k"], [1e6, "1M"], [1e9, "1B"]]) {
       if (at >= peak || yAt(at) - yAt(peak) < 12) continue;
       const tick = document.createElementNS(NS, "line");
@@ -8515,19 +8522,25 @@ function termSeriesChart(data, zoom) {
     label.setAttribute("class", "term-series-ymax");
     label.setAttribute("x", "2");
     label.setAttribute("y", String(yAt(peak) + 10));
-    label.textContent = `${usageShort(peak)} (log)`;
+    label.textContent = `${usageShort(peak)} max (log)`;
     svg.append(rule, label);
   }
   box.appendChild(svg);
   const compactions = (data.compactions || []).length;
-  const total = cum.length ? termSeriesTotal(cum[cum.length - 1]) : 0;
-  box.title = `${usageShort(total)} tokens sent over ` +
-    `${fmtAge(span)}` + (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
+  const last = pts[pts.length - 1];
+  const asked = data.count || pts.length;
+  box.title = `context of ${asked} request${asked > 1 ? "s" : ""} over ${fmtAge(span)}; ` +
+    `last ${usageShort(termSeriesTotal(last))}, largest ${usageShort(peak)}` +
+    (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
     (swaps.length ? `; ${swaps.length} profile swap${swaps.length > 1 ? "s" : ""}` : "") +
     (zoom ? "" : "\nhover for the whole conversation");
   if (zoom) {
     const axis = el("div", "term-series-axis");
-    axis.append(el("span", "", `${ago(data.start)}`), el("span", "", "now"));
+    /* The time of a request is not on the axis, so three of the requests
+       carry it: the first, the middle one and the last. */
+    const ticks = pts.length > 2 ? [0, Math.round((pts.length - 1) / 2), pts.length - 1]
+      : pts.map((p, i) => i);
+    for (const i of ticks) axis.append(el("span", "", `#${pts[i].n} · ${ago(pts[i].t)}`));
     const legend = el("div", "term-series-legend");
     for (const [, label, colour] of TERM_SERIES_LAYERS.slice().reverse()) {
       const item = el("span", "term-series-key", label);
@@ -8541,9 +8554,9 @@ function termSeriesChart(data, zoom) {
       const rect = svg.getBoundingClientRect();
       const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
       const p = pts[Math.max(0, Math.min(pts.length - 1, Math.round(frac * (pts.length - 1))))];
-      const c = cum[pts.indexOf(p)];
-      readout.textContent = `${ago(p.t)}: in ${usageShort(c.input)} · cached ${usageShort(c.cache_read)}` +
-        ` · write ${usageShort(c.cache_write)} (+${usageShort(termSeriesTotal(p))} in ${fmtAge(data.bucket_s)})`;
+      readout.textContent = `#${p.n} · ${ago(p.t)}: ${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
+        ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}` +
+        (p.count > 1 ? ` (largest of ${p.count} requests)` : "");
     });
     svg.addEventListener("mouseleave", () => { readout.textContent = " "; });
     box.append(axis, legend, readout);

@@ -8,8 +8,11 @@
    mouse input:
 
    - entering it grows it, and the zoomed chart lies under the pointer;
-   - the zoomed chart labels its height axis with the maximum, and a profile
-     swap is a solid mark where a compaction is dashed (claunch-0af4e.1.1);
+   - the zoomed chart labels its height axis with the largest context, and a
+     profile swap is a solid mark where a compaction is dashed
+     (claunch-0af4e.1.1);
+   - one value per request: the compaction mark stands on the fall of the
+     context between two requests (claunch-0af4e.1.2);
    - small moves inside it repaint nothing;
    - the overlay builds at all: app.js runs under "use strict", where a write
      to an SVG element's read-only className throws, and that throw aborted
@@ -59,13 +62,17 @@ function el(tag, cls, text) {
 }
 const fmtAge = (s) => Math.round(s / 60) + "m", usageShort = (n) => String(n);
 ${src.slice(constStart, constEnd)}
-${["termSeriesTotal", "termSeriesCumulative", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
+${["termSeriesTotal", "termSeriesIndexAt", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
     "termSeriesMaker"].map(slice).join("\n")}
+/* 30 requests, one every 120 s; the context grows to request 15, is
+   compacted at 1800 s (the summary is the next request's context) and grows
+   again. */
 const series = (win) => ({
-  available: true, window: win, start: 0, until: 3600, bucket_s: 120, requests: 30,
+  available: true, window: win, start: 0, until: 3600, requests: 30, count: 30,
   compactions: [1800],
   swaps: [{ at: 2400, from: "opencode", to: "opencode2" }],
-  points: Array.from({ length: 30 }, (_, i) => ({ t: i * 120, input: 5, cache_read: 50 + i, cache_write: 8 })),
+  points: Array.from({ length: 30 }, (_, i) => ({
+    t: i * 120, n: i + 1, count: 1, input: 5, cache_read: i < 15 ? 50 + i * 10 : 10 + i, cache_write: 8 })),
 });
 window.renders = 0;
 function renderTermTps() {
@@ -115,9 +122,18 @@ renderTermTps();
               compactionStroke: getComputedStyle(document.querySelector(".term-series-compaction")).stroke,
             };
           });
-          assert.equal(drawnMarks.max, String(5 * 30 + 8 * 30 + [...Array(30).keys()].reduce((a, i) => a + 50 + i, 0)) + " (log)",
-            "the zoomed chart's height axis is labelled with its maximum");
+          assert.equal(drawnMarks.max, String(5 + 8 + 50 + 14 * 10) + " max (log)",
+            "the zoomed chart's height axis is labelled with the largest context");
           assert.ok(drawnMarks.labelInPlot, "and the label is laid out");
+          const fall = await p.evaluate(() => {
+            const top = document.querySelector(".term-series.zoom .term-series-line.cache_read")
+              .getAttribute("points").split(" ").map((pt) => pt.split(",").map(Number));
+            const mark = Number(document.querySelector(".term-series.zoom .term-series-compaction").getAttribute("x1"));
+            return { before: top[14], after: top[15], mark };
+          });
+          assert.ok(fall.after[1] > fall.before[1], "the context falls at the compaction (larger y is lower)");
+          assert.ok(fall.before[0] < fall.mark && fall.mark < fall.after[0],
+            "and the compaction mark stands on that fall, between the two requests");
           assert.equal(drawnMarks.swapDash, "none", "a swap mark is solid");
           assert.notEqual(drawnMarks.compactionDash, "none", "a compaction mark is dashed");
           assert.notEqual(drawnMarks.swapStroke, drawnMarks.compactionStroke, "and the two differ in colour");
