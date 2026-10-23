@@ -100,9 +100,9 @@ const LISTING = {
                             openai: "https://apis.opengateway.ai/v1" },
                models: { default: "deepseek/deepseek-v4.1-flash-ultrafast" },
                context_window: 1000000,
-               api_key_set: true,
                routing: { order: ["CoreWeave"] },
                harness_options: { claude: { env: { A: "1" } } } },
+      api_key_set: true,
       problems: [], kept: ["routing"] },
     { name: "broken", entry: {}, problems: ["endpoints is required"] },
   ],
@@ -148,14 +148,25 @@ const LISTING = {
   // The reviewed defect: the form drew no control for `routing`, `dynamic`,
   // `capabilities` or the harness options other than claude.model_tag, and a
   // save replaced the stored entry, deleting them while reporting success.
+  // The fixture carries `claude.env` although the server withholds it today
+  // (it can hold a token): the page's own rule is "never drop what I do not
+  // draw", and it has to hold for any entry a listing puts in front of it.
   {
-    const loaded = context.providerDraftFromEntry(LISTING.providers[0].entry,
-                                                  { kept: ["routing"] });
+    const loaded = context.providerDraftFromEntry(
+      LISTING.providers[0].entry,
+      { kept: ["routing"], api_key_set: LISTING.providers[0].api_key_set }
+    );
     const back = context.providerEntryFromDraft(loaded);
     check("routing survives a load and a save", back.routing, { order: ["CoreWeave"] });
     check("an un-drawn harness option survives", back.harness_options.claude.env, { A: "1" });
     ok("the key is never part of the entry the form sends",
        loaded.residual.api_key === undefined && !("api_key" in loaded.residual));
+    // The listing's own display flag is not a provider field; posting it back
+    // is refused as `unknown field(s): api_key_set`. The server keeps it on the
+    // row, and the page must not forward it even if one arrives in the entry.
+    ok("the page never posts the listing's api_key_set back",
+       !("api_key_set" in back) && !("api_key_set" in loaded.residual));
+    ok("a stored key is reported from the row, not the entry", loaded.api_key_set === true);
     const was = context.providersState.draft;
     context.providersState.draft = loaded;
     const panel = text(context.providersPanel());

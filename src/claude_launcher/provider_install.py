@@ -300,15 +300,33 @@ def _pin(doc: dict, profile: str, provider: str) -> Profile:
 
 
 def _public_entry(entry: dict) -> dict:
-    """A stored entry as it may be sent to the browser: no secret, no surprise.
+    """A stored entry as it may be sent to the browser: no secret in it.
 
     ``api_key`` stays out of the payload -- the page shows whether one is
-    stored (``api_key_set``) and never receives its value, the way the profile
-    and LLM-settings pages already treat a stored token.
+    stored (the row's ``api_key_set``) and never receives its value, the way
+    the profile and LLM-settings pages already treat a stored token.
+
+    So do the values of ``harness_options.claude.env``. That block is the
+    harness's environment and on this machine it can hold
+    ``ANTHROPIC_AUTH_TOKEN``; the form draws no control for it, so the page has
+    no use for the values, and :func:`merge_entry` puts the stored block back
+    into a save that never named it.
+
+    The flag belongs to the **row**, not the entry: the page posts the entry it
+    loaded back, so a key that travelled inside it would be posted back too and
+    refused as an unknown field on the next save.
     """
     out = copy.deepcopy(entry) if isinstance(entry, dict) else {}
-    stored = out.pop("api_key", "")
-    out["api_key_set"] = bool(str(stored or "").strip())
+    out.pop("api_key", None)
+    options = out.get("harness_options")
+    if isinstance(options, dict):
+        claude = options.get("claude")
+        if isinstance(claude, dict):
+            claude.pop("env", None)
+            if not claude:
+                options.pop("claude")
+        if not options:
+            out.pop("harness_options")
     return out
 
 
@@ -323,6 +341,9 @@ def listing() -> dict:
             {
                 "name": name,
                 "entry": _public_entry(entry),
+                "api_key_set": bool(
+                    str((entry or {}).get("api_key") or "").strip()
+                ),
                 "problems": validate(name, entry),
                 "kept": sorted(set(entry) - set(FORM_FIELDS)),
             }

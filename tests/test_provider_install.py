@@ -309,7 +309,64 @@ def test_the_listing_never_carries_the_key(home):
     assert "sk-secret-value" not in json.dumps(body)
     row = body["providers"][0]
     assert "api_key" not in row["entry"]
-    assert row["entry"]["api_key_set"] is True
+    # The flag says a key is stored; it belongs beside the entry, not in it.
+    assert row["api_key_set"] is True
+    assert "api_key_set" not in row["entry"]
+
+
+def test_the_listing_does_not_ship_the_harness_environment(home):
+    """``harness_options.claude.env`` can hold a token; the page draws no control for it.
+
+    It is withheld from the payload and put back by the merge, so withholding it
+    costs the round trip nothing -- the same arrangement as ``api_key``.
+    """
+    provider_install.save(
+        "demo",
+        _valid(
+            harness_options={
+                "claude": {
+                    "model_tag": "tag",
+                    "env": {"ANTHROPIC_AUTH_TOKEN": "sk-env-secret"},
+                }
+            }
+        ),
+    )
+    body = provider_install.listing()
+    assert "sk-env-secret" not in json.dumps(body)
+    posted = json.loads(json.dumps(body["providers"][0]["entry"]))
+    assert "env" not in (posted.get("harness_options") or {}).get("claude", {})
+    provider_install.save("demo", posted)
+    options = store.load()["providers"]["demo"]["harness_options"]
+    assert options["claude"]["env"] == {"ANTHROPIC_AUTH_TOKEN": "sk-env-secret"}
+    assert options["claude"]["model_tag"] == "tag"
+
+
+def test_an_entry_the_listing_emitted_can_be_saved_back(home):
+    """A row's ``entry`` is what the page posts back, so it must be storable.
+
+    ``app.js`` fills the form from ``row.entry`` and sends that entry to
+    ``POST /api/providers``. Whatever the listing adds to it for the page's own
+    use therefore becomes a field the server is asked to store: when
+    ``api_key_set`` was carried inside the entry, every save over an installed
+    provider was refused with ``unknown field(s): api_key_set``. This is the
+    round trip over the payload the listing actually emits.
+    """
+    provider_install.save(
+        "demo",
+        _valid(
+            api_key="sk-stored",
+            routing={"order": ["CoreWeave"]},
+            harness_options={"claude": {"model_tag": "tag", "env": {"A": "1"}}},
+        ),
+    )
+    row = provider_install.listing()["providers"][0]
+    posted = json.loads(json.dumps(row["entry"]))  # what the page sends
+    assert provider_install.validate("demo", posted) == []
+    provider_install.save("demo", posted)
+    entry = store.load()["providers"]["demo"]
+    assert entry["api_key"] == "sk-stored"
+    assert entry["routing"] == {"order": ["CoreWeave"]}
+    assert entry["harness_options"]["claude"]["env"] == {"A": "1"}
 
 
 def test_the_page_and_the_server_agree_on_which_keys_the_form_owns(home):

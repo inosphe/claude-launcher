@@ -901,10 +901,13 @@ draws the same entry as a form and writes it for you.
   `claude.model_tag`. Those are merged back from the stored entry, and the page
   names them under the form. A control that does not exist cannot be cleared, so
   removing one of them is a `~/.claunch.yaml` edit.
-- **`api_key` is never sent to the browser.** The listing reports
-  `api_key_set: true/false` instead of the value; leaving the field empty keeps
-  the stored key, typing one replaces it, and clearing it is a
-  `~/.claunch.yaml` edit.
+- **A credential is never sent to the browser.** The listing reports
+  `api_key_set: true/false` on the provider's row, beside the entry rather than
+  in it — the entry a row carries is exactly what the page posts back, so a
+  display flag inside it would be refused as an unknown field. Leaving the key
+  field empty keeps the stored key, typing one replaces it, and clearing it is a
+  `~/.claunch.yaml` edit. The values of `harness_options.claude.env` are
+  withheld for the same reason and put back by the merge.
 
 The page and its three routes (`GET /api/providers`, `POST /api/providers`,
 `POST /api/providers/check`) come from the daemon process, which runs the

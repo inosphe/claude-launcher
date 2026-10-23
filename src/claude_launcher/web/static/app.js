@@ -35296,6 +35296,11 @@ const PROVIDER_FORM_FIELDS = [
    round trip — it would report success and silently drop a routing rule. */
 function providerResidual(entry) {
   const rest = JSON.parse(JSON.stringify(entry || {}));
+  /* ``api_key_set`` is how the listing says a key is stored; it is not a
+     provider field the server accepts, and sending it back rejects the save.
+     The server keeps it on the row rather than in the entry -- this is only
+     the page refusing to forward a display flag even if one arrives in it. */
+  delete rest.api_key_set;
   const empty = (node) => !node || typeof node !== "object" || !Object.keys(node).length;
   for (const field of PROVIDER_FORM_FIELDS) {
     const parts = field.key.split(".");
@@ -35317,7 +35322,10 @@ function providerResidual(entry) {
 function providerDraftFromEntry(entry, options) {
   const draft = { name: "", profile: "", kept: [], api_key_set: false, residual: {} };
   if (options && Array.isArray(options.kept)) draft.kept = options.kept.slice();
-  draft.api_key_set = entry.api_key_set === true;
+  /* The flag is the row's (provider_install.listing puts it beside ``entry``),
+     not the entry's: an entry the page loaded is posted back, so a key that
+     travelled inside it would be posted back and refused as unknown. */
+  draft.api_key_set = !!(options && options.api_key_set === true);
   draft.residual = providerResidual(entry);
   for (const field of PROVIDER_FORM_FIELDS) draft[field.key] = "";
   const text = (value) => (value === undefined || value === null ? "" : String(value));
@@ -35474,7 +35482,8 @@ function providersPanel() {
     load.type = "button";
     load.title = "load this provider into the form";
     load.addEventListener("click", () => {
-      st.draft = providerDraftFromEntry(row.entry || {}, { kept: row.kept || [] });
+      st.draft = providerDraftFromEntry(row.entry || {},
+                                        { kept: row.kept || [], api_key_set: row.api_key_set });
       st.draft.name = row.name;
       st.notice = "";
       st.check = null;
