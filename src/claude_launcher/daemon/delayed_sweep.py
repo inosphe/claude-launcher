@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..delayed_sweep import BATCH_SETTLE, BATCH_SIZE, NOTIFIED, Queue
 from .. import config, store, test_window
-from . import instance_manifest, paths
+from . import instance_manifest, paths, pools
 from .session import delivery_wake
 
 log = logging.getLogger("claunch.daemon.delayed_sweep")
@@ -228,7 +228,7 @@ class Clock:
 
         A tip is swept whether or not it has a watcher; a spawn that fails is
         tried again after SPAWN_BACKOFF and never holds the sweep back."""
-        await asyncio.to_thread(queue.dispatch, *policy)
+        await pools.background(queue.dispatch, *policy)
         jobs = queue.status()["jobs"]
         live = 0
         for job in jobs:

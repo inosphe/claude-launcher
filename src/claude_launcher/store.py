@@ -605,6 +605,13 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # Thread pools behind asyncio.to_thread (daemon/pools.py, claunch-d18v8):
+    # the loop's default executor takes work a request is waiting on, a second
+    # pool takes clocks, sweeps and scans. 0 derives the size from the core
+    # count (cores + 4 up to 32, and a quarter of the cores from 2 to 8).
+    # Read once at daemon start.
+    "thread_pool_interactive": 0,
+    "thread_pool_background": 0,
     # Where improv-worker-v2's session routing sends an easy task
     # (claunch-yl0to): the fork child's profile and model preset (one of
     # provider_spec.MODEL_ROLES, or a model name). The run's start inputs

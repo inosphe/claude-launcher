@@ -94,7 +94,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
-from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths
+from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths, pools
 from .session import STATUS_IDLE, delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow2")
@@ -359,7 +359,7 @@ class Cflow2Clock:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self._wake.wait(), timeout=self.poll)
                 self._wake.clear()
-                for cwd, name, text in await asyncio.to_thread(self.scan):
+                for cwd, name, text in await pools.background(self.scan):
                     self._deliver(cwd, name, text)
                 self._start_restarts()
                 await self.run_triggers()
@@ -375,7 +375,7 @@ class Cflow2Clock:
         while not self.stop.is_set():
             await asyncio.sleep(HEARTBEAT_EVERY)
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(self._beat)
+                await pools.background(self._beat)
 
     def _mark(self) -> None:
         """A pass made progress (a slot, a probe, a spawn started)."""

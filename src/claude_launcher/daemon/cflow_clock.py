@@ -63,7 +63,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
-from . import actors, briefing, instance_manifest, landing_route, session_procs, status_checks
+from . import actors, briefing, instance_manifest, landing_route, pools, session_procs, status_checks
 from . import paths as daemon_paths
 from .session import STATUS_BUSY, STATUS_IDLE, delivery_wake
 
@@ -97,7 +97,7 @@ class AskClock:
         while True:
             try:
                 await asyncio.sleep(self.interval)
-                for moved in await asyncio.to_thread(tick):
+                for moved in await pools.background(tick):
                     if moved.get("moved_to"):
                         log.info(
                             "cflow ask %s at step %s expired with %s; the "
@@ -1433,7 +1433,7 @@ class StallPingClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                due = await asyncio.to_thread(self.scan, time.monotonic())
+                due = await pools.background(self.scan, time.monotonic())
                 for cwd, scope, block in due:
                     await self._deliver(cwd, scope, block)
             except asyncio.CancelledError:
@@ -1651,7 +1651,7 @@ class WindowClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                for cwd, scope, block in await asyncio.to_thread(self.scan):
+                for cwd, scope, block in await pools.background(self.scan):
                     await self._deliver(cwd, scope, block)
             except asyncio.CancelledError:
                 raise
@@ -1768,7 +1768,7 @@ class TimerClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                for cwd, scope, block in await asyncio.to_thread(self.scan):
+                for cwd, scope, block in await pools.background(self.scan):
                     await self._deliver(cwd, scope, block)
             except asyncio.CancelledError:
                 raise
@@ -1901,7 +1901,7 @@ class ChecklistClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                for cwd, scope, frame in await asyncio.to_thread(self.scan):
+                for cwd, scope, frame in await pools.background(self.scan):
                     await self._deliver(cwd, scope, frame)
             except asyncio.CancelledError:
                 raise
@@ -2087,7 +2087,7 @@ class RestartClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                actions = await asyncio.to_thread(self.scan)
+                actions = await pools.background(self.scan)
                 for cwd, scope, action in actions:
                     await self._deliver(cwd, scope, restart_started_block(action))
                     if action["kind"] != "run":
@@ -2353,9 +2353,9 @@ class TriggerClock:
                 # slow one delays the rest of this pass — which is the right
                 # trade at this volume (a handful per round) and keeps one
                 # misconfigured endpoint from opening N concurrent calls.
-                await asyncio.to_thread(self.refresh_landing)
-                await asyncio.to_thread(self.grant_mergers)
-                for cwd, scope, action in await asyncio.to_thread(self.scan):
+                await pools.background(self.refresh_landing)
+                await pools.background(self.grant_mergers)
+                for cwd, scope, action in await pools.background(self.scan):
                     performed, detail = await self._perform(cwd, scope, action)
                     await asyncio.to_thread(
                         cflow_engine.complete_trigger,
@@ -2774,7 +2774,7 @@ class RoundStartClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                for cwd, scope, block in await asyncio.to_thread(self.scan):
+                for cwd, scope, block in await pools.background(self.scan):
                     await self._deliver(cwd, scope, block)
             except asyncio.CancelledError:
                 raise
@@ -3168,7 +3168,7 @@ class RunEventClock:
         while True:
             try:
                 await asyncio.sleep(self.poll)
-                self._debt.extend(await asyncio.to_thread(self.scan))
+                self._debt.extend(await pools.background(self.scan))
                 remaining: List[dict] = []
                 for event in self._debt:
                     if not await self._deliver(event):
