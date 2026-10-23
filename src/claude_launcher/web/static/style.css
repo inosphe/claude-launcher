@@ -2416,7 +2416,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   display: flex; flex-wrap: nowrap; align-items: center; gap: 8px 10px;
   background: #1b1e24; border-bottom: 1px solid #2a2e36; font-size: 13px;
 }
-/* toolbar.js measures available space, then uses icons and an overflow menu. */
+/* toolbar.js measures available space: it moves controls into the overflow
+   menu first and falls back to these fixed-width glyphs only when nothing is
+   left to move. */
 #term-header > *, .term-actions > * { flex: none; }
 .term-actions { display: contents; }
 .term-btn { white-space: nowrap; }
