@@ -1391,29 +1391,6 @@ class Session:
             return None
         return idle_for
 
-    def screen_idle_for(self, now: Optional[float] = None) -> Optional[float]:
-        """Seconds since a new line last appeared, or ``None`` when unmeasured.
-
-        This is the reading :meth:`idle_since` cannot give: that one answers
-        only while the session is IDLE, and the state the session reminder's
-        stall hold asks about is a session that is *busy* -- a turn parked on
-        a long command, or a TUI animating a spinner without drawing a new
-        line for minutes. The tracker already ignores animated rows when it
-        decides what counts as meaningful change, so a spinner alone does not
-        move this number; a line of actual output does.
-
-        ``None`` before the first sample and for a parked grid nobody
-        renders (``Harness.background_render`` off, no viewer attached),
-        where the line hashes say nothing and PTY output timing is the only
-        reading there is -- the same split :meth:`_heuristic_status` makes.
-        """
-        if self.exited or not self._saw_output:
-            return None
-        now = time.monotonic() if now is None else now
-        if not self.background_render and not self.is_focused():
-            return max(0.0, now - self._last_output_mono)
-        return self.tracker.idle_for(now)
-
     async def _deliver(
         self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False,
         before: Optional[Callable[[], Awaitable[None]]] = None,
@@ -2739,9 +2716,6 @@ class DeadSession:
 
     def idle_since(self) -> Optional[float]:
         return None
-
-    def screen_idle_for(self, now: Optional[float] = None) -> Optional[float]:
-        return None  # a session with no screen has no stillness to measure
 
     def note_human_input(
         self,

@@ -1172,6 +1172,81 @@ def test_role_source_reminds_a_session_with_no_cflow_run(proj):
     assert "## Cflow" not in block
 
 
+class _StillScreenSession(_FakeSession):
+    """Busy, with a screen that has drawn nothing new for a long time.
+
+    This is the shape the rollback in claunch-pumne.1 is about: a turn
+    waiting on a long command, a long reasoning block, a streaming reply
+    that rewrites its own rows. The session is working, so nothing about
+    the screen's stillness may suppress a reminder it is due.
+    """
+
+    def __init__(self, name: str, cwd: str, still: float = 3600.0) -> None:
+        super().__init__(name, cwd)
+        self.still = still
+
+    def screen_idle_for(self):
+        return self.still
+
+    def idle_since(self):
+        return self.still
+
+
+class _RunningTask:
+    """Stands in for the service's task loop so `running` reads true.
+
+    `status()` answers "stopped" before it looks at anything else, so a test
+    that never starts the loop reads that value whatever the rest of the
+    code does -- an assertion against it can never fail.
+    """
+
+    def done(self) -> bool:
+        return False
+
+
+def test_a_still_screen_does_not_hold_a_due_reminder(proj):
+    """claunch-pumne.1: the screen-stillness hold is gone.
+
+    Raising the reminder on "the screen has not moved for N seconds" reads
+    ordinary work as a parked turn -- 15 quiet seconds happen inside any
+    long command -- so it was rolled back. The session here is busy and has
+    drawn nothing for an hour; the reminder it is due must be delivered.
+    The header half of the same rule is the next test -- kept separate so
+    this assertion cannot fire first and hide it.
+    """
+    sess = _StillScreenSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    cfg = {"role_reminder": True, "role_reminder_interval": 600.0}
+
+    asyncio.run(service.tick(1000.0))       # first sight arms the role source
+    asyncio.run(service.tick(1601.0))
+    assert len(sess.delivered) == 1
+
+
+def test_a_still_screen_never_reads_as_a_stalled_header(proj):
+    """claunch-pumne.1: `stalled` is not a state the header can report.
+
+    The reading is taken one interval after the delivery, where a busy
+    session reads "due" -- and where the removed hold used to read
+    "stalled". The service's task loop is not started here, so it is stood
+    in for: `status()` answers "stopped" before anything else otherwise,
+    and the assertion below could never fail (review on 4e58909b).
+    """
+    sess = _StillScreenSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    cfg = {"role_reminder": True, "role_reminder_interval": 600.0}
+
+    asyncio.run(service.tick(1000.0))       # first sight arms the role source
+    asyncio.run(service.tick(1601.0))
+    service._task = _RunningTask()
+    state = service.status("w1", now=2201.0, cfg=cfg)["role"]["state"]
+    assert state == "due"
+
+
 def test_role_source_skips_repeats_when_session_has_not_moved(proj):
     sess = _ActivitySession("w1", str(proj))
     mgr = _KinManager({"w1": sess})

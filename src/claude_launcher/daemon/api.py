@@ -5305,17 +5305,8 @@ def _cflow_timers(
         rem["state"] = "watching"
     elif due_in > 0:
         rem["state"] = "counting"
-    elif not busy:
-        rem["state"] = "held"
-    elif cflow_clock.stalled_for_reminder(
-        session, cflow_clock.stall_hold_seconds(cfg)
-    ) is not None:
-        # Due, and held because the session has drawn no new line for the
-        # stall threshold -- the same silence as "held", for a terminal that
-        # is working but parked (cflow_clock.REMINDER_STALL, claunch-pumne).
-        rem["state"] = "stalled"
     else:
-        rem["state"] = "due"
+        rem["state"] = "held" if not busy else "due"
     # Which block is coming, not just when. The reminder restates the step in
     # full the first time it speaks at a position and says the short form
     # after that (:class:`cflow_clock.ReminderClock`), and a countdown that

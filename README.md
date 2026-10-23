@@ -5260,16 +5260,7 @@ the current membership and stance id; its longer `cflow_reminder` correction
 appears on the first Cflow fire at that position. Progress resets only the
 Cflow timer. A role or stance update resets only the Role timer. Reminders are
 typed only while the session is **working** (busy); a due reminder for an idle
-or suspended session is held until it is working again. A delivery is also
-held while the session's screen has drawn no new line for
-`reminder_stall_hold` seconds (default 15; 0 turns it off) — a turn parked on
-a long command, or a TUI animating a spinner, reads as busy without producing
-anything new to read, and a reminder typed into it is noise. That hold takes
-the same path as the idle one: when the next line appears, the source timer
-starts a fresh interval rather than replaying the reminder, and the header
-chip reports the state as `stalled` (the run page reports it the same way).
-The hold reads the same non-animated screen marker the no-progress rules use,
-so a spinner or clock repaint does not count as a new line. Defaults:
+or suspended session is held until it is working again. Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 600` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above). Role uses
@@ -5339,8 +5330,7 @@ Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
 `cflow_reminder`, `cflow_reminder_interval`, `role_reminder`,
 `role_reminder_interval`, `prompt_pack_reminder`,
-`prompt_pack_reminder_interval`, `reminder_stall_hold`, `resume_nudge`,
-`jev_model`,
+`prompt_pack_reminder_interval`, `resume_nudge`, `jev_model`,
 `jev_model_qa_nudge`, `jev_model_megathread`, `megathread_threshold_ratio`,
 `megathread_jev_budget_tokens`, `megathread_max_chars`,
 `megathread_concurrency`); runtime

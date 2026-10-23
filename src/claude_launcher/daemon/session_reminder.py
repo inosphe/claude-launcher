@@ -978,17 +978,7 @@ class SessionReminderService:
                     busy = session.status() == STATUS_BUSY
                 except Exception:  # noqa: BLE001 - raced with exit
                     busy = False
-                if not busy:
-                    view["state"] = "held"
-                elif cflow_clock.stalled_for_reminder(
-                    session, cflow_clock.stall_hold_seconds(cfg or {})
-                ) is not None:
-                    # Due, but held for a screen that has drawn nothing new:
-                    # the same silence as "held", for a session that is
-                    # working rather than stopped (cflow_clock.REMINDER_STALL).
-                    view["state"] = "stalled"
-                else:
-                    view["state"] = "due"
+                view["state"] = "due" if busy else "held"
         return {"paused": paused, "role": view}
 
     def scan_goals(self, now: float, cfg: dict) -> set:
@@ -1080,7 +1070,6 @@ class SessionReminderService:
                     packs=packs_due.get(name),
                     packs_due=name in packs_due,
                     now=now,
-                    cfg=cfg,
                 )
             else:
                 await self._deliver_session(
@@ -1090,7 +1079,6 @@ class SessionReminderService:
                     packs=packs_due.get(name),
                     packs_due=name in packs_due,
                     now=now,
-                    cfg=cfg,
                 )
 
     @staticmethod
@@ -1133,7 +1121,6 @@ class SessionReminderService:
         packs: Optional[List[dict]] = None,
         packs_due: bool = False,
         now: Optional[float] = None,
-        cfg: Optional[dict] = None,
     ) -> None:
         # One clock for the whole decision.  The scan that found this source
         # due and the stamps written back when it lands have to be on the
@@ -1160,23 +1147,7 @@ class SessionReminderService:
             roles if roles is not None else role_entries(name, self.manager, self.mesh)
         )
 
-        # Two reasons to hold, and they answer different questions. Not busy
-        # means the agent has finished its turn: nothing of ours would land
-        # in a turn, and the reminder is re-armed when the session starts
-        # one. A still screen means the session is working (or animating)
-        # but has not drawn a new line for ``reminder_stall_hold`` seconds --
-        # a long command, a spinner-only wait -- and a reminder typed into
-        # that is read minutes later or not at all (claunch-pumne). Both take
-        # the same hold, so the same resume rule below re-arms rather than
-        # replays.
-        stalled = cflow_clock.stalled_for_reminder(
-            session, cflow_clock.stall_hold_seconds(cfg)
-        )
-        try:
-            working = session.status() == STATUS_BUSY
-        except Exception:  # noqa: BLE001 - raced with exit; nothing to type into
-            working = False
-        if not working or stalled is not None:
+        if session.status() != STATUS_BUSY:
             stamp = at
             if cflow_entry is not None:
                 cflow_entry["held_at"] = stamp
@@ -1186,18 +1157,7 @@ class SessionReminderService:
                 self._packs[name]["held_at"] = stamp
             if goal_entry is not None:
                 goal_entry["held_at"] = stamp
-            if stalled is not None:
-                log.debug(
-                    "session reminder held for %r: screen still for %.0fs "
-                    "(hold %.0fs)",
-                    name,
-                    stalled,
-                    cflow_clock.stall_hold_seconds(cfg),
-                )
-            else:
-                log.debug(
-                    "session reminder held for %r: session is not working", name
-                )
+            log.debug("session reminder held for %r: session is not working", name)
             return
 
         # A reminder that became due while the session was idle is not useful

@@ -186,12 +186,6 @@ check("a tick that is not running is NOT the same as switched off",
 check("held names the reason it is silent, which is not the configuration",
       say({ state: "held", due_in: -12 }),
       "cflow reminder held — session stopped");
-/* The sibling silence: the session IS working, it just has not drawn a new
-   line (daemon/cflow_clock REMINDER_STALL). Telling the two apart is the
-   difference between "wake it" and "let it finish". */
-check("a working but quiet session is held for its screen, not for itself",
-      say({ state: "stalled", due_in: -12 }),
-      "cflow reminder held — no new line for a while");
 check("a gate is the protocol's silence, not the settings'",
       say({ state: "blocked", due_in: null }),
       "cflow reminder paused — not this run's move");
@@ -208,10 +202,10 @@ check("a ping armed behind a working session is not 'off'",
 
 /* Each state gets its own glyph, so the strip is readable with the colour
    stripped — which is how it renders in the common (counting) case. */
-const glyphs = ["due", "counting", "stalled", "held", "waiting", "watching",
-                "arming", "blocked", "off", "stopped"]
+const glyphs = ["due", "counting", "held", "waiting", "watching", "arming",
+                "blocked", "off", "stopped"]
   .map((state) => ctx.line(ctx.pick(timers(REM({ state, due_in: null }), PING()))).glyph);
-check("no state is left without a glyph", glyphs.filter(Boolean).length, 10);
+check("no state is left without a glyph", glyphs.filter(Boolean).length, 9);
 
 /* ---- the hover text answers about the clock it is NOT reporting ------ */
 const title = ctx.line(ctx.pick(timers(
