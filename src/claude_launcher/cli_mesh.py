@@ -375,7 +375,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     machine = args.machine
     if not machine:
-        if not sys.stdin.isatty():
+        # sys.stdin can be None outright (pythonw, some launchers); isatty()
+        # on it raises AttributeError rather than saying "no prompt".
+        if sys.stdin is None or not sys.stdin.isatty():
             print("error: give MACHINE and SESSION, or run interactively",
                   file=sys.stderr)
             return 2
@@ -390,7 +392,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
             return 1
     session = args.session
     if not session:
-        if not sys.stdin.isatty():
+        # sys.stdin can be None outright (pythonw, some launchers); isatty()
+        # on it raises AttributeError rather than saying "no prompt".
+        if sys.stdin is None or not sys.stdin.isatty():
             print("error: give SESSION as well (no prompt without a tty)",
                   file=sys.stderr)
             return 2
@@ -407,7 +411,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
             print("cancelled")
             return 1
     handle = args.handle
-    if handle is None and sys.stdin.isatty() and not args.machine:
+    if (
+        handle is None
+        and sys.stdin is not None
+        and sys.stdin.isatty()
+        and not args.machine
+    ):
         # only prompt inside the full wizard flow; flags stay scriptable
         try:
             handle = input(f"handle [{session}]: ").strip() or ""
