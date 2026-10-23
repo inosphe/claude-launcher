@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+from pathlib import Path
 
 import yaml
 
@@ -46,9 +48,24 @@ def _write_preset(base, name, text):
     return path
 
 
+def test_the_shipped_presets_live_in_the_package_not_the_launcher_home(home):
+    """The default is the package's own directory; a preset is not an install target.
+
+    ``home`` is the launcher home the autouse fixture points at a throwaway
+    directory, and ``CLAUDE_LAUNCHER_PRESET_DIR`` is set beside it so a test
+    that writes a preset cannot edit the source tree. That makes ``directory()``
+    the redirected path here; what this pins is the *default*, which is the
+    package -- and that the default is not a layer under the launcher home.
+    """
+    package = Path(provider_presets.__file__).resolve().parent / provider_presets.DIRNAME
+    assert provider_presets.PACKAGE_DIR == package
+    assert home not in package.parents, "a preset is shipped, not installed into the home"
+    assert provider_presets.directory() == Path(os.environ[provider_presets.ENV_DIR])
+
+
 def test_presets_load_from_their_own_directory(home):
     base = provider_presets.directory()
-    assert base == home / provider_presets.DIRNAME
+    assert base == Path(os.environ[provider_presets.ENV_DIR])
     _write_preset(base, "gateway", GOOD_PRESET)
     rows = provider_presets.load_all()
     assert [row.name for row in rows] == ["gateway"]

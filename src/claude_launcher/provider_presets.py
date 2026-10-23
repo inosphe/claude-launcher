@@ -1,4 +1,4 @@
-"""Provider presets: one YAML file per provider, under the launcher home.
+"""Provider presets: one YAML file per provider, shipped with the package.
 
 A *preset* is a starting value for the dashboard's provider form
 (``#/settings/providers``): the ``providers.<name>`` entry a person would
@@ -6,10 +6,10 @@ otherwise type into ``~/.claunch.yaml`` by hand.  Picking a preset fills the
 form; nothing is installed until the form is saved, and every field stays
 editable afterwards.
 
-The files are ``<launcher home>/provider-presets/<name>.yaml`` -- one provider
-per file, so one can be edited or deleted without touching the rest::
+The files are ``src/claude_launcher/provider-presets/<name>.yaml`` -- in the
+source tree, shipped inside the package, one provider per file::
 
-    # ~/.claude-launcher/provider-presets/gateway.yaml
+    # src/claude_launcher/provider-presets/gateway.yaml
     label: Example gateway           # optional, shown in the picker
     note: serves both protocols      # optional, one line under it
     provider:                        # required: the entry itself
@@ -25,14 +25,18 @@ configuration down with it. Here a file that does not parse marks only itself
 (:attr:`Preset.error`) and the other presets still stand -- the same isolation
 goal as the ``workflows/`` per-file layer.
 
-Why the launcher home and not the package: a provider entry is machine
-configuration (it names endpoints and, sometimes, a key), and the package is
-replaced on upgrade.  ``~/.claude-launcher`` is already where this tool keeps
-the state a person edits (``workflows/``), and it survives an upgrade.
+Why the package and not a layer under the launcher home: a preset is not an
+install target and not machine state. It is a template for the install form --
+picking one and saving writes ``~/.claunch.yaml``, which is the only place a
+provider then lives, and where any per-machine adjustment belongs. Shipping
+the files with the package means the set travels with the code that reads it
+and nothing has to copy them; there is no second layer to drift from the
+first, and no writer here that could rewrite the installed tree.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,10 +44,19 @@ from typing import Dict, List, Optional
 
 import yaml
 
-from . import atomic, config, provider_spec
+from . import provider_spec
 
-#: Directory under :func:`config.launcher_home` holding one file per preset.
+#: Directory inside the package holding one file per preset.
 DIRNAME = "provider-presets"
+
+#: The shipped directory: a sibling of this module, so it travels in the wheel
+#: (``packages = ["src/claude_launcher"]`` in ``pyproject.toml``).
+PACKAGE_DIR = Path(__file__).resolve().parent / DIRNAME
+
+#: A different directory for the same files. Not a user setting -- the shipped
+#: presets are the package's own -- but the test suite must not write into the
+#: source tree, and an experiment may want its own set.
+ENV_DIR = "CLAUDE_LAUNCHER_PRESET_DIR"
 
 #: A preset file name doubles as the suggested provider name, so it is held to
 #: the same shape a ``providers:`` key should have.
@@ -80,8 +93,12 @@ class Preset:
 
 
 def directory() -> Path:
-    """The preset directory (it need not exist; a missing one means no presets)."""
-    return config.launcher_home() / DIRNAME
+    """The preset directory (it need not exist; a missing one means no presets).
+
+    :data:`PACKAGE_DIR` unless :data:`ENV_DIR` names another one.
+    """
+    override = os.environ.get(ENV_DIR, "").strip()
+    return Path(override) if override else PACKAGE_DIR
 
 
 def path_for(name: str, *, base: Optional[Path] = None) -> Path:
@@ -185,35 +202,6 @@ def load_all(base: Optional[Path] = None) -> List[Preset]:
     return out
 
 
-def save(name: str, entry: Dict[str, object], *, base: Optional[Path] = None,
-         label: str = "", note: str = "") -> Path:
-    """Write one preset file atomically (``claunch`` never calls this yet).
-
-    The install form saves *providers*, not presets; this exists so a preset
-    can be produced from a config that works -- and so the format has a writer
-    that agrees with :func:`read`. A caller that grows this into a UI action
-    does not have to invent the on-disk shape twice.
-    """
-    if not isinstance(entry, dict) or not entry:
-        raise PresetError("a preset needs a provider entry")
-    unknown = provider_spec.unknown_fields(entry)
-    if unknown:
-        raise PresetError(f"unknown field(s) {', '.join(unknown)}")
-    try:
-        provider_spec.from_entry(entry, f"preset {name}")
-    except provider_spec.SpecError as exc:
-        raise PresetError(str(exc)) from exc
-    path = path_for(name, base=base)
-    document: Dict[str, object] = {}
-    if label:
-        document["label"] = label
-    if note:
-        document["note"] = note
-    document["provider"] = dict(entry)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(document, sort_keys=False, allow_unicode=True,
-                          default_flow_style=False)
-    with atomic.scratch(path) as tmp:
-        tmp.write_text(text, encoding="utf-8")
-        atomic.replace(tmp, path)
-    return path
+# A writer for preset files lived here and is gone with the directory move: it
+# could only ever target the installed package, which is the wrong thing for a
+# running launcher to rewrite. A preset is added by committing a file.

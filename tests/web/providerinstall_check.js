@@ -113,7 +113,7 @@ const LISTING = {
   ],
   profiles: [{ name: "work", provider: "opengateway", effective: "opengateway" }],
   global_provider: "",
-  preset_dir: "/home/x/.claude-launcher/provider-presets",
+  preset_dir: "/opt/py/lib/claude_launcher/provider-presets",
   fields: { protocols: ["anthropic", "openai"], roles: [], reasoning_efforts: [],
             openai_reasoning_formats: [], anthropic_auth_headers: [], fields: [],
             reserved: ["default", "claude"] },
@@ -136,7 +136,7 @@ const LISTING = {
   ]) {
     ok(`the form has a row for ${label}`, page.includes(label));
   }
-  ok("the preset directory is shown", page.includes("/home/x/.claude-launcher/provider-presets"));
+  ok("the preset directory is shown", page.includes("/opt/py/lib/claude_launcher/provider-presets"));
   ok("an installed provider with a problem shows the reason", page.includes("endpoints is required"));
   ok("an installed provider's facts are drawn",
      page.includes("anthropic: https://apis.opengateway.ai"));

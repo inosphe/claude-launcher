@@ -35234,8 +35234,10 @@ function providerAffinityCard() {
    GET /api/providers is the listing, POST /api/providers validates and writes
    ~/.claunch.yaml atomically, POST /api/providers/check makes one real call to
    the backend. A preset is only a starting value for this form — one YAML file
-   per provider under <launcher home>/provider-presets/, loaded and reported by
-   the server — and every field stays editable after it fills. */
+   per provider shipped in the package (src/claude_launcher/provider-presets/),
+   loaded and reported by the server — and every field stays editable after it
+   fills. Installing writes ~/.claunch.yaml, which is where the provider then
+   lives; presets themselves are not installed anywhere. */
 let providersState = {
   data: null,        // the GET payload: providers, presets, profiles, fields
   error: "",

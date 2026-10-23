@@ -860,13 +860,16 @@ draws the same entry as a form and writes it for you.
 
 - **Every field is editable, a preset only fills the form.** Pick a preset, change
   anything, save. A preset is a starting value, not a sealed profile.
-- **Presets are one YAML file per provider** in
-  `~/.claude-launcher/provider-presets/<name>.yaml` (the directory the page prints).
-  Edit them by hand; a file that does not parse is marked in the picker and the
-  others still load.
+- **Presets are one YAML file per provider, shipped in the package** at
+  `src/claude_launcher/provider-presets/<name>.yaml` (the directory the page
+  prints). A preset is not an install target and not machine state: picking one
+  and saving writes `~/.claunch.yaml`, which is the only place a provider then
+  lives and where any per-machine adjustment belongs. The set travels with the
+  package, so nothing copies it and there is no second layer to drift. A file
+  that does not parse is marked in the picker and the others still load.
 
   ```yaml
-  # ~/.claude-launcher/provider-presets/gateway.yaml
+  # src/claude_launcher/provider-presets/gateway.yaml
   label: Example gateway        # optional, shown in the picker
   note: serves both protocols   # optional
   provider:                     # the entry itself — the block you would have typed
