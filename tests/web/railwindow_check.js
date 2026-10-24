@@ -53,7 +53,7 @@ const ctx = {};
 new Function("exports", "document",
   constSrc + "\n" + [
     "const railRowPx = new Map();",
-    "const railSeen = { rows: 0, px: 0 };",
+    "const railSeen = { rows: 0, px: 0, closed: false };",
     "const railSeenKeys = new Set();",
     "const RAIL_ESTIMATE_SAMPLE = 32;",
     slice("railEstimatePx"),
@@ -152,6 +152,7 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   assert.strictEqual(railRowPxOf({ type: "session", session: { name: "unseen" } }), 150);
   railSeen.rows = 0;
   railSeen.px = 0;
+  railSeen.closed = false;
 }
 
 /* ---- 2b. what feeds the estimate, and when it stops moving -------------
@@ -171,6 +172,7 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   railSeenKeys.clear();
   railSeen.rows = 0;
   railSeen.px = 0;
+  railSeen.closed = false;
 
   railMeasureRows(host(["m0", "m1"], 100));
   railMeasureRows(host(["m0", "m1"], 500));   // the same rows, measured taller
@@ -178,11 +180,12 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
     "a row feeds the estimate once, however often it is measured");
   assert.strictEqual(railSeen.px, 200, "at the height it was first measured");
 
-  for (let i = 0; i < RAIL_ESTIMATE_SAMPLE + 10; i++) {
-    railMeasureRows(host([`k${i}`], 100));
-  }
+  // One pass that draws more rows than the sample holds fills it to the cap.
+  railMeasureRows(host(Array.from({ length: RAIL_ESTIMATE_SAMPLE + 10 },
+    (_, i) => `k${i}`), 100));
   assert.strictEqual(railSeen.rows, RAIL_ESTIMATE_SAMPLE,
     "the sample is full and no further row joins it");
+  assert.strictEqual(railSeen.closed, true, "and it is closed");
   const frozen = railEstimatePx();
   railMeasureRows(host(["z0"], 900));
   assert.strictEqual(railEstimatePx(), frozen,
@@ -194,6 +197,22 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   railSeenKeys.clear();
   railSeen.rows = 0;
   railSeen.px = 0;
+  railSeen.closed = false;
+
+  // claunch-gpxur: the slice at the top of a rail draws about two dozen rows,
+  // fewer than the sample holds. The rows of the next slice joining it moved
+  // every unmeasured offset at once, so the sample closes with the first pass
+  // that measured enough rows for the estimate to be used at all.
+  railMeasureRows(host(Array.from({ length: 24 }, (_, i) => `t${i}`), 72));
+  assert.strictEqual(railEstimatePx(), 72, "the first pass's rows set the estimate");
+  railMeasureRows(host(Array.from({ length: 24 }, (_, i) => `u${i}`), 136));
+  assert.strictEqual(railEstimatePx(), 72,
+    "and the next pass's taller rows do not move it, though the sample is not full");
+  railRowPx.clear();
+  railSeenKeys.clear();
+  railSeen.rows = 0;
+  railSeen.px = 0;
+  railSeen.closed = false;
 }
 
 /* ---- 3. the spacer carries no chrome ----------------------------------- */
@@ -222,8 +241,15 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
 
   assert.ok(/const planRows = typeof railWindowForPass === "function"\s*\n?\s*\? rows\.filter\(drawnByFilter\)/
     .test(body), "the plan is over the rows the filter admits");
-  assert.ok(/railWindowForPass\(list, planRows, keptScrollTop\)/.test(body),
+  assert.ok(/railWindowForPass\(list, planRows, keptScrollTop, railAnchorTaken\)/.test(body),
     "the pass asks the window helper for its slice, at the position it took before the teardown");
+  // claunch-gpxur: the row the reader looks at is read off the page before the
+  // pass moves anything, and put back once everything that adds height has run.
+  assert.ok(body.indexOf("railTakeAnchor(list)") < body.indexOf("const inPlace = rebuild"),
+    "the anchor is taken before the list is touched");
+  assert.ok(body.indexOf("applyBriefingCards();") < body.indexOf("railMeasureRows(list);")
+    && body.indexOf("railMeasureRows(list);") < body.indexOf("railRestoreAnchor(list, railAnchor)"),
+    "the rows are measured after the painters, and the anchor restored last");
   const chooser = slice("railWindowForPass");
   assert.ok(/rows\.length < RAIL_WINDOW_MIN_ROWS/.test(chooser),
     "a short rail is drawn whole");
@@ -260,7 +286,8 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   // The spacers are squared against the list as it finally stands, after the
   // in-place pass has taken the last pass's tail out of it: a total that
   // misses high leaves the last rows past the end of the scroll.
-  assert.ok(/railWin\.total - list\.scrollHeight/.test(body),
+  assert.ok(/const total = railOffsets\(planRows\)\.total;/.test(body)
+    && /Math\.round\(total - list\.scrollHeight\)/.test(body),
     "the spacers are squared against the list's height");
   assert.ok(/if \(railTailFix\) railTailFix\(\);/.test(body),
     "and that happens once the pass has finished");
@@ -282,7 +309,7 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   // The scroll handler redraws only when the slice stops covering the view,
   // and it asks for a rebuild rather than running a pass itself.
   const wire = slice("railWireWindowScroll");
-  assert.ok(/plan\.first === span\[0\] && plan\.last === span\[1\]/.test(wire),
+  assert.ok(/if \(railSliceCovers\(box\)\) return;/.test(wire),
     "a scroll inside the drawn slice draws nothing");
   assert.ok(/refreshSessions\._forceRebuild = true/.test(wire),
     "a scroll past it asks for one rebuild");
