@@ -185,6 +185,40 @@ def test_the_529_fault_is_marked_and_keeps_the_status_code():
     assert det.view(now=now["t"] + 301)["active"] is False
 
 
+PI_TIMEOUT = "Error: Request timed out."
+PI_RETRIES_EXHAUSTED = "Error: Retry failed after 3 attempts: Request timed out."
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_a_timed_out_request_is_read_in_every_harness(harness):
+    """pi (s1736) painted this line; until claunch-pczoc.2.1 the pattern sat
+    in `harnesses.claude`, so every other harness read nothing."""
+    found = session_fault.default().match(harness, PI_TIMEOUT)
+    assert found is not None, f"{harness}: the timeout line matched nothing"
+    assert found[0].name == "network"
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_an_exhausted_retry_is_read_in_every_harness(harness):
+    found = session_fault.default().match(harness, PI_RETRIES_EXHAUSTED)
+    assert found is not None, f"{harness}: the exhausted-retry line matched nothing"
+    assert found[0].name == "network"
+
+
+def test_the_exhausted_retry_line_is_the_one_recorded():
+    """Both lines are `network`, so the kind does not separate them; what
+    does is precedence -- the screen that ends with "Retry failed after N
+    attempts" is the one where the client stopped, and its message is what a
+    person reads in the tooltip."""
+    det, now = _detector("pi")
+    det.scan(_Screen(PI_TIMEOUT, PI_TIMEOUT, PI_TIMEOUT, PI_RETRIES_EXHAUSTED),
+             now=now["t"])
+    view = det.view()
+    assert view["kind"] == "network"
+    assert view["harness"] == "pi"
+    assert view["message"] == PI_RETRIES_EXHAUSTED
+
+
 @pytest.mark.parametrize("document", [
     {},
     {"version": 2, "kinds": {}},

@@ -129,6 +129,25 @@ common:
   - kind: network
     pattern: |-
       Error: Connection error
+  # pi, 2026-10-24 (s1736): the screen showed "Error: Request timed out."
+  # four times and then "Error: Retry failed after 3 attempts: Request
+  # timed out." -- the client's own retry loop gave up. Both lines are the
+  # transport failing, so both are `network`; the exhausted line is listed
+  # first so a screen that ends that way records that message rather than
+  # one of the attempts above it. They sit in `common` because the wording
+  # belongs to the provider client and not to one harness: `claude` painted
+  # it too, and pi painted it here (it lived in `harnesses.claude` until
+  # claunch-pczoc.2.1, so every other harness read nothing).
+  - kind: network
+    pattern: |-
+      Retry failed after \d+ attempts
+    sample: |-
+      Error: Retry failed after 3 attempts: Request timed out.
+  - kind: network
+    pattern: |-
+      Request timed out
+    sample: |-
+      Error: Request timed out.
   # The generic status fallback: any "API Error: <code>", reached only when
   # nothing above matched. It lives here, last in `common`, so a provider's
   # status error is read in every harness and not only in `claude` (where it
@@ -178,9 +197,9 @@ harnesses:
         Can't reach the API server
       sample: |-
         API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)
-    - kind: network
-      pattern: |-
-        Request timed out
+    # "Request timed out" and "Retry failed after N attempts" are in
+    # `common` -- pi painted the same lines (claunch-pczoc.2.1), so they are
+    # the provider client's wording rather than this harness's.
     # The generic "API Error: <code>" fallback, and the 401/429 by code, are
     # in `common`, so every harness reads them; the wording above stays here
     # because it is this harness's.

@@ -65,6 +65,16 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
 `api_status`(30분)보다 짧은 5분으로 두는 이유는, 한 번의 재시도로 풀리는 경우가
 많고 5분이 지나도 남아 있으면 그때는 프로바이더 열화로 읽어야 하기 때문이다.
 
+`Error: Request timed out.`과 `Error: Retry failed after 3 attempts: Request
+timed out.`은 `common:`에 있다 — 문구가 프로바이더 클라이언트의 것이지 한
+하네스의 것이 아니다(`claude`도 찍고 pi도 찍는다, s1736 관측). 두 줄 모두
+`network`로 읽는다. 나뉘는 것은 kind가 아니라 **기록되는 메시지**다: 소진
+문구(`Retry failed after N attempts`)를 목록 앞에 두어, 그 줄로 끝나는 화면은
+위의 시도 줄들 대신 소진 줄을 기록한다. 그 화면이 클라이언트가 멈춘 상태이고
+사람이 툴팁에서 읽어야 하는 줄이기 때문이다. 재시도가 소진됐다는 사실에 별도
+kind나 다른 창을 주지는 않았다 — 관측이 한 건이고, 창의 근거가 될 재시도
+간격을 재지 못했다.
+
 ## 어디에 나타나는가
 
 - 세션 정보(`Session.info()`, `/api/sessions` 행): `fault` 필드. 활성/만료
@@ -112,3 +122,7 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
   메시지가 적은 리셋 시각이 정한다.
 - `background_render: false`인 하네스(pi)는 아무도 붙어 있지 않을 때 화면을
   갱신하지 않는다. 그 구간의 fault는 뷰어가 붙어 화면이 그려질 때 읽힌다.
+- `Error: Request timed out.`은 전송 계층의 실패라 `network`로 읽지만, 그
+  줄이 한 번 찍힌 것과 재시도를 다 쓴 것(`Retry failed after N attempts`)은
+  kind가 같아 창 길이로는 갈리지 않는다. 소진 쪽 창을 따로 둘 근거(재시도
+  간격·시도 횟수의 관측)는 아직 없다.
