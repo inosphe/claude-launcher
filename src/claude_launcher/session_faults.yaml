@@ -98,6 +98,20 @@ common:
       You'?ve reached your (?:weekly|5-hour|7-day|daily) usage limit
     sample: |-
       API Error: Request rejected (429) · You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.
+  # Claude Code's own exhausted-plan wording; it lived in `harnesses.claude`
+  # until claunch-pczoc.2.1. It is here because `common` is tried before a
+  # harness's own list: once the timeout entries below joined `common`, a
+  # screen showing this line and a `Request timed out` row together read as
+  # `network` (measured, 2026-10-24) -- a 15-minute connectivity fault
+  # instead of the 24-hour plan wait. A `common` entry is read against every
+  # harness's wording, so the wording it must not outrank has to be up here
+  # with it. Other harnesses never painted this line; reading it as an
+  # exhausted plan costs nothing.
+  - kind: usage_limit
+    pattern: |-
+      You'?ve hit your (?:weekly|5-hour|daily) limit
+    sample: |-
+      You've hit your weekly limit · resets Oct 26, 9am (Asia/Seoul)
   # A provider answering with a JSON error body, whatever harness painted it.
   - kind: auth
     pattern: |-
@@ -123,12 +137,44 @@ common:
   - kind: rate_limit
     pattern: |-
       API Error: 429\b
+  # Claude Code's wording for a 429 that names no quota. It stayed in
+  # `harnesses.claude` until claunch-pczoc.2.1 and lost to the timeout entries
+  # below whenever the two shared a window (measured: `rate_limit` alone,
+  # `network` with a timeout row). The code-level entry above does not cover
+  # it -- this line says "Request rejected (429)", not "API Error: 429".
+  - kind: rate_limit
+    pattern: |-
+      Request rejected \(429\)
   - kind: network
     pattern: |-
       \b(?:ECONNREFUSED|ENOTFOUND|EAI_AGAIN)\b
   - kind: network
     pattern: |-
       Error: Connection error
+  # The login prompt and the policy refusal, stated here for the same reason
+  # as the exhausted-plan line above: both are painted by one harness
+  # (`claude`'s "Please run /login", pi's "Use /login to log into a provider",
+  # `claude`'s "safeguards flagged this message") and both sat in that
+  # harness's list until claunch-pczoc.2.1. With the timeout entries below in
+  # `common`, a screen showing either line beside a timeout row read as
+  # `network` -- measured for both harnesses, and a regression for `claude`
+  # (it read `policy_blocked` before). They are listed above the timeout
+  # entries so the more specific reading survives a shared window.
+  - kind: auth
+    pattern: |-
+      Please run /login
+    sample: |-
+      ●Please run /login · API Error: 401 Invalid bearer token
+  - kind: auth
+    pattern: |-
+      Use /login to log into a provider
+    sample: |-
+      Use /login to log into a provider via OAuth or API key. See: /home/user/.pi/agent/install/releases/1.1.0/n...
+  - kind: policy_blocked
+    pattern: |-
+      safeguards flagged this message
+    sample: |-
+      API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).
   # pi, 2026-10-24 (s1736): the screen showed "Error: Request timed out."
   # four times and then "Error: Retry failed after 3 attempts: Request
   # timed out." -- the client's own retry loop gave up. Both lines are the
@@ -162,35 +208,18 @@ common:
 
 harnesses:
   claude:
-    # Claude Code's own wording when the subscription is exhausted. Observed
-    # in s15 (2026-10-23): "You've hit your weekly limit · resets Oct 26,
-    # 9am (Asia/Seoul)". The reset time is parsed out of this line.
-    - kind: usage_limit
-      pattern: |-
-        You'?ve hit your (?:weekly|5-hour|daily) limit
-      sample: |-
-        You've hit your weekly limit · resets Oct 26, 9am (Asia/Seoul)
-    # "●Please run /login · API Error: 401 Invalid bearer token"
-    - kind: auth
-      pattern: |-
-        Please run /login
-      sample: |-
-        ●Please run /login · API Error: 401 Invalid bearer token
+    # The exhausted-plan line ("You've hit your weekly limit · resets Oct 26,
+    # 9am (Asia/Seoul)"), the login prompt and the policy refusal are in
+    # `common` now (claunch-pczoc.2.1): each of them can share a screen with
+    # the provider client's timeout wording, which is also in `common`, and a
+    # `common` entry is read before anything here.
     - kind: auth
       pattern: |-
         API Error: 401[^\n]{0,160}
       sample: |-
         API Error: 401 Invalid bearer token
-    # "API Error: Opus 5.5's safeguards flagged this message"
-    - kind: policy_blocked
-      pattern: |-
-        safeguards flagged this message
-      sample: |-
-        API Error: Opus 5.5's safeguards flagged this message (https://www.anthropic.com/legal/aup).
-    # 429 without a quota sentence is a rate window, not an exhausted plan.
-    - kind: rate_limit
-      pattern: |-
-        Request rejected \(429\)
+    # 429 without a quota sentence is a rate window, not an exhausted plan;
+    # that wording is in `common` (see the note above it).
     # "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)"
     - kind: network
       pattern: |-
@@ -205,12 +234,10 @@ harnesses:
     # because it is this harness's.
 
   pi:
-    # "Use /login to log into a provider via OAuth or API key. See: ..."
-    - kind: auth
-      pattern: |-
-        Use /login to log into a provider
-      sample: |-
-        Use /login to log into a provider via OAuth or API key. See: /home/user/.pi/agent/install/releases/1.1.0/n...
+    # pi's login prompt ("Use /login to log into a provider via OAuth or API
+    # key. See: ...") moved to `common` in claunch-pczoc.2.1, for the same
+    # reason as claude's lines: the provider client's timeout wording is in
+    # `common`, and a `common` entry wins over anything listed here.
 
   # Nothing observed yet on this machine's Codex sessions (127 output logs
   # searched, 2026-10-23). Its own error wording goes here when it is

@@ -219,6 +219,40 @@ def test_the_exhausted_retry_line_is_the_one_recorded():
     assert view["message"] == PI_RETRIES_EXHAUSTED
 
 
+SAFEGUARDS = (
+    "API Error: Opus 5.5's safeguards flagged this message "
+    "(https://www.anthropic.com/legal/aup)."
+)
+PI_LOGIN = "Use /login to log into a provider via OAuth or API key. See: ..."
+
+
+@pytest.mark.parametrize("harness, rows, kind", [
+    ("claude", (WEEKLY, PI_TIMEOUT), "usage_limit"),
+    ("claude", (SAFEGUARDS, PI_TIMEOUT), "policy_blocked"),
+    ("claude", ("●Please run /login · API Error: 401 Invalid bearer token", PI_TIMEOUT), "auth"),
+    ("claude", ("API Error: Request rejected (429)", PI_TIMEOUT), "rate_limit"),
+    ("pi", (PI_LOGIN, PI_TIMEOUT), "auth"),
+])
+def test_a_more_specific_line_survives_a_timeout_in_the_same_window(harness, rows, kind):
+    """`common` is matched before the harness's own list, so an entry there
+    beats whatever that harness painted beside it. The timeout entries are
+    in `common`; until the plan-reset sentence, the login prompt and the
+    policy refusal moved above them (claunch-pczoc.2.1), a screen holding
+    either of those next to a timeout row read `network`."""
+    det, now = _detector(harness)
+    det.scan(_Screen(*rows), now=now["t"])
+    view = det.view()
+    assert view["kind"] == kind, f"{harness}: {rows} read {view['kind']}"
+
+
+def test_the_timeout_lines_are_in_common_so_every_harness_reads_them():
+    """A harness added later gets them without a list of its own -- the bug
+    this round fixed was a pattern that only `claude` had."""
+    sources = " ".join(pattern.source for pattern in session_fault.default().common)
+    assert "Retry failed after" in sources
+    assert "Request timed out" in sources
+
+
 @pytest.mark.parametrize("document", [
     {},
     {"version": 2, "kinds": {}},
