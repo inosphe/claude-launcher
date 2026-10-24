@@ -22,6 +22,10 @@
      it gets no mouseleave, and before the fix the overlay stayed zoomed;
    - the readout under the pointer survives a repaint with no pointer move,
      and is empty again once the pointer is off the plot (claunch-v5z9y);
+   - the readout is two lines whose widest realistic text fits the plot, and
+     the row they are laid out in keeps its reserved height whether or not
+     they have text, so neither a longer readout nor an empty one moves the
+     chart (claunch-k5udr, claunch-k5udr.1);
    - on the light page the overlay's text and marks are the colours the dark
      page gives them: theme.js rewrites every colour in the overlay's own
      rules for a light page, which put dark text on the overlay's dark wash
@@ -196,15 +200,20 @@ renderTermTps();
       await p.waitForTimeout(100);
       const plot = await (await p.$(".term-series.zoom .term-series-chart")).boundingBox();
       await p.mouse.move(plot.x + plot.width * 0.5, plot.y + plot.height / 2, { steps: 4 });
-      const readout = () => p.evaluate(() => document.querySelector(".term-series-readout").textContent);
+      /* Two lines: which request, then what it sent (claunch-k5udr.1). */
+      const readout = () => p.evaluate(() =>
+        [...document.querySelectorAll(".term-series-readout-line")].map((n) => n.textContent));
       const shown = await readout();
-      assert.ok(/^#\d+ · /.test(shown), `the readout names the request under the pointer, got ${JSON.stringify(shown)}`);
+      assert.equal(shown.length, 2, "the readout has two lines");
+      assert.ok(/^#\d+ · /.test(shown[0]), `the first line names the request under the pointer, got ${JSON.stringify(shown)}`);
+      assert.ok(/ = in .* · cached .* · write /.test(shown[1]),
+        `the second line gives what it sent, got ${JSON.stringify(shown)}`);
       const before = await p.evaluate(() => window.renders);
       await p.evaluate(() => renderTermTps());
       assert.equal(await p.evaluate(() => window.renders) - before, 1, "one repaint, with no pointer move");
-      assert.equal(await readout(), shown, "the readout is the same after the repaint");
+      assert.deepEqual(await readout(), shown, "the readout is the same after the repaint");
       await p.evaluate(() => { renderTermTps(); renderTermTps(); });
-      assert.equal(await readout(), shown, "and after more repaints");
+      assert.deepEqual(await readout(), shown, "and after more repaints");
       /* The chart does not move under the readout (claunch-k5udr). The
          overlay is right-anchored, so a wider readout used to widen the box
          the plot is laid out in and shift the plot left, out from under a
@@ -216,35 +225,66 @@ renderTermTps();
         const r = document.querySelector(".term-series.zoom .term-series-chart").getBoundingClientRect();
         return [r.x, r.y, r.width, r.height].join();
       });
-      const still = await box();
-      const widened = await p.evaluate(() => {
-        const readout = document.querySelector(".term-series-readout");
-        const was = readout.textContent;
-        readout.textContent = `${was} (largest of 12345 requests)`;
-        const r = document.querySelector(".term-series.zoom .term-series-chart").getBoundingClientRect();
-        return [r.x, r.y, r.width, r.height].join();
+      const readoutBox = () => p.evaluate(() => {
+        const r = document.querySelector(".term-series-readout").getBoundingClientRect();
+        const lines = [...document.querySelectorAll(".term-series-readout-line")]
+          .map((n) => ({ shown: n.getBoundingClientRect().width, text: n.scrollWidth }));
+        return { box: [r.x, r.y, r.width, r.height].join(), lines };
       });
-      assert.equal(widened, still, "a longer readout leaves the plot exactly where it was");
+      const still = await box();
+      const sized = await readoutBox();
+      assert.equal(sized.lines.length, 2, "two line boxes are laid out");
+      assert.ok(sized.lines.every((l) => l.text <= plot.width),
+        `each line is no wider than the plot, got ${JSON.stringify(sized.lines)}`);
+      assert.equal(sized.box.split(",")[2], String(plot.width),
+        `the readout is exactly as wide as the plot, got ${sized.box} against ${plot.width}`);
+      const widened = await p.evaluate(() => {
+        const line = document.querySelectorAll(".term-series-readout-line")[1];
+        line.textContent = `${line.textContent} · largest of 12345 requests with 1.00M cached input`;
+        const r = document.querySelector(".term-series.zoom .term-series-chart").getBoundingClientRect();
+        const box = document.querySelector(".term-series-readout").getBoundingClientRect();
+        return { plot: [r.x, r.y, r.width, r.height].join(), readout: [box.x, box.width].join() };
+      });
+      assert.equal(widened.plot, still, "a longer readout leaves the plot exactly where it was");
+      assert.equal(widened.readout, [plot.x, plot.width].join(),
+        `and the readout box does not grow with it, got ${widened.readout}`);
+      await p.evaluate(() => renderTermTps());
       const sweep = [];
       for (const frac of [0.05, 0.25, 0.5, 0.75, 0.95]) {
         await p.mouse.move(plot.x + plot.width * frac, plot.y + plot.height / 2, { steps: 2 });
         await p.waitForTimeout(30);
-        sweep.push([await readout(), await box()]);
+        sweep.push([await readout(), await box(), await readoutBox()]);
       }
-      assert.ok(sweep.every(([text]) => text.trim().startsWith("#")),
-        `the readout stays filled across the whole plot, got ${JSON.stringify(sweep.map(([t]) => t))}`);
+      assert.ok(sweep.every(([text]) => text[0].trim().startsWith("#") && /\d/.test(text[1])),
+        `both lines stay filled across the whole plot, got ${JSON.stringify(sweep.map(([t]) => t))}`);
+      assert.ok(sweep.every(([, , r]) => r.lines.every((l) => l.text <= 320)),
+        `no line reaches past the plot at any step, got ${JSON.stringify(sweep.map(([, , r]) => r.lines))}`);
       assert.equal(new Set(sweep.map(([, b]) => b)).size, 1,
         `the plot does not move as the pointer crosses it, got ${JSON.stringify(sweep.map(([, b]) => b))}`);
+      assert.equal(new Set(sweep.map(([, , r]) => r.box)).size, 1,
+        `and neither does the readout's reserved row, got ${JSON.stringify(sweep.map(([, , r]) => r.box))}`);
+      /* Wheel the numbers up to the widest a 1M window can produce: the
+         second line still has to fit the plot, not be clipped by it. */
+      const wide = await p.evaluate(() => {
+        const line = document.querySelectorAll(".term-series-readout-line")[1];
+        line.textContent = "999.9k = in 999.9k · cached 999.9k · write 999.9k";
+        const first = document.querySelectorAll(".term-series-readout-line")[0];
+        first.textContent = "#1234 · 11h38m ago · max of 12";
+        return [...document.querySelectorAll(".term-series-readout-line")].map((n) => n.scrollWidth);
+      });
+      assert.ok(wide.every((w) => w <= 320), `the widest realistic line fits the plot, got ${JSON.stringify(wide)}`);
       /* Off the plot but inside the chart's box: the readout is cleared, and
          a repaint does not bring it back. */
       const legend = await (await p.$(".term-series.zoom .term-series-legend")).boundingBox();
       await p.mouse.move(legend.x + 4, legend.y + legend.height / 2, { steps: 4 });
-      assert.equal((await readout()).trim(), "", "the readout is empty off the plot");
+      assert.deepEqual((await readout()).map((t) => t.trim()), ["", ""], "the readout is empty off the plot");
+      const cleared = await readoutBox();
+      assert.equal(cleared.box, sized.box, "the reserved row keeps its height with no text in it");
       await p.evaluate(() => renderTermTps());
-      assert.equal((await readout()).trim(), "", "and stays empty after a repaint");
+      assert.deepEqual((await readout()).map((t) => t.trim()), ["", ""], "and stays empty after a repaint");
       /* Back on the plot, then out of the chart: the state ends with it. */
       await p.mouse.move(plot.x + plot.width * 0.25, plot.y + plot.height / 2, { steps: 4 });
-      assert.notEqual((await readout()).trim(), "", "the readout is back on the plot");
+      assert.notEqual((await readout())[0].trim(), "", "the readout is back on the plot");
       await p.mouse.move(20, 690, { steps: 10 });
       await p.waitForTimeout(100);
       assert.deepEqual(await p.evaluate(() => [termSeriesHover, termSeriesPointerAt]), [false, null],

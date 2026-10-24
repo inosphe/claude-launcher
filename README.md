@@ -1597,7 +1597,12 @@ most the last twelve hours; past 600 requests consecutive requests are grouped
 and a point is the largest context of its group (the readout says how many
 requests it stands for). The readout names the request under the pointer and
 keeps doing so while the overlay repaints under a pointer that does not move
-(claunch-v5z9y). The overlay keeps its dark wash and its dark-theme text colours
+(claunch-v5z9y). It is two lines: which request (`#<number> · <age>`, and
+`max of <n>` when the point stands for a group), then what it sent
+(`<total> = in <input> · cached <cached> · write <write>`) — the numbers alone
+did not fit one line inside the chart's width (claunch-k5udr.1). Both lines
+have their row reserved whether or not they carry text, so the chart stays
+where it is while the pointer moves and after it leaves. The overlay keeps its dark wash and its dark-theme text colours
 on the light page. The height axis is linear from 0 to the model's context
 window (Claude without a declared window: 1M; Codex: the window it records; Pi:
 the spec's `context_window`; no window known: the largest context), so the same
