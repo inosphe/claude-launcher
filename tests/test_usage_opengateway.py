@@ -97,6 +97,9 @@ def test_records_for_another_upstream_are_not_counted():
         prof,
         _record(_stamp(), input_tokens=100),
         _record(_stamp(), upstream="https://opencode.ai/zen/go", input_tokens=900),
+        # ``metering.load`` matches the string, so this lookalike comes back
+        # with the gateway's own records and has to be dropped by host.
+        _record(_stamp(), upstream="https://apis.opengateway.ai.example/v1", input_tokens=700),
     )
 
     assert report.raw["records"] == 1
@@ -105,10 +108,13 @@ def test_records_for_another_upstream_are_not_counted():
 
 def test_a_failed_request_is_counted_and_named_in_the_totals():
     prof = _gateway_profile()
-    _read(prof, _record(_stamp(), input_tokens=10), _record(_stamp(), status=429))
+    report = _read(prof, _record(_stamp(), input_tokens=10), _record(_stamp(), status=429))
 
     totals = usage._opengateway_totals(metering.load(upstream="apis.opengateway.ai"))
     assert (totals["requests"], totals["failed"]) == (2, 1)
+    # Named on the line when there is one; a clean reading leaves it out (the
+    # exact strings above already pin that).
+    assert report.windows[0].detail.endswith("· 1 failed")
 
 
 def test_a_record_with_no_readable_time_lands_in_neither_bucket():

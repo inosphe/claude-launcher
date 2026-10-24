@@ -597,6 +597,15 @@ def _compact_count(value: int) -> str:
     return str(value)
 
 
+def _from_opengateway(record: dict) -> bool:
+    """Whether this record's upstream is OpenGateway itself, by host."""
+    try:
+        host = urllib.parse.urlsplit(str(record.get("upstream") or "")).hostname
+    except ValueError:
+        return False
+    return bool(host) and host.lower() == "apis.opengateway.ai"
+
+
 def _record_time(record: dict) -> Optional[datetime]:
     """When a metering record was written, or ``None`` when the stamp is
     unusable. The shim writes local time with its offset."""
@@ -630,13 +639,21 @@ def _opengateway_totals(records: List[dict]) -> dict:
 
 
 def _opengateway_detail(totals: dict) -> str:
-    """One line naming what a bucket of records spent."""
-    return (
+    """One line naming what a bucket of records spent.
+
+    Failures are named only when there are some: a forwarded request that
+    came back 429 or 5xx is worth seeing, and "0 failed" on every reading is
+    noise.
+    """
+    line = (
         f"{_compact_count(totals['requests'])} req · "
         f"in {_compact_count(totals['input_tokens'])} · "
         f"cache {_compact_count(totals['cache_read'])} · "
         f"out {_compact_count(totals['output_tokens'])}"
     )
+    if totals["failed"]:
+        line += f" · {_compact_count(totals['failed'])} failed"
+    return line
 
 
 def _opengateway_windows(
@@ -685,7 +702,10 @@ def _fetch_opengateway(profile: Profile, now: Optional[datetime] = None) -> Usag
     upstream = _opengateway_context(profile)
     if upstream is None:
         raise UsageError(f"profile {profile.selector!r} no longer selects OpenGateway")
-    records = metering.load(upstream=upstream)
+    # ``metering.load`` matches the string, so a lookalike host
+    # (``apis.opengateway.ai.example``) comes back with it; the host itself is
+    # what makes a record this account's.
+    records = [r for r in metering.load(upstream=upstream) if _from_opengateway(r)]
     windows, undated = _opengateway_windows(records, now)
     raw = {
         "upstream": upstream,
