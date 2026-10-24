@@ -39,7 +39,7 @@ TOOLS = [
                 },
                 "kind": {
                     "type": "string",
-                    "description": "fault kind, e.g. usage_limit, account_suspended, auth, api_status, network, policy_blocked, rate_limit",
+                    "description": "fault kind, e.g. usage_limit, account_suspended, auth, api_status, overloaded, network, policy_blocked, rate_limit",
                 },
                 "harness": {
                     "type": "string",
