@@ -73,6 +73,7 @@ def _profile_backend_config(
 def test_llm_config_absent_block_is_disabled_defaults(home):
     cfg = briefing.llm_config({})
     assert cfg == {
+        "preset": "",
         "profile": "",
         "endpoint": "",
         "model": "",
@@ -215,6 +216,202 @@ def test_llm_config_direct_endpoint_still_works(config_file):
     assert cfg["endpoint"] == "https://typed.example/v1/chat/completions"
     assert cfg["api_key"] == "sk-typed"
     assert briefing.llm_configured(cfg)
+
+
+# --------------------------------------------------------------------------- #
+# presets — several saved backends, one of them switched on
+# --------------------------------------------------------------------------- #
+_DIRECT_CHEAP = {
+    "id": "cheap",
+    "endpoint": "https://cheap.example/v1/chat/completions",
+    "model": "glm-small",
+    "api_key": "sk-cheap",
+}
+_DIRECT_OTHER = {
+    "id": "other",
+    "endpoint": "https://other.example/v1/chat/completions",
+    "model": "other-model",
+    "api_key": "sk-other",
+}
+
+
+def test_presets_resolve_to_the_active_one(config_file):
+    """Pointing at a preset is the whole switch — no other field changes."""
+    _profile_backend_config()
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [
+                        {"id": "big", "profile": "brief"},
+                        dict(_DIRECT_CHEAP),
+                    ],
+                    "preset": "cheap",
+                    # the block's own fields describe a THIRD backend; the
+                    # active preset must win over them entirely
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "typed-model",
+                    "api_key": "sk-typed",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["preset"] == "cheap"
+    assert cfg["endpoint"] == "https://cheap.example/v1/chat/completions"
+    assert cfg["model"] == "glm-small"
+    assert cfg["api_key"] == "sk-cheap"
+    assert briefing.llm_configured(cfg)
+
+    # switching is a pointer move, nothing else
+    store.update(lambda doc: doc["llm"].update({"preset": "big"}))
+    cfg = briefing.llm_config()
+    assert cfg["profile"] == "brief"
+    assert cfg["endpoint"] == "https://example.test/v1/chat/completions"
+    assert cfg["api_key"] == "provider-secret"
+    # an empty preset model follows the profile's default
+    assert cfg["model"] == "deepseek-flash"
+
+
+def test_preset_without_a_pointer_leaves_the_block_in_charge(config_file):
+    """Saved presets that nobody pointed at must not change today's call."""
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [dict(_DIRECT_CHEAP)],
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "typed-model",
+                    "api_key": "sk-typed",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["preset"] == ""
+    assert cfg["endpoint"] == "https://typed.example/v1/chat/completions"
+    assert cfg["model"] == "typed-model"
+    assert cfg["api_key"] == "sk-typed"
+
+
+def test_preset_does_not_own_the_budget_or_params(config_file):
+    """Switching backends must not change what the call is allowed to spend."""
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [dict(_DIRECT_CHEAP, max_tokens=1)],
+                    "preset": "cheap",
+                    "max_tokens": 777,
+                    "params": {"temperature": 0.1},
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["max_tokens"] == 777
+    assert cfg["params"] == {"temperature": 0.1}
+
+
+def test_preset_pointing_at_a_deleted_name_reads_as_none(config_file):
+    """A stale pointer falls back to the block rather than disabling the call.
+
+    Hand-edited files drift; the card must open showing what the daemon
+    would actually use, and the block's own fields are that.
+    """
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [dict(_DIRECT_CHEAP)],
+                    "preset": "gone",
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "typed-model",
+                    "api_key": "sk-typed",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["preset"] == ""
+    assert cfg["endpoint"] == "https://typed.example/v1/chat/completions"
+    assert briefing.llm_configured(cfg)
+
+
+def test_presets_are_cleaned_and_duplicates_dropped(config_file):
+    """A hand-edited preset list costs only its own bad rows."""
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [
+                        dict(_DIRECT_CHEAP),
+                        {"id": "BAD NAME", "endpoint": "https://x/v1/chat/completions"},
+                        "not an object",
+                        {"endpoint": "https://no-id.example/v1/chat/completions"},
+                        dict(_DIRECT_CHEAP, endpoint="https://second.example/v1"),
+                        dict(_DIRECT_OTHER),
+                    ]
+                }
+            }
+        )
+    )
+    assert [p["id"] for p in briefing.presets()] == ["cheap", "other"]
+    # the first row survived, not the later duplicate
+    assert briefing.presets()[0]["endpoint"] == (
+        "https://cheap.example/v1/chat/completions"
+    )
+
+
+def test_presets_for_display_never_carry_a_key(config_file):
+    """This payload reaches a browser; the secrets stay in the daemon."""
+    _profile_backend_config()
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [
+                        dict(_DIRECT_CHEAP),
+                        {"id": "big", "profile": "brief"},
+                        {"id": "broken", "profile": "no-such-profile"},
+                    ]
+                }
+            }
+        )
+    )
+    rows = {r["id"]: r for r in briefing.presets_for_display()}
+    assert "sk-cheap" not in json.dumps(rows)
+    assert rows["cheap"]["api_key_set"] is True
+    assert rows["cheap"]["resolved"] == {
+        "endpoint": "https://cheap.example/v1/chat/completions",
+        "model": "glm-small",
+        "has_key": True,
+    }
+    assert rows["big"]["resolved"]["has_key"] is True
+    assert rows["big"]["resolved"]["model"] == "deepseek-flash"
+    assert "does not exist" in rows["broken"]["error"]
+
+
+def test_check_preset_list_refuses_what_cannot_be_stored():
+    """A submitted list is refused, not pruned: the form sent what it shows."""
+    with pytest.raises(briefing.PresetError, match="must be lowercase"):
+        briefing.check_preset_list([{"id": "Not Valid", "endpoint": "https://x/v1"}])
+    with pytest.raises(briefing.PresetError, match="duplicate"):
+        briefing.check_preset_list([
+            {"id": "a", "endpoint": "https://x/v1"},
+            {"id": "a", "endpoint": "https://y/v1"},
+        ])
+    with pytest.raises(briefing.PresetError, match="needs a profile or an endpoint"):
+        briefing.check_preset_list([{"id": "a", "model": "m"}])
+    with pytest.raises(briefing.PresetError, match="at most"):
+        briefing.check_preset_list([
+            {"id": f"p{i}", "endpoint": "https://x/v1"}
+            for i in range(briefing.MAX_PRESETS + 1)
+        ])
+    assert briefing.check_preset_list(None) == []
+    assert briefing.check_preset_list([
+        {"id": "a", "profile": "brief", "model": " ", "api_key": ""},
+    ]) == [{"id": "a", "profile": "brief"}]
 
 
 # --------------------------------------------------------------------------- #
@@ -1580,6 +1777,192 @@ def test_briefing_llm_settings_key_handling_and_refusals(home):
                 assert fragment in (await resp.json())["error"], payload
             # a refused save changed nothing
             assert briefing.llm_config()["model"] == "m"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_presets_save_switch_and_keep_their_keys(home):
+    """The whole point of presets, through the endpoint the card calls.
+
+    Saving several backends and moving the pointer between them has to be
+    enough to change which model answers — and a save that touches one
+    preset must not wipe another's key, because every password box arrives
+    blank and blank means "keep".
+    """
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            presets = [
+                {"id": "cheap", "endpoint": "https://cheap.example/v1/chat/completions",
+                 "model": "glm-small", "api_key": "sk-cheap"},
+                {"id": "big", "endpoint": "https://big.example/v1/chat/completions",
+                 "model": "big-model", "api_key": "sk-big"},
+            ]
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": presets, "preset": "cheap",
+                      "endpoint": "", "model": "", "api_key": None},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["preset"] == "cheap"
+            assert body["configured"] is True
+            assert body["resolved"]["model"] == "glm-small"
+            assert body["api_key_set"] is False  # the block's own key
+            rows = {r["id"]: r for r in body["presets"]}
+            assert rows["cheap"]["api_key_set"] is True
+            assert rows["big"]["api_key_set"] is True
+            assert "sk-cheap" not in json.dumps(body)
+            assert briefing.llm_config()["model"] == "glm-small"
+
+            # moving the pointer is the switch — nothing else is sent
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER, json={"preset": "big"},
+            )
+            body = await resp.json()
+            assert body["preset"] == "big"
+            assert body["resolved"]["model"] == "big-model"
+            assert briefing.llm_config()["api_key"] == "sk-big"
+
+            # a save that sends blank keys for both rows keeps both secrets
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [
+                    {"id": "cheap", "endpoint": "https://cheap.example/v1/chat/completions",
+                     "model": "glm-small-2", "api_key": ""},
+                    {"id": "big", "endpoint": "https://big.example/v1/chat/completions",
+                     "model": "big-model", "api_key": ""},
+                ]},
+            )
+            assert resp.status == 200
+            stored = {p["id"]: p for p in briefing.presets()}
+            assert stored["cheap"]["api_key"] == "sk-cheap"
+            assert stored["big"]["api_key"] == "sk-big"
+            assert briefing.llm_config()["model"] == "big-model"
+
+            # null drops one preset's key and leaves the other alone
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [
+                    {"id": "cheap", "endpoint": "https://cheap.example/v1/chat/completions",
+                     "model": "glm-small-2"},
+                    {"id": "big", "endpoint": "https://big.example/v1/chat/completions",
+                     "model": "big-model", "api_key": None},
+                ]},
+            )
+            assert resp.status == 200
+            stored = {p["id"]: p for p in briefing.presets()}
+            assert stored["cheap"]["api_key"] == "sk-cheap"
+            assert "api_key" not in stored["big"]
+            # the call is now unconfigured: the active preset lost its key
+            assert (await resp.json())["configured"] is False
+
+            for payload, fragment in [
+                ({"preset": "nope"}, "not one of the saved presets"),
+                ({"presets": [{"id": "BAD", "endpoint": "https://x/v1"}]},
+                 "lowercase"),
+                ({"presets": [{"id": "a", "model": "m"}]},
+                 "needs a profile or an endpoint"),
+            ]:
+                resp = await client.put(
+                    "/api/briefing/llm", headers=BEARER, json=payload,
+                )
+                assert resp.status == 400, payload
+                assert fragment in (await resp.json())["error"], payload
+                # a refused save changed nothing
+                assert [p["id"] for p in briefing.presets()] == ["cheap", "big"]
+
+            # deleting the active preset leaves the pointer cleared, not stale
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [{"id": "cheap",
+                                   "endpoint": "https://cheap.example/v1/chat/completions",
+                                   "model": "glm-small-2"}],
+                      "preset": ""},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["preset"] == ""
+            assert [p["id"] for p in body["presets"]] == ["cheap"]
+
+            # renaming a preset keeps its stored key: the card's Name box
+            # edits the id in place, and the secret is filed under the name it
+            # was saved as, so the row travels with its previous name. Without
+            # that, editing a name would silently drop the credential and turn
+            # the briefing off (peer-review, claunch-wug8b).
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [
+                    {"id": "cheap-renamed", "previous_id": "cheap",
+                     "endpoint": "https://cheap.example/v1/chat/completions",
+                     "model": "glm-small-2"},
+                ], "preset": "cheap-renamed"},
+            )
+            assert resp.status == 200
+            stored = {p["id"]: p for p in briefing.presets()}
+            assert stored["cheap-renamed"]["api_key"] == "sk-cheap"
+            body = await resp.json()
+            assert body["configured"] is True
+            assert body["api_key_set"] is False  # the block's own key
+            assert briefing.llm_config()["api_key"] == "sk-cheap"
+
+            # a rename that names no stored row inherits nothing
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [
+                    {"id": "fresh", "previous_id": "never-existed",
+                     "endpoint": "https://x/v1/chat/completions", "model": "m"},
+                ], "preset": "fresh"},
+            )
+            assert resp.status == 200
+            assert (await resp.json())["configured"] is False
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_reports_a_pointer_at_a_preset_that_is_gone(home):
+    """A pointer naming no saved preset is reported, not silently dropped.
+
+    ``active_preset()`` filters the pointer, so the payload cannot read the
+    filtered value to tell the card what happened. It reads the block's own
+    name: the call falls back to the block's fields, and the card says so
+    instead of showing an unexplained "none" (peer-review, claunch-wug8b).
+    """
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            store.update(lambda doc: doc.update({"llm": {
+                "endpoint": "https://block.example/v1/chat/completions",
+                "model": "block-model", "api_key": "sk-block",
+                "presets": [{"id": "cheap", "endpoint": "https://cheap/v1",
+                             "model": "glm"}],
+                "preset": "gone",
+            }}))
+
+            resp = await client.get("/api/briefing/llm", headers=BEARER)
+            body = await resp.json()
+            # the call falls back to the block, and the pointer is still named
+            assert body["preset"] == ""
+            assert body["resolved"]["model"] == "block-model"
+            assert body["configured"] is True
+            assert "gone" in body["error"]
+            assert "not saved" in body["error"]
+
+            # a saved pointer reports no error
+            store.update(lambda doc: doc["llm"].update({"preset": "cheap"}))
+            body = await (await client.get("/api/briefing/llm", headers=BEARER)).json()
+            assert body["preset"] == "cheap"
+            assert body["error"] == ""
 
             await mgr.shutdown_all()
         finally:
