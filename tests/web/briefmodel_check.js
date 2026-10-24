@@ -100,6 +100,7 @@ const submit = (root) =>
   await submit(root);
   let sent = JSON.parse(requests.at(-1)[1].body);
   assert.deepEqual(sent, {
+    presets: [], preset: "",
     profile: "", model: "m", max_tokens: 4096,
     endpoint: "https://typed.example/v1/chat/completions", api_key: "sk-typed",
   });
@@ -157,6 +158,7 @@ const submit = (root) =>
   await submit(root);
   sent = JSON.parse(requests.at(-1)[1].body);
   assert.deepEqual(sent, {
+    presets: [], preset: "",
     profile: "ds4", model: "deepseek-flash", max_tokens: 4096,
     endpoint: "", api_key: null,
   });
@@ -191,7 +193,101 @@ const submit = (root) =>
   assert(find(root, (n) => n.text.includes("max_tokens must be between")));
   assert.equal(find(root, (n) => n.text === "Save").disabled, false);
 
+  /* ── Presets ─────────────────────────────────────────────────────────────
+     Two saved backends, the second one chosen. The picker must switch the
+     fields to that preset's backend, and the save must send the whole list
+     plus the pointer — this is the whole feature: choosing a preset is how
+     the operator changes the model the briefing uses. */
+  ok = true;
+  response = {
+    preset: "cheap", profile: "", model: "", endpoint: "", max_tokens: 4096,
+    api_key_set: false, configured: true, error: "",
+    resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                model: "glm-small", has_key: true },
+    profiles: [
+      { name: "ds4", endpoint: "https://ds.example/v1/chat/completions",
+        models: ["deepseek-flash", "glm-small"], has_key: true },
+    ],
+    presets: [
+      { id: "big", profile: "ds4", model: "", endpoint: "", api_key_set: false,
+        resolved: { endpoint: "https://ds.example/v1/chat/completions",
+                    model: "deepseek-flash", has_key: true }, error: "" },
+      { id: "cheap", profile: "", endpoint: "https://cheap.example/v1/chat/completions",
+        model: "glm-small", api_key_set: true,
+        resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                    model: "glm-small", has_key: true }, error: "" },
+    ],
+  };
+  // A fresh page. ``llmDraft`` is a ``let`` inside the context, so it is not
+  // a property of ``context`` — it has to be cleared from inside.
+  vm.runInContext("llmDraft = null;", context);
+  await context.refreshLlmSettings();
+  root = card();
+  const presetPicker = field(root, "llm-preset");
+  assert.deepEqual(presetPicker.children.map((o) => o.value), ["", "big", "cheap"]);
+  assert.equal(presetPicker.value, "cheap");
+  // the fields show the CHOSEN preset, not the block's own (empty) values
+  assert.equal(field(root, "llm-endpoint").value,
+               "https://cheap.example/v1/chat/completions");
+  assert.equal(field(root, "llm-model").value, "glm-small");
+  assert.equal(field(root, "llm-api-key").placeholder, "stored · blank keeps it");
+  assert(find(root, (n) => n.text.includes("backend preset cheap")));
+
+  /* Switching to the other preset carries it across, and the save sends both
+     rows with the new pointer. The second preset's stored key is not sent
+     back (the box is blank), and is not nulled either — one field saved must
+     not wipe another preset's credential. */
+  presetPicker.value = "big";
+  presetPicker.handlers.change();
+  root = card();
+  assert.equal(field(root, "llm-profile").value, "ds4");
+  assert.equal(field(root, "llm-endpoint").readOnly, true);
+  await submit(root);
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "big");
+  // "big" names a profile and no model, so it keeps following that profile's
+  // default rather than being pinned to whatever the profile leads with today.
+  assert.deepEqual(sent.presets, [
+    { id: "big", profile: "ds4", model: "", endpoint: "",
+      api_key: null },
+    { id: "cheap", profile: "", model: "glm-small",
+      endpoint: "https://cheap.example/v1/chat/completions" },
+  ]);
+
+  /* Deleting the chosen preset sends the list without it and the pointer
+     cleared, so the daemon is not left pointing at a name that is gone. */
+  response = { ...response, preset: "big" };
+  await context.refreshLlmSettings();
+  root = card();
+  find(root, (n) => n.text === "Delete preset").handlers.click();
+  await new Promise((r) => setTimeout(r, 0));
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "");
+  assert.deepEqual(sent.presets.map((p) => p.id), ["cheap"]);
+
+  /* "Add preset" seeds a row from the fields and saves it straight away, so
+     the new row is selectable: the daemon refuses a pointer at a preset the
+     same request does not also save. */
+  requests.length = 0;
+  response = {
+    ...response, preset: "", presets: [],
+    profile: "", model: "some-model",
+    endpoint: "https://typed.example/v1/chat/completions", api_key_set: true,
+  };
+  await context.refreshLlmSettings();
+  root = card();
+  find(root, (n) => n.text === "Add preset").handlers.click();
+  await new Promise((r) => setTimeout(r, 0));
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "preset-1");
+  assert.deepEqual(sent.presets, [{
+    id: "preset-1", profile: "", model: "some-model",
+    endpoint: "https://typed.example/v1/chat/completions", api_key: null,
+  }]);
+
   console.log("briefmodel ok: profile list, direct save, a profile carries "
     + "endpoint and model with it, save clears the block's pair, typed "
-    + "endpoint survives an abandoned pick, unknown profile kept, error");
+    + "endpoint survives an abandoned pick, unknown profile kept, error, "
+    + "preset switch carries endpoint and model, save sends the list and "
+    + "pointer, delete clears the pointer, add saves the new row");
 })().catch((err) => { console.error(err); process.exit(1); });

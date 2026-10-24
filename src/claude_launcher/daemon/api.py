@@ -4196,7 +4196,9 @@ async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
 #: The ``llm`` block fields the Settings page may write. ``params`` is left
 #: out on purpose: it is a free map of extra chat/completions fields, which a
 #: text box cannot validate and which nothing in the UI reads back.
-LLM_EDITABLE = frozenset({"profile", "model", "endpoint", "api_key", "max_tokens"})
+LLM_EDITABLE = frozenset(
+    {"profile", "model", "endpoint", "api_key", "max_tokens", "presets", "preset"}
+)
 #: Upper bound for the completion budget a form may save. The endpoint's own
 #: limit is the real one; this only keeps a typo (a pasted model id, a stray
 #: zero) from being written as a number the call then spends a minute failing
@@ -4254,8 +4256,19 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
             briefing.profile_backend(cfg["profile"], doc)
         except briefing.BriefingError as exc:
             error = str(exc)
+    presets = briefing.presets_for_display(doc)
+    active = cfg["preset"]
+    if active and not any(p["id"] == active for p in presets):
+        # A pointer at a preset that no longer exists: kept so the card can
+        # say the name rather than silently reporting "none".
+        error = error or f"active preset {active!r} is not saved"
     return {
-        "profile": cfg["profile"],
+        "preset": active,
+        # The block's own four fields, regardless of the active preset: the
+        # card binds its inputs to whichever set is in play, and the payload
+        # has to carry both or a preset could not be edited without the
+        # direct form being overwritten on the way back.
+        "profile": str(block.get("profile") or "").strip(),
         "model": str(block.get("model") or "").strip(),
         "endpoint": str(block.get("endpoint") or "").strip(),
         "max_tokens": cfg["max_tokens"],
@@ -4268,6 +4281,9 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
         },
         "error": error,
         "profiles": _llm_profile_rows(doc),
+        "presets": presets,
+        "max_presets": briefing.MAX_PRESETS,
+        "preset_name_re": briefing.PRESET_ID_RE.pattern,
     }
 
 
@@ -4286,7 +4302,55 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
     if not isinstance(body, dict) or set(body) - LLM_EDITABLE:
         raise ValueError("unsupported briefing llm setting")
     block = dict(doc.get("llm") if isinstance(doc.get("llm"), dict) else {})
+    # ``presets`` and ``preset`` are handled first: the active pointer is
+    # checked against the list this same save would store, not the one on
+    # disk, so a card that adds a preset and selects it lands in one request.
+    submitted = None
+    if "presets" in body:
+        submitted = briefing.check_preset_list(body["presets"])
+        # Each preset's ``api_key`` follows the same convention as the block's
+        # own: a value stores it, ``null`` removes it, and blank or absent
+        # keeps what is stored under that preset id. The "keep" case is the
+        # common one, not an edge: the card's password boxes arrive blank on
+        # every render, so a save of any other field would otherwise wipe
+        # every preset's secret.
+        stored = {p["id"]: p for p in briefing.presets(doc)}
+        by_id: dict = {}
+        for item in body["presets"]:
+            if isinstance(item, dict):
+                by_id.setdefault(str(item.get("id") or "").strip(), item)
+        for row in submitted:
+            item = by_id.get(row["id"], {})
+            if "api_key" in item and item["api_key"] is None:
+                continue  # explicit removal; check_preset_list already dropped it
+            if row.get("api_key"):
+                continue  # a typed key won
+            # blank or absent: keep this preset's stored secret
+            if stored.get(row["id"], {}).get("api_key"):
+                row["api_key"] = stored[row["id"]]["api_key"]
+        block["presets"] = submitted
+    if "preset" in body:
+        pointer = body["preset"]
+        if pointer is None:
+            block.pop("preset", None)
+        elif not isinstance(pointer, str):
+            raise ValueError("preset must be text")
+        else:
+            pointer = pointer.strip()
+            if not pointer:
+                block.pop("preset", None)
+            else:
+                known = submitted
+                if known is None:
+                    known = [{"id": p["id"]} for p in briefing.presets(doc)]
+                if not any(p["id"] == pointer for p in known):
+                    raise ValueError(
+                        f"preset {pointer!r} is not one of the saved presets"
+                    )
+                block["preset"] = pointer
     for key, value in body.items():
+        if key in ("presets", "preset"):
+            continue
         if key == "max_tokens":
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError("max_tokens must be a whole number")
@@ -4333,6 +4397,11 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
             block[key] = value
         else:
             block.pop(key, None)
+    # An empty block is no block: dropping ``llm:`` entirely is what makes
+    # the feature read as off rather than as configured with blanks.
+    for field in ("presets",):
+        if not block.get(field):
+            block.pop(field, None)
     return block
 
 
@@ -4353,7 +4422,7 @@ async def h_briefing_llm_save(request: web.Request) -> web.Response:
     before = briefing.llm_config(doc)
     try:
         block = _llm_block_update(body, doc)
-    except ValueError as exc:
+    except (ValueError, briefing.PresetError) as exc:
         return json_error(400, str(exc))
     try:
         def mutate(document: dict) -> None:

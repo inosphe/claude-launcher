@@ -35734,14 +35734,116 @@ async function refreshLlmSettings() {
 function llmDraftValues() {
   if (llmDraft) return llmDraft;
   const saved = llmSettings || {};
+  // ``key`` is the draft's own handle on a row and never changes; ``id`` is
+  // the saved name and is editable. Looking a row up by name would lose it
+  // the moment the operator typed in the name box.
+  const presets = (saved.presets || []).map((p) => ({
+    key: p.id, id: p.id, profile: p.profile || "", model: p.model || "",
+    endpoint: p.endpoint || "", api_key: "",
+    api_key_set: !!p.api_key_set, error: p.error || "",
+  }));
+  const active = saved.preset || "";
+  const chosen = presets.find((p) => p.id === active) || null;
+  // With a preset chosen the fields edit that preset; with none they are the
+  // block's own. ``api_key`` always starts blank — a stored secret is never
+  // sent back, and blank means "keep it" on save.
   llmDraft = {
-    profile: saved.profile || "",
-    model: saved.model || "",
-    endpoint: saved.endpoint || "",
+    preset: active,
+    presets,
+    profile: chosen ? chosen.profile : (saved.profile || ""),
+    model: chosen ? chosen.model : (saved.model || ""),
+    endpoint: chosen ? chosen.endpoint : (saved.endpoint || ""),
     api_key: "",
     max_tokens: saved.max_tokens || 4096,
   };
   return llmDraft;
+}
+
+/*: The preset row the draft is editing right now, or null for the block's
+   own fields. ``draft.preset`` is a row *key*, not the saved name — the name
+   is editable and would otherwise slip out from under the lookup. */
+function llmDraftTarget(draft) {
+  return draft.preset ? draft.presets.find((p) => p.key === draft.preset) || null : null;
+}
+
+/*: ``presets`` as the PUT expects it. A row's ``api_key`` is sent only when
+   the operator typed one; omitting the field is what tells the daemon to
+   keep that preset's stored key, and ``null`` removes it. */
+function llmPresetsBody(draft) {
+  return draft.presets.map((p) => {
+    const row = { id: p.id, profile: p.profile || "", model: p.model || "",
+                  endpoint: p.endpoint || "" };
+    if (p.api_key) row.api_key = p.api_key;
+    else if (!p.api_key_set) row.api_key = null;
+    return row;
+  });
+}
+
+/*: Copy the form's four fields into whichever thing they are editing — the
+   active preset's row, or the block's own values (which the draft *is* when
+   no preset is chosen). Called on every field edit, so switching to another
+   preset and back does not lose what was typed. */
+function llmDraftSync(draft) {
+  const target = llmDraftTarget(draft);
+  if (!target) return;
+  target.profile = draft.profile;
+  target.model = draft.model;
+  target.endpoint = draft.endpoint;
+  if (draft.api_key) {
+    target.api_key = draft.api_key;
+    target.api_key_set = true;
+  }
+}
+
+/*: Make the row with draft key ``key`` the one the form edits, carrying the
+   current values into the row being left first. ``""`` returns the form to
+   the block's own fields. */
+function llmDraftChoosePreset(draft, key) {
+  llmDraftSync(draft);
+  draft.preset = key;
+  const target = llmDraftTarget(draft);
+  draft.profile = target ? target.profile : (llmSettings.profile || "");
+  draft.model = target ? target.model : (llmSettings.model || "");
+  draft.endpoint = target ? target.endpoint : (llmSettings.endpoint || "");
+  // A stored secret is never sent back, so the box starts blank either way.
+  draft.api_key = "";
+}
+
+/*: The key state the form should show for what it is editing. */
+function llmDraftKeySet(draft) {
+  const target = llmDraftTarget(draft);
+  return target ? !!target.api_key_set : !!llmSettings.api_key_set;
+}
+
+/*: The whole PUT body: the preset list, the active pointer, and the block's
+   own four fields copied from whatever the form is editing right now.
+   ``max_tokens`` is added by the submit handler, which is the only caller
+   that reads its box.
+
+   The block's own fields are written from the draft as it stands — with a
+   preset chosen that is the preset's values, saved alongside it. Leaving the
+   block's fields behind on every switch would mean the "none" form held
+   whatever was typed days ago, and a preset that is later deleted would take
+   the backend with it. */
+function llmDraftSaveBody(draft) {
+  const target = llmDraftTarget(draft);
+  const body = {
+    presets: llmPresetsBody(draft),
+    preset: target ? (target.id || "") : "",
+    profile: draft.profile,
+    model: draft.model,
+  };
+  // Same pairing rule as before: a profile owns the endpoint/key pair, so the
+  // block's own two are removed rather than left describing a backend that
+  // is no longer called.
+  if (draft.profile) {
+    body.endpoint = "";
+    body.api_key = null;
+  } else {
+    body.endpoint = draft.endpoint;
+    body.api_key = draft.api_key;
+  }
+  return body;
 }
 
 async function llmSettingsSave(body) {
@@ -35779,10 +35881,11 @@ function llmSettingsCard() {
   card.appendChild(el(
     "p", "wf-note",
     "Which backend writes the session briefings (the ▸ card on a rail row). " +
-    "Pick a profile and the call reuses that profile's OpenAI-compatible " +
-    "endpoint, key and default model; saving then drops the endpoint and key " +
-    "typed in here, which that backend does not use. Leave the profile empty " +
-    "to type them in instead."
+    "Save several backends as presets and switch between them with the preset " +
+    "list — the call follows the chosen preset. Inside a preset, pick a " +
+    "profile to reuse that profile's OpenAI-compatible endpoint, key and " +
+    "default model; the endpoint and key typed in are then dropped, since " +
+    "that backend does not use them. Leave the profile empty to type them in."
   ));
   if (llmSettingsError) card.appendChild(el("p", "error", llmSettingsError));
   if (!llmSettings) {
@@ -35792,6 +35895,105 @@ function llmSettingsCard() {
   const draft = llmDraftValues();
   const rows = llmSettings.profiles || [];
   const chosen = rows.find((r) => r.name === draft.profile);
+
+  // ── Presets ── the saved backends this card switches between. Picking one
+  // is the whole switch: the fields below then edit (and save) that preset,
+  // and the briefing call reads it. Nameless rows are only in the draft
+  // while "Add preset" starts one; nothing is saved until the form is.
+  const presetSection = el("div", "llm-presets");
+  presetSection.appendChild(el("p", "wf-note",
+    "Presets are saved backends. Choose one here and the briefing call uses " +
+    "it — switching is this selection, nothing else. The fields below edit " +
+    "whichever preset is chosen, or the unsaved backend when none is."));
+  const presetSelect = document.createElement("select");
+  presetSelect.id = "llm-preset";
+  presetSelect.disabled = llmSettingsBusy;
+  const presetOption = (value, label) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    presetSelect.appendChild(opt);
+    return opt;
+  };
+  presetOption("", "— none (the fields below) —");
+  for (const p of draft.presets) {
+    const where = p.profile || p.endpoint || "(incomplete)";
+    presetOption(p.key, `${p.id || "(unnamed)"} — ${where}`);
+  }
+  if (draft.preset && !draft.presets.some((p) => p.key === draft.preset)) {
+    // A pointer at a preset that was deleted or renamed by hand. Shown so the
+    // card does not claim "none" while the daemon still holds the name.
+    presetOption(draft.preset, `${draft.preset} (not saved)`);
+  }
+  presetSelect.value = draft.preset;
+  presetSelect.addEventListener("change", () => {
+    llmDraftChoosePreset(draft, presetSelect.value);
+    renderWorkspaces();
+  });
+  const presetRow = el("div", "llm-preset-row");
+  const presetLabel = el("label", null, "Preset");
+  presetLabel.appendChild(presetSelect);
+  presetRow.appendChild(presetLabel);
+
+  const nameLabel = el("label", null, "Name");
+  const nameInput = document.createElement("input");
+  nameInput.id = "llm-preset-name";
+  nameInput.type = "text";
+  nameInput.disabled = !draft.preset || llmSettingsBusy;
+  {
+    const target = llmDraftTarget(draft);
+    nameInput.value = target ? target.id : "";
+  }
+  nameInput.title = "lowercase letters, digits and hyphens";
+  nameInput.addEventListener("input", () => {
+    const target = llmDraftTarget(draft);
+    if (target) target.id = nameInput.value.trim();
+  });
+  nameLabel.appendChild(nameInput);
+  presetRow.appendChild(nameLabel);
+
+  const addPreset = el("button", "wf-btn", "Add preset");
+  addPreset.type = "button";
+  addPreset.disabled = llmSettingsBusy || draft.presets.length >= (llmSettings.max_presets || 20);
+  addPreset.addEventListener("click", () => {
+    let n = draft.presets.length + 1;
+    while (draft.presets.some((p) => p.id === `preset-${n}`)) n += 1;
+    const id = `preset-${n}`;
+    // Start from what the fields show, so "save what I have as a preset" is
+    // one click rather than a retype. The key is deliberately NOT carried
+    // over: a stored secret never leaves the daemon, so the block's key is
+    // not in this page to copy, and claiming it here would draw "stored ·
+    // blank keeps it" over a preset that holds none while a save sent
+    // nothing for it. A profile-backed preset needs no key of its own.
+    llmDraftSync(draft);
+    draft.presets.push({
+      key: id, id, profile: draft.profile, model: draft.model,
+      endpoint: draft.endpoint, api_key: "", api_key_set: false,
+    });
+    llmDraftChoosePreset(draft, id);
+    // Saving on add is what makes the new row selectable: the daemon refuses
+    // a pointer at a preset the same request does not also save, and storing
+    // it now means the picker and the file agree from the next render on.
+    return llmSettingsSave(llmDraftSaveBody(draft));
+  });
+  presetRow.appendChild(addPreset);
+
+  const removePreset = el("button", "wf-btn danger", "Delete preset");
+  removePreset.type = "button";
+  removePreset.disabled = !draft.preset || llmSettingsBusy;
+  removePreset.addEventListener("click", () => {
+    const key = draft.preset;
+    if (!key) return;
+    const target = llmDraftTarget(draft);
+    if (!confirm(`Delete preset '${(target && target.id) || key}'?`)) return;
+    draft.presets = draft.presets.filter((p) => p.key !== key);
+    llmDraftChoosePreset(draft, "");
+    return llmSettingsSave(llmDraftSaveBody(draft));
+  });
+  presetRow.appendChild(removePreset);
+  presetSection.appendChild(presetRow);
+  card.appendChild(presetSection);
+
   const form = el("form", "llm-settings-form");
 
   const profileLabel = el("label", null, "Profile");
@@ -35823,6 +36025,7 @@ function llmSettingsCard() {
     // backend that has never heard of it.
     const picked = rows.find((r) => r.name === draft.profile);
     if (picked && picked.models.length) draft.model = picked.models[0];
+    llmDraftSync(draft);
     renderWorkspaces();
   });
   profileLabel.appendChild(profileSelect);
@@ -35837,7 +36040,10 @@ function llmSettingsCard() {
     ? `${chosen.models[0]} (the profile's default)`
     : "model id the backend accepts";
   model.setAttribute("list", "llm-model-options");
-  model.addEventListener("input", () => { draft.model = model.value; });
+  model.addEventListener("input", () => {
+    draft.model = model.value;
+    llmDraftSync(draft);
+  });
   modelLabel.appendChild(model);
   const options = document.createElement("datalist");
   options.id = "llm-model-options";
@@ -35869,6 +36075,7 @@ function llmSettingsCard() {
   endpoint.addEventListener("input", () => {
     if (draft.profile) return;
     draft.endpoint = endpoint.value;
+    llmDraftSync(draft);
   });
   endpointLabel.appendChild(endpoint);
   form.appendChild(endpointLabel);
@@ -35879,14 +36086,17 @@ function llmSettingsCard() {
   key.type = "password";
   key.autocomplete = "new-password";
   key.value = draft.api_key;
-  key.placeholder = llmSettings.api_key_set
+  key.placeholder = llmDraftKeySet(draft)
     ? "stored · blank keeps it"
     : "API key";
   key.disabled = !!draft.profile;
   key.title = draft.profile
     ? "the chosen profile supplies this — saving removes the one stored here"
     : "sent as the Authorization header, and never returned to this page";
-  key.addEventListener("input", () => { draft.api_key = key.value; });
+  key.addEventListener("input", () => {
+    draft.api_key = key.value;
+    llmDraftSync(draft);
+  });
   keyLabel.appendChild(key);
   form.appendChild(keyLabel);
 
@@ -35907,13 +36117,26 @@ function llmSettingsCard() {
   save.type = "submit";
   save.disabled = llmSettingsBusy;
   form.appendChild(save);
-  if (llmSettings.api_key_set && !draft.profile) {
+  if (llmDraftKeySet(draft) && !draft.profile) {
     const clear = el("button", "wf-btn clear", "Remove stored key");
     clear.type = "button";
     clear.disabled = llmSettingsBusy;
     clear.addEventListener("click", () => {
-      if (!confirm("Remove the API key saved in the llm: block?")) return;
-      llmSettingsSave({ api_key: null });
+      const what = draft.preset
+        ? `preset '${(llmDraftTarget(draft) || {}).id || draft.preset}'`
+        : "the llm: block";
+      if (!confirm(`Remove the API key saved in ${what}?`)) return;
+      const body = llmDraftSaveBody(draft);
+      if (draft.preset) {
+        // Drop the key from this row only; the rest of the block is
+        // untouched, so the other presets keep theirs.
+        const row = body.presets.find((p) => p.id === (llmDraftTarget(draft) || {}).id);
+        if (row) row.api_key = null;
+        const target = llmDraftTarget(draft);
+        if (target) target.api_key_set = false;
+        return llmSettingsSave(body);
+      }
+      return llmSettingsSave({ api_key: null });
     });
     form.appendChild(clear);
   }
@@ -35925,24 +36148,9 @@ function llmSettingsCard() {
       renderWorkspaces();
       return;
     }
-    const body = {
-      profile: draft.profile,
-      model: draft.model,
-      max_tokens: budgetValue,
-    };
-    // A profile owns the endpoint/key pair, so the block's own two values are
-    // removed on save ("" deletes the endpoint, null deletes the key) rather
-    // than left where they are. They are not read while a profile is set, and
-    // a key left behind belongs to whichever backend was typed in before: the
-    // card would keep showing that endpoint as the one in use, and the file
-    // would keep a credential for a backend nobody calls.
-    if (draft.profile) {
-      body.endpoint = "";
-      body.api_key = null;
-    } else {
-      body.endpoint = draft.endpoint;
-      body.api_key = draft.api_key;
-    }
+    llmDraftSync(draft);
+    const body = llmDraftSaveBody(draft);
+    body.max_tokens = budgetValue;
     // Returned, not fired and forgotten: the caller (and the harness that
     // stands in for it) can then wait for the save to land.
     return llmSettingsSave(body);
@@ -35952,6 +36160,7 @@ function llmSettingsCard() {
   const resolved = llmSettings.resolved || {};
   const facts = [
     llmSettings.configured ? "on" : "off",
+    `backend ${llmSettings.preset ? `preset ${llmSettings.preset}` : "the fields above"}`,
     `endpoint ${resolved.endpoint || "(none)"}`,
     `model ${resolved.model || "(none)"}`,
     resolved.has_key ? "key set" : "NO key",

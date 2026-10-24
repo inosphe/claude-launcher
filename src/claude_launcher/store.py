@@ -35,6 +35,13 @@ Schema::
     briefing:                  # legacy FAQ source; imported by the daemon
       faq: [{id: <id>, question: <text>, answer: <optional reference>, enabled: true}, ...]
     llm:                        # the session briefing's summariser; see daemon/briefing.py
+      preset: <preset name>     # the saved backend the call uses; empty = the fields below
+      presets:                  # saved backends, switchable from the Settings card
+        - id: <preset name>     # lowercase letters, digits, hyphens; up to 20
+          profile: <profile name>  # this preset's backend, as the fields below describe
+          model: <model id>
+          endpoint: https://host/v1/chat/completions
+          api_key: <key>
       profile: <profile name>   # the backend to call: its provider's endpoints.openai + key
       model: <model id>         # sent to that backend; empty = the profile's models.default
       endpoint: https://host/v1/chat/completions  # instead of a profile: typed in directly

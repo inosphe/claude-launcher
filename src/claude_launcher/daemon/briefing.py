@@ -10,8 +10,13 @@ JSON shape.
 
 Configuration is the ``llm:`` block of ``~/.claunch.yaml`` (``store.load()``
 is authoritative), editable from the web dashboard's Settings page
-(``GET``/``PUT /api/briefing/llm``). It says where the call goes in one of
-two ways:
+(``GET``/``PUT /api/briefing/llm``). The backend comes from one of two
+places: the block's own fields, or — when ``preset:`` names one — a *saved
+preset* from the block's ``presets:`` list. A preset is one whole backend
+(the same four fields), so switching which model answers is a pointer move
+rather than a retype, and the list holds as many as the operator wants.
+
+Within whichever is in charge, the backend is said in one of two ways:
 
 * ``profile: <name>`` — the call reuses a claunch profile's backend. That
   profile's provider chain states the OpenAI-compatible endpoint
@@ -30,6 +35,13 @@ the profile's ``models.default`` when a profile is named and the field is
 empty. An empty ``api_key`` with no profile to supply one means the feature
 is off — the key must never be committed or logged; it leaves this module
 only as the ``Authorization`` header of the LLM call itself.
+
+``max_tokens`` and ``params`` belong to the block, never to a preset:
+switching which backend answers must not quietly change what the call is
+allowed to spend. A ``preset:`` that names nothing in ``presets:`` (deleted,
+or renamed by hand) reads as no preset at all and falls back to the block's
+own fields, which is what makes the card and the call agree about what is in
+use.
 
 Results are cached per session, keyed by what would change the answer: the
 transcript file's (mtime, size) and the cflow step. The cache is persisted in
@@ -91,6 +103,19 @@ from . import codex_sessions, paths
 #: change of sample. Only the last two are counted the same way, so only
 #: those two compare.
 DEFAULT_MAX_TOKENS = 4096
+
+#: A saved preset's name. Lowercase alphanumerics and hyphens, short enough
+#: for a select — the same shape ``model_tiers`` uses for its ids.
+PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+#: Most presets one block may hold. A picker, not a collection: the card draws
+#: every preset as an editable row.
+MAX_PRESETS = 20
+
+#: The fields a preset carries. ``max_tokens``, ``params`` and the preset list
+#: itself stay on the block: switching a preset changes which backend answers,
+#: and must not quietly change how much the call is allowed to spend.
+PRESET_FIELDS = ("profile", "model", "endpoint", "api_key")
 
 #: How much transcript feeds the prompt. ``TAIL_BYTES`` bounds the file read
 #: (the tail is read from the end, never the whole file); ``EVENT_TAIL`` the
@@ -203,6 +228,71 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
     )
 
 
+def _clean_preset(raw: object) -> Optional[dict]:
+    """One saved preset as a well-shaped dict, or ``None`` when unusable.
+
+    A preset with no id, an id that is not a preset name, or not one of the
+    known fields at all is dropped: a corrupt entry must cost its own row,
+    not the picker. Values are stripped strings, and an absent one is simply
+    absent (a preset that names only a profile is the common case).
+    """
+    if not isinstance(raw, dict):
+        return None
+    preset_id = str(raw.get("id") or "").strip()
+    if not PRESET_ID_RE.match(preset_id):
+        return None
+    out: dict = {"id": preset_id}
+    for field in PRESET_FIELDS:
+        value = str(raw.get(field) or "").strip()
+        if value:
+            out[field] = value
+    return out
+
+
+def presets(doc: Optional[dict] = None) -> List[dict]:
+    """Every saved preset, in stored order, cleaned.
+
+    Duplicates are dropped after the first: the picker addresses a preset by
+    its id, so a second row with the same id would be unreachable and the
+    active pointer ambiguous.
+    """
+    doc = store.load() if doc is None else doc
+    block = doc.get("llm")
+    if not isinstance(block, dict):
+        return []
+    out: List[dict] = []
+    seen = set()
+    for raw in block.get("presets") or []:
+        preset = _clean_preset(raw)
+        if preset is None or preset["id"] in seen:
+            continue
+        seen.add(preset["id"])
+        out.append(preset)
+    return out
+
+
+def active_preset(doc: Optional[dict] = None) -> str:
+    """The preset id the block points at, or ``""`` for the block's own fields.
+
+    A pointer that names no saved preset resolves to ``""`` rather than
+    failing: the row it named was deleted or hand-renamed, and the card's job
+    is to show that plainly beside the fields it falls back to.
+    """
+    doc = store.load() if doc is None else doc
+    block = doc.get("llm")
+    if not isinstance(block, dict):
+        return ""
+    wanted = str(block.get("preset") or "").strip()
+    if not wanted:
+        return ""
+    return wanted if any(p["id"] == wanted for p in presets(doc)) else ""
+
+
+def _block_fields(block: dict) -> dict:
+    """The block's own four backend fields, blank when absent."""
+    return {field: str(block.get(field) or "").strip() for field in PRESET_FIELDS}
+
+
 def llm_config(doc: Optional[dict] = None) -> dict:
     """The effective ``llm`` settings (missing keys filled with defaults).
 
@@ -212,11 +302,21 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     same case: the returned config is simply not configured, and
     ``GET /api/briefing/llm`` is where the reason is reported.
 
+    The backend comes from the *active preset* when one is pointed at, and
+    from the block's own ``profile``/``model``/``endpoint``/``api_key``
+    otherwise. A preset is a whole saved backend, so it supplies all four of
+    its fields at once, in the same pairing the block's own two use: a preset
+    that names a profile reads that profile's endpoint and key and ignores
+    any typed endpoint it also holds, and a preset with no profile is the
+    direct form. ``max_tokens``, ``params`` and the preset list itself are
+    the block's, never a preset's — switching backends must not change what
+    the call is allowed to spend.
+
     A named profile supplies ``endpoint`` and ``api_key`` as one pair, and
     the block's own two fields are then left out of the result. The two
     identify one backend together, so filling one of them from the block
     would send a key typed for one endpoint to another. ``model`` is the
-    exception: the block's value wins, because the model is this feature's
+    exception: the chosen model wins, because the model is this feature's
     choice about the backend rather than a property of it, and the profile's
     ``default`` fills in only when the field is empty.
     """
@@ -225,14 +325,19 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     if not isinstance(block, dict):
         block = {}
     params = block.get("params")
+    chosen_id = active_preset(doc)
+    source = None
+    if chosen_id:
+        source = next(p for p in presets(doc) if p["id"] == chosen_id)
+    fields = _block_fields(source if source is not None else block)
     try:
         max_tokens = int(block.get("max_tokens") or DEFAULT_MAX_TOKENS)
     except (TypeError, ValueError):
         max_tokens = DEFAULT_MAX_TOKENS
-    profile_name = str(block.get("profile") or "").strip()
-    endpoint = str(block.get("endpoint") or "").strip()
-    api_key = str(block.get("api_key") or "").strip()
-    model = str(block.get("model") or "").strip()
+    profile_name = fields["profile"]
+    endpoint = fields["endpoint"]
+    api_key = fields["api_key"]
+    model = fields["model"]
     if profile_name:
         try:
             backend = profile_backend(profile_name, doc)
@@ -242,6 +347,7 @@ def llm_config(doc: Optional[dict] = None) -> dict:
             endpoint, api_key = backend.endpoint, backend.api_key
             model = model or backend.model
     return {
+        "preset": chosen_id,
         "profile": profile_name,
         "endpoint": endpoint,
         "model": model,
@@ -254,6 +360,106 @@ def llm_config(doc: Optional[dict] = None) -> dict:
 def llm_configured(cfg: dict) -> bool:
     """Whether the feature is on: endpoint, model and api_key all present."""
     return bool(cfg.get("endpoint") and cfg.get("model") and cfg.get("api_key"))
+
+
+class PresetError(Exception):
+    """A preset name or saved preset that cannot be used."""
+
+
+def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
+    """Every saved preset as the Settings card may see it — without keys.
+
+    The key of each preset is reported as ``api_key_set`` and never as a
+    value, for the same reason the block's own key is not returned: this
+    payload crosses to a browser. A preset naming a profile is additionally
+    resolved, so the card can show the endpoint and model a call would
+    actually use and say when the profile cannot serve.
+    """
+    doc = store.load() if doc is None else doc
+    rows: List[dict] = []
+    for preset in presets(doc):
+        # ``_clean_preset`` drops a field rather than storing it blank, so
+        # every read here goes through ``.get``.
+        profile_name = preset.get("profile", "")
+        model = preset.get("model", "")
+        endpoint = preset.get("endpoint", "")
+        row: dict = {
+            "id": preset["id"],
+            "profile": profile_name,
+            "model": model,
+            "endpoint": endpoint,
+            "api_key_set": bool(preset.get("api_key")),
+            "resolved": {"endpoint": "", "model": "", "has_key": False},
+            "error": "",
+        }
+        if profile_name:
+            try:
+                backend = profile_backend(profile_name, doc)
+            except BriefingError as exc:
+                row["error"] = str(exc)
+            else:
+                row["resolved"] = {
+                    "endpoint": backend.endpoint,
+                    "model": model or backend.model,
+                    "has_key": bool(backend.api_key),
+                }
+        else:
+            row["resolved"] = {
+                "endpoint": endpoint,
+                "model": model,
+                "has_key": bool(preset.get("api_key")),
+            }
+        rows.append(row)
+    return rows
+
+
+def check_preset_name(name: str) -> str:
+    """``name`` as a storable preset id, or :class:`PresetError` saying why."""
+    text = str(name or "").strip()
+    if not PRESET_ID_RE.match(text):
+        raise PresetError(
+            f"preset name {name!r} must be lowercase letters, digits and "
+            "hyphens, at most 32 characters, starting with a letter or digit"
+        )
+    return text
+
+
+def check_preset_list(raw: object) -> List[dict]:
+    """A submitted preset list as it may be stored, or :class:`PresetError`.
+
+    Unlike reading a hand-edited file, a *submitted* list is refused rather
+    than pruned: the card sends what the operator sees, so a row that cannot
+    be stored means the form and the store disagree, and silently dropping it
+    would lose an entry the operator believes they saved.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PresetError("presets must be a list")
+    if len(raw) > MAX_PRESETS:
+        raise PresetError(f"at most {MAX_PRESETS} presets, got {len(raw)}")
+    out: List[dict] = []
+    seen = set()
+    for position, item in enumerate(raw):
+        where = f"preset {position + 1}"
+        if not isinstance(item, dict):
+            raise PresetError(f"{where}: must be an object")
+        preset_id = check_preset_name(item.get("id"))
+        if preset_id in seen:
+            raise PresetError(f"{where}: duplicate preset name {preset_id!r}")
+        seen.add(preset_id)
+        entry: dict = {"id": preset_id}
+        for field in PRESET_FIELDS:
+            value = str(item.get(field) or "").strip()
+            if value:
+                entry[field] = value
+        if not (entry.get("profile") or entry.get("endpoint")):
+            raise PresetError(
+                f"{where}: needs a profile or an endpoint — a preset that "
+                "names neither identifies no backend"
+            )
+        out.append(entry)
+    return out
 
 
 # --------------------------------------------------------------------------- #
