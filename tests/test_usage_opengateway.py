@@ -11,9 +11,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from claude_launcher import cli, metering, profile, profile_usage, store, usage
 
 GATEWAY = "https://apis.opengateway.ai"
+
+
+@pytest.fixture(autouse=True)
+def _metered(monkeypatch):
+    """The suite switches metering off process-wide (tests/conftest.py) so no
+    proxy is started. This reader measures what metering wrote, so the tests
+    put the switch back; ``test_metering_off_is_refused_...`` then proves the
+    *config* switch is what the reader answers to."""
+    monkeypatch.setenv("CLAUNCH_METERING", "1")
 
 
 def _gateway_profile(name="og"):
@@ -115,6 +126,34 @@ def test_a_failed_request_is_counted_and_named_in_the_totals():
     # Named on the line when there is one; a clean reading leaves it out (the
     # exact strings above already pin that).
     assert report.windows[0].detail.endswith("· 1 failed")
+
+
+def test_a_cache_write_figure_is_named_on_the_line():
+    """``cache_write`` is summed, so it is printed too -- otherwise the line's
+    ``cache`` figure would mean different things depending on the records."""
+    prof = _gateway_profile()
+    report = _read(
+        prof,
+        _record(_stamp(), input_tokens=1000, cache_read=200, cache_write=5000, output_tokens=10),
+    )
+
+    assert report.windows[0].detail == (
+        "1 req · in 1.0k · cache 200 · out 10 · cache write 5.0k"
+    )
+
+
+def test_metering_off_is_refused_instead_of_read_as_zero():
+    """No shim means no records, and "0 req" would be a measurement where
+    nothing was measured (peer review, claunch-firtc)."""
+    prof = _gateway_profile()
+    store.update(lambda doc: doc["providers"]["opengateway"].__setitem__("metering", False))
+
+    with pytest.raises(usage.UsageError) as caught:
+        usage.fetch(prof)
+
+    message = str(caught.value)
+    assert "metering is off" in message
+    assert "opengateway" in message
 
 
 def test_a_record_with_no_readable_time_lands_in_neither_bucket():

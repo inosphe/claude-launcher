@@ -622,7 +622,8 @@ def _opengateway_totals(records: List[dict]) -> dict:
     The quantities are kept apart for the reason :mod:`tokenusage` keeps them
     apart: a session sends most of its input as cache reads, so a single
     "input" figure would be dominated by the cheapest component
-    (claunch-ha2s9).
+    (claunch-ha2s9). Each one is printed as well (:func:`_opengateway_detail`),
+    so nothing is summed here and then dropped from the line.
     """
     def answered(record: dict) -> bool:
         status = record.get("status")
@@ -643,7 +644,9 @@ def _opengateway_detail(totals: dict) -> str:
 
     Failures are named only when there are some: a forwarded request that
     came back 429 or 5xx is worth seeing, and "0 failed" on every reading is
-    noise.
+    noise. The cache write figure is named the same way -- this gateway does
+    not report it today, so most readings leave it out, and a reading that
+    carries it must not lose it behind the cache read figure.
     """
     line = (
         f"{_compact_count(totals['requests'])} req · "
@@ -651,6 +654,8 @@ def _opengateway_detail(totals: dict) -> str:
         f"cache {_compact_count(totals['cache_read'])} · "
         f"out {_compact_count(totals['output_tokens'])}"
     )
+    if totals["cache_write"]:
+        line += f" · cache write {_compact_count(totals['cache_write'])}"
     if totals["failed"]:
         line += f" · {_compact_count(totals['failed'])} failed"
     return line
@@ -698,10 +703,21 @@ def _fetch_opengateway(profile: Profile, now: Optional[datetime] = None) -> Usag
     The records belong to the account rather than to a profile: two profiles
     pointing at the same gateway forward through the same shim, and what they
     spend is one number.
+
+    With metering switched off for the provider there are no records to
+    total, and an empty total would be printed as "0 req" -- a measurement
+    of zero where nothing was measured at all. That is refused instead.
     """
     upstream = _opengateway_context(profile)
     if upstream is None:
         raise UsageError(f"profile {profile.selector!r} no longer selects OpenGateway")
+    provider = providers.resolve_name(profile)
+    if not metering.provider_enabled(provider):
+        raise UsageError(
+            f"this reading is built from the metering records, and metering is "
+            f"off for provider {provider!r} or globally; turn it back on to "
+            f"measure this profile"
+        )
     # ``metering.load`` matches the string, so a lookalike host
     # (``apis.opengateway.ai.example``) comes back with it; the host itself is
     # what makes a record this account's.
