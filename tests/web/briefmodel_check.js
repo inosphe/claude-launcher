@@ -285,9 +285,51 @@ const submit = (root) =>
     endpoint: "https://typed.example/v1/chat/completions", api_key: null,
   }]);
 
+  /* Renaming a preset carries the name it is filed under. The Name box edits
+     the id in place, and the daemon holds the secret under the old name — a
+     save that sends only the new one would drop the key and turn the
+     briefing off. ``previous_id`` is what lets it keep the credential. */
+  requests.length = 0;
+  response = {
+    preset: "cheap", profile: "", model: "", endpoint: "", max_tokens: 4096,
+    api_key_set: false, configured: true, error: "",
+    resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                model: "glm-small", has_key: true },
+    profiles: [],
+    presets: [
+      { id: "cheap", profile: "", endpoint: "https://cheap.example/v1/chat/completions",
+        model: "glm-small", api_key_set: true,
+        resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                    model: "glm-small", has_key: true }, error: "" },
+    ],
+  };
+  vm.runInContext("llmDraft = null;", context);
+  await context.refreshLlmSettings();
+  root = card();
+  const nameInput = field(root, "llm-preset-name");
+  assert.equal(nameInput.value, "cheap");
+  assert.equal(nameInput.disabled, false);
+  nameInput.value = "cheap-a";
+  nameInput.handlers.input();
+  await submit(root);
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "cheap-a");
+  assert.deepEqual(sent.presets, [{
+    id: "cheap-a", previous_id: "cheap", profile: "", model: "glm-small",
+    endpoint: "https://cheap.example/v1/chat/completions",
+  }]);
+  // an unrenamed row sends no previous_id at all
+  vm.runInContext("llmDraft = null;", context);
+  await context.refreshLlmSettings();
+  root = card();
+  await submit(root);
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.presets[0].previous_id, undefined);
+
   console.log("briefmodel ok: profile list, direct save, a profile carries "
     + "endpoint and model with it, save clears the block's pair, typed "
     + "endpoint survives an abandoned pick, unknown profile kept, error, "
     + "preset switch carries endpoint and model, save sends the list and "
-    + "pointer, delete clears the pointer, add saves the new row");
+    + "pointer, delete clears the pointer, add saves the new row, rename "
+    + "sends the name the key is filed under");
 })().catch((err) => { console.error(err); process.exit(1); });

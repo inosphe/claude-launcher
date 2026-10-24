@@ -4258,10 +4258,17 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
             error = str(exc)
     presets = briefing.presets_for_display(doc)
     active = cfg["preset"]
-    if active and not any(p["id"] == active for p in presets):
-        # A pointer at a preset that no longer exists: kept so the card can
-        # say the name rather than silently reporting "none".
-        error = error or f"active preset {active!r} is not saved"
+    # ``cfg["preset"]`` is already filtered — it is ``""`` for a pointer that
+    # names no saved preset, which is exactly the case the card has to report.
+    # The name of a pointer that was deleted or hand-renamed is still in the
+    # block, so read that: the card shows both it and the fields the call
+    # actually falls back to, and the next save does not clear it in silence.
+    wanted = str(block.get("preset") or "").strip()
+    if wanted and not active:
+        error = error or (
+            f"active preset {wanted!r} is not saved — the call uses the "
+            "fields below"
+        )
     return {
         "preset": active,
         # The block's own four fields, regardless of the active preset: the
@@ -4325,9 +4332,16 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
                 continue  # explicit removal; check_preset_list already dropped it
             if row.get("api_key"):
                 continue  # a typed key won
-            # blank or absent: keep this preset's stored secret
-            if stored.get(row["id"], {}).get("api_key"):
-                row["api_key"] = stored[row["id"]]["api_key"]
+            # blank or absent: keep this preset's stored secret. A renamed row
+            # says which name to inherit from — the card's Name box edits the
+            # id in place, and the secret is filed under the id it was saved
+            # as, so looking only at the new name would drop it (and take the
+            # briefing's credentials with it).
+            previous = str(item.get("previous_id") or "").strip()
+            for name in (row["id"], previous):
+                if name and stored.get(name, {}).get("api_key"):
+                    row["api_key"] = stored[name]["api_key"]
+                    break
         block["presets"] = submitted
     if "preset" in body:
         pointer = body["preset"]

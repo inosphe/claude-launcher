@@ -35773,6 +35773,11 @@ function llmPresetsBody(draft) {
   return draft.presets.map((p) => {
     const row = { id: p.id, profile: p.profile || "", model: p.model || "",
                   endpoint: p.endpoint || "" };
+    // The name the row is filed under in the daemon. The Name box edits ``id``
+    // in place, and a stored key stays under the name it was saved as — sending
+    // the old name is what lets the daemon keep that key when the row is
+    // renamed. Without it, editing a name would quietly drop the credential.
+    if (p.key && p.key !== p.id) row.previous_id = p.key;
     if (p.api_key) row.api_key = p.api_key;
     else if (!p.api_key_set) row.api_key = null;
     return row;

@@ -4982,8 +4982,11 @@ switch — choosing one is what changes the model the briefings use, and the
 fields below then edit and save that preset. **Add preset** seeds a new row
 from what the fields show and saves it at once (a pointer at a preset the same
 save does not also store is refused); **Delete preset** drops the row and
-clears the pointer. Without a chosen preset the fields are the block's own
-backend, exactly as before.
+clears the pointer, and **Name** renames the chosen one in place — the row
+carries the name it was stored under, so a rename keeps the preset's key
+rather than dropping it. Without a chosen preset the fields are the block's
+own backend, exactly as before. A `preset:` naming a row that is no longer
+saved falls back to those fields and says so on the card.
 
 Inside a preset (or the block), picking a
 **profile** reuses that profile's backend: its provider already records an

@@ -419,8 +419,6 @@ def test_check_preset_list_refuses_what_cannot_be_stored():
 # --------------------------------------------------------------------------- #
 def _jl(**kw) -> str:
     return json.dumps(kw, ensure_ascii=False)
-def _jl(**kw) -> str:
-    return json.dumps(kw, ensure_ascii=False)
 
 
 def test_tail_events_extracts_text_and_tool_names(tmp_path):
@@ -1891,6 +1889,80 @@ def test_briefing_llm_presets_save_switch_and_keep_their_keys(home):
             body = await resp.json()
             assert body["preset"] == ""
             assert [p["id"] for p in body["presets"]] == ["cheap"]
+
+            # renaming a preset keeps its stored key: the card's Name box
+            # edits the id in place, and the secret is filed under the name it
+            # was saved as, so the row travels with its previous name. Without
+            # that, editing a name would silently drop the credential and turn
+            # the briefing off (peer-review, claunch-wug8b).
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [
+                    {"id": "cheap-renamed", "previous_id": "cheap",
+                     "endpoint": "https://cheap.example/v1/chat/completions",
+                     "model": "glm-small-2"},
+                ], "preset": "cheap-renamed"},
+            )
+            assert resp.status == 200
+            stored = {p["id"]: p for p in briefing.presets()}
+            assert stored["cheap-renamed"]["api_key"] == "sk-cheap"
+            body = await resp.json()
+            assert body["configured"] is True
+            assert body["api_key_set"] is False  # the block's own key
+            assert briefing.llm_config()["api_key"] == "sk-cheap"
+
+            # a rename that names no stored row inherits nothing
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"presets": [
+                    {"id": "fresh", "previous_id": "never-existed",
+                     "endpoint": "https://x/v1/chat/completions", "model": "m"},
+                ], "preset": "fresh"},
+            )
+            assert resp.status == 200
+            assert (await resp.json())["configured"] is False
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_reports_a_pointer_at_a_preset_that_is_gone(home):
+    """A pointer naming no saved preset is reported, not silently dropped.
+
+    ``active_preset()`` filters the pointer, so the payload cannot read the
+    filtered value to tell the card what happened. It reads the block's own
+    name: the call falls back to the block's fields, and the card says so
+    instead of showing an unexplained "none" (peer-review, claunch-wug8b).
+    """
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            store.update(lambda doc: doc.update({"llm": {
+                "endpoint": "https://block.example/v1/chat/completions",
+                "model": "block-model", "api_key": "sk-block",
+                "presets": [{"id": "cheap", "endpoint": "https://cheap/v1",
+                             "model": "glm"}],
+                "preset": "gone",
+            }}))
+
+            resp = await client.get("/api/briefing/llm", headers=BEARER)
+            body = await resp.json()
+            # the call falls back to the block, and the pointer is still named
+            assert body["preset"] == ""
+            assert body["resolved"]["model"] == "block-model"
+            assert body["configured"] is True
+            assert "gone" in body["error"]
+            assert "not saved" in body["error"]
+
+            # a saved pointer reports no error
+            store.update(lambda doc: doc["llm"].update({"preset": "cheap"}))
+            body = await (await client.get("/api/briefing/llm", headers=BEARER)).json()
+            assert body["preset"] == "cheap"
+            assert body["error"] == ""
 
             await mgr.shutdown_all()
         finally:
