@@ -5045,9 +5045,15 @@ const RAIL_WINDOW_MIN_ROWS = 160;
 const RAIL_WINDOW_OVERSCAN_PX = 800;
 const RAIL_ROW_EST_PX = 64;
 const RAIL_WINDOW_SCROLL_MS = 80;
-// How many distinct rows the estimate is sampled from before it stops moving
-// (claunch-thuwx.1). One windowed pass draws more than this, so the rail has
-// its figure after the first pass and keeps it for the session.
+// How close the viewport may come to an edge of the drawn slice before a
+// scroll asks for the next one: half the overscan, so a pass that drew the
+// slice around the reader is never asked for again until they have moved.
+const RAIL_WINDOW_SLACK_PX = RAIL_WINDOW_OVERSCAN_PX / 2;
+// How many distinct rows the estimate is sampled from at most (claunch-thuwx.1).
+// The sample also closes at the end of the first pass that measured enough rows
+// to fill railEstimatePx's floor (railSeen.closed): a slice at the top of a
+// rail draws about two dozen rows, fewer than this, and the next slice's rows
+// joining the sample moved every unmeasured offset at once (claunch-gpxur).
 const RAIL_ESTIMATE_SAMPLE = 32;
 const railRowPx = new Map();
 // What a row this window has not seen is assumed to be: the mean of the rows
@@ -5062,7 +5068,7 @@ const railRowPx = new Map();
 // unmeasured row's offset, so the same model at the same scrollTop planned a
 // different slice before and after a scroll -- a rail that never settled
 // under the reader (claunch-thuwx.1).
-const railSeen = { rows: 0, px: 0 };
+const railSeen = { rows: 0, px: 0, closed: false };
 const railSeenKeys = new Set();
 let railWindowScrollTimer = 0;
 
@@ -5157,12 +5163,14 @@ function railMeasureRows(list) {
     // Each row feeds the estimate once, and only until the sample is full:
     // see RAIL_ESTIMATE_SAMPLE. A row measured again is the row's own height
     // and moves nothing else.
-    if (railSeen.rows < RAIL_ESTIMATE_SAMPLE && !railSeenKeys.has(key)) {
+    if (!railSeen.closed && railSeen.rows < RAIL_ESTIMATE_SAMPLE
+        && !railSeenKeys.has(key)) {
       railSeenKeys.add(key);
       railSeen.rows += 1;
       railSeen.px += px;
     }
   });
+  if (railSeen.rows >= 8) railSeen.closed = true;
   const headings = list.querySelectorAll(".session-group-heading");
   if (!headings || typeof headings.forEach !== "function") return;
   headings.forEach((el) => {
@@ -5172,6 +5180,24 @@ function railMeasureRows(list) {
     const key = `g:${group.dataset.groupLevel || 0}:${group.dataset.group}=${group.dataset.value}`;
     railRowPx.set(key, px);
   });
+}
+
+/* Whether the slice on the list still covers the viewport with room to spare
+   (RAIL_WINDOW_SLACK_PX on each side that has rows past it). Asked of the
+   model the slice was drawn from, as it stands now: comparing a fresh plan's
+   `[first, last]` with the drawn span instead asked for a rebuild whenever a
+   measurement moved either end by one row -- including the scroll event the
+   pass's own position restore fires -- and each of those passes moved the
+   reader again (claunch-gpxur). */
+function railSliceCovers(box) {
+  const span = box._railWindowSpan || [0, 0];
+  const rows = box._railRows;
+  const { offsets } = railOffsets(rows);
+  const top = box.scrollTop || 0;
+  const bottom = top + box.clientHeight;
+  if (span[0] > 0 && top < offsets[span[0]] + RAIL_WINDOW_SLACK_PX) return false;
+  if (span[1] < rows.length && bottom > offsets[span[1]] - RAIL_WINDOW_SLACK_PX) return false;
+  return true;
 }
 
 /* Scroll asks for a rebuild only when the drawn slice no longer covers what
@@ -5187,9 +5213,7 @@ function railWireWindowScroll(list) {
       const box = typeof $ === "function" ? $("session-list") : null;
       if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
       if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
-      const plan = railWindowPlan(box._railRows, box.scrollTop || 0, box.clientHeight);
-      const span = box._railWindowSpan || [0, 0];
-      if (plan.first === span[0] && plan.last === span[1]) return;
+      if (railSliceCovers(box)) return;
       refreshSessions._forceRebuild = true;
       // From the cache, not the daemon: a scroll asks for rows already in
       // hand to be drawn, and putting a request behind every flick of the
@@ -5204,40 +5228,32 @@ function railWireWindowScroll(list) {
    and while a press holds the rows it started on. Kept out of refreshSessions
    so the isolated rail harnesses that slice that function do not have to know
    any of the window's names. */
-function railWindowForPass(list, rows, scrollTop) {
+function railWindowForPass(list, rows, scrollTop, anchor) {
   if (!list) return null;
   if (typeof sessionView !== "undefined" && sessionView === "grid") return null;
   if (typeof list.clientHeight !== "number" || list.clientHeight <= 0) return null;
   if (!Array.isArray(rows) || rows.length < RAIL_WINDOW_MIN_ROWS) return null;
   // A rebuild empties the list, and an empty list's scrollTop is 0 -- so the
   // position the plan is for is the one the pass took before the teardown.
-  const taken = typeof scrollTop === "number" ? scrollTop : (list.scrollTop || 0);
+  // The position is planned as it stands. Where the reader ends up is not
+  // decided here but by the row they were looking at (railTakeAnchor /
+  // railRestoreAnchor): a correction computed from the model alone moved the
+  // reader by the model's own drift, which the page had already shown them,
+  // so every pass that measured a row above them jumped them by it
+  // (claunch-gpxur).
+  // A reader who is looking at a drawn row is planned for around that row:
+  // the model may have moved under it since the slice was drawn (the rows just
+  // measured, an estimate that changed), and a slice planned around the bare
+  // number could then leave out the very row restored to below.
   const heights = railOffsets(rows);
-  // The model moves under a reader who does not move: the rows this pass draws
-  // are measured, their real heights replace the estimate, and every offset
-  // below them shifts by the difference. Handing the reader the position they
-  // had puts them past the row they were reading, so the pass corrects by the
-  // anchor row's own drift -- where that row is now, less where it was
-  // (claunch-thuwx.1). Against an unchanged model the drift is 0, so the
-  // correction cannot ask for the pass that made it.
-  let at = taken;
-  const anchor = list._railAnchor;
-  // Only the same row at the same index may correct anything: a filter that
-  // reshaped the model since moves a different row there, and correcting for
-  // that one would jump the reader.
-  if (anchor && typeof anchor.offset === "number"
-      && anchor.index >= 0 && anchor.index < rows.length
-      && railRowKey(rows[anchor.index]) === anchor.key) {
-    const drift = heights.offsets[anchor.index] - anchor.offset;
-    if (drift) at = Math.max(0, at + drift);
+  let at = typeof scrollTop === "number" ? scrollTop : (list.scrollTop || 0);
+  if (anchor) {
+    const i = rows.findIndex((r) => r.type === "session" && r.session
+      && r.session.name === anchor.name);
+    if (i >= 0) at = Math.max(0, heights.offsets[i] - anchor.delta);
   }
   const plan = railWindowPlan(rows, at, list.clientHeight, heights);
   if (plan.last - plan.first >= rows.length) return null;
-  plan.scrollTop = at;
-  list._railAnchor = {
-    index: plan.at, key: railRowKey(rows[plan.at]),
-    offset: heights.offsets[plan.at],
-  };
   // The card the keyboard holds stays drawn: removing the focused node
   // drops focus to the body, and the pass would restore it to a node that is
   // no longer there.
@@ -5266,11 +5282,59 @@ function railWindowForPass(list, rows, scrollTop) {
    the last drawn slice stayed blank (claunch-thuwx.1). */
 function railClearWindow(list, rebuild) {
   if (!list || !rebuild) return;
-  if (!(list._railRows || list._railWindowPlan || list._railAnchor)) return;
+  if (list.classList) list.classList.remove("rail-windowed");
+  if (!(list._railRows || list._railWindowPlan)) return;
   list._railRows = null;
   list._railWindowPlan = null;
   list._railWindowSpan = null;
-  list._railAnchor = null;
+}
+
+/* The row the reader is looking at and how far below the scroller's top edge
+   it sits, read off the page before a pass touches the list. The pass puts
+   that row back at that distance (railRestoreAnchor) -- the one position that
+   does not depend on whether the model's heights were right.
+   A reader scrolled into a spacer has no drawn row on screen: the anchor is
+   then the row the model places there (`plan.at`), at the distance the model
+   gives it, so the row the scrollbar pointed at is the row they land on. */
+function railTakeAnchor(list) {
+  if (!list || typeof list.getBoundingClientRect !== "function"
+      || typeof list.querySelectorAll !== "function") return null;
+  const box = list.getBoundingClientRect();
+  if (!box || typeof box.top !== "number") return null;
+  const cards = list.querySelectorAll("li[data-name]");
+  for (const li of cards) {
+    const r = li.getBoundingClientRect ? li.getBoundingClientRect() : null;
+    if (!r || typeof r.top !== "number" || !(r.height > 0)) continue;
+    if (r.top + r.height <= box.top) continue;
+    if (r.top >= box.top + (list.clientHeight || 0)) return null;
+    return { name: li.dataset.name, delta: r.top - box.top };
+  }
+  return null;
+}
+
+function railPlanAnchor(rows, plan, scrollTop) {
+  if (!plan || !Array.isArray(rows)) return null;
+  const row = rows[plan.at];
+  if (!row || row.type !== "session" || !row.session) return null;
+  return { name: row.session.name, delta: plan.offsets[plan.at] - (scrollTop || 0) };
+}
+
+/* Move the scroller so the anchor row is where railTakeAnchor saw it. Returns
+   whether it could: a row the pass did not draw leaves the position alone. */
+function railRestoreAnchor(list, anchor) {
+  if (!list || !anchor || typeof list.getBoundingClientRect !== "function") return false;
+  let li = null;
+  for (const card of list.querySelectorAll("li[data-name]")) {
+    if (card.dataset.name === anchor.name) { li = card; break; }
+  }
+  if (!li || !li.getBoundingClientRect) return false;
+  const box = list.getBoundingClientRect();
+  const r = li.getBoundingClientRect();
+  if (!box || typeof box.top !== "number" || typeof r.top !== "number"
+      || !(r.height > 0)) return false;
+  const move = (r.top - box.top) - anchor.delta;
+  if (Math.abs(move) >= 0.5) list.scrollTop = Math.max(0, (list.scrollTop || 0) + move);
+  return true;
 }
 
 async function refreshSessions(options) {
@@ -5442,6 +5506,12 @@ async function refreshSessions(options) {
   if (tabSwitched) sessionGroupTabScrollReset = false;
   const keptScrollTop = rebuild && !tabSwitched && typeof list.scrollTop === "number"
     ? list.scrollTop : 0;
+  // claunch-gpxur: on a windowed rail the number alone does not hold the
+  // reader -- the heights under it change as rows are measured -- so the row
+  // they are looking at is read off the page here, before anything moves, and
+  // put back where it was once the pass is done (railRestoreAnchor below).
+  const railAnchorTaken = rebuild && !tabSwitched && list._railWindowPlan
+    && typeof railTakeAnchor === "function" ? railTakeAnchor(list) : null;
   // A redraw updates the rail in place (claunch-v87): a row whose own
   // signature (rowSignature below) is unchanged keeps its node -- with its
   // listeners, hover, focus and any text selection in it -- and a group keeps
@@ -5660,7 +5730,14 @@ async function refreshSessions(options) {
   const planRows = typeof railWindowForPass === "function"
     ? rows.filter(drawnByFilter) : rows;
   const railWin = typeof railWindowForPass === "function"
-    ? railWindowForPass(list, planRows, keptScrollTop) : null;
+    ? railWindowForPass(list, planRows, keptScrollTop, railAnchorTaken) : null;
+  const railAnchor = railWin && typeof railPlanAnchor === "function"
+    ? (railAnchorTaken || railPlanAnchor(planRows, railWin, keptScrollTop)) : null;
+  // The drawn slice is a few dozen rows, so its rows are laid out for real
+  // (style.css, `.rail-windowed`): a row `content-visibility: auto` skips
+  // measures as its 64 px placeholder, and the model built on that figure
+  // moved every offset below it the first time the row came on screen.
+  if (railWin && list.classList) list.classList.add("rail-windowed");
   if (typeof railWireWindowScroll === "function") railWireWindowScroll(list);
   // Every heading's size, counted from the model rather than from the rows
   // this pass draws: a windowed pass draws a fraction of a group, and the
@@ -6206,7 +6283,6 @@ async function refreshSessions(options) {
     list._railRows = planRows;
     list._railWindowPlan = railWin;
     list._railWindowSpan = [railWin.first, railWin.last];
-    railMeasureRows(list);
     // The total is built from estimates; the rows just drawn are real. Pay the
     // difference out of the spacers so the content ends where the model does: a
     // content shorter than the total leaves the last rows past the end of the
@@ -6250,9 +6326,6 @@ async function refreshSessions(options) {
       while (box.childNodes.length > used) box.removeChild(box.childNodes[used]);
     }
   }
-  // claunch-thuwx: the spacers are squared against the list as it now stands
-  // (see where railTailFix is built): only here has the last pass's tail left.
-  if (railTailFix) railTailFix();
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (keyCardHeld && typeof restoreRailFocus === "function") {
     restoreRailFocus(keyCardHeld);
@@ -6391,13 +6464,22 @@ async function refreshSessions(options) {
   // Assigning past the content's height is not an error -- the browser clamps
   // it -- so a poll that drops rows lands at the new bottom rather than
   // refusing to move, and a rail too short to scroll takes the 0 it had.
-  // The plan says where to put the reader when the model moved under them
-  // (railWindowForPass): putting back the position the teardown took would undo
-  // that correction on every pass that measured a row above them.
-  const restoreTop = railWin && typeof railWin.scrollTop === "number"
-    ? railWin.scrollTop : keptScrollTop;
-  if (rebuild && restoreTop) list.scrollTop = restoreTop;
+  // claunch-thuwx: the drawn rows are measured, and the spacers squared
+  // against the list (see where railTailFix is built), only now: the painters
+  // above add lines to the rows (the cflow badge is a second line), and a row
+  // measured before them goes into the model shorter than the page shows it.
+  if (railWin) {
+    railMeasureRows(list);
+    if (railTailFix) railTailFix();
+  }
+  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
   else if (rebuild && tabSwitched) list.scrollTop = 0;
+  // ...and then the row the reader was looking at goes back where it was
+  // (claunch-gpxur). The number above is right only while the model's heights
+  // match the page; the row is right either way.
+  if (rebuild && railAnchor && typeof railRestoreAnchor === "function") {
+    railRestoreAnchor(list, railAnchor);
+  }
   // The ancestor band above the list reads the rows this pass just drew (and
   // the scroll position it was left at), so it is painted after both are in
   // place. Guarded: the isolated rail harnesses slice this function without

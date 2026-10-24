@@ -681,6 +681,12 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    put on by revealSessionCard (app.js, layRailOut) for one turn; the poll's
    redraw never adds it, so the skip the rule above bought is kept. */
 #session-list.rail-laid-out li[data-name] { content-visibility: visible; }
+/* A windowed rail (app.js, claunch-thuwx) draws only a few dozen rows around
+   the viewport, so it does not need the skip -- and it measures what it draws
+   to plan the next slice. A drawn row the skip had not rendered yet measured
+   as its 64px placeholder, the model took that figure, and the row's real
+   height moved every offset below it when it came on screen (claunch-gpxur). */
+#session-list.rail-windowed li[data-name] { content-visibility: visible; }
 #session-list li:hover { background: #22262d; }
 #session-list li.active { background: #2b313b; }
 /* Where the header's `⇱ card` just landed. The scroll alone puts the row

@@ -95,6 +95,20 @@ function nodeHeight(n) {
   return n.kids.reduce((sum, kid) => sum + nodeHeight(kid), 0);
 }
 
+/* Where a node sits on screen: the list's own top is 0, and everything in it
+   is laid out top to bottom and moved up by the list's scrollTop -- what
+   getBoundingClientRect reports in a page, for the anchor to read. */
+function nodeTop(n) {
+  if (!n || n === list || !n.parentNode) return 0;
+  const parent = n.parentNode;
+  let at = parent === list ? -(list.scrollTop || 0) : nodeTop(parent);
+  for (const kid of parent.kids) {
+    if (kid === n) break;
+    at += nodeHeight(kid);
+  }
+  return at;
+}
+
 let scrollListeners = [];
 function node(tag) {
   const n = {
@@ -131,7 +145,7 @@ function node(tag) {
       const want = matchSelector(sel);
       return walk(n).filter(want);
     },
-    getBoundingClientRect() { return { height: nodeHeight(n) }; },
+    getBoundingClientRect() { return { top: nodeTop(n), height: nodeHeight(n) }; },
     get firstElementChild() { return n.kids.find((k) => k.tag) || null; },
     get childNodes() { return n.kids; },
     get scrollHeight() { return nodeHeight(n); },
@@ -227,6 +241,7 @@ new Function(
   + [
       constant("RAIL_WINDOW_MIN_ROWS"), constant("RAIL_WINDOW_OVERSCAN_PX"),
       constant("RAIL_ROW_EST_PX"), constant("RAIL_WINDOW_SCROLL_MS"),
+      optionalConstant("RAIL_WINDOW_SLACK_PX", ""),
       optionalConstant("RAIL_ESTIMATE_SAMPLE", "const RAIL_ESTIMATE_SAMPLE = 32;"),
     ].join("\n")
   + "\n"
@@ -241,7 +256,10 @@ new Function(
   + slice("railEstimatePx") + slice("railRowKey") + slice("railRowPxOf")
   + optionalSlice("railOffsets") + slice("railWindowPlan") + slice("railSpacerRow")
   + slice("railMeasureRows") + slice("railWindowForPass")
+  + optionalSlice("railSliceCovers")
   + slice("railWireWindowScroll") + optionalSlice("railClearWindow")
+  + optionalSlice("railTakeAnchor") + optionalSlice("railPlanAnchor")
+  + optionalSlice("railRestoreAnchor")
   + slice("refreshSessions")
   + `
 const __api = {
@@ -277,7 +295,6 @@ const resetWindow = () => {
   list._railRows = null;
   list._railWindowPlan = null;
   list._railWindowSpan = null;
-  list._railAnchor = null;
   list._sessionsSignature = null;
   list._sessionsSigSeq = null;
   list.scrollTop = 0;
@@ -372,6 +389,7 @@ const resetWindow = () => {
   railSeenKeys.clear();
   railSeen.rows = 0;
   railSeen.px = 0;
+  railSeen.closed = false;
   const measured = (names, px) => {
     const host = node("ul");
     for (const name of names) {
@@ -400,41 +418,85 @@ const resetWindow = () => {
         [one.first, one.last, one.top, one.total], [two.first, two.last, two.top, two.total]);
   check("...and the same offsets", one.offsets, two.offsets);
 
-  /* ---- 6. a model that drifts is corrected for, not handed to the reader
-     The rows above the reader are measured on this pass and they are taller
-     than the estimate was. Every offset below them moves down by that much;
-     unless the position moves with it, the reader's row jumps. */
+  /* ---- 6. the row the reader looks at stays where it is ---------------
+     claunch-gpxur: "스크롤바의 위치가 안정되지 못하네. 계속 의도와 다른곳으로
+     스크롤 위치가 튀고있어". A rail whose rows below the top are taller than
+     the estimate the first slice froze (a region of rows with a second line).
+     A scroll into that region draws it, measures it, and every offset in it
+     moves; the reader must still land on the row the scrollbar pointed at,
+     and the polls that follow must leave that row where it is on screen. */
   resetWindow();
   heights.clear();
   railRowPx.clear();
-  const fleetRows = fleet("r", 400);
-  const at = 12000;
-  /* The row the reader's position sits in, counted here rather than read off
-     the plan, so the check does not depend on the fix's own bookkeeping. */
-  const anchorRow = (() => {
-    const was = railOffsets(fleetRows);
-    let i = 0;
-    while (i < fleetRows.length - 1 && was.offsets[i + 1] <= at) i += 1;
-    return i;
-  })();
-  const before = railWindowForPass(list, fleetRows, at);
-  assert.ok(before, "the slice is planned over a fleet-sized model");
-  railRowPx.set(`s:r${anchorRow - 5}`, 72 + 200);  // one row above, measured taller
-  const afterDrift = railWindowForPass(list, fleetRows, at);
-  const now = railOffsets(fleetRows);
-  assert.strictEqual(typeof afterDrift.scrollTop, "number",
-    "the plan says where to put the reader once the model under it moved");
-  assert.strictEqual(afterDrift.scrollTop - now.offsets[anchorRow],
-    at - before.offsets[anchorRow],
-    "the anchor row keeps its distance from the top of the viewport");
+  railSeenKeys.clear();
+  railSeen.rows = 0;
+  railSeen.px = 0;
+  railSeen.closed = false;
+  const tallFleet = fleet("q", 800);
+  tallFleet.forEach((s, i) => { if (i >= 100) heights.set(s.name, 136); });
+  served = { sessions: tallFleet };
+  await refresh();
+  assert.ok(list._railWindowPlan, "the tall fleet is windowed");
+  assert.strictEqual(railEstimatePx(), 72, "its estimate comes from the short rows at the top");
 
-  /* ---- 7. ...and an unchanged model at the same position corrects by
-     nothing, so the correction cannot ask for the pass that made it ---- */
-  const again = railWindowForPass(list, fleetRows, at);
-  const settled = railWindowForPass(list, fleetRows, at);
-  check("a correction against an unchanged model is the same slice",
-        [again.first, again.last], [settled.first, settled.last]);
-  check("...at the same position", again.scrollTop, settled.scrollTop);
+  /* What the reader sees: the first drawn card on screen and how far below
+     the top edge it sits. */
+  const onScreen = () => {
+    for (const li of walk(list)) {
+      if (!(li.tag === "li" && li.dataset.name)) continue;
+      const top = nodeTop(li), h = nodeHeight(li);
+      if (h > 0 && top + h > 0) return { name: li.dataset.name, at: Math.round(top) };
+    }
+    return null;
+  };
+  // Scroll to where the model says row q400 starts.
+  const target = 400;
+  const planned = railOffsets(list._railRows).offsets[target];
+  list.scrollTop = planned;
+  scrollListeners[0]();
+  await wait(250);
+  check("a scroll into an unmeasured region lands on the row the scrollbar pointed at",
+        onScreen(), { name: `q${target}`, at: 0 });
+
+  // Polls that change a session rebuild the slice at the same position.
+  const settledView = onScreen();
+  const settledTop = list.scrollTop;
+  for (let k = 0; k < 3; k++) {
+    list._sessionsSignature = null;
+    await refresh();
+    check(`poll ${k + 1} after the scroll leaves the reader's row where it was`,
+          onScreen(), settledView);
+  }
+  check("...and the scroll position settled after the first measuring pass",
+        list.scrollTop, settledTop);
+
+  /* ---- 7. a pass's own restore does not ask for another pass -------------
+     The restore moves scrollTop and the browser fires a scroll event for it.
+     Planned afresh against the just-measured model, the slice's ends moved by
+     a row, so the handler asked for a rebuild -- and that pass moved the reader
+     again. Inside the drawn slice, the scroll handler must not ask. */
+  const planBefore = list._railWindowPlan;
+  scrollListeners[0]();
+  await wait(250);
+  check("a scroll event at the settled position draws nothing new",
+        list._railWindowPlan === planBefore, true);
+  // A small move inside the slice is not a reason either.
+  list.scrollTop = settledTop + 120;
+  scrollListeners[0]();
+  await wait(250);
+  check("a scroll of 120px inside the slice draws nothing new",
+        list._railWindowPlan === planBefore, true);
+  list.scrollTop = settledTop;
+
+  /* ---- 7b. the drawn rows are laid out for real ------------------------
+     A row `content-visibility: auto` has not rendered measures as its 64 px
+     placeholder; the window's own rows must not be skipped. */
+  check("a windowed list carries the class that lays its rows out",
+        list.classList.contains("rail-windowed"), true);
+  const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
+  check("...and the stylesheet turns the skip off under it",
+        /#session-list\.rail-windowed li\[data-name\]\s*\{[^}]*content-visibility:\s*visible/
+          .test(css), true);
 
   /* ---- 8. a whole draw still takes the window off ---------------------
      The other half: the window must not outlive the rail it describes. A
@@ -451,6 +513,8 @@ const resetWindow = () => {
   assert.strictEqual(list._railWindowPlan, null,
     "a rail drawn whole leaves no window behind");
   assert.strictEqual(list._railRows, null, "and no model either");
+  check("and the windowed class comes off with it",
+        list.classList.contains("rail-windowed"), false);
 
   /* ---- 9. the helpers the page keeps are the ones under test ---------- */
   assert.strictEqual(typeof railClearWindow, "function",
