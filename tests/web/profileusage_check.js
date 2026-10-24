@@ -78,6 +78,10 @@ const body = {
   assert.deepStrictEqual(T.shownWindows([used, reset, idle]).map((w) => w.name),
     ['five_hour', 'seven_day']);
   assert.deepStrictEqual(T.shownWindows([idle]).map((w) => w.name), ['seven_day_opus']);
+  // A reading with no percentage and no money carries a line instead, and is
+  // shown rather than dropped (opengateway-local, claunch-firtc).
+  const local = { name: 'today', utilization: 0, resets_at: null, detail: '2 req · in 1.4k' };
+  assert.deepStrictEqual(T.shownWindows([idle, local]).map((w) => w.name), ['today']);
 
   // The next periodic read rides in the body.
   answer = { ok: true, status: 200, json: async () => ({ ...body, next_at: 1792650900 }) };

@@ -58,6 +58,9 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
                 "limit_dollars": None,
                 "remaining_dollars": None,
                 "status": "ok",
+                # A reader with no percentage to show names what it counted
+                # instead (opengateway-local, claunch-firtc).
+                "detail": None,
             }
         ],
     }

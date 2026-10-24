@@ -221,6 +221,7 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
                         "limit_dollars": item.limit_dollars,
                         "remaining_dollars": item.remaining_dollars,
                         "status": item.status,
+                        "detail": item.detail,
                     }
                     for item in report.windows
                 ],
@@ -333,6 +334,7 @@ def _key_reading(profile, base: str, key, *, manual: bool) -> dict:
                         "limit_dollars": item.limit_dollars,
                         "remaining_dollars": item.remaining_dollars,
                         "status": item.status,
+                        "detail": item.detail,
                     }
                     for item in report.windows
                 ],

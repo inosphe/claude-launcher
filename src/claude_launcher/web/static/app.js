@@ -15164,6 +15164,11 @@ function newUsageWindowText(window) {
   const amount = newUsageMoney(window && window.used_dollars);
   const limit = newUsageMoney(window && window.limit_dollars);
   const left = newUsageMoney(window && window.remaining_dollars);
+  // A reading with no percentage at all carries its own line
+  // (opengateway-local totals this machine's records).
+  if (window && typeof window.detail === "string" && window.detail) {
+    return `${label} ${window.detail}`;
+  }
   const parts = [];
   // Spend without a limit has no percentage to show; the amount is the answer.
   const amountOnly = !!amount && !limit;
@@ -15187,7 +15192,8 @@ function newUsageWindowLine(window) {
   accent.className = `new-usage-pct ${level}`.trim();
   accent.textContent = newUsageWindowText(window);
   li.appendChild(accent);
-  if (Number.isFinite(pct)) {
+  const hasDetail = !!(window && typeof window.detail === "string" && window.detail);
+  if (Number.isFinite(pct) && !hasDetail) {
     const bar = document.createElement("span");
     bar.className = `new-usage-bar ${level}`.trim();
     const fill = document.createElement("i");

@@ -38,6 +38,7 @@
     "kimi-web-server": "via Kimi Code local server",
     "fireworks-billing": "via Fireworks billing API",
     "opencode-go": "via OpenCode Go usage API",
+    "opengateway-local": "via this machine's request records",
   };
   // Statuses `claunch usage` leaves out: the ones that say nothing is wrong.
   const QUIET_STATUSES = new Set(["allowed", "ok"]);
@@ -378,7 +379,7 @@
      or all of them when none has either. */
   function shownWindows(windows) {
     const active = windows.filter((window) => Number(window.utilization) > 0 || window.resets_at
-      || Number.isFinite(dollars(window.used_dollars)));
+      || Number.isFinite(dollars(window.used_dollars)) || window.detail);
     return active.length ? active : windows;
   }
 
@@ -401,20 +402,23 @@
 
   function windowLine(window) {
     const line = node("div", "profile-usage-window");
+    // A reading with no percentage to show: the reader's own line
+    // (opengateway-local) rather than a bar at zero.
+    const detail = typeof window.detail === "string" && window.detail ? window.detail : "";
     // Spend with no limit has no percentage: the line shows the amount.
     const amountOnly = Number.isFinite(dollars(window.used_dollars))
       && !Number.isFinite(dollars(window.limit_dollars));
-    const pct = amountOnly ? NaN : Number(window.utilization);
+    const pct = amountOnly || detail ? NaN : Number(window.utilization);
     line.append(
       node("strong", "", WINDOW_LABELS[window.name] || String(window.name)),
-      node("span", `profile-usage-pct ${level(pct)}`, amountOnly ? money(window.used_dollars)
-        : Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "—"),
+      node("span", `profile-usage-pct ${level(pct)}`, detail || (amountOnly ? money(window.used_dollars)
+        : Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "—")),
     );
     const bar = node("div", `profile-usage-bar ${level(pct)}`);
     const fill = node("span");
     fill.style.width = `${Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0}%`;
     bar.append(fill);
-    if (amountOnly) bar.classList.add("hidden");
+    if (amountOnly || detail) bar.classList.add("hidden");
     line.append(bar);
     const notes = [];
     const used = money(window.used_dollars);
