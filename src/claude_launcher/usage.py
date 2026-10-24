@@ -22,6 +22,12 @@ and, when the configuration records a credit balance, what is left of it.
 An OpenCode Go provider (``opencode.ai/zen/go``) reports its plan windows --
 the rolling 5 hours, the week and the month, each a percentage and a reset
 time -- at ``/zen/go/v1/usage``, read with the profile's API key.
+An OpenGateway provider (``apis.opengateway.ai``) has no endpoint a key can
+read: its management surface answers ``401`` to a data-plane key and the data
+plane carries no usage route (claunch-firtc). Its reading is therefore what
+this machine itself forwarded -- the routing shim writes one record per
+request for every keyed provider (:mod:`metering`), and the reader totals
+those records for today and for the month to date.
 Harnesses without a supported equivalent are rejected explicitly.
 """
 
@@ -41,7 +47,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
-from . import config, credentials, harnesses, lineage, providers, runner, store
+from . import config, credentials, harnesses, lineage, metering, providers, runner, store
 from .profile import Profile
 
 _OAUTH_BETA = "oauth-2025-04-20"
@@ -57,6 +63,10 @@ _OPENCODE_GO_HOSTS = {"opencode.ai", "opencode.ai:443"}
 _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 #: OpenCode Go's window names, and the names a reading gives them.
 _OPENCODE_GO_WINDOWS = (("rolling", "five_hour"), ("weekly", "weekly"), ("monthly", "monthly"))
+_OPENGATEWAY_HOSTS = {"apis.opengateway.ai", "apis.opengateway.ai:443"}
+#: What :func:`metering.load` matches in a record's ``upstream``: the shim
+#: records the endpoint it forwarded to, with whatever path the harness used.
+_OPENGATEWAY_UPSTREAM = "apis.opengateway.ai"
 
 
 class UsageError(Exception):
@@ -78,6 +88,10 @@ class UsageWindow:
     limit_dollars: Optional[float] = None
     status: Optional[str] = None
     remaining_dollars: Optional[float] = None
+    #: A line a reader prints when it has no percentage to show -- an account
+    #: with no spend limit, or one whose usage is counted rather than rated
+    #: (``opengateway-local``). ``utilization`` is then not the reading.
+    detail: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -548,6 +562,174 @@ def _fetch_opencode_go(profile: Profile, token: str) -> UsageReport:
     except json.JSONDecodeError as exc:
         raise UsageError(f"unexpected (non-JSON) OpenCode Go usage response: {exc}") from exc
     return UsageReport(windows=_opencode_go_windows(payload), raw=payload, source="opencode-go")
+
+
+def _opengateway_context(profile: Profile) -> Optional[str]:
+    """The upstream whose local records a profile's OpenGateway traffic lands
+    under, or ``None`` when its provider is another backend.
+
+    No credential is read: nothing is asked of the account. OpenGateway's
+    management surface needs a login session rather than a data-plane key,
+    and its data plane has no usage route at all, so the only measurement
+    available is the one this machine already keeps (:mod:`metering`).
+    """
+    provider = providers.resolve_name(profile)
+    if provider == providers.DEFAULT_PROVIDER:
+        return None
+    declared_env = providers.provider_env(provider)
+    declared_env.update(lineage.effective_env(profile))
+    raw_base = str(declared_env.get("ANTHROPIC_BASE_URL") or "")
+    try:
+        parsed = urllib.parse.urlsplit(raw_base)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "https" or parsed.netloc.lower() not in _OPENGATEWAY_HOSTS:
+        return None
+    return _OPENGATEWAY_UPSTREAM
+
+
+def _compact_count(value: int) -> str:
+    """A request or token count as a short human figure (``1.2M``)."""
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
+def _from_opengateway(record: dict) -> bool:
+    """Whether this record's upstream is OpenGateway itself, by host."""
+    try:
+        host = urllib.parse.urlsplit(str(record.get("upstream") or "")).hostname
+    except ValueError:
+        return False
+    return bool(host) and host.lower() == "apis.opengateway.ai"
+
+
+def _record_time(record: dict) -> Optional[datetime]:
+    """When a metering record was written, or ``None`` when the stamp is
+    unusable. The shim writes local time with its offset."""
+    try:
+        stamp = datetime.fromisoformat(str(record.get("ts") or ""))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+
+
+def _opengateway_totals(records: List[dict]) -> dict:
+    """Requests and the four token quantities of one bucket of records.
+
+    The quantities are kept apart for the reason :mod:`tokenusage` keeps them
+    apart: a session sends most of its input as cache reads, so a single
+    "input" figure would be dominated by the cheapest component
+    (claunch-ha2s9). Each one is printed as well (:func:`_opengateway_detail`),
+    so nothing is summed here and then dropped from the line.
+    """
+    def answered(record: dict) -> bool:
+        status = record.get("status")
+        return not record.get("error") and (status is None or 200 <= int(status) < 300)
+
+    return {
+        "requests": len(records),
+        "failed": sum(1 for r in records if not answered(r)),
+        "input_tokens": sum(int(r.get("input_tokens") or 0) for r in records),
+        "cache_read": sum(int(r.get("cache_read") or 0) for r in records),
+        "cache_write": sum(int(r.get("cache_write") or 0) for r in records),
+        "output_tokens": sum(int(r.get("output_tokens") or 0) for r in records),
+    }
+
+
+def _opengateway_detail(totals: dict) -> str:
+    """One line naming what a bucket of records spent.
+
+    Failures are named only when there are some: a forwarded request that
+    came back 429 or 5xx is worth seeing, and "0 failed" on every reading is
+    noise. The cache write figure is named the same way -- this gateway does
+    not report it today, so most readings leave it out, and a reading that
+    carries it must not lose it behind the cache read figure.
+    """
+    line = (
+        f"{_compact_count(totals['requests'])} req · "
+        f"in {_compact_count(totals['input_tokens'])} · "
+        f"cache {_compact_count(totals['cache_read'])} · "
+        f"out {_compact_count(totals['output_tokens'])}"
+    )
+    if totals["cache_write"]:
+        line += f" · cache write {_compact_count(totals['cache_write'])}"
+    if totals["failed"]:
+        line += f" · {_compact_count(totals['failed'])} failed"
+    return line
+
+
+def _opengateway_windows(
+    records: List[dict], now: Optional[datetime] = None
+) -> "tuple[List[UsageWindow], int]":
+    """Today's and this month's totals over ``records``, as two windows, and
+    how many records could not be dated.
+
+    A writing time that cannot be read is counted in neither bucket: a record
+    placed in the wrong day is a wrong number, and the count of records that
+    could not be placed travels in the report's ``raw``.
+    """
+    moment = (now or datetime.now(timezone.utc)).astimezone()
+    today: List[dict] = []
+    month: List[dict] = []
+    undated = 0
+    for record in records:
+        stamp = _record_time(record)
+        if stamp is None:
+            undated += 1
+            continue
+        local = stamp.astimezone(moment.tzinfo)
+        if local.date() == moment.date():
+            today.append(record)
+        if (local.year, local.month) == (moment.year, moment.month):
+            month.append(record)
+    windows = []
+    for name, bucket in (("today", today), ("month", month)):
+        totals = _opengateway_totals(bucket)
+        windows.append(UsageWindow(
+            name=name,
+            utilization=0.0,
+            resets_at=None,
+            detail=_opengateway_detail(totals),
+        ))
+    return windows, undated
+
+
+def _fetch_opengateway(profile: Profile, now: Optional[datetime] = None) -> UsageReport:
+    """OpenGateway's usage as this machine recorded it.
+
+    The records belong to the account rather than to a profile: two profiles
+    pointing at the same gateway forward through the same shim, and what they
+    spend is one number.
+
+    With metering switched off for the provider there are no records to
+    total, and an empty total would be printed as "0 req" -- a measurement
+    of zero where nothing was measured at all. That is refused instead.
+    """
+    upstream = _opengateway_context(profile)
+    if upstream is None:
+        raise UsageError(f"profile {profile.selector!r} no longer selects OpenGateway")
+    provider = providers.resolve_name(profile)
+    if not metering.provider_enabled(provider):
+        raise UsageError(
+            f"this reading is built from the metering records, and metering is "
+            f"off for provider {provider!r} or globally; turn it back on to "
+            f"measure this profile"
+        )
+    # ``metering.load`` matches the string, so a lookalike host
+    # (``apis.opengateway.ai.example``) comes back with it; the host itself is
+    # what makes a record this account's.
+    records = [r for r in metering.load(upstream=upstream) if _from_opengateway(r)]
+    windows, undated = _opengateway_windows(records, now)
+    raw = {
+        "upstream": upstream,
+        "records": len(records),
+        "undated": undated,
+        "accounts_for": "every session on this machine that forwarded to this gateway",
+    }
+    return UsageReport(windows=windows, raw=raw, source="opengateway-local")
 
 
 def credit_setting(profile: Profile) -> Optional[tuple[float, date]]:
@@ -1024,6 +1206,8 @@ def reader(profile: Profile) -> str:
             return "fireworks-billing"
         if _opencode_go_context(profile) is not None:
             return "opencode-go"
+        if _opengateway_context(profile) is not None:
+            return "opengateway-local"
         provider = providers.resolve_name(profile)
         if not providers.uses_anthropic_oauth(provider):
             raise UsageError(
@@ -1058,6 +1242,8 @@ def fetch(profile: Profile) -> UsageReport:
         if token is None:
             raise UsageError(f"profile {profile.selector!r} no longer selects OpenCode Go")
         return _fetch_opencode_go(profile, token)
+    if kind == "opengateway-local":
+        return _fetch_opengateway(profile)
     if kind == "anthropic":
         return _fetch_claude(profile)
     entry = harnesses.get(lineage.effective_harness(profile))
@@ -1077,6 +1263,7 @@ KEYED_READERS = ("anthropic", "kimi-provider", "fireworks-billing", "opencode-go
 LOGIN_SCOPED_READERS = {
     "codex-app-server": "the codex harness reports usage for its login, not for a key",
     "kimi-web-server": "the kimi harness reports usage for its login, not for a key",
+    "opengateway-local": "the OpenGateway reading totals this machine's requests, and its records carry no key identity",
 }
 
 

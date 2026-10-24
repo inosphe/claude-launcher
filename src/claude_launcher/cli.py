@@ -1416,14 +1416,22 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
         "kimi-web-server": "  (via Kimi Code local server)",
         "fireworks-billing": "  (via Fireworks billing API)",
         "opencode-go": "  (via OpenCode Go usage API)",
+        "opengateway-local": "  (via this machine's request records)",
     }.get(report.source, "")
     print(f"usage for profile {name!r}{suffix}")
-    active = [w for w in report.windows if w.utilization > 0 or w.resets_at]
+    active = [
+        w for w in report.windows
+        if w.utilization > 0 or w.resets_at or w.detail or w.used_dollars is not None
+    ]
     windows = active or report.windows
     if not windows:
         print("  no usage windows reported")
         return
     for w in windows:
+        if w.detail:
+            # A reading with no percentage to show: the reader's own line.
+            print(f"  {w.name:<18} {w.detail}")
+            continue
         bar = _bar(w.utilization)
         note = _fmt_reset(w.resets_at)
         if w.status and w.status not in ("allowed", "ok"):
