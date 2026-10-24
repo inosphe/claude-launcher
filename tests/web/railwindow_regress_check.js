@@ -449,25 +449,47 @@ const resetWindow = () => {
     }
     return null;
   };
+  /* claunch-thuwx.1.1: where the scrollbar's thumb sits, as a share of the
+     scroll range. */
+  const thumb = () => list.scrollTop / Math.max(1, list.scrollHeight - listViewport);
+  check("the content is as tall as the model once the first pass has measured",
+        list.scrollHeight, railOffsets(list._railRows).total);
+
   // Scroll to where the model says row q400 starts.
   const target = 400;
   const planned = railOffsets(list._railRows).offsets[target];
+  const heightBefore = list.scrollHeight;
   list.scrollTop = planned;
+  const intended = thumb();
   scrollListeners[0]();
   await wait(250);
   check("a scroll into an unmeasured region lands on the row the scrollbar pointed at",
         onScreen(), { name: `q${target}`, at: 0 });
+  /* The bound on one scroll's thumb movement: the height this pass's
+     measurements added to the content, as a share of the scroll range. That
+     much the thumb has to move -- the rows turned out taller than the estimate
+     -- and nothing on top of it (a correction, a pass that squares against a
+     stale total) may move it further. */
+  const grown = Math.abs(list.scrollHeight - heightBefore);
+  const bound = grown / Math.max(1, list.scrollHeight - listViewport);
+  check("one scroll moves the thumb no further than the measured rows account for",
+        Math.abs(thumb() - intended) <= bound, true);
 
   // Polls that change a session rebuild the slice at the same position.
   const settledView = onScreen();
   const settledTop = list.scrollTop;
+  const settledHeight = list.scrollHeight;
+  const settledThumb = thumb();
   for (let k = 0; k < 3; k++) {
     list._sessionsSignature = null;
     await refresh();
     check(`poll ${k + 1} after the scroll leaves the reader's row where it was`,
           onScreen(), settledView);
+    check(`poll ${k + 1}: the content keeps its height`,
+          list.scrollHeight, settledHeight);
+    check(`poll ${k + 1}: and the thumb its place`, thumb(), settledThumb);
   }
-  check("...and the scroll position settled after the first measuring pass",
+  check("...and the scroll position settled in the pass that measured",
         list.scrollTop, settledTop);
 
   /* ---- 7. a pass's own restore does not ask for another pass -------------

@@ -286,7 +286,8 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   // The spacers are squared against the list as it finally stands, after the
   // in-place pass has taken the last pass's tail out of it: a total that
   // misses high leaves the last rows past the end of the scroll.
-  assert.ok(/railWin\.total - list\.scrollHeight/.test(body),
+  assert.ok(/const total = railOffsets\(planRows\)\.total;/.test(body)
+    && /Math\.round\(total - list\.scrollHeight\)/.test(body),
     "the spacers are squared against the list's height");
   assert.ok(/if \(railTailFix\) railTailFix\(\);/.test(body),
     "and that happens once the pass has finished");

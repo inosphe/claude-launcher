@@ -6289,8 +6289,15 @@ async function refreshSessions(options) {
     // scroll, where no scroll reaches them, and a longer one scrolls into blank.
     // Read after the in-place cleanup below, which is what takes the rows of
     // the last pass out of the list -- measuring before it counts them in.
+    // The total it squares against is the model's as it stands once this
+    // pass's rows are measured (railTailFix runs after railMeasureRows): the
+    // plan's own total still holds the estimates those rows replaced, and
+    // squaring against it left the scrollbar one pass behind -- the next poll
+    // at the same position changed the content's height, and the thumb moved
+    // under a reader who had not (claunch-thuwx.1.1).
     railTailFix = () => {
-      const fix = Math.round(railWin.total - list.scrollHeight);
+      const total = railOffsets(planRows).total;
+      const fix = Math.round(total - list.scrollHeight);
       if (fix === 0) return;
       // The difference goes to the spacer below the slice first, where the
       // reader is not looking; what is left (the tail already at 0) comes off
