@@ -38,6 +38,7 @@
 | `usage_limit` | usage limit | 24시간 | 리셋을 기다리거나 플랜을 올린다 |
 | `account_suspended` | account suspended | 24시간 | 프로바이더의 결제·청구 상태를 확인한다 |
 | `rate_limit` | rate limit | 15분 | rate window가 지나기를 기다린다 |
+| `overloaded` | provider overloaded | 5분 | 몇 분 기다린다. 계속되면 프로바이더가 열화된 상태다 |
 | `auth` | login | 6시간 | 하네스 로그인을 다시 한다 |
 | `api_status` | API error | 30분 | 프로바이더 상태를 확인하고 나중에 재시도한다 |
 | `network` | network | 15분 | 연결과 DNS를 확인한다 |
@@ -48,9 +49,21 @@
 window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
 
 `API Error: <숫자>` 꼴은 코드 전용 패턴이 없어도 `api_status`로 잡고, 읽은
-코드를 fault의 `code` 필드에 싣는다(`API Error: 503` → `code: 503`). 특정 코드가
-고유한 의미를 가지면 그 코드 전용 패턴을 그 앞에 두어 별도 kind로 읽는다
-(401 → `auth`, 412 → `account_suspended`, 429 → `usage_limit`/`rate_limit`).
+코드를 fault의 `code` 필드에 싣는다(`API Error: 503` → `code: 503`). 이 일반
+폴백은 `common:`의 마지막 항목이라 하네스와 무관하게 적용된다(2026-10-24 이전에는
+`claude` 목록에만 있어 다른 하네스는 상태 코드를 읽지 못했다). 특정 코드가
+고유한 의미를 가지면 그 코드 전용 패턴을 폴백 앞에 두어 별도 kind로 읽는다
+(401 → `auth`, 412 → `account_suspended`, 429 → `usage_limit`/`rate_limit`,
+529 → `overloaded`). `common:`이 하네스 목록보다 먼저 평가되므로, 코드로 읽는
+판정도 `common:`에 있어야 그 하네스가 다른 하네스에서도 선다 — 401과 429가
+`claude` 목록에만 있던 동안 다른 하네스의 같은 문구는 fault로 서지 않았다.
+429를 코드로 읽는 항목은 한도 문구(`Your quota will reset…`)보다 뒤에 둔다:
+한도를 적은 429는 rate window가 아니라 소진된 플랜이다.
+
+`529 Overloaded`는 프로바이더가 요청을 거절하는 동안 하네스가 스스로 재시도하는
+상태다(`API Error: 529 Overloaded — retrying in 30s (attempt 3/10)`). 창을
+`api_status`(30분)보다 짧은 5분으로 두는 이유는, 한 번의 재시도로 풀리는 경우가
+많고 5분이 지나도 남아 있으면 그때는 프로바이더 열화로 읽어야 하기 때문이다.
 
 ## 어디에 나타나는가
 

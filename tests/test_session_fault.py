@@ -120,6 +120,71 @@ def test_a_status_code_with_no_pattern_is_api_status_and_keeps_the_code():
     assert view["code"] == "503"
 
 
+OVERLOADED = "API Error: 529 Overloaded — retrying in 30s (attempt 3/10)"
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_a_529_is_read_in_every_harness(harness):
+    """The status fallback lives in `common`, so a harness with no list of
+    its own still reads a 529 (it did not before claunch-pczoc.2)."""
+    found = session_fault.default().match(harness, OVERLOADED)
+    assert found is not None, f"{harness}: the 529 line matched nothing"
+    assert found[0].name == "overloaded"
+
+
+def test_overloaded_expires_sooner_than_api_status():
+    """A 529 is usually one retry; api_status's 30 minutes would leave the
+    pill up long after the provider took the request again."""
+    catalog = session_fault.default()
+    assert catalog.kinds["overloaded"].window < catalog.kinds["api_status"].window
+
+
+def test_the_generic_fallback_does_not_swallow_codes_with_their_own_reading():
+    """The fallback sits in `common`, which is matched before a harness's own
+    list, so the codes with a specific reading must be stated above it or a
+    401 would come out as api_status."""
+    catalog = session_fault.default()
+    cases = {
+        "API Error: 500 Internal Server Error": "api_status",
+        "API Error: 503 Service Unavailable": "api_status",
+        "API Error: 401 Invalid bearer token": "auth",
+        "API Error: 412 Account x is suspended": "account_suspended",
+        "API Error: 429 Too Many Requests": "rate_limit",
+        # claude's own 429 wording, listed here because it must still read as
+        # a rate window now that the code-level entry sits above it in
+        # `common` (a pattern lower in the list never gets to speak first).
+        "API Error: Request rejected (429)": "rate_limit",
+    }
+    for harness in ("claude", "codex"):
+        for line, kind in cases.items():
+            if harness != "claude" and "Request rejected" in line:
+                continue  # this harness did not paint that wording
+            found = catalog.match(harness, line)
+            assert found is not None, f"{harness}: {line!r} matched nothing"
+            assert found[0].name == kind, (
+                f"{harness}: {line!r} matched {found[0].name}, expected {kind}")
+
+
+def test_a_quota_sentence_beats_the_code_level_429():
+    """Both are in `common` now; the sentence must still win, or an exhausted
+    plan would be reported as a 15-minute rate window."""
+    found = session_fault.default().match("codex", KIMI_429)
+    assert found is not None
+    assert found[0].name == "usage_limit"
+
+
+def test_the_529_fault_is_marked_and_keeps_the_status_code():
+    det, now = _detector()
+    det.scan(_Screen(OVERLOADED), now=now["t"])
+    view = det.view()
+    assert view["kind"] == "overloaded"
+    assert view["code"] == "529"
+    assert view["active"] is True
+    # The shorter window is what the rail reads: five minutes later it is
+    # expired, where api_status would still be active.
+    assert det.view(now=now["t"] + 301)["active"] is False
+
+
 @pytest.mark.parametrize("document", [
     {},
     {"version": 2, "kinds": {}},

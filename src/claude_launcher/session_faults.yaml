@@ -34,6 +34,13 @@ kinds:
     label: rate limit
     action: wait for the rate window to pass
     window: 900
+  # The provider answers but is out of capacity (529 Overloaded). The harness
+  # retries by itself, so the window is shorter than api_status's: a session
+  # that is still here after five minutes is not waiting out one retry.
+  overloaded:
+    label: provider overloaded
+    action: wait a few minutes; if it stays, the provider is degraded
+    window: 300
   auth:
     label: login
     action: run the harness's login again
@@ -65,6 +72,20 @@ common:
   - kind: account_suspended
     pattern: |-
       API Error: 412\b
+  # Observed 2026-10-24 on a claude session: "API Error: 529 Overloaded —
+  # retrying in 30s (attempt 3/10)". It sits in `common` because the wording
+  # is the provider's, and it is listed before the generic status fallback
+  # below so 529 gets the shorter `overloaded` window instead of
+  # `api_status`'s 1800 seconds. Only 529 is read this way — no 503 or other
+  # 5xx message has been collected, and `api_status` already covers them.
+  - kind: overloaded
+    pattern: |-
+      API Error: 529\b
+    sample: |-
+      API Error: 529 Overloaded — retrying in 30s (attempt 3/10)
+  - kind: overloaded
+    pattern: |-
+      API Error:[^\n]{0,60}\bOverloaded\b
   # Kimi / Anthropic subscriptions: "You've reached your weekly (7-day)
   # usage limit. Your quota will reset when the current 7-day window ends."
   - kind: usage_limit
@@ -86,18 +107,39 @@ common:
   - kind: auth
     pattern: |-
       "code"\s*:\s*"UNAUTHORIZED"
+  # The two codes that were only readable inside a harness list (401 as
+  # `Please run /login`, 429 as `Request rejected`). Stated here by code, so
+  # every harness reads them; they sit after the quota sentences above
+  # because a 429 that names a quota is an exhausted plan, not a rate window.
+  - kind: auth
+    pattern: |-
+      API Error: 401\b
   - kind: rate_limit
     pattern: |-
       "code"\s*:\s*"rate_limit_error"|"type"\s*:\s*"rate_limit_error"
   - kind: rate_limit
     pattern: |-
       Error: 429: .{0,160}"rate limit
+  - kind: rate_limit
+    pattern: |-
+      API Error: 429\b
   - kind: network
     pattern: |-
       \b(?:ECONNREFUSED|ENOTFOUND|EAI_AGAIN)\b
   - kind: network
     pattern: |-
       Error: Connection error
+  # The generic status fallback: any "API Error: <code>", reached only when
+  # nothing above matched. It lives here, last in `common`, so a provider's
+  # status error is read in every harness and not only in `claude` (where it
+  # was collected). The code is reported in the fault's ``code`` field, so a
+  # new status needs no new pattern to be visible -- only a kind if it
+  # deserves its own reading.
+  - kind: api_status
+    pattern: |-
+      API Error: \d{3,}
+    sample: |-
+      API Error: 500 Internal Server Error
 
 harnesses:
   claude:
@@ -139,16 +181,9 @@ harnesses:
     - kind: network
       pattern: |-
         Request timed out
-    # The generic status fallback: any "API Error: <code>", reached only when
-    # nothing above matched (401 is auth, 412 is the suspended account, 429
-    # is a rate window, policy refusals have their own wording). The code is
-    # reported in the fault's ``code`` field, so a new status needs no new
-    # pattern to be visible -- only a kind if it deserves its own reading.
-    - kind: api_status
-      pattern: |-
-        API Error: \d{3,}
-      sample: |-
-        API Error: 500 Internal Server Error
+    # The generic "API Error: <code>" fallback, and the 401/429 by code, are
+    # in `common`, so every harness reads them; the wording above stays here
+    # because it is this harness's.
 
   pi:
     # "Use /login to log into a provider via OAuth or API key. See: ..."
