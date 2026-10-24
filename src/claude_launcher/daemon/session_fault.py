@@ -111,12 +111,19 @@ class Kind:
 
 @dataclass(frozen=True)
 class Pattern:
-    """One message pattern, in catalogue order (which is precedence)."""
+    """One message pattern.
+
+    ``fallback`` marks a reading that names no cause -- a bare status code,
+    or the client saying it gave up. It decides only when nothing else in the
+    scanned window matched; see :meth:`Catalog.match`. Catalogue order is the
+    tie-break between two entries that start at the same character.
+    """
 
     kind: str
     regex: Regex
     source: str
     sample: str = ""
+    fallback: bool = False
 
 
 class Catalog:
@@ -178,30 +185,54 @@ class Catalog:
                 raise CatalogError(
                     f"session faults: {where}[{index}] does not compile: {exc}"
                 ) from exc
+            fallback = row.get("fallback", False)
+            if not isinstance(fallback, bool):
+                raise CatalogError(
+                    f"session faults: {where}[{index}] 'fallback' must be true or false"
+                )
             out.append(Pattern(
                 kind=kind,
                 regex=compiled,
                 source=source,
                 sample=str(row.get("sample") or "").strip(),
+                fallback=fallback,
             ))
         return tuple(out)
 
     def patterns_for(self, harness: str) -> Tuple[Pattern, ...]:
-        """The patterns tried for one harness: common first, then its own.
+        """The patterns read for one harness: common first, then its own.
 
-        Common first is deliberate: a provider's quota sentence
-        ("You've reached your weekly usage limit") must win over a harness's
-        generic 429 fallback, whichever harness painted it.
+        The order breaks a tie -- two entries matching at the same character.
+        Which entry decides is otherwise settled by :meth:`match`, so putting
+        a message in ``common`` does not by itself outrank the harness's own
+        wording painted beside it.
         """
         return self.common + self.harnesses.get(harness, ())
 
     def match(self, harness: str, text: str) -> Optional[Tuple[Kind, Pattern, re.Match]]:
-        """The first pattern that matches ``text``, with its kind."""
+        """The match that decides, with its kind.
+
+        ``text`` is the scanned window with its rows joined top to bottom, so
+        a match starting later is a row painted later -- the line the session
+        stopped on. A pattern that matches more than once counts at its last
+        hit. An entry marked ``fallback`` (a bare status code, or the client
+        saying it gave up) only decides when no other entry matched in the
+        same window, wherever the two sit; catalogue order breaks a tie
+        between two entries starting at the same character.
+        """
+        best: Optional[Tuple[Tuple[bool, int], Kind, Pattern, re.Match]] = None
         for pattern in self.patterns_for(harness):
-            found = pattern.regex.search(text)
-            if found is not None:
-                return self.kinds[pattern.kind], pattern, found
-        return None
+            deepest = None
+            for found in pattern.regex.finditer(text):
+                deepest = found
+            if deepest is None:
+                continue
+            rank = (not pattern.fallback, deepest.start())
+            if best is None or rank > best[0]:
+                best = (rank, self.kinds[pattern.kind], pattern, deepest)
+        if best is None:
+            return None
+        return best[1], best[2], best[3]
 
 
 def load(text: str) -> Catalog:

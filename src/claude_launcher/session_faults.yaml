@@ -10,11 +10,19 @@
 # matches every `sample` against its declared kind, so a pattern that stops
 # matching the real message fails the suite.
 #
-# Order inside a list is precedence: the first pattern that matches the
-# scanned window decides the kind. Put the specific wording before the
-# generic status-code fallback. `common` is tried before the harness's own
-# list, because a provider's message can be painted by any harness (the
-# Kimi 429 in the samples below was printed by a `claude` session).
+# Which entry decides is not catalogue order. The detector reads the bottom
+# of the screen (daemon/session_fault.py, claunch-pczoc.2.1.1) and the match
+# whose row sits lowest wins -- the line painted last is the one the session
+# stopped on. Order inside a list only breaks a tie between two entries that
+# start at the same character, and it is the one reason `common` is read
+# before a harness's own list: a provider's message can be painted by any
+# harness (the Kimi 429 in the samples below was printed by a `claude`
+# session).
+#
+# `fallback: true` marks an entry that names no cause -- a bare status code,
+# or the client saying it gave up. It decides only when nothing else in the
+# scanned window matched, whichever row either one sits on. That is how a
+# provider's quota sentence beats the bare 429 beside it.
 
 version: 1
 
@@ -68,17 +76,22 @@ common:
       Account \S+ is suspended
     sample: |-
       API Error: 412 Account yusanghyun-uuplax3zp is suspended, possibly due to reaching the monthly spending limit or failure to pay past invoices. Please go to https://fireworks.ai/account/billing for more information.
-  # The status code alone, when the body says nothing more readable.
+  # The status code alone, when the body says nothing more readable. A bare
+  # code is a `fallback` (see the note at the top of this file).
   - kind: account_suspended
+    fallback: true
     pattern: |-
       API Error: 412\b
   # Observed 2026-10-24 on a claude session: "API Error: 529 Overloaded —
   # retrying in 30s (attempt 3/10)". It sits in `common` because the wording
-  # is the provider's, and it is listed before the generic status fallback
-  # below so 529 gets the shorter `overloaded` window instead of
-  # `api_status`'s 1800 seconds. Only 529 is read this way — no 503 or other
-  # 5xx message has been collected, and `api_status` already covers them.
+  # is the provider's. Both entries below it are `fallback`, so a bare 529
+  # gets the shorter `overloaded` window instead of `api_status`'s 1800
+  # seconds when the word "Overloaded" is there, and the code entry above the
+  # generic status pattern settles it by list order when it is not. Only 529
+  # is read this way — no 503 or other 5xx message has been collected, and
+  # `api_status` already covers them.
   - kind: overloaded
+    fallback: true
     pattern: |-
       API Error: 529\b
     sample: |-
@@ -99,14 +112,13 @@ common:
     sample: |-
       API Error: Request rejected (429) · You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.
   # Claude Code's own exhausted-plan wording; it lived in `harnesses.claude`
-  # until claunch-pczoc.2.1. It is here because `common` is tried before a
-  # harness's own list: once the timeout entries below joined `common`, a
-  # screen showing this line and a `Request timed out` row together read as
-  # `network` (measured, 2026-10-24) -- a 15-minute connectivity fault
-  # instead of the 24-hour plan wait. A `common` entry is read against every
-  # harness's wording, so the wording it must not outrank has to be up here
-  # with it. Other harnesses never painted this line; reading it as an
-  # exhausted plan costs nothing.
+  # until claunch-pczoc.2.1. It is in `common` because only `claude` has been
+  # seen to paint it, and a harness added later still reads it. When the
+  # timeout entries below joined `common`, a screen showing this line and a
+  # `Request timed out` row together read as `network` (measured,
+  # 2026-10-24) -- a 15-minute connectivity fault instead of the 24-hour
+  # plan wait. The timeout entries are `fallback` now, so this line wins
+  # wherever the two sit (claunch-pczoc.2.1.1).
   - kind: usage_limit
     pattern: |-
       You'?ve hit your (?:weekly|5-hour|daily) limit
@@ -123,9 +135,11 @@ common:
       "code"\s*:\s*"UNAUTHORIZED"
   # The two codes that were only readable inside a harness list (401 as
   # `Please run /login`, 429 as `Request rejected`). Stated here by code, so
-  # every harness reads them; they sit after the quota sentences above
-  # because a 429 that names a quota is an exhausted plan, not a rate window.
+  # every harness reads them. Both are `fallback`: a bare code yields to the
+  # quota sentences above when a 429 names one, because that is an exhausted
+  # plan and not a rate window.
   - kind: auth
+    fallback: true
     pattern: |-
       API Error: 401\b
   - kind: rate_limit
@@ -135,6 +149,7 @@ common:
     pattern: |-
       Error: 429: .{0,160}"rate limit
   - kind: rate_limit
+    fallback: true
     pattern: |-
       API Error: 429\b
   # Claude Code's wording for a 429 that names no quota. It stayed in
@@ -158,8 +173,9 @@ common:
   # harness's list until claunch-pczoc.2.1. With the timeout entries below in
   # `common`, a screen showing either line beside a timeout row read as
   # `network` -- measured for both harnesses, and a regression for `claude`
-  # (it read `policy_blocked` before). They are listed above the timeout
-  # entries so the more specific reading survives a shared window.
+  # (it read `policy_blocked` before). The timeout entries are `fallback`
+  # now, so the more specific reading survives a shared window in either
+  # order.
   - kind: auth
     pattern: |-
       Please run /login
@@ -178,18 +194,21 @@ common:
   # pi, 2026-10-24 (s1736): the screen showed "Error: Request timed out."
   # four times and then "Error: Retry failed after 3 attempts: Request
   # timed out." -- the client's own retry loop gave up. Both lines are the
-  # transport failing, so both are `network`; the exhausted line is listed
-  # first so a screen that ends that way records that message rather than
-  # one of the attempts above it. They sit in `common` because the wording
-  # belongs to the provider client and not to one harness: `claude` painted
-  # it too, and pi painted it here (it lived in `harnesses.claude` until
-  # claunch-pczoc.2.1, so every other harness read nothing).
+  # transport failing, so both are `network`, and both are `fallback`: they
+  # say the client stopped, not why. A screen that ends with the exhausted
+  # line records that line, because it is the lowest of the matches. They sit
+  # in `common` because the wording belongs to the provider client and not to
+  # one harness: `claude` painted it too, and pi painted it here (it lived in
+  # `harnesses.claude` until claunch-pczoc.2.1, so every other harness read
+  # nothing).
   - kind: network
+    fallback: true
     pattern: |-
       Retry failed after \d+ attempts
     sample: |-
       Error: Retry failed after 3 attempts: Request timed out.
   - kind: network
+    fallback: true
     pattern: |-
       Request timed out
     sample: |-
@@ -201,6 +220,7 @@ common:
   # new status needs no new pattern to be visible -- only a kind if it
   # deserves its own reading.
   - kind: api_status
+    fallback: true
     pattern: |-
       API Error: \d{3,}
     sample: |-
@@ -212,7 +232,7 @@ harnesses:
     # 9am (Asia/Seoul)"), the login prompt and the policy refusal are in
     # `common` now (claunch-pczoc.2.1): each of them can share a screen with
     # the provider client's timeout wording, which is also in `common`, and a
-    # `common` entry is read before anything here.
+    # `fallback` entry never outranks a line that names a cause.
     - kind: auth
       pattern: |-
         API Error: 401[^\n]{0,160}
@@ -237,7 +257,8 @@ harnesses:
     # pi's login prompt ("Use /login to log into a provider via OAuth or API
     # key. See: ...") moved to `common` in claunch-pczoc.2.1, for the same
     # reason as claude's lines: the provider client's timeout wording is in
-    # `common`, and a `common` entry wins over anything listed here.
+    # `common` too, and the login prompt names a cause while the timeout
+    # entries only say the client gave up.
 
   # Nothing observed yet on this machine's Codex sessions (127 output logs
   # searched, 2026-10-23). Its own error wording goes here when it is
