@@ -55019,8 +55019,17 @@ function renderTrace(data) {
    while the tab sat unwatched must NOT time out before it is read, which is
    exactly the restart case, while a blip that already healed should not
    need clearing by hand. `key` is the other half of that — a flapping
-   daemon replaces its own card instead of stacking twenty of them. */
+   daemon replaces its own card instead of stacking twenty of them.
+
+   `routine` is the third decision (claunch-ewk3x): a notice nobody has to
+   act on and that recurs without an answer — a reviewer a workflow ended
+   on its own. Its card leaves faster than a normal one and its history row
+   is born read, so a night of them cannot turn the bell into a backlog: the
+   row is kept to be read later, but it never asks to be. The read mark is
+   put on the record rather than on the timer, so the panel-open path (no
+   card at all) and a reload before the timer runs behave the same way. */
 const NOTICE_MS = 8000;          // how long a non-sticky card stays up
+const ROUTINE_MS = 5000;         // how long a routine one stays up
 const NOTICE_LINK = "daemon-link";  // the connection's card: offline / back
 const NOTICE_BOOT = "daemon-boot";  // "this is a different daemon"
 const notices = new Map();       // key -> {node, timer}
@@ -55049,7 +55058,8 @@ function notify(title, sub, opts) {
     o.session ? { session: o.session } : {},
     o.session && o.target ? { target: o.target } : {},
     o.sync ? { sync: o.sync } : {},
-    remote && typeof remote.read === "boolean" ? { read: remote.read } : {}
+    remote && typeof remote.read === "boolean" ? { read: remote.read } : {},
+    o.routine ? { read: true } : {}
   ));
   if (remote && (remote.dismissed || remote.read === true)) return null;
   // With the history panel open the notice goes to the panel only: no card
@@ -55082,7 +55092,7 @@ function notify(title, sub, opts) {
   host.appendChild(node);
   const timer = o.sticky
     ? null
-    : setTimeout(() => dismissNotice(key), o.ms || NOTICE_MS);
+    : setTimeout(() => dismissNotice(key), o.ms || (o.routine ? ROUTINE_MS : NOTICE_MS));
   notices.set(key, { node, timer, sync: o.sync || "", title, sub: sub || "", at: rec.at });
   return node;
 }
@@ -55142,8 +55152,9 @@ function gateSessionLink(name, onOpen) {
 
    The bell counts the waiting requests that were not marked read plus the
    unread history rows; a row is read once its card or its row is clicked,
-   or marked read in the panel (claunch-x76l8). Opening the panel no longer
-   reads everything.
+   or marked read in the panel (claunch-x76l8). A routine notice's row is
+   read from the moment it is made (claunch-ewk3x), so it is never counted.
+   Opening the panel no longer reads everything.
 
    A row can also be marked (★, claunch-knuet), apart from read: the History
    head's All / Kept / Not read filter shows every row, only the marked ones
@@ -57472,10 +57483,13 @@ function killReapedNotify(all) {
     killReapedSeen.add(rec.id);
     changed = true;
     if (first) continue;
+    // `routine`: the reviewer reap needs no answer and repeats whenever a
+    // workflow ends one, so its card is short-lived and its history row is
+    // born read (claunch-ewk3x).
     notify(
       `reviewer ended by its workflow: ${rec.target || "?"}`,
       `${rec.session || "?"}'s run ended it (${rec.reason || "cflow"}) — no approval needed`,
-      { kind: "info", session: rec.session }
+      { kind: "info", session: rec.session, routine: true }
     );
   }
   if (changed) {
