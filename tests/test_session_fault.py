@@ -120,6 +120,22 @@ def test_a_status_code_with_no_pattern_is_api_status_and_keeps_the_code():
     assert view["code"] == "503"
 
 
+@pytest.mark.parametrize("line, kind", [
+    ("API Error: 401", "auth"),
+    ("API Error: 412", "account_suspended"),
+    ("API Error: 429", "rate_limit"),
+    ("API Error: 529", "overloaded"),
+])
+def test_a_bare_status_code_keeps_its_own_reading_by_list_order(line, kind):
+    """Each of these codes starts at the same character as the generic
+    `API Error: <code>` fallback, and both are `fallback` entries, so nothing
+    but catalogue order separates them: the code's own entry is listed above
+    the generic one. Move it below and a bare 529 reads `api_status`."""
+    found = session_fault.default().match("codex", line)
+    assert found is not None, f"{line} matched nothing"
+    assert found[0].name == kind, f"{line} read {found[0].name}"
+
+
 OVERLOADED = "API Error: 529 Overloaded — retrying in 30s (attempt 3/10)"
 
 
