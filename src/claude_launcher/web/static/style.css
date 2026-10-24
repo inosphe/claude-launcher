@@ -653,6 +653,13 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   display: flex; align-items: center; gap: 5px; font-size: 13px;
   flex-wrap: wrap;  /* the cflow badge is a full-width second line */
 }
+/* A stand-in row for the rows the rail does not draw (app.js, claunch-thuwx):
+   it holds their height so the list keeps its full length and the scrollbar
+   does not move. `#session-list li` above would add its padding and border to
+   the height it was given, so both are stripped here. */
+#session-list li.rail-gap {
+  padding: 0; margin: 0; border: 0; background: none; pointer-events: none;
+}
 /* A row scrolled out of the rail is not laid out or painted (claunch-oo8au.1).
    A trace of a ~200-row rail showed ~16,800 layout objects on the page and a
    65-436 ms Commit after each poll that redrew rows; most of those rows were

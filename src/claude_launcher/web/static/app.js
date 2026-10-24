@@ -5022,6 +5022,175 @@ function sessionRowsJoin(rows, defs) {
   return rows;
 }
 
+/* ── the rail's drawn window (claunch-thuwx) ─────────────────────────────
+   The rail is a page-length list: a pass built, signed and decorated every
+   row of it, and `content-visibility: auto` (style.css) skipped only the
+   layout of the rows off screen. At ~800 rows that is still ~800 nodes, ~800
+   style targets and ~800 decorations per pass -- and the measured cost of the
+   pass (longest task 51-67 ms at 792 rows with the polls stopped, style 29 ms)
+   is that per-row work, not the transport: the payload already arrives as
+   changed rows only.
+
+   So a pass draws the rows around the viewport and stands two spacer rows in
+   for the rest. The list keeps its full height (the scrollbar does not move),
+   the document holds only the drawn slice, and the rows that are not drawn
+   still count toward their group's badge. Heights come from what earlier
+   passes measured (`railRowPx`); until a row has been seen the estimate is the
+   same 64 px `contain-intrinsic-size` already names.
+
+   A scroll that leaves the drawn slice asks for one rebuild through
+   `refreshSessions._forceRebuild` -- the same pass that already knows how to
+   hold the reader's scroll position, focus and in-place diff. */
+const RAIL_WINDOW_MIN_ROWS = 160;
+const RAIL_WINDOW_OVERSCAN_PX = 800;
+const RAIL_ROW_EST_PX = 64;
+const RAIL_WINDOW_SCROLL_MS = 80;
+const railRowPx = new Map();
+// What a row this window has not seen is assumed to be: the mean of what it
+// has measured. A rail of rich rows is far taller than the 64 px
+// `contain-intrinsic-size` names, and a plan built on that figure grows --
+// visibly, as a scrollbar that keeps lengthening -- every time a pass
+// measures taller rows than the last.
+const railSeen = { rows: 0, px: 0 };
+let railWindowScrollTimer = 0;
+
+function railEstimatePx() {
+  if (railSeen.rows >= 8) return Math.max(24, Math.round(railSeen.px / railSeen.rows));
+  return RAIL_ROW_EST_PX;
+}
+
+function railRowKey(row) {
+  if (!row) return "";
+  if (row.type === "session") return `s:${row.session && row.session.name}`;
+  if (row.type === "shadow") return `x:${(row.shadow && row.shadow.name) || ""}`;
+  if (row.type === "group") return `g:${row.level || 0}:${row.group}=${row.value}`;
+  return "";
+}
+
+function railRowPxOf(row) {
+  if (!row || row.type === "ungroup") return 0;
+  const px = railRowPx.get(railRowKey(row));
+  return typeof px === "number" && px > 0 ? px : railEstimatePx();
+}
+
+/* Where the drawn window sits in the whole model: the first and last rows to
+   draw, the height of everything above it, the model's total height, and each
+   row's offset (the reveal path scrolls to one by index). */
+function railWindowPlan(rows, scrollTop, viewportPx) {
+  const list = Array.isArray(rows) ? rows : [];
+  const top = Math.max(0, (scrollTop || 0) - RAIL_WINDOW_OVERSCAN_PX);
+  const bottom = (scrollTop || 0) + Math.max(viewportPx || 0, RAIL_ROW_EST_PX)
+    + RAIL_WINDOW_OVERSCAN_PX;
+  const offsets = new Array(list.length + 1);
+  let at = 0;
+  let first = -1;
+  let last = list.length;
+  for (let i = 0; i < list.length; i++) {
+    offsets[i] = at;
+    const ends = at + railRowPxOf(list[i]);
+    if (first < 0 && ends > top) first = i;
+    if (first >= 0 && last === list.length && at > bottom) last = i;
+    at = ends;
+  }
+  offsets[list.length] = at;
+  if (first < 0) first = Math.max(0, list.length - 1);
+  // One row of context above the first visible one: a reader scrolled just
+  // past a row should still see it.
+  first = Math.max(0, first - 1);
+  last = Math.min(list.length, Math.max(last, first + 1));
+  return { first, last, top: offsets[first], total: at, offsets };
+}
+
+/* A spacer is a row the reader never sees: its height stands in for rows that
+   are not drawn. No `data-name`, so nothing that acts on a card by name can
+   take it. */
+function railSpacerRow(px) {
+  const li = document.createElement("li");
+  li.className = "rail-gap";
+  li.setAttribute("aria-hidden", "true");
+  li.style.height = `${Math.max(0, Math.round(px))}px`;
+  return li;
+}
+
+/* What this pass drew, measured, for the next pass's plan. Only drawn rows
+   can be measured; the rest keep the estimate until they are seen. */
+function railMeasureRows(list) {
+  if (!list || typeof list.querySelectorAll !== "function") return;
+  list.querySelectorAll("li[data-name]").forEach((li) => {
+    const px = li.getBoundingClientRect ? li.getBoundingClientRect().height
+      : li.offsetHeight;
+    if (px > 0) {
+      railRowPx.set(`s:${li.dataset.name}`, px);
+      railSeen.rows += 1;
+      railSeen.px += px;
+    }
+  });
+  const headings = list.querySelectorAll(".session-group-heading");
+  if (!headings || typeof headings.forEach !== "function") return;
+  headings.forEach((el) => {
+    const group = typeof el.closest === "function" ? el.closest("li.session-group") : null;
+    const px = el.getBoundingClientRect ? el.getBoundingClientRect().height : el.offsetHeight;
+    if (!group || !(px > 0) || !group.dataset) return;
+    const key = `g:${group.dataset.groupLevel || 0}:${group.dataset.group}=${group.dataset.value}`;
+    railRowPx.set(key, px);
+  });
+}
+
+/* Scroll asks for a rebuild only when the drawn slice no longer covers what
+   the reader is looking at. Without this the rail would show blanks as soon as
+   the reader scrolled past the slice drawn at the last poll. */
+function railWireWindowScroll(list) {
+  if (!list || list._railWindowWired || typeof list.addEventListener !== "function") return;
+  list._railWindowWired = true;
+  list.addEventListener("scroll", () => {
+    if (railWindowScrollTimer) return;
+    railWindowScrollTimer = setTimeout(() => {
+      railWindowScrollTimer = 0;
+      const box = typeof $ === "function" ? $("session-list") : null;
+      if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
+      if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+      const plan = railWindowPlan(box._railRows, box.scrollTop || 0, box.clientHeight);
+      const span = box._railWindowSpan || [0, 0];
+      if (plan.first === span[0] && plan.last === span[1]) return;
+      refreshSessions._forceRebuild = true;
+      // From the cache, not the daemon: a scroll asks for rows already in
+      // hand to be drawn, and putting a request behind every flick of the
+      // wheel is what makes a slow poll stall the rail it is not changing.
+      if (typeof refreshSessions === "function") refreshSessions({ cached: true });
+    }, RAIL_WINDOW_SCROLL_MS);
+  }, { passive: true });
+}
+
+/* The slice this pass draws, or null to draw the whole model: off for a short
+   rail (nothing to save), for the grid, for a stub with no measured viewport,
+   and while a press holds the rows it started on. Kept out of refreshSessions
+   so the isolated rail harnesses that slice that function do not have to know
+   any of the window's names. */
+function railWindowForPass(list, rows, scrollTop) {
+  if (!list) return null;
+  if (typeof sessionView !== "undefined" && sessionView === "grid") return null;
+  if (typeof list.clientHeight !== "number" || list.clientHeight <= 0) return null;
+  if (!Array.isArray(rows) || rows.length < RAIL_WINDOW_MIN_ROWS) return null;
+  // A rebuild empties the list, and an empty list's scrollTop is 0 -- so the
+  // position the plan is for is the one the pass took before the teardown.
+  const at = typeof scrollTop === "number" ? scrollTop : (list.scrollTop || 0);
+  const plan = railWindowPlan(rows, at, list.clientHeight);
+  if (plan.last - plan.first >= rows.length) return null;
+  // The card the keyboard holds stays drawn: removing the focused node
+  // drops focus to the body, and the pass would restore it to a node that is
+  // no longer there.
+  const held = typeof railFocusedCardName === "function" ? railFocusedCardName() : null;
+  if (held) {
+    const at = rows.findIndex((r) => r.type === "session" && r.session.name === held);
+    if (at >= 0) {
+      plan.first = Math.min(plan.first, at);
+      plan.last = Math.max(plan.last, at + 1);
+      plan.top = plan.offsets[plan.first];
+    }
+  }
+  return plan;
+}
+
 async function refreshSessions(options) {
   // The recurring poll asks for every unarchived record, not the running
   // ones alone. The rail's "current" view is running plus killed plus paused,
@@ -5153,7 +5322,11 @@ async function refreshSessions(options) {
   );
   // See the hold above: a press in flight keeps the rows it started on, and
   // the redraw it postpones is owed back the moment the press ends.
-  const changed = signature !== list._sessionsSignature;
+  // claunch-thuwx: a scroll that left the drawn slice asks for one rebuild of
+  // its own, which is the pass that knows how to hold the reader's position.
+  const windowForced = refreshSessions._forceRebuild === true;
+  refreshSessions._forceRebuild = false;
+  const changed = windowForced || signature !== list._sessionsSignature;
   const rebuild = changed && !railHeld();
   // A rebuild throws away the node that holds the keyboard, and the browser
   // hands focus back to the body without saying so. Remember which card had
@@ -5391,6 +5564,133 @@ async function refreshSessions(options) {
     // and the typing quiet timer both redraw on this flag.
     if (typeof railRedrawPending !== "undefined") railRedrawPending = true;
   };
+  // claunch-thuwx: the slice of the model this pass draws (see
+  // railWindowForPass). Planned over the rows the filter admits: a row the
+  // filter turns away has no height in a whole draw either, so counting it
+  // into the spacers would leave the reader scrolled into blank space -- which
+  // is every filtered view, and a filtered view over a large fleet is the case
+  // this window exists for. Null when the rail is drawn whole, and null in an
+  // isolated harness that slices this function without the window's helpers.
+  const planRows = typeof railWindowForPass === "function"
+    ? rows.filter(drawnByFilter) : rows;
+  const railWin = typeof railWindowForPass === "function"
+    ? railWindowForPass(list, planRows, keptScrollTop) : null;
+  if (typeof railWireWindowScroll === "function") railWireWindowScroll(list);
+  // Every heading's size, counted from the model rather than from the rows
+  // this pass draws: a windowed pass draws a fraction of a group, and the
+  // heading it does draw must still say how many rows the group holds.
+  const groupSizes = new Map();
+  const openGroupKeys = [];
+  for (const row of planRows) {
+    if (row.type === "ungroup") { openGroupKeys.length = 0; continue; }
+    if (row.type === "group") {
+      const parentKey = row.level
+        ? (openGroupKeys[row.level - 1] || {}).key || "" : "";
+      const key = `${parentKey}/${row.level}:${row.group}=${row.value}`;
+      openGroupKeys.length = row.level;
+      openGroupKeys[row.level] = { key };
+      if (!groupSizes.has(key)) groupSizes.set(key, { n: 0 });
+      continue;
+    }
+    for (const open of openGroupKeys) {
+      const box = open && groupSizes.get(open.key);
+      if (box) box.n += 1;
+    }
+  }
+  // A heading, drawn from its row. Split out of the loop so the groups that
+  // enclose the slice can be drawn at the top of it.
+  const drawGroupRow = (row) => {
+    // A heading's containing block is its own group.  Native sticky then
+    // releases it at that group's bottom instead of leaving an old nested
+    // heading visible underneath the next outer group.
+    if (!nestedGroupContainers) {
+      const heading = document.createElement("li");
+      heading.className = `session-group-heading session-group-level-${row.level}`;
+      const label = row.group === "workspace"
+        ? sessionWorkspaceLabel(row.value) : row.value;
+      heading.textContent = `${row.group} · ${label}`;
+      heading.title = `${row.group} group ${row.value}`;
+      list.appendChild(heading);
+      return;
+    }
+    const parent = groupBodies[row.level - 1] || list;
+    const groupKey = `${row.level ? groupKeys[row.level - 1] : ""}/` +
+      `${row.level}:${row.group}=${row.value}`;
+    const keptGroup = inPlace ? keptGroups.get(groupKey) : null;
+    if (keptGroup) {
+      keptGroups.delete(groupKey);
+      const keptCount = keptGroup._railGroupCount;
+      keptCount._sessionCount = 0;
+      keptCount.textContent = "0";
+      place(parent, keptGroup);
+      placed.set(keptGroup._railGroupBody, 0);
+      groupBodies.length = row.level;
+      groupBodies[row.level] = keptGroup._railGroupBody;
+      groupCounts.length = row.level;
+      groupCounts[row.level] = keptCount;
+      groupKeys.length = row.level;
+      groupKeys[row.level] = groupKey;
+      return;
+    }
+    const group = document.createElement("li");
+    group.className = `session-group session-group-level-${row.level}`;
+    group.dataset.group = row.group;
+    group.dataset.value = row.value;
+    const heading = document.createElement("div");
+    heading.className = `session-group-heading session-group-level-${row.level}`;
+    heading.dataset.groupLevel = String(row.level);
+    const label = row.group === "workspace"
+      ? sessionWorkspaceLabel(row.value) : row.value;
+    // The name, then how many sessions are inside it. Only the ungrouped
+    // rail's per-daemon headings for other machines' sessions reach here
+    // (remoteRailRows); a grouped rail names its groups in the tab strip.
+    const name = document.createElement("span");
+    name.className = "session-group-name";
+    name.textContent = `${row.group} · ${label}`;
+    const count = document.createElement("span");
+    count.className = "session-group-count";
+    count.textContent = "0";
+    heading.append(name, count);
+    heading.title = `${row.group} group ${row.value}`;
+    const body = document.createElement("ul");
+    body.className = "session-group-body";
+    group.append(heading, body);
+    group._railGroupKey = groupKey;
+    group._railGroupBody = body;
+    group._railGroupCount = count;
+    place(parent, group);
+    if (inPlace) placed.set(body, 0);
+    groupBodies.length = row.level;
+    groupBodies[row.level] = body;
+    groupCounts.length = row.level;
+    groupCounts[row.level] = count;
+    groupKeys.length = row.level;
+    groupKeys[row.level] = groupKey;
+  };
+  // The groups that enclose the slice's first row: their headings stand at the
+  // top of the slice, so the rows under them keep their container and their
+  // count, and their height comes out of the top spacer.
+  const hoistedGroups = [];
+  if (railWin && railWin.first > 0) {
+    const open = [];
+    for (let i = 0; i < railWin.first; i++) {
+      const row = planRows[i];
+      if (row.type === "ungroup") { open.length = 0; continue; }
+      if (row.type === "group") { open.length = row.level; open[row.level] = row; }
+    }
+    for (const row of open) if (row) hoistedGroups.push(row);
+  }
+  let hoistedPx = 0;
+  for (const row of hoistedGroups) {
+    hoistedPx += typeof railRowPxOf === "function" ? railRowPxOf(row) : 0;
+  }
+  let topSpacerLi = null;
+  if (railWin && railWin.top - hoistedPx > 0) {
+    topSpacerLi = railSpacerRow(railWin.top - hoistedPx);
+    place(list, topSpacerLi);
+  }
+  for (const row of hoistedGroups) drawGroupRow(row);
+  let planAt = -1;
   const sliceIt = rows.length > RAIL_SLICE_MIN_ROWS;
   let sliceStart = sliceNow();
   for (let rowAt = 0; rowAt < rows.length; rowAt++) {
@@ -5404,78 +5704,20 @@ async function refreshSessions(options) {
       sliceStart = sliceNow();
     }
     if (!drawnByFilter(row)) continue;
+    // claunch-thuwx: the row's place in the plan, which is over the rows the
+    // filter admits. A row outside the drawn slice keeps its height and
+    // nothing else -- its group's count comes from the model (groupSizes).
+    planAt += 1;
+    if (railWin && (planAt < railWin.first || planAt >= railWin.last)) {
+      continue;
+    }
     if (row.type === "ungroup") {
       groupBodies.length = 0;
       groupCounts.length = 0;
       continue;
     }
     if (row.type === "group") {
-      // A heading's containing block is its own group.  Native sticky then
-      // releases it at that group's bottom instead of leaving an old nested
-      // heading visible underneath the next outer group.
-      if (!nestedGroupContainers) {
-        const heading = document.createElement("li");
-        heading.className = `session-group-heading session-group-level-${row.level}`;
-        const label = row.group === "workspace"
-          ? sessionWorkspaceLabel(row.value) : row.value;
-        heading.textContent = `${row.group} · ${label}`;
-        heading.title = `${row.group} group ${row.value}`;
-        list.appendChild(heading);
-        continue;
-      }
-      const parent = groupBodies[row.level - 1] || list;
-      const groupKey = `${row.level ? groupKeys[row.level - 1] : ""}/` +
-        `${row.level}:${row.group}=${row.value}`;
-      const keptGroup = inPlace ? keptGroups.get(groupKey) : null;
-      if (keptGroup) {
-        keptGroups.delete(groupKey);
-        const keptCount = keptGroup._railGroupCount;
-        keptCount._sessionCount = 0;
-        keptCount.textContent = "0";
-        place(parent, keptGroup);
-        placed.set(keptGroup._railGroupBody, 0);
-        groupBodies.length = row.level;
-        groupBodies[row.level] = keptGroup._railGroupBody;
-        groupCounts.length = row.level;
-        groupCounts[row.level] = keptCount;
-        groupKeys.length = row.level;
-        groupKeys[row.level] = groupKey;
-        continue;
-      }
-      const group = document.createElement("li");
-      group.className = `session-group session-group-level-${row.level}`;
-      group.dataset.group = row.group;
-      group.dataset.value = row.value;
-      const heading = document.createElement("div");
-      heading.className = `session-group-heading session-group-level-${row.level}`;
-      heading.dataset.groupLevel = String(row.level);
-      const label = row.group === "workspace"
-        ? sessionWorkspaceLabel(row.value) : row.value;
-      // The name, then how many sessions are inside it. Only the ungrouped
-      // rail's per-daemon headings for other machines' sessions reach here
-      // (remoteRailRows); a grouped rail names its groups in the tab strip.
-      const name = document.createElement("span");
-      name.className = "session-group-name";
-      name.textContent = `${row.group} · ${label}`;
-      const count = document.createElement("span");
-      count.className = "session-group-count";
-      count.textContent = "0";
-      heading.append(name, count);
-      heading.title = `${row.group} group ${row.value}`;
-      const body = document.createElement("ul");
-      body.className = "session-group-body";
-      group.append(heading, body);
-      group._railGroupKey = groupKey;
-      group._railGroupBody = body;
-      group._railGroupCount = count;
-      place(parent, group);
-      if (inPlace) placed.set(body, 0);
-      groupBodies.length = row.level;
-      groupBodies[row.level] = body;
-      groupCounts.length = row.level;
-      groupCounts[row.level] = count;
-      groupKeys.length = row.level;
-      groupKeys[row.level] = groupKey;
+      drawGroupRow(row);
       continue;
     }
     if (row.type === "shadow") {
@@ -5856,6 +6098,58 @@ async function refreshSessions(options) {
     place(parent, li);
     countRow();
   }
+  // claunch-thuwx: the height of everything below the drawn slice, the counts
+  // the drawn headings show, then what the next pass and the reveal path read
+  // back off the list.
+  let railTailFix = null;
+  if (railWin) {
+    const tail = railWin.total - (railWin.offsets[railWin.last] || 0);
+    const tailLi = railSpacerRow(tail);
+    place(list, tailLi);
+    // A heading drawn here holds a fraction of its group, so its count comes
+    // from the model instead of from the rows this pass appended.
+    if (nestedGroupContainers) {
+      list.querySelectorAll("li.session-group").forEach((group) => {
+        const box = group._railGroupCount;
+        const size = group._railGroupKey ? groupSizes.get(group._railGroupKey) : null;
+        if (!box || !size) return;
+        box._sessionCount = size.n;
+        box.textContent = String(size.n);
+      });
+    }
+    list._railRows = planRows;
+    list._railWindowPlan = railWin;
+    list._railWindowSpan = [railWin.first, railWin.last];
+    railMeasureRows(list);
+    // The total is built from estimates; the rows just drawn are real. Pay the
+    // difference out of the spacers so the content ends where the model does: a
+    // content shorter than the total leaves the last rows past the end of the
+    // scroll, where no scroll reaches them, and a longer one scrolls into blank.
+    // Read after the in-place cleanup below, which is what takes the rows of
+    // the last pass out of the list -- measuring before it counts them in.
+    railTailFix = () => {
+      const fix = Math.round(railWin.total - list.scrollHeight);
+      if (fix === 0) return;
+      // The difference goes to the spacer below the slice first, where the
+      // reader is not looking; what is left (the tail already at 0) comes off
+      // the spacer above it.
+      const tailNow = Math.max(0, Math.round(tail));
+      const tailNext = Math.max(0, tailNow + fix);
+      const left = fix - (tailNext - tailNow);
+      tailLi.style.height = `${tailNext}px`;
+      if (left !== 0 && topSpacerLi) {
+        const topNow = Math.max(0, Math.round(railWin.top - hoistedPx));
+        topSpacerLi.style.height = `${Math.max(0, topNow + left)}px`;
+      }
+    };
+  } else if (list && (list._railRows || list._railWindowPlan)) {
+    // A whole draw leaves no window behind: keeping the last one would hand
+    // the reveal path a model this pass no longer draws (a filter that shrank
+    // the rail, a tab that switched to a smaller group).
+    list._railRows = null;
+    list._railWindowPlan = null;
+    list._railWindowSpan = null;
+  }
   // The list is whole now, so this pass's signature describes it (see where
   // it used to be written, above the loop). `_sessionsSigSeq` records which
   // pass signed it: a pass that is superseded later must not clear a signature
@@ -5873,6 +6167,9 @@ async function refreshSessions(options) {
       while (box.childNodes.length > used) box.removeChild(box.childNodes[used]);
     }
   }
+  // claunch-thuwx: the spacers are squared against the list as it now stands
+  // (see where railTailFix is built): only here has the last pass's tail left.
+  if (railTailFix) railTailFix();
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (keyCardHeld && typeof restoreRailFocus === "function") {
     restoreRailFocus(keyCardHeld);
@@ -24973,11 +25270,46 @@ function revealSessionListRow(name) {
   const bar = $("session-group-tabs");
   const tab = bar && [...bar.querySelectorAll(".session-group-tab")].find((el) =>
     (el._groupRows || []).some((r) => r.type === "session" && r.session.name === name));
-  if (!tab) return null;
-  setSessionGroupTab(tab.dataset.group, tab.dataset.value);
-  // From the records in hand: no request, so the rows are drawn before this
-  // returns.
-  refreshSessions({ cached: true });
+  if (tab) {
+    setSessionGroupTab(tab.dataset.group, tab.dataset.value);
+    // From the records in hand: no request, so the rows are drawn before this
+    // returns.
+    refreshSessions({ cached: true });
+    row = find();
+    if (row) return row;
+  }
+  // claunch-thuwx: the row is in the model but outside the drawn window. Put
+  // the list where it would be, then draw once more and look again.
+  const model = Array.isArray(list._railRows) ? list._railRows : [];
+  const at = model.findIndex((r) => r.type === "session" && r.session.name === name);
+  if (at < 0) return null;
+  // The offset is read off the model as it stands now, not off the plan the
+  // last pass stored: the rows drawn since then have been measured, so the
+  // stored offsets are short by their height difference -- enough to land the
+  // target just outside the slice drawn for it. The row is put in the middle
+  // of the viewport so a stale estimate either way still leaves it drawn.
+  const aim = () => {
+    if (typeof railWindowPlan !== "function") return;
+    const offsets = railWindowPlan(model, 0, 0).offsets;
+    const middle = Math.round(railRowPxOf(model[at]) / 2);
+    list.scrollTop = Math.max(0, (offsets[at] || 0) + middle
+      - Math.round((list.clientHeight || 0) / 2));
+  };
+  aim();
+  refreshSessions._forceRebuild = true;
+  // A pass drew before the spacers were squared, so the scroll above may have
+  // been clamped short of the model's end; the pass that just ran left the
+  // list at the model's real height, so aiming once more reaches it.
+  let rounds = 0;
+  const again = () => {
+    if (find() || ++rounds > 2) return;
+    aim();
+    refreshSessions._forceRebuild = true;
+    const next = refreshSessions({ cached: true });
+    if (next && typeof next.then === "function") next.then(again, () => {});
+  };
+  const drawn = refreshSessions({ cached: true });
+  if (drawn && typeof drawn.then === "function") drawn.then(again, () => {});
   return find();
 }
 

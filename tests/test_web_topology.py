@@ -435,6 +435,7 @@ CHECKS = [
         "raillayout_check.js",
         "railsplit_check.js",
         "railkeypool_check.js",
+        "railwindow_check.js",
         "detailsplit_check.js",
         "bulk_check.js",
         "cleanup_check.js",
