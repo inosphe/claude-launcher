@@ -8737,12 +8737,23 @@ function termSeriesChart(data, zoom) {
     }
     if (compactions) legend.appendChild(el("span", "term-series-key compaction", "compaction"));
     if (swaps.length) legend.appendChild(el("span", "term-series-key swap", "profile swap"));
-    const readout = el("div", "term-series-readout", " ");
+    /* The readout is two lines (claunch-k5udr.1): which request, then what it
+       sent. One line could not hold both -- a long one ran out of the box
+       and across the terminal under it. Both lines are laid out whether or
+       not they have text, so the reserved height does not change with the
+       pointer. */
+    const readout = el("div", "term-series-readout");
+    const when = el("div", "term-series-readout-line", " ");
+    const what = el("div", "term-series-readout-line", " ");
+    readout.append(when, what);
     const show = (frac) => {
       const p = pts[Math.max(0, Math.min(pts.length - 1, Math.round(frac * (pts.length - 1))))];
-      readout.textContent = `#${p.n} · ${ago(p.t)}: ${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
-        ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}` +
-        (p.count > 1 ? ` (largest of ${p.count} requests)` : "");
+      /* Which request on one line (the group size belongs to it, not to the
+         numbers), what it sent on the other: the numbers alone are the long
+         line, and the widest of them still fits the plot's 320px. */
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
+      what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
+        ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
     if (termSeriesPointerAt !== null) show(termSeriesPointerAt);
     svg.addEventListener("mousemove", (ev) => {
@@ -8752,7 +8763,8 @@ function termSeriesChart(data, zoom) {
     });
     svg.addEventListener("mouseleave", () => {
       termSeriesPointerAt = null;
-      readout.textContent = " ";
+      when.textContent = " ";
+      what.textContent = " ";
     });
     box.append(axis, legend, readout);
   }

@@ -9569,19 +9569,26 @@ a.category-ref:hover { text-decoration: underline; }
   background: #39c5cf; width: 6px; height: 6px; margin-right: 5px; border-radius: 0;
   transform: rotate(45deg);
 }
-/* The zoomed chart is exactly as wide as its plot, and one fixed row under
-   the legend is reserved for the readout (claunch-k5udr). The readout's text
-   changes as the pointer moves, and it used to widen the box the chart is
-   laid out in: the overlay is anchored at its top-right corner, so every
-   longer readout made the box wider and moved the plot left, out from under
-   a pointer that had not moved -- which cleared the readout, shrank the box
-   and moved the plot back. Pinning the box's width and keeping the readout
-   out of the flow holds the chart still; a readout wider than the plot runs
-   left from the box's right edge instead of widening it. */
+/* The zoomed chart is exactly as wide as its plot, and two fixed rows under
+   the legend are reserved for the readout (claunch-k5udr, claunch-k5udr.1).
+   The readout's text changes as the pointer moves, and it used to widen the
+   box the chart is laid out in: the overlay is anchored at its top-right
+   corner, so every longer readout made the box wider and moved the plot
+   left, out from under a pointer that had not moved -- which cleared the
+   readout, shrank the box and moved the plot back. Pinning the box's width
+   and keeping the readout out of the flow holds the chart still. The text
+   is two lines now -- which request, then what it sent -- because one line
+   of those numbers ran past the plot and across the terminal under it; the
+   reserved height covers both lines whether or not they have text, and the
+   box clips either line rather than let it leave the overlay. */
 #term-tps-overlay .term-series.zoom {
-  position: relative; width: 320px; padding-bottom: 14px;
+  position: relative; width: 320px; padding-bottom: 26px;
 }
 #term-tps-overlay .term-series-readout {
   position: absolute; right: 0; bottom: 0;
-  font-size: 10px; line-height: 12px; height: 12px; color: #c9d1d9; white-space: nowrap;
+  width: 100%; height: 24px; overflow: hidden;
+  font-size: 10px; line-height: 12px; color: #c9d1d9;
+}
+#term-tps-overlay .term-series-readout-line {
+  height: 12px; line-height: 12px; text-align: right; white-space: nowrap;
 }

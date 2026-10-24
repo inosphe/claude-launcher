@@ -170,15 +170,23 @@ const series = (win, start = 1000) => ({
   const rule = zsvg.kids.filter((k) => k.attrs.class === "term-series-ymax-rule");
   check("the maximum has a rule level with the largest context, among the axis' own rules",
         [rule.some((k) => k.attrs.y1 === "2.0"), rule.every((k) => k.attrs.y1 === k.attrs.y2)], [true, true]);
+  /* Two lines: which request, then what it sent (claunch-k5udr.1). One line
+     of both ran out of the box and across the terminal under it. */
+  const readoutLines = (chart) => chart.kids[3].kids.map((k) => k.textContent);
+  check("the readout has two lines", big.kids[3].kids.map((k) => k.className),
+        ["term-series-readout-line", "term-series-readout-line"]);
   big.kids[0].handlers.mousemove({ clientX: 100 });
   check("the readout names the request under the pointer, with its time and context",
-        big.kids[3].textContent, "#4 · 1m ago: 44 = in 2 · cached 40 · write 2");
+        readoutLines(big), ["#4 · 1m ago", "44 = in 2 · cached 40 · write 2"]);
   big.kids[0].handlers.mousemove({ clientX: 0 });
-  check("the first request is under the left edge", big.kids[3].textContent.startsWith("#1 · 6m ago: 13 ="), true);
+  check("the first request is under the left edge", readoutLines(big), ["#1 · 6m ago", "13 = in 1 · cached 10 · write 2"]);
   const grouped = ctx.chart({ ...series("full"), points: series("full").points.map((p) => ({ ...p, count: 5 })) }, true);
   grouped.kids[0].handlers.mousemove({ clientX: 100 });
-  check("a point that stands for several requests says so",
-        grouped.kids[3].textContent.endsWith("(largest of 5 requests)"), true);
+  check("a point that stands for several requests says so on its own line",
+        readoutLines(grouped), ["#4 · 1m ago · max of 5", "44 = in 2 · cached 40 · write 2"]);
+  big.kids[0].handlers.mouseleave();
+  check("the readout is blank on both lines once the pointer leaves",
+        readoutLines(big).map((t) => t.trim()), ["", ""]);
 
   // The height axis (claunch-e0e3n, claunch-k5udr): linear from 0 to the
   // context window, ticked in round steps; a line at the compact threshold.
