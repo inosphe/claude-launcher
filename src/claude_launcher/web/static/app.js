@@ -5045,13 +5045,25 @@ const RAIL_WINDOW_MIN_ROWS = 160;
 const RAIL_WINDOW_OVERSCAN_PX = 800;
 const RAIL_ROW_EST_PX = 64;
 const RAIL_WINDOW_SCROLL_MS = 80;
+// How many distinct rows the estimate is sampled from before it stops moving
+// (claunch-thuwx.1). One windowed pass draws more than this, so the rail has
+// its figure after the first pass and keeps it for the session.
+const RAIL_ESTIMATE_SAMPLE = 32;
 const railRowPx = new Map();
-// What a row this window has not seen is assumed to be: the mean of what it
-// has measured. A rail of rich rows is far taller than the 64 px
+// What a row this window has not seen is assumed to be: the mean of the rows
+// it has seen. A rail of rich rows is far taller than the 64 px
 // `contain-intrinsic-size` names, and a plan built on that figure grows --
 // visibly, as a scrollbar that keeps lengthening -- every time a pass
 // measures taller rows than the last.
+//
+// Each row counts ONCE, and only until RAIL_ESTIMATE_SAMPLE of them have.
+// Summed over every measurement instead, the mean re-weighted itself by
+// whichever rows happened to be on screen: measuring a tall region moved every
+// unmeasured row's offset, so the same model at the same scrollTop planned a
+// different slice before and after a scroll -- a rail that never settled
+// under the reader (claunch-thuwx.1).
 const railSeen = { rows: 0, px: 0 };
+const railSeenKeys = new Set();
 let railWindowScrollTimer = 0;
 
 function railEstimatePx() {
@@ -5073,32 +5085,52 @@ function railRowPxOf(row) {
   return typeof px === "number" && px > 0 ? px : railEstimatePx();
 }
 
-/* Where the drawn window sits in the whole model: the first and last rows to
-   draw, the height of everything above it, the model's total height, and each
-   row's offset (the reveal path scrolls to one by index). */
-function railWindowPlan(rows, scrollTop, viewportPx) {
+/* Every row's offset and the model's total height: one walk of the model, and
+   the one place a row's height is looked up. The plan and the anchor
+   correction below must agree on these numbers, so they read the same array
+   rather than each walking the model for itself. */
+function railOffsets(rows) {
   const list = Array.isArray(rows) ? rows : [];
+  const offsets = new Array(list.length + 1);
+  let at = 0;
+  for (let i = 0; i < list.length; i++) {
+    offsets[i] = at;
+    at += railRowPxOf(list[i]);
+  }
+  offsets[list.length] = at;
+  return { offsets, total: at };
+}
+
+/* Where the drawn window sits in the whole model: the first and last rows to
+   draw, the height of everything above it, the model's total height, each
+   row's offset (the reveal path scrolls to one by index), and the index of the
+   row the reader's own position sits in -- which `first` is not, because the
+   overscan above the viewport moves it.
+   `model` is railOffsets' answer, for a caller that already has it. */
+function railWindowPlan(rows, scrollTop, viewportPx, model) {
+  const list = Array.isArray(rows) ? rows : [];
+  const heights = model || railOffsets(list);
+  const offsets = heights.offsets;
   const top = Math.max(0, (scrollTop || 0) - RAIL_WINDOW_OVERSCAN_PX);
   const bottom = (scrollTop || 0) + Math.max(viewportPx || 0, RAIL_ROW_EST_PX)
     + RAIL_WINDOW_OVERSCAN_PX;
-  const offsets = new Array(list.length + 1);
-  let at = 0;
   let first = -1;
   let last = list.length;
   for (let i = 0; i < list.length; i++) {
-    offsets[i] = at;
-    const ends = at + railRowPxOf(list[i]);
+    const ends = offsets[i + 1];
     if (first < 0 && ends > top) first = i;
-    if (first >= 0 && last === list.length && at > bottom) last = i;
-    at = ends;
+    if (first >= 0 && last === list.length && offsets[i] > bottom) last = i;
   }
-  offsets[list.length] = at;
   if (first < 0) first = Math.max(0, list.length - 1);
+  // The row the reader is looking at, counted without the overscan: this is
+  // what the next pass holds still (see railWindowForPass).
+  let at = 0;
+  while (at < list.length - 1 && offsets[at + 1] <= (scrollTop || 0)) at += 1;
   // One row of context above the first visible one: a reader scrolled just
   // past a row should still see it.
   first = Math.max(0, first - 1);
   last = Math.min(list.length, Math.max(last, first + 1));
-  return { first, last, top: offsets[first], total: at, offsets };
+  return { first, last, top: offsets[first], total: heights.total, offsets, at };
 }
 
 /* A spacer is a row the reader never sees: its height stands in for rows that
@@ -5119,8 +5151,14 @@ function railMeasureRows(list) {
   list.querySelectorAll("li[data-name]").forEach((li) => {
     const px = li.getBoundingClientRect ? li.getBoundingClientRect().height
       : li.offsetHeight;
-    if (px > 0) {
-      railRowPx.set(`s:${li.dataset.name}`, px);
+    if (!(px > 0)) return;
+    const key = `s:${li.dataset.name}`;
+    railRowPx.set(key, px);
+    // Each row feeds the estimate once, and only until the sample is full:
+    // see RAIL_ESTIMATE_SAMPLE. A row measured again is the row's own height
+    // and moves nothing else.
+    if (railSeen.rows < RAIL_ESTIMATE_SAMPLE && !railSeenKeys.has(key)) {
+      railSeenKeys.add(key);
       railSeen.rows += 1;
       railSeen.px += px;
     }
@@ -5173,9 +5211,33 @@ function railWindowForPass(list, rows, scrollTop) {
   if (!Array.isArray(rows) || rows.length < RAIL_WINDOW_MIN_ROWS) return null;
   // A rebuild empties the list, and an empty list's scrollTop is 0 -- so the
   // position the plan is for is the one the pass took before the teardown.
-  const at = typeof scrollTop === "number" ? scrollTop : (list.scrollTop || 0);
-  const plan = railWindowPlan(rows, at, list.clientHeight);
+  const taken = typeof scrollTop === "number" ? scrollTop : (list.scrollTop || 0);
+  const heights = railOffsets(rows);
+  // The model moves under a reader who does not move: the rows this pass draws
+  // are measured, their real heights replace the estimate, and every offset
+  // below them shifts by the difference. Handing the reader the position they
+  // had puts them past the row they were reading, so the pass corrects by the
+  // anchor row's own drift -- where that row is now, less where it was
+  // (claunch-thuwx.1). Against an unchanged model the drift is 0, so the
+  // correction cannot ask for the pass that made it.
+  let at = taken;
+  const anchor = list._railAnchor;
+  // Only the same row at the same index may correct anything: a filter that
+  // reshaped the model since moves a different row there, and correcting for
+  // that one would jump the reader.
+  if (anchor && typeof anchor.offset === "number"
+      && anchor.index >= 0 && anchor.index < rows.length
+      && railRowKey(rows[anchor.index]) === anchor.key) {
+    const drift = heights.offsets[anchor.index] - anchor.offset;
+    if (drift) at = Math.max(0, at + drift);
+  }
+  const plan = railWindowPlan(rows, at, list.clientHeight, heights);
   if (plan.last - plan.first >= rows.length) return null;
+  plan.scrollTop = at;
+  list._railAnchor = {
+    index: plan.at, key: railRowKey(rows[plan.at]),
+    offset: heights.offsets[plan.at],
+  };
   // The card the keyboard holds stays drawn: removing the focused node
   // drops focus to the body, and the pass would restore it to a node that is
   // no longer there.
@@ -5189,6 +5251,26 @@ function railWindowForPass(list, rows, scrollTop) {
     }
   }
   return plan;
+}
+
+/* What a pass that drew the whole model leaves behind: nothing. A window kept
+   past the rail it describes would hand the scroll handler and the reveal path
+   a model this pass no longer draws (a filter that shrank the rail, a tab that
+   switched to a smaller group).
+   Only a pass that DREW may take the window off. A pass that drew nothing -- a
+   quiet poll, whose `rows` is empty because nothing changed, or a pass a press
+   held off -- has not touched the list, so the window it found there still
+   describes the rows on screen. Clearing it there is what turned scrolling off
+   until some session happened to change: `railWireWindowScroll` bails on a list
+   with no `_railRows`, so the rail stopped redrawing itself and the space past
+   the last drawn slice stayed blank (claunch-thuwx.1). */
+function railClearWindow(list, rebuild) {
+  if (!list || !rebuild) return;
+  if (!(list._railRows || list._railWindowPlan || list._railAnchor)) return;
+  list._railRows = null;
+  list._railWindowPlan = null;
+  list._railWindowSpan = null;
+  list._railAnchor = null;
 }
 
 async function refreshSessions(options) {
@@ -5328,6 +5410,10 @@ async function refreshSessions(options) {
   refreshSessions._forceRebuild = false;
   const changed = windowForced || signature !== list._sessionsSignature;
   const rebuild = changed && !railHeld();
+  // A forced rebuild a press held off is still owed (claunch-thuwx.1): the pass
+  // the release triggers sees the same signature, reads as "nothing changed",
+  // and the slice the scroll asked for is never drawn.
+  if (windowForced && !rebuild) refreshSessions._forceRebuild = true;
   // A rebuild throws away the node that holds the keyboard, and the browser
   // hands focus back to the body without saying so. Remember which card had
   // it so the same card can take it back below: otherwise a poll landing
@@ -6142,13 +6228,10 @@ async function refreshSessions(options) {
         topSpacerLi.style.height = `${Math.max(0, topNow + left)}px`;
       }
     };
-  } else if (list && (list._railRows || list._railWindowPlan)) {
-    // A whole draw leaves no window behind: keeping the last one would hand
-    // the reveal path a model this pass no longer draws (a filter that shrank
-    // the rail, a tab that switched to a smaller group).
-    list._railRows = null;
-    list._railWindowPlan = null;
-    list._railWindowSpan = null;
+  } else if (typeof railClearWindow === "function") {
+    // A whole draw leaves no window behind -- but a pass that drew nothing
+    // leaves the one it found (see railClearWindow).
+    railClearWindow(list, rebuild);
   }
   // The list is whole now, so this pass's signature describes it (see where
   // it used to be written, above the loop). `_sessionsSigSeq` records which
@@ -6308,7 +6391,12 @@ async function refreshSessions(options) {
   // Assigning past the content's height is not an error -- the browser clamps
   // it -- so a poll that drops rows lands at the new bottom rather than
   // refusing to move, and a rail too short to scroll takes the 0 it had.
-  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  // The plan says where to put the reader when the model moved under them
+  // (railWindowForPass): putting back the position the teardown took would undo
+  // that correction on every pass that measured a row above them.
+  const restoreTop = railWin && typeof railWin.scrollTop === "number"
+    ? railWin.scrollTop : keptScrollTop;
+  if (rebuild && restoreTop) list.scrollTop = restoreTop;
   else if (rebuild && tabSwitched) list.scrollTop = 0;
   // The ancestor band above the list reads the rows this pass just drew (and
   // the scroll position it was left at), so it is painted after both are in

@@ -54,14 +54,19 @@ new Function("exports", "document",
   constSrc + "\n" + [
     "const railRowPx = new Map();",
     "const railSeen = { rows: 0, px: 0 };",
+    "const railSeenKeys = new Set();",
+    "const RAIL_ESTIMATE_SAMPLE = 32;",
     slice("railEstimatePx"),
     slice("railRowKey"),
     slice("railRowPxOf"),
+    slice("railOffsets"),
     slice("railWindowPlan"),
     slice("railSpacerRow"),
+    slice("railMeasureRows"),
   ].join("\n") + "\nexports.api = { railWindowPlan, railSpacerRow, railRowKey,"
-  + " railRowPxOf, railRowPx, railSeen, railEstimatePx, RAIL_WINDOW_MIN_ROWS,"
-  + " RAIL_ROW_EST_PX, RAIL_WINDOW_OVERSCAN_PX };")(
+  + " railRowPxOf, railRowPx, railSeen, railSeenKeys, railEstimatePx,"
+  + " railOffsets, railMeasureRows, RAIL_WINDOW_MIN_ROWS,"
+  + " RAIL_ROW_EST_PX, RAIL_WINDOW_OVERSCAN_PX, RAIL_ESTIMATE_SAMPLE };")(
   ctx,
   // Just enough element for a spacer.
   { createElement: (tag) => ({
@@ -70,8 +75,9 @@ new Function("exports", "document",
     }) }
 );
 const { railWindowPlan, railSpacerRow, railRowKey, railRowPxOf, railRowPx,
-        railSeen, railEstimatePx,
-        RAIL_WINDOW_MIN_ROWS, RAIL_ROW_EST_PX, RAIL_WINDOW_OVERSCAN_PX } = ctx.api;
+        railSeen, railSeenKeys, railEstimatePx, railOffsets, railMeasureRows,
+        RAIL_WINDOW_MIN_ROWS, RAIL_ROW_EST_PX, RAIL_WINDOW_OVERSCAN_PX,
+        RAIL_ESTIMATE_SAMPLE } = ctx.api;
 
 const session = (name) => ({ type: "session", session: { name } });
 const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
@@ -144,6 +150,48 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   assert.strictEqual(railEstimatePx(), 150,
     "once rows have been measured it is their mean");
   assert.strictEqual(railRowPxOf({ type: "session", session: { name: "unseen" } }), 150);
+  railSeen.rows = 0;
+  railSeen.px = 0;
+}
+
+/* ---- 2b. what feeds the estimate, and when it stops moving -------------
+   claunch-thuwx.1: summed over every measurement, the mean re-weighted itself
+   by whichever rows were on screen, so the same model at the same scrollTop
+   planned differently before and after a scroll to a tall region. */
+{
+  const host = (names, px) => ({
+    querySelectorAll: (sel) => (sel === "li[data-name]"
+      ? names.map((name) => ({
+          dataset: { name },
+          getBoundingClientRect: () => ({ height: px }),
+        }))
+      : []),
+  });
+  railRowPx.clear();
+  railSeenKeys.clear();
+  railSeen.rows = 0;
+  railSeen.px = 0;
+
+  railMeasureRows(host(["m0", "m1"], 100));
+  railMeasureRows(host(["m0", "m1"], 500));   // the same rows, measured taller
+  assert.strictEqual(railSeen.rows, 2,
+    "a row feeds the estimate once, however often it is measured");
+  assert.strictEqual(railSeen.px, 200, "at the height it was first measured");
+
+  for (let i = 0; i < RAIL_ESTIMATE_SAMPLE + 10; i++) {
+    railMeasureRows(host([`k${i}`], 100));
+  }
+  assert.strictEqual(railSeen.rows, RAIL_ESTIMATE_SAMPLE,
+    "the sample is full and no further row joins it");
+  const frozen = railEstimatePx();
+  railMeasureRows(host(["z0"], 900));
+  assert.strictEqual(railEstimatePx(), frozen,
+    "so a tall region measured elsewhere cannot move it");
+  assert.strictEqual(railRowPxOf({ type: "session", session: { name: "z0" } }), 900,
+    "while that row keeps its own measured height");
+
+  railRowPx.clear();
+  railSeenKeys.clear();
   railSeen.rows = 0;
   railSeen.px = 0;
 }
