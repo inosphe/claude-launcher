@@ -24,13 +24,22 @@ from.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from . import credentials, lineage, profile as profile_mod, providers, usage, usage_history
+from . import (
+    credentials,
+    lineage,
+    profile as profile_mod,
+    profile_keys,
+    providers,
+    usage,
+    usage_history,
+)
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +96,20 @@ def _entry(key: str) -> Optional[_Entry]:
             payload = {k: v for k, v in sample.items() if k != "at"}
             entry = _entries[key] = _Entry(requested_at=sample["at"], payload=payload)
     return entry
+
+
+def _reusable(entry: Optional[_Entry], now: float, manual: bool) -> bool:
+    """Whether ``entry`` answers a read without reaching the account.
+
+    One place for the period rule, because two readers ask it now: the
+    profile's own reading (:func:`fetch`) and each pool key's
+    (:func:`key_usage`). A manual read always reaches the provider.
+    """
+    return bool(
+        entry is not None
+        and not manual
+        and now - entry.requested_at < AUTO_COOLDOWN_SECONDS
+    )
 
 
 def schedule(key: str) -> dict:
@@ -163,7 +186,7 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
     with _guard:
         lock = _locks.setdefault(key, threading.Lock())
         entry = _entry(key)
-        if not manual and entry is not None and now - entry.requested_at < AUTO_COOLDOWN_SECONDS:
+        if _reusable(entry, now, manual):
             if entry.error:
                 raise usage.UsageError(entry.error)
             if entry.payload is not None:
@@ -173,7 +196,7 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
         now = time.time()
         with _guard:
             entry = _entries.get(key)
-            if not manual and entry is not None and now - entry.requested_at < AUTO_COOLDOWN_SECONDS:
+            if _reusable(entry, now, manual):
                 if entry.error:
                     raise usage.UsageError(entry.error)
                 if entry.payload is not None:
@@ -215,3 +238,122 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
         except OSError as exc:
             log.warning("usage history: cannot write %s: %s", key, exc)
         return payload, False, updated_at
+
+
+def key_usage(
+    selector: str, *, manual: bool = False, skip=()
+) -> dict:
+    """The usage each key of the pool a launch of ``selector`` reads reports.
+
+    One account read per key, cached on the same period as the profile's own
+    reading (:data:`PERIOD_SECONDS`) and keyed by the pool key rather than by
+    the account, because a pool exists precisely so that its keys are
+    different accounts. ``skip`` names key ids the caller reads another way —
+    the key currently in the token file is the profile's own reading, and
+    measuring it twice would spend one request to show the same numbers.
+
+    Answer: ``{"owner", "keys": {key_id: row}, "unmeasurable"}``. ``owner`` is
+    the profile whose pool it is (``None`` when no profile in the chain has
+    one), and ``unmeasurable`` is the sentence from
+    :func:`usage.unmeasurable_reason` when the harness's usage belongs to its
+    login and no key can be asked (``keys`` is then empty).
+
+    A key whose read fails is a row with ``error`` and no windows: one account
+    endpoint failing must not blank the other keys' numbers. Unlike
+    :func:`fetch` this never raises for that reason, and it writes no
+    :mod:`usage_history` samples — the history is the usage page's, keyed by
+    the profile's account, and a pool key is not one of its rows.
+    """
+    try:
+        selected, _provider, base = _resolve(selector)
+    except _ERRORS as exc:
+        raise usage.UsageError(str(exc)) from exc
+    source = profile_keys.owner(selected)
+    if source is None:
+        return {"owner": None, "keys": {}, "unmeasurable": None}
+    pool = profile_keys.load(source)
+    if pool is None or not pool.keys:
+        return {"owner": source.name, "keys": {}, "unmeasurable": None}
+    try:
+        reason = usage.unmeasurable_reason(usage.reader(selected))
+    except _ERRORS as exc:
+        reason = f"the profile's usage reader is not available ({exc})"
+    if reason is not None:
+        return {"owner": source.name, "keys": {}, "unmeasurable": reason}
+    skipped = set(skip or ())
+    rows = {}
+    for key in pool.keys:
+        if key.id in skipped:
+            continue
+        rows[key.id] = _key_reading(selected, base, key, manual=manual)
+    return {"owner": source.name, "keys": rows, "unmeasurable": None}
+
+
+def _key_reading(profile, base: str, key, *, manual: bool) -> dict:
+    """One pool key's cached reading (:func:`key_usage`'s per-key half).
+
+    The cache key holds the token's digest: a key id survives a token
+    replacement (``claunch set-token --key``), so the id alone would serve the
+    previous account's numbers under the new credential.
+    """
+    token = str(key.token or "").strip()
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    cache_key = f"{base}/key:{key.id}:{digest}"
+    now = time.time()
+    with _guard:
+        lock = _locks.setdefault(cache_key, threading.Lock())
+        entry = _entries.get(cache_key)
+        if _reusable(entry, now, manual):
+            return _key_row(key, entry)
+
+    with lock:
+        now = time.time()
+        with _guard:
+            entry = _entries.get(cache_key)
+            if _reusable(entry, now, manual):
+                return _key_row(key, entry)
+            entry = _Entry(requested_at=now)
+            _entries[cache_key] = entry
+
+        try:
+            report = usage.report_for_token(profile, token)
+            if report is None:
+                raise usage.UsageError(
+                    usage.unmeasurable_reason(usage.reader(profile))
+                    or "this key's own usage cannot be read"
+                )
+            payload = {
+                "source": report.source,
+                "windows": [
+                    {
+                        "name": item.name,
+                        "utilization": item.utilization,
+                        "resets_at": item.resets_at,
+                        "used_dollars": item.used_dollars,
+                        "limit_dollars": item.limit_dollars,
+                        "remaining_dollars": item.remaining_dollars,
+                        "status": item.status,
+                    }
+                    for item in report.windows
+                ],
+            }
+        except _ERRORS as exc:
+            with _guard:
+                entry.error = str(exc)
+                entry.requested_at = time.time()
+            return _key_row(key, entry)
+        with _guard:
+            entry.payload = payload
+            entry.requested_at = time.time()
+        return _key_row(key, entry)
+
+
+def _key_row(key, entry: _Entry) -> dict:
+    payload = entry.payload or {}
+    return {
+        "key_id": key.id,
+        "windows": payload.get("windows") or [],
+        "source": payload.get("source"),
+        "updated_at": entry.requested_at,
+        "error": entry.error,
+    }

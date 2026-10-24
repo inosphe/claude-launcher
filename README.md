@@ -506,6 +506,12 @@ claunch keys strategy work rotation                    # rotation (default)
 claunch keys select work                               # what the next launch picks
 ```
 
+The dashboard's New session / Spawn child form shows the same answers for the
+profile picked in its **Runs as** section: what that account's usage reads
+(the same windows as `claunch usage`), every key of the pool with its own
+usage, which key the next launch takes, and the strategy — editable there,
+since it decides the pick for every launch of that profile.
+
 Strategies:
 
 | Strategy | What it picks |

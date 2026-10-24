@@ -56,6 +56,13 @@ FORMAT_VERSION = 1
 #: Strategy names accepted on the command line and in the file.
 STRATEGIES = ("rotation", "usage-min", "usage-max", "random")
 DEFAULT_STRATEGY = "rotation"
+#: Strategies that read every key's own usage to choose one (claunch-wllke.4).
+#: A caller that already holds each key's usage asks the account nothing more;
+#: one that only previews a pick must not spend a read per key for it.
+MEASURING_STRATEGIES = ("usage-min", "usage-max")
+#: Strategies whose pick is decided when they run, so a preview cannot name
+#: the key a launch would take (``random`` with more than one key).
+UNPREDICTABLE_STRATEGIES = ("random",)
 
 
 class KeysError(Exception):
@@ -707,7 +714,7 @@ def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
     if strategy == "random" and len(pool.keys) > 1:
         index = random.randrange(len(pool.keys))
         return Selection(pool.keys[index], strategy, index, owner_profile)
-    if strategy in ("usage-min", "usage-max"):
+    if strategy in MEASURING_STRATEGIES:
         measure, unmeasurable = _utilization_reader(source)
         scored = []
         for position, key in enumerate(pool.keys):

@@ -1035,6 +1035,33 @@
                is exactly the mistake promoting the row was meant to stop.
                Silent unless one of them applies (renderProfileHint). -->
           <p id="profile-hint" class="hidden"></p>
+          <!-- What the selected credential reports, and what is left of it
+               (claunch-yx2bd). The Profile row decides whose token a session
+               spends; until this block existed the form said nothing about
+               what that token has left, and on a profile holding several keys
+               it hid the pool entirely — which key the launch takes, and
+               which strategy picks it, were answers nobody could see before
+               creating the session. Drawn from /api/usage/keys by
+               renderNewUsage; empty until an answer arrives, so a daemon too
+               old to serve that route draws nothing rather than an error. -->
+          <div id="new-usage" class="new-usage hidden">
+            <div class="new-usage-head">
+              <span id="new-usage-who" class="new-usage-who"></span>
+              <span id="new-usage-when" class="new-usage-when"></span>
+              <button id="new-usage-refresh" class="new-usage-refresh" type="button"
+                title="read the account again now">refresh</button>
+            </div>
+            <ul id="new-usage-windows" class="new-usage-windows"></ul>
+            <ul id="new-usage-keys" class="new-usage-keys hidden"></ul>
+            <!-- The pool's strategy, a property of the PROFILE rather than of
+                 this launch: changing it here changes the pick for every
+                 session of that profile (h_profile_key_strategy). No `name`:
+                 it is not a field the create request carries. -->
+            <label id="new-strategy-row" class="new-usage-strategy hidden">Strategy
+              <select id="new-key-strategy"></select>
+            </label>
+            <p id="new-usage-note" class="wf-note hidden"></p>
+          </div>
         </fieldset>
 
         <!-- What the session is FOR. Decided here because arranging them

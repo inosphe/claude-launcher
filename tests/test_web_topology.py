@@ -305,6 +305,18 @@ above the box no longer draws keep-alive, because a value that can be
 changed in one place and read stale four lines up is read twice and believed
 once.
 
+``formusage_check`` holds the create form's usage readout (claunch-yx2bd):
+the block under the Profile row that says what the selected credential has
+left. It checks that nothing is asked for and nothing is drawn before there
+is an answer, the profile's own windows, one row per key of a pool with the
+row the NEXT launch takes marked from the server's answer rather than guessed
+here, the strategy select offered only for a pool and enabled only when two
+or more keys make the choice mean something, the "lowest/highest now" mark a
+usage strategy gets instead of a preview (the server will not spend an
+account read per key on a pick the launch re-decides), a refused read shown
+as the daemon's own sentence, and that a late answer for a profile the
+operator has already left never paints over the one they picked next.
+
 ``sessstill_check`` holds the same panel still while somebody is using it.
 The panel is emptied and rebuilt every five seconds, and three things a
 reader puts into it were destroyed on every one of those rebuilds: the scroll
@@ -436,6 +448,7 @@ CHECKS = [
         "meshjoin_check.js",
         "meshleave_check.js",
         "createonboard_check.js",
+        "formusage_check.js",
         "openingimages_check.js",
         "meshattach_check.js",
         "reborrow_check.js",

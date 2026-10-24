@@ -71,9 +71,16 @@ check("the dialog view takes the modes it is given",
       /options\.modes \|\| \[mode\]/.test(slice("createSessionFormView")));
 check("switching to New session spends the held directory",
       /if \(want === "new"\) spendSpawnSameDirectory\(f, view\);/.test(slice("setSessionModalTab")));
-check("...and openSessionModal asks again once the workspace list has landed",
-      /spendSpawnSameDirectory\(f, f\._sessionView\);\s*syncSessionModalChrome\(\);\s*\}$/
-        .test(slice("openSessionModal")));
+// After the awaited option fills, wherever the rest of the opener settles:
+// the point is the order against the fills, not that the call is the last
+// statement before the closing brace.
+{
+  const openerSrc = slice("openSessionModal");
+  const fills = openerSrc.indexOf("await Promise.all");
+  check("...and openSessionModal asks again once the workspace list has landed",
+        fills >= 0 &&
+        openerSrc.indexOf("spendSpawnSameDirectory(f, f._sessionView)") > fills);
+}
 {
   const rctx = {};
   vm.createContext(rctx);
