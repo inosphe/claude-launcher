@@ -65,6 +65,27 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
 `api_status`(30분)보다 짧은 5분으로 두는 이유는, 한 번의 재시도로 풀리는 경우가
 많고 5분이 지나도 남아 있으면 그때는 프로바이더 열화로 읽어야 하기 때문이다.
 
+`Error: Request timed out.`과 `Error: Retry failed after 3 attempts: Request
+timed out.`은 `common:`에 있다 — 문구가 프로바이더 클라이언트의 것이지 한
+하네스의 것이 아니다(`claude`도 찍고 pi도 찍는다, s1736 관측). 두 줄 모두
+`network`로 읽는다. 나뉘는 것은 kind가 아니라 **기록되는 메시지**다: 소진
+문구(`Retry failed after N attempts`)를 목록 앞에 두어, 그 줄로 끝나는 화면은
+위의 시도 줄들 대신 소진 줄을 기록한다. 그 화면이 클라이언트가 멈춘 상태이고
+사람이 툴팁에서 읽어야 하는 줄이기 때문이다. 재시도가 소진됐다는 사실에 별도
+kind나 다른 창을 주지는 않았다 — 관측이 한 건이고, 창의 근거가 될 재시도
+간격을 재지 못했다.
+
+`common:`은 하네스 목록보다 먼저 평가되고, 판정은 목록 순서가 정한다 — 화면
+아래 16행 안에서 어느 행이 더 아래에 있는지는 보지 않는다. 그래서 `common:`에
+넣은 문구는 그 하네스가 같은 창에 함께 그린 더 구체적인 문구를 이긴다. 위의
+두 타임아웃 줄을 `common:`에 넣은 뒤, 같은 창에 함께 뜰 수 있는 더 구체적인
+문구 — 플랜 소진 문구(`You've hit your weekly limit`), 로그인 안내(`Please run
+/login`, `Use /login to log into a provider`), 정책 거부(`safeguards flagged
+this message`), 한도 없는 429(`Request rejected (429)`) — 를 각 하네스 목록에서
+`common:`의 타임아웃 항목 위로 올렸다. 올리지 않았으면 그 화면은 `usage_limit`·`auth`·`policy_blocked`·`rate_limit`
+대신 `network`(15분)로 읽혔다 — claunch-pczoc.2.1의 리뷰에서 지적되어
+2026-10-24에 실측했고, `claude`에서는 변경 전보다 나빠지는 회귀였다.
+
 ## 어디에 나타나는가
 
 - 세션 정보(`Session.info()`, `/api/sessions` 행): `fault` 필드. 활성/만료
@@ -92,13 +113,19 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
    - 목록 안의 순서가 우선순위다. 구체적인 문구를 일반 상태 코드 fallback보다
      앞에 둔다. `common:`이 하네스 목록보다 먼저 평가된다 — 프로바이더의 한도
      문구가 하네스의 일반 429 fallback을 이겨야 하기 때문이다.
+   - `common:`에 문구를 넣기 전에, 그 문구가 그 하네스의 다른 문구와 같은 화면에
+     함께 뜰 수 있는지 본다. 함께 뜬다면 그 다른 문구도 `common:`의 위쪽에 둔다 —
+     아래쪽 하네스 목록에 그대로 두면 진다.
    - `pattern`은 `re.IGNORECASE`로 컴파일된다. 줄바꿈은 스캔 창에서 공백으로
      합쳐지므로 감싸진 문장은 공백 기준으로 쓴다.
    - `sample`은 테스트가 실제 메시지와 패턴이 어긋나는 것을 잡는 근거다.
 3. `uv run --no-sync pytest tests/test_session_fault.py -q`로 확인한다.
 
-하네스 항목이 비어 있는 것(`codex`, `kimi`, `agent`, `devin`)은 아직 이 머신에서
-그 하네스가 낸 fault 문구를 관측하지 못했다는 뜻이다. `common`만 적용된다.
+하네스 항목이 비어 있는 것(`pi`, `codex`, `kimi`, `agent`, `devin`)은 그 하네스에
+고유한 문구가 목록에 없다는 뜻이다 — 아직 관측하지 못했거나(대부분), 관측한
+문구가 `common`으로 올라갔거나(pi의 로그인 안내). 그 하네스에도 `common`은
+적용된다. `claude`의 목록에는 남은 두 항목(401, `Can't reach the API server`)만
+있다.
 
 ## 한계
 
@@ -112,3 +139,13 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
   메시지가 적은 리셋 시각이 정한다.
 - `background_render: false`인 하네스(pi)는 아무도 붙어 있지 않을 때 화면을
   갱신하지 않는다. 그 구간의 fault는 뷰어가 붙어 화면이 그려질 때 읽힌다.
+- `Error: Request timed out.`은 전송 계층의 실패라 `network`로 읽지만, 그
+  줄이 한 번 찍힌 것과 재시도를 다 쓴 것(`Retry failed after N attempts`)은
+  kind가 같아 창 길이로는 갈리지 않는다. 소진 쪽 창을 따로 둘 근거(재시도
+  간격·시도 횟수의 관측)는 아직 없다.
+- 한 화면에 fault 문구가 둘 이상 있으면 목록 순서가 이긴다. 어느 행이 더
+  아래에 있는지(더 최근에 그려졌는지)는 보지 않으므로, 같은 창에 함께 뜬
+  두 문구 가운데 목록에서 위인 쪽이 fault의 kind를 정한다. 이 규칙은
+  데이터(목록 순서)로만 지켜지고, 새 문구를 넣는 사람이 위 절차의 셋째
+  항목으로 판단해야 한다. 판정을 행 위치로 정하는 변경은 검출기 로직의
+  변경이라 이번 회차의 범위 밖이다.

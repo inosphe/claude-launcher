@@ -185,6 +185,74 @@ def test_the_529_fault_is_marked_and_keeps_the_status_code():
     assert det.view(now=now["t"] + 301)["active"] is False
 
 
+PI_TIMEOUT = "Error: Request timed out."
+PI_RETRIES_EXHAUSTED = "Error: Retry failed after 3 attempts: Request timed out."
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_a_timed_out_request_is_read_in_every_harness(harness):
+    """pi (s1736) painted this line; until claunch-pczoc.2.1 the pattern sat
+    in `harnesses.claude`, so every other harness read nothing."""
+    found = session_fault.default().match(harness, PI_TIMEOUT)
+    assert found is not None, f"{harness}: the timeout line matched nothing"
+    assert found[0].name == "network"
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_an_exhausted_retry_is_read_in_every_harness(harness):
+    found = session_fault.default().match(harness, PI_RETRIES_EXHAUSTED)
+    assert found is not None, f"{harness}: the exhausted-retry line matched nothing"
+    assert found[0].name == "network"
+
+
+def test_the_exhausted_retry_line_is_the_one_recorded():
+    """Both lines are `network`, so the kind does not separate them; what
+    does is precedence -- the screen that ends with "Retry failed after N
+    attempts" is the one where the client stopped, and its message is what a
+    person reads in the tooltip."""
+    det, now = _detector("pi")
+    det.scan(_Screen(PI_TIMEOUT, PI_TIMEOUT, PI_TIMEOUT, PI_RETRIES_EXHAUSTED),
+             now=now["t"])
+    view = det.view()
+    assert view["kind"] == "network"
+    assert view["harness"] == "pi"
+    assert view["message"] == PI_RETRIES_EXHAUSTED
+
+
+SAFEGUARDS = (
+    "API Error: Opus 5.5's safeguards flagged this message "
+    "(https://www.anthropic.com/legal/aup)."
+)
+PI_LOGIN = "Use /login to log into a provider via OAuth or API key. See: ..."
+
+
+@pytest.mark.parametrize("harness, rows, kind", [
+    ("claude", (WEEKLY, PI_TIMEOUT), "usage_limit"),
+    ("claude", (SAFEGUARDS, PI_TIMEOUT), "policy_blocked"),
+    ("claude", ("●Please run /login · API Error: 401 Invalid bearer token", PI_TIMEOUT), "auth"),
+    ("claude", ("API Error: Request rejected (429)", PI_TIMEOUT), "rate_limit"),
+    ("pi", (PI_LOGIN, PI_TIMEOUT), "auth"),
+])
+def test_a_more_specific_line_survives_a_timeout_in_the_same_window(harness, rows, kind):
+    """`common` is matched before the harness's own list, so an entry there
+    beats whatever that harness painted beside it. The timeout entries are
+    in `common`; until the plan-reset sentence, the login prompt and the
+    policy refusal moved above them (claunch-pczoc.2.1), a screen holding
+    either of those next to a timeout row read `network`."""
+    det, now = _detector(harness)
+    det.scan(_Screen(*rows), now=now["t"])
+    view = det.view()
+    assert view["kind"] == kind, f"{harness}: {rows} read {view['kind']}"
+
+
+def test_the_timeout_lines_are_in_common_so_every_harness_reads_them():
+    """A harness added later gets them without a list of its own -- the bug
+    this round fixed was a pattern that only `claude` had."""
+    sources = " ".join(pattern.source for pattern in session_fault.default().common)
+    assert "Retry failed after" in sources
+    assert "Request timed out" in sources
+
+
 @pytest.mark.parametrize("document", [
     {},
     {"version": 2, "kinds": {}},
