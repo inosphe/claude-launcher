@@ -4976,7 +4976,16 @@ changed the common declaration and wrote the value into every existing Claude
 profile; its scope included both existing profiles and future profile creation.
 
 General also carries a **Briefing model** card, which chooses the backend that
-writes the session briefings (the `▸` card on a rail row). Picking a
+writes the session briefings (the `▸` card on a rail row). Several backends
+can be saved as **presets**; the **Preset** list at the top of the card is the
+switch — choosing one is what changes the model the briefings use, and the
+fields below then edit and save that preset. **Add preset** seeds a new row
+from what the fields show and saves it at once (a pointer at a preset the same
+save does not also store is refused); **Delete preset** drops the row and
+clears the pointer. Without a chosen preset the fields are the block's own
+backend, exactly as before.
+
+Inside a preset (or the block), picking a
 **profile** reuses that profile's backend: its provider already records an
 OpenAI-compatible endpoint (`endpoints.openai`), the key that opens it (the
 profile's `set-token` secret, else the provider's `api_key`) and the model ids
@@ -4988,14 +4997,19 @@ under a profile never reads. Before, a profile changed only which credential
 went out while both boxes went on showing the backend typed in before. The
 endpoint you typed survives in the form, so a profile tried and abandoned
 costs nothing — it is the save that drops it. An empty model under a profile
-means that profile's `models.default`. The key is
+means that profile's `models.default`. The token budget is the block's, not a
+preset's: changing which backend answers must not change what the call may
+spend. The key is
 never returned to the page: the field shows `stored · blank keeps it`, and
-**Remove stored key** is the one way to take it back out. The card writes the
-`llm:` block of `~/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`), which is
+**Remove stored key** is the one way to take it back out — of the backend the
+card is editing, block or preset, and no other. The card writes the
+`llm:` block of `~/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`:
+`presets:` and `preset:` beside the four backend fields), which is
 still hand-editable; saving a different backend drops the cached briefings so
 the next card is written by the model just chosen. While endpoint, model and
 key are not all present the feature is off, and every briefing control says so
-and names this card.
+and names this card. See [docs/briefing-model-presets.md](docs/briefing-model-presets.md)
+for the stored shape and the resolution rules.
 
 The same Settings page carries a **GitHub CLI (gh)** card, the machine side
 of the [PR-landing worker](#workflows-cflow): whether `gh` resolves on the
