@@ -120,6 +120,22 @@ def test_a_status_code_with_no_pattern_is_api_status_and_keeps_the_code():
     assert view["code"] == "503"
 
 
+@pytest.mark.parametrize("line, kind", [
+    ("API Error: 401", "auth"),
+    ("API Error: 412", "account_suspended"),
+    ("API Error: 429", "rate_limit"),
+    ("API Error: 529", "overloaded"),
+])
+def test_a_bare_status_code_keeps_its_own_reading_by_list_order(line, kind):
+    """Each of these codes starts at the same character as the generic
+    `API Error: <code>` fallback, and both are `fallback` entries, so nothing
+    but catalogue order separates them: the code's own entry is listed above
+    the generic one. Move it below and a bare 529 reads `api_status`."""
+    found = session_fault.default().match("codex", line)
+    assert found is not None, f"{line} matched nothing"
+    assert found[0].name == kind, f"{line} read {found[0].name}"
+
+
 OVERLOADED = "API Error: 529 Overloaded — retrying in 30s (attempt 3/10)"
 
 
@@ -207,9 +223,9 @@ def test_an_exhausted_retry_is_read_in_every_harness(harness):
 
 def test_the_exhausted_retry_line_is_the_one_recorded():
     """Both lines are `network`, so the kind does not separate them; what
-    does is precedence -- the screen that ends with "Retry failed after N
-    attempts" is the one where the client stopped, and its message is what a
-    person reads in the tooltip."""
+    does is position -- the screen that ends with "Retry failed after N
+    attempts" is the one where the client stopped, and the lowest matching
+    row is what a person reads in the tooltip."""
     det, now = _detector("pi")
     det.scan(_Screen(PI_TIMEOUT, PI_TIMEOUT, PI_TIMEOUT, PI_RETRIES_EXHAUSTED),
              now=now["t"])
@@ -228,21 +244,63 @@ PI_LOGIN = "Use /login to log into a provider via OAuth or API key. See: ..."
 
 @pytest.mark.parametrize("harness, rows, kind", [
     ("claude", (WEEKLY, PI_TIMEOUT), "usage_limit"),
+    ("claude", (PI_TIMEOUT, WEEKLY), "usage_limit"),
     ("claude", (SAFEGUARDS, PI_TIMEOUT), "policy_blocked"),
-    ("claude", ("●Please run /login · API Error: 401 Invalid bearer token", PI_TIMEOUT), "auth"),
+    ("claude", (PI_TIMEOUT, SAFEGUARDS), "policy_blocked"),
+    ("claude", (LOGIN, PI_TIMEOUT), "auth"),
+    ("claude", (PI_TIMEOUT, LOGIN), "auth"),
     ("claude", ("API Error: Request rejected (429)", PI_TIMEOUT), "rate_limit"),
+    ("claude", (PI_TIMEOUT, "API Error: Request rejected (429)"), "rate_limit"),
     ("pi", (PI_LOGIN, PI_TIMEOUT), "auth"),
+    ("pi", (PI_TIMEOUT, PI_LOGIN), "auth"),
 ])
-def test_a_more_specific_line_survives_a_timeout_in_the_same_window(harness, rows, kind):
-    """`common` is matched before the harness's own list, so an entry there
-    beats whatever that harness painted beside it. The timeout entries are
-    in `common`; until the plan-reset sentence, the login prompt and the
-    policy refusal moved above them (claunch-pczoc.2.1), a screen holding
-    either of those next to a timeout row read `network`."""
+def test_a_named_cause_survives_a_timeout_on_either_side(harness, rows, kind):
+    """The timeout entries are `fallback`: they say the client gave up, not
+    why. A screen that also holds a line naming the cause reads that cause
+    whichever of the two sits lower. claunch-pczoc.2.1 held this by moving
+    the wording above the timeouts, which only worked in one order; the
+    marker makes it independent of where the line is listed or painted."""
     det, now = _detector(harness)
     det.scan(_Screen(*rows), now=now["t"])
     view = det.view()
     assert view["kind"] == kind, f"{harness}: {rows} read {view['kind']}"
+
+
+def test_between_two_named_causes_the_lower_row_decides():
+    """Neither line is a fallback, so position settles it: the row painted
+    last is the line the session stopped on."""
+    for rows, kind in (
+        ((WEEKLY, SAFEGUARDS), "policy_blocked"),
+        ((SAFEGUARDS, WEEKLY), "usage_limit"),
+    ):
+        det, now = _detector("claude")
+        det.scan(_Screen(*rows), now=now["t"])
+        assert det.view()["kind"] == kind, f"{rows} read {det.view()['kind']}"
+
+
+def test_entries_starting_at_the_same_character_are_decided_by_catalogue_order():
+    """Position cannot separate two readings of the same characters, so the
+    list decides, and `common` is read before a harness's own list -- which
+    is why a provider's quota sentence still beats a harness's own 429 for
+    the same text."""
+    catalog = session_fault.load(
+        """
+        version: 1
+        kinds:
+          usage_limit: {label: usage limit, action: wait, window: 86400}
+          rate_limit: {label: rate limit, action: wait, window: 900}
+        common:
+          - kind: usage_limit
+            pattern: 'quota'
+        harnesses:
+          claude:
+            - kind: rate_limit
+              pattern: 'quota'
+        """
+    )
+    det, now = _detector("claude", catalog=catalog)
+    det.scan(_Screen("quota exceeded"), now=now["t"])
+    assert det.view()["kind"] == "usage_limit"
 
 
 def test_the_timeout_lines_are_in_common_so_every_harness_reads_them():
@@ -262,6 +320,8 @@ def test_the_timeout_lines_are_in_common_so_every_harness_reads_them():
     {"version": 1, "kinds": {"auth": {"window": 1}}, "common": [
         {"kind": "auth", "pattern": "("}]},
     {"version": 1, "kinds": {"auth": {"label": "x"}}},
+    {"version": 1, "kinds": {"auth": {"window": 1}}, "common": [
+        {"kind": "auth", "pattern": "x", "fallback": "yes"}]},
 ])
 def test_a_broken_catalogue_is_refused(document):
     with pytest.raises(session_fault.CatalogError):
