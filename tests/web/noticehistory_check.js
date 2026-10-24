@@ -215,6 +215,7 @@ function build(opts) {
     " refreshNudgeGate," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
+    " killReapedNotify," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -233,7 +234,7 @@ function build(opts) {
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
   return {
-    api, nodes, clock, gate, apiCalls, apiBodies, storage, loc, layouts,
+    api, nodes, clock, gate, apiCalls, apiBodies, storage, loc, layouts, timers,
     strip: () => nodes.notices.children,
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
@@ -395,6 +396,37 @@ function gotoRec(rec) {
     check("Mark all read empties the count", w.badge() === "" &&
             w.api.noticeHistory.every((e) => e.read), [w.badge(), w.api.noticeHistory]);
     check("and leaves nothing to mark", !w.press(w.nodes["notice-panel-body"], "Mark all read"), w.panel());
+  }
+
+  /* --- routine notices (claunch-ewk3x) --------------------------------- */
+  /* The reviewer reap repeats whenever a workflow ends one and needs no
+     answer: its card is short-lived and its history row is born read, so the
+     bell never turns a night of them into a backlog. The ordinary notice's
+     own timing and unread row are checked beside it so the routine flag is
+     what made the difference. */
+  {
+    const w = build();
+    w.api.killReapedNotify([]);   // a browser's first poll only remembers
+    check("a fresh browser says nothing about reaps already on the board",
+          w.strip().length === 0 && w.timers.length === 0, w.said());
+    w.api.killReapedNotify([
+      { id: "k1", status: "reaped", session: "s9", target: "s9-rev", reason: "settle-reap" },
+    ]);
+    const row = w.api.noticeHistory[0];
+    check("a reaped reviewer still gets its card",
+          row && row.title === "reviewer ended by its workflow: s9-rev", row && row.title);
+    check("its history row is born read, so the bell does not count it",
+          row.read === true && w.badge() === "", [row.read, w.badge()]);
+    check("and its card leaves after 5 s",
+          w.timers.length === 1 && w.timers[0].ms === 5000, w.timers);
+    w.timers[0].fn();
+    check("the card is gone after that timer", w.strip().length === 0, w.said());
+
+    w.api.notify("ordinary", "x", { key: "k9" });
+    const ordinary = w.api.noticeHistory.find((e) => e.title === "ordinary");
+    check("an ordinary notice stays 8 s and stays unread",
+          w.timers.length === 1 && w.timers[0].ms === 8000 && ordinary.read === false && w.badge() === "1",
+          [w.timers, ordinary.read, w.badge()]);
   }
 
   /* --- the session link inside a history row (claunch-49fvl) ----------- */
