@@ -27393,6 +27393,12 @@ function cflowGhVerdict(doc) {
 
 const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
 
+/* The id counter cflowInputRow draws on a checkbox so its caption can point
+   at it (a caption outside the control's own box is not associated
+   implicitly). The box's id is a page-unique handle, never a name the
+   collector reads: that comes from the row's data-input. */
+let cf2InputSerial = 0;
+
 /* One input's control. Lists and check lists are rows with add/remove;
    every control carries data-input so the collector and the error marker
    find it again. */
@@ -27620,6 +27626,18 @@ function cflowInputRow(field, seeded) {
   // reads "name, then control" whichever shape the control is. Nesting the
   // box inside the caption put it ahead of the name and broke the one rule
   // the combobox rows keep (claunch-ngfo3).
+  //
+  // Moving the box out of the caption also ended the implicit association a
+  // nested control gets, so the caption was left pointing at nothing: click
+  // it and no box ticked. A label still activates a control it wraps, and
+  // most of these rows keep that; where the control is a sibling instead,
+  // tie the two together by id (a checkbox -- the one control whose caption
+  // is its only clickable text on a one-line row).
+  const boxed = control.querySelector && control.querySelector('input[type="checkbox"]');
+  if (boxed) {
+    if (!boxed.id) boxed.id = `cf2-input-${++cf2InputSerial}`;
+    label.htmlFor = boxed.id;
+  }
   row.appendChild(label);
   row.appendChild(control);
   // The paragraph stays in the row whether or not it is shown: the toggle
