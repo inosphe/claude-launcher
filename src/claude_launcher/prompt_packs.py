@@ -652,6 +652,7 @@ DEFAULT_ROLE_PACKS: Dict[str, List[str]] = {
     "leader": ["role-leader"],
     "merger": ["role-merger"],
     "operator": ["role-operator"],
+    "oneshot": ["role-oneshot"],
     "pm": ["role-pm"],
     "reviewer": ["role-reviewer"],
     "specialist": ["role-specialist"],
