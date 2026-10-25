@@ -9049,10 +9049,33 @@ const TERM_SERIES_LAYERS = [
    300k there. A pure log floor axis cannot express this: normalizing
    log_b(v/f) to the same floor and top draws the same heights for every base,
    so the midpoint there is set by the floor alone, and reaching 300k would
-   need a floor of 90k with every smaller request pinned to the baseline. */
-const TERM_SERIES_LOG_BASE = 5.44;
+   need a floor of 90k with every smaller request pinned to the baseline.
+   B=9 is what the request asked for next (claunch-nw9ca.1): stronger
+   compression, with the middle of a 1M window at 250k instead of 300k. */
+const TERM_SERIES_LOG_BASE = 9;
 /* How many rules the zoomed chart draws below the top; the top has its own. */
 const TERM_SERIES_TICK_COUNT = 6;
+/* The zoomed chart's height and the inset its plot area keeps at the top and
+   bottom, so a value on the ceiling is not drawn on the border. */
+const TERM_SERIES_ZOOM_HEIGHT = 96;
+const TERM_SERIES_PLOT_INSET = 3;
+/* The height of one tick label's box in pixels, for the 9px label in
+   style.css (Chrome getBBox on a rendered chart), plus one pixel of daylight:
+   two boxes exactly a box apart touch, and a font-metric or rounding change
+   would flip that to an overlap. The tick picker keeps this many pixels
+   between the label anchors it chooses (claunch-nw9ca.1: the guard was a bare
+   0.06 of the plot height, 5.58px, and 19 of 89 measured windows drew
+   overlapping labels). The picker measures in the pixels the chart draws with,
+   through termSeriesTickLabelY, rather than in axis fractions: the label
+   anchor is clamped near the ceiling, so a fraction of the plot height and the
+   drawn box are not the same distance. Measured through Chromium over 911
+   windows: 10 leaves 0.005px of clearance, 11 leaves 1.0px, and both fill
+   every window with five rules, so the margin costs nothing. */
+const TERM_SERIES_TICK_LABEL_HEIGHT = 11;
+/* The zoomed chart's label anchor: 2px above the rule, and never above 8px, so
+   a rule near the ceiling still leaves its text on the chart. */
+const TERM_SERIES_TICK_LABEL_LIFT = 2;
+const TERM_SERIES_TICK_LABEL_MIN = 8;
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
 /* Whether the pointer is on the chart: its slot name, or false for none. */
@@ -9119,14 +9142,15 @@ function termSeriesIndexAt(pts, at) {
 }
 
 /* The height axis of one chart: a log axis whose middle falls at 1/(1+sqrt(B))
-   of the top — 300k of a 1M window at B=5.44 (claunch-nw9ca). Zero sits on
-   the baseline and the context window the daemon names in `limits.top` on the
-   ceiling, so a small session is lifted off the floor instead of flattened
-   against it, and the area under a line is still not the tokens sent. A
-   request larger than the window pushes the top up to it; a session with no
-   named window is drawn to its largest request. Also the auto-compact
-   thresholds to draw as horizontal lines: one per distinct value (the two
-   sides of a borrowed session often agree), none that fall outside the axis. */
+   of the top — 250k of a 1M window at B=9 (claunch-nw9ca.1; B=5.44 put 300k
+   there, claunch-nw9ca). Zero sits on the baseline and the context window the
+   daemon names in `limits.top` on the ceiling, so a small session is lifted
+   off the floor instead of flattened against it, and the area under a line is
+   still not the tokens sent. A request larger than the window pushes the top
+   up to it; a session with no named window is drawn to its largest request.
+   Also the auto-compact thresholds to draw as horizontal lines: one per
+   distinct value (the two sides of a borrowed session often agree), none that
+   fall outside the axis. */
 function termSeriesScale(pts, limits) {
   const totals = pts.map(termSeriesTotal);
   const peak = Math.max(1, ...totals);
@@ -9152,15 +9176,38 @@ function termSeriesScale(pts, limits) {
   };
 }
 
+/* Where the zoomed chart puts a tick's label anchor, in pixels from the top of
+   the svg: above the rule by TERM_SERIES_TICK_LABEL_LIFT, and never above
+   TERM_SERIES_TICK_LABEL_MIN. The chart draws with this and the tick picker
+   spaces with it, so the distance the picker enforces between two anchors is
+   the distance the labels are actually drawn at — the clamp near the ceiling
+   would otherwise make a fraction of the plot height enforce more space than
+   the labels occupy, and the picker would reject candidates it did not need
+   to (claunch-nw9ca.1). */
+function termSeriesTickLabelY(top, v) {
+  const inset = TERM_SERIES_ZOOM_HEIGHT - TERM_SERIES_PLOT_INSET;
+  const ratio = Math.log(1 + (TERM_SERIES_LOG_BASE - 1) * (Math.min(Math.max(v, 0), top) / top)) /
+    Math.log(TERM_SERIES_LOG_BASE);
+  const rule = TERM_SERIES_ZOOM_HEIGHT - 1 - Math.min(1, ratio) * inset;
+  return Math.max(TERM_SERIES_TICK_LABEL_MIN, rule - TERM_SERIES_TICK_LABEL_LIFT);
+}
+
 /* The values marked on that axis below `top`: for each even step of the axis'
    height, the round value nearest it, so the rules are spread by eye and the
-   labels are numbers a reader recognises (75k, 150k, 300k, 500k, 700k on a 1M
-   window). A round value already carrying a rule is not used twice, and the
-   top is not among them -- the chart draws its own rule and label for it. */
+   labels are numbers a reader recognises (100k, 200k, 300k, 500k, 700k on a 1M
+   window at B=9). A round value already carrying a rule is not used twice, and
+   the top is not among them -- the chart draws its own rule and label for it.
+   Two candidates are only both used when their label anchors are at least one
+   label box plus a pixel of daylight apart (TERM_SERIES_TICK_LABEL_HEIGHT),
+   measured through termSeriesTickLabelY so the picker and the chart agree on
+   where the text goes. The box height is the measured one, not a guess, so
+   raising the label's font size in style.css without touching this picker
+   cannot quietly reintroduce the overlap of claunch-nw9ca.1. The picker
+   under-fills rather than overlaps: it leaves a step empty when no candidate
+   clears its neighbours, and the rules that are drawn stay spread. */
 function termSeriesTicks(top) {
   if (!(top > 0)) return [];
   const bias = TERM_SERIES_LOG_BASE - 1;
-  const at = (frac) => top * (Math.pow(TERM_SERIES_LOG_BASE, frac) - 1) / bias;
   /* The round values a chart can mark: 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 7.5, 8
      times each power of ten below the top, and whole numbers under a
      hundred. */
@@ -9170,7 +9217,9 @@ function termSeriesTicks(top) {
   for (const d of [decade / 10, decade, decade * 10]) {
     for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 7.5, 8]) {
       const v = d * m;
-      if (v >= 1 && v < top) cands.push(Number(v.toPrecision(6)));
+      if (v >= 1 && v < top && !cands.includes(Number(v.toPrecision(6)))) {
+        cands.push(Number(v.toPrecision(6)));
+      }
     }
   }
   const place = (v) => Math.log(1 + bias * (v / top)) / Math.log(TERM_SERIES_LOG_BASE);
@@ -9180,7 +9229,8 @@ function termSeriesTicks(top) {
     let best = null;
     for (const v of cands) {
       if (out.includes(v)) continue;
-      if (out.some((o) => Math.abs(place(o) - place(v)) < 0.06)) continue;
+      const y = termSeriesTickLabelY(top, v);
+      if (out.some((o) => Math.abs(termSeriesTickLabelY(top, o) - y) < TERM_SERIES_TICK_LABEL_HEIGHT)) continue;
       if (best === null || Math.abs(place(v) - want) < Math.abs(place(best) - want)) best = v;
     }
     if (best !== null) out.push(best);
@@ -9201,7 +9251,10 @@ function termSeriesTick(v) {
 
 function termSeriesChart(data, zoom) {
   const NS = "http://www.w3.org/2000/svg";
-  const w = zoom ? 320 : 120, h = zoom ? 96 : 26;
+  /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
+     picker derives its label-clearance floor from that height and the inset
+     below (claunch-nw9ca.1). */
+  const w = zoom ? 320 : 120, h = zoom ? TERM_SERIES_ZOOM_HEIGHT : 26;
   const box = el("div", "term-series" + (zoom ? " zoom" : ""));
   const svg = document.createElementNS(NS, "svg");
   // setAttribute only: an SVG element's className is a read-only
@@ -9225,7 +9278,7 @@ function termSeriesChart(data, zoom) {
      cached input dwarfs fresh input and write, and on the linear axis this
      chart had before (claunch-k5udr) the two thin parts were not visible at
      all (claunch-nw9ca). */
-  const yAt = (v) => h - 1 - ratio(v) * (h - 3);
+  const yAt = (v) => h - 1 - ratio(v) * (h - TERM_SERIES_PLOT_INSET);
   const below = drawn.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
     const above = drawn.map((p, i) => below[i] + p[key]);
@@ -9317,7 +9370,7 @@ function termSeriesChart(data, zoom) {
       const text = document.createElementNS(NS, "text");
       text.setAttribute("class", "term-series-ytick");
       text.setAttribute("x", "2");
-      text.setAttribute("y", String(Math.max(8, y - 2)));
+      text.setAttribute("y", String(termSeriesTickLabelY(top, at)));
       text.textContent = termSeriesTick(at);
       svg.appendChild(text);
     }
