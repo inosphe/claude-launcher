@@ -175,32 +175,83 @@ def _build(boards, snaps):
     return docs
 
 
-EDITABLE = {"source", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval"}
+EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval"}
 SOURCES = ("custom", "profile")
+
+
+def _check_source_row(source, row):
+    """Validate one connection path's stored values; return them cleaned."""
+    if not isinstance(row, dict):
+        raise ValueError(f"sources.{source} must be an object")
+    unknown = set(row) - set(store.RAG_SOURCE_FIELDS[source])
+    if unknown:
+        raise ValueError(f"unsupported setting for the {source} connection: {sorted(unknown)[0]}")
+    clean = {}
+    for key, value in row.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{source}.{key} must be text")
+        clean[key] = value.strip()
+    return clean
 
 
 def proposed(body):
     """The config document a save (or a test) would write.
 
-    Both connection paths stay in the block: choosing ``source: profile``
-    keeps the typed ``base_url``/``api_key`` for a later switch back, and
-    choosing ``custom`` keeps the profile name. Only the chosen path is
-    validated, so a profile-backed block needs no typed address.
+    Both connection paths stay in the block, each with its own endpoint and
+    model ids (claunch-pxxn4): ``sources.custom`` holds the typed
+    ``base_url``/``api_key``/models and ``sources.profile`` the profile name
+    and the models that path uses. Choosing one leaves the other untouched,
+    so switching the radio back restores that path's model ids instead of
+    borrowing the ones that were just in force.
+
+    Two body shapes reach here. The form sends ``sources`` with both rows. A
+    caller that knows only the flat fields (``source`` plus
+    ``base_url``/``api_key``/``embedding_model``/``rerank_model``/``profile``)
+    still works: those land in the row ``source`` names. Only the chosen path
+    is validated, so a profile-backed block needs no typed address.
     """
     if not isinstance(body, dict) or set(body) - EDITABLE:
         raise ValueError("unsupported search setting")
     doc = store.load()
     block = dict(doc.get("rag") or {})
+    rows = store.rag_source_rows(block)
+    submitted_sources = set()
+    if "sources" in body:
+        submitted = body["sources"]
+        if not isinstance(submitted, dict):
+            raise ValueError("sources must be an object")
+        for source, row in submitted.items():
+            if source not in SOURCES:
+                raise ValueError(f"unknown connection: {source}")
+            clean = _check_source_row(source, row)
+            # An empty password field preserves the saved secret.
+            if not clean.get("api_key"):
+                clean.pop("api_key", None)
+            rows[source].update(clean)
+            submitted_sources.add(source)
+    if "source" in body and body["source"] not in SOURCES:
+        raise ValueError("source must be custom or profile")
+    # The path a flat body writes into. ``source`` in this same body wins, so
+    # one request can switch the connection and set that path's models.
+    pending = body.get("source") or block.get("source")
+    active = "profile" if pending == "profile" else "custom"
     for key, value in body.items():
-        if key == "source":
-            if value not in SOURCES:
-                raise ValueError("source must be custom or profile")
-        elif key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
+        if key in ("source", "sources"):
+            continue
+        if key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be text")
             if key == "api_key" and not value:
                 continue  # An empty password field preserves the saved secret.
             value = value.strip()
+            # A flat value belongs to the path it describes: ``profile`` and
+            # ``base_url``/``api_key`` each to their own row, and the model ids
+            # to the row this body's ``source`` picks.
+            chosen = "profile" if key == "profile" else (
+                "custom" if key in ("base_url", "api_key") else active
+            )
+            rows[chosen][key] = value
+            continue
         elif key == "verify_tls":
             if not isinstance(value, bool):
                 raise ValueError("verify_tls must be boolean")
@@ -212,16 +263,32 @@ def proposed(body):
             if key in ("batch", "candidates", "rerank_top") and int(value) != value:
                 raise ValueError(f"{key} must be an integer")
         block[key] = value
-    source = "profile" if block.get("source") == "profile" else "custom"
-    if source == "profile":
-        if not block.get("profile"):
-            raise ValueError("choose a profile for the profile connection")
-        store.rag_profile_backend(block["profile"], doc)
-    if source == "custom" or block.get("base_url"):
-        address = urlsplit(block.get("base_url", ""))
+    if "source" in body:
+        block["source"] = body["source"]
+    source = active
+    # The path in force must be usable, and the other path is only checked when
+    # this request touched it -- a body that switches the radio carries the
+    # saved row of the path it left, and refusing that save because an unused
+    # path has no address yet would make switching impossible to complete.
+    profile_name = rows["profile"].get("profile", "")
+    if source == "profile" and not profile_name:
+        raise ValueError("choose a profile for the profile connection")
+    if profile_name and (source == "profile" or "profile" in submitted_sources):
+        store.rag_profile_backend(profile_name, doc)
+    if source == "custom" and not rows["custom"].get("base_url"):
+        raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
+    if rows["custom"].get("base_url"):
+        address = urlsplit(rows["custom"]["base_url"])
         if address.scheme not in ("http", "https") or not address.hostname or address.username or address.password or address.query or address.fragment:
             raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
     block.pop("dimensions", None)  # Output width is learned from model responses.
+    # The per-path values now live in their rows. Leaving a copy at the block
+    # root would be a second place they can disagree from, and the copy would
+    # be the one that goes stale -- ``rag_config`` reads the rows whenever they
+    # are there, so a stale root key would look saved and change nothing.
+    for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
+        block.pop(key, None)
+    block["sources"] = rows
     doc["rag"] = block
     return doc
 
@@ -251,12 +318,26 @@ def public_settings():
 
     ``base_url`` is the typed custom address (what the form field holds);
     ``resolved`` is what a call would use under the chosen ``source``.
+    ``sources`` carries both rows so the card can fill each path's own model
+    ids when the reader switches the radio (claunch-pxxn4) — the row not in
+    force would otherwise be invisible, and a switch would look like it had
+    changed models.
     """
     doc = store.load()
     block = doc.get("rag") if isinstance(doc.get("rag"), dict) else {}
     cfg = store.rag_config(doc)
     custom = store.rag_config({"rag": {**block, "source": "custom"}})
-    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url"}}
+    stored = store.rag_source_rows(block)
+    rows = {
+        source: {k: stored[source].get(k, "") for k in store.RAG_SOURCE_FIELDS[source]}
+        for source in SOURCES
+    }
+    # The secret never leaves the daemon, and each row keeps exactly the keys a
+    # save accepts -- the card posts these rows straight back, and one carrying
+    # an extra key would be refused by ``_check_source_row``. Whether a key is
+    # on file is the top-level ``api_key_set``.
+    rows["custom"].pop("api_key", None)
+    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url", "sources"}}
     out.update({
         "base_url": custom["base_url"],
         "api_key_set": bool(custom["api_key"]),
@@ -264,6 +345,7 @@ def public_settings():
         "profile_error": cfg["profile_error"],
         "resolved": {"base_url": cfg["base_url"], "has_key": bool(cfg["api_key"])},
         "profiles": profile_rows(doc),
+        "sources": rows,
     })
     return out
 
