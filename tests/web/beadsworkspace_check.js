@@ -86,13 +86,17 @@ new Function(
   "let beadsDetail = null;\n"
   + "const beadsDetailKept = new Map();\n"
   + "let beadsFocus = '';\n"
+  + "let beadsCache = null, beadsWorkspace = '/selected';\n"
   + "function renderBeads() { record('render'); }\n"
   + "function setState(detail, focus) { beadsDetail = detail; beadsFocus = focus; }\n"
   + "function detailState() { return beadsDetail; }\n"
+  + "function keep(root, id, d) { beadsDetailKept.set(beadsDetailKey(root, id), d); }\n"
+  + "function kept(root, id) { return beadsDetailKept.has(beadsDetailKey(root, id)); }\n"
   + "function openSessionModal(o) { record('modal:' + JSON.stringify(o)); }\n"
+  + slice("beadsRootOf") + slice("beadsDetailKey")
   + slice("beadsStripMeta") + slice("beadsWorkspaceBlock") + slice("beadsStartBlock")
   + "Object.assign(exports, { strip: beadsStripMeta, block: beadsWorkspaceBlock,"
-  + " start: beadsStartBlock, setState, detailState });",
+  + " start: beadsStartBlock, setState, detailState, keep, kept });",
 )(
   ctx,
   el,
@@ -186,6 +190,8 @@ ctx.setState(
   { root: "/repo", workspace: "alpha", workspaces: WORKSPACES, issue: {} },
   "claunch-1",
 );
+ctx.keep("/repo", "claunch-1", { root: "/repo", workspace: "alpha" });
+ctx.keep("/other", "claunch-1", { root: "/other", workspace: "alpha" });
 block = ctx.block();
 let pick = find(block, "beads-ws-pick")[0];
 pick.value = "beta";
@@ -197,6 +203,11 @@ check("the change POSTs the chosen name against the issue's own board",
        { workspace: "beta", cwd: "/repo" }]);
 check("and the pane is redrawn, since the description carries the block",
       calls.some((c) => c.event === "render"), true);
+/* The kept answer still names the old workspace; the next open of the
+   issue must not draw it (claunch-m793w.1). Only this board's entry goes. */
+check("the kept answer for this issue on this board is dropped",
+      [ctx.kept("/repo", "claunch-1"), ctx.kept("/other", "claunch-1")],
+      [false, true]);
 
 answer = { ok: false, body: { error: "no workspace named 'nowhere'" } };
 ctx.setState(

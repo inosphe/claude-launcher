@@ -29531,12 +29531,18 @@ let beadsDetail = null;    // its /api/beads/<id> payload
 /* Each issue's last payload, kept for this page load (claunch-m793w): an
    issue opened before — Back to it, or a link to it again — is drawn at once
    and read again behind it, rather than "loading…" every time. Bounded,
-   oldest first out. */
+   oldest first out. Keyed by board and id: two boards can hold the same id,
+   and one board's payload must not stand in for the other's
+   (claunch-m793w.1). */
 const BEADS_DETAIL_KEEP = 64;
 const beadsDetailKept = new Map();
-function keepBeadsDetail(id, data) {
-  beadsDetailKept.delete(id);   // re-added last, so the oldest goes first
-  beadsDetailKept.set(id, data);
+function beadsDetailKey(root, id) {
+  return `${root || ""}\n${id}`;
+}
+function keepBeadsDetail(root, id, data) {
+  const key = beadsDetailKey(root, id);
+  beadsDetailKept.delete(key);   // re-added last, so the oldest goes first
+  beadsDetailKept.set(key, data);
   while (beadsDetailKept.size > BEADS_DETAIL_KEEP) beadsDetailKept.delete(beadsDetailKept.keys().next().value);
 }
 let beadsFilter = "active";  // status filter: active | <status> | all
@@ -29603,7 +29609,9 @@ function openBeads(id, section) {
   beadsSection = section === "reports" ? "reports"
     : section === "queues" ? "queues" : "board";
   const focus = id || "";
-  if (focus !== beadsFocus) beadsDetail = (focus && beadsDetailKept.get(focus)) || null;
+  if (focus !== beadsFocus) {
+    beadsDetail = (focus && beadsDetailKept.get(beadsDetailKey(beadsRootOf(focus), focus))) || null;
+  }
   beadsFocus = focus;
   showView("beads");
   if (beadsSection === "reports") {
@@ -29696,7 +29704,7 @@ async function refreshBeadsDetail() {
     const data = await resp.json().catch(() => ({}));
     if (beadsFocus === detailWanted) {
       beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
-      if (resp.ok) keepBeadsDetail(detailWanted, data);
+      if (resp.ok) keepBeadsDetail(data.root || root, detailWanted, data);
       // The daemon answers from the board the issue is on, which is not
       // always the one asked about: a link to an issue carries no board, so
       // an id not on the loaded page was asked for on the selected one
@@ -30908,7 +30916,7 @@ function beadsWorkspaceBlock() {
       // The description carries the block, so the pane must be redrawn from
       // the daemon rather than patched here — otherwise the Description
       // section keeps showing the value that was just replaced.
-      beadsDetailKept.delete(beadsFocus);
+      beadsDetailKept.delete(beadsDetailKey(beadsDetail.root || beadsRootOf(beadsFocus), beadsFocus));
       beadsDetail = null;
       renderBeads();
     } catch (err) {

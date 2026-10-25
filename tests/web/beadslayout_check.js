@@ -117,6 +117,7 @@ new Function(
   // (claunch-4aesv); real helpers, so the row reads as the page draws it.
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("renderQueues") + slice("renderReports") + slice("openBeads")
+  + slice("beadsRootOf") + slice("beadsDetailKey")
   + slice("stopBeadsPoll")
   + slice("sessBeads") + slice("sessBeadsPanel")
   + `
@@ -125,7 +126,7 @@ Object.assign(exports, {
   panels: [sessBeads, sessBeadsPanel],
   filters: () => [beadsWorkspace, beadsSession],
   set(k, v) { eval(k + " = v"); },
-  keepDetail: (id, d) => { beadsDetailKept.set(id, d); },
+  keepDetail: (root, id, d) => { beadsDetailKept.set(beadsDetailKey(root, id), d); },
   detail: () => beadsDetail,
 });`)(ctx, document, el);
 
@@ -202,13 +203,19 @@ check("opening an issue refreshes its detail",
       ctx.asked.includes("refreshBeadsDetail"), true);
 // An issue read before is drawn from its kept answer at once, and still
 // read again (claunch-m793w); one never read waits for its answer.
-ctx.keepDetail("issue-read-before", { issue: { id: "issue-read-before" } });
+ctx.keepDetail("/a", "issue-read-before", { issue: { id: "issue-read-before" } });
 ctx.asked.length = 0;
 ctx.open("issue-read-before", "board");
 check("an issue read before shows its kept answer", ctx.detail(), { issue: { id: "issue-read-before" } });
 check("...and is read again", ctx.asked.includes("refreshBeadsDetail"), true);
 ctx.open("issue-never-read", "board");
 check("an issue never read starts empty", ctx.detail(), null);
+// The same id kept from another board is not drawn for this one
+// (claunch-m793w.1): two boards can hold one id.
+ctx.keepDetail("/b", "issue-on-both", { root: "/b", issue: { id: "issue-on-both" } });
+ctx.open("issue-on-both", "board");
+check("an id kept from another board is not drawn here", ctx.detail(), null);
+ctx.open("issue-never-read", "board");
 ctx.asked.length = 0;
 ctx.set("beadsWorkspace", "/b");
 ctx.open("issue-from-search", "board");
