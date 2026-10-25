@@ -1139,6 +1139,10 @@ def prune_basetemps(session: str, *, keep: int = KEEP_BASETEMPS) -> List[Path]:
 #: before it deletes the tree (``daemon/basetemp_reaper.py``).
 RUN_SUMMARY = "claunch-run.json"
 
+#: The junit report a run writes there for the receipt's ``skips``
+#: (``sweep.junit_env``/``sweep.parse_skips``).
+JUNIT_REPORT = "claunch-junit.xml"
+
 
 def command_basetemp(cmd: List[str]) -> Optional[str]:
     """The ``--basetemp=`` a pytest command line names, if any."""
@@ -1726,6 +1730,10 @@ def run_and_record(
     """
     started = datetime.now(timezone.utc)
     lines: List[str] = []
+    basetemp, workers = command_basetemp(cmd), command_workers(cmd)
+    # Beside the run's other leftovers, and read back into the receipt below:
+    # the receipt outlives the basetemp, so it carries the names, not the path.
+    junit = Path(basetemp, JUNIT_REPORT) if basetemp else None
     proc = subprocess.Popen(
         cmd,
         cwd=str(repo),
@@ -1734,7 +1742,7 @@ def run_and_record(
         text=True,
         errors="replace",
         bufsize=1,
-        env=environment,
+        env=sweep.junit_env(os.environ if environment is None else environment, junit) if junit else environment,
     )
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -1744,7 +1752,6 @@ def run_and_record(
     code = proc.wait()
     finished = datetime.now(timezone.utc)
     output = "".join(lines)
-    basetemp, workers = command_basetemp(cmd), command_workers(cmd)
     write_run_summary(basetemp, {
         "tree": tree,
         "selection": sorted(files),
@@ -1789,6 +1796,8 @@ def run_and_record(
         "seconds": round((finished - started).total_seconds(), 1),
         "deselected": sorted(set(deselect)),
         "known_failures": known_failures,
+        # Which tests did not run, and why; ``counts`` only says how many.
+        "skips": sweep.parse_skips(junit) if junit else None,
     }
     if comparison is not None:
         receipt.update(comparison)

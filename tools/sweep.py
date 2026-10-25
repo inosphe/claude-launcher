@@ -652,6 +652,63 @@ def _failure_lines(output: str, limit: Optional[int] = 40) -> list:
     return lines if limit is None else lines[:limit]
 
 
+#: How a run asks pytest for the report :func:`parse_skips` reads: through
+#: the environment, so the receipt's ``command`` stays the command a person
+#: would type, and a ``--command`` that is not pytest ignores it. ``xunit1``
+#: because it is the family that writes each case's ``file``; the default
+#: (``xunit2``) leaves only a dotted ``classname``, which cannot tell a
+#: package from a class.
+#:
+#: The report and not ``-rs``: pytest folds the short summary by location and
+#: reason (claunch-1b2d7.1, measured on pytest 9.1.1 without Playwright:
+#: ``SKIPPED [51] tests/test_web_topology.py:791: Playwright is not
+#: installed``), so the 51 harnesses that did not run are one line with no
+#: names.
+def junit_env(env: dict, path: Path) -> dict:
+    """``env`` with pytest asked to write its junit report to ``path``."""
+    out = dict(env)
+    own = f'"--junit-xml={path.as_posix()}" -o junit_family=xunit1'
+    out["PYTEST_ADDOPTS"] = f"{out.get('PYTEST_ADDOPTS', '')} {own}".strip()
+    return out
+
+
+def parse_skips(path: Path) -> Optional[list]:
+    """``[{"nodeid", "reason"}]`` for every test the junit report at ``path``
+    marks skipped; ``None`` when there is no readable report, which is not
+    the same as nothing skipped.
+
+    An ``xfail`` is reported as skipped too and is left out: it ran.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    skips = []
+    for case in root.iter("testcase"):
+        mark = case.find("skipped")
+        if mark is None or mark.get("type") == "pytest.xfail":
+            continue
+        file = case.get("file") or ""
+        classname = case.get("classname") or ""
+        module = file[:-3].replace("/", ".") if file.endswith(".py") else ""
+        if not classname:
+            # A module skipped at collection: the node is the file.
+            nodeid = file or case.get("name", "")
+        else:
+            inner = classname[len(module) + 1:] if module and classname.startswith(module + ".") else ""
+            parts = [file or classname, *(inner.split(".") if inner else []), case.get("name", "")]
+            nodeid = "::".join(parts)
+        reason = mark.get("message") or ""
+        if reason == "collection skipped":
+            # The text is the repr of (path, line, "Skipped: <reason>").
+            found = re.search(r"'Skipped: (.*)'\)\s*$", mark.text or "")
+            reason = found.group(1) if found else reason
+        skips.append({"nodeid": nodeid, "reason": reason})
+    return sorted(skips, key=lambda s: s["nodeid"])
+
+
 #: The cap on the suite output a red run parks beside its receipt, and how
 #: much is kept from each end. Both are sized against this repository's last
 #: red sweep (``1fdc7a7``: 2 failed, 2319 passed, 2085 warnings), whose
@@ -801,6 +858,7 @@ def cmd_run(args) -> int:
     suite_home = Path(tempfile.mkdtemp(
         prefix="sweep-home-", dir=os.environ.get("CLAUNCH_SCRATCH") or None))
     result_file = suite_home.with_name(suite_home.name + ".result.json")
+    junit_file = suite_home.with_name(suite_home.name + ".junit.xml")
     clock = time.monotonic()
     try:
         proc = subprocess.run(
@@ -811,10 +869,11 @@ def cmd_run(args) -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=suite_env(grant, suite_home, result_file),
+            env=junit_env(suite_env(grant, suite_home, result_file), junit_file),
         )
         _report_window(grant, result_file, proc.returncode,
                        (proc.stdout or "") + (proc.stderr or ""), time.monotonic() - clock)
+        skips = parse_skips(junit_file)
     finally:
         grant.release()
         # Anything left here is a test that wrote to the launcher home it was
@@ -822,6 +881,7 @@ def cmd_run(args) -> int:
         home_writes = sorted(p.name for p in suite_home.iterdir())
         shutil.rmtree(suite_home, ignore_errors=True)
         result_file.unlink(missing_ok=True)
+        junit_file.unlink(missing_ok=True)
     finished = datetime.now(timezone.utc)
     # A stream that came back as ``None`` is not an empty stream: the reader
     # died and took the output with it. Both states parse to ``counts {}``, and
@@ -847,6 +907,8 @@ def cmd_run(args) -> int:
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),
+        # Which tests did not run, and why; ``counts`` only says how many.
+        "skips": skips,
     }
     if home_writes:
         receipt["suite_home_writes"] = home_writes[:40]

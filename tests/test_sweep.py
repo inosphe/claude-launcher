@@ -637,6 +637,113 @@ def test_the_receipt_carries_the_command_in_full(repo, receipts):
     assert receipt["tree"] == _git(repo, "rev-parse", "master^{tree}").strip()
 
 
+#: A suite with every shape of skip junit writes differently: a parametrized
+#: case, a method, a module skipped at collection, and an xfail (reported as
+#: skipped, but it ran).
+_SKIPPING_SUITE = {
+    "tests/web/test_h.py": (
+        "import pytest\n"
+        "@pytest.mark.parametrize('h', ['a.cjs', 'b.cjs'])\n"
+        "def test_harness(h):\n"
+        "    pytest.skip('Playwright is not installed (or not on NODE_PATH)')\n"
+        "class TestC:\n"
+        "    def test_m(self):\n"
+        "        pytest.skip('no display')\n"
+        "@pytest.mark.xfail(reason='known')\n"
+        "def test_x():\n"
+        "    assert False\n"
+        "def test_ok():\n"
+        "    pass\n"
+    ),
+    "tests/test_mod.py": (
+        "import pytest\n"
+        "pytest.skip('whole module', allow_module_level=True)\n"
+    ),
+}
+
+_SKIPS = [
+    {"nodeid": "tests/test_mod.py", "reason": "whole module"},
+    {"nodeid": "tests/web/test_h.py::TestC::test_m", "reason": "no display"},
+    {"nodeid": "tests/web/test_h.py::test_harness[a.cjs]",
+     "reason": "Playwright is not installed (or not on NODE_PATH)"},
+    {"nodeid": "tests/web/test_h.py::test_harness[b.cjs]",
+     "reason": "Playwright is not installed (or not on NODE_PATH)"},
+]
+
+
+def _skipping_suite(root: Path) -> None:
+    for rel, text in _SKIPPING_SUITE.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+
+
+def test_parse_skips_names_each_skipped_node_and_its_reason(tmp_path):
+    """``-rs`` folds skips by location (claunch-1b2d7.1: 51 harnesses on one
+    line); the junit report the run is asked for names every node."""
+    _skipping_suite(tmp_path)
+    report = tmp_path / "out" / "junit.xml"
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider",
+         f"--rootdir={tmp_path}", f"--basetemp={tmp_path / 'bt'}"],
+        cwd=str(tmp_path), env=sweep.junit_env(dict(os.environ), report),
+        capture_output=True,
+    )
+    assert sweep.parse_skips(report) == _SKIPS
+
+
+def test_parse_skips_tells_no_report_from_nothing_skipped(tmp_path):
+    assert sweep.parse_skips(tmp_path / "absent.xml") is None
+    (tmp_path / "half.xml").write_text("<testsuites><testsu", encoding="utf-8")
+    assert sweep.parse_skips(tmp_path / "half.xml") is None
+    (tmp_path / "none.xml").write_text(
+        '<testsuites><testsuite><testcase classname="t" name="a" file="t.py"/>'
+        "</testsuite></testsuites>", encoding="utf-8")
+    assert sweep.parse_skips(tmp_path / "none.xml") == []
+
+
+def test_junit_env_keeps_the_callers_addopts(tmp_path):
+    env = sweep.junit_env({"PYTEST_ADDOPTS": "-x"}, tmp_path / "r.xml")
+    assert env["PYTEST_ADDOPTS"].startswith("-x ")
+    assert f"--junit-xml={(tmp_path / 'r.xml').as_posix()}" in env["PYTEST_ADDOPTS"]
+
+
+#: The receipt's keys before ``skips`` was added; the gate's readers
+#: (``is_green``, ``_newest_green``) read these and must find them unchanged.
+_RECEIPT_KEYS = {
+    "commit", "tree", "code_tree", "branch", "repo", "command", "exit_code",
+    "counts", "failures", "dirty", "session", "window", "started_at",
+    "finished_at", "seconds",
+}
+
+
+def test_the_sweep_receipt_names_what_was_skipped(repo, receipts):
+    _skipping_suite(repo)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "suite")
+    command = (f'"{sys.executable}" -m pytest tests -q -p no:cacheprovider '
+               f'--basetemp="{(repo.parent / "bt").as_posix()}"')
+    assert _run(repo, receipts, "--command", command) == 0
+    commit = _git(repo, "rev-parse", "master").strip()
+    receipt = json.loads(
+        sweep.receipt_path(repo, commit, receipts).read_text(encoding="utf-8")
+    )
+    assert receipt["skips"] == _SKIPS
+    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+    assert receipt["command"] == command, "the junit request rides in the environment"
+    assert receipt["counts"] == {"passed": 1, "skipped": 4, "xfailed": 1}
+    assert _check(repo, receipts) == 0
+
+
+def test_a_command_that_writes_no_report_files_skips_as_unknown(repo, receipts):
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    commit = _git(repo, "rev-parse", "master").strip()
+    receipt = json.loads(
+        sweep.receipt_path(repo, commit, receipts).read_text(encoding="utf-8")
+    )
+    assert receipt["skips"] is None
+    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+
+
 def test_an_unreadable_branch_cannot_tell_rather_than_failing(tmp_path):
     """Outside a repository the honest answer is "cannot tell", not "red".
 
