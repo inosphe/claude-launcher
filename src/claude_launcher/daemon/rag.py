@@ -197,7 +197,7 @@ def _decode(text: str) -> array:
 RAG_SESSION_ID = "claunch-rag"
 
 
-def request_headers(cfg: dict, *, path: str = "") -> Dict[str, str]:
+def request_headers(cfg: dict) -> Dict[str, str]:
     """The request headers one embedding or rerank call goes out with.
 
     The OpenAI-compatible shape (``Accept``, ``Content-Type``, the bearer) plus
@@ -206,16 +206,21 @@ def request_headers(cfg: dict, *, path: str = "") -> Dict[str, str]:
     directly — no shim in its path — so a provider that refuses a request
     without its own session header (OpenCode Go answers ``400 MissingSessionID``,
     measured 2026-10-25 on the briefing's ``chat/completions`` call) rejects
-    every sync, and a provider that wants the credential under ``x-api-key``
-    on its Messages path gets a 401 on the bearer.
+    every sync.
 
     ``cfg["provider"]`` is set only when the block's ``source`` is ``profile``
     (``store.rag_config`` derives it). A typed ``base_url`` belongs to no
     provider entry, so no rule applies to it and the plain headers go out.
 
-    ``path`` is where the call lands; the rules only look at it for the
-    Messages auth move, which cannot fire on ``/embeddings`` or ``/rerank``.
-    It is passed anyway so this call reads the same as the other two.
+    Only the session header applies here. ``routing.apply_anthropic_auth`` is
+    deliberately **not** called: it fires on any path containing ``/messages``,
+    and the paths this caller uses are ``/embeddings`` and ``/rerank`` under a
+    base URL nobody constrains. A base URL that happens to contain ``/messages``
+    would then lose the bearer — a regression against the bearer-only headers
+    this call sent before the session rule existed. The two protocols are fixed
+    here, so "this call is not on a Messages path" is a fact about the caller,
+    not a guess about a string; passing a path in would make the rule's own
+    substring test the only thing standing between the pool and a 401.
 
     A malformed provider value raises :class:`RagError` naming the config key.
     The shim can degrade to log-and-skip because traffic must keep flowing;
@@ -232,7 +237,6 @@ def request_headers(cfg: dict, *, path: str = "") -> Dict[str, str]:
         return headers
     try:
         routing.apply_session_header(headers, provider, session=RAG_SESSION_ID)
-        routing.apply_anthropic_auth(headers, provider, path=path)
     except routing.RoutingError as exc:
         raise RagError(str(exc)) from exc
     return headers
@@ -262,7 +266,7 @@ class RagClient:
         self.batch = max(1, int(cfg.get("batch") or store.RAG_DEFAULTS["batch"]))
 
     def _session(self) -> aiohttp.ClientSession:
-        headers = request_headers(self.cfg, path=self.base)
+        headers = request_headers(self.cfg)
         if self.cfg.get("verify_tls") is False:
             connector = aiohttp.TCPConnector(ssl=False)
         elif _OS_TRUST_CONTEXT is not None:

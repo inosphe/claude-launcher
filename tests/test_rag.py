@@ -397,6 +397,31 @@ def test_client_sends_the_providers_required_session_header():
     assert "x-opencode-session" not in ep.headers[1]
 
 
+def test_embeddings_keep_the_bearer_even_when_the_base_url_contains_messages():
+    """The Messages-only auth move must not reach this caller at all.
+
+    ``/embeddings`` and ``/rerank`` are the only paths here, so a base URL
+    containing ``/messages`` says nothing about the protocol. Passing that URL
+    to ``routing.apply_anthropic_auth`` made its substring test the decider:
+    an ``anthropic_auth_header: x-api-key`` provider then dropped the bearer
+    and left only ``x-api-key`` — a regression against the headers this call
+    sent before the session rule existed.
+    """
+    async def run():
+        store.update(lambda doc: doc.setdefault("providers", {}).update({
+            "ocgo": {"api_key": "k", "endpoints": {"openai": "https://x/messages/v1"},
+                     "session_header": "x-opencode-session",
+                     "anthropic_auth_header": "x-api-key"}}))
+        cfg = dict(store.RAG_DEFAULTS, base_url="https://x/messages/v1",
+                   api_key="k", embedding_model="m", provider="ocgo")
+        headers = rag.request_headers(cfg)
+        assert headers["Authorization"] == "Bearer k"
+        assert "x-api-key" not in headers
+        assert headers["x-opencode-session"] == rag.RAG_SESSION_ID
+
+    asyncio.run(run())
+
+
 def test_a_malformed_rag_header_rule_fails_the_call_with_the_config_key():
     async def run():
         store.update(lambda doc: doc.setdefault("providers", {}).update({
