@@ -91,6 +91,7 @@ function requestAnimationFrame() {}
 // openBeads' collaborators, recording what was asked of them.
 const asked = [];
 let beadsDetail = null, beadsOpen = false, beadsTimer = null;
+const beadsDetailKept = new Map();
 function showView() {}
 function clearInterval() {}
 function stopReportsPoll() {}
@@ -124,6 +125,8 @@ Object.assign(exports, {
   panels: [sessBeads, sessBeadsPanel],
   filters: () => [beadsWorkspace, beadsSession],
   set(k, v) { eval(k + " = v"); },
+  keepDetail: (id, d) => { beadsDetailKept.set(id, d); },
+  detail: () => beadsDetail,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -197,6 +200,15 @@ check("opening an issue preserves the board's current pages",
       ctx.asked.includes("restartBeadsStream"), false);
 check("opening an issue refreshes its detail",
       ctx.asked.includes("refreshBeadsDetail"), true);
+// An issue read before is drawn from its kept answer at once, and still
+// read again (claunch-m793w); one never read waits for its answer.
+ctx.keepDetail("issue-read-before", { issue: { id: "issue-read-before" } });
+ctx.asked.length = 0;
+ctx.open("issue-read-before", "board");
+check("an issue read before shows its kept answer", ctx.detail(), { issue: { id: "issue-read-before" } });
+check("...and is read again", ctx.asked.includes("refreshBeadsDetail"), true);
+ctx.open("issue-never-read", "board");
+check("an issue never read starts empty", ctx.detail(), null);
 ctx.asked.length = 0;
 ctx.set("beadsWorkspace", "/b");
 ctx.open("issue-from-search", "board");

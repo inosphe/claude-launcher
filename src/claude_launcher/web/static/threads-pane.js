@@ -97,6 +97,20 @@ globalThis.ThreadsPane = (() => {
   const attached = new Map(); // thread id ("" = new thread) -> [{file, src, isFile?}]: attachments waiting to be sent
   const unfolded = new Set(); // thread ids whose closed question chips are shown
   const drawn = {side: "", main: ""};   // what each half last drew
+  // The last answers, kept across mounts for this page load (claunch-m793w):
+  // coming back to a session's pane draws its list and the thread it shows
+  // from these at once, and the first read then asks only for what came
+  // after (loadThread's `after`). Bounded, oldest first out: a dashboard
+  // left open for days must not keep every conversation it ever showed.
+  const CACHE_SESSIONS = 32, CACHE_THREADS = 64;
+  const listCache = new Map();   // session -> its last list answer
+  const convoCache = new Map();  // thread id -> {id, thread, messages}
+  function cacheKeep(map, key, value, max) {
+    map.delete(key);   // re-added last, so the oldest goes first
+    map.set(key, value);
+    while (map.size > max) map.delete(map.keys().next().value);
+  }
+  const cachedConvo = (tid) => (tid && convoCache.get(tid)) || null;
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
   const SIDE_W_KEY = "claunch_threadsidew"; // localStorage: the list column's width in px
   const SIDE_W_MIN = 140;    // narrower and every title is ellipsis
@@ -518,6 +532,7 @@ globalThis.ThreadsPane = (() => {
       if (mine !== seq || want !== name) return;
       error = "";
       list = doc;
+      cacheKeep(listCache, want, doc, CACHE_SESSIONS);
       current = pick(allThreads(list), current);
       remember(current);
       await loadThread(early);
@@ -553,6 +568,7 @@ globalThis.ThreadsPane = (() => {
     if (tid !== current) return;
     convo = fresh ? {id: tid, thread: doc.thread, messages: doc.messages || []}
                   : {id: tid, thread: doc.thread, messages: (have ? have.messages : []).concat(doc.messages || [])};
+    cacheKeep(convoCache, tid, convo, CACHE_THREADS);
   }
 
   async function act(fn) {
@@ -908,6 +924,7 @@ globalThis.ThreadsPane = (() => {
       await request(`/api/threads/${encodeURIComponent(tid)}/asks/${seq}/answer`, body);
       askDrafts.delete(`${tid}:${seq}`);
       convo = null;   // the answer landed on the entry in place: a fresh read redraws it
+      convoCache.delete(tid);
     }));
   }
 
@@ -1102,11 +1119,12 @@ globalThis.ThreadsPane = (() => {
         if (current === t.id) return;
         if (renaming) { renaming = ""; drafts.delete(RENAME); }
         current = t.id;
-        convo = null;
+        convo = cachedConvo(t.id);
+        if (convo) render();   // what was read last, while the read goes out
         load();
       });
       li.addEventListener("dblclick", () => {
-        if (current !== t.id) { current = t.id; convo = null; load(); }
+        if (current !== t.id) { current = t.id; convo = cachedConvo(t.id); load(); }
         startRename(t.id);
       });
       ul.append(li);
@@ -1396,7 +1414,18 @@ globalThis.ThreadsPane = (() => {
     storageKey = opts.storageKey || "claunch_threadread";
     current = remembered(session);
     if (wanted && wanted.session === session) { current = wanted.tid; wanted = null; }
-    host.replaceChildren(node("p", "wf-note", "불러오는 중…"));
+    // Back on a session shown before: its last list and thread at once,
+    // brought up to date by the load below (claunch-m793w).
+    list = listCache.get(session) || null;
+    if (list) {
+      // A thread asked for by id stays asked for even when the kept list
+      // predates it: the load below picks from the fresh list.
+      if (!current) current = pick(allThreads(list), "");
+      convo = cachedConvo(current);
+      render();
+    } else {
+      host.replaceChildren(node("p", "wf-note", "불러오는 중…"));
+    }
     load();
     timer = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
@@ -1431,7 +1460,7 @@ globalThis.ThreadsPane = (() => {
   function select(tid) {
     if (!host || !tid) return;
     composing = false;
-    if (current !== tid) { current = tid; convo = null; }
+    if (current !== tid) { current = tid; convo = cachedConvo(tid); }
     load();
   }
 

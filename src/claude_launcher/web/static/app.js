@@ -29528,6 +29528,17 @@ let beadsTotal = null;     // selected board total in the tree view
 let beadsLanePages = {};   // independent page per status; reset with filters
 let beadsFocus = "";       // the issue opened in the detail pane, by id
 let beadsDetail = null;    // its /api/beads/<id> payload
+/* Each issue's last payload, kept for this page load (claunch-m793w): an
+   issue opened before — Back to it, or a link to it again — is drawn at once
+   and read again behind it, rather than "loading…" every time. Bounded,
+   oldest first out. */
+const BEADS_DETAIL_KEEP = 64;
+const beadsDetailKept = new Map();
+function keepBeadsDetail(id, data) {
+  beadsDetailKept.delete(id);   // re-added last, so the oldest goes first
+  beadsDetailKept.set(id, data);
+  while (beadsDetailKept.size > BEADS_DETAIL_KEEP) beadsDetailKept.delete(beadsDetailKept.keys().next().value);
+}
 let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
 let beadsPri = null;       // priority filter: null = every priority
@@ -29592,7 +29603,7 @@ function openBeads(id, section) {
   beadsSection = section === "reports" ? "reports"
     : section === "queues" ? "queues" : "board";
   const focus = id || "";
-  if (focus !== beadsFocus) beadsDetail = null;
+  if (focus !== beadsFocus) beadsDetail = (focus && beadsDetailKept.get(focus)) || null;
   beadsFocus = focus;
   showView("beads");
   if (beadsSection === "reports") {
@@ -29685,6 +29696,7 @@ async function refreshBeadsDetail() {
     const data = await resp.json().catch(() => ({}));
     if (beadsFocus === detailWanted) {
       beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
+      if (resp.ok) keepBeadsDetail(detailWanted, data);
       // The daemon answers from the board the issue is on, which is not
       // always the one asked about: a link to an issue carries no board, so
       // an id not on the loaded page was asked for on the selected one
@@ -30896,6 +30908,7 @@ function beadsWorkspaceBlock() {
       // The description carries the block, so the pane must be redrawn from
       // the daemon rather than patched here — otherwise the Description
       // section keeps showing the value that was just replaced.
+      beadsDetailKept.delete(beadsFocus);
       beadsDetail = null;
       renderBeads();
     } catch (err) {
@@ -45238,6 +45251,12 @@ let sessKidsBox = null;   // the children panel, which polls on its own
 let sessKidsTimer = null;
 let sessJournalBox = null;  // the input journal — it holds a fold's open/shut
                             // state and the lines a reader is selecting
+/* Each session's last /meta answer, kept for this page load (claunch-m793w):
+   aiming the panel at a session shown before draws it at once, and the read
+   that follows brings it up to date, rather than "loading…" on every Back
+   or terminal switch. Bounded, oldest first out. */
+const SESS_META_KEEP = 32;
+const sessMetaKept = new Map();
 
 /* Forget the open detail. State only — the caller syncs the layout, which is
    what actually takes the panel off the screen. */
@@ -45304,7 +45323,9 @@ function repointDetail(name) {
   sessRunFold = null;
   sessNoteBox = null;
   sessReminderNoteBox = null;
-  $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  const kept = sessMetaKept.get(name);
+  if (kept) renderSession(kept);
+  else $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   // The panel's subject is one of the cards the rail expands (railCardMode),
   // so the row it now describes has to change density with it.
@@ -45346,6 +45367,9 @@ async function refreshSession() {
     return;
   }
   if (sessName !== want) return; // navigated away mid-flight
+  sessMetaKept.delete(want);   // re-added last, so the oldest goes first
+  sessMetaKept.set(want, data);
+  while (sessMetaKept.size > SESS_META_KEEP) sessMetaKept.delete(sessMetaKept.keys().next().value);
   renderSession(data);
 }
 

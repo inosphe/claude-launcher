@@ -112,6 +112,10 @@ const history = {
   replaceState(st, _t, h) { this.state = st; if (h !== undefined) location.hash = h; },
 };
 function refreshSession() { refreshes++; }
+// The panel's kept /meta answers (claunch-m793w), and what was drawn from one.
+const sessMetaKept = new Map();
+const drawnMeta = [];
+function renderSession(data) { drawnMeta.push(data.name); }
 function refitSoon() { fits++; }
 function showView(name) {
   currentPage = name;
@@ -195,6 +199,8 @@ Object.assign(exports, {
   holdRun: () => { sessRunFold = "the open fold"; },
   kidsBox: () => sessKidsBox, kidsStops: () => sessKidsStops,
   holdKids: () => { sessKidsBox = "the children roster"; },
+  keepMeta: (name, data) => { sessMetaKept.set(name, data); },
+  drawnMeta: () => drawnMeta.slice(),
 });`
 )(ctx, $, document, MOBILE_MQ, () => 1, () => {}, el, terminalOnScreen);
 
@@ -258,6 +264,17 @@ ctx.openDetail("coder2");                      // the same button closes it
 check("wide: the button toggles it off", !up() && ctx.open() === null);
 check("wide: ...and takes it out of the address", ctx.hash() === "#/s/coder2", ctx.hash());
 check("wide: closing gives the width back", ctx.fits() === fitsOpen + 1);
+
+// A session the panel has read before is drawn from its kept answer at
+// once, and still read again behind it (claunch-m793w).
+ctx.keepMeta("coder2", { name: "coder2" });
+const pollsKept = ctx.polls();
+ctx.openDetail("coder2");
+check("wide: a kept answer is drawn at once", ctx.drawnMeta().join() === "coder2", ctx.drawnMeta().join());
+check("wide: ...with no loading line", !String(view.innerHTML || "").includes("loading"), view.innerHTML);
+check("wide: ...and is read again", ctx.polls() === pollsKept + 1, ctx.polls());
+ctx.openDetail("coder2");
+check("wide: closed again", !up());
 check("wide: the handle goes down with it", !handleUp());
 
 /* ---- wide: the rail is the address's, on every page ---- */

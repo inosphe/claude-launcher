@@ -84,6 +84,7 @@ const ctx = {};
 new Function(
   "exports", "el", "api", "record",
   "let beadsDetail = null;\n"
+  + "const beadsDetailKept = new Map();\n"
   + "let beadsFocus = '';\n"
   + "function renderBeads() { record('render'); }\n"
   + "function setState(detail, focus) { beadsDetail = detail; beadsFocus = focus; }\n"

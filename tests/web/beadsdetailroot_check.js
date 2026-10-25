@@ -39,7 +39,9 @@ let beadsCache = { boards: [
 ] };
 function restartBeadsStream() { restarts.push(beadsWorkspace); }
 async function api(url) { requests.push(url); return answer; }
-` + slice("beadsRootOf") + slice("refreshBeadsDetail"), ctx);
+const BEADS_DETAIL_KEEP = 64;
+const beadsDetailKept = new Map();
+` + slice("beadsRootOf") + slice("keepBeadsDetail") + slice("refreshBeadsDetail"), ctx);
 
 function reply(status, body) {
   ctx.answer = { ok: status === 200, status, json: async () => body };
@@ -90,6 +92,11 @@ const run = (code) => vm.runInContext(code, ctx);
   assert(run("beadsDetail.error").includes("ISSUE_NOT_FOUND"));
   assert.strictEqual(run("beadsWorkspace"), "/gds6");
   assert.strictEqual(ctx.restarts.length, 2);
+
+  // 6. Each answer read is kept for the next open of that issue
+  // (claunch-m793w); a refusal is not.
+  assert.strictEqual(run('beadsDetailKept.get("claunch-kg3oe.1.1").issue.id'), "claunch-kg3oe.1.1");
+  assert.strictEqual(run('beadsDetailKept.has("nowhere-1")'), false);
 
   console.log("beadsdetailroot: ok");
 })().catch((err) => { console.error(err); process.exit(1); });
