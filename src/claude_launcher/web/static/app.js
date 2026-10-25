@@ -2277,6 +2277,19 @@ function setSessionSearch(q) {
   sessionSearch = { q: String(q || ""), hits: null, pending: false, error: "", index: null };
   syncSessionSearchNote();
   syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
+  railSearchRedraw();
+}
+
+/* A rail long enough to window takes the search into its model
+   (claunch-gpxur.1, in refreshSessions), so a change of the search is a
+   change of what it draws: one redraw from the records in hand. A rail the
+   last pass drew whole and uncut is left to the in-place marking above. */
+function railSearchRedraw() {
+  const list = typeof $ === "function" ? $("session-list") : null;
+  if (!list || !(list._railRows || list._railSearchCut)) return;
+  if (typeof refreshSessions !== "function") return;
+  refreshSessions._forceRebuild = true;
+  refreshSessions({ cached: true });
 }
 
 /* The box's own clear button (index.html #session-search-clear). It is shown
@@ -2362,6 +2375,7 @@ async function runSessionSearch(q) {
   sessionSearch = next;
   syncSessionSearchNote();
   syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
+  railSearchRedraw();
 }
 
 /* One mutually exclusive state filter for the rail. "Current" is the normal
@@ -5247,10 +5261,19 @@ function railWindowForPass(list, rows, scrollTop, anchor) {
   // number could then leave out the very row restored to below.
   const heights = railOffsets(rows);
   let at = typeof scrollTop === "number" ? scrollTop : (list.scrollTop || 0);
+  // The anchor's cards each say where the reader is; the place most of them
+  // agree on is planned for (see railRestoreAnchor).
   if (anchor) {
-    const i = rows.findIndex((r) => r.type === "session" && r.session
-      && r.session.name === anchor.name);
-    if (i >= 0) at = Math.max(0, heights.offsets[i] - anchor.delta);
+    const index = new Map();
+    rows.forEach((r, i) => {
+      if (r.type === "session" && r.session) index.set(r.session.name, i);
+    });
+    const tops = [];
+    for (const card of Array.isArray(anchor) ? anchor : [anchor]) {
+      const i = index.get(card.name);
+      if (i !== undefined) tops.push(heights.offsets[i] - card.delta);
+    }
+    if (tops.length) at = Math.max(0, railAgreed(tops));
   }
   const plan = railWindowPlan(rows, at, list.clientHeight, heights);
   if (plan.last - plan.first >= rows.length) return null;
@@ -5295,44 +5318,76 @@ function railClearWindow(list, rebuild) {
    does not depend on whether the model's heights were right.
    A reader scrolled into a spacer has no drawn row on screen: the anchor is
    then the row the model places there (`plan.at`), at the distance the model
-   gives it, so the row the scrollbar pointed at is the row they land on. */
+   gives it, so the row the scrollbar pointed at is the row they land on.
+   The anchor is every card on screen, top first (claunch-gpxur.1). One row
+   alone held the reader only while that row stayed put: a top card that left
+   the rail (archived, filtered out) dropped the pass back to the bare number,
+   and one that moved (a new parent, another mesh's heading) took the reader
+   with it to wherever it went. The cards that did not move agree on where the
+   reader is; railRestoreAnchor goes with them. */
+const RAIL_ANCHOR_CARDS = 8;
 function railTakeAnchor(list) {
   if (!list || typeof list.getBoundingClientRect !== "function"
       || typeof list.querySelectorAll !== "function") return null;
   const box = list.getBoundingClientRect();
   if (!box || typeof box.top !== "number") return null;
-  const cards = list.querySelectorAll("li[data-name]");
-  for (const li of cards) {
+  const bottom = box.top + (list.clientHeight || 0);
+  const seen = [];
+  for (const li of list.querySelectorAll("li[data-name]")) {
     const r = li.getBoundingClientRect ? li.getBoundingClientRect() : null;
     if (!r || typeof r.top !== "number" || !(r.height > 0)) continue;
     if (r.top + r.height <= box.top) continue;
-    if (r.top >= box.top + (list.clientHeight || 0)) return null;
-    return { name: li.dataset.name, delta: r.top - box.top };
+    if (r.top >= bottom) break;
+    seen.push({ name: li.dataset.name, delta: r.top - box.top });
+    if (seen.length >= RAIL_ANCHOR_CARDS) break;
   }
-  return null;
+  return seen.length ? seen : null;
 }
 
 function railPlanAnchor(rows, plan, scrollTop) {
   if (!plan || !Array.isArray(rows)) return null;
   const row = rows[plan.at];
   if (!row || row.type !== "session" || !row.session) return null;
-  return { name: row.session.name, delta: plan.offsets[plan.at] - (scrollTop || 0) };
+  return [{ name: row.session.name, delta: plan.offsets[plan.at] - (scrollTop || 0) }];
 }
 
-/* Move the scroller so the anchor row is where railTakeAnchor saw it. Returns
-   whether it could: a row the pass did not draw leaves the position alone. */
+/* The one value most of `values` agree on, to the pixel; a tie goes to the
+   one that came first (the card nearest the top). */
+function railAgreed(values) {
+  const votes = new Map();
+  let best = null;
+  for (const v of values) {
+    const key = Math.round(v);
+    const n = (votes.get(key) || 0) + 1;
+    votes.set(key, n);
+    if (best === null || n > votes.get(best)) best = key;
+  }
+  return best;
+}
+
+/* Move the scroller so the anchor's cards are where railTakeAnchor saw them.
+   Each card still drawn says how far the list has to move to put it back; the
+   move most of them agree on is taken, so a card that left or moved on its own
+   does not decide where the reader goes. Returns whether it could: a pass that
+   drew none of them leaves the position alone. */
 function railRestoreAnchor(list, anchor) {
   if (!list || !anchor || typeof list.getBoundingClientRect !== "function") return false;
-  let li = null;
-  for (const card of list.querySelectorAll("li[data-name]")) {
-    if (card.dataset.name === anchor.name) { li = card; break; }
-  }
-  if (!li || !li.getBoundingClientRect) return false;
+  const cards = Array.isArray(anchor) ? anchor : [anchor];
   const box = list.getBoundingClientRect();
-  const r = li.getBoundingClientRect();
-  if (!box || typeof box.top !== "number" || typeof r.top !== "number"
-      || !(r.height > 0)) return false;
-  const move = (r.top - box.top) - anchor.delta;
+  if (!box || typeof box.top !== "number") return false;
+  const drawnAt = new Map();
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    if (!drawnAt.has(li.dataset.name)) drawnAt.set(li.dataset.name, li);
+  }
+  const moves = [];
+  for (const card of cards) {
+    const li = drawnAt.get(card.name);
+    const r = li && li.getBoundingClientRect ? li.getBoundingClientRect() : null;
+    if (!r || typeof r.top !== "number" || !(r.height > 0)) continue;
+    moves.push((r.top - box.top) - card.delta);
+  }
+  if (!moves.length) return false;
+  const move = railAgreed(moves);
   if (Math.abs(move) >= 0.5) list.scrollTop = Math.max(0, (list.scrollTop || 0) + move);
   return true;
 }
@@ -5667,13 +5722,67 @@ async function refreshSessions(options) {
   // count from `rows` whole -- their badges apply the filter themselves --
   // and `session-filtered` stays for what changes between rebuilds: the
   // search, and a record that left the filter while the rail was held.
-  const drawnByFilter = (row) => {
+  const drawnByState = (row) => {
     if (row.type === "session") return sessionMatchesFilter(row.session);
     if (row.type === "shadow" && typeof shadowMatchesFilter === "function") {
       return shadowMatchesFilter(row.shadow);
     }
     return true;
   };
+  // claunch-gpxur.1: on a rail the state filter leaves long enough to window,
+  // the search is a filter of the draw too. Marking the drawn rows
+  // `session-filtered` (syncSessionFilters) reaches only the slice on the
+  // list: a match outside it was never drawn, the slice's own rows went blank,
+  // and the spacers still held the whole fleet's height -- a full-length
+  // scrollbar over one card. Cut here, the matches (with their lineage, as
+  // sessionSearchLineage keeps it) are the model: few enough to be drawn
+  // whole, and the scrollbar is theirs. A search change redraws such a rail
+  // (railSearchRedraw). A short rail keeps the in-place marking.
+  const searchQ = typeof sessionSearch !== "undefined"
+    && String(sessionSearch.q || "").trim();
+  const searchCuts = !!searchQ && typeof railWindowForPass === "function"
+    && typeof sessionMatchesSearch === "function"
+    && rows.filter(drawnByState).length >= RAIL_WINDOW_MIN_ROWS;
+  const searchShown = searchCuts && typeof sessionSearchLineage === "function"
+    ? sessionSearchLineage(rows
+      .filter((row) => row.type === "session" && sessionMatchesFilter(row.session))
+      .map((row) => row.session))
+    : null;
+  const drawnBySearch = (row) => {
+    if (row.type === "session") {
+      return searchShown ? searchShown.has(row.session.name) : sessionMatchesSearch(row.session);
+    }
+    if (row.type === "shadow" && typeof shadowMatchesSearch === "function") {
+      return shadowMatchesSearch(row.shadow);
+    }
+    return true;
+  };
+  // ...and a heading the search left nothing under is not drawn: a heading
+  // holds the rows after it up to the next heading at its level or above.
+  const keptHeadings = new Set();
+  if (searchCuts) {
+    const holds = [];
+    for (let at = rows.length - 1; at >= 0; at--) {
+      const row = rows[at];
+      if (row.type === "ungroup") { holds.length = 0; continue; }
+      if (row.type === "group") {
+        const level = row.level || 0;
+        if (holds[level]) keptHeadings.add(row);
+        holds.length = level;
+        continue;
+      }
+      if (drawnByState(row) && drawnBySearch(row)) {
+        for (let l = 0; l <= 8; l++) holds[l] = true;
+      }
+    }
+  }
+  const drawnByFilter = (row) => {
+    if (!drawnByState(row)) return false;
+    if (!searchCuts) return true;
+    if (row.type === "group") return keptHeadings.has(row);
+    return drawnBySearch(row);
+  };
+  if (rebuild && list) list._railSearchCut = searchCuts;
   /* The draw is sliced across event-loop turns (claunch-rw7tw).
      A fleet of two thousand records built in one task put the whole rebuild
      -- every row's nodes, every decoration, every gauge -- into a single
@@ -5854,7 +5963,14 @@ async function refreshSessions(options) {
   }
   for (const row of hoistedGroups) drawGroupRow(row);
   let planAt = -1;
-  const sliceIt = rows.length > RAIL_SLICE_MIN_ROWS;
+  // A windowed pass is not sliced (claunch-gpxur.1): it draws a few dozen rows
+  // whatever the fleet's size, so it is one short task already -- and a pass
+  // that yielded between taking the reader's anchor and putting it back let
+  // the page paint a half-drawn list and the reader scroll it, and then put
+  // them back where they had been before that scroll. A scroll that left the
+  // slice meanwhile asked for a pass that superseded this one, and that pass
+  // took its anchor off the half-drawn list.
+  const sliceIt = !railWin && rows.length > RAIL_SLICE_MIN_ROWS;
   let sliceStart = sliceNow();
   for (let rowAt = 0; rowAt < rows.length; rowAt++) {
     const row = rows[rowAt];
