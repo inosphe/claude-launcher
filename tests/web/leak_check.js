@@ -152,6 +152,16 @@ function makeEl(tag, ns) {
   n.getAttribute = (k) => (k in n._attrs ? n._attrs[k] : null);
   n.removeAttribute = (k) => { delete n._attrs[k]; };
   n.hasAttribute = (k) => k in n._attrs;
+  // The DOM's presence-attribute API, which the terminal input field uses to
+  // carry `data-expanded`. It toggles on the same store the four above read,
+  // so a later getAttribute sees what it set. This harness only got away
+  // without it while main() hung on its first tick and never reached attach().
+  n.toggleAttribute = (k, force) => {
+    const want = force === undefined ? !(k in n._attrs) : !!force;
+    if (want) n._attrs[k] = "";
+    else delete n._attrs[k];
+    return want;
+  };
   n.addEventListener = (type, fn) => { n._listeners.push({ type, fn }); };
   n.removeEventListener = (type, fn) => {
     const i = n._listeners.findIndex((l) => l.type === type && l.fn === fn);
@@ -433,6 +443,14 @@ class FakeTerminal {
     this.rows = 24;
     this.element = makeEl("div");
     this.disposed = false;
+    // xterm's parser, which installOsc52 reaches for to take a copy out of
+    // the terminal stream. The page only registers a handler, so recording
+    // them is enough — and recording rather than ignoring is what keeps this
+    // from quietly changing shape if a check ever asks what was registered.
+    this.oscHandlers = new Map();
+    this.parser = {
+      registerOscHandler: (code, fn) => { this.oscHandlers.set(code, fn); },
+    };
     live.terminals += 1;
   }
   loadAddon() {}
@@ -501,9 +519,46 @@ function answer(pathname) {
   return {};
 }
 
-async function fetchStub(input) {
+/* The page does not fetch each read on its own: it gathers a tick's reads
+   into POST /api/batch and takes the answers out of one reply
+   (`daemon/api.py`, the batch route). A stub that answered that route with
+   `{}` looked like a daemon refusing every read — each caller settled with
+   a 502, `refreshSessions` returned on `!resp.ok`, and nothing was ever
+   rendered. That is what this harness was doing while it reported nothing.
+
+   The reply's shape is the route's: `{answers: {path: payload}, errors: {}}`,
+   with each path answered by the same `answer()` a direct read gets. */
+function batchAnswer(paths) {
+  const answers = {};
+  const errors = {};
+  for (const path of paths) {
+    try {
+      answers[path] = answer(String(path));
+    } catch (err) {
+      errors[path] = String((err && err.message) || err);
+    }
+  }
+  return { answers, errors };
+}
+
+async function fetchStub(input, opts) {
   fetchCount += 1;
   const pathname = String(input);
+  if (pathname.endsWith("/api/batch") && opts && opts.body) {
+    let paths = [];
+    try {
+      paths = JSON.parse(String(opts.body)).paths || [];
+    } catch {
+      paths = [];
+    }
+    const body = batchAnswer(paths);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    };
+  }
   const body = answer(pathname);
   return {
     ok: true,
@@ -632,21 +687,111 @@ function census() {
 
 /* Fire every scheduled one-shot, oldest first. The page schedules its
    reconnect through setTimeout, so an outage cannot be played out without
-   this; intervals are left alone (the poll is driven explicitly). */
+   this; intervals are left alone (the poll is driven explicitly).
+
+   Each is only started, then the loop turns: `await t.fn()` here would wait
+   on a body that itself queues work behind a timer this loop has not reached
+   yet — the reconnect's own retry, or a batched read and its deadline — and
+   would sit there waiting for the very turn it is blocking. Settling at the
+   end is `settle()`'s job, not this loop's. */
 async function runTimeouts() {
   for (const [id, t] of [...timers]) {
     if (t.kind !== "timeout") continue;
     clearTimerStub(id);
-    await t.fn();
+    Promise.resolve().then(() => t.fn()).catch(() => {});
     await flush();
   }
+  await flush();
+}
+
+/* The oldest one-shot still on the clock, started and removed. Deliberately
+   NOT awaited: firing the batch flush runs a read that schedules its own
+   timeout (the control-read deadline), and blocking here would leave that
+   one unreachable — which is the same hang, one level down. Whoever called
+   this gets to run the next turn and fire the next one.
+
+   Returns false when the page has no one-shot left, which is how the poll
+   loop below tells "stuck" from "slow". */
+function fireOneTimeout() {
+  for (const [id, t] of [...timers]) {
+    if (t.kind !== "timeout") continue;
+    clearTimerStub(id);
+    // A rejection here is the page's own business: it is what the
+    // reconnect and the read deadline are made of, and the poll observes
+    // them through its own await. Letting it escape would turn one refused
+    // read into a harness failure.
+    Promise.resolve()
+      .then(() => t.fn())
+      .catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+/* One poll, played out the way a browser plays it.
+
+   This used to be `await pollTick()`. That hung, and it hung silently: the
+   poll's reads leave through the batch window, which the page opens with
+   `setTimeout(batchFlush, BATCH_WINDOW_MS)`, and this stub world only fires
+   a timer when someone asks. So `pollTick()` never settled, `main()` awaited
+   it forever, Node ran out of work and exited 0 with an empty stdout — a
+   harness that reported nothing and passed.
+
+   So the await is interleaved with the timers: start the poll, and on each
+   turn flush the microtasks and fire one queued one-shot, until the poll
+   settles. A real browser fires them on their own clock; here the poll is
+   driven by hand instead of by an interval, so the timers have to be driven
+   by hand too, in the same loop.
+
+   The guard is the assertion that this stayed finite: a poll that cannot
+   settle in this many turns is a hang in the page, and it must fail loudly
+   instead of quietly ending the process. */
+const POLL_TURNS = 64;
+
+/* Let a read the page just started finish, the same way `tick` does: flush
+   the microtasks, fire what the page queued, repeat until there is nothing
+   left to fire. The briefing fetch leaves through the batch window like
+   every other read, so `await flush()` alone never saw its answer land —
+   the cache stayed empty and the checks below failed on the page's behalf. */
+async function settle(turns = 16) {
+  for (let turn = 0; turn < turns; turn++) {
+    await flush();
+    if (!fireOneTimeout()) {
+      await flush();
+      return;
+    }
+  }
+  await flush();
+}
+
+async function tick() {
+  let settled = false;
+  const poll = vm.runInContext("pollTick()", ctx);
+  poll.then(() => { settled = true; }, () => { settled = true; });
+  for (let turn = 0; turn < POLL_TURNS && !settled; turn++) {
+    await flush();
+    if (settled) break;
+    // Nothing left to fire and the poll is still pending: no further turn
+    // can help it. `polling` is the page's own record that a tick is in
+    // flight, so it is what says this is a stuck read rather than an idle
+    // page.
+    if (!fireOneTimeout()) {
+      throw new Error(
+        `pollTick never settled (turn ${turn}, polling=${read("polling")})`
+      );
+    }
+  }
+  if (!settled) throw new Error(`pollTick never settled after ${POLL_TURNS} turns`);
+  // Let what the poll started (its renders, its socket opens) finish.
+  for (let i = 0; i < 4; i++) {
+    await flush();
+    if (!fireOneTimeout()) break;
+  }
+  await flush();
 }
 
 async function ticks(n) {
-  for (let i = 0; i < n; i++) {
-    await vm.runInContext("pollTick()", ctx);
-    await flush();
-  }
+  for (let i = 0; i < n; i++) await tick();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -721,7 +866,7 @@ async function main() {
     await ticks(1);
     // The reader folds the new session's card open to see what it is for...
     await vm.runInContext(`toggleBriefing(${JSON.stringify(name)})`, ctx);
-    await flush();
+    await settle();
     // ...and it is killed while still folded open, as most of them are.
   }
   SESSIONS = ["s1"];
@@ -755,7 +900,7 @@ async function main() {
   SESSIONS = ["reused"];
   await ticks(1);
   await vm.runInContext('toggleBriefing("reused")', ctx);
-  await flush();
+  await settle();
   check("the first incarnation's briefing is what is cached",
         read('(briefingCache.get("reused")||{}).data.goal') === "first",
         { got: read('JSON.stringify(briefingCache.get("reused"))') });
@@ -769,7 +914,7 @@ async function main() {
         !read('briefingCache.has("reused")'),
         { cached: read('JSON.stringify(briefingCache.get("reused"))') });
   await vm.runInContext('toggleBriefing("reused")', ctx);
-  await flush();
+  await settle();
   check("and folding it open now summarises the session that is actually there",
         read('(briefingCache.get("reused")||{}).data.goal') === "second",
         { got: read('JSON.stringify(briefingCache.get("reused"))') });
@@ -800,6 +945,7 @@ async function main() {
     if (sock.onclose) sock.onclose();
     await flush();
     await runTimeouts();   // the backoff's scheduled retry
+    await settle();
     const back = read("ws");
     // The next connection opens now and receives init on the next pass.
     if (back && back.onopen) back.onopen();
