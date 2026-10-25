@@ -9041,6 +9041,18 @@ const TERM_SERIES_LAYERS = [
   ["input", "input", "#bc8cff"],
   ["cache_read", "cached input", "#58a6ff"],
 ];
+/* The base of the chart's log height axis (claunch-nw9ca). The axis maps a
+   value v to log_B(1 + (B-1)*v/top) / log_B(B), so 0 sits on the baseline and
+   the top on the ceiling. What B sets is where the middle of the axis falls:
+   1/(1+sqrt(B)) of the top. The linear axis put 500k at mid-height of a 1M
+   window; B=1.4 barely moves it (458k, still a linear look), and B=5.44 puts
+   300k there. A pure log floor axis cannot express this: normalizing
+   log_b(v/f) to the same floor and top draws the same heights for every base,
+   so the midpoint there is set by the floor alone, and reaching 300k would
+   need a floor of 90k with every smaller request pinned to the baseline. */
+const TERM_SERIES_LOG_BASE = 5.44;
+/* How many rules the zoomed chart draws below the top; the top has its own. */
+const TERM_SERIES_TICK_COUNT = 6;
 /* window -> {name, at, data, pending}; one session at a time. */
 const termSeriesReads = {};
 /* Whether the pointer is on the chart: its slot name, or false for none. */
@@ -9106,22 +9118,27 @@ function termSeriesIndexAt(pts, at) {
   return lo - 0.5;
 }
 
-/* The height axis of one chart. It is linear: 0 at the bottom, the context
-   window the daemon names in `limits.top` at the top, so the same height is
-   the same count whatever the session reached (claunch-e0e3n) and the area
-   under a line is the number of tokens it stands for (claunch-k5udr). A
+/* The height axis of one chart: a log axis whose middle falls at 1/(1+sqrt(B))
+   of the top — 300k of a 1M window at B=5.44 (claunch-nw9ca). Zero sits on
+   the baseline and the context window the daemon names in `limits.top` on the
+   ceiling, so a small session is lifted off the floor instead of flattened
+   against it, and the area under a line is still not the tokens sent. A
    request larger than the window pushes the top up to it; a session with no
-   named window is drawn from 0 to its largest request. Also the auto-compact
+   named window is drawn to its largest request. Also the auto-compact
    thresholds to draw as horizontal lines: one per distinct value (the two
-   sides of a borrowed session often agree), none that fall outside the axis,
-   and the round values to mark on the axis in between. */
+   sides of a borrowed session often agree), none that fall outside the axis. */
 function termSeriesScale(pts, limits) {
   const totals = pts.map(termSeriesTotal);
   const peak = Math.max(1, ...totals);
   const named = limits && Number.isFinite(limits.top) && limits.top > 0 ? limits.top : 0;
   const top = Math.max(named, peak);
   const fixed = named >= peak && named > 0;
-  const ratio = (v) => Math.max(0, Math.min(v, top)) / top;
+  const bias = TERM_SERIES_LOG_BASE - 1;
+  const denom = Math.log(TERM_SERIES_LOG_BASE);
+  const ratio = (v) => {
+    const clamped = Math.max(0, Math.min(v, top));
+    return Math.min(1, Math.log(1 + bias * (clamped / top)) / denom);
+  };
   const sides = ((limits && limits.sides) || [])
     .filter((x) => x && Number.isFinite(x.compact) && x.compact > 0 && x.compact <= top);
   const lines = [];
@@ -9129,37 +9146,57 @@ function termSeriesScale(pts, limits) {
     const same = lines.find((l) => l.at === x.compact);
     if (same) same.labels.push(x.label); else lines.push({ at: x.compact, labels: [x.label] });
   }
-  return { peak, top, fixed, ratio, compact: lines, ticks: termSeriesTicks(top) };
+  return {
+    peak, top, fixed, ratio, compact: lines,
+    ticks: termSeriesTicks(top),
+  };
 }
 
-/* The values marked on a linear axis to `top`: the coarsest round step that
-   still leaves at least three steps, so a 1M window reads 0, 250k, 500k,
-   750k, 1M and a 200k one 0, 50k, 100k, 150k, 200k. Never finer than one
-   token, so a session of a few hundred tokens still reads whole numbers. */
+/* The values marked on that axis below `top`: for each even step of the axis'
+   height, the round value nearest it, so the rules are spread by eye and the
+   labels are numbers a reader recognises (75k, 150k, 300k, 500k, 700k on a 1M
+   window). A round value already carrying a rule is not used twice, and the
+   top is not among them -- the chart draws its own rule and label for it. */
 function termSeriesTicks(top) {
-  const decade = Math.pow(10, Math.floor(Math.log10(top)));
-  const steps = [];
-  for (const base of [decade / 100, decade / 10, decade, decade * 10]) {
-    for (const m of [1, 2, 2.5, 5]) {
-      const step = base * m;
-      if (step >= 1 && !steps.includes(step)) steps.push(step);
+  if (!(top > 0)) return [];
+  const bias = TERM_SERIES_LOG_BASE - 1;
+  const at = (frac) => top * (Math.pow(TERM_SERIES_LOG_BASE, frac) - 1) / bias;
+  /* The round values a chart can mark: 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 7.5, 8
+     times each power of ten below the top, and whole numbers under a
+     hundred. */
+  const cands = [];
+  for (let v = 1; v < 100 && v < top; v++) cands.push(v);
+  const decade = Math.pow(10, Math.floor(Math.log10(Math.max(1, top))));
+  for (const d of [decade / 10, decade, decade * 10]) {
+    for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 7.5, 8]) {
+      const v = d * m;
+      if (v >= 1 && v < top) cands.push(Number(v.toPrecision(6)));
     }
   }
-  steps.sort((a, b) => a - b);
-  let step = steps[0];
-  for (const s of steps) { if (top / s >= 3) step = s; }
+  const place = (v) => Math.log(1 + bias * (v / top)) / Math.log(TERM_SERIES_LOG_BASE);
   const out = [];
-  for (let i = 0; i * step <= top * (1 + 1e-9); i++) out.push(Number((i * step).toPrecision(12)));
-  return out;
+  for (let i = 1; i < TERM_SERIES_TICK_COUNT; i++) {
+    const want = i / TERM_SERIES_TICK_COUNT;
+    let best = null;
+    for (const v of cands) {
+      if (out.includes(v)) continue;
+      if (out.some((o) => Math.abs(place(o) - place(v)) < 0.06)) continue;
+      if (best === null || Math.abs(place(v) - want) < Math.abs(place(best) - want)) best = v;
+    }
+    if (best !== null) out.push(best);
+  }
+  return out.sort((a, b) => a - b);
 }
 
-/* A tick's label: 0, 250k, 1M, 1.5M. */
+/* A tick's label: 0, 7.5, 300k, 1M. A value under a thousand keeps one
+   decimal when it has one, so a small session's axis does not round two
+   rules onto the same label. */
 function termSeriesTick(v) {
   if (!(v > 0)) return "0";
   for (const [size, unit] of [[1e9, "B"], [1e6, "M"], [1e3, "k"]]) {
     if (v >= size) return `${Math.round((v / size) * 100) / 100}${unit}`;
   }
-  return String(Math.round(v));
+  return Number.isInteger(v) ? String(v) : String(Math.round(v * 10) / 10);
 }
 
 function termSeriesChart(data, zoom) {
@@ -9181,9 +9218,13 @@ function termSeriesChart(data, zoom) {
      across the whole chart. */
   const drawn = pts.length === 1 ? [pts[0], pts[0]] : pts;
   const xAt = (i) => (i / (drawn.length - 1)) * w;
-  /* Height on a linear axis from 0 to the top (the context window where the
-     daemon names one, else the largest context): the three parts of a
-     request are drawn at their real share of the tokens sent. */
+  /* Height on the log axis from 0 to the top (the context window where the
+     daemon names one, else the largest context): each layer is drawn at its
+     own boundary on that axis. On this axis a layer's thickness is not its
+     share of the tokens and the area under a line is not the total sent —
+     cached input dwarfs fresh input and write, and on the linear axis this
+     chart had before (claunch-k5udr) the two thin parts were not visible at
+     all (claunch-nw9ca). */
   const yAt = (v) => h - 1 - ratio(v) * (h - 3);
   const below = drawn.map(() => 0);
   for (const [key, , colour] of TERM_SERIES_LAYERS) {
@@ -9258,9 +9299,9 @@ function termSeriesChart(data, zoom) {
     svg.appendChild(mark);
   }
   if (zoom) {
-    /* The height axis: a faint rule and its label at every round value from
-       0 to the top (0, 250k, 500k, 750k on a 1M window), except at the top
-       itself, which the maximum's own rule and label carry. */
+    /* The height axis: a faint rule and its label at each round value below
+       the top, except at the top itself, which the maximum's own rule and
+       label carry. */
     for (const at of ticks) {
       if (at >= top) continue;
       const y = yAt(at);

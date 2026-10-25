@@ -188,8 +188,9 @@ const series = (win, start = 1000) => ({
   check("the readout is blank on both lines once the pointer leaves",
         readoutLines(big).map((t) => t.trim()), ["", ""]);
 
-  // The height axis (claunch-e0e3n, claunch-k5udr): linear from 0 to the
-  // context window, ticked in round steps; a line at the compact threshold.
+  // The height axis (claunch-nw9ca): a log axis whose middle is 1/(1+sqrt(B))
+  // of the top, so 300k of a 1M window sits at half height; ticked at round
+  // values near even steps; a line at the compact threshold.
   const big1 = (n) => [{ input: 2, cache_read: n - 2, cache_write: 0 }];
   const sc = (n, limits) => {
     const r = ctx.scale(big1(n), limits);
@@ -199,25 +200,39 @@ const series = (win, start = 1000) => ({
   check("top is the largest request without a window", sc(367e3, null), [367e3, false]);
   check("top is the window, not the largest request", sc(367e3, { top: 1e6 }), [1e6, true]);
   check("a request over the window pushes the top up to it", sc(2e6, { top: 1e6 }), [2e6, false]);
-  check("a 1M window is ticked 0, 250k, 500k, 750k, 1M",
-        ticks(1e3, { top: 1e6 }), [0, 250e3, 500e3, 750e3, 1e6]);
-  check("a 200k window is ticked every 50k",
-        ticks(1e3, { top: 2e5 }), [0, 50e3, 100e3, 150e3, 2e5]);
-  check("a session of a few dozen tokens is ticked in whole tokens",
-        ctx.scale(big1(44), null).ticks, [0, 10, 20, 30, 40]);
+  check("a 1M window is ticked 100k, 150k, 300k, 500k, 700k",
+        ticks(1e3, { top: 1e6 }), [100e3, 150e3, 300e3, 500e3, 700e3]);
+  check("a 200k window is ticked 15k, 30k, 60k, 100k, 150k",
+        ticks(1e3, { top: 2e5 }), [15e3, 30e3, 60e3, 100e3, 150e3]);
+  check("a session of a few dozen tokens is ticked in round whole tokens",
+        ctx.scale(big1(44), null).ticks, [3, 7.5, 13, 21, 31]);
   const ratioOf = (n, v, limits) => ctx.scale(big1(n), limits).ratio(v);
-  check("the height is the value over the top, linearly", [ratioOf(5e3, 0, { top: 1e6 }),
-    ratioOf(5e3, 250e3, { top: 1e6 }), ratioOf(5e3, 1e6, { top: 1e6 })], [0, 0.25, 1]);
+  check("the middle of a 1M axis is 300k, where a linear axis put 500k",
+        ratioOf(5e3, 300e3, { top: 1e6 }).toFixed(4), "0.4999");
+  check("500k sits above the middle of a 1M axis",
+        ratioOf(5e3, 500e3, { top: 1e6 }).toFixed(3), "0.690");
+  check("the axis has its top at the ceiling and zero on the baseline",
+        [ratioOf(5e3, 0, { top: 1e6 }), ratioOf(5e3, 1e6, { top: 1e6 })], [0, 1]);
   check("a value over the top is clamped to it", ratioOf(5e3, 1.5e6, { top: 1e6 }), 1);
   check("the largest request changing does not move a position when the window is named",
         [ratioOf(5e3, 3e4, { top: 1e6 }), ratioOf(9e5, 3e4, { top: 1e6 })].map((r) => r.toFixed(6)).every((r, _, a) => r === a[0]), true);
-  check("a small session sits on the baseline of a 1M axis",
-        ratioOf(44e3, 44e3, { top: 1e6 }).toFixed(3), "0.044");
+  check("a 44k session sits well above the baseline of a 1M axis",
+        ratioOf(44e3, 44e3, { top: 1e6 }).toFixed(3), "0.105");
   const tiny = ctx.scale([{ input: 200, cache_read: 0, cache_write: 0 }, { input: 500, cache_read: 0, cache_write: 0 }], { top: 1e6 });
-  check("a session wholly under any floor is drawn from 0 too, not from its smallest request",
-        [tiny.top, tiny.ratio(200), tiny.ratio(500)], [1e6, 0.0002, 0.0005]);
+  check("a session of a few hundred tokens is lifted off the baseline too",
+        [tiny.top, tiny.ratio(200).toFixed(4), tiny.ratio(500).toFixed(4)], [1e6, "0.0005", "0.0013"]);
   const sameSize = ctx.scale([{ input: 700, cache_read: 0, cache_write: 0 }], { top: 1e6 });
-  check("one request of one size keeps a non-zero axis", [sameSize.top, sameSize.ratio(700)], [1e6, 0.0007]);
+  check("one request of one size keeps a non-zero axis", [sameSize.top, sameSize.ratio(700).toFixed(4)], [1e6, "0.0018"]);
+  // 1.4 is what the request named, and it is worth holding here: on this axis
+  // the base is the only knob, and 1.4 is the value that leaves the chart
+  // looking linear, which is why the shipped axis uses 5.44 instead.
+  const biased = (v, top, b) => Math.log(1 + (b - 1) * (v / top)) / Math.log(b);
+  check("the shipped axis puts 300k at half height of a 1M window",
+        biased(300e3, 1e6, 5.44).toFixed(4), "0.4999");
+  check("base 1.4 would leave 458k near the middle, a linear-looking chart",
+        [biased(458e3, 1e6, 1.4).toFixed(3), biased(500e3, 1e6, 1.4).toFixed(3)], ["0.500", "0.542"]);
+  check("the middle of the axis is top*(sqrt(B)-1)/(B-1) for the base in use",
+        Math.round(1e6 * (Math.sqrt(5.44) - 1) / 4.44), 300086);
   const side = (label, window, compact) => ({ label, window, compact });
   const lines = (limits, n = 367e3) => ctx.scale(big1(n), limits).compact.map((l) => [l.at, l.labels]);
   check("one threshold, one line", lines({ top: 1e6, sides: [side("a", 1e6, 9e5)] }), [[9e5, ["a"]]]);
@@ -236,7 +251,7 @@ const series = (win, start = 1000) => ({
   const one = lineAt(lim);
   check("the threshold line is horizontal across the chart at its height",
         [one.length, one[0].attrs.x1, one[0].attrs.x2, one[0].attrs.y1 === one[0].attrs.y2,
-         one[0].attrs.y1], [1, "0", "120", true, (26 - 1 - (9e5 / 1e6) * 23).toFixed(1)]);
+         one[0].attrs.y1], [1, "0", "120", true, "3.2"]);
   check("two sides with the same threshold draw one line", lineAt({ ...lim, sides: [side("a", 1e6, 9e5), side("b", 1e6, 9e5)] }).length, 1);
   check("two sides with different thresholds draw two", lineAt({ ...lim, sides: [side("a", 1e6, 9e5), side("b", 2e5, 1.5e5)] }).length, 2);
   check("a session without a threshold draws no line", lineAt({ top: 1e6, sides: [side("a", 1e6, null)] }).length, 0);
@@ -259,22 +274,23 @@ const series = (win, start = 1000) => ({
   check("the context falls after the compaction (larger y is lower) and then rises again",
         [ys[2] > ys[1], ys[3] < ys[2]], [true, true]);
   check("the largest context is at the chart's top edge", ys[3] === 2 && ys.every((y) => y >= 2), true);
-  // Linear height axis: write at the bottom, input above it, cached input on top,
-  // each at its real share of the 44 tokens the last request sent.
-  const linY = (v, h = 26, top = 44) => Number((h - 1 - (v / top) * (h - 3)).toFixed(1));
-  check("the stack's boundaries are on a linear axis, last request: write 2, +input 4, +cached 44",
+  // The log height axis: write at the bottom, input above it, cached input at
+  // the top, each at its own boundary on the axis of the 44-token request.
+  const logY = (v, h = 26, top = 44) =>
+    Number((h - 1 - (Math.log(1 + 4.44 * (v / top)) / Math.log(5.44)) * (h - 3)).toFixed(1));
+  check("the stack's boundaries are on the log axis, last request: write 2, +input 4, +cached 44",
         [edge(svg, "cache_write"), edge(svg, "input"), edge(svg, "cache_read")].map((e) => e[e.length - 1]),
-        [linY(2), linY(4), linY(44)]);
-  check("the smallest boundary sits near the baseline, the largest context at the top",
-        [linY(2), linY(44)], [24.0, 2.0]);
+        [logY(2), logY(4), logY(44)]);
+  check("the smallest boundary sits above the baseline, the largest context at the top",
+        [logY(2), logY(44)], [22.5, 2.0]);
   const huge = ctx.chart({ ...series("full"), points: [0, 1, 2, 3].map((i) => ({
     t: 1000 + i * 100, n: i + 1, count: 1, input: 1e5 * (i + 1), cache_read: 2e8 * (i + 1), cache_write: 3e3 })) }, true);
-  check("a linear axis is ticked from 0 in round steps, none above the maximum",
+  check("a large axis is ticked at round values, none above the maximum",
         huge.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").map((k) => k.textContent),
-        ["0", "250M", "500M", "750M"]);
+        ["60M", "150M", "250M", "400M", "600M"]);
   check("a small axis is ticked in whole tokens too",
         big.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").map((k) => k.textContent),
-        ["0", "10", "20", "30", "40"]);
+        ["3", "7.5", "13", "21", "31"]);
   check("the axis row names the first, the middle and the last request with their times",
         big.kids[1].kids.map((k) => k.textContent), ["#1 · 6m ago", "#3 · 3m ago", "#4 · 1m ago"]);
   check("the tooltip counts the requests, names the last and largest context and the swap",

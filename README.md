@@ -1603,12 +1603,15 @@ keeps doing so while the overlay repaints under a pointer that does not move
 did not fit one line inside the chart's width (claunch-k5udr.1). Both lines
 have their row reserved whether or not they carry text, so the chart stays
 where it is while the pointer moves and after it leaves. The overlay keeps its dark wash and its dark-theme text colours
-on the light page. The height axis is linear from 0 to the model's context
+on the light page. The height axis is a log axis from 0 to the model's context
 window (Claude without a declared window: 1M; Codex: the window it records; Pi:
-the spec's `context_window`; no window known: the largest context), so the same
-height is the same count whatever the session reached, a layer's thickness is
-the share of the tokens it stands for, and the area under a line is the total
-sent (claunch-k5udr). A request larger than the window pushes the top up to it.
+the spec's `context_window`; no window known: the largest context), mapped as
+`log_B(1 + (B-1)·v/top) / log_B(B)` with `B = 5.44`, so the middle of the axis
+falls at `1/(1+sqrt(B))` of the top — 300k of a 1M window, where the linear axis
+this replaced (claunch-k5udr) put 500k there (claunch-nw9ca). A small session is
+lifted off the baseline instead of flattened against it; on this axis a layer's
+thickness is not its share of the tokens and the area under a line is not the
+total sent. A request larger than the window pushes the top up to it.
 A horizontal amber line marks the auto-compact threshold (Claude's
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, or the spec's `auto_compact_at`; Pi needs a
 `context_window` as well). A borrowed session draws the line of each account it
@@ -1619,11 +1622,11 @@ with a diamond head is a profile swap (the session was relaunched onto a
 borrowed token, onto another borrowed one, or back onto its own), named on
 hover with the profiles before and after. Hovering the chart grows it and shows
 the whole conversation, with the window as the label of the height axis
-(`max`, plus a rule and a label at every round step below it — 0, 250k, 500k,
-750k on a 1M window), an axis row, a legend and the context of the request
-under the pointer in a row of its own kept at a fixed height, so the chart
-stays where it is while that text changes; moving the pointer off it returns
-it to the small view (claunch-a27zc).
+(`max`, plus a rule and a label at every round step below it — 100k, 150k,
+300k, 500k, 700k on a 1M window), an axis row, a legend and the context of the
+request under the pointer in a row of its own kept at a fixed height, so the
+chart stays where it is while that text changes; moving the pointer off it
+returns it to the small view (claunch-a27zc).
 `GET /api/sessions/{name}/token-series` serves it.
 
 A call that failed is drawn where the rate would be (claunch-waakh.1): a
