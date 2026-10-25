@@ -306,6 +306,25 @@ ctx.apply();
 check("an unknown grade is shown by its own name",
       quiet(rows.s1).children[0].title.includes("cleared by: operator"), true);
 
+/* A fault that came back after its window closed is the same kind seen
+   again, and the row says how many sightings it has had: the number is what
+   separates "still stopped" from "a line that keeps walking back onto the
+   rail" (claunch-5ldt8). */
+ctx.setSessions([faultRow({ strikes: 3 })]);
+ctx.apply();
+check("a re-observed fault says how often",
+      quiet(rows.s1).children[0].title.includes("re-observed: 2×"), true);
+check("...and the window is no longer described as open-ended",
+      quiet(rows.s1).children[0].title.includes("unless the message is seen again"),
+      false);
+
+/* A daemon older than the strike counter publishes no number: the row must
+   read without it rather than print "re-observed: NaNx". */
+ctx.setSessions([faultRow()]);
+ctx.apply();
+check("a fault with no strike count says nothing about repeats",
+      quiet(rows.s1).children[0].title.includes("re-observed:"), false);
+
 /* Expired: the record stays in the payload and the pill goes, the same rule
    as every other row on this line. */
 ctx.setSessions([faultRow({ active: false })]);
