@@ -274,6 +274,45 @@ const READ = `(() => {
     assert.notEqual(childMark.bg.bg, deep.background,
       `...which is not its ordinary child-card face (${deep.background})`);
 
+    /* ---- ...and it still shows it on the row that is ALSO active ------ */
+    /* The case above flashes a child that is not the current session, and
+       that is not how the reader reaches the flash. `revealSessionCard` is
+       called from `⇱ card` (`gotoSessionCard`, which reveals `currentName`
+       by definition), from the boot landing, and from a band click — so the
+       row being marked is, in the ordinary path, the one about to be or
+       already `.active`. `li.child`, `li.child:hover` and `li.child.active`
+       all tie `.goto-flash` at specificity 0,2,1, so only declaration order
+       decides, and a flash rule placed before the tints loses to them.
+       Measured on tree e76ed6e4 with the rule in that position: this exact
+       row came out rgb(38,45,56) — the active tint — instead of the flash's
+       rgb(27,42,68), while the assertion above still passed. The flash has
+       to beat the tint: the tint says where the reader is, the flash says
+       which row was just asked for. `w1b` is used because the assertions
+       after this one read `w1` and `w1a`. */
+    const activeChild = async (name) => {
+      await page.evaluate((n) => {
+        document.querySelectorAll("#session-list li").forEach((li) => {
+          li.classList.toggle("active", li.dataset.name === n);
+          li.classList.toggle("goto-flash", li.dataset.name === n);
+        });
+      }, name);
+      return await page.evaluate((n) => {
+        const li = document.querySelector(`#session-list li[data-name="${n}"]`);
+        const cs = getComputedStyle(li);
+        return { active: li.classList.contains("active"), flash: li.classList.contains("goto-flash"),
+                 child: li.classList.contains("child"),
+                 bg: cs.backgroundColor, ring: cs.boxShadow };
+      }, name);
+    };
+    const both = await activeChild("w1b");
+    assert.equal(both.child, true, "the row under test is a child");
+    assert.equal(both.active, true, "...which is also the active row");
+    assert.equal(both.flash, true, "...and carries the flash");
+    assert.equal(both.bg, rootMark.bg.bg,
+      `an active flashed child keeps the flash face, not the active tint (${both.bg} vs ${rootMark.bg.bg})`);
+    assert.equal(both.ring, rootMark.bg.ring,
+      `...and the flash ring (${both.ring} vs ${rootMark.bg.ring})`);
+
     /* ---- picking a card expands it ----------------------------------- */
     /* The reader's only way to open a card now: this is what the removed
        fold left behind, so it has to work in the shipped page. */

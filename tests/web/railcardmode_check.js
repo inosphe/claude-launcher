@@ -305,23 +305,39 @@ ok("...with its own rim", /box-shadow:/.test(child), child.trim().slice(0, 80));
 ok("...and a rounded right edge", /border-radius:/.test(child), child.trim().slice(0, 80));
 ok("the tick that hangs it off its parent is still drawn",
    /content:\s*"└"/.test(rule("#session-list li.child::before")));
-/* A child row that `⇱ card` just landed on still has to show the mark. The
-   child card is a background and a rim on the same row, and it is declared
-   after `li.goto-flash` at the same specificity -- so without a rule of its
-   own the card paints over the flash wherever the row is a child, which is
-   most rows in a tree. The flash is the stronger claim: the card says where
-   the row sits, the flash says which row was asked for.
-   gotocard_check.js is a node check and only greps for the root selector, so
-   it cannot see this; railcards_browser.cjs measures the child's colours. */
+/* A child row that `⇱ card` just landed on still has to show the mark.
+
+   The child card, its `:hover` tint and its `.active` tint all carry the
+   same specificity as `.goto-flash` on the same element (0,2,1), so the
+   winner among them is decided by DECLARATION ORDER alone — not by
+   `li.child` sitting higher up the file. That was measured the hard way:
+   a rule placed after `li.child` but before `:hover`/`.active` still lost
+   to both, and since `revealSessionCard` is the thing that draws the flash
+   (on `⇱ card`, on a boot landing, on a band click) and in all of those the
+   row it marks becomes `.active`, the mark was missing on the ordinary path
+   while a harness flashing an inactive child saw it fine.
+
+   So this check pins the order that the cascade actually reads: the child's
+   flash rule must come after `.active`, and it must name the
+   `:hover`/`.active` combinations so no state can slip past it. Order is
+   the whole mechanism here; a rule that exists but sits one tint too early
+   is the defect this catches. railcards_browser.cjs measures the painted
+   colour on a child that is also active. */
 {
-  const flashAt = plain.indexOf("#session-list li.goto-flash {");
-  const childAt = plain.indexOf("#session-list li.child {");
+  const activeAt = plain.indexOf("#session-list li.child.active");
+  const hoverAt = plain.indexOf("#session-list li.child:hover");
+  const flashAt = plain.lastIndexOf("#session-list li.child.goto-flash");
+  ok("the child's hover and active tints are declared",
+     hoverAt >= 0 && activeAt >= 0, `hover ${hoverAt}, active ${activeAt}`);
+  ok("...and the child's flash is declared after BOTH of them",
+     flashAt > activeAt && flashAt > hoverAt,
+     `flash ${flashAt}, hover ${hoverAt}, active ${activeAt}`);
   const childFlash = plain.match(
-    /#session-list li\.child\.goto-flash\s*\{([^}]*)\}/);
-  ok("a child row's card rule is declared after the flash rule",
-     childAt > flashAt, `flash ${flashAt}, child ${childAt}`);
-  ok("...so a flashed child row gets a rule of its own, at higher specificity",
-     !!childFlash, childFlash ? childFlash[1].trim().slice(0, 80) : "no rule");
+    /#session-list li\.child\.goto-flash[\s\S]{0,200}?\{([^}]*)\}/);
+  ok("...naming the :hover and .active combinations so no tint outranks it",
+     !!childFlash && /\.child\.goto-flash:hover/.test(plain)
+       && /\.child\.goto-flash\.active/.test(plain),
+     "the selector list does not cover the states the flash overlaps");
   ok("...that paints the same background as the root row's flash",
      childFlash && /background:\s*#1b2a44/.test(childFlash[1]),
      childFlash ? childFlash[1].trim().slice(0, 80) : "no rule");

@@ -821,10 +821,6 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    just asked for, and a reader who pressed `⇱` on a child is looking for
    exactly that. Same colours as the root row's flash, so the mark reads the
    same at any depth. */
-#session-list li.child.goto-flash {
-  background: #1b2a44;
-  box-shadow: inset 0 0 0 1px #1f6feb;
-}
 /* The tick that hangs the row off its parent: the same glyph as before, now
    in the child's own rim colour so it reads as part of the card. */
 #session-list li.child::before {
@@ -846,6 +842,34 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    than the face so a hovered child still reads as the card it is. */
 #session-list li.child:hover { background: #20262e; }
 #session-list li.child.active { background: #262d38; }
+/* A child row that `⇱ card` just landed on still has to show the mark, and
+   the two rules above are where the earlier attempt at this went wrong.
+
+   `li.child`, `li.child:hover` and `li.child.active` all tie
+   `li.child.goto-flash` at specificity (0,2,1), so among them only
+   declaration order decides — a rule placed before the tints loses to them
+   no matter that `li.child` itself is declared higher up the file. That
+   matters because `revealSessionCard` is what draws the flash, and it runs
+   on `⇱ card` (`gotoSessionCard` reveals `currentName` by definition), on a
+   boot landing and on a band click: on every one of those the row it marks
+   is the `.active` one. Measured on tree e76ed6e4 with the rule in the
+   earlier position: a flashed child that was also active painted
+   rgb(38,45,56) — the active tint — instead of the flash's rgb(27,42,68),
+   while a harness flashing an inactive child saw the mark fine.
+
+   So the flash is declared last, after both tints, and names the states it
+   overlaps. It has to win: the child card says where a row sits, the tint
+   says where the reader is, and the flash says which row was just asked
+   for — the last one is what the reader is waiting to see. Same colours as
+   the root row's flash, so the mark reads the same at any depth.
+   railcards_browser.cjs flashes a child that is ALSO active, the
+   combination this rule exists for. */
+#session-list li.child.goto-flash,
+#session-list li.child.goto-flash:hover,
+#session-list li.child.goto-flash.active {
+  background: #1b2a44;
+  box-shadow: inset 0 0 0 1px #1f6feb;
+}
 /* A row the search does not match, kept in view because it is the parent,
    an ancestor or a descendant of a match (claunch-78p7b): faded so the
    matches stand out from the tree around them. */
