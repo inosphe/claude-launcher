@@ -44,6 +44,31 @@ llm:
 토큰 예산은 변하지 않는다 — 백엔드를 바꾸는 일과 지출 한도를 바꾸는 일은
 다른 일이다.
 
+## provider의 요청 헤더 규칙 (OpenCode Go)
+
+프로필을 적은 프리셋은 그 프로필의 provider를 통해 나간다. provider가
+`session_header`나 `anthropic_auth_header`를 선언했으면 그 규칙이 **이 호출에도**
+적용된다. 실제로는 harness 트래픽만 shim을 거치므로 규칙이 shim 안에만 있으면
+데몬이 직접 부르는 브리핑 호출은 거절된다 — OpenCode Go에서
+`400 MissingSessionID`로 재현됐다(2026-10-25, `claunch-acy2f`).
+
+- 규칙의 정본은 `src/claude_launcher/routing.py`의 `apply_session_header`와
+  `apply_anthropic_auth`이고, shim과 `daemon/briefing.py`가 같은 함수를 부른다.
+- `daemon/briefing.py:briefing_request_headers()`가 호출마다 헤더를 만든다.
+  설정을 매번 다시 읽으므로 `~/.claunch.yaml`(또는 Settings 카드)의 편집이
+  다음 브리핑에 바로 반영된다.
+- `session_header`에 보내는 값은 **`claunch-briefing`** 이다
+  (`briefing.BRIEFING_SESSION_ID`). 세션 이름을 쓰지 않는다: 브리핑은 세션의
+  한 턴이 아니라 데몬의 요약 호출이고, 사용자가 상류에서 그것을 구분해
+  보이게 해 달라고 요청했다(2026-10-25).
+- `endpoint`/`api_key`를 직접 적은 프리셋은 어느 provider 항목에도 속하지
+  않으므로 규칙이 적용되지 않는다.
+- 값이 잘못된 경우(헤더 이름 규칙 위반) 브리핑 호출은
+  `BriefingError`로 실패하며 메시지에 설정 키가 들어간다. shim처럼 헤더를
+  건너뛰고 트래픽을 계속 보내는 선택지는 여기 없다 — 상류가 어차피 거절한다.
+- `GET /api/briefing/llm`의 `resolved.provider`와 프리셋 행의
+  `resolved.provider`가 어느 provider가 규칙을 정하는지 알려 준다.
+
 ## API
 
 `GET /api/briefing/llm`의 응답에 세 키가 늘었다.

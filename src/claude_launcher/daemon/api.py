@@ -4285,6 +4285,11 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
             "endpoint": cfg["endpoint"],
             "model": cfg["model"],
             "has_key": bool(cfg["api_key"]),
+            # The provider the endpoint belongs to, when a profile supplies
+            # it: its declared request-header rules go out on the call
+            # (briefing.briefing_request_headers), and a card that cannot say
+            # which provider is in play cannot explain a 400 from it.
+            "provider": cfg.get("provider", ""),
         },
         "error": error,
         "profiles": _llm_profile_rows(doc),

@@ -166,6 +166,23 @@ const submit = (root) =>
   assert.equal(field(root, "llm-endpoint").value,
                "https://ds.example/v1/chat/completions");
 
+  /* The provider is on the card when one is resolved: it decides which
+     request headers the call carries (session_header, anthropic_auth_header),
+     so an upstream that rejects the call names something the card showed. */
+  response = { ...response, profile: "ds4", resolved: {
+    endpoint: "https://ds.example/v1/chat/completions",
+    model: "deepseek-flash", has_key: true, provider: "ds4-provider" } };
+  await submit(root);
+  root = card();
+  assert(find(root, (n) => n.text.includes("provider ds4-provider")));
+  // the typed form belongs to no provider entry, so nothing is claimed there
+  response = { ...response, resolved: {
+    endpoint: "https://typed.example/v1/chat/completions",
+    model: "m", has_key: true, provider: "" } };
+  await submit(root);
+  root = card();
+  assert.equal(find(root, (n) => n.text.includes("provider ")), undefined);
+
   /* A profile the picker cannot offer (hand-edited, or its provider lost the
      endpoint) is still shown with the reason, instead of the form proposing
      "none" as if the operator had chosen it. A save is what hands the card
@@ -331,5 +348,5 @@ const submit = (root) =>
     + "endpoint survives an abandoned pick, unknown profile kept, error, "
     + "preset switch carries endpoint and model, save sends the list and "
     + "pointer, delete clears the pointer, add saves the new row, rename "
-    + "sends the name the key is filed under");
+    + "sends the name the key is filed under, provider shown when resolved");
 })().catch((err) => { console.error(err); process.exit(1); });

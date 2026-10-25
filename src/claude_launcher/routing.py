@@ -279,6 +279,89 @@ def requires_shim(provider_name: str, doc: Optional[dict] = None) -> bool:
     )
 
 
+def apply_session_header(
+    headers,
+    provider_name: Optional[str],
+    *,
+    session: Optional[str] = None,
+    doc: Optional[dict] = None,
+) -> None:
+    """Send ``session`` under the provider's required session header.
+
+    The value is ``session`` when the caller has one and
+    :data:`SESSION_HEADER_FALLBACK` otherwise; a caller that set the header
+    itself keeps its value. Raises :class:`RoutingError` for a malformed
+    ``providers.<name>.session_header`` (see :func:`session_header`).
+    """
+    if not provider_name:
+        return
+    doc = store.load() if doc is None else doc
+    required = session_header(provider_name, doc)
+    if required and not _header_sent(headers, required):
+        headers[required] = session or SESSION_HEADER_FALLBACK
+
+
+def apply_anthropic_auth(
+    headers,
+    provider_name: Optional[str],
+    *,
+    path: str = "",
+    doc: Optional[dict] = None,
+) -> None:
+    """Move the Messages credential where the provider reads it.
+
+    On an Anthropic Messages path (any ``path`` containing ``/messages``) an
+    ``Authorization: Bearer`` credential goes out as ``x-api-key`` when the
+    provider declares ``anthropic_auth_header: x-api-key``; the OpenAI
+    protocol (``/chat/completions``) keeps the bearer. Raises
+    :class:`RoutingError` for a malformed value.
+    """
+    if not provider_name:
+        return
+    doc = store.load() if doc is None else doc
+    if "/messages" in path and anthropic_auth_header(provider_name, doc):
+        _move_bearer_to_api_key(headers)
+
+
+def _header_sent(headers, name: str) -> bool:
+    """Whether ``headers`` already carries ``name``, case-insensitively.
+
+    ``CIMultiDict`` does this by itself; a plain dict the caller hands in does
+    not, and the two callers of these rules use one each (the shim passes a
+    ``CIMultiDict``, the briefing call a dict).
+    """
+    wanted = name.lower()
+    return any(str(key).lower() == wanted for key in headers.keys())
+
+
+def _header_value(headers, name: str):
+    """The value ``headers`` holds under ``name``, case-insensitively."""
+    wanted = name.lower()
+    for key in headers.keys():
+        if str(key).lower() == wanted:
+            return headers[key]
+    return None
+
+
+def _move_bearer_to_api_key(headers) -> None:
+    """Move an ``Authorization: Bearer`` credential to ``x-api-key``.
+
+    A caller that already sent ``x-api-key`` keeps it as sent.
+    """
+    auth = _header_value(headers, "Authorization")
+    if not auth or _header_sent(headers, "x-api-key"):
+        return
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return
+    try:
+        headers.popall("Authorization", None)  # CIMultiDict
+    except AttributeError:
+        for key in [k for k in headers.keys() if str(k).lower() == "authorization"]:
+            del headers[key]
+    headers["x-api-key"] = token.strip()
+
+
 #: Per-provider config key switching the shim to live resolution
 #: (``providers.<name>.dynamic``). A dynamic provider's shim asks the config
 #: file for the upstream URL, the api key and the model alias table on every

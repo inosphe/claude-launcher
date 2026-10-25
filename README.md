@@ -1424,16 +1424,22 @@ typo degrades to no header instead of breaking traffic.
 
 Some upstreams accept a request only with a header neither harness sends, or
 want the key under a different header than the one the harness picks. Two
-provider keys let the shim fix the request on its way out:
+provider keys fix the request: `routing.py` applies them
+(`apply_session_header`, `apply_anthropic_auth`), and every caller that
+reaches such an upstream runs that code — the shim for harness traffic, and
+`daemon/briefing.py` for the daemon's own LLM call, which has no shim in its
+path.
 
-| Key | Value | What the shim does |
+| Key | Value | What the rule does |
 |---|---|---|
-| `session_header` | a header name (`[A-Za-z0-9-]+`) | adds that header to every request, carrying the calling session's name (`claunch` when the request names no session). A caller that sets the header itself keeps its value. |
+| `session_header` | a header name (`[A-Za-z0-9-]+`) | adds that header to every request, carrying the caller's session id (`claunch` when the caller has none — and `claunch-briefing` from the daemon's briefing call). A caller that sets the header itself keeps its value. |
 | `anthropic_auth_header` | `x-api-key` | on Anthropic-protocol requests (any path containing `/messages`) moves `Authorization: Bearer <key>` to `x-api-key: <key>`. OpenAI-protocol requests (`/chat/completions`, Pi) keep the bearer. |
 
 Either key puts the provider behind the shim even with metering off. Both are
-read live from the config on every request, like `session_affinity`; a
-malformed value is a config error the shim logs once and treats as unset.
+read live from the config on every request, like `session_affinity`. The shim
+logs a malformed value once and treats it as unset so traffic keeps flowing;
+a caller with no fallback path (`daemon/briefing.py`) fails the call instead
+and names the config key.
 
 [OpenCode Go](https://opencode.ai) needs both. Its endpoint
 `https://opencode.ai/zen/go/v1` rejects a request without an
@@ -1473,6 +1479,19 @@ claunch validate opencode:pi          # Pi harness heartbeat
 The `https://opencode.ai/inference/...` paths belong to the pay-as-you-go Zen
 account, not to a Go subscription; with a Go key they answer `402 Insufficient
 account funds`.
+
+Both keys apply to every caller that reaches the upstream, not only to the
+harnesses behind the shim. The rules live in `routing.py`
+(`apply_session_header`, `apply_anthropic_auth`) and the shim calls them; so
+does the daemon's own LLM call for the session briefing
+(`daemon/briefing.py`), which talks to the configured backend directly. That
+call sends the session header under the id **`claunch-briefing`** — a mark for
+this feature, deliberately not a session name, since a briefing is the
+daemon's summariser talking, not a session's turn. A provider named only by a
+typed `llm.endpoint`/`llm.api_key` has no provider entry, so no rule applies
+to it. Without this an OpenCode-backed briefing answered
+`400 MissingSessionID` while sessions on the same provider worked — the header
+was applied inside the shim, and the briefing never goes through the shim.
 
 ### Prompt-cache TTL
 

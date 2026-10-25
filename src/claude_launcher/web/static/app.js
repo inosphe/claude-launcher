@@ -36539,7 +36539,11 @@ function llmSettingsCard() {
     `endpoint ${resolved.endpoint || "(none)"}`,
     `model ${resolved.model || "(none)"}`,
     resolved.has_key ? "key set" : "NO key",
-  ];
+    // The provider is what decides which request headers the call carries
+    // (session_header, anthropic_auth_header), so it belongs on the card:
+    // a 400 from an upstream that wants one names nothing the card showed.
+    resolved.provider ? `provider ${resolved.provider}` : "",
+  ].filter(Boolean);
   card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
   if (llmSettings.error) card.appendChild(el("p", "wf-warning", llmSettings.error));
   if (llmSettingsNotice) card.appendChild(el("p", "wf-note", llmSettingsNotice));
