@@ -611,12 +611,44 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(host.children.length, 0);
   assert.ok(timers.every((t) => t === null), "no poll outlives the pane");
 
-  // reopening the pane reads the thread it last showed beside the list, in
-  // the same turn -- one batch, one round trip (claunch-8utpv)
+  // reopening the pane on a session shown before in this page load draws
+  // its last list and thread at once, before any answer, and asks only for
+  // the list -- the thread is read again only past what is held
+  // (claunch-m793w)
   assert.deepEqual(JSON.parse(store.get("k:open")), {s1: "th-1"}, "the shown thread is remembered per session");
   calls.length = 0;
   P.mount(host, "s1", {api, storageKey: "k"});
-  assert.deepEqual(calls.map((c) => c[1]).sort(), ["/api/threads/th-1?after=0", "/api/threads?session=s1"],
+  assert.deepEqual(calls.map((c) => c[1]), ["/api/threads?session=s1"], "only the list goes out");
+  assert.deepEqual(host.querySelectorAll(".th-item").map((i) => i.dataset.id), ["th-1", "th-2"],
+    "the kept list is drawn before the read answers");
+  const keptMsgs = host.querySelectorAll(".th-msg").length;
+  assert.ok(keptMsgs >= 2, "the kept conversation is drawn before the read answers");
+  await settle();
+  assert.ok(calls.filter((c) => c[1].startsWith("/api/threads/th-1?")).every((c) => c[1] !== "/api/threads/th-1?after=0"),
+    "the conversation is not read from the start again");
+  assert.equal(host.querySelectorAll(".th-msg").length, keptMsgs, "nothing is drawn twice");
+  P.unmount();
+  // a reply that came while the pane was away: the kept conversation is
+  // drawn first, then only the messages after it are read and appended
+  const lastSeq = messages["th-1"][messages["th-1"].length - 1].seq;
+  messages["th-1"].push({seq: lastSeq + 1, author: "agent", body: "while away", at: "2026-10-13T00:00:09+00:00"});
+  threads[0].last_seq = lastSeq + 1;
+  calls.length = 0;
+  P.mount(host, "s1", {api, storageKey: "k"});
+  assert.equal(host.querySelectorAll(".th-msg").length, keptMsgs, "the kept conversation first");
+  await settle();
+  assert.deepEqual(calls.map((c) => c[1]).filter((u) => u.startsWith("/api/threads/th-1?")),
+    [`/api/threads/th-1?after=${lastSeq}`], "only what came after the kept messages is read");
+  assert.equal(host.querySelectorAll(".th-msg").length, keptMsgs + 1, "the new reply is appended");
+  P.unmount();
+  // a session this page load has not shown reads its remembered thread
+  // beside the list, in the same turn -- one batch, one round trip
+  // (claunch-8utpv)
+  store.set("k:open", JSON.stringify({s1: "th-1", s3: "th-1"}));
+  calls.length = 0;
+  P.mount(host, "s3", {api, storageKey: "k"});
+  assert.equal(host.querySelectorAll(".th-item").length, 0, "nothing kept: no list before the answer");
+  assert.deepEqual(calls.map((c) => c[1]).sort(), ["/api/threads/th-1?after=0", "/api/threads?session=s3"],
     "list and conversation go out before either answers");
   await settle();
   assert.equal(calls.filter((c) => c[1].startsWith("/api/threads/th-1?")).length, 1, "the early read is used, not repeated");
@@ -639,8 +671,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   P.unmount();
   calls.length = 0;
   P.mount(host, "s1", {api, storageKey: "k"});
-  assert.ok(calls.some((c) => c[1].startsWith("/api/threads/th-2?")), "the wished thread is read, not th-1");
   await settle();
+  assert.equal(host.querySelectorAll(".th-item").find((i) => i.classList.contains("on")).dataset.id, "th-2", "the wished thread is shown, not th-1");
   P.unmount();
   calls.length = 0;
   P.mount(host, "s1", {api, storageKey: "k"});

@@ -211,6 +211,32 @@ function q(over = {}) {
     h.pane.unmount();
   }
 
+  /* --- back on a session: its last questions at once, then updated
+         (claunch-m793w) ---------------------------------------------------- */
+  {
+    const h = paneHarness();
+    h.setList({ session: "s1", unresolved: 1, agent_seq: 3, questions: [q()] });
+    const host = new N("div");
+    h.pane.mount(host, "s1", { api: h.api });
+    await tick();
+    h.pane.unmount();
+    h.pane.mount(host, "s2", { api: h.api });   // another session in between
+    h.pane.unmount();
+    h.setList({ session: "s1", unresolved: 2, agent_seq: 4,
+                questions: [q(), q({ id: "qa-2", title: "Second" })] });
+    h.pane.mount(host, "s1", { api: h.api });
+    assert.equal(host.querySelectorAll(".qa-card").length, 1, "the kept question is drawn before the read answers");
+    assert.ok(!host.querySelector(".qa-count").textContent.includes("불러오는 중"), "no loading line over kept data");
+    await tick();
+    assert.equal(host.querySelectorAll(".qa-card").length, 2, "the read then adds what is new");
+    h.pane.unmount();
+    const other = new N("div");
+    h.pane.mount(other, "s3", { api: h.api });
+    assert.equal(other.querySelectorAll(".qa-card").length, 0, "a session never shown starts empty");
+    assert.ok(other.querySelector(".qa-count").textContent.includes("불러오는 중"));
+    h.pane.unmount();
+  }
+
   /* --- closed questions fold away; an emptied list says so --------------- */
   {
     const h = paneHarness();

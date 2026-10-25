@@ -44,6 +44,24 @@
     // ([{file, src}]), posts still out, and what the last post said.
     drafts: new Map(), attached: new Map(), sending: new Set(), notice: null, refocus: "",
   };
+  // Each conversation last read, kept for this page load (claunch-m793w):
+  // picking a thread read before, or coming back to the page, shows it at
+  // once while it is read again. Bounded, oldest first out.
+  const DETAIL_CACHE = 64;
+  const detailCache = new Map();   // thread id -> its last GET /api/threads/<id> answer
+  function keepDetail(data) {
+    const id = data && data.thread && data.thread.id;
+    if (!id) return;
+    detailCache.delete(id);   // re-added last, so the oldest goes first
+    detailCache.set(id, data);
+    while (detailCache.size > DETAIL_CACHE) detailCache.delete(detailCache.keys().next().value);
+  }
+  // The conversation the right side should show now: the one held when it
+  // is the target, else the target's kept one, else none (Loading…).
+  function restoreDetail() {
+    const id = target();
+    if (id && (!state.detail || state.detail.thread.id !== id)) state.detail = detailCache.get(id) || null;
+  }
   // The threads pane's helpers (threads-pane.js loads first on the dashboard).
   const pane = () => globalThis.ThreadsPane || {};
   const node = (tag, cls, text) => {
@@ -208,11 +226,15 @@
     const id = target();
     const seq = ++state.detailSeq;
     if (!id) { state.detail = null; state.detailError = ""; if (state.open) render(); return; }
-    if (state.detail && state.detail.thread.id !== id) state.detail = null;
+    if (state.detail && state.detail.thread.id !== id) {
+      restoreDetail();
+      if (state.open) render();
+    }
     try {
       const data = await fetchJson(`/api/threads/${encodeURIComponent(id)}`);
       if (seq !== state.detailSeq || !state.open) return;
       state.detail = data;
+      keepDetail(data);
       state.detailError = "";
     } catch (error) {
       if (seq !== state.detailSeq) return;
@@ -645,6 +667,7 @@
     state.selected = next === "tree" ? (id || state.selected || "") : state.selected;
     state.open = true;
     startPoll();
+    restoreDetail();
     if (listed) {
       // Same list, another thread or mode: only the right side changes.
       render();

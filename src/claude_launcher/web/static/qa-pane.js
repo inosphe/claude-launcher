@@ -54,6 +54,11 @@ globalThis.QaPane = (() => {
   const cards = new Map();   // id -> {node, sig}
   const editing = new Set();   // closed question ids whose answer editor is open
   const checking = new Map();  // id -> direction-check note being written
+  // Each session's last answer, kept across mounts for this page load
+  // (claunch-m793w): coming back to a session draws its questions at once
+  // and the read that follows only updates them. Bounded, oldest first out.
+  const CACHE_SESSIONS = 32;
+  const cache = new Map();   // session -> its last /api/qa answer
 
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -78,6 +83,9 @@ globalThis.QaPane = (() => {
       if (!resp.ok) { error = doc.error || `HTTP ${resp.status}`; render(); return; }
       error = "";
       data = doc;
+      cache.delete(want);   // re-added last, so the oldest session goes first
+      cache.set(want, doc);
+      while (cache.size > CACHE_SESSIONS) cache.delete(cache.keys().next().value);
       render();
     } catch {
       // offline: the page's health poll says so; keep the last picture
@@ -604,7 +612,7 @@ globalThis.QaPane = (() => {
     onDiscuss = opts.onDiscuss || null;
     focusWant = "";
     if (wanted && wanted.session === session) { focusWant = wanted.id; wanted = null; }
-    data = null;
+    data = cache.get(session) || null;
     error = "";
     nudging = false;
     nudgeNotice = null;

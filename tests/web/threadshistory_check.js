@@ -211,6 +211,26 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   view.byClass('thh-group')[1].byClass('thh-srow')[0].listeners.click();
   assert.strictEqual(view.byClass('thh-group')[1].byClass('thh-trow').length, 2);
 
+  // Back to a thread read before: its kept conversation shows at once, with
+  // no Loading… in between, and is read again behind it (claunch-m793w).
+  view.byClass('thh-group')[1].byClass('thh-trow')[0].listeners.click();   // th-2
+  await settle();
+  assert.strictEqual(view.byClass('thh-detail')[0].dataset.thread, 'th-2');
+  calls.length = 0;
+  view.byClass('thh-group')[1].byClass('thh-trow')[1].listeners.click();   // th-1 again
+  assert.strictEqual(view.byClass('thh-detail')[0].dataset.thread, 'th-1', 'the kept conversation, before the read answers');
+  assert.ok(view.byClass('thh-detail')[0].textContent.includes('body of th-1'));
+  await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/th-1']);
+  // Leaving the page and coming back shows the list and the thread at once too.
+  page.stop();
+  calls.length = 0;
+  page.open('tree', 'th-1');
+  assert.strictEqual(view.byClass('thh-detail')[0].dataset.thread, 'th-1', 'kept across leaving the page');
+  assert.strictEqual(view.byClass('thh-group').length, 2);
+  await settle();
+  assert.deepStrictEqual(calls, ['/api/threads/index', '/api/threads/th-1']);
+
   // newest: the whole thread list stays (flat, with sessions), and only the newest shows.
   calls.length = 0;
   modeTabs()[1].listeners.click();
