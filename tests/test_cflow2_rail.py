@@ -187,22 +187,39 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
 def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):
     """``started``/``updated``/``entered_at`` (claunch-c2emv): the Chart page
     reads them to tell a run that is still moving from one that has sat in
-    the same task, which ``current`` alone cannot show."""
+    the same task, which ``current`` alone cannot show.
+
+    The stamps are handed in rather than read from the wall clock. ``r.now``
+    is ``time.time()`` (``runtime.RunState.now``), so a clock that steps back
+    between the two moves below stamps the second instance *before* the
+    first and ``entered_at > first`` fails on a run that did nothing wrong
+    (claunch-6hv7n; observed once in a gate run and not reproduced since).
+    The assertion is about the rail carrying the run's own stamps, not about
+    the machine's clock behaving, so the test supplies them: ``start`` and
+    ``select`` both take ``now``.
+    """
     cwd = str(proj)
-    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+    t0 = 1_792_930_095.2870767
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={}, now=t0)
     r = _rail(cwd, "s1")["s1"]
     state = runtime.RunStore(cwd, "s1").load_state()
     (active,) = state["active"]
     assert r["started"] == state["started"]
     assert r["updated"] == state["updated"]
     assert r["entered_at"] == pytest.approx(state["inst"][active]["entered_at"])
+    # The rail reports the stamp the run was given, not one it read itself.
+    assert r["entered_at"] == pytest.approx(t0)
     first = r["entered_at"]
 
     # Moving the run into a task replaces the active instance, so the stamp
-    # moves with it -- that is what "still moving" means to the chart.
-    runtime.select(None, "left", cwd=cwd, scope="s1", caller=runtime.CALLER_USER)
+    # moves with it -- that is what "still moving" means to the chart. The
+    # second stamp is later than the first by construction, which is the
+    # property the chart depends on.
+    later = t0 + 0.4002784
+    runtime.select(None, "left", cwd=cwd, scope="s1", caller=runtime.CALLER_USER, now=later)
     r = _rail(cwd, "s1")["s1"]
     assert r["current"] == ["Step A"]
+    assert r["entered_at"] == pytest.approx(later)
     assert r["entered_at"] > first
     moved = runtime.RunStore(cwd, "s1").load_state()
     assert r["updated"] == moved["updated"]
