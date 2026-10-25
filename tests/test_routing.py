@@ -216,6 +216,118 @@ def test_a_malformed_anthropic_auth_header_is_rejected(home, bad):
         routing.anthropic_auth_header("openrouter")
 
 
+# --------------------------------------------------------------------------- #
+# the shared application of those rules (the shim and the daemon both call it)
+# --------------------------------------------------------------------------- #
+def _ocgo_provider(**extra):
+    store.update(lambda doc: doc.setdefault("providers", {}).update({
+        "ocgo": {
+            "endpoints": {"openai": "https://opencode.ai/zen/go/v1"},
+            "models": {"default": "deepseek-flash"},
+            "session_header": "x-opencode-session",
+            **extra,
+        }
+    }))
+
+
+def test_apply_session_header_sends_the_callers_id_and_the_fallback(home):
+    """The rule is one function so the shim and the daemon cannot disagree.
+
+    The daemon's own LLM calls (:mod:`claude_launcher.daemon.briefing`) reach
+    the same upstreams without a shim, so a rule that lives only in the shim
+    leaves those calls rejected with the provider's own 400.
+    """
+    _ocgo_provider()
+    headers = {"Authorization": "Bearer sk-test"}
+    routing.apply_session_header(headers, "ocgo", session="s1404")
+    assert headers["x-opencode-session"] == "s1404"
+    # no caller id (a plain `claunch run`): the shared fallback, still sent
+    other = {"Authorization": "Bearer sk-test"}
+    routing.apply_session_header(other, "ocgo")
+    assert other["x-opencode-session"] == routing.SESSION_HEADER_FALLBACK
+    # a caller that set the header itself keeps its value
+    own = {"x-opencode-session": "caller-own"}
+    routing.apply_session_header(own, "ocgo", session="s1404")
+    assert own["x-opencode-session"] == "caller-own"
+
+
+def test_apply_session_header_is_a_no_op_without_the_rule(home):
+    _write_provider()  # no session_header
+    headers = {"Authorization": "Bearer sk-test"}
+    routing.apply_session_header(headers, "openrouter", session="s1404")
+    assert headers == {"Authorization": "Bearer sk-test"}
+    # and without a provider name at all
+    routing.apply_session_header(headers, "", session="s1404")
+    assert headers == {"Authorization": "Bearer sk-test"}
+
+
+def test_apply_anthropic_auth_moves_the_bearer_on_messages_paths_only(home):
+    _ocgo_provider(anthropic_auth_header="x-api-key")
+    messages = {"Authorization": "Bearer sk-test"}
+    routing.apply_anthropic_auth(messages, "ocgo", path="/s/x/v1/messages")
+    assert "Authorization" not in messages
+    assert messages["x-api-key"] == "sk-test"
+    # the OpenAI protocol keeps the bearer — this is the briefing's own path
+    chat = {"Authorization": "Bearer sk-test"}
+    routing.apply_anthropic_auth(chat, "ocgo", path="/v1/chat/completions")
+    assert chat == {"Authorization": "Bearer sk-test"}
+
+
+def test_the_two_rules_compose_for_a_messages_request(home):
+    """Both rules on one request, which is what OpenCode Go needs.
+
+    The shim and the briefing call each run them; nothing composes them for
+    them, so this pins that running both in order leaves both headers.
+    """
+    _ocgo_provider(anthropic_auth_header="x-api-key")
+    headers = {"Authorization": "Bearer sk-test"}
+    routing.apply_session_header(headers, "ocgo", session="s1")
+    routing.apply_anthropic_auth(headers, "ocgo", path="/v1/messages")
+    assert headers["x-opencode-session"] == "s1"
+    assert headers["x-api-key"] == "sk-test"
+
+
+def test_apply_session_header_reads_the_live_config(home):
+    """An edit reaches the very next call — the shim's live read, shared."""
+    _ocgo_provider()
+    headers = {}
+    routing.apply_session_header(headers, "ocgo", session="s1")
+    assert headers["x-opencode-session"] == "s1"
+    store.update(lambda doc: doc["providers"]["ocgo"].update(
+        {"session_header": "x-other-session"}))
+    again = {}
+    routing.apply_session_header(again, "ocgo", session="s1")
+    assert again == {"x-other-session": "s1"}
+
+
+def test_the_rules_raise_on_a_malformed_value(home):
+    """Whoever calls them decides what a typo costs; the rules just refuse."""
+    _ocgo_provider(session_header="x opencode")
+    with pytest.raises(routing.RoutingError):
+        routing.apply_session_header({}, "ocgo", session="s1")
+    _ocgo_provider(anthropic_auth_header="api-key")
+    with pytest.raises(routing.RoutingError):
+        routing.apply_anthropic_auth({}, "ocgo", path="/v1/messages")
+
+
+def test_the_rules_accept_a_plain_dict_as_well_as_a_cimultidict(home):
+    """The shim passes ``CIMultiDict``, the briefing call a dict; both work."""
+    from multidict import CIMultiDict
+
+    _ocgo_provider(anthropic_auth_header="x-api-key")
+    plain = {"Authorization": "Bearer sk-test"}
+    routing.apply_session_header(plain, "ocgo", session="s1")
+    routing.apply_anthropic_auth(plain, "ocgo", path="/v1/messages")
+    assert plain == {"x-opencode-session": "s1", "x-api-key": "sk-test"}
+
+    multi = CIMultiDict({"Authorization": "Bearer sk-test"})
+    routing.apply_session_header(multi, "ocgo", session="s1")
+    routing.apply_anthropic_auth(multi, "ocgo", path="/v1/messages")
+    assert multi["x-opencode-session"] == "s1"
+    assert multi["x-api-key"] == "sk-test"
+    assert "Authorization" not in multi
+
+
 def test_a_session_header_provider_is_fronted_with_metering_off(home, monkeypatch):
     # conftest switches metering off; the header is mandatory for the
     # upstream, so the shim must front the provider anyway

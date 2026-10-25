@@ -75,6 +75,7 @@ def test_llm_config_absent_block_is_disabled_defaults(home):
     assert cfg == {
         "preset": "",
         "profile": "",
+        "provider": "",
         "endpoint": "",
         "model": "",
         "api_key": "",
@@ -114,6 +115,106 @@ def test_llm_config_reads_the_store_and_keeps_params(config_file):
     # a non-numeric max_tokens falls back rather than erroring the endpoint
     cfg = briefing.llm_config({"llm": {"max_tokens": "lots"}})
     assert cfg["max_tokens"] == briefing.DEFAULT_MAX_TOKENS
+
+
+def test_profile_backend_carries_the_provider_name(config_file):
+    """The provider is what decides the request headers the call goes out with.
+
+    :func:`briefing.call_llm` applies the rules that provider declares
+    (``session_header``, ``anthropic_auth_header``) so a daemon-side call is
+    accepted where a harness session on the same provider is — the shim is not
+    in this path.
+    """
+    _profile_backend_config()
+    assert briefing.profile_backend("brief").provider == "ds"
+
+
+def test_llm_config_provider_is_the_profile_provider_or_blank(config_file):
+    _profile_backend_config()
+    store.update(lambda doc: doc.update({"llm": {"profile": "brief"}}))
+    assert briefing.llm_config()["provider"] == "ds"
+    # the typed form belongs to no provider entry, so no rule applies to it
+    store.update(lambda doc: doc.update(
+        {"llm": {"endpoint": "https://typed.example/v1/chat/completions",
+                 "api_key": "sk-typed", "model": "m"}}))
+    assert briefing.llm_config()["provider"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# the request headers a briefing call goes out with
+# --------------------------------------------------------------------------- #
+def _ocgo_profile(name="brief-ocgo", **provider_extra):
+    """A profile on a provider that refuses a request without its own header.
+
+    opencode.ai/zen/go answers 400 ``MissingSessionID`` to a call that does
+    not carry ``x-opencode-session`` — measured 2026-10-25 on this feature's
+    own ``chat/completions`` call, which is why it exists here.
+    """
+    prof = profile.create(name)
+
+    def mutate(doc):
+        doc.setdefault("providers", {})[name] = {
+            "api_key": "provider-secret",
+            "endpoints": {"openai": "https://opencode.example/v1"},
+            "models": {"default": "deepseek-flash"},
+            "session_header": "x-opencode-session",
+            **provider_extra,
+        }
+        doc.setdefault("profiles", {}).setdefault(name, {})["provider"] = name
+
+    store.update(mutate)
+    return prof
+
+
+def test_briefing_headers_send_the_marked_id_under_the_required_header(home):
+    """The id is this feature's own mark, not the calling session's name."""
+    _ocgo_profile()
+    store.update(lambda doc: doc.update({"llm": {"profile": "brief-ocgo"}}))
+    cfg = briefing.llm_config()
+    headers = briefing.briefing_request_headers(cfg)
+    assert headers["x-opencode-session"] == briefing.BRIEFING_SESSION_ID
+    assert headers["x-opencode-session"] == "claunch-briefing"
+    assert headers["Authorization"] == "Bearer provider-secret"
+    assert headers["Accept"] == "application/json"
+
+
+def test_briefing_headers_are_plain_without_a_provider(home):
+    cfg = {"endpoint": "https://typed.example/v1/chat/completions",
+           "model": "m", "api_key": "sk-typed", "provider": ""}
+    assert briefing.briefing_request_headers(cfg) == {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-typed",
+    }
+
+
+def test_briefing_headers_stay_a_bearer_on_the_chat_completions_path(home):
+    """The Messages-only auth move must not fire on the protocol this speaks."""
+    _ocgo_profile(anthropic_auth_header="x-api-key")
+    store.update(lambda doc: doc.update({"llm": {"profile": "brief-ocgo"}}))
+    headers = briefing.briefing_request_headers(briefing.llm_config())
+    assert headers["Authorization"] == "Bearer provider-secret"
+    assert "x-api-key" not in headers
+
+
+def test_briefing_headers_follow_a_live_config_edit(home):
+    """Read per call, like the shim's: an edit reaches the next briefing."""
+    _ocgo_profile()
+    store.update(lambda doc: doc.update({"llm": {"profile": "brief-ocgo"}}))
+    briefing.briefing_request_headers(briefing.llm_config())
+    store.update(lambda doc: doc["providers"]["brief-ocgo"].update(
+        {"session_header": "x-other-session"}))
+    headers = briefing.briefing_request_headers(briefing.llm_config())
+    assert headers["x-other-session"] == briefing.BRIEFING_SESSION_ID
+    assert "x-opencode-session" not in headers
+
+
+def test_a_malformed_header_rule_fails_the_call_with_the_config_key(home):
+    """A typo is named, not silently skipped: the upstream refuses anyway."""
+    _ocgo_profile(session_header="x opencode")
+    store.update(lambda doc: doc.update({"llm": {"profile": "brief-ocgo"}}))
+    with pytest.raises(briefing.BriefingError, match="session_header"):
+        briefing.briefing_request_headers(briefing.llm_config())
 
 
 def test_profile_backend_reads_endpoint_key_and_models(config_file):
@@ -386,6 +487,7 @@ def test_presets_for_display_never_carry_a_key(config_file):
         "endpoint": "https://cheap.example/v1/chat/completions",
         "model": "glm-small",
         "has_key": True,
+        "provider": "",  # typed in directly: it belongs to no provider entry
     }
     assert rows["big"]["resolved"]["has_key"] is True
     assert rows["big"]["resolved"]["model"] == "deepseek-flash"
@@ -833,6 +935,49 @@ def test_call_llm_sends_the_openai_shape_and_reads_the_answer(home):
     assert seen["body"]["max_tokens"] == 128
     assert seen["body"]["top_k"] == 7  # params merged into the body
     assert seen["body"]["messages"] == [{"role": "user", "content": "summarize this"}]
+
+
+def test_call_llm_sends_the_providers_required_session_header(home):
+    """The end-to-end half of the fix.
+
+    A provider that refuses a request without its own session header
+    (OpenCode Go answers ``400 MissingSessionID``) rejected this feature's
+    calls, because ``call_llm`` built its headers by hand and never read the
+    provider's rule. Reproduced before the fix on 2026-10-25 against
+    ``https://opencode.ai/zen/go/v1/chat/completions``; here the same shape
+    is asserted against a local endpoint, so the assertion is that the header
+    leaves, not that the provider is up.
+    """
+    from aiohttp import web as aioweb
+
+    seen = {}
+
+    async def handler(request):
+        seen["session"] = request.headers.get("x-opencode-session")
+        seen["auth"] = request.headers.get("Authorization")
+        return aioweb.json_response(_llm_answer("ok"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "deepseek-v4.1-flash",
+                "api_key": "sk-test",
+                "max_tokens": 32,
+                "provider": "opencode",
+            }
+            store.update(lambda doc: doc.setdefault("providers", {}).update({
+                "opencode": {"session_header": "x-opencode-session"}}))
+            got = await briefing.call_llm(cfg, "hi")
+            assert got.text == "ok"
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert seen["session"] == "claunch-briefing"
+    # the OpenAI protocol keeps the bearer: x-api-key is for Messages only
+    assert seen["auth"] == "Bearer sk-test"
 
 
 def _spy_on_the_session(monkeypatch):
@@ -1650,6 +1795,8 @@ def test_briefing_llm_settings_endpoint_reads_and_saves(home):
                 "endpoint": "https://example.test/v1/chat/completions",
                 "model": "glm-small",
                 "has_key": True,
+                # the provider decides which request headers go out
+                "provider": "ds",
             }
             # no secret crosses the boundary, in either direction of the save
             assert "api_key" not in json.dumps(body) or body["api_key_set"] is False

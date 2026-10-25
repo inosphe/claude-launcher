@@ -73,7 +73,7 @@ log = logging.getLogger("claunch.daemon.briefing")
 
 from .. import atomic, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, provider_spec, providers
-from .. import store, transcripts
+from .. import routing, store, transcripts
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -171,6 +171,11 @@ class Backend(NamedTuple):
     #: Every model id the profile names, ``default`` first — what the
     #: Settings page offers beside the model field.
     models: Tuple[str, ...]
+    #: The provider name behind the profile. The call needs it to apply the
+    #: request-header rules that provider declares (:mod:`claude_launcher.
+    #: routing`), which the harness paths get from the shim and this one
+    #: otherwise would not.
+    provider: str = ""
 
 
 def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
@@ -225,6 +230,7 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
         api_key=str(lineage.stored_auth_token(prof) or spec.api_key or ""),
         model=models[0] if models else "",
         models=models,
+        provider=providers.resolve_name(prof, doc),
     )
 
 
@@ -319,6 +325,12 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     exception: the chosen model wins, because the model is this feature's
     choice about the backend rather than a property of it, and the profile's
     ``default`` fills in only when the field is empty.
+
+    ``provider`` is the provider name behind a named profile, and empty for
+    the typed form — a typed endpoint belongs to no provider entry, so no
+    per-provider request-header rule applies to it. :func:`call_llm` reads it
+    to send what a shim would have sent (see
+    :func:`briefing_request_headers`).
     """
     doc = store.load() if doc is None else doc
     block = doc.get("llm")
@@ -338,6 +350,7 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     endpoint = fields["endpoint"]
     api_key = fields["api_key"]
     model = fields["model"]
+    provider = ""
     if profile_name:
         try:
             backend = profile_backend(profile_name, doc)
@@ -346,9 +359,11 @@ def llm_config(doc: Optional[dict] = None) -> dict:
         else:
             endpoint, api_key = backend.endpoint, backend.api_key
             model = model or backend.model
+            provider = backend.provider
     return {
         "preset": chosen_id,
         "profile": profile_name,
+        "provider": provider,
         "endpoint": endpoint,
         "model": model,
         "api_key": api_key,
@@ -389,7 +404,8 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
             "model": model,
             "endpoint": endpoint,
             "api_key_set": bool(preset.get("api_key")),
-            "resolved": {"endpoint": "", "model": "", "has_key": False},
+            "resolved": {"endpoint": "", "model": "", "has_key": False,
+                         "provider": ""},
             "error": "",
         }
         if profile_name:
@@ -402,12 +418,14 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
                     "endpoint": backend.endpoint,
                     "model": model or backend.model,
                     "has_key": bool(backend.api_key),
+                    "provider": backend.provider,
                 }
         else:
             row["resolved"] = {
                 "endpoint": endpoint,
                 "model": model,
                 "has_key": bool(preset.get("api_key")),
+                "provider": "",
             }
         rows.append(row)
     return rows
@@ -839,6 +857,56 @@ class LlmAnswer(NamedTuple):
     completion_tokens: Optional[int]
 
 
+#: The id this feature sends under a provider's required session header
+#: (``providers.<name>.session_header``). It is deliberately NOT the calling
+#: session's name: a briefing is the daemon's own summariser call, not one of
+#: a session's turns, and the user asked for it to be marked as such at the
+#: upstream (2026-10-25). The shape is the same as
+#: :data:`routing.SESSION_HEADER_FALLBACK` — one shared id for every launch of
+#: this caller — so the two read as the same kind of value.
+BRIEFING_SESSION_ID = "claunch-briefing"
+
+
+def briefing_request_headers(cfg: dict) -> Dict[str, str]:
+    """The request headers one briefing call goes out with.
+
+    The OpenAI-compatible shape (``Accept``, ``Content-Type``, the bearer)
+    plus whatever per-provider rule :mod:`claude_launcher.routing` declares
+    for the provider this endpoint belongs to. The rules are read on every
+    call, live, exactly as the shim reads them: a provider edited in
+    ``~/.claunch.yaml`` (including from the Settings page) takes effect on the
+    next briefing without a restart.
+
+    A malformed provider value raises :class:`BriefingError` instead of
+    skipping the header — the shim can degrade to "traffic still flows", but
+    here there is nothing left to send: the upstream refuses the request
+    anyway, and a silent skip would look like a provider bug. The message is
+    the routing error's, which names the config key.
+
+    The path is the endpoint's own, so the Messages-only auth move applies
+    exactly when this call is on a Messages path — which it is not for the
+    ``chat/completions`` calls this feature makes, but the rule is the rule.
+    """
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {cfg.get('api_key', '')}",
+    }
+    provider = str(cfg.get("provider") or "")
+    if not provider:
+        return headers
+    try:
+        routing.apply_session_header(
+            headers, provider, session=BRIEFING_SESSION_ID
+        )
+        routing.apply_anthropic_auth(
+            headers, provider, path=str(cfg.get("endpoint") or "")
+        )
+    except routing.RoutingError as exc:
+        raise BriefingError(str(exc)) from exc
+    return headers
+
+
 async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> LlmAnswer:
     """POST the prompt to the OpenAI-compatible endpoint, return the answer.
 
@@ -850,6 +918,11 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
     returns when ``max_tokens`` ran out mid-thought, and it arrives as a
     perfectly ordinary HTTP 200 — so if it were passed on, the caller would
     cache "" and the UI would render a blank card with nothing to say why.
+
+    The request headers are :func:`briefing_request_headers`'s, so a provider
+    that refuses a request without its own session header (OpenCode Go) is
+    answered the way a session on that provider is: the shim is not in this
+    path, so the rules are applied here or nowhere.
     """
     body = {
         "model": cfg["model"],
@@ -857,11 +930,7 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
         "messages": [{"role": "user", "content": prompt}],
     }
     body.update(cfg.get("params") or {})
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {cfg['api_key']}",
-    }
+    headers = briefing_request_headers(cfg)
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         connector = (

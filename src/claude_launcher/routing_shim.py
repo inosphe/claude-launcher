@@ -34,7 +34,10 @@ name (or ``routing.SESSION_HEADER_FALLBACK`` when none arrived) goes out
 under that header on every request, for upstreams such as OpenCode Go that
 refuse a request without one, and ``providers.<name>.anthropic_auth_header:
 x-api-key`` moves a bearer credential to ``x-api-key`` on Anthropic Messages
-paths, for upstreams that read it only from there.
+paths, for upstreams that read it only from there. Both of those rules are
+:mod:`routing`'s (:func:`routing.apply_session_header`,
+:func:`routing.apply_anthropic_auth`), not this file's: the daemon's own LLM
+calls reach the same upstreams without a shim and apply the same rules.
 
 ``--route <name>`` starts the shim for a *dynamic* provider. The shim then
 re-reads ``providers.<name>`` on every request — the anthropic endpoint to
@@ -150,52 +153,35 @@ def _affinity_on(app: web.Application) -> bool:
         return False
 
 
-def _session_header(app: web.Application):
-    """The header the provider requires a session id under, read live.
+def _apply_provider_headers(app: web.Application, headers: CIMultiDict,
+                            *, session_name, path: str) -> None:
+    """Apply the provider's request-header rules, read live.
 
-    Same live read and error policy as :func:`_affinity_on`: a malformed
-    value is logged once per distinct message and no header is added.
+    The rules themselves live in :mod:`routing`
+    (:func:`routing.apply_session_header`, :func:`routing.apply_anthropic_auth`),
+    shared with the daemon's own LLM calls
+    (:mod:`claude_launcher.daemon.briefing`) — the same provider rejects both
+    paths when its header is missing, so the two must not decide separately.
+    This wrapper is the shim's error policy, which the daemon does not share:
+    a malformed value is logged once per distinct message and that one rule is
+    skipped, so a config typo degrades to no header instead of failing traffic.
     """
     provider = app["cfg"].get("provider")
     if not provider:
-        return None
-    try:
-        return routing.session_header(provider)
-    except routing.RoutingError as exc:
-        if app.get("session_header_error") != str(exc):
-            print(f"session_header config error: {exc}", file=sys.stderr)
-            app["session_header_error"] = str(exc)
-        return None
-
-
-def _anthropic_auth_header(app: web.Application):
-    """``providers.<name>.anthropic_auth_header``, read live (see
-    :func:`_session_header` for the error policy)."""
-    provider = app["cfg"].get("provider")
-    if not provider:
-        return None
-    try:
-        return routing.anthropic_auth_header(provider)
-    except routing.RoutingError as exc:
-        if app.get("anthropic_auth_error") != str(exc):
-            print(f"anthropic_auth_header config error: {exc}", file=sys.stderr)
-            app["anthropic_auth_error"] = str(exc)
-        return None
-
-
-def _bearer_to_api_key(headers: CIMultiDict) -> None:
-    """Move an ``Authorization: Bearer`` credential to ``x-api-key``.
-
-    A caller that already sent ``x-api-key`` keeps it as sent.
-    """
-    auth = headers.get("Authorization")
-    if not auth or headers.get("x-api-key") is not None:
         return
-    scheme, _, token = auth.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return
-    headers.popall("Authorization", None)
-    headers["x-api-key"] = token.strip()
+    for key, apply in (
+        ("session_header_error",
+         lambda: routing.apply_session_header(
+             headers, provider, session=session_name)),
+        ("anthropic_auth_error",
+         lambda: routing.apply_anthropic_auth(headers, provider, path=path)),
+    ):
+        try:
+            apply()
+        except routing.RoutingError as exc:
+            if app.get(key) != str(exc):
+                print(f"request header config error: {exc}", file=sys.stderr)
+                app[key] = str(exc)
 
 
 def _metered_path(path: str) -> bool:
@@ -291,11 +277,8 @@ async def _proxy_counted(request: web.Request) -> web.StreamResponse:
         # same rule merge_body applies to the body.
         if AFFINITY_HEADER not in headers:
             headers[AFFINITY_HEADER] = session_name
-    required = _session_header(request.app)
-    if required and required not in headers:
-        headers[required] = session_name or routing.SESSION_HEADER_FALLBACK
-    if "/messages" in path and _anthropic_auth_header(request.app):
-        _bearer_to_api_key(headers)
+    _apply_provider_headers(request.app, headers, session_name=session_name,
+                            path=path)
     meter = None
     if request.method == "POST" and _metered_path(path):
         meter = metering.Meter(session=session_name, path=path)
