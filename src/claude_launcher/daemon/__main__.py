@@ -276,6 +276,20 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         shared_read_max_age=float(cfg["shared_read_max_age"] or 0),
     )
 
+    # What this boot still has to do, readable from the first request that
+    # lands (GET /api/health and /api/daemon both carry it; claunch-9akgh).
+    # Set before the socket accepts so no reader can see a bound port with
+    # no answer to "is it done" -- and before ``runner.setup()`` below, which
+    # runs the startup handlers: the shims' first reconcile pass waits for
+    # this phase to leave "restoring", and reading build_app's "ready" default
+    # would let it run against an empty fleet (claunch-esmr3).
+    app["boot"] = {
+        "phase": "restoring",
+        "done": 0,
+        "total": 0,
+        "started": time.monotonic(),
+    }
+
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     # aiohttp's own connection count, which the WebSocket registry cannot
@@ -287,16 +301,6 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # than the restart flow's patience (stop waits 10s, the successor's lock
     # grace is 15s). Keep teardown well inside that budget.
     site = web.TCPSite(runner, host, port, shutdown_timeout=3.0)
-    # What this boot still has to do, readable from the first request that
-    # lands (GET /api/health and /api/daemon both carry it; claunch-9akgh).
-    # Set before the socket accepts so no reader can see a bound port with
-    # no answer to "is it done".
-    app["boot"] = {
-        "phase": "restoring",
-        "done": 0,
-        "total": 0,
-        "started": time.monotonic(),
-    }
     try:
         await site.start()
     except OSError as exc:

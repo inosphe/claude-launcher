@@ -291,6 +291,76 @@ def test_an_idle_only_shutdown_waits_for_the_request_in_flight(home):
 # --------------------------------------------------------------------------- #
 # tests leave no shim behind (claunch-19liw.2.5)
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# the first pass waits for the boot's restore (claunch-esmr3)
+# --------------------------------------------------------------------------- #
+def test_no_reconcile_pass_runs_before_the_fleet_is_restored(owner, monkeypatch):
+    """A pass during restore sees no sessions and retires their shims.
+
+    On 2026-10-24 and again on 2026-10-25 the boot's first pass ran seconds
+    ahead of ``adopted ... s1736``, pruned s1736's shim users and stopped the
+    shim that session was still talking to. Its process then hung on connect
+    (a closed loopback port here times out instead of being refused) and
+    retried ``Request timed out.`` until it was restarted (claunch-esmr3).
+    """
+    import asyncio
+
+    calls = []
+    monkeypatch.setattr(shims_mod, "reconcile_once",
+                        lambda manager: calls.append(("pass", len(calls))) or
+                        {"started": [], "retired": [], "errors": []})
+    # the second pass is the one the test would wait RECONCILE_S for
+    monkeypatch.setattr(routing, "RECONCILE_S", 0.05)
+
+    async def run():
+        app = {"boot": {"phase": "restoring"}, "shims_manager": None}
+        task = asyncio.get_running_loop().create_task(shims_mod._loop(app))
+        try:
+            await asyncio.sleep(0.2)
+            assert calls == [], "a pass ran while the boot was still restoring"
+            app["boot"]["phase"] = "ready"
+            for _ in range(100):
+                if len(calls) >= 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(calls) >= 2, "the pass never ran after the restore finished"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+
+
+def test_the_boot_wait_gives_up_and_reconciles_anyway(owner, monkeypatch):
+    """A restore that never finishes must not hold the shims forever."""
+    import asyncio
+
+    monkeypatch.setattr(shims_mod, "BOOT_WAIT_S", 0.1)
+    calls = []
+    monkeypatch.setattr(shims_mod, "reconcile_once",
+                        lambda manager: calls.append(1) or
+                        {"started": [], "retired": [], "errors": []})
+    monkeypatch.setattr(routing, "RECONCILE_S", 0.05)
+
+    async def run():
+        app = {"boot": {"phase": "restoring"}, "shims_manager": None}
+        task = asyncio.get_running_loop().create_task(shims_mod._loop(app))
+        try:
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0.05)
+            assert calls, "the pass never ran after the boot wait expired"
+            assert app["boot"]["phase"] == "restoring", "the wait must not end the boot"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+
+
 def test_a_shim_a_test_started_is_reaped_even_when_its_record_is_gone(owner, spawned_shims):
     import shutil
 

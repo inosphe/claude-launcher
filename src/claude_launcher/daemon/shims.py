@@ -7,11 +7,18 @@ held). This module is its two duties:
 * ``POST /api/routing/ensure`` — a process outside the daemon (``claunch
   run``, a heartbeat) that needs a shim asks for it here; the daemon starts
   it if it is not running and keeps it while that process lives.
-* a reconcile pass at startup and every :data:`routing.RECONCILE_S` — start
-  the shims the config wants, retire the ones nothing needs any more
-  (:func:`routing.reconcile`).
+* a reconcile pass after the fleet is back and every
+  :data:`routing.RECONCILE_S` after that — start the shims the config wants,
+  retire the ones nothing needs any more (:func:`routing.reconcile`).
 
 The pass runs off the loop: it probes ports and may wait out a shim start.
+
+The first pass waits for the boot's restore to finish (claunch-esmr3).
+``reconcile`` decides a shim is unused from the sessions it is given, and
+during restore that list does not yet hold the sessions the PTY host kept
+alive. Pruning their entries retired a shim those sessions were still talking
+to, and a session pointed at a stopped shim hangs on connect instead of being
+refused: it retries timeouts until something restarts it.
 """
 
 from __future__ import annotations
@@ -43,8 +50,36 @@ def reconcile_once(manager) -> dict:
     return result
 
 
+#: How long the first pass waits for the boot's restore before running anyway.
+#: Restore is the boot's longest stretch and it can fail; a shim that is
+#: wanted has to come up even then, so the wait is bounded (claunch-esmr3).
+BOOT_WAIT_S = 600.0
+
+
+def _boot_ready(app: web.Application) -> bool:
+    boot = app.get("boot") or {}
+    return boot.get("phase", "ready") == "ready"
+
+
+async def _wait_for_boot(app: web.Application) -> None:
+    """Hold the first pass until the fleet is back.
+
+    A pass that runs during restore sees an empty session list and prunes the
+    shim users of every session the PTY host kept, retiring shims those
+    sessions are still talking to (claunch-esmr3).
+    """
+    deadline = asyncio.get_running_loop().time() + BOOT_WAIT_S
+    while not _boot_ready(app):
+        if asyncio.get_running_loop().time() >= deadline:
+            log.warning("routing shims: boot still restoring after %ss; "
+                        "reconciling without waiting for it", int(BOOT_WAIT_S))
+            return
+        await asyncio.sleep(0.2)
+
+
 async def _loop(app: web.Application) -> None:
     loop = asyncio.get_running_loop()
+    await _wait_for_boot(app)
     while True:
         try:
             await loop.run_in_executor(None, reconcile_once, app.get("shims_manager"))
