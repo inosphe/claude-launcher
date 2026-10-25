@@ -141,6 +141,37 @@ def _words(text: str) -> str:
     return " ".join(text.split())
 
 
+def _chart_prose(chart) -> str:
+    """Every piece of prose the chart hands a reader, in words.
+
+    Crediting only labelled nodes misses most of it: of this workflow's 788
+    nodes, 498 have no label, and a ``choose`` option's ``description`` --
+    the line a session reads when it picks the option -- lives in the
+    ``options`` list of just such a node. A guard that reads only labelled
+    ``prompt``/``description`` therefore asserts its absence against a text
+    that was never collected, and stays green through any revert
+    (claunch-f56fz, second review).
+
+    So collect from every node, labelled or not, and read the option list
+    too: ``name``/``description`` per option are what the chooser sees.
+    """
+    chunks = []
+    for node in chart.nodes.values():
+        for key in ("prompt", "description"):
+            value = node.get(key)
+            if isinstance(value, str):
+                chunks.append(value)
+        options = node.get("options")
+        if isinstance(options, list):
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                for value in option.values():
+                    if isinstance(value, str):
+                        chunks.append(value)
+    return _words(" ".join(chunks))
+
+
 def _as_v2(v1_block: str) -> str:
     """The v1 block with the declared v2 divergences applied, in words."""
     words = _words(v1_block)
@@ -2430,3 +2461,120 @@ def test_the_targeted_run_starts_in_the_background_whenever_possible():
     assert "예상 시간과 관계없이 가능하면 항상 백그라운드로 시작한다" in prompt
     assert "예상 시간이 길면 백그라운드" not in prompt
     assert "백그라운드 실행의 끝은 그 프로세스로 기다린다" in prompt
+
+
+# -- the branch decision: reuse before cutting (claunch-f56fz) ---------------
+
+
+def test_branch_setup_reuses_a_branch_before_it_cuts_a_new_one():
+    """A round used to cut a fresh feature branch every time, so a session
+    reused across rounds -- or a worktree shared with another session --
+    split one line of work into a fresh branch per round (s1762/s1803 both
+    ran in the same worktree and left one branch each). The rule is now a
+    decision: keep the branch you are on when it is fit to carry the round,
+    and cut only when it is not.
+
+    What still must hold: the name of a NEW branch is session-prefixed, an
+    existing branch is never overwritten, and the report says which of the
+    two happened and why -- a done_when that only accepts a "new" branch
+    would push every round back to cutting one.
+    """
+    chart = _chart()
+    setup = next(n for n in chart.nodes.values() if n.label == "branch-setup")
+    prompt = _words(setup.get("prompt"))
+    done_when = _words(setup.get("done_when") or "")
+
+    # the decision comes first, and it names all three ways to keep a branch
+    assert prompt.index("지금 있는 브랜치를 쓸 수 있는가") < prompt.index("새로 팔 때 이름은")
+    for anchor in (
+        "통합 대상이 아니다",             # the target itself is not a work branch
+        "이미 착지하지 않았다",            # git branch --contains ... --list <기준>
+        "동결·심사 중이 아니다",           # a frozen branch must not move
+        "이 세션의 이번 회차 브랜치가 이미 있다",   # restart / re-entry
+        "지금 체크아웃을 다른 세션이 함께 쓴다",      # the shared worktree case
+        "위 둘이 아니다",                  # and only then: cut a new one
+    ):
+        assert anchor in prompt, f"branch-setup lost its reuse rule {anchor!r}"
+
+    # the shared-worktree case cites the incidents it exists for
+    assert "s1762" in prompt and "s1803" in prompt
+
+    # a new branch keeps its session prefix and never overwrites a name
+    assert "<세션>-<요지>" in prompt
+    assert "$CLAUNCH_SESSION" in prompt
+    assert "이미 있는 브랜치를 덮어쓰지 않는다" in prompt
+
+    # a reused branch is switched to, not cut; its uncommitted work is not ours
+    assert "재사용을 골랐으면 브랜치를 만들지 않고" in prompt
+    assert "그 브랜치의 미커밋 변경은 내 것이 아니다" in prompt
+
+    # done_when accepts a reuse, and asks for the reason either way
+    assert "재사용한 경우 1의 네 조건을 만족한다는 근거가 보고에 있다" in done_when
+    assert "새 세션 접두사 피처 브랜치가 존재하고" not in done_when
+
+
+def test_the_commit_step_folds_only_a_branch_this_round_cut():
+    """The --no-ff fold into the worktree branch is how a round tidies its own
+    fresh branch away. On a reused branch there is no second line to fold --
+    the round's commits are already on that branch -- so the fold is scoped
+    to ``branch-setup`` having cut one."""
+    chart = _chart()
+    commit = next(n for n in chart.nodes.values() if n.label == "commit")
+    prompt = _words(commit.get("prompt"))
+    assert "branch-setup이 이 세션의 브랜치를 새로 판 경우에만 이 절이 적용된다" in prompt
+    assert "접을 갈래가 없으므로 머지하지 않는다" in prompt
+
+
+def test_intake_no_longer_promises_a_fresh_branch_per_round():
+    """``intake`` used to tell the reader a reused session still gets a new
+    branch ("이전 회차의 브랜치를 새 목표에 재사용하지 않는다"), and the
+    re-entry paragraph said ``branch-setup`` cuts one. Both contradicted the
+    reuse decision; the branch is now settled at ``branch-setup``."""
+    chart = _chart()
+    intake = _words(next(n for n in chart.nodes.values() if n.label == "intake").get("prompt"))
+    assert "이전 회차의 브랜치를 새 목표에 재사용하지 않는다" not in intake
+    assert "실제 브랜치 이름과 생성 여부는" in intake
+    assert "쓸 수 없을 때만 이 요지로 새로 판다" in intake
+
+
+def test_no_step_still_promises_a_brand_new_branch_for_every_round():
+    """The reuse decision has to reach the places that cite it, not just the
+    step that makes it. Leftovers survived the first pass and reviewers
+    found them (claunch-f56fz):
+
+    * ``stack-round`` said "(intake의 branch-setup과 같은 규칙)" next to
+      "cut a new ``<세션>-stack-round-<n>`` from master" -- citing the rule
+      while instructing its opposite.
+    * ``next-round`` described the next round as "새 목표·새 브랜치·새 착지".
+    * ``workspace``'s occupancy axis excluded the main checkout because
+      "branch-setup이 워크트리를 파서 그 경우를 스스로 푼다" -- but the rule
+      now keeps the shared branch instead of always cutting a worktree, so
+      that stated grounds no longer holds (the axis value itself does not
+      change: the main checkout is still excluded).
+
+    The collection this reads covers every node and every choose option, so
+    all four anchors below fire on a revert. The second review caught the
+    earlier version reading only labelled nodes -- 498 of 788 have no label,
+    and ``next-round``'s line is in one of them, which made that anchor true
+    no matter what the yaml said.
+    """
+    chart = _chart()
+    everything = _chart_prose(chart)
+
+    # What this guard reads has to include an unlabelled choose option's
+    # description, or the ``next-round`` anchor below is vacuous. This line
+    # lives in exactly such an option; if the collection ever narrows again,
+    # this fails here rather than letting the anchors pass silently.
+    assert "배정 큐가 남았다" in everything
+
+    assert "intake의 branch-setup과 같은 규칙" not in everything
+    assert "새 목표·새 브랜치·새 착지" not in everything
+    assert "branch-setup이 워크트리를 파서" not in everything
+    assert "브랜치를 파기 전에" not in everything
+
+    # the shipped text: stack-round hands the decision over instead of
+    # prescribing a cut, and the occupancy axis names the reuse rule
+    assert "branch-setup`의 판정을 그대로 쓴다" in everything
+    assert "재사용 판정이 그 공유를 조건부로 승인한다" in everything
+    # and next-round, in the option description the collection now reaches
+    assert "새 목표·브랜치 판정·새 착지" in everything
