@@ -20,6 +20,14 @@ POSIX only. Windows has no per-process descriptor ceiling of this shape —
 handles are bounded by memory and the system-wide table — so
 :func:`raise_soft_limit` reports ``None`` there rather than pretending.
 
+An unlimited hard limit is spelled ``RLIM_INFINITY``, which the ``resource``
+module reports as ``-1`` — smaller than every real limit. Comparing the soft
+limit against that number numerically would call a finite soft limit "already
+at its maximum" and leave it where it was, which is the platform this module
+most needs to serve: macOS ships ``RLIMIT_NOFILE`` as 256 with an unlimited
+hard limit, so a numerically compared 256 is not the maximum but one
+descriptor short of an outage.
+
 Failure is not fatal. A daemon that cannot raise its limit is a daemon with
 the limit it was started with, which is what every daemon ran with before
 this module existed; refusing to start would turn a resource ceiling into an
@@ -54,6 +62,11 @@ def limits() -> Optional[tuple]:
     return int(soft), int(hard)
 
 
+def _label(value: int) -> str:
+    """``unlimited`` for ``RLIM_INFINITY``, which ``resource`` reports as ``-1``."""
+    return "unlimited" if _INFINITY is not None and value == _INFINITY else str(value)
+
+
 def raise_soft_limit() -> Optional[dict]:
     """Set the open-file soft limit to the hard limit; report what changed.
 
@@ -75,7 +88,13 @@ def raise_soft_limit() -> Optional[dict]:
     assert before is not None  # supported() is true here
     record = {"before": before, "after": before, "why": ""}
     soft, hard = before
-    if soft >= hard:
+    # ``RLIM_INFINITY`` is -1, so a numeric ``soft >= hard`` is true for every
+    # finite soft limit paired with an unlimited hard one — the shape macOS
+    # ships, and the one where being wrong costs the most. Ask the question
+    # of the sentinel instead of the number.
+    already_unlimited = soft == _INFINITY
+    unbounded_hard = hard == _INFINITY
+    if already_unlimited or (not unbounded_hard and soft >= hard):
         return record
     try:
         _resource.setrlimit(_NOFILE, (hard, hard))
@@ -99,20 +118,26 @@ def describe(record: Optional[dict]) -> str:
     before = record.get("before")
     after = record.get("after")
     if record.get("why"):
-        held = f"{before[0]}/{before[1]}" if before else "unknown"
+        held = f"{_label(before[0])}/{_label(before[1])}" if before else "unknown"
         return f"open-file limit unchanged ({held}): {record['why']}"
     if not before or not after:
         return ""
     if before[0] == after[0]:
-        return f"open-file limit already at its maximum ({after[0]}/{after[1]})"
+        return (
+            f"open-file limit already at its maximum "
+            f"({_label(after[0])}/{_label(after[1])})"
+        )
     return (
-        f"open-file soft limit raised {before[0]} -> {after[0]} "
-        f"(hard {after[1]})"
+        f"open-file soft limit raised {_label(before[0])} -> {_label(after[0])} "
+        f"(hard {_label(after[1])})"
     )
 
 
-#: ``EMFILE``/``ENFILE``: the process or the system ran out of descriptors.
-EXHAUSTION_ERRNOS = frozenset({24, 23})
+#: ``EMFILE``: this process ran out of descriptors at its own limit.
+#: ``ENFILE`` is the system-wide table, which no soft limit of ours answers.
+EMFILE = 24
+ENFILE = 23
+EXHAUSTION_ERRNOS = frozenset({EMFILE, ENFILE})
 
 
 def exhaustion_note(exc: BaseException) -> str:
@@ -121,14 +146,19 @@ def exhaustion_note(exc: BaseException) -> str:
     ``[Errno 24] Too many open files`` says nothing about which limit was hit
     or by which process, so an operator reading it has to guess whether the
     daemon is capped, the system is, or one walk is holding everything. The
-    caller's own numbers answer that; the errno alone does not.
+    caller's own numbers answer that for ``EMFILE``; the errno alone does not.
     """
-    if getattr(exc, "errno", None) not in EXHAUSTION_ERRNOS:
+    errno = getattr(exc, "errno", None)
+    if errno not in EXHAUSTION_ERRNOS:
         return ""
+    if errno == ENFILE:
+        # The system-wide table, not this process's soft limit: printing our
+        # own numbers here would name a limit that is not the one that ran out.
+        return " (the whole system is out of file handles, not just this process)"
     pair = limits()
     if pair is None:
         return " (this process is out of file descriptors)"
     return (
         f" (this process is out of file descriptors at a soft limit of "
-        f"{pair[0]} of {pair[1]}; sessions it hosts are what consume them)"
+        f"{_label(pair[0])} of {_label(pair[1])}; sessions it hosts are what consume them)"
     )

@@ -167,6 +167,107 @@ def test_describe_is_silent_where_there_is_no_limit():
     assert open_files.describe(None) == ""
 
 
+def test_an_unlimited_hard_limit_still_raises(tmp_path):
+    """``RLIM_INFINITY`` is ``-1``, so a numeric compare calls 256 the maximum.
+
+    macOS ships ``RLIMIT_NOFILE`` as soft 256 with an unlimited hard limit.
+    Comparing the two numbers directly makes ``soft >= hard`` true there, the
+    raise never runs, and the log says the limit is already at its maximum —
+    the opposite of the truth on the platform that needs it most.
+    """
+    if not open_files.supported():
+        pytest.skip("no RLIMIT_NOFILE on this platform")
+
+    got = _run_child(
+        """
+import json
+from claude_launcher.daemon import open_files
+
+state = {"pair": (256, open_files._INFINITY)}
+calls = []
+
+
+def getrlimit(which):
+    return state["pair"]
+
+
+def setrlimit(which, values):
+    calls.append(list(values))
+    state["pair"] = (values[0], values[1])
+
+
+open_files._resource.getrlimit = getrlimit
+open_files._resource.setrlimit = setrlimit
+record = open_files.raise_soft_limit()
+print(json.dumps({
+    "record": {"before": list(record["before"]), "after": list(record["after"]),
+               "why": record["why"]},
+    "calls": calls,
+    "line": open_files.describe(record),
+    "infinity": open_files._INFINITY,
+}))
+""",
+        tmp_path,
+    )
+
+    assert got["infinity"] == -1, "the premise: resource reports infinity as -1"
+    assert got["calls"] == [[-1, -1]], "setrlimit must be reached"
+    assert got["record"]["why"] == ""
+    assert got["record"]["before"] == [256, -1]
+    assert got["record"]["after"] == [-1, -1]
+    assert "raised 256 -> unlimited" in got["line"]
+
+
+def test_an_unlimited_soft_limit_has_nothing_to_do(tmp_path):
+    """Both unlimited is the one case that really is already at its maximum."""
+    if not open_files.supported():
+        pytest.skip("no RLIMIT_NOFILE on this platform")
+
+    got = _run_child(
+        """
+import json
+from claude_launcher.daemon import open_files
+
+
+def refuse(which, values):
+    raise AssertionError("setrlimit must not be called")
+
+
+open_files._resource.getrlimit = lambda which: (-1, -1)
+open_files._resource.setrlimit = refuse
+record = open_files.raise_soft_limit()
+print(json.dumps({"record": record, "line": open_files.describe(record)}))
+""",
+        tmp_path,
+    )
+
+    assert got["record"]["why"] == ""
+    assert got["record"]["before"] == got["record"]["after"] == [-1, -1]
+    assert "already at its maximum (unlimited/unlimited)" in got["line"]
+
+
+def test_a_system_wide_exhaustion_does_not_blame_this_process_limit():
+    """``ENFILE`` is the system table; printing our soft limit would mislead.
+
+    ``EMFILE`` is this process hitting its own ceiling and the numbers answer
+    it. ``ENFILE`` means the machine ran out of handles, which no soft limit
+    of ours governs — the note must not name one.
+    """
+    emfile = OSError(open_files.EMFILE, "Too many open files")
+    enfile = OSError(open_files.ENFILE, "Too many open files in system")
+    assert open_files.EMFILE == 24 and open_files.ENFILE == 23
+
+    note = open_files.exhaustion_note(enfile)
+    assert "whole system" in note
+    assert "soft limit of" not in note
+
+    if open_files.limits() is not None:
+        soft, hard = open_files.limits()
+        assert f"soft limit of {soft} of {hard}" in open_files.exhaustion_note(emfile)
+
+    assert open_files.exhaustion_note(OSError(13, "Permission denied")) == ""
+
+
 def _write_config(home: Path) -> None:
     """The daemon refuses to start without its config file (:func:`missing_config_error`)."""
     home.mkdir(parents=True, exist_ok=True)
