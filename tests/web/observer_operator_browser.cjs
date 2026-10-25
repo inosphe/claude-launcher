@@ -188,8 +188,29 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await page.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
+      // The observer polls on a 10s interval (observer.js); waiting ten
+      // seconds for the page to notice a change the harness just made would
+      // make this harness minutes long, so it is sped up.
+      //
+      // 200ms was too fast: each tick calls operators().refresh() -> render(),
+      // which rebuilds the operator section's DOM (including an open form).
+      // A form being filled at that rate is replaced under the pointer, and
+      // Playwright's "visible, enabled and stable" action check never settles
+      // on an element that is replaced five times a second -- that was the
+      // flake at `waiting for .op-tab two` and at the form's error line, 1
+      // run in ~8, with the element present and visible whenever it was
+      // measured. A second is still far faster than the wait, and slow enough
+      // that a press lands on the node it was aimed at.
       const interval = window.setInterval;
-      window.setInterval = (fn, ms, ...args) => interval(fn, ms === 10000 ? 200 : ms, ...args);
+      window.setInterval = (fn, ms, ...args) => interval(fn, ms === 10000 ? 1000 : ms, ...args);
+      // Chromium will not settle an action on an element whose box moves
+      // between paints, so the page's own animations go off as well.
+      window.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent = "*, *::before, *::after { animation: none !important;"
+          + " transition: none !important; scroll-behavior: auto !important; }";
+        document.head.appendChild(style);
+      });
     });
     const errors = []; page.on("pageerror", error => errors.push(error.message));
     page.on("dialog", dialog => dialog.accept());

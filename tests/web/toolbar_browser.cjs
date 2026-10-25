@@ -224,23 +224,31 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     // disabled), so the stop is the first segment that can be pressed, and
     // the arrows skip the disabled ones. An arrow only moves focus: nothing
     // is pressed by walking the group.
-    const LIFE = ["term-resume", "term-pause", "term-kill", "term-archive"];
+    //
+    // The segments are read off the group rather than listed here: hold
+    // joined the lifecycle pill in claunch-p6me5, and a harness that keeps
+    // its own copy of the list silently measures a group the page no longer
+    // has. The order is the group's DOM order.
+    const LIFE = await page.evaluate(() =>
+      [...document.querySelectorAll("#term-life [role=radio]")].map((b) => b.id));
+    assert.deepEqual(LIFE, ["term-resume", "term-idle-hold", "term-pause", "term-kill", "term-archive"],
+      `the lifecycle group's segments: ${JSON.stringify(LIFE)}`);
     const stops = () => page.evaluate((ids) => ids.map(id => document.getElementById(id).getAttribute("tabindex")), LIFE);
     const focused = () => page.evaluate(() => document.activeElement && document.activeElement.id);
     await page.evaluate((ids) => {
       window.lifePresses = [];
       for (const id of ids) document.getElementById(id).addEventListener("click", () => window.lifePresses.push(id));
     }, LIFE);
-    assert.deepEqual(await stops(), ["-1", "0", "-1", "-1"], "the stop is the first pressable segment");
+    assert.deepEqual(await stops(), ["-1", "0", "-1", "-1", "-1"], "the stop is the first pressable segment");
     await page.locator("#term-pause").focus();
     const walk = [];
     for (const key of ["ArrowRight", "ArrowRight", "ArrowLeft", "Home", "End", "ArrowDown", "ArrowUp"]) {
       await page.keyboard.press(key);
       walk.push(await focused());
     }
-    assert.deepEqual(walk, ["term-archive", "term-pause", "term-archive", "term-pause", "term-archive",
-      "term-pause", "term-archive"], `arrow walk: ${JSON.stringify(walk)}`);
-    assert.deepEqual(await stops(), ["-1", "-1", "-1", "0"], "the stop follows focus");
+    assert.deepEqual(walk, ["term-archive", "term-idle-hold", "term-archive", "term-idle-hold", "term-archive",
+      "term-idle-hold", "term-archive"], `arrow walk: ${JSON.stringify(walk)}`);
+    assert.deepEqual(await stops(), ["-1", "-1", "-1", "-1", "0"], "the stop follows focus");
     assert.deepEqual(await page.evaluate(() => window.lifePresses), [], "walking the group presses nothing");
     await page.keyboard.press("Tab");
     assert(!LIFE.includes(await focused()), "Tab leaves the group from its stop");
@@ -253,7 +261,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       document.getElementById("term-kill").disabled = false;
     });
     await settle();
-    assert.deepEqual(await stops(), ["-1", "-1", "0", "-1"], "the stop moves to the checked segment");
+    assert.deepEqual(await stops(), ["-1", "-1", "-1", "0", "-1"], "the stop moves to the checked segment");
     await page.locator("#term-kill").focus();
     await page.keyboard.press("Enter");
     assert.deepEqual(await page.evaluate(() => window.lifePresses), ["term-kill"], "Enter presses the focused segment");

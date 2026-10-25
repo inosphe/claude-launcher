@@ -219,9 +219,20 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(drafts[0].sessions.sort(), ["s1", "s2"], "the preview scores what is on screen");
     assert.equal(await page.textContent(`${picker} .mt-new-count`), "1개 선택",
       "the recommendation arrives ticked");
-    const flags = await page.$$eval(`${picker} .mt-new-flag`, (els) => els.map((e) => e.textContent));
-    assert.equal(flags.length, 1, "only the scored recommendation is flagged");
-    assert.ok(flags[0].includes("추천"));
+    // Every scored member carries a flag; only the recommended one carries
+    // the `추천` mark, and the rest are drawn weak (megathread-page.js: the
+    // recommendation is the strong flag, a scored non-recommendation is
+    // `mt-new-flag weak`). What this holds is that exactly one member is
+    // recommended, not that only one member is scored.
+    const flags = await page.$$eval(`${picker} .mt-new-flag`, (els) => els.map((e) => ({
+      text: e.textContent, weak: e.classList.contains("weak"),
+    })));
+    const strong = flags.filter((f) => !f.weak);
+    assert.equal(strong.length, 1, `only the scored recommendation is flagged strongly: ${JSON.stringify(flags)}`);
+    assert.ok(strong[0].text.includes("추천"));
+    assert.equal(flags.length, 2, `both scored members are flagged: ${JSON.stringify(flags)}`);
+    assert.ok(flags.filter((f) => f.weak).every((f) => !f.text.includes("추천")),
+      "a weak flag never claims a recommendation");
     assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("1명을 추천"),
       "the panel says what the preview found");
 

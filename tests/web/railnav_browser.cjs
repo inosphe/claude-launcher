@@ -103,9 +103,22 @@ async function settle(page) {
 
     // 4. keyboard focus opens it (the click in 2 left focus on a link and
     //    did not keep it open: only keyboard focus, :focus-visible, does)
+    //
+    // What Tab moves to is read off the nav rather than named here: the page
+    // list grows (Artifacts was added between worktrees and glossary), and a
+    // harness that pins the neighbour's name goes red the moment a page is
+    // added. The claim is "Tab goes to the next link", not "the next link is
+    // glossary".
+    const after = await page.evaluate(() => {
+      const links = [...document.querySelectorAll("#rail-nav a[data-page]")];
+      const at = links.findIndex((a) => a.dataset.page === "worktrees");
+      return at >= 0 && at + 1 < links.length ? links[at + 1].dataset.page : null;
+    });
+    assert.ok(after, "worktrees has a link after it to move to");
     await page.focus("#rail-nav a[data-page=worktrees]");
     await page.keyboard.press("Tab");
-    assert.equal(await page.evaluate(() => document.activeElement.dataset.page), "glossary");
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.page), after,
+      `Tab moves to the link after worktrees (${after})`);
     await settle(page);
     assert.equal((await page.evaluate(measure)).visible.length, folded.total, "focus opens it");
     await page.evaluate(() => document.activeElement.blur());

@@ -39,7 +39,13 @@ const box = (page, sel) => page.locator(sel).evaluate(n => {
   await safeListen(server);
   const browser = await chromium.launch({headless: true});
   try {
-    const page = await browser.newPage({viewport: {width: 1440, height: 900}});
+    // Wide enough that the threads button stays on the toolbar row: the row
+    // peels its controls into the overflow menu from the right as the column
+    // narrows (toolbar.js), and at 1440 the threads button is in that menu --
+    // hidden, so the click below could never land. What this harness holds is
+    // the view memory and the split pane, not when a button leaves the row;
+    // toolbar_browser.cjs measures that.
+    const page = await browser.newPage({viewport: {width: 2600, height: 900}});
     const errors = []; page.on("pageerror", e => errors.push(String(e)));
     await page.addInitScript(() => localStorage.setItem("claunch_token:/", "fixture"));
     // The rail's default filter holds running, hold, delayed and paused, so an

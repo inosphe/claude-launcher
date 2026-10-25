@@ -34,7 +34,12 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
    f.workflow.add(new Option('none','')); f.cwd.add(new Option('repo','F:/repo'));
    window.posts=[];
    globalThis.SysPerfPage?.stopBadge();
-   api=async(url,opts)=>{ if(opts?.method==='POST') {posts.push({url,body:JSON.parse(opts.body)});return {ok:false,status:400,json:async()=>({error:'test refusal'})};}
+   // The page's own reads also arrive here -- the dashboard coalesces them
+   // into one POST /api/batch (app.js batchFlush). `posts` is what the FORM
+   // sent, so that path is answered without being recorded; the assertions
+   // below are about how many times the form posted, not the page's polling.
+   api=async(url,opts)=>{ if(opts?.method==='POST'&&url==='/api/batch') return {ok:true,json:async()=>({answers:{},errors:{},statuses:{}})};
+     if(opts?.method==='POST') {posts.push({url,body:JSON.parse(opts.body)});return {ok:false,status:400,json:async()=>({error:'test refusal'})};}
      if(url.includes('/children')) return {ok:true,json:async()=>({child_cflow:'worker-flow'})};
      if(url.includes('/roles')) return {ok:true,json:async()=>({default:'free-role',roles:[{name:'leader',exclusive:true},{name:'worker'},{name:'free-role'}]})};
      if(url.includes('/cflow/workflows')) return {ok:true,json:async()=>({workflows:[{name:'leader-flow'},{name:'worker-flow'},{name:'side',kind:'subflow'}]})};
@@ -68,16 +73,43 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     const row=box.querySelector('[data-input="force_pr"]');
     return {border:getComputedStyle(box).borderTopWidth, title:box.querySelector('h4').textContent,
      row:rect(row), checkbox:rect(row.querySelector('input')),
+     control:rect(row.querySelector('.cf2-input-control')),
+     label:rect(row.querySelector('.cf2-input-label')),
      list:[...box.querySelector('.cf2-input-row').children].map(rect),
      overflow:box.scrollWidth > box.clientWidth+1};
    });
    assert.equal(geometry.border,'1px');
    assert.equal(geometry.title,'Workflow variables');
    assert.ok(geometry.checkbox.width < 24, `${host}: checkbox keeps native width`);
-   assert.ok(Math.abs(geometry.checkbox.x-geometry.row.x)<2, `${host}: checkbox aligns left`);
+   // A bool row reads "caption, then control" like the combobox rows around
+   // it (claunch-ngfo3): the checkbox sits at the LEFT of the control column,
+   // which is where the row's other inputs start -- not at the row's own left
+   // edge, which is the caption's column.
+   assert.ok(Math.abs(geometry.checkbox.x-geometry.control.x)<2,
+     `${host}: checkbox starts its control column (${geometry.checkbox.x} vs ${geometry.control.x})`);
+   // Either shape is the one the stylesheet asks for: on a wide row the box
+   // starts the control column beside the caption, and below the breakpoint
+   // the control takes the second line across the full width
+   // (style.css, `.cf2-input > .cf2-input-control`). What must hold in both
+   // is that the box is inside its own control, not loose in the row.
+   assert.ok(geometry.checkbox.x>=geometry.control.x-1
+     && geometry.checkbox.right<=geometry.control.right+1,
+     `${host}: the box sits inside its control column`
+     + ` (box ${geometry.checkbox.x}..${geometry.checkbox.right},`
+     + ` control ${geometry.control.x}..${geometry.control.right})`);
    assert.ok(Math.abs(geometry.list[0].y-geometry.list[1].y)<2, `${host}: remove aligns with input`);
    assert.equal(geometry.overflow,false, `${host}: workflow inputs fit their container`);
    const check = page.locator('[data-input="force_no_pr"] input');
+   // The caption and the box are siblings (claunch-ngfo3 put the box in the
+   // control column), so the click only reaches the box through the label's
+   // `for` pointing at the box's id. Without that the caption points at
+   // nothing and pressing it does nothing at all.
+   const linked = await page.locator('[data-input="force_no_pr"]').evaluate(row => {
+     const label = row.querySelector('.cf2-input-label'), box = row.querySelector('input[type=checkbox]');
+     return { htmlFor: label.htmlFor || null, boxId: box.id || null, wraps: label.contains(box) };
+   });
+   assert.ok(linked.wraps || (linked.htmlFor && linked.htmlFor === linked.boxId),
+     `${host}: the caption is associated with its checkbox ${JSON.stringify(linked)}`);
    await page.locator('[data-input="force_no_pr"] label').click();
    assert.equal(await check.isChecked(),true, `${host}: caption toggles checkbox`);
    const where=await rect('#new-where'), identity=await rect('#new-identity');

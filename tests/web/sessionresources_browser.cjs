@@ -40,7 +40,13 @@ const server = http.createServer((req, res) => {
   await safeListen(server);
   const browser = await chromium.launch({headless: true});
   try {
-    const page = await browser.newPage({viewport: {width: 1440, height: 900}});
+    // Wide enough that the split-pane buttons stay on the row: the toolbar
+    // peels its controls into the overflow menu from the right as the column
+    // narrows (toolbar.js), and at 1440 the sims and chart buttons are in
+    // that menu -- hidden, so the waits below could not see them. This
+    // harness is about what the buttons claim, not about when they leave the
+    // row, which toolbar_browser.cjs measures.
+    const page = await browser.newPage({viewport: {width: 2600, height: 900}});
     const errors = []; page.on("pageerror", e => errors.push(String(e)));
     await page.addInitScript(() => localStorage.setItem("claunch_token:/", "fixture"));
     // The rail's default filter holds running, hold, delayed and paused, so an

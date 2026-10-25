@@ -148,18 +148,43 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator("#session-grid .lineage-parent, #session-grid .lineage-child").count(), 0);
 
     // A rail of another width reflows the cells; the arrows follow.
+    //
+    // The click selects asynchronously -- currentName is what
+    // drawSessionGridLineage draws for, and it moves a frame or more after
+    // the press -- so the overlay has to be waited for BEFORE the width
+    // changes. Resizing while the previous selection (solo, which has no
+    // relatives) was still current made the ResizeObserver's own redraw a
+    // no-op: it drew nothing, removed the overlay, and the check then waited
+    // on a rail that was never going to draw one. Under a loaded runner that
+    // was 2 runs in 3; alone it essentially never happened.
     await cell("w1").click();
-    await page.evaluate(() => { document.getElementById("session-grid").style.width = "260px"; });
     await page.waitForFunction(() => {
       const host = document.getElementById("session-grid");
-      const p = host.querySelector(".sg-lineage-arrow.child");
-      const c = host.querySelector('.sg-cell[data-name="g1"]');
-      if (!p || !c) return false;
+      return !!host.querySelector(".sg-lineage-arrow.child")
+        && (typeof currentName === "undefined" || currentName === "w1");
+    }, null, { timeout: 5000 });
+    await page.evaluate(() => { document.getElementById("session-grid").style.width = "260px"; });
+    // The overlay is now thrown away and drawn again for the new width, so a
+    // single sample can land in the gap where none is attached. Sampling over
+    // a settled stretch and requiring the same answer twice skips the gap
+    // instead of measuring it.
+    const aim = () => page.evaluate(() => {
+      const host = document.getElementById("session-grid");
+      const p = host && host.querySelector(".sg-lineage-arrow.child");
+      const c = host && host.querySelector('.sg-cell[data-name="g1"]');
+      if (!p || !c || !p.isConnected) return false;
       const s = p.ownerSVGElement.getBoundingClientRect(), r = c.getBoundingClientRect();
       const e = p.getPointAtLength(p.getTotalLength());
       return e.x + s.left >= r.left - 2 && e.x + s.left <= r.right + 2
         && e.y + s.top >= r.top - 2 && e.y + s.top <= r.bottom + 2;
-    }, null, { timeout: 5000 });
+    });
+    let reflowed = false;
+    for (let i = 0; i < 50 && !reflowed; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      // Two matching samples in a row, so a torn-down overlay is not counted.
+      reflowed = (await aim()) && (await aim());
+    }
+    assert.equal(reflowed, true, "the arrows follow a reflowed rail");
 
     // The list view has no overlay; coming back to the grid draws it again.
     await page.locator('input[name="session-view"][value="list"]').check({ force: true });
