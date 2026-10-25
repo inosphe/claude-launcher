@@ -675,6 +675,31 @@ def test_a_reset_that_has_already_passed_counts_one_run_not_one_per_scan():
     assert view["until"] == first["until"]
 
 
+def test_a_stale_reset_does_not_hold_a_later_window_shut():
+    """A record with no window must not veto the next sighting's window.
+
+    Reading "this record has no window" from the previous record alone kept a
+    session inactive after it had once drawn a reset time behind the clock: a
+    later screen naming a future one was folded into the old, dead window
+    (claunch-5ldt8 review)."""
+    noon = datetime(2026, 10, 26, 12, tzinfo=ZoneInfo("Asia/Seoul")).timestamp()
+    det, _ = _detector()
+    det.scan(_Screen(WEEKLY), now=noon)                       # resets 9am, past
+    stale = det.view(now=noon)
+    assert stale["active"] is False
+    det.scan(
+        _Screen("You've hit your 5-hour limit · resets Oct 26, 5pm (Asia/Seoul)"),
+        now=noon + 300,
+    )
+    later = det.view(now=noon + 300)
+    assert later["active"] is True
+    assert later["until"] == datetime(
+        2026, 10, 26, 8, tzinfo=ZoneInfo("UTC")
+    ).isoformat()  # 5pm KST, the reset the new sighting names
+    assert later["since"] != stale["since"]
+    assert later["strikes"] == 1
+
+
 def test_a_kind_that_comes_back_after_its_window_is_a_second_sighting():
     catalog = session_fault.load(
         "version: 1\n"

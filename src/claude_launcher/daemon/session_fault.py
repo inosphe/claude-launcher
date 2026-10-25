@@ -461,10 +461,20 @@ class Detector:
         # then ``until`` is behind ``since`` from the first scan: ``now <
         # until`` never holds, every scan would be a new run, and ``strikes``
         # would count scans rather than sightings (1 per second while the
-        # screen keeps changing). Such a record has no window to end, so it
-        # is continued instead.
-        born_expired = previous is not None and previous["until"] <= previous["since"]
-        running = same_kind and (now < previous["until"] or born_expired)
+        # screen keeps changing). Such a record has no window to end, so a
+        # sighting like it is folded into the record instead.
+        #
+        # Both sides of that comparison have to be about the same observation.
+        # Reading it from the previous record alone held the window shut for
+        # good: a session that once drew a stale reset stayed inactive when a
+        # later screen named a future one (claunch-5ldt8 review).
+        previous_expired = (
+            previous is not None and previous["until"] <= previous["since"]
+        )
+        this_expired = deadline is not None and deadline <= now
+        running = same_kind and (
+            now < previous["until"] or (previous_expired and this_expired)
+        )
         if running:
             since = previous["since"]
             until = previous["until"]
@@ -474,9 +484,16 @@ class Detector:
             since = now
             until = deadline if deadline is not None else now + kind.window
             reset = hint
-            # Coming back after the window closed is a second sighting of
-            # the same kind; a different kind is the first of its own run.
-            strikes = previous.get("strikes", 0) + 1 if same_kind else 1
+            if not same_kind:
+                # A different kind opens its own first run.
+                strikes = 1
+            elif previous_expired:
+                # The run being replaced never had a window, so nothing closed
+                # and this is not a second sighting of it.
+                strikes = previous.get("strikes", 1)
+            else:
+                # Coming back after the window closed is a second sighting.
+                strikes = previous.get("strikes", 0) + 1
         self._record = {
             "harness": self.harness,
             "kind": kind.name,
