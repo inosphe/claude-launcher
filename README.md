@@ -223,12 +223,24 @@ claunch run company:pi --borrow company2
 the harness belongs to the running selector and all variants of `company2`
 share the one credential. For Claude, the lender's
 **[provider](#api-providers-third-party-backends)** comes with its token, so a
-Kimi/other backend brings its base URL, model pins and auth. For an `auth:
+Kimi/other backend brings its base URL, model ids and auth. For an `auth:
 api-key` harness such as Pi, only the lender's launcher token crosses the
 boundary and the packaged `token_env` decides its destination. Lender env,
 storage and harness do not cross. OAuth harnesses (Codex, Kimi and Cursor)
 cannot borrow: select `company2:HARNESS` to use that profile's namespaced OAuth
 home instead.
+
+The **model ids come from the lender too**, role for role. A borrow runs on
+the lender's backend, so the tier each Claude alias reaches is the one that
+profile's `models:` declares — with the lender `glm-flash` owning `small` and
+`ds4` owning `large`, `--borrow glm-flash` sends `haiku` to the lender's small
+model and `opus` to its large one, never the running profile's ids. This holds
+inside one provider as well: the running profile's own model pins describe
+*its* tiers, and a borrow is the lender's launch. Everything else the lender
+holds stays behind — its `env`, its skills, its config dir — and everything
+else the running profile pins (context window, compaction, effort) stays the
+running profile's, because a borrow changes whose credential is spent, not how
+much room the session keeps.
 
 The direct `run` form persists nothing. A missing or expired lender credential
 is reported by the shared borrow validation; managed sessions expose the same

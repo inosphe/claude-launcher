@@ -227,11 +227,10 @@ def resolve(
             f"harness {harness.name!r} has no token_env for the Pi adapter"
         )
     try:
-        spec = providers.spec_for(
-            profile,
-            name,
-            overlay_models=(name == providers.resolve_name(profile)),
-        )
+        # ``launch_spec`` reads the model table from ``borrow`` when there is
+        # one, so a Pi session borrowing another profile lists that profile's
+        # models; context and reasoning stay the running profile's.
+        spec = providers.launch_spec(profile, name, borrow=borrow)
     except providers.ProviderError as exc:
         raise PiProviderError(str(exc)) from exc
 
@@ -378,6 +377,7 @@ def launch_args(
     *,
     tools: Optional[Sequence[str]] = None,
     effort: Optional[str] = None,
+    borrow: Optional[Profile] = None,
 ) -> list[str]:
     """Prepend Pi's extensions and default model when required.
 
@@ -388,6 +388,10 @@ def launch_args(
     ``--models`` owns model selection for that launch, including flags
     forwarded after ``claunch run PROFILE:pi``. Flags after ``--`` are prompt
     text and do not suppress the projection.
+
+    ``borrow`` is the profile whose token the launch spends; the default
+    model comes from the same projection the environment does, so it is that
+    profile's, matching the rest of the launch.
     """
     forwarded = list(args)
     if harness.provider_adapter != ADAPTER:
@@ -395,7 +399,7 @@ def launch_args(
     adapter_args: list[str] = ["--extension", str(activity_extension_path())]
     if enabled_tools(profile, harness, override=tools):
         adapter_args += ["--extension", str(tools_extension_path())]
-    projection = resolve(profile, harness, effort=effort)
+    projection = resolve(profile, harness, effort=effort, borrow=borrow)
     if projection is None:
         return [*adapter_args, *forwarded]
     adapter_args += ["--extension", str(extension_path())]

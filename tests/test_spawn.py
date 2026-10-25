@@ -1583,7 +1583,9 @@ def test_a_codex_preset_needs_the_id_its_profile_declares(monkeypatch):
         def model(self, role):
             return {"small": "gpt-mini"}.get(role)
 
-    monkeypatch.setattr(spawn.providers, "spec_for", lambda prof: _Spec())
+    monkeypatch.setattr(
+        spawn.providers, "launch_spec", lambda prof, *a, **k: _Spec()
+    )
     child = spawn.check(_policy(allow_args=True), {"model": "small"},
                         parent=parent, depth=0, children=0)
     assert child["model"] == "gpt-mini"

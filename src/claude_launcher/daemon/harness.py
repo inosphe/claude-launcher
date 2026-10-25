@@ -1279,8 +1279,16 @@ def build_command(
         runtime_args = [*base_args, *model_args, *effort_args, *session_args]
         if prof is not None:
             try:
+                # ``borrow`` reaches the translated args and the adapter's
+                # default model, so a borrowed declared-harness session lists
+                # the lender's models -- the same answer its env carries.
                 runtime_args = runner.harness_launch_args(
-                    prof, entry, runtime_args, tools=sdef.tools, effort=sdef.effort
+                    prof,
+                    entry,
+                    runtime_args,
+                    tools=sdef.tools,
+                    effort=sdef.effort,
+                    borrow=borrow_prof,
                 )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
