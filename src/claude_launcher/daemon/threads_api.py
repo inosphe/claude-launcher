@@ -416,7 +416,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             if session.queue_delivery(body, **({"before": before} if before else {})):
                 return True
         except Exception:  # noqa: BLE001 -- gone or not deliverable
-            pass
+            # Not ``pass``: the acceptance of this message is what the thread
+            # row reports back, so a delivery that raised must not read as
+            # one that simply had nowhere to go (claunch-0ccn4.1). The wake
+            # queue below is still tried -- a session that is merely asleep
+            # takes it there -- but the failure is on the record now.
+            log.exception("threads: delivering to %s raised", name)
         try:
             return bool(manager.wake_soon(name, by="thread", deliver=text))
         except Exception:  # noqa: BLE001

@@ -576,6 +576,49 @@ def test_a_named_guest_that_cannot_take_it_now_says_why(home, tmp_path):
     run(tmp_path, scenario)
 
 
+def test_a_guest_delivery_that_raises_is_not_swallowed(home, tmp_path, caplog):
+    """claunch-0ccn4.1: the guest path ran off the loop, so every guest
+    delivery raised "no running event loop" and ``except Exception: pass``
+    ate it. The daemon log showed only a never-awaited warning; the thread
+    row said the message was accepted.
+
+    Two assertions, one per half of the defect: the guest is actually typed
+    into from the handler's worker thread, and a delivery that raises anyway
+    leaves a line in the log rather than reading as "nowhere to go".
+    """
+    import logging
+
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "t"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s2"})
+        before = len(mgr.sessions["s2"].delivered)
+
+        # The real handler path: mention_delivery reaches queue_delivery
+        # through asyncio.to_thread. The fake below is a plain double and
+        # would pass either way, so it stands in for a session that raises
+        # the way the real one raised off the loop.
+        def off_loop(text, **kwargs):
+            raise RuntimeError("no running event loop")
+
+        original = mgr.sessions["s2"].queue_delivery
+        mgr.sessions["s2"].queue_delivery = off_loop
+        with caplog.at_level(logging.ERROR):
+            res = await req("POST", f"/api/threads/{tid}/messages",
+                            {"text": "@s2 확인 부탁"})
+        mgr.sessions["s2"].queue_delivery = original
+
+        assert res["guests_delivered"] == {"s2": False}
+        assert len(mgr.sessions["s2"].delivered) == before
+        # The failure is on the record now. Before, the swallow left nothing:
+        # the only trace in the daemon log was Python's own never-awaited
+        # warning from deep inside asyncio.
+        raised = [r for r in caplog.records
+                  if r.levelno >= logging.ERROR and "delivering to s2 raised" in r.getMessage()]
+        assert raised, [r.getMessage() for r in caplog.records]
+
+    run(tmp_path, scenario)
+
+
 def test_a_guest_is_removed_or_leaves(tmp_path):
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"to": "s1", "title": "Plan"}))["thread"]["id"]

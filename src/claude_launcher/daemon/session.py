@@ -1636,9 +1636,48 @@ class Session:
                 except ValueError:
                     pass
 
-        task = asyncio.create_task(send())
-        self._deferred_deliveries.add(task)
-        task.add_done_callback(self._deferred_deliveries.discard)
+        # The task belongs to this session's loop, which is not necessarily
+        # the caller's: ``threads_api`` and ``megathread_api`` reach
+        # ``deliver`` through ``asyncio.to_thread``, so the call arrives on a
+        # worker thread where ``asyncio.create_task`` raises "no running
+        # event loop", the coroutine is never awaited, and the message is
+        # never typed in -- silently, because the caller's handler swallows
+        # it (claunch-0ccn4.1). Handing the task creation to the loop is what
+        # makes a delivery from any thread a delivery.
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        loop = getattr(self, "_loop", None) or running
+
+        def start() -> None:
+            """Create the send task on the loop that owns it."""
+            task = loop.create_task(send())
+            self._deferred_deliveries.add(task)
+            task.add_done_callback(self._deferred_deliveries.discard)
+
+        if running is not None and running is loop:
+            start()
+        elif loop is not None:
+            try:
+                loop.call_soon_threadsafe(start)
+            except RuntimeError:     # the loop is closed; this one cannot go in
+                with contextlib.suppress(ValueError):
+                    queue.remove(record)
+                log.warning(
+                    "queued notification to %r dropped: its loop is closed",
+                    self.sdef.name,
+                )
+                return False
+        else:
+            # Double, or a session built off any loop: nothing can run the send.
+            with contextlib.suppress(ValueError):
+                queue.remove(record)
+            log.warning(
+                "queued notification to %r dropped: it has no event loop",
+                self.sdef.name,
+            )
+            return False
         return True
 
     async def await_input_ready(self) -> None:
