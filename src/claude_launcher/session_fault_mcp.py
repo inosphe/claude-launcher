@@ -17,11 +17,15 @@ TOOLS = [
     {
         "name": "session_faults",
         "description": (
-            "List session faults: harness messages that say the account, the "
-            "credentials or the service has stopped a session (an exhausted "
-            "usage plan, a rejected login, an API status error, a network "
-            "outage, a policy refusal). Read from the bottom of each session's "
-            "terminal by the daemon; this tool only reads the record. Defaults "
+            "List session faults: harness messages that stop a session for a "
+            "reason the work cannot fix -- an exhausted usage plan, a rejected "
+            "login, an API status error, a network outage, a policy refusal, "
+            "or a prompt waiting for a keystroke. Read from the bottom of each "
+            "session's terminal by the daemon; this tool only reads the "
+            "record. Each row carries 'resolved_by' -- what clears the stop: "
+            "'input' (someone presses a key on that terminal), 'account' "
+            "(billing, plan, login), 'provider' (the service recovers or time "
+            "passes) or 'policy' (the session changes how it asks). Defaults "
             "to active faults across the fleet. Pass 'session' for one "
             "session, 'active' false for expired records too, or 'kind'/"
             "'harness' to narrow."
@@ -39,7 +43,7 @@ TOOLS = [
                 },
                 "kind": {
                     "type": "string",
-                    "description": "fault kind, e.g. usage_limit, account_suspended, auth, api_status, overloaded, network, policy_blocked, rate_limit",
+                    "description": "fault kind, e.g. usage_limit, account_suspended, auth, api_status, overloaded, network, policy_blocked, rate_limit, awaiting_input",
                 },
                 "harness": {
                     "type": "string",

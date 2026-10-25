@@ -7432,6 +7432,16 @@ function applyCflow2Badges() {
   }
 }
 
+/* The grade of a fault (`resolved_by` in session_faults.yaml): who or what
+   clears the stop. The kind states the diagnosis; this states the fix, so a
+   prompt waiting for a keystroke reads differently from an exhausted plan. */
+const RESOLVED_BY_TEXT = {
+  input: "a keystroke on that session's terminal",
+  account: "the account, plan or login",
+  provider: "the provider recovering, or time passing",
+  policy: "changing how the session asks",
+};
+
 /* The settings a person made that the rail must not hide, drawn on that
    session's own row.
 
@@ -7475,6 +7485,9 @@ function railQuietFlags(name) {
       title:
         `session fault — ${f.label || f.kind} (${f.harness})` +
         (f.code ? ` · API ${f.code}` : "") + "\n" +
+        (f.resolved_by
+          ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
+          : "") +
         `${f.message}\n` +
         (f.reset ? `resets: ${f.reset}\n` : "") +
         (f.action ? `what to do: ${f.action}\n` : "") +

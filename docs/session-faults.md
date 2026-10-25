@@ -1,11 +1,15 @@
 # 세션 fault
 
-세션 fault는 하네스(에이전트 CLI)가 **작업이 아니라 계정·인증·서비스 상태 때문에**
-더 진행할 수 없게 된 상태다. 에이전트가 다르게 일해서 풀 수 없고, 사람이 조치해야
-한다. 일반 작업 실패(테스트 실패, 도구 오류)는 fault가 아니다.
+세션 fault는 하네스(에이전트 CLI)가 **작업이 아니라 계정·인증·서비스 상태, 또는
+사람의 키 입력 때문에** 더 진행할 수 없게 된 상태다. 에이전트가 다르게 일해서
+풀 수 없고, 사람이 조치해야 한다. 일반 작업 실패(테스트 실패, 도구 오류)는
+fault가 아니다.
 
 예: 주간 사용 한도 소진, 로그인 거부, API 5xx/overloaded, DNS·연결 실패, 정책상
-응답 거부.
+응답 거부, 모달 프롬프트가 키 입력을 기다림.
+
+무엇이 풀어 주는지는 kind마다 다르고, 그 차이는 `resolved_by`가 적는다(아래
+「등급」).
 
 ## 왜 필요한가
 
@@ -20,12 +24,16 @@
 세션이 멈출 때 마지막으로 그려지는 반면 대화 본문에 인용된 같은 문구는 위로
 스크롤되어 사라지기 때문이다.
 
-두 가지 행은 매칭 전에 뺀다.
+세 가지 행은 매칭 전에 뺀다.
 
 - diff 행: `+ text`, `- text`, `  12 + text`. fault 문구를 인용한 문서를 쓰는
   세션이 자기 자신을 fault로 만들지 않게 한다.
 - 하네스 도구 호출 헤더: `⏺ Bash(rg "You've hit...")` 같은 행. 명령줄에 문구가
   들어간 경우다.
+- 그려진 구분선: `──────`처럼 상자나 안내를 감싸는 가로줄. 낱말이 없고, 기록되는
+  메시지는 매칭된 행 아래를 길이 제한까지 이어 붙이므로 아래에 그어진 줄이
+  메시지 끝에 붙었다(`pi`, s1736, 2026-10-25: `Error: Retry failed after 3
+  attempts: Request timed out.` 뒤에 `─` 140자).
 
 이 판별은 휴리스틱이다. 거짓 양성이 생기면 그 kind의 window가 끝날 때 사라진다.
 
@@ -33,16 +41,17 @@
 
 `src/claude_launcher/session_faults.yaml`의 `kinds:`가 정의한다.
 
-| kind | label | 기본 window | 사람이 할 일 |
-|---|---|---|---|
-| `usage_limit` | usage limit | 24시간 | 리셋을 기다리거나 플랜을 올린다 |
-| `account_suspended` | account suspended | 24시간 | 프로바이더의 결제·청구 상태를 확인한다 |
-| `rate_limit` | rate limit | 15분 | rate window가 지나기를 기다린다 |
-| `overloaded` | provider overloaded | 5분 | 몇 분 기다린다. 계속되면 프로바이더가 열화된 상태다 |
-| `auth` | login | 6시간 | 하네스 로그인을 다시 한다 |
-| `api_status` | API error | 30분 | 프로바이더 상태를 확인하고 나중에 재시도한다 |
-| `network` | network | 15분 | 연결과 DNS를 확인한다 |
-| `policy_blocked` | policy block | 1시간 | 표현을 바꾸거나 모델을 바꾼다 |
+| kind | label | 기본 window | `resolved_by` | 사람이 할 일 |
+|---|---|---|---|---|
+| `usage_limit` | usage limit | 24시간 | `account` | 리셋을 기다리거나 플랜을 올린다 |
+| `account_suspended` | account suspended | 24시간 | `account` | 프로바이더의 결제·청구 상태를 확인한다 |
+| `rate_limit` | rate limit | 15분 | `provider` | rate window가 지나기를 기다린다 |
+| `overloaded` | provider overloaded | 5분 | `provider` | 몇 분 기다린다. 계속되면 프로바이더가 열화된 상태다 |
+| `auth` | login | 6시간 | `account` | 하네스 로그인을 다시 한다 |
+| `api_status` | API error | 30분 | `provider` | 프로바이더 상태를 확인하고 나중에 재시도한다 |
+| `network` | network | 15분 | `provider` | 연결과 DNS를 확인한다 |
+| `policy_blocked` | policy block | 1시간 | `policy` | 표현을 바꾸거나 모델을 바꾼다 |
+| `awaiting_input` | waiting for input | 15분 | `input` | 그 세션의 터미널에서 프롬프트에 답한다 |
 
 메시지가 리셋 시각을 적으면(`resets Oct 26, 9am (Asia/Seoul)`) window 대신 그
 시각이 만료 시각이 된다. `zoneinfo`로 시간대를 해석하고, 해석할 수 없으면
@@ -74,6 +83,45 @@ timed out.`은 `common:`에 있다 — 문구가 프로바이더 클라이언트
 사람이 툴팁에서 읽어야 하는 줄이기 때문이다. 재시도가 소진됐다는 사실에 별도
 kind나 다른 창을 주지는 않았다 — 관측이 한 건이고, 창의 근거가 될 재시도
 간격을 재지 못했다.
+
+### 등급: `resolved_by`
+
+kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는가**다. 값 넷.
+
+| `resolved_by` | 뜻 |
+|---|---|
+| `input` | 그 터미널에서 사람이 키를 누른다 |
+| `account` | 사람이 플랜·결제·로그인을 고친다 |
+| `provider` | 프로바이더 상태가 회복되거나 시간이 지난다 |
+| `policy` | 세션이 표현이나 모델을 바꾼다 |
+
+이 축이 없으면 "기다리면 풀리는 정지"와 "아무도 보지 않으면 영원히 서 있는 정지"가 같은 무게로 읽힌다. `policy_blocked`를 `account`에 넣지 않은 이유도 같다: 그 둘의 조치는 서로 다른 사람·대상에게 있다.
+
+### `awaiting_input`: 사용자 입력 대기
+
+하네스가 키 입력을 기다려 멈춘 상태다. 계정도 서비스도 정상이고, 기다려도 풀리지 않는다 — 그 터미널 앞의 사람만 푼다. 정지의 성격(다른 누구도 세션을 움직일 수 없다)이 위의 fault들과 같아 같은 목록에서 읽고, `resolved_by: input`으로 가른다.
+
+관측된 화면 둘(2026-10-25, `claude`):
+
+```
+  Teach auto mode about your environment?
+  ❯ 1. Yes
+    2. Not now
+    3. Don't show again
+
+  Enter to confirm · Esc to cancel
+```
+
+```
+  We're changing auto mode to no longer charge for classifier requests in Claude Code.
+  …
+
+  Enter to continue · Esc to cancel
+```
+
+패턴은 두 푸터의 공통 부분(`Enter to confirm|continue … Esc to cancel`)을 잡는다. 두 낱말 사이의 구분자는 화면폭에 따라 달라지므로 패턴이 그것에 의존하지 않는다. 푸터는 `harnesses.claude`에 있다 — 관측이 이 하네스 하나뿐이다.
+
+이 kind에는 자동 동작이 없다. 검출은 기록과 표시까지이고, 키를 대신 보내거나 세션을 끝내지 않는다. 키를 기다리는 화면은 이 둘 외에도 있다(도구 승인 프롬프트가 같은 푸터를 그린다). 반대로 이 목록에 넣지 않는 정지가 있다: 리더·상위의 답을 기다리는 mesh ask, compaction, 작업 실패 재시도 루프 — 셋 다 키 입력을 기다리지 않고 사람이 풀 일도 없다.
 
 ## 판정 규칙
 
@@ -138,6 +186,10 @@ kind나 다른 창을 주지는 않았다 — 관측이 한 건이고, 창의 �
      동률이 생겼을 때를 위한 관례다 — 두 목록에서 같은 문자에 걸리는 쌍(`claude`의
      `API Error: 401[^\n]{0,160}`와 `common`의 `API Error: 401\b`)은 한쪽이
      `fallback`이라 표시가 먼저 갈라, 지금은 이 순서가 판정을 바꾸는 자리가 없다.
+   - kind를 새로 만들면 `resolved_by`도 정해야 한다(`input`·`account`·
+     `provider`·`policy` 가운데 하나). 없거나 다른 값이면 카탈로그가
+     `CatalogError`로 거절한다 — 등급 없는 kind는 배지에서 무엇을 해야
+     하는지 말하지 못한다.
    - `pattern`은 `re.IGNORECASE`로 컴파일된다. 줄바꿈은 스캔 창에서 공백으로
      합쳐지므로 감싸진 문장은 공백 기준으로 쓴다.
    - `sample`은 테스트가 실제 메시지와 패턴이 어긋나는 것을 잡는 근거다.
@@ -170,3 +222,6 @@ kind나 다른 창을 주지는 않았다 — 관측이 한 건이고, 창의 �
   문구가 더 오래 남는 원인이면 그 판정은 틀린다(예: 아래쪽에 찍힌 `network`
   한 줄이 위쪽의 `usage_limit`을 이긴다). 폴백 표시는 이 추정에서 원인을 말하지
   않는 문구만 빼는 장치이고, 원인 문구끼리의 우열은 데이터로 정하지 않는다.
+- `awaiting_input`의 기록은 화면에서 프롬프트가 사라진 뒤에도 window(15분)
+  동안 남는다. 검출기는 화면만 읽으므로 "사람이 키를 눌렀다"를 별도로 알지
+  못한다. 조기 해제를 넣지 않은 것은 의도다 — 근거가 되는 관측이 아직 없다.
