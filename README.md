@@ -1606,9 +1606,11 @@ where it is while the pointer moves and after it leaves. The overlay keeps its d
 on the light page. The height axis is a log axis from 0 to the model's context
 window (Claude without a declared window: 1M; Codex: the window it records; Pi:
 the spec's `context_window`; no window known: the largest context), mapped as
-`log_B(1 + (B-1)·v/top) / log_B(B)` with `B = 5.44`, so the middle of the axis
-falls at `1/(1+sqrt(B))` of the top — 300k of a 1M window, where the linear axis
-this replaced (claunch-k5udr) put 500k there (claunch-nw9ca). A small session is
+`log_B(1 + (B-1)·v/top) / log_B(B)` with `B = 9`, so the middle of the axis
+falls at `1/(1+sqrt(B))` of the top — 250k of a 1M window, where the linear axis
+this replaced (claunch-k5udr) put 500k there (claunch-nw9ca). The base went from
+5.44, which put 300k at the middle, to 9 for stronger compression
+(claunch-nw9ca.1). A small session is
 lifted off the baseline instead of flattened against it; on this axis a layer's
 thickness is not its share of the tokens and the area under a line is not the
 total sent. A request larger than the window pushes the top up to it.
@@ -1622,8 +1624,10 @@ with a diamond head is a profile swap (the session was relaunched onto a
 borrowed token, onto another borrowed one, or back onto its own), named on
 hover with the profiles before and after. Hovering the chart grows it and shows
 the whole conversation, with the window as the label of the height axis
-(`max`, plus a rule and a label at every round step below it — 100k, 150k,
-300k, 500k, 700k on a 1M window), an axis row, a legend and the context of the
+(`max`, plus a rule and a label at every round step below it — 100k, 200k,
+300k, 500k, 700k on a 1M window; two rules are only both drawn when their
+label boxes clear each other, so the labels never overlap, claunch-nw9ca.1),
+an axis row, a legend and the context of the
 request under the pointer in a row of its own kept at a fixed height, so the
 chart stays where it is while that text changes; moving the pointer off it
 returns it to the small view (claunch-a27zc).

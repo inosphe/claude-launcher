@@ -102,15 +102,19 @@ const ctx = {};
 new Function(
   "exports", "el", "document", "api", "renderTermTps", "fmtAge", "usageShort",
   '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesIndexAt", "termSeriesScale",
-    "termSeriesTicks", "termSeriesTick", "termSeriesChart",
+    "termSeriesTicks", "termSeriesTick", "termSeriesTickLabelY", "termSeriesChart",
     "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker"].map(slice).join("\n") + `
 exports.read = termSeriesRead;
 exports.data = termSeriesData;
 exports.chart = termSeriesChart;
 exports.scale = termSeriesScale;
+exports.tickLabelY = termSeriesTickLabelY;
 exports.indexAt = termSeriesIndexAt;
 exports.maker = termSeriesMaker;
 exports.reads = termSeriesReads;
+exports.consts = { TERM_SERIES_LOG_BASE, TERM_SERIES_TICK_COUNT, TERM_SERIES_ZOOM_HEIGHT,
+  TERM_SERIES_PLOT_INSET, TERM_SERIES_TICK_LABEL_HEIGHT,
+  TERM_SERIES_TICK_LABEL_LIFT, TERM_SERIES_TICK_LABEL_MIN };
 exports.hover = (v) => { termSeriesHover = v; };
 exports.hovered = () => termSeriesHover;
 `)(ctx, node, document, api, renderTermTps,
@@ -188,9 +192,10 @@ const series = (win, start = 1000) => ({
   check("the readout is blank on both lines once the pointer leaves",
         readoutLines(big).map((t) => t.trim()), ["", ""]);
 
-  // The height axis (claunch-nw9ca): a log axis whose middle is 1/(1+sqrt(B))
-  // of the top, so 300k of a 1M window sits at half height; ticked at round
-  // values near even steps; a line at the compact threshold.
+  // The height axis (claunch-nw9ca, retuned in claunch-nw9ca.1): a log axis
+  // whose middle is 1/(1+sqrt(B)) of the top, so 250k of a 1M window sits at
+  // half height at B=9; ticked at round values near even steps; a line at the
+  // compact threshold.
   const big1 = (n) => [{ input: 2, cache_read: n - 2, cache_write: 0 }];
   const sc = (n, limits) => {
     const r = ctx.scale(big1(n), limits);
@@ -200,39 +205,91 @@ const series = (win, start = 1000) => ({
   check("top is the largest request without a window", sc(367e3, null), [367e3, false]);
   check("top is the window, not the largest request", sc(367e3, { top: 1e6 }), [1e6, true]);
   check("a request over the window pushes the top up to it", sc(2e6, { top: 1e6 }), [2e6, false]);
-  check("a 1M window is ticked 100k, 150k, 300k, 500k, 700k",
-        ticks(1e3, { top: 1e6 }), [100e3, 150e3, 300e3, 500e3, 700e3]);
-  check("a 200k window is ticked 15k, 30k, 60k, 100k, 150k",
-        ticks(1e3, { top: 2e5 }), [15e3, 30e3, 60e3, 100e3, 150e3]);
-  check("a session of a few dozen tokens is ticked in round whole tokens",
-        ctx.scale(big1(44), null).ticks, [3, 7.5, 13, 21, 31]);
+  check("a 1M window is ticked 100k, 200k, 300k, 500k, 700k",
+        ticks(1e3, { top: 1e6 }), [100e3, 200e3, 300e3, 500e3, 700e3]);
+  check("a 200k window is ticked 10k, 25k, 50k, 80k, 150k",
+        ticks(1e3, { top: 2e5 }), [10e3, 25e3, 50e3, 80e3, 150e3]);
+  check("a session of a few dozen tokens is ticked in round small values",
+        ctx.scale(big1(44), null).ticks, [2.5, 6, 11, 18, 29]);
   const ratioOf = (n, v, limits) => ctx.scale(big1(n), limits).ratio(v);
-  check("the middle of a 1M axis is 300k, where a linear axis put 500k",
-        ratioOf(5e3, 300e3, { top: 1e6 }).toFixed(4), "0.4999");
-  check("500k sits above the middle of a 1M axis",
-        ratioOf(5e3, 500e3, { top: 1e6 }).toFixed(3), "0.690");
+  check("the middle of a 1M axis is 250k, where a linear axis put 500k",
+        ratioOf(5e3, 250e3, { top: 1e6 }).toFixed(4), "0.5000");
+  check("300k sits above the middle of a 1M axis at B=9",
+        ratioOf(5e3, 300e3, { top: 1e6 }).toFixed(4), "0.5570");
+  check("500k sits well above the middle of a 1M axis",
+        ratioOf(5e3, 500e3, { top: 1e6 }).toFixed(3), "0.732");
   check("the axis has its top at the ceiling and zero on the baseline",
         [ratioOf(5e3, 0, { top: 1e6 }), ratioOf(5e3, 1e6, { top: 1e6 })], [0, 1]);
   check("a value over the top is clamped to it", ratioOf(5e3, 1.5e6, { top: 1e6 }), 1);
   check("the largest request changing does not move a position when the window is named",
         [ratioOf(5e3, 3e4, { top: 1e6 }), ratioOf(9e5, 3e4, { top: 1e6 })].map((r) => r.toFixed(6)).every((r, _, a) => r === a[0]), true);
   check("a 44k session sits well above the baseline of a 1M axis",
-        ratioOf(44e3, 44e3, { top: 1e6 }).toFixed(3), "0.105");
+        ratioOf(44e3, 44e3, { top: 1e6 }).toFixed(3), "0.137");
   const tiny = ctx.scale([{ input: 200, cache_read: 0, cache_write: 0 }, { input: 500, cache_read: 0, cache_write: 0 }], { top: 1e6 });
   check("a session of a few hundred tokens is lifted off the baseline too",
-        [tiny.top, tiny.ratio(200).toFixed(4), tiny.ratio(500).toFixed(4)], [1e6, "0.0005", "0.0013"]);
+        [tiny.top, tiny.ratio(200).toFixed(4), tiny.ratio(500).toFixed(4)], [1e6, "0.0007", "0.0018"]);
   const sameSize = ctx.scale([{ input: 700, cache_read: 0, cache_write: 0 }], { top: 1e6 });
-  check("one request of one size keeps a non-zero axis", [sameSize.top, sameSize.ratio(700).toFixed(4)], [1e6, "0.0018"]);
-  // 1.4 is what the request named, and it is worth holding here: on this axis
-  // the base is the only knob, and 1.4 is the value that leaves the chart
-  // looking linear, which is why the shipped axis uses 5.44 instead.
+  check("one request of one size keeps a non-zero axis", [sameSize.top, sameSize.ratio(700).toFixed(4)], [1e6, "0.0025"]);
+  // The base is the only knob on this axis, and each value of it is worth
+  // holding: 1.4 leaves the chart looking linear (458k near the middle), 5.44
+  // put 300k at half height, and 9 — what claunch-nw9ca.1 moved to — puts 250k
+  // there.
   const biased = (v, top, b) => Math.log(1 + (b - 1) * (v / top)) / Math.log(b);
-  check("the shipped axis puts 300k at half height of a 1M window",
-        biased(300e3, 1e6, 5.44).toFixed(4), "0.4999");
   check("base 1.4 would leave 458k near the middle, a linear-looking chart",
         [biased(458e3, 1e6, 1.4).toFixed(3), biased(500e3, 1e6, 1.4).toFixed(3)], ["0.500", "0.542"]);
+  check("base 5.44 put 300k at half height of a 1M window",
+        biased(300e3, 1e6, 5.44).toFixed(4), "0.4999");
+  check("the shipped base 9 puts 250k at half height of a 1M window",
+        biased(250e3, 1e6, 9).toFixed(4), "0.5000");
   check("the middle of the axis is top*(sqrt(B)-1)/(B-1) for the base in use",
-        Math.round(1e6 * (Math.sqrt(5.44) - 1) / 4.44), 300086);
+        Math.round(1e6 * (Math.sqrt(9) - 1) / 8), 250000);
+  // The label-overlap check claunch-nw9ca.1 asked for: the tick picker may
+  // only place two rules whose labels' boxes clear each other. Before the fix
+  // the guard was a bare 0.06 (5.58px) against a 10px box, and 19 of 89
+  // measured windows drew overlapping labels. This measures the drawn y of
+  // each rule exactly as the chart does and requires every gap to hold a
+  // label box.
+  const plotH = (96 - 3);
+  // The measured height of a 9px label's box in Chromium (claunch-nw9ca.1),
+  // not the guard: the guard is this plus a pixel of daylight.
+  const labelBox = 10;
+  /* The anchor the chart draws each tick's label at, through the function the
+     chart itself calls -- so this measures the drawn text, not a parallel
+     calculation that could disagree with it (near the ceiling the anchor is
+     clamped, which a plain fraction of the plot height does not show). */
+  const tickYs = (pts, limits) => {
+    const s = ctx.scale(pts, limits);
+    return s.ticks.map((v) => ctx.tickLabelY(s.top, v));
+  };
+  const minGap = (pts, limits) => {
+    const ys = tickYs(pts, limits);
+    let min = Infinity;
+    for (let i = 1; i < ys.length; i++) min = Math.min(min, Math.abs(ys[i] - ys[i - 1]));
+    return min;
+  };
+  for (const win of [1e6, 400e3, 260e3, 200e3]) {
+    check(`a ${Math.round(win / 1e3)}k window's tick labels do not overlap (gap >= ${labelBox}px)`,
+          minGap(big1(1e3), { top: win }) >= labelBox, true);
+  }
+  check("the labels of a session of a few dozen tokens do not overlap either",
+        minGap(big1(44), null) >= labelBox, true);
+  // The picker and the chart must share one geometry. This is the case the
+  // fraction-based guard missed: near the ceiling the label anchor is clamped
+  // at TERM_SERIES_TICK_LABEL_MIN, so two rules 12.9px apart in the plot can
+  // still put their text closer than a box.
+  const clamped = [];
+  for (let i = 0; i < 400; i++) clamped.push(20000 + i * 3313);
+  check("no window in a wide sweep draws two labels closer than a box",
+        clamped.every((win) => minGap(big1(win), { top: win }) >= labelBox), true);
+  // Boxes exactly a box apart touch: the guard keeps a pixel of daylight so a
+  // font-metric or rounding difference cannot flip a touch into an overlap.
+  check("the picker keeps more than the bare box between two labels",
+        ctx.consts.TERM_SERIES_TICK_LABEL_HEIGHT > labelBox, true);
+  check("the label anchor is clamped near the ceiling, which is why the picker uses it",
+        [ctx.tickLabelY(1e6, 1e6), ctx.tickLabelY(1e6, 900e3)],
+        [ctx.consts.TERM_SERIES_TICK_LABEL_MIN, ctx.consts.TERM_SERIES_TICK_LABEL_MIN]);
+  check("the chart's plot height is the zoom height less the inset",
+        ctx.consts.TERM_SERIES_ZOOM_HEIGHT - ctx.consts.TERM_SERIES_PLOT_INSET, plotH);
   const side = (label, window, compact) => ({ label, window, compact });
   const lines = (limits, n = 367e3) => ctx.scale(big1(n), limits).compact.map((l) => [l.at, l.labels]);
   check("one threshold, one line", lines({ top: 1e6, sides: [side("a", 1e6, 9e5)] }), [[9e5, ["a"]]]);
@@ -251,7 +308,7 @@ const series = (win, start = 1000) => ({
   const one = lineAt(lim);
   check("the threshold line is horizontal across the chart at its height",
         [one.length, one[0].attrs.x1, one[0].attrs.x2, one[0].attrs.y1 === one[0].attrs.y2,
-         one[0].attrs.y1], [1, "0", "120", true, "3.2"]);
+         one[0].attrs.y1], [1, "0", "120", true, "3.0"]);
   check("two sides with the same threshold draw one line", lineAt({ ...lim, sides: [side("a", 1e6, 9e5), side("b", 1e6, 9e5)] }).length, 1);
   check("two sides with different thresholds draw two", lineAt({ ...lim, sides: [side("a", 1e6, 9e5), side("b", 2e5, 1.5e5)] }).length, 2);
   check("a session without a threshold draws no line", lineAt({ top: 1e6, sides: [side("a", 1e6, null)] }).length, 0);
@@ -277,20 +334,20 @@ const series = (win, start = 1000) => ({
   // The log height axis: write at the bottom, input above it, cached input at
   // the top, each at its own boundary on the axis of the 44-token request.
   const logY = (v, h = 26, top = 44) =>
-    Number((h - 1 - (Math.log(1 + 4.44 * (v / top)) / Math.log(5.44)) * (h - 3)).toFixed(1));
+    Number((h - 1 - (Math.log(1 + 8 * (v / top)) / Math.log(9)) * (h - 3)).toFixed(1));
   check("the stack's boundaries are on the log axis, last request: write 2, +input 4, +cached 44",
         [edge(svg, "cache_write"), edge(svg, "input"), edge(svg, "cache_read")].map((e) => e[e.length - 1]),
         [logY(2), logY(4), logY(44)]);
   check("the smallest boundary sits above the baseline, the largest context at the top",
-        [logY(2), logY(44)], [22.5, 2.0]);
+        [logY(2), logY(44)], [21.8, 2.0]);
   const huge = ctx.chart({ ...series("full"), points: [0, 1, 2, 3].map((i) => ({
     t: 1000 + i * 100, n: i + 1, count: 1, input: 1e5 * (i + 1), cache_read: 2e8 * (i + 1), cache_write: 3e3 })) }, true);
   check("a large axis is ticked at round values, none above the maximum",
         huge.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").map((k) => k.textContent),
-        ["60M", "150M", "250M", "400M", "600M"]);
-  check("a small axis is ticked in whole tokens too",
+        ["40M", "100M", "200M", "300M", "500M"]);
+  check("a small axis is ticked in round small values too",
         big.kids[0].kids.filter((k) => k.attrs.class === "term-series-ytick").map((k) => k.textContent),
-        ["3", "7.5", "13", "21", "31"]);
+        ["2.5", "6", "11", "18", "29"]);
   check("the axis row names the first, the middle and the last request with their times",
         big.kids[1].kids.map((k) => k.textContent), ["#1 · 6m ago", "#3 · 3m ago", "#4 · 1m ago"]);
   check("the tooltip counts the requests, names the last and largest context and the swap",

@@ -74,7 +74,8 @@ function el(tag, cls, text) {
 }
 const fmtAge = (s) => Math.round(s / 60) + "m", usageShort = (n) => String(n);
 ${src.slice(constStart, constEnd)}
-${["termSeriesTotal", "termSeriesIndexAt", "termSeriesScale", "termSeriesTicks", "termSeriesTick", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
+${["termSeriesTotal", "termSeriesIndexAt", "termSeriesScale", "termSeriesTicks", "termSeriesTick",
+    "termSeriesTickLabelY", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
     "termSeriesMaker"].map(slice).join("\n")}
 /* 30 requests, one every 120 s; the context grows to request 15, is
    compacted at 1800 s (the summary is the next request's context) and grows
@@ -162,6 +163,29 @@ renderTermTps();
           assert.ok(compact.lines[0].y < compact.lines[1].y, "the higher threshold is the higher line");
           assert.deepEqual(compact.labels, ["compact 900000 (work)", "compact 450000 (lender)"]);
           assert.ok(drawnMarks.labelInPlot, "and the label is laid out");
+          /* The height axis' own labels are drawn, not merely computed: this
+             is the geometry the fix of claunch-nw9ca.1 is about, and only a
+             browser can measure the box a font actually produces. */
+          const axisLabels = await p.evaluate(() => {
+            const boxes = [...document.querySelectorAll(".term-series.zoom > .term-series-chart > .term-series-ytick")]
+              .filter((n) => !n.textContent.startsWith("compact"))
+              .map((n) => { const b = n.getBBox(); return { text: n.textContent, y: b.y, h: b.height }; });
+            let closest = null, clear = Infinity;
+            for (let i = 1; i < boxes.length; i++) {
+              // ticks ascend by value, so boxes[i-1] is drawn lower than boxes[i]
+              const gap = boxes[i - 1].y - (boxes[i].y + boxes[i].h);
+              if (gap < clear) { clear = gap; closest = [boxes[i].text, boxes[i - 1].text]; }
+            }
+            return { count: boxes.length, labels: boxes.map((b) => b.text), clear, closest,
+                     boxHeight: boxes.length ? boxes[0].h : null };
+          });
+          assert.ok(axisLabels.count >= 4,
+            `the zoomed chart draws several height rules, got ${axisLabels.labels.join(",")}`);
+          // A positive clearance is the labels not touching: the gap is the
+          // bottom of the upper box to the top of the lower one.
+          assert.ok(axisLabels.clear > 0,
+            `no two height labels overlap: the closest pair ${JSON.stringify(axisLabels.closest)} ` +
+            `clears ${axisLabels.clear.toFixed(2)}px, against a ${axisLabels.boxHeight}px box`);
           const fall = await p.evaluate(() => {
             const top = document.querySelector(".term-series.zoom .term-series-line.cache_read")
               .getAttribute("points").split(" ").map((pt) => pt.split(",").map(Number));
