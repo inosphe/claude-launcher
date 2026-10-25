@@ -10,7 +10,14 @@ import sys
 import pytest
 from dataclasses import replace
 
-from claude_launcher import credentials, lineage, profile, store, transcripts
+from claude_launcher import (
+    credentials,
+    lineage,
+    pi_provider,
+    profile,
+    store,
+    transcripts,
+)
 from claude_launcher.daemon import harness
 from claude_launcher.daemon.harness import HarnessError, SessionDef
 
@@ -759,6 +766,45 @@ def test_daemon_pi_adapter_projects_provider_model_and_token(home, tmp_path):
     assert "--extension" in argv
     assert env["KEYED_API_KEY"] == "provider-secret"
     assert env["CLAUNCH_PI_TOKEN_ENV"] == "KEYED_API_KEY"
+
+
+def test_a_borrowing_session_gets_the_lenders_default_model(home, tmp_path):
+    """The model list and the default model follow the borrow, not the seat.
+
+    ``build_command`` reads ``harness_launch_args``, which asks the lender
+    whose ``models:`` table the launch runs on. The seat pins one id and the
+    lender another, so a launch that asked the seat would show a different
+    ``--model`` -- and the process would name a tier of the profile it is
+    borrowing *from*, not the backend it spends.
+    """
+    _declare_harness(
+        "keyed",
+        auth="api-key",
+        token_env="KEYED_API_KEY",
+        home_env="KEYED_HOME",
+        provider_adapter="pi",
+    )
+    runtime = _profile_for("work", "keyed")
+    lender = profile.create("lender")
+    credentials.save_token(runtime, "provider-secret")
+    credentials.save_token(lender, "lender-secret")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"shared": {"endpoints": {"openai": "https://shared.example/v1"}}}
+        )
+    )
+    store.set_profile_field("work", "provider", "shared")
+    store.set_profile_field("work", "models", {"default": "seat-default"})
+    store.set_profile_field("lender", "provider", "shared")
+    store.set_profile_field("lender", "models", {"default": "lender-default"})
+
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work:keyed", cwd=str(tmp_path), borrow="lender")
+    )
+    argv, env, _ = harness.build_command(sdef)
+
+    assert argv[argv.index("--model") + 1] == "lender-default"
+    assert json.loads(env[pi_provider.ENV_MODELS])[0] == "lender-default"
 
 
 def test_borrow_selector_is_rejected_even_when_its_harness_matches(home, tmp_path):
