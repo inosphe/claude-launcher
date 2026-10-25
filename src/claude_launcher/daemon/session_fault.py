@@ -67,6 +67,14 @@ _DIFF_ROW = re.compile(r"^\s*(?:\d+\s+)?[+-](?:\s|$)")
 #: that built this module did) without the harness being in a fault.
 _TOOL_ROW = re.compile(r"^\s*[⏺●]\s*[A-Za-z_][\w.-]*\(")
 
+#: A row is skipped when it is drawn decoration: a horizontal rule under a
+#: box or a notice. It carries no words, and the message kept for the tooltip
+#: takes the rows under the matched one until its length limit -- so a rule
+#: below the last line of a fault ended up inside the recorded message
+#: (pi, s1736, 2026-10-25: ``Error: Retry failed after 3 attempts: Request
+#: timed out.`` followed by 140 ``─``).
+_RULE_ROW = re.compile(r"^[\s─━═\-=_*~]{3,}$")
+
 #: The absolute form of a reset time: "resets Oct 26, 9am (Asia/Seoul)".
 _RESET_ABSOLUTE = re.compile(
     r"resets?\s+(?:at\s+|on\s+)?"
@@ -94,6 +102,18 @@ _MONTHS = {
 
 _UNIT_SECONDS = {"m": 60.0, "h": 3600.0, "d": 86400.0}
 
+#: What unblocks a stop, which is the axis a person triages by. The kind is
+#: the diagnosis (an exhausted plan, a 529, a prompt); this says who or what
+#: clears it: ``input`` -- someone presses a key on that terminal;
+#: ``account`` -- someone fixes the plan, the payment or the login;
+#: ``provider`` -- the provider's state recovers, or time passes;
+#: ``policy`` -- the session changes how it asks.
+#:
+#: A prompt that waits for a keystroke is not an account or service fault,
+#: and reading it as one loses the difference between "nothing here can
+#: move until a person looks" and "waiting will fix it" (claunch-pczoc.3).
+RESOLVED_BY = ("input", "account", "provider", "policy")
+
 
 class CatalogError(Exception):
     """The catalogue document is not usable; its message names the entry."""
@@ -101,12 +121,19 @@ class CatalogError(Exception):
 
 @dataclass(frozen=True)
 class Kind:
-    """One class of fault: how it reads, what a person can do, how long it lasts."""
+    """One class of fault: how it reads, what a person can do, how long it lasts.
+
+    ``resolved_by`` is the coarse grade of that action (see
+    :data:`RESOLVED_BY`): it says who or what clears the stop, so a reader
+    can tell a prompt waiting for a keystroke apart from an exhausted plan
+    without reading the message.
+    """
 
     name: str
     label: str
     action: str
     window: float
+    resolved_by: str
 
 
 @dataclass(frozen=True)
@@ -148,11 +175,18 @@ class Catalog:
                 raise CatalogError(f"session faults: kind {name!r} needs a numeric window")
             if window <= 0:
                 raise CatalogError(f"session faults: kind {name!r} window must be positive")
+            resolved_by = str(row.get("resolved_by") or "").strip()
+            if resolved_by not in RESOLVED_BY:
+                raise CatalogError(
+                    f"session faults: kind {name!r} needs 'resolved_by', one of "
+                    + ", ".join(RESOLVED_BY)
+                )
             self.kinds[str(name)] = Kind(
                 name=str(name),
                 label=str(row.get("label") or name),
                 action=str(row.get("action") or ""),
                 window=window,
+                resolved_by=resolved_by,
             )
         self.common = self._patterns(document.get("common"), "common")
         raw_harnesses = document.get("harnesses") or {}
@@ -326,7 +360,7 @@ def _clean_row(row: str) -> bool:
     """Whether a screen row may be read as harness message text."""
     if not row.strip():
         return False
-    if _DIFF_ROW.match(row) or _TOOL_ROW.match(row):
+    if _DIFF_ROW.match(row) or _TOOL_ROW.match(row) or _RULE_ROW.match(row):
         return False
     return True
 
@@ -412,6 +446,7 @@ class Detector:
             "kind": kind.name,
             "label": kind.label,
             "action": kind.action,
+            "resolved_by": kind.resolved_by,
             "message": message,
             "code": status.group(1) if status else "",
             "reset": hint,
@@ -432,6 +467,7 @@ class Detector:
             "kind": record["kind"],
             "label": record["label"],
             "action": record["action"],
+            "resolved_by": record.get("resolved_by", ""),
             "message": record["message"],
             "code": record.get("code", ""),
             "reset": record["reset"],

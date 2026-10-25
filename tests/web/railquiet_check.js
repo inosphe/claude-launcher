@@ -35,6 +35,20 @@ function slice(name) {
   throw new Error(`unbalanced ${name}`);
 }
 
+/* A top-level `const NAME = {...}` a sliced function reads. `slice` returns
+   the function body only, so a constant declared beside it is missing from
+   the sandbox and the call fails at the line that reads it. */
+function sliceConst(name) {
+  const start = src.indexOf(`const ${name} = {`);
+  if (start < 0) throw new Error(`cannot locate const ${name} in app.js`);
+  let depth = 0;
+  for (let j = src.indexOf("{", start); j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (!depth) return src.slice(start, j + 2); }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+
 /* ---- stub DOM ---- */
 function makeEl(tag) {
   const node = {
@@ -82,7 +96,8 @@ function row(name) {
 const ctx = {};
 new Function(
   "exports", "$", "document", "sessionsCache", "cflowCache",
-  [slice("el"), slice("scopeSession"), slice("sessCflowRun"), slice("railQuietFlags"),
+  [slice("el"), slice("scopeSession"), slice("sessCflowRun"),
+   sliceConst("RESOLVED_BY_TEXT"), slice("railQuietFlags"),
    slice("applyRailQuiet")].join("\n") + `
 exports.apply = applyRailQuiet;
 exports.flags = railQuietFlags;
@@ -246,6 +261,56 @@ check("a held session shows both its hold and its backlog",
 ctx.setSessions([{ name: "s1", status: "idle" }]);
 ctx.apply();
 check("a payload without the field draws nothing", quiet(rows.s1), null);
+
+/* --- a session the harness itself stopped -------------------------------- */
+/* The one pill on this line that is not a setting: an exhausted plan, a
+   rejected login, a prompt waiting for a keystroke (daemon/session_fault.py).
+   The grade is the part a reader acts on -- who or what clears the stop --
+   so a row that says "waiting for input" must not read like an exhausted
+   plan (claunch-pczoc.3). */
+const faultRow = (extra) => ({
+  name: "s1", status: "idle",
+  fault: Object.assign({
+    kind: "awaiting_input", label: "waiting for input", harness: "claude",
+    resolved_by: "input", active: true, message: "Enter to confirm · Esc to cancel",
+    code: "", reset: "", action: "answer the prompt on the session's terminal",
+    last_seen: "2026-10-25T14:37:46+00:00", until: "2026-10-25T14:52:46+00:00",
+  }, extra || {}),
+});
+
+ctx.setSessions([faultRow()]);
+ctx.setRuns([]);
+ctx.apply();
+check("a faulted session says what it is caught on",
+      pills(rows.s1), ["waiting for input"]);
+const faultTitle = quiet(rows.s1).children[0].title;
+check("the hover names who clears it",
+      faultTitle.includes(
+        "cleared by: a keystroke on that session's terminal"), true);
+check("...and still carries the message itself",
+      faultTitle.includes("Enter to confirm · Esc to cancel"), true);
+
+/* An older daemon publishes no grade: the row must read as before, not throw
+   on a name that is not in the table. */
+ctx.setSessions([faultRow({ resolved_by: "" })]);
+ctx.apply();
+check("a fault without a grade draws its pill",
+      pills(rows.s1), ["waiting for input"]);
+check("...and says nothing about clearing it",
+      quiet(rows.s1).children[0].title.includes("cleared by:"), false);
+
+/* A grade this build does not know is printed as written, so a newer daemon
+   keeps the information on the row instead of dropping the line. */
+ctx.setSessions([faultRow({ resolved_by: "operator" })]);
+ctx.apply();
+check("an unknown grade is shown by its own name",
+      quiet(rows.s1).children[0].title.includes("cleared by: operator"), true);
+
+/* Expired: the record stays in the payload and the pill goes, the same rule
+   as every other row on this line. */
+ctx.setSessions([faultRow({ active: false })]);
+ctx.apply();
+check("an expired fault draws no pill", quiet(rows.s1), null);
 
 /* --- the end-of-run protection ------------------------------------------ */
 /* The one flag on this line that is not a silence. `cflow kill-on-end` ends

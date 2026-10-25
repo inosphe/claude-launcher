@@ -38,6 +38,26 @@ FIREWORKS_412 = (
     "Please go to https://fireworks.ai/account/billing for more information."
 )
 
+# The two screens `awaiting_input` was collected from (2026-10-25): a
+# permission-mode prompt and an announcement. Both stop the session on a
+# keystroke and end on the same footer.
+AWAITING_CONFIRM = "  Enter to confirm · Esc to cancel"
+AWAITING_CONTINUE = "  Enter to continue · Esc to cancel"
+AWAITING_PROMPT = (
+    "  Teach auto mode about your environment?",
+    "  ❯ 1. Yes",
+    "    2. Not now",
+    "    3. Don't show again",
+    "",
+    AWAITING_CONFIRM,
+)
+AWAITING_NOTICE = (
+    "  We're changing auto mode to no longer charge for classifier requests"
+    " in Claude Code.",
+    "",
+    AWAITING_CONTINUE,
+)
+
 
 class _Screen:
     """The slice of ScreenState the detector reads."""
@@ -110,6 +130,74 @@ def test_common_patterns_apply_to_a_harness_with_no_list_of_its_own():
 def test_a_suspended_account_is_its_own_fault():
     found = session_fault.default().match("claude", FIREWORKS_412)
     assert found and found[0].name == "account_suspended"
+
+
+@pytest.mark.parametrize("rows", [AWAITING_PROMPT, AWAITING_NOTICE],
+                         ids=["confirm", "continue"])
+def test_an_observed_prompt_screen_reads_as_awaiting_input(rows):
+    """The session cannot move until somebody presses a key on its terminal;
+    nothing about the account or the service is wrong (claunch-pczoc.3)."""
+    det, now = _detector("claude")
+    det.scan(_Screen(*rows), now=now["t"])
+    view = det.view(now=now["t"])
+    assert view["kind"] == "awaiting_input", view["message"]
+    assert view["label"] == "waiting for input"
+    assert view["resolved_by"] == "input"
+
+
+@pytest.mark.parametrize("footer", [
+    AWAITING_CONFIRM,
+    AWAITING_CONTINUE,
+    # The separator between the two halves is drawn by the terminal, so the
+    # pattern must not read it: a two-space footer is the same prompt.
+    "Enter to confirm  Esc to cancel",
+])
+def test_the_prompt_footer_does_not_depend_on_how_the_terminal_separates_it(footer):
+    found = session_fault.default().match("claude", footer)
+    assert found and found[0].name == "awaiting_input"
+
+
+def test_the_prompt_footer_is_read_only_for_the_harness_it_was_seen_in():
+    """Both observations are `claude` screens. A harness that draws the same
+    footer has not been seen, and the catalogue keeps readings where they
+    were collected (docs/session-faults.md, `awaiting_input`)."""
+    catalog = session_fault.default()
+    assert catalog.match("claude", AWAITING_CONTINUE) is not None
+    assert catalog.match("pi", AWAITING_CONTINUE) is None
+
+
+def test_a_prompt_footer_is_a_named_cause_so_the_lower_row_decides():
+    """The footer names a stop the terminal holds; a limit line names a stop
+    the account holds. Both are named, so the row painted last decides --
+    the same rule as any other two named causes."""
+    for rows, kind in (
+        ((WEEKLY, AWAITING_CONFIRM), "awaiting_input"),
+        ((AWAITING_CONFIRM, WEEKLY), "usage_limit"),
+    ):
+        det, now = _detector("claude")
+        det.scan(_Screen(*rows), now=now["t"])
+        assert det.view()["kind"] == kind, f"{rows} read {det.view()['kind']}"
+
+
+def test_every_packaged_kind_says_what_clears_it():
+    """The table in docs/session-faults.md, held as data: a kind added to the
+    YAML without a decision about who or what resolves it fails here, and so
+    does a grade changed on one side only."""
+    graded = {
+        name: kind.resolved_by
+        for name, kind in session_fault.default().kinds.items()
+    }
+    assert graded == {
+        "usage_limit": "account",
+        "account_suspended": "account",
+        "rate_limit": "provider",
+        "overloaded": "provider",
+        "auth": "account",
+        "api_status": "provider",
+        "network": "provider",
+        "policy_blocked": "policy",
+        "awaiting_input": "input",
+    }
 
 
 def test_a_status_code_with_no_pattern_is_api_status_and_keeps_the_code():
@@ -287,8 +375,8 @@ def test_entries_starting_at_the_same_character_are_decided_by_catalogue_order()
         """
         version: 1
         kinds:
-          usage_limit: {label: usage limit, action: wait, window: 86400}
-          rate_limit: {label: rate limit, action: wait, window: 900}
+          usage_limit: {label: usage limit, action: wait, window: 86400, resolved_by: account}
+          rate_limit: {label: rate limit, action: wait, window: 900, resolved_by: provider}
         common:
           - kind: usage_limit
             pattern: 'quota'
@@ -315,17 +403,27 @@ def test_the_timeout_lines_are_in_common_so_every_harness_reads_them():
     {},
     {"version": 2, "kinds": {}},
     {"version": 1, "kinds": {}},
-    {"version": 1, "kinds": {"auth": {"window": 1}}, "common": [
-        {"kind": "nope", "pattern": "x"}]},
-    {"version": 1, "kinds": {"auth": {"window": 1}}, "common": [
-        {"kind": "auth", "pattern": "("}]},
-    {"version": 1, "kinds": {"auth": {"label": "x"}}},
-    {"version": 1, "kinds": {"auth": {"window": 1}}, "common": [
-        {"kind": "auth", "pattern": "x", "fallback": "yes"}]},
+    {"version": 1, "kinds": {"auth": {"window": 1, "resolved_by": "account"}},
+     "common": [{"kind": "nope", "pattern": "x"}]},
+    {"version": 1, "kinds": {"auth": {"window": 1, "resolved_by": "account"}},
+     "common": [{"kind": "auth", "pattern": "("}]},
+    {"version": 1, "kinds": {"auth": {"label": "x", "resolved_by": "account"}}},
+    {"version": 1, "kinds": {"auth": {"window": 1, "resolved_by": "account"}},
+     "common": [{"kind": "auth", "pattern": "x", "fallback": "yes"}]},
+    # A kind with no grade, and one with a grade nobody defined: the badge
+    # cannot say what clears the stop, so the catalogue refuses to load.
+    {"version": 1, "kinds": {"auth": {"window": 1}}},
+    {"version": 1, "kinds": {"auth": {"window": 1, "resolved_by": "nobody"}}},
 ])
 def test_a_broken_catalogue_is_refused(document):
     with pytest.raises(session_fault.CatalogError):
         session_fault.Catalog(document)
+
+
+def test_the_message_a_missing_grade_fails_with_names_the_field():
+    with pytest.raises(session_fault.CatalogError) as caught:
+        session_fault.Catalog({"version": 1, "kinds": {"auth": {"window": 1}}})
+    assert "resolved_by" in str(caught.value)
 
 
 # ----------------------------------------------------------------- reset time
@@ -405,11 +503,78 @@ def test_a_tool_call_header_that_quotes_a_message_is_not_a_fault():
     assert det.view() is None
 
 
+# The bottom of s1736's pi terminal (captured 2026-10-25): the warning pi
+# prints when the configured model id is unknown to the provider, an update
+# notice drawn inside rules, and the retry loop that stopped the session.
+PI_RULE = "─" * 140
+PI_MODEL_WARNING = (
+    'Warning: Model "deepseek/deepseek-v4.1-flash-ultrafast" not found for',
+    'provider "claunch-profile". Using custom model id.',
+)
+PI_UPDATE_BOX = (
+    PI_RULE,
+    " Update Available",
+    " New version 1.4.0 is available. Run pi update",
+    " Changelog: https://pi.dev/changelog",
+    PI_RULE,
+)
+PI_RETRY_ROW = "Error: Retry failed after 3 attempts: Request timed out."
+PI_RETRY_SCREEN = (
+    *PI_MODEL_WARNING,
+    "",
+    *PI_UPDATE_BOX,
+    "",
+    " continue",
+    "",
+    " Error: Request timed out.",
+    "",
+    " Error: Request timed out.",
+    "",
+    " Error: Request timed out.",
+    "",
+    " Error: Request timed out.",
+    "",
+    " Error: Retry failed after 3 attempts: Request timed out.",
+    "",
+    PI_RULE,
+)
+
+
+def test_the_pi_retry_screen_reads_the_line_that_stopped_it():
+    """pi draws neither of the two claude screens; its stop is the exhausted
+    retry line, which `common` reads for every harness."""
+    det, now = _detector("pi")
+    det.scan(_Screen(*PI_RETRY_SCREEN), now=now["t"])
+    view = det.view(now=now["t"])
+    assert view["kind"] == "network"
+    assert view["resolved_by"] == "provider"
+
+
+@pytest.mark.parametrize("rows", [PI_MODEL_WARNING, PI_UPDATE_BOX],
+                         ids=["model-warning", "update-notice"])
+def test_pi_notices_that_do_not_stop_the_session_are_not_faults(rows):
+    """pi answers the unknown model with "Using custom model id." and carries
+    on, and the update notice waits for nobody -- neither is a fault."""
+    det, now = _detector("pi")
+    det.scan(_Screen(*rows), now=now["t"])
+    assert det.view() is None
+
+
+def test_a_drawn_rule_is_not_part_of_the_recorded_message():
+    """The message takes the rows under the matched one until its length
+    limit, so the rule pi draws below the retry line used to be recorded as
+    part of it (measured on s1736, 2026-10-25: 140 box-drawing characters
+    after the sentence)."""
+    det, now = _detector("pi")
+    det.scan(_Screen(*PI_RETRY_SCREEN), now=now["t"])
+    assert det.view(now=now["t"])["message"] == PI_RETRY_ROW
+
+
 def test_the_fault_stays_within_its_window_and_then_expires():
     catalog = session_fault.load(
         "version: 1\n"
         "kinds:\n"
-        "  usage_limit: {label: usage limit, action: wait, window: 60}\n"
+        "  usage_limit: {label: usage limit, action: wait, window: 60, resolved_by: account}\n"
         "common: []\n"
         "harnesses:\n"
         "  claude:\n"
@@ -451,7 +616,7 @@ def test_a_harness_with_no_patterns_never_scans():
     catalog = session_fault.load(
         "version: 1\n"
         "kinds:\n"
-        "  auth: {label: login, window: 10}\n"
+        "  auth: {label: login, window: 10, resolved_by: account}\n"
         "common: []\n"
         "harnesses: {}\n"
     )
@@ -483,6 +648,22 @@ def test_the_session_carries_the_fault_and_its_info_row(home, tmp_path):
         assert fault["kind"] == "usage_limit"
         assert fault["active"] is True
         assert s.info()["fault"]["kind"] == "usage_limit"
+        s._log.close()
+
+    asyncio.run(run())
+
+
+def test_the_grade_travels_with_the_fault_to_the_information_row(home, tmp_path):
+    async def run():
+        s = _session(tmp_path)
+        s.screen.feed_render(
+            b"\r\n" * (s.screen.rows + 1) + (AWAITING_CONTINUE + "\r\n").encode()
+        )
+        s._fault._clock = lambda: 2000.0
+        s._fault.scan(s.screen, now=2000.0)
+        row = s.info()["fault"]
+        assert row["kind"] == "awaiting_input"
+        assert row["resolved_by"] == "input"
         s._log.close()
 
     asyncio.run(run())
@@ -545,9 +726,9 @@ class _Faulted(DeadSession):
         return self._view
 
 
-def _fault_view(harness="claude"):
+def _fault_view(harness="claude", rows=(WEEKLY,)):
     det, _ = _detector(harness)
-    det.scan(_Screen(WEEKLY), now=1_000_000.0)
+    det.scan(_Screen(*rows), now=1_000_000.0)
     return det.view(now=1_000_000.0)
 
 
@@ -577,6 +758,24 @@ def test_the_fleet_route_lists_active_faults(mgr, tmp_path):
     assert body["faults"][0]["kind"] == "usage_limit"
     assert one["count"] == 1
     assert none["count"] == 0
+
+
+def test_the_fleet_route_carries_the_grade(mgr, tmp_path):
+    """The rail's tooltip and the MCP tool both read this field off the row;
+    a route that dropped it would say what is wrong on every row and never
+    who can clear it."""
+    mgr._sessions["f2"] = _Faulted(
+        "f2", tmp_path, "claude", _fault_view(rows=AWAITING_NOTICE)
+    )
+
+    async def scenario(client):
+        return await (await client.get(
+            "/api/session-faults?session=f2", headers=BEARER)).json()
+
+    body = _client(mgr, scenario)
+    assert body["count"] == 1
+    assert body["faults"][0]["kind"] == "awaiting_input"
+    assert body["faults"][0]["resolved_by"] == "input"
 
 
 def test_the_route_filters_by_kind_and_expired(mgr, tmp_path):

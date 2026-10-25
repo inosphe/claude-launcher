@@ -23,6 +23,13 @@
 # or the client saying it gave up. It decides only when nothing else in the
 # scanned window matched, whichever row either one sits on. That is how a
 # provider's quota sentence beats the bare 429 beside it.
+#
+# Every kind also carries `resolved_by`, the grade of what clears the stop:
+# `input` (a keystroke on that terminal), `account` (billing, plan, login),
+# `provider` (the service recovers, or time passes), or `policy` (the
+# session changes how it asks). The kind is the diagnosis; this is the fix,
+# and it is what keeps a prompt waiting for a keystroke from reading like an
+# exhausted plan (claunch-pczoc.3).
 
 version: 1
 
@@ -34,14 +41,17 @@ kinds:
     label: usage limit
     action: wait for the reset, or raise the plan
     window: 86400
+    resolved_by: account
   account_suspended:
     label: account suspended
     action: check the provider's billing and payment
     window: 86400
+    resolved_by: account
   rate_limit:
     label: rate limit
     action: wait for the rate window to pass
     window: 900
+    resolved_by: provider
   # The provider answers but is out of capacity (529 Overloaded). The harness
   # retries by itself, so the window is shorter than api_status's: a session
   # that is still here after five minutes is not waiting out one retry.
@@ -49,22 +59,42 @@ kinds:
     label: provider overloaded
     action: wait a few minutes; if it stays, the provider is degraded
     window: 300
+    resolved_by: provider
   auth:
     label: login
     action: run the harness's login again
     window: 21600
+    resolved_by: account
   api_status:
     label: API error
     action: check the provider's status; retry later
     window: 1800
+    resolved_by: provider
   network:
     label: network
     action: check connectivity and DNS
     window: 900
+    resolved_by: provider
   policy_blocked:
     label: policy block
     action: rephrase, or switch model
     window: 3600
+    resolved_by: policy
+  # The harness is waiting for a keystroke: a prompt it will not leave on its
+  # own (s1735, 2026-10-25). Nothing is wrong with the account or the
+  # service, and no amount of waiting clears it -- the person at that
+  # terminal is the one who does. It is read here because it is the same
+  # kind of stop (nobody else can move the session), and `resolved_by:
+  # input` is what keeps it apart from the account and service faults above.
+  # The window is the length of the other short faults; detection reads the
+  # screen and cannot see that the key was pressed, so the badge stays for
+  # the window after the prompt is gone. Nothing acts on this record --
+  # there is no send-keys and no auto-release (claunch-pczoc.3).
+  awaiting_input:
+    label: waiting for input
+    action: answer the prompt on the session's terminal
+    window: 900
+    resolved_by: input
 
 common:
   # Fireworks, 2026-10-23 (s1342): "API Error: 412 Account
@@ -233,6 +263,19 @@ harnesses:
     # `common` now (claunch-pczoc.2.1): each of them can share a screen with
     # the provider client's timeout wording, which is also in `common`, and a
     # `fallback` entry never outranks a line that names a cause.
+    # The footer a modal paints while it waits for a keystroke (s1735,
+    # 2026-10-25). Two wordings were collected: "Enter to confirm · Esc to
+    # cancel" on the auto-mode setup prompt, and "Enter to continue · Esc to
+    # cancel" on the auto-mode billing notice. The separator between the two
+    # halves is a dot on some screens and a plain space on others, so the
+    # pattern spans it rather than naming it. These stay in this harness's
+    # list, not in `common`: both collections came from `claude`, and the
+    # footer is the harness's own furniture.
+    - kind: awaiting_input
+      pattern: |-
+        Enter to (?:confirm|continue)[^\n]{0,40}Esc to cancel
+      sample: |-
+        Enter to confirm · Esc to cancel
     - kind: auth
       pattern: |-
         API Error: 401[^\n]{0,160}
