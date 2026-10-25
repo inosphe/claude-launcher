@@ -215,7 +215,6 @@ def proposed(body):
     doc = store.load()
     block = dict(doc.get("rag") or {})
     rows = store.rag_source_rows(block)
-    submitted_sources = set()
     if "sources" in body:
         submitted = body["sources"]
         if not isinstance(submitted, dict):
@@ -228,7 +227,6 @@ def proposed(body):
             if not clean.get("api_key"):
                 clean.pop("api_key", None)
             rows[source].update(clean)
-            submitted_sources.add(source)
     if "source" in body and body["source"] not in SOURCES:
         raise ValueError("source must be custom or profile")
     # The path a flat body writes into. ``source`` in this same body wins, so
@@ -266,18 +264,25 @@ def proposed(body):
     if "source" in body:
         block["source"] = body["source"]
     source = active
-    # The path in force must be usable, and the other path is only checked when
-    # this request touched it -- a body that switches the radio carries the
-    # saved row of the path it left, and refusing that save because an unused
-    # path has no address yet would make switching impossible to complete.
+    # Only the path in force is validated. The card sends both rows on every
+    # save, so "this request carried the profile row" says nothing about
+    # whether the profile path is the one being chosen -- and a stale profile
+    # name left in the row out of force (the card keeps it, so switching back
+    # restores it) would block a custom save the reader meant to make
+    # (claunch-pxxn4, found in review). The stale name is kept and diagnosed
+    # by ``profile_error`` when that path is chosen.
     profile_name = rows["profile"].get("profile", "")
-    if source == "profile" and not profile_name:
-        raise ValueError("choose a profile for the profile connection")
-    if profile_name and (source == "profile" or "profile" in submitted_sources):
+    if source == "profile":
+        if not profile_name:
+            raise ValueError("choose a profile for the profile connection")
         store.rag_profile_backend(profile_name, doc)
     if source == "custom" and not rows["custom"].get("base_url"):
         raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
     if rows["custom"].get("base_url"):
+        # Well-formedness of the stored address is checked even while the
+        # profile path is in force: the row is written either way, and an
+        # address that cannot be parsed is refused at the moment it is given
+        # rather than at the switch that would trust it.
         address = urlsplit(rows["custom"]["base_url"])
         if address.scheme not in ("http", "https") or not address.hostname or address.username or address.password or address.query or address.fragment:
             raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")

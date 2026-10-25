@@ -979,6 +979,55 @@ def test_a_legacy_block_feeds_both_rows_and_the_first_save_splits_them():
     assert store.rag_config({**doc, "rag": {**doc["rag"], "source": "custom"}})["embedding_model"] == "legacy-embed"
 
 
+def test_a_stale_profile_name_does_not_block_a_custom_save():
+    """The row out of force is kept, not validated (claunch-pxxn4 review).
+
+    The card sends both rows on every save, so "the body carried the profile
+    row" is always true and cannot mean "the profile path is the one being
+    chosen". A profile the person deleted therefore used to block a custom
+    save -- the reader had to fix a path they were not using. The stale name
+    stays in the file so switching back restores it, and ``profile_error``
+    diagnoses it at that point.
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "k",
+                   "embedding_model": "omlx-embed", "rerank_model": ""},
+        "profile": {"profile": "gone", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "profile"}})
+    # The card's shape: both rows, the custom one chosen.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "",
+                   "embedding_model": "omlx-2", "rerank_model": ""},
+        "profile": {"profile": "gone", "embedding_model": "fw-embed", "rerank_model": ""}}})
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "omlx-2"
+    assert doc["rag"]["sources"]["profile"]["profile"] == "gone"  # kept, not dropped
+    assert store.rag_config(doc)["embedding_model"] == "omlx-2"
+    # Choosing that path is where the missing profile is reported.
+    switched = {**doc, "rag": {**doc["rag"], "source": "profile"}}
+    assert store.rag_config(switched)["profile_error"]
+    with pytest.raises(ValueError):
+        search_anything.proposed({"source": "profile"})
+
+
+def test_a_legacy_stale_profile_name_does_not_block_the_first_save():
+    """Same, for a block written before the rows existed: its flat ``profile``
+    becomes the profile row's initial value, and that name may be gone. The
+    first custom save must still go through."""
+    _rag_profile()
+    store.save({**store.load(), "rag": {"base_url": "http://localhost:8000/v1", "api_key": "k",
+                                        "embedding_model": "embed", "profile": "gone"}})
+    # The card's shape again: the first save after a legacy block carries both
+    # rows, the profile one seeded from that flat ``profile``.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "",
+                   "embedding_model": "embed", "rerank_model": ""},
+        "profile": {"profile": "gone", "embedding_model": "", "rerank_model": ""}}})
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "embed"
+    assert doc["rag"]["sources"]["profile"]["profile"] == "gone"
+    assert store.rag_config(doc)["embedding_model"] == "embed"
+
+
 def test_profile_source_validation():
     _rag_profile()
     _rag_profile("anthropic-only", provider="anth", endpoints={"anthropic": "https://example.test/anthropic"})
