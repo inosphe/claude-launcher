@@ -42,6 +42,11 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
   데몬이 재기동돼도 journal이 큐 그대로라 남는다. 응답은 `delivered`가 `true`, `hold`가 `"exited"`이고, 패널이
   「다시 시작하면 전달된다」고 표시한다. 잠든(held) 세션은 자동으로 깨어나므로 큐에 넣지 않고 `hold`가 `"asleep"`이다.
   세션을 지우면(`clear-sessions`) 그 디렉터리와 함께 큐도 사라진다.
+- 게스트 전달은 `asyncio.to_thread`를 지나므로 `Session.queue_delivery`가 워커 스레드에서
+  불린다. 그 함수는 보내기 task를 세션 자신의 이벤트 루프에 만들고, 루프가 없거나 닫혀
+  있으면 메시지를 접수하지 않고 `False`를 돌려준다 — 조용히 접수해 두고 아무도 타이핑하지
+  않는 상태를 만들지 않는다(claunch-0ccn4.1). 전달이 예외로 실패하면 핸들러가 그것을
+  데몬 로그에 `threads: delivering to <세션> raised`로 남긴다.
 - 에이전트의 읽음 위치(`agent_read`)는 소유 세션이 `thread_read`로 읽거나 `thread_reply`로 답할 때 이동한다.
   `thread_list`의 `agent_unread`는 그 뒤의 사용자·게스트 메시지 수다. 사용자의 읽음 위치는 브라우저 localStorage에 있다.
 
