@@ -14,10 +14,12 @@
    tick, the dot and the name share one line on the parent and on children
    at depth 1 and 4.
 
-   The same rows also keep the ▸ toggle on the buttons' line. The meta text
+   The same rows also keep the ⟳ refresh on the buttons' line. The meta text
    there was based on its own width, and a flex line breaks before anything
-   shrinks, so once a child row's indent grew at depth 2 the ▸ took a line of
-   its own (claunch-gge34.1). */
+   shrinks, so once a child row's indent grew at depth 2 the last control took
+   a line of its own (claunch-gge34.1). The original subject was the briefing
+   fold's ▸; the fold is gone and the ⟳ took that place, so that is what the
+   assertion below checks. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");

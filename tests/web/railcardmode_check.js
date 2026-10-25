@@ -258,6 +258,38 @@ ok("a gated cflow badge is drawn even on a compact card",
    /#session-list li\[data-rail-mode="compact"\] \.sess-cflow:not\(\.gated\)/.test(plain),
    "the compact rule does not exempt .gated");
 
+/* The same defence, for the line that says why a session is silent. A short
+   card may drop what a reader can infer from the name and the dot; it may
+   not drop the fault `!`, a delivery hold or a message still waiting to be
+   typed in. docs/session-faults.md promises the fault pill on the rail, and
+   the compact density is the default for every row the reader is not on --
+   so a rule that hides `.rail-quiet` outright takes those three off the
+   rail for most of the fleet. Measured before this check existed: the fault
+   pill went from 17px to 0px on a compact row.
+
+   The exception is expressed with `:has()`, and only for the three alerting
+   pills: keep-alive and reminder-off are decisions that want nothing from
+   the reader and may be dropped. Checking the selector rather than a
+   rendering keeps this a node check; railcards_browser.cjs measures the
+   painted height. */
+const ALERTING = ["quiet-fault", "quiet-hold", "quiet-waiting"];
+for (const mode of ["min", "compact"]) {
+  const hide = plain.match(new RegExp(
+    `#session-list li\\[data-rail-mode="${mode}"\\][^{]*\\.rail-quiet([^{]*)\\{([^}]*)\\}`));
+  ok(`a ${mode} card's rule for .rail-quiet is conditional`,
+     hide && /:not\(:has\(/.test(hide[1]),
+     hide ? `.rail-quiet${hide[1]}`.slice(0, 90) : "no rule for .rail-quiet");
+  const guard = hide ? hide[1] : "";
+  for (const pill of ALERTING) {
+    ok(`...and it spares .${pill}`,
+       guard.includes(`.${pill}`),
+       `.rail-quiet${guard}`.slice(0, 90));
+  }
+  ok(`...while the decided flags may still be dropped on a ${mode} card`,
+     !guard.includes("quiet-keepalive") && !guard.includes("quiet-remind"),
+     `.rail-quiet${guard}`.slice(0, 90));
+}
+
 /* The rail has no row fold any more: the toggle's rule is gone with it. */
 check("the briefing toggle has no rule on the rail",
       rule("#session-list .sess-brief-toggle"), "");
@@ -273,6 +305,30 @@ ok("...with its own rim", /box-shadow:/.test(child), child.trim().slice(0, 80));
 ok("...and a rounded right edge", /border-radius:/.test(child), child.trim().slice(0, 80));
 ok("the tick that hangs it off its parent is still drawn",
    /content:\s*"└"/.test(rule("#session-list li.child::before")));
+/* A child row that `⇱ card` just landed on still has to show the mark. The
+   child card is a background and a rim on the same row, and it is declared
+   after `li.goto-flash` at the same specificity -- so without a rule of its
+   own the card paints over the flash wherever the row is a child, which is
+   most rows in a tree. The flash is the stronger claim: the card says where
+   the row sits, the flash says which row was asked for.
+   gotocard_check.js is a node check and only greps for the root selector, so
+   it cannot see this; railcards_browser.cjs measures the child's colours. */
+{
+  const flashAt = plain.indexOf("#session-list li.goto-flash {");
+  const childAt = plain.indexOf("#session-list li.child {");
+  const childFlash = plain.match(
+    /#session-list li\.child\.goto-flash\s*\{([^}]*)\}/);
+  ok("a child row's card rule is declared after the flash rule",
+     childAt > flashAt, `flash ${flashAt}, child ${childAt}`);
+  ok("...so a flashed child row gets a rule of its own, at higher specificity",
+     !!childFlash, childFlash ? childFlash[1].trim().slice(0, 80) : "no rule");
+  ok("...that paints the same background as the root row's flash",
+     childFlash && /background:\s*#1b2a44/.test(childFlash[1]),
+     childFlash ? childFlash[1].trim().slice(0, 80) : "no rule");
+  ok("...and the same ring",
+     childFlash && /box-shadow:\s*inset 0 0 0 1px #1f6feb/.test(childFlash[1]),
+     childFlash ? childFlash[1].trim().slice(0, 80) : "no rule");
+}
 const spine = rule("#session-list li.child::after");
 ok("a child row draws a spine at its level",
    /position:\s*absolute/.test(spine) && /width:/.test(spine),

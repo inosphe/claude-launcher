@@ -528,8 +528,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    run time (sessionGridTipStyles in app.js).
    560px because the copy gets the rail's wide layout: sessionGridTipStyles
    carries @media rules but not the rail's @container rule, so the card's
-   whole first line (name group, meta, + pin eye pencil ⓘ, checks ⟳, the
-   ▸) has to fit in one row. At 320px every card pushed its buttons onto a
+   whole first line (name group, meta, + pin eye pencil ⓘ, checks ⟳) has to
+   fit in one row. At 320px every card pushed its buttons onto a
    second line; measured on the live page, 520px was the first width with no
    such card out of 200, and 560px leaves room for a longer meta. */
 #sg-tip {
@@ -671,6 +671,16 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    Hidden with `display: none` rather than `visibility`, so an expanded row
    is the only one whose height counts these lines at all -- which is what
    the height model expects (railRowKey keys the density in).
+
+   One line survives every density: `.rail-quiet`, and only when it carries
+   a pill that says the session cannot go on. A shorter card may drop what a
+   reader can infer from the name and the dot; it may not drop the row's red
+   `!`, the delivery hold or a message still waiting to be typed in. Those
+   three are the rail's only answer to "why is this session silent", and
+   docs/session-faults.md promises the fault pill to every row. The decided
+   flags (keep-alive, reminder off) are still dropped: they want nothing from
+   the reader, so the short card can afford to lose them. `:has()` does the
+   separating -- the line is hidden when none of the three is inside it.
    --------------------------------------------------------------------- */
 #session-list li[data-rail-mode="min"] { padding: 4px 10px 4px 16px; }
 #session-list li[data-rail-mode="min"] .rail-actions,
@@ -681,7 +691,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="min"] .rail-usage-line,
 #session-list li[data-rail-mode="min"] .rail-seen,
 #session-list li[data-rail-mode="min"] .rail-life,
-#session-list li[data-rail-mode="min"] .rail-quiet,
+#session-list li[data-rail-mode="min"] .rail-quiet:not(:has(.quiet-fault, .quiet-hold, .quiet-waiting)),
 #session-list li[data-rail-mode="min"] .rail-brief,
 #session-list li[data-rail-mode="min"] .rail-note,
 #session-list li[data-rail-mode="min"] .rail-progress,
@@ -712,7 +722,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .rail-usage-line,
 #session-list li[data-rail-mode="compact"] .rail-seen,
 #session-list li[data-rail-mode="compact"] .rail-life,
-#session-list li[data-rail-mode="compact"] .rail-quiet,
+#session-list li[data-rail-mode="compact"] .rail-quiet:not(:has(.quiet-fault, .quiet-hold, .quiet-waiting)),
 #session-list li[data-rail-mode="compact"] .rail-note,
 #session-list li[data-rail-mode="compact"] .rail-progress,
 #session-list li[data-rail-mode="compact"] .rail-procs,
@@ -802,6 +812,18 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   border-radius: 0 7px 7px 0;
   border-bottom-color: #171b21;
   box-shadow: inset 0 0 0 1px #262c35;
+}
+/* The child card is drawn after `goto-flash` above and at the same
+   specificity, so without this rule it would paint over the mark wherever a
+   child was the row `⇱ card` landed on -- which is most of them, since a
+   tree's rows are mostly children. The flash is the stronger claim of the
+   two: the child card says where a row sits, the flash says which row was
+   just asked for, and a reader who pressed `⇱` on a child is looking for
+   exactly that. Same colours as the root row's flash, so the mark reads the
+   same at any depth. */
+#session-list li.child.goto-flash {
+  background: #1b2a44;
+  box-shadow: inset 0 0 0 1px #1f6feb;
 }
 /* The tick that hangs the row off its parent: the same glyph as before, now
    in the child's own rim colour so it reads as part of the card. */
@@ -907,16 +929,16 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   flex: 1 1 0; min-width: 0; overflow: hidden;
 }
 /* The row's action buttons — spawn +, 📌, 👁, note ✎, details ⓘ, the checks
-   and briefing refreshes, the briefing ▸ toggle — on a line of their own
-   under the name line (claunch-ku033). The name line keeps the name, its
-   qualifier pills and the profile meta: the meta is what the reader scans
-   the right end for, and the buttons no longer compete with the name group
-   for the same flex line — a row whose fixed content outgrew the rail used
-   to collapse the name group and stack the name a character per line.
+   and briefing refreshes — on a line of their own under the name line
+   (claunch-ku033). The name line keeps the name, its qualifier pills and the
+   profile meta: the meta is what the reader scans the right end for, and the
+   buttons no longer compete with the name group for the same flex line — a
+   row whose fixed content outgrew the rail used to collapse the name group
+   and stack the name a character per line.
    Ordered between the name line (order 0) and the full-width sub-lines
    (order 2+), indented like them so it reads as another line of the card.
-   Its children keep their own order inside the box, so the ▸ toggle's
-   order 1 still lands last. */
+   Its children keep their own order inside the box, so the briefing refresh
+   still lands last on the line. */
 #session-list .rail-actions {
   flex-basis: 100%; order: 1; display: flex; align-items: center;
   gap: 2px; min-width: 0; padding-left: 16px;
@@ -1237,11 +1259,11 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    is the one place the rail says what a session is actually DOING, and a
    summary cut at 260px says it about half. Nothing carried the tail either:
    the rule this replaced promised "the whole text on hover", but the
-   element's title is a fixed label ("one-line job description — ▸ opens the
-   full briefing", app.js decorateBriefingRow) and never the text — so what
-   the ellipsis ate was simply gone. Height is the price, and it is the cheap
-   one: the row is already allowed to grow (the cflow line and the briefing
-   card are full-width lines under this one), so a long summary costs rows in
+   element's title is a fixed label ("one-line job description — pick the
+   session for the full briefing", app.js decorateBriefingRow) and never the
+   text — so what the ellipsis ate was simply gone. Height is the price, and
+   it is the cheap one: the row is already allowed to grow (the cflow line
+   and the briefing card are full-width lines under this one), so a long summary costs rows in
    a rail that scrolls, not shape in a row that must not break. `anywhere`
    because the fallback text is the recorded opening task, which carries
    paths and branch names offering no break opportunity — one of those would
@@ -1414,8 +1436,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 .sess-status-check-rowref.updated, .sess-brief-check-refresh.updated { color: #3fb950; }
 .sess-status-check-rowref.failed, .sess-brief-check-refresh.failed { color: #f85149; }
 /* The row's ⟳: refresh the summary without opening it. Same glyph family
-   as the card's. Sits on the row's buttons line (.rail-actions), before the
-   ▸ toggle. */
+   as the card's. Sits last on the row's buttons line (.rail-actions) — it
+   is appended after the buttons are built. */
 #session-list .sess-brief-rowref {
   flex: none; order: 0; background: none; border: none; color: #6e7681;
   font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer;
@@ -1482,9 +1504,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 /* The same fact on the rail row itself, as the one line each row spends on
    it: a thin gauge bar with the short count beside it, indented like the
    cflow line so it reads as belonging to the name above. A full-width
-   line-breaker (see the invariant on .rail-head), ordered between the ▸
-   toggle and the cflow line. Every bar spans the same fixed 0–1M domain (JS
-   sets the fill inline), and the tick is whichever threshold the harness
+   line-breaker (see the invariant on .rail-head), ordered between the
+   buttons line and the cflow line. Every bar spans the same fixed 0–1M
+   domain (JS sets the fill inline), and the tick is whichever threshold the harness
    actually reports: claude's auto-compact window, the point the
    conversation compacts at, or the model context window codex is told on
    every request. Either way it is what the fill is read against; the fill
@@ -1918,7 +1940,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   /* The name never caps at half the row any more — it wraps whole (see
      .rail-name), and capping it here would clip the second line. The meta
      beside it keeps its basis-0 ellipsis further down this block, so the
-     buttons and the ▸ still land on the line. */
+     buttons still land on the line. */
   #session-list .rail-name { flex-shrink: 1; max-width: none; }
   /* The meta takes the line after the name group alone; the buttons live on
      their own full-width line below it (CSS, .rail-actions), so nothing on

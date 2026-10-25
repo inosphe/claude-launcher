@@ -31,13 +31,16 @@ const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
-    parent: null,
+    parent: null, keep_alive: true,
     briefing: { one_line: "착지를 관리하고 자식을 배분한다", state: "working" } },
   { name: "w1", status: "busy", role: "worker", profile: "nc",
     cwd: "/repo/.claude/worktrees/w1", parent: "lead",
     briefing: { one_line: "카드 밀도 분기를 구현한다", state: "working" } },
   { name: "w1a", status: "idle", role: "worker", profile: "nc",
     cwd: "/repo/.claude/worktrees/w1a", parent: "w1",
+    fault: { active: true, kind: "quota", harness: "claude", code: 429,
+             label: "account suspended", message: "the account is over quota",
+             last_seen: "2026-10-25T15:00:00Z", until: "2026-10-26T15:00:00Z" },
     briefing: { one_line: "스타일을 작성한다", state: "done" } },
   { name: "w1b", status: "idle", role: "worker", profile: "nc",
     cwd: "/repo/.claude/worktrees/w1b", parent: "w1",
@@ -126,6 +129,19 @@ const READ = `(() => {
         card: shown(li.querySelector(".sess-brief")),
       },
       briefText: brief ? brief.textContent.slice(0, 32) : "",
+      /* The line that says why a session is silent. Measured by the PAINTED
+         box, not by the selector: display:none leaves a 0x0 rect, and the
+         regression this checks for was exactly that — the fault pill went
+         from 17px to 0px on a compact card while every selector still read
+         as written. */
+      faultPill: (() => {
+        const p = li.querySelector(".rail-quiet-pill.quiet-fault");
+        if (!p) return null;
+        const b = p.getBoundingClientRect();
+        return { shown: shown(p), h: Math.round(b.height), w: Math.round(b.width) };
+      })(),
+      quietLine: shown(li.querySelector(".rail-quiet")),
+      flash: li.classList.contains("goto-flash"),
       spine: spine.content === "none" || !spine.width ? "" : spine.width + "@" + spine.left,
       background: getComputedStyle(li).backgroundColor,
       tick: getComputedStyle(li, "::before").content,
@@ -207,6 +223,56 @@ const READ = `(() => {
     assert.equal(deep.tick, '"└"', "the tick still hangs the child off its parent");
     assert.notEqual(deep.background, by("lead").background,
       "a child row is drawn as a card on a face of its own");
+
+    /* ---- the line that says why a session is silent ------------------- */
+    /* w1a is a compact child card with an active harness fault. The compact
+       density is the default for every row the reader is not on, so a rule
+       that hides the quiet line outright takes the fault `!` off the rail
+       for most of the fleet — and docs/session-faults.md promises it there.
+       Measured: this pill used to come out 0px tall on a compact card. */
+    assert.equal(deep.mode, "compact", "the faulted fixture is a compact card");
+    assert.ok(deep.faultPill, "a faulted session still draws its fault pill");
+    assert.equal(deep.faultPill.shown, true, "and the pill is laid out");
+    assert.ok(deep.faultPill.h > 8 && deep.faultPill.w > 8,
+      `and it has a box, not a swallowed one (${deep.faultPill.w}x${deep.faultPill.h})`);
+    assert.equal(deep.quietLine, true, "its quiet line is drawn with it");
+
+    /* The decided flags are still allowed to go: keep-alive on a compact row
+       is a setting that wants nothing from the reader. */
+    assert.equal(by("lead").quietLine, false,
+      "a compact row with no alerting flag draws no quiet line");
+
+    /* ---- a child row that ⇱ just landed on still shows the mark ------- */
+    /* The child card is a background and a rim on the row, declared after
+       the flash rule at the same specificity — so without a rule of its own
+       it paints over the mark on exactly the rows where the reader pressed
+       `⇱`. Measured before the fix: the flashed child came out rgb(23,27,33)
+       with a grey rim, the root's flash rgb(27,42,68) with a blue one. */
+    /* Both a root row and a child row, flashed the same way, so the
+       comparison is between two marks rather than against a face the root
+       row happens not to have (a plain row is transparent). */
+    const flashOf = async (name) => {
+      await page.evaluate((n) => { window.revealSessionCard(n); }, name);
+      await page.waitForFunction((n) => {
+        const li = document.querySelector(`#session-list li[data-name="${n}"]`);
+        return li && li.classList.contains("goto-flash");
+      }, name);
+      const row = (await page.evaluate(READ)).find((r) => r.name === name);
+      return { row, bg: await page.evaluate((n) => {
+        const li = document.querySelector(`#session-list li[data-name="${n}"]`);
+        const cs = getComputedStyle(li);
+        return { bg: cs.backgroundColor, ring: cs.boxShadow };
+      }, name) };
+    };
+    const rootMark = await flashOf("lead");
+    const childMark = await flashOf("w1a");
+    assert.equal(childMark.row.flash, true, "the child row is the one marked");
+    assert.equal(childMark.bg.bg, rootMark.bg.bg,
+      `a flashed child wears the same face as a flashed root (${childMark.bg.bg} vs ${rootMark.bg.bg})`);
+    assert.equal(childMark.bg.ring, rootMark.bg.ring,
+      `...and the same ring (${childMark.bg.ring} vs ${rootMark.bg.ring})`);
+    assert.notEqual(childMark.bg.bg, deep.background,
+      `...which is not its ordinary child-card face (${deep.background})`);
 
     /* ---- picking a card expands it ----------------------------------- */
     /* The reader's only way to open a card now: this is what the removed
