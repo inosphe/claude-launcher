@@ -140,13 +140,28 @@ def load(profile: Profile) -> Optional[Pool]:
     falling back to "no keys" would quietly authenticate with whatever
     ``.launcher-token`` happens to hold, which is the opposite of what the
     file asked for.
+
+    "No pool file" is decided by the read, not by a check before it. Asking
+    ``is_file()`` first and reading second leaves a window between the two:
+    ``credentials.clear_token`` deletes the pool there, the read then fails
+    with ``FileNotFoundError``, and that arrived as ``KeysError`` -- a launch
+    that raced a clear failed instead of finding no pool (claunch-nxm2i).
+    One read closes the window: the file is either there (and read) or it is
+    gone (and the answer is ``None``), whichever happens first.
     """
     file = path(profile)
-    if not file.is_file():
-        return None
     try:
-        raw = json.loads(file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        text = file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Includes the pool that a concurrent clear removed between the open
+        # and the read: a pool file that no longer exists is a profile with
+        # no pool, which is what the caller is asking about.
+        return None
+    except OSError as exc:
+        raise KeysError(f"cannot read key pool {file}: {exc}") from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise KeysError(f"cannot read key pool {file}: {exc}") from exc
     if not isinstance(raw, dict):
         raise KeysError(f"key pool {file} is not a JSON object")
