@@ -32,9 +32,12 @@ assert.strictEqual(P.stateOf({ status: 'exited', failed_at: 'x' }), 'failed');
 assert.strictEqual(P.stateOf({ status: 'exited' }), 'killed');
 assert.strictEqual(P.stateOf({ status: 'exited', archived_at: 'x' }), 'archived');
 
-// Ended records leave by themselves: archived only when asked for, killed
-// for the window after they ended, held and paused always.
 const killedAgo = (h) => ({ name: 'k', status: 'exited', exited_at: iso(now - h * H) });
+const killedAgo0 = () => killedAgo(0);
+// Ended records stay off unless asked for: archived behind their switch,
+// killed and failed behind a window (none by default), held and paused always.
+assert.strictEqual(P.keep(killedAgo0(), {}, now), false, 'killed is hidden by default');
+assert.strictEqual(P.keep({ status: 'exited', failed_at: iso(now) }, {}, now), false, 'failed too');
 assert.strictEqual(P.keep(killedAgo(1), { endedMs: 6 * H }, now), true);
 assert.strictEqual(P.keep(killedAgo(7), { endedMs: 6 * H }, now), false);
 assert.strictEqual(P.keep(killedAgo(7), { endedMs: Infinity }, now), true);
@@ -117,6 +120,7 @@ assert.deepStrictEqual(model.projects.map((p) => p.name), ['claunch', 'gds']);
 assert.strictEqual(model.hiddenArchived, 1);
 assert.strictEqual(model.hiddenEnded, 1, 'gone is past the window; w2 is kept for its child');
 assert.strictEqual(model.killedTotal, 2);
+assert.strictEqual(model.archivable, 2, 'the archive button counts what archive-exited takes');
 const claunch = model.projects[0];
 // The tree goes under the mesh its root leads; roots with no mesh last.
 assert.deepStrictEqual(claunch.meshes.map((m) => m.name), ['claunch', '']);
@@ -157,6 +161,13 @@ const p3 = claunch.pool[0].decks[3];
 assert.deepStrictEqual(p3.items.map((i) => i.id), ['c-5']);
 assert.deepStrictEqual(p3.items[0].children.map((i) => i.id), ['c-5.1']);
 assert.strictEqual(claunch.poolCount, 5);
+
+// The default window hides every killed record; failed ones count toward
+// the archive button with the killed ones.
+const dflt = plain(P.buildModel([...fleet, s('f1', { status: 'exited', failed_at: iso(now) })], queues,
+                                { now, meshesOf: (n) => MESH[n] || [] }));
+assert.strictEqual(dflt.hiddenEnded, 2, 'gone and f1; w2 stays for its live child');
+assert.strictEqual(dflt.archivable, 3);
 
 // Narrowed to one project, the others are gone, the pool with them.
 const gds = plain(P.buildModel(fleet, queues, { now, project: 'gds', meshesOf: (n) => MESH[n] || [] }));

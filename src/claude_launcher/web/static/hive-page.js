@@ -11,10 +11,11 @@
    siblings (killed, failed) once there are several, and the board's
    unassigned pool by priority.
 
-   Ended records leave the canvas by themselves: archived ones are hidden
-   unless asked for, killed/failed ones stay for a chosen window after they
-   ended (6h by default) and then drop off, and the toolbar archives every
-   killed record at once through the rail's own bulk action. An ended
+   Ended records stay off the canvas unless asked for: archived ones behind
+   their own switch, killed/failed ones behind a window picker (hidden by
+   default; 1h/6h/24h/all keep them for that long after they ended), and
+   the toolbar archives every killed and failed record at once through the
+   rail's own bulk action. An ended
    session that still has a live descendant stays as a faded chip so the
    tree above that descendant is not cut.
 
@@ -123,12 +124,13 @@ globalThis.HivePage = (() => {
   }
 
   /* Whether a record is drawn at all: archived only when asked for, killed
-     and failed for `endedMs` after they ended, everything else always. */
+     and failed for `endedMs` after they ended (none by default),
+     everything else always. */
   function keep(s, opts, now) {
     const c = category(s);
     if (c === "archived") return !!opts.archived;
     if (c === "killed" || c === "failed") {
-      const w = opts.endedMs ?? 6 * H;
+      const w = opts.endedMs || 0;
       if (!w) return false;
       if (w === Infinity) return true;
       const t = endedAt(s);
@@ -285,11 +287,14 @@ globalThis.HivePage = (() => {
     for (const s of sessions || []) if (s && s.name) all.set(s.name, s);
     const { lanes, boards } = readQueues(queues);
     const counts = Object.fromEntries(STATES.map((s) => [s, 0]));
-    let hiddenEnded = 0, hiddenArchived = 0, killedTotal = 0;
+    let hiddenEnded = 0, hiddenArchived = 0, killedTotal = 0, archivable = 0;
     const shown = new Set();
     for (const s of all.values()) {
       const st = stateOf(s);
       if (st === "killed") killedTotal++;
+      // What the rail's 'archive exited' takes: every exited record that is
+      // not held, paused or archived -- killed and failed alike.
+      if (st === "killed" || st === "failed") archivable++;
       if (!keep(s, opts, now)) {
         if (st === "archived") hiddenArchived++; else hiddenEnded++;
         continue;
@@ -424,7 +429,7 @@ globalThis.HivePage = (() => {
                  poolCount: p.pool.reduce((n, b) => n + b.decks.reduce((k, d) => k + d.count, 0), 0) });
     }
     out.sort((a, b) => (b.counts.live - a.counts.live) || a.name.localeCompare(b.name));
-    return { projects: out, counts, hiddenEnded, hiddenArchived, killedTotal,
+    return { projects: out, counts, hiddenEnded, hiddenArchived, killedTotal, archivable,
              projectNames: [...new Set([...all.values()].map(projectOf))].sort() };
   }
 
@@ -474,7 +479,7 @@ globalThis.HivePage = (() => {
   let shell = null;            // the elements built once per page life
 
   function loadState() {
-    const base = { ended: "6h", archived: false, issues: true, pool: true, stackMinor: true,
+    const base = { ended: "0", archived: false, issues: true, pool: true, stackMinor: true,
                    stackIdle: true, project: "", view: { x: 24, y: 16, k: 1 } };
     try {
       const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
@@ -494,7 +499,7 @@ globalThis.HivePage = (() => {
   }
 
   function endedMs() {
-    const w = ENDED_WINDOWS.find((x) => x[0] === state.ended) || ENDED_WINDOWS[2];
+    const w = ENDED_WINDOWS.find((x) => x[0] === state.ended) || ENDED_WINDOWS[0];
     return w[2];
   }
 
@@ -979,7 +984,7 @@ globalThis.HivePage = (() => {
     bar.appendChild(search);
     const archiveBtn = node("button", "hive-btn hive-archive", "");
     archiveBtn.type = "button";
-    archiveBtn.title = "killed 세션을 전부 보관한다(세션 레일의 'archive exited'와 같은 동작)";
+    archiveBtn.title = "killed·failed 세션을 전부 보관한다(세션 레일의 'archive exited'와 같은 동작)";
     archiveBtn.onclick = () => {
       const b = typeof document !== "undefined" && document.getElementById("archive-exited");
       if (b) b.click();
@@ -1036,19 +1041,30 @@ globalThis.HivePage = (() => {
     return box;
   }
 
+  /* The project is the page's one shared pick (app.js currentProject, the
+     tabs above the rail and `?project=` in the address), as on the Chart
+     page: choosing one here moves the rail with it, and a tab pressed over
+     the rail redraws this page. Without app.js the page keeps its own. */
   function currentProjectPick() {
-    return state.project;
+    return typeof currentProject === "string" ? currentProject : state.project;
+  }
+
+  function pickProject(name) {
+    if (typeof setCurrentProject === "function") setCurrentProject(name);
+    else { state.project = name; remember(); }
+    render(true);
   }
 
   function renderProjectPick(model) {
     const wrap = shell.project;
-    const want = [["", "모든 프로젝트"], ...model.projectNames.map((p) => [p, p])];
-    const sig = JSON.stringify(want);
+    const pick = currentProjectPick();
+    const names = pick && !model.projectNames.includes(pick) ? [...model.projectNames, pick] : model.projectNames;
+    const want = [["", "모든 프로젝트"], ...names.map((p) => [p, p])];
+    const sig = JSON.stringify([want, pick]);
     if (wrap.dataset.sig === sig) return;
     wrap.dataset.sig = sig;
     wrap.innerHTML = "";
-    if (state.project && !model.projectNames.includes(state.project)) state.project = "";
-    wrap.appendChild(select(want, state.project, (v) => { state.project = v; remember(); render(true); }));
+    wrap.appendChild(select(want, pick, pickProject));
   }
 
   function render(force = false) {
@@ -1079,8 +1095,8 @@ globalThis.HivePage = (() => {
     if (queuesError) bits.push(`일감 읽기 실패: ${queuesError}`);
     else if (!queues && state.issues) bits.push("일감 읽는 중…");
     shell.status.textContent = bits.join(" · ");
-    shell.archiveBtn.textContent = `killed ${model.killedTotal}개 보관`;
-    shell.archiveBtn.disabled = !model.killedTotal;
+    shell.archiveBtn.textContent = `killed·failed ${model.archivable}개 보관`;
+    shell.archiveBtn.disabled = !model.archivable;
     if (key === lastKey) return;
     lastKey = key;
     const frag = document.createDocumentFragment();

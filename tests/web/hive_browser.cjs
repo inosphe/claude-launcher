@@ -11,8 +11,9 @@
         draws both chips;
      4. clicking a chip fills the detail pane with the session and a link to
         open it; clicking it again clears the pane;
-     5. the ended-window picker set to 숨김 drops the killed chip, and the
-        choice survives a reload;
+     5. the killed chip is hidden by default; the ended-window picker set
+        to 6시간 brings it back, and the choice survives a reload; the
+        archive button counts killed and failed records;
      6. the search box marks the matching chip;
      7. the zoom buttons change the scale, and fit brings the whole stage
         into the viewport;
@@ -114,12 +115,12 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     assert.ok(nested, "the worker's chip is under the leader's");
 
     // 3. The reviewers are one deck until it is opened.
-    assert.deepEqual(await chipNames(page), ["dead", "lead", "parked", "wk"]);
+    assert.deepEqual(await chipNames(page), ["lead", "parked", "wk"]);
     const face = page.locator('#hive-view .hive-deck-face[data-deck="wk/minor"]');
     assert.match(await face.textContent(), /보조 세션 ×2/);
     await face.click();
     await page.waitForSelector('#hive-view .hive-deck.open .hive-chip[data-id="wk-rev2"]');
-    assert.deepEqual(await chipNames(page), ["dead", "lead", "parked", "wk", "wk-rev", "wk-rev2"]);
+    assert.deepEqual(await chipNames(page), ["lead", "parked", "wk", "wk-rev", "wk-rev2"]);
 
     // 4. A chip fills the detail pane; a second click clears it.
     await page.click('#hive-view .hive-chip[data-id="wk"]');
@@ -129,13 +130,15 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     await page.click('#hive-view .hive-chip[data-id="wk"]');
     await page.waitForSelector("#hive-view .hive-detail.hidden", { state: "attached" });
 
-    // 5. Hiding ended sessions drops the killed chip, and stays so.
-    await page.selectOption("#hive-view .hive-toolbar label.hive-tool select", "0");
-    await page.waitForFunction(() => !document.querySelector('#hive-view .hive-chip[data-id="dead"]'));
+    // 5. Ended sessions are hidden by default; a window brings them back,
+    // and stays so.
+    assert.match(await page.textContent("#hive-view .hive-status"), /끝난 세션 1 숨김/);
+    assert.equal(await page.textContent("#hive-view .hive-archive"), "killed·failed 1개 보관");
+    await page.selectOption("#hive-view .hive-toolbar label.hive-tool select", "6h");
+    await page.waitForSelector('#hive-view .hive-chip[data-id="dead"]');
     await page.reload();
     await page.waitForSelector('#hive-view .hive-chip[data-id="lead"]');
-    assert.ok(!(await page.$('#hive-view .hive-chip[data-id="dead"]')), "the choice survives a reload");
-    assert.match(await page.textContent("#hive-view .hive-status"), /끝난 세션 1 숨김/);
+    assert.ok(await page.$('#hive-view .hive-chip[data-id="dead"]'), "the choice survives a reload");
 
     // 6. Search marks the match.
     await page.fill("#hive-view .hive-search", "parked");
