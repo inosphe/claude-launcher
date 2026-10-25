@@ -49,6 +49,13 @@ delivery: always
    디렉터리(`$CLAUNCH_SCRATCH` 아래)로 둔 셸에서 하고(설정 파일은 그 홈 안의
    `.claunch.yaml`이다), `CLAUNCH_INSTANCE_BASE`·`CLAUNCH_DAEMON`은 비운다. 데몬 재기동·정지는
    이 규칙과 관계없이 사용자의 명령이다(AGENTS.md).
+   **손으로 친 재현 스크립트는 `uv run --no-sync python tools/isolated_home.py --
+   python <스크립트>`로 띄운다.** 홈·시드·`CLAUDE_CONFIG_DIR`를
+   `$CLAUNCH_SCRATCH` 아래 임시 디렉터리로 돌리고 위의 인스턴스 변수 여섯 개를
+   지우며 `CLAUNCH_TEST_REAL_HOMES`까지 세우므로, 1~5를 손으로 반복하지 않아도
+   같은 가드가 걸린다 — `store.save()`를 부르는 손 재현이 실제 설정 파일을 덮은
+   사고(claunch-wo1zj)가 그 자리였다. 위 `home` 픽스처의 격리는 pytest 실행에만
+   걸리므로 pytest 밖의 재현은 이 도우미가 맡는다.
 6. 실제 홈에 남은 산출물을 발견하면 사용자 승인 없이 지우지 않는다. 경로·생성
    시각·추정 출처를 이슈 코멘트로 남기고 사용자에게 알린다.
 7. 테스트는 대상 파일만 실행한다. 전체 스윕은 지연 스윕 러너의 몫이고, 그 러너는

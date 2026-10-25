@@ -151,6 +151,14 @@
     실패한다(claunch-zbu54.1: 스윕 job ca5e348e 원인 미상, 삭제 주체 미기록).
   - **이미 `/tmp`를 왕복시킨 측정이 있으면 다시 잰다.** 값이 맞았는지가 아니라
     근거가 섰는지가 문제다.
+  - 손으로 친 재현 스크립트는 `uv run --no-sync python tools/isolated_home.py --
+    python <스크립트>`로 띄운다. 런처 홈·시드·`CLAUDE_CONFIG_DIR`를
+    `$CLAUNCH_SCRATCH` 아래 임시 디렉터리로 돌리고 데몬 인스턴스 변수 여섯 개를
+    지우며 `CLAUNCH_TEST_REAL_HOMES`를 세우므로, 실제 홈이나 설정 파일로
+    해석되는 순간 `config.RealHomeInTest`로 멈춘다 — `store.save()`를 부르는
+    재현이 실제 `~/.claude-launcher/.claunch.yaml`을 덮은 사고(claunch-wo1zj)가
+    그 자리였다. pytest 안의 같은 격리는 `tests/conftest.py`의 autouse `home`
+    픽스처가 맡는다.
 
 
 --- 
