@@ -141,6 +141,37 @@ def _words(text: str) -> str:
     return " ".join(text.split())
 
 
+def _chart_prose(chart) -> str:
+    """Every piece of prose the chart hands a reader, in words.
+
+    Crediting only labelled nodes misses most of it: of this workflow's 788
+    nodes, 498 have no label, and a ``choose`` option's ``description`` --
+    the line a session reads when it picks the option -- lives in the
+    ``options`` list of just such a node. A guard that reads only labelled
+    ``prompt``/``description`` therefore asserts its absence against a text
+    that was never collected, and stays green through any revert
+    (claunch-f56fz, second review).
+
+    So collect from every node, labelled or not, and read the option list
+    too: ``name``/``description`` per option are what the chooser sees.
+    """
+    chunks = []
+    for node in chart.nodes.values():
+        for key in ("prompt", "description"):
+            value = node.get(key)
+            if isinstance(value, str):
+                chunks.append(value)
+        options = node.get("options")
+        if isinstance(options, list):
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                for value in option.values():
+                    if isinstance(value, str):
+                        chunks.append(value)
+    return _words(" ".join(chunks))
+
+
 def _as_v2(v1_block: str) -> str:
     """The v1 block with the declared v2 divergences applied, in words."""
     words = _words(v1_block)
@@ -2508,8 +2539,8 @@ def test_intake_no_longer_promises_a_fresh_branch_per_round():
 
 def test_no_step_still_promises_a_brand_new_branch_for_every_round():
     """The reuse decision has to reach the places that cite it, not just the
-    step that makes it. Two kinds of leftovers survived the first pass and a
-    reviewer found them (claunch-f56fz):
+    step that makes it. Leftovers survived the first pass and reviewers
+    found them (claunch-f56fz):
 
     * ``stack-round`` said "(intake의 branch-setup과 같은 규칙)" next to
       "cut a new ``<세션>-stack-round-<n>`` from master" -- citing the rule
@@ -2520,13 +2551,21 @@ def test_no_step_still_promises_a_brand_new_branch_for_every_round():
       now keeps the shared branch instead of always cutting a worktree, so
       that stated grounds no longer holds (the axis value itself does not
       change: the main checkout is still excluded).
+
+    The collection this reads covers every node and every choose option, so
+    all four anchors below fire on a revert. The second review caught the
+    earlier version reading only labelled nodes -- 498 of 788 have no label,
+    and ``next-round``'s line is in one of them, which made that anchor true
+    no matter what the yaml said.
     """
     chart = _chart()
-    texts = {
-        n.label: _words((n.get("prompt") or "") + " " + (n.get("description") or ""))
-        for n in chart.nodes.values() if n.label
-    }
-    everything = " ".join(texts.values())
+    everything = _chart_prose(chart)
+
+    # What this guard reads has to include an unlabelled choose option's
+    # description, or the ``next-round`` anchor below is vacuous. This line
+    # lives in exactly such an option; if the collection ever narrows again,
+    # this fails here rather than letting the anchors pass silently.
+    assert "배정 큐가 남았다" in everything
 
     assert "intake의 branch-setup과 같은 규칙" not in everything
     assert "새 목표·새 브랜치·새 착지" not in everything
@@ -2537,3 +2576,5 @@ def test_no_step_still_promises_a_brand_new_branch_for_every_round():
     # prescribing a cut, and the occupancy axis names the reuse rule
     assert "branch-setup`의 판정을 그대로 쓴다" in everything
     assert "재사용 판정이 그 공유를 조건부로 승인한다" in everything
+    # and next-round, in the option description the collection now reaches
+    assert "새 목표·브랜치 판정·새 착지" in everything
