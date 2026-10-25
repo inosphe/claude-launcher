@@ -1418,7 +1418,9 @@ globalThis.ThreadsPane = (() => {
     // brought up to date by the load below (claunch-m793w).
     list = listCache.get(session) || null;
     if (list) {
-      current = pick(allThreads(list), current);
+      // A thread asked for by id stays asked for even when the kept list
+      // predates it: the load below picks from the fresh list.
+      if (!current) current = pick(allThreads(list), "");
       convo = cachedConvo(current);
       render();
     } else {

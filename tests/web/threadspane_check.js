@@ -206,12 +206,14 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     if (failRename && p.endsWith("/title")) return {ok: false, status: 400, json: async () => ({error: "title too long"})};
     let doc = {};
     if (p.startsWith("/api/threads/forkable?session=")) doc = forkCapDoc;
-    else if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
+    else if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads: threads.slice(), open: 1, agent_seq: 2};
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
       const after = Number(p.split("after=")[1]);
       doc = {thread: threads[0], messages: messages["th-1"].filter((m) => m.seq > after)};
     } else if (/^\/api\/threads\/th-2\?after=/.test(p)) {
       doc = {thread: threads[1], messages: []};
+    } else if (/^\/api\/threads\/th-new\?after=/.test(p)) {
+      doc = {thread: threads.find((t) => t.id === "th-new"), messages: []};
     } else if (p === "/api/threads/th-1/messages") {
       doc = {message: {seq: 3}, delivered: true, hold: postHold};
       if (postUnknown.length) doc.unknown_mentions = postUnknown;
@@ -673,6 +675,17 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   P.mount(host, "s1", {api, storageKey: "k"});
   await settle();
   assert.equal(host.querySelectorAll(".th-item").find((i) => i.classList.contains("on")).dataset.id, "th-2", "the wished thread is shown, not th-1");
+  P.unmount();
+  // a wish for a thread newer than the kept list is not replaced by a pick
+  // from that list: the fresh list has it
+  threads.push({id: "th-new", title: "Opened while away", status: "open", opened_by: "agent", last_seq: 0, last: null});
+  P.focus("s1", "th-new");
+  calls.length = 0;
+  P.mount(host, "s1", {api, storageKey: "k"});
+  await settle();
+  assert.equal(host.querySelectorAll(".th-item").find((i) => i.classList.contains("on")).dataset.id, "th-new",
+    "the wished thread survives a kept list that lacks it");
+  threads.pop();
   P.unmount();
   calls.length = 0;
   P.mount(host, "s1", {api, storageKey: "k"});
