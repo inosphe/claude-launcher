@@ -4400,9 +4400,13 @@ claunch install                   # MCP tools + the /mesh and /cflow skills
 - **Roles**: a role is what a member **is** — its stance, who hears about a
   stall (`stall_watch`), its task-poll wording. The packaged vocabulary is
   interconnect's (`leader`/`operator`/`worker`/`reviewer`/`specialist`, plus
-  `free-role`; aliases work, so `coder1` is a worker and `mod` leads, and
+  `free-role` and `oneshot`; aliases work, so `coder1` is a worker and `mod`
+  leads, and
   anything unrecognised defaults to `free-role` — no role's powers, but free
-  to carry out the task its creator gave it). Each mesh
+  to carry out the task its creator gave it). `oneshot` is the child a
+  workflow's `session` delegation spawns for one job: the workflow names it
+  in `default_role` (`oneshot-job-v2` does) and the spawn carries that name,
+  so the child does not fall to the default role it never chose. Each mesh
   may upload its own YAML — `claunch mesh roles <mesh> --file roles.yaml`,
   `PUT /api/mesh/{mesh}/roles`, or the web panel. A role in the upload
   replaces that role whole, `<name>: null` deletes one, `replace: true`

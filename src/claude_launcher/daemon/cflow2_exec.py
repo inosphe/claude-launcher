@@ -90,7 +90,8 @@ def delegation_marker(st: RunStore, run_id: Optional[str], did: str) -> str:
 def spawn_body(brief: Dict[str, Any], *, cwd: str, scope: str, receipt_path: str,
                mcp: bool = True, marker: Optional[str] = None,
                receipt_token: Optional[str] = None, workflow: Optional[str] = None,
-               inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               inputs: Optional[Dict[str, Any]] = None,
+               role: Optional[str] = None) -> Dict[str, Any]:
     task = executors.session_task(brief, cwd=cwd, scope=scope,
                                   receipt_path=receipt_path, mcp=mcp,
                                   receipt_token=receipt_token, workflow=workflow)
@@ -109,6 +110,14 @@ def spawn_body(brief: Dict[str, Any], *, cwd: str, scope: str, receipt_path: str
         body["workflow_version"] = 2
         if inputs:
             body["cflow_inputs"] = dict(inputs)
+    if role:
+        # The child's mesh role, when the run it is started on volunteers one
+        # (``default_role``). Without it the join infers from the handle, and
+        # a delegation child's handle is an ``sN`` — so it silently lands in
+        # the vocabulary's default role, which by then says nothing about
+        # what this child is for. It rides only with a workflow: a child
+        # without a run has no declaration to read a role off.
+        body["role"] = str(role).strip()
     return body
 
 
@@ -130,6 +139,34 @@ def session_workflow_inputs(workflow: str, cwd: str, values: Dict[str, Any]) -> 
         return {}
     declared = (chart.meta or {}).get("inputs") or {}
     return {k: v for k, v in values.items() if k in declared}
+
+
+def session_workflow_role(workflow: str, cwd: str) -> Optional[str]:
+    """The mesh role ``workflow`` volunteers for a child started on it, or
+    ``None`` when it volunteers none.
+
+    The declaration is the chart's own ``default_role`` — the same key a
+    picker reads to auto-select a workflow for a role, read here in the
+    other direction: a run that says "I am the oneshot job" also says which
+    role its driver is. Keeping it in the workflow rather than in this
+    module means the name exists in the documentation the role set already
+    owns (``mesh_roles.DEFAULT_YAML``) and in one YAML line, not as a
+    constant in the executor that would have to be edited for every new
+    ``session_workflow``.
+
+    An unknown name is *not* filtered here: the join refuses it and the
+    spawn reroutes, which is where a bad declaration should surface. A
+    workflow that does not compile yields ``None`` for the same reason it
+    yields no inputs — the spawn that follows reports it.
+    """
+    from . import cflow2_web
+
+    try:
+        chart = cflow2_web.load(workflow, cwd)
+    except Exception:  # noqa: BLE001 - reported by the spawn that follows
+        return None
+    role = (chart.meta or {}).get("default_role")
+    return str(role).strip() or None if role else None
 
 
 def receipt_key_hash(token: str) -> str:
@@ -179,12 +216,15 @@ def spawn_session(cwd: str, scope: str, did: str, *,
         runtime.delegate_update(did, cwd=cwd, scope=scope, runner=runner)
     workflow = None if brief.get("nested") else r.chart.node(rec["node"]).get("session_workflow")
     inputs = None
+    role = None
     if workflow:
         inputs = session_workflow_inputs(workflow, str(st.cwd), {
             "delegation": did, "delegation_scope": st.scope, "delegation_cwd": str(st.cwd)})
+        role = session_workflow_role(workflow, str(st.cwd))
     body = spawn_body(brief, cwd=str(st.cwd), scope=st.scope,
                       receipt_path=str(st.receipt_path(did, ".child.json")), mcp=mcp,
-                      marker=marker, receipt_token=token, workflow=workflow, inputs=inputs)
+                      marker=marker, receipt_token=token, workflow=workflow, inputs=inputs,
+                      role=role)
     # the parent is named as the session manager names it: the slot without
     # its daemon (``s15`` for ``s15@main``, claunch-9jmdz)
     parent = unqualified(st.scope)

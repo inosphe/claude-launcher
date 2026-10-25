@@ -1111,9 +1111,13 @@ behaviours the daemon keys off it. The vocabulary is a **document**, not a
 table in the source.
 
 **The packaged set.** `leader` / `operator` / `worker` / `reviewer` /
-`specialist`, plus `free-role`, with interconnect's aliases (`coder`, `dev`,
+`specialist`, plus `free-role` and `oneshot`, with interconnect's aliases
+(`coder`, `dev`,
 `engineer`, … -> worker; `mod`, `lead`, `chair` -> leader; `qa`, `critic`,
-`peer` -> reviewer). `free-role` is the default: an unlabelled member holds
+`peer` -> reviewer). `oneshot` is the child a workflow's `session`
+delegation spawns for one job (`oneshot-job-v2` names it in `default_role`,
+and `cflow2_exec.spawn_body` carries the name into the spawn): it produces
+one result and ends, and holds none of a role's powers. `free-role` is the default: an unlabelled member holds
 **none of a role's powers** (integration, audit, exclusivity) but is free to
 carry out the task its creator gave it, asking that creator — not the leader,
 who does not know the task — when unsure. It keeps `no-role` as an alias so a

@@ -144,8 +144,8 @@ def test_an_upload_replaces_roles_one_at_a_time():
             stance: build the thing
     """))
     assert sorted(rs.roles) == [
-        "analyst", "free-role", "leader", "local-sync-manager", "merger", "operator", "pm", "reviewer",
-        "specialist", "sync-integrator", "unreal", "worker",
+        "analyst", "free-role", "leader", "local-sync-manager", "merger", "oneshot", "operator", "pm",
+        "reviewer", "specialist", "sync-integrator", "unreal", "worker",
     ]
     assert rs.infer("hacker2") == "worker"
     assert rs.get("worker").stance == "build the thing"
@@ -156,8 +156,8 @@ def test_an_upload_replaces_roles_one_at_a_time():
     # B2: a tombstone deletes.
     rs = mesh_roles.resolve(_yaml("roles: {specialist: null, operator: null}"))
     assert sorted(rs.roles) == [
-        "analyst", "free-role", "leader", "local-sync-manager", "merger", "pm", "reviewer", "sync-integrator", "unreal",
-        "worker",
+        "analyst", "free-role", "leader", "local-sync-manager", "merger", "oneshot", "pm", "reviewer",
+        "sync-integrator", "unreal", "worker",
     ]
 
     # B3: replace:true is the whole vocabulary.
@@ -633,8 +633,8 @@ def test_the_http_surface_uploads_reads_and_resets_the_role_set(home, tmp_path):
             assert resp.status == 200 and doc["custom"] is False
             assert doc["default"] == "free-role"
             assert [r["name"] for r in doc["roles"]] == [
-                "analyst", "free-role", "leader", "local-sync-manager", "merger", "operator", "pm",
-                "reviewer", "specialist", "sync-integrator", "unreal", "worker",
+                "analyst", "free-role", "leader", "local-sync-manager", "merger", "oneshot",
+                "operator", "pm", "reviewer", "specialist", "sync-integrator", "unreal", "worker",
             ]
             # The roster is where the vocabulary meets reality.
             assert next(

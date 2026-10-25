@@ -1232,6 +1232,8 @@ def test_without_session_workflow_the_child_has_no_run():
                                   cwd="/w", scope="s1", receipt_path="/w/r.json")
     assert body["workflow"] == "-" and "cflow_inputs" not in body
     assert "workflow_version" not in body and "daemon ends this session" not in body["task"]
+    # No declaration to read a role off, so none is sent -- the join infers.
+    assert "role" not in body
 
 
 def test_session_workflow_inputs_are_narrowed_to_what_the_chart_declares(tmp_path):
@@ -1239,6 +1241,78 @@ def test_session_workflow_inputs_are_narrowed_to_what_the_chart_declares(tmp_pat
     assert cflow2_exec.session_workflow_inputs("oneshot-job-v2", str(tmp_path), values) == values
     assert cflow2_exec.session_workflow_inputs("sample-v2", str(tmp_path), values) == {}
     assert cflow2_exec.session_workflow_inputs("no-such-v2", str(tmp_path), values) == {}
+
+
+def _job_layer(tmp_path, extra: str = ""):
+    """A project layer with ``job-v2`` carrying ``extra`` top-level keys."""
+    layer = tmp_path / ".claunch" / "workflows" / "v2"
+    layer.mkdir(parents=True)
+    (layer / "job-v2.yaml").write_text(
+        "cflow: 2\nname: job-v2\n" + extra + "nodes:\n  t: {prompt: work}\nbody: [t]\n",
+        encoding="utf-8")
+    return tmp_path
+
+
+def test_the_session_workflow_names_the_role_its_child_joins_under(tmp_path):
+    """A delegation child's handle is an ``sN``, which infers the vocabulary's
+    *default* role -- so a run that knows what its driver is for has to say
+    so, or the child arrives holding a role nobody chose for it."""
+    cwd = _job_layer(tmp_path, "default_role: scribe\n")
+    assert cflow2_exec.session_workflow_role("job-v2", str(cwd)) == "scribe"
+
+    # ...and it travels into the spawn body.
+    body = cflow2_exec.spawn_body({"delegation": "d1", "node": "n", "tasks": [],
+                                   "returns": {"ok": {}}},
+                                  cwd=str(cwd), scope="s1", receipt_path="/w/r.json",
+                                  workflow="job-v2", role="scribe")
+    assert body["role"] == "scribe"
+
+    # A workflow that volunteers no role and one that does not exist both
+    # yield None; the spawn body then carries no role at all.
+    plain = _job_layer(tmp_path / "plain")
+    assert cflow2_exec.session_workflow_role("job-v2", str(plain)) is None
+    assert cflow2_exec.session_workflow_role("no-such-v2", str(plain)) is None
+    bare = cflow2_exec.spawn_body({"delegation": "d1", "node": "n", "tasks": [],
+                                   "returns": {"ok": {}}},
+                                  cwd=str(plain), scope="s1", receipt_path="/w/r.json",
+                                  workflow="job-v2")
+    assert "role" not in bare
+
+
+def test_the_oneshot_job_declares_a_role_its_children_join_under(tmp_path):
+    """The packaged one-shot job is the workflow this exists for: a report
+    delegation's child must not fall to the vocabulary's default role."""
+    from claude_launcher.daemon import mesh_roles
+
+    role = cflow2_exec.session_workflow_role("oneshot-job-v2", str(tmp_path))
+    assert role, "oneshot-job-v2 declares no default_role"
+    assert role != mesh_roles.resolve().default
+    assert mesh_roles.resolve().get(role) is not None, (
+        f"{role!r} is not in the packaged vocabulary -- the join would refuse it")
+
+
+def test_every_role_a_packaged_workflow_declares_has_a_pack():
+    """``default_role`` on a packaged workflow names a role whose prompt pack
+    the daemon ships: a child that joins under a role with no pack gets a
+    stance and none of the guidance the stance defers to.
+
+    Checked against :data:`DEFAULT_ROLE_PACKS`, not against the live mapping:
+    a saved ``role_packs`` block in ``~/.claunch.yaml`` replaces the packaged
+    one whole, so an operator who has edited it must add the row themselves —
+    that is a setting, not an invariant of this repository.
+    """
+    from claude_launcher import prompt_packs
+    from claude_launcher.cflow2 import layers
+
+    mapping = prompt_packs.DEFAULT_ROLE_PACKS
+    declared = {
+        d.name: (layers.load(d.name, None).meta or {}).get("default_role")
+        for d in layers.list_definitions(None) if d.layer == "package" and not d.error
+    }
+    assert declared.get("oneshot-job-v2")
+    for name, role in declared.items():
+        if role:
+            assert mapping.get(role), f"{name} declares {role!r}, which has no prompt pack"
 
 
 # -- an ending that answers the end gate (claunch-q4cqy) ------------------------

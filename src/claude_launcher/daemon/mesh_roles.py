@@ -542,6 +542,34 @@ roles:
       You are a one-shot analysis session created by an application: do the
       opening task, submit ONE payload, and end your turn once it is accepted.
 
+  oneshot:
+    # The child a ``session`` delegation spawns for one job: a report pass,
+    # a measurement, anything a workflow hands to a fresh session that ends
+    # when the job is done (``oneshot-job-v2``, whose ``default_role`` names
+    # this role, and ``cflow2_exec.spawn_body`` carries that name into the
+    # spawn so the child joins under it).
+    #
+    # Why it is its own role rather than the default: a delegation child's
+    # handle is an ``sN``, whose leading word names nothing, so without this
+    # it landed in ``free-role`` — a role whose whole point is "nobody
+    # assigned you work, so stand by or ask your creator". That is the wrong
+    # instruction for a session holding one concrete brief, and the wrong
+    # thing for a roster to say about it.
+    #
+    # No aliases on purpose. ``oneshot`` is not a family a handle should be
+    # able to opt into by accident, and the name is carried explicitly (see
+    # above) rather than inferred. It grants no powers: a one-shot child
+    # produces one result and ends, so it never needs integration, audit or
+    # a standing queue.
+    cflow_reminder: >-
+      a step that has not moved is a result you have not handed back. Your
+      run is one briefing long: finish the job, submit what you have with
+      the unknowns named, and let the run reach its end — the daemon closes
+      this session then, so nothing has to kill it.
+    stance: |
+      You are a one-shot session spawned for a single delegated job: carry
+      out that briefing, hand back ONE result, and end your turn.
+
   specialist:
     aliases: [service, gatekeeper]
     cflow_reminder: >-
