@@ -5045,7 +5045,14 @@ preset's: changing which backend answers must not change what the call may
 spend. The key is
 never returned to the page: the field shows `stored · blank keeps it`, and
 **Remove stored key** is the one way to take it back out — of the backend the
-card is editing, block or preset, and no other. The card writes the
+card is editing, block or preset, and no other. **Test connection** sends one
+minimal call to whatever the fields show right now, saved or not, and reports
+connected or failed on the card with the upstream's status and a snippet of
+its reply. It goes out through the same headers a briefing does, so a provider
+that refuses a briefing without its own session header refuses this too — and
+that is the point: see the failure here rather than wait for one. The probe
+spends a fixed small budget, not the token budget, and it saves nothing. The
+card writes the
 `llm:` block of `~/.claude-launcher/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`:
 `presets:` and `preset:` beside the four backend fields), which is
 still hand-editable; saving a different backend drops the cached briefings so

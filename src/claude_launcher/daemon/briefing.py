@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,6 +131,17 @@ TOTAL_LIMIT = 60_000
 #: the user's own choice and may be slow; the aiohttp handler awaiting this is
 #: one request, not the daemon.
 LLM_TIMEOUT = 60.0
+
+#: The timeout of the Settings card's "Test connection" probe. Shorter than a
+#: briefing's: the probe spends one token, and a card that waits a minute to
+#: say "the host did not answer" reads as a broken page rather than a broken
+#: endpoint.
+CONNECTION_TIMEOUT = 20.0
+
+#: What the probe asks for. One token, no instructions to follow — the probe
+#: reports whether the endpoint answers, not what it answers, so anything
+#: longer would be spent for a text this feature never reads.
+CONNECTION_PROMPT = "ping"
 
 #: An SSL context that verifies against the OS's own trust store instead of
 #: OpenSSL's own chain validation, the same one :mod:`.rag` and
@@ -983,6 +995,152 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
             f"completion_tokens={spent}): {why}"
         )
     return LlmAnswer(text, str(finish) if finish is not None else None, spent)
+
+
+class Connection(NamedTuple):
+    """What one connection probe learned about a backend.
+
+    ``ok`` is whether a briefing sent to this backend right now would leave
+    the machine and be answered — the status codes and the parse, not the
+    text. ``detail`` is the sentence the Settings card shows, and it carries
+    at most a snippet of the *response* body for the same reason
+    :func:`call_llm`'s does: the request holds the key.
+    """
+
+    ok: bool
+    status: Optional[int]
+    detail: str
+    model: str
+    endpoint: str
+    provider: str
+    seconds: float
+
+
+#: The completion budget a probe spends, and its ceiling: the probe reads the
+#: status and the shape of the answer, never the answer itself, so a saved
+#: budget of 4096 is not spent to learn whether the host is up.
+CONNECTION_MAX_TOKENS = 16
+
+
+async def probe_llm(cfg: dict, *, timeout: float = CONNECTION_TIMEOUT) -> Connection:
+    """Send one minimal call to the backend ``cfg`` describes.
+
+    This is the Settings card's "Test connection", and it deliberately walks
+    the *same* path a briefing walks: the same resolved endpoint, model and
+    key (:func:`llm_config`), the same body shape, and the same headers from
+    :func:`briefing_request_headers`, per-provider rules included. A probe
+    that built its own request would report a reachable endpoint for a
+    provider that answers every real briefing with ``400 MissingSessionID``
+    — which is the exact failure this feature exists to make visible before
+    the operator waits for a briefing to fail.
+
+    An unreachable host, a refused key, a bad provider rule and a body that
+    is not a chat completion all come back as ``ok=False`` with the reason in
+    ``detail``. They are results here rather than exceptions because every
+    one of them is a thing the card has to *show*, not a fault in the request
+    that asked for the probe.
+    """
+    started = time.monotonic()
+    model = str(cfg.get("model") or "")
+    endpoint = str(cfg.get("endpoint") or "")
+    provider = str(cfg.get("provider") or "")
+
+    def result(ok: bool, status: Optional[int], detail: str) -> Connection:
+        return Connection(
+            ok=ok,
+            status=status,
+            detail=detail,
+            model=model,
+            endpoint=endpoint,
+            provider=provider,
+            seconds=round(time.monotonic() - started, 3),
+        )
+
+    missing = [
+        name
+        for name, value in (
+            ("endpoint", endpoint),
+            ("model", model),
+            ("api_key", str(cfg.get("api_key") or "")),
+        )
+        if not value
+    ]
+    if missing:
+        return result(
+            False,
+            None,
+            "not sent: " + ", ".join(missing) + " not set"
+            + (" (a named profile supplies these)" if cfg.get("profile") else ""),
+        )
+    try:
+        headers = briefing_request_headers(cfg)
+    except BriefingError as exc:
+        return result(False, None, f"not sent: {exc}")
+    body = {
+        "model": model,
+        "max_tokens": CONNECTION_MAX_TOKENS,
+        "messages": [{"role": "user", "content": CONNECTION_PROMPT}],
+    }
+    # The saved params are merged first so the cap goes on last: a
+    # ``params.max_tokens`` of 4096 would otherwise ride over the budget this
+    # probe promises to stay inside.
+    body.update(cfg.get("params") or {})
+    body["max_tokens"] = min(int(body.get("max_tokens") or CONNECTION_MAX_TOKENS),
+                             CONNECTION_MAX_TOKENS)
+    try:
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        connector = (
+            aiohttp.TCPConnector(ssl=_OS_TRUST_CONTEXT)
+            if _OS_TRUST_CONTEXT is not None
+            else None
+        )
+        async with aiohttp.ClientSession(
+            timeout=client_timeout, connector=connector
+        ) as http:
+            async with http.post(endpoint, json=body, headers=headers) as resp:
+                status = resp.status
+                text = await resp.text()
+                if status != 200:
+                    return result(
+                        False, status, f"answered {status}: {text[:300]}"
+                    )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        return result(False, None, f"could not reach {endpoint}: {exc}")
+    try:
+        data = json.loads(text)
+        choice = data["choices"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return result(
+            False,
+            status,
+            f"answered {status} but not with a chat completion "
+            f"(no choices[0]): {text[:300]}",
+        )
+    finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+    content = ""
+    if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
+        content = str(choice["message"].get("content") or "")
+    elapsed = round(time.monotonic() - started, 3)
+    if content.strip():
+        detail = f"answered {status} in {elapsed}s — the backend replied"
+    else:
+        # A 200 with nothing in it is still a connected, authenticated call;
+        # at this budget a reasoning model spends the tokens thinking, so it
+        # is reported rather than failed.
+        detail = (
+            f"answered {status} in {elapsed}s — connected, but the reply "
+            f"was empty (finish_reason={finish!r}); a real briefing uses the "
+            "llm.max_tokens budget, not this probe's"
+        )
+    return Connection(
+        ok=True,
+        status=status,
+        detail=detail,
+        model=model,
+        endpoint=endpoint,
+        provider=provider,
+        seconds=elapsed,
+    )
 
 
 _FENCE_OPEN = re.compile(r"^```[A-Za-z0-9_-]*\s*")
