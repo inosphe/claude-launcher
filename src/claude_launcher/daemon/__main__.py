@@ -23,7 +23,7 @@ from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, pools, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
-from . import hold as hold_mod, instance_manifest, operator_keepalive, restore_queue, session_procs, session_reminder
+from . import hold as hold_mod, instance_manifest, open_files, operator_keepalive, restore_queue, session_procs, session_reminder
 from .api import build_app, close_websockets, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -951,6 +951,14 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     # Out of the environment before anything can inherit it.
     successor_port = os.environ.pop(SUCCESSOR_PORT_ENV, "")
+    # First thing, before this process opens a file: every live session costs
+    # the daemon at least a PTY pair, so its descriptor count grows with the
+    # sessions it hosts. A daemon hosting 103 sessions held 705 descriptors
+    # against a soft limit of 1024 while the hard limit was 1048576, and
+    # artifact_cleanup then failed every item with EMFILE (claunch-wo1zj.1).
+    # Never fatal -- a daemon that cannot raise the ceiling keeps the one it
+    # was started with. Logged below, where a log first exists.
+    open_file_limit = open_files.raise_soft_limit()
     if args.name:
         # Into the environment (not a variable) so every paths.instance()
         # call — and any child process — sees the same instance.
@@ -988,6 +996,10 @@ def main(argv=None) -> int:
     if scrubbed:
         log.info("removed session variables from the daemon environment: %s",
                  ", ".join(scrubbed))
+    # Already raised above, before anything opened a file; this only records it.
+    note = open_files.describe(open_file_limit)
+    if note:
+        log.info("%s", note)
 
     lock = runtime_state.SingletonLock()
     if not _acquire_with_grace(lock):

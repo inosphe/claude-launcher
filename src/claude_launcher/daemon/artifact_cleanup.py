@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 
-from . import basetemp_reaper as basetemp, paths
+from . import basetemp_reaper as basetemp, open_files, paths
 
 log = logging.getLogger(__name__)
 
@@ -353,7 +353,10 @@ class Cleanup:
                 row.update(kind="test", run=summary, seconds=(end - start).total_seconds())
             row["status"] = "ready"
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            row["reason"] = str(exc)
+            # "Too many open files" on its own leaves the reader guessing
+            # whether this daemon was capped or the machine ran out; the
+            # process's own limit answers that (claunch-wo1zj.1).
+            row["reason"] = str(exc) + open_files.exhaustion_note(exc)
         return row
 
     def plan(self, session, budget=PLAN_BUDGET):
@@ -568,7 +571,8 @@ class Cleanup:
                     shutil.rmtree(path)
                 row["status"] = "removed"
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                row.update(status="cleanup_pending", reason=str(exc))
+                row.update(status="cleanup_pending",
+                           reason=str(exc) + open_files.exhaustion_note(exc))
             self._save(document)  # stop on recording failure before another item
         document["removed"] = sum(r["status"] == "removed" for r in document["items"])
         document["cleanup_pending"] = sum(r["status"] != "removed" for r in document["items"])
