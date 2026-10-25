@@ -20,11 +20,17 @@ function between(src, from, to) {
 }
 
 const button = between(html, '<button id="term-conn"', '</button>') + '</button>'
-  + between(html, '<button id="term-force"', '</button>') + '</button>';
-const mobile = between(html, '<button id="m-conn"', '</button>') + '</button>';
+  + between(html, '<button id="term-link"', '</button>') + '</button>';
+const mobile = between(html, '<button id="m-conn"', '</button>') + '</button>'
+  + between(html, '<button id="m-link"', '</button>') + '</button>';
+// The session screen and the offline cover on it (claunch-9ywu0).
+const terminal = between(html, '<div id="terminal">', "<!-- Split mode's bar and pane");
 const panel = between(html, '<div id="conn-panel"', '\n</div>\n') + '\n</div>';
 const logCode = between(app, '/* ---- the link log (claunch-xbdy7) ----', '/* ---- the connection the page keeps ----');
 const panelCode = between(app, '/* ---- the link panel', '/* ---- queued deliveries ----');
+// syncLinkChip and the cover it drives: the page's own say on a down link.
+const chipCode = between(app, '/* The header (and its mirror on a phone) say what the socket is doing',
+  '/* Is the daemon answering?');
 
 // What the panel reads, as globals a step can change.
 const world = `
@@ -60,7 +66,8 @@ const server = http.createServer((req, res) => {
   if (req.url === '/') {
     res.setHeader('Content-Type', 'text/html');
     return res.end('<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/style.css">'
-      + `<body><div id="mobile-top">${mobile}</div><div id="term-header">${button}</div>${panel}</body>`);
+      + `<body><div id="mobile-top">${mobile}</div><div id="term-header">${button}</div>`
+      + `${terminal}${panel}</body>`);
   }
   if (req.url !== '/style.css') { res.statusCode = 404; return res.end(); }
   res.setHeader('Content-Type', 'text/css');
@@ -84,7 +91,7 @@ const server = http.createServer((req, res) => {
     // The page loads quietdom.js before anything else; the panel's 1 Hz
     // render leans on its same-value guards.
     await page.addScriptTag({ path: path.join(root, 'quietdom.js') });
-    await page.addScriptTag({ content: world + logCode + panelCode });
+    await page.addScriptTag({ content: world + logCode + panelCode + chipCode });
     await page.evaluate(() => {
       linkLog('term.open', { session: 's7', via: 'channel', ch: 3 });
       linkLogFlush();
@@ -159,14 +166,72 @@ const server = http.createServer((req, res) => {
     await render();
     assert.match(await page.locator('#conn-panel-rows').innerText(), /session line\s+open: socket bound to a running child/);
 
-    // force reconnect, from the header or the panel: the state at the press
-    // is logged first, then a fresh login, then both connections reopened.
+    // force reconnect, from the session screen's cover or the panel: the
+    // state at the press is logged first, then a fresh login, then both
+    // connections reopened. There is no header chip any more
+    // (claunch-9ywu0) -- the cover is the one on the screen a person is
+    // looking at when the link drops.
     await page.evaluate(() => {
       linkState = 'live';
       controlSock = { readyState: 1 };
       ws = { readyState: 1, linkVia: 'socket', linkStartedAt: Date.now(), linkReadyAt: Date.now() };
     });
-    await page.locator('#term-force').click();
+
+    // The cover says what the screen cannot: a grid that stopped moving and a
+    // grid whose link dropped look the same, and only one is fixed here.
+    const cover = page.locator('#term-offline');
+    assert.equal(await cover.isVisible(), false, 'no cover while the link is up');
+    assert.equal(await page.locator('#terminal').getAttribute('class'), null,
+      'and no dimming class on the session screen');
+
+    // The grid the dimming is drawn on. The production one is xterm's root,
+    // which term.open() appends to #terminal (app.js) and which carries
+    // class="xterm" (vendor/xterm.js) -- the element the stylesheet's
+    // `#terminal.link-down > .xterm` rule selects. The fixture has to hold
+    // one too, or every dimming assertion below measures an element the rule
+    // never touches and passes with the rule deleted (claunch-9ywu0 review,
+    // s1755-rev: deleting the rules left this harness green).
+    const grid = await page.evaluate(() => {
+      const g = document.createElement('div');
+      g.className = 'xterm';
+      g.textContent = 'line 1: the session last said this';
+      document.getElementById('terminal').prepend(g);
+      return getComputedStyle(g).opacity;
+    });
+    assert.equal(grid, '1', 'the grid starts at full strength');
+
+    await page.evaluate(() => {
+      linkState = 'reconnecting'; linkTry = 2; syncLinkChip();
+    });
+    assert.equal(await cover.isVisible(), true, 'a dropped link puts the cover up');
+    assert.match(await page.locator('#terminal').getAttribute('class'), /\blink-down\b/,
+      'the session screen it covers is dimmed');
+    assert.match(await page.locator('.term-offline-title').innerText(), /reconnecting.*2\/4/,
+      'the cover carries the retry count');
+    assert.match(await page.locator('.term-offline-note').innerText(), /socket dropped/);
+
+    // ...and the dimming is actually drawn. This is the assertion the rule
+    // has to satisfy: the grid is at .35 and greyed, the box that holds it
+    // and the card over it are not. The 160ms transition is waited out rather
+    // than read mid-flight, which would return an interpolated value.
+    const dim = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      await wait(400);
+      const t = document.getElementById('terminal');
+      const g = t.querySelector(':scope > .xterm');
+      return {
+        grid: getComputedStyle(g).opacity,
+        filter: getComputedStyle(g).filter,
+        term: getComputedStyle(t).opacity,
+        card: getComputedStyle(document.querySelector('.term-offline-card')).opacity,
+      };
+    });
+    assert.equal(dim.grid, '0.35', 'the grid under the cover is dimmed');
+    assert.match(dim.filter, /grayscale\(0\.75\)/, 'and loses its colour');
+    assert.equal(dim.term, '1', 'the box itself is not faded -- moving it there would dim the cover too');
+    assert.equal(dim.card, '1', 'the cover stays at full strength over the dimmed grid');
+
+    await page.locator('#term-offline-retry').click();
     await page.waitForFunction(() => calls.length >= 4);
     assert.deepEqual(await page.evaluate(() => calls), [
       ['relogin'], ['controlRecycle', 'force reconnect'],
@@ -175,7 +240,19 @@ const server = http.createServer((req, res) => {
     const snap = await page.evaluate(() => linkLogEntries().find((e) => e.k === 'force.snapshot'));
     assert.equal(snap['t.via'], 'socket', 'the snapshot holds what the page believed at the press');
     assert.equal(snap['c.state'], 'OPEN');
-    assert.equal(snap.grade, 'warn');
+    assert.equal(snap.grade, 'down', 'the press came from a link the page had already given up on');
+    // ...and the cover comes down with the link it described, taking the
+    // dimming with it.
+    await page.evaluate(() => { linkState = 'live'; syncLinkChip(); });
+    assert.equal(await cover.isVisible(), false, 'a live link takes the cover down');
+    assert.doesNotMatch(String(await page.locator('#terminal').getAttribute('class')), /link-down/);
+    const back = await page.evaluate(async () => {
+      await new Promise((done) => setTimeout(done, 400));
+      const g = document.getElementById('terminal').querySelector(':scope > .xterm');
+      return { grid: getComputedStyle(g).opacity, filter: getComputedStyle(g).filter };
+    });
+    assert.equal(back.grid, '1', 'a live link gives the grid its contrast back');
+    assert.equal(back.filter, 'none', 'and its colour');
     // With the control socket already gone it is opened, not recycled.
     await page.evaluate(() => { calls = []; controlSock = null; ws = null; linkState = 'lost'; });
     await page.locator('#conn-panel-reconnect').click();

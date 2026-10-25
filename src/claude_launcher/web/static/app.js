@@ -18855,7 +18855,14 @@ function syncTerminalFocus() {
    the status badge beside them cannot: that one reports the *session*, which
    goes on running perfectly well while this browser cannot see it. A tab that
    says `idle` next to a terminal that has been frozen for a minute is the
-   worst of the states this page can be in. */
+   worst of the states this page can be in.
+
+   The session screen itself says it too (claunch-9ywu0), because the chips are
+   a dozen pixels in a bar of a dozen controls and the reader's eyes are on the
+   terminal. While the link is down the grid goes dim and #term-offline covers
+   it with the reason and the retry: a terminal whose output stopped and a
+   terminal whose link dropped look identical when nothing moves on screen, and
+   only one of them is fixed by pressing something here. */
 function syncLinkChip() {
   const down = linkState === "reconnecting" || linkState === "lost";
   const text = linkState === "lost"
@@ -18870,6 +18877,32 @@ function syncLinkChip() {
     chip.title = title;
     chip.className = `${cls} link-chip ${linkState}${down ? "" : " hidden"}`;
   }
+  syncLinkOffline(down);
+}
+
+/* The session screen's offline cover, driven by syncLinkChip. The dimming is a
+   class on #terminal so it takes the whole grid -- xterm's rows, the snapshot
+   fallback, the throughput overlay -- and the cover sits above all of them.
+   Text is set only when it changes: this runs on every link transition and the
+   strings are the same for every retry within a state. */
+function syncLinkOffline(down) {
+  const box = $("terminal");
+  const cover = $("term-offline");
+  if (!box || !cover) return;
+  box.classList.toggle("link-down", down);
+  cover.hidden = !down;
+  if (!down) return;
+  const lost = linkState === "lost";
+  const name = cover.querySelector(".term-offline-title");
+  const note = cover.querySelector(".term-offline-note");
+  const said = lost
+    ? "disconnected"
+    : `reconnecting… ${linkTry}/${LINK_BACKOFF.length}`;
+  const why = lost
+    ? "The daemon is not answering. Nothing you type reaches the session until the link is back."
+    : "This terminal's socket dropped. Keystrokes are held and typed in when the link returns.";
+  if (name && name.textContent !== said) name.textContent = said;
+  if (note && note.textContent !== why) note.textContent = why;
 }
 
 /* Is the daemon answering? Unauthenticated (api.py keeps /api/health open),
@@ -21764,7 +21797,10 @@ function wireLinkPanel() {
   $("term-conn").addEventListener("click", () => toggleLinkPanel());
   if ($("m-conn")) $("m-conn").addEventListener("click", () => toggleLinkPanel());
   $("conn-panel-close").addEventListener("click", () => toggleLinkPanel(false));
-  for (const id of ["term-force", "m-force", "conn-panel-reconnect"]) {
+  /* The session screen's cover (syncLinkOffline) and the link panel's own
+     button. There is no header chip any more: the cover is where a person
+     who needs this is looking. */
+  for (const id of ["term-offline-retry", "conn-panel-reconnect"]) {
     if ($(id)) $(id).addEventListener("click", () => forceReconnect());
   }
   $("conn-panel-copy").addEventListener("click", async () => {
