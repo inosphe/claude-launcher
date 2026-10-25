@@ -243,16 +243,20 @@ new Function(
       constant("RAIL_ROW_EST_PX"), constant("RAIL_WINDOW_SCROLL_MS"),
       optionalConstant("RAIL_WINDOW_SLACK_PX", ""),
       optionalConstant("RAIL_ESTIMATE_SAMPLE", "const RAIL_ESTIMATE_SAMPLE = 32;"),
+      optionalConstant("RAIL_ANCHOR_CARDS", ""),
     ].join("\n")
   + "\n"
   + [state("railRowPx"), state("railSeen"),
      optionalState("railSeenKeys", "const railSeenKeys = new Set();"),
-     state("railWindowScrollTimer")].join("\n")
+     state("railWindowScrollTimer"), state("sessionSearch")].join("\n")
   + "\n"
   + slice("sessionCategory") + slice("sessionMatchesFilter")
   + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes")
   + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")
+  + slice("sessionSearchText") + slice("sessionMatchesSearch")
+  + slice("sessionSearchLineage") + optionalSlice("railAgreed")
+  + optionalSlice("railSearchRedraw")
   + slice("railEstimatePx") + slice("railRowKey") + slice("railRowPxOf")
   + optionalSlice("railOffsets") + slice("railWindowPlan") + slice("railSpacerRow")
   + slice("railMeasureRows") + slice("railWindowForPass")
@@ -268,7 +272,11 @@ const __api = {
   railWindowPlan, railWindowForPass, railMeasureRows,
   held(on) { railHeldOn = on; },
   view(name) { sessionView = name; },
+  search(q) {
+    sessionSearch = { q: String(q || ""), hits: null, pending: false, error: "", index: null };
+  },
 };
+if (typeof railSearchRedraw === "function") __api.railSearchRedraw = railSearchRedraw;
 // A piece the fix adds is exported only when it is there (optionalSlice).
 if (typeof railOffsets === "function") __api.railOffsets = railOffsets;
 if (typeof railClearWindow === "function") __api.railClearWindow = railClearWindow;
@@ -537,6 +545,99 @@ const resetWindow = () => {
   assert.strictEqual(list._railRows, null, "and no model either");
   check("and the windowed class comes off with it",
         list.classList.contains("rail-windowed"), false);
+
+  /* ---- 10. claunch-gpxur.1: the rare jumps left after PR #483 -----------
+     "많이 개선되었는데, 여전히 다소 희소하게 한번씩 스크롤 위치가 튀는 문제가
+     남아있네". Each case below is a poll that lands while the reader is
+     somewhere in the middle of a fleet-sized rail. */
+  const settle = async (prefix, at) => {
+    resetWindow();
+    heights.clear();
+    railRowPx.clear();
+    railSeenKeys.clear();
+    railSeen.rows = 0;
+    railSeen.px = 0;
+    railSeen.closed = false;
+    const sessions = fleet(prefix, 800);
+    served = { sessions };
+    await refresh();
+    list.scrollTop = railOffsets(list._railRows).offsets[at];
+    scrollListeners[0]();
+    await wait(250);
+    return sessions;
+  };
+  const screenTop = (name) => {
+    const li = walk(list).find((n) => n.tag === "li" && n.dataset.name === name);
+    return li ? Math.round(nodeTop(li)) : null;
+  };
+
+  // 10a. A pass is sliced across event-loop turns on a large rail
+  // (claunch-rw7tw). One that yielded after taking the anchor put the reader
+  // back where they were when it began, over a scroll they made meanwhile.
+  await settle("y", 300);
+  list._sessionsSignature = null;
+  refresh._sliceMs = 1e-9;                // yield at every row it can
+  const pending = refresh();
+  await wait(0);                          // the reader scrolls meanwhile
+  const userTop = list.scrollTop + 200;
+  list.scrollTop = userTop;
+  await pending;
+  refresh._sliceMs = undefined;
+  check("a scroll made while a poll's pass runs is not undone by that pass",
+        list.scrollTop, userTop);
+
+  // 10b. The top card on screen moves elsewhere in the rail (another parent
+  // adopts it): the cards that stayed are where they were.
+  let sessions = await settle("m", 300);
+  let next = "m301", nextAt = screenTop(next);
+  assert.ok(nextAt !== null && nextAt > 0, "the card below the top one is on screen");
+  served = { sessions: [...sessions.filter((s) => s.name !== "m300"),
+                        sessions.find((s) => s.name === "m300")] };
+  list._sessionsSignature = null;
+  await refresh();
+  check("a poll that moves the top card elsewhere leaves the next card where it was",
+        screenTop(next), nextAt);
+
+  // 10c. The top card on screen leaves the rail (archived, filtered out).
+  sessions = await settle("g", 300);
+  next = "g302";
+  nextAt = screenTop(next);
+  served = { sessions: sessions.filter((s) => s.name !== "g300") };
+  list._sessionsSignature = null;
+  await refresh();
+  check("a poll that drops the top card leaves the cards after it where they were",
+        screenTop(next), nextAt);
+
+  /* ---- 11. claunch-gpxur.1: the search on a windowed rail ---------------
+     "세션 검색 필터를 사용했을 때 검색된 항목이 제대로 표시되지 않고 여전히
+     스크롤바의 길이도 full size로 나오네 (특히 세션 카드가 1개만 보일 때)". */
+  await settle("h", 0);
+  A.search("h555");
+  list._sessionsSignature = null;
+  await refresh();
+  check("a search on a windowed rail draws the match, wherever it is in the fleet",
+        drawn(), ["h555"]);
+  check("...and the content is that match's height, not the fleet's",
+        list.scrollHeight, 72);
+  A.search("");
+  list._sessionsSignature = null;
+  await refresh();
+  check("clearing the search brings the window back over the whole fleet",
+        !!list._railWindowPlan && list._railRows.length === 800, true);
+  // A search change redraws such a rail by itself: the search box does not
+  // change the poll's signature.
+  check("the search box has a redraw for a windowed rail",
+        typeof A.railSearchRedraw, "function");
+  if (typeof A.railSearchRedraw === "function") {
+    A.search("h7");                       // h7, h70..h79, h700..h799
+    A.railSearchRedraw();
+    await wait(0);
+    check("...which draws the matches without waiting for a poll",
+          drawn().every((name) => name.startsWith("h7")) && drawn().length > 0, true);
+    A.search("");
+    A.railSearchRedraw();
+    await wait(0);
+  }
 
   /* ---- 9. the helpers the page keeps are the ones under test ---------- */
   assert.strictEqual(typeof railClearWindow, "function",
