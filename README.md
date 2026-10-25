@@ -5023,16 +5023,22 @@ profile; its scope included both existing profiles and future profile creation.
 
 General also carries a **Briefing model** card, which chooses the backend that
 writes the session briefings (the `▸` card on a rail row). Several backends
-can be saved as **presets**; the **Preset** list at the top of the card is the
-switch — choosing one is what changes the model the briefings use, and the
-fields below then edit and save that preset. **Add preset** seeds a new row
-from what the fields show and saves it at once (a pointer at a preset the same
-save does not also store is refused); **Delete preset** drops the row and
-clears the pointer, and **Name** renames the chosen one in place — the row
-carries the name it was stored under, so a rename keeps the preset's key
-rather than dropping it. Without a chosen preset the fields are the block's
-own backend, exactly as before. A `preset:` naming a row that is no longer
-saved falls back to those fields and says so on the card.
+can be saved as **presets**, and the top of the card is a radio list — one row
+per saved preset plus **custom**. Selecting is the whole switch: selecting a
+preset and saving points the briefing at it, and selecting **custom** is how you
+use none of them, in which case the fields are the block's own backend exactly
+as a fresh install has them. A preset is **read-only** — name included — until
+**Edit preset** opens it, and **Save preset** writes it; a locked field refuses
+typing, so nothing rewrites a stored backend on the way past. Unsaved changes
+are discarded only after a confirmation, and a cancelled confirmation leaves the
+card on the preset it was editing. **Add preset** starts a nameless row from
+what the fields show and does not save it: the name is decided at Save, so a
+preset no longer has to be named before it can be added. Saving an unnamed row
+is refused on the card with the box opened, and a row abandoned by **Cancel** or
+by selecting another backend disappears. **Delete preset** drops a saved row and
+clears the pointer; the row carries the name it was stored under, so a rename
+keeps the preset's key rather than dropping it. A `preset:` naming a row that is
+no longer saved falls back to the block's fields and says so on the card.
 
 Inside a preset (or the block), picking a
 **profile** reuses that profile's backend: its provider already records an

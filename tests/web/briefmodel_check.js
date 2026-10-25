@@ -211,10 +211,11 @@ const submit = (root) =>
   assert.equal(find(root, (n) => n.text === "Save").disabled, false);
 
   /* ── Presets ─────────────────────────────────────────────────────────────
-     Two saved backends, the second one chosen. The picker must switch the
-     fields to that preset's backend, and the save must send the whole list
-     plus the pointer — this is the whole feature: choosing a preset is how
-     the operator changes the model the briefing uses. */
+     Two saved backends, the second one chosen. The presets are radio buttons
+     — one row per saved backend plus "custom", which is the block's own
+     backend and what a fresh install uses. Selecting is the whole switch, and
+     a saved preset is read-only until Edit opens it: the fields must not let
+     a stray keystroke rewrite the backend on the way past. */
   ok = true;
   response = {
     preset: "cheap", profile: "", model: "", endpoint: "", max_tokens: 4096,
@@ -240,9 +241,13 @@ const submit = (root) =>
   vm.runInContext("llmDraft = null;", context);
   await context.refreshLlmSettings();
   root = card();
-  const presetPicker = field(root, "llm-preset");
-  assert.deepEqual(presetPicker.children.map((o) => o.value), ["", "big", "cheap"]);
-  assert.equal(presetPicker.value, "cheap");
+  const radios = (r) => all(r).filter((n) => n.type === "radio");
+  const checked = (r) => radios(r).find((n) => n.checked);
+  assert.deepEqual(radios(root).map((n) => n.value), ["", "big", "cheap"]);
+  assert.equal(checked(root).value, "cheap");
+  // "custom" is a named row, not an empty slot: the card says which backend
+  // the fields below stand for
+  assert(find(root, (n) => n.text.includes("custom")));
   // the fields show the CHOSEN preset, not the block's own (empty) values
   assert.equal(field(root, "llm-endpoint").value,
                "https://cheap.example/v1/chat/completions");
@@ -250,57 +255,223 @@ const submit = (root) =>
   assert.equal(field(root, "llm-api-key").placeholder, "stored · blank keeps it");
   assert(find(root, (n) => n.text.includes("backend preset cheap")));
 
-  /* Switching to the other preset carries it across, and the save sends both
-     rows with the new pointer. The second preset's stored key is not sent
-     back (the box is blank), and is not nulled either — one field saved must
-     not wipe another preset's credential. */
-  presetPicker.value = "big";
-  presetPicker.handlers.change();
-  root = card();
-  assert.equal(field(root, "llm-profile").value, "ds4");
+  /* Read-only by default, name included: every field refuses typing, and the
+     card offers Edit rather than Save. */
+  assert.equal(field(root, "llm-model").readOnly, true);
   assert.equal(field(root, "llm-endpoint").readOnly, true);
-  await submit(root);
-  sent = JSON.parse(requests.at(-1)[1].body);
-  assert.equal(sent.preset, "big");
-  // "big" names a profile and no model, so it keeps following that profile's
-  // default rather than being pinned to whatever the profile leads with today.
-  assert.deepEqual(sent.presets, [
-    { id: "big", profile: "ds4", model: "", endpoint: "",
-      api_key: null },
-    { id: "cheap", profile: "", model: "glm-small",
-      endpoint: "https://cheap.example/v1/chat/completions" },
-  ]);
+  assert.equal(field(root, "llm-profile").disabled, true);
+  assert.equal(field(root, "llm-api-key").disabled, true);
+  assert.equal(field(root, "llm-preset-name").disabled, true);
+  assert(find(root, (n) => n.text === "Edit preset"));
+  assert.equal(find(root, (n) => n.text === "Save preset"), undefined);
+  // a keystroke that reaches a locked field changes nothing
+  const lockedModel = field(root, "llm-model");
+  lockedModel.value = "typed-anyway";
+  lockedModel.handlers.input();
+  assert.equal(card().children.length > 0, true);
+  assert.equal(vm.runInContext("llmDraft.model", context), "glm-small");
 
-  /* Deleting the chosen preset sends the list without it and the pointer
-     cleared, so the daemon is not left pointing at a name that is gone. */
-  response = { ...response, preset: "big" };
+  /* Edit opens that one preset — the name and the four value fields
+     together — and the card swaps Edit for Save/Delete plus Cancel. Nothing
+     is written by opening it. */
+  requests.length = 0;
+  find(root, (n) => n.text === "Edit preset").handlers.click();
+  root = card();
+  assert.equal(requests.length, 0);
+  assert.equal(field(root, "llm-model").readOnly, false);
+  assert.equal(field(root, "llm-endpoint").readOnly, false);
+  assert.equal(field(root, "llm-profile").disabled, false);
+  assert.equal(field(root, "llm-api-key").disabled, false);
+  assert.equal(field(root, "llm-preset-name").disabled, false);
+  assert(find(root, (n) => n.text === "Save preset"));
+  assert(find(root, (n) => n.text === "Cancel"));
+
+  /* Save sends the whole list with the edited values and the pointer. The
+     other preset's stored key is neither sent back (its box is blank) nor
+     nulled — one field saved must not wipe another preset's credential. */
+  field(root, "llm-model").value = "glm-large";
+  field(root, "llm-model").handlers.input();
+  root = card();
+  assert(find(root, (n) => n.text.includes("저장하지 않은 변경")));
+  await find(root, (n) => n.text === "Save preset").handlers.click();
+  await new Promise((r) => setTimeout(r, 0));
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "cheap");
+  assert.equal(sent.presets.find((p) => p.id === "cheap").model, "glm-large");
+  assert.equal(sent.presets.find((p) => p.id === "big").api_key, null);
+  assert.equal(sent.presets.find((p) => p.id === "cheap").api_key, undefined);
+
+  /* An unsaved edit is thrown away only with the operator's consent. A
+     declined confirm leaves the card on the preset it was editing — a radio
+     that moves anyway would show a backend the draft never went to. */
+  vm.runInContext("llmDraft = null;", context);
   await context.refreshLlmSettings();
   root = card();
+  find(root, (n) => n.text === "Edit preset").handlers.click();
+  root = card();
+  field(root, "llm-model").value = "never-saved";
+  field(root, "llm-model").handlers.input();
+  root = card();
+  let asked = 0;
+  context.confirm = () => { asked += 1; return false; };
+  radios(root).find((n) => n.value === "big").handlers.change();
+  root = card();
+  assert.equal(asked, 1);
+  assert.equal(checked(root).value, "cheap");
+  // the declined switch did not carry the half-typed value anywhere either
+  assert.equal(vm.runInContext("llmDraft.presets.find(p => p.key === 'big').model",
+                               context), "");
+  // ... and consenting does move, back to a read-only view of the other one
+  context.confirm = () => { asked += 1; return true; };
+  radios(root).find((n) => n.value === "big").handlers.change();
+  root = card();
+  assert.equal(asked, 2);
+  assert.equal(checked(root).value, "big");
+  assert.equal(field(root, "llm-profile").value, "ds4");
+  assert.equal(field(root, "llm-model").readOnly, true);
+  assert.equal(field(root, "llm-endpoint").readOnly, true);
+  assert.equal(field(root, "llm-endpoint").value,
+               "https://ds.example/v1/chat/completions");
+
+  /* Cancel puts back what is stored, reading the row rather than the form. */
+  find(root, (n) => n.text === "Edit preset").handlers.click();
+  root = card();
+  field(root, "llm-model").value = "throw-me-away";
+  field(root, "llm-model").handlers.input();
+  root = card();
+  requests.length = 0;
+  find(root, (n) => n.text === "Cancel").handlers.click();
+  root = card();
+  assert.equal(requests.length, 0);
+  assert.equal(field(root, "llm-model").value, "");
+  assert.equal(field(root, "llm-model").readOnly, true);
+
+  /* "custom" is the block's own backend: always editable, and it has no name
+     box because there is no row behind it to name. */
+  context.confirm = () => true;
+  radios(root).find((n) => n.value === "").handlers.change();
+  root = card();
+  assert.equal(checked(root).value, "");
+  assert.equal(field(root, "llm-model").readOnly, false);
+  assert.equal(field(root, "llm-endpoint").readOnly, false);
+  assert.equal(field(root, "llm-profile").disabled, false);
+  assert.equal(field(root, "llm-preset-name").disabled, true);
+  assert.equal(find(root, (n) => n.text === "Edit preset"), undefined);
+
+  /* Switching to custom carries the save's pointer to "": the briefing then
+     follows the block's own fields. */
+  field(root, "llm-endpoint").value = "https://typed.example/v1/chat/completions";
+  field(root, "llm-endpoint").handlers.input();
+  field(root, "llm-model").value = "typed-model";
+  field(root, "llm-model").handlers.input();
+  requests.length = 0;
+  await submit(card());
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "");
+  assert.equal(sent.endpoint, "https://typed.example/v1/chat/completions");
+  assert.equal(sent.model, "typed-model");
+  assert.deepEqual(sent.presets.map((p) => p.id), ["big", "cheap"]);
+
+  /* ── Adding a preset ─────────────────────────────────────────────────────
+     The point of this round: a preset no longer has to be named before it
+     exists. "Add preset" starts a nameless row from the fields and opens it,
+     writes nothing, and the name is decided at Save — or the row is dropped
+     by Cancel or by selecting something else. */
+  vm.runInContext("llmDraft = null;", context);
+  response = {
+    ...response, preset: "", profile: "", model: "", endpoint: "",
+    endpoint: "", api_key_set: false,
+  };
+  await context.refreshLlmSettings();
+  root = card();
+  field(root, "llm-endpoint").value = "https://fresh.example/v1/chat/completions";
+  field(root, "llm-endpoint").handlers.input();
+  field(root, "llm-model").value = "fresh-model";
+  field(root, "llm-model").handlers.input();
+  root = card();
+  requests.length = 0;
+  find(root, (n) => n.text === "Add preset").handlers.click();
+  root = card();
+  assert.equal(requests.length, 0, "adding writes nothing");
+  assert.equal(radios(root).length, 4);
+  assert(find(root, (n) => n.text.includes("(name needed)")));
+  // the draft key is only a handle inside the card; the name is what is saved
+  assert.equal(checked(root).value, "preset-3");
+  // it opens straight into edit mode, so the name box is ready
+  assert.equal(field(root, "llm-preset-name").disabled, false);
+  assert.equal(field(root, "llm-preset-name").value, "");
+  assert.equal(field(root, "llm-model").value, "fresh-model");
+
+  /* Saving before the row has a name is refused by the card with the reason
+     on it, rather than by the daemon's 400 after a round-trip. */
+  await submit(root);
+  root = card();
+  assert(find(root, (n) => n.text.includes("Name this preset before saving")));
+  assert.equal(requests.length, 0);
+
+  /* Naming it later and saving is the whole flow: the row goes into the file
+     under that name, and it is the selected one. */
+  field(root, "llm-preset-name").value = "fresh";
+  field(root, "llm-preset-name").handlers.input();
+  root = card();
+  await find(root, (n) => n.text === "Save preset").handlers.click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(requests.length, 1);
+  sent = JSON.parse(requests.at(-1)[1].body);
+  assert.equal(sent.preset, "fresh");
+  assert.deepEqual(sent.presets.find((p) => p.id === "fresh"), {
+    id: "fresh", profile: "", model: "fresh-model",
+    endpoint: "https://fresh.example/v1/chat/completions", api_key: null,
+  });
+
+  /* An added row that is abandoned goes away with no request: it was never in
+     the file, so leaving it would hold a nameless row every later save has to
+     refuse. */
+  vm.runInContext("llmDraft = null;", context);
+  await context.refreshLlmSettings();
+  root = card();
+  find(root, (n) => n.text === "Add preset").handlers.click();
+  root = card();
+  requests.length = 0;
+  find(root, (n) => n.text === "Cancel").handlers.click();
+  root = card();
+  assert.equal(requests.length, 0);
+  assert.equal(radios(root).length, 3);
+  assert.equal(checked(root).value, "");
+
+  /* A second "Add preset" while one is still unnamed opens that one instead
+     of starting another — the card never holds two nameless rows. */
+  find(root, (n) => n.text === "Add preset").handlers.click();
+  root = card();
+  requests.length = 0;
+  find(root, (n) => n.text === "Add preset").handlers.click();
+  root = card();
+  assert.equal(radios(root).length, 4);
+  assert.equal(requests.length, 0);
+
+  /* Deleting a saved preset sends the list without it and the pointer
+     cleared, so the daemon is not left pointing at a name that is gone. */
+  vm.runInContext("llmDraft = null;", context);
+  response = {
+    ...response, preset: "big",
+    presets: [
+      { id: "big", profile: "ds4", model: "", endpoint: "", api_key_set: false,
+        resolved: { endpoint: "https://ds.example/v1/chat/completions",
+                    model: "deepseek-flash", has_key: true }, error: "" },
+      { id: "cheap", profile: "", endpoint: "https://cheap.example/v1/chat/completions",
+        model: "glm-small", api_key_set: true,
+        resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                    model: "glm-small", has_key: true }, error: "" },
+    ],
+  };
+  await context.refreshLlmSettings();
+  root = card();
+  requests.length = 0;
   find(root, (n) => n.text === "Delete preset").handlers.click();
   await new Promise((r) => setTimeout(r, 0));
   sent = JSON.parse(requests.at(-1)[1].body);
   assert.equal(sent.preset, "");
   assert.deepEqual(sent.presets.map((p) => p.id), ["cheap"]);
-
-  /* "Add preset" seeds a row from the fields and saves it straight away, so
-     the new row is selectable: the daemon refuses a pointer at a preset the
-     same request does not also save. */
-  requests.length = 0;
-  response = {
-    ...response, preset: "", presets: [],
-    profile: "", model: "some-model",
-    endpoint: "https://typed.example/v1/chat/completions", api_key_set: true,
-  };
-  await context.refreshLlmSettings();
-  root = card();
-  find(root, (n) => n.text === "Add preset").handlers.click();
-  await new Promise((r) => setTimeout(r, 0));
-  sent = JSON.parse(requests.at(-1)[1].body);
-  assert.equal(sent.preset, "preset-1");
-  assert.deepEqual(sent.presets, [{
-    id: "preset-1", profile: "", model: "some-model",
-    endpoint: "https://typed.example/v1/chat/completions", api_key: null,
-  }]);
 
   /* Renaming a preset carries the name it is filed under. The Name box edits
      the id in place, and the daemon holds the secret under the old name — a
@@ -323,25 +494,64 @@ const submit = (root) =>
   vm.runInContext("llmDraft = null;", context);
   await context.refreshLlmSettings();
   root = card();
+  // the name is locked with the rest until Edit
+  assert.equal(field(root, "llm-preset-name").disabled, true);
+  find(root, (n) => n.text === "Edit preset").handlers.click();
+  root = card();
   const nameInput = field(root, "llm-preset-name");
   assert.equal(nameInput.value, "cheap");
   assert.equal(nameInput.disabled, false);
   nameInput.value = "cheap-a";
   nameInput.handlers.input();
-  await submit(root);
+  await find(card(), (n) => n.text === "Save preset").handlers.click();
+  await new Promise((r) => setTimeout(r, 0));
   sent = JSON.parse(requests.at(-1)[1].body);
   assert.equal(sent.preset, "cheap-a");
   assert.deepEqual(sent.presets, [{
     id: "cheap-a", previous_id: "cheap", profile: "", model: "glm-small",
     endpoint: "https://cheap.example/v1/chat/completions",
   }]);
-  // an unrenamed row sends no previous_id at all
+
+  /* An unrenamed row sends no previous_id at all — an unchanging save must
+     not look like a rename. */
   vm.runInContext("llmDraft = null;", context);
   await context.refreshLlmSettings();
   root = card();
   await submit(root);
   sent = JSON.parse(requests.at(-1)[1].body);
   assert.equal(sent.presets[0].previous_id, undefined);
+
+  /* A refused save must not have moved the row: the values typed into the
+     form are adopted only once the daemon has accepted them, so Cancel after
+     a failure still restores what is stored rather than the rejected edit. */
+  find(card(), (n) => n.text === "Edit preset").handlers.click();
+  root = card();
+  field(root, "llm-model").value = "rejected-edit";
+  field(root, "llm-model").handlers.input();
+  ok = false;
+  response = { error: "endpoint must be an HTTP(S) URL" };
+  await submit(card());
+  root = card();
+  assert(find(root, (n) => n.text.includes("HTTP(S) URL")));
+  ok = true;
+  response = {
+    preset: "cheap", profile: "", model: "", endpoint: "", max_tokens: 4096,
+    api_key_set: false, configured: true, error: "",
+    resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                model: "glm-small", has_key: true },
+    profiles: [],
+    presets: [
+      { id: "cheap", profile: "", endpoint: "https://cheap.example/v1/chat/completions",
+        model: "glm-small", api_key_set: true,
+        resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                    model: "glm-small", has_key: true }, error: "" },
+    ],
+  };
+  root = card();
+  find(root, (n) => n.text === "Cancel").handlers.click();
+  root = card();
+  assert.equal(field(root, "llm-model").value, "glm-small");
+  assert.equal(field(root, "llm-model").readOnly, true);
 
   /* ── Test connection ─────────────────────────────────────────────────────
      The button sends the fields as they stand, not the saved block: the
@@ -364,6 +574,10 @@ const submit = (root) =>
   };
   vm.runInContext("llmDraft = null; llmTestResult = null;", context);
   await context.refreshLlmSettings();
+  root = card();
+  // the preset is read-only until Edit, and a typed value has to be the one
+  // the probe sends — so open it first
+  find(root, (n) => n.text === "Edit preset").handlers.click();
   root = card();
   const typed = field(root, "llm-endpoint");
   typed.value = "https://typed.example/v1/chat/completions";
@@ -445,8 +659,14 @@ const submit = (root) =>
   console.log("briefmodel ok: profile list, direct save, a profile carries "
     + "endpoint and model with it, save clears the block's pair, typed "
     + "endpoint survives an abandoned pick, unknown profile kept, error, "
-    + "preset switch carries endpoint and model, save sends the list and "
-    + "pointer, delete clears the pointer, add saves the new row, rename "
+    + "presets as radios with a named custom row, preset read-only until "
+    + "Edit (name included) and locked fields ignore keystrokes, Edit writes "
+    + "nothing, Save preset sends the listed edit and pointer, a declined "
+    + "discard keeps the card where it was, Cancel restores the stored "
+    + "values, custom is always editable and saves the empty pointer, Add "
+    + "preset starts a nameless row and writes nothing, saving unnamed is "
+    + "refused by the card, naming later saves it, an abandoned new row "
+    + "disappears, a saved preset deletes with the pointer cleared, rename "
     + "sends the name the key is filed under, provider shown when resolved, "
     + "Test connection sends the unsaved fields and reports the result");
 })().catch((err) => { console.error(err); process.exit(1); });

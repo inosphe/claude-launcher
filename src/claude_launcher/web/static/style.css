@@ -7572,6 +7572,20 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
    legible where :disabled greys out a field that is empty anyway. */
 .llm-settings-form input[readonly] { color: #adbac7; background: #161b22; cursor: default; }
 .llm-settings-form .wf-btn { align-self: end; }
+/* The preset picker is a radio list, one row per saved backend plus "custom":
+   the operator is choosing which backend answers, and a list shows every
+   candidate and which one is in use without opening anything. */
+.llm-presets { margin: 12px 0 0; }
+.llm-preset-list { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.llm-preset-item { display: flex; align-items: center; gap: 7px; padding: 3px 0; font-size: 12.5px; color: #c9d1d9; cursor: pointer; }
+.llm-preset-item input[type="radio"] { width: auto; margin: 0; cursor: pointer; }
+.llm-preset-item input[type="radio"]:disabled { cursor: default; }
+.llm-preset-name-text { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.llm-preset-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.llm-preset-row label { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1 1 180px; }
+.llm-preset-row input { width: 100%; box-sizing: border-box; padding: 7px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.llm-preset-row input:disabled { color: #7d8590; background: #161b22; cursor: default; }
+.llm-presets .wf-warning { margin: 6px 0 0; font-size: 12px; }
 .model-choices-settings .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
 .qa-nudge-settings .llm-settings-form > p, .qa-nudge-settings .qa-nudge-toggle { grid-column: 1 / -1; }
 .qa-nudge-settings .qa-nudge-toggle { flex-direction: row; align-items: center; }
