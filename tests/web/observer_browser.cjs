@@ -464,8 +464,16 @@ async function fadeCost(page, selector, fade) {
     const scopeBox = page.locator("#observer-scope-pinned");
     assert.equal(await scopeBox.isVisible(), true);
     assert.equal(await scopeBox.isChecked(), false);
+    // The wait is for the request the press sends, not for the checkbox it
+    // moves: the box flips synchronously inside .check() while
+    // observer.js's setScope() is still awaiting its POST, so a wait on the
+    // box let `.at(-1)` read whatever settings request came before this one
+    // -- under load, 3 runs in 12. The fixture records a settings post
+    // before it answers it, so the answer is the point where `sent` holds it.
+    const scopePosted = page.waitForResponse(r => r.url().endsWith("/api/observer/settings")
+      && r.request().method() === "POST" && /"scope":\s*"pinned"/.test(r.request().postData() || ""));
     await scopeBox.check();
-    await page.waitForFunction(()=>document.getElementById("observer-scope-pinned").checked);
+    await scopePosted;
     assert.deepEqual(sent.filter(r=>r.url==="/api/observer/settings").at(-1).body, {enabled:true,scope:"pinned"});
     // The monitor button posts `enabled` alone; a route that reset the scope
     // on every switch would silently widen what the operator is paying for.

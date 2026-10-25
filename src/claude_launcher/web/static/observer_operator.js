@@ -55,6 +55,12 @@ let root = null, area = null, bar = null, onChange = () => {};
 let list = [], detail = null, selected = "", loaded = false, listError = "";
 let projects = [], profiles = [], form = null, formError = "", busy = false, expanded = false;
 let listSignature = "", task = null;
+/* A pointer is down inside this view. A poll's read can finish between the
+   down and the up, and render() replaces the whole section -- the button the
+   press was aimed at goes with it and never receives its click. While the
+   pointer is down the redraw waits; the next poll or the release picks it up
+   (releaseRender, below). */
+let pressing = false;
 const askDrafts = new Map();
 /* The thread on screen per operator, the list showing (in the narrow
    layout), and a new thread being written. */
@@ -126,13 +132,21 @@ function stateText(op) {
 function refresh() {
   if(task) return task;
   task = (async () => {
+    let read = false;
     try {
       const data = await call("api/operators");
       list = Array.isArray(data.operators) ? data.operators : [];
       listError = "";
+      read = true;
     } catch(err) { listError = err.message; }
     loaded = true;
-    if(!list.some(o => o.id === selected)) choose(list[0]?.id || "");
+    // The selection is reconciled against a list that was actually read. A
+    // failed read says nothing about which operators exist, and choosing off
+    // it would write the empty id over the one the reader had -- which is
+    // what a poll cut short (a reload, a navigated-away page) used to do,
+    // leaving the next visit on the first operator in the list instead of
+    // the reader's own.
+    if(read && !list.some(o => o.id === selected)) choose(list[0]?.id || "");
     if(selected) {
       try {
         const id = selected, tid = threadOf.get(id);
@@ -149,8 +163,16 @@ function refresh() {
     } else detail = null;
     const signature = JSON.stringify(list.map(o => [o.id, o.name, o.all, o.projects]));
     if(signature !== listSignature) { listSignature = signature; onChange(); }
-    // An ask answer being typed survives a poll that would redraw it away.
-    if(!area?.contains(document.activeElement) || !document.activeElement.matches("textarea,input,select")) render();
+    // An ask answer being typed, and a control the reader is pressing,
+    // survive a poll that would redraw them away. The press matters on its
+    // own: a poll can land between a pointer's down and up, and a button
+    // replaced in that gap never receives the click, so 「만들기」 did nothing
+    // at all in 3 of 24 runs of the harness and would do the same to a
+    // reader -- more often on a loaded machine, where the poll's read and
+    // the reader's press are likelier to overlap.
+    const active = document.activeElement;
+    const held = pressing || (area?.contains(active) && active.matches("textarea,input,select"));
+    if(!held) render();
   })().finally(() => { task = null; });
   return task;
 }
@@ -514,12 +536,30 @@ function render() {
   if(page) page.scrollTop = opts.composer && atEnd ? page.scrollHeight : top;
   if(input) input.send.disabled = busy || !op;
 }
+/* The press that was held back: a redraw waits while a pointer is down, and
+   the release draws what the poll had read instead of losing it. */
+function releaseRender() {
+  if(!pressing) return;
+  pressing = false;
+  // After the click, not before it: the browser dispatches it right after
+  // the pointerup, and the press has to reach the node it was aimed at.
+  setTimeout(() => {
+    if(pressing) return;
+    if(!area?.contains(document.activeElement) || !document.activeElement.matches("textarea,input,select")) render();
+  }, 0);
+}
 /* -- what observer.js uses --------------------------------------------- */
 const TARGET = "operator:";
 let input = null;
 function mount(element, changed) {
   root = element; onChange = changed || onChange;
   area = root;
+  // Capture on the root: a press that starts here is this view's, wherever
+  // the pointer ends up, and a cancel (the pointer left, the browser took
+  // the gesture) releases it the same way.
+  root.addEventListener("pointerdown", () => { pressing = true; }, true);
+  root.addEventListener("pointerup", releaseRender, true);
+  root.addEventListener("pointercancel", releaseRender, true);
   if(opts.composer) {
     bar = node("div", "", "op-sessionbar"); bar.hidden = true;
     area = node("div", "", "op-area");

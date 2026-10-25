@@ -560,6 +560,65 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.deepEqual(await innerScrollers(page), []);
     if (process.env.CLAUNCH_SCREENSHOT_PHONE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_PHONE, fullPage: true });
 
+    // A poll's redraw waits while a pointer is down: render() replaces the
+    // whole section, and a button replaced between a press's down and up
+    // never receives its click. This is the shipped behaviour measured
+    // against a poll pinned to land inside a press -- held down with the
+    // pointer for the length of one, then released.
+    {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await tab("ops-a").click();
+      await page.waitForFunction(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("ops-a"));
+      await page.click("#observer-operators .op-actions button:has-text('설정')");
+      await page.waitForSelector("#observer-operators .op-form");
+      // The box is read in the page: Playwright's own action check wants the
+      // node to stay put, and the poll is exactly what moves it.
+      await page.evaluate(() => document.querySelector("#observer-operators .op-form").scrollIntoView({ block: "center" }));
+      const saveBox = await page.evaluate(() => {
+        const r = document.querySelector("#observer-operators .op-form button[type=submit]").getBoundingClientRect();
+        return { x: r.left, y: r.top, width: r.width, height: r.height };
+      });
+      const saves = sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length;
+      // Down on the button, one poll's redraw in between, then up. The click
+      // the browser dispatches after the up has to reach the form.
+      await page.mouse.move(saveBox.x + saveBox.width / 2, saveBox.y + saveBox.height / 2);
+      await page.mouse.down();
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.mouse.up();
+      // The save closes the form; the press that never landed leaves it open.
+      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"), null, { timeout: 5000 });
+      assert.equal(sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length, saves + 1,
+        "the press lands although a poll ran between its down and its up");
+    }
+
+    // A list read that FAILED says nothing about which operators exist, so it
+    // must not touch the selection. It used to: `choose("")` ran whenever the
+    // list did not hold the selected id, and a list left empty by a failed
+    // read holds nothing -- so a read cut short wrote the empty id over the
+    // reader's, and the next visit opened on the first operator in the list
+    // instead. That is what a reload does to the read in flight, which is how
+    // the floating dialog's harness hit it in 2 runs of 12.
+    //
+    // The first read of a page is the one that matters: it is the only read
+    // that meets an empty list. Refusing that read is the regression. The
+    // selection has to outlive a visit, so the operator it is on is one the
+    // run has not deleted: all-ops, made above.
+    await page.evaluate(() => { localStorage.setItem("claunch-observer-operator-dock", "open"); });
+    await tab("all-ops").click();
+    await page.waitForFunction(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("all-ops"));
+    const key = () => page.evaluate(() => localStorage.getItem("claunch-observer-operator"));
+    const kept = Object.values(ops).find(o => o.name === "all-ops").id;
+    assert.equal(await key(), kept, "the pressed operator is the one kept");
+    await page.route("**/api/operators", route => route.fulfill({ status: 500, body: '{"error":"boom"}' }));
+    await page.reload();
+    await page.waitForFunction(() => /operator 목록을 읽지 못했습니다/.test(document.querySelector("#observer-operators")?.textContent || ""));
+    assert.equal(await key(), kept, "a refused list read leaves the reader's operator alone");
+    await page.unroute("**/api/operators");
+    await page.reload();
+    await tab("all-ops").waitFor();
+    assert.equal(await page.evaluate(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent),
+      "all-ops", "and the next visit opens on it");
+
     assert.deepEqual(errors, []);
     console.log("PASS: threads list and conversation taking turns in the dock and on a phone, a row press, a message into the thread on screen, a new thread with a title and a staged image, operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, session line outside the scroller with the session's state and link, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, Ctrl+J newline and Enter send in the dock composer, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
