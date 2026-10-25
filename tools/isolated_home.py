@@ -21,6 +21,9 @@ Usage
     python tools/isolated_home.py -- python my-repro.py
     python tools/isolated_home.py -c 'from claude_launcher import store; ...'
 
+``-c`` is a real option of this file (not a command word), so the snippet runs
+in the same isolation as a script would; anything after ``--`` is a command.
+
 The child inherits the caller's environment with these changes, and is started
 in the caller's working directory. The throwaway home is printed on the first
 line (``isolated home: <path>``) so a reproduction can be re-read afterwards;
@@ -303,6 +306,11 @@ def main(argv: list = None) -> int:
         help="print the isolation as KEY=VALUE lines and exit, without starting anything",
     )
     parser.add_argument(
+        "-c", dest="code", metavar="PYTHON",
+        help="run this python snippet instead of a command "
+             "(pass a command after '--' for anything else)",
+    )
+    parser.add_argument(
         "command", nargs=argparse.REMAINDER,
         help="the command to run (a leading '--' is dropped)",
     )
@@ -325,6 +333,13 @@ def main(argv: list = None) -> int:
     command = list(args.command)
     if command[:1] == ["--"]:
         command = command[1:]
+    if args.code is not None:
+        # ``-c`` is a real option, not a command word: without it here argparse
+        # read ``-c`` as an unknown flag and refused the invocation this file's
+        # own docstring advertises (found in review of claunch-wo1zj).
+        if command:
+            parser.error("-c takes the snippet itself; pass either -c or a command after '--', not both")
+        command = ["-c", args.code]
     if not command:
         parser.error("no command: pass one after '--', or use -c '<python>'")
 

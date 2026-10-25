@@ -297,6 +297,43 @@ def test_the_script_runs_with_its_own_argv(tmp_path):
     assert done.stdout.strip().splitlines()[-1] == "alpha|beta"
 
 
+def test_the_c_form_the_help_advertises_actually_runs(tmp_path):
+    """``-c`` is advertised in the docstring, the epilog and the error message.
+
+    It was not an option at all: argparse read it as an unknown flag and the
+    invocation returned exit 2 with "unrecognized arguments: -c", so the one
+    usage this file recommends to a person racing to reproduce something was
+    the one that did not work. Found in review of claunch-wo1zj, not by any of
+    the tests here -- none of them called the advertised form.
+
+    Pinned against the help text too, so the two cannot drift apart again.
+    """
+    child = dict(os.environ)
+    child["CLAUNCH_ISOLATED_HOME"] = str(tmp_path / "iso")
+
+    done = subprocess.run(
+        [sys.executable, str(TOOL), "-c", "from claude_launcher import store; print(store.path())"],
+        capture_output=True, text=True, env=child, timeout=120,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().splitlines()[-1] == str(tmp_path / "iso" / "home" / config.CONFIG_NAME)
+    help_text = subprocess.run(
+        [sys.executable, str(TOOL), "--help"], capture_output=True, text=True, timeout=60,
+    ).stdout
+    assert "-c PYTHON" in help_text
+
+
+def test_c_and_a_command_together_are_refused(tmp_path):
+    """Two answers to "what should run" is a mistake, not a preference."""
+    done = subprocess.run(
+        [sys.executable, str(TOOL), "-c", "print(1)", "--", "echo", "hi"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert done.returncode != 0
+    assert "not both" in (done.stderr + done.stdout)
+
+
 def test_no_command_is_refused_rather_than_running_an_interactive_shell(tmp_path):
     """An empty invocation must not fall through to something that waits."""
     done = subprocess.run(
