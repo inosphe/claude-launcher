@@ -2399,6 +2399,59 @@ def test_deselected_node_ids_reach_the_run_and_the_receipt(repo, split_gate, tmp
     )
 
 
+#: The receipt's keys before ``skips`` was added (claunch-1b2d7.1); a run
+#: with no comparison and a readable ``HEAD`` writes exactly these.
+_RECEIPT_KEYS = {
+    "kind", "tree", "selection", "base", "repo", "command", "exit_code",
+    "counts", "failures", "session", "basetemp", "workers", "window",
+    "started_at", "finished_at", "seconds", "deselected", "known_failures",
+    "commit",
+}
+
+
+def test_the_receipt_names_each_skipped_node_and_its_reason(repo, tmp_path):
+    """``-rs`` would fold both cases into one ``SKIPPED [2] ...:3`` line."""
+    _write(repo, "tests/test_skip.py", (
+        "import pytest\n"
+        "@pytest.mark.parametrize('h', ['a.cjs', 'b.cjs'])\n"
+        "def test_harness(h):\n"
+        "    pytest.skip('Playwright is not installed (or not on NODE_PATH)')\n"
+        "def test_ok():\n"
+        "    pass\n"
+    ))
+    basetemp = tmp_path / "bt"
+    cmd = [sys.executable, "-m", "pytest", "tests/test_skip.py", "-q",
+           "-p", "no:cacheprovider", f"--basetemp={basetemp}"]
+    receipts = tmp_path / "receipts"
+    files = ["tests/test_skip.py"]
+
+    code = changed_tests.run_and_record(repo, files, cmd, "t" * 40, "master", receipts)
+
+    assert code == 0
+    receipt = json.loads(changed_tests.receipt_path(
+        repo, "t" * 40, files, receipts).read_text(encoding="utf-8"))
+    reason = "Playwright is not installed (or not on NODE_PATH)"
+    assert receipt["skips"] == [
+        {"nodeid": "tests/test_skip.py::test_harness[a.cjs]", "reason": reason},
+        {"nodeid": "tests/test_skip.py::test_harness[b.cjs]", "reason": reason},
+    ]
+    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+    assert receipt["command"] == cmd, "the junit request rides in the environment"
+    assert receipt["counts"] == {"passed": 1, "skipped": 2}
+    assert str(basetemp) not in json.dumps(receipt["skips"])
+
+
+def test_a_run_without_a_basetemp_files_skips_as_unknown(repo, tmp_path):
+    cmd = [sys.executable, "-c", "print('1 passed')"]
+    receipts = tmp_path / "receipts"
+    files = ["tests/test_mesh.py"]
+    assert changed_tests.run_and_record(repo, files, cmd, "u" * 40, "master", receipts) == 0
+    receipt = json.loads(changed_tests.receipt_path(
+        repo, "u" * 40, files, receipts).read_text(encoding="utf-8"))
+    assert receipt["skips"] is None
+    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+
+
 def test_deselect_flag_reaches_the_real_pytest_command():
     cmd = changed_tests.build_command(
         ["tests/test_a.py"], basetemp="C:/t/x", deselect=("tests/test_a.py::t",)
