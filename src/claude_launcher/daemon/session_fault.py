@@ -437,6 +437,7 @@ class Detector:
         hint = reset_hint(text)
         deadline = reset_deadline(text, now)
         previous = self._record
+        same_kind = previous is not None and previous["kind"] == kind.name
         # A run is one continuous sighting of one kind: it starts at the
         # first match and ends when its window does. A re-match inside that
         # window updates what was seen -- the message, the last sighting --
@@ -448,21 +449,33 @@ class Detector:
         # record with a fresh window (s1812, 2026-10-25: the session quoted
         # "Request timed out" in its own analysis and the badge stayed 15
         # minutes past the last real sighting, again and again).
-        running = (
-            previous is not None
-            and previous["kind"] == kind.name
-            and now < previous["until"]
-        )
+        #
+        # ``reset`` is the text the window was measured from, so it belongs
+        # to the run exactly as ``since`` and ``until`` do. Re-reading it on
+        # a re-match let one row show two observations at once -- a screen
+        # drawing both a weekly and a five-hour limit line keeps the same
+        # kind, so the tooltip said "resets: Oct 25, 2pm" beside a window
+        # that ended Oct 26 09:00.
+        #
+        # A message can also name a reset time that has already passed, and
+        # then ``until`` is behind ``since`` from the first scan: ``now <
+        # until`` never holds, every scan would be a new run, and ``strikes``
+        # would count scans rather than sightings (1 per second while the
+        # screen keeps changing). Such a record has no window to end, so it
+        # is continued instead.
+        born_expired = previous is not None and previous["until"] <= previous["since"]
+        running = same_kind and (now < previous["until"] or born_expired)
         if running:
             since = previous["since"]
             until = previous["until"]
+            reset = previous.get("reset", "")
             strikes = previous.get("strikes", 1)
         else:
             since = now
             until = deadline if deadline is not None else now + kind.window
+            reset = hint
             # Coming back after the window closed is a second sighting of
             # the same kind; a different kind is the first of its own run.
-            same_kind = previous is not None and previous["kind"] == kind.name
             strikes = previous.get("strikes", 0) + 1 if same_kind else 1
         self._record = {
             "harness": self.harness,
@@ -472,7 +485,7 @@ class Detector:
             "resolved_by": kind.resolved_by,
             "message": message,
             "code": status.group(1) if status else "",
-            "reset": hint,
+            "reset": reset,
             "since": since,
             "last_seen": now,
             "until": until,

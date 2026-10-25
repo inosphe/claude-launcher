@@ -633,6 +633,48 @@ def test_a_scrolling_quote_keeps_the_run_it_started():
     assert later["strikes"] == 1
 
 
+def test_a_re_match_inside_the_window_keeps_the_reset_it_was_measured_from():
+    """One row's `resets:` and `until:` come from the same sighting.
+
+    A screen that draws both a weekly and a five-hour limit line matches the
+    same kind twice in a row, so re-reading the hint on a re-match put one
+    observation's reset beside another observation's window (claunch-5ldt8
+    review)."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    first = det.view(now=1000.0)
+    det.scan(
+        _Screen("You've hit your 5-hour limit · resets Oct 25, 2pm (Asia/Seoul)"),
+        now=1060.0,
+    )
+    later = det.view(now=1060.0)
+    assert later["kind"] == "usage_limit"
+    assert later["reset"] == first["reset"]
+    assert later["until"] == first["until"]
+    assert later["since"] == first["since"]
+    assert later["strikes"] == 1
+
+
+def test_a_reset_that_has_already_passed_counts_one_run_not_one_per_scan():
+    """A message can name a reset time that is already behind the clock.
+
+    `reset_deadline` reads up to six hours back, so such a record starts with
+    `until` behind `since`; `now < until` never held, every scan became a new
+    run, and `strikes` counted scans instead of sightings -- one per second
+    while the screen kept changing (claunch-5ldt8 review)."""
+    start = datetime(2026, 10, 26, 3, tzinfo=ZoneInfo("UTC")).timestamp()
+    det, _ = _detector()
+    det.scan(_Screen("attempt 0 · " + WEEKLY), now=start)
+    first = det.view(now=start)
+    for step in range(1, 5):
+        det.scan(_Screen("attempt %d · %s" % (step, WEEKLY)), now=start + step)
+    view = det.view(now=start + 4)
+    assert view["active"] is False
+    assert view["strikes"] == 1
+    assert view["since"] == first["since"]
+    assert view["until"] == first["until"]
+
+
 def test_a_kind_that_comes_back_after_its_window_is_a_second_sighting():
     catalog = session_fault.load(
         "version: 1\n"
