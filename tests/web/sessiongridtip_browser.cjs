@@ -49,7 +49,7 @@ const server = http.createServer((req, res) => {
   } catch { res.statusCode = 404; res.end(); }
 });
 const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info",
-  ".sess-status-check-rowref", ".sess-brief-rowref", ".sess-brief-toggle"];
+  ".sess-status-check-rowref", ".sess-brief-rowref"];
 (async () => {
   await safeListen(server);
   const browser = await chromium.launch({ headless: true });

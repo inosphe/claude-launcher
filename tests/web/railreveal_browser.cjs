@@ -256,14 +256,24 @@ const landing = (page, name) => page.evaluate((name) => {
     await bare.route("**/api/sessions*", async (route) => {
       const answer = await route.fetch();
       const body = await answer.json();
-      // Drop s040..s139, keeping the head, the foot and so the target with
-      // its parent and grandparent: 201 rows minus 100 = 101, against a
-      // 160-row threshold. The name is parsed whole -- `startsWith("s0")`
-      // only ever matched s000..s099, so the range above s099 was never
-      // dropped and 141 rows survived.
+      // Drop s060..s109, keeping the head, the foot and so the target with
+      // its parent and grandparent: 201 rows minus 50 = 151, still under the
+      // 160-row threshold that turns on the windowed rail. The name is parsed
+      // whole -- `startsWith("s0")` only ever matched s000..s099, so the
+      // range above s099 was never dropped and 141 rows survived.
+      //
+      // The band was 101 rows until the rail's compact cards got shorter
+      // (claunch-6ezw3: a row now hides its directory, context and attention
+      // lines unless the reader is on it). The estimate a skipped row is
+      // planned with is a per-row error, so a shorter card means a shorter
+      // rail means less of it to accumulate: at 101 rows the bare scroll
+      // landed 507px off on a 564px rail and the assertion below -- "off by
+      // more than a rail" -- stopped holding. The check needs a rail where
+      // the error still shows, so it keeps 151 rows instead of 101. Measure
+      // before changing this range: the margin is about 1.7x a rail.
       const thin = (body.sessions || []).filter((s) => {
         const m = /^s(\d+)$/.exec(s.name || "");
-        return !(m && Number(m[1]) >= 40 && Number(m[1]) < 140);
+        return !(m && Number(m[1]) >= 60 && Number(m[1]) < 110);
       });
       await route.fulfill({ json: { ...body, sessions: thin }, headers: answer.headers() });
     });
@@ -302,6 +312,10 @@ const landing = (page, name) => page.evaluate((name) => {
     // Unconditional: the row has to be there for the step to mean anything,
     // and a missing row is a broken fixture rather than a reason to look away.
     assert.ok(estimated, "the target row must be drawn on the thinned rail");
+    // The bar is a rail-height because that is what the press used to get
+    // wrong by; it is a floor on the effect, not the effect itself. With the
+    // shorter compact cards (claunch-6ezw3) the thinned fixture measures
+    // ~957px against this 564px rail -- see the range in the route above.
     assert.ok(Math.abs(estimated.error) > estimated.railHeight,
       `without the laid-out rail the same scroll is off by more than a rail: ${estimated.error}px`
       + ` (rail ${estimated.railHeight}px, height estimated ${estimated.before}`

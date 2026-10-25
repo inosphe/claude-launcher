@@ -56,6 +56,11 @@ new Function("exports", "document",
     "const railSeen = { rows: 0, px: 0, closed: false };",
     "const railSeenKeys = new Set();",
     "const RAIL_ESTIMATE_SAMPLE = 32;",
+    // The rail's densities: the height model samples each one apart, so the
+    // estimate a row is planned with depends on which card it is drawn as.
+    "const railSeenByMode = new Map();",
+    slice("railSeenFor"),
+    slice("railRowMode"),
     slice("railEstimatePx"),
     slice("railRowKey"),
     slice("railRowPxOf"),
@@ -65,6 +70,7 @@ new Function("exports", "document",
     slice("railMeasureRows"),
   ].join("\n") + "\nexports.api = { railWindowPlan, railSpacerRow, railRowKey,"
   + " railRowPxOf, railRowPx, railSeen, railSeenKeys, railEstimatePx,"
+  + " railSeenFor, railSeenByMode,"
   + " railOffsets, railMeasureRows, RAIL_WINDOW_MIN_ROWS,"
   + " RAIL_ROW_EST_PX, RAIL_WINDOW_OVERSCAN_PX, RAIL_ESTIMATE_SAMPLE };")(
   ctx,

@@ -35,6 +35,17 @@ function slice(name) {
 }
 const capLine = src.match(/^const RAIL_MESH_TAGS = .+$/m);
 if (!capLine) throw new Error("cannot locate RAIL_MESH_TAGS in app.js");
+/* The card-density block: which role families exist, which of them draw as a
+   one-line card, and the decision itself. Sliced whole (the Map's `for` loop
+   fills it) because the row builder's `data-rail-mode` comes from it, and
+   railcardmode_check pins what it decides — here it only has to run. */
+const densitySrc = [
+  src.match(/^const RAIL_ROLE_FAMILIES = new Map\(\);[\s\S]*?^}$/m),
+  src.match(/^const RAIL_MIN_CARD_FAMILIES = .+$/m),
+].map((m) => {
+  if (!m) throw new Error("cannot locate the rail card-density constants");
+  return m[0];
+}).join("\n");
 
 let failures = 0;
 function check(what, got, want) {
@@ -179,10 +190,11 @@ function decorateBriefingRow(li, s) {}
 const ctx = {};
 new Function(
   "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
-  stubs + capLine[0] + "\n"
+  stubs + capLine[0] + "\n" + densitySrc + "\n"
   + slice("sessionCategory") + slice("sessionMatchesFilter")
   + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")
+  + slice("railRoleFamily") + slice("railSessionRole") + slice("railCardMode")
   + slice("refreshSessions")
   + `
 Object.assign(exports, {
@@ -262,9 +274,13 @@ ctx.setMeshes([
      what it says and when). It is listed here because this line is a census
      of the name line: a part that stopped being a child of the box would be
      loose on the row, which is the wrap this whole harness exists to catch. */
+  /* The role pill now also carries its family's colour class (role-worker,
+     app.js railRoleFamily); the pill's place on the line is what this census
+     is about, so the colour class is part of the expected string rather than
+     something the check has to look past. */
   check("name, keyboard chip, role and rooms share one container",
         head("s21").kids.map((k) => k.className),
-        ["rail-name", "rail-keys hidden", "mesh-role", "rail-meshes"]);
+        ["rail-name", "rail-keys hidden", "mesh-role role-worker", "rail-meshes"]);
   check("the mesh tags sit beside the role badge, not under the row",
         some(find("s21", ".rail-mesh").parent).parent?.className ?? "(loose)",
         "rail-head");
@@ -410,20 +426,17 @@ ctx.setMeshes([
   check("a long unbreakable token breaks rather than widening the rail",
         decl("#session-list .rail-brief", "overflow-wrap"), "anywhere");
 
-  const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));
-  ok("the ▸ toggle declares an order", Number.isFinite(toggleOrder));
+  /* The buttons box is the first full-width breaker under the name line, and
+     every other sub-line sorts after it. It used to also be the briefing ▸
+     toggle's own line, and the assertions here were pinned to the toggle's
+     order; the rail has no row fold any more (app.js railCardMode — picking a
+     card expands it), so the box's own order is the anchor. */
   const actionsOrder = Number(decl("#session-list .rail-actions", "order"));
   ok("the buttons line declares an order", Number.isFinite(actionsOrder));
+  check("the rail draws no briefing toggle — picking a card expands it",
+        decl("#session-list .sess-brief-toggle", "order"), undefined);
   for (const sel of BREAKERS) {
-    if (sel === "#session-list .rail-actions") {
-      // The buttons line is the toggle's own line: it sorts at the toggle's
-      // order, directly after the name line, and the toggle's matching order
-      // keeps it the last button inside the box.
-      ok(`${sel} sorts at the toggle's order — it is the toggle's line`,
-         Number.isFinite(actionsOrder) && actionsOrder === toggleOrder,
-         `order ${decl(sel, "order")} vs toggle ${toggleOrder}`);
-      continue;
-    }
+    if (sel === "#session-list .rail-actions") continue;
     const o = Number(decl(sel, "order"));
     ok(`${sel} sorts after the buttons line so the name and buttons keep their lines`,
        Number.isFinite(o) && o > actionsOrder, `order ${decl(sel, "order")} vs buttons line ${actionsOrder}`);

@@ -360,10 +360,15 @@ served = { sessions: [
     (css.match(/#session-list \.rail-cwd \.cwd-branch \{([^}]*)\}/) || [])[1] || "";
   check("the branch never shrinks to nothing", /flex:\s*none/.test(branchRule), true);
   const order = Number((rule.match(/order:\s*(\d+)/) || [])[1]);
-  const toggle = Number(((css.match(/#session-list \.sess-brief-toggle \{([^}]*)\}/) || [])[1]
-                         .match(/order:\s*(\d+)/) || [])[1]);
-  check("...and sorts after the ▸ toggle so the toggle keeps the name line",
-        Number.isFinite(order) && Number.isFinite(toggle) && order > toggle, true);
+  /* The buttons line is what the sub-lines sort after — it is the first
+     full-width breaker under the name line. It used to hold the briefing ▸
+     toggle and the sub-lines were pinned to sort after THAT; the rail has no
+     row fold any more (app.js railCardMode), so the box itself is the
+     anchor and the line budget is the same one. */
+  const actionsRule = (css.match(/#session-list \.rail-actions \{([^}]*)\}/) || [])[1] || "";
+  const actions = Number((actionsRule.match(/order:\s*(\d+)/) || [])[1]);
+  check("...and sorts after the buttons line so the name line keeps its own row",
+        Number.isFinite(order) && Number.isFinite(actions) && order > actions, true);
   check("the daemon-cwd form has its own, dimmer rule",
         /#session-list \.rail-cwd\.unknown \{/.test(css), true);
 

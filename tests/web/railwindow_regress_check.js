@@ -257,6 +257,7 @@ new Function(
   + slice("sessionSearchText") + slice("sessionMatchesSearch")
   + slice("sessionSearchLineage") + optionalSlice("railAgreed")
   + optionalSlice("railSearchRedraw")
+  + optionalSlice("railSeenFor") + optionalSlice("railRowMode")
   + slice("railEstimatePx") + slice("railRowKey") + slice("railRowPxOf")
   + optionalSlice("railOffsets") + slice("railWindowPlan") + slice("railSpacerRow")
   + slice("railMeasureRows") + slice("railWindowForPass")

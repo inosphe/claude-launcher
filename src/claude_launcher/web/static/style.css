@@ -653,6 +653,84 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   display: flex; align-items: center; gap: 5px; font-size: 13px;
   flex-wrap: wrap;  /* the cflow badge is a full-width second line */
 }
+/* ---------------------------------------------------------------------
+   Card density (app.js railCardMode; the row says which with
+   `data-rail-mode`).
+
+   The rail is read as a list of many sessions at once, so the default is
+   the short card: the name line and the briefing one-line, nothing else.
+   Everything the row knows is still in the DOM -- the lines are hidden, not
+   left unbuilt -- because the same row is expanded by the reader picking
+   it, and a rebuild just to reveal a line would lose focus, hover and the
+   scroll position for a card that is already in hand.
+
+   min       one line: dot, name, role. Reviewer and oneshot rows.
+   compact   three lines: name, briefing one-line, buttons. The default.
+   expanded  every line the row has, plus the briefing card.
+
+   Hidden with `display: none` rather than `visibility`, so an expanded row
+   is the only one whose height counts these lines at all -- which is what
+   the height model expects (railRowKey keys the density in).
+   --------------------------------------------------------------------- */
+#session-list li[data-rail-mode="min"] { padding: 4px 10px 4px 16px; }
+#session-list li[data-rail-mode="min"] .rail-actions,
+#session-list li[data-rail-mode="min"] .rail-cwd,
+#session-list li[data-rail-mode="min"] .rail-ctx-line,
+#session-list li[data-rail-mode="min"] .rail-ctx-tokens,
+#session-list li[data-rail-mode="min"] .rail-tps-line,
+#session-list li[data-rail-mode="min"] .rail-usage-line,
+#session-list li[data-rail-mode="min"] .rail-seen,
+#session-list li[data-rail-mode="min"] .rail-life,
+#session-list li[data-rail-mode="min"] .rail-quiet,
+#session-list li[data-rail-mode="min"] .rail-brief,
+#session-list li[data-rail-mode="min"] .rail-note,
+#session-list li[data-rail-mode="min"] .rail-progress,
+#session-list li[data-rail-mode="min"] .rail-procs,
+#session-list li[data-rail-mode="min"] .rail-commits,
+#session-list li[data-rail-mode="min"] .rail-status-checks,
+#session-list li[data-rail-mode="min"] .rail-talk,
+#session-list li[data-rail-mode="min"] .rail-beads,
+#session-list li[data-rail-mode="min"] .sess-cflow,
+#session-list li[data-rail-mode="min"] .sess-cflow2,
+#session-list li[data-rail-mode="min"] .sess-sims,
+#session-list li[data-rail-mode="min"] .sess-brief,
+#session-list li[data-rail-mode="min"] .meta,
+#session-list li[data-rail-mode="min"] .rail-meshes,
+#session-list li[data-rail-mode="min"] .rail-handle,
+#session-list li[data-rail-mode="min"] .rail-watch,
+#session-list li[data-rail-mode="min"] .rail-keys,
+#session-list li[data-rail-mode="min"] .rail-compacting {
+  display: none;
+}
+/* The compact card: the name line, the one-line summary, and the buttons
+   that act on the session. The profile meta stays -- "nc" / "ds4" is how a
+   reader tells two sessions of the same job apart. */
+#session-list li[data-rail-mode="compact"] .rail-cwd,
+#session-list li[data-rail-mode="compact"] .rail-ctx-line,
+#session-list li[data-rail-mode="compact"] .rail-ctx-tokens,
+#session-list li[data-rail-mode="compact"] .rail-tps-line,
+#session-list li[data-rail-mode="compact"] .rail-usage-line,
+#session-list li[data-rail-mode="compact"] .rail-seen,
+#session-list li[data-rail-mode="compact"] .rail-life,
+#session-list li[data-rail-mode="compact"] .rail-quiet,
+#session-list li[data-rail-mode="compact"] .rail-note,
+#session-list li[data-rail-mode="compact"] .rail-progress,
+#session-list li[data-rail-mode="compact"] .rail-procs,
+#session-list li[data-rail-mode="compact"] .rail-commits,
+#session-list li[data-rail-mode="compact"] .rail-status-checks,
+#session-list li[data-rail-mode="compact"] .rail-talk,
+#session-list li[data-rail-mode="compact"] .sess-sims,
+#session-list li[data-rail-mode="compact"] .sess-brief {
+  display: none;
+}
+/* Cflow badges are the exception on a compact card: a run that wants the
+   reader's keyboard is the one thing a short card must not swallow. */
+#session-list li[data-rail-mode="compact"] .sess-cflow:not(.gated),
+#session-list li[data-rail-mode="compact"] .sess-cflow2:not(.gated) {
+  display: none;
+}
+/* The expanded card is every line the row has, in the order the rest of this
+   sheet already gives them — it needs no rule of its own. */
 /* A stand-in row for the rows the rail does not draw (app.js, claunch-thuwx):
    it holds their height so the list keeps its full length and the scrollbar
    does not move. `#session-list li` above would add its padding and border to
@@ -699,12 +777,53 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li.goto-flash {
   background: #1b2a44; box-shadow: inset 0 0 0 1px #1f6feb;
 }
-/* A spawned session sits under the one that spawned it. The indent is set
-   per row in JS (it depends on depth); this is the tick that says the indent
-   is lineage and not decoration. */
+/* A spawned session sits under the one that spawned it.
+
+   The indent alone did not say that. A reader scanning twenty rows saw a
+   ragged left edge and one `└`, and the fleet's shape — which sessions are
+   one pile under one parent, and how deep — was the thing they came to the
+   rail to find. So a child row is drawn as a CARD that sits on the one above
+   it: its own face on a darker rim, a rounded right edge, and a spine at its
+   level that runs down to the next sibling. Rows of the same parent share
+   the spine, so a pile reads as one column with the parent's card behind it.
+
+   The indent is still set per row in JS (it depends on depth) and stays the
+   measure of nesting; the spine is placed just left of the child's own tick
+   (`::before`) by depth, so the tick always lands on the line it hangs from.
+
+   Background and rim, not extra elements: the row is a flex container whose
+   children are its lines, and anything inserted into it would count against
+   the line budget raillayout_check pins. `::before` and `::after` are not
+   children of a flex container in that sense — `::before` already was the
+   tick — and neither takes part in the wrap. */
+#session-list li.child {
+  position: relative;
+  background: #171b21;
+  border-radius: 0 7px 7px 0;
+  border-bottom-color: #171b21;
+  box-shadow: inset 0 0 0 1px #262c35;
+}
+/* The tick that hangs the row off its parent: the same glyph as before, now
+   in the child's own rim colour so it reads as part of the card. */
 #session-list li.child::before {
   content: "└"; color: #6e7681; font-size: 11px; flex: none; margin-right: -2px;
 }
+/* The spine, at the level the indent put this row. `left` is the row's
+   padding-left (12 + min(depth, 4) * 10, app.js) minus 14px, which puts it
+   between the parent's card edge and this row's tick. Depth stops at four
+   for the same reason the indent does. */
+#session-list li.child::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 8px; width: 2px;
+  background: #30363d; border-radius: 1px; pointer-events: none;
+}
+#session-list li.child[data-rail-depth="2"]::after { left: 18px; }
+#session-list li.child[data-rail-depth="3"]::after { left: 28px; }
+#session-list li.child[data-rail-depth="4"]::after { left: 38px; }
+/* The card's own states: the shared hover/active tints are the rail's flat
+   row colour, and this row is not that shape any more. Kept a step lighter
+   than the face so a hovered child still reads as the card it is. */
+#session-list li.child:hover { background: #20262e; }
+#session-list li.child.active { background: #262d38; }
 /* A row the search does not match, kept in view because it is the parent,
    an ancestor or a descendant of a match (claunch-78p7b): faded so the
    matches stand out from the tree around them. */
@@ -829,6 +948,41 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list .mesh-role {
   flex: 0 1 auto; padding: 1px 5px; min-width: 3em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* What a session IS, in one colour per role family (app.js railRoleFamily).
+   The rail carries dozens of these pills down one column, and reading them
+   was reading the words one at a time; with the families coloured, the
+   leader, the reviewer and the workers separate at a glance and the eye
+   lands on the odd one out.
+
+   Only the pill's colours change — its size, its floor and its ellipsis are
+   the shared rule above. The rim is an inset shadow rather than a border for
+   that reason: a border would add two pixels to every coloured pill and make
+   the row taller for the sessions whose role happens to be coloured.
+
+   Six families and one fallback. A role the table does not know gets the
+   neutral pill (.mesh-role's own), because a colour is a claim about what
+   the session is and an unknown role has nothing to claim. */
+#session-list .mesh-role.role-leader {
+  background: #2d2308; color: #e3b341; box-shadow: inset 0 0 0 1px #4d3c10;
+}
+#session-list .mesh-role.role-operator {
+  background: #2b1a3a; color: #d2a8ff; box-shadow: inset 0 0 0 1px #4b3168;
+}
+#session-list .mesh-role.role-worker {
+  background: #172947; color: #58a6ff; box-shadow: inset 0 0 0 1px #29416b;
+}
+#session-list .mesh-role.role-reviewer {
+  background: #2a1526; color: #ff7b9c; box-shadow: inset 0 0 0 1px #54263d;
+}
+#session-list .mesh-role.role-oneshot {
+  background: #0c2a2e; color: #39c5cf; box-shadow: inset 0 0 0 1px #1c4a50;
+}
+#session-list .mesh-role.role-specialist {
+  background: #10251a; color: #56d364; box-shadow: inset 0 0 0 1px #1b4522;
+}
+#session-list .mesh-role.role-free {
+  background: #191d24; color: #6e7681; box-shadow: inset 0 0 0 1px #2a2e36;
 }
 /* The selected card used to draw its role again on a line of its own and hide
    the name line's copy (claunch-g4owg.1). That is gone (claunch-hknpm): the
@@ -981,22 +1135,15 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 /* Blocked on the person reading this — the amber that means "your move". */
 #session-list .sess-cflow.gated { color: #d29922; font-weight: 600; }
 
-/* The briefing card a row folds open. Its pieces are appended after the
-   row's inline children, so flex `order` (not DOM order) lines them up:
-   the name line first, then the buttons line (CSS, .rail-actions), then
-   the cflow line, then the card — the wrap algorithm runs after ordering,
-   so each still breaks where its flex-basis says. */
-#session-list .sess-brief-toggle {
-  /* order 1 inside .rail-actions keeps the toggle the last of the row's
-     buttons; the buttons line itself is ordered after the name line. */
-  flex: none; order: 1; background: none; border: none; color: #6e7681;
-  font-size: 14px; line-height: 1; padding: 4px 6px; cursor: pointer;
-  min-width: 26px; min-height: 26px;
-}
-#session-list .sess-brief-toggle:hover:not(:disabled) { color: #58a6ff; }
-/* off (no llm: block): still visible so the feature is discoverable, but
-   plainly inert — the tooltip carries the how-to-enable */
-#session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
+/* The briefing card an expanded row carries. Its pieces are appended after
+   the row's inline children, so flex `order` (not DOM order) lines them up:
+   the name line first, the buttons line (.rail-actions), the sub-lines, then
+   the card — the wrap algorithm runs after ordering, so each still breaks
+   where its flex-basis says.
+
+   There is no fold any more: the card is what an expanded card IS (app.js
+   railCardMode), so opening it is the same act as picking the session. The
+   `▸` toggle and its glyph rule are gone with it. */
 #session-list .sess-cflow { order: 3; }
 /* The session's cflow v2 run (applyCflow2Badges): its own line under the v1
    one, same indent and the same amber when a person owes it something. The

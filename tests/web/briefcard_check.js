@@ -1,14 +1,19 @@
 /* The rail's briefing card, run against the real functions from app.js.
 
-   Each session row carries a toggle that folds open a card summarising the
-   session — goal / now / state / progress, produced by the daemon's LLM.
-   What has to hold: opening the card asks the daemon once and shows what
-   came back; the ⟳ re-asks with refresh=1 while keeping the stale text
-   readable underneath; the card tells apart the daemon's four answers
-   (a briefing, prose that missed the shape, "no LLM configured", "no
-   record"); blocked/waiting wear the loud classes while an unrecognised
-   state stays neutral; and the open card survives the row rebuild every
-   poll performs, because the open-set and the cache live outside the rows. */
+   An EXPANDED rail row carries a card summarising the session — goal /
+   now / state / progress, produced by the daemon's LLM. There is no fold any
+   more (app.js railCardMode): a card is expanded because the reader is on it
+   — the terminal on screen, the detail panel's subject, a pinned session —
+   and a card at another density carries no briefing at all.
+
+   What has to hold: an expanded card asks the daemon once, on sight, because
+   no control is left to ask with; it shows what came back; the ⟳ re-asks
+   with refresh=1 while keeping the stale text readable underneath; the card
+   tells apart the daemon's four answers (a briefing, prose that missed the
+   shape, "no LLM configured", "no record"); blocked/waiting wear the loud
+   classes while an unrecognised state stays neutral; and the card survives
+   the row rebuild every poll performs, because the cache lives outside the
+   rows. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -82,9 +87,13 @@ function mkel(tag) {
 }
 
 const list = mkel("ul");
-function row(name) {
+/* A rail row as refreshSessions builds one: the density is an attribute the
+   stylesheet and applyBriefingCards both read (app.js railCardMode). `expanded`
+   is the card the reader is on, which is the only one that draws a briefing. */
+function row(name, mode = "expanded") {
   const li = mkel("li");
   li.dataset.name = name;
+  li.dataset.railMode = mode;
   list.appendChild(li);
   return li;
 }
@@ -110,7 +119,7 @@ new Function(
    slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
    slice("statusCheckName"), slice("statusCheckRefreshState"),
    slice("paintStatusCheckRefresh"), slice("appendStatusChecks"),
-   slice("fetchBriefing"), slice("toggleBriefing"),
+   slice("fetchBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
    slice("applyBriefingCards"), slice("syncRowRefresh")].join("\n") + `
 const briefingOpen = new Set();
@@ -133,7 +142,7 @@ function check(what, got, want) {
   }
 }
 
-const toggle = (li) => li.querySelector(".sess-brief-toggle");
+
 const card = (li) => li.querySelector(".sess-brief");
 const note = (li) => li.querySelector(".sess-brief-note");
 const click = (n) => n.listeners.click({ stopPropagation() {} });
@@ -152,25 +161,26 @@ const kv = (li) => {
     { id: "tests", name: "Tests", question: "Did the targeted tests pass?", answer: "yes" },
   ] });
 
-  /* Every row grows a closed toggle; nobody grows a card unasked. */
-  ctx.apply();
-  check("each row carries a toggle, closed",
-        [toggle(rows.s1).textContent, toggle(rows.s2).textContent], ["▸", "▸"]);
-  check("no card before anyone asks", card(rows.s1), null);
-
-  /* Opening asks the daemon for this session's briefing, says so while it
-     is out, and renders the four fields when it lands. */
-  const iso = new Date(Date.now() - 90_000).toISOString();
+  /* The rail has no fold. The card is what an EXPANDED row carries, so the
+     first apply asks the daemon for that session's briefing unprompted —
+     there is no control left to ask with, and an expanded card that said
+     "nothing yet" under a reader who could not open it would be worse than
+     no card. */
   answer = { status: 200, body: {
-    session: "s1", generated_at: iso, cached: false,
-    source: { jsonl: true, cflow: true },
+    session: "s1", generated_at: new Date(Date.now() - 90_000).toISOString(),
+    cached: false, source: { jsonl: true, cflow: true },
     briefing: { goal: "ship the card", now: "wiring CSS",
                 state: "working", progress: "2 of 3 pieces done" },
     raw: null,
   } };
-  click(toggle(rows.s1));
-  check("opening asks for this session's briefing",
-        calls, ["/api/sessions/s1/briefing?cached=1"]);
+  ctx.apply();
+  /* Order is not the contract: fetchBriefing repaints the cards when it
+     starts, and that repaint asks for the sessions still uncached, so the
+     second row can reach the daemon before the first. What matters is that
+     every expanded row asked once, uncached. */
+  check("every expanded row asks for its session's briefing on sight",
+        [...calls].sort(), ["/api/sessions/s1/briefing?cached=1",
+                            "/api/sessions/s2/briefing?cached=1"]);
   check("the card says it is summarising while the answer is out",
         note(rows.s1).textContent, "summarising…");
   await flush();
@@ -188,8 +198,23 @@ const kv = (li) => {
         [statusIcon.textContent, statusIcon.className, statusIcon.title,
          statusIcon.parent.children[1].textContent],
         ["✓", "status-check-icon check-yes", "Did the targeted tests pass?", "Tests"]);
-  check("the toggle now reads open", toggle(rows.s1).textContent, "▾");
-  check("the neighbour is untouched", card(rows.s2), null);
+
+  /* A card at another density carries none: the compact card says what the
+     session is doing with the one-line it already has, and the one-line
+     roles have a single line of their own. Moving the row's density is what
+     opens and closes it, and that is the rail's attribute, not a button. */
+  ctx.apply();
+  rows.s1.dataset.railMode = "compact";
+  ctx.apply();
+  check("a compact row carries no card", card(rows.s1), null);
+  rows.s1.dataset.railMode = "min";
+  ctx.apply();
+  check("a one-line row carries no card either", card(rows.s1), null);
+  rows.s1.dataset.railMode = "expanded";
+  const before = calls.length;
+  ctx.apply();
+  check("going back to expanded draws the card from cache, asking nothing new",
+        [calls.length, kv(rows.s1).goal], [before, "ship the card"]);
 
   /* ⟳ re-asks with refresh=1; the stale text stays readable, dimmed, and
      the button spins so a second click can't stack a second request. */
@@ -202,7 +227,7 @@ const kv = (li) => {
   } };
   click(card(rows.s1).querySelector(".sess-brief-refresh"));
   check("the refresh asks again, uncached",
-        calls[1], "/api/sessions/s1/briefing?refresh=1");
+        calls.at(-1), "/api/sessions/s1/briefing?refresh=1");
   check("the stale text stays readable under the refresh",
         [card(rows.s1).className, kv(rows.s1).goal],
         ["sess-brief refreshing", "ship the card"]);
@@ -218,18 +243,14 @@ const kv = (li) => {
         card(rows.s1).querySelector(".sess-brief-age").textContent,
         "0s ago · cached");
 
-  /* The open card survives the poll's row rebuild — and does NOT re-ask. */
+  /* The card survives the poll's row rebuild — and does NOT re-ask. */
   list.children.length = 0;
   rows.s1 = row("s1"); rows.s2 = row("s2");
+  const rebuiltFrom = calls.length;
   ctx.apply();
-  check("a rebuilt row gets its open card back from cache",
-        [toggle(rows.s1).textContent, kv(rows.s1).now], ["▾", "verifying"]);
-  check("the rebuild asked the daemon nothing", calls.length, 2);
-
-  /* Closing takes the card with it. */
-  click(toggle(rows.s1));
-  check("closing removes the card and flips the glyph",
-        [card(rows.s1), toggle(rows.s1).textContent], [null, "▸"]);
+  check("a rebuilt row gets its card back from cache",
+        kv(rows.s1).now, "verifying");
+  check("the rebuild asked the daemon nothing", calls.length, rebuiltFrom);
 
   /* The daemon's other answers, each told apart.  Prose that missed the
      agreed shape is still shown, as it came. */
@@ -238,18 +259,18 @@ const kv = (li) => {
     source: { jsonl: true, cflow: false },
     briefing: null, raw: "three lines of\nunshaped prose",
   } };
-  click(toggle(rows.s2));
+  const s2row = row("s2b");
+  ctx.apply();
   await flush();
-  const raw = card(rows.s2).querySelector(".sess-brief-raw");
+  const raw = card(s2row).querySelector(".sess-brief-raw");
   check("unshaped prose is shown as it came",
         [raw.tag, raw.textContent], ["pre", "three lines of\nunshaped prose"]);
   check("prose carries no state pill",
-        card(rows.s2).querySelector(".sess-brief-state"), null);
+        card(s2row).querySelector(".sess-brief-state"), null);
 
   const s3 = row("s3");
   answer = { status: 400, body: { error: "llm not configured" } };
   ctx.apply();
-  click(toggle(s3));
   await flush();
   check("no LLM points at the config to write",
         note(s3).textContent,
@@ -259,7 +280,6 @@ const kv = (li) => {
   const s4 = row("s4");
   answer = { status: 404, body: { error: "no record" } };
   ctx.apply();
-  click(toggle(s4));
   await flush();
   check("a session with no record says that, not an error",
         note(s4).textContent, "no session record to summarise");
@@ -267,7 +287,6 @@ const kv = (li) => {
   const s5 = row("s5");
   answer = { status: 500, body: { error: "summariser fell over" } };
   ctx.apply();
-  click(toggle(s5));
   await flush();
   check("a real failure is reported in the daemon's words",
         [note(s5).textContent, note(s5).className],
@@ -284,33 +303,30 @@ const kv = (li) => {
     raw: null,
   } };
   ctx.apply();
-  click(toggle(s6));
   await flush();
   check("an unrecognised state stays neutral",
         card(s6).querySelector(".sess-brief-state").className,
         "sess-brief-state st-other");
   check("an empty progress grows no row", kv(s6), { goal: "g", now: "n" });
 
-  /* No llm: block — the session poll says so and every toggle goes inert:
-     disabled, its tooltip pointing at the config to write, and any open
-     card folded away. Writing the config brings it all back on the next
-     poll, the open-set intact, without anyone reloading. */
+  /* No llm: block. The card is still drawn — the expanded row is what the
+     reader is on, and it is where the missing setting is explained — but it
+     says the setting's how-to rather than a summary, and no request goes
+     out. */
   ctx.setLLM(false);
   ctx.apply();
-  check("without an llm the toggle is disabled, closed",
-        [toggle(s6).disabled, toggle(s6).textContent], [true, "▸"]);
-  check("its tooltip points at the config to write",
-        toggle(s6).title,
+  check("without an llm the expanded card explains the setting instead",
+        note(s6).textContent,
         "briefing off — pick a profile and model in Settings ▸ Briefing model "
         + "(the llm: block of ~/.claude-launcher/.claunch.yaml)");
-  check("the open card is folded away while off", card(s6), null);
+  const quietFrom = calls.length;
+  await flush();
+  check("and nothing is asked of a summariser that is not configured",
+        calls.length, quietFrom);
   ctx.setLLM(true);
   ctx.apply();
-  check("configuring brings the toggle and the open card back",
-        [toggle(s6).disabled, toggle(s6).textContent, kv(s6).goal],
-        [false, "▾", "g"]);
-  check("and the tooltip reads as the feature again",
-        toggle(s6).title, "briefing: goal, current work, state — summarised");
+  check("configuring brings the summary back from cache without a reload",
+        kv(s6).goal, "g");
 
   if (failures) {
     console.error(`${failures} check(s) failed`);
