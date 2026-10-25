@@ -278,11 +278,22 @@ const landing = (page, name) => page.evaluate((name) => {
       await route.fulfill({ json: { ...body, sessions: thin }, headers: answer.headers() });
     });
     await bare.goto(`http://127.0.0.1:${server.address().port}`);
-    const skips = await bare.waitForFunction(() => {
+    /* Wait for the row the next step needs, not merely for "some row, and not
+       windowed". Those are different instants: the windowed class comes off
+       the list as the pass that drops the window is decided, and the redraw
+       that puts every row of the thinned rail into the DOM finishes after it.
+       Waiting only on the class let the `evaluate` below run against the
+       previous pass's slice, find no `s180`, and fail on "the target row must
+       be drawn on the thinned rail" -- intermittently, and only under load,
+       which is where the two instants separate. Measured on tree 95575f3f:
+       2 of 4 `-n 4` runs failed there, while standalone runs passed.
+       The timeout is generous because this is a wait, not an assertion: a rail
+       that genuinely cannot be thinned still fails, on the assertion below. */
+    const skips = await bare.waitForFunction((name) => {
       const list = document.querySelector("#session-list");
-      if (!list || !list.querySelector("li[data-name]")) return false;
-      return !list.classList.contains("rail-windowed");
-    }, null, { timeout: 5000 }).then(() => true, () => false);
+      if (!list || list.classList.contains("rail-windowed")) return false;
+      return !!list.querySelector(`li[data-name="${CSS.escape(name)}"]`);
+    }, TARGET, { timeout: 20000 }).then(() => true, () => false);
     // A skipped step is a lost assertion, not a pass. It used to be silent:
     // `estimated` came back null every run and this harness reported ok while
     // checking nothing here. Failing instead means the day the fixture stops
