@@ -223,6 +223,16 @@ const series = (win, start = 1000) => ({
         [tiny.top, tiny.ratio(200).toFixed(4), tiny.ratio(500).toFixed(4)], [1e6, "0.0005", "0.0013"]);
   const sameSize = ctx.scale([{ input: 700, cache_read: 0, cache_write: 0 }], { top: 1e6 });
   check("one request of one size keeps a non-zero axis", [sameSize.top, sameSize.ratio(700).toFixed(4)], [1e6, "0.0018"]);
+  // 1.4 is what the request named, and it is worth holding here: on this axis
+  // the base is the only knob, and 1.4 is the value that leaves the chart
+  // looking linear, which is why the shipped axis uses 5.44 instead.
+  const biased = (v, top, b) => Math.log(1 + (b - 1) * (v / top)) / Math.log(b);
+  check("the shipped axis puts 300k at half height of a 1M window",
+        biased(300e3, 1e6, 5.44).toFixed(4), "0.4999");
+  check("base 1.4 would leave 458k near the middle, a linear-looking chart",
+        [biased(458e3, 1e6, 1.4).toFixed(3), biased(500e3, 1e6, 1.4).toFixed(3)], ["0.500", "0.542"]);
+  check("the middle of the axis is top*(sqrt(B)-1)/(B-1) for the base in use",
+        Math.round(1e6 * (Math.sqrt(5.44) - 1) / 4.44), 300086);
   const side = (label, window, compact) => ({ label, window, compact });
   const lines = (limits, n = 367e3) => ctx.scale(big1(n), limits).compact.map((l) => [l.at, l.labels]);
   check("one threshold, one line", lines({ top: 1e6, sides: [side("a", 1e6, 9e5)] }), [[9e5, ["a"]]]);
