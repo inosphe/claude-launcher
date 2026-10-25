@@ -916,3 +916,46 @@ def test_scratch_candidate_holds_the_name_rule_and_the_artifact_probe(setup, tmp
     }
     assert taken == {"pytest-of-me", "browser", "s1-preview-r2", "bt-preview", "runs-1"}
     assert not ac.scratch_candidate(scratch / "notes", "s1", set())
+
+
+def test_a_descriptor_exhaustion_reason_says_which_limit(setup, monkeypatch):
+    """``[Errno 24]`` alone cannot say whether this daemon was capped.
+
+    On 2026-10-25 every item of a plan came back ``cleanup_pending`` with the
+    same ``[Errno 24] Too many open files``, and the reason a reader needs —
+    the daemon's own soft limit — was in neither the plan nor the error
+    (claunch-wo1zj.1). The hint is appended to the reason at both places a
+    reason is recorded: measuring an item, and deleting one.
+    """
+    service, root, _, _ = setup
+    completed(root / "s1c1012000000")
+
+    def starve(path, deadline=None):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(ac, "_snapshot", starve)
+    monkeypatch.setattr(ac.open_files, "limits", lambda: (1024, 1048576))
+
+    plan = service.plan("s1")
+
+    assert plan["items"], "nothing to check: the plan had no items"
+    for row in plan["items"]:
+        assert row["status"] == "cleanup_pending"
+        assert "[Errno 24] Too many open files" in row["reason"]
+        assert "soft limit of 1024 of 1048576" in row["reason"]
+
+
+def test_a_reason_that_is_not_descriptor_exhaustion_is_left_alone(setup, monkeypatch):
+    """The hint is for ``EMFILE``/``ENFILE`` only, not for every failure."""
+    service, root, _, _ = setup
+    completed(root / "s1c1012000000")
+
+    def denied(path, deadline=None):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(ac, "_snapshot", denied)
+
+    plan = service.plan("s1")
+
+    assert plan["items"]
+    assert all(row["reason"] == "[Errno 13] Permission denied" for row in plan["items"])
