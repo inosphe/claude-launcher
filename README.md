@@ -3509,13 +3509,30 @@ Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` 
   setup" seed that left it out does not untick it; take it off the list to
   stop. Installed or not makes no difference: a session gets the workspace's
   copy, or claunch's when the workspace has not installed it, and the form
-  says which. Until saved, `DEFAULT_PACKS` in `prompt_packs.py` (`asking-the-user`, `common`, `korean-replies`, `mcp-threads`, `mcp-qa`, `mcp-sim`);
-  which packs are defaults is this setting's value, not something a pack's
-  header declares. Only the web form reads it: `--prompt-pack` on the CLI and
-  `prompt_packs` on MCP `spawn` take exactly the packs named.
+  says which. Each pack's own header says whether it starts ticked
+  (`check_default: true`; the six shipped packs that say so are
+  `asking-the-user`, `common`, `korean-replies`, `mcp-qa`, `mcp-sim` and
+  `mcp-threads`), and the setting holds **one statement per pack**
+  (`{pack id: true|false}`) that wins over that header for the packs it
+  names. A pack the setting does not mention keeps its header's answer, so a
+  pack added to the package later starts ticked without anyone editing this
+  file; a workspace copy whose header says something wins over both for its
+  own id, so a tick here does not reach a workspace whose copy states its own
+  answer — the Settings card marks such a row and names the workspace. The
+  form saves **only the rows an operator changed**: a row left as the pack
+  answered is not written, so it keeps following the header (and a workspace
+  copy's header keeps winning there). A list of ids is still read as "these
+  are ticked and the other shipped defaults are not". Only the web form reads
+  it: `--prompt-pack` on the CLI and `prompt_packs` on MCP `spawn` take
+  exactly the packs named.
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
-  not; the form shows them ticked and locked with a 🔒 <role> badge. A
+  not; the form shows them ticked and locked with a 🔒 <role> badge. The
+  setting overrides **one row at a time**: a role it names takes its own
+  list, and a role it does not name keeps the package's packs — so a role the
+  package adds later is not hidden by a config written before it existed
+  (claunch-imo9c.3). `{"worker": []}` states that a role requires no pack;
+  leaving the row out does not. A
   required pack needs no install: the workspace's copy is used when it has
   one (an edit there wins), and the copy claunch ships otherwise — the form
   badges it "claunch", the opening block says "shipped with claunch" and
@@ -3555,16 +3572,23 @@ the stance followed by the text of those packs (the copy installed in the
 current directory's workspace, or claunch's), which is how a member that
 joined by hand, without a create-time opening, reads them.
 
-HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings and
-`shipped_default_packs`),
+HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings,
+`shipped_default_packs` — what the packs' headers say —,
+`saved_default_packs` — the per-pack overrides the config states — and
+`saved_role_packs` — the role rows the config states, apart from the merged
+answer, so a card can tell an operator's row from the package's; each
+workspace row carries `copy_check_default`, what that workspace's copy states
+about starting ticked, which is the value that wins there),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),
 `GET /api/prompt-packs/text?id=&cwd=` (one pack's text as a session there
 would get it, with `source` — `workspace` or `package` — and for a workspace
 copy its `status`: `current`, `stale`, `edited` or `local`; 404 for an id
 that is neither installed nor shipped),
 `POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
-`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
-restores a default; a bad id in either saves neither).
+`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; each
+overrides item by item, `default_packs` takes `{pack id: bool}` or a list of
+ids, `null` clears that setting so its defaults answer again, and a bad id or
+value in either saves neither).
 
 #### Workspace prompt (every session created in a workspace)
 

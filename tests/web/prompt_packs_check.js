@@ -650,8 +650,10 @@ const DOC = {
       { id: "beads", status: "stale" }, { id: "common", status: "current" },
     ] },
   ],
-  role_packs: { unreal: ["unreal-operator"] },
+  role_packs: { unreal: ["unreal-operator"], worker: ["role-worker"] },
+  saved_role_packs: { unreal: ["unreal-operator"] },
   default_packs: ["common"],
+  saved_default_packs: {},
   roles: ["leader", "unreal", "worker"],
 };
 
@@ -695,16 +697,26 @@ check("force only after a confirm, and a declined confirm sends nothing", async 
   ]);
 });
 
-check("the settings draft starts from the saved mapping", () => {
+check("the settings draft holds only what the operator stated", () => {
   card.doc = DOC;
   card.card();
-  assert.deepEqual(card.draft(), {
-    role_packs: { unreal: ["unreal-operator"] }, default_packs: ["common"],
-  });
+  // The two settings override item by item, so the draft carries the
+  // operator's rows alone: a row it drew and nobody touched is not a
+  // statement, and saving it would freeze the package's answer as an
+  // override that masks a workspace copy's header (claunch-imo9c.3 review,
+  // finding 1).
+  const draft = card.draft();
+  assert.deepEqual(draft.role_packs, { unreal: ["unreal-operator"] });
+  assert.deepEqual(draft.default_packs, {});
 });
 
 check("the default packs are one list of checkboxes, saved with the role mapping", async () => {
-  card.doc = { ...DOC, default_packs: ["beads"], shipped_default_packs: ["common"] };
+  card.doc = {
+    ...DOC,
+    default_packs: ["common"],
+    shipped_default_packs: ["common"],
+    saved_default_packs: {},
+  };
   // The previous check left a draft; discarding it reads the doc again.
   const discard = (n) => n.tag === "button" && n.textContent === "Discard changes";
   all(card.card(), discard)[0].handlers.click[0]();
@@ -712,21 +724,93 @@ check("the default packs are one list of checkboxes, saved with the role mapping
   assert.equal(all(c, (n) => n.id === "prompt-pack-always").length, 0);
   const list = all(c, (n) => n.id === "prompt-pack-defaults")[0];
   const items = list.children.map((l) => [l.children[1].textContent, l.children[0].checked]);
-  assert.deepEqual(items.slice(0, 2), [["beads", true], ["common", false]]);
-  // The note says what Restore defaults puts back, read from the doc.
-  assert.match(text(c), /Restore defaults sets: common\./);
-  const common = list.children[1].children[0];
-  common.checked = true;
+  // Ticks the packs' own headers answer: common says yes, beads says nothing.
+  assert.deepEqual(items.slice(0, 2), [["beads", false], ["common", true]]);
+  // The note names the packs whose own header says they start ticked, so an
+  // operator can tell their override from the pack's answer.
+  assert.match(text(c), /the shipped packs that say yes are: common/);
+  assert.doesNotMatch(list.children[0].children.map((n) => n.textContent).join(""),
+    /overrides its header/);
+  // A row whose tick disagrees with its header is marked as an override.
+  const beads = list.children[0].children[0];
+  beads.checked = true;
+  beads.handlers.change[0]();
+  assert.deepEqual(card.draft().default_packs, { beads: true });
+  const row = all(card.card(), (n) => n.id === "prompt-pack-defaults")[0];
+  assert.match(row.children[0].children.map((n) => n.textContent).join(""),
+    /beads \(overrides its header\)/);
+  // A tick back to the header's own answer drops the key: the pack follows
+  // its header again, which is not the same as stating the header's value.
+  const common = row.children[1].children[0];
+  common.checked = false;
   common.handlers.change[0]();
+  assert.deepEqual(card.draft().default_packs, { beads: true, common: false });
+  const again = all(card.card(), (n) => n.id === "prompt-pack-defaults")[0];
+  const common2 = again.children[1].children[0];
+  common2.checked = true;
+  common2.handlers.change[0]();
+  assert.deepEqual(card.draft().default_packs, { beads: true });
   calls.length = 0;
-  const save = all(c, (n) => n.tag === "button" && n.textContent === "Save")[0];
+  const save = all(card.card(), (n) => n.tag === "button" && n.textContent === "Save")[0];
   await save.handlers.click[0]();
-  assert.deepEqual(calls.pop(), { url: "/api/prompt-packs/role-packs", body: {
-    role_packs: { unreal: ["unreal-operator"] }, default_packs: ["beads", "common"],
-  } });
+  // Only the rows the operator changed are sent: one override, and the
+  // operator's own role rows.
+  const sent = calls.pop();
+  assert.equal(sent.url, "/api/prompt-packs/role-packs");
+  assert.deepEqual(sent.body.role_packs, { unreal: ["unreal-operator"] });
+  assert.deepEqual(sent.body.default_packs, { beads: true });
   const reset = all(card.card(), (n) => n.tag === "button" && n.textContent === "Restore defaults")[0];
   await reset.handlers.click[0]();
   assert.deepEqual(calls.pop().body, { role_packs: null, default_packs: null });
+});
+
+check("a row a workspace copy decides says so", () => {
+  // The workspace's copy is applied last (default_packs), so a tick in this
+  // machine-wide setting cannot reach that workspace. The row states it
+  // instead of drawing a switch that has no effect (claunch-imo9c.3 review).
+  card.doc = {
+    ...DOC,
+    workspaces: [
+      { name: "proj", path: "F:/proj", packs: [
+        { id: "beads", status: "edited", copy_check_default: false },
+        { id: "common", status: "missing", copy_check_default: null },
+      ] },
+    ],
+    shipped_default_packs: ["common"],
+    saved_default_packs: {},
+  };
+  const discard = (n) => n.tag === "button" && n.textContent === "Discard changes";
+  const stale = all(card.card(), discard)[0];
+  if (stale) stale.handlers.click[0]();
+  const list = all(card.card(), (n) => n.id === "prompt-pack-defaults")[0];
+  assert.match(list.children[0].children.map((n) => n.textContent).join(""),
+    /its copy in proj states its own answer, which wins there/);
+  assert.doesNotMatch(list.children[1].children.map((n) => n.textContent).join(""),
+    /states its own answer/);
+});
+
+check("Remove states that a role requires no pack, and keeps the row", () => {
+  card.doc = {
+    ...DOC,
+    role_packs: { unreal: ["unreal-operator"], worker: ["beads"] },
+    saved_role_packs: {},
+  };
+  const discard = (n) => n.tag === "button" && n.textContent === "Discard changes";
+  const stale = all(card.card(), discard)[0];
+  if (stale) stale.handlers.click[0]();
+  const table = all(card.card(), (n) => n.className === "md-table prompt-pack-roles")[0];
+  const worker = table.children.find((tr) => tr.children[0].textContent === "worker");
+  const rm = all(worker, (n) => n.tag === "button" && n.textContent === "Remove")[0];
+  rm.handlers.click[0]();
+  // An empty row is the statement; forgetting the key would ask for the
+  // package's packs again and the row would come straight back.
+  assert.deepEqual(card.draft().role_packs, { worker: [] });
+  const after = all(card.card(), (n) => n.className === "md-table prompt-pack-roles")[0];
+  const stillWorker = after.children.find((tr) => tr.children[0].textContent === "worker");
+  assert.ok(stillWorker);
+  const ticks = all(stillWorker, (n) => n.tag === "input").map((n) => n.checked);
+  assert.ok(ticks.length > 0);
+  assert.equal(ticks.some(Boolean), false);
 });
 
 check("an on-demand pack installs like any pack but is in neither setting", () => {

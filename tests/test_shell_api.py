@@ -225,7 +225,7 @@ def test_the_shell_pack_ships_on_demand():
     pack = prompt_packs.shipped("mcp-shell")
     assert pack.title.startswith("MCP")
     assert "'mcp-shell'" in mcp_server.SERVER.instructions
-    assert "mcp-shell" not in prompt_packs.DEFAULT_PACKS
+    assert "mcp-shell" not in prompt_packs.shipped_default_packs()
     assert "mcp-shell" in prompt_packs.mcp_ids()
     assert prompt_packs.loadable_copy(None, "mcp-shell").body == pack.body
     assert "shell_suggest" in pack.body and "only when the user accepts" in pack.body

@@ -34818,9 +34818,15 @@ function promptPackSettings(doc, allIds) {
   const ids = allIds.filter((id) => !onDemand.includes(id));
   const box = el("div", "prompt-pack-settings");
   if (!promptPacksDraft) {
+    // Only what the operator CHANGES is a statement: a row left as it was
+    // is not written, so a pack keeps following its own header and a role
+    // keeps following the package. Saving every drawn row would freeze all
+    // of them as explicit overrides, which then mask a workspace copy's
+    // header (claunch-imo9c.3 review, finding 1).
     promptPacksDraft = {
-      role_packs: JSON.parse(JSON.stringify(doc.role_packs || {})),
-      default_packs: [...(doc.default_packs || [])],
+      role_packs: JSON.parse(JSON.stringify(doc.saved_role_packs || {})),
+      // {pack id: bool} — the overrides only, sent as the override map.
+      default_packs: { ...(doc.saved_default_packs || {}) },
     };
   }
   const draft = promptPacksDraft;
@@ -34838,20 +34844,62 @@ function promptPackSettings(doc, allIds) {
   };
 
   box.appendChild(el("h4", null, "Default packs"));
+  const shipped = doc.shipped_default_packs || [];
+  const shippedSet = new Set(shipped);
+  const savedDefaults = draft.default_packs;
+  // What a pack answers with no setting of yours: the shipped header. The
+  // comparison is against the package on purpose, because this card is the
+  // machine-wide setting and a workspace copy outranks it; comparing against
+  // a copy would make the same value mean an override in one workspace and
+  // not in another.
+  const baselineDefault = (id) => shippedSet.has(id);
+  // A workspace copy that states check_default answers last for its own
+  // workspace, so a tick here does not reach that workspace. The rows say so
+  // rather than looking like a switch that has no effect.
+  const copyDecides = new Map();
+  for (const w of doc.workspaces || []) {
+    for (const p of w.packs || []) {
+      if (p.copy_check_default === undefined || p.copy_check_default === null) continue;
+      if (!copyDecides.has(p.id)) copyDecides.set(p.id, []);
+      copyDecides.get(p.id).push(w.name);
+    }
+  }
+  const effectiveDefault = (id) => (id in savedDefaults ? savedDefaults[id] === true
+    : baselineDefault(id));
   box.appendChild(el("p", "wf-note",
     "Packs New session and Spawn child tick every time they open. Unticking " +
     "one in the form leaves it out of that one session only; take it off " +
     "this list to stop ticking it. Each session gets its workspace's copy, " +
     "or the copy claunch ships when the workspace has not installed it " +
-    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.` +
+    `(the form says which). A pack states its own answer in its header; the ` +
+    `shipped packs that say yes are: ${shipped.join(", ") || "none"}. A tick ` +
+    `you change here becomes an override for that one pack; a pack you leave ` +
+    `as it is keeps following its header, and a workspace copy's header wins ` +
+    `over this setting for its own workspace.` +
     (onDemand.length ? ` Not listed here or below: ${onDemand.join(", ")} — sent on demand to a running session, never in an opening.` : "")));
   const defaults = el("div", "new-check-list");
   defaults.id = "prompt-pack-defaults";
   for (const id of ids) {
     const label = el("label", "check");
-    label.appendChild(check(draft.default_packs.includes(id),
-      (on) => toggle(draft.default_packs, id, on)));
+    label.appendChild(check(effectiveDefault(id),
+      (on) => {
+        // Back to the pack's own answer is not an override: drop the key, so
+        // the header (and the workspace copy above it) answers again.
+        if (on === baselineDefault(id)) delete savedDefaults[id];
+        else savedDefaults[id] = on;
+        renderWorkspaces();
+      }));
     label.appendChild(el("span", null, id));
+    // Mark the rows the operator overrode, so it is visible which values are
+    // theirs and which are the pack's.
+    if (id in savedDefaults) {
+      label.appendChild(el("span", "wf-note", " (overrides its header)"));
+    }
+    const copies = copyDecides.get(id);
+    if (copies) {
+      label.appendChild(el("span", "wf-note",
+        ` (its copy in ${copies.join(", ")} states its own answer, which wins there)`));
+    }
     defaults.appendChild(label);
   }
   box.appendChild(defaults);
@@ -34869,22 +34917,47 @@ function promptPackSettings(doc, allIds) {
   for (const id of ids) head.appendChild(el("th", null, id));
   head.appendChild(el("th", null, ""));
   table.appendChild(head);
-  for (const role of Object.keys(draft.role_packs).sort()) {
+  const merged = doc.role_packs || {};
+  const rows = new Set([...Object.keys(merged), ...Object.keys(draft.role_packs)]);
+  // The list a row shows: the operator's override when there is one, else
+  // the merged answer (package row, or a role the operator added).
+  const rowPacks = (role) => (role in draft.role_packs
+    ? draft.role_packs[role] : (merged[role] || []));
+  for (const role of [...rows].sort()) {
     const tr = el("tr", null);
-    tr.appendChild(el("td", null, role));
+    const nameTd = el("td", null, role);
+    if (role in draft.role_packs) nameTd.appendChild(el("span", "wf-note", " (override)"));
+    tr.appendChild(nameTd);
     for (const id of ids) {
       const td = el("td", null);
-      td.appendChild(check((draft.role_packs[role] || []).includes(id),
-        (on) => toggle(draft.role_packs[role], id, on)));
+      td.appendChild(check(rowPacks(role).includes(id),
+        (on) => {
+          // Any change writes the row whole: an edited row is the operator's
+          // statement about that role, and it must beat the package's row.
+          const list = [...rowPacks(role)];
+          toggle(list, id, on);
+          draft.role_packs[role] = list;
+          renderWorkspaces();
+        }));
       tr.appendChild(td);
     }
     const td = el("td", null);
     const rm = el("button", "wf-btn clear", "Remove");
-    rm.addEventListener("click", () => { delete draft.role_packs[role]; renderWorkspaces(); });
+    // Remove states "this role requires none". It must not forget the row:
+    // a forgotten row asks for the package's packs, so the role would come
+    // straight back (claunch-imo9c.3 review, finding 3).
+    rm.addEventListener("click", () => {
+      draft.role_packs[role] = [];
+      renderWorkspaces();
+    });
     td.appendChild(rm);
     tr.appendChild(td);
     table.appendChild(tr);
   }
+  box.appendChild(el("p", "wf-note",
+    "Remove states that the role requires no pack; the row stays and shows " +
+    "nothing ticked. A role with no override row keeps the package's packs " +
+    "— including a role the package adds later."));
   const roleScroll = el("div", "install-table-scroll");
   roleScroll.appendChild(table);
   box.appendChild(roleScroll);
@@ -34893,7 +34966,7 @@ function promptPackSettings(doc, allIds) {
   pick.id = "prompt-pack-role-pick";
   pick.appendChild(new Option("(add a role)", ""));
   for (const r of doc.roles || []) {
-    if (!draft.role_packs[r]) pick.appendChild(new Option(r, r));
+    if (!rows.has(r)) pick.appendChild(new Option(r, r));
   }
   pick.addEventListener("change", () => {
     if (!pick.value) return;

@@ -1,6 +1,7 @@
 ---
 title: MCP — session QA
 description: How to use the qa_* tools — put questions to the user as records in the QA pane, read their answers, and handle nudges and direction checks.
+check_default: true
 ---
 ## Session QA (qa_* tools)
 

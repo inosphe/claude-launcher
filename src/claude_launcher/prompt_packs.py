@@ -13,12 +13,20 @@ Two steps, on purpose:
    A workspace opts in; a profile never does, because a pack describes a
    repository's working rules and a profile spans repositories.
 2. **Choose it at session creation.** The create form offers every pack
-   installed in the chosen workspace as a checkbox, checked when Settings
-   lists it as a default pack (:func:`default_packs`); a CLI create or a
+   installed in the chosen workspace as a checkbox, checked when the pack
+   says it starts ticked (:func:`default_packs`); a CLI create or a
    spawn names its packs itself (``--prompt-pack``, ``prompt_packs``). The
    ones chosen are put into the session's opening
    (:func:`opening_block`). The copy in the workspace is what is read, so a
    workspace that edited its copy gets its edit.
+
+The two settings in the config override **item by item, never whole**: a
+role row or a pack's tick that the config states wins for that role or that
+pack, and everything it does not mention keeps the package's answer. So a
+role or a pack added to the package reaches an installation whose config was
+written before it existed (claunch-imo9c.3); a row left out asks for the
+package's row, and ``{"worker": []}`` is how the config states "this role
+requires none".
 
 A copy is compared against the package and against what was last written
 (:data:`SEED_RECORD`), which gives four answers (:func:`status`): not
@@ -122,6 +130,12 @@ class Pack:
     source: str = WORKSPACE
     #: :data:`OPENING`, :data:`ON_DEMAND` or :data:`ALWAYS`, from the header.
     delivery: str = OPENING
+    #: Whether a create form ticks this pack on every opening it draws
+    #: (:func:`default_packs`). ``None`` means the header says nothing, which
+    #: is different from saying ``false``: :func:`default_packs` resolves the
+    #: chain shipped header -> config -> workspace copy, and only a stated
+    #: value takes part in it.
+    check_default: Optional[bool] = None
 
     @property
     def on_demand(self) -> bool:
@@ -140,6 +154,8 @@ class Pack:
         # as it did before the header existed.
         if self.delivery != OPENING:
             out["delivery"] = self.delivery
+        if self.check_default is not None:
+            out["check_default"] = self.check_default
         return out
 
 
@@ -169,6 +185,11 @@ def parse(pack_id: str, raw: str) -> Pack:
             meta = loaded
         body = raw[m.end():]
     delivery = str(meta.get("delivery") or "").strip().lower()
+    # ``check_default`` is the header that decides whether a create form
+    # ticks this pack: the pack says what it is for, and a workspace copy
+    # that disagrees says what that workspace wants. Anything but a stated
+    # boolean is "says nothing", so an old copy with an unrelated header
+    # still parses and takes no part in the chain.
     return Pack(
         id=pack_id,
         title=str(meta.get("title") or pack_id).strip(),
@@ -176,7 +197,21 @@ def parse(pack_id: str, raw: str) -> Pack:
         body=body.strip(),
         raw=raw,
         delivery=delivery if delivery in _DELIVERIES else OPENING,
+        check_default=as_bool(meta.get("check_default")),
     )
+
+
+def as_bool(value) -> Optional[bool]:
+    """A header's boolean, or ``None`` when it says nothing usable."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "yes", "on", "1"):
+            return True
+        if text in ("false", "no", "off", "0"):
+            return False
+    return None
 
 
 def check_id(pack_id: str) -> str:
@@ -408,15 +443,30 @@ def always_wanted(body: dict) -> bool:
 
 
 def workspace_rows(workspace: Path) -> List[dict]:
-    """One row per pack a workspace could hold: shipped ones, then local."""
+    """One row per pack a workspace could hold: shipped ones, then local.
+
+    A shipped row describes the package's pack, so its ``check_default`` is
+    the package's answer and says nothing about this workspace. The copy's
+    own statement, when it makes one, is reported beside it as
+    ``copy_check_default`` -- that is the value :func:`default_packs` applies
+    last for this workspace, and a card that showed only the package's answer
+    would draw a switch that does nothing here.
+    """
     rows = []
     shipped_ids = set()
+    here = {p.id: p for p in installed(workspace)}
     for pack in catalog():
         shipped_ids.add(pack.id)
-        rows.append({**pack.to_dict(), "status": status(workspace, pack)})
+        copy = here.get(pack.id)
+        rows.append({
+            **pack.to_dict(),
+            "status": status(workspace, pack),
+            "copy_check_default": copy.check_default if copy is not None else None,
+        })
     for pack in installed(workspace):
         if pack.id not in shipped_ids:
-            rows.append({**pack.to_dict(), "status": LOCAL})
+            rows.append({**pack.to_dict(), "status": LOCAL,
+                         "copy_check_default": pack.check_default})
     return rows
 
 
@@ -662,22 +712,29 @@ DEFAULT_ROLE_PACKS: Dict[str, List[str]] = {
     "local-sync-manager": ["role-local-sync-manager"],
 }
 
-#: The default packs of an untouched config (:func:`default_packs`). A
-#: setting's value like :data:`DEFAULT_ROLE_PACKS`, kept here rather than in
-#: the packs' headers: which packs a form ticks is not a property of a pack.
-DEFAULT_PACKS: List[str] = [
-    "asking-the-user", "common", "korean-replies", "mcp-threads", "mcp-qa", "mcp-sim",
-]
-
 _ROLE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def shipped_default_packs() -> List[str]:
+    """The shipped packs whose own header says they start ticked.
+
+    Which packs a form ticks is read from the packs (``check_default: true``)
+    rather than from a constant here, so a workspace copy that disagrees wins
+    like any other edit there, and a pack added to the package needs no
+    second edit in this file. An on-demand pack is never part of an opening,
+    so it never starts there.
+    """
+    return [p.id for p in catalog() if p.check_default and not p.on_demand]
 
 
 def clean_role_packs(raw, *, strict: bool = True) -> Dict[str, List[str]]:
     """Validate a role → packs mapping.
 
-    An on-demand pack is refused (``strict``), or dropped when reading back a
-    mapping saved before the pack was one -- one stale entry must not cost
-    every role its packs.
+    An empty list is kept: ``{"worker": []}`` says that role requires no
+    pack, which is a different statement from leaving the row out (that one
+    asks for :data:`DEFAULT_ROLE_PACKS`' answer). An on-demand pack is
+    refused (``strict``), or dropped when reading back a mapping saved before
+    the pack was one -- one stale entry must not cost every role its packs.
     """
     if not isinstance(raw, dict):
         raise PackError("role packs must be a mapping of role -> [pack ids]")
@@ -693,31 +750,31 @@ def clean_role_packs(raw, *, strict: bool = True) -> Dict[str, List[str]]:
         clean = [check_id(i) for i in dict.fromkeys(str(i).strip() for i in ids)]
         clean = (check_offerable(clean, f"required by role {role}")
                  if strict else offerable(clean))
-        if clean:
-            out[role] = clean
+        out[role] = clean
     return dict(sorted(out.items()))
 
 
 def role_packs(doc: Optional[dict] = None) -> Dict[str, List[str]]:
-    """The role → required packs mapping, or :data:`DEFAULT_ROLE_PACKS`.
+    """The role → required packs mapping: :data:`DEFAULT_ROLE_PACKS`, with the
+    rows the config names replaced one by one.
 
-    A saved empty mapping is kept as empty: clearing every row in Settings is
-    a decision, and reading it back as the default would undo it.
+    The config overrides rows, never the mapping: a role the package added
+    after the config was written keeps the package's packs, and a role the
+    config names takes its own. ``{"worker": []}`` is how a config says a
+    role requires none -- the row wins as empty, which is why
+    :func:`clean_role_packs` keeps empty lists.
     """
-    from . import store
-
-    doc = store.load() if doc is None else doc
-    block = doc.get(CONFIG_KEY)
-    if not isinstance(block, dict) or "role_packs" not in block:
-        return {k: list(v) for k, v in DEFAULT_ROLE_PACKS.items()}
-    try:
-        return clean_role_packs(block.get("role_packs") or {}, strict=False)
-    except PackError:
-        return {}
+    default = {k: list(v) for k, v in DEFAULT_ROLE_PACKS.items()}
+    return {**default, **saved_role_packs(doc)}
 
 
 def set_role_packs(mapping) -> Dict[str, List[str]]:
-    """Validate and save the mapping; ``None`` restores the default."""
+    """Validate and save the rows the config states; ``None`` clears them.
+
+    A row saved here overrides that role only. ``{"worker": []}`` is kept as
+    an explicit "this role requires none", which is what the Settings card's
+    Remove writes.
+    """
     from . import store
 
     clean = None if mapping is None else clean_role_packs(mapping)
@@ -739,27 +796,128 @@ def set_role_packs(mapping) -> Dict[str, List[str]]:
     return role_packs()
 
 
-def default_packs(doc: Optional[dict] = None) -> List[str]:
-    """The pack ids New session and Spawn child tick on every opening.
+def _stated_from_list(ids) -> Dict[str, bool]:
+    """A whole-set statement turned into one per pack.
 
-    Saved in Settings as ``prompt_packs.default_packs``; until then
-    :data:`DEFAULT_PACKS`. Installed or not makes no difference: a session
-    gets the workspace's copy when it has one and claunch's otherwise
-    (:func:`pack_copy`), and the form says which. An untick holds for the
-    one opening it was made in.
+    A config written before this setting took a map holds a list: the packs
+    to tick. It says nothing about the packs it leaves out of the shipped
+    set, so the only faithful reading is that those do not start ticked --
+    which for the old list of defaults is exactly the old behaviour. A pack
+    outside the shipped set that the list names is stated true.
+    """
+    named = {i for i in dict.fromkeys(str(x).strip() for x in ids) if _ID.match(i)}
+    out = {i: False for i in shipped_default_packs()}
+    for pack_id in offerable(sorted(named)):
+        out[pack_id] = True
+    return out
+
+
+def saved_default_packs(doc: Optional[dict] = None) -> Dict[str, bool]:
+    """The ``check_default`` values the config states, by pack id: ``{}``
+    when it states none.
+
+    One statement per pack, and only for the packs it states -- a pack the
+    config does not mention keeps the answer of its own header
+    (:func:`default_packs`), so a pack added to the package later starts
+    ticked without the operator editing anything. The older list form is a
+    statement about every shipped default, so it is read as one
+    (:func:`_stated_from_list`).
     """
     from . import store
 
     doc = store.load() if doc is None else doc
     block = doc.get(CONFIG_KEY)
-    if isinstance(block, dict) and "default_packs" in block:
-        raw = block.get("default_packs") or []
-        if isinstance(raw, list):
-            return offerable(
-                [i for i in dict.fromkeys(str(x) for x in raw) if _ID.match(i)]
-            )
-        return []
-    return list(DEFAULT_PACKS)
+    if not isinstance(block, dict):
+        return {}
+    raw = block.get("default_packs")
+    if isinstance(raw, list):
+        return _stated_from_list(raw)
+    out: Dict[str, bool] = {}
+    if isinstance(raw, dict):
+        for pack_id, value in raw.items():
+            stated = as_bool(value)
+            if stated is not None and _ID.match(str(pack_id)):
+                out[str(pack_id)] = stated
+    return out
+
+
+def saved_role_packs(doc: Optional[dict] = None) -> Dict[str, List[str]]:
+    """The rows the config states, by role: ``{}`` when it states none.
+
+    :func:`role_packs` merges this over :data:`DEFAULT_ROLE_PACKS`; this is
+    the config's half alone, which is what a form needs to tell an operator's
+    row from the package's.
+    """
+    from . import store
+
+    doc = store.load() if doc is None else doc
+    block = doc.get(CONFIG_KEY)
+    if not isinstance(block, dict) or "role_packs" not in block:
+        return {}
+    try:
+        return clean_role_packs(block.get("role_packs") or {}, strict=False)
+    except PackError:
+        return {}
+
+
+def default_packs(doc: Optional[dict] = None, workspace: Optional[Path] = None) -> List[str]:
+    """The pack ids New session and Spawn child tick on every opening.
+
+    Three layers, each overriding the one before it for the packs it names:
+    a shipped pack's own ``check_default`` header
+    (:func:`shipped_default_packs`), then what the config states in
+    ``prompt_packs.default_packs`` (:func:`saved_default_packs`), then the
+    workspace's installed copy when it has one and its header states
+    something. A pack named by none of the three does not start ticked.
+
+    The workspace's copy is last on purpose: "every session created here"
+    is a decision that workspace makes about itself, so it wins over a
+    setting written for the whole machine -- the same precedence
+    :func:`pack_copy` gives the copy's text.
+
+    Installed or not makes no difference to what a session gets: the
+    workspace's copy is read when it has one and claunch's otherwise
+    (:func:`pack_copy`), and the form says which. An untick holds for the
+    one opening it was made in.
+    """
+    stated = {p.id: p.check_default for p in catalog()
+              if p.check_default is not None}
+    stated.update(saved_default_packs(doc))
+    if workspace is not None:
+        for pack in installed(workspace):
+            if pack.check_default is not None:
+                stated[pack.id] = pack.check_default
+    # Order: the shipped catalog's own order first, then any other pack a
+    # layer names, so the form's rows read the same way every time.
+    order = [p.id for p in catalog()]
+    order += sorted(set(stated) - set(order))
+    return offerable([i for i in order if stated.get(i)])
+
+
+def set_default_packs(values) -> List[str]:
+    """Validate and save the ``check_default`` overrides; ``None`` clears them.
+
+    ``values`` is ``{pack id: bool}`` -- the rows the operator changed, which
+    is what the Settings form sends. A list of ids is still read as the whole
+    answer ("these are ticked and the other shipped defaults are not"), which
+    is the form older builds sent. ``None`` drops the setting, so every pack
+    answers from its own header again.
+    """
+    if values is None:
+        _save_list("default_packs", None)
+        return default_packs()
+    if isinstance(values, dict):
+        clean: Dict[str, bool] = {}
+        for pack_id, value in values.items():
+            stated = as_bool(value)
+            if stated is None:
+                raise PackError(f"{pack_id}: check_default must be true or false")
+            clean[check_offerable([check_id(pack_id)], "a default pack")[0]] = stated
+    else:
+        ids = _clean_ids(values, "default packs")
+        clean = _stated_from_list(check_offerable(ids, "a default pack"))
+    _save_list("default_packs", dict(sorted(clean.items())))
+    return default_packs()
 
 
 def _clean_ids(ids, what: str) -> List[str]:
@@ -770,8 +928,8 @@ def _clean_ids(ids, what: str) -> List[str]:
     return [check_id(i) for i in dict.fromkeys(str(i).strip() for i in ids)]
 
 
-def _save_list(key: str, clean: Optional[List[str]]) -> None:
-    """Write one list of the settings block; ``None`` drops the key."""
+def _save_list(key: str, clean) -> None:
+    """Write one value of the settings block; ``None`` drops the key."""
     from . import store
 
     def _mutate(doc: dict) -> None:
@@ -788,13 +946,6 @@ def _save_list(key: str, clean: Optional[List[str]]) -> None:
             doc.pop(CONFIG_KEY, None)
 
     store.update(_mutate)
-
-
-def set_default_packs(ids) -> List[str]:
-    """Validate and save the default list; ``None`` restores :data:`DEFAULT_PACKS`."""
-    _save_list("default_packs", None if ids is None else check_offerable(
-        _clean_ids(ids, "default packs"), "a default pack"))
-    return default_packs()
 
 
 def required_for(

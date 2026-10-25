@@ -1,6 +1,7 @@
 ---
 title: MCP — session threads
 description: How to use the thread_* tools — answer a thread where it was asked, open your own topics, and alert the user in a thread when they must act now (every agent message there raises a dashboard notice).
+check_default: true
 ---
 ## Session threads (thread_* tools)
 

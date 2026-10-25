@@ -1301,10 +1301,13 @@ def test_every_role_a_packaged_workflow_declares_has_a_pack():
     the daemon ships: a child that joins under a role with no pack gets a
     stance and none of the guidance the stance defers to.
 
-    Checked against :data:`DEFAULT_ROLE_PACKS`, not against the live mapping:
-    a saved ``role_packs`` block in ``~/.claude-launcher/.claunch.yaml`` replaces the packaged
-    one whole, so an operator who has edited it must add the row themselves —
-    that is a setting, not an invariant of this repository.
+    Checked against :data:`DEFAULT_ROLE_PACKS` (the package's rows), not
+    against the live mapping: a saved ``prompt_packs.role_packs`` block in the
+    config file overrides the rows it names, so what an operator sees there is
+    a setting. Since claunch-imo9c.3 it overrides only those rows, so a role
+    packaged here is still reachable on a machine whose config was written
+    before that role existed — but the invariant being pinned is the package's
+    own, not any one machine's setting.
     """
     from claude_launcher import prompt_packs
     from claude_launcher.cflow2 import layers
