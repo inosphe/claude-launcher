@@ -100,6 +100,51 @@ def test_unreadable_pool_is_an_error_not_an_empty_pool(home):
         profile_keys.load(p)
 
 
+def test_a_pool_that_vanishes_before_the_read_is_no_pool(home, monkeypatch):
+    """A clear landing between the existence check and the read leaves no pool (claunch-nxm2i).
+
+    The window was a TOCTOU: ``load`` asked ``is_file()`` first and read
+    second, and a ``credentials.clear_token`` that deleted the pool in
+    between made the read raise ``FileNotFoundError``, which surfaced as
+    ``KeysError`` and failed a launch that should simply have found no pool.
+    The delete happens inside the read here, so the test does not depend on
+    timing: whatever order the two land in, the answer is "no pool".
+    """
+    p = _pooled("sk-AAAA1111BBBB")
+    file = profile_keys.path(p)
+    original = Path.read_text
+
+    def read_after_clear(self, *args, **kwargs):
+        if self == file:
+            self.unlink()  # the concurrent clear lands here
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_after_clear)
+    assert profile_keys.load(p) is None
+
+
+def test_a_pool_that_cannot_be_read_still_raises(home, monkeypatch):
+    """Every other read failure stays an error, pooled keys and all.
+
+    The fix above turns exactly one failure into "no pool". A permission
+    problem is not a deleted pool: answering ``None`` there would fall back
+    to whatever ``.launcher-token`` holds, which is the silent empty pool the
+    docstring warns against.
+    """
+    p = _pooled("sk-AAAA1111BBBB")
+    file = profile_keys.path(p)
+    original = Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self == file:
+            raise PermissionError("denied")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    with pytest.raises(profile_keys.KeysError, match="cannot read key pool"):
+        profile_keys.load(p)
+
+
 def test_unknown_strategy_in_the_file_is_refused(home):
     p = _pooled("sk-AAAA1111BBBB")
     raw = json.loads(profile_keys.path(p).read_text(encoding="utf-8"))
