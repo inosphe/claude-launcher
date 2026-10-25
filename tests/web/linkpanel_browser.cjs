@@ -20,11 +20,17 @@ function between(src, from, to) {
 }
 
 const button = between(html, '<button id="term-conn"', '</button>') + '</button>'
-  + between(html, '<button id="term-force"', '</button>') + '</button>';
-const mobile = between(html, '<button id="m-conn"', '</button>') + '</button>';
+  + between(html, '<button id="term-link"', '</button>') + '</button>';
+const mobile = between(html, '<button id="m-conn"', '</button>') + '</button>'
+  + between(html, '<button id="m-link"', '</button>') + '</button>';
+// The session screen and the offline cover on it (claunch-9ywu0).
+const terminal = between(html, '<div id="terminal">', "<!-- Split mode's bar and pane");
 const panel = between(html, '<div id="conn-panel"', '\n</div>\n') + '\n</div>';
 const logCode = between(app, '/* ---- the link log (claunch-xbdy7) ----', '/* ---- the connection the page keeps ----');
 const panelCode = between(app, '/* ---- the link panel', '/* ---- queued deliveries ----');
+// syncLinkChip and the cover it drives: the page's own say on a down link.
+const chipCode = between(app, '/* The header (and its mirror on a phone) say what the socket is doing',
+  '/* Is the daemon answering?');
 
 // What the panel reads, as globals a step can change.
 const world = `
@@ -60,7 +66,8 @@ const server = http.createServer((req, res) => {
   if (req.url === '/') {
     res.setHeader('Content-Type', 'text/html');
     return res.end('<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/style.css">'
-      + `<body><div id="mobile-top">${mobile}</div><div id="term-header">${button}</div>${panel}</body>`);
+      + `<body><div id="mobile-top">${mobile}</div><div id="term-header">${button}</div>`
+      + `${terminal}${panel}</body>`);
   }
   if (req.url !== '/style.css') { res.statusCode = 404; return res.end(); }
   res.setHeader('Content-Type', 'text/css');
@@ -84,7 +91,7 @@ const server = http.createServer((req, res) => {
     // The page loads quietdom.js before anything else; the panel's 1 Hz
     // render leans on its same-value guards.
     await page.addScriptTag({ path: path.join(root, 'quietdom.js') });
-    await page.addScriptTag({ content: world + logCode + panelCode });
+    await page.addScriptTag({ content: world + logCode + panelCode + chipCode });
     await page.evaluate(() => {
       linkLog('term.open', { session: 's7', via: 'channel', ch: 3 });
       linkLogFlush();
@@ -159,14 +166,47 @@ const server = http.createServer((req, res) => {
     await render();
     assert.match(await page.locator('#conn-panel-rows').innerText(), /session line\s+open: socket bound to a running child/);
 
-    // force reconnect, from the header or the panel: the state at the press
-    // is logged first, then a fresh login, then both connections reopened.
+    // force reconnect, from the session screen's cover or the panel: the
+    // state at the press is logged first, then a fresh login, then both
+    // connections reopened. There is no header chip any more
+    // (claunch-9ywu0) -- the cover is the one on the screen a person is
+    // looking at when the link drops.
     await page.evaluate(() => {
       linkState = 'live';
       controlSock = { readyState: 1 };
       ws = { readyState: 1, linkVia: 'socket', linkStartedAt: Date.now(), linkReadyAt: Date.now() };
     });
-    await page.locator('#term-force').click();
+
+    // The cover says what the screen cannot: a grid that stopped moving and a
+    // grid whose link dropped look the same, and only one is fixed here.
+    const cover = page.locator('#term-offline');
+    assert.equal(await cover.isVisible(), false, 'no cover while the link is up');
+    assert.equal(await page.locator('#terminal').getAttribute('class'), null,
+      'and no dimming class on the session screen');
+    await page.evaluate(() => {
+      linkState = 'reconnecting'; linkTry = 2; syncLinkChip();
+    });
+    assert.equal(await cover.isVisible(), true, 'a dropped link puts the cover up');
+    assert.match(await page.locator('#terminal').getAttribute('class'), /\blink-down\b/,
+      'the session screen it covers is dimmed');
+    assert.match(await page.locator('.term-offline-title').innerText(), /reconnecting.*2\/4/,
+      'the cover carries the retry count');
+    assert.match(await page.locator('.term-offline-note').innerText(), /socket dropped/);
+    // The dimming is on the grid itself, not the card: a reader still has to
+    // read the last output, and the cover has to stay legible over it.
+    const dim = await page.evaluate(() => {
+      const t = document.getElementById('terminal');
+      const card = document.querySelector('.term-offline-card');
+      return {
+        term: getComputedStyle(t).opacity,
+        card: getComputedStyle(card).opacity,
+        cls: t.className,
+      };
+    });
+    assert.equal(dim.term, '1', 'the box is not faded -- the grid inside it is');
+    assert.equal(dim.card, '1', 'the cover stays at full strength');
+
+    await page.locator('#term-offline-retry').click();
     await page.waitForFunction(() => calls.length >= 4);
     assert.deepEqual(await page.evaluate(() => calls), [
       ['relogin'], ['controlRecycle', 'force reconnect'],
@@ -175,7 +215,11 @@ const server = http.createServer((req, res) => {
     const snap = await page.evaluate(() => linkLogEntries().find((e) => e.k === 'force.snapshot'));
     assert.equal(snap['t.via'], 'socket', 'the snapshot holds what the page believed at the press');
     assert.equal(snap['c.state'], 'OPEN');
-    assert.equal(snap.grade, 'warn');
+    assert.equal(snap.grade, 'down', 'the press came from a link the page had already given up on');
+    // ...and the cover comes down with the link it described.
+    await page.evaluate(() => { linkState = 'live'; syncLinkChip(); });
+    assert.equal(await cover.isVisible(), false, 'a live link takes the cover down');
+    assert.doesNotMatch(String(await page.locator('#terminal').getAttribute('class')), /link-down/);
     // With the control socket already gone it is opened, not recycled.
     await page.evaluate(() => { calls = []; controlSock = null; ws = null; linkState = 'lost'; });
     await page.locator('#conn-panel-reconnect').click();

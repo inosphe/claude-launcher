@@ -2961,6 +2961,59 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   /* Keep xterm layers and terminal overlays below page-wide dialogs. */
   isolation: isolate;
 }
+/* The link is down (claunch-9ywu0, syncLinkOffline). The grid keeps every line
+   it had -- a reader still has to be able to see what the session last said --
+   but loses its contrast and its colour, which is the difference between "this
+   is the output" and "this was the output". Only the covered elements fade:
+   #term-offline and the notice banner stay at full strength, because they are
+   the ones with something to say. A transition, not a state, so a drop that
+   lasts a frame does not flash. */
+#terminal.link-down > .xterm,
+#terminal.link-down > pre.term-snapshot,
+#terminal.link-down > #term-tps-overlay {
+  opacity: 0.35;
+  filter: grayscale(0.75);
+  transition: opacity 160ms linear, filter 160ms linear;
+}
+/* The cover over a down link: the reason, then the retry, centred on the
+   screen the reader is already looking at. `hidden` (app.js) is the switch;
+   this rule only ever describes the visible state, so no display here.
+   Only the card takes the pointer. The rest of the cover is transparent to
+   it on purpose: keystrokes typed while the link is down are held and typed
+   in when it returns (linkQueue), and a cover that swallowed them would take
+   that away from the one person most likely to use it. */
+.term-offline {
+  /* Above the throughput overlay (z-index 20): both describe the moment, and
+     when they disagree about it the retry should win the reader's eye. */
+  position: absolute; inset: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; pointer-events: none;
+}
+.term-offline[hidden] { display: none; }
+.term-offline-card {
+  pointer-events: auto;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  max-width: 420px; padding: 16px 20px; border-radius: 8px;
+  text-align: center;
+  background: rgba(20, 22, 26, 0.92); border: 1px solid #6e2a2a;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+  font-family: SFMono-Regular, Consolas, monospace;
+}
+.term-offline-title { font-size: 14px; font-weight: 600; color: #ff7b72; }
+.term-offline-note {
+  font-size: 11px; line-height: 16px; color: #8b949e;
+  font-family: system-ui, sans-serif;
+}
+.term-offline-retry {
+  font: 600 12px/1 system-ui, sans-serif; padding: 7px 14px;
+  border-radius: 6px; cursor: pointer;
+  color: #fff; background: #b91c1c; border: 1px solid #d1453b;
+}
+.term-offline-retry:hover { background: #d1453b; }
+.term-offline-retry:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+/* On the light page the card keeps its dark wash (it sits over a dark grid in
+   both themes) but the muted line needed more contrast to read at 11px. */
+html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 /* The throughput overlay on the PTY's top-right corner: the number big
    enough to read from the screen, the rest small under it. It floats
    above xterm's layers (which stack up to z-index 10 or so), takes no
