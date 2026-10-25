@@ -243,6 +243,40 @@ def test_the_port_is_bound_before_the_fleet_is_restored():
     )
 
 
+def test_the_boot_phase_is_set_before_the_startup_handlers_run():
+    """The shims' first pass waits on this phase, so it must be set first.
+
+    ``runner.setup()`` runs the app's ``on_startup`` handlers, and the shims
+    register one: their first reconcile pass holds until
+    ``app["boot"]["phase"]`` leaves ``"restoring"`` (claunch-esmr3). The
+    dict that says so is written in ``_serve``, and ``build_app`` has already
+    seeded the same key with ``"ready"`` -- so if the write sits *after*
+    ``runner.setup()``, the waiting pass reads ``"ready"``, runs against the
+    empty fleet, prunes the shim users of every session the PTY host kept
+    and retires the shims those sessions are still talking to. They then
+    hang on connect instead of being refused and retry timeouts forever.
+
+    Pinned by source order for the same reason as
+    :func:`test_the_port_is_bound_before_the_fleet_is_restored`: the claim
+    is about the order of two statements, and standing up a real daemon to
+    observe it would test aiohttp more than this code. Reverting the
+    move leaves every other test here green (raised by the round's
+    reviewer, s1812-rev).
+    """
+    import claude_launcher.daemon.__main__ as daemon_main
+
+    source = Path(daemon_main.__file__).read_text(encoding="utf-8")
+    seeded = source.index('app["boot"] = {')
+    handlers = source.index("await runner.setup()")
+    assert seeded < handlers, (
+        "the boot phase must be set before the startup handlers run: "
+        f'app["boot"] = {{}} is at offset {seeded}, runner.setup() at '
+        f"{handlers}. After setup() the shims' first reconcile pass reads "
+        "build_app's 'ready' default and runs against the empty fleet "
+        "(claunch-esmr3)"
+    )
+
+
 def test_boot_status_defaults_to_ready():
     app = web.Application()
     assert api.boot_status(app) == {"phase": "ready", "done": 0, "total": 0}
