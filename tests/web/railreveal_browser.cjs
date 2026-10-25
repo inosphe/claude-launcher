@@ -97,7 +97,18 @@ const landing = (page, name) => page.evaluate((name) => {
       window.setInterval = () => 0;
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
-    await page.locator(`#session-list li.sess-card[data-name="${TARGET}"]`).waitFor();
+    // The rail draws only its visible rows (claunch-thuwx), so the target is
+    // in the model and NOT in the DOM on load -- waiting for the row here
+    // would wait for something the press itself is what draws. Wait for the
+    // model instead: the row exists, the press is what puts it on screen.
+    await page.waitForFunction(
+      (name) => {
+        const list = document.querySelector("#session-list");
+        const model = Array.isArray(list?._railRows) ? list._railRows : [];
+        return model.some((r) => r.type === "session" && r.session.name === name);
+      },
+      TARGET,
+    );
 
     // A rail that has to scroll, and a target below the fold: otherwise the
     // press proves nothing.
@@ -105,7 +116,8 @@ const landing = (page, name) => page.evaluate((name) => {
       const list = document.querySelector("#session-list");
       const rows = [...list.querySelectorAll("li[data-name]")];
       return { count: rows.length, scrollHeight: list.scrollHeight,
-               clientHeight: list.clientHeight };
+               clientHeight: list.clientHeight,
+               model: Array.isArray(list._railRows) ? list._railRows.length : 0 };
     });
     assert.ok(rail.scrollHeight > rail.clientHeight * 3,
       `the rail has to scroll for this check to mean anything (${rail.scrollHeight} vs ${rail.clientHeight})`);
@@ -191,15 +203,26 @@ const landing = (page, name) => page.evaluate((name) => {
 
     // The skip the press borrowed is given back, so the poll keeps the
     // rendering win it was bought for (claunch-oo8au.1).
+    //
+    // What "given back" amounts to changed with the windowed rail
+    // (claunch-thuwx): the rail now draws only a few dozen rows around the
+    // viewport, so it carries `.rail-windowed` and its drawn rows are laid
+    // out for real -- a row that skipped its layout would measure as the
+    // 64px placeholder and move every offset below it once it came on
+    // screen (claunch-gpxur). So the class the press borrowed must be gone,
+    // and the row must be laid out because the rail is windowed rather than
+    // because that class is still on.
     const handedBack = await page.evaluate(async () => {
       await new Promise((r) => setTimeout(r, 800));
       const list = document.querySelector("#session-list");
       const row = list.querySelector("li[data-name]");
       return { classed: list.classList.contains("rail-laid-out"),
+               windowed: list.classList.contains("rail-windowed"),
                visibility: getComputedStyle(row).contentVisibility };
     });
     assert.equal(handedBack.classed, false, "the rail is not left laid out");
-    assert.equal(handedBack.visibility, "auto", "the rows skip their layout again");
+    assert.equal(handedBack.visibility, handedBack.windowed ? "visible" : "auto",
+      `the row's layout follows the rail it is in (windowed ${handedBack.windowed})`);
 
     // And it stays where it landed once the skip is back.
     const after = await landing(page, TARGET);
@@ -211,16 +234,39 @@ const landing = (page, name) => page.evaluate((name) => {
     // the bare scroll the press used to do, aimed with the rail's estimates.
     // Without this the check above could pass on a rail that had simply been
     // scrolled once before.
+    //
+    // The rail has to be one that still skips off-screen rows for this to
+    // mean anything: the windowed rail (CLAUNCH-thuwx, RAIL_WINDOW_MIN_ROWS
+    // rows) lays out everything it draws, so the estimates never come into
+    // it. Ask the fixture for a rail below that threshold -- the same
+    // sessions thinned out -- and skip this step if the daemon's rail cannot
+    // be made to skip at all.
+    await page.route("**/api/sessions", async (route) => {
+      const answer = await route.fetch();
+      const body = await answer.json();
+      // Drop s040..s139, keeping the head, the foot and so the target with
+      // its parent and grandparent: 101 rows against a 160-row threshold.
+      const thin = (body.sessions || []).filter((s) => {
+        const n = Number((s.name || "").slice(1));
+        return !(s.name.startsWith("s0") && n >= 40 && n < 140);
+      });
+      await route.fulfill({ json: { ...body, sessions: thin }, headers: answer.headers() });
+    });
     const bare = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await bare.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
       window.setInterval = () => 0;
     });
     await bare.goto(`http://127.0.0.1:${server.address().port}`);
-    await bare.locator(`#session-list li.sess-card[data-name="${TARGET}"]`).waitFor();
-    const estimated = await bare.evaluate(async (name) => {
+    const skips = await bare.waitForFunction(() => {
+      const list = document.querySelector("#session-list");
+      if (!list || !list.querySelector("li[data-name]")) return false;
+      return !list.classList.contains("rail-windowed");
+    }, null, { timeout: 5000 }).then(() => true, () => false);
+    const estimated = !skips ? null : await bare.evaluate(async (name) => {
       const list = document.querySelector("#session-list");
       const row = list.querySelector(`li[data-name="${CSS.escape(name)}"]`);
+      if (!row) return null;
       const before = list.scrollHeight;
       const truth = () => [...list.querySelectorAll("li[data-name]")]
         .reduce((n, x) => n + x.offsetHeight, 0);
@@ -236,10 +282,12 @@ const landing = (page, name) => page.evaluate((name) => {
                railHeight: Math.round(lr.height) };
     }, TARGET);
     await bare.close();
-    assert.ok(Math.abs(estimated.error) > estimated.railHeight,
-      `without the laid-out rail the same scroll is off by more than a rail: ${estimated.error}px`
-      + ` (rail ${estimated.railHeight}px, height estimated ${estimated.before}`
-      + ` against ${estimated.truth})`);
+    if (estimated) {
+      assert.ok(Math.abs(estimated.error) > estimated.railHeight,
+        `without the laid-out rail the same scroll is off by more than a rail: ${estimated.error}px`
+        + ` (rail ${estimated.railHeight}px, height estimated ${estimated.before}`
+        + ` against ${estimated.truth})`);
+    }
 
     // The band floats, so at the very top it would sit on the first row
     // whenever that row's parent is not drawn (the state filter hides an

@@ -76,6 +76,12 @@ const server = http.createServer((req, res) => {
     page.on("pageerror", (e) => errors.push(String(e)));
     await page.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
+      // The rail's default filter is running + paused (claunch-jhvdu), and
+      // step 3 ends a session (q4) to watch its row be rebuilt — an exited
+      // record is `killed`, which that filter drops outright. Ask for every
+      // category so the row is still there to look at; the filter is not what
+      // this harness measures.
+      localStorage.setItem("claunch_session_filter:/", "current");
       // The page's own timers stay off: each step below polls by hand, so a
       // record seen in a window is one that step made.
       window.setInterval = () => 0;

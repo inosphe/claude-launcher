@@ -40,12 +40,22 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       renderWorkspaces();
       window.batchRequests = [];
       globalThis.SysPerfPage?.stopBadge();
+      // The page sends more than one request while the install runs -- the
+      // dashboard's own reads go out through `/api/batch` (app.js
+      // batchFlush), and that one lands between the press and the answer it
+      // is waiting for. So each paused request gets its own resolver, queued
+      // in order; a single `window.finishBatch` was overwritten by the poll
+      // and the install-all promise then never settled (the harness hung on
+      // `promptPacksBusy`). The harness releases every paused request, so the
+      // poll is not left hanging either.
+      window.paused = [];
       api = async (url, options) => {
         window.batchRequests.push([url, JSON.parse(options.body)]);
-        await new Promise(resolve => { window.finishBatch = resolve; });
+        await new Promise(resolve => { window.paused.push(resolve); });
         return { ok: true, json: async () => ({ ...window.testDoc,
           batch: [{ id: 'common', error: 'permission denied' }] }) };
       };
+      window.finishBatch = () => { for (const release of window.paused.splice(0)) release(); };
     });
     for (const width of [1440, 1024, 768, 390]) {
       await page.setViewportSize({ width, height: 1000 });
@@ -64,9 +74,14 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     await page.evaluate(() => window.finishBatch());
     await page.waitForFunction(() => !promptPacksBusy);
     assert.match(await page.locator('.prompt-packs .wf-error').innerText(), /common: permission denied/);
-    assert.deepEqual(await page.evaluate(() => window.batchRequests), [
-      ['/api/prompt-packs/install-all', { workspace: 'example-workspace' }],
-    ]);
+    // One install-all press is one request, with that workspace and nothing
+    // else. The page's own dashboard reads also pass through api(), so they
+    // are filtered out by path rather than asserted away -- what this holds
+    // is that the press did not post twice or send the wrong body.
+    assert.deepEqual(
+      (await page.evaluate(() => window.batchRequests)).filter(([url]) => url === '/api/prompt-packs/install-all'),
+      [['/api/prompt-packs/install-all', { workspace: 'example-workspace' }]],
+    );
     assert.deepEqual(errors, []);
     if (process.env.CLAUNCH_SCRATCH) {
       await page.setViewportSize({ width: 1440, height: 1100 });
