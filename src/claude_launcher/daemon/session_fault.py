@@ -390,7 +390,9 @@ class Detector:
     :meth:`scan` is called from the session's sample loop. It reads only the
     bottom ``SCAN_ROWS`` rows, at most once per :data:`SCAN_INTERVAL`, and
     keeps the last match as this session's fault until the kind's window (or
-    the message's own reset time) runs out.
+    the message's own reset time) runs out. Seeing the same kind again inside
+    that window does not extend it; seeing it after the window opens a new
+    run and counts a strike.
     """
 
     def __init__(
@@ -434,13 +436,64 @@ class Detector:
         status = _STATUS_CODE.search(text)
         hint = reset_hint(text)
         deadline = reset_deadline(text, now)
-        until = deadline if deadline is not None else now + kind.window
         previous = self._record
-        same = (
-            previous is not None
-            and previous["kind"] == kind.name
-            and previous["message"] == message
+        same_kind = previous is not None and previous["kind"] == kind.name
+        # A run is one continuous sighting of one kind: it starts at the
+        # first match and ends when its window does. A re-match inside that
+        # window updates what was seen -- the message, the last sighting --
+        # and leaves the window where it was. Pushing ``until`` out on every
+        # scan is what kept a fault on the rail after the session had moved
+        # on: the message kept for the tooltip is an excerpt of the rows
+        # under the match, so a paragraph scrolling through the scanned rows
+        # changed it every second, and a changed message started a new
+        # record with a fresh window (s1812, 2026-10-25: the session quoted
+        # "Request timed out" in its own analysis and the badge stayed 15
+        # minutes past the last real sighting, again and again).
+        #
+        # ``reset`` is the text the window was measured from, so it belongs
+        # to the run exactly as ``since`` and ``until`` do. Re-reading it on
+        # a re-match let one row show two observations at once -- a screen
+        # drawing both a weekly and a five-hour limit line keeps the same
+        # kind, so the tooltip said "resets: Oct 25, 2pm" beside a window
+        # that ended Oct 26 09:00.
+        #
+        # A message can also name a reset time that has already passed, and
+        # then ``until`` is behind ``since`` from the first scan: ``now <
+        # until`` never holds, every scan would be a new run, and ``strikes``
+        # would count scans rather than sightings (1 per second while the
+        # screen keeps changing). Such a record has no window to end, so a
+        # sighting like it is folded into the record instead.
+        #
+        # Both sides of that comparison have to be about the same observation.
+        # Reading it from the previous record alone held the window shut for
+        # good: a session that once drew a stale reset stayed inactive when a
+        # later screen named a future one (claunch-5ldt8 review).
+        previous_expired = (
+            previous is not None and previous["until"] <= previous["since"]
         )
+        this_expired = deadline is not None and deadline <= now
+        running = same_kind and (
+            now < previous["until"] or (previous_expired and this_expired)
+        )
+        if running:
+            since = previous["since"]
+            until = previous["until"]
+            reset = previous.get("reset", "")
+            strikes = previous.get("strikes", 1)
+        else:
+            since = now
+            until = deadline if deadline is not None else now + kind.window
+            reset = hint
+            if not same_kind:
+                # A different kind opens its own first run.
+                strikes = 1
+            elif previous_expired:
+                # The run being replaced never had a window, so nothing closed
+                # and this is not a second sighting of it.
+                strikes = previous.get("strikes", 1)
+            else:
+                # Coming back after the window closed is a second sighting.
+                strikes = previous.get("strikes", 0) + 1
         self._record = {
             "harness": self.harness,
             "kind": kind.name,
@@ -449,10 +502,11 @@ class Detector:
             "resolved_by": kind.resolved_by,
             "message": message,
             "code": status.group(1) if status else "",
-            "reset": hint,
-            "since": previous["since"] if same else now,
+            "reset": reset,
+            "since": since,
             "last_seen": now,
             "until": until,
+            "strikes": strikes,
         }
         return True
 
@@ -474,6 +528,7 @@ class Detector:
             "since": _iso(record["since"]),
             "last_seen": _iso(record["last_seen"]),
             "until": _iso(record["until"]),
+            "strikes": record.get("strikes", 1),
             "active": now < record["until"],
             "source": "screen",
         }

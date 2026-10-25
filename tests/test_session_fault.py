@@ -605,6 +605,142 @@ def test_a_later_different_fault_replaces_the_record():
     assert det.view(now=1005.0)["kind"] == "auth"
 
 
+def test_a_re_match_inside_the_window_does_not_push_the_window_out():
+    """The window belongs to the run, not to the last scan (claunch-5ldt8)."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    first = det.view(now=1000.0)
+    det.scan(_Screen(WEEKLY), now=1500.0)
+    later = det.view(now=1500.0)
+    assert later["since"] == first["since"]
+    assert later["until"] == first["until"]
+    assert later["last_seen"] != first["last_seen"]
+
+
+def test_a_scrolling_quote_keeps_the_run_it_started():
+    """The s1812 case: the excerpt of the rows under the match changes every
+    second while the same line scrolls, and a changed excerpt used to start a
+    new record with a new window -- so an answered session stayed faulted."""
+    det, now = _detector()
+    det.scan(_Screen("shim died at 16:19 and Request timed out followed"), now=1000.0)
+    first = det.view(now=1000.0)
+    det.scan(_Screen("then Request timed out again at 16:41"), now=1010.0)
+    later = det.view(now=1010.0)
+    assert later["kind"] == "network"
+    assert later["message"] != first["message"]
+    assert later["since"] == first["since"]
+    assert later["until"] == first["until"]
+    assert later["strikes"] == 1
+
+
+def test_a_re_match_inside_the_window_keeps_the_reset_it_was_measured_from():
+    """One row's `resets:` and `until:` come from the same sighting.
+
+    A screen that draws both a weekly and a five-hour limit line matches the
+    same kind twice in a row, so re-reading the hint on a re-match put one
+    observation's reset beside another observation's window (claunch-5ldt8
+    review)."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    first = det.view(now=1000.0)
+    det.scan(
+        _Screen("You've hit your 5-hour limit · resets Oct 25, 2pm (Asia/Seoul)"),
+        now=1060.0,
+    )
+    later = det.view(now=1060.0)
+    assert later["kind"] == "usage_limit"
+    assert later["reset"] == first["reset"]
+    assert later["until"] == first["until"]
+    assert later["since"] == first["since"]
+    assert later["strikes"] == 1
+
+
+def test_a_reset_that_has_already_passed_counts_one_run_not_one_per_scan():
+    """A message can name a reset time that is already behind the clock.
+
+    `reset_deadline` reads up to six hours back, so such a record starts with
+    `until` behind `since`; `now < until` never held, every scan became a new
+    run, and `strikes` counted scans instead of sightings -- one per second
+    while the screen kept changing (claunch-5ldt8 review)."""
+    start = datetime(2026, 10, 26, 3, tzinfo=ZoneInfo("UTC")).timestamp()
+    det, _ = _detector()
+    det.scan(_Screen("attempt 0 · " + WEEKLY), now=start)
+    first = det.view(now=start)
+    for step in range(1, 5):
+        det.scan(_Screen("attempt %d · %s" % (step, WEEKLY)), now=start + step)
+    view = det.view(now=start + 4)
+    assert view["active"] is False
+    assert view["strikes"] == 1
+    assert view["since"] == first["since"]
+    assert view["until"] == first["until"]
+
+
+def test_a_stale_reset_does_not_hold_a_later_window_shut():
+    """A record with no window must not veto the next sighting's window.
+
+    Reading "this record has no window" from the previous record alone kept a
+    session inactive after it had once drawn a reset time behind the clock: a
+    later screen naming a future one was folded into the old, dead window
+    (claunch-5ldt8 review)."""
+    noon = datetime(2026, 10, 26, 12, tzinfo=ZoneInfo("Asia/Seoul")).timestamp()
+    det, _ = _detector()
+    det.scan(_Screen(WEEKLY), now=noon)                       # resets 9am, past
+    stale = det.view(now=noon)
+    assert stale["active"] is False
+    det.scan(
+        _Screen("You've hit your 5-hour limit · resets Oct 26, 5pm (Asia/Seoul)"),
+        now=noon + 300,
+    )
+    later = det.view(now=noon + 300)
+    assert later["active"] is True
+    assert later["until"] == datetime(
+        2026, 10, 26, 8, tzinfo=ZoneInfo("UTC")
+    ).isoformat()  # 5pm KST, the reset the new sighting names
+    assert later["since"] != stale["since"]
+    assert later["strikes"] == 1
+
+
+def test_a_kind_that_comes_back_after_its_window_is_a_second_sighting():
+    catalog = session_fault.load(
+        "version: 1\n"
+        "kinds:\n"
+        "  usage_limit: {label: usage limit, action: wait, window: 60, resolved_by: account}\n"
+        "common: []\n"
+        "harnesses:\n"
+        "  claude:\n"
+        "    - kind: usage_limit\n"
+        "      pattern: 'weekly limit'\n"
+    )
+    det, now = _detector(catalog=catalog)
+    det.scan(_Screen("You've hit your weekly limit"), now=1000.0)
+    first = det.view(now=1000.0)
+    assert first["strikes"] == 1
+    det.scan(_Screen("You've hit your weekly limit"), now=1070.0)
+    later = det.view(now=1070.0)
+    assert later["strikes"] == 2
+    assert later["since"] != first["since"]
+    assert later["active"] is True
+
+
+def test_a_different_kind_starts_the_count_over():
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    det.scan(_Screen(LOGIN), now=1005.0)
+    assert det.view(now=1005.0)["strikes"] == 1
+
+
+def test_a_line_that_keeps_scrolling_holds_the_badge_one_window_at_a_time():
+    """Half an hour of sightings, thirty seconds apart, each with a different
+    excerpt: two fifteen-minute runs, not one record stretched over the half
+    hour."""
+    det, now = _detector()
+    for step in range(0, 1800, 30):
+        det.scan(_Screen("attempt %d: Request timed out" % step), now=1000.0 + step)
+    view = det.view(now=1000.0 + 1800)
+    assert view["strikes"] == 2
+    assert view["active"] is False
+
+
 def test_a_second_scan_inside_the_interval_is_throttled():
     det, now = _detector()
     assert det.scan(_Screen(WEEKLY), now=1000.0) is True

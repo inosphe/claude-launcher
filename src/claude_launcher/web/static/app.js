@@ -7491,8 +7491,11 @@ function railQuietFlags(name) {
         `${f.message}\n` +
         (f.reset ? `resets: ${f.reset}\n` : "") +
         (f.action ? `what to do: ${f.action}\n` : "") +
-        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"} ` +
-        "unless the message is seen again.",
+        (f.strikes > 1
+          ? `re-observed: ${f.strikes - 1}× — each sighting opens its own ` +
+            "window and never extends the last one\n"
+          : "") +
+        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"}.`,
     });
   }
   // Exited rows are left out: a record with no terminal holds nothing back
