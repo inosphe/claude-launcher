@@ -272,3 +272,142 @@ def test_the_enqueue_landing_trigger_pushes_nothing_from_master(tmp_path):
         {"do": "enqueue-landing"}, driver="w1", facts_fn=lambda c, s: dict(facts)))
     assert not ok
     assert "integration branch itself" in detail and "nothing was pushed" in detail
+
+# -- a move the transcript never recorded (claunch-1o6cs) ----------------------
+
+#: The shape a spawned worker hits: the run's cwd is the PARENT's checkout
+#: (spawn inherits it) and the round's branch lives in a worktree cut for the
+#: session -- `s1803-harness-pw164` for `s1803`. Nothing in the transcript
+#: says so: every entry records the inherited cwd, because the session reaches
+#: the other checkout with `git -C` rather than by standing in it. Measured on
+#: that session: 1154 cwd entries, all of them the parent's worktree.
+#:
+#: The landing request then carried the PARENT's branch and tip (7b78b56c of
+#: s1762-harness-flake instead of cf4957c0 of s1803-skip-receipt), and the
+#: leader held the merge on the mismatch.
+
+
+@pytest.fixture
+def parent_and_worker(tmp_path):
+    """A repository, the parent's checkout, and the worker's own worktree.
+
+    ``s1`` is the parent session; ``s2`` the worker spawned into ``s1``'s
+    checkout, whose round branch was cut in ``s2-round``.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "master")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    (root / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(root, "add", "a.txt")
+    _git(root, "commit", "-q", "-m", "base")
+    parent = tmp_path / "s1-checkout"
+    _git(root, "worktree", "add", "-q", "-b", "s1-round", str(parent))
+    (parent / "p.txt").write_text("p\n", encoding="utf-8")
+    _git(parent, "add", "p.txt")
+    _git(parent, "commit", "-q", "-m", "parent round")
+    worker = tmp_path / "s2-round"
+    _git(root, "worktree", "add", "-q", "-b", "s2-round", str(worker))
+    (worker / "w.txt").write_text("w\n", encoding="utf-8")
+    _git(worker, "add", "w.txt")
+    _git(worker, "commit", "-q", "-m", "worker round")
+    return root, parent, worker
+
+
+def _spawned(session, checkout, parent="s1"):
+    return SessionDef(name=session, cwd=str(checkout), parent=parent)
+
+
+def test_the_sessions_own_worktree_is_found_by_its_branch(
+        parent_and_worker, tmp_path, monkeypatch):
+    """The round branch is `<session>-...`; its checkout is the session's own,
+    even though the transcript never left the inherited directory."""
+    _root, parent, worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(parent)}, {"cwd": str(parent)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    sdef = _spawned("s2", parent)
+    assert work_checkout.of(sdef) == str(worker)
+
+
+def test_a_branch_of_another_session_is_not_taken(parent_and_worker, tmp_path, monkeypatch):
+    """`s1-round` belongs to the parent. A session called `s2` must not claim
+    it by prefix, and must not fall through to it either."""
+    _root, parent, _worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(parent)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    assert work_checkout.of(_spawned("s3", parent)) is None
+
+
+def test_a_prefix_that_is_only_a_string_prefix_is_not_taken(
+        parent_and_worker, tmp_path, monkeypatch):
+    """`s2-round` is the branch; a session named `s2-r` must not match it --
+    the separator, not the letters, is what makes it the session's own."""
+    _root, parent, _worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(parent)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    assert work_checkout.of(_spawned("s2-r", parent)) is None
+
+
+def test_the_recorded_move_still_wins_over_the_branch_guess(
+        parent_and_worker, tmp_path, monkeypatch):
+    """A transcript that DOES record the move is the better evidence: it is
+    what the session stood in, while a branch-prefix checkout is an inference.
+    Both must agree here, and the answer must not depend on which is read."""
+    _root, parent, worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(parent)}, {"cwd": str(worker)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    assert work_checkout.of(_spawned("s2", parent)) == str(worker)
+
+
+def test_a_detached_worktree_is_not_the_round_the_session_works_in(
+        parent_and_worker, tmp_path, monkeypatch):
+    """A `git worktree add --detach` scratch tree has no branch, so it says
+    nothing about which round the session is on. With the session's own round
+    worktree gone, the only checkout left is the parent's and a detached
+    scratch -- the answer must be None, not the scratch tree."""
+    root, parent, worker = parent_and_worker
+    _git(root, "worktree", "remove", str(worker))
+    scratch = tmp_path / "s2-scratch"
+    _git(root, "worktree", "add", "-q", "--detach", str(scratch))
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(parent)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    assert work_checkout.of(_spawned("s2", parent)) is None
+
+
+def test_a_main_checkout_session_does_not_adopt_a_leftover_round_branch(
+        parent_and_worker, tmp_path, monkeypatch):
+    """Session names are reused after `clear-sessions` (worktree.child_name),
+    so a session standing at the repository's main checkout must not be given
+    a same-named round branch some earlier session left behind -- it would
+    wake on someone else's branch."""
+    root, _parent, _worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(root)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    assert work_checkout.of(_spawned("s2", root)) is None
+
+
+def test_the_landing_facts_of_a_spawned_worker_are_its_own_branch(
+        parent_and_worker, tmp_path, monkeypatch):
+    """The defect as the leader saw it: the queue row carried the parent's
+    branch and tip. It must carry the worker's."""
+    _root, parent, worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(parent)}, {"cwd": str(parent)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    monkeypatch.setattr(cflow_landing, "in_review_of", lambda cwd, s: ["c-1"])
+    facts = cflow2_triggers.session_facts(_Manager(_Session("s2", parent)))(str(parent), "s2")
+    assert facts["branch"] == "s2-round"
+    assert facts["head"] == _git(worker, "rev-parse", "HEAD")
+    assert facts["head"] != _git(parent, "rev-parse", "HEAD")
+    assert cflow2_triggers.landing_refusal(facts) is None
+
+
+def test_a_session_already_on_its_own_round_branch_has_not_moved(
+        parent_and_worker, tmp_path, monkeypatch):
+    """The worker's own checkout is where it was started and stands on its own
+    round branch: there is no move to report. Searching anyway would answer
+    with an OLDER round's checkout the same session left behind."""
+    _root, _parent, worker = parent_and_worker
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(worker)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    assert work_checkout.of(_spawned("s2", worker)) is None
