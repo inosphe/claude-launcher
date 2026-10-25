@@ -692,6 +692,28 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(P.focus.length === 2, "focus(session, tid)");
   await settle();
   assert.equal(host.querySelector(".th-pane").style.props["--th-side-w"], "280px", "a kept width comes back at mount");
+  // a click on a thread read before, and select() of one (a QA card's
+  // link), start from its kept conversation: it is not read from the start
+  // again (claunch-m793w.1)
+  {
+    // th-1, which has messages to start from; th-2 has none, so even a kept
+    // copy of it is read from the start
+    const onNow = () => host.querySelectorAll(".th-item").find((i) => i.classList.contains("on")).dataset.id;
+    if (onNow() === "th-1") { P.select("th-2"); await settle(); }
+    calls.length = 0;
+    host.querySelectorAll(".th-item").find((i) => i.dataset.id === "th-1").fire("click");
+    await settle();
+    assert.ok(!calls.some((c) => c[1] === "/api/threads/th-1?after=0"),
+      "a click on a kept thread does not read it from the start");
+    P.select("th-2");
+    await settle();
+    calls.length = 0;
+    P.select("th-1");
+    await settle();
+    assert.ok(!calls.some((c) => c[1] === "/api/threads/th-1?after=0"),
+      "select() of a kept thread does not read it from the start");
+    assert.equal(onNow(), "th-1");
+  }
   P.unmount();
 
   /* claunch-bvbmi: with no thread the list takes the whole width, and a
@@ -939,13 +961,18 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
                       : {type: "approve", choices: [], answer: null}},
     ];
     const qcalls = [];
+    let listDown = false;
     const qapi = async (p, opts = {}) => {
       qcalls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+      if (listDown && p.startsWith("/api/threads?session=")) return {ok: false, status: 503, json: async () => ({error: "down"})};
       let doc = {};
-      if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads: [askT], open: 1, agent_seq: 0};
-      else if (p.startsWith("/api/threads/th-q?after=")) doc = {thread: askT, messages: askMsgs()};
+      // copies, as a JSON answer is: a kept conversation must not see the
+      // list's row change under it
+      if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads: [{...askT}], open: 1, agent_seq: 0};
+      else if (p.startsWith("/api/threads/th-q?after=")) doc = {thread: {...askT}, messages: askMsgs()};
       else if (p.endsWith("/answer")) {
         answered = {decision: "approve", text: "go", at: "2026-10-21T00:00:02+00:00"};
+        askT.updated_at = `answered ${qcalls.length}`;   // an entry changed in place
         doc = {message: askMsgs()[1]};
       }
       return {ok: true, status: 200, json: async () => doc};
@@ -969,6 +996,24 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
                      ["POST", "/api/threads/th-q/asks/3/answer", {decision: "approve", text: "go"}]);
     const said = qh.querySelector(".th-ask-said");
     assert.ok(said && said.text().includes("사용자 답변 · 승인"), "the answer shows on the entry");
+    P.unmount();
+    // an answer whose re-read did not land leaves no kept copy of the
+    // unanswered ask: the next mount does not draw "답변 대기" from it
+    // (claunch-m793w.1)
+    answered = null;
+    askT.updated_at = "asked again";
+    P.mount(qh, "s1", {api: qapi, storageKey: "qk"});
+    await settle();
+    qh.querySelector(".th-ask-note").value = "again";
+    qh.querySelector(".th-ask-note").fire("input");
+    listDown = true;
+    qh.querySelector(".th-ask").querySelectorAll(".th-ask-btn")[0].fire("click");
+    await settle();
+    P.unmount();
+    listDown = false;
+    P.mount(qh, "s1", {api: qapi, storageKey: "qk"});
+    assert.ok(!qh.querySelector(".th-ask-waiting"), "the answered ask's kept copy is dropped");
+    await settle();
     P.unmount();
     // the all-threads page and a guest's view read the thread without
     // answer controls (only the owner's pane answers).

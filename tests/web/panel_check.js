@@ -477,5 +477,46 @@ check("re-widening puts it back on the right, once",
       ids.layout.kids.filter((k) => k.id === "detail-split").length === 1,
       { main: ids.main.kids.length, layout: ids.layout.kids.map((k) => k.id) });
 
-console.log(failures ? `\n${failures} failure(s)` : "all panel checks passed");
-process.exit(failures ? 1 : 0);
+/* ---- the real refreshSession keeps what it read (claunch-m793w.1) ---- */
+/* The stub above stands in for it; this drives the real one, so a read that
+   stops keeping its answer -- or keeps a refusal, or keeps an answer for a
+   session the panel has already left -- is caught. */
+{
+  const vm = require("vm");
+  const box = vm.createContext({ answers: [], drawn: [] });
+  vm.runInContext(`
+let sessName = "coder2";
+const SESS_META_KEEP = 2;
+const sessMetaKept = new Map();
+const viewNode = { innerHTML: "", appendChild() {} };
+function $() { return viewNode; }
+function el() { return {}; }
+function renderSession(data) { drawn.push(data.name); }
+async function api() { const a = answers.shift(); if (a.during) a.during(); return a.resp; }
+function reply(status, body, during) {
+  answers.push({ during, resp: { ok: status === 200, status, json: async () => body } });
+}
+` + "async " + slice("refreshSession"), box);
+  const run = (code) => vm.runInContext(code, box);
+  (async () => {
+    run('reply(200, { name: "coder2" })');
+    await run("refreshSession()");
+    check("refresh: an answer read is kept for the next open",
+          run('sessMetaKept.get("coder2") && sessMetaKept.get("coder2").name') === "coder2");
+    run('sessName = "gone"; reply(404, { error: "no such session" })');
+    await run("refreshSession()");
+    check("refresh: a refusal is not kept", run('sessMetaKept.has("gone")') === false);
+    run('sessName = "a"; reply(200, { name: "a" }, () => { sessName = "b"; })');
+    await run("refreshSession()");
+    check("refresh: an answer for a session left mid-read is not kept",
+          run('sessMetaKept.has("a")') === false);
+    run('sessName = "b"; reply(200, { name: "b" })');
+    await run("refreshSession()");
+    run('sessName = "c"; reply(200, { name: "c" })');
+    await run("refreshSession()");
+    check("refresh: bounded, the oldest goes first",
+          run("[...sessMetaKept.keys()].join()") === "b,c", run("[...sessMetaKept.keys()].join()"));
+    console.log(failures ? `\n${failures} failure(s)` : "all panel checks passed");
+    process.exit(failures ? 1 : 0);
+  })().catch((err) => { console.error(err); process.exit(1); });
+}

@@ -230,6 +230,12 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   assert.strictEqual(view.byClass('thh-group').length, 2);
   await settle();
   assert.deepStrictEqual(calls, ['/api/threads/index', '/api/threads/th-1']);
+  // Coming back on another thread read before: open() itself draws that
+  // thread's kept conversation, before the list is read (claunch-m793w.1).
+  page.stop();
+  page.open('tree', 'th-2');
+  assert.strictEqual(view.byClass('thh-detail')[0].dataset.thread, 'th-2', 'kept th-2 drawn by open()');
+  await settle();
 
   // newest: the whole thread list stays (flat, with sessions), and only the newest shows.
   calls.length = 0;
@@ -252,6 +258,21 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   await settle();
   assert.deepStrictEqual(calls, ['/api/threads/index', '/api/threads/th-4']);
   assert.strictEqual(view.byClass('thh-detail')[0].dataset.thread, 'th-4');
+  // The newest changes back to one read before: the kept conversation is
+  // drawn while its read is still out (claunch-m793w.1).
+  const th4 = index.threads.shift();
+  const unheld = ctx.api;
+  let release;
+  const held = new Promise(r => { release = r; });
+  ctx.api = async url => (url.startsWith('/api/threads/th-') ? held.then(() => unheld(url)) : unheld(url));
+  view.byClass('thh-controls')[0].children.find(c => c.textContent === 'Refresh').listeners.click();
+  await settle();
+  assert.strictEqual(view.byClass('thh-detail')[0].dataset.thread, 'th-3', 'kept th-3, read still out');
+  assert.ok(view.byClass('thh-detail')[0].textContent.includes('body of th-3'));
+  release();
+  await settle();
+  ctx.api = unheld;
+  index.threads.unshift(th4);
 
   // A row in newest opens that thread in tree; the filters are sent to the index.
   view.byClass('thh-trow').find(r => r.dataset.thread === 'th-2').listeners.click();

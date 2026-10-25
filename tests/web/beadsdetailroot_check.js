@@ -41,7 +41,7 @@ function restartBeadsStream() { restarts.push(beadsWorkspace); }
 async function api(url) { requests.push(url); return answer; }
 const BEADS_DETAIL_KEEP = 64;
 const beadsDetailKept = new Map();
-` + slice("beadsRootOf") + slice("keepBeadsDetail") + slice("refreshBeadsDetail"), ctx);
+` + slice("beadsRootOf") + slice("beadsDetailKey") + slice("keepBeadsDetail") + slice("refreshBeadsDetail"), ctx);
 
 function reply(status, body) {
   ctx.answer = { ok: status === 200, status, json: async () => body };
@@ -94,9 +94,12 @@ const run = (code) => vm.runInContext(code, ctx);
   assert.strictEqual(ctx.restarts.length, 2);
 
   // 6. Each answer read is kept for the next open of that issue
-  // (claunch-m793w); a refusal is not.
-  assert.strictEqual(run('beadsDetailKept.get("claunch-kg3oe.1.1").issue.id'), "claunch-kg3oe.1.1");
-  assert.strictEqual(run('beadsDetailKept.has("nowhere-1")'), false);
+  // (claunch-m793w), under the board that answered (claunch-m793w.1); a
+  // refusal is not.
+  assert.strictEqual(run('beadsDetailKept.get(beadsDetailKey("/claunch", "claunch-kg3oe.1.1")).issue.id'), "claunch-kg3oe.1.1");
+  assert.strictEqual(run('beadsDetailKept.has(beadsDetailKey("/gds6", "claunch-kg3oe.1.1"))'), false);
+  assert.strictEqual(run('beadsDetailKept.get(beadsDetailKey("/elsewhere", "elsewhere-1")).issue.id'), "elsewhere-1");
+  assert.strictEqual(run('[...beadsDetailKept.keys()].some((k) => k.endsWith("\\nnowhere-1"))'), false);
 
   console.log("beadsdetailroot: ok");
 })().catch((err) => { console.error(err); process.exit(1); });
