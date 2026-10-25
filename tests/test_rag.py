@@ -198,6 +198,36 @@ def test_rag_config_reads_the_store():
 
 def test_rag_config_watch_interval_zero_is_off_not_default():
     assert store.rag_config({})["watch_interval"] == store.RAG_DEFAULTS["watch_interval"]
+
+
+def test_profile_source_carries_the_provider_and_custom_carries_none():
+    """``provider`` is derived for a profile source only.
+
+    It is what decides the request headers the call goes out with
+    (:func:`rag.request_headers`); a typed ``base_url`` belongs to no provider
+    entry, so nothing is claimed for it.
+    """
+    from claude_launcher import profile
+    profile.create("ds4")
+
+    def mutate(doc):
+        doc.setdefault("providers", {})["fw"] = {
+            "api_key": "fw-secret",
+            "endpoints": {"openai": "https://api.fireworks.ai/inference/v1"},
+            "models": {"default": "m"},
+        }
+        doc.setdefault("profiles", {}).setdefault("ds4", {})["provider"] = "fw"
+
+    store.update(mutate)
+    cfg = store.rag_config({**store.load(), "rag": {
+        "source": "profile", "profile": "ds4", "embedding_model": "e"}})
+    assert cfg["provider"] == "fw"
+    assert (cfg["base_url"], cfg["api_key"]) == (
+        "https://api.fireworks.ai/inference/v1", "fw-secret")
+    typed = store.rag_config({**store.load(), "rag": {
+        "base_url": "http://localhost:8000/v1", "api_key": "k",
+        "embedding_model": "e"}})
+    assert typed["provider"] == ""
     assert store.rag_config({"rag": {"watch_interval": 0}})["watch_interval"] == 0.0
     assert store.rag_config({"rag": {"watch_interval": "5"}})["watch_interval"] == 5.0
     assert store.rag_config({"rag": {"watch_interval": -3}})["watch_interval"] == 0.0
@@ -333,6 +363,49 @@ def test_client_sends_the_openai_and_cohere_shapes():
             assert "500" in str(err.value) and "rag-secret" not in str(err.value)
         finally:
             await server.close()
+
+    asyncio.run(run())
+
+
+def test_client_sends_the_providers_required_session_header():
+    """The header leaves on the wire, marked as this feature's own call.
+
+    A provider that refuses a request without its own session header (OpenCode
+    Go answers ``400 MissingSessionID``) rejected every sync, because
+    ``RagClient._session`` built its headers by hand and never read the
+    provider's rule. The indexer calls the upstream directly — no shim in its
+    path — so the rule has to be applied here or nowhere.
+    """
+    ep = Endpoint()
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            store.update(lambda doc: doc.setdefault("providers", {}).update({
+                "ocgo": {"session_header": "x-opencode-session"}}))
+            cfg = _cfg(server, provider="ocgo")
+            await rag.RagClient(cfg).embed(["kanban"])
+            # a typed endpoint names no provider, so no rule applies to it
+            await rag.RagClient(_cfg(server, provider="")).embed(["kanban"])
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert ep.headers[0]["x-opencode-session"] == rag.RAG_SESSION_ID
+    assert ep.headers[0]["x-opencode-session"] == "claunch-rag"
+    assert ep.headers[0]["Authorization"] == "Bearer rag-secret"
+    assert "x-opencode-session" not in ep.headers[1]
+
+
+def test_a_malformed_rag_header_rule_fails_the_call_with_the_config_key():
+    async def run():
+        store.update(lambda doc: doc.setdefault("providers", {}).update({
+            "ocgo": {"session_header": "x opencode"}}))
+        cfg = dict(store.RAG_DEFAULTS, base_url="https://x/v1", api_key="k",
+                   embedding_model="m", provider="ocgo")
+        with pytest.raises(rag.RagError, match="session_header"):
+            async with rag.RagClient(cfg)._session():
+                pass
 
     asyncio.run(run())
 

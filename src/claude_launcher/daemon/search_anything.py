@@ -239,7 +239,7 @@ def profile_rows(doc=None):
     rows = []
     for prof in profile_mod.list_all():
         try:
-            base, key = store.rag_profile_backend(prof.name, doc)
+            base, key, _provider = store.rag_profile_backend(prof.name, doc)
         except ValueError:
             continue
         rows.append({"name": prof.name, "base_url": base, "has_key": bool(key)})
