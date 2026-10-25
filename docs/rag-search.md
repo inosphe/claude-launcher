@@ -28,12 +28,17 @@ disabled default, never an error.
 
 ```yaml
 rag:
-  source: custom        # custom = base_url + api_key below; profile = a profile's backend
-  profile: ds4          # with source: profile, its provider's endpoints.openai + key
-  base_url: https://omlx.inosphe.work/v1     # OpenAI-compatible root
-  api_key: <key>                             # or CLAUNCH_RAG_API_KEY in the env
-  embedding_model: mlx-community--Qwen3-Embedding-4B-mxfp8
-  rerank_model: mlx-community--Qwen3-Reranker-4B-mxfp8   # optional
+  source: custom        # which row below is in force: custom or profile
+  sources:              # one row per connection path, each with its own models
+    custom:
+      base_url: https://omlx.inosphe.work/v1   # OpenAI-compatible root
+      api_key: <key>                           # or CLAUNCH_RAG_API_KEY in the env
+      embedding_model: mlx-community--Qwen3-Embedding-4B-mxfp8
+      rerank_model: mlx-community--Qwen3-Reranker-4B-mxfp8   # optional
+    profile:
+      profile: ds4         # its provider's endpoints.openai + key
+      embedding_model: accounts/fireworks/models/qwen3-embedding-8b
+      rerank_model: ""
   verify_tls: false     # this endpoint's chain fails Python's verification
   dimensions: 1024      # 0 = the model's width (2560 here); Matryoshka truncation
   timeout: 120          # seconds per endpoint call
@@ -43,17 +48,28 @@ rag:
   watch_interval: 30    # seconds between checks of each board's .beads files; 0 = off
 ```
 
-`source` picks where the endpoint and key come from (claunch-dkrqf).
+`source` picks which row is in force (claunch-dkrqf, claunch-pxxn4).
 `custom` (the default, and what a block without `source` means) uses the
 typed `base_url` and `api_key` — a local server such as oMLX. `profile`
 uses the named claunch profile's backend instead: its provider's
 `endpoints.openai` as the base and the profile's stored token (else the
 provider's `api_key`) as the key, the same resolution the Observer and the
-briefing use — e.g. `ds4` → Fireworks. The typed pair stays in the block
-while `profile` is chosen, so switching back is one choice in **Settings ▸
-Search settings**. `CLAUNCH_RAG_API_KEY` is a key for the typed endpoint and
-applies to `custom` only. The embedding and rerank model ids are always typed
-in: a profile's `models` are chat models. Changing the source changes the
+briefing use — e.g. `ds4` → Fireworks.
+
+Each row keeps its own `embedding_model` and `rerank_model` (claunch-pxxn4).
+The two paths name models differently — a local oMLX server takes a
+converted model id, a provider takes its own — so one shared pair meant that
+choosing a path overwrote the other path's ids. Switching the radio in
+**Settings ▸ Search settings** now shows that row's ids, and saving writes
+only the row in force (the other row is carried unchanged). Only the row in
+force is validated, so a path with no address yet does not block the other.
+
+A block written before `sources` existed has one set of values at the root.
+That set was what both paths meant then, so `store.rag_source_rows()` reads
+it as both rows' initial values; the first save writes the rows and drops the
+flat keys. `CLAUNCH_RAG_API_KEY` is a key for the typed endpoint and applies
+to `custom` only. The embedding and rerank model ids are always typed in: a
+profile's `models` are chat models. Changing the source changes the
 base URL, so the index is rebuilt.
 
 The feature is on when the chosen source yields a base URL and a key and
