@@ -1575,9 +1575,9 @@ stream only carries token counts when the request asks for them, so behind
 the shim claunch lets Pi send `stream_options.include_usage` (a backend that
 rejects that field can opt out with `providers.<name>.metering: false`).
 
-The web UI shows the same records: each session's rail row carries a
-throughput line (`⚡ 38.1 tok/s · ttft 715ms · avg 900ms · 97% · 45s ago`), an
-open briefing card a chip with the same figure, and the attached session's
+The web UI shows the same records: an expanded session rail row carries a
+throughput line (`⚡ 38.1 tok/s · ttft 715ms · avg 900ms · 97% · 45s ago`), its
+briefing card a chip with the same figure, and the attached session's
 header a badge with a twin overlay drawn over the top-right corner of its
 terminal. All of them read the `tps` block the daemon hangs on the session
 (`GET /api/sessions` and `/api/sessions/<name>/meta`); `GET /api/metering?session=<name>`
@@ -4839,6 +4839,22 @@ injects) but is dismissed there, where its mail is counted.
 
 ## Web UI & HTTP API
 
+- A session's **rail card** is drawn at one of three densities, because the
+  rail is read as a list of many sessions at once. A **one-line** card is the
+  dot, the name and its role — what a `reviewer` or `oneshot` session gets,
+  since a fleet holds many of them and their cards differ only in the name. A
+  **compact** card (everything else) adds the briefing's one-line job
+  description and the row's buttons. An **expanded** card draws every line the
+  row has — worktree, context gauge, attention line, cflow badges — and the
+  whole briefing. Expanded is the card the reader is on: the terminal on
+  screen, the detail panel's subject, or a pinned session; clicking a card
+  opens its session, which is what expands it. There is no fold to open a
+  briefing with any more — the compact card's one-line already says what the
+  session is doing, and the full text comes with the expanded card. A role's
+  pill is coloured by its family (leader, operator, worker, reviewer, oneshot,
+  specialist, free), and a child session's row is drawn as a card resting on
+  its parent's with a spine at its depth.
+
 **Session line sync.** The **type for this session** line is local-only by
 default: what one browser types stays in that browser until Enter. The
 **Sync** button beside it switches the *session* to remote-sync, and every
@@ -5046,7 +5062,8 @@ changed the common declaration and wrote the value into every existing Claude
 profile; its scope included both existing profiles and future profile creation.
 
 General also carries a **Briefing model** card, which chooses the backend that
-writes the session briefings (the `▸` card on a rail row). Several backends
+writes the session briefings (the card an expanded rail row draws, and the
+header's `briefing` pane). Several backends
 can be saved as **presets**, and the top of the card is a radio list — one row
 per saved preset plus **custom**. Selecting is the whole switch: selecting a
 preset and saving points the briefing at it, and selecting **custom** is how you

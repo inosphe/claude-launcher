@@ -2990,6 +2990,11 @@ function toggleSessionPin(name) {
   if (!name) return false;
   const on = setSessionPinned(name, !isSessionPinned(name));
   syncSessionPinUi();
+  // A pin is one of the three things that make a card expanded
+  // (railCardMode), so the row's density is repainted here, before the poll
+  // the refresh below asks for — pinning is a press on this row and the card
+  // has to answer it now. refreshSessions rebuilds the same rows afterwards.
+  if (typeof syncRailDensity === "function") syncRailDensity();
   if (typeof refreshSessions === "function") refreshSessions();
   return on;
 }
@@ -5084,16 +5089,51 @@ const railRowPx = new Map();
 // under the reader (claunch-thuwx.1).
 const railSeen = { rows: 0, px: 0, closed: false };
 const railSeenKeys = new Set();
+// The same sample, kept apart per card density. A one-line card is a fifth of
+// an expanded one's height, so a single mean over both plans the rows it has
+// not seen against a figure that is wrong for whichever density they are —
+// and a rail whose reviewers pile up at the bottom would scroll wrong until
+// each of them had been on screen. The compact bucket is `railSeen` itself,
+// so the model the earlier passes were tuned against is unchanged.
+const railSeenByMode = new Map();
 let railWindowScrollTimer = 0;
 
-function railEstimatePx() {
-  if (railSeen.rows >= 8) return Math.max(24, Math.round(railSeen.px / railSeen.rows));
+/* The sample for one density: how many rows of it have been measured and how
+   tall they were, or the stylesheet's figure until enough have been. */
+function railSeenFor(mode) {
+  const key = mode || "compact";
+  if (key === "compact") return railSeen;
+  let seen = railSeenByMode.get(key);
+  if (!seen) {
+    seen = { rows: 0, px: 0, closed: false };
+    railSeenByMode.set(key, seen);
+  }
+  return seen;
+}
+
+function railEstimatePx(mode = "compact") {
+  const seen = railSeenFor(mode);
+  if (seen.rows >= 8) return Math.max(24, Math.round(seen.px / seen.rows));
   return RAIL_ROW_EST_PX;
+}
+
+/* The density a row is drawn at, for the height model. Anything that is not
+   a session row has no density and is planned as a compact one. */
+function railRowMode(row) {
+  if (!row || row.type !== "session") return "compact";
+  return row.mode || "compact";
 }
 
 function railRowKey(row) {
   if (!row) return "";
-  if (row.type === "session") return `s:${row.session && row.session.name}`;
+  // A session row's height depends on its density (app.js, railCardMode), so
+  // the density is part of what identifies the row to the height model. Keyed
+  // by name alone, a card reopened at `expanded` would be planned with the
+  // `compact` height it was measured at, and every offset below it would be
+  // wrong by the difference until something else happened to remeasure it.
+  if (row.type === "session") {
+    return `s:${row.session && row.session.name}@${railRowMode(row)}`;
+  }
   if (row.type === "shadow") return `x:${(row.shadow && row.shadow.name) || ""}`;
   if (row.type === "group") return `g:${row.level || 0}:${row.group}=${row.value}`;
   return "";
@@ -5102,7 +5142,7 @@ function railRowKey(row) {
 function railRowPxOf(row) {
   if (!row || row.type === "ungroup") return 0;
   const px = railRowPx.get(railRowKey(row));
-  return typeof px === "number" && px > 0 ? px : railEstimatePx();
+  return typeof px === "number" && px > 0 ? px : railEstimatePx(railRowMode(row));
 }
 
 /* Every row's offset and the model's total height: one walk of the model, and
@@ -5168,23 +5208,40 @@ function railSpacerRow(px) {
    can be measured; the rest keep the estimate until they are seen. */
 function railMeasureRows(list) {
   if (!list || typeof list.querySelectorAll !== "function") return;
+  const touched = new Set();
   list.querySelectorAll("li[data-name]").forEach((li) => {
     const px = li.getBoundingClientRect ? li.getBoundingClientRect().height
       : li.offsetHeight;
     if (!(px > 0)) return;
-    const key = `s:${li.dataset.name}`;
+    // Same key railRowKey builds for a session row: the density is part of
+    // it, so a card that changed density is measured again under the new one
+    // while the old measurement stays (a card that closes keeps its expanded
+    // height for the next time it opens).
+    const mode = li.dataset.railMode || "compact";
+    const key = `s:${li.dataset.name}@${mode}`;
     railRowPx.set(key, px);
-    // Each row feeds the estimate once, and only until the sample is full:
-    // see RAIL_ESTIMATE_SAMPLE. A row measured again is the row's own height
-    // and moves nothing else.
-    if (!railSeen.closed && railSeen.rows < RAIL_ESTIMATE_SAMPLE
+    // Each row feeds ITS DENSITY's estimate once, and only until that sample
+    // is full (see RAIL_ESTIMATE_SAMPLE), so a rail whose reader keeps one
+    // expanded card open does not plan every unmeasured row as if it were
+    // that tall. The seen-key set is shared: the key already carries the
+    // density, and a row is one row whatever card it is drawn as.
+    const seen = railSeenFor(mode);
+    if (!seen.closed && seen.rows < RAIL_ESTIMATE_SAMPLE
         && !railSeenKeys.has(key)) {
       railSeenKeys.add(key);
-      railSeen.rows += 1;
-      railSeen.px += px;
+      seen.rows += 1;
+      seen.px += px;
     }
+    touched.add(mode);
   });
-  if (railSeen.rows >= 8) railSeen.closed = true;
+  // A density's sample closes at the same floor it always did -- once eight
+  // rows of THAT density have been measured -- and per density, because
+  // closing the compact sample on an expanded card's measurement would freeze
+  // it at a figure it never saw.
+  for (const mode of touched) {
+    const seen = railSeenFor(mode);
+    if (seen.rows >= 8) seen.closed = true;
+  }
   const headings = list.querySelectorAll(".session-group-heading");
   if (!headings || typeof headings.forEach !== "function") return;
   headings.forEach((el) => {
@@ -5390,6 +5447,124 @@ function railRestoreAnchor(list, anchor) {
   const move = railAgreed(moves);
   if (Math.abs(move) >= 0.5) list.scrollTop = Math.max(0, (list.scrollTop || 0) + move);
   return true;
+}
+
+/* ---- rail card density ------------------------------------------------
+   One rail, many sessions, and the reader's question is usually "which of
+   these is doing what" rather than "tell me everything about one of them".
+   So a row is drawn at one of three densities, and the rail says which with
+   `data-rail-mode` on the li (style.css keys every difference off it):
+
+     min      one line: the status dot, the name, the role. For the roles a
+              fleet carries by the dozen and whose rows differ only in name
+              (reviewer, oneshot) — a full card for each of them is a wall
+              of repetition that hides the workers.
+     compact  three lines: the name line (name, role, handle, meta), the
+              briefing's one-line job description, and the buttons line.
+     expanded everything the row has: the context gauge, the directory, the
+              attention line, the cflow badges, and the briefing card itself.
+
+   Expanded is for the session the reader is on — the terminal on screen, the
+   detail panel's subject, or a pinned one — because those are the cards the
+   person asked to keep in front of them. Everything else is compact. Picking
+   a card (clicking it) opens the session, which is what makes it expanded.
+
+   The density is part of the row's height, so it is part of the height
+   model's key too (railRowKey): a session that switches from compact to
+   expanded is a row of a different height, not the same row measured twice. */
+
+/* The role families the rail colours. A role's aliases arrive unresolved in
+   `s.role` for a session whose mesh poll has not landed, so the alias table
+   is here rather than read off the mesh's vocabulary (the daemon resolves
+   the label for memberships, and both paths land in the same family).
+   Families follow the packaged vocabulary in daemon/mesh_roles.py; a role the
+   table does not know keeps the neutral pill it had. */
+const RAIL_ROLE_FAMILIES = new Map();
+for (const [family, words] of [
+  ["leader", ["leader", "lead", "moderator", "mod", "chair",
+              "pm", "project-manager", "planner", "coordinator"]],
+  ["operator", ["operator", "op", "liaison", "relay"]],
+  ["worker", ["worker", "coder", "dev", "developer", "engineer", "builder",
+              "maker", "programmer", "implementer"]],
+  ["reviewer", ["reviewer", "review", "peer", "critic", "auditor",
+                "checker", "qa"]],
+  ["oneshot", ["oneshot", "analyst", "job", "gds", "analysis"]],
+  ["specialist", ["specialist", "service", "gatekeeper"]],
+  ["free", ["free-role", "no-role"]],
+]) {
+  for (const word of words) RAIL_ROLE_FAMILIES.set(word, family);
+}
+
+/* The family a role label belongs to, or "" for one the table does not
+   know: an unrecognised role must not borrow a colour and say it is
+   something it is not. */
+function railRoleFamily(role) {
+  const key = String(role || "").trim().toLowerCase();
+  return key ? (RAIL_ROLE_FAMILIES.get(key) || "") : "";
+}
+
+/* The roles drawn as one line while their card is not expanded. Both are
+   roles a fleet holds many of at once and whose cards differ only in the
+   name, which is exactly what a full card cannot show twenty of. */
+const RAIL_MIN_CARD_FAMILIES = new Set(["reviewer", "oneshot"]);
+
+/* The role this session reads as, by the same precedence the row draws:
+   its own field first, then what the first mesh it joined says. */
+function railSessionRole(s) {
+  if (!s) return "";
+  if (s.role) return s.role;
+  if (typeof sessMeshes === "function") {
+    for (const m of sessMeshes(s.name) || []) {
+      if (m && m.label) return m.label;
+    }
+  }
+  return "";
+}
+
+/* Which density this row is drawn at (see the block above). */
+function railCardMode(s) {
+  if (!s || !s.name) return "compact";
+  const name = s.name;
+  const expanded = name === currentName || name === sessName
+    || (typeof isSessionPinned === "function" && isSessionPinned(name));
+  if (expanded) return "expanded";
+  return RAIL_MIN_CARD_FAMILIES.has(railRoleFamily(railSessionRole(s)))
+    ? "min" : "compact";
+}
+
+/* Repaint the densities on the rows already on screen, and expand the one
+   that changed. Called from the paths that move `currentName`, `sessName` or
+   the pin list WITHOUT a poll behind them — opening a session, opening the
+   detail panel, pinning from the row's own button — because the density is
+   what makes a card open, and waiting for the next /api/sessions poll means
+   the reader clicked a card and nothing moved for up to two seconds.
+
+   The row that gained a density is also the row that changed height, so the
+   virtual scroll's height model is told about it (railRowPx is keyed by
+   density, and the old measurement stays under its own key). The next pass
+   measures the row again under the key it now has. */
+function syncRailDensity() {
+  const list = $("session-list");
+  if (!list || !list.querySelectorAll) return;
+  const cache = typeof sessionsCache === "undefined" ? [] : (sessionsCache || []);
+  let changed = false;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const name = li.dataset.name;
+    // A row whose record the poll has not landed yet is left alone: guessing
+    // its density from the name alone would flip a reviewer's one-line card
+    // to a compact one and back on every poll that raced the mesh answer.
+    const rec = cache.find((s) => s.name === name);
+    if (!rec) continue;
+    const mode = railCardMode(rec);
+    if (li.dataset.railMode === mode) continue;
+    li.dataset.railMode = mode;
+    changed = true;
+  }
+  // The card comes and goes with the density: an expanded card draws the
+  // briefing and the others must not keep a stale one. Once, after the loop
+  // — applyBriefingCards repaints every row, and calling it per row would
+  // repaint the whole rail once per card that moved.
+  if (changed && typeof applyBriefingCards === "function") applyBriefingCards();
 }
 
 async function refreshSessions(options) {
@@ -5690,6 +5865,19 @@ async function refreshSessions(options) {
   const tabbed = rebuild && groupOrder.length && typeof sessionGroupTabRows === "function"
     ? sessionGroupTabRows(originRows, groupOrder[0]) : null;
   const rows = tabbed ? tabbed.rows : originRows;
+  // Each session row carries the density it is drawn at (railCardMode), so
+  // the height model can tell one density's height from another's
+  // (railRowKey) without recomputing it during the plan. Guarded like the
+  // other late helpers here: the isolated rail harnesses slice this function
+  // without the density block, and a row built without a mode is the compact
+  // card they were written against.
+  if (typeof railCardMode === "function") {
+    for (const row of rows) {
+      if (row.type === "session" && row.session) {
+        row.mode = railCardMode(row.session);
+      }
+    }
+  }
   if (rebuild && typeof renderSessionGroupTabs === "function") {
     renderSessionGroupTabs(groupOrder[0] || "", tabbed ? tabbed.tabs : [],
                            tabbed ? tabbed.active : null);
@@ -6053,6 +6241,14 @@ async function refreshSessions(options) {
     // does, and a link is a tab stop too.
     li.classList.add("sess-card");
     li.tabIndex = 0;
+    // Which density this card is drawn at (railCardMode). The stylesheet keys
+    // every difference between the three off this attribute, and the height
+    // model keys its measurement by it (railRowKey, railMeasureRows). A
+    // harness that sliced the row builder without the density block builds
+    // the compact card, which is what those harnesses were written against.
+    const mode = row.mode
+      || (typeof railCardMode === "function" ? railCardMode(s) : "compact");
+    li.dataset.railMode = mode;
     if (s.name === currentName) li.classList.add("active");
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
@@ -6065,6 +6261,12 @@ async function refreshSessions(options) {
     if (depth) {
       li.style.paddingLeft = `${12 + Math.min(depth, 4) * 10}px`;
       li.classList.add("child");
+      // How deep, for the stylesheet's stack (style.css, `li.child`): the
+      // spine and the card sliver above each child are tinted by level, so a
+      // reader can see the pile a session sits in without reading the indent.
+      // Capped like the indent for the same reason — past four levels the
+      // step stops saying anything new.
+      li.dataset.railDepth = String(Math.min(depth, 4));
       li.title = `spawned by ${s.parent}`;
     }
     if (kin) {
@@ -6108,6 +6310,16 @@ async function refreshSessions(options) {
     const meshRoles = [...new Set(memberships.map((m) => m.label).filter(Boolean))];
     role.textContent = s.role || (underRole && underRole.label)
       || meshRoles[0] || "free-role";
+    // The role's family colours the pill (railRoleFamily). Keyed off the pill's
+    // own text so the row's role, a mesh heading's role and the alias the
+    // record still carries all land on the same colour. A family the table
+    // does not know adds no class: an unrecognised role keeps the neutral
+    // pill rather than borrowing a colour that would claim it is something
+    // else.
+    const roleFamily = typeof railRoleFamily === "function"
+      ? railRoleFamily(role.textContent) : "";
+    if (roleFamily) role.classList.add(`role-${roleFamily}`);
+    role.title = `${role.textContent} role`;
     // And the name the mesh calls it by, when that is not the name above.
     // First of the qualifiers, before the role, because it is another way of
     // saying WHO this row is — the role and the rooms are both properties of
@@ -11052,7 +11264,11 @@ function renderBriefingCard(name, entry) {
   }
   card.appendChild(head);
 
-  if (loading && !data) {
+  if (!briefingLLM) {
+    // An expanded card with no summariser behind it says so, and where to
+    // put one: the row has no control of its own to explain that on.
+    card.appendChild(el("div", "sess-brief-note", BRIEFING_OFF_HINT));
+  } else if (loading && !data) {
     card.appendChild(el("div", "sess-brief-note", "summarising…"));
   } else if (!entry || entry.phase === "unconfigured") {
     card.appendChild(el(
@@ -11100,53 +11316,59 @@ function renderBriefingCard(name, entry) {
   return card;
 }
 
-/* Repaint every row's toggle and card from the state above. Safe to call
-   any time; refreshSessions calls it after each rebuild. The card is
-   rebuilt in place (its listeners live and die with it) — only the toggle
-   is reused, and it carries no state beyond its glyph. */
+/* Repaint every row's briefing card from the state above. Safe to call any
+   time; refreshSessions calls it after each rebuild.
+
+   A rail row has no fold any more. The card is part of what an EXPANDED row
+   is (railCardMode): the two dense cards — reviewer and oneshot one-liners —
+   never carry it, a compact row shows the one-line job description instead,
+   and the session the reader is on gets the whole thing. That is why picking
+   a card is the only way to open a briefing: picking it opens the session,
+   which makes it the expanded card.
+
+   `briefingOpen` still exists for the header's own toggle (applyBriefingTop),
+   which is a different surface with its own pane; the rail no longer reads
+   it. */
 function applyBriefingCards() {
   const list = $("session-list");
   if (!list) return;
+  // The sessions this pass has to ask about, collected rather than asked for
+  // in the loop: fetchBriefing repaints the cards when it starts, so asking
+  // from inside a paint would re-enter this function and let the inner pass
+  // finish the outer one's rows.
+  const ask = [];
   for (const li of list.querySelectorAll("li[data-name]")) {
     const name = li.dataset.name;
-    let btn = li.querySelector(".sess-brief-toggle");
-    if (!btn) {
-      btn = el("button", "sess-brief-toggle");
-      btn.type = "button";
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();   // the row itself attaches; this button does not
-        toggleBriefing(name);
-      });
-      (li.querySelector(".rail-actions") || li).appendChild(btn);
-    }
-    // The toggle is the feature's one always-visible handle, so it is also
-    // where "this exists but is off" is said: without a backend the button
-    // stays put but inert, and its tooltip points at the Settings card that
-    // sets one — better than a live-looking button opening onto that
-    // sentence.
-    btn.disabled = !briefingLLM;
-    btn.title = briefingLLM
-      ? "briefing: goal, current work, state — summarised"
-      : BRIEFING_OFF_HINT;
-    const open = briefingLLM && briefingOpen.has(name);
-    btn.textContent = open ? "▾" : "▸";
+    // A stale fold left by a build that predates this change is not a card
+    // any more: only this function appends `.sess-brief` to a rail row.
+    const old = li.querySelector(".sess-brief");
+    if (old) old.remove();
     syncRowRefresh(li, name);
     // A refresh that just landed paints its one-line onto the row now, so
     // the ⟳ stopping and the text changing are one event — otherwise the
     // line waits for the next /api/sessions poll and the click looks to
     // have done nothing. The poll repaints the same words from the
-    // daemon's cache, so this is early, not different.
+    // daemon's cache, so this is early, not different. It runs at every
+    // density: the one-line is the compact card's summary.
     const fresh = briefingCache.get(name);
     const one = fresh && fresh.phase === "ok" && fresh.data && fresh.data.briefing
       && fresh.data.briefing["one-line-job-description"];
     const oline = li.querySelector(".rail-brief");
     if (one && oline) oline.textContent = one;
-    const old = li.querySelector(".sess-brief");
-    if (old) old.remove();
-    if (open) li.appendChild(renderBriefingCard(name, briefingCache.get(name)));
+    if (li.dataset.railMode !== "expanded") continue;
+    // Asking on sight is the point of the fold's removal: the expanded card
+    // exists to be read, and an unasked card would say "nothing yet" under a
+    // reader who never had a control to ask with.
+    if (briefingLLM && !briefingCache.has(name)) ask.push(name);
+    li.appendChild(renderBriefingCard(name, briefingCache.get(name)));
   }
   // And the current session's top-bar button + pane, now the rail exists.
   applyBriefingTop();
+  for (const name of ask) {
+    // One already in hand by the time the loop ended (a fetch started by the
+    // card's own ⟳, or by the header) is not asked for again.
+    if (!briefingCache.has(name)) fetchBriefing(name, false);
+  }
 }
 
 /* The top header's briefing control: the same feature the row ▸ carries,
@@ -11471,20 +11693,22 @@ function openRailNoteEditor(li, name) {
   }
 }
 
-/* What a rail row says whether folded or open: the briefing's one-line job
-   description only — the opening task belongs to the detail panel. The
-   digest rides the /api/sessions poll (see briefing.digest), so a browser
-   refresh repaints it from the daemon's session state instead of asking the
-   LLM again. The row's ⟳ refresh sits beside it as the collapsed-state
-   handle — same fetch as the card's, but it never opens the card. Built here
-   on every row rebuild; the ▸ toggle and the card are applyBriefingCards'. */
+/* What a rail row says at every density: the briefing's one-line job
+   description — the opening task belongs to the detail panel. The digest
+   rides the /api/sessions poll (see briefing.digest), so a browser refresh
+   repaints it from the daemon's session state instead of asking the LLM
+   again. This line IS the compact card's summary (railCardMode); the full
+   briefing is what an expanded card draws under it, so nothing has to be
+   opened to read what a session is doing. The row's ⟳ refresh sits beside
+   it — same fetch as the card's, and it never changes the density. Built
+   here on every row rebuild; the card is applyBriefingCards'. */
 function decorateBriefingRow(li, s) {
   const one = (s.briefing && s.briefing.one_line) || "";
   let oline = li.querySelector(".rail-brief");
   if (one) {
     if (!oline) {
       oline = el("div", "rail-brief");
-      oline.title = "one-line job description — ▸ opens the full briefing";
+      oline.title = "one-line job description — pick the session for the full briefing";
       li.appendChild(oline);
     }
     oline.textContent = one;
@@ -23664,6 +23888,9 @@ function restoreTerminal(b) {
   );
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // ...and which card is the expanded one: the density is what opens a card,
+  // and it follows the terminal rather than waiting for the next poll.
+  if (typeof syncRailDensity === "function") syncRailDensity();
   // And which card unfolds its commits (claunch-7myrv).
   if (typeof syncRailCommits === "function") syncRailCommits();
   markDetailRow();
@@ -24012,6 +24239,9 @@ async function snapshotAttach(name) {
   );
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // ...and which card is the expanded one: the density is what opens a card,
+  // and it follows the terminal rather than waiting for the next poll.
+  if (typeof syncRailDensity === "function") syncRailDensity();
   // And which card unfolds its commits (claunch-7myrv).
   if (typeof syncRailCommits === "function") syncRailCommits();
   markDetailRow();
@@ -24102,6 +24332,9 @@ function freshAttach(name) {
   );
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // ...and which card is the expanded one: the density is what opens a card,
+  // and it follows the terminal rather than waiting for the next poll.
+  if (typeof syncRailDensity === "function") syncRailDensity();
   // And which card unfolds its commits (claunch-7myrv).
   if (typeof syncRailCommits === "function") syncRailCommits();
   // The panel may already have been pointing here (opened from the rail's ⓘ
@@ -45030,6 +45263,9 @@ function dropDetail() {
   sessReminderNoteBox = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
+  // The row the panel described is no longer the panel's subject, so it goes
+  // back to its own density (railCardMode).
+  if (typeof syncRailDensity === "function") syncRailDensity();
 }
 
 /* ⓘ, and the terminal header's `details`. Same button both ways: pressing it
@@ -45070,6 +45306,9 @@ function repointDetail(name) {
   sessReminderNoteBox = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
+  // The panel's subject is one of the cards the rail expands (railCardMode),
+  // so the row it now describes has to change density with it.
+  if (typeof syncRailDensity === "function") syncRailDensity();
   refreshSession();
   sessPollTimer = setInterval(visiblePoll(refreshSession, () => sessPollTimer), 5000);
 }

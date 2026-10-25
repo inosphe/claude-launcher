@@ -347,10 +347,13 @@ check("the rail line is full-width", /flex-basis:\s*100%/.test(rule), true);
 check("...and wraps rather than being cut", /white-space:\s*pre-wrap/.test(rule), true);
 check("...breaking inside long words", /overflow-wrap:\s*anywhere/.test(rule), true);
 const order = Number((rule.match(/order:\s*(\d+)/) || [])[1]);
-const toggle = Number(((css.match(/#session-list \.sess-brief-toggle \{([^}]*)\}/) || [])[1]
-                       .match(/order:\s*(\d+)/) || [])[1]);
-check("...sorted after the ▸ toggle so the toggle keeps the name line",
-      Number.isFinite(order) && Number.isFinite(toggle) && order > toggle, true);
+/* The buttons line is the anchor every sub-line sorts after: the row has no
+   briefing fold any more (app.js railCardMode), so the box that used to hold
+   its ▸ toggle is the first full-width breaker under the name line. */
+const actionsRule = (css.match(/#session-list \.rail-actions \{([^}]*)\}/) || [])[1] || "";
+const actions = Number((actionsRule.match(/order:\s*(\d+)/) || [])[1]);
+check("...sorted after the buttons line so the name line keeps its own row",
+      Number.isFinite(order) && Number.isFinite(actions) && order > actions, true);
 
 const chipRule = (css.match(/\.term-note \{([^}]*)\}/) || [])[1] || "";
 check("the header chip has a rule of its own", chipRule.length > 0, true);
