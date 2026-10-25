@@ -23,7 +23,7 @@ def test_the_merged_instructions_fit_the_client_window():
 @pytest.mark.parametrize("pack_id", MCP_PACKS)
 def test_each_tool_family_points_at_its_shipped_default_pack(pack_id):
     assert f"'{pack_id}'" in mcp_server.SERVER.instructions
-    assert pack_id in prompt_packs.DEFAULT_PACKS
+    assert pack_id in prompt_packs.shipped_default_packs()
     pack = prompt_packs.shipped(pack_id)
     assert pack.title.startswith("MCP")
 
@@ -72,7 +72,7 @@ def test_the_cflow_watch_pack_ships_loadable_but_not_in_the_opening():
     pack = prompt_packs.shipped("mcp-cflow-watch")
     assert pack.title.startswith("MCP")
     assert "'mcp-cflow-watch'" in mcp_server.SERVER.instructions
-    assert "mcp-cflow-watch" not in prompt_packs.DEFAULT_PACKS
+    assert "mcp-cflow-watch" not in prompt_packs.shipped_default_packs()
     assert "mcp-cflow-watch" in prompt_packs.mcp_ids()
     # loadable_copy is the on-demand path; it refuses anything but mcp- packs
     assert prompt_packs.loadable_copy(None, "mcp-cflow-watch").body == pack.body

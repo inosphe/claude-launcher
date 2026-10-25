@@ -698,9 +698,11 @@ check("force only after a confirm, and a declined confirm sends nothing", async 
 check("the settings draft starts from the saved mapping", () => {
   card.doc = DOC;
   card.card();
-  assert.deepEqual(card.draft(), {
-    role_packs: { unreal: ["unreal-operator"] }, default_packs: ["common"],
-  });
+  // default_packs is one statement per pack in view, not the saved list.
+  const draft = card.draft();
+  assert.deepEqual(draft.role_packs, { unreal: ["unreal-operator"] });
+  assert.equal(draft.default_packs.common, true);
+  assert.equal(draft.default_packs.beads, false);
 });
 
 check("the default packs are one list of checkboxes, saved with the role mapping", async () => {
@@ -713,17 +715,25 @@ check("the default packs are one list of checkboxes, saved with the role mapping
   const list = all(c, (n) => n.id === "prompt-pack-defaults")[0];
   const items = list.children.map((l) => [l.children[1].textContent, l.children[0].checked]);
   assert.deepEqual(items.slice(0, 2), [["beads", true], ["common", false]]);
-  // The note says what Restore defaults puts back, read from the doc.
-  assert.match(text(c), /Restore defaults sets: common\./);
+  // The note names the packs whose own header says they start ticked, so an
+  // operator can tell their override from the pack's answer.
+  assert.match(text(c), /the shipped packs that say yes are: common/);
+  // A row whose tick disagrees with its header is marked as an override.
+  assert.match(list.children[0].children.map((n) => n.textContent).join(""),
+    /beads \(overrides its header\)/);
   const common = list.children[1].children[0];
   common.checked = true;
   common.handlers.change[0]();
   calls.length = 0;
   const save = all(c, (n) => n.tag === "button" && n.textContent === "Save")[0];
   await save.handlers.click[0]();
-  assert.deepEqual(calls.pop(), { url: "/api/prompt-packs/role-packs", body: {
-    role_packs: { unreal: ["unreal-operator"] }, default_packs: ["beads", "common"],
-  } });
+  // Saved whole: the form sends one statement per pack it drew.
+  const sent = calls.pop();
+  assert.equal(sent.url, "/api/prompt-packs/role-packs");
+  assert.deepEqual(sent.body.role_packs, { unreal: ["unreal-operator"] });
+  assert.equal(sent.body.default_packs.beads, true);
+  assert.equal(sent.body.default_packs.common, true);
+  assert.equal(sent.body.default_packs.beads, true);
   const reset = all(card.card(), (n) => n.tag === "button" && n.textContent === "Restore defaults")[0];
   await reset.handlers.click[0]();
   assert.deepEqual(calls.pop().body, { role_packs: null, default_packs: null });

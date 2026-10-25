@@ -34820,7 +34820,9 @@ function promptPackSettings(doc, allIds) {
   if (!promptPacksDraft) {
     promptPacksDraft = {
       role_packs: JSON.parse(JSON.stringify(doc.role_packs || {})),
-      default_packs: [...(doc.default_packs || [])],
+      // {pack id: bool} — one statement per pack, sent as the override map.
+      default_packs: Object.fromEntries(
+        ids.map((id) => [id, (doc.default_packs || []).includes(id)])),
     };
   }
   const draft = promptPacksDraft;
@@ -34838,20 +34840,30 @@ function promptPackSettings(doc, allIds) {
   };
 
   box.appendChild(el("h4", null, "Default packs"));
+  const shipped = doc.shipped_default_packs || [];
+  const shippedSet = new Set(shipped);
   box.appendChild(el("p", "wf-note",
     "Packs New session and Spawn child tick every time they open. Unticking " +
     "one in the form leaves it out of that one session only; take it off " +
     "this list to stop ticking it. Each session gets its workspace's copy, " +
     "or the copy claunch ships when the workspace has not installed it " +
-    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.` +
+    `(the form says which). A pack states its own answer in its header; the ` +
+    `shipped packs that say yes are: ${shipped.join(", ") || "none"}. Saving ` +
+    `here writes one override per pack — a pack you leave at its header value ` +
+    `still follows the header when the package changes it.` +
     (onDemand.length ? ` Not listed here or below: ${onDemand.join(", ")} — sent on demand to a running session, never in an opening.` : "")));
   const defaults = el("div", "new-check-list");
   defaults.id = "prompt-pack-defaults";
   for (const id of ids) {
     const label = el("label", "check");
-    label.appendChild(check(draft.default_packs.includes(id),
-      (on) => toggle(draft.default_packs, id, on)));
+    label.appendChild(check(draft.default_packs[id] === true,
+      (on) => { draft.default_packs[id] = on; }));
     label.appendChild(el("span", null, id));
+    // Mark the rows that differ from the pack's own header, so an operator
+    // can see at a glance which values are theirs and which are the pack's.
+    if ((draft.default_packs[id] === true) !== shippedSet.has(id)) {
+      label.appendChild(el("span", "wf-note", " (overrides its header)"));
+    }
     defaults.appendChild(label);
   }
   box.appendChild(defaults);

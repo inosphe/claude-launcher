@@ -4044,7 +4044,10 @@ def _prompt_packs_doc() -> dict:
         "role_packs": prompt_packs.role_packs(),
         "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
         "default_packs": prompt_packs.default_packs(),
-        "shipped_default_packs": prompt_packs.DEFAULT_PACKS,
+        # What the packs' own headers say, so the card can show which rows
+        # the config overrode rather than what it computed.
+        "shipped_default_packs": prompt_packs.shipped_default_packs(),
+        "saved_default_packs": prompt_packs.saved_default_packs(),
         # Shown for install like any pack, kept out of the two settings.
         "on_demand_packs": prompt_packs.on_demand_ids(),
         "roles": sorted(roleset.roles),
@@ -4080,8 +4083,10 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "cwd": str(cwd),
         "workspace": owner.to_dict() if owner is not None else None,
         "packs": packs,
-        # Ticked on every opening of the form, installed or not.
-        "default_packs": prompt_packs.default_packs(),
+        # Ticked on every opening of the form, installed or not. The
+        # workspace's copies are read too: one whose header states
+        # ``check_default`` overrides the shipped answer for its id.
+        "default_packs": prompt_packs.default_packs(workspace=root),
         "role_packs": prompt_packs.role_packs(),
         "shipped": [p.to_dict() for p in prompt_packs.catalog()
                     if not p.on_demand],
@@ -4178,9 +4183,15 @@ async def h_prompt_packs_remove(request: web.Request) -> web.Response:
 
 
 async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
-    """Save the role → required packs mapping and/or the default packs.
+    """Save the role → required packs overrides and/or the default-pack ones.
 
-    Each key is optional; ``null`` restores that setting's default.
+    Each key is optional; ``null`` clears that setting, so its answers come
+    from the defaults again. Both settings override item by item -- the rows
+    or packs the request names, and nothing else -- so an unmentioned role
+    keeps the package's packs and an unmentioned pack keeps its header's
+    ``check_default``. ``default_packs`` takes ``{pack id: bool}`` (one
+    statement per pack) or a list of ids (the ticked set, with the packs it
+    leaves out stated false).
     """
     body = await _json_body(request)
     if "role_packs" not in body and "default_packs" not in body:
@@ -4189,9 +4200,17 @@ async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
         # Both checked before either is written, so a bad half saves nothing.
         if body.get("role_packs") is not None:
             prompt_packs.clean_role_packs(body["role_packs"])
-        if isinstance(body.get("default_packs"), list):
+        stated = body.get("default_packs")
+        if isinstance(stated, dict):
+            for pack_id, value in stated.items():
+                if prompt_packs.as_bool(value) is None:
+                    raise prompt_packs.PackError(
+                        f"{pack_id}: check_default must be true or false")
+                prompt_packs.check_offerable(
+                    [prompt_packs.check_id(str(pack_id))], "a default pack")
+        elif isinstance(stated, list):
             prompt_packs.check_offerable(
-                [prompt_packs.check_id(str(i)) for i in body["default_packs"]],
+                [prompt_packs.check_id(str(i)) for i in stated],
                 "a default pack",
             )
         if "role_packs" in body:

@@ -40,9 +40,11 @@ def test_the_catalog_ships_the_packs_and_the_default_packs():
     # never depends on a workspace having installed it.
     for packs in prompt_packs.DEFAULT_ROLE_PACKS.values():
         assert set(packs) <= set(ids)
-    assert set(prompt_packs.DEFAULT_PACKS) <= set(ids)
-    # Which packs are defaults is the setting's value, not a pack's header.
-    assert all("default" not in p.to_dict() for p in prompt_packs.catalog())
+    # Which packs start ticked is each pack's own header.
+    # In catalog order (the pack files' own order), not the old list's.
+    assert prompt_packs.shipped_default_packs() == [
+        "asking-the-user", "common", "korean-replies", "mcp-qa", "mcp-sim", "mcp-threads",
+    ]
     for pack in prompt_packs.catalog():
         assert pack.title and pack.body and not pack.body.startswith("---")
 
@@ -117,40 +119,96 @@ def test_opening_block_names_the_id_rebrief_uses():
     assert block.endswith("rule one")
 
 
-def test_role_packs_default_save_and_clear(home):
+def test_role_packs_override_row_by_row(home):
     assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
     assert prompt_packs.role_packs()["unreal"] == ["unreal-operator"]
     assert prompt_packs.role_packs()["worker"] == ["role-worker"]
     saved = prompt_packs.set_role_packs({"Worker": "beads, common", "pm": []})
-    assert saved == {"worker": ["beads", "common"]}
+    # The named rows are the config's; an unnamed role keeps the package's.
+    assert saved["worker"] == ["beads", "common"] and saved["pm"] == []
+    assert saved["leader"] == prompt_packs.DEFAULT_ROLE_PACKS["leader"]
+    # ``unreal`` was not named, so it still requires the package's pack.
     assert prompt_packs.required_for(["worker", "unreal"]) == {
         "beads": ["worker"], "common": ["worker"],
+        "unreal-operator": ["unreal"],
     }
-    # Clearing every row is kept as cleared, not read back as the default.
-    assert prompt_packs.set_role_packs({}) == {}
+    # A role the package adds after the config was written is not hidden by
+    # it: this is the defect claunch-imo9c.3 exists to fix.
+    monkeypatch_default = {"leader": ["role-leader"], "shortworker": ["role-shortworker"]}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(prompt_packs, "DEFAULT_ROLE_PACKS", monkeypatch_default)
+        assert prompt_packs.role_packs()["shortworker"] == ["role-shortworker"]
+        assert prompt_packs.role_packs()["worker"] == ["beads", "common"]
+    # ``{}`` states nothing, so every row answers from the package again.
+    assert prompt_packs.set_role_packs({}) == prompt_packs.DEFAULT_ROLE_PACKS
     assert prompt_packs.set_role_packs(None) == prompt_packs.DEFAULT_ROLE_PACKS
     with pytest.raises(prompt_packs.PackError):
         prompt_packs.set_role_packs({"unreal": ["Bad Id"]})
 
 
-def test_default_packs_are_the_constant_until_saved(home):
-    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS == [
-        "asking-the-user", "common", "korean-replies", "mcp-threads", "mcp-qa", "mcp-sim",
-    ]
+def test_an_empty_role_row_means_that_role_requires_none(home):
+    # claunch-imo9c.3: ``worker: []`` is how a config says a role requires no
+    # pack. Dropping the row instead would ask for the package's answer.
+    assert prompt_packs.clean_role_packs({"worker": []}) == {"worker": []}
+    saved = prompt_packs.set_role_packs({"worker": []})
+    assert saved["worker"] == []
+    assert prompt_packs.required_for(["worker"]) == {}
+    assert prompt_packs.role_packs()["leader"] == prompt_packs.DEFAULT_ROLE_PACKS["leader"]
+
+
+def test_default_packs_come_from_the_headers_until_saved(home):
+    shipped = prompt_packs.shipped_default_packs()
+    assert len(shipped) == 6
+    assert prompt_packs.default_packs() == shipped
+    # A list states the whole set: the ids it names are on, the shipped
+    # defaults it leaves out are off, and everything else keeps its header.
     assert prompt_packs.set_default_packs(["beads", "common", "beads"]) == ["beads", "common"]
+    assert prompt_packs.saved_default_packs()["common"] is True
+    assert prompt_packs.saved_default_packs()["korean-replies"] is False
     assert prompt_packs.set_default_packs([]) == []
     with pytest.raises(prompt_packs.PackError):
         prompt_packs.set_default_packs(["Bad Id"])
     assert prompt_packs.default_packs() == []
-    assert prompt_packs.set_default_packs(None) == prompt_packs.DEFAULT_PACKS
+    # ``None`` drops the setting, so the headers answer again.
+    assert prompt_packs.set_default_packs(None) == shipped
 
 
-def test_a_default_header_in_a_pack_file_means_nothing(home):
-    # An installed copy written before the header was dropped still parses,
-    # and its old "default: true" ticks nothing.
+def test_a_saved_default_pack_row_leaves_the_others_to_the_package(home):
+    # A pack the package adds later starts ticked without the operator
+    # touching the config: only the rows the config states take part.
+    prompt_packs.set_default_packs({"beads": True})
+    assert prompt_packs.saved_default_packs() == {"beads": True}
+    got = prompt_packs.default_packs()
+    assert "beads" in got and "common" in got       # header still answers
+    prompt_packs.set_default_packs({"common": False})
+    assert prompt_packs.saved_default_packs() == {"common": False}
+    got = prompt_packs.default_packs()
+    assert "common" not in got and "korean-replies" in got
+    with pytest.raises(prompt_packs.PackError, match="true or false"):
+        prompt_packs.set_default_packs({"common": "maybe"})
+
+
+def test_a_packs_own_header_says_whether_it_starts_ticked(home):
+    # An installed copy written before the header existed still parses, and
+    # its unrelated "default: true" states nothing.
     pack = prompt_packs.parse("x", "---\ntitle: X\ndefault: true\n---\nbody")
     assert pack.title == "X" and pack.body == "body"
+    assert pack.check_default is None
     assert pack.to_dict() == {"id": "x", "title": "X", "description": ""}
+    assert prompt_packs.parse("y", "---\ncheck_default: false\n---\nb").check_default is False
+
+
+def test_a_workspace_copy_overrides_the_check_default_header(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / ".claunch" / "prompts").mkdir(parents=True)
+    (ws / ".claunch" / "prompts" / "common.md").write_text(
+        "---\ntitle: Common\ncheck_default: false\n---\nour rules\n", encoding="utf-8")
+    (ws / ".claunch" / "prompts" / "house.md").write_text(
+        "---\ntitle: House\ncheck_default: true\n---\nhouse rules\n", encoding="utf-8")
+    got = prompt_packs.default_packs(workspace=ws)
+    assert "common" not in got          # the workspace turned the shipped one off
+    assert "house" in got               # and turned its own on
+    assert "korean-replies" in got      # untouched headers still answer
 
 
 def test_choose_adds_required_packs_and_names_the_role(tmp_path):
@@ -284,8 +342,9 @@ def test_the_stance_command_prints_the_role_packs(home, tmp_path, monkeypatch, c
     assert "role-worker -- installed in this workspace" in out
     assert out.rstrip().endswith("house rule")
 
-    # A role with no packs prints nothing.
-    prompt_packs.set_role_packs({})
+    # A role stated as requiring none prints nothing. Clearing every row
+    # would not: ``{}`` states nothing, so the package's rows answer again.
+    prompt_packs.set_role_packs({"worker": []})
     cli_mesh._print_role_packs(["worker"])
     assert capsys.readouterr().out == ""
 
@@ -416,8 +475,9 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
         try:
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
             assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
-            assert doc["default_packs"] == prompt_packs.DEFAULT_PACKS
-            assert doc["shipped_default_packs"] == prompt_packs.DEFAULT_PACKS
+            assert doc["default_packs"] == prompt_packs.shipped_default_packs()
+            assert doc["shipped_default_packs"] == prompt_packs.shipped_default_packs()
+            assert doc["saved_default_packs"] == {}
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
@@ -447,12 +507,15 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
                                           "default_packs": ["beads"]})
             assert resp.status == 400
             # The bad half refused the good half too.
-            assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS
+            assert prompt_packs.default_packs() == prompt_packs.shipped_default_packs()
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
                                     json={"role_packs": {"worker": ["beads"]},
                                           "default_packs": ["beads"]})
             doc = await resp.json()
-            assert doc["role_packs"] == {"worker": ["beads"]}
+            # Only the row the request named; every other role keeps the
+            # package's packs.
+            assert doc["role_packs"] == {**prompt_packs.DEFAULT_ROLE_PACKS,
+                                         "worker": ["beads"]}
             assert doc["default_packs"] == ["beads"]
 
             # The form's offer carries the saved list, installed or not:
@@ -743,7 +806,7 @@ def test_the_retrospective_ships_as_an_on_demand_pack():
     # Every other shipped pack is an opening pack and reads as before.
     assert all(not p.on_demand and "delivery" not in p.to_dict()
                for p in prompt_packs.catalog() if p.id != "retrospective")
-    assert "retrospective" not in prompt_packs.DEFAULT_PACKS
+    assert "retrospective" not in prompt_packs.shipped_default_packs()
     assert not any("retrospective" in v
                    for v in prompt_packs.DEFAULT_ROLE_PACKS.values())
 
@@ -751,7 +814,7 @@ def test_the_retrospective_ships_as_an_on_demand_pack():
 def test_no_setting_may_name_an_on_demand_pack(home):
     with pytest.raises(prompt_packs.PackError, match="on demand"):
         prompt_packs.set_default_packs(["common", "retrospective"])
-    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS
+    assert prompt_packs.default_packs() == prompt_packs.shipped_default_packs()
     with pytest.raises(prompt_packs.PackError, match="on demand"):
         prompt_packs.set_role_packs({"worker": ["role-worker", "retrospective"]})
     assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
@@ -764,8 +827,14 @@ def test_no_setting_may_name_an_on_demand_pack(home):
                        "leader": ["retrospective"]},
     }}))
     assert prompt_packs.default_packs() == ["common"]
-    assert prompt_packs.role_packs() == {"worker": ["role-worker"]}
+    # The rows it names survive with the on-demand pack dropped; rows it does
+    # not name keep the package's (``leader`` is named and left empty).
+    saved = prompt_packs.role_packs()
+    assert saved["worker"] == ["role-worker"] and saved["leader"] == []
+    assert saved["merger"] == prompt_packs.DEFAULT_ROLE_PACKS["merger"]
     assert prompt_packs.required_for(["worker"]) == {"role-worker": ["worker"]}
+    assert prompt_packs.required_for(["merger"]) == {
+        "role-merger": ["merger"]}
 
 
 def test_choose_refuses_a_ticked_on_demand_pack(tmp_path):

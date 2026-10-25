@@ -1,6 +1,7 @@
 ---
 title: MCP — simulations
 description: How the sim_* tools work — who may read, change and run a simulation, what a start launches, and what a "[claunch simulation]" line means.
+check_default: true
 ---
 ## Simulations (sim_* tools)
 
