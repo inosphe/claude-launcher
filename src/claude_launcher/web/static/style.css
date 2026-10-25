@@ -9924,3 +9924,226 @@ a.category-ref:hover { text-decoration: underline; }
 #term-tps-overlay .term-series-readout-line {
   height: 12px; line-height: 12px; text-align: right; white-space: nowrap;
 }
+
+/* Hive (#/hive, hive-page.js): projects, meshes, session trees and the
+   board's work on one pan-and-zoom canvas (claunch-yzgqb). One shape at
+   every level: a project is a wide hexagonal cell, a mesh a smaller one, a
+   session or an issue a chip with a hexagonal core. Children nest one size
+   smaller (the font shrinks per level and stops after three). Every colour
+   is here so the light theme derives it. */
+#hive-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 18px 22px 12px; min-height: 0; }
+#hive-view .wf-head { display: flex; align-items: baseline; gap: 12px; flex: none; }
+.hive-muted { color: #8b949e; font-size: 12px; }
+.hive-error { color: #ff7b72; font-size: 12px; margin: 4px 0; }
+.hive-empty { padding: 40px; }
+.hive-toolbar { flex: none; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 10px 0 6px; font-size: 12px; }
+.hive-tool, .hive-toggle { display: inline-flex; align-items: center; gap: 4px; color: #c9d1d9; }
+.hive-select, .hive-search { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 3px 7px; font-size: 12px; }
+.hive-search { width: 180px; }
+.hive-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+.hive-btn:hover { border-color: #58a6ff; color: #e6edf3; }
+.hive-btn:disabled { opacity: 0.45; cursor: default; }
+.hive-status { flex: none; color: #8b949e; font-size: 12px; margin-bottom: 8px; }
+.hive-frame { flex: 1; min-height: 0; display: flex; gap: 10px; }
+.hive-port {
+  flex: 1; min-width: 0; position: relative; overflow: hidden; cursor: grab;
+  border: 1px solid #262c36; border-radius: 10px; outline: none;
+  background-color: #0e1116;
+  background-image:
+    radial-gradient(circle at 1px 1px, #1f2630 1px, transparent 1.5px);
+  background-size: 22px 22px;
+  touch-action: none;
+}
+.hive-port.panning { cursor: grabbing; }
+.hive-port:focus-visible { border-color: #58a6ff; }
+.hive-stage {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0;
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 28px;
+  width: max-content; max-width: 3600px; font-size: 13px;
+}
+
+/* -- cells: the wide hexagon a project and a mesh are drawn as. The border
+   is the outer box's colour showing through a 1px inset of the same shape. */
+.hive-cell {
+  --cut: 22px; position: relative; padding: 14px calc(var(--cut) + 10px) 16px;
+  clip-path: polygon(var(--cut) 0, calc(100% - var(--cut)) 0, 100% 50%, calc(100% - var(--cut)) 100%, var(--cut) 100%, 0 50%);
+}
+.hive-cell::before {
+  content: ""; position: absolute; inset: 1px; z-index: -1;
+  clip-path: inherit;
+}
+.hive-project { --cut: 30px; background: #2b3442; isolation: isolate; max-width: 3400px; }
+.hive-project::before { background: linear-gradient(160deg, #161b23 0%, #12161d 100%); }
+.hive-mesh { --cut: 18px; background: #263040; isolation: isolate; padding-top: 10px; }
+.hive-mesh::before { background: linear-gradient(160deg, #1a212b 0%, #151a22 100%); }
+.hive-mesh.nomesh { background: #2a2f37; }
+.hive-pool { background: #3a3150; }
+.hive-pool::before { background: linear-gradient(160deg, #1b1824 0%, #16141d 100%); }
+.hive-cell-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 10px; }
+.hive-cell-head h3 { font-size: 15px; color: #e6edf3; letter-spacing: 0.3px; }
+.hive-cell-head h4 { font-size: 13px; color: #c9d1d9; }
+.hive-hex { color: #58a6ff; font-size: 14px; }
+.hive-pool .hive-hex { color: #bc8cff; }
+.hive-meshes { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.hive-forest { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-start; max-width: 1500px; }
+.hive-counts { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+/* -- chips: a pill with a hexagonal core. The core carries the state. */
+.hive-chip {
+  --core: #484f58; --rim: #30363d;
+  display: inline-flex; align-items: center; gap: 0.5em; position: relative;
+  min-width: 0; max-width: 17em; padding: 0.25em 0.7em 0.25em 0.25em;
+  border-radius: 1.2em; border: 1px solid var(--rim);
+  background: linear-gradient(180deg, #252c37 0%, #1b2029 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.45);
+  color: #d8dbe0; cursor: pointer; user-select: none; outline: none;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.hive-chip:hover { transform: translateY(-1px); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 3px 8px rgba(0, 0, 0, 0.5); }
+.hive-chip:focus-visible, .hive-chip.picked { border-color: #58a6ff; box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.35); }
+.hive-core {
+  flex: none; width: 2.1em; height: 1.85em; display: inline-flex; align-items: center; justify-content: center;
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+  background: var(--core); color: #0d1117; font-size: 0.85em; font-weight: 700;
+}
+.hive-core i { font-style: normal; }
+.hive-body { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+.hive-name { font-size: 0.95em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hive-sub { font-size: 0.78em; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hive-badges { display: inline-flex; gap: 3px; margin-left: 0.2em; }
+.hive-badge {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 1.35em; height: 1.35em;
+  padding: 0 0.3em; border-radius: 0.7em; font-size: 0.72em; font-weight: 700;
+  background: #30363d; color: #c9d1d9;
+}
+.hive-badge.fault { background: #da3633; color: #fff; }
+.hive-badge.compact { background: #1f6feb; color: #fff; }
+.hive-badge.flow { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+.hive-badge.flow.f-running { color: #3fb950; }
+.hive-badge.flow.f-yours { background: #d29922; color: #0d1117; border-color: #d29922; }
+.hive-badge.flow.f-error { color: #ff7b72; }
+.hive-badge.created { background: transparent; color: #8b949e; border: 1px dashed #484f58; }
+
+/* session states */
+.hive-chip.s-busy { --core: #3fb950; --rim: #2e6b3a; }
+.hive-chip.s-idle { --core: #2f7d40; --rim: #284a31; }
+.hive-chip.s-starting { --core: #58a6ff; --rim: #24456e; }
+.hive-chip.s-hold { --core: #d29922; --rim: #5a4517; }
+.hive-chip.s-delayed { --core: #bc8cff; --rim: #4b3a6a; }
+.hive-chip.s-paused { --core: #58a6ff; --rim: #2b4766; }
+.hive-chip.s-failed { --core: #f85149; --rim: #6e2b2a; }
+.hive-chip.s-killed { --core: #6e7681; --rim: #30363d; opacity: 0.7; }
+.hive-chip.s-archived { --core: #484f58; --rim: #30363d; opacity: 0.55; border-style: dashed; }
+.hive-chip.s-killed .hive-name, .hive-chip.s-archived .hive-name { text-decoration: line-through; text-decoration-color: #6e7681; }
+.hive-chip.ghost { opacity: 0.45; border-style: dashed; }
+.hive-chip.s-busy .hive-core { animation: hive-pulse 1.6s ease-in-out infinite; }
+@keyframes hive-pulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.45); } }
+@media (prefers-reduced-motion: reduce) { .hive-chip.s-busy .hive-core { animation: none; } }
+
+/* minor roles: smaller, flatter, no subtitle */
+.hive-chip.minor { font-size: 0.8em; max-width: 11em; background: #1a1f27; box-shadow: none; }
+.hive-tree.minor > .hive-head { opacity: 0.85; }
+
+/* issues: the same chip, the core holds the priority, the rim the status */
+.hive-issue { --core: #8b949e; --rim: #30363d; max-width: 19em; border-radius: 0.5em; background: linear-gradient(180deg, #1f2430 0%, #191d26 100%); font-size: 0.88em; }
+.hive-issue.p-0 { --core: #ff7b72; }
+.hive-issue.p-1 { --core: #f0883e; }
+.hive-issue.p-2 { --core: #d29922; }
+.hive-issue.p-3 { --core: #8b949e; }
+.hive-issue.p-4 { --core: #6e7681; }
+.hive-issue.st-in_progress { --rim: #2e6b3a; border-left: 3px solid #3fb950; }
+.hive-issue.st-in_review { --rim: #4b3a6a; border-left: 3px solid #bc8cff; }
+.hive-issue.st-blocked { --rim: #6e2b2a; border-left: 3px solid #f85149; }
+.hive-issue.st-in_ready { --rim: #1f4f5c; border-left: 3px solid #39c5cf; }
+.hive-issue.st-open { --rim: #30363d; }
+
+/* -- trees: chip on top, its issues beside it, its children below one size
+   smaller, joined by a rail on the left. */
+.hive-tree { display: flex; flex-direction: column; gap: 6px; }
+.hive-head { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
+.hive-attach { display: flex; flex-wrap: wrap; gap: 4px; align-items: flex-start; max-width: 40em; }
+.hive-kids {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: flex-start;
+  margin-left: 0.9em; padding: 4px 0 2px 0.9em; border-left: 2px solid #2b3442;
+  font-size: 0.92em; max-width: 1200px;
+}
+.hive-kids .hive-kids .hive-kids .hive-kids { font-size: 1em; }
+.hive-itree { display: flex; flex-direction: column; gap: 3px; }
+.hive-ikids { display: flex; flex-wrap: wrap; gap: 3px 6px; margin-left: 0.8em; padding-left: 0.6em; border-left: 1px dashed #3a3150; font-size: 0.92em; }
+
+/* -- decks: stacked siblings, drawn as a chip with two cards behind it */
+.hive-deck { display: flex; flex-direction: column; gap: 6px; }
+.hive-deck-face { --core: #6e7681; margin: 0 6px 6px 0; overflow: visible; }
+.hive-deck-face::before, .hive-deck-face::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: -1;
+  border: 1px solid #30363d; background: #1b2029;
+}
+.hive-deck-face::before { transform: translate(3px, 3px); }
+.hive-deck-face::after { transform: translate(6px, 6px); opacity: 0.7; }
+.hive-deck { isolation: isolate; }
+.hive-deck.of-issue .hive-deck-face { --core: #bc8cff; border-radius: 0.5em; }
+.hive-deck.open > .hive-deck-face::before, .hive-deck.open > .hive-deck-face::after { display: none; }
+.hive-deck-dots { display: inline-flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+.hive-deck-toggle { color: #8b949e; font-size: 0.85em; }
+.hive-deck-items {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: flex-start; max-width: 1200px;
+  padding: 6px 8px; border: 1px dashed #30363d; border-radius: 8px; background: rgba(13, 17, 23, 0.4);
+}
+.hive-more { color: #8b949e; font-size: 0.8em; align-self: center; }
+
+/* count dots: the same colours as the cores */
+.hive-dot { display: inline-flex; align-items: center; padding: 0 0.45em; border-radius: 0.7em; font-size: 0.72em; line-height: 1.5; background: #30363d; color: #c9d1d9; white-space: nowrap; }
+.hive-dot.s-busy { background: #3fb950; color: #0d1117; }
+.hive-dot.s-idle { background: #2f7d40; color: #e6edf3; }
+.hive-dot.s-starting, .hive-dot.s-paused { background: #1f6feb; color: #fff; }
+.hive-dot.s-hold { background: #d29922; color: #0d1117; }
+.hive-dot.s-delayed { background: #8957e5; color: #fff; }
+.hive-dot.s-failed { background: #da3633; color: #fff; }
+.hive-dot.s-killed, .hive-dot.s-archived { background: #484f58; color: #e6edf3; }
+.hive-dot.st-in_progress { background: #3fb950; color: #0d1117; }
+.hive-dot.st-in_review { background: #8957e5; color: #fff; }
+.hive-dot.st-blocked { background: #da3633; color: #fff; }
+.hive-dot.st-in_ready { background: #1b7c83; color: #fff; }
+.hive-dot.st-open { background: #484f58; color: #e6edf3; }
+
+/* -- semantic zoom: far out the chips keep their cores and the cells their
+   names; mid-way the subtitles go. */
+.hive-port.z-mid .hive-sub, .hive-port.z-mid .hive-deck-dots { display: none; }
+.hive-port.z-far .hive-body, .hive-port.z-far .hive-badges, .hive-port.z-far .hive-deck-toggle { display: none; }
+.hive-port.z-far .hive-chip { padding: 0.15em; }
+.hive-port.z-far .hive-cell-head h3 { font-size: 30px; }
+.hive-port.z-far .hive-cell-head h4 { font-size: 22px; }
+
+/* -- search: everything else dims */
+.hive-port.searching .hive-chip { opacity: 0.25; }
+.hive-port.searching .hive-chip.hit { opacity: 1; border-color: #f0883e; box-shadow: 0 0 0 2px rgba(240, 136, 62, 0.4); }
+
+/* -- overlays */
+.hive-zoom { position: absolute; right: 10px; top: 10px; display: flex; gap: 4px; align-items: center; z-index: 2; }
+.hive-zoom-label { color: #8b949e; font-size: 11px; min-width: 3.2em; text-align: center; }
+.hive-legend {
+  position: absolute; left: 10px; bottom: 10px; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  max-width: calc(100% - 20px); padding: 5px 8px; border-radius: 8px; background: rgba(13, 17, 23, 0.85); border: 1px solid #262c36;
+  font-size: 13px; cursor: default;
+}
+.hive-legend-sep { color: #484f58; margin: 0 2px; }
+.hive-legend-note { color: #8b949e; font-size: 11px; margin-right: 4px; }
+.hive-detail {
+  flex: none; width: 300px; overflow: auto; position: relative;
+  border: 1px solid #262c36; border-radius: 10px; background: #12161d; padding: 14px 16px; font-size: 12px;
+}
+.hive-detail h3 { font-size: 14px; color: #e6edf3; margin-bottom: 6px; word-break: break-all; padding-right: 20px; }
+.hive-detail-title { color: #c9d1d9; margin-bottom: 8px; line-height: 1.4; }
+.hive-detail-close { position: absolute; right: 8px; top: 6px; background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer; }
+.hive-detail-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 6px 0 12px; }
+.hive-detail-list dt { color: #8b949e; }
+.hive-detail-list dd { color: #d8dbe0; word-break: break-word; }
+.hive-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 720px) {
+  #hive-view { padding: 12px 10px 8px; }
+  .hive-frame { flex-direction: column; }
+  .hive-detail { width: auto; max-height: 40%; }
+}
+/* A deck's face lifts nothing: a transform would make it a stacking context
+   and pull the two cards drawn behind it in front of its own background. */
+.hive-deck-face:hover { transform: none; }

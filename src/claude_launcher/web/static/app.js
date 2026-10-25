@@ -13537,6 +13537,7 @@ function setCurrentProject(name) {
   refreshMeshList({ cached: true });
   if (currentPage === "home") renderHome();
   if (currentPage === "chart") globalThis.ChartPage?.render(true);
+  if (currentPage === "hive") globalThis.HivePage?.render(true);
 }
 
 /* The rail's project rides the address as `?project=`. An address that
@@ -26139,6 +26140,7 @@ function mobileTitle() {
     case "window": return "measurement window";
     case "stats": return "session statistics";
     case "chart": return "session chart";
+    case "hive": return "hive";
     case "settings": return "settings";
     case "workspaces": return "workspaces";
     case "beads": return beadsSection === "reports" ? "reports"
@@ -26309,6 +26311,7 @@ const VIEWS = {
   window: "window-view",
   stats: "stats-view",
   chart: "chart-view",
+  hive: "hive-view",
   "profile-usage": "profile-usage-view",
   sysperf: "sysperf-view",
   cli: "cli-view",
@@ -27097,6 +27100,7 @@ function parseHash(h) {
   }
   if (parts[0] === "window") return { page: "window" };
   if (parts[0] === "chart") return { page: "chart" };
+  if (parts[0] === "hive") return { page: "hive" };
   if (parts[0] === "profile-usage") return { page: "profile-usage" };
   if (parts[0] === "sysperf") return { page: "sysperf" };
   // #/stats opens on a default session; #/stats/<name> names one.
@@ -27197,6 +27201,7 @@ function route() {
   if (r.page !== "window") stopWindowPoll();
   if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "chart") globalThis.ChartPage?.stop();
+  if (r.page !== "hive") globalThis.HivePage?.stop();
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
@@ -27283,6 +27288,7 @@ function route() {
     case "window": openWindowPage(); break;
     case "stats": openStatsPage(r.name, r.compare); break;
     case "chart": showView("chart"); globalThis.ChartPage.open(); break;
+    case "hive": showView("hive"); globalThis.HivePage.open(); break;
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "sysperf": showView("sysperf"); globalThis.SysPerfPage.open(); break;
     case "cli": openCli(); break;
