@@ -364,6 +364,18 @@ const submit = (root) =>
   field(root, "llm-endpoint").handlers.input();
   field(root, "llm-model").value = "typed-model";
   field(root, "llm-model").handlers.input();
+
+  /* The unsaved-changes line must name a button that is on the card. ``custom``
+     has no Save preset — its fields are the block's own — so the line has to
+     point at the form's Save, or it sends the operator looking for a control
+     that is not rendered. */
+  root = card();
+  assert.equal(find(root, (n) => n.text === "Save preset"), undefined);
+  const dirtyLine = find(root, (n) => n.cls === "wf-warning"
+                                  && n.text.includes("저장하지 않은 변경"));
+  assert(dirtyLine, "custom shows the unsaved-changes line");
+  assert(dirtyLine.text.includes("아래 Save"));
+  assert(!dirtyLine.text.includes("Save preset"));
   requests.length = 0;
   await submit(card());
   sent = JSON.parse(requests.at(-1)[1].body);
@@ -390,6 +402,24 @@ const submit = (root) =>
   field(root, "llm-model").handlers.input();
   root = card();
   requests.length = 0;
+
+  /* Add preset carries the typed values into the new row, so its question
+     must not borrow the discard wording — an operator who reads "discard"
+     and approves would get the opposite of what they agreed to. It asks
+     once, and declining leaves everything exactly as it was. */
+  let prompts = [];
+  context.confirm = (msg) => { prompts.push(msg); return false; };
+  find(root, (n) => n.text === "Add preset").handlers.click();
+  root = card();
+  assert.equal(prompts.length, 1);
+  assert(prompts[0].includes("옮길까요"), prompts[0]);
+  assert(!prompts[0].includes("버리고"), prompts[0]);
+  assert.equal(radios(root).length, 3, "declining starts no row");
+  assert.equal(field(root, "llm-model").value, "fresh-model");
+  assert.equal(vm.runInContext("llmDraft.dirty", context), true);
+
+  // approving the same question starts the row with those values
+  context.confirm = () => true;
   find(root, (n) => n.text === "Add preset").handlers.click();
   root = card();
   assert.equal(requests.length, 0, "adding writes nothing");

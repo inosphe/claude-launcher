@@ -36322,13 +36322,25 @@ function llmDraftChoosePreset(draft, key) {
 }
 
 /*: The one question the card asks before throwing unsaved changes out — on a
-   radio for another backend, on Cancel, on Add preset, and on leaving the
-   page. */
+   radio for another backend, on Cancel, and on leaving the page. */
 function llmDraftConfirmDiscard(draft) {
   const target = llmDraftTarget(draft);
   const what = target ? `preset '${target.id || target.key}'` : "custom";
   return confirm(
     `저장하지 않은 변경이 있습니다 — ${what}의 변경을 버리고 이동할까요?`
+  );
+}
+
+/*: The question Add preset asks. Its answer carries the typing into the new
+   row rather than discarding it, so it must not borrow the discard wording:
+   an operator who reads "discard" and approves would get the opposite of what
+   they agreed to. Declining leaves the card exactly as it was. */
+function llmDraftConfirmSeedNew(draft) {
+  const target = llmDraftTarget(draft);
+  const what = target ? `preset '${target.id || target.key}'` : "custom";
+  return confirm(
+    `저장하지 않은 변경이 있습니다 — ${what}의 편집 중인 값을 새 프리셋의 ` +
+    "시작값으로 옮길까요? (옮기지 않으려면 취소)"
   );
 }
 
@@ -36659,17 +36671,23 @@ function llmSettingsCard() {
     // unnamed would put two nameless rows in the file's way, so it opens the
     // one already there instead.
     const started = draft.presets.find((p) => !p.saved);
-    if (draft.dirty && !llmDraftConfirmDiscard(draft)) return undefined;
     if (started) {
+      // Opening the row that is already there. Its own typing survives the
+      // redraw, so there is nothing to ask about in that case; leaving a
+      // different preset does throw that preset's edit out.
+      if (started.key === draft.preset) return renderWorkspaces();
+      if (draft.dirty && !llmDraftConfirmDiscard(draft)) return undefined;
       draft.editing = null;
       draft.dirty = false;
-      if (started.key !== draft.preset) {
-        draft.preset = started.key;
-        llmDraftLoadTarget(draft);
-      }
+      draft.preset = started.key;
+      llmDraftLoadTarget(draft);
       draft.editing = started.key;
       return renderWorkspaces();
     }
+    // A new row is seeded from the fields, so the typing is carried over
+    // rather than thrown out — the question has to say that, or an operator
+    // reading "discard" would answer it on the wrong understanding.
+    if (draft.dirty && !llmDraftConfirmSeedNew(draft)) return undefined;
     draft.editing = null;
     draft.dirty = false;
     let n = draft.presets.length + 1;
@@ -36715,9 +36733,14 @@ function llmSettingsCard() {
   presetRow.appendChild(removePreset);
   presetSection.appendChild(presetRow);
   if (draft.dirty) {
+    // The line has to name a button that is on the card. ``custom`` has no
+    // Save preset — its fields are the block's own, and the form's Save is
+    // what writes them — so naming that button there would point at nothing.
     presetSection.appendChild(el(
       "p", "wf-warning",
-      "저장하지 않은 변경이 있습니다 — Save preset을 눌러야 반영됩니다."));
+      draft.preset && llmDraftEditing(draft)
+        ? "저장하지 않은 변경이 있습니다 — Save preset을 눌러야 반영됩니다."
+        : "저장하지 않은 변경이 있습니다 — 아래 Save를 눌러야 반영됩니다."));
   }
   card.appendChild(presetSection);
 
