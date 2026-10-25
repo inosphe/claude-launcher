@@ -2504,3 +2504,36 @@ def test_intake_no_longer_promises_a_fresh_branch_per_round():
     assert "이전 회차의 브랜치를 새 목표에 재사용하지 않는다" not in intake
     assert "실제 브랜치 이름과 생성 여부는" in intake
     assert "쓸 수 없을 때만 이 요지로 새로 판다" in intake
+
+
+def test_no_step_still_promises_a_brand_new_branch_for_every_round():
+    """The reuse decision has to reach the places that cite it, not just the
+    step that makes it. Two kinds of leftovers survived the first pass and a
+    reviewer found them (claunch-f56fz):
+
+    * ``stack-round`` said "(intake의 branch-setup과 같은 규칙)" next to
+      "cut a new ``<세션>-stack-round-<n>`` from master" -- citing the rule
+      while instructing its opposite.
+    * ``next-round`` described the next round as "새 목표·새 브랜치·새 착지".
+    * ``workspace``'s occupancy axis excluded the main checkout because
+      "branch-setup이 워크트리를 파서 그 경우를 스스로 푼다" -- but the rule
+      now keeps the shared branch instead of always cutting a worktree, so
+      that stated grounds no longer holds (the axis value itself does not
+      change: the main checkout is still excluded).
+    """
+    chart = _chart()
+    texts = {
+        n.label: _words((n.get("prompt") or "") + " " + (n.get("description") or ""))
+        for n in chart.nodes.values() if n.label
+    }
+    everything = " ".join(texts.values())
+
+    assert "intake의 branch-setup과 같은 규칙" not in everything
+    assert "새 목표·새 브랜치·새 착지" not in everything
+    assert "branch-setup이 워크트리를 파서" not in everything
+    assert "브랜치를 파기 전에" not in everything
+
+    # the shipped text: stack-round hands the decision over instead of
+    # prescribing a cut, and the occupancy axis names the reuse rule
+    assert "branch-setup`의 판정을 그대로 쓴다" in everything
+    assert "재사용 판정이 그 공유를 조건부로 승인한다" in everything
