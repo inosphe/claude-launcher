@@ -211,6 +211,36 @@ def test_a_workspace_copy_overrides_the_check_default_header(tmp_path):
     assert "korean-replies" in got      # untouched headers still answer
 
 
+def test_a_workspace_copy_wins_over_the_saved_setting(tmp_path, home):
+    # "every session created here" is the workspace's own decision, so a copy
+    # that states check_default answers after this machine's setting -- the
+    # order pack_copy already gives the copy's text.
+    ws = tmp_path / "ws"
+    (ws / ".claunch" / "prompts").mkdir(parents=True)
+    (ws / ".claunch" / "prompts" / "common.md").write_text(
+        "---\ntitle: Common\ncheck_default: false\n---\nour rules\n", encoding="utf-8")
+    prompt_packs.set_default_packs({"common": True, "beads": True})
+    assert "common" in prompt_packs.default_packs()          # no workspace: setting applies
+    got = prompt_packs.default_packs(workspace=ws)
+    assert "common" not in got                               # the copy decides here
+    assert "beads" in got                                    # no copy: the setting applies
+    # The row says which value this workspace actually ends up with, so a
+    # card drawn from it does not look like a switch that does nothing.
+    rows = {r["id"]: r for r in prompt_packs.workspace_rows(ws)}
+    assert rows["common"]["copy_check_default"] is False
+    assert rows["beads"]["copy_check_default"] is None
+
+
+def test_saved_role_packs_is_the_configs_half_alone(home):
+    # The card needs the operator's rows apart from the package's: a row it
+    # did not state must not be written back as one.
+    assert prompt_packs.saved_role_packs() == {}
+    prompt_packs.set_role_packs({"worker": ["beads"], "pm": []})
+    assert prompt_packs.saved_role_packs() == {"worker": ["beads"], "pm": []}
+    assert prompt_packs.role_packs()["leader"] == prompt_packs.DEFAULT_ROLE_PACKS["leader"]
+    assert "leader" not in prompt_packs.saved_role_packs()
+
+
 def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -478,9 +508,17 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
             assert doc["default_packs"] == prompt_packs.shipped_default_packs()
             assert doc["shipped_default_packs"] == prompt_packs.shipped_default_packs()
             assert doc["saved_default_packs"] == {}
+            # The config's half of each setting is reported apart from the
+            # merged answer, so the card can write back only what an
+            # operator stated.
+            assert doc["saved_role_packs"] == {}
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
+            # No copy installed: the package's answer stands for this
+            # workspace (the copy_check_default the card reads).
+            assert {p["id"]: p["copy_check_default"]
+                    for p in row["packs"]}["beads"] is None
 
             resp = await client.post("/api/prompt-packs/install", headers=BEARER,
                                      json={"workspace": "proj", "pack": "beads"})

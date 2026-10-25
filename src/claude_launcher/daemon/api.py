@@ -4041,7 +4041,10 @@ def _prompt_packs_doc() -> dict:
             {**w.to_dict(), "packs": prompt_packs.workspace_rows(Path(w.path))}
             for w in workspaces.list_all()
         ],
+        # The merged answer, and the config's own half of each setting so the
+        # card can tell an operator's row from the package's.
         "role_packs": prompt_packs.role_packs(),
+        "saved_role_packs": prompt_packs.saved_role_packs(),
         "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
         "default_packs": prompt_packs.default_packs(),
         # What the packs' own headers say, so the card can show which rows

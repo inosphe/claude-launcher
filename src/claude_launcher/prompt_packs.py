@@ -443,15 +443,30 @@ def always_wanted(body: dict) -> bool:
 
 
 def workspace_rows(workspace: Path) -> List[dict]:
-    """One row per pack a workspace could hold: shipped ones, then local."""
+    """One row per pack a workspace could hold: shipped ones, then local.
+
+    A shipped row describes the package's pack, so its ``check_default`` is
+    the package's answer and says nothing about this workspace. The copy's
+    own statement, when it makes one, is reported beside it as
+    ``copy_check_default`` -- that is the value :func:`default_packs` applies
+    last for this workspace, and a card that showed only the package's answer
+    would draw a switch that does nothing here.
+    """
     rows = []
     shipped_ids = set()
+    here = {p.id: p for p in installed(workspace)}
     for pack in catalog():
         shipped_ids.add(pack.id)
-        rows.append({**pack.to_dict(), "status": status(workspace, pack)})
+        copy = here.get(pack.id)
+        rows.append({
+            **pack.to_dict(),
+            "status": status(workspace, pack),
+            "copy_check_default": copy.check_default if copy is not None else None,
+        })
     for pack in installed(workspace):
         if pack.id not in shipped_ids:
-            rows.append({**pack.to_dict(), "status": LOCAL})
+            rows.append({**pack.to_dict(), "status": LOCAL,
+                         "copy_check_default": pack.check_default})
     return rows
 
 
@@ -749,22 +764,17 @@ def role_packs(doc: Optional[dict] = None) -> Dict[str, List[str]]:
     role requires none -- the row wins as empty, which is why
     :func:`clean_role_packs` keeps empty lists.
     """
-    from . import store
-
-    doc = store.load() if doc is None else doc
     default = {k: list(v) for k, v in DEFAULT_ROLE_PACKS.items()}
-    block = doc.get(CONFIG_KEY)
-    if not isinstance(block, dict) or "role_packs" not in block:
-        return default
-    try:
-        saved = clean_role_packs(block.get("role_packs") or {}, strict=False)
-    except PackError:
-        return default
-    return {**default, **saved}
+    return {**default, **saved_role_packs(doc)}
 
 
 def set_role_packs(mapping) -> Dict[str, List[str]]:
-    """Validate and save the mapping; ``None`` restores the default."""
+    """Validate and save the rows the config states; ``None`` clears them.
+
+    A row saved here overrides that role only. ``{"worker": []}`` is kept as
+    an explicit "this role requires none", which is what the Settings card's
+    Remove writes.
+    """
     from . import store
 
     clean = None if mapping is None else clean_role_packs(mapping)
@@ -831,15 +841,39 @@ def saved_default_packs(doc: Optional[dict] = None) -> Dict[str, bool]:
     return out
 
 
+def saved_role_packs(doc: Optional[dict] = None) -> Dict[str, List[str]]:
+    """The rows the config states, by role: ``{}`` when it states none.
+
+    :func:`role_packs` merges this over :data:`DEFAULT_ROLE_PACKS`; this is
+    the config's half alone, which is what a form needs to tell an operator's
+    row from the package's.
+    """
+    from . import store
+
+    doc = store.load() if doc is None else doc
+    block = doc.get(CONFIG_KEY)
+    if not isinstance(block, dict) or "role_packs" not in block:
+        return {}
+    try:
+        return clean_role_packs(block.get("role_packs") or {}, strict=False)
+    except PackError:
+        return {}
+
+
 def default_packs(doc: Optional[dict] = None, workspace: Optional[Path] = None) -> List[str]:
     """The pack ids New session and Spawn child tick on every opening.
 
-    Three answers, each overriding the one before it for the packs it names:
+    Three layers, each overriding the one before it for the packs it names:
     a shipped pack's own ``check_default`` header
     (:func:`shipped_default_packs`), then what the config states in
     ``prompt_packs.default_packs`` (:func:`saved_default_packs`), then the
     workspace's installed copy when it has one and its header states
     something. A pack named by none of the three does not start ticked.
+
+    The workspace's copy is last on purpose: "every session created here"
+    is a decision that workspace makes about itself, so it wins over a
+    setting written for the whole machine -- the same precedence
+    :func:`pack_copy` gives the copy's text.
 
     Installed or not makes no difference to what a session gets: the
     workspace's copy is read when it has one and claunch's otherwise
@@ -848,13 +882,13 @@ def default_packs(doc: Optional[dict] = None, workspace: Optional[Path] = None) 
     """
     stated = {p.id: p.check_default for p in catalog()
               if p.check_default is not None}
+    stated.update(saved_default_packs(doc))
     if workspace is not None:
         for pack in installed(workspace):
             if pack.check_default is not None:
                 stated[pack.id] = pack.check_default
-    stated.update(saved_default_packs(doc))
-    # Order: the shipped catalog's own order first, then any other pack the
-    # config names, so the form's rows read the same way every time.
+    # Order: the shipped catalog's own order first, then any other pack a
+    # layer names, so the form's rows read the same way every time.
     order = [p.id for p in catalog()]
     order += sorted(set(stated) - set(order))
     return offerable([i for i in order if stated.get(i)])
@@ -863,10 +897,11 @@ def default_packs(doc: Optional[dict] = None, workspace: Optional[Path] = None) 
 def set_default_packs(values) -> List[str]:
     """Validate and save the ``check_default`` overrides; ``None`` clears them.
 
-    ``values`` is ``{pack id: bool}`` (or a list of ids, meaning "these are
-    ticked and nothing else is" -- what the Settings form sends when it is
-    saved whole). ``None`` drops the setting, so every pack answers from its
-    own header again.
+    ``values`` is ``{pack id: bool}`` -- the rows the operator changed, which
+    is what the Settings form sends. A list of ids is still read as the whole
+    answer ("these are ticked and the other shipped defaults are not"), which
+    is the form older builds sent. ``None`` drops the setting, so every pack
+    answers from its own header again.
     """
     if values is None:
         _save_list("default_packs", None)

@@ -3517,10 +3517,14 @@ Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` 
   names. A pack the setting does not mention keeps its header's answer, so a
   pack added to the package later starts ticked without anyone editing this
   file; a workspace copy whose header says something wins over both for its
-  own id. Saving the form whole sends one statement per pack it drew, and a
-  list of ids is still read as "these are ticked and the other shipped
-  defaults are not". Only the web form reads it: `--prompt-pack` on the CLI
-  and `prompt_packs` on MCP `spawn` take exactly the packs named.
+  own id, so a tick here does not reach a workspace whose copy states its own
+  answer — the Settings card marks such a row and names the workspace. The
+  form saves **only the rows an operator changed**: a row left as the pack
+  answered is not written, so it keeps following the header (and a workspace
+  copy's header keeps winning there). A list of ids is still read as "these
+  are ticked and the other shipped defaults are not". Only the web form reads
+  it: `--prompt-pack` on the CLI and `prompt_packs` on MCP `spawn` take
+  exactly the packs named.
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
   not; the form shows them ticked and locked with a 🔒 <role> badge. The
@@ -3569,8 +3573,12 @@ current directory's workspace, or claunch's), which is how a member that
 joined by hand, without a create-time opening, reads them.
 
 HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings,
-`shipped_default_packs` — what the packs' headers say — and
-`saved_default_packs` — the per-pack overrides the config states),
+`shipped_default_packs` — what the packs' headers say —,
+`saved_default_packs` — the per-pack overrides the config states — and
+`saved_role_packs` — the role rows the config states, apart from the merged
+answer, so a card can tell an operator's row from the package's; each
+workspace row carries `copy_check_default`, what that workspace's copy states
+about starting ticked, which is the value that wins there),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),
 `GET /api/prompt-packs/text?id=&cwd=` (one pack's text as a session there
 would get it, with `source` — `workspace` or `package` — and for a workspace
