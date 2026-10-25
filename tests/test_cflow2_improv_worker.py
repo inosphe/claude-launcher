@@ -141,6 +141,47 @@ def _words(text: str) -> str:
     return " ".join(text.split())
 
 
+def _procedure_prose(chart) -> str:
+    """``description`` of every procedure the chart's definition can reach.
+
+    A procedure's own ``description`` never becomes a node: the frontend
+    keeps it on its internal procedure record and drops it, so no amount of
+    walking ``chart.nodes`` reaches it (claunch-qt475). It is still text an
+    author writes for a reader, so a guard aimed at it has to read the
+    files -- the chart's file and everything it ``include``s, transitively.
+
+    Nodes declared inside a procedure body are already in ``chart.nodes``
+    when a step reaches them; this adds only the descriptions, which no
+    compiled chart carries at all.
+    """
+    source = Path(chart.source or "")
+    if not source.is_file():
+        return ""
+    chunks, seen, pending = [], set(), [source.resolve()]
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for raw in (doc.get("procedures") or {}).values():
+            if isinstance(raw, dict) and isinstance(raw.get("description"), str):
+                chunks.append(raw["description"])
+        for name in doc.get("include") or []:
+            # beside the including file first: a layer's library is looked up
+            # next to it, which is what the resolver does for that layer
+            beside = path.parent / f"{name}.yaml"
+            hit = beside if beside.is_file() else layers.find(str(name))
+            if hit is not None:
+                pending.append(Path(hit).resolve())
+    return _words(" ".join(chunks))
+
+
 def _chart_prose(chart) -> str:
     """Every piece of prose the chart hands a reader, in words.
 
@@ -153,7 +194,9 @@ def _chart_prose(chart) -> str:
     (claunch-f56fz, second review).
 
     So collect from every node, labelled or not, and read the option list
-    too: ``name``/``description`` per option are what the chooser sees.
+    too: ``name``/``description`` per option are what the chooser sees. The
+    procedures' own descriptions are not in any node and come from the
+    files (:func:`_procedure_prose`) -- claunch-qt475.
     """
     chunks = []
     for node in chart.nodes.values():
@@ -169,7 +212,7 @@ def _chart_prose(chart) -> str:
                 for value in option.values():
                     if isinstance(value, str):
                         chunks.append(value)
-    return _words(" ".join(chunks))
+    return _words(" ".join(chunks + [_procedure_prose(chart)]))
 
 
 def _as_v2(v1_block: str) -> str:
@@ -2578,3 +2621,37 @@ def test_no_step_still_promises_a_brand_new_branch_for_every_round():
     assert "재사용 판정이 그 공유를 조건부로 승인한다" in everything
     # and next-round, in the option description the collection now reaches
     assert "새 목표·브랜치 판정·새 착지" in everything
+
+
+def test_chart_prose_reaches_a_procedure_description():
+    """A procedure's ``description`` is prose an author writes for a reader,
+    and it reaches no compiled node -- the frontend keeps it on its own
+    record (claunch-qt475). A guard written against the procedure text used
+    to pass no matter what that text said, because the collection only ever
+    walked ``chart.nodes``.
+
+    The first anchor lives in ``land``'s description and nowhere else in any
+    layer file, so it fails the moment the collection stops reading the
+    procedures -- which is the revert this test exists to catch. The second
+    lives in a procedure of an *included* file (``improv-common``), so it
+    fails if the collection reads only the definition's own file.
+    """
+    chart = _chart()
+    anchor = "결과는 landed(머지 해시), held(동결로 마감), rework(작업으로 되돌아감) 셋 중 하나다"
+    included = "회차 도중 발견한 범위 밖 결함 하나를 이슈로 남긴다"
+
+    # not reachable from nodes: this is the gap the collection had to close,
+    # and asserting it keeps the anchor from being satisfied by some node
+    # that happens to say the same thing
+    nodes_only = _words(" ".join(
+        str(value)
+        for node in chart.nodes.values()
+        for key in ("prompt", "description", "options")
+        for value in [node.get(key)]
+        if isinstance(value, str)
+    ))
+    assert anchor not in nodes_only
+    assert included not in nodes_only
+
+    assert anchor in _chart_prose(chart)
+    assert included in _chart_prose(chart)
