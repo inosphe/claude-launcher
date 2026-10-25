@@ -343,10 +343,110 @@ const submit = (root) =>
   sent = JSON.parse(requests.at(-1)[1].body);
   assert.equal(sent.presets[0].previous_id, undefined);
 
+  /* ── Test connection ─────────────────────────────────────────────────────
+     The button sends the fields as they stand, not the saved block: the
+     backend an operator is checking is the one they just typed, and after
+     picking a preset that backend is not in the file yet. It is a plain
+     button, so it must not save. */
+  requests.length = 0;
+  response = {
+    preset: "cheap", profile: "", model: "", endpoint: "", max_tokens: 4096,
+    api_key_set: false, configured: true, error: "",
+    resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                model: "glm-small", has_key: true },
+    profiles: [],
+    presets: [
+      { id: "cheap", profile: "", endpoint: "https://cheap.example/v1/chat/completions",
+        model: "glm-small", api_key_set: true,
+        resolved: { endpoint: "https://cheap.example/v1/chat/completions",
+                    model: "glm-small", has_key: true }, error: "" },
+    ],
+  };
+  vm.runInContext("llmDraft = null; llmTestResult = null;", context);
+  await context.refreshLlmSettings();
+  root = card();
+  const typed = field(root, "llm-endpoint");
+  typed.value = "https://typed.example/v1/chat/completions";
+  typed.handlers.input();
+  field(root, "llm-model").value = "typed-model";
+  field(root, "llm-model").handlers.input();
+  response = {
+    ok: true, status: 200, detail: "answered 200 in 0.31s — the backend replied",
+    endpoint: "https://typed.example/v1/chat/completions", model: "typed-model",
+    provider: "", seconds: 0.31,
+  };
+  const testBtn = find(root, (n) => n.text === "Test connection");
+  assert(testBtn, "the card offers Test connection");
+  assert.equal(testBtn.type, "button");
+  await testBtn.handlers.click();
+  const [testUrl, testOpts] = requests.at(-1);
+  assert.equal(testUrl, "/api/briefing/llm/test");
+  assert.equal(testOpts.method, "POST");
+  const tested = JSON.parse(testOpts.body);
+  // the typed fields, not the saved preset's — and the preset's own name,
+  // which is what tells the daemon whose stored key a blank api_key means
+  assert.deepEqual(tested, {
+    preset: "cheap", profile: "", model: "typed-model",
+    endpoint: "https://typed.example/v1/chat/completions", api_key: "",
+  });
+  // a test writes nothing: no PUT followed it
+  assert.equal(requests.filter(([u, o]) => o && o.method === "PUT").length, 0);
+  root = card();
+  const okLine = find(root, (n) => n.text.startsWith("Connected —"));
+  assert(okLine);
+  assert(okLine.text.includes("the backend replied"));
+  // the line names what was tested, so a later edit cannot read as covered
+  assert(okLine.text.includes("https://typed.example/v1/chat/completions"));
+  assert(okLine.text.includes("typed-model"));
+
+  /* A refusal is shown the same way, with the upstream's own words. */
+  response = {
+    ok: false, status: 400, detail: "answered 400: {\"error\":\"MissingSessionID\"}",
+    endpoint: "https://typed.example/v1/chat/completions", model: "typed-model",
+    provider: "", seconds: 0.12,
+  };
+  await find(card(), (n) => n.text === "Test connection").handlers.click();
+  root = card();
+  const badLine = find(root, (n) => n.text.startsWith("Failed —"));
+  assert(badLine);
+  assert(badLine.text.includes("MissingSessionID"));
+  assert.equal(badLine.cls, "wf-warning");
+
+  /* The result outlives a re-render (the card is rebuilt on every poll), and
+     a second test replaces it rather than stacking up. */
+  root = card();
+  assert.equal(all(root).filter((n) => n.text.startsWith("Connected —")
+                                  || n.text.startsWith("Failed —")).length, 1);
+
+  /* With a profile chosen the typed endpoint/key are not sent beside it —
+     the same pairing rule the save follows. */
+  response = {
+    preset: "", profile: "", model: "", endpoint: "", max_tokens: 4096,
+    api_key_set: true, configured: true, error: "",
+    resolved: { endpoint: "https://ds.example/v1/chat/completions",
+                model: "deepseek-flash", has_key: true },
+    profiles: [
+      { name: "ds4", endpoint: "https://ds.example/v1/chat/completions",
+        models: ["deepseek-flash"], has_key: true },
+    ],
+    presets: [],
+  };
+  vm.runInContext("llmDraft = null; llmTestResult = null;", context);
+  await context.refreshLlmSettings();
+  root = card();
+  field(root, "llm-profile").value = "ds4";
+  field(root, "llm-profile").handlers.change();
+  requests.length = 0;
+  await find(card(), (n) => n.text === "Test connection").handlers.click();
+  const withProfile = JSON.parse(requests.at(-1)[1].body);
+  assert.deepEqual(withProfile,
+                   { preset: "", profile: "ds4", model: "deepseek-flash" });
+
   console.log("briefmodel ok: profile list, direct save, a profile carries "
     + "endpoint and model with it, save clears the block's pair, typed "
     + "endpoint survives an abandoned pick, unknown profile kept, error, "
     + "preset switch carries endpoint and model, save sends the list and "
     + "pointer, delete clears the pointer, add saves the new row, rename "
-    + "sends the name the key is filed under, provider shown when resolved");
+    + "sends the name the key is filed under, provider shown when resolved, "
+    + "Test connection sends the unsaved fields and reports the result");
 })().catch((err) => { console.error(err); process.exit(1); });

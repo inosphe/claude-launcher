@@ -36154,6 +36154,11 @@ let llmSettings = null;
 let llmSettingsError = "";
 let llmSettingsNotice = "";
 let llmSettingsBusy = false;
+//: The last "Test connection" result, kept beside the draft for the same
+//: reason: the card is rebuilt on every poll, and a result that lived only in
+//: the DOM would be erased by the next one. ``null`` means "not tried yet".
+let llmTestResult = null;
+let llmTestBusy = false;
 //: The form's own values while it is being edited. renderWorkspaces() rebuilds
 //: this card on every poll, so a draft kept in the DOM would be typed over
 //: mid-word; null means "take the saved values again".
@@ -36318,6 +36323,49 @@ async function llmSettingsSave(body) {
     llmSettingsError = String(err);
   }
   llmSettingsBusy = false;
+  renderWorkspaces();
+}
+
+/*: The body "Test connection" sends: the backend fields as the form holds
+   them right now, saved or not, plus which preset they belong to.
+   ``presets``/``max_tokens`` are deliberately absent — a probe tests one
+   backend, and the budget it spends is the daemon's own.
+
+   ``preset`` is not a saved thing being asked for but where the *blank*
+   fields come from: the password box never holds a secret, so the daemon
+   needs the name of the row whose stored key to test. Without it a blank key
+   would resolve to whichever preset is saved, and the button would test one
+   backend's credential against another backend's endpoint.
+
+   The pairing rule is the save's: a profile owns the endpoint/key pair, so
+   the typed ones are not sent beside it. */
+function llmTestBody(draft) {
+  const body = { preset: draft.preset || "", profile: draft.profile,
+                 model: draft.model };
+  if (!draft.profile) {
+    body.endpoint = draft.endpoint;
+    body.api_key = draft.api_key;
+  }
+  return body;
+}
+
+async function llmSettingsTest(draft) {
+  llmTestBusy = true;
+  llmTestResult = null;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/briefing/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(llmTestBody(draft)),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    llmTestResult = data;
+  } catch (err) {
+    llmTestResult = { ok: false, detail: String(err) };
+  }
+  llmTestBusy = false;
   renderWorkspaces();
 }
 
@@ -36563,6 +36611,18 @@ function llmSettingsCard() {
   save.type = "submit";
   save.disabled = llmSettingsBusy;
   form.appendChild(save);
+
+  // Tests the fields as they stand, saved or not: the thing an operator wants
+  // to check after picking a preset is exactly the backend that is not in the
+  // file yet. It is a plain button, not a submit, so it never saves.
+  const test = el("button", "wf-btn", llmTestBusy ? "Testing…" : "Test connection");
+  test.type = "button";
+  test.disabled = llmSettingsBusy || llmTestBusy;
+  test.addEventListener("click", () => {
+    llmDraftSync(draft);
+    return llmSettingsTest(draft);
+  });
+  form.appendChild(test);
   if (llmDraftKeySet(draft) && !draft.profile) {
     const clear = el("button", "wf-btn clear", "Remove stored key");
     clear.type = "button";
@@ -36618,6 +36678,18 @@ function llmSettingsCard() {
   card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
   if (llmSettings.error) card.appendChild(el("p", "wf-warning", llmSettings.error));
   if (llmSettingsNotice) card.appendChild(el("p", "wf-note", llmSettingsNotice));
+  // The last probe. It reports on the values that were sent, which may since
+  // have been edited — said on the line, so a stale "connected" cannot be
+  // read as a claim about what the fields hold now.
+  if (llmTestResult) {
+    const what = [llmTestResult.endpoint, llmTestResult.model]
+      .filter(Boolean).join(" · ");
+    card.appendChild(el(
+      "p", llmTestResult.ok ? "wf-note" : "wf-warning",
+      `${llmTestResult.ok ? "Connected" : "Failed"} — ${llmTestResult.detail}`
+      + (what ? `  [tested ${what}]` : "")
+    ));
+  }
   if (!rows.length) {
     card.appendChild(el(
       "p", "wf-note",

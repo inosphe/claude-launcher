@@ -931,6 +931,9 @@ def build_app(
     r.add_put("/api/prompt-packs/role-packs", h_prompt_packs_role_packs)
     r.add_get("/api/briefing/llm", h_briefing_llm)
     r.add_put("/api/briefing/llm", h_briefing_llm_save)
+    # The card's "Test connection": one minimal call through the same path a
+    # briefing takes, with the form's current (possibly unsaved) values.
+    r.add_post("/api/briefing/llm/test", h_briefing_llm_test)
     r.add_get("/api/briefing/faq", h_briefing_faq)
     r.add_post("/api/briefing/faq", h_briefing_faq_add)
     r.add_put("/api/briefing/faq/{faq_id}", h_briefing_faq_update)
@@ -4434,6 +4437,154 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
 async def h_briefing_llm(request: web.Request) -> web.Response:
     """Which backend and model the session briefing calls."""
     return json_response(_llm_settings_payload())
+
+
+#: The bodies ``POST /api/briefing/llm/test`` accepts: the card's backend
+#: fields, plus ``preset`` to say which saved row supplies the ones left out.
+#: ``presets`` and ``max_tokens`` are refused rather than ignored — a probe
+#: tests a *backend*, and silently dropping a field the caller sent would
+#: report on something other than what was asked about.
+LLM_TESTABLE = frozenset({"profile", "model", "endpoint", "api_key", "preset"})
+
+
+def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
+    """Resolve the card's current fields into a callable config, unsaved.
+
+    The Settings card has to be able to test what is *typed*, before a save:
+    an operator choosing a preset is checking exactly the values that are not
+    in the file yet, and a probe that read the saved block would test the
+    backend they are trying to replace.
+
+    So this resolves the same way :func:`briefing.llm_config` does, with the
+    submitted fields laid over a base: ``preset`` names which saved row the
+    fields that were *not* submitted come from, and ``""`` (or no ``preset``)
+    means the block's own. Submitting a field overrides that base.
+
+    ``preset`` is also what makes a blank ``api_key`` mean "that row's stored
+    key" instead of "the block's". The card's password box arrives blank on
+    every render and never holds a secret, so without the row's own name the
+    key of whichever preset is *saved* would be sent to the endpoint of one
+    being tried out. Same convention the PUT follows, scoped to the row asked
+    about.
+
+    ``max_tokens`` and ``params`` stay the block's: they bound the call rather
+    than describe the backend, and the probe floors the budget anyway.
+    """
+    if not isinstance(body, dict) or set(body) - LLM_TESTABLE:
+        raise ValueError("unsupported briefing llm test field")
+    saved = briefing.llm_config(doc)
+    block = dict(doc.get("llm") if isinstance(doc.get("llm"), dict) else {})
+    base = block
+    wanted = body.get("preset")
+    if wanted is not None and not isinstance(wanted, str):
+        raise ValueError("preset must be text")
+    wanted = (wanted or "").strip()
+    if wanted:
+        # An unknown name falls back to the block, matching llm_config: the
+        # card shows a pointer at a preset that was deleted or hand-renamed,
+        # and the backend a briefing would use in that state is the block's.
+        base = next(
+            (p for p in briefing.presets(doc) if p["id"] == wanted), block
+        )
+    fields = dict(base)
+    for field in ("profile", "model", "endpoint", "api_key"):
+        if field not in body:
+            continue
+        value = body[field]
+        if field == "api_key":
+            # ``null`` removes the key and a blank one keeps the base's — the
+            # same convention the save follows, and the only way the button
+            # can test a backend whose key is already stored: the card never
+            # receives a secret to send back.
+            if value is None:
+                fields[field] = ""
+            elif not isinstance(value, str):
+                raise ValueError(f"{field} must be text")
+            elif value.strip():
+                fields[field] = value.strip()
+            continue
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{field} must be text")
+        # For the other three a blank value is the card saying the box is
+        # empty, and an empty box on save clears the field — so clearing it
+        # here too is what keeps the button honest about what a save would do.
+        fields[field] = str(value or "").strip()
+    fields = {
+        field: str(fields.get(field) or "").strip()
+        for field in briefing.PRESET_FIELDS
+    }
+    profile_name = fields["profile"]
+    endpoint = fields["endpoint"]
+    api_key = fields["api_key"]
+    model = fields["model"]
+    provider = ""
+    if profile_name:
+        try:
+            backend = briefing.profile_backend(profile_name, doc)
+        except briefing.BriefingError as exc:
+            # Handed back as a reason rather than raised: a profile that
+            # cannot serve is a fact about the backend, which is the thing
+            # the button exists to tell the operator. The card shows it in
+            # the same place a refused call's answer goes.
+            return (
+                {"profile": profile_name, "model": model, "endpoint": ""},
+                str(exc),
+            )
+        endpoint, api_key = backend.endpoint, backend.api_key
+        model = model or backend.model
+        provider = backend.provider
+    cfg = {
+        "preset": "",
+        "profile": profile_name,
+        "provider": provider,
+        "endpoint": endpoint,
+        "model": model,
+        "api_key": api_key,
+        "max_tokens": saved.get("max_tokens") or briefing.DEFAULT_MAX_TOKENS,
+        "params": dict(saved.get("params") or {}),
+    }
+    return cfg, ""
+
+
+async def h_briefing_llm_test(request: web.Request) -> web.Response:
+    """Send one minimal call to the backend the card is showing.
+
+    Refused with 400 only when the body itself is malformed. Everything the
+    operator needs to read — unreachable host, rejected key, a provider rule
+    that cannot be applied, an answer that is not a chat completion — comes
+    back as ``ok: false`` with a ``detail`` sentence, so the card has one
+    shape to render whatever the endpoint did.
+    """
+    body = await _json_body(request)
+    doc = store.load()
+    try:
+        cfg, refused = _llm_probe_config(body, doc)
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    if refused:
+        return json_response(
+            {
+                "ok": False,
+                "status": None,
+                "detail": f"not sent: {refused}",
+                "model": cfg.get("model", ""),
+                "endpoint": "",
+                "provider": "",
+                "seconds": 0.0,
+            }
+        )
+    probe = await briefing.probe_llm(cfg)
+    return json_response(
+        {
+            "ok": probe.ok,
+            "status": probe.status,
+            "detail": probe.detail,
+            "model": probe.model,
+            "endpoint": probe.endpoint,
+            "provider": probe.provider,
+            "seconds": probe.seconds,
+        }
+    )
 
 
 async def h_briefing_llm_save(request: web.Request) -> web.Response:

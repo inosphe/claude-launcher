@@ -94,6 +94,32 @@ llm:
 - 저장할 수 없는 값은 400으로 거절한다: 이름 규칙 위반, 중복 id, `profile`도
   `endpoint`도 없는 행, 상한 초과, 저장된 목록에 없는 `preset`.
 
+`POST /api/briefing/llm/test`는 카드의 **Test connection**이 부르는 경로다.
+저장하지 않은 편집값을 그대로 받아 최소 호출을 한 번 보내고 결과를 돌려준다.
+
+- 본문은 `profile`, `model`, `endpoint`, `api_key`, `preset` 다섯 필드만 받는다.
+  `presets`·`max_tokens`는 400으로 거절한다 — 시험 대상은 백엔드 하나이고,
+  조용히 버린 필드가 있으면 요청한 것과 다른 것을 보고하게 된다.
+- `preset`은 저장된 행을 가리키며, **보내지 않은 필드의 출처**다. 저장된 목록에
+  없는 이름은 블록으로 되돌아간다(`llm_config()`와 같은 규칙).
+- 빈 값의 뜻은 필드마다 다르다. `api_key`가 빈 문자열이면 그 행에 저장된 키를
+  쓰고(`null`은 제거), `profile`·`model`·`endpoint`가 비면 빈 값 그대로다 —
+  저장 경로에서도 빈 상자는 그 필드를 지우므로 두 경로가 같은 것을 뜻한다.
+  카드의 비밀번호 상자는 비밀을 되받지 못해 늘 비어 오므로 이 구분이 필요하다:
+  없으면 저장된 활성 프리셋의 키가 다른 프리셋의 endpoint로 나간다.
+- 해석 규칙은 `llm_config()`와 같다: `profile`이 있으면 그 프로필의 endpoint와
+  키를 쓰고 보낸 endpoint·키는 쓰지 않는다.
+- 요청은 브리핑 호출과 같은 경로를 탄다: 같은 `briefing_request_headers()`,
+  같은 본문 형태. 그래서 `session_header`를 요구하는 provider는 시험에서도
+  같은 헤더를 받는다. 예산은 `params`를 머지한 **뒤에**
+  `CONNECTION_MAX_TOKENS`(16)로 묶는다 — 블록의 `params.max_tokens`가 상한을
+  넘어서지 못한다. 프롬프트는
+  `CONNECTION_PROMPT`("ping")이다.
+- 실패는 예외가 아니라 결과다. 연결 실패, 상류의 4xx/5xx, `choices[0]`가 없는
+  본문, 설정 누락이 모두 `ok: false`와 `detail` 문장으로 온다. `detail`은
+  응답 본문 일부(300자)만 담고 요청은 담지 않는다 — 키가 새지 않는다.
+- 아무것도 저장하지 않는다. 파일은 시험 전후로 같다.
+
 ## 카드
 
 `src/claude_launcher/web/static/app.js`의 `llmSettingsCard()`.
@@ -107,6 +133,11 @@ llm:
 - **Delete preset**은 고른 행을 목록에서 빼고 포인터를 비운다.
 - **Remove stored key**는 지금 편집 중인 것(블록 또는 고른 프리셋)의 키만
   지운다. 다른 프리셋의 키는 그대로다.
+- **Test connection**은 지금 필드에 보이는 값으로 최소 호출을 한 번 보낸다.
+  저장하지 않은 편집 내용으로도 시험할 수 있고, 아무것도 저장하지 않는다.
+  결과는 카드 아래 한 줄에 성공·실패와 `detail`로 남고, 시험한 endpoint와
+  model을 함께 적어 그 뒤에 필드를 고쳤을 때 결과가 낡았다는 것을 알 수 있게
+  한다. 결과는 `llmTestResult`에 있으므로 다음 폴링의 재렌더에서도 남는다.
 
 ## 시험
 
@@ -116,4 +147,6 @@ llm:
   키 보존·거절·이름 변경 시 키 승계, 없는 이름을 가리키는 포인터의 `error` 보고.
 - `tests/web/briefmodel_check.js` — 카드가 프리셋 목록을 그리고, 고른 프리셋의
   endpoint·model을 필드에 옮기고, 저장 본문에 목록과 포인터를 함께 싣고,
-  삭제가 포인터를 비우고, 추가가 새 행을 저장하는지.
+  삭제가 포인터를 비우고, 추가가 새 행을 저장하는지, **Test connection**이
+  저장하지 않은 필드로 `/api/briefing/llm/test`를 부르고 결과를 카드에
+  남기는지.

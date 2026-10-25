@@ -2160,3 +2160,510 @@ def test_briefing_llm_save_drops_cached_briefings_when_the_backend_changes(home)
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# "Test connection": one minimal call through the briefing's own path
+# --------------------------------------------------------------------------- #
+def test_probe_llm_reports_a_working_backend(home):
+    """A reachable endpoint that answers is reported with its status code.
+
+    The point of the probe is that it walks the same path a briefing does, so
+    what is asserted here is the shape that is actually sent: the configured
+    model, a budget floored to the probe's own, and the authorization header.
+    """
+    from aiohttp import web as aioweb
+
+    seen = {}
+
+    async def handler(request):
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = await request.json()
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "acc/model",
+                "api_key": "sk-test",
+                "provider": "",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            got = await briefing.probe_llm(cfg)
+            assert got.ok is True
+            assert got.status == 200
+            assert got.model == "acc/model"
+            assert "the backend replied" in got.detail
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    # same credential as a briefing, and the probe's own small budget
+    assert seen["auth"] == "Bearer sk-test"
+    assert seen["body"]["model"] == "acc/model"
+    assert seen["body"]["max_tokens"] == briefing.CONNECTION_MAX_TOKENS
+    assert seen["body"]["messages"] == [
+        {"role": "user", "content": briefing.CONNECTION_PROMPT}
+    ]
+
+
+def test_probe_llm_caps_the_budget_after_merging_the_saved_params(home):
+    """``params`` cannot lift the probe's budget back to the block's.
+
+    ``params`` is merged into the body, and it can carry ``max_tokens`` of its
+    own. Applied before the cap it would win, and the probe would spend the
+    saved 4096 to learn what a 16-token call already answers.
+    """
+    from aiohttp import web as aioweb
+
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "k",
+                "provider": "",
+                "max_tokens": 4096,
+                "params": {"max_tokens": 4096, "temperature": 0.2},
+            }
+            got = await briefing.probe_llm(cfg)
+            assert got.ok is True
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert seen["body"]["max_tokens"] == briefing.CONNECTION_MAX_TOKENS
+    # the rest of the saved params still travel: only the budget is bounded
+    assert seen["body"]["temperature"] == 0.2
+
+
+def test_probe_llm_applies_the_providers_session_header(home):
+    """The half that makes the button worth having.
+
+    A provider that refuses a briefing without its session header
+    (OpenCode Go answers ``400 MissingSessionID``) also refuses the probe —
+    unless the probe goes through ``briefing_request_headers``, which it does.
+    A probe that built its own request would report "connected" for a backend
+    every real briefing then fails on.
+    """
+    from aiohttp import web as aioweb
+
+    _profile_backend_config(provider="ocgo")
+    seen = {}
+
+    async def handler(request):
+        seen["session"] = request.headers.get("x-ocgo-session")
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            store.update(
+                lambda doc: doc.setdefault("providers", {}).setdefault(
+                    "ocgo", {}
+                ).update({"session_header": "x-ocgo-session"})
+            )
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "k",
+                "provider": "ocgo",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            got = await briefing.probe_llm(cfg)
+            assert got.ok is True
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert seen["session"] == briefing.BRIEFING_SESSION_ID
+
+
+def test_probe_llm_reports_an_upstream_refusal_with_its_status(home):
+    """A 400 is a result the card shows, not an exception thrown at it.
+
+    The body snippet is what makes the message actionable — ``400
+    MissingSessionID`` names the missing header, where a bare "failed" sends
+    whoever reads it to the network.
+    """
+    from aiohttp import web as aioweb
+
+    async def handler(request):
+        return aioweb.json_response({"error": "MissingSessionID"}, status=400)
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "k",
+                "provider": "",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            got = await briefing.probe_llm(cfg)
+            assert got.ok is False
+            assert got.status == 400
+            assert "answered 400" in got.detail
+            assert "MissingSessionID" in got.detail
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_probe_llm_says_what_is_missing_instead_of_calling(home):
+    """Nothing configured is reported as such, and no request goes out."""
+    async def run():
+        got = await briefing.probe_llm(
+            {"endpoint": "", "model": "", "api_key": "", "provider": ""}
+        )
+        assert got.ok is False
+        assert got.status is None
+        assert got.detail.startswith("not sent:")
+        # all three are named, so one fix does not reveal the next
+        for field in ("endpoint", "model", "api_key"):
+            assert field in got.detail
+
+    asyncio.run(run())
+
+
+def test_probe_llm_reports_a_body_that_is_not_a_chat_completion(home):
+    """A 200 whose body has no choices is not a working briefing backend.
+
+    An HTML error page behind a proxy arrives as 200 often enough that
+    treating status alone as success would report a backend that cannot
+    answer a briefing.
+    """
+    from aiohttp import web as aioweb
+
+    async def handler(request):
+        return aioweb.Response(text="<html>gateway</html>", status=200)
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "k",
+                "provider": "",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            got = await briefing.probe_llm(cfg)
+            assert got.ok is False
+            assert got.status == 200
+            assert "no choices[0]" in got.detail
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_test_endpoint_tests_the_unsaved_fields(home):
+    """``POST /api/briefing/llm/test``: the card's button.
+
+    The fields it is given win over the file, because the backend an operator
+    is checking is the one they just typed — a probe that read the saved block
+    would confirm the backend they are trying to replace. A blank key means
+    the stored one, the same convention the save's password box follows.
+    """
+    from aiohttp import web as aioweb
+
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        seen["auth"] = request.headers.get("Authorization")
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            url = str(server.make_url("/v1/chat/completions"))
+            # the file holds a different backend than the one being tested
+            _set_llm("https://saved.test/v1/chat/completions")
+            mgr = SessionManager(
+                idle_threshold=0.5, scrollback=200, restore_default=True
+            )
+            client = await _serve(mgr)
+            try:
+                resp = await client.post(
+                    "/api/briefing/llm/test", headers=BEARER,
+                    json={"endpoint": url, "model": "typed-model", "api_key": "typed-key"},
+                )
+                assert resp.status == 200
+                body = await resp.json()
+                assert body["ok"] is True
+                assert body["status"] == 200
+                assert body["endpoint"] == url
+                assert body["model"] == "typed-model"
+                # nothing is written: a test is not a save
+                assert briefing.llm_config()["endpoint"] == (
+                    "https://saved.test/v1/chat/completions"
+                )
+            finally:
+                await client.close()
+                await mgr.shutdown_all()
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert seen["body"]["model"] == "typed-model"
+    # the typed key goes out, not the saved one: the credential on the wire is
+    # the one being tested, which is the whole point of the unsaved-fields axis
+    assert seen["auth"] == "Bearer typed-key"
+
+
+def test_briefing_llm_test_endpoint_uses_the_stored_key_when_blank(home):
+    """The card cannot send a secret back, so a blank key is "the stored one".
+
+    Without this the button would report "not sent: api_key not set" on every
+    backend whose key was already saved — which is all of them, since the
+    password box arrives blank on each render.
+    """
+    from aiohttp import web as aioweb
+
+    seen = {}
+
+    async def handler(request):
+        seen["auth"] = request.headers.get("Authorization")
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            url = str(server.make_url("/v1/chat/completions"))
+            _set_llm(url)  # stores api_key "sk"
+            mgr = SessionManager(
+                idle_threshold=0.5, scrollback=200, restore_default=True
+            )
+            client = await _serve(mgr)
+            try:
+                resp = await client.post(
+                    "/api/briefing/llm/test", headers=BEARER,
+                    json={"endpoint": url, "model": "m", "api_key": ""},
+                )
+                assert resp.status == 200
+                assert (await resp.json())["ok"] is True
+            finally:
+                await client.close()
+                await mgr.shutdown_all()
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert seen["auth"] == "Bearer sk"
+
+
+def test_briefing_llm_test_endpoint_never_returns_the_key(home):
+    """The reported result carries the outcome, never the credential.
+
+    The card renders ``detail`` verbatim and the response is a JSON body on
+    the wire, so a key that reached either one would be on screen and in
+    whatever recorded the call. Both paths are checked: a connected backend
+    and an upstream refusal, whose snippet could otherwise be assembled from
+    the request.
+    """
+    from aiohttp import web as aioweb
+
+    secret = "sk-live-9c1f-never-echo"
+
+    async def ok_handler(request):
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def bad_handler(request):
+        return aioweb.json_response(
+            {"error": "invalid key", "given": "…"}, status=401
+        )
+
+    async def run():
+        for handler, expect_ok in ((ok_handler, True), (bad_handler, False)):
+            server = await _start_llm(handler)
+            try:
+                url = str(server.make_url("/v1/chat/completions"))
+                mgr = SessionManager(
+                    idle_threshold=0.5, scrollback=200, restore_default=True
+                )
+                client = await _serve(mgr)
+                try:
+                    resp = await client.post(
+                        "/api/briefing/llm/test", headers=BEARER,
+                        json={"endpoint": url, "model": "m", "api_key": secret},
+                    )
+                    assert resp.status == 200
+                    text = await resp.text()
+                    body = json.loads(text)
+                    assert body["ok"] is expect_ok
+                    assert secret not in text
+                    assert secret not in body["detail"]
+                finally:
+                    await client.close()
+                    await mgr.shutdown_all()
+            finally:
+                await server.close()
+
+    asyncio.run(run())
+
+
+def test_probe_llm_does_not_echo_the_key_on_failure(home):
+    """The failure sentence is built from the response, not the request.
+
+    ``detail`` goes straight into the card, so an unreachable host's exception
+    text and an upstream body are the two places a key could ride out. Neither
+    does: the transport error names the endpoint, the refusal names the status.
+    """
+    from aiohttp import web as aioweb
+
+    secret = "sk-live-7f2a-never-echo"
+    seen = {}
+
+    async def handler(request):
+        seen["auth"] = request.headers.get("Authorization")
+        return aioweb.json_response({"error": "nope"}, status=503)
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": secret,
+                "provider": "",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            got = await briefing.probe_llm(cfg)
+            assert got.ok is False
+            assert got.status == 503
+            assert secret not in got.detail
+            # the key did travel, in the header only
+            assert seen["auth"] == f"Bearer {secret}"
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_test_endpoint_reports_a_profile_that_cannot_serve(home):
+    """A profile the picker cannot use is answered, not raised.
+
+    The card offers hand-edited names too, and "this profile has no OpenAI
+    endpoint" is precisely what the operator needs to read there.
+    """
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.post(
+                "/api/briefing/llm/test", headers=BEARER,
+                json={"profile": "gone", "model": "m"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["ok"] is False
+            assert body["detail"].startswith("not sent:")
+            assert "gone" in body["detail"]
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_test_endpoint_refuses_a_body_it_cannot_test(home):
+    """Fields the probe has no meaning for are refused, not ignored.
+
+    ``presets``/``max_tokens`` describe the block rather than the backend, and
+    a probe that quietly dropped one would report on something other than
+    what the caller asked about. ``preset`` is accepted (it names which saved
+    row a blank field comes from) but only as text.
+    """
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            for bad in ({"max_tokens": 8}, {"presets": []}, {"preset": 7}):
+                resp = await client.post(
+                    "/api/briefing/llm/test", headers=BEARER, json=bad,
+                )
+                assert resp.status == 400, bad
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_test_endpoint_tests_the_chosen_presets_stored_key(home):
+    """A blank key resolves against the preset being tested, not the active one.
+
+    The card sends ``preset`` for exactly this: the password box never holds a
+    secret, so the daemon has to look the key up somewhere, and looking it up
+    under whichever preset happens to be *saved* would send one backend's
+    credential to another backend's endpoint. Here "cheap" is saved and active,
+    "big" is the row being tried out, and the key that must go out is big's.
+    """
+    from aiohttp import web as aioweb
+
+    seen = {}
+
+    async def handler(request):
+        seen["auth"] = request.headers.get("Authorization")
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            url = str(server.make_url("/v1/chat/completions"))
+            store.update(
+                lambda doc: doc.update(
+                    {
+                        "llm": {
+                            "preset": "cheap",
+                            "max_tokens": 4096,
+                            "presets": [
+                                {"id": "cheap", "endpoint": "https://cheap.test/v1",
+                                 "model": "glm-small", "api_key": "cheap-key"},
+                                {"id": "big", "endpoint": url,
+                                 "model": "big-model", "api_key": "big-key"},
+                            ],
+                        }
+                    }
+                )
+            )
+            mgr = SessionManager(
+                idle_threshold=0.5, scrollback=200, restore_default=True
+            )
+            client = await _serve(mgr)
+            try:
+                resp = await client.post(
+                    "/api/briefing/llm/test", headers=BEARER,
+                    json={"preset": "big", "profile": "", "model": "big-model",
+                          "endpoint": url, "api_key": ""},
+                )
+                assert resp.status == 200
+                body = await resp.json()
+                assert body["ok"] is True
+                assert body["endpoint"] == url
+            finally:
+                await client.close()
+                await mgr.shutdown_all()
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert seen["auth"] == "Bearer big-key"
