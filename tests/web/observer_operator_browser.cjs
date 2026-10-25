@@ -591,6 +591,42 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
         "the press lands although a poll ran between its down and its up");
     }
 
+    // A press that ends PAST the view's edge still releases it. The flag that
+    // holds a redraw back while a pointer is down is set on a down inside the
+    // view; if its only release listener sat on the view's own root, a
+    // pointerup over the page outside would never reach it and the flag
+    // would stay set -- every later poll would go on waiting for a press
+    // that had already ended, and the section would stop redrawing for good.
+    // Measured before the window listener: five polls after such a release
+    // drew nothing.
+    {
+      await tab("ops-a").click();
+      await page.waitForFunction(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("ops-a"));
+      // A redraw is visible as the section's nodes being replaced, so the
+      // probe holds the node that is on screen now and asks whether it is
+      // still the one connected once the polls have run.
+      const spot = await page.evaluate(() => {
+        window.__before = document.querySelector("#observer-operators .op-tabs");
+        const r = document.querySelector("#observer-operators .op-tab").getBoundingClientRect();
+        // A point genuinely OUTSIDE the dock: on desktop the dock is the
+        // right column, so the bottom-right corner of the window is still
+        // inside it -- a release there bubbles through the dock and the
+        // probe would pass without the window listener doing anything. The
+        // dock's left edge is the boundary to cross.
+        const dock = document.querySelector("#observer-operators").getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2,
+                 bx: Math.max(1, dock.left - 40), by: Math.round(r.top + r.height / 2) };
+      });
+      await page.mouse.move(spot.x, spot.y);
+      await page.mouse.down();
+      await page.mouse.move(spot.bx, spot.by);   // well outside the dock
+      await page.mouse.up();
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.waitForFunction(() => window.__before && !window.__before.isConnected,
+        null, { timeout: 5000 });
+    }
+
     // A list read that FAILED says nothing about which operators exist, so it
     // must not touch the selection. It used to: `choose("")` ran whenever the
     // list did not hold the selected id, and a list left empty by a failed

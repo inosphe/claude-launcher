@@ -61,6 +61,10 @@ let listSignature = "", task = null;
    pointer is down the redraw waits; the next poll or the release picks it up
    (releaseRender, below). */
 let pressing = false;
+/* Whether this view already listens for the release on the window (see
+   mount). Per view: the page's dock and the floating dialog are two
+   instances of this module, each with its own `pressing`. */
+let windowListening = false;
 const askDrafts = new Map();
 /* The thread on screen per operator, the list showing (in the narrow
    layout), and a new thread being written. */
@@ -554,12 +558,22 @@ let input = null;
 function mount(element, changed) {
   root = element; onChange = changed || onChange;
   area = root;
-  // Capture on the root: a press that starts here is this view's, wherever
-  // the pointer ends up, and a cancel (the pointer left, the browser took
-  // the gesture) releases it the same way.
+  // Capture on the root: a press that starts here is this view's.
   root.addEventListener("pointerdown", () => { pressing = true; }, true);
-  root.addEventListener("pointerup", releaseRender, true);
-  root.addEventListener("pointercancel", releaseRender, true);
+  // The release is listened for on the WINDOW, not the root: a reader who
+  // presses a control here and lets go past the edge of the view -- a drag
+  // out of the dialog, a button whose press ends over the page -- sends its
+  // pointerup to whatever is under the pointer, and the view never hears it.
+  // A flag set on down and cleared only on a root-local up would then stay
+  // set, and every poll would go on waiting for a press that ended: the view
+  // stops redrawing for good. Measured: five polls after such a release drew
+  // nothing. A capture listener on the window hears every release, and it is
+  // registered once per mount.
+  if(!windowListening) {
+    windowListening = true;
+    window.addEventListener("pointerup", releaseRender, true);
+    window.addEventListener("pointercancel", releaseRender, true);
+  }
   if(opts.composer) {
     bar = node("div", "", "op-sessionbar"); bar.hidden = true;
     area = node("div", "", "op-area");

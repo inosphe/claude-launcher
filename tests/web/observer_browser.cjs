@@ -80,8 +80,16 @@ const server = http.createServer((req, res) => {
         const patch=JSON.parse(body);
         data.enabled=patch.enabled;
         if(patch.scope!==undefined) data.scope=patch.scope;
-        sent.push({url:req.url, body:patch});
-        return res.end(JSON.stringify({enabled:data.enabled, scope:data.scope||"all"}));
+        // Recorded when the answer is sent, 250ms after the request arrives,
+        // so a reader that waits on the box instead of on this request reads
+        // the entry BEFORE it. Without the delay that ordering held only
+        // because an idle machine answered within the same tick, and the
+        // guard around it could not tell a waiting reader from a lucky one.
+        setTimeout(() => {
+          sent.push({url:req.url, body:patch});
+          res.end(JSON.stringify({enabled:data.enabled, scope:data.scope||"all"}));
+        }, 250);
+        return;
       }
       // One-shot refresh: the pass ran and added events, which is what the
       // card reports back. A pass with nothing new answers called:false.
@@ -275,8 +283,14 @@ async function fadeCost(page, selector, fade) {
     assert.match(lastCallLine, /입력 900 · 출력 60/);
     assert.doesNotMatch(lastCallLine, /캐시/, "a provider that reported no cache gets no cache column");
     await page.locator("#observer-usage summary").click();
+    // The label flips from the snapshot, not from the request, so the wait
+    // is on the request: `sent` holds the entry only once the fixture has
+    // answered it (see the settings route).
+    const mobileOff = page.waitForResponse(r => r.url().endsWith("/api/observer/settings")
+      && r.request().method() === "POST" && /"enabled":\s*false/.test(r.request().postData() || ""));
     await page.click("#observer-mobile-monitor");
     await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 시작");
+    await mobileOff;
     assert(sent.some(r=>r.url==="/api/observer/settings" && r.body.enabled===false));
     await page.click("#observer-mobile-monitor");
     await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 끄기");
