@@ -256,7 +256,8 @@ def child_env(
         profile_env = {
             k: v for k, v in profile_env.items() if k not in BACKEND_ENV_KEYS
         }
-    if with_token and borrow is not None and not routing.dynamic(provider):
+    lender_models = with_token and borrow is not None and not routing.dynamic(provider)
+    if lender_models:
         # A borrow moves the backend to the lender, so the model ids come from
         # the lender too — the running profile's pins describe the other
         # profile's tiers, and passing them on asks the lender's endpoint for
@@ -274,7 +275,16 @@ def child_env(
             if k not in provider_spec.CLAUDE_MODEL_KEYS
         }
     env.update(profile_env)
-    if borrowed_models:
+    if lender_models:
+        # Every model key still standing came from the running profile's own
+        # ``models:`` (through the provider translation) or from the lender's
+        # raw env, and the second source is already folded into
+        # ``borrowed_models``. Clearing them all before the lender's
+        # resolution goes on leaves no role to the running profile — the ones
+        # the lender leaves unset stay unset instead of falling back to the
+        # borrower's ids on the lender's endpoint.
+        for key in provider_spec.CLAUDE_MODEL_KEYS:
+            env.pop(key, None)
         env.update(borrowed_models)
     if with_token:
         if not providers.uses_anthropic_oauth(provider):
@@ -378,23 +388,6 @@ def _borrowed_model_env(
         if key in provider_spec.CLAUDE_MODEL_KEYS
     }
 
-    spec = providers.launch_spec(lender, provider)
-    if spec.legacy_env is not None:
-        # A not-yet-migrated provider hands its recorded Claude variables to
-        # Claude verbatim and ignores ``models:``. The role table is already
-        # the reverse translation of those same variables and applies the role
-        # fallbacks a borrow needs, so translate from it instead.
-        spec = provider_spec.replace(spec, legacy_env=None)
-    env = dict(translators.for_harness(harnesses.CLAUDE_HARNESS, spec).env)
-    # The lender's own raw env keeps its usual say over the provider's
-    # translation, exactly as in a launch of that profile.
-    env.update(lineage.chain_env(lender))
-    return {
-        key: value
-        for key, value in env.items()
-        if key in provider_spec.CLAUDE_MODEL_KEYS
-    }
-
 
 def claude_model_env(
     profile: Profile,
@@ -441,7 +434,8 @@ def claude_model_env(
             if key not in BACKEND_ENV_KEYS
         }
     borrowed_models: dict = {}
-    if borrow is not None and not routing.dynamic(provider):
+    lender_models = borrow is not None and not routing.dynamic(provider)
+    if lender_models:
         borrowed_models = _borrowed_model_env(borrow, provider, doc)
         profile_env = {
             key: value
@@ -449,6 +443,12 @@ def claude_model_env(
             if key not in provider_spec.CLAUDE_MODEL_KEYS
         }
     env.update(profile_env)
+    if lender_models:
+        # Same rule as :func:`child_env`: nothing the running profile put on
+        # the wire survives a borrow's model resolution, so a role the lender
+        # leaves unset stays unset.
+        for key in provider_spec.CLAUDE_MODEL_KEYS:
+            env.pop(key, None)
     env.update(borrowed_models)
     return {
         key: value
@@ -785,7 +785,7 @@ def _plain_spawn(
     cmd = [
         *harness.launch_command(),
         *harness_launch_args(
-            profile, harness, [*harness.args, *args], tools=tools
+            profile, harness, [*harness.args, *args], tools=tools, borrow=borrow
         ),
     ]
     try:
