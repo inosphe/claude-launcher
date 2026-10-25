@@ -241,21 +241,31 @@ const landing = (page, name) => page.evaluate((name) => {
     // it. Ask the fixture for a rail below that threshold -- the same
     // sessions thinned out -- and skip this step if the daemon's rail cannot
     // be made to skip at all.
-    await page.route("**/api/sessions", async (route) => {
-      const answer = await route.fetch();
-      const body = await answer.json();
-      // Drop s040..s139, keeping the head, the foot and so the target with
-      // its parent and grandparent: 101 rows against a 160-row threshold.
-      const thin = (body.sessions || []).filter((s) => {
-        const n = Number((s.name || "").slice(1));
-        return !(s.name.startsWith("s0") && n >= 40 && n < 140);
-      });
-      await route.fulfill({ json: { ...body, sessions: thin }, headers: answer.headers() });
-    });
+    // The route is armed on `bare`, the page it is meant to thin, and it is
+    // armed BEFORE that page navigates: arming it on `page` fed the wrong tab,
+    // and `"**/api/sessions"` matches no request either, because the rail
+    // reads `/api/sessions?view=rail&state=...` (app.js railPoll on line 5430
+    // in the tree this comment was written against). With both mistakes in
+    // place the rail was never thinned, `skips` was always false, and the
+    // assertion below was skipped while the harness still printed ok.
     const bare = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await bare.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
       window.setInterval = () => 0;
+    });
+    await bare.route("**/api/sessions*", async (route) => {
+      const answer = await route.fetch();
+      const body = await answer.json();
+      // Drop s040..s139, keeping the head, the foot and so the target with
+      // its parent and grandparent: 201 rows minus 100 = 101, against a
+      // 160-row threshold. The name is parsed whole -- `startsWith("s0")`
+      // only ever matched s000..s099, so the range above s099 was never
+      // dropped and 141 rows survived.
+      const thin = (body.sessions || []).filter((s) => {
+        const m = /^s(\d+)$/.exec(s.name || "");
+        return !(m && Number(m[1]) >= 40 && Number(m[1]) < 140);
+      });
+      await route.fulfill({ json: { ...body, sessions: thin }, headers: answer.headers() });
     });
     await bare.goto(`http://127.0.0.1:${server.address().port}`);
     const skips = await bare.waitForFunction(() => {
@@ -263,7 +273,14 @@ const landing = (page, name) => page.evaluate((name) => {
       if (!list || !list.querySelector("li[data-name]")) return false;
       return !list.classList.contains("rail-windowed");
     }, null, { timeout: 5000 }).then(() => true, () => false);
-    const estimated = !skips ? null : await bare.evaluate(async (name) => {
+    // A skipped step is a lost assertion, not a pass. It used to be silent:
+    // `estimated` came back null every run and this harness reported ok while
+    // checking nothing here. Failing instead means the day the fixture stops
+    // producing a non-windowed rail, that shows up as red rather than as the
+    // quiet disappearance of a regression guard.
+    assert.ok(skips, "the fixture must produce a rail below RAIL_WINDOW_MIN_ROWS"
+      + " -- this step checks the estimate-driven scroll and cannot be skipped");
+    const estimated = await bare.evaluate(async (name) => {
       const list = document.querySelector("#session-list");
       const row = list.querySelector(`li[data-name="${CSS.escape(name)}"]`);
       if (!row) return null;
@@ -282,12 +299,13 @@ const landing = (page, name) => page.evaluate((name) => {
                railHeight: Math.round(lr.height) };
     }, TARGET);
     await bare.close();
-    if (estimated) {
-      assert.ok(Math.abs(estimated.error) > estimated.railHeight,
-        `without the laid-out rail the same scroll is off by more than a rail: ${estimated.error}px`
-        + ` (rail ${estimated.railHeight}px, height estimated ${estimated.before}`
-        + ` against ${estimated.truth})`);
-    }
+    // Unconditional: the row has to be there for the step to mean anything,
+    // and a missing row is a broken fixture rather than a reason to look away.
+    assert.ok(estimated, "the target row must be drawn on the thinned rail");
+    assert.ok(Math.abs(estimated.error) > estimated.railHeight,
+      `without the laid-out rail the same scroll is off by more than a rail: ${estimated.error}px`
+      + ` (rail ${estimated.railHeight}px, height estimated ${estimated.before}`
+      + ` against ${estimated.truth})`);
 
     // The band floats, so at the very top it would sit on the first row
     // whenever that row's parent is not drawn (the state filter hides an
