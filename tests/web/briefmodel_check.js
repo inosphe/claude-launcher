@@ -1,7 +1,7 @@
 /* The Settings page's "Briefing model" card: which backend writes the
    session briefings.
 
-   The setting used to exist only as the llm: block of ~/.claunch.yaml, so
+   The setting used to exist only as the llm: block of ~/.claude-launcher/.claunch.yaml, so
    what this harness holds is the part a form can get wrong. Choosing a
    profile moves three fields at once: the endpoint box shows that profile's
    URL read-only, the model switches to that profile's default, and the save

@@ -201,7 +201,7 @@ def _record(root, op_id=OP, **fields):
 def home(home, tmp_path, monkeypatch):
     # Requests conftest's ``home`` of the same name: overriding it without
     # asking for it dropped the launcher-home isolation, so cli.main's
-    # bootstrap read the host's ~/.claunch.yaml (claunch-iw5i8.7).
+    # bootstrap read the host's ~/.claude-launcher/.claunch.yaml (claunch-iw5i8.7).
     monkeypatch.setattr(paths, "daemon_dir", lambda: tmp_path)
     return tmp_path
 

@@ -8,7 +8,7 @@ spawn. Registering the directory moves that check to the moment the user knows
 the answer, and turns the web UI's directory field from a text box into a
 picker with no way to spell it wrong.
 
-The registry lives in ``~/.claunch.yaml`` under ``workspaces``, name -> path::
+The registry lives in ``~/.claude-launcher/.claunch.yaml`` under ``workspaces``, name -> path::
 
     workspaces:
       claude-launcher: F:\\works\\claude-launcher

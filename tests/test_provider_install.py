@@ -76,7 +76,7 @@ def test_presets_load_from_their_own_directory(home):
 
 
 def test_a_preset_may_be_a_bare_entry(home):
-    """A block copied out of ~/.claunch.yaml is the common case, not the broken one."""
+    """A block copied out of ~/.claude-launcher/.claunch.yaml is the common case, not the broken one."""
     _write_preset(provider_presets.directory(), "copied", """\
 endpoints: {openai: https://api.example.com/v1}
 models: {default: m}

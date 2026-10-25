@@ -53,6 +53,7 @@ def short_clocks(monkeypatch):
     monkeypatch.setattr(daemon_client, "START_ALIVE_TIMEOUT", 3.0)
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_live_daemon_that_needs_longer_than_the_fixed_wait_is_waited_for(
     short_clocks, monkeypatch, capsys
 ):
@@ -64,6 +65,7 @@ def test_a_live_daemon_that_needs_longer_than_the_fixed_wait_is_waited_for(
     assert "still starting" in err and "pid 4242" in err
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_daemon_that_exited_with_an_error_is_reported_as_such_not_as_slow(
     short_clocks, monkeypatch
 ):
@@ -79,6 +81,7 @@ def test_a_daemon_that_exited_with_an_error_is_reported_as_such_not_as_slow(
     assert time.monotonic() - t0 < 2.0
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_lock_loser_exiting_zero_still_gives_the_winner_the_fixed_wait(
     short_clocks, monkeypatch
 ):
@@ -92,6 +95,7 @@ def test_a_lock_loser_exiting_zero_still_gives_the_winner_the_fixed_wait(
     assert daemon_client.ensure_running() is client
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_an_unwatchable_spawn_keeps_the_fixed_wait(short_clocks, monkeypatch):
     """Spawns the tests monkeypatch return None; that path is the old one."""
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
@@ -103,6 +107,7 @@ def test_an_unwatchable_spawn_keeps_the_fixed_wait(short_clocks, monkeypatch):
     assert time.monotonic() - t0 < 2.0
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_live_daemon_that_never_listens_fails_at_the_alive_cap(
     short_clocks, monkeypatch
 ):

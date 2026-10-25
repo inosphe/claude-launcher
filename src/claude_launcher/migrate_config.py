@@ -1,4 +1,4 @@
-"""``claunch migrate-config``: rewrite ``~/.claunch.yaml`` to the spec schema.
+"""``claunch migrate-config``: rewrite ``~/.claude-launcher/.claunch.yaml`` to the spec schema.
 
 Version 1 providers carry a Claude-vocabulary ``env``; version 2 providers
 carry the harness-neutral fields of :mod:`provider_spec`.  The conversion is

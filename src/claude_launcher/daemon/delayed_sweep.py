@@ -172,14 +172,11 @@ class Clock:
         # `python` check commands find no interpreter unless its directory
         # is on PATH (what activating the venv would do).
         env["PATH"] = str(Path(job["python"]).parent) + os.pathsep + env.get("PATH", "")
+        # The config file is <home>/.claunch.yaml, so it goes with the home:
+        # another instance's daemon running this job cannot hand the suite its
+        # own config file under the origin's home (claunch-edy0w). A ``config``
+        # recorded by older code is not read.
         env[config.LAUNCHER_HOME_ENV] = origin["home"]
-        # The config file goes with the home. Another instance's daemon may
-        # run this job, and its own config file under the origin's home made
-        # the suite's cli.main reconcile that instance's profiles into the
-        # origin's home (claunch-edy0w). A job queued before origins recorded
-        # it inherits the daemon's; cli.main's pairing check refuses that.
-        if origin.get("config"):
-            env[config.LAUNCHER_SYNC_ENV] = origin["config"]
         env[paths.INSTANCE_BASE_ENV] = origin["base"]
         # The daemon of a named instance carries its manifest's bookkeeping
         # (applied name, previous values, port). The suite's first cli.main()

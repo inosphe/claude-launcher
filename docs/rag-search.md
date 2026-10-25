@@ -19,7 +19,7 @@ dashboard, the CLI and any agent ask it the same `GET /api/search`.
 
 ## Configuration — the `rag:` block
 
-Top-level in `~/.claunch.yaml`, beside `llm:` (which stays what it is: the
+Top-level in `~/.claude-launcher/.claunch.yaml`, beside `llm:` (which stays what it is: the
 backend the briefing posts to — a profile, or a `chat/completions` URL and key
 typed in, held either in the block itself or in one of its saved `presets:`;
 edited in the dashboard's **Settings ▸ Briefing model** card). `store.rag_config()` is

@@ -7,7 +7,7 @@ Consumers (a workflow's delegation step, the shim, a future switcher UI)
 call :func:`resolve` and get one concrete tuple; editing the config — the
 table or the active pointer — takes effect on the next call, no restart.
 
-Storage is the top-level ``model_tiers:`` block of ``~/.claunch.yaml``::
+Storage is the top-level ``model_tiers:`` block of ``~/.claude-launcher/.claunch.yaml``::
 
     model_tiers:
       version: 1

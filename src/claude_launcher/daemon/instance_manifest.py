@@ -3,18 +3,23 @@
 A named instance (``claunch -L NAME`` / ``CLAUNCH_DAEMON=NAME``) always owns its
 runtime state directory (:func:`paths.daemon_dir`), but by default it shares
 everything else with the default daemon: the launcher home (profiles, global
-workflows, the sync merge base) and the config file ``~/.claunch.yaml``.
-Isolating those used to mean exporting ``CLAUDE_LAUNCHER_HOME`` and
-``CLAUDE_LAUNCHER_SYNC_FILE`` by hand in every shell that talks to the
-instance — miss one and the command silently reads the shared set.
+workflows, the sync merge base) and the config file inside it
+(``<home>/.claunch.yaml``). Isolating those used to mean exporting
+``CLAUDE_LAUNCHER_HOME`` by hand in every shell that talks to the instance —
+miss one and the command silently reads the shared set.
 
 The manifest writes that choice down once, next to the instance's state::
 
     <base home>/daemons/<name>/instance.yaml
 
     home: ~/.claude-launcher-team     # omitted = share the base home
-    config: ~/.claunch-team.yaml      # omitted = share ~/.claunch.yaml
     port: 8390                        # omitted = ephemeral port
+
+The config file is always the one inside the home, so a manifest that moves
+the home moves the config file with it. There is no ``config:`` key: a config
+file named apart from its home let a process hold one instance's config under
+another's home (claunch-edy0w) and let a script that isolated only the home
+write the real config file.
 
 :func:`apply` turns it into the environment variables the rest of the launcher
 already resolves every path through, so ``config.launcher_home()`` and
@@ -63,7 +68,6 @@ PORT_ENV = "CLAUNCH_DAEMON_PORT"
 #: Manifest key -> the environment variable it sets.
 _KEY_ENV = {
     "home": config.LAUNCHER_HOME_ENV,
-    "config": config.LAUNCHER_SYNC_ENV,
     "port": PORT_ENV,
 }
 
@@ -123,15 +127,12 @@ class Manifest:
     name: str
     path: Path
     home: Optional[Path] = None
-    config: Optional[Path] = None
     port: Optional[int] = None
 
     def env(self) -> Dict[str, str]:
         out = {}
         if self.home is not None:
             out[_KEY_ENV["home"]] = str(self.home)
-        if self.config is not None:
-            out[_KEY_ENV["config"]] = str(self.config)
         if self.port is not None:
             out[_KEY_ENV["port"]] = str(self.port)
         return out
@@ -140,8 +141,6 @@ class Manifest:
         doc = {}
         if self.home is not None:
             doc["home"] = str(self.home)
-        if self.config is not None:
-            doc["config"] = str(self.config)
         if self.port is not None:
             doc["port"] = self.port
         return doc
@@ -173,16 +172,19 @@ def parse(name: str, path: Path, doc) -> Manifest:
         doc = {}
     if not isinstance(doc, dict):
         raise InstanceManifestError(f"{path}: expected a mapping")
+    if "config" in doc:
+        raise InstanceManifestError(
+            f"{path}: 'config' is no longer supported -- the config file is "
+            f"<home>/{config.CONFIG_NAME}; copy the file there and remove the key"
+        )
     unknown = sorted(set(doc) - set(_KEY_ENV))
     if unknown:
         raise InstanceManifestError(
-            f"{path}: unknown key(s) {', '.join(unknown)} (allowed: home, config, port)"
+            f"{path}: unknown key(s) {', '.join(unknown)} (allowed: home, port)"
         )
     m = Manifest(name=name, path=path)
     if doc.get("home") is not None:
         m.home = _as_path(doc["home"], "home", path)
-    if doc.get("config") is not None:
-        m.config = _as_path(doc["config"], "config", path)
     if doc.get("port") is not None:
         m.port = _as_port(doc["port"], path)
     return m
@@ -241,59 +243,6 @@ def check_conflicts(m: Manifest) -> None:
                 f"instance {m.name!r}: home {m.home} is already the home of "
                 f"instance {other.name!r} ({other.path})"
             )
-
-
-def check_pairing() -> None:
-    """Refuse a launcher home and config file that belong to different instances.
-
-    Run after :func:`apply`, before anything reads or writes the store. A
-    manifest that declares ``config:`` pairs that file with its ``home:`` (or
-    the base home when it declares none). A process holding that config file
-    under another home would reconcile the instance's profiles into the wrong
-    home and rewrite the file from there (claunch-edy0w: kimyori's profiles
-    created under the default home by a delayed-sweep runner). Likewise a
-    process on an instance's declared home must hold that instance's declared
-    config file.
-
-    Manifests that cannot be read are skipped here: :func:`apply` reports the
-    active instance's own, and an unrelated broken one must not stop every
-    command.
-    """
-    home = config.launcher_home()
-    cfg = config.sync_file()
-    for m in _readable_manifests():
-        if m.config is not None and _same(m.config, cfg):
-            want = m.home if m.home is not None else paths.base_home()
-            if not _same(want, home):
-                raise InstanceManifestError(
-                    f"config file {cfg} belongs to instance {m.name!r} "
-                    f"(home {want}, {m.path}) but the launcher home is {home}; "
-                    f"use 'claunch -L {m.name}' or unset "
-                    f"{config.LAUNCHER_SYNC_ENV}/{config.LAUNCHER_HOME_ENV}"
-                )
-        if (m.home is not None and m.config is not None
-                and _same(m.home, home) and not _same(m.config, cfg)):
-            raise InstanceManifestError(
-                f"launcher home {home} belongs to instance {m.name!r} "
-                f"(config {m.config}, {m.path}) but the config file is {cfg}; "
-                f"use 'claunch -L {m.name}' or unset "
-                f"{config.LAUNCHER_SYNC_ENV}/{config.LAUNCHER_HOME_ENV}"
-            )
-
-
-def _readable_manifests() -> List[Manifest]:
-    out = []
-    root = paths.base_home() / "daemons"
-    if not root.is_dir():
-        return out
-    for d in sorted(root.iterdir()):
-        try:
-            m = load(paths.validate_instance(d.name))
-        except (ValueError, InstanceManifestError):
-            continue
-        if m is not None:
-            out.append(m)
-    return out
 
 
 def _undo() -> None:

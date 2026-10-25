@@ -25,10 +25,6 @@ LAUNCHER_USAGE_URL_ENV = "CLAUDE_LAUNCHER_USAGE_URL"
 #: Override the config dir new profiles are seeded from.
 LAUNCHER_SEED_ENV = "CLAUDE_LAUNCHER_SEED"
 
-#: Override the YAML file used by ``claunch export`` / ``import`` (also holds
-#: provider definitions and selection).
-LAUNCHER_SYNC_ENV = "CLAUDE_LAUNCHER_SYNC_FILE"
-
 #: Server side: directory holding the sync server's documents and user list.
 SYNC_SERVER_DIR_ENV = "CLAUNCH_SYNC_SERVER_DIR"
 
@@ -43,7 +39,7 @@ SYNC_NAMESPACE_ENV = "CLAUNCH_SYNC_NAMESPACE"
 #: ``home`` fixture) and inherited by every process a test starts. While it is
 #: set, a launcher home equal to one of them, or a config file directly inside
 #: one, is refused: a test that lost its throwaway home fails instead of
-#: writing profiles, daemons/<name> or ~/.claunch.yaml on the developer's
+#: writing profiles, daemons/<name> or <home>/.claunch.yaml on the developer's
 #: machine and passing (claunch-gziru).
 TEST_REAL_HOMES_ENV = "CLAUNCH_TEST_REAL_HOMES"
 
@@ -137,10 +133,39 @@ def seed_source_dir() -> Path:
     return Path(override).expanduser() if override else default_config_dir()
 
 
+#: Name of the config file inside the launcher home.
+CONFIG_NAME = ".claunch.yaml"
+
+
 def sync_file() -> Path:
-    """YAML file that ``export``/``import`` read and write (default ``~/.claunch.yaml``)."""
-    override = os.environ.get(LAUNCHER_SYNC_ENV)
-    return guard_config(Path(override).expanduser() if override else Path.home() / ".claunch.yaml")
+    """The config file: ``<launcher home>/.claunch.yaml``.
+
+    It has no override of its own. It used to (``CLAUDE_LAUNCHER_SYNC_FILE``,
+    default ``~/.claunch.yaml``), and a process that isolated only the launcher
+    home kept writing the real config file -- a reproduction script's
+    ``store.save()`` replaced the whole file with its fixture. Moving the home
+    now moves the config file with it.
+    """
+    return guard_config(launcher_home() / CONFIG_NAME)
+
+
+def missing_config_error() -> Optional[str]:
+    """Why a daemon must not start here, or None when the config file exists.
+
+    A daemon that starts without its config file runs on built-in defaults:
+    no relays, loopback only, no PTY host, none of the profiles -- and its
+    first save writes a new file that hides the missing one. It refuses
+    instead, and so does every path that would stop the running daemon to
+    start one (``daemon start``/``restart``, the restart API and gate).
+    """
+    path = sync_file()
+    if path.is_file():
+        return None
+    return (
+        f"config file {path} not found: the daemon home {path.parent} has no "
+        f"{CONFIG_NAME}. Copy the config file there (versions before this one "
+        f"read ~/{CONFIG_NAME}); the daemon does not start without it."
+    )
 
 
 def sync_base_file() -> Path:

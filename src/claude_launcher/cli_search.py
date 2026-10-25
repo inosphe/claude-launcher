@@ -114,7 +114,7 @@ def _cmd_rag_status(args) -> int:
         print(json.dumps(view, ensure_ascii=False, indent=2))
         return 0
     if not view.get("configured"):
-        print("rag: not configured — fill the rag: block in ~/.claunch.yaml "
+        print("rag: not configured — fill the rag: block in ~/.claude-launcher/.claunch.yaml "
               "(base_url, api_key, embedding_model; rerank_model optional)")
         return 0
     print(f"rag: {view.get('host') or '?'}  embed={view.get('embedding_model')}"

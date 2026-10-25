@@ -93,7 +93,7 @@ def test_install_codex_profile_targets_codex_home(home, capsys):
     # talk to the default daemon (claunch-d55af).
     assert {
         "CLAUNCH_SESSION", "CLAUNCH_PROJECT", "CLAUNCH_SCRATCH",
-        "CLAUNCH_DAEMON", "CLAUDE_LAUNCHER_HOME", "CLAUDE_LAUNCHER_SYNC_FILE",
+        "CLAUNCH_DAEMON", "CLAUDE_LAUNCHER_HOME",
         "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_BASE",
     } <= env_vars
     assert "restart active agent sessions" in out

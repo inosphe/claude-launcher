@@ -3,7 +3,7 @@
 ``cflow2/inputs.py`` declares ``options: {from, of, empty}`` and checks a
 value against a *catalog*; the engine has no launcher config of its own, so
 the catalog lives here, beside the code that later acts on the value
-(``spawn``). One :class:`Catalog` reads ``~/.claunch.yaml`` once and answers
+(``spawn``). One :class:`Catalog` reads ``~/.claude-launcher/.claunch.yaml`` once and answers
 every question of one check (a form edit, a start, a run-page write).
 
 What each list holds -- what the value will be accepted as further on:

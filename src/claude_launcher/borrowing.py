@@ -162,7 +162,7 @@ def validate(
 
     ``doc`` is the already-loaded config document. A caller that validates
     many pairs -- the daemon's profile inventory does, once per refresh --
-    passes it so each verdict does not re-parse ``~/.claunch.yaml`` through
+    passes it so each verdict does not re-parse ``~/.claude-launcher/.claunch.yaml`` through
     the policy, provider and lineage layers below.
     """
     if entry is None:

@@ -203,10 +203,10 @@ def _cmd_docs(args: argparse.Namespace) -> int:
 def register(sub) -> None:
     p = sub.add_parser(
         "sync",
-        help="synchronize ~/.claunch.yaml with the configured sync server "
+        help="synchronize ~/.claude-launcher/.claunch.yaml with the configured sync server "
         "(--mode merge|up|down)",
         description="Reconcile this machine's profile config with a sync server. "
-        "The server is described by the 'sync:' block in ~/.claunch.yaml.",
+        "The server is described by the 'sync:' block in ~/.claude-launcher/.claunch.yaml.",
     )
     p.add_argument(
         "--mode",

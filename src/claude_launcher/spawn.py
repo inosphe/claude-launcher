@@ -10,7 +10,7 @@ So the request is deliberately *not* the full :class:`SessionDef`. A child
 **inherits** its parent's harness, profile, cwd, args and env, and the agent
 supplies only the things that make the child a different worker — a name, a
 mesh handle and role, an opening task. Everything else has to be unlocked, per
-field, in ``~/.claunch.yaml``::
+field, in ``~/.claude-launcher/.claunch.yaml``::
 
     spawn:
       enabled: true
@@ -157,18 +157,18 @@ AUTO_WORKTREE = "@auto"
 _DENIALS = {
     "borrow": (
         "a spawned session authenticates the way its parent does — set "
-        "'spawn.allow_profile: true' in ~/.claunch.yaml to let an agent "
+        "'spawn.allow_profile: true' in ~/.claude-launcher/.claunch.yaml to let an agent "
         "choose whose login a child runs under (profile and borrow alike)"
     ),
     "workspace": (
         "a spawned session inherits its parent's working directory — set "
-        "'spawn.allow_workspace: true' in ~/.claunch.yaml to let an agent "
+        "'spawn.allow_workspace: true' in ~/.claude-launcher/.claunch.yaml to let an agent "
         "move a child to a directory you registered with 'claunch workspace add'"
     ),
     "worktree": (
         "a spawned session inherits its parent's working directory, and may "
         "not cut a checkout of its own — set 'spawn.allow_worktree: true' in "
-        "~/.claunch.yaml to let a child have a git worktree of the repository "
+        "~/.claude-launcher/.claunch.yaml to let a child have a git worktree of the repository "
         "its parent is in"
     ),
 }
@@ -352,7 +352,7 @@ def check(
     if not policy.enabled:
         raise SpawnDenied(
             "spawning is switched off on this daemon "
-            "(set 'spawn.enabled: true' in ~/.claunch.yaml)"
+            "(set 'spawn.enabled: true' in ~/.claude-launcher/.claunch.yaml)"
         )
     if depth >= policy.max_depth and not exempt_depth:
         raise SpawnDenied(
@@ -445,7 +445,7 @@ def check(
                 _DENIALS.get(key)
                 or (
                     f"a spawned session inherits its parent's {key} — set "
-                    f"'spawn.{gate}: true' in ~/.claunch.yaml to let an agent "
+                    f"'spawn.{gate}: true' in ~/.claude-launcher/.claunch.yaml to let an agent "
                     f"choose it"
                 )
             )
@@ -823,7 +823,7 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
     grants the child nothing its parent did not already hold. The thing being
     copied *is* the parent's context, the child is the parent's own creation,
     and no directory, profile or token becomes reachable that was not
-    reachable before — so there is no unlock to write in ``~/.claunch.yaml``,
+    reachable before — so there is no unlock to write in ``~/.claude-launcher/.claunch.yaml``,
     only two things to be true.
 
     The first is the harness: only the same harness can read its transcript.

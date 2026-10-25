@@ -142,6 +142,11 @@ def _parse(stamp) -> Optional[datetime]:
 PTY_HOST_MODES = ("keep", "full")
 
 
+class ConfigMissing(Exception):
+    """The daemon home has no config file, so a successor would refuse to
+    start and leave no daemon (:func:`config.missing_config_error`)."""
+
+
 class StaleHost(Exception):
     """A keep approval would leave the PTY host on code other than what the
     next daemon loads (claunch-xnnct.3); ``check`` is
@@ -284,6 +289,11 @@ class RestartGate:
         """
         record = self.record
         if record is not None and record["status"] == "pending":
+            from .. import config
+
+            missing = config.missing_config_error()
+            if missing is not None:
+                raise ConfigMissing(missing)
             if pty_host in PTY_HOST_MODES:
                 record["pty_host"] = pty_host
             if keep_stale:
@@ -333,10 +343,11 @@ class RestartGate:
         if self.record is not None and self.record["id"] == request_id:
             try:
                 self.approve(decided_by="timeout")
-            except StaleHost as exc:
+            except (StaleHost, ConfigMissing) as exc:
                 # The clock cannot pick between ending the sessions and
                 # keeping the old host, so it restarts nothing; the asking
                 # CLI reads the refusal off the record (claunch-xnnct.3).
+                # Nor can it restart into a home with no config file.
                 record = self._settle("rejected", "timeout")
                 if record is not None:
                     record["refused"] = str(exc)

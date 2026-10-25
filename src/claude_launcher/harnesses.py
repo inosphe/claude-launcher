@@ -6,7 +6,7 @@ which meant a fresh install knew exactly one. Profiles now name a declared
 harness once; session creation only displays that resolved value read-only.
 
 The set is now a **document**. The packaged default declares the harnesses
-claunch knows about (:data:`DEFAULT_YAML`), and ``~/.claunch.yaml`` may
+claunch knows about (:data:`DEFAULT_YAML`), and ``~/.claude-launcher/.claunch.yaml`` may
 override or extend it::
 
     harnesses:
@@ -793,7 +793,7 @@ def _builtin() -> Dict[str, Harness]:
 def validate_model_choices(value: object) -> Dict[str, str]:
     """Validate the ordered choice -> model ID mapping edited in Settings.
 
-    ``model_choices: {codex: {gpt6-sol: gpt-6-sol}}`` in ~/.claunch.yaml
+    ``model_choices: {codex: {gpt6-sol: gpt-6-sol}}`` in ~/.claude-launcher/.claunch.yaml
     replaces only models and aliases, leaving the harness declaration live.
     An empty mapping deliberately offers only the harness default.
     """

@@ -227,7 +227,7 @@ def search(args: dict) -> dict:
         if "not configured" in str(exc):
             raise SearchMcpError(
                 "semantic search is not configured on this daemon (the rag: block "
-                "in ~/.claunch.yaml). Fall back to `claunch beads search \"<words>\" "
+                "in ~/.claude-launcher/.claunch.yaml). Fall back to `claunch beads search \"<words>\" "
                 "--json` for the board and `claunch sessions` for the fleet."
             ) from exc
         raise

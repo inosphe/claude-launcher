@@ -54,6 +54,7 @@ def _still_draining(monkeypatch) -> _FakeTime:
     return fake_time
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_restart_retries_until_the_predecessor_finally_lets_go(home, monkeypatch):
     """Two lost lock races, then the predecessor is gone: the third spawn
     attempt succeeds and ``restart()`` returns its client."""
@@ -80,6 +81,7 @@ def test_restart_retries_until_the_predecessor_finally_lets_go(home, monkeypatch
     ]
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_restart_fails_clearly_once_the_lock_budget_is_exhausted(home, monkeypatch):
     """A predecessor that never releases the lock exhausts the whole time
     budget (not a small fixed number of attempts -- four of them lost to an
@@ -107,6 +109,7 @@ def test_restart_fails_clearly_once_the_lock_budget_is_exhausted(home, monkeypat
     assert len(fake_time.sleeps) > 4
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_restart_stops_early_once_the_lock_frees_but_spawning_still_fails(
     home, monkeypatch
 ):
@@ -133,6 +136,7 @@ def test_restart_stops_early_once_the_lock_frees_but_spawning_still_fails(
     assert calls["n"] == 1
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_restart_succeeds_on_the_first_try_when_nothing_is_racing(home, monkeypatch):
     """The common case: the predecessor is already gone, so the first spawn
     just works and nothing backs off or retries."""
@@ -153,6 +157,7 @@ def test_restart_succeeds_on_the_first_try_when_nothing_is_racing(home, monkeypa
 # was spawned, and there was no daemon at all for 45 minutes.
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_restart_does_not_accept_the_predecessor_as_the_successor(home, monkeypatch):
     fake_time = _still_draining(monkeypatch)
     records = iter([
@@ -168,6 +173,7 @@ def test_restart_does_not_accept_the_predecessor_as_the_successor(home, monkeypa
     assert fake_time.sleeps == [daemon_client.RESTART_BACKOFF_START]
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_daemon_that_answers_with_the_lock_free_is_the_successor(home, monkeypatch):
     """The rejection above is keyed on the lock, so a pid that merely looks
     familiar does not stall a restart: once the lock is free that process

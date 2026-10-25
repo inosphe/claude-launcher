@@ -127,6 +127,7 @@ class _Booted(Exception):
     pass
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_daemon_started_by_hand_in_a_worktree_moves_to_the_main_checkout(
         repo, linked, monkeypatch):
     """A start that did not go through spawn_daemon (``python -m
@@ -158,6 +159,7 @@ def test_a_cwd_less_fallback_answers_the_main_checkout(repo, linked, monkeypatch
     assert Path(cflow_state.resolve_cwd(None)) == repo
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_test_that_boots_the_daemon_in_process_leaves_the_directory_alone(
         repo, linked, monkeypatch, request):
     """``main()`` moves the process; in a test that move would outlive the

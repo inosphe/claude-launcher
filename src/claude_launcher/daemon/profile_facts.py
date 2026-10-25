@@ -157,7 +157,7 @@ class ProfileFacts:
     def invalidate(self) -> None:
         """Forget everything: the next read sees the config as it is now.
 
-        Called after the daemon writes ``~/.claunch.yaml`` itself. Writes made
+        Called after the daemon writes ``~/.claude-launcher/.claunch.yaml`` itself. Writes made
         outside the daemon (``claunch create``, ``set-token``) are picked up by
         the next clock tick instead.
         """

@@ -288,7 +288,7 @@ TOOLS = [
             "'connect' to let it reach other members. Check your budget with "
             "'children' first (it also lists the workspaces you may send a "
             "child to, if any); limits come from the 'spawn' block in "
-            "~/.claunch.yaml. The child cap is SOFT: at the limit the spawn "
+            "~/.claude-launcher/.claunch.yaml. The child cap is SOFT: at the limit the spawn "
             "still goes through and the answer carries a 'warnings' entry "
             "saying so, so a full parent is a thing to notice, not a wall to "
             "work around. The depth limit is hard and does refuse. "

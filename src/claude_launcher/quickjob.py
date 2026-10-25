@@ -7,7 +7,7 @@ wizard can build that child, but it asks every question every time; the
 dashboard's quick-job form asks only the task and reads everything else from
 here.
 
-The defaults live in ``~/.claunch.yaml`` (see :mod:`store`), so they are the
+The defaults live in ``~/.claude-launcher/.claunch.yaml`` (see :mod:`store`), so they are the
 user's to set and survive the daemon::
 
     quick_job:

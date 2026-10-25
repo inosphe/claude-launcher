@@ -603,6 +603,16 @@ def connect_or_start() -> DaemonClient:
     return start(report)
 
 
+def _check_config() -> None:
+    """Refuse to spawn a daemon that would refuse to start: its home has no
+    config file (:func:`config.missing_config_error`)."""
+    from . import config
+
+    missing = config.missing_config_error()
+    if missing is not None:
+        raise DaemonClientError(missing)
+
+
 def start(report: Optional[dict] = None, *, via: str = "start") -> DaemonClient:
     """Spawn the daemon and wait until it answers.
 
@@ -621,6 +631,7 @@ def start(report: Optional[dict] = None, *, via: str = "start") -> DaemonClient:
     it is being waited for rather than being handed a false "did not come
     up" seconds before it does.
     """
+    _check_config()
     _check_relay_name()
     report = report if report is not None else (_last_report or {})
     proc = spawn_daemon(
@@ -762,6 +773,9 @@ def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False,
     ordinary restart-notice channel — so this is the one place the failure
     can still be made clear.
     """
+    # Before the stop: a successor that refuses to start would leave no
+    # daemon at all.
+    _check_config()
     before = runtime_state.read_daemon_json() or {}
     predecessor = int(before.get("pid") or 0)
     stop(timeout=stop_timeout, mode="full" if with_pty_host else "keep",

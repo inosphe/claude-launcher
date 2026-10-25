@@ -1,7 +1,7 @@
 """Profile inheritance: a profile may declare a parent and inherit from it.
 
 A child profile (e.g. ``company_work``) names a parent (``company``) in the
-central config file (``~/.claunch.yaml``, see :mod:`store`). At launch the child
+central config file (``~/.claude-launcher/.claunch.yaml``, see :mod:`store`). At launch the child
 inherits the parent's environment variables (child keys win) and, when it has no
 token of its own, the parent's login token — so you can log in once on a parent
 and share it across several working profiles.
@@ -184,7 +184,7 @@ def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:
     ``doc`` is an already-read config document, for the callers that ask this
     about every profile in one breath (the web dashboard's profile listing).
     Without it each link of each chain re-reads and re-parses
-    ``~/.claunch.yaml``, and so does each registry lookup below.
+    ``~/.claude-launcher/.claunch.yaml``, and so does each registry lookup below.
     """
     return harness_with_source(profile, doc)[0]
 

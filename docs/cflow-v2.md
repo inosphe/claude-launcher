@@ -12,7 +12,7 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | IR | 표면 문법과 실행 사이에 IR을 둔다. IR은 계층적 statechart(SCXML 계열)다 | ANALYSIS-6 |
 | 재귀 | 같은 런 안의 재귀 호출은 금지한다. `call`은 컴파일 시점에 펼친다 | 사용자 결정 |
 | 실행 주체 | `inline`, `subagent`, `session` 세 가지. 첫 단계에서 지원하던 `headless`는 claunch-xjbrh에서 제거했다(6.4) | 사용자 결정 |
-| capability | 실행 주체가 기대는 하네스·provider 기능을 원자 단위로 정의하고 `~/.claunch.yaml`의 provider에서 기술한다. 기능에 따라 갈라지는 모든 경로에 fallback을 정의한다 | 사용자 결정, 6절 |
+| capability | 실행 주체가 기대는 하네스·provider 기능을 원자 단위로 정의하고 `~/.claude-launcher/.claunch.yaml`의 provider에서 기술한다. 기능에 따라 갈라지는 모든 경로에 fallback을 정의한다 | 사용자 결정, 6절 |
 | 정의 | 첫 v2 정의는 `improv-worker-v2`. v1 정의는 deprecated 표시 후 유지한다 | 사용자 선택 |
 
 ## 1. 파일과 레이어
@@ -2369,7 +2369,7 @@ capability는 세 층에서 기술하고 아래 순서로 합성한다. 뒤의 �
 
 1. 하네스 기본값: 패키지 `harnesses.yaml`의 `capabilities:` (하네스의 CLI가
    제공하는 기능). 사용자 `harnesses:` 블록도 같은 키를 쓸 수 있다.
-2. provider: `~/.claunch.yaml`의 `providers.<이름>.capabilities:` (모든 하네스에
+2. provider: `~/.claude-launcher/.claunch.yaml`의 `providers.<이름>.capabilities:` (모든 하네스에
    적용) 와 `providers.<이름>.harness_options.<하네스>.capabilities:`
    (그 하네스에만 적용).
 3. profile: `profiles.<이름>.capabilities:` 와

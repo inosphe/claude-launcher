@@ -57,6 +57,7 @@ def test_a_session_shell_is_refused_too_and_queues_nothing(spawns, monkeypatch):
     assert not (paths.base_home() / "daemons" / "typo").exists()
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_registered_instance_passes_the_check(spawns, monkeypatch):
     monkeypatch.setenv(paths.INSTANCE_ENV, "alt")
     (paths.base_home() / "daemons" / "alt").mkdir(parents=True)
@@ -66,6 +67,7 @@ def test_a_registered_instance_passes_the_check(spawns, monkeypatch):
     assert len(spawns) == 1
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_daemon_start_creates_an_unregistered_instance(spawns, monkeypatch):
     monkeypatch.setenv(paths.INSTANCE_ENV, "fresh")
     _relays(monkeypatch, "shared-daemon-main")

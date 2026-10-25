@@ -18,7 +18,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .. import daemon_client, providers, routing, session_env, store
+from .. import config, daemon_client, providers, routing, session_env, store
 from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, pools, restart_notice, resume, runtime_state, window as window_mod
@@ -44,6 +44,10 @@ RESTART_CODE = 75
 #: ``claunch -L other`` then auto-started the other instance on this one's
 #: port (claunch-d55af).
 SUCCESSOR_PORT_ENV = "CLAUNCH_SUCCESSOR_PORT"
+
+#: Exit code of a daemon that refused to start because its home has no
+#: config file (:func:`config.missing_config_error`).
+NO_CONFIG_EXIT = 3
 
 
 def _setup_logging(foreground: bool) -> None:
@@ -958,11 +962,15 @@ def main(argv=None) -> int:
     # the port, so the manifest's port is read again for the bind below.
     try:
         instance_manifest.apply()
-        instance_manifest.check_pairing()
         manifest_port = instance_manifest.pinned_port()
     except instance_manifest.InstanceManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    # After the manifest, which can move the home and with it the config file.
+    missing = config.missing_config_error()
+    if missing is not None:
+        print(f"error: {missing}", file=sys.stderr)
+        return NO_CONFIG_EXIT
     # No session's identity in the daemon's own environment, whatever shell
     # started it (claunch-2yiij): spawn_daemon removes it on the way, and
     # this covers every start that did not go through it (a daemon run by

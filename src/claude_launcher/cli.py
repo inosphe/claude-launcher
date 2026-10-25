@@ -409,7 +409,7 @@ def _cmd_parent(args: argparse.Namespace) -> int:
 def _cmd_template(args: argparse.Namespace) -> int:
     if args.init:
         template.ensure_file()
-    # The live default env lives in ~/.claunch.yaml; template.yaml only seeds it.
+    # The live default env lives in ~/.claude-launcher/.claunch.yaml; template.yaml only seeds it.
     print(f"source of truth: {store.path()}")
     path = template.template_path()
     suffix = "" if path.is_file() else "  (not created; built-in defaults used to bootstrap)"
@@ -809,7 +809,7 @@ def _announce_translation(p, harness_name: str) -> None:
 
 
 def _cmd_set_provider(args: argparse.Namespace) -> int:
-    # Records the choice in the config file (~/.claunch.yaml). Forms:
+    # Records the choice in the config file (~/.claude-launcher/.claunch.yaml). Forms:
     #   set-provider NAME            -> global provider
     #   set-provider PROFILE NAME    -> pin a profile (NAME may be 'default')
     #   set-provider PROFILE --clear -> drop a profile's override (inherit)
@@ -1662,7 +1662,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_prune = sub.add_parser(
         "prune",
-        help="delete local profile dirs not declared in the store (~/.claunch.yaml)",
+        help="delete local profile dirs not declared in the store (~/.claude-launcher/.claunch.yaml)",
     )
     p_prune.add_argument(
         "--dry-run",
@@ -1673,7 +1673,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mig_cfg = sub.add_parser(
         "migrate-config",
-        help="rewrite ~/.claunch.yaml from provider/profile `env` to the "
+        help="rewrite ~/.claude-launcher/.claunch.yaml from provider/profile `env` to the "
         "harness-neutral schema (api_key, endpoints, models, context_window, "
         "auto_compact_at, reasoning_effort, openai_reasoning_format, "
         "harness_options); a .v1.bak copy is kept",
@@ -1896,11 +1896,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
     try:
         # Before anything resolves a path: an instance manifest may move the
-        # launcher home, the config file and the port for this process tree.
+        # launcher home (and with it the config file) and the port for this
+        # process tree.
         instance_manifest.apply()
-        # ...and a home and config file of two different instances would
-        # reconcile one instance's profiles into the other's home.
-        instance_manifest.check_pairing()
     except (ValueError, instance_manifest.InstanceManifestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

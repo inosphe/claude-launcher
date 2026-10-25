@@ -3,7 +3,7 @@
 
    Naming a parent turns Create into a spawn, and the two differ in what may
    be asked. What a child inherits is the spawn policy's call, field by field
-   (the `spawn.allow_*` unlocks in ~/.claunch.yaml), and the daemon publishes
+   (the `spawn.allow_*` unlocks in ~/.claude-launcher/.claunch.yaml), and the daemon publishes
    it per parent — so this form asks, greys what the policy keeps shut, and
    hands back what it opened. Both halves are mistakes waiting to happen: a
    form that offers what it cannot send teaches the policy wrong, and one
@@ -413,7 +413,7 @@ async function main() {
         ctx.fields(form, {}).auto_compact, undefined);
 
   /* The policy arrives. Every row it opens is handed back — this is the case
-     the form used to get wrong: `allow_profile: true` in ~/.claunch.yaml, the
+     the form used to get wrong: `allow_profile: true` in ~/.claude-launcher/.claunch.yaml, the
      CLI wizard offering the row, and the browser greying it anyway. */
   reports.lead = {
     may_choose: ["args", "model", "effort", "borrow", "null_token", "profile", "worktree"],
@@ -546,7 +546,7 @@ async function main() {
   /* The two reasons a row is shut, kept apart. The policy above opened
      borrow and null_token; the codex harness is what closed them again. One
      sentence for both told the operator who HAS unlocked those rows in
-     ~/.claunch.yaml that the unlock did not take. */
+     ~/.claude-launcher/.claunch.yaml that the unlock did not take. */
   check("a row the policy opened and the child then shut is not blamed on the policy",
         [box_["parent-hint"].textContent.includes("stay its parent's"),
          box_["parent-hint"].textContent.includes(

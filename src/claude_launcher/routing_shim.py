@@ -131,7 +131,7 @@ def _affinity_on(app: web.Application) -> bool:
 
     The shim knows its provider's config name (``--provider``) and reads the
     flag from the live config per request — ``store.load`` serves at most
-    100ms-stale state, so a toggle in ``~/.claunch.yaml`` (including from the
+    100ms-stale state, so a toggle in ``~/.claude-launcher/.claunch.yaml`` (including from the
     web Settings page) reaches already-running shims without a restart, in
     both directions. A malformed flag is a config error, not a reason to
     break traffic: the header is skipped, the error is logged once per

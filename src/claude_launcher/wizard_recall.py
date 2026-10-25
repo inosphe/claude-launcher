@@ -8,7 +8,7 @@ opens with them as its defaults.
 
 This is *recall*, not configuration: the file is machine-local convenience
 state under :func:`config.launcher_home` (``~/.claude-launcher/
-wizard-recall.yaml``), deliberately not ``~/.claunch.yaml`` — the canonical
+wizard-recall.yaml``), deliberately not ``~/.claude-launcher/.claunch.yaml`` — the canonical
 store is hand-edited and synced, and the last thing somebody typed into a
 form is neither. Losing the file costs nothing but retyping once.
 

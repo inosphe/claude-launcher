@@ -1,6 +1,6 @@
 """The harness-neutral description of a backend: one set of values per provider.
 
-A provider entry in ``~/.claunch.yaml`` describes *the backend* -- where it
+A provider entry in ``~/.claude-launcher/.claunch.yaml`` describes *the backend* -- where it
 is, which models it serves, what it costs in context -- in one vocabulary
 that no harness owns.  At launch a per-harness translator
 (:mod:`translators`) turns that description into the harness's own words:

@@ -293,7 +293,7 @@ const ago = (secs) => new Date(Date.now() - secs * 1000).toISOString();
   check("off, the ⟳ is disabled and points at the config",
         [refresh(s4).disabled, refresh(s4).title],
         [true, "briefing off — pick a profile and model in Settings ▸ "
-          + "Briefing model (the llm: block of ~/.claunch.yaml)"]);
+          + "Briefing model (the llm: block of ~/.claude-launcher/.claunch.yaml)"]);
   check("off, a task is still no one-line", oneLine(s4), null);
   const s7 = row("s7");
   ctx.decorate(s7, { name: "s7", briefing: { one_line: "뽑아온 줄", state: "working" } });

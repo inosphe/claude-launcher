@@ -2,7 +2,7 @@
 
 A *harness* is a CLI agent program. Which ones exist is declared, not decided
 here — see :mod:`claude_launcher.harnesses` for the packaged set (claude,
-codex, pi) and how ``~/.claunch.yaml`` extends it. ``claude`` is the one
+codex, pi) and how ``~/.claude-launcher/.claunch.yaml`` extends it. ``claude`` is the one
 spawned through the profile machinery (config dir, provider env, OAuth token)
 via :func:`claude_launcher.runner.child_env`; every other harness is a plain
 command with optional args and env.

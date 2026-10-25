@@ -372,7 +372,6 @@ def test_round_trip_push_then_pull_on_a_second_machine(server, tmp_path, monkeyp
     a = tmp_path / "machine-a"
     a.mkdir()
     monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(a))
-    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(a / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(tmp_path))
     store.save({"profiles": {"work": {"env": {"K": "1"}}}})
     _configure(server.url, token)
@@ -383,7 +382,6 @@ def test_round_trip_push_then_pull_on_a_second_machine(server, tmp_path, monkeyp
     b = tmp_path / "machine-b"
     b.mkdir()
     monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(b))
-    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(b / ".claunch.yaml"))
     store.save({})
     _configure(server.url, token)
     down = sync.run("down")
@@ -404,7 +402,6 @@ def test_merge_carries_each_machine_s_change_to_the_other(server, tmp_path, monk
 
     def machine(root: Path) -> None:
         monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(root))
-        monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(root / ".claunch.yaml"))
 
     # A publishes 'work'
     machine(a)
@@ -444,7 +441,6 @@ def test_merge_propagates_a_deletion_across_machines(server, tmp_path, monkeypat
 
     def machine(root: Path) -> None:
         monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(root))
-        monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(root / ".claunch.yaml"))
 
     machine(a)
     store.save({"profiles": {"work": {}, "scratch": {}}})

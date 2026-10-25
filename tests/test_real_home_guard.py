@@ -54,17 +54,23 @@ def test_an_instance_base_at_the_real_home_is_refused(monkeypatch):
         paths.base_home()
 
 
-@pytest.mark.parametrize("name", [".claunch.yaml", ".claunch.kimyori.yaml"])
-def test_a_config_file_in_the_user_home_is_refused(monkeypatch, name):
-    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(Path.home() / name))
-    with pytest.raises(config.RealHomeInTest, match="real config file"):
-        config.sync_file()
-
-
 def test_the_default_config_file_is_refused(monkeypatch):
-    monkeypatch.delenv(config.LAUNCHER_SYNC_ENV)
+    monkeypatch.delenv(config.LAUNCHER_HOME_ENV)
     with pytest.raises(config.RealHomeInTest):
         config.sync_file()
+
+
+def test_the_old_config_variable_does_not_move_the_config_file(home, monkeypatch):
+    # CLAUDE_LAUNCHER_SYNC_FILE is gone: isolating the launcher home is all it
+    # takes, and a leftover variable cannot point the store at the real file.
+    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(Path.home() / ".claunch.yaml"))
+    assert config.sync_file() == home / ".claunch.yaml"
+
+
+def test_the_config_file_follows_the_launcher_home(home, tmp_path, monkeypatch):
+    other = tmp_path / "other-home"
+    monkeypatch.setenv(config.LAUNCHER_HOME_ENV, str(other))
+    assert config.sync_file() == other / ".claunch.yaml"
 
 
 def test_a_path_under_the_real_home_is_not_the_home(tmp_path, monkeypatch):

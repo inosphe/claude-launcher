@@ -2,7 +2,7 @@
 
 A *preset* is a starting value for the dashboard's provider form
 (``#/settings/providers``): the ``providers.<name>`` entry a person would
-otherwise type into ``~/.claunch.yaml`` by hand.  Picking a preset fills the
+otherwise type into ``~/.claude-launcher/.claunch.yaml`` by hand.  Picking a preset fills the
 form; nothing is installed until the form is saved, and every field stays
 editable afterwards.
 
@@ -27,7 +27,7 @@ goal as the ``workflows/`` per-file layer.
 
 Why the package and not a layer under the launcher home: a preset is not an
 install target and not machine state. It is a template for the install form --
-picking one and saving writes ``~/.claunch.yaml``, which is the only place a
+picking one and saving writes ``~/.claude-launcher/.claunch.yaml``, which is the only place a
 provider then lives, and where any per-machine adjustment belongs. Shipping
 the files with the package means the set travels with the code that reads it
 and nothing has to copy them; there is no second layer to drift from the
@@ -117,7 +117,7 @@ def _entry_of(document: dict) -> Dict[str, object]:
 
     A file may wrap it under ``provider:`` (the shape this module documents) or
     be the entry itself -- a person who copies a block straight out of
-    ``~/.claunch.yaml`` writes the second one, and refusing it would make the
+    ``~/.claude-launcher/.claunch.yaml`` writes the second one, and refusing it would make the
     common case the broken one.
     """
     for key in ("provider", "providers"):

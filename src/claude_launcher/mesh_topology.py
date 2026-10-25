@@ -228,7 +228,7 @@ master ← MID round branch ← --no-ff the cut (stack-merge, once per landing)
   only what you spawned (or what your children spawned).
 - "would put a session N level(s) deep": the subtree does not fit under the
   new parent. Move fewer or shallower workers, or ask the user to raise
-  `spawn.max_depth` in `~/.claunch.yaml`.
+  `spawn.max_depth` in `~/.claude-launcher/.claunch.yaml`.
 - "has exited": pick a live parent.
 - "cannot move itself": a session is moved by the one that commands it, or
   by an operator (`claunch reparent SESSION PARENT`).
@@ -354,7 +354,7 @@ landing finish, then move. And do not move to "tidy" — every move costs a brie
 - "make a cycle": the target is the session itself or something under it.
 - "would put a session N level(s) deep": the subtree does not fit under the
   target. Move fewer or shallower sessions, or ask the user to raise
-  `spawn.max_depth` in `~/.claunch.yaml`.
+  `spawn.max_depth` in `~/.claude-launcher/.claunch.yaml`.
 """
 
 

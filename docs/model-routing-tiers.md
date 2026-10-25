@@ -14,7 +14,7 @@
 
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
-| provider·profile·모델 정의 위치 | `~/.claunch.yaml`의 `providers:`/`profiles:` 섹션 | `store.py` 스키마, `providers.py:66-74` |
+| provider·profile·모델 정의 위치 | `~/.claude-launcher/.claunch.yaml`의 `providers:`/`profiles:` 섹션 | `store.py` 스키마, `providers.py:66-74` |
 | 모델 역할 어휘 | `MODEL_ROLES = (default, small, large, xlarge, subagent)`, 폴백 규칙 `ROLE_FALLBACKS = {xlarge: large, subagent: small}` | `provider_spec.py:118-120` |
 | role → 백엔드 모델 표 | `providers.<name>.models`와 프로파일 오버레이 `profiles.<name>.models` | `provider_spec.py:152-158`, `254-260` |
 | claude 하네스의 모델 결정 시점 | 런칭 시점에 `ANTHROPIC_*_MODEL` env로 구워짐. 이후 변경 경로 없음 | `translators.py:111-167`, `runner.py:189-304` |
@@ -91,7 +91,7 @@
 
 ### 5.1 스키마
 
-`~/.claunch.yaml` 최상위 키로 둔다. `daemon:` 블록에 넣지 않는 이유: 이 값은 세션 라우팅 정의로 데몬 설정보다 상위에 있고, shim과 워크플로 양쪽이 라이브로 읽어야 하기 때문이다. `relays:` 블록(`store.py:775-817`)과 같은 위상이다.
+`~/.claude-launcher/.claunch.yaml` 최상위 키로 둔다. `daemon:` 블록에 넣지 않는 이유: 이 값은 세션 라우팅 정의로 데몬 설정보다 상위에 있고, shim과 워크플로 양쪽이 라이브로 읽어야 하기 때문이다. `relays:` 블록(`store.py:775-817`)과 같은 위상이다.
 
 ```yaml
 model_tiers:

@@ -2,7 +2,7 @@
 
 Everything machine-local the daemon needs (its address file, auth token, lock,
 session definitions, per-session logs) lives under ``<launcher home>/daemon/``.
-None of this belongs in ``~/.claunch.yaml`` — that file is synced between
+None of this belongs in ``~/.claude-launcher/.claunch.yaml`` — that file is synced between
 machines and holds *settings*, while these are per-machine *runtime state*.
 
 Named instances (tmux ``-L`` style): setting ``CLAUNCH_DAEMON=<name>`` (or

@@ -3,7 +3,7 @@
 Earlier versions kept launcher config in three places: each profile's ``env`` in
 its native ``settings.json``, the ``parent`` in ``<config_dir>/.launcher.json``,
 and the default template in ``<launcher home>/template.json``. The source of
-truth is now ``~/.claunch.yaml`` (see :mod:`store`), so on first run we absorb any
+truth is now ``~/.claude-launcher/.claunch.yaml`` (see :mod:`store`), so on first run we absorb any
 of those legacy stores into it and remove the duplicates.
 
 Migration runs **exactly once**, gated by a marker file. That matters for two
@@ -13,7 +13,7 @@ orphan; and (2) registering every directory on *every* run would defeat ``prune`
 (whose job is to remove dirs the store no longer lists). The marker draws that
 line — one bulk registration at upgrade, then steady state.
 
-Legacy *live* values win over a pre-existing ``~/.claunch.yaml``: before this
+Legacy *live* values win over a pre-existing ``~/.claude-launcher/.claunch.yaml``: before this
 change that file was an export snapshot while the profile directory was the live
 source, so an old export must not clobber newer ``settings.json`` / ``.launcher.json``
 values.
@@ -62,7 +62,7 @@ def reconcile() -> None:
 
     The store is the source of truth, but a profile only *works* with a real
     storage root. So a config copied from another machine (or a
-    hand-edited ``~/.claunch.yaml``) can name a profile whose directory does not
+    hand-edited ``~/.claude-launcher/.claunch.yaml``) can name a profile whose directory does not
     exist yet — create it on demand, seeding only Claude profiles, so commands work without an
     explicit step. Idempotent: once the directory exists this does nothing.
     """
@@ -88,7 +88,7 @@ def run() -> None:
 
 
 def _migrate_legacy() -> None:
-    """Absorb legacy scattered config into ``~/.claunch.yaml`` (once)."""
+    """Absorb legacy scattered config into ``~/.claude-launcher/.claunch.yaml`` (once)."""
     marker = _marker_path()
     if marker.is_file():
         return

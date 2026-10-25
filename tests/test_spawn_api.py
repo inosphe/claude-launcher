@@ -654,7 +654,7 @@ def test_a_child_runs_in_the_workspace_it_was_given(home, tmp_path):
 
 
 def test_children_lists_the_workspaces_a_child_may_be_sent_to(home, tmp_path):
-    """An agent cannot read ~/.claunch.yaml's registry, so the budget report
+    """An agent cannot read ~/.claude-launcher/.claunch.yaml's registry, so the budget report
     is where the names come from — otherwise 'workspace' is a field it can
     only guess at."""
     _register_py_harness()

@@ -275,7 +275,7 @@ function findTag(node, tag) {
         [btn.disabled, btn.title, btn.textContent],
         [true,
          "briefing off — pick a profile and model in Settings ▸ Briefing model "
-         + "(the llm: block of ~/.claunch.yaml)",
+         + "(the llm: block of ~/.claude-launcher/.claunch.yaml)",
          "▸ briefing"]);
   ctx.setLLM(true);
   ctx.apply();
@@ -312,7 +312,7 @@ function findTag(node, tag) {
         [note.className, note.textContent, calls.length === c0],
         ["sess-brief-note",
          "briefing off — pick a profile and model in Settings ▸ Briefing model "
-         + "(the llm: block of ~/.claunch.yaml)",
+         + "(the llm: block of ~/.claude-launcher/.claunch.yaml)",
          true]);
   ctx.setLLM(true);
 

@@ -66,7 +66,7 @@ def _seed_settings(
     if not src.is_file():
         return False
     text = src.read_text(encoding="utf-8")
-    # The launcher's env lives in ~/.claunch.yaml (the source of truth); never
+    # The launcher's env lives in ~/.claude-launcher/.claunch.yaml (the source of truth); never
     # carry an "env" block over from the seed source, or Claude Code would read
     # it directly and shadow the store. Other keys (mcpServers, etc.) are kept.
     try:

@@ -461,7 +461,7 @@ nodes:
 ## 4. capability와 fallback 읽기
 
 위임 노드가 실제로 어떻게 실행되는지는 자식 세션의 하네스와 provider에 달려
-있다. capability는 `~/.claunch.yaml`에서 provider와 profile 단위로 기술한다
+있다. capability는 `~/.claude-launcher/.claunch.yaml`에서 provider와 profile 단위로 기술한다
 (규격 6.2절).
 
 ```

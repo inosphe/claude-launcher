@@ -96,6 +96,7 @@ class _Booted(Exception):
     pass
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_the_daemon_removes_them_from_its_own_environment_at_boot(monkeypatch):
     """A daemon not started through spawn_daemon (by hand, or by a
     predecessor on older code) still drops them before anything runs."""
@@ -200,6 +201,7 @@ def test_spawn_daemon_hands_the_child_no_session_header(monkeypatch):
     assert not set(S1388_HEADERS) & set(seen["env"])
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_the_daemon_drops_the_session_header_at_boot(monkeypatch):
     import os
 

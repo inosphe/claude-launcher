@@ -1,7 +1,7 @@
 """Per-profile environment variables, plus the profile's native ``settings.json``.
 
 A profile's launcher-managed ``env`` lives in the central config file
-(``~/.claunch.yaml``, see :mod:`store`), not in the profile directory — the
+(``~/.claude-launcher/.claunch.yaml``, see :mod:`store`), not in the profile directory — the
 launcher injects it into ``claude``'s process at launch. The ``get_env`` /
 ``set_env`` / ``replace_env`` / ``unset_env`` helpers here read and write that
 central store.

@@ -1,6 +1,6 @@
 """Per-instance manifests (daemon/instance_manifest.py): a named daemon
-instance declares its own launcher home, config file and port once, and
-``claunch -L NAME`` applies them."""
+instance declares its own launcher home (which holds its config file) and
+port once, and ``claunch -L NAME`` applies them."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from claude_launcher.daemon import paths
 
 #: Every variable ``apply()`` or ``claunch -L`` may write.
 _ENV_VARS = (paths.INSTANCE_ENV, *im.ENV_VARS)
-#: The two of them the ``home`` fixture owns (set per test, restored by it).
-_HOME_VARS = (config.LAUNCHER_HOME_ENV, config.LAUNCHER_SYNC_ENV)
+#: The one of them the ``home`` fixture owns (set per test, restored by it).
+_HOME_VARS = (config.LAUNCHER_HOME_ENV,)
 #: What the instance variables held when this module was imported. Every
 #: test checks, before touching anything, that the test before it left them
 #: that way -- a leak shows up at the very next test, in this module, instead
@@ -38,8 +38,8 @@ def clean_env(home):
     ``os.environ`` directly (``apply()`` sets CLAUNCH_INSTANCE_APPLIED, the
     CLI's ``-L`` sets CLAUNCH_DAEMON) outlives the test. That is how this
     module leaked an instance into ``test_loops.py`` and broke seven of its
-    tests in the same process (claunch-50qrv). The home and config variables
-    the ``home`` fixture set are kept, never deleted: deleting them sends the
+    tests in the same process (claunch-50qrv). The home variable the
+    ``home`` fixture set is kept, never deleted: deleting them sends the
     test to the developer's real ~/.claude-launcher.
     """
     before = {v: os.environ.get(v) for v in _ENV_VARS}
@@ -73,8 +73,8 @@ def test_no_manifest_changes_nothing(home, monkeypatch):
 
 def test_manifest_moves_home_config_and_port(home, tmp_path, monkeypatch):
     team_home = tmp_path / "team-home"
-    team_cfg = tmp_path / "team.yaml"
-    _manifest(home, "team", {"home": str(team_home), "config": str(team_cfg), "port": 8390})
+    team_cfg = team_home / ".claunch.yaml"
+    _manifest(home, "team", {"home": str(team_home), "port": 8390})
     monkeypatch.setenv(paths.INSTANCE_ENV, "team")
 
     m = im.apply()
@@ -246,7 +246,7 @@ def test_a_daemon_started_from_a_session_binds_its_manifests_port(
 
 
 def test_switching_instance_undoes_the_previous_manifest(home, tmp_path, monkeypatch):
-    _manifest(home, "team", {"home": str(tmp_path / "t"), "config": str(tmp_path / "t.yaml")})
+    _manifest(home, "team", {"home": str(tmp_path / "t")})
     monkeypatch.setenv(paths.INSTANCE_ENV, "team")
     im.apply()
 
@@ -286,6 +286,7 @@ def test_two_instances_on_one_home_are_refused(home, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("doc, match", [
     ({"hmoe": "/x"}, "unknown key"),
+    ({"home": "/x", "config": "/x.yaml"}, "'config' is no longer supported"),
     ({"home": "relative/dir"}, "absolute path"),
     ({"port": 0}, "1-65535"),
     ({"port": "8390"}, "1-65535"),
@@ -311,14 +312,15 @@ def test_cli_create_show_ls_and_apply(home, tmp_path, capsys):
         "sync": {"url": "https://sync.example", "namespace": "me"},
     }), encoding="utf-8")
     team_home = tmp_path / "team-home"
-    team_cfg = tmp_path / "team.yaml"
+    team_cfg = team_home / ".claunch.yaml"
 
     rc = cli.main(["daemon", "instance", "create", "team", "--home", str(team_home),
-                   "--config", str(team_cfg), "--port", "8392", "--seed"])
+                   "--port", "8392", "--seed"])
     out = capsys.readouterr().out
     assert rc == 0, out
+    assert f"config  {team_cfg}" in out
     manifest = yaml.safe_load((home / "daemons" / "team" / "instance.yaml").read_text())
-    assert manifest == {"home": str(team_home), "config": str(team_cfg), "port": 8392}
+    assert manifest == {"home": str(team_home), "port": 8392}
     seeded = yaml.safe_load(team_cfg.read_text(encoding="utf-8"))
     assert seeded["profiles"] == {"work": {"env": {"A": "1"}}}
     assert "sync" not in seeded
@@ -339,13 +341,22 @@ def test_cli_create_show_ls_and_apply(home, tmp_path, capsys):
     assert config.sync_file() == team_cfg
 
 
-def test_seed_needs_config_and_never_overwrites(home, tmp_path, capsys):
+def test_seed_needs_home_and_never_overwrites(home, tmp_path, capsys):
     assert cli.main(["daemon", "instance", "create", "x", "--seed"]) == 2
-    target = tmp_path / "exists.yaml"
+    assert "--seed needs --home" in capsys.readouterr().err
+    x_home = tmp_path / "x-home"
+    x_home.mkdir()
+    target = x_home / ".claunch.yaml"
     target.write_text("version: 1\n", encoding="utf-8")
-    assert cli.main(["daemon", "instance", "create", "x", "--config", str(target), "--seed"]) == 0
+    assert cli.main(["daemon", "instance", "create", "x", "--home", str(x_home), "--seed"]) == 0
     assert "not seeded" in capsys.readouterr().out
     assert target.read_text(encoding="utf-8") == "version: 1\n"
+
+
+def test_create_has_no_config_option(home, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["daemon", "instance", "create", "x", "--config", str(tmp_path / "x.yaml")])
+    assert not (home / "daemons" / "x" / "instance.yaml").exists()
 
 
 def test_create_refuses_a_home_another_instance_owns(home, tmp_path, capsys):
@@ -401,12 +412,11 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
     team_home = tmp_path / "team-home"
     (team_home / "profiles" / "teamonly").mkdir(parents=True)
     (home / "profiles" / "baseonly").mkdir(parents=True)
-    team_cfg = tmp_path / "team.yaml"
-    team_cfg.write_text("version: 1\n", encoding="utf-8")
+    (team_home / ".claunch.yaml").write_text("version: 1\n", encoding="utf-8")
 
     env = os.environ.copy()
     for var in (paths.INSTANCE_ENV, *im.ENV_VARS):
-        if var not in (config.LAUNCHER_HOME_ENV, config.LAUNCHER_SYNC_ENV):
+        if var != config.LAUNCHER_HOME_ENV:
             env.pop(var, None)
     src = str(Path(claude_launcher.__file__).resolve().parents[1])
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
@@ -422,7 +432,7 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
         s.close()
-        _manifest(home, "team", {"home": str(team_home), "config": str(team_cfg), "port": port})
+        _manifest(home, "team", {"home": str(team_home), "port": port})
         with open(log_path, "wb") as log:
             return port, subprocess.Popen(
                 [sys.executable, "-m", "claude_launcher.daemon", "--name", "team"],
@@ -469,57 +479,19 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
 
 
 
-# -- home and config file of two different instances (claunch-edy0w) ----------
-def _team(base, tmp_path, **doc):
+# -- the config file goes with the home (claunch-edy0w) ----------------------
+def _team(base, tmp_path):
     team_home = tmp_path / "team-home"
-    team_cfg = tmp_path / "team.yaml"
-    team_cfg.write_text(yaml.safe_dump({"version": 1, "profiles": {"teamonly": {}}}),
-                        encoding="utf-8")
-    full = {"home": str(team_home), "config": str(team_cfg)}
-    full.update(doc)
-    _manifest(base, "team", {k: v for k, v in full.items() if v is not None})
-    return team_home, team_cfg
+    team_home.mkdir()
+    (team_home / ".claunch.yaml").write_text(
+        yaml.safe_dump({"version": 1, "profiles": {"teamonly": {}}}), encoding="utf-8")
+    _manifest(base, "team", {"home": str(team_home)})
+    return team_home
 
 
-def test_cli_refuses_an_instances_config_under_the_base_home(home, tmp_path, monkeypatch, capsys):
-    """The delayed-sweep runner of 2026-10-18: the default instance's home
-    with kimyori's config file. bootstrap would create kimyori's profiles
-    under the default home and rewrite kimyori's config from there."""
-    _, team_cfg = _team(home, tmp_path)
-    before = team_cfg.read_bytes()
-    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(team_cfg))
-    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
-
-    assert cli.main(["list"]) == 2
-    err = capsys.readouterr().err
-    assert "belongs to instance 'team'" in err and str(home) in err
-    assert not (home / "profiles" / "teamonly").exists()
-    assert team_cfg.read_bytes() == before
-
-
-def test_cli_refuses_an_instances_home_with_another_config(home, tmp_path, monkeypatch, capsys):
-    team_home, _ = _team(home, tmp_path)
-    monkeypatch.setenv(config.LAUNCHER_HOME_ENV, str(team_home))
-    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
-
-    assert cli.main(["list"]) == 2
-    assert "launcher home" in capsys.readouterr().err
-    assert not (team_home / "profiles").exists()
-
-
-def test_config_only_manifest_pairs_its_config_with_the_base_home(home, tmp_path, monkeypatch):
-    _, team_cfg = _team(home, tmp_path, home=None)
-    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(team_cfg))
-    im.check_pairing()  # shares the base home: this is that instance
-    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
-    monkeypatch.setenv(config.LAUNCHER_HOME_ENV, str(tmp_path / "elsewhere"))
-    with pytest.raises(im.InstanceManifestError, match="belongs to instance 'team'"):
-        im.check_pairing()
-
-
-def test_matching_pairs_run(home, tmp_path, monkeypatch, capsys):
-    team_home, _ = _team(home, tmp_path)
-    # The default instance, next to a named one with its own home and config.
+def test_each_instance_reads_the_config_file_in_its_own_home(home, tmp_path, capsys):
+    team_home = _team(home, tmp_path)
+    # The default instance, next to a named one with its own home.
     assert cli.main(["list"]) == 0
     assert not (home / "profiles" / "teamonly").exists()
     # The named instance through its manifest.
@@ -528,17 +500,26 @@ def test_matching_pairs_run(home, tmp_path, monkeypatch, capsys):
     assert "teamonly" in capsys.readouterr().out
 
 
-def test_an_unreadable_manifest_of_another_instance_does_not_block(home, tmp_path):
-    _manifest(home, "broken", {"home": "relative"})
-    _team(home, tmp_path)
-    im.check_pairing()
+def test_the_old_config_variable_cannot_pair_a_config_with_another_home(
+    home, tmp_path, monkeypatch, capsys
+):
+    """The delayed-sweep runner of 2026-10-18 ran the default instance's home
+    with kimyori's config file. The variable that made that possible is
+    ignored now: the default home reads its own config file."""
+    team_home = _team(home, tmp_path)
+    before = (team_home / ".claunch.yaml").read_bytes()
+    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(team_home / ".claunch.yaml"))
+    assert cli.main(["list"]) == 0
+    assert not (home / "profiles" / "teamonly").exists()
+    assert (team_home / ".claunch.yaml").read_bytes() == before
 
 
-def test_daemon_refuses_a_mismatched_pair_before_starting(home, tmp_path, monkeypatch):
+def test_cli_and_daemon_refuse_a_manifest_that_still_names_a_config(home, tmp_path, capsys):
     from claude_launcher.daemon import __main__ as daemon_main
 
-    _, team_cfg = _team(home, tmp_path)
-    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(team_cfg))
-    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
-    assert daemon_main.main([]) == 2
-    assert not (home / "daemon").exists()
+    _manifest(home, "team", {"home": str(tmp_path / "t"), "config": str(tmp_path / "t.yaml")})
+    assert cli.main(["-L", "team", "list"]) == 2
+    err = capsys.readouterr().err
+    assert "'config' is no longer supported" in err and ".claunch.yaml" in err
+    assert daemon_main.main(["--name", "team"]) == 2
+    assert not (home / "daemons" / "team" / "daemon.json").exists()

@@ -50,7 +50,7 @@ name forwarded as the ``x-session-affinity`` header (see :data:`AFFINITY_HEADER`
 The flag is *not* part of the shim's identity. A shim is started with the
 provider's name (``--provider``) and reads ``session_affinity`` from the live
 config on every request (:func:`store.load` serves at most 100ms-stale state),
-so toggling the flag in ``~/.claunch.yaml`` — including from the web Settings
+so toggling the flag in ``~/.claude-launcher/.claunch.yaml`` — including from the web Settings
 page — changes what running shims and freshly launched sessions do without a
 daemon restart, in both directions. A malformed flag logs to the shim's
 stderr and skips the header rather than breaking traffic.

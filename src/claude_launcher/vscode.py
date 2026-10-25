@@ -54,7 +54,7 @@ ASSETS: Dict[Tuple[str, str], str] = {
     ("macos", "arm64"): "82c7144406ac31c373acfa786b6705c7c5463d895f728fde2cb94402b945b301",
 }
 
-#: Defaults for the top-level ``vscode`` block of ``~/.claunch.yaml``. Read
+#: Defaults for the top-level ``vscode`` block of ``~/.claude-launcher/.claunch.yaml``. Read
 #: live: the daemon looks them up on every request and every idle sweep.
 DEFAULTS = {
     # Whether the daemon serves /vscode/ at all.

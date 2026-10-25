@@ -8,7 +8,7 @@ its cflow run position (read-only), and the tail of its harness transcript
 OpenAI-compatible ``chat/completions`` endpoint to compress it into a fixed
 JSON shape.
 
-Configuration is the ``llm:`` block of ``~/.claunch.yaml`` (``store.load()``
+Configuration is the ``llm:`` block of ``~/.claude-launcher/.claunch.yaml`` (``store.load()``
 is authoritative), editable from the web dashboard's Settings page
 (``GET``/``PUT /api/briefing/llm``). The backend comes from one of two
 places: the block's own fields, or — when ``preset:`` names one — a *saved
@@ -874,7 +874,7 @@ def briefing_request_headers(cfg: dict) -> Dict[str, str]:
     plus whatever per-provider rule :mod:`claude_launcher.routing` declares
     for the provider this endpoint belongs to. The rules are read on every
     call, live, exactly as the shim reads them: a provider edited in
-    ``~/.claunch.yaml`` (including from the Settings page) takes effect on the
+    ``~/.claude-launcher/.claunch.yaml`` (including from the Settings page) takes effect on the
     next briefing without a restart.
 
     A malformed provider value raises :class:`BriefingError` instead of
@@ -971,7 +971,7 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
             why = (
                 f"the budget ran out (max_tokens={cfg['max_tokens']}); a "
                 "reasoning model spends it on its reasoning before it writes "
-                "anything, so raise llm.max_tokens in ~/.claunch.yaml"
+                "anything, so raise llm.max_tokens in ~/.claude-launcher/.claunch.yaml"
             )
         else:
             why = (

@@ -156,6 +156,7 @@ def test_user_shell_does_not_spawn_beside_an_unresponsive_daemon(quick, spawns, 
     assert spawns == []
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_user_shell_still_starts_an_absent_daemon_at_once(spawns, monkeypatch):
     """The user's decision on claunch-19liw.2: auto-start stays, and with the
     lock free nothing is coming back, so it does not wait first."""

@@ -1,12 +1,12 @@
 """Remove local profile directories not declared in the store.
 
-``~/.claunch.yaml`` is the source of truth and the launcher *creates* a directory
+``~/.claude-launcher/.claunch.yaml`` is the source of truth and the launcher *creates* a directory
 for every profile it lists (see :func:`bootstrap.reconcile`). The inverse —
 deleting a directory that the store no longer lists — is destructive, so it is
 never automatic; this is the explicit ``claunch prune`` operation.
 
 An *orphan* is a profile directory whose name has no entry in the store. That
-happens when an entry is removed from ``~/.claunch.yaml`` by hand, or a directory
+happens when an entry is removed from ``~/.claude-launcher/.claunch.yaml`` by hand, or a directory
 is created outside the launcher.
 """
 

@@ -1,4 +1,4 @@
-"""The profile sync server: one shared ``~/.claunch.yaml`` document per namespace.
+"""The profile sync server: one shared ``~/.claude-launcher/.claunch.yaml`` document per namespace.
 
 Small on purpose. It stores documents, not profiles: it never interprets what a
 profile *means*, so a launcher upgrade that adds config keys needs no server

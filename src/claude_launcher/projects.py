@@ -32,7 +32,7 @@ reader can tell a project nobody configured from one configured to stay out
 of meshes. The CLI and API creation paths do not join it on their own: a
 mesh join is asked for with ``--mesh``/``mesh`` as before.
 
-The registry lives in ``~/.claunch.yaml`` under ``projects``, name -> fields::
+The registry lives in ``~/.claude-launcher/.claunch.yaml`` under ``projects``, name -> fields::
 
     projects:
       launcher:

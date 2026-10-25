@@ -21,7 +21,7 @@ embeddings call; the reranker costs about a quarter second per document on
 the measured endpoint, which is why it scores a dozen and not the board.
 
 Indexes are machine-local derived data under ``<daemon dir>/rag/`` — the same
-rule ``briefings.json`` follows: ``~/.claunch.yaml`` carries configuration and
+rule ``briefings.json`` follows: ``~/.claude-launcher/.claunch.yaml`` carries configuration and
 is synced, this directory carries what a reindex can rebuild and is not. Each
 corpus is a zvec collection (``<key>.zvec/``) beside a small sidecar
 (``<key>.meta.json``) holding the model, width and signature it was built
@@ -920,7 +920,7 @@ class RagService:
 
     ``board`` is the daemon's :class:`daemon.beads.Board` (issues per
     repository root), ``manager`` its session registry. ``config`` is read on
-    every call so an edit to ``~/.claunch.yaml`` takes effect without a
+    every call so an edit to ``~/.claude-launcher/.claunch.yaml`` takes effect without a
     restart; ``client_factory`` and ``root_dir`` are the test seams.
     """
 

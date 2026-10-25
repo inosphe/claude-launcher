@@ -1,7 +1,7 @@
 """The daemon's in-memory profile facts (claunch-89eom).
 
 The Restart-settings picker and the session detail poll used to re-read
-``~/.claunch.yaml`` and re-validate every lender on each request. These tests
+``~/.claude-launcher/.claunch.yaml`` and re-validate every lender on each request. These tests
 pin the replacement: one validation per refresh interval, the clock turning it
 over, and a config write invalidating it.
 """

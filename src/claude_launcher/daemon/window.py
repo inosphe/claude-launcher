@@ -110,7 +110,7 @@ instance on a shared window enforces what the main one published, not its
 own ``window_*`` keys. An operator who changes a limit on the Window page
 changes it on the main daemon only (:meth:`WindowManager.set_limits`); the
 change is kept in the shared state as an override of the main daemon's config
--- machine-local, so ``~/.claunch.yaml``, which is synced between machines,
+-- machine-local, so ``~/.claude-launcher/.claunch.yaml``, which is synced between machines,
 does not carry one machine's core count to another. The config keys stay the
 defaults an override replaces; clearing an override returns to them.
 

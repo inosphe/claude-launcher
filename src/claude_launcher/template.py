@@ -1,6 +1,6 @@
 """The profile template: a live base layer under every profile, and its bootstrap seed.
 
-The ``template`` block of ``~/.claunch.yaml`` is a profile *layer* (the same
+The ``template`` block of ``~/.claude-launcher/.claunch.yaml`` is a profile *layer* (the same
 fields a profile entry may carry -- ``models``, ``context_window``,
 ``auto_compact_at``, ``reasoning_effort``, ``harness_options`` -- plus the
 common ``env``). It is read at launch as the bottom of every profile's parent
@@ -14,8 +14,8 @@ value (``KEY:`` in YAML, i.e. ``null``) -- see :func:`resolve_layers`. That is
 how a profile opts out of a template default.
 
 ``template.yaml`` in the launcher home is only the bootstrap seed: it is
-consulted to create ``~/.claunch.yaml`` the first time (and written by
-``claunch template --init``). Once ``~/.claunch.yaml`` exists, its ``template``
+consulted to create ``~/.claude-launcher/.claunch.yaml`` the first time (and written by
+``claunch template --init``). Once ``~/.claude-launcher/.claunch.yaml`` exists, its ``template``
 block is authoritative.
 """
 
@@ -50,7 +50,7 @@ def template_path() -> Path:
 
 
 def default_document() -> dict:
-    """The initial ``~/.claunch.yaml`` document (from ``template.yaml`` or built-in).
+    """The initial ``~/.claude-launcher/.claunch.yaml`` document (from ``template.yaml`` or built-in).
 
     This is a complete, valid config skeleton: a ``template.env`` block of
     defaults plus an empty ``profiles`` map. Providers/selections start absent.

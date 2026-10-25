@@ -1,6 +1,6 @@
 """Installing a provider from the dashboard: validate, write, and check it.
 
-A provider has always been something a person typed into ``~/.claunch.yaml``.
+A provider has always been something a person typed into ``~/.claude-launcher/.claunch.yaml``.
 This module is the server half of the Settings page that writes it instead
 (``#/settings/providers``): the same entry, from a form, with the reasons a
 value is refused rather than a silently inert field.
@@ -242,7 +242,7 @@ def merge_entry(previous, entry) -> Dict[str, object]:
     :func:`provider_spec.from_entry` prefers ``api_key``, so the launcher would
     read nothing while the stored secret sat unread beside it.
 
-    Removing any of these by hand is a ``~/.claunch.yaml`` edit.
+    Removing any of these by hand is a ``~/.claude-launcher/.claunch.yaml`` edit.
     """
     new = copy.deepcopy(entry) if isinstance(entry, dict) else {}
     old = previous if isinstance(previous, dict) else {}

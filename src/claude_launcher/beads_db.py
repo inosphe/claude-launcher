@@ -18,7 +18,7 @@ setting:
     is a git checkout keeps the board it already had, with its
     ``issues.jsonl`` tracked beside it.
 
-``beads.boards.<name>`` in ``~/.claunch.yaml``
+``beads.boards.<name>`` in ``~/.claude-launcher/.claunch.yaml``
     An override, and it names the **database file itself** rather than a
     directory. A directory would have to be guessed at (``.beads/`` under it?
     which name inside?) and the guess would be silent; a path that must end
@@ -72,7 +72,7 @@ DB_NAME = "beads.db"
 #: after the typo, which is the mistake the check exists to prevent.
 SUFFIX = ".db"
 
-#: Where the overrides live in ``~/.claunch.yaml``.
+#: Where the overrides live in ``~/.claude-launcher/.claunch.yaml``.
 SECTION = "beads"
 BOARDS_KEY = "boards"
 

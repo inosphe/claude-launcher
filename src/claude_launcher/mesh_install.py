@@ -265,7 +265,7 @@ yours to carry out, with `spawn`.
   write its name anywhere, and do not spawn again for the same work. A
   rejection means nothing was created: carry on without the child.
 - A refusal that mentions `spawn.<something>` is policy, not a bug: the limit
-  is in the user's `~/.claunch.yaml`. Do not retry it — tell the user which
+  is in the user's `~/.claude-launcher/.claunch.yaml`. Do not retry it — tell the user which
   key would allow it, and carry on without the child.
 
 Spawn when the work genuinely splits — parallel tracks, or a second pair of

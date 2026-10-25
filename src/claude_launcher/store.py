@@ -1,4 +1,4 @@
-"""The launcher's single source of truth: ``~/.claunch.yaml``, read live.
+"""The launcher's single source of truth: ``~/.claude-launcher/.claunch.yaml``, read live.
 
 Every launcher-managed setting lives here in one YAML file the launcher reads at
 each launch — each profile's ``env``/``parent``/``provider``, the default
@@ -158,7 +158,7 @@ class TransientStoreError(StoreError):
 
 
 def path() -> Path:
-    """The config file backing the store (``~/.claunch.yaml`` by default)."""
+    """The config file backing the store (``~/.claude-launcher/.claunch.yaml`` by default)."""
     return config.sync_file()
 
 
@@ -398,7 +398,7 @@ DAEMON_DEFAULTS = {
     # registry and its borrow verdicts (daemon/profile_facts.py,
     # claunch-89eom). The session detail panel polls a session every two
     # seconds and the borrow picker reads once per panel; both used to read
-    # ~/.claunch.yaml and re-validate every lender per request. 0 keeps the
+    # ~/.claude-launcher/.claunch.yaml and re-validate every lender per request. 0 keeps the
     # first answer and rebuilds only when a config write invalidates it.
     # Read when the daemon starts.
     "profile_facts_s": 5.0,

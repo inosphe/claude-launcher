@@ -31,7 +31,7 @@ _DAEMON_INSTANCE_VARS = (
 )
 #: The homes this pytest was started with -- the machine's real ones, unless
 #: a runner already handed it throwaway ones -- plus the built-in default and
-#: the user's home directory (where ~/.claunch*.yaml live). Read before the
+#: the user's home directory (where the old ~/.claunch*.yaml live). Read before the
 #: instance variables are cleared below. The ``home`` fixture exports them as
 #: config.TEST_REAL_HOMES_ENV, so a test (or a process it starts) that
 #: resolves one of them fails instead of writing there (claunch-gziru).
@@ -42,7 +42,6 @@ _REAL_HOMES = os.pathsep.join(dict.fromkeys(
         str(Path.home()),
         os.environ.get(config.LAUNCHER_HOME_ENV, ""),
         os.environ.get("CLAUNCH_INSTANCE_BASE", "").strip(),
-        os.path.dirname(os.environ.get(config.LAUNCHER_SYNC_ENV, "")),
     )
     if p
 ))
@@ -188,7 +187,6 @@ def home(tmp_path, monkeypatch):
     seed = tmp_path / ".seed"
     seed.mkdir()
     monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(h))
-    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(h / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
     # From here on, resolving a real home is an error (claunch-gziru).
     monkeypatch.setenv(config.TEST_REAL_HOMES_ENV, _REAL_HOMES)
@@ -482,8 +480,19 @@ def repo_template(tmp_path_factory):
 
 @pytest.fixture
 def config_file(home):
-    """Path to the live config file (``~/.claunch.yaml`` equivalent)."""
+    """Path to the live config file (``~/.claude-launcher/.claunch.yaml`` equivalent)."""
     return home / ".claunch.yaml"
+
+
+@pytest.fixture
+def daemon_config(home):
+    """A config file in the test's home, for tests that boot a daemon: the
+    daemon refuses to start in a home without one
+    (``config.missing_config_error``)."""
+    path = home / ".claunch.yaml"
+    if not path.exists():
+        path.write_text("version: 2\n", encoding="utf-8")
+    return path
 
 
 @pytest.fixture(scope="session", autouse=True)

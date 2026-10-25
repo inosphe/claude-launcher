@@ -1,4 +1,4 @@
-"""Sync ``~/.claunch.yaml`` with a remote profile sync server.
+"""Sync ``~/.claude-launcher/.claunch.yaml`` with a remote profile sync server.
 
 The config file is the launcher's source of truth (see :mod:`store`); this
 module keeps that file in step with the same document held by a sync server, so

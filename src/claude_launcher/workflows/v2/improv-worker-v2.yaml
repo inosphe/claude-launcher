@@ -224,7 +224,7 @@ inputs:
     group: 리뷰어
     help: >-
       reviewer-ensure가 세우는 자식 리뷰어의 profile(claunch ls의 이름). 비우면 이 세션의
-      profile을 물려받는다. 다른 profile로 세우려면 ~/.claunch.yaml의 spawn.allow_profile이
+      profile을 물려받는다. 다른 profile로 세우려면 ~/.claude-launcher/.claunch.yaml의 spawn.allow_profile이
       켜져 있어야 한다
     placeholder: 예) work
     default: ""
@@ -274,7 +274,7 @@ inputs:
     help: >-
       session_routing으로 위임할 때 자식 세션의 profile(claunch ls의 이름). 비우면 데몬
       설정 delegate_profile(웹 Settings)을 쓴다. 이 세션과 다른 profile이면
-      ~/.claunch.yaml의 spawn.allow_profile이 켜져 있어야 한다
+      ~/.claude-launcher/.claunch.yaml의 spawn.allow_profile이 켜져 있어야 한다
     placeholder: 예) ds4
     default: ""
     options: {from: profiles, empty: delegate}
@@ -2588,7 +2588,7 @@ nodes:
         같다: profile 없이 다시 세우지 않는다(시작 입력은 사람이 고른
         리뷰어다 — 다른 리뷰어로 바꾸는 것은 사람의 몫이다). 이슈에
         `REVIEWER PROFILE REFUSED: <selector> — <거절 문구>`를 남기고,
-        보고에 그 문구와 「~/.claunch.yaml의 spawn.allow_profile을 켜거나
+        보고에 그 문구와 「~/.claude-launcher/.claunch.yaml의 spawn.allow_profile을 켜거나
         시작 입력을 비우면 선다」를 적는다. profile·harness 이름이 틀려
         400으로 거절되면 그 문구도 같은 방식으로 남긴다.
         스폰한 리뷰어의 profile·harness(`children` 출력의 그 행)를 보고에

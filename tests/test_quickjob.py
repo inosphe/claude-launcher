@@ -1,7 +1,7 @@
 """The quick-job defaults: one YAML block, read by a form, written by a form.
 
 The dashboard's leader panel spawns a preconfigured worker, and everything
-but the task comes from the ``quick_job`` block of ``~/.claunch.yaml``. Two
+but the task comes from the ``quick_job`` block of ``~/.claude-launcher/.claunch.yaml``. Two
 things must hold or the form starts lying: :mod:`quickjob` reads the block
 the way every other launcher setting is read (malformed values fall back
 field by field, never raise), and what ``PUT /api/quickjob`` stores is

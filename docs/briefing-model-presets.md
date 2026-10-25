@@ -6,7 +6,7 @@
 
 ## 왜
 
-`~/.claunch.yaml`의 `llm:` 블록은 설정 하나가 곧 백엔드 하나였다. 다른
+`~/.claude-launcher/.claunch.yaml`의 `llm:` 블록은 설정 하나가 곧 백엔드 하나였다. 다른
 백엔드로 옮기려면 프로필·모델·엔드포인트·키를 카드에 다시 입력하거나 파일을
 손으로 고쳐야 했고, 되돌아오려면 같은 값을 다시 입력해야 했다. 프리셋은 그
 네 값을 이름 하나 뒤에 저장한다.
@@ -55,7 +55,7 @@ llm:
 - 규칙의 정본은 `src/claude_launcher/routing.py`의 `apply_session_header`와
   `apply_anthropic_auth`이고, shim과 `daemon/briefing.py`가 같은 함수를 부른다.
 - `daemon/briefing.py:briefing_request_headers()`가 호출마다 헤더를 만든다.
-  설정을 매번 다시 읽으므로 `~/.claunch.yaml`(또는 Settings 카드)의 편집이
+  설정을 매번 다시 읽으므로 `~/.claude-launcher/.claunch.yaml`(또는 Settings 카드)의 편집이
   다음 브리핑에 바로 반영된다.
 - `session_header`에 보내는 값은 **`claunch-briefing`** 이다
   (`briefing.BRIEFING_SESSION_ID`). 세션 이름을 쓰지 않는다: 브리핑은 세션의

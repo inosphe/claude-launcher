@@ -279,7 +279,7 @@ def register(sub) -> None:
         "plugin",
         help="declare plugins/marketplaces for every profile, and install them",
         description=(
-            "The declaration lives in ~/.claunch.yaml (the 'shared' block) and "
+            "The declaration lives in ~/.claude-launcher/.claunch.yaml (the 'shared' block) and "
             "is applied to every Claude Code profile, including profiles created "
             "later. Installs run Claude Code's own 'claude plugin' CLI once per "
             "profile with CLAUDE_CONFIG_DIR pointed at it."

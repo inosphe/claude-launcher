@@ -51,6 +51,7 @@ from .. import (
     usage_history,
 )
 from .. import auto_compact as auto_compact_mod
+from .. import config as config_mod
 from .. import install
 from .. import install_plan
 from .. import commit_detail, session_commits
@@ -2409,6 +2410,10 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
     mode = body.get("mode") or "keep"
     if mode not in restart_gate.PTY_HOST_MODES:
         return json_error(400, "mode must be keep or full")
+    # The successor would refuse to start, and this daemon would be gone.
+    missing = config_mod.missing_config_error()
+    if missing is not None:
+        return json_error(409, missing)
     if mode == "keep":
         refused = _stale_keep_refusal(body)
         if refused is not None:
@@ -2468,6 +2473,8 @@ async def h_restart_request_approve(request: web.Request) -> web.Response:
     try:
         record = gate.approve(decided_by="web", pty_host=pty_host,
                               keep_stale=body.get("keep_stale") is True)
+    except restart_gate.ConfigMissing as exc:
+        return json_error(409, str(exc))
     except restart_gate.StaleHost as exc:
         # The card offers both answers: "Restart with PTY host" sends
         # pty_host full, "Keep anyway" sends keep_stale (claunch-xnnct.3).
@@ -2823,7 +2830,7 @@ async def h_profiles(request: web.Request) -> web.Response:
     # One config read for the whole listing, one availability probe per
     # harness. Both used to happen inside the double loop below: fourteen
     # profiles times six harnesses is 98 rows, and each row re-read and
-    # re-parsed ~/.claunch.yaml (once per link of the profile's inheritance
+    # re-parsed ~/.claude-launcher/.claunch.yaml (once per link of the profile's inheritance
     # chain, plus once per registry lookup) and re-ran shutil.which -- which
     # on Windows walks every PATH directory against every PATHEXT extension.
     # That was ten thousand filesystem probes and a stack of YAML parses to
@@ -4693,7 +4700,7 @@ async def h_test_output_dir(request: web.Request) -> web.Response:
     Answers the saved setting ("" when unset) and the root it resolves to
     now: the built-in per-platform default when empty, the launcher home
     plus the value when relative. There is deliberately no PUT — the
-    operator edits ``~/.claunch.yaml``."""
+    operator edits ``~/.claude-launcher/.claunch.yaml``."""
     try:
         return json_response(_test_output_dir_state())
     except store.StoreError as exc:
@@ -7401,7 +7408,7 @@ async def h_providers_save(request: web.Request) -> web.Response:
     """Create or replace ``providers.<name>`` from the install form.
 
     Validated before anything is written (:func:`provider_install.save`), so a
-    400 leaves ``~/.claunch.yaml`` byte-identical — the answer is the reason,
+    400 leaves ``~/.claude-launcher/.claunch.yaml`` byte-identical — the answer is the reason,
     not a half-written entry. With ``profile``, the selection is written in the
     same atomic save, so the two cannot disagree. Answers with the fresh
     listing, which is what the page redraws from.

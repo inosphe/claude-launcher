@@ -479,7 +479,7 @@
       for (const window of shownWindows(windows)) section.append(windowLine(window));
       // The Fireworks API reports no prepaid balance (claunch-f5w4x.5).
       if (reading.data.source === "fireworks-billing" && !windows.some((w) => w.name === "credit")) {
-        section.append(node("p", "wf-note", "To show credit left, copy the balance from the Fireworks console into ~/.claunch.yaml as credit: {balance_usd: <amount>, as_of: <YYYY-MM-DD>} on this provider or profile."));
+        section.append(node("p", "wf-note", "To show credit left, copy the balance from the Fireworks console into ~/.claude-launcher/.claunch.yaml as credit: {balance_usd: <amount>, as_of: <YYYY-MM-DD>} on this provider or profile."));
       }
       const updated = toDate(reading.updatedAt);
       if (updated) {

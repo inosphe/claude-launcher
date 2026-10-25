@@ -241,6 +241,8 @@ def suite_env(grant, home: Path, result_file: Path) -> dict:
         env.pop(name, None)
     env["CLAUDE_LAUNCHER_HOME"] = str(home)
     env["CLAUNCH_INSTANCE_BASE"] = str(home)
+    # Current code puts the config file at <home>/.claunch.yaml with no
+    # override; a snapshot of older code still reads this variable.
     env["CLAUDE_LAUNCHER_SYNC_FILE"] = str(home / ".claunch.yaml")
     return env
 

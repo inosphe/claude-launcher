@@ -152,8 +152,8 @@ claunch run work:claude                  # explicit Claude selector
 | `plugin [list\|install\|uninstall\|marketplace]` | Declare [plugins and marketplaces](#plugins--shared-settings-every-profile) for every profile, and install them. |
 | `shared [KEY=VALUE ...]` | Show the `settings.json` keys every profile carries (`--unset KEY`). A dotted `KEY` writes inside a nested object, e.g. `shared permissions.defaultMode=auto` — the value claunch ships as a default. |
 | `apply [name]`         | Converge profiles onto the shared declaration (`--dry-run`, `--check`). |
-| `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
-| `sync [--mode ...]`    | Reconcile `~/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
+| `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claude-launcher/.claunch.yaml`. |
+| `sync [--mode ...]`    | Reconcile `~/.claude-launcher/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
 | `search <query> [--kind beads\|sessions]` | Rank the repository board or the daemon's sessions by meaning (needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
 | `rag status\|reindex`  | The semantic-search index: configuration, coverage, and a sync. |
 | `validate [name[:harness]]` | Run the selected harness's declared non-interactive heartbeat (all bare profile defaults if no name). |
@@ -635,7 +635,7 @@ into the new profile — carrying over the onboarding flags
 (`hasCompletedOnboarding` etc.), UI preferences and `settings.json`, while
 **stripping** account- and project-specific data (`oauthAccount`, `projects`,
 cached API-key responses) so profiles stay isolated. The `settings.json` `env`
-block is also stripped — launcher env is owned by `~/.claunch.yaml`, and
+block is also stripped — launcher env is owned by `~/.claude-launcher/.claunch.yaml`, and
 profiles get their defaults from the [template](#default-template), not from your
 global env. Each profile still logs in with its own setup-token.
 
@@ -646,7 +646,7 @@ claunch create work --no-seed       # start fully fresh (onboarding will run)
 ```
 
 `claunch create` makes the profile directory first and writes its entry into
-`~/.claunch.yaml` second, so a failure on that write (on Windows a sharing
+`~/.claude-launcher/.claunch.yaml` second, so a failure on that write (on Windows a sharing
 conflict can refuse the rename: "run the command again") leaves the directory
 behind with no entry and no seeded config. Running `create` again then reports
 `profile 'work' already exists`. `--reinit` finishes that setup in place:
@@ -684,7 +684,7 @@ claunch create work --no-install    # skip; 'claunch install work' later
 ## Per-profile environment variables
 
 Each profile can set environment variables in its `env` block. They live in the
-central config file (`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
+central config file (`~/.claude-launcher/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
 and `claunch run` and the daemon export them into the session's process, so they
 take effect immediately and **override** any value inherited from your shell.
 
@@ -707,7 +707,7 @@ claunch env work --effective                      # template + parent chain + ow
 
 ### Default template
 
-The `template` section of `~/.claunch.yaml` is a profile *layer* that applies
+The `template` section of `~/.claude-launcher/.claunch.yaml` is a profile *layer* that applies
 **under every profile**. It holds the same fields a profile entry may carry
 (`models`, `context_window`, `auto_compact_at`, `reasoning_effort`,
 `harness_options`; see [API providers](#api-providers-third-party-backends))
@@ -771,8 +771,8 @@ template:
         CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
 ```
 
-`template.yaml` only *seeds* `~/.claunch.yaml` the first time; afterwards the
-live `template` block in `~/.claunch.yaml` is authoritative (edit it directly, or
+`template.yaml` only *seeds* `~/.claude-launcher/.claunch.yaml` the first time; afterwards the
+live `template` block in `~/.claude-launcher/.claunch.yaml` is authoritative (edit it directly, or
 run `claunch template --init` to write the bootstrap seed). `claunch template`
 shows the live block.
 
@@ -852,7 +852,7 @@ serves, how much context they carry -- in a vocabulary no harness owns. At
 launch a per-harness *translator* turns that description into the harness's
 own words: Claude Code's `ANTHROPIC_*` environment, Codex's `-c key=value`
 overrides, Pi's in-process provider registration. Providers are defined and
-selected **in the config file** (`~/.claunch.yaml`, the launcher's
+selected **in the config file** (`~/.claude-launcher/.claunch.yaml`, the launcher's
 [source of truth](#configuration-source-of-truth)), which the launcher reads
 live at launch. You can edit that file directly, or use `set-provider`
 (below), which just records the selection in it.
@@ -987,7 +987,7 @@ profiles:
 
 ### Installing one from the dashboard (Settings ▸ Providers)
 
-`~/.claunch.yaml` is still the file a provider lives in, but it does not have to
+`~/.claude-launcher/.claunch.yaml` is still the file a provider lives in, but it does not have to
 be typed there: the dashboard's **Settings ▸ Providers** tab (`#/settings/providers`)
 draws the same entry as a form and writes it for you.
 
@@ -996,7 +996,7 @@ draws the same entry as a form and writes it for you.
 - **Presets are one YAML file per provider, shipped in the package** at
   `src/claude_launcher/provider-presets/<name>.yaml` (the directory the page
   prints). A preset is not an install target and not machine state: picking one
-  and saving writes `~/.claunch.yaml`, which is the only place a provider then
+  and saving writes `~/.claude-launcher/.claunch.yaml`, which is the only place a provider then
   lives and where any per-machine adjustment belongs. The set travels with the
   package, so nothing copies it and there is no second layer to drift. A file
   that does not parse is marked in the picker and the others still load.
@@ -1014,7 +1014,7 @@ draws the same entry as a form and writes it for you.
   ```
 
   A bare entry (the `provider:` wrapper left off) is accepted too, since that is
-  what copying the block out of `~/.claunch.yaml` produces.
+  what copying the block out of `~/.claude-launcher/.claunch.yaml` produces.
 - **A refusal writes nothing.** The entry is parsed with the same reader every
   launch uses and the extra keys are checked by the modules that consume them
   (`session_affinity`/`session_header`/`anthropic_auth_header` by the routing
@@ -1035,7 +1035,7 @@ draws the same entry as a form and writes it for you.
   and the two pre-schema spellings an unmigrated config may still carry, `env`
   and `api-key`. Those are merged back from the stored entry, and the page
   names them under the form. A control that does not exist cannot be cleared, so
-  removing one of them is a `~/.claunch.yaml` edit. One exception: a save that
+  removing one of them is a `~/.claude-launcher/.claunch.yaml` edit. One exception: a save that
   types a new `api_key` stores that key alone and drops the stored `api-key`
   (below) — the two are one secret under two names.
 - **`harness_options` is merged a level deeper, and the page does not name its
@@ -1055,7 +1055,7 @@ draws the same entry as a form and writes it for you.
   exactly what the page posts back, so a display flag inside it would be refused
   as an unknown field; the flag is true when any of those spellings holds a
   value. Leaving the key field empty keeps the stored key, typing one replaces
-  it, and clearing it is a `~/.claunch.yaml` edit. **Typing a key also drops a
+  it, and clearing it is a `~/.claude-launcher/.claunch.yaml` edit. **Typing a key also drops a
   stored pre-schema `api-key`.** The two spellings are one secret and
   `provider_spec.from_entry` prefers `api_key`, so keeping the old copy would
   leave a replaced secret in the file with nothing reading it — a save that
@@ -1181,7 +1181,7 @@ version 1) is still read: Claude receives the variables verbatim, and every
 other harness reads a reverse translation of them (`endpoints.openai` is
 assumed only when the Anthropic URL has no path). `claunch migrate-config
 --dry-run` shows how such a file would be rewritten to the schema above, and
-`claunch migrate-config` does it, keeping a `~/.claunch.yaml.v1.bak`. The
+`claunch migrate-config` does it, keeping a `~/.claude-launcher/.claunch.yaml.v1.bak`. The
 rewrite keeps the Claude outcome: any variable the translation would not
 reproduce is pinned under `harness_options.claude.env`, the empty
 `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` pins are dropped (the launcher
@@ -1331,7 +1331,7 @@ profiles using a provider:
   work                 fireworks-glm5p2
 ```
 
-> **Secrets.** Prefer keeping backend keys **out** of `~/.claunch.yaml` via
+> **Secrets.** Prefer keeping backend keys **out** of `~/.claude-launcher/.claunch.yaml` via
 > `set-token` (above) — the file is meant to be copied between machines. If you
 > do put an `ANTHROPIC_AUTH_TOKEN` in a provider's `env`, it is plaintext:
 > treat the file as a secret when committing or copying it.
@@ -1744,7 +1744,7 @@ the global `settings.json` keys. Seeding copies that state at **creation** time
 only, so a plugin installed afterwards reaches the one profile it was installed
 in — and the set drifts apart without anything reporting it.
 
-One declaration fixes that: the `shared` block of `~/.claunch.yaml` says what
+One declaration fixes that: the `shared` block of `~/.claude-launcher/.claunch.yaml` says what
 every Claude Code profile should have, and `claunch apply` converges the
 profiles onto it.
 
@@ -1831,10 +1831,10 @@ value each profile already has (the value it replaced was never recorded, so it
 could not be restored).
 
 Every command is idempotent, and a no-op really is one: re-declaring something
-already declared writes neither `~/.claunch.yaml` nor any profile, and runs no
+already declared writes neither `~/.claude-launcher/.claunch.yaml` nor any profile, and runs no
 `claude` at all. That matters beyond tidiness, because rewriting the config file
 is refused outright while another process holds it open — an editor with
-`~/.claunch.yaml` loaded is enough on Windows — so a command with nothing to do
+`~/.claude-launcher/.claunch.yaml` loaded is enough on Windows — so a command with nothing to do
 must stay off that path.
 
 A profile created later gets the declaration during `claunch create`, so it is
@@ -1846,7 +1846,7 @@ stores a boolean and anything unparseable stays a string.
 
 ## Configuration source of truth
 
-Every launcher-managed setting lives in **one file, `~/.claunch.yaml`**, which
+Every launcher-managed setting lives in **one file, `~/.claude-launcher/.claunch.yaml`**, which
 the launcher reads live at launch — there is no separate "export" step, because
 this file *is* the state. It holds the profile list, each profile's `harness`,
 `env`, `parent` and Claude `provider`, the default `template`,
@@ -1886,7 +1886,7 @@ any profile the file declares but whose directory is missing (creating and
 seeding it), so a config copied to a new machine just works — no import command.
 
 ```bash
-cp ~/.claunch.yaml  /backups/                 # back it up / version it / copy it
+cp ~/.claude-launcher/.claunch.yaml  /backups/                 # back it up / version it / copy it
 # on the new machine, drop it in place; the next command creates the dirs:
 claunch list
 claunch login work                            # tokens are per-machine (below)
@@ -1900,20 +1900,27 @@ per-machine secret file. Run `claunch login` for OAuth harnesses or
 `claunch set-token` for Pi/Claude providers on each machine. A plaintext provider
 token placed manually in an `env` block is still plaintext (see the
 [secrets note](#api-providers-third-party-backends)).
-Override the file's path with `CLAUDE_LAUNCHER_SYNC_FILE`.
+The file always sits in the launcher home (`<CLAUDE_LAUNCHER_HOME>/.claunch.yaml`),
+so moving the home with `CLAUDE_LAUNCHER_HOME` moves the config file with it. It
+has no path override of its own: the former `CLAUDE_LAUNCHER_SYNC_FILE` is
+ignored, and a config file at the old default `~/.claunch.yaml` is not read —
+copy it to `~/.claude-launcher/.claunch.yaml`. The daemon does not start in a
+home without this file: it prints `error: config file ... not found` and exits
+(code 3), and `claunch daemon start`/`restart`, the restart API and the restart
+gate refuse before they stop the running daemon.
 
 **Pruning.** Reconciliation only ever *creates* directories. To delete local
 profile directories that the file no longer lists (the destructive direction),
 run it explicitly:
 
 ```bash
-claunch prune --dry-run        # show orphan dirs (not declared in ~/.claunch.yaml)
+claunch prune --dry-run        # show orphan dirs (not declared in ~/.claude-launcher/.claunch.yaml)
 claunch prune                  # delete them
 ```
 
 ## Profile sync server
 
-Copying `~/.claunch.yaml` by hand works for two machines and stops scaling at
+Copying `~/.claude-launcher/.claunch.yaml` by hand works for two machines and stops scaling at
 three. `claunch sync` reconciles that file with a **sync server** — a small
 service that holds one shared document per namespace — so every machine ends up
 with the same profiles, providers and template.
@@ -1926,7 +1933,7 @@ describe *that* machine, not the profile set.
 
 ### Client setup
 
-Describe the server in `~/.claunch.yaml`:
+Describe the server in `~/.claude-launcher/.claunch.yaml`:
 
 ```yaml
 sync:
@@ -1975,7 +1982,7 @@ $ claunch sync
 synced 'alice' with https://sync.example.com  (mode: merge)
   conflicts (1, kept local):
     ! profiles.work.env.REGION   local='apac'  remote='us'
-  local changes (~/.claunch.yaml):
+  local changes (~/.claude-launcher/.claunch.yaml):
     + profiles.lab
   pushed to server:
     ~ profiles.work.env.REGION
@@ -2030,7 +2037,7 @@ upgrade that adds config keys needs no server change:
 | `PUT /api/sync/doc/{ns}` | Body `{"revision": <what you read>, "doc": {...}}`; `409` with the winning document if the revision is stale. |
 | `DELETE /api/sync/doc/{ns}` | Drop a namespace's document. |
 
-**Secrets note.** Provider auth tokens live in `~/.claunch.yaml` (see the
+**Secrets note.** Provider auth tokens live in `~/.claude-launcher/.claunch.yaml` (see the
 [providers section](#api-providers-third-party-backends)), so they are part of
 what syncs. `claunch sync` therefore refuses plain `http` to anything but
 loopback unless you set `sync.allow_insecure: true`; put the server behind TLS,
@@ -2053,7 +2060,7 @@ claunch sync-server serve --host 127.0.0.1 --port 8378
 #   then front it with nginx/caddy for TLS -> https://sync.example.com
 ```
 
-**On the desktop** (the machine whose config wins first). Add to `~/.claunch.yaml`:
+**On the desktop** (the machine whose config wins first). Add to `~/.claude-launcher/.claunch.yaml`:
 
 ```yaml
 sync:
@@ -2102,7 +2109,7 @@ claunch sync-server user ls
 ```
 
 Two accounts, two tokens, and both may write the *same* document — that is the
-whole point. Each member puts the shared namespace in their `~/.claunch.yaml`:
+whole point. Each member puts the shared namespace in their `~/.claude-launcher/.claunch.yaml`:
 
 ```yaml
 sync:
@@ -2114,7 +2121,7 @@ sync:
 claunch sync                 # first run pulls the team's profiles
 ```
 
-Bob adds a provider definition to his `~/.claunch.yaml` and shares it:
+Bob adds a provider definition to his `~/.claude-launcher/.claunch.yaml` and shares it:
 
 ```bash
 claunch sync
@@ -2128,7 +2135,7 @@ Alice picks it up on her next sync, without having touched providers herself:
 
 ```bash
 claunch sync
-#   local changes (~/.claunch.yaml):
+#   local changes (~/.claude-launcher/.claunch.yaml):
 #     + providers
 #   revision: 2
 ```
@@ -2157,9 +2164,9 @@ propagating (`claunch sync --status` says `no base for this server yet`).
 # personal (the default home)
 claunch sync
 
-# team, fully separate state (its own profiles, config file and merge base)
+# team, fully separate state (its own profiles, config file and merge base;
+# the config file is ~/.claude-launcher-team/.claunch.yaml)
 export CLAUDE_LAUNCHER_HOME=~/.claude-launcher-team
-export CLAUDE_LAUNCHER_SYNC_FILE=~/.claunch-team.yaml
 export CLAUNCH_SYNC_URL=https://sync.example.com   # the new file has no sync: block
 export CLAUNCH_SYNC_NAMESPACE=team-infra
 claunch sync --mode down                           # first run on an empty home
@@ -2167,7 +2174,7 @@ claunch sync --mode down                           # first run on an empty home
 
 #### 3. Disposable machines (CI, containers)
 
-A fresh container needs the config but has no `~/.claunch.yaml` to edit and must
+A fresh container needs the config but has no `~/.claude-launcher/.claunch.yaml` to edit and must
 never push. Every setting has an env override, so **no file editing at all**:
 
 ```bash
@@ -2471,7 +2478,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `workspace code [WS] [--worktree NAME] [--session S] [--install] [--stop]` | Open a workspace, one of its worktrees, or a session's directory in VS Code in the browser (code-server run by the daemon) and print the URL; with no workspace, list the running servers (see [VS Code in the browser](#vs-code-in-the-browser-one-code-server-per-workspace-and-worktree)). |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control. Commands run from your own shell auto-start an absent daemon, tmux-style; a managed session's shell never starts one (a `mesh send` there is queued until the daemon is up, other commands fail), and a daemon that is up but not answering is reported, never replaced. |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
-| `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
+| `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claude-launcher/.claunch.yaml`). |
 | `daemon relay [KEY [VALUE]] [--relay HANDLE] [--remove HANDLE]` | Show or set the relay uplinks (reach this daemon from outside the LAN — see below). With no argument it lists every configured relay; `--relay` targets one of several (a new handle adds it) and `--remove` drops one. |
 | `web [--open]`        | Print (and open) the web UI URL. |
 
@@ -2513,8 +2520,7 @@ else is shared with the default daemon:
 | Daemon state (sessions, meshes, token, lock, log) | Own | `~/.claude-launcher/daemons/NAME/` |
 | Port | Own (ephemeral) | its `daemon.json` |
 | Relay identity | Own | `<hostname>-NAME` |
-| Config file | **Shared** | `~/.claunch.yaml` |
-| Profiles (logins, settings, plugins), global workflows, sync merge base | **Shared** | `~/.claude-launcher/` |
+| Config file, profiles (logins, settings, plugins), global workflows, sync merge base | **Shared** | `~/.claude-launcher/` (config file `~/.claude-launcher/.claunch.yaml`) |
 
 So `claunch -L test new-session --profile work` runs the *same* `work` profile, with
 the same login, as the default daemon does.
@@ -2526,7 +2532,6 @@ To separate the rest, write the instance a **manifest** once:
 ```bash
 claunch daemon instance create team \
     --home ~/.claude-launcher-team \
-    --config ~/.claunch-team.yaml \
     --seed            # optional: start the new config as a copy of the current one
 ```
 
@@ -2534,13 +2539,14 @@ This writes `~/.claude-launcher/daemons/team/instance.yaml`:
 
 ```yaml
 home: C:\Users\me\.claude-launcher-team   # omitted = shared launcher home
-config: C:\Users\me\.claunch-team.yaml    # omitted = shared ~/.claunch.yaml
 port: 8390                                # omitted = ephemeral port
 ```
 
+The instance's config file is the one in its home
+(`~/.claude-launcher-team/.claunch.yaml`); there is no separate config path.
 From then on `-L team` alone is enough. Every command run as `claunch -L team
 ...` (or with `CLAUNCH_DAEMON=team`), the daemon it starts, and every session
-that daemon launches use the manifest's home, config file and port. Nothing has
+that daemon launches use the manifest's home (and so its config file) and port. Nothing has
 to be exported in your shell:
 
 ```bash
@@ -2553,13 +2559,15 @@ claunch daemon instance ls         # every named instance at a glance
 
 Details:
 
-- **Each key is independent.** Give only `--config` to keep the profiles
-  shared but use a different config file. Give only `--port` to pin the port.
+- **The config file goes with the home.** An instance with its own config
+  file has its own home; one that shares the home shares the config file.
+  Give only `--port` to pin the port and share both.
 - **The daemon state does not move.** It stays in
   `~/.claude-launcher/daemons/NAME/` next to the manifest, even when `home:`
   points elsewhere. That way `daemon restart --all` and `daemon instance ls`
   still see every instance from a plain shell.
-- **`--seed`** copies the config file you are currently using to `--config`.
+- **`--seed`** (with `--home`) copies the config file you are currently using
+  to `<home>/.claunch.yaml`.
   It leaves out the `sync:` block, because the sync merge base is kept per
   launcher home, and it never overwrites an existing file. Profiles declared
   in the copy are created empty in the new home on first use. Logins are
@@ -2567,16 +2575,18 @@ Details:
 - **The manifest wins over the environment.** The manifest is read from the
   home in effect before it applies (normally `~/.claude-launcher`, or
   `CLAUDE_LAUNCHER_HOME` if you set one). Its values then replace
-  `CLAUDE_LAUNCHER_HOME`, `CLAUDE_LAUNCHER_SYNC_FILE` and `CLAUNCH_DAEMON_PORT`
+  `CLAUDE_LAUNCHER_HOME` and `CLAUNCH_DAEMON_PORT`
   for that instance. To change an instance's home, edit its manifest or run
   `create --force`.
 - **Two instances cannot share one home.** A manifest whose `home:` is
   already another instance's home is refused, both at `create` and when the
   instance starts. Such a pair would silently share profiles and the merge
   base.
-- **Paths must be absolute** (`~` is allowed). The only keys are `home`,
-  `config` and `port`. Any other key is an error, so a typo does not silently
-  fall back to sharing.
+- **Paths must be absolute** (`~` is allowed). The only keys are `home` and
+  `port`. Any other key is an error, so a typo does not silently fall back to
+  sharing. A manifest written by an older version with a `config:` key is
+  refused with the path to copy the file to: move that file to
+  `<home>/.claunch.yaml` and delete the key.
 - A bad manifest stops every `claunch -L NAME` command with an error. It does
   not fall back to the shared home.
 - A manifest changes nothing for a daemon that is **already running**. The
@@ -2602,7 +2612,7 @@ later), set in the profile's common `env` (see
 ```
 
 ```yaml
-# ~/.claunch-team.yaml (the instance's config file)
+# ~/.claude-launcher-team/.claunch.yaml (the instance's config file)
 template:
   env:
     GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
@@ -2686,7 +2696,7 @@ relay writes one into its `relay.toml` on first start if none is set.
 
 The `backend_token` is a machine secret set on the relay (its `relay.toml`),
 **separate** from the browser login password. Prefer the `CLAUNCH_RELAY_TOKEN`
-env var so it need not live in `~/.claunch.yaml`. For a self-signed relay,
+env var so it need not live in `~/.claude-launcher/.claunch.yaml`. For a self-signed relay,
 `claunch daemon relay verify_tls false` accepts its certificate. The uplink
 reconnects on its own (keepalive ping, receive watchdog, backoff+jitter); while
 the relay is down the local daemon is unaffected.
@@ -2956,7 +2966,7 @@ claunch mesh ls --project launcher
   shows every project's meshes, tagging those outside the default project.
   `?project=` on `/api/sessions` and `/api/mesh` narrows an API read. The
   registry itself is `/api/projects` and the Projects card on the settings
-  page. Config lives under `projects:` in `~/.claunch.yaml`, machine-local
+  page. Config lives under `projects:` in `~/.claude-launcher/.claunch.yaml`, machine-local
   like `workspaces`.
 
 ### Workspaces (where a session may be spawned)
@@ -2970,7 +2980,7 @@ claunch workspace ls
 claunch workspace rm hq                  # unregisters; the directory stays
 ```
 
-The registry lives under `workspaces:` in `~/.claunch.yaml` (name → path) and
+The registry lives under `workspaces:` in `~/.claude-launcher/.claunch.yaml` (name → path) and
 is read live, so a workspace added in a terminal shows up in an open browser
 tab within a couple of seconds. It is **machine-local by default** — absolute
 paths mean nothing on another machine, so `workspaces` is deliberately absent
@@ -3364,7 +3374,7 @@ outer repository's board. Two boards may deliberately read one file — that is
 what `claunch-default` pinned to a workspace's board is — and the card says so
 on both rows.
 
-The registry lives under `beads.boards` in `~/.claunch.yaml` (board name →
+The registry lives under `beads.boards` in `~/.claude-launcher/.claunch.yaml` (board name →
 `.db` path) and is machine-local for the same reason `workspaces` is: the
 values are absolute paths.
 
@@ -3484,7 +3494,7 @@ first); `POST` delivers the same block and answers `{ok, delivered, source,
 chars, images, reason}`, with `reason` saying why when it did not land (not
 running, or no delivery was confirmed within 90s).
 
-Two settings sit under the matrix, stored in `~/.claunch.yaml` under
+Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` under
 `prompt_packs`:
 
 - **Default packs** (`default_packs`): packs New session and Spawn child
@@ -4002,7 +4012,7 @@ selected profile's missing harness as unavailable without offering an
 alternative picker. Spawning one that is not installed is refused up front,
 naming the program it looked for, instead of failing later as `could not spawn`.
 
-`~/.claunch.yaml` overrides or extends the set. Overriding is **per harness,
+`~/.claude-launcher/.claunch.yaml` overrides or extends the set. Overriding is **per harness,
 not per field** — a name in the config replaces that harness's whole
 definition, so a half-merged declaration (new command, inherited flags) cannot
 happen:
@@ -4043,7 +4053,7 @@ Pi's native provider/model registration.
 
 Every new user-facing session requires a **profile selector**, and that
 selector is the only source of its harness. A bare profile uses the
-`harness:` default stored under `profiles.<name>` in `~/.claunch.yaml`
+`harness:` default stored under `profiles.<name>` in `~/.claude-launcher/.claunch.yaml`
 (or inherits it, then defaults to Claude). An explicit
 `PROFILE:HARNESS` selects a harness for that execution without changing the
 YAML. Managed sessions resolve either form once and persist the canonical
@@ -4186,7 +4196,7 @@ Every Pi session claunch launches also loads a packaged tools extension
 Which builtin tools a session gets is decided in two layers:
 
 - **Per profile (the default):** `harness_options.pi.tools: {full_read: false}`
-  in `~/.claunch.yaml`, or `claunch tools PROFILE --off full_read` /
+  in `~/.claude-launcher/.claunch.yaml`, or `claunch tools PROFILE --off full_read` /
   `--on full_read`, which writes that block for you and prints the current
   defaults.
 - **Per session (an override):** `--tools full_read,…` or `--tools none` on
@@ -4543,7 +4553,7 @@ with a `stack` sub run beside it).
   args, env — from the session that spawned it. The agent chooses *who* it
   is: name, mesh handle, role, an opening `task`, optionally a `workflow`
   (a cflow run scoped to the child's own session). Each inherited field has
-  its own unlock in `~/.claunch.yaml`, alongside the limits:
+  its own unlock in `~/.claude-launcher/.claunch.yaml`, alongside the limits:
 
   ```yaml
   spawn:
@@ -4994,7 +5004,7 @@ the common declaration and immediately updates existing Claude profiles that
 use it. New profiles use the common default too. **Apply to profile** saves
 an override and updates only that profile. **Use shared default** removes its
 override and applies the current common value. Overrides are stored under
-`profiles.<name>.settings.permissions.defaultMode` in `~/.claunch.yaml` (the
+`profiles.<name>.settings.permissions.defaultMode` in `~/.claude-launcher/.claunch.yaml` (the
 setting name `permissions.defaultMode` is a dotted key) and survive subsequent
 shared changes and `claunch apply`. These overrides belong to the named profile
 and are not inherited through its parent profile.
@@ -5036,7 +5046,7 @@ spend. The key is
 never returned to the page: the field shows `stored · blank keeps it`, and
 **Remove stored key** is the one way to take it back out — of the backend the
 card is editing, block or preset, and no other. The card writes the
-`llm:` block of `~/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`:
+`llm:` block of `~/.claude-launcher/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`:
 `presets:` and `preset:` beside the four backend fields), which is
 still hand-editable; saving a different backend drops the cached briefings so
 the next card is written by the model just chosen. While endpoint, model and
@@ -5401,7 +5411,7 @@ read from the environment variable `jev_api_key_env` names
 (`TYPESAFE_API_KEY`). Every judgment is logged to
 `~/.claude-launcher/daemon/qa_nudge.jsonl`.
 
-Daemon settings live under `daemon:` in `~/.claunch.yaml`
+Daemon settings live under `daemon:` in `~/.claude-launcher/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
 `cflow_reminder`, `cflow_reminder_interval`, `role_reminder`,
 `role_reminder_interval`, `prompt_pack_reminder`,
@@ -5822,7 +5832,7 @@ outside — a supervising script or another agent can watch
   to its harness. Claude keeps the existing `ANTHROPIC_*`/`CLAUDE_CODE_*`
   precedence; those namespaces are not copied to unrelated harnesses.
 - Launcher config (`harness`, `env`, `parent`, Claude provider,
-  templates/definitions) lives in `~/.claunch.yaml`. Secrets stay local.
+  templates/definitions) lives in `~/.claude-launcher/.claunch.yaml`. Secrets stay local.
 
 A profile directory typically holds:
 
@@ -5839,12 +5849,11 @@ A profile directory typically holds:
 
 | Environment variable        | Purpose |
 | --------------------------- | ------- |
-| `CLAUDE_LAUNCHER_HOME`      | Base directory for profiles (default `~/.claude-launcher`). |
+| `CLAUDE_LAUNCHER_HOME`      | Base directory for profiles and the config file `<home>/.claunch.yaml` (default `~/.claude-launcher`). |
 | `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`). |
 | `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
 | `CLAUDE_LAUNCHER_USAGE_MODEL` | Model for the setup-token usage fallback call (default Haiku). |
 | `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
-| `CLAUDE_LAUNCHER_SYNC_FILE` | The config source of truth (default `~/.claunch.yaml`). |
 | `CLAUNCH_SYNC_URL`          | [Sync server](#profile-sync-server) URL, overriding `sync.url`. |
 | `CLAUNCH_SYNC_TOKEN`        | Sync auth token, overriding `sync.token` (the preferred place for it). |
 | `CLAUNCH_SYNC_NAMESPACE`    | Synced document's namespace, overriding `sync.namespace`. |
@@ -5853,7 +5862,7 @@ A profile directory typically holds:
 | `CLAUNCH_DAEMON_PORT`       | Pin a named instance's port (default ephemeral; an instance manifest's `port:` sets it). |
 
 An [instance manifest](#giving-an-instance-its-own-home-and-config) sets
-`CLAUDE_LAUNCHER_HOME`, `CLAUDE_LAUNCHER_SYNC_FILE` and `CLAUNCH_DAEMON_PORT`
+`CLAUDE_LAUNCHER_HOME` and `CLAUNCH_DAEMON_PORT`
 for everything run under `-L NAME`, over any value already in the environment.
 The instance's sessions inherit these variables and `CLAUNCH_DAEMON`, so a
 `claunch` command run inside one reaches its own instance without `-L`. The

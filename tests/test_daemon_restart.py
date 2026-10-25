@@ -17,6 +17,8 @@ import asyncio
 import os
 import time
 
+import pytest
+
 from claude_launcher.daemon import __main__ as daemon_main
 from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
@@ -125,10 +127,12 @@ def _drive_main(monkeypatch, code: int, *, bound_port: int = 0) -> list:
     return spawned
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_restart_exit_spawns_the_successor(home, monkeypatch):
     assert len(_drive_main(monkeypatch, daemon_main.RESTART_CODE)) == 1
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_plain_exit_spawns_nothing(home, monkeypatch):
     assert _drive_main(monkeypatch, 0) == []
 
@@ -136,6 +140,7 @@ def test_a_plain_exit_spawns_nothing(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 # the address: a restart the browser can follow
 # --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("daemon_config")
 def test_a_named_instance_hands_its_port_to_the_successor(home, monkeypatch):
     """An instance binds an ephemeral port, so nothing but this would put the
     successor back on the address the page that asked for the restart is on.
@@ -153,6 +158,7 @@ def test_a_named_instance_hands_its_port_to_the_successor(home, monkeypatch):
     assert "CLAUNCH_DAEMON_PORT" not in os.environ
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_the_successor_binds_the_handed_port_and_keeps_it_from_its_sessions(
     home, monkeypatch
 ):
@@ -183,6 +189,7 @@ def test_the_successor_binds_the_handed_port_and_keeps_it_from_its_sessions(
     assert "CLAUNCH_DAEMON_PORT" not in seen["env"]
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_a_pinned_port_is_left_alone(home, monkeypatch):
     """Already pinned: the successor inherits that pin as-is, so there is
     nothing for this to override — it hands over no environment at all."""
@@ -194,6 +201,7 @@ def test_a_pinned_port_is_left_alone(home, monkeypatch):
     assert os.environ["CLAUNCH_DAEMON_PORT"] == "9999"
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_the_default_daemon_pins_nothing(home, monkeypatch):
     """Its port is fixed in the config; the successor rebinds it by itself,
     and an env pin would outlive a later config edit."""
@@ -207,6 +215,7 @@ def test_the_default_daemon_pins_nothing(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 # the lock is free before the loop's teardown joins the executor
 # --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("daemon_config")
 def test_the_lock_is_released_while_an_executor_thread_is_still_blocked(
     home, monkeypatch
 ):

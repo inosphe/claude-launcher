@@ -1297,7 +1297,7 @@ def test_every_role_a_packaged_workflow_declares_has_a_pack():
     stance and none of the guidance the stance defers to.
 
     Checked against :data:`DEFAULT_ROLE_PACKS`, not against the live mapping:
-    a saved ``role_packs`` block in ``~/.claunch.yaml`` replaces the packaged
+    a saved ``role_packs`` block in ``~/.claude-launcher/.claunch.yaml`` replaces the packaged
     one whole, so an operator who has edited it must add the row themselves —
     that is a setting, not an invariant of this repository.
     """

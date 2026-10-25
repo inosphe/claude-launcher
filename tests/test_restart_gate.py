@@ -21,6 +21,8 @@ import argparse
 import asyncio
 import time
 
+import pytest
+
 from claude_launcher.daemon import restart_notice
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.manager import SessionManager
@@ -1069,6 +1071,7 @@ def test_a_human_shell_restart_passes_the_mode_on(home, monkeypatch, capsys):
     assert "with the PTY host" in capsys.readouterr().out
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_daemon_client_restart_sends_the_mode(monkeypatch):
     from claude_launcher import daemon_client
 

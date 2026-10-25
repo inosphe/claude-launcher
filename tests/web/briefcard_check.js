@@ -254,7 +254,7 @@ const kv = (li) => {
   check("no LLM points at the config to write",
         note(s3).textContent,
         "no LLM configured — briefing off — pick a profile and model in "
-        + "Settings ▸ Briefing model (the llm: block of ~/.claunch.yaml)");
+        + "Settings ▸ Briefing model (the llm: block of ~/.claude-launcher/.claunch.yaml)");
 
   const s4 = row("s4");
   answer = { status: 404, body: { error: "no record" } };
@@ -302,7 +302,7 @@ const kv = (li) => {
   check("its tooltip points at the config to write",
         toggle(s6).title,
         "briefing off — pick a profile and model in Settings ▸ Briefing model "
-        + "(the llm: block of ~/.claunch.yaml)");
+        + "(the llm: block of ~/.claude-launcher/.claunch.yaml)");
   check("the open card is folded away while off", card(s6), null);
   ctx.setLLM(true);
   ctx.apply();

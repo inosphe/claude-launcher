@@ -1,4 +1,4 @@
-"""The store is the single source of truth: read/write of ~/.claunch.yaml."""
+"""The store is the single source of truth: read/write of ~/.claude-launcher/.claunch.yaml."""
 
 from __future__ import annotations
 
@@ -336,6 +336,5 @@ def test_load_disk_ttl_ignores_a_stale_cache_from_a_different_path(
     (as it does between tests sharing this module's globals)."""
     store.save({"profiles": {"a": {"env": {"X": "1"}}}})
     store.load()
-    other = home / "other.claunch.yaml"
-    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(other))
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(home / "other-home"))
     assert store.load() == {"version": store.VERSION}

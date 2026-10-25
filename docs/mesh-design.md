@@ -1384,7 +1384,7 @@ would strand all three, silently. `--no-restore` on a root still marks the
 whole subtree ephemeral. What a restore does *not* bring back is the drive —
 every session returns resumed and idle, waiting to be told to go on.
 
-**2. The spawn policy** (`spawn:` in `~/.claunch.yaml`, see
+**2. The spawn policy** (`spawn:` in `~/.claude-launcher/.claunch.yaml`, see
 `claude_launcher/spawn.py`). A child **inherits** its parent's harness,
 profile, cwd, args and env; the agent supplies only what makes it a
 different worker — name, handle, role, opening task. Each inherited field

@@ -112,6 +112,7 @@ def _daemon_args(action: str = "restart", **kw) -> argparse.Namespace:
     return argparse.Namespace(action=action, all=False, force=False, **kw)
 
 
+@pytest.mark.usefixtures("daemon_config")
 def test_the_record_is_on_disk_before_the_daemon_is_stopped(home, monkeypatch):
     """The whole fix is this ordering, so the test is about the moment, not
     the outcome: what ``stop`` can see when it is called.

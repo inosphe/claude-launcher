@@ -1,6 +1,6 @@
 """Profile/provider allow-lists for selecting an execution harness.
 
-``allowed_harnesses`` is an optional additive policy in ``~/.claunch.yaml``.
+``allowed_harnesses`` is an optional additive policy in ``~/.claude-launcher/.claunch.yaml``.
 Every profile constraint in the inheritance chain and the effective provider's
 constraint must admit a harness.  Missing fields add no restriction; an empty
 list deliberately admits none.  Keeping the verdict here gives CLI, daemon,

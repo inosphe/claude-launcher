@@ -2354,7 +2354,7 @@ async function runSessionSearch(q) {
   if (!q) { setSessionSearch(""); return; }
   if (!ragConfigured) {
     sessionSearch = { q, hits: null, pending: false, index: null,
-                      error: "semantic search needs the rag: block in ~/.claunch.yaml" };
+                      error: "semantic search needs the rag: block in ~/.claude-launcher/.claunch.yaml" };
     syncSessionSearchNote();
     return;
   }
@@ -10844,7 +10844,7 @@ let briefingLLM = true;
    reader can act on, and keeps the config key for whoever edits the file. */
 const BRIEFING_OFF_HINT =
   "briefing off — pick a profile and model in Settings ▸ Briefing model "
-  + "(the llm: block of ~/.claunch.yaml)";
+  + "(the llm: block of ~/.claude-launcher/.claunch.yaml)";
 
 /* The states the summariser is allowed to claim. blocked and waiting are
    the two where the reader may BE the unblock, so they carry the loud
@@ -12712,7 +12712,7 @@ function newProfileHarnessName(f, selector = "") {
    passes; what the backend answers on is a different string, and it is the
    one nobody can see from here. On Claude the alias is resolved out of the
    profile's own environment (ANTHROPIC_DEFAULT_SONNET_MODEL, which a
-   provider, a profile or a borrow in ~/.claunch.yaml decides) and a form
+   provider, a profile or a borrow in ~/.claude-launcher/.claunch.yaml decides) and a form
    never reads that file, so the daemon publishes the resolution per profile
    (profile_details[].model_ids) and this only spells it out.
 
@@ -16486,7 +16486,7 @@ $("new-session").addEventListener("input", (event) => {
    that decides what runs — harness, profile, auth, directory, args — so
    those rows start greyed. WHICH of them it may still be asked is not this
    form's opinion though: it is the spawn policy's, field by field (the
-   per-field unlocks in ~/.claunch.yaml), and the daemon publishes exactly
+   per-field unlocks in ~/.claude-launcher/.claunch.yaml), and the daemon publishes exactly
    that, per parent. So the form asks, and hands back the rows the policy
    opens — the same rows, from the same report, as the CLI wizard and the
    spawn modal. A form that offers what it cannot send teaches the policy
@@ -16670,7 +16670,7 @@ function syncSpawnMode() {
   // The policy's own answer, taken here because the harness rules further
   // down overrule it row by row. Two different facts shut a row and they
   // need different words: the spawn.* policy, which an unlock in
-  // ~/.claunch.yaml opens, and what the child itself runs, which no unlock
+  // ~/.claude-launcher/.claunch.yaml opens, and what the child itself runs, which no unlock
   // opens. After the overrules, `.disabled` alone cannot tell them apart --
   // and the hint then tells an operator who HAS unlocked a row that the
   // unlock did not take.
@@ -16726,7 +16726,7 @@ function syncSpawnMode() {
     syncNewModelOptions(f, childHarness, childCapabilities, parent);
     // Named, not merely greyed: "inherits everything" is true of a locked
     // form and of an open one alike, and the operator who unlocked profile
-    // in ~/.claunch.yaml needs to see which rows are still shut to know the
+    // in ~/.claude-launcher/.claunch.yaml needs to see which rows are still shut to know the
     // daemon read the file. Which is also why the two reasons are spelled
     // apart below: one sentence for both would answer "did the unlock take?"
     // with "no" on a row the unlock opened and the harness then closed.
@@ -16748,7 +16748,7 @@ function syncSpawnMode() {
       `a child of ${parent.name}: it inherits that session's setup, and the ` +
       `rows left open below are what may differ` +
       (byPolicy.length
-        ? ` — ${byPolicy.join(", ")} stay its parent's (the spawn.* unlocks in ~/.claunch.yaml)`
+        ? ` — ${byPolicy.join(", ")} stay its parent's (the spawn.* unlocks in ~/.claude-launcher/.claunch.yaml)`
         : "") +
       (byChild.length
         ? `${byPolicy.length ? ";" : " —"} ${byChild.join(", ")} ` +
@@ -30004,7 +30004,7 @@ function beadsSearchBox() {
   box.value = beadsSearch.q;
   box.placeholder = ragConfigured
     ? "search the board by meaning — Enter"
-    : "search needs the rag: block in ~/.claunch.yaml";
+    : "search needs the rag: block in ~/.claude-launcher/.claunch.yaml";
   box.title = "Enter ranks every issue of the board by meaning (and by id/title); Esc clears";
   box.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); box.blur(); runBeadsSearch(box.value); }
@@ -30029,7 +30029,7 @@ async function runBeadsSearch(q) {
   if (!q) { clearBeadsSearch(); return; }
   if (!ragConfigured) {
     beadsSearch = { q, results: null, pending: false, index: null, reranked: false,
-                    error: "semantic search needs the rag: block in ~/.claunch.yaml" };
+                    error: "semantic search needs the rag: block in ~/.claude-launcher/.claunch.yaml" };
     renderBeads();
     return;
   }
@@ -34200,7 +34200,7 @@ function reasoningEffortEditor(row) {
   fallback.value = "";
   select.appendChild(fallback);
   const choices = effortChoices.slice();
-  // A value written by hand in ~/.claunch.yaml stays visible and selectable:
+  // A value written by hand in ~/.claude-launcher/.claunch.yaml stays visible and selectable:
   // dropping it from the list would show the select on an option that is not
   // the value on disk, and the next Save would silently rewrite the config.
   const declared = row.reasoning_effort_declared || "";
@@ -35185,7 +35185,7 @@ function vscodePanel() {
   const cur = st.settings || {};
   const draft = vscodeDraft || { ...cur };
   const sc = el("section", "prompt-preset-settings");
-  sc.appendChild(el("h3", null, "settings (vscode: in ~/.claunch.yaml)"));
+  sc.appendChild(el("h3", null, "settings (vscode: in ~/.claude-launcher/.claunch.yaml)"));
   const form = el("form", "vscode-settings");
   const row = (labelText, input, note) => {
     const r = el("label", "vscode-setting");
@@ -35598,7 +35598,7 @@ async function statusCheckRemove(row) {
 
 /* Briefing model (#/settings) — which backend composes the summaries.      */
 /* The feature used to be reachable only by hand-editing the llm: block of  */
-/* ~/.claunch.yaml, and every inert briefing control on the page said so.   */
+/* ~/.claude-launcher/.claunch.yaml, and every inert briefing control on the page said so.   */
 /* A profile is the short way to say it: the profile's provider already     */
 /* records an OpenAI-compatible endpoint, the key that opens it and the     */
 /* models it serves, so the card offers the profiles that qualify and lets  */
@@ -37155,7 +37155,7 @@ function ptyHostSettingCard() {
 
 /* Test output directory (claunch-pyv3d.1) -- daemon.test_output_dir, read
    with GET /api/test-output-dir. Read-only on purpose: the operator edits
-   ~/.claunch.yaml to change it. The card shows the saved value (or that
+   ~/.claude-launcher/.claunch.yaml to change it. The card shows the saved value (or that
    the default root is in use) and where that root is now -- the directory
    every session's pytest basetemp and $CLAUNCH_TEST_DIR (<root>/<session>)
    live under, reaped when the session ends. */
@@ -37183,7 +37183,7 @@ function testOutputDirCard() {
   card.appendChild(el("p", "wf-note",
     "Root every session's test outputs are written under: pytest's basetemp " +
     "and $CLAUNCH_TEST_DIR (<root>/<session>, reaped when the session " +
-    "ends). Same setting as daemon.test_output_dir in ~/.claunch.yaml — " +
+    "ends). Same setting as daemon.test_output_dir in ~/.claude-launcher/.claunch.yaml — " +
     "shown read-only here; edit the file to change it."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
@@ -37374,7 +37374,7 @@ function sweepBatchSettingCard() {
     "Neither value delays a merge or the next leader round, which does not wait " +
     "for sweeps; they decide when the sweep starts and how many merges one " +
     "sweep covers. Same settings as daemon.delayed_sweep_batch_size / " +
-    "delayed_sweep_batch_settle in ~/.claunch.yaml. A saved value applies " +
+    "delayed_sweep_batch_settle in ~/.claude-launcher/.claunch.yaml. A saved value applies " +
     "from the next sweep clock tick (within 15 seconds), no restart needed."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
@@ -37398,7 +37398,7 @@ function sweepBatchSettingCard() {
   return card;
 }
 
-/* Model tiers (claunch-cvife) -- the model_tiers: block of ~/.claunch.yaml,
+/* Model tiers (claunch-cvife) -- the model_tiers: block of ~/.claude-launcher/.claunch.yaml,
    read and written with GET/PUT /api/model-tiers. A tier is a named routing
    slot (economy / standard / heavy...); its entries are ordered
    (profile, model, harness) tuples and the active pointer picks the entry
@@ -37604,7 +37604,7 @@ function modelTiersCard() {
     "Named routing slots of ordered (profile, model, harness) entries; the " +
     "marked entry is what the tier resolves to. An empty harness/model means " +
     "the profile default / the default role model. Edits save immediately. " +
-    "Same settings as the model_tiers: block of ~/.claunch.yaml."));
+    "Same settings as the model_tiers: block of ~/.claude-launcher/.claunch.yaml."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
     card.appendChild(el("p", "wf-note", "reading…"));
@@ -37688,7 +37688,7 @@ function providerAffinityCard() {
     "x-session-affinity header so its requests keep reaching the replica that " +
     "holds its cache. Applies per provider, live — running sessions and shims " +
     "pick a change up without a daemon restart. Same key as " +
-    "providers.<name>.session_affinity in ~/.claunch.yaml."));
+    "providers.<name>.session_affinity in ~/.claude-launcher/.claunch.yaml."));
   card.appendChild(el("p", "wf-note",
     "Prompt cache TTL is the claude harness's own setting, per provider: it " +
     "defaults to 1h on a Claude subscription and 5m on an API key, and " +
@@ -37736,11 +37736,11 @@ function providerAffinityCard() {
 /* Installing a provider from the dashboard (Settings ▸ Providers,
    #/settings/providers). The server half is claude_launcher.provider_install:
    GET /api/providers is the listing, POST /api/providers validates and writes
-   ~/.claunch.yaml atomically, POST /api/providers/check makes one real call to
+   ~/.claude-launcher/.claunch.yaml atomically, POST /api/providers/check makes one real call to
    the backend. A preset is only a starting value for this form — one YAML file
    per provider shipped in the package (src/claude_launcher/provider-presets/),
    loaded and reported by the server — and every field stays editable after it
-   fills. Installing writes ~/.claunch.yaml, which is where the provider then
+   fills. Installing writes ~/.claude-launcher/.claunch.yaml, which is where the provider then
    lives; presets themselves are not installed anywhere. */
 let providersState = {
   data: null,        // the GET payload: providers, presets, profiles, fields
@@ -37961,12 +37961,12 @@ function providersPanel() {
   head.appendChild(refresh);
   card.appendChild(head);
   card.appendChild(el("p", "wf-note",
-    "A provider is a backend in ~/.claunch.yaml: where it is, which models it " +
+    "A provider is a backend in ~/.claude-launcher/.claunch.yaml: where it is, which models it " +
     "serves, how much context they carry. Saving here writes that entry " +
     "atomically — a refused entry changes nothing. Presets are starting values " +
     "for this form, one YAML file per provider shipped with the package " +
     "(the directory named below); a per-machine adjustment belongs in " +
-    "~/.claunch.yaml, not in the preset. Leave the form empty to fill it in."));
+    "~/.claude-launcher/.claunch.yaml, not in the preset. Leave the form empty to fill it in."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.data) {
     if (!st.error) card.appendChild(el("p", "wf-note", "reading…"));
@@ -50350,7 +50350,7 @@ async function prModalGo(st) {
    The wizard's spawn form shrunk to the child a leader actually dispatches:
    a worker-role session driving the worker workflow, in a checkout of its
    own, briefed with one task. Everything but the task is prefilled from the
-   `quick_job:` block of ~/.claunch.yaml (GET /api/quickjob), and the form
+   `quick_job:` block of ~/.claude-launcher/.claunch.yaml (GET /api/quickjob), and the form
    can write edited defaults back (PUT) — the YAML stays the single source,
    the form is just a hand on it. What a child MAY be is still the spawn
    policy's call: a default the policy refuses is refused at spawn time,
@@ -50401,13 +50401,13 @@ function sessQuickJob(data) {
   box.appendChild(form);
 
   // What this panel IS, now that the spawn wizard does the spawning: the
-  // hand on the quick_job block of ~/.claunch.yaml, plus the one button that
+  // hand on the quick_job block of ~/.claude-launcher/.claunch.yaml, plus the one button that
   // hands those defaults to the wizard. It is deliberately NOT a second
   // spawn form — every field a child can differ on lives in the wizard, and
   // a panel that offered them too would be a second reading of the policy.
   form.appendChild(el(
     "p", "wf-note",
-    "the quick_job defaults from ~/.claunch.yaml — role, workflow and " +
+    "the quick_job defaults from ~/.claude-launcher/.claunch.yaml — role, workflow and " +
     "worktree for the workers this leader dispatches. Save as defaults " +
     "writes them back; Spawn worker hands them to the spawn wizard, where " +
     "the task is typed and the spawn actually happens"
@@ -50439,7 +50439,7 @@ function sessQuickJob(data) {
   spawnBtn.disabled = true;
   const saveBtn = el("button", "wf-btn option", "Save as defaults");
   saveBtn.title = "write role/workflow/worktree back to the quick_job block " +
-    "of ~/.claunch.yaml";
+    "of ~/.claude-launcher/.claunch.yaml";
   saveBtn.disabled = true;
   const btns = el("div", "sess-quickjob-btns");
   btns.append(spawnBtn, saveBtn);
@@ -50522,7 +50522,7 @@ function sessQuickJob(data) {
 
     // Same rule as the wizard's: a picker emptied by a failed fetch says so.
     // Here it matters twice over, because these two values are what gets
-    // WRITTEN BACK to ~/.claunch.yaml — saving an empty role over a good one
+    // WRITTEN BACK to ~/.claude-launcher/.claunch.yaml — saving an empty role over a good one
     // because /api/roles was down is a silent edit of the user's config.
     const srcNote = spawnSourceNote(spawnMissingSources({ roles, workflows: wfs }));
     if (srcNote) {
@@ -50598,7 +50598,7 @@ function sessQuickJob(data) {
       return;
     }
     defaults = { ...defaults, ...(doc.quick_job || {}) };
-    say("saved to ~/.claunch.yaml (quick_job)");
+    say("saved to ~/.claude-launcher/.claunch.yaml (quick_job)");
   });
 
   return box;

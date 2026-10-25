@@ -639,7 +639,7 @@ def opening(recorded) -> str:
 # --------------------------------------------------------------------------- #
 # role → pack: packs a mesh role makes mandatory
 # --------------------------------------------------------------------------- #
-#: Where the mapping lives in the central config (``~/.claunch.yaml``).
+#: Where the mapping lives in the central config (``~/.claude-launcher/.claunch.yaml``).
 CONFIG_KEY = "prompt_packs"
 #: What an untouched config means. A role here is matched against a session's
 #: primary role and its subroles alike, so ``unreal`` held beside ``worker``

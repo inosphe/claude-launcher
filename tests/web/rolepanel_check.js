@@ -239,7 +239,7 @@ async function main() {
   check("save sends role/workflow/worktree and nothing else", put &&
     JSON.stringify(Object.keys(put.body).sort()) ===
     JSON.stringify(["role", "workflow", "worktree"]), put && put.body);
-  check("save names the yaml it wrote", texts(box).includes("~/.claunch.yaml"));
+  check("save names the yaml it wrote", texts(box).includes("~/.claude-launcher/.claunch.yaml"));
 
   /* a leader that may not spawn is told so before anything is dispatched */
   ctx.drop();
@@ -340,7 +340,7 @@ async function main() {
 
   /* ---- a picker emptied by a failed fetch says so, and refuses to save ---
      The panel's two pickers are also what "Save as defaults" WRITES to
-     ~/.claunch.yaml. So a dead /api/roles is worse here than in the wizard:
+     ~/.claude-launcher/.claunch.yaml. So a dead /api/roles is worse here than in the wizard:
      the role list degrades to empty, the picker holds the placeholder, and
      one press of Save would put that empty string over the user's real
      default. The warning has to be visible and the save has to be shut. */
