@@ -60,7 +60,9 @@ llm:
 - `session_header`에 보내는 값은 **`claunch-briefing`** 이다
   (`briefing.BRIEFING_SESSION_ID`). 세션 이름을 쓰지 않는다: 브리핑은 세션의
   한 턴이 아니라 데몬의 요약 호출이고, 사용자가 상류에서 그것을 구분해
-  보이게 해 달라고 요청했다(2026-10-25).
+  보이게 해 달라고 요청했다(2026-10-25). 데몬의 다른 두 호출자도 같은 방식으로
+  자기 표시를 쓴다 — 관찰은 `claunch-observer`(`observer.OBSERVER_SESSION_ID`),
+  의미 검색은 `claunch-rag`(`rag.RAG_SESSION_ID`, `docs/rag-search.md`).
 - `endpoint`/`api_key`를 직접 적은 프리셋은 어느 provider 항목에도 속하지
   않으므로 규칙이 적용되지 않는다.
 - 값이 잘못된 경우(헤더 이름 규칙 위반) 브리핑 호출은

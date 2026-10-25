@@ -1120,6 +1120,11 @@ RAG_DEFAULTS = {
     #: Derived, never read from the file: why ``source: profile`` resolved
     #: to no endpoint (empty when it did, or when the source is ``custom``).
     "profile_error": "",
+    #: Derived, never read from the file: the provider whose request-header
+    #: rules (``session_header``, ``anthropic_auth_header``) this call follows.
+    #: Set for ``source: profile`` only — a typed endpoint belongs to no
+    #: provider entry, so no rule applies to it.
+    "provider": "",
 }
 
 
@@ -1142,6 +1147,11 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     resolved is the not-configured case, with the reason in
     ``profile_error``. ``CLAUNCH_RAG_API_KEY`` is a key for the typed
     endpoint and so applies to ``custom`` only.
+
+    ``provider`` is the derived provider name behind a ``profile`` source
+    (empty for ``custom``), so the caller can apply that provider's request
+    header rules. It is derived like ``profile_error`` and never read from
+    the file.
     """
     import os
 
@@ -1155,12 +1165,14 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     out["source"] = "profile" if block.get("source") == "profile" else "custom"
     out["profile_error"] = ""
     if out["source"] == "profile":
-        out["base_url"], out["api_key"] = "", ""
+        out["base_url"], out["api_key"], out["provider"] = "", "", ""
         if not out["profile"]:
             out["profile_error"] = "no profile selected"
         else:
             try:
-                out["base_url"], out["api_key"] = rag_profile_backend(out["profile"], doc)
+                out["base_url"], out["api_key"], out["provider"] = rag_profile_backend(
+                    out["profile"], doc
+                )
             except ValueError as exc:
                 out["profile_error"] = str(exc)
     else:
@@ -1190,8 +1202,10 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     return out
 
 
-def rag_profile_backend(name: str, doc: Optional[dict] = None) -> Tuple[str, str]:
-    """``(base_url, api_key)`` for semantic search through profile ``name``.
+def rag_profile_backend(
+    name: str, doc: Optional[dict] = None
+) -> Tuple[str, str, str]:
+    """``(base_url, api_key, provider)`` for semantic search through profile ``name``.
 
     The same resolution the Observer and the session briefing perform: the
     profile's provider records the OpenAI-compatible endpoint, and the key is
@@ -1199,6 +1213,12 @@ def rag_profile_backend(name: str, doc: Optional[dict] = None) -> Tuple[str, str
     base URL is the ``/v1`` root (a Chat Completions URL recorded there is cut
     back to it) because ``/embeddings`` and ``/rerank`` hang off it. Raises
     ``ValueError`` with a message that names no secret.
+
+    ``provider`` is the effective provider name, reported so the call can
+    follow the request-header rules that provider declares
+    (:func:`routing.apply_session_header`, :func:`routing.apply_anthropic_auth`)
+    the way a harness behind the shim does — the daemon's own embedding calls
+    reach the same upstream with no shim in their path.
     """
     from . import lineage, profile as profile_mod, provider_spec, providers
 
@@ -1214,7 +1234,11 @@ def rag_profile_backend(name: str, doc: Optional[dict] = None) -> Tuple[str, str
             f"profile {prof.name!r} has no OpenAI-compatible endpoint "
             f"(set providers.<provider>.endpoints.openai)"
         )
-    return base, str(lineage.stored_auth_token(prof) or spec.api_key or "")
+    return (
+        base,
+        str(lineage.stored_auth_token(prof) or spec.api_key or ""),
+        providers.resolve_name(prof, doc),
+    )
 
 
 def rag_configured(cfg: dict) -> bool:

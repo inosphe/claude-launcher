@@ -62,6 +62,30 @@ process only as the `Authorization` header; status and error messages never
 carry it. `sync.sections` does not include `rag` by default, so a synced
 config does not carry the key unless the operator lists the section.
 
+### provider의 요청 헤더 규칙
+
+`source: profile`이면 호출은 그 프로필의 provider를 통해 나간다. provider가
+`session_header`나 `anthropic_auth_header`를 선언했으면 그 규칙이 **임베딩과
+리랭크 호출에도** 적용된다. 인덱서는 상류를 직접 부르고 shim이 경로에 없으므로,
+규칙을 여기서 적용하지 않으면 OpenCode Go 같은 상류가 모든 동기화를
+`400 MissingSessionID`로 거절한다(브리핑 호출에서 2026-10-25에 같은 원인으로
+재현됐다, `claunch-acy2f`).
+
+- 규칙의 정본은 `src/claude_launcher/routing.py`의 `apply_session_header`와
+  `apply_anthropic_auth`이고, shim·`daemon/briefing.py`·`daemon/observer.py`가
+  같은 함수를 부른다.
+- `daemon/rag.py:request_headers()`가 `RagClient._session()`마다 헤더를 만든다.
+  설정을 매번 다시 읽으므로 provider 편집이 다음 동기화에 바로 반영된다.
+- `session_header`에 보내는 값은 **`claunch-rag`** 이다 (`rag.RAG_SESSION_ID`).
+  색인 대상 세션의 이름을 쓰지 않는다: 이 호출은 세션의 한 턴이 아니라 데몬의
+  색인 작업이고, 상류에서 그것이 구분되어 보여야 한다.
+- `provider`는 `store.rag_config()`가 `source: profile`일 때만 채운다.
+  `base_url`/`api_key`를 직접 적은 `custom` 블록은 어느 provider 항목에도
+  속하지 않으므로 규칙이 적용되지 않는다.
+- 값이 잘못된 경우(헤더 이름 규칙 위반) 호출은 `RagError`로 실패하며 메시지에
+  설정 키가 들어간다. shim처럼 헤더를 건너뛰고 계속 보내는 선택지는 여기 없다 —
+  상류가 어차피 거절하므로 건너뛰면 원인을 감춘다.
+
 `verify_tls` exists because the target endpoint's certificate chain fails
 Python verification ("Basic Constraints of CA cert not marked critical");
 the daemon's relay block already needed the same switch for the same domain.

@@ -49,11 +49,12 @@ import json
 import logging
 import ssl
 from datetime import datetime, timezone
+from typing import Dict
 
 import aiohttp
 from aiohttp import web
 
-from .. import atomic, lineage, profile, provider_spec, providers, store
+from .. import atomic, lineage, profile, provider_spec, providers, routing, store
 from . import briefing, paths, transcript_view, observer_reports, session_events, search_records
 from .observer_filter import communication_only, visible
 
@@ -249,17 +250,60 @@ def configuration():
     if not endpoint or not key:
         raise ValueError("관찰 프로파일에 OpenAI 호환 endpoint와 API 키가 필요합니다.")
     return {"profile": name, "model": str(block.get("model") or "deepseek-flash"),
-            "endpoint": endpoint, "api_key": key}
+            "endpoint": endpoint, "api_key": key,
+            "provider": providers.resolve_name(p, doc)}
+
+
+#: The session id this caller sends a provider's required session header
+#: under. A fixed mark for the observer feature, not the observed session's
+#: name: one observer pass may cover several sessions, and the user asked for
+#: the daemon's own calls to be distinguishable from a session's turn at the
+#: upstream (2026-10-25, claunch-acy2f). Shaped like
+#: :data:`routing.SESSION_HEADER_FALLBACK` and
+#: :data:`daemon.briefing.BRIEFING_SESSION_ID`, so the three read as the same
+#: kind of value.
+OBSERVER_SESSION_ID = "claunch-observer"
+
+
+def request_headers(cfg: dict) -> Dict[str, str]:
+    """The request headers one observer call goes out with.
+
+    The OpenAI-compatible shape (``Authorization`` bearer) plus whatever
+    per-provider rule :mod:`claude_launcher.routing` declares for the provider
+    this profile resolves to. The observer talks to the upstream directly — no
+    shim in its path — so a provider that refuses a request without its own
+    session header (OpenCode Go answers ``400 MissingSessionID``) would reject
+    every pass, which is exactly what happened to the briefing call before
+    :func:`daemon.briefing.briefing_request_headers` existed.
+
+    ``cfg["provider"]`` is empty for a profile whose provider cannot be
+    resolved by name; no rule applies then and the plain headers go out.
+
+    A malformed provider value raises :class:`ValueError` naming the config
+    key, matching :func:`configuration`'s other refusals rather than the
+    shim's log-and-skip: the upstream refuses the headerless request anyway,
+    so skipping would only hide the cause.
+    """
+    headers = {"Authorization": "Bearer " + cfg["api_key"]}
+    provider = str(cfg.get("provider") or "")
+    if not provider:
+        return headers
+    try:
+        routing.apply_session_header(headers, provider, session=OBSERVER_SESSION_ID)
+        routing.apply_anthropic_auth(headers, provider, path=str(cfg.get("endpoint") or ""))
+    except routing.RoutingError as exc:
+        raise ValueError(str(exc)) from exc
+    return headers
 
 
 async def complete(cfg, messages):
     body = {"model": cfg["model"], "messages": messages, "max_tokens": 4096,
             "response_format": {"type": "json_object"}}
+    headers = request_headers(cfg)
     try:
         connector = aiohttp.TCPConnector(ssl=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)) if truststore else None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), connector=connector) as http:
-            async with http.post(cfg["endpoint"], json=body,
-                                 headers={"Authorization": "Bearer " + cfg["api_key"]}) as response:
+            async with http.post(cfg["endpoint"], json=body, headers=headers) as response:
                 if response.status != 200:
                     # Provider bodies and exception URLs may echo credentials.
                     raise ValueError(f"관찰 API HTTP {response.status}")

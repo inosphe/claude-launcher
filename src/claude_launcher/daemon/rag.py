@@ -55,6 +55,12 @@ means the feature is off: every producer is a no-op and the queue stays empty
 until the block is filled in, at which point the watcher's next tick catches
 up. The key leaves this module only as the ``Authorization`` header of the
 endpoint call — never in an error message, never in status.
+
+A ``profile`` source also carries that profile's provider name, so the calls
+follow the provider's request-header rules (:func:`request_headers`, the same
+:mod:`claude_launcher.routing` functions the shim and the briefing call use):
+the indexer reaches the upstream with no shim in its path, and an upstream
+that refuses a request without its own session header rejects every sync.
 """
 
 from __future__ import annotations
@@ -79,7 +85,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTupl
 
 import aiohttp
 
-from .. import atomic, beads_db, cli_beads, store
+from .. import atomic, beads_db, cli_beads, routing, store
 from . import paths, pools, search_keywords
 
 try:
@@ -181,6 +187,61 @@ def _decode(text: str) -> array:
 # --------------------------------------------------------------------------- #
 # the endpoint
 # --------------------------------------------------------------------------- #
+#: The session id this caller sends a provider's required session header
+#: under: a fixed mark for the semantic-search feature, not the name of any
+#: session whose text is being indexed. Shaped like
+#: :data:`routing.SESSION_HEADER_FALLBACK`,
+#: :data:`daemon.briefing.BRIEFING_SESSION_ID` and
+#: :data:`daemon.observer.OBSERVER_SESSION_ID`, so the daemon's own callers
+#: read as the same kind of value at the upstream (2026-10-25, claunch-acy2f).
+RAG_SESSION_ID = "claunch-rag"
+
+
+def request_headers(cfg: dict) -> Dict[str, str]:
+    """The request headers one embedding or rerank call goes out with.
+
+    The OpenAI-compatible shape (``Accept``, ``Content-Type``, the bearer) plus
+    whatever per-provider rule :mod:`claude_launcher.routing` declares for the
+    provider this endpoint belongs to. The indexer talks to the upstream
+    directly — no shim in its path — so a provider that refuses a request
+    without its own session header (OpenCode Go answers ``400 MissingSessionID``,
+    measured 2026-10-25 on the briefing's ``chat/completions`` call) rejects
+    every sync.
+
+    ``cfg["provider"]`` is set only when the block's ``source`` is ``profile``
+    (``store.rag_config`` derives it). A typed ``base_url`` belongs to no
+    provider entry, so no rule applies to it and the plain headers go out.
+
+    Only the session header applies here. ``routing.apply_anthropic_auth`` is
+    deliberately **not** called: it fires on any path containing ``/messages``,
+    and the paths this caller uses are ``/embeddings`` and ``/rerank`` under a
+    base URL nobody constrains. A base URL that happens to contain ``/messages``
+    would then lose the bearer — a regression against the bearer-only headers
+    this call sent before the session rule existed. The two protocols are fixed
+    here, so "this call is not on a Messages path" is a fact about the caller,
+    not a guess about a string; passing a path in would make the rule's own
+    substring test the only thing standing between the pool and a 401.
+
+    A malformed provider value raises :class:`RagError` naming the config key.
+    The shim can degrade to log-and-skip because traffic must keep flowing;
+    here the upstream refuses the request regardless, and a silent skip would
+    surface as an unexplained endpoint error.
+    """
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {cfg.get('api_key', '')}",
+    }
+    provider = str(cfg.get("provider") or "")
+    if not provider:
+        return headers
+    try:
+        routing.apply_session_header(headers, provider, session=RAG_SESSION_ID)
+    except routing.RoutingError as exc:
+        raise RagError(str(exc)) from exc
+    return headers
+
+
 class RagClient:
     """The OpenAI-compatible embeddings call and the Cohere-shaped rerank call.
 
@@ -205,11 +266,7 @@ class RagClient:
         self.batch = max(1, int(cfg.get("batch") or store.RAG_DEFAULTS["batch"]))
 
     def _session(self) -> aiohttp.ClientSession:
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.cfg.get('api_key', '')}",
-        }
+        headers = request_headers(self.cfg)
         if self.cfg.get("verify_tls") is False:
             connector = aiohttp.TCPConnector(ssl=False)
         elif _OS_TRUST_CONTEXT is not None:

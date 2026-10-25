@@ -522,6 +522,107 @@ def test_profile_configuration_uses_named_backend(config_file, monkeypatch):
     assert cfg["endpoint"] == "https://example.test/v1/chat/completions"
 
 
+def _observer_ocgo_profile(name="obs-ocgo", **provider_extra):
+    """A profile on a provider that refuses a request without its own header.
+
+    opencode.ai/zen/go answers 400 ``MissingSessionID`` to a call that does
+    not carry ``x-opencode-session``. The observer calls the upstream directly
+    — no shim in its path — so the rule has to be applied here or nowhere;
+    this profile is what makes a missing application fail loudly.
+    """
+    from claude_launcher import profile, store
+
+    profile.create(name)
+
+    def mutate(doc):
+        doc.setdefault("providers", {})[name] = {
+            "api_key": "provider-secret",
+            "endpoints": {"openai": "https://opencode.example/v1"},
+            "models": {"default": "deepseek-flash"},
+            "session_header": "x-opencode-session",
+            **provider_extra,
+        }
+        doc.setdefault("profiles", {}).setdefault(name, {})["provider"] = name
+
+    store.update(mutate)
+
+
+def test_configuration_carries_the_provider_that_decides_the_headers(config_file):
+    """The provider name is what :func:`observer.request_headers` applies."""
+    from claude_launcher import store
+    store.save({"providers": {"ds": {"api_key": "provider-secret",
+                                    "endpoints": {"openai": "https://example.test/v1"}}},
+                "profiles": {"ds4-official": {"provider": "ds"}}})
+    assert observer.configuration()["provider"] == "ds"
+
+
+def test_observer_headers_send_the_marked_id_under_the_required_header(config_file):
+    """The id is this feature's own mark, not the observed session's name."""
+    _observer_ocgo_profile()
+    from claude_launcher import store
+    store.update(lambda doc: doc.__setitem__("observer", {"profile": "obs-ocgo"}))
+    cfg = observer.configuration()
+    headers = observer.request_headers(cfg)
+    assert headers["x-opencode-session"] == observer.OBSERVER_SESSION_ID
+    assert headers["x-opencode-session"] == "claunch-observer"
+    assert headers["Authorization"] == "Bearer provider-secret"
+
+
+def test_observer_headers_are_plain_without_a_provider():
+    cfg = {"profile": "", "model": "m", "endpoint": "https://typed.example/v1",
+           "api_key": "sk-typed", "provider": ""}
+    assert observer.request_headers(cfg) == {"Authorization": "Bearer sk-typed"}
+
+
+def test_observer_headers_stay_a_bearer_on_the_chat_completions_path(config_file):
+    """The Messages-only auth move must not fire on the protocol this speaks."""
+    _observer_ocgo_profile(anthropic_auth_header="x-api-key")
+    from claude_launcher import store
+    store.update(lambda doc: doc.__setitem__("observer", {"profile": "obs-ocgo"}))
+    headers = observer.request_headers(observer.configuration())
+    assert headers["Authorization"] == "Bearer provider-secret"
+    assert "x-api-key" not in headers
+
+
+def test_a_malformed_observer_header_rule_fails_the_call_with_the_config_key(config_file):
+    _observer_ocgo_profile(session_header="x opencode")
+    from claude_launcher import store
+    store.update(lambda doc: doc.__setitem__("observer", {"profile": "obs-ocgo"}))
+    with pytest.raises(ValueError, match="session_header"):
+        observer.request_headers(observer.configuration())
+
+
+def test_complete_sends_the_providers_required_session_header(home):
+    """The end-to-end half: the header leaves the process.
+
+    Asserted against a local endpoint, so what is pinned is that the header
+    is on the wire — not that the provider is up.
+    """
+    seen = {}
+
+    async def scenario():
+        async def completion(request):
+            seen["session"] = request.headers.get("x-opencode-session")
+            seen["auth"] = request.headers.get("Authorization")
+            return web.json_response({"choices": [{"message": {"content": json.dumps(answer())},
+                                                   "finish_reason": "stop"}]})
+
+        app = web.Application()
+        app.router.add_post("/chat/completions", completion)
+        async with TestServer(app) as server:
+            from claude_launcher import store
+            store.update(lambda doc: doc.setdefault("providers", {}).update({
+                "opencode": {"session_header": "x-opencode-session"}}))
+            await observer.complete({
+                **CFG, "provider": "opencode",
+                "endpoint": str(server.make_url("/chat/completions")),
+            }, [])
+    asyncio.run(scenario())
+    assert seen["session"] == "claunch-observer"
+    # the OpenAI protocol keeps the bearer: x-api-key is for Messages only
+    assert seen["auth"] == "Bearer secret"
+
+
 @pytest.mark.parametrize("finish,content", [("length", '{}'), ("stop", 'not json'), ("stop", '{"summary":[],"events":[]}')])
 def test_unusable_completions_fail(finish, content):
     async def scenario():
