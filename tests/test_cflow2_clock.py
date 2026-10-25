@@ -1222,6 +1222,11 @@ def test_a_session_workflow_child_is_started_on_that_run(tmp_path, monkeypatch):
     assert body["beads"] is False
     assert body["cflow_inputs"] == {"delegation": did, "delegation_scope": "own@main",
                                     "delegation_cwd": str(run_dir.resolve())}
+    # The workflow's ``default_role``, read by ``spawn_session`` -- this child's
+    # handle is an ``sN``, so without it the join falls back to ``free-role``
+    # (claunch-imo9c). ``spawn_body``'s unit test hands the argument in itself,
+    # so only this end-to-end test can catch the wiring being dropped.
+    assert body["role"] == "oneshot"
     assert "review thing" in body["task"]
     assert "'oneshot-job-v2'" in body["task"] and "daemon ends this session" in body["task"]
 
