@@ -639,6 +639,7 @@ CHECKS = [
         "artifacts_check.js",
         "commitpage_check.js",
         "chartpage_check.js",
+        "hivepage_check.js",
         "profileusage_check.js",
         "glossarypage_check.js",
         "categorypage_check.js",
@@ -672,6 +673,7 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "chart_browser.cjs",
+    "hive_browser.cjs",
     "megathread_browser.cjs",
     "sessionprs_browser.cjs",
     "commandcopy_browser.cjs",

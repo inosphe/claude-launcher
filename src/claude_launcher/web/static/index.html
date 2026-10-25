@@ -325,6 +325,7 @@
       <a href="#/window" data-page="window"><span>▦</span>Window</a>
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/chart" data-page="chart"><span>☰</span>Chart</a>
+      <a href="#/hive" data-page="hive"><span>⬢</span>Hive</a>
       <a href="#/profile-usage" data-page="profile-usage"><span>◷</span>Usage</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
       <a href="#/category" data-page="category"><span>⌘</span>Category</a>
@@ -1607,6 +1608,10 @@
          and cflow state, narrowed by project and mesh/workspace; drawn by
          chart-page.js from the rail's own caches. -->
     <div id="chart-view" class="hidden"></div>
+    <!-- Every project, mesh, session tree and the board's work on one
+         pan-and-zoom canvas of hexagon-cored chips; drawn by hive-page.js
+         from the rail's caches and /api/beads/queues. -->
+    <div id="hive-view" class="hidden"></div>
     <div id="profile-usage-view" class="hidden"></div>
     <!-- System performance: CPU, memory, disk I/O history and disk
          capacity (sysperf-page.js). -->
@@ -1724,6 +1729,7 @@
 <script src="static/artifacts-page.js"></script>
 <script src="static/commit-page.js"></script>
 <script src="static/chart-page.js"></script>
+<script src="static/hive-page.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/spec-page.js"></script>
 <script src="static/sim-page.js"></script>
