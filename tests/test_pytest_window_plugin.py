@@ -22,6 +22,7 @@ _GRANT_VARS = (
 class _Config:
     def __init__(self, args):
         self.args = args
+        self.invocation_params = argparse.Namespace(args=tuple(args))
         self.option = argparse.Namespace(numprocesses=None, tx=[], dist="no")
         self.pluginmanager = self
         self.stash = pytest.Stash()
@@ -44,8 +45,9 @@ def window(monkeypatch):
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     calls = {"acquire": [], "release": [], "report": []}
 
-    def acquire(cls, label=None, workers=None):
+    def acquire(cls, label=None, workers=None, borrow_args=None):
         calls["acquire"].append((cls, label))
+        calls.setdefault("borrow_args", []).append(borrow_args)
         grant = test_window.WindowGrant(
             cls=cls, grant_id="g1", advisory_n=4, source="daemon",
             wait_seconds=0.0, session="s1",
@@ -151,3 +153,22 @@ def test_an_in_process_nested_run_leaves_the_outer_grant_alone(window):
     plugin.pytest_sessionfinish(outer, 0)
     assert window["release"] == ["g1"]
     assert [gid for gid, _ in window["report"]] == ["g1"]
+
+
+def test_a_session_run_offers_its_arguments_for_borrowing(window):
+    plugin.pytest_sessionstart(_Session(["tests/test_x.py", "-q"]))
+    assert window["borrow_args"] == [["tests/test_x.py", "-q"]]
+
+
+def test_a_borrowed_run_ends_as_the_remote_run_ended(window, monkeypatch):
+    remote = {"exit_code": 1, "output": "1 failed in 0.1s\n", "machine": "b"}
+
+    def borrowed(*args, **kwargs):
+        raise test_window.RemoteResult(remote)
+
+    replayed = []
+    monkeypatch.setattr(test_window, "acquire", borrowed)
+    monkeypatch.setattr(test_window, "replay_remote",
+                        lambda config, got, **kw: replayed.append(got))
+    plugin.pytest_sessionstart(_Session(["tests/test_x.py"]))
+    assert replayed == [remote]

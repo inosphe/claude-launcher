@@ -69,9 +69,14 @@ def pytest_sessionstart(session):
             window_class(config.args),
             label="pytest " + " ".join(str(a) for a in config.args),
             workers=test_window.requested_xdist_width(config.option),
+            borrow_args=list(config.invocation_params.args),
         )
     except test_window.WindowUnavailable as exc:
         raise pytest.UsageError(str(exc)) from exc
+    except test_window.RemoteResult as exc:
+        # Another machine ran it (claunch-ohsyx): end as that run ended.
+        test_window.replay_remote(config, exc.remote)
+        return
     grant.install_environment()
     test_window.clamp_xdist_width(config.option, grant.advisory_n)
     state["grant"] = grant

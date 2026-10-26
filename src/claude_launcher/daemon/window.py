@@ -243,6 +243,22 @@ REMINDER_POLL = 15.0
 #: blocked that session until someone released it by hand.
 GONE_POLL = 1.0
 
+#: Remote borrowing (claunch-ohsyx): another machine's daemon runs a waiting
+#: request in its own checkout and sends the result back. The borrower beats
+#: every ``BORROW_HEARTBEAT`` seconds (``window_borrow_heartbeat``); a borrow
+#: with no beat for ``BORROW_TIMEOUT`` (``window_borrow_timeout``) is revoked
+#: and the request waits here again at its old place. This is a liveness
+#: deadline on the borrower's signal, not a TTL on the run: a borrowed run
+#: that beats may run as long as it needs.
+BORROW_HEARTBEAT = 15.0
+BORROW_TIMEOUT = 60.0
+#: The longest one ``/api/window/await`` call waits. A borrowed request is
+#: answered ``borrowed`` at once and its client re-asks in steps of this, so
+#: no connection outlives a step however long the remote run takes.
+AWAIT_STEP = 60.0
+#: A borrowed result left by a client that never came for it.
+BORROW_RESULT_TTL = 86400.0
+
 _STATE_VERSION = 1
 
 #: How long the run history is kept. Stated to the user in the CLI help, the
@@ -546,9 +562,16 @@ class WindowManager:
         cores: Optional[int] = None,
         instance: Optional[str] = None,
         owns_limits: Optional[bool] = None,
+        borrow_timeout: Optional[float] = None,
     ) -> None:
         self._manager = manager
         self._caps_src = caps or self._caps_from_config
+        if borrow_timeout is not None:
+            self._borrow_timeout_src = lambda: float(borrow_timeout)
+        elif caps is not None:
+            self._borrow_timeout_src = lambda: BORROW_TIMEOUT
+        else:
+            self._borrow_timeout_src = self._borrow_timeout_from_config
         if limits is not None:
             self._limits_src = limits
         elif caps is not None:
@@ -567,6 +590,9 @@ class WindowManager:
         self._adaptive: dict = {"budget": None, "decreased_at": None, "reason": ""}
         self._granted_events: Dict[str, asyncio.Event] = {}
         self._history_path = self._state_path.parent / "window-history.jsonl"
+        # A borrowed run's output and junit report: too large for the state
+        # file every decision rewrites, so each waits in a file of its own.
+        self._results_dir = self._state_path.parent / "window-borrow-results"
         self._history: List[dict] = []
         self._history_pruned_at = 0.0
         self._history_sig: Optional[Tuple[int, int]] = None
@@ -717,6 +743,14 @@ class WindowManager:
             int(cfg.get("window_sweep_cap", 1)),
             int(cfg.get("window_targeted_cap", 3)),
         )
+
+    @staticmethod
+    def _borrow_timeout_from_config() -> float:
+        try:
+            value = float(store.daemon_config().get("window_borrow_timeout", BORROW_TIMEOUT))
+        except (TypeError, ValueError):
+            return BORROW_TIMEOUT
+        return value if value > 0 else BORROW_TIMEOUT
 
     @staticmethod
     def _limits_from_config() -> dict:
@@ -1003,6 +1037,9 @@ class WindowManager:
             "end": end,
             "result": entry.get("result"),
         }
+        borrow = entry.get("borrow")
+        if borrow:
+            line["borrowed_by"] = borrow.get("machine")
         self._history.append(line)
         if (
             self._prune_history()
@@ -1232,7 +1269,24 @@ class WindowManager:
         dropped = before_h - len(self._holders) + before_q - len(self._queue)
         if dropped:
             log.info("window: reaped %d dead holder/waiter entr(ies)", dropped)
-        return dropped > 0
+        return self._expire_borrows() or dropped > 0
+
+    def _expire_borrows(self, now: Optional[float] = None) -> bool:
+        """Revoke every borrow whose borrower stopped beating (claunch-ohsyx).
+
+        A borrow whose result is in is left alone: nothing more is owed by
+        the borrower, and the waiter collects it at its next await.
+        """
+        now = time.time() if now is None else now
+        timeout = self._borrow_timeout_src()
+        lost = [
+            q for q in self._queue
+            if q.get("borrow") and not q["borrow"].get("result_file")
+            and now - float(q["borrow"].get("last_beat") or 0) > timeout
+        ]
+        for entry in lost:
+            self._revoke(entry, "heartbeat-lost", now=now)
+        return bool(lost)
 
     # ---- granting ----------------------------------------------------------- #
 
@@ -1337,7 +1391,10 @@ class WindowManager:
 
     def _ahead_of(self, priority: int) -> List[dict]:
         """The waiting entries a new request of this priority queues behind."""
-        return [q for q in self._queue if self._priority(q) >= priority]
+        return [
+            q for q in self._queue
+            if self._priority(q) >= priority and not q.get("borrow")
+        ]
 
     def _process_queue(self) -> List[dict]:
         """Grant everything the queue allows, in priority-then-FIFO order.
@@ -1350,6 +1407,10 @@ class WindowManager:
         granted = []
         ahead: List[dict] = []
         for entry in list(self._queue):
+            if entry.get("borrow"):
+                # Running elsewhere: it neither takes a slot here nor blocks
+                # the entries behind it, and keeps its place for a revoke.
+                continue
             if self._blocker(
                 entry["cls"], entry.get("session"), ahead, entry.get("instance") or ""
             ) is not None:
@@ -1385,6 +1446,7 @@ class WindowManager:
         bound: bool = False,
         gone: Optional[Callable[[], bool]] = None,
         requested_by: Optional[str] = None,
+        borrow: Optional[dict] = None,
     ) -> dict:
         """Grant the window, or queue for it up to ``wait`` seconds.
 
@@ -1407,6 +1469,13 @@ class WindowManager:
         without the name the Window page showed only a pid (claunch-ersj2).
         It is shown and recorded, never used: liveness, the per-session cap
         and release-by-session still read ``session`` alone.
+
+        ``borrow`` is what another machine needs to run this request in its
+        own checkout (claunch-ohsyx; ``test_window.borrow_info``). Only a
+        client that sends it can take a remote result, so only such a
+        request may be borrowed. A queued request that is borrowed while this
+        call waits is answered ``borrowed`` at once; its client then waits
+        through :meth:`await_entry`.
         """
         if cls not in CLASSES:
             return {"granted": False, "error": f"unknown window class {cls!r}"}
@@ -1437,6 +1506,12 @@ class WindowManager:
             entry["bound"] = True
         if workers:
             entry["requested"] = max(1, int(workers))
+        if isinstance(borrow, dict) and borrow:
+            entry["borrow_info"] = borrow
+        if wait > 0:
+            # Wall clock, in the entry: the await calls that follow a borrow
+            # are other connections, possibly on another daemon instance.
+            entry["wait_deadline"] = time.time() + min(wait, MAX_WAIT)
         grant_id = entry["grant_id"]
         with self._locked():
             changed = self._reap()
@@ -1512,10 +1587,26 @@ class WindowManager:
                         self._save()
                     if self._holder(grant_id) is not None:
                         break
-                    if self._queued(grant_id) is None:
+                    queued = self._queued(grant_id)
+                    if queued is None:
                         return {"granted": False, "cancelled": True}
+                    if queued.get("borrow"):
+                        return {
+                            "granted": False,
+                            "grant_id": grant_id,
+                            "borrowed": self._borrow_brief(queued["borrow"]),
+                        }
         except asyncio.TimeoutError:
             with self._locked():
+                queued = self._queued(grant_id)
+                if queued is not None and queued.get("borrow"):
+                    # Borrowed in the last poll: the borrow holds the
+                    # deadline (D4), so the client awaits instead.
+                    return {
+                        "granted": False,
+                        "grant_id": grant_id,
+                        "borrowed": self._borrow_brief(queued["borrow"]),
+                    }
                 if self._holder(grant_id) is None:
                     if self._unqueue(grant_id, "timeout"):
                         self._save()
@@ -1656,6 +1747,256 @@ class WindowManager:
         log.info("window: operator forced %s (%s)", grant_id, holder["cls"])
         return holder
 
+    # ---- remote borrowing (claunch-ohsyx) ----------------------------------- #
+    #
+    # A waiting request whose client sent ``borrow_info`` can be run by another
+    # machine's daemon. The request stays in the queue at its place, marked
+    # ``borrow``; it is neither granted here nor blocks anything while marked.
+    # The borrower holds a token that every beat, result and release must
+    # carry -- the relay does not say who sent a request, so the token is what
+    # keeps a third party from answering for the borrower. A beat that stops
+    # revokes the borrow; the request then waits here again, at the same place
+    # and with the wait it had left.
+
+    @staticmethod
+    def _borrow_brief(borrow: dict) -> dict:
+        """A borrow as anyone may see it: everything but the token."""
+        return {k: v for k, v in borrow.items() if k != "token"}
+
+    def _public(self, entry: dict) -> dict:
+        out = dict(entry)
+        if out.get("borrow"):
+            out["borrow"] = self._borrow_brief(out["borrow"])
+        return out
+
+    def _revoke(self, entry: dict, end: str, *, now: Optional[float] = None) -> None:
+        """End one borrow and put its request back to waiting here."""
+        borrow = entry.pop("borrow", None)
+        if borrow is None:
+            return
+        now = time.time() if now is None else now
+        left = borrow.get("paused_left")
+        if left is not None:
+            # The borrowed time does not count against the wait (D4).
+            entry["wait_deadline"] = now + max(0.0, float(left))
+        past = entry.setdefault("borrows", [])
+        past.append({
+            "machine": borrow.get("machine"),
+            "since": borrow.get("since"),
+            "ended_at": _utcnow(),
+            "end": end,
+        })
+        del past[:-5]
+        self._drop_result_file(borrow)
+        log.info("window: borrow of %s by %s ended (%s); waiting here again",
+                 entry.get("grant_id"), borrow.get("machine"), end)
+
+    def _drop_result_file(self, borrow: dict) -> None:
+        name = borrow.get("result_file")
+        if name:
+            with contextlib.suppress(OSError):
+                (self._results_dir / name).unlink()
+
+    def _borrowed(self, grant_id: str, token: str) -> Tuple[Optional[dict], str]:
+        """The queued entry this token borrows, or why not: ``unknown`` (no
+        such waiter here -- answered, cancelled, or a daemon restart dropped
+        it) or ``revoked`` (it waits, under no borrow or another one)."""
+        entry = self._queued(grant_id)
+        if entry is None:
+            return None, "unknown"
+        borrow = entry.get("borrow")
+        if not borrow or not token or not secrets.compare_digest(
+            str(borrow.get("token") or ""), str(token)
+        ):
+            return None, "revoked"
+        return entry, "ok"
+
+    @_shared
+    def borrowable(self) -> List[dict]:
+        """Every waiting request a peer could be offered, with its borrow
+        info; whether its tree can be reproduced is the caller's question
+        (``window_borrow.recipe``), answered outside this lock."""
+        return [
+            self._public(q) for q in self._queue
+            if q.get("borrow_info") or q.get("borrow")
+        ]
+
+    @_shared
+    def borrow(self, grant_id: str, machine: str) -> dict:
+        """Lend one waiting request to ``machine``. ``ok`` with the token, or
+        ``ok: False`` and the reason; the queue is unchanged on a refusal."""
+        if self._reap():
+            self._process_queue()
+            self._save()
+        entry = self._queued(grant_id)
+        if entry is None:
+            return {"ok": False, "error": f"no waiting request {grant_id}"}
+        if not entry.get("borrow_info"):
+            return {"ok": False, "error": (
+                "this request's client cannot take a remote result "
+                "(a test_window from before claunch-ohsyx)")}
+        if entry.get("borrow"):
+            return {"ok": False, "error": (
+                f"already borrowed by {entry['borrow'].get('machine')}")}
+        now = time.time()
+        deadline = entry.get("wait_deadline")
+        token = secrets.token_hex(16)
+        entry["borrow"] = {
+            "machine": str(machine)[:80],
+            "token": token,
+            "since": _utcnow(),
+            "last_beat": now,
+            "phase": "claimed",
+            "paused_left": (float(deadline) - now) if deadline else None,
+        }
+        # A borrowed sweep no longer holds back the targeted runs behind it.
+        self._process_queue()
+        self._save()
+        log.info("window: %s borrowed by %s", grant_id, machine)
+        return {"ok": True, "token": token, "entry": self._public(entry)}
+
+    @_shared
+    def borrow_beat(self, grant_id: str, token: str, phase: str = "") -> str:
+        """The borrower is alive: ``ok``, else ``revoked``/``unknown`` and the
+        borrower stops (D5, D12)."""
+        if self._reap():
+            self._process_queue()
+            self._save()
+        entry, verdict = self._borrowed(grant_id, token)
+        if entry is None:
+            return verdict
+        entry["borrow"]["last_beat"] = time.time()
+        if phase:
+            entry["borrow"]["phase"] = str(phase)[:40]
+        self._save()
+        return "ok"
+
+    @_shared
+    def borrow_result(self, grant_id: str, token: str, result: dict) -> str:
+        """The borrowed run's result: ``ok`` when kept for the waiter, else
+        why it was discarded (D7: a result after a revoke is nobody's)."""
+        if self._reap():
+            self._process_queue()
+            self._save()
+        entry, verdict = self._borrowed(grant_id, token)
+        if entry is None:
+            return verdict
+        if entry["borrow"].get("result_file"):
+            return "ok"  # a retried post of a result already kept
+        self._prune_results()
+        name = f"{grant_id}.json"
+        try:
+            self._results_dir.mkdir(parents=True, exist_ok=True)
+            with atomic.scratch(self._results_dir / name) as tmp:
+                tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+                atomic.replace(tmp, self._results_dir / name)
+        except OSError as exc:
+            log.warning("window: borrowed result for %s not kept: %s", grant_id, exc)
+            return "unkept"
+        borrow = entry["borrow"]
+        borrow["result_file"] = name
+        borrow["phase"] = "done"
+        borrow["exit_code"] = result.get("exit_code")
+        self._save()
+        return "ok"
+
+    def _prune_results(self) -> None:
+        try:
+            files = list(self._results_dir.iterdir())
+        except OSError:
+            return
+        cutoff = time.time() - BORROW_RESULT_TTL
+        for path in files:
+            with contextlib.suppress(OSError):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+
+    @_shared
+    def borrow_release(self, grant_id: str, token: str, reason: str = "") -> bool:
+        """The borrower gives the request back (it could not reproduce the
+        tree, it stopped, its daemon restarted): it waits here again now
+        instead of after the heartbeat deadline."""
+        entry, _ = self._borrowed(grant_id, token)
+        if entry is None:
+            return False
+        self._revoke(entry, "released" + (f": {reason[:120]}" if reason else ""))
+        self._process_queue()
+        self._save()
+        return True
+
+    def _await_answer(self, grant_id: str) -> Optional[dict]:
+        """What a waiter's await call answers now, or None to keep waiting."""
+        holder = self._holder(grant_id)
+        if holder is not None:
+            answer = {"granted": True, "grant_id": grant_id,
+                      "advisory_n": holder.get("workers")
+                      or self._width(holder.get("cls", TARGETED), None)}
+            if holder.get("forced"):
+                answer["forced"] = True
+            return answer
+        entry = self._queued(grant_id)
+        if entry is None:
+            return {"granted": False, "cancelled": True}
+        borrow = entry.get("borrow")
+        if borrow and borrow.get("result_file"):
+            path = self._results_dir / borrow["result_file"]
+            try:
+                remote = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                log.warning("window: borrowed result for %s unreadable: %s", grant_id, exc)
+                self._revoke(entry, "result-unreadable")
+                self._process_queue()
+                self._save()
+                return None
+            cleaned = clean_result(remote.get("window_result"))
+            if cleaned is not None:
+                entry["result"] = cleaned
+            self._unqueue(grant_id, "borrowed")
+            self._drop_result_file(borrow)
+            self._save()
+            return {"granted": False, "grant_id": grant_id, "remote": remote}
+        if not borrow:
+            deadline = entry.get("wait_deadline")
+            if deadline is not None and time.time() >= float(deadline):
+                self._unqueue(grant_id, "timeout")
+                self._save()
+                return {"granted": False, "timeout": True}
+        return None
+
+    async def await_entry(
+        self,
+        grant_id: str,
+        *,
+        wait: float = AWAIT_STEP,
+        gone: Optional[Callable[[], bool]] = None,
+    ) -> dict:
+        """One step of a waiter's wait after ``acquire`` answered ``borrowed``.
+
+        Answers ``granted`` (it ran out of borrows and was granted here),
+        ``remote`` (the borrowed run's result), ``cancelled``, ``timeout``
+        (unborrowed past its wait), or ``pending`` after ``wait`` seconds (at
+        most :data:`AWAIT_STEP`) -- then the client asks again.
+        """
+        end = time.monotonic() + max(0.0, min(float(wait), AWAIT_STEP))
+        while True:
+            with self._locked():
+                if self._reap():
+                    self._process_queue()
+                    self._save()
+                answer = self._await_answer(grant_id)
+                if answer is not None:
+                    return answer
+                entry = self._queued(grant_id) or {}
+                if time.monotonic() >= end or (gone is not None and gone()):
+                    borrow = entry.get("borrow")
+                    return {
+                        "granted": False,
+                        "pending": True,
+                        "grant_id": grant_id,
+                        "borrowed": self._borrow_brief(borrow) if borrow else None,
+                    }
+            await asyncio.sleep(min(SHARED_POLL, max(0.05, end - time.monotonic())))
+
     @_shared
     def limits_view(self) -> dict:
         """Who sets the limits and what is in force (claunch-k7x63)."""
@@ -1726,9 +2067,10 @@ class WindowManager:
         sweep_cap, targeted_cap = self._caps()
         return {
             "holders": list(self._holders),
-            "queue": list(self._queue),
+            "queue": [self._public(q) for q in self._queue],
             "caps": {"sweep": sweep_cap, "targeted": targeted_cap},
             "max_wait": MAX_WAIT,
+            "borrow_timeout": self._borrow_timeout_src(),
             "reminder_interval": REMINDER_INTERVAL,
             "cores": self._cores,
             # The width a targeted request made now would be granted.
@@ -1825,9 +2167,14 @@ class WindowManager:
         for index, entry in enumerate(self._queue):
             if not self._same_session(entry, session):
                 continue
-            ahead = self._queue[:index]
+            ahead = [q for q in self._queue[:index] if not q.get("borrow")]
             enqueued = _parse_ts(entry.get("enqueued_at"))
-            reason = self._blocker(entry["cls"], session, ahead)
+            borrow = entry.get("borrow")
+            reason = (
+                f"borrowed by {borrow.get('machine')} ({borrow.get('phase')})"
+                if borrow
+                else self._blocker(entry["cls"], session, ahead)
+            )
             if reason is None:
                 reason = (
                     f"{len(ahead)} request(s) are queued ahead"
@@ -1847,6 +2194,7 @@ class WindowManager:
                         round(max(0.0, now - enqueued), 1) if enqueued is not None else None
                     ),
                     "reason": reason,
+                    "borrowed": self._borrow_brief(borrow) if borrow else None,
                     "estimate": self.estimate(entry["cls"], entry.get("label") or ""),
                 }
             )

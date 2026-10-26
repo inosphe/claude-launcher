@@ -295,3 +295,74 @@ def test_xdist_width_is_read_and_cut_to_the_grant():
 
     remote = SimpleNamespace(tx=["ssh=host//python=python3"] * 3)
     assert test_window.clamp_xdist_width(remote, 1) is None  # not ours to edit
+
+
+class _Borrowing:
+    """A daemon that answers ``borrowed`` and then the remote result."""
+
+    def __init__(self, final):
+        self.calls = []
+        self.final = final
+
+    def post(self, path, body, **kwargs):
+        self.calls.append((path, body))
+        if path.endswith("/acquire"):
+            return {"granted": False, "grant_id": "g-9",
+                    "borrowed": {"machine": "b", "phase": "claimed"}}
+        if len([c for c in self.calls if c[0].endswith("/await")]) == 1:
+            return {"granted": False, "pending": True, "grant_id": "g-9",
+                    "borrowed": {"machine": "b", "phase": "testing"}}
+        return self.final
+
+
+def test_a_borrowed_request_raises_the_remote_result(monkeypatch, tmp_path, capsys):
+    client = _Borrowing({"granted": False, "remote": {"exit_code": 0, "machine": "b"}})
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)
+    monkeypatch.setattr(test_window, "borrow_info", lambda args, cwd=None: {"v": 1, "x": args})
+    with pytest.raises(test_window.RemoteResult) as caught:
+        test_window.acquire("targeted", borrow_args=["tests/test_x.py"])
+    assert caught.value.exit_code == 0
+    assert client.calls[0][1]["borrow"] == {"v": 1, "x": ["tests/test_x.py"]}
+    assert [c[0] for c in client.calls[1:]] == ["/api/window/await"] * 2
+    err = capsys.readouterr().err
+    assert "borrowed by b (claimed)" in err and "borrowed by b (testing)" in err
+
+
+def test_a_revoked_borrow_ends_in_a_grant_here(monkeypatch):
+    client = _Borrowing({"granted": True, "grant_id": "g-9", "advisory_n": 3})
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)
+    monkeypatch.setattr(test_window, "borrow_info", lambda args, cwd=None: {"v": 1})
+    grant = test_window.acquire("targeted", borrow_args=[])
+    assert (grant.grant_id, grant.advisory_n, grant.source) == ("g-9", 3, "daemon")
+
+
+def test_borrowing_can_be_switched_off(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)
+    monkeypatch.setenv(test_window.WINDOW_BORROW_ENV, "0")
+    test_window.acquire("targeted", borrow_args=["tests"]).release()
+    assert "borrow" not in client.calls[0][1]
+
+
+def test_replay_remote_writes_junit_and_result_and_exits_with_the_code(tmp_path, capsys):
+    import argparse
+
+    class _PM:
+        def get_plugin(self, name):
+            return None
+
+        def unregister(self, plugin):
+            pass
+
+    config = argparse.Namespace(
+        option=argparse.Namespace(xmlpath=str(tmp_path / "out" / "j.xml")),
+        pluginmanager=_PM(), stash=pytest.Stash())
+    remote = {"exit_code": 1, "output": "FAILED t.py::x\n1 failed in 1s", "machine": "b",
+              "junit": "<testsuite/>", "window_result": {"outcome": "failed"}}
+    result = tmp_path / "r.json"
+    with pytest.raises(pytest.exit.Exception) as caught:
+        test_window.replay_remote(config, remote, result_file=str(result))
+    assert caught.value.returncode == 1
+    assert (tmp_path / "out" / "j.xml").read_text() == "<testsuite/>"
+    assert '"failed"' in result.read_text()
+    assert "1 failed in 1s" in capsys.readouterr().out

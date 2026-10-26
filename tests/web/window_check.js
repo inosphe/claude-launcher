@@ -74,6 +74,12 @@ let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
 let windowCancelBusy = new Set();
+let windowRemote = null;
+let windowRemoteAt = 0;
+let windowRemoteBusy = false;
+let windowBorrows = [];
+let windowBorrowBusy = new Set();
+const WINDOW_REMOTE_EVERY = 20000;
 let sessionsCache = [{ name: "s1", status: "busy" }];
 function $() { return view; }
 function showView(name) { shown.push(name); }
@@ -94,6 +100,7 @@ function plural(n, one, many) { return n + " " + (n === 1 ? one : many || one + 
 function setAnswer(next) { answer = next; }
 function setCache(next) { windowCache = next; windowError = ""; }
 function setHistory(next) { windowHistory = next; }
+function setRemote(remote, runs) { windowRemote = remote; windowBorrows = runs || []; }
 function state() {
   return { cache: windowCache, error: windowError, open: windowPageOpen };
 }
@@ -110,11 +117,13 @@ new Function(
   + slice("windowEntry") + slice("windowSummary") + slice("renderWindow")
   + slice("windowSeconds") + slice("windowResultText") + slice("windowHistorySection")
   + slice("parseHash")
+  + slice("refreshWindowBorrows") + slice("windowBorrowTag") + slice("windowRemoteSection")
+  + slice("windowBorrow") + slice("windowBorrowsSection")
   + `
 Object.assign(exports, {
   open: openWindowPage, stop: stopWindowPoll, refresh: refreshWindow,
   owner: windowOwner, age: windowAge, entry: windowEntry, render: renderWindow,
-  parseHash, setAnswer, setCache, setHistory, state,
+  parseHash, setAnswer, setCache, setHistory, setRemote, state,
 });`
 )(ctx, document, el, view, fetched, shown, timers, answer);
 
@@ -270,6 +279,49 @@ const snapshot = {
         withClass("window-history-row").length === 2 &&
         view.words().includes("failed (30 passed, 2 failed)") &&
         view.words().includes("timeout") && view.words().includes("unreported"),
+        view.words());
+
+  // Remote borrowing (claunch-ohsyx).
+  check("opening also reads the borrowed runs and the peers' queues",
+        fetched.includes("/api/window/borrows") && fetched.includes("/api/window/remote"),
+        fetched);
+  ctx.setCache({ ...snapshot, queue: [
+    { grant_id: "q3", cls: "targeted", session: "s2", pid: 22, label: "lent",
+      enqueued_at: "2026-08-31T06:02:00Z",
+      borrow: { machine: "box2", phase: "testing", since: "2026-08-31T06:03:00Z" } },
+  ] });
+  ctx.setRemote({ machine: "here", enabled: true, peers: [
+    { machine: "box2", queue: [
+      { grant_id: "r1", cls: "sweep", label: "their sweep", borrowable: true,
+        recipe: { kind: "merge", head: "abcdef0123456789" }, local_workspace: "proj",
+        enqueued_at: "2026-08-31T06:02:00Z" },
+      { grant_id: "r2", cls: "targeted", label: "dirty run", borrowable: false,
+        reason: "the waiter's tree has uncommitted changes" },
+    ] },
+    { machine: "box3", error: "HTTP 404" },
+  ] }, [
+    { id: "x1", machine: "box2", cls: "targeted", status: "testing", label: "lent",
+      recipe: { kind: "commit" }, started_at: "2026-08-31T06:04:00Z", beat: "ok" },
+    { id: "x0", machine: "box2", cls: "sweep", status: "discarded", label: "old",
+      error: "lender answered revoked", exit_code: 0 },
+  ]);
+  ctx.render();
+  check("a lent queue row says who borrowed it and what it is doing",
+        view.words().includes("borrowed by box2 (testing)"), view.words());
+  check("the other machines' rows show the recipe, the refusal and a peer error",
+        view.words().includes("Other machines") && view.words().includes("merge abcdef0123") &&
+        view.words().includes("uncommitted changes") && view.words().includes("box3: HTTP 404"),
+        view.words());
+  const borrowButtons = withClass("window-borrow");
+  check("only a borrowable row's Borrow button is enabled",
+        borrowButtons.length === 2 && !borrowButtons[0].disabled && borrowButtons[1].disabled,
+        borrowButtons.map((b) => b.disabled));
+  check("borrowed runs list their state, and only an active one can be stopped",
+        view.words().includes("Borrowed runs") && view.words().includes("discarded") &&
+        view.words().includes("lender answered revoked") &&
+        withClass("window-borrows").length === 1 &&
+        // one Cancel on the lent queue row, one Stop on the active run
+        withClass("window-cancel").length === 2,
         view.words());
 
   if (failures) process.exit(1);

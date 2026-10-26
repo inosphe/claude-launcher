@@ -587,6 +587,14 @@ DAEMON_DEFAULTS = {
     # run adds one back up to window_worker_budget. 0 turns it off.
     "window_adaptive": 1,
     "window_adaptive_floor": 4,
+    # Remote borrowing (claunch-ohsyx, daemon/window_borrow.py): a person on
+    # another machine's Window page may run a test waiting in this window.
+    # window_borrow off refuses both lending and borrowing. The borrower
+    # beats every window_borrow_heartbeat seconds; a borrow without a beat
+    # for window_borrow_timeout seconds is revoked and waits here again.
+    "window_borrow": True,
+    "window_borrow_heartbeat": 15,
+    "window_borrow_timeout": 60,
     # The resume nudge's machine switch: after a daemon restart, whether the
     # sessions that were mid-turn when it went down are told to carry on.
     # Restored sessions come back alive but idle — nothing is driving them —

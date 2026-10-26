@@ -7526,6 +7526,11 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 .window-tag.window-forced { color: #f0883e; background: #3d2412; }
 .window-tag.window-priority { color: #d2a8ff; background: #2b1d4d; }
+/* Remote borrowing (claunch-ohsyx): a queued row lent to another machine,
+   the rebuild recipe a peer row offers, and why a row cannot be borrowed. */
+.window-tag.window-borrowed { color: #79c0ff; background: #102a43; }
+.window-tag.window-recipe { color: #7ee787; background: #12261e; }
+.window-tag.window-unborrowable { color: #8b949e; background: #21262d; white-space: normal; }
 .window-footnote {
   max-width: 980px; color: #6e7681; font-size: 11px; margin-top: -4px;
 }

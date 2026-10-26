@@ -32435,6 +32435,7 @@ async function refreshWindow() {
       const data = await hist.json().catch(() => null);
       windowHistory = data && data.stats ? data : null;
     }
+    await refreshWindowBorrows();
   } catch { return; }   // api() owns auth and connection recovery
   if (windowPageOpen) renderWindow();
 }
@@ -32541,6 +32542,7 @@ function windowEntry(entry, position = null, queued = false) {
     label.appendChild(el("span", "window-tag window-workers", `-n ${Number(entry.workers)}`));
   }
   if (entry.forced) label.appendChild(el("span", "window-tag window-forced", "forced"));
+  if (queued && entry.borrow) label.appendChild(windowBorrowTag(entry.borrow));
   if (queued && Number(entry.priority)) {
     const priority = label.appendChild(el("span", "window-tag window-priority",
       `priority ${Number(entry.priority)}`));
@@ -32602,6 +32604,182 @@ async function windowAction(action, entry, button) {
     windowCancelBusy.delete(grantId);
   }
   if (windowPageOpen) renderWindow();
+}
+
+/* Remote borrowing (claunch-ohsyx). "Other machines" lists the relay peers'
+   waiting requests; Borrow runs one here, in a detached worktree rebuilt from
+   the shared remote, and sends the result back to the machine whose test it
+   is. Only a person starts one — this button is the one trigger. The peers'
+   queues cost a relay round trip each, so they are read every
+   WINDOW_REMOTE_EVERY ms (or on Refresh), not on every 5 s poll. */
+let windowRemote = null;        // GET /api/window/remote
+let windowRemoteAt = 0;
+let windowRemoteBusy = false;
+let windowBorrows = [];         // GET /api/window/borrows
+let windowBorrowBusy = new Set();
+const WINDOW_REMOTE_EVERY = 20000;
+
+async function refreshWindowBorrows(force = false) {
+  try {
+    const runs = await api("/api/window/borrows");
+    if (runs.ok) {
+      const data = await runs.json().catch(() => ({}));
+      windowBorrows = Array.isArray(data.runs) ? data.runs : [];
+    }
+    if (!force && (windowRemoteBusy || Date.now() - windowRemoteAt < WINDOW_REMOTE_EVERY)) return;
+    windowRemoteBusy = true;
+    windowRemoteAt = Date.now();
+    try {
+      const resp = await api("/api/window/remote");
+      if (resp.ok) windowRemote = await resp.json().catch(() => null);
+      else if (resp.status === 404) windowRemote = null;
+    } finally { windowRemoteBusy = false; }
+  } catch { /* api() owns auth and connection recovery */ }
+}
+
+function windowBorrowTag(borrow) {
+  const tag = el("span", "window-tag window-borrowed",
+    `borrowed by ${borrow.machine || "?"} (${borrow.phase || "?"})`);
+  tag.title = `since ${borrow.since || "?"}; the request keeps its place and ` +
+    "waits here again if the borrower stops beating";
+  return tag;
+}
+
+function windowRemoteSection(remote) {
+  const box = el("section", "window-section window-remote");
+  const head = el("div", "window-section-head");
+  head.appendChild(el("h3", null, "Other machines"));
+  const rows = (remote.peers || []).flatMap((p) => (p.queue || []).map((r) => [p, r]));
+  head.appendChild(el("span", "window-count", String(rows.length)));
+  const refresh = el("button", "wf-btn clear", windowRemoteBusy ? "Reading…" : "Refresh");
+  refresh.type = "button";
+  refresh.disabled = windowRemoteBusy;
+  refresh.addEventListener("click", async () => {
+    await refreshWindowBorrows(true);
+    if (windowPageOpen) renderWindow();
+  });
+  head.appendChild(refresh);
+  box.appendChild(head);
+  box.appendChild(el("p", "wf-note",
+    "Requests waiting in other machines' windows. Borrow runs one on this " +
+    "machine when git can rebuild its tree from the shared remote (a pushed " +
+    "commit, or a merge of pushed parents); the result goes back to the " +
+    "waiting test. This machine's own window decides when it runs here."));
+  if (remote.enabled === false) {
+    box.appendChild(el("p", "wf-warning", "window_borrow is off on this daemon"));
+  }
+  for (const peer of remote.peers || []) {
+    if (peer.error) {
+      box.appendChild(el("p", "wf-note", `${peer.machine || "relay"}: ${peer.error}`));
+    }
+  }
+  if (!rows.length && !(remote.peers || []).some((p) => p.error)) {
+    box.appendChild(el("p", "wf-note", "no other machine has a borrowable request waiting"));
+  }
+  for (const [peer, row] of rows) {
+    const line = el("div", "window-row " + (row.cls || "unknown"));
+    line.appendChild(el("span", "window-rank", peer.machine || "?"));
+    line.appendChild(el("span", "window-class", row.cls || "unknown class"));
+    line.appendChild(el("span", "window-owner",
+      row.session || (row.requested_by ? `for ${row.requested_by}` : "no session")));
+    const label = line.appendChild(el("span", "window-label", row.label || "no label"));
+    if (row.borrow) label.appendChild(windowBorrowTag(row.borrow));
+    else if (row.recipe) {
+      label.appendChild(el("span", "window-tag window-recipe",
+        `${row.recipe.kind} ${String(row.recipe.head || "").slice(0, 10)}`));
+    }
+    if (!row.borrowable && row.reason) {
+      label.appendChild(el("span", "window-tag window-unborrowable", row.reason));
+    }
+    line.appendChild(el("span", "window-age", windowAge(row)));
+    const actions = line.appendChild(el("span", "window-actions"));
+    const key = `${peer.machine}/${row.grant_id}`;
+    const button = el("button", "wf-btn clear window-borrow", "Borrow");
+    button.type = "button";
+    button.disabled = !row.borrowable || windowBorrowBusy.has(key);
+    button.title = row.borrowable
+      ? `Run it here in a worktree of ${row.local_workspace || "the matching workspace"}`
+      : (row.reason || "not borrowable");
+    button.addEventListener("click", () => windowBorrow(peer.machine, row, button));
+    actions.appendChild(button);
+    box.appendChild(line);
+  }
+  return box;
+}
+
+async function windowBorrow(machine, row, button) {
+  const key = `${machine}/${row.grant_id}`;
+  if (windowBorrowBusy.has(key)) return;
+  if (!confirm(`Run ${machine}'s ${row.cls || ""} request "${row.label || row.grant_id}" ` +
+    "on this machine? It waits for this machine's window like any other run.")) return;
+  windowBorrowBusy.add(key);
+  if (button) button.disabled = true;
+  try {
+    const resp = await api("/api/window/borrow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machine, grant_id: row.grant_id }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    windowError = resp.ok ? "" : (data.error || `HTTP ${resp.status}`);
+    await refreshWindowBorrows(true);
+  } catch {
+    windowError = "unable to borrow the request";
+  } finally {
+    windowBorrowBusy.delete(key);
+  }
+  if (windowPageOpen) renderWindow();
+}
+
+function windowBorrowsSection(runs) {
+  const box = el("section", "window-section window-borrows");
+  const head = el("div", "window-section-head");
+  head.appendChild(el("h3", null, "Borrowed runs"));
+  head.appendChild(el("span", "window-count", String(runs.length)));
+  box.appendChild(head);
+  box.appendChild(el("p", "wf-note",
+    "Runs this machine borrowed, newest first. A run beats to its lender " +
+    "while it works; if the lender answers that the request was revoked or " +
+    "is gone, the run stops and its worktree is removed."));
+  const active = ["starting", "fetching", "checkout", "setup", "waiting-window", "testing", "reporting"];
+  for (const run of runs) {
+    const line = el("div", "window-row " + (run.cls || "unknown"));
+    line.appendChild(el("span", "window-rank", run.status || "?"));
+    line.appendChild(el("span", "window-class", run.cls || "unknown class"));
+    line.appendChild(el("span", "window-owner",
+      `${run.machine || "?"}${run.session ? " · " + run.session : ""}`));
+    const label = line.appendChild(el("span", "window-label", run.label || run.grant_id || ""));
+    if (run.recipe && run.recipe.kind) {
+      label.appendChild(el("span", "window-tag window-recipe", run.recipe.kind));
+    }
+    if (run.exit_code !== undefined && run.exit_code !== null) {
+      label.appendChild(el("span", "window-tag window-result", `exit ${run.exit_code}`));
+    }
+    if (run.beat && run.beat !== "ok") {
+      label.appendChild(el("span", "window-tag window-unborrowable", `beat: ${run.beat}`));
+    }
+    if (run.error) label.appendChild(el("span", "window-tag window-unborrowable", run.error));
+    const age = line.appendChild(el("span", "window-age",
+      windowAge({ acquired_at: run.started_at })));
+    age.title = run.last_beat ? `last beat ${run.last_beat}` : "";
+    const actions = line.appendChild(el("span", "window-actions"));
+    if (active.includes(run.status)) {
+      const stop = el("button", "wf-btn clear window-cancel", "Stop");
+      stop.type = "button";
+      stop.title = "Stop this run here; the lender puts the request back in its queue.";
+      stop.addEventListener("click", async () => {
+        stop.disabled = true;
+        try {
+          await api(`/api/window/borrows/${encodeURIComponent(run.id)}/stop`, { method: "POST" });
+          await refreshWindowBorrows();
+        } catch { /* api() owns auth and connection recovery */ }
+        if (windowPageOpen) renderWindow();
+      });
+      actions.appendChild(stop);
+    }
+    box.appendChild(line);
+  }
+  return box;
 }
 
 function windowSummary(title, used, cap, detail) {
@@ -32805,6 +32983,8 @@ function renderWindow() {
   };
   view.appendChild(section("Holders", holders, "no grants are held", false));
   view.appendChild(section("Queue", queue, "nothing is waiting", true));
+  if (windowRemote) view.appendChild(windowRemoteSection(windowRemote));
+  if (windowBorrows.length) view.appendChild(windowBorrowsSection(windowBorrows));
   if (windowCache.limits_control) {
     view.appendChild(windowLimitsSection(windowCache.limits_control));
   }
