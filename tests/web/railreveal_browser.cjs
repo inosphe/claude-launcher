@@ -248,7 +248,9 @@ const landing = (page, name) => page.evaluate((name) => {
     // in the tree this comment was written against). With both mistakes in
     // place the rail was never thinned, `skips` was always false, and the
     // assertion below was skipped while the harness still printed ok.
-    const bare = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    // A short desktop viewport keeps the regression observable with the
+    // denser compact cards: the bare-scroll error must exceed this rail.
+    const bare = await browser.newPage({ viewport: { width: 1440, height: 600 } });
     await bare.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
       window.setInterval = () => 0;

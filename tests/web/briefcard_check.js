@@ -58,7 +58,13 @@ function mkel(tag) {
   const node = {
     tag, className: "", title: "", dataset: {}, children: [],
     listeners: {}, parent: null, disabled: false,
-    appendChild(c) { this.children.push(c); c.parent = this; return c; },
+    appendChild(c) { c.remove(); this.children.push(c); c.parent = this; return c; },
+    get firstChild() { return this.children[0] || null; },
+    insertBefore(c, before) {
+      c.remove();
+      const i = before ? this.children.indexOf(before) : this.children.length;
+      this.children.splice(i, 0, c); c.parent = this; return c;
+    },
     append(...cs) { for (const c of cs) this.appendChild(c); },
     remove() {
       if (this.parent) {
@@ -190,7 +196,7 @@ const kv = (li) => kvOf(card(li));
   ctx.apply();
   check("opening uncached expanded rows makes no request", calls, []);
   check("the empty card explains the explicit action", note(rows.s1).textContent,
-        "No summary yet · use ⟳ to request one");
+        "No summary yet");
   check("the empty card has an enabled refresh", card(rows.s1).querySelector(".sess-brief-refresh").disabled, false);
   ctx.apply();
   check("repainting empty rows still makes no request", calls, []);
@@ -313,7 +319,7 @@ const kv = (li) => kvOf(card(li));
   click(card(s3).querySelector(".sess-brief-refresh"));
   await flush();
   check("no LLM points at the config to write",
-        note(s3).textContent,
+        note(s3).title,
         "no LLM configured — briefing off — pick a profile and model in "
         + "Settings ▸ Briefing model (the llm: block of ~/.claude-launcher/.claunch.yaml)");
 
@@ -363,7 +369,7 @@ const kv = (li) => kvOf(card(li));
   ctx.setLLM(false);
   ctx.apply();
   check("without an llm the expanded card explains the setting instead",
-        note(s6).textContent,
+        note(s6).title,
         "briefing off — pick a profile and model in Settings ▸ Briefing model "
         + "(the llm: block of ~/.claude-launcher/.claunch.yaml)");
   const quietFrom = calls.length;

@@ -757,130 +757,106 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   display: none;
 }
 /* Workflow state remains visible at every card density. */
-/* Expanded cards share one text inset and put the summary before controls
-   and measurements. Keep semantic colours (role, checks, faults and gates)
-   while giving the surrounding metadata a consistent rhythm. */
-#session-list li[data-rail-mode="expanded"] {
-  --rail-inset: 16px;
-  row-gap: 6px;
-}
-#session-list li[data-rail-mode="expanded"] .rail-brief {
-  order: 1; font-size: 12px; font-weight: 600; color: #c6cdd5;
-  padding-left: var(--rail-inset); line-height: 1.5;
-}
-#session-list li[data-rail-mode="expanded"] .rail-actions {
-  order: 2; gap: 6px; padding-left: var(--rail-inset);
-}
-#session-list li[data-rail-mode="expanded"] > :is(
-  .rail-cwd, .rail-ctx-line, .rail-ctx-tokens, .rail-tps-line,
-  .rail-usage-line, .rail-seen, .rail-life, .rail-status-checks,
-  .rail-talk, .rail-beads, .rail-commits, .rail-quiet
-) {
-  order: 3; padding-left: var(--rail-inset); margin-top: 0;
-}
-/* Each refresh remains available once: the card header owns the expanded
-   view, and row controls cover expanded cards without a briefing footer. */
-#session-list li[data-rail-mode="expanded"]:has(.sess-brief)
-  :is(.sess-brief-rowref, .sess-status-check-rowref) { display: none; }
-#session-list li[data-rail-mode="expanded"] .sess-brief {
-  margin: 2px 0 0 var(--rail-inset); padding: 8px 0 0;
-  border: 0; border-top: 1px solid #30363d; border-radius: 0;
-  background: transparent;
-}
-#session-list li[data-rail-mode="expanded"] .sess-brief-head {
-  flex-wrap: wrap; gap: 6px;
-}
-/* Card separation uses borders rather than vertical margins: the rail height
-   model measures bounding boxes, which include borders and exclude margins.
-   Session-card visual hierarchy: quiet surfaces, one readable summary,
-   a compact metadata scale and low-emphasis diagnostics. State colours and
-   focus/attention rings remain in the rules below this section. */
+/* Identity and the job description lead at both densities. Expanded cards
+   add controls and a context gauge; diagnostics are an explicit reveal. */
 #session-list li.sess-card {
-  margin: 0 8px; padding-top: 12px; padding-bottom: 12px;
+  --rail-inset: 16px;
+  margin: 0 8px; padding-top: 8px; padding-bottom: 8px;
   border: 0; border-bottom: 1px solid #262c35; border-radius: 0;
-  background: transparent; row-gap: 8px; box-shadow: none;
+  background: transparent; row-gap: 4px; box-shadow: none;
 }
 #session-list li.sess-card[data-rail-mode="min"] {
   padding-top: 7px; padding-bottom: 7px;
 }
 #session-list .sess-card.active:not(.goto-flash) {
-  background: #202b3a; box-shadow: inset 2px 0 0 #426286;
+  background: transparent; box-shadow: inset 2px 0 0 #426286;
 }
 #session-list li.sess-card .rail-name {
   font-weight: 600; letter-spacing: .01em; flex: 1 1 auto; min-width: 8ch;
 }
 #session-list li.sess-card .meta { font-size: 10px; color: #8793a3; }
 #session-list li.sess-card .rail-brief {
-  font-size: 12px; line-height: 1.6; color: #c6cdd5; font-weight: 500;
+  order: 1; font-size: 12px; line-height: 1.5; color: #c6cdd5;
+  font-weight: 500; background: transparent; border: 0;
+  padding: 0 0 0 var(--rail-inset);
 }
-#session-list li.sess-card .rail-actions { gap: 8px; }
+#session-list li.sess-card :is(.sess-cflow, .sess-cflow2, .rail-quiet) {
+  order: 2; background: transparent; border: 0;
+  padding: 0 0 0 var(--rail-inset); box-sizing: border-box;
+}
+#session-list li.sess-card :is(.rail-beads, .rail-status-checks) {
+  order: 3; margin-top: 0; padding-left: var(--rail-inset);
+}
+#session-list li.sess-card .rail-status-checks { gap: 2px 8px; padding-top: 0; }
+#session-list li.sess-card .rail-status-check {
+  padding: 0; border: 0; border-radius: 0; background: transparent;
+  font-size: 10px; line-height: 17px; font-variant-numeric: tabular-nums;
+}
+#session-list li.sess-card .mesh-role { border-radius: 3px; font-size: 10px; }
+#session-list li[data-rail-mode="expanded"] .rail-ctx-line {
+  order: 4; background: transparent; border: 0;
+  padding: 2px 0 0 var(--rail-inset); box-sizing: border-box;
+}
+#session-list li[data-rail-mode="expanded"] .rail-seen {
+  order: 4; display: flex; gap: 4px 14px; flex-wrap: wrap;
+  padding-left: var(--rail-inset); margin-top: 0; overflow: visible;
+}
+#session-list li.sess-card .rail-seen-pair {
+  padding: 0; gap: 3px; font-variant-numeric: tabular-nums;
+}
+#session-list li[data-rail-mode="expanded"] .rail-actions {
+  order: 5; gap: 8px; padding: 0 0 0 var(--rail-inset);
+  background: transparent; border: 0;
+}
 #session-list li.sess-card .rail-actions > button {
-  min-height: 24px; border-radius: 5px;
+  min-height: 24px; border-radius: 3px;
 }
+#session-list .rail-details-toggle {
+  order: 1; margin-left: auto; background: none; border: 0;
+  color: #8b949e; font: inherit; font-size: 10px; cursor: pointer;
+}
+#session-list .rail-details-toggle:hover { color: #58a6ff; }
+/* Keep these ordinary row children: incremental polling replaces them in
+   place. Their visibility belongs to the card, so updates preserve it. */
+#session-list li[data-rail-mode="expanded"] > :is(
+  .rail-cwd, .rail-ctx-tokens, .rail-tps-line, .rail-usage-line,
+  .rail-life, .rail-commits
+) {
+  order: 7; margin-top: 0; padding-left: var(--rail-inset);
+  background: transparent; border: 0;
+}
+#session-list li[data-rail-mode="expanded"]:not(.rail-details-open) > :is(
+  .rail-cwd, .rail-ctx-tokens, .rail-tps-line, .rail-usage-line,
+  .rail-life, .rail-commits
+) { display: none; }
 #session-list li.sess-card :is(.rail-cwd, .rail-ctx-tokens) {
   font-size: 10px; color: #7d8999; line-height: 1.5;
 }
-#session-list li.sess-card .rail-status-checks { gap: 4px 8px; padding-top: 0; }
-#session-list li.sess-card .rail-status-check {
-  padding: 1px 4px; border-color: transparent; border-radius: 4px;
-  background: transparent; font-size: 10px; line-height: 17px;
-  font-variant-numeric: tabular-nums;
-}
-#session-list li.sess-card .mesh-role { border-radius: 5px; font-size: 10px; }
-#session-list li.sess-card .sess-brief {
-  border-top-color: #364151; padding-top: 10px;
-}
-#session-list li.sess-card .sess-brief-head { font-size: 10px; }
-#session-list li.sess-card :is(.rail-seen, .rail-life) {
-  font-variant-numeric: tabular-nums;
+#session-list li.sess-card :is(.rail-ctx-tokens, .rail-life) {
   flex-wrap: wrap; white-space: normal; overflow: visible;
 }
-#session-list li.sess-card .rail-ctx-tokens { flex-wrap: wrap; }
-/* Internal surfaces align to the same 16px inset. The metric rows remain
-   ordinary children so the incremental poll can replace them in place. */
-#session-list li.sess-card .rail-brief {
-  background: transparent; border: 0;
-  padding: 4px 0 4px 16px;
-}
-#session-list li[data-rail-mode="expanded"] .rail-actions {
-  background: transparent; border: 0;
-  padding-top: 2px; padding-bottom: 2px;
-}
-#session-list li[data-rail-mode="expanded"] :is(.rail-ctx-line, .rail-ctx-tokens) {
-  background: transparent; border: 0;
-  padding: 3px 0 3px 16px;
-  box-sizing: border-box;
-}
-#session-list li[data-rail-mode="expanded"] :is(.rail-seen, .rail-life) {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0; padding-left: 16px; background: transparent;
-  border: 0;
-}
-#session-list li[data-rail-mode="expanded"] .rail-life {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-#session-list li[data-rail-mode="expanded"] .rail-seen-pair {
-  min-width: 0; padding: 3px 8px 3px 0; flex-wrap: wrap; gap: 2px 5px;
-}
-#session-list li[data-rail-mode="expanded"] .rail-seen-pair + .rail-seen-pair {
-  border: 0;
-}
-#session-list li.sess-card .rail-status-check {
-  background: transparent; border: 0;
-}
-#session-list li.sess-card :is(.sess-cflow, .sess-cflow2) {
-  background: transparent; border: 0;
-  padding: 3px 0 3px 16px; box-sizing: border-box;
-}
+/* One refresh for each function; status and controls share one baseline. */
+#session-list li[data-rail-mode="expanded"]:has(.sess-brief)
+  :is(.sess-brief-rowref, .sess-status-check-rowref) { display: none; }
 #session-list li.sess-card .sess-brief {
-  background: transparent; border: 0; border-top: 1px solid #30363d;
-  border-radius: 0; padding: 8px 0 0; margin-left: 16px;
+  order: 6; margin: 0 0 0 var(--rail-inset); padding: 0;
+  background: transparent; border: 0; border-radius: 0;
 }
-#session-list li.sess-card .sess-brief-note { margin-top: 5px; }
+#session-list li.sess-card .sess-brief-head {
+  flex-wrap: nowrap; gap: 6px; min-height: 24px; font-size: 10px;
+}
+#session-list li.sess-card .sess-brief-head .sess-brief-note {
+  margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 11px;
+}
+#session-list li.sess-card .sess-brief-age {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #session-list li.sess-card .sess-brief-refresh {
-  min-width: 24px; min-height: 24px; border: 1px solid #41536a;
-  border-radius: 4px; background: #223249;
+  min-width: 24px; min-height: 24px; border: 0;
+  border-radius: 0; background: transparent;
 }
+#session-list li.sess-card .sess-brief-refresh.spinning { animation: none; }
 /* A stand-in row for the rows the rail does not draw (app.js, claunch-thuwx):
    it holds their height so the list keeps its full length and the scrollbar
    does not move. `#session-list li` above would add its padding and border to
@@ -2039,44 +2015,20 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   #rail-nav { transition: none; }
 }
 
-/* The rail can be resized independently of the window. Give identity its
-   own line before the fixed-width actions consume the name's space.
-
-   The name group's basis is what ends that line, so it is the line minus
-   what sits before it: the dot and a gap (8 + 5), and on a child row the
-   tick and a gap too (11 - 2 + 5). The tick's width is fixed here because
-   the └ comes from whatever fallback font the platform has: left at its
-   glyph width it drew wider than the old `calc(100% - 24px)` allowed, the
-   name group wrapped, and the tick and the dot sat alone on a line above
-   the name (claunch-gge34, tests/web/railchildline_browser.cjs). 11px is a
-   full em of its 11px font, the widest a CJK face draws it. The 2px of
-   slack keeps sub-pixel rounding from wrapping the name, and stays under
-   the 5px gap so nothing that follows can squeeze into it. */
+/* Reserve enough room for the name and role before placing the profile.
+   Short profiles share their line; long identities wrap as a unit, keeping
+   the harness suffix readable even on deeply indented cards. */
 @container session-rail (max-width: 420px) {
   #session-list li.child { --rail-child-indent: 12px; }
   #session-list li[data-name] > .dot { order: -1; }
   #session-list li.child::before { order: -1; width: 11px; overflow: hidden; }
   #session-list li[data-name] > .rail-head {
-    order: -1; flex: 1 1 calc(100% - 15px);
+    order: -1; flex: 1 1 100px;
   }
-  #session-list li.child > .rail-head { flex-basis: calc(100% - 29px); }
-  /* The name never caps at half the row any more — it wraps whole (see
-     .rail-name), and capping it here would clip the second line. The meta
-     beside it keeps its basis-0 ellipsis further down this block, so the
-     buttons still land on the line. */
   #session-list .rail-name { flex-shrink: 1; max-width: none; }
-  /* The meta takes the line after the name group alone; the buttons live on
-     their own full-width line below it (CSS, .rail-actions), so nothing on
-     this line fights the meta for the width. Based at 0 it grows into what
-     is left and ellipses at its 42% cap; the full text is on its title. */
   #session-list .meta {
-    margin-left: 0; margin-right: auto; flex: 1 1 0; min-width: 0;
+    order: -1; margin-left: auto; flex: 0 1 auto; min-width: 0; max-width: 100%;
   }
-  /* Compact controls share this second line. Give the identity the space
-     left after those controls, rather than capping it at 42% of an already
-     indented child card: opencode/claude and opencode/codex must keep their
-     distinguishing suffix. Long annotations can still ellipse. */
-  #session-list li[data-rail-mode="compact"] .meta { max-width: none; }
 }
 
 /* ---- the pages that live in #main ---- */
