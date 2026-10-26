@@ -26,7 +26,9 @@
    one lane per session (its queue) plus each board's unassigned pool. That
    payload carries no parent-child edges, so an issue's parent is read from
    its id: `claunch-q4cqy.5` belongs under `claunch-q4cqy` when both are
-   drawn.
+   drawn. After each queues read the page reads the category tree of every
+   board's workspace (/api/category) and tags each session and issue chip
+   with the node it is filed under (claunch-yzgqb.1.1).
 
    The model (buildModel and the helpers before it) takes plain data so
    tests/web/hivepage_check.js runs it without a page. The canvas is rebuilt
@@ -154,11 +156,12 @@ globalThis.HivePage = (() => {
   const ISSUE_RANK = Object.fromEntries(ISSUE_ACTIVE.map((s, i) => [s, i]));
   const byName = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
 
-  function issueChip(row) {
+  function issueChipOf(row) {
     return {
       kind: "issue", id: String(row.id), title: String(row.title || ""),
       status: String(row.status || "open"), priority: Number.isFinite(row.priority) ? row.priority : 2,
       type: String(row.issue_type || "task"), assignee: row.assignee || "", children: [],
+      categories: [],
     };
   }
 
@@ -268,6 +271,41 @@ globalThis.HivePage = (() => {
     return { lanes, boards };
   }
 
+  /* "kind:ref" -> the category paths ("parent / child") an item is filed
+     under, from /api/category payloads (category.tree: nodes with their
+     path, items with their node_id). An item's rows are collected into a
+     list, so the same reading holds if an item can sit in several nodes
+     (claunch-2gb7l weighs that; today it is one). */
+  function readCategories(trees) {
+    const out = new Map();
+    for (const t of trees || []) {
+      const paths = new Map();
+      for (const n of (t && t.nodes) || []) {
+        const p = Array.isArray(n.path) && n.path.length ? n.path : [n.label];
+        paths.set(n.id, p.map(String).join(" / "));
+      }
+      for (const it of (t && t.items) || []) {
+        const p = paths.get(it.node_id);
+        if (!p || !it.kind || !it.ref) continue;
+        const key = `${it.kind}:${it.ref}`;
+        if (!out.has(key)) out.set(key, []);
+        if (!out.get(key).includes(p)) out.get(key).push(p);
+      }
+    }
+    return out;
+  }
+
+  /* The workspace names the boards in a /api/beads/queues payload belong
+     to: whose category trees the page reads. */
+  function boardWorkspaces(queues) {
+    const names = new Set();
+    for (const b of (queues && queues.boards) || []) {
+      const ws = b.workspace && typeof b.workspace === "object" ? b.workspace.name : b.workspace;
+      if (ws) names.add(String(ws));
+    }
+    return [...names].sort();
+  }
+
   function boardLabel(b) {
     const ws = b.workspace && typeof b.workspace === "object" ? b.workspace.name : b.workspace;
     if (ws) return String(ws);
@@ -278,11 +316,18 @@ globalThis.HivePage = (() => {
   /* Everything the canvas draws.
      opts: now, endedMs, archived, issues (draw work), pool (draw the
      unassigned pool), stackMinor, project ("" = all), meshesOf(name),
-     cflowOf(name). */
+     cflowOf(name), categories (a readCategories map). */
   function buildModel(sessions, queues, opts = {}) {
     const now = opts.now ?? Date.now();
     const meshesOf = opts.meshesOf || (() => []);
     const cflowOf = opts.cflowOf || (() => null);
+    const cats = opts.categories instanceof Map ? opts.categories : new Map();
+    const catsOf = (kind, ref) => cats.get(`${kind}:${ref}`) || [];
+    const issueChip = (row) => {
+      const c = issueChipOf(row);
+      c.categories = catsOf("issue", c.id);
+      return c;
+    };
     const all = new Map();
     for (const s of sessions || []) if (s && s.name) all.set(s.name, s);
     const { lanes, boards } = readQueues(queues);
@@ -340,7 +385,8 @@ globalThis.HivePage = (() => {
         fault: s.fault && s.fault.active ? String(s.fault.label || s.fault.kind || "fault") : "",
         compacting: !!s.compacting,
         cflow: cflow ? { state: cflow.state, label: cflow.label } : null,
-        created: lane ? lane.created : 0, issues, children: [], decks: [],
+        created: lane ? lane.created : 0, categories: catsOf("session", name),
+        issues, children: [], decks: [],
       });
     }
     const roots = [];
@@ -472,6 +518,9 @@ globalThis.HivePage = (() => {
   let queuesBusy = false;
   let archivedRecords = [];
   let archivedBusy = false;
+  const categoryTrees = new Map();  // workspace -> /api/category payload
+  let categories = new Map();       // readCategories(categoryTrees)
+  let categoriesBusy = false;
   let lastKey = "";
   let lastModel = null;
   let picked = null;           // {kind, id}
@@ -479,7 +528,7 @@ globalThis.HivePage = (() => {
   let shell = null;            // the elements built once per page life
 
   function loadState() {
-    const base = { ended: "0", archived: false, issues: true, pool: true, stackMinor: true,
+    const base = { ended: "0", archived: false, issues: true, pool: true, categories: true, stackMinor: true,
                    stackIdle: true, project: "", view: { x: 24, y: 16, k: 1 } };
     try {
       const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
@@ -560,6 +609,28 @@ globalThis.HivePage = (() => {
       queuesBusy = false;
     }
     render();
+    if (state.categories) readCategoriesNow();
+  }
+
+  /* The category trees of the boards' workspaces, read after each queues
+     read. A workspace whose tree cannot be read keeps what it had: the tags
+     are an index, and a missing one costs nothing else on the page. */
+  async function readCategoriesNow() {
+    if (categoriesBusy || typeof api !== "function") return;
+    categoriesBusy = true;
+    try {
+      for (const ws of boardWorkspaces(queues)) {
+        try {
+          const resp = await api(`/api/category?workspace=${encodeURIComponent(ws)}`);
+          const data = await resp.json().catch(() => ({}));
+          if (resp.ok) categoryTrees.set(ws, data);
+        } catch { /* keep what we had */ }
+      }
+      categories = readCategories([...categoryTrees.values()]);
+    } finally {
+      categoriesBusy = false;
+    }
+    render();
   }
 
   async function loadArchived() {
@@ -585,7 +656,18 @@ globalThis.HivePage = (() => {
     if (n.compacting) parts.push("compacting");
     if (n.cflow) parts.push(`cflow: ${n.cflow.label}`);
     if (n.issue) parts.push(`issue: ${n.issue}`);
+    if (n.categories.length) parts.push(`category: ${n.categories.join("; ")}`);
     return parts.join("\n");
+  }
+
+  /* The category tag under a chip's name: the leaf of its first path, and
+     how many more paths it has. The full paths are in the chip's title. */
+  function catTag(paths) {
+    if (!state.categories || !paths.length) return null;
+    const leaf = paths[0].split(" / ").pop();
+    const t = node("span", "hive-cat", paths.length > 1 ? `# ${leaf} +${paths.length - 1}` : `# ${leaf}`);
+    t.title = paths.join("\n");
+    return t;
   }
 
   function sessionChip(n) {
@@ -602,6 +684,8 @@ globalThis.HivePage = (() => {
     if (!n.minor) {
       const sub = [n.role || "", STATE_LABEL[n.state]].filter(Boolean).join(" · ");
       body.appendChild(node("span", "hive-sub", sub));
+      const tag = catTag(n.categories);
+      if (tag) body.appendChild(tag);
     }
     c.appendChild(body);
     const badges = [];
@@ -623,13 +707,16 @@ globalThis.HivePage = (() => {
     c.dataset.kind = "issue";
     c.dataset.id = i.id;
     c.tabIndex = 0;
-    c.title = `${i.id} — ${i.status} · P${i.priority} · ${i.type}\n${i.title}${i.assignee ? `\nassignee: ${i.assignee}` : ""}`;
+    c.title = `${i.id} — ${i.status} · P${i.priority} · ${i.type}\n${i.title}${i.assignee ? `\nassignee: ${i.assignee}` : ""}`
+      + (i.categories.length ? `\ncategory: ${i.categories.join("; ")}` : "");
     const core = node("span", "hive-core");
     core.appendChild(node("i", null, `P${i.priority}`));
     c.appendChild(core);
     const body = node("span", "hive-body");
     body.appendChild(node("b", "hive-name", i.id));
     body.appendChild(node("span", "hive-sub", i.title));
+    const tag = catTag(i.categories);
+    if (tag) body.appendChild(tag);
     c.appendChild(body);
     if (picked && picked.kind === "issue" && picked.id === i.id) c.classList.add("picked");
     return c;
@@ -802,6 +889,7 @@ globalThis.HivePage = (() => {
       row("큐", it.issues.length ? `${countIssues(it.issues)}건` : "");
       row("만든 후속 일감", it.created || "");
       row("cflow", it.cflow ? it.cflow.label : "");
+      row("카테고리", it.categories.join("\n"));
       row("fault", it.fault);
       side.appendChild(dl);
       const actions = node("div", "hive-detail-actions");
@@ -827,6 +915,7 @@ globalThis.HivePage = (() => {
       row("type", it.type);
       row("assignee", it.assignee || "(없음)");
       row("하위 일감", it.children.length ? `${countIssues(it.children)}건` : "");
+      row("카테고리", it.categories.join("\n"));
       side.appendChild(dl);
       const actions = node("div", "hive-detail-actions");
       const open = node("a", "hive-btn", "Beads에서 열기 →");
@@ -1005,6 +1094,8 @@ globalThis.HivePage = (() => {
       () => { if (state.archived && !archivedRecords.length) loadArchived(); }));
     bar.appendChild(toggle("일감", "issues", "세션이 쥔 일감과 보드 풀을 그린다"));
     bar.appendChild(toggle("풀", "pool", "보드의 미배정 일감을 우선순위별 묶음으로 그린다"));
+    bar.appendChild(toggle("카테고리", "categories", "세션·일감 칩에 카테고리 트리(#/category)의 배정을 표시한다",
+      () => { if (state.categories) readCategoriesNow(); }));
     bar.appendChild(toggle("보조 role 묶기", "stackMinor", "reviewer·oneshot 세션을 형제끼리 한 묶음으로 접는다"));
     bar.appendChild(toggle("쉬는 세션 묶기", "stackIdle", "살아 있는 자손이 없는 hold·paused 형제를 한 묶음으로 접는다"));
     const search = node("input", "hive-search");
@@ -1106,13 +1197,13 @@ globalThis.HivePage = (() => {
     const model = buildModel(liveSessions(), queues, {
       now: Date.now(), endedMs: endedMs(), archived: state.archived,
       issues: state.issues, pool: state.pool, stackMinor: state.stackMinor,
-      stackIdle: state.stackIdle,
+      stackIdle: state.stackIdle, categories,
       project: currentProjectPick(), meshesOf: appMeshesOf, cflowOf: appCflowOf,
     });
     lastModel = model;
     renderProjectPick(model);
     const q = shell.search.value.trim().toLowerCase();
-    const key = JSON.stringify([model.projects, q, picked, [...openDecks]]);
+    const key = JSON.stringify([model.projects, q, picked, [...openDecks], state.categories]);
     const c = model.counts;
     const live = c.busy + c.idle + c.starting;
     const bits = [`살아 있음 ${live} (busy ${c.busy} · idle ${c.idle})`,
@@ -1165,6 +1256,6 @@ globalThis.HivePage = (() => {
   }
 
   return { open, stop, render, fit, category, stateOf, keep, isMinor, roleOf,
-           issueParentId, nestIssues, readQueues, buildModel, tally,
+           issueParentId, nestIssues, readQueues, readCategories, boardWorkspaces, buildModel, tally,
            arrangeSiblings, ENDED_WINDOWS, STATES, get model() { return lastModel; } };
 })();

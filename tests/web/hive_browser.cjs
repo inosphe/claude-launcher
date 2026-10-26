@@ -20,7 +20,11 @@
      8. the unassigned pool is a deck under the board's cell;
      9. a drag pans from a chip and from header text without picking or
         selecting anything, and a press inside the slop is still a click;
-    10. no page errors. */
+    10. a chip filed in the category tree carries its node as a tag (an
+        item in two nodes says so), the detail pane lists the full paths,
+        search finds a chip by its category, and the toolbar switch hides
+        the tags;
+    11. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -64,6 +68,25 @@ const QUEUES = {
   }],
 };
 
+// The board's workspace tree: wk under web/hive, c-1 in two nodes (the
+// reading claunch-2gb7l may bring), c-7 under a node of its own.
+const CATEGORY = {
+  workspace: "claunch",
+  nodes: [
+    { id: "n1", parent_id: null, label: "web", path: ["web"] },
+    { id: "n2", parent_id: "n1", label: "hive", path: ["web", "hive"] },
+    { id: "n3", parent_id: null, label: "beads", path: ["beads"] },
+  ],
+  items: [
+    { kind: "session", ref: "wk", node_id: "n2" },
+    { kind: "issue", ref: "c-1", node_id: "n3" },
+    { kind: "issue", ref: "c-1", node_id: "n2" },
+    { kind: "issue", ref: "c-7", node_id: "n3" },
+  ],
+  proposals: [], unassigned: [], details: {},
+};
+const categoryAsked = [];
+
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
@@ -74,6 +97,10 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === "/api/mesh") return res.end(JSON.stringify(MESH));
     if (url.pathname === "/api/beads/queues") return res.end(JSON.stringify(QUEUES));
+    if (url.pathname === "/api/category") {
+      categoryAsked.push(url.searchParams.get("workspace"));
+      return res.end(JSON.stringify(CATEGORY));
+    }
     res.statusCode = 404;
     return res.end("{}");
   }
@@ -200,7 +227,33 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     await page.click('#hive-view .hive-chip[data-id="wk"]');
     await page.waitForSelector("#hive-view .hive-detail.hidden", { state: "attached" });
 
-    // 10.
+    // 10. Category tags, from the tree of the board's workspace.
+    await page.waitForSelector('#hive-view .hive-chip[data-id="wk"] .hive-cat');
+    assert.deepEqual([...new Set(categoryAsked)], ["claunch"], "the board's workspace tree is read");
+    const tagOf = (kind, id) => page.textContent(`#hive-view .hive-chip[data-kind="${kind}"][data-id="${id}"] .hive-cat`);
+    assert.equal(await tagOf("session", "wk"), "# hive");
+    assert.equal(await tagOf("issue", "c-1"), "# beads +1", "an item in two nodes");
+    assert.equal(await page.$('#hive-view .hive-chip[data-id="lead"] .hive-cat'), null, "lead is filed nowhere");
+    await page.click('#hive-view .hive-chip[data-kind="issue"][data-id="c-1"]');
+    await page.waitForSelector("#hive-view .hive-detail:not(.hidden) h3");
+    const catRow = await page.$$eval("#hive-view .hive-detail dt", (dts) => {
+      const dt = dts.find((d) => d.textContent === "카테고리");
+      return dt ? dt.nextElementSibling.textContent : null;
+    });
+    assert.equal(catRow, "beads\nweb / hive");
+    await page.click('#hive-view .hive-chip[data-kind="issue"][data-id="c-1"]');
+    await page.waitForSelector("#hive-view .hive-detail.hidden", { state: "attached" });
+    await page.fill("#hive-view .hive-search", "web / hive");
+    await page.waitForSelector('#hive-view .hive-port.searching .hive-chip.hit[data-id="wk"]');
+    assert.deepEqual(await page.$$eval("#hive-view .hive-chip.hit", (e) => e.map((c) => c.dataset.id).sort()), ["c-1", "wk"]);
+    await page.fill("#hive-view .hive-search", "");
+    const catSwitch = page.locator("#hive-view .hive-toolbar label.hive-toggle", { hasText: "카테고리" }).locator("input");
+    await catSwitch.uncheck();
+    await page.waitForSelector("#hive-view .hive-cat", { state: "detached" });
+    await catSwitch.check();
+    await page.waitForSelector('#hive-view .hive-chip[data-id="wk"] .hive-cat');
+
+    // 11.
     assert.deepEqual(errors, []);
     console.log("hive browser ok");
   } finally {

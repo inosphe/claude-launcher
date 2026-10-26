@@ -183,6 +183,39 @@ assert.deepStrictEqual(bw1.children.map((n) => n.name), ['w1-kid', 'w1-rev', 'w1
 assert.strictEqual(bare.projects[0].pool.length, 0);
 assert.strictEqual(bare.projects[0].meshes[1].decks.length, 0);
 
+// Categories: an item's rows in /api/category become its paths; a second
+// row for the same item (an item in two nodes) adds a second path; rows on
+// unknown nodes are dropped. The model tags sessions and issues with them.
+const trees = [{
+  nodes: [
+    { id: 'n1', parent_id: null, label: 'web', path: ['web'] },
+    { id: 'n2', parent_id: 'n1', label: 'hive', path: ['web', 'hive'] },
+    { id: 'n3', parent_id: null, label: 'beads', path: ['beads'] },
+  ],
+  items: [
+    { kind: 'session', ref: 'w1', node_id: 'n2' },
+    { kind: 'issue', ref: 'c-1', node_id: 'n2' },
+    { kind: 'issue', ref: 'c-1', node_id: 'n3' },
+    { kind: 'issue', ref: 'c-4', node_id: 'n1' },
+    { kind: 'issue', ref: 'c-5', node_id: 'gone' },
+  ],
+}];
+const cats = P.readCategories(trees);
+assert.deepStrictEqual(plain([...cats]), [
+  ['session:w1', ['web / hive']], ['issue:c-1', ['web / hive', 'beads']], ['issue:c-4', ['web']],
+]);
+assert.deepStrictEqual(plain(P.boardWorkspaces(queues)), ['claunch']);
+const tagged = plain(P.buildModel(fleet, queues, { now, endedMs: 6 * H, categories: cats,
+                                                  meshesOf: (n) => MESH[n] || [] }));
+const tw1 = tagged.projects[0].meshes[0].roots[0].children[0];
+assert.deepStrictEqual(tw1.categories, ['web / hive']);
+assert.deepStrictEqual(tw1.issues[0].categories, ['web / hive', 'beads']);
+assert.deepStrictEqual(tw1.issues[0].children[0].categories, [], 'c-1.1 is filed nowhere');
+assert.deepStrictEqual(tagged.projects[0].meshes[0].roots[0].categories, [], 'lead is filed nowhere');
+const tp1 = tagged.projects[0].pool[0].decks.find((d) => d.label === '미배정 P1');
+assert.deepStrictEqual(tp1.items[0].categories, ['web']);
+assert.deepStrictEqual(w1.categories, [], 'no categories given: none drawn');
+
 // An ended sibling group folds from three on, but one with work in hand
 // keeps its own place.
 const ended3 = P.arrangeSiblings([
