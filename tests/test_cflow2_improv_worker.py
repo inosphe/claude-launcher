@@ -197,10 +197,15 @@ def _chart_prose(chart) -> str:
     too: ``name``/``description`` per option are what the chooser sees. The
     procedures' own descriptions are not in any node and come from the
     files (:func:`_procedure_prose`) -- claunch-qt475.
+
+    ``done_when`` is prose too, and it is the line a step is judged by: 97
+    nodes carry one and it is in no ``prompt``, ``description`` or option,
+    so an anchor aimed at it used to pass whatever it said
+    (claunch-4zz0b).
     """
     chunks = []
     for node in chart.nodes.values():
-        for key in ("prompt", "description"):
+        for key in ("prompt", "description", "done_when"):
             value = node.get(key)
             if isinstance(value, str):
                 chunks.append(value)
@@ -2656,6 +2661,7 @@ def test_chart_prose_reaches_a_procedure_description():
     assert anchor in _chart_prose(chart)
     assert included in _chart_prose(chart)
 
+
 # -- 재작업 예산: 3회까지 자율, 그 뒤는 사람 승인 (사용자 지시 2026-10-26) -----
 #
 # 「rework를 최대 3회까지 자율적으로 진행할 수 있도록 해줘. 이후에는 사용자
@@ -2832,3 +2838,39 @@ def test_hold_at_the_gate_ends_without_rework(tmp_path, monkeypatch):
     assert entered.count("land/rework-gate") == REWORK_BUDGET
     assert state["data"]["land_out"] == {"reason": "declined", "rework": False}
 
+
+def test_chart_prose_reaches_a_done_when():
+    """``done_when`` is the line a step is actually judged by, and it is in
+    no ``prompt``, ``description`` or option: 97 nodes carry one of their
+    own, and none of those 97 strings appears among the prose those other
+    keys hold (claunch-4zz0b).
+
+    So a guard written against ``done_when`` used to pass no matter what it
+    said -- the same blind spot the procedure descriptions had before
+    claunch-qt475. The anchor below lives in ``done_when`` (in ``commit``'s
+    and ``integration-request``'s) and nowhere in ``prompt``,
+    ``description`` or an option, which is the assertion the body makes
+    below; the collection stopping its ``done_when`` key fails this test.
+    """
+    chart = _chart()
+    anchor = "master는 움직이지 않았다"
+
+    # unreachable from the keys the collection used to read: asserting it
+    # keeps the anchor from being satisfied by some prompt that happens to
+    # say the same thing, which would make this test vacuous again
+    without_done_when = []
+    for node in chart.nodes.values():
+        for key in ("prompt", "description"):
+            value = node.get(key)
+            if isinstance(value, str):
+                without_done_when.append(value)
+        options = node.get("options")
+        if isinstance(options, list):
+            for option in options:
+                if isinstance(option, dict):
+                    for value in option.values():
+                        if isinstance(value, str):
+                            without_done_when.append(value)
+    assert anchor not in _words(" ".join(without_done_when))
+
+    assert anchor in _chart_prose(chart)
