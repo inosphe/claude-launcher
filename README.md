@@ -70,7 +70,7 @@ To install the CLI and daemon as a separate `claunch-nogil` command instead,
 run `tools/install_freethreaded.sh` (Linux, WSL) or
 `tools\install_freethreaded.ps1` (Windows). The script builds a `zvec` wheel
 from source once and caches it, installs this checkout editable on `3.14t` with
-`uv tool install --editable ".[p2p]" --reinstall --overrides <zvec wheel>`, and
+`uv tool install` with `--editable ".[p2p]"`, `--reinstall` and `--overrides` pointing at the wheel, and
 writes a `claunch-nogil` wrapper that sets `PYTHON_GIL=0`. The tool environment
 lives under `~/.local/share/claunch-nogil` (`%LOCALAPPDATA%\claunch-nogil` on
 Windows), so the regular `claunch` tool is not replaced. `pyproject.toml` is not

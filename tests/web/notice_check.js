@@ -148,6 +148,7 @@ function build(opts) {
     "restoreNewFormDraft",
     // The sidebar PTY host badge boot() draws (claunch-xnnct.3).
     "renderPtyHostBadge",
+    "renderGilBadge",
     // Left without an argument: Node's real BroadcastChannel would hold the
     // process open (claunch-j6lg0).
     "BroadcastChannel",
@@ -182,6 +183,7 @@ function build(opts) {
     () => {},   // refreshTermProcs (the process line; termprocs_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
     () => {},   // renderPtyHostBadge
+    () => {},   // renderGilBadge
   );
 
   return { api, nodes, daemon, clock, apiCalls, timers,
