@@ -148,6 +148,7 @@ exports.statusSessions = sessionsCache;
 /* The same builder without the rail's trim — what the detail panel and the
    terminal's top pane draw. Exposed rather than rebuilt here so the checks
    below run the shipped function, not a copy of it. */
+exports.railCard = (entry, rowSummary) => renderBriefingCard("s1", entry, {rail: true, rowSummary});
 exports.fullCard = (name) => renderBriefingCard(name, briefingCache.get(name));
 `)(ctx, (id) => (id === "session-list" ? list : null),
    { createElement: mkel }, api, noChip);
@@ -193,6 +194,18 @@ const kv = (li) => kvOf(card(li));
                 state: "working", progress: "2 of 3 pieces done" },
     raw: null,
   } };
+  for (const summary of ["", "   ", "existing job summary"]) {
+    const rendered = ctx.railCard(null, summary);
+    check("empty notice follows row summary presence: " + summary,
+      !!rendered.querySelector(".sess-brief-note"), !summary.trim());
+    check("refresh remains available", !!rendered.querySelector(".sess-brief-refresh"), true);
+  }
+  for (const [phase, expected] of [["loading", "summarising…"], ["error", "failed"]]) {
+    check("row summary preserves " + phase,
+      ctx.railCard({phase, error: "failed"}, "existing").querySelector(".sess-brief-note").textContent,
+      expected);
+  }
+  check("full card still explains missing detail", !!ctx.fullCard("missing").querySelector(".sess-brief-note"), true);
   ctx.apply();
   check("opening uncached expanded rows makes no request", calls, []);
   check("the empty card explains the explicit action", note(rows.s1).textContent,
