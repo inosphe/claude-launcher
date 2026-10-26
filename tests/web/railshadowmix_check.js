@@ -609,10 +609,10 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   ]);
   await ctx.refresh();
   await open("alpha");
-  const localDepth = (n) => n.classes.has("child") ? n.style.paddingLeft : 0;
+  const localDepth = (n) => n.classes.has("child") ? n.style.marginLeft : 0;
   check("the first mesh tab holds the shared child under its parent",
         items(list).map((n) => [who(n), localDepth(n)]),
-        [["parent", 0], ["child", "22px"], ["shared@m2", 0]]);
+        [["parent", 0], ["child", "calc(8px + 1 * var(--rail-child-indent, 20px))"], ["shared@m2", 0]]);
   check("each tab counts distinct membership cards",
         [tabCount("alpha"), tabCount("bravo")], ["3", "2"]);
   check("the first tab draws its own role",

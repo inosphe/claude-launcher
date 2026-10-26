@@ -267,11 +267,11 @@ const ev = (key, over = {}) => Object.assign({
   check("the rail has no pinned label strip", !!bar(), false);
   check("pinning does not move rows", names(), ["s1", "s2", "s3", "s4"]);
   check("the pinned session keeps its place and indent in the tree",
-        [row("s2").classes.has("child"), row("s2").style.paddingLeft,
-         row("s2").title], [true, "22px", "spawned by s1"]);
+        [row("s2").classes.has("child"), row("s2").style.marginLeft,
+         row("s2").title], [true, "calc(8px + 1 * var(--rail-child-indent, 20px))", "spawned by s1"]);
   check("its child is still under it rather than promoted to a root",
-        [row("s3").classes.has("child"), row("s3").style.paddingLeft],
-        [true, "32px"]);
+        [row("s3").classes.has("child"), row("s3").style.marginLeft],
+        [true, "calc(8px + 2 * var(--rail-child-indent, 20px))"]);
   check("every row carries a pin toggle that names its session",
         rows().map((r) => pinButton(r.dataset.name).dataset.name), ["s1", "s2", "s3", "s4"]);
   check("the toggle is lit on the pinned row alone, and says so to a reader",
@@ -364,7 +364,7 @@ const ev = (key, over = {}) => Object.assign({
         [false, ["s1", "s2", "s3", "s4"]]);
   check("the lineage is untouched: s2 under s1, s3 under s2",
         [row("s2").classes.has("child"), row("s3").classes.has("child"),
-         row("s3").style.paddingLeft], [true, true, "32px"]);
+         row("s3").style.marginLeft], [true, true, "calc(8px + 2 * var(--rail-child-indent, 20px))"]);
   check("the empty list is remembered too",
         writes.at(-1), ["claunch_session_pins:/t/local/", "[]"]);
 

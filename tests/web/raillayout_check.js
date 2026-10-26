@@ -318,7 +318,14 @@ ctx.setMeshes([
   /* The indent may not eat the row: it is the one part that grows without
      bound as the tree deepens, and past a few levels it would spend the
      whole rail on whitespace. */
-  const pad = (name) => parseInt(row(name).style.paddingLeft || "0", 10);
+  const indent = (r) => {
+    if (!r.classList.contains("child")) return 8;
+    const depth = Number(r.dataset.railDepth);
+    check("the whole card uses its depth for responsive indentation", r.style.marginLeft,
+      `calc(8px + ${depth} * var(--rail-child-indent, 20px))`);
+    return 8 + depth * 12; // Narrow-rail geometry is also measured in the browser.
+  };
+  const pad = (name) => indent(row(name));
   ok("a child row is indented", pad("s21") > 0, `s21 padding ${pad("s21")}`);
   ok("a grandchild is indented further than its parent",
      pad("s25") > pad("s21"), `s21 ${pad("s21")} vs s25 ${pad("s25")}`);
@@ -334,7 +341,7 @@ ctx.setMeshes([
   ctx.setMeshes([]);
   await ctx.refresh();
   const deepRows = list.kids.filter((r) => r.dataset.name);
-  const deep = deepRows.map((r) => parseInt(r.style.paddingLeft || "0", 10));
+  const deep = deepRows.map(indent);
   check("the rail still lists the whole chain",
         deepRows.map((r) => r.dataset.name).length, 8);
   ok("the deepest row still leaves the rail most of its width",

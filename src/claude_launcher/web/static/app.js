@@ -6307,22 +6307,11 @@ async function refreshSessions(options) {
       || (typeof railCardMode === "function" ? railCardMode(s) : "compact");
     li.dataset.railMode = mode;
     if (s.name === currentName) li.classList.add("active");
-    // The indent goes on the row, not on a spacer element, so the whole row
-    // stays one click target and the hover/active background still spans it.
-    // The step is deliberately small: on a 260px rail every pixel of indent
-    // is taken from the name and its tags, and depth is already spelt out by
-    // the └ tick — the indent only has to make the nesting scannable, not
-    // measure it. It stops growing past four levels for the same reason; a
-    // deep child that indented itself off the rail would be unreadable in
-    // exchange for a fact the tick and the tooltip already carry.
+    // Move the whole card at each depth; CSS reduces the step on narrow rails.
+    // Cap at four levels so deeply nested sessions retain readable content.
     if (depth) {
-      li.style.paddingLeft = `${12 + Math.min(depth, 4) * 10}px`;
+      li.style.marginLeft = `calc(8px + ${Math.min(depth, 4)} * var(--rail-child-indent, 20px))`;
       li.classList.add("child");
-      // How deep, for the stylesheet's stack (style.css, `li.child`): the
-      // spine and the card sliver above each child are tinted by level, so a
-      // reader can see the pile a session sits in without reading the indent.
-      // Capped like the indent for the same reason — past four levels the
-      // step stops saying anything new.
       li.dataset.railDepth = String(Math.min(depth, 4));
       li.title = `spawned by ${s.parent}`;
     }

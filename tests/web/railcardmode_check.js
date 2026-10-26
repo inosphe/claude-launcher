@@ -354,15 +354,10 @@ for (const mode of ["min", "compact"]) {
 check("the briefing toggle has no rule on the rail",
       rule("#session-list .sess-brief-toggle"), "");
 
-/* ---- the child stack ---------------------------------------------------
-   A child row is a card on the card above it, with a spine at its own level.
-   The spine is placed from `data-rail-depth`, which the row builder sets
-   alongside the indent (capped at four levels, like the indent). */
+/* ---- the child hierarchy ----------------------------------------------
+   The card's own margin supplies nesting; the guide follows that edge. */
 const child = rule("#session-list li.child");
-ok("a child row is drawn as a card", /background:/.test(child),
-   child.trim().slice(0, 80));
-ok("...with its own rim", /box-shadow:/.test(child), child.trim().slice(0, 80));
-ok("...and a rounded right edge", /border-radius:/.test(child), child.trim().slice(0, 80));
+ok("a child shares the root card surface", !/background:|box-shadow:/.test(child));
 ok("the tick that hangs it off its parent is still drawn",
    /content:\s*"└"/.test(rule("#session-list li.child::before")));
 /* A child row that `⇱ card` just landed on still has to show the mark.
@@ -411,23 +406,7 @@ ok("a child row draws a spine at its level",
    spine.trim().slice(0, 80));
 ok("...that runs the height of the row",
    /top:\s*0/.test(spine) && /bottom:\s*0/.test(spine), spine.trim().slice(0, 80));
-for (const depth of [2, 3, 4]) {
-  const r = rule(`#session-list li.child[data-rail-depth="${depth}"]::after`);
-  ok(`a depth-${depth} child's spine moves out with its indent`,
-     /left:\s*\d+px/.test(r), r.trim() || "no rule");
-}
-/* The four level positions must be distinct, or two depths would share a
-   spine and the nesting would read as one level. */
-{
-  const lefts = [1, 2, 3, 4].map((d) => {
-    const m = (d === 1 ? spine : rule(`#session-list li.child[data-rail-depth="${d}"]::after`))
-      .match(/left:\s*(\d+)px/);
-    return m ? Number(m[1]) : null;
-  });
-  ok("each depth's spine sits at its own offset",
-     lefts.every((v) => v !== null) && new Set(lefts).size === lefts.length,
-     lefts.join(","));
-}
+ok("the guide is a single pixel", /width:\s*1px/.test(spine));
 
 /* ---- the role pills ----------------------------------------------------
    One colour per family, and only the colours change: the pill's size, floor

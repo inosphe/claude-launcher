@@ -797,15 +797,14 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    focus/attention rings remain in the rules below this section. */
 #session-list li.sess-card {
   margin: 0 8px; padding-top: 12px; padding-bottom: 12px;
-  border: 3px solid #11161c; border-radius: 12px;
-  background: #1a2028; background-clip: padding-box; row-gap: 8px;
-  box-shadow: inset 0 0 0 1px #29313b;
+  border: 0; border-bottom: 1px solid #262c35; border-radius: 0;
+  background: transparent; row-gap: 8px; box-shadow: none;
 }
 #session-list li.sess-card[data-rail-mode="min"] {
   padding-top: 7px; padding-bottom: 7px;
 }
 #session-list .sess-card.active:not(.goto-flash) {
-  background: #202b3a; box-shadow: inset 0 0 0 1px #426286;
+  background: #202b3a; box-shadow: inset 2px 0 0 #426286;
 }
 #session-list li.sess-card .rail-name {
   font-weight: 600; letter-spacing: .01em; flex: 1 1 auto; min-width: 8ch;
@@ -840,42 +839,42 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 /* Internal surfaces align to the same 16px inset. The metric rows remain
    ordinary children so the incremental poll can replace them in place. */
 #session-list li.sess-card .rail-brief {
-  background: #172331; border-left: 3px solid #456a91;
-  border-radius: 0 6px 6px 0; padding: 8px 10px 8px 13px;
+  background: transparent; border: 0;
+  padding: 4px 0 4px 16px;
 }
 #session-list li[data-rail-mode="expanded"] .rail-actions {
-  background: #171e27; border-block: 1px solid #344050;
-  padding-top: 4px; padding-bottom: 4px; border-radius: 4px;
+  background: transparent; border: 0;
+  padding-top: 2px; padding-bottom: 2px;
 }
 #session-list li[data-rail-mode="expanded"] :is(.rail-ctx-line, .rail-ctx-tokens) {
-  background: #151d27; border-left: 2px solid #344050;
-  padding: 7px 8px 7px 14px; border-radius: 4px;
+  background: transparent; border: 0;
+  padding: 3px 0 3px 16px;
   box-sizing: border-box;
 }
 #session-list li[data-rail-mode="expanded"] :is(.rail-seen, .rail-life) {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0; padding-left: 0; background: #171e27;
-  border: 1px solid #344050; border-radius: 5px;
+  gap: 0; padding-left: 16px; background: transparent;
+  border: 0;
 }
 #session-list li[data-rail-mode="expanded"] .rail-life {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 #session-list li[data-rail-mode="expanded"] .rail-seen-pair {
-  min-width: 0; padding: 5px 8px; flex-wrap: wrap; gap: 2px 5px;
+  min-width: 0; padding: 3px 8px 3px 0; flex-wrap: wrap; gap: 2px 5px;
 }
 #session-list li[data-rail-mode="expanded"] .rail-seen-pair + .rail-seen-pair {
-  border-left: 1px solid #344050;
+  border: 0;
 }
 #session-list li.sess-card .rail-status-check {
-  background: #151d27; border: 1px solid #344050;
+  background: transparent; border: 0;
 }
 #session-list li.sess-card :is(.sess-cflow, .sess-cflow2) {
-  background: #171e27; border: 1px solid #344050;
-  border-radius: 5px; padding: 5px 8px; box-sizing: border-box;
+  background: transparent; border: 0;
+  padding: 3px 0 3px 16px; box-sizing: border-box;
 }
 #session-list li.sess-card .sess-brief {
-  background: #171e27; border: 1px solid #344050;
-  border-radius: 6px; padding: 8px; margin-left: 0;
+  background: transparent; border: 0; border-top: 1px solid #30363d;
+  border-radius: 0; padding: 8px 0 0; margin-left: 16px;
 }
 #session-list li.sess-card .sess-brief-note { margin-top: 5px; }
 #session-list li.sess-card .sess-brief-refresh {
@@ -928,61 +927,19 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li.goto-flash {
   background: #1b2a44; box-shadow: inset 0 0 0 1px #1f6feb;
 }
-/* A spawned session sits under the one that spawned it.
-
-   The indent alone did not say that. A reader scanning twenty rows saw a
-   ragged left edge and one `└`, and the fleet's shape — which sessions are
-   one pile under one parent, and how deep — was the thing they came to the
-   rail to find. So a child row is drawn as a CARD that sits on the one above
-   it: its own face on a darker rim, a rounded right edge, and a spine at its
-   level that runs down to the next sibling. Rows of the same parent share
-   the spine, so a pile reads as one column with the parent's card behind it.
-
-   The indent is still set per row in JS (it depends on depth) and stays the
-   measure of nesting; the spine is placed just left of the child's own tick
-   (`::before`) by depth, so the tick always lands on the line it hangs from.
-
-   Background and rim, not extra elements: the row is a flex container whose
-   children are its lines, and anything inserted into it would count against
-   the line budget raillayout_check pins. `::before` and `::after` are not
-   children of a flex container in that sense — `::before` already was the
-   tick — and neither takes part in the wrap. */
-#session-list li.child {
-  position: relative;
-  background: #171b21;
-  border-radius: 10px;
-  border-bottom-color: #11161c;
-  box-shadow: inset 0 0 0 1px #262c35;
-}
-/* The child card is drawn after `goto-flash` above and at the same
-   specificity, so without this rule it would paint over the mark wherever a
-   child was the row `⇱ card` landed on -- which is most of them, since a
-   tree's rows are mostly children. The flash is the stronger claim of the
-   two: the child card says where a row sits, the flash says which row was
-   just asked for, and a reader who pressed `⇱` on a child is looking for
-   exactly that. Same colours as the root row's flash, so the mark reads the
-   same at any depth. */
-/* The tick that hangs the row off its parent: the same glyph as before, now
-   in the child's own rim colour so it reads as part of the card. */
+/* Child cards move as a whole so every line shares the nesting inset.
+   The one-pixel guide stays inside the card for content-visibility clipping.
+   Narrow rails reduce the step to retain space for labels at depth four. */
+#session-list li.child { position: relative; }
 #session-list li.child::before {
   content: "└"; color: #6e7681; font-size: 11px; flex: none; margin-right: -2px;
 }
-/* The spine, at the level the indent put this row. `left` is the row's
-   padding-left (12 + min(depth, 4) * 10, app.js) minus 14px, which puts it
-   between the parent's card edge and this row's tick. Depth stops at four
-   for the same reason the indent does. */
 #session-list li.child::after {
-  content: ""; position: absolute; top: 0; bottom: 0; left: 8px; width: 2px;
-  background: #30363d; border-radius: 1px; pointer-events: none;
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 1px;
+  background: #30363d; pointer-events: none;
 }
-#session-list li.child[data-rail-depth="2"]::after { left: 18px; }
-#session-list li.child[data-rail-depth="3"]::after { left: 28px; }
-#session-list li.child[data-rail-depth="4"]::after { left: 38px; }
-/* The card's own states: the shared hover/active tints are the rail's flat
-   row colour, and this row is not that shape any more. Kept a step lighter
-   than the face so a hovered child still reads as the card it is. */
-#session-list li.child:hover { background: #20262e; }
-#session-list li.child.active { background: #262d38; }
+#session-list li.child:hover { background: #22262d; }
+#session-list li.child.active { background: #202b3a; }
 /* A child row that `⇱ card` just landed on still has to show the mark, and
    the two rules above are where the earlier attempt at this went wrong.
 
@@ -2096,6 +2053,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    slack keeps sub-pixel rounding from wrapping the name, and stays under
    the 5px gap so nothing that follows can squeeze into it. */
 @container session-rail (max-width: 420px) {
+  #session-list li.child { --rail-child-indent: 12px; }
   #session-list li[data-name] > .dot { order: -1; }
   #session-list li.child::before { order: -1; width: 11px; overflow: hidden; }
   #session-list li[data-name] > .rail-head {

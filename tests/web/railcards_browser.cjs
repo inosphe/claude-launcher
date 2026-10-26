@@ -43,6 +43,7 @@ const fixtureChecks = [
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
     parent: null, keep_alive: true, status_checks: fixtureChecks,
+    created_at: "2026-10-25T12:00:00Z",
     context: { tokens: 177000, input: 2, cache_read: 176000, cache_write: 1090,
       output: 210, model: "claude-opus-4-5", at: new Date().toISOString(),
       compact_window: 200000 },
@@ -139,6 +140,7 @@ const READ = `(() => {
       child: li.classList.contains("child"),
       depth: li.dataset.railDepth || "",
       h: Math.round(li.getBoundingClientRect().height),
+      left: li.getBoundingClientRect().left,
       role: role ? role.textContent : "",
       roleColor: rs ? rs.color : "",
       roleClass: role ? role.className : "",
@@ -293,15 +295,15 @@ const READ = `(() => {
     assert.ok(deep.spine, "a child row draws a spine");
     assert.equal(sibling.spine, deep.spine,
       "siblings at one depth share the spine's offset");
-    assert.ok(parseInt(shallow.spine.split("@")[1], 10)
-              < parseInt(deep.spine.split("@")[1], 10),
+    assert.ok(shallow.left < deep.left,
       `a shallower child's spine sits further left (${shallow.spine} vs ${deep.spine})`);
     assert.deepEqual([shallow.depth, deep.depth], ["1", "2"],
       "each child carries its depth for the spine");
     assert.equal(by("lead").spine, "", "a root row draws no spine");
     assert.equal(deep.tick, '"└"', "the tick still hangs the child off its parent");
-    assert.notEqual(deep.background, by("lead").background,
-      "a child row is drawn as a card on a face of its own");
+    assert.equal(deep.left, sibling.left, "siblings align their entire cards");
+    assert.equal(deep.background, by("lead").background,
+      "ordinary parent and child cards share the rail background");
 
     /* ---- the line that says why a session is silent ------------------- */
     /* w1a is a compact child card with an active harness fault. The compact
@@ -479,22 +481,51 @@ const READ = `(() => {
         window.claunchTheme.set(theme);
       }, {width, theme});
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      await lead.locator(".rail-brief").waitFor({state: "visible"});
+      // Earlier navigation can leave the expanded root outside the rail's
+      // viewport. Bring it into view before measuring content-visibility rows,
+      // and wait for all measured sections after the theme/width transition.
+      await lead.scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => {
+        const li = document.querySelector('#session-list li[data-name="lead"]');
+        return li && [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"]
+          .every(selector => {
+            const e = li.querySelector(selector), r = e && e.getBoundingClientRect();
+            return r && r.width > 0 && r.height > 0;
+          });
+      });
+      const hierarchy = await page.evaluate(() => ["lead", "w1", "w1a", "w1b"].map(name => {
+        const e = document.querySelector(`#session-list li[data-name="${name}"]`);
+        const r = e.getBoundingClientRect();
+        return {left: r.left, right: r.right};
+      }));
+      const step = width <= 420 ? 12 : 20;
+      assert.equal(hierarchy[1].left - hierarchy[0].left, step, "first-level card inset");
+      assert.equal(hierarchy[2].left - hierarchy[1].left, step, "second-level card inset");
+      assert.equal(hierarchy[2].left, hierarchy[3].left, "sibling card edges align");
+      assert.ok(hierarchy.every(r => Math.abs(r.right - hierarchy[0].right) < 1),
+        "nested cards share the rail's right edge");
+      if (process.env.RAIL_SCREENSHOT_DIR) {
+        await page.locator("#sidebar").screenshot({path: path.join(
+          process.env.RAIL_SCREENSHOT_DIR, `rail-${theme}-${width}.png`)});
+      }
       const sections = await lead.evaluate(li => {
         const rowBg = getComputedStyle(li).backgroundColor;
         const names = [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"];
         return names.map(selector => {
           const e = li.querySelector(selector), c = getComputedStyle(e), box = e.getBoundingClientRect();
           const cells = [...e.querySelectorAll(".rail-seen-pair")].map(x => x.getBoundingClientRect());
-          return {selector, filled: c.backgroundColor !== "rgba(0, 0, 0, 0)" && c.backgroundColor !== rowBg,
+          return {selector, display: c.display, connected: e.isConnected,
+            mode: li.dataset.railMode, scroll: document.getElementById("session-list").scrollTop,
+            cardTop: li.getBoundingClientRect().top, cardHeight: li.getBoundingClientRect().height,
+            filled: c.backgroundColor !== "rgba(0, 0, 0, 0)" && c.backgroundColor !== rowBg,
             painted: box.width > 0 && box.height > 0,
             aligned: cells.every(x => Math.abs(x.width - cells[0].width) < 1),
             contained: cells.every(x => x.left >= box.left && x.right <= box.right + 1)};
         });
       });
       for (const section of sections) {
-        assert.ok(section.filled && section.painted && section.aligned && section.contained,
-          `${theme} ${width}px internal surface stays filled, visible and aligned: ${JSON.stringify(section)}`);
+        assert.ok(!section.filled && section.painted && section.aligned && section.contained,
+          `${theme} ${width}px internal content shares the card surface and stays visible and aligned: ${JSON.stringify(section)}`);
       }
     }
 
