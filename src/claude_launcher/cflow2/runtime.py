@@ -5174,6 +5174,72 @@ def wait_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunner] =
     return payload
 
 
+#: Delegation states a pass of the clock does nothing for. Anything else --
+#: open, verifying (``_lost_verifies``), or a state this list does not know --
+#: keeps the run off :func:`quiescent`.
+SETTLED_DELEGATIONS = ("returned", "failed", "cancelled", "timeout", "rerouted")
+
+
+def quiescent(r: Run) -> bool:
+    """Whether the clock has nothing to do for ``r`` until something writes it.
+
+    The daemon's clock skips a held driver's slot while this holds and the
+    slot's files are unchanged (:class:`..daemon.cflow2_clock.CflowV2Clock`):
+    a held session's run waits on a person's answer, an agent that is not
+    there, or nothing at all. Everything that moves such a run is a write -- an answer
+    from the CLI or the dashboard, the driver's own call once it is woken --
+    and a write changes the slot's files.
+
+    So it is a list of what a pass *would* do, each one ruled out, and it
+    answers no for anything it does not recognise: a time-based await
+    (wait, pause, a timeout's deadline, a held choice's window, a verify that
+    may be lost), an ask still being routed or with a deadline or a notice
+    not yet given, a delegation not settled (a child's receipt arrives as a
+    file the clock settles over :data:`..daemon.cflow2_clock.RECEIPT_SETTLE`
+    seconds), a failed acceptance (rechecked), triggers, a restart a task
+    node declares, a watched queue with a record still unsettled (its probe
+    runs every ``watch.every`` seconds, :func:`watch_due`), ``spec.monitors``,
+    and a finished run whose next round starts by itself.
+    """
+    state = r.state
+    if state.get("triggers"):
+        return False
+    if r.status not in LIVE_STATUSES:
+        return not (state.get("next_round") or {}).get("auto")
+    if (state.get("acceptance") or {}).get("status") == "failed":
+        return False
+    if any(rec.get("status") not in SETTLED_DELEGATIONS
+           for rec in (state.get("delegations") or {}).values()):
+        return False
+    for rec in (state.get("asks") or {}).values():
+        if rec.get("status") != "open":
+            continue
+        if rec.get("resolution") not in (RES_HUMAN, RES_SELF) \
+                or rec.get("deadline") is not None or rec.get("retry_at") is not None \
+                or rec.get("notified") != rec.get("resolution"):
+            return False
+    if (r.chart.spec or {}).get("monitors"):
+        return False
+    cols = state.get("collections") or {}
+    if any(spec.get("watch") and spec.get("kind") == "queue"
+           and col_mod.unsettled(cols.get(name), spec)
+           for name, spec in _col_specs(r).items()):
+        return False
+    for inst in r.inst.values():
+        await_ = inst.get("await")
+        if not await_:
+            continue
+        frame = inst.get("frame") or {}
+        if await_ == AW_APPROVAL:
+            continue
+        if await_ == AW_CHOOSE and not frame.get("held"):
+            continue
+        if await_ == AW_TASK and not r.chart.node(inst["node"]).get("restart"):
+            continue
+        return False
+    return True
+
+
 # -- spec.monitors -------------------------------------------------------------
 
 #: How often an ``always`` monitor without ``every`` is evaluated.

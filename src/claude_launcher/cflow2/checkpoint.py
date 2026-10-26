@@ -16,9 +16,9 @@ verifies only the state; the chart is verified when the chart is read.
 A parsed chart is kept apart from that, by the checksum of its text
 (:data:`CHART_CACHE_MAX` texts): a commit that moves only the state
 re-verifies the chart text but does not parse it again. It does not cover a
-clock pass over more live runs than that: on 2026-10-26 the daemon's clock
-ticked 163 live runs with 163 distinct chart texts (97.8 MB), so each pass
-reads every one of them again. What keeps that read cheap is
+clock pass over more live runs than that: on 2026-10-26 the directories the
+daemon's clock scans held 46 live runs with 45 distinct chart texts, so each
+pass reads every one of them again. What keeps that read cheap is
 :class:`..ir.LazyNodes` (a node is built when it is looked up).
 """
 from __future__ import annotations

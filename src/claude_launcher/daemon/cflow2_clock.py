@@ -160,6 +160,10 @@ LOST_WATCH = 900.0
 #: left alone this long (it may still be being written) before it is
 #: submitted anyway for validation to refuse.
 RECEIPT_SETTLE = 30.0
+#: Seconds a held driver's quiescent slot goes without a full pass when its
+#: files have not changed (:meth:`Cflow2Clock._still_quiet`): a safety net
+#: for a move :func:`..cflow2.runtime.quiescent` does not know about.
+HELD_RECHECK = 600.0
 #: Probe wall clock.
 PROBE_TIMEOUT = 60.0
 #: A collection watch probe's wall clock (docs 2.7, watch).
@@ -328,6 +332,12 @@ class Cflow2Clock:
         #: ``_open_delegations``: a restart forgets it and the resume nudge
         #: covers the down time.
         self._driver_nudged: Dict[Tuple[str, str], float] = {}
+        #: ``(cwd, scope) -> (the slot's files, when the full pass ran)`` for
+        #: a held driver's slot that pass found quiescent; a pass skips it
+        #: while both still hold. In memory only, so a restart -- whose first
+        #: pass also settles restarts of the previous boot -- ticks every
+        #: slot once.
+        self._quiet: Dict[Tuple[str, str], Tuple[Any, float]] = {}
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -677,10 +687,14 @@ class Cflow2Clock:
                         # another daemon's session, or one that ended
                         self._open_delegations.pop((cwd, scope), None)
                         continue
+                    if self._still_quiet(cwd, scope, now):
+                        continue
+                    self._quiet.pop((cwd, scope), None)
                     self._mark()
                     self._beat()
                     try:
                         self.tick_slot(cwd, scope, now, notices)
+                        self._note_quiet(cwd, scope, now)
                     except (runtime.FlowError, cstore.StoreError) as exc:
                         log.debug("cflow2 clock skipped %s/%s: %s", cwd, scope, exc)
                     except Exception:
@@ -688,6 +702,45 @@ class Cflow2Clock:
         finally:
             self._scanning = False
         return notices
+
+    # -- held drivers ------------------------------------------------------
+    def _held(self, scope: str) -> bool:
+        try:
+            session = self.manager.get(cstore.session_of(scope))
+        except Exception:
+            return False
+        return bool(session is not None and getattr(session, "exited", False)
+                    and getattr(session, "held_at", None))
+
+    def _still_quiet(self, cwd: str, scope: str, now: Optional[float]) -> bool:
+        """Whether this pass can skip a held driver's slot: the last full
+        pass found it quiescent, its files are as they were then, the driver
+        is still held, and :data:`HELD_RECHECK` has not run out. A held
+        session has nobody to move its run, so only a write elsewhere (an
+        answer, a receipt) or the clock's own time can, and the first one
+        changes the files."""
+        seen = self._quiet.get((cwd, scope))
+        if seen is None:
+            return False
+        files, at = seen
+        clock_now = time.time() if now is None else float(now)
+        return (clock_now - at < HELD_RECHECK and self._held(scope)
+                and _slot_files(cwd, scope) == files)
+
+    def _note_quiet(self, cwd: str, scope: str, now: Optional[float]) -> None:
+        """After a full pass over a held driver's slot: remember it when the
+        run is :func:`runtime.quiescent`. The files are read before the run,
+        so a write landing in between makes the next pass a full one."""
+        if not self._held(scope):
+            return
+        files = _slot_files(cwd, scope)
+        if files is None:
+            return
+        st = cstore.RunStore(cwd, scope)
+        if not st.exists() or cstore.recovery_held(st.load_state()):
+            return
+        if runtime.quiescent(runtime.Run.load(st, now)):
+            self._quiet[(cwd, scope)] = (files, time.time() if now is None else float(now))
 
     def tick_slot(self, cwd: str, scope: str, now: Optional[float],
                   notices: List[Notice]) -> None:
@@ -1357,6 +1410,27 @@ def _open_delegations(state: Dict[str, Any]) -> Set[str]:
 
 
 #: Why the clock says a run moved (the protocol line of :func:`moved_block`).
+def _slot_files(cwd: str, scope: str) -> Optional[Tuple[Any, ...]]:
+    """What a write to a slot changes: the stat of its checkpoint, its JSON
+    state (a run with no checkpoint yet) and its receipts directory (a
+    child's receipt is a file there). None when the slot cannot be read."""
+    try:
+        st = cstore.RunStore(cwd, scope)
+    except Exception:  # noqa: BLE001 - an unreadable slot is never skipped
+        return None
+    out: List[Any] = []
+    for path in (st.checkpoint_path, st.state_path, st.receipts_dir):
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            out.append(None)
+            continue
+        except OSError:
+            return None
+        out.append((info.st_ino, info.st_size, info.st_mtime_ns))
+    return tuple(out)
+
+
 WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
 WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
 WHY_NUDGE = ("the run is still waiting on you -- the clock re-nudges a waiting "
