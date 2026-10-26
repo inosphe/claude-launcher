@@ -43382,7 +43382,9 @@ function cflow2GraphLayout(chart, detail, opts) {
     const ref = shared(id);
     const count = (procs.sites.get(procs.first.get(id)) || []).length;
     const nkids = kids(id).length;
-    const head = ref ? `call ${n.proc || "?"}` : (bits.head || n.label || n.id);
+    /* a call is a call whether its body is drawn inside it or not */
+    const head = ref || n.type === "scope" ? `call ${n.proc || "?"}`
+      : (bits.head || n.label || n.id);
     const site = n.type === "scope" ? cflow2GraphSite(id) : "";
     let sub = ref ? [site, `shared ×${count}`].filter(Boolean).join(" · ")
       : [bits.sub, n.type === "scope" ? site : ""].filter(Boolean).join(" · ");
