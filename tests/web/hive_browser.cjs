@@ -24,7 +24,13 @@
         item in two nodes says so), the detail pane lists the full paths,
         search finds a chip by its category, and the toolbar switch hides
         the tags;
-    11. no page errors. */
+    11. relations (claunch-yzgqb.2): the worker's issue marks that the
+        worker holds it and was started on it and that a reviewer joined
+        it; the leader carries a reference chip for the pool issue it
+        filed; picking the issue lights its sessions, fades the rest and
+        draws a line to each drawn one; the detail pane lists them by kind;
+        a legend button hides one kind and the toolbar switch hides all;
+    12. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -39,7 +45,7 @@ const SESSIONS = [
   { name: "lead", status: "busy", created_at: ago(5), project: "claunch", cwd: "/w/claunch" },
   { name: "wk", status: "idle", parent: "lead", created_at: ago(4), project: "claunch", cwd: "/w/claunch", issue: "c-1" },
   { name: "wk-rev", status: "idle", parent: "wk", created_at: ago(1), project: "claunch", cwd: "/w/claunch" },
-  { name: "wk-rev2", status: "busy", parent: "wk", created_at: ago(1), project: "claunch", cwd: "/w/claunch" },
+  { name: "wk-rev2", status: "busy", parent: "wk", created_at: ago(1), project: "claunch", cwd: "/w/claunch", issue: "c-1" },
   { name: "parked", status: "exited", held_at: ago(3), created_at: ago(9), project: "gds", cwd: "/w/gds" },
   { name: "dead", status: "exited", exited_at: ago(2), created_at: ago(9), project: "gds", cwd: "/w/gds" },
 ];
@@ -63,7 +69,7 @@ const QUEUES = {
     ],
     unassigned: [
       { id: "c-7", title: "pool one", status: "open", priority: 3 },
-      { id: "c-8", title: "pool two", status: "open", priority: 3 },
+      { id: "c-8", title: "pool two", status: "open", priority: 3, created_by: "lead" },
     ],
   }],
 };
@@ -253,7 +259,55 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     await catSwitch.check();
     await page.waitForSelector('#hive-view .hive-chip[data-id="wk"] .hive-cat');
 
-    // 11.
+    // 11. Relations between sessions and issues.
+    const marks = (sel) => page.$$eval(`${sel} .hive-rels .hive-rel`, (els) => els.map((e) => e.textContent));
+    const c1 = '#hive-view .hive-attach .hive-chip[data-kind="issue"][data-id="c-1"]';
+    assert.deepEqual(await marks(c1), ["담당", "시작", "참가 wk-rev2"]);
+    const ref = '#hive-view .hive-chip[data-id="lead"] ~ .hive-refs .hive-ref[data-id="c-8"]';
+    await page.waitForSelector(ref);
+    assert.deepEqual(await marks(ref), ["생성", "미배정"]);
+    assert.equal(await page.$eval(ref, (c) => c.dataset.ref), "lead");
+    // Open the reviewers' deck so both sessions tied to c-1 are drawn.
+    await page.click('#hive-view .hive-deck-face[data-deck="wk/minor"]');
+    await page.waitForSelector('#hive-view .hive-deck.open .hive-chip[data-id="wk-rev2"]');
+    const rref = '#hive-view .hive-chip[data-id="wk-rev2"] ~ .hive-refs .hive-ref[data-id="c-1"]';
+    assert.deepEqual(await marks(rref), ["참가", "담당 wk"]);
+    await page.click(c1);
+    await page.waitForSelector("#hive-view .hive-port.relating .hive-links");
+    const lit = await page.$$eval("#hive-view .hive-chip.rel[data-kind=session]", (els) => els.map((e) => e.dataset.id).sort());
+    assert.deepEqual(lit, ["wk", "wk-rev2"]);
+    const lines = await page.$$eval("#hive-view .hive-links path", (ps) => ps.map((p) => [p.dataset.to, p.getAttribute("class")]).sort());
+    assert.deepEqual(lines, [["session:wk", "r-assignee"], ["session:wk-rev2", "r-join"]]);
+    assert.equal(await page.$eval('#hive-view .hive-chip[data-id="lead"]', (c) => getComputedStyle(c).opacity), "0.3");
+    const dd = (label) => page.$$eval("#hive-view .hive-detail dt", (dts, l) => {
+      const dt = dts.find((d) => d.textContent === l);
+      return dt ? dt.nextElementSibling.textContent : null;
+    }, label);
+    assert.equal(await dd("담당 세션"), "wk");
+    assert.equal(await dd("시작 세션"), "wk");
+    assert.equal(await dd("참가 세션"), "wk-rev2");
+    // A session pick lists its ties by kind and lights its reference chip.
+    await page.click('#hive-view .hive-chip[data-kind="session"][data-id="lead"]');
+    await page.waitForFunction(() => document.querySelector("#hive-view .hive-detail h3")?.textContent === "lead");
+    assert.equal(await dd("생성"), "c-8");
+    assert.ok(await page.$(`${ref}.rel`), "the reference chip is lit");
+    await page.click('#hive-view .hive-chip[data-kind="session"][data-id="lead"]');
+    await page.waitForSelector("#hive-view .hive-detail.hidden", { state: "attached" });
+    assert.equal(await page.$("#hive-view .hive-port.relating"), null);
+    // The legend hides one kind; the toolbar switch hides them all.
+    await page.click('#hive-view .hive-legend button[data-rel="join"]');
+    await page.waitForFunction((sel) => !document.querySelector(sel), rref);
+    assert.deepEqual(await marks(c1), ["담당", "시작"]);
+    await page.click('#hive-view .hive-legend button[data-rel="join"]');
+    await page.waitForSelector(rref);
+    const relSwitch = page.locator("#hive-view .hive-toolbar label.hive-toggle", { hasText: "관계" }).locator("input");
+    await relSwitch.uncheck();
+    await page.waitForSelector("#hive-view .hive-rels", { state: "detached" });
+    assert.equal(await page.$("#hive-view .hive-refs"), null);
+    await relSwitch.check();
+    await page.waitForSelector(ref);
+
+    // 12.
     assert.deepEqual(errors, []);
     console.log("hive browser ok");
   } finally {
