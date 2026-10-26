@@ -27,7 +27,11 @@ const rail = railMarkup(fs.readFileSync(path.join(root, 'index.html'), 'utf8'));
 const writes = [];
 const searches = [];
 const now = Date.parse('2026-09-18T10:00:00Z');
-const cfg = {source:'custom', profile:'', profiles:[{name:'ds4', base_url:'https://api.fireworks.ai/inference/v1', has_key:true}], base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
+const cfg = {source:'custom', profile:'', profiles:[{name:'ds4', base_url:'https://api.fireworks.ai/inference/v1', has_key:true}], base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true,
+  // claunch-pxxn4: each connection path keeps its own model ids, so switching
+  // the radio restores that path's pair instead of showing the other one's.
+  sources:{custom:{base_url:'http://omlx/v1', embedding_model:'embed', rerank_model:'rank'},
+           profile:{profile:'', embedding_model:'fw-embed', rerank_model:''}}};
 const server = http.createServer(async (req,res) => {
   if (req.url === '/') { res.setHeader('Content-Type','text/html; charset=utf-8'); res.end(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body>
     <aside style="width:260px">${rail}</aside><input id="editor"><div class="xterm"><textarea id="terminal"></textarea></div><div id="settings"></div>
@@ -90,6 +94,18 @@ const server = http.createServer(async (req,res) => {
   }
   res.setHeader('Content-Type','application/json');
   if (req.method === 'PUT' || req.method === 'POST') { let text=''; for await(const part of req) text+=part; writes.push({url:req.url,body:JSON.parse(text)}); }
+  if(req.url==='/api/rag/settings' && req.method === 'PUT') {
+    // The daemon answers a save with the settings as they now stand, so the
+    // card's next save starts from them. Echo the rows that were written.
+    const written = writes.at(-1).body.sources || {};
+    for (const [name, row] of Object.entries(written)) {
+      cfg.sources[name] = {...cfg.sources[name], ...row};
+      for (const [key, value] of Object.entries(row)) if (key !== 'profile' && key !== 'api_key') cfg[key] = value;
+    }
+    cfg.source = writes.at(-1).body.source;
+    cfg.profile = cfg.sources.profile.profile || '';
+    res.end(JSON.stringify(cfg));return;
+  }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
   if(req.url==='/api/rag/test') {res.end(JSON.stringify({ok:true,dimensions:2560,rerank:true}));return;}
   res.end(JSON.stringify({text:'원문 기록',session:'s1'}));
@@ -259,16 +275,30 @@ const server = http.createServer(async (req,res) => {
     assert.equal(await page.locator('input[name=dimensions]').count(),0);
     await page.getByRole('button',{name:'연결 테스트',exact:true}).click();await page.getByText(/실제 차원 2560/).waitFor();
     await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
-    assert.equal(writes.at(-1).body.embedding_model,'replacement');assert.equal(writes.at(-1).body.api_key,'');
+    // claunch-pxxn4: the save carries both rows, the picked one taking what is
+    // on screen and the other keeping what it had.
+    assert.equal(writes.at(-1).body.embedding_model,undefined);
+    assert.equal(writes.at(-1).body.sources.custom.embedding_model,'replacement');
+    assert.equal(writes.at(-1).body.sources.custom.api_key,undefined);
     assert.equal(writes.at(-1).body.source,'custom');
     // claunch-dkrqf: the profile path hides the typed endpoint and sends both paths' values.
     assert.equal(await page.locator('select[name=profile]').isVisible(),false);
     await page.getByLabel('Profile (provider)').check();
     assert.equal(await page.locator('input[name=base_url]').isVisible(),false);
+    // Switching the radio shows that path's own model ids.
+    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'fw-embed');
     await page.locator('select[name=profile]').selectOption('ds4');
     await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
-    assert.equal(writes.at(-1).body.source,'profile');assert.equal(writes.at(-1).body.profile,'ds4');
-    assert.equal(writes.at(-1).body.base_url,'http://omlx/v1');
+    assert.equal(writes.at(-1).body.source,'profile');
+    assert.equal(writes.at(-1).body.sources.profile.profile,'ds4');
+    assert.equal(writes.at(-1).body.sources.profile.embedding_model,'fw-embed');
+    // The custom path keeps the value typed before the switch.
+    assert.equal(writes.at(-1).body.sources.custom.base_url,'http://omlx/v1');
+    assert.equal(writes.at(-1).body.sources.custom.embedding_model,'replacement');
+    // Switching back restores the custom pair rather than the profile's.
+    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'fw-embed');
+    await page.getByLabel('Custom API (직접 입력)').check();
+    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'replacement');
     await page.getByLabel('Custom API (직접 입력)').check();
     assert.equal(await page.locator('input[name=base_url]').isVisible(),true);
     await page.locator('#search-anything-open').click();

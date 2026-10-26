@@ -1128,6 +1128,44 @@ RAG_DEFAULTS = {
 }
 
 
+#: Which keys belong to one connection path rather than to the feature as a
+#: whole. ``source`` at the block root picks the row in force; each row keeps
+#: its own endpoint and models, so switching the radio button does not
+#: overwrite the other path's model names (claunch-pxxn4). ``embedding_model``
+#: and ``rerank_model`` appear in both rows on purpose: that pair is the thing
+#: the two paths most often disagree about (a local oMLX model id and a
+#: provider's model id are different strings).
+RAG_SOURCE_FIELDS = {
+    "custom": ("base_url", "api_key", "embedding_model", "rerank_model"),
+    "profile": ("profile", "embedding_model", "rerank_model"),
+}
+
+
+def rag_source_rows(block: dict) -> Dict[str, dict]:
+    """Both connection paths as the file holds them, every field present.
+
+    A block written before the paths were stored apart keeps one set of values
+    for both — that is what it meant then, and reading it that way is the
+    migration: the first save writes ``sources`` and from then on each row is
+    its own. ``sources`` being present but a row missing is not the legacy
+    case: it means that path has nothing stored yet, and its fields read empty
+    rather than borrowing the other path's values.
+    """
+    block = block if isinstance(block, dict) else {}
+    stored = block.get("sources")
+    if not isinstance(stored, dict):
+        return {
+            source: {key: block.get(key, "") for key in keys}
+            for source, keys in RAG_SOURCE_FIELDS.items()
+        }
+    rows = {}
+    for source, keys in RAG_SOURCE_FIELDS.items():
+        row = stored.get(source)
+        row = row if isinstance(row, dict) else {}
+        rows[source] = {key: row.get(key, "") for key in keys}
+    return rows
+
+
 def rag_config(doc: Optional[dict] = None) -> dict:
     """The effective ``rag`` settings (missing keys filled with defaults).
 
@@ -1137,16 +1175,19 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     same arrangement the relay token has, so a synced config need not carry
     it. It never leaves this dict except as an ``Authorization`` header.
 
-    ``source`` picks where ``base_url`` and ``api_key`` come from. ``custom``
-    reads the block's own two fields (a local server typed in directly).
-    ``profile`` reads the named profile's backend instead -- its provider's
-    ``endpoints.openai`` and the key that reaches it (:func:`rag_profile_backend`)
-    -- and leaves the typed pair in the file untouched, so switching back is
-    one choice rather than retyping. A block written before ``source``
-    existed has none and reads as ``custom``. A profile that cannot be
-    resolved is the not-configured case, with the reason in
-    ``profile_error``. ``CLAUNCH_RAG_API_KEY`` is a key for the typed
-    endpoint and so applies to ``custom`` only.
+    ``source`` picks which row of ``sources`` is in force. ``custom`` reads the
+    typed endpoint (a local server entered directly). ``profile`` reads the
+    named profile's backend instead -- its provider's ``endpoints.openai`` and
+    the key that reaches it (:func:`rag_profile_backend`). Both rows keep
+    their own ``embedding_model``/``rerank_model``, and the row not in force
+    is left untouched on save, so switching back is one choice rather than
+    retyping model ids (claunch-pxxn4). A block written before the rows were
+    stored apart has one set of values for both and reads that way
+    (:func:`rag_source_rows`); a block written before ``source`` existed has
+    none and reads as ``custom``. A profile that cannot be resolved is the
+    not-configured case, with the reason in ``profile_error``.
+    ``CLAUNCH_RAG_API_KEY`` is a key for the typed endpoint and so applies to
+    ``custom`` only.
 
     ``provider`` is the derived provider name behind a ``profile`` source
     (empty for ``custom``), so the caller can apply that provider's request
@@ -1160,9 +1201,11 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     if not isinstance(block, dict):
         block = {}
     out = dict(RAG_DEFAULTS)
-    for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
-        out[key] = str(block.get(key) or "").strip()
     out["source"] = "profile" if block.get("source") == "profile" else "custom"
+    rows = rag_source_rows(block)
+    for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
+        source = "profile" if key == "profile" else out["source"]
+        out[key] = str(rows[source].get(key) or "").strip()
     out["profile_error"] = ""
     if out["source"] == "profile":
         out["base_url"], out["api_key"], out["provider"] = "", "", ""

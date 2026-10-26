@@ -458,6 +458,38 @@ def _messages_url(base: str) -> str:
     return text + "/v1/messages"
 
 
+#: The provider name the probe judges an entry under. The entry may not be
+#: saved yet -- that is the point of checking it first -- so the routing rules
+#: are asked about a config holding only this entry, under a name no form can
+#: create (``__`` is not in :data:`NAME_RE`).
+PROBE_NAME = "__probe__"
+
+#: The id this check sends under a provider's required session header. The
+#: real callers send their own (:data:`rag.RAG_SESSION_ID`,
+#: :data:`observer.OBSERVER_SESSION_ID`, :data:`briefing.BRIEFING_SESSION_ID`);
+#: a check is none of those, and a value naming it keeps it out of their
+#: traffic at the upstream.
+PROBE_SESSION_ID = "claunch-provider-probe"
+
+
+def _probe_rules(headers: Dict[str, str], entry: dict, path: str) -> None:
+    """Apply the provider's request-header rules to a check's headers.
+
+    The rules come from :mod:`routing`, not from a second copy here: a check
+    that sent different headers from the traffic it stands for would report on
+    a request nobody makes. A malformed value raises
+    :class:`InstallError` through :class:`routing.RoutingError`.
+    """
+    doc = {"providers": {PROBE_NAME: dict(entry)}}
+    try:
+        routing.apply_session_header(
+            headers, PROBE_NAME, session=PROBE_SESSION_ID, doc=doc
+        )
+        routing.apply_anthropic_auth(headers, PROBE_NAME, path=path, doc=doc)
+    except routing.RoutingError as exc:
+        raise InstallError(str(exc)) from exc
+
+
 def probe_request(
     entry: dict, api_key: Optional[str] = None
 ) -> Tuple[str, str, Dict[str, str], Optional[dict]]:
@@ -468,10 +500,13 @@ def probe_request(
     with ``max_tokens: 1``, because the Messages protocol has no cheaper
     endpoint that proves a key works.
 
-    The credential goes where that protocol puts it: ``Authorization: Bearer``
-    for the OpenAI protocol, and for the Messages protocol wherever the entry's
-    ``anthropic_auth_header`` says (``x-api-key`` when it says so, otherwise
-    ``Authorization``).
+    The credential starts as ``Authorization: Bearer`` for both protocols;
+    :func:`_probe_rules` then applies the entry's own rules, so an
+    ``anthropic_auth_header: x-api-key`` provider gets its key on
+    ``x-api-key`` for a Messages path and a ``session_header`` provider gets
+    its session id. The check therefore goes out with the headers the real
+    call sends, which is the only way its answer is about that call
+    (claunch-lkyhl).
     """
     try:
         spec = provider_spec.from_entry(entry, "probe")
@@ -480,10 +515,12 @@ def probe_request(
     openai = spec.endpoint("openai")
     if openai:
         base = provider_spec.openai_urls(openai).base_url
+        url = f"{base.rstrip('/')}/models"
         headers = {"Accept": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        return "GET", f"{base.rstrip('/')}/models", headers, None
+        _probe_rules(headers, entry, url)
+        return "GET", url, headers, None
     anthropic = spec.endpoint("anthropic")
     if not anthropic:
         raise InstallError(
@@ -497,17 +534,15 @@ def probe_request(
         "anthropic-version": "2023-06-01",
     }
     if api_key:
-        entry_auth = str(entry.get("anthropic_auth_header") or "").strip()
-        if entry_auth.lower() == "x-api-key":
-            headers["x-api-key"] = api_key
-        else:
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers["Authorization"] = f"Bearer {api_key}"
+    url = _messages_url(anthropic)
+    _probe_rules(headers, entry, url)
     body = {
         "model": model,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}],
     }
-    return "POST", _messages_url(anthropic), headers, body
+    return "POST", url, headers, body
 
 
 async def probe(entry: dict, api_key: Optional[str] = None) -> dict:

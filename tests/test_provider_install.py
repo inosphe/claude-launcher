@@ -20,9 +20,10 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 import yaml
 
-from claude_launcher import provider_install, provider_presets, provider_spec, store
+from claude_launcher import provider_install, provider_presets, provider_spec, routing, store
 from claude_launcher.daemon import api
 from claude_launcher.profile import create as create_profile
 
@@ -648,6 +649,57 @@ def test_the_probe_offers_both_protocols_when_the_entry_has_both(home):
          "models": {"default": "m"}},
     )
     assert method == "GET" and url.endswith("/models")
+
+
+def test_the_probe_sends_the_providers_session_header(home):
+    """claunch-lkyhl: a ``session_header`` provider was checked without the
+    header the real call sends, so the check reported on a request nobody
+    makes. The rules come from :mod:`routing`, which the daemon's own callers
+    (rag, observer, briefing) use too."""
+    _, _, headers, _ = provider_install.probe_request(
+        {"endpoints": {"openai": "https://apis.opengateway.ai/v1"},
+         "models": {"default": "m"},
+         "session_header": "x-opencode-session"},
+        "sk-4",
+    )
+    assert headers["x-opencode-session"] == provider_install.PROBE_SESSION_ID
+    # The check's id is its own: it is not a session, not a briefing, not rag.
+    assert provider_install.PROBE_SESSION_ID not in (
+        routing.SESSION_HEADER_FALLBACK, "claunch-briefing", "claunch-rag")
+    assert headers["Authorization"] == "Bearer sk-4"
+
+
+def test_the_probe_sends_the_providers_messages_auth_header(home):
+    """An ``anthropic_auth_header`` provider read its credential from
+    ``x-api-key`` while the check put it in ``Authorization`` -- the form
+    reported 401 for an entry whose real call would have worked."""
+    _, _, headers, _ = provider_install.probe_request(
+        {"endpoints": {"anthropic": "https://opencode.example.com"},
+         "models": {"default": "m"},
+         "anthropic_auth_header": "x-api-key"},
+        "sk-5",
+    )
+    assert headers["x-api-key"] == "sk-5"
+    assert "Authorization" not in headers
+
+
+def test_the_probe_applies_no_rules_a_plain_entry_does_not_ask_for(home):
+    _, _, headers, _ = provider_install.probe_request(
+        {"endpoints": {"openai": "https://x.example.com/v1"},
+         "models": {"default": "m"}},
+        "sk-6",
+    )
+    assert sorted(headers) == ["Accept", "Authorization"]
+
+
+def test_the_probe_reports_a_malformed_rule_as_a_refusal(home):
+    with pytest.raises(provider_install.InstallError):
+        provider_install.probe_request(
+            {"endpoints": {"openai": "https://x.example.com/v1"},
+             "models": {"default": "m"},
+             "session_header": "not a header name"},
+            "sk-7",
+        )
 
 
 # --------------------------------------------------------------------------- #

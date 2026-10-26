@@ -165,7 +165,10 @@ def test_checks_events_preserve_old_answers_without_poll_duplicates():
 def test_config_preserves_secret_and_removes_requested_dimensions():
     store.save({"rag": {"base_url": "http://localhost:123/v1", "api_key": "secret", "embedding_model": "embed", "dimensions": 1024}})
     doc = search_anything.proposed({"api_key": "", "rerank_model": "rerank"})
-    assert doc["rag"]["api_key"] == "secret"
+    # The per-path values are stored in their row, and the first save after a
+    # legacy block writes the rows and drops the flat copies (claunch-pxxn4).
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "secret"
+    assert "api_key" not in doc["rag"] and "base_url" not in doc["rag"]
     assert "dimensions" not in doc["rag"]
     assert "secret" not in str(search_anything.public_settings())
     for bad in ({"dimensions": 123}, {"batch": 1.5}, {"timeout": float("nan")}, {"base_url": "http://user:pass@host/v1"}):
@@ -879,8 +882,8 @@ def test_profile_source_uses_the_profile_backend_and_keeps_the_typed_pair():
         "base_url": "http://localhost:8000/v1", "api_key": "local-secret", "embedding_model": "embed"}))
     doc = search_anything.proposed({"source": "profile", "profile": "ds4", "api_key": ""})
     # Both paths stay in the file; only the choice moved.
-    assert doc["rag"]["base_url"] == "http://localhost:8000/v1"
-    assert doc["rag"]["api_key"] == "local-secret"
+    assert doc["rag"]["sources"]["custom"]["base_url"] == "http://localhost:8000/v1"
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "local-secret"
     cfg = store.rag_config(doc)
     assert cfg["source"] == "profile" and not cfg["profile_error"]
     assert cfg["base_url"] == "https://api.fireworks.ai/inference/v1"
@@ -904,6 +907,183 @@ def test_the_environment_key_belongs_to_the_custom_endpoint(monkeypatch):
     block = {"base_url": "http://localhost:8000/v1", "embedding_model": "e", "profile": "ds4"}
     assert store.rag_config({"rag": {**block, "source": "custom"}})["api_key"] == "env-secret"
     assert store.rag_config({**store.load(), "rag": {**block, "source": "profile"}})["api_key"] == "fw-secret"
+
+
+def test_switching_the_connection_keeps_each_paths_model_ids():
+    """claunch-pxxn4: the two connection paths keep their own model ids.
+
+    A local oMLX server and a provider name their embedding models differently,
+    and sharing one pair of fields meant that choosing a path overwrote the
+    other path's names. Each row is now saved and read on its own, in both
+    directions, and switching the radio does not need the unused path to have
+    a usable address yet.
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "local-secret",
+                   "embedding_model": "omlx-embed", "rerank_model": "omlx-rerank"},
+        "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "custom"}})
+    # (a) profile -> custom: the custom path's ids are the ones that come back.
+    store.save(search_anything.proposed({"source": "profile"}))
+    assert store.rag_config()["embedding_model"] == "fw-embed"
+    store.save(search_anything.proposed({"source": "custom"}))
+    cfg = store.rag_config()
+    assert cfg["source"] == "custom"
+    assert (cfg["embedding_model"], cfg["rerank_model"]) == ("omlx-embed", "omlx-rerank")
+
+    # (b) the other direction, with the custom ids replaced while in force.
+    store.save(search_anything.proposed({"source": "custom", "embedding_model": "omlx-2"}))
+    store.save(search_anything.proposed({"source": "profile"}))
+    assert store.rag_config()["embedding_model"] == "fw-embed"
+    store.save(search_anything.proposed({"source": "custom"}))
+    assert store.rag_config()["embedding_model"] == "omlx-2"
+    assert store.load()["rag"]["sources"]["profile"]["embedding_model"] == "fw-embed"
+
+    # The card posts both rows; the path not in force keeps what it had.
+    doc = search_anything.proposed({"source": "profile", "sources": {
+        "profile": {"profile": "ds4", "embedding_model": "fw-2", "rerank_model": ""},
+        "custom": {"base_url": "http://localhost:8000/v1", "embedding_model": "omlx-2",
+                   "rerank_model": "omlx-rerank"}}})
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "omlx-2"
+    assert store.rag_config(doc)["embedding_model"] == "fw-2"
+
+    # A path with no address yet does not block choosing the other one.
+    store.save({**store.load(), "rag": {"sources": {"profile": {"profile": "ds4", "embedding_model": "fw-embed"}},
+                                        "source": "profile"}})
+    assert search_anything.proposed({"source": "profile", "profile": "ds4"})["rag"]["source"] == "profile"
+
+
+def test_a_legacy_block_feeds_both_rows_and_the_first_save_splits_them():
+    """(c) A block written before the rows existed had one set of values.
+
+    That one set is what both paths meant then, so both rows start from it --
+    that reading is the migration. The first save writes the rows and drops the
+    flat copies, so the two can then disagree without the flat copy going stale.
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"base_url": "http://localhost:8000/v1", "api_key": "local-secret",
+                                        "embedding_model": "legacy-embed", "rerank_model": "legacy-rerank",
+                                        "profile": "ds4"}})
+    rows = store.rag_source_rows(store.load()["rag"])
+    assert rows["custom"]["embedding_model"] == "legacy-embed"
+    assert rows["profile"]["embedding_model"] == "legacy-embed"
+    assert rows["profile"]["profile"] == "ds4"
+    assert rows["custom"]["base_url"] == "http://localhost:8000/v1"
+
+    doc = search_anything.proposed({"source": "profile", "embedding_model": "fw-embed"})
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "legacy-embed"
+    assert set(doc["rag"]) & {"base_url", "api_key", "profile", "embedding_model", "rerank_model"} == set()
+    # The rows are now the only place those values live, and they disagree.
+    assert store.rag_config(doc)["embedding_model"] == "fw-embed"
+    assert store.rag_config({**doc, "rag": {**doc["rag"], "source": "custom"}})["embedding_model"] == "legacy-embed"
+
+
+def test_a_stale_profile_name_does_not_block_a_custom_save():
+    """The row out of force is kept, not validated (claunch-pxxn4 review).
+
+    The card sends both rows on every save, so "the body carried the profile
+    row" is always true and cannot mean "the profile path is the one being
+    chosen". A profile the person deleted therefore used to block a custom
+    save -- the reader had to fix a path they were not using. The stale name
+    stays in the file so switching back restores it, and ``profile_error``
+    diagnoses it at that point.
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "k",
+                   "embedding_model": "omlx-embed", "rerank_model": ""},
+        "profile": {"profile": "gone", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "profile"}})
+    # The card's shape: both rows, the custom one chosen.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "",
+                   "embedding_model": "omlx-2", "rerank_model": ""},
+        "profile": {"profile": "gone", "embedding_model": "fw-embed", "rerank_model": ""}}})
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "omlx-2"
+    assert doc["rag"]["sources"]["profile"]["profile"] == "gone"  # kept, not dropped
+    assert store.rag_config(doc)["embedding_model"] == "omlx-2"
+    # Choosing that path is where the missing profile is reported.
+    switched = {**doc, "rag": {**doc["rag"], "source": "profile"}}
+    assert store.rag_config(switched)["profile_error"]
+    with pytest.raises(ValueError):
+        search_anything.proposed({"source": "profile"})
+
+
+def test_a_legacy_stale_profile_name_does_not_block_the_first_save():
+    """Same, for a block written before the rows existed: its flat ``profile``
+    becomes the profile row's initial value, and that name may be gone. The
+    first custom save must still go through."""
+    _rag_profile()
+    store.save({**store.load(), "rag": {"base_url": "http://localhost:8000/v1", "api_key": "k",
+                                        "embedding_model": "embed", "profile": "gone"}})
+    # The card's shape again: the first save after a legacy block carries both
+    # rows, the profile one seeded from that flat ``profile``.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "",
+                   "embedding_model": "embed", "rerank_model": ""},
+        "profile": {"profile": "gone", "embedding_model": "", "rerank_model": ""}}})
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "embed"
+    assert doc["rag"]["sources"]["profile"]["profile"] == "gone"
+    assert store.rag_config(doc)["embedding_model"] == "embed"
+
+
+def test_an_empty_password_in_the_row_keeps_the_saved_secret():
+    """The card's rows carry ``api_key: ""`` when the field was left blank.
+
+    That blank means "unchanged", not "erase": the reader never sees the saved
+    key, so posting the field back empty is the only thing the form can do. The
+    row shape reaches this through its own branch (``sources``), which is why
+    one test covers the flat body's ``api_key: ""`` and this one the rows'
+    (claunch-pxxn4 leader review: a mutation dropping that branch passed).
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "local-secret",
+                   "embedding_model": "omlx-embed", "rerank_model": ""},
+        "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "custom"}})
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "",
+                   "embedding_model": "omlx-2", "rerank_model": ""}}})
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "local-secret"
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "omlx-2"
+    # A row that omits the key entirely keeps it too.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "embedding_model": "omlx-3"}}})
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "local-secret"
+    # A non-empty value replaces it.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "new-secret"}}})
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "new-secret"
+
+
+def test_the_settings_card_is_told_both_rows_and_no_secret():
+    """``public_settings()`` feeds each path's model ids to the card.
+
+    Without ``sources`` the card cannot show the ids of the path that is not in
+    force, so switching the radio would appear to have changed the models --
+    the defect claunch-pxxn4 fixes. ``api_key`` must not ride along in the row:
+    the card posts these rows straight back and ``_check_source_row`` refuses an
+    unknown key, so a secret in the row would also break every save
+    (claunch-pxxn4 leader review: a mutation dropping ``sources`` passed).
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "local-secret",
+                   "embedding_model": "omlx-embed", "rerank_model": "omlx-rerank"},
+        "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "profile"}})
+    public = search_anything.public_settings()
+    assert set(public["sources"]) == {"custom", "profile"}
+    assert public["sources"]["custom"]["embedding_model"] == "omlx-embed"
+    assert public["sources"]["custom"]["rerank_model"] == "omlx-rerank"
+    assert public["sources"]["profile"] == {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""}
+    assert "api_key" not in public["sources"]["custom"]
+    assert "local-secret" not in str(public) and "fw-secret" not in str(public)
+    assert public["api_key_set"]
+    # Every row sails through the save's own check, since the card posts it back.
+    assert search_anything.proposed({"source": "profile", "sources": public["sources"]})["rag"]["source"] == "profile"
 
 
 def test_profile_source_validation():
@@ -943,7 +1123,7 @@ def test_settings_routes_call_the_profile_backend(tmp_path):
             assert response.status == 200
             text = await response.text()
             assert "fw-secret" not in text and "rag-secret" not in text
-            assert store.load()["rag"]["base_url"] == "http://localhost:9/v1"
+            assert store.load()["rag"]["sources"]["custom"]["base_url"] == "http://localhost:9/v1"
             assert store.rag_config()["base_url"] == str(server.make_url("/v1"))
         finally:
             await service.shutdown()
