@@ -713,8 +713,6 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="min"] .rail-status-checks,
 #session-list li[data-rail-mode="min"] .rail-talk,
 #session-list li[data-rail-mode="min"] .rail-beads,
-#session-list li[data-rail-mode="min"] .sess-cflow,
-#session-list li[data-rail-mode="min"] .sess-cflow2,
 #session-list li[data-rail-mode="min"] .sess-sims,
 #session-list li[data-rail-mode="min"] .sess-brief,
 #session-list li[data-rail-mode="min"] .meta,
@@ -758,12 +756,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .rail-actions:not(:has(.sess-key)) {
   display: none;
 }
-/* Cflow badges are the exception on a compact card: a run that wants the
-   reader's keyboard is the one thing a short card must not swallow. */
-#session-list li[data-rail-mode="compact"] .sess-cflow:not(.gated),
-#session-list li[data-rail-mode="compact"] .sess-cflow2:not(.gated) {
-  display: none;
-}
+/* Workflow state remains visible at every card density. */
 /* Expanded cards share one text inset and put the summary before controls
    and measurements. Keep semantic colours (role, checks, faults and gates)
    while giving the surrounding metadata a consistent rhythm. */
@@ -791,7 +784,6 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   :is(.sess-brief-rowref, .sess-status-check-rowref) { display: none; }
 #session-list li[data-rail-mode="expanded"] .sess-brief {
   margin: 2px 0 0 var(--rail-inset); padding: 8px 0 0;
-  flex-basis: calc(100% - var(--rail-inset));
   border: 0; border-top: 1px solid #30363d; border-radius: 0;
   background: transparent;
 }
@@ -883,7 +875,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 }
 #session-list li.sess-card .sess-brief {
   background: #171e27; border: 1px solid #344050;
-  border-radius: 6px; padding: 8px; margin-left: 0; flex-basis: 100%;
+  border-radius: 6px; padding: 8px; margin-left: 0;
 }
 #session-list li.sess-card .sess-brief-note { margin-top: 5px; }
 #session-list li.sess-card .sess-brief-refresh {

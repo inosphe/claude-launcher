@@ -227,7 +227,7 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-ctx-tokens",
                     ".rail-tps-line", ".rail-usage-line", ".rail-seen",
                     ".rail-life", ".rail-brief", ".rail-note", ".rail-beads",
                     ".rail-status-checks", ".rail-commits", ".rail-actions",
-                    ".sess-cflow", ".sess-cflow2", ".sess-brief", ".meta"]) {
+                    ".sess-brief", ".meta"]) {
   const body = plain.match(new RegExp(
     `#session-list li\\[data-rail-mode="min"\\][^{]*\\${line}[^{]*\\{([^}]*)\\}`));
   ok(`a one-line card does not draw ${line}`,
@@ -310,9 +310,13 @@ ok("a compact card keeps the status-check chips — no rule hides them",
 
 /* A run that wants the reader's keyboard survives every density: hiding it
    on the short cards is how a gated session goes unnoticed. */
-ok("a gated cflow badge is drawn even on a compact card",
-   /#session-list li\[data-rail-mode="compact"\] \.sess-cflow:not\(\.gated\)/.test(plain),
-   "the compact rule does not exempt .gated");
+for (const mode of ["min", "compact"]) for (const badge of ["sess-cflow", "sess-cflow2"]) {
+  const rules = [...plain.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  ok(`${mode} cards keep every ${badge} state visible`,
+     !rules.some(([, selectors, body]) => selectors.includes(`data-rail-mode="${mode}"`)
+       && selectors.includes(`.${badge}`) && /display:\s*none/.test(body)),
+     "workflow state must not be hidden by card density");
+}
 
 /* The same defence, for the line that says why a session is silent. A short
    card may drop what a reader can infer from the name and the dot; it may

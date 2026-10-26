@@ -73,6 +73,7 @@ const sessions = [
 
 const refreshRequests = [];
 const briefingRequests = [];
+let workflowRows = {};
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.endsWith("/briefing")) briefingRequests.push(url.pathname + url.search);
@@ -91,6 +92,7 @@ const server = http.createServer((req, res) => {
     if (url.pathname === "/api/batch") { res.statusCode = 404; return res.end("{}"); }
     let data = {};
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "card" };
+    else if (url.pathname === "/api/cflow2/rail") data = { rows: workflowRows };
     else if (url.pathname === "/api/sessions") data = { sessions, llm_configured: true };
     else if (url.pathname.endsWith("/status-checks/refresh")) data = { delivered: true };
     else if (url.pathname.endsWith("/briefing")) {
@@ -476,6 +478,8 @@ const READ = `(() => {
         document.getElementById("sidebar").style.width = width + "px";
         window.claunchTheme.set(theme);
       }, {width, theme});
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await lead.locator(".rail-brief").waitFor({state: "visible"});
       const sections = await lead.evaluate(li => {
         const rowBg = getComputedStyle(li).backgroundColor;
         const names = [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"];
@@ -511,6 +515,25 @@ const READ = `(() => {
        density is the card's own, not inherited down the tree. */
     assert.equal(rows.find((r) => r.name === "w1a").mode, "compact",
       "a child card keeps its own density when its parent opens");
+
+    /* Workflow state stays visible on compact and minimum cards too. */
+    for (const status of ["running", "waiting", "done"]) {
+      workflowRows = Object.fromEntries(["w1", "rev-a"].map(name => [name, {
+        workflow: "fixture-worker-v2", scope: name + "@main", cwd: "/repo",
+        status, gated: false, current: ["work"], round: 1,
+      }]));
+      await page.evaluate(() => refreshCflow2Rail());
+      for (const width of [260, 440]) {
+        await page.evaluate(width => { document.getElementById("sidebar").style.width = width + "px"; }, width);
+        for (const name of ["w1", "rev-a"]) {
+          const badge = page.locator(`#session-list li[data-name="${name}"] .sess-cflow2`);
+          const box = await badge.boundingBox();
+          assert.ok(box && box.width > 0 && box.height > 0,
+            `${name} ${width}px collapsed workflow ${status} has a painted box`);
+          assert.match(await badge.innerText(), new RegExp(status));
+        }
+      }
+    }
 
     /* And a pinned card is expanded without being picked. */
     const beforeReload = briefingRequests.length;
