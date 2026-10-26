@@ -707,6 +707,9 @@ def build_app(
     search_anything.install(app)
     from . import glossary_api
     glossary_api.install(app)
+    # Workspace knowledge records: decisions, vision, needs (claunch-269q1).
+    from . import knowledge_api
+    knowledge_api.install(app)
     # Fleet read of session faults (daemon/session_fault_api.py,
     # claunch-pczoc): which sessions the harness itself has stopped, read
     # off each session's screen by daemon/session_fault.py.
