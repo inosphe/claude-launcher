@@ -56728,7 +56728,7 @@ const NOTICE_SOURCES = [
     deadline: "expires as a refusal at its deadline",
     refresh: () => refreshReposyncGate(), row: noticeRowReposync },
   { id: "spawn", label: "spawn requests", gate: true,
-    deadline: "creates the session as asked after its countdown",
+    deadline: "settles itself at its deadline: a child request is created as asked, a top-level request is created as the asker's child instead, a resume request is not resumed and files a spawn request; one held by Manual has no countdown and waits",
     refresh: () => refreshSpawnGate(), row: noticeRowSpawn },
   { id: "resume", label: "session resume requests", gate: true,
     refresh: () => refreshResumeGate(), row: noticeRowResume },

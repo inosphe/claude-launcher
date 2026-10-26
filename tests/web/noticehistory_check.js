@@ -1581,7 +1581,7 @@ function gotoRec(rec) {
     check("the settings list every kind", w.api.NOTICE_SOURCES.every((s) => settings.includes(s.label)),
           settings);
     check("a hidden gate kind says what happens when nobody answers",
-          /creates the session as asked after its countdown/.test(settings), settings);
+          /a child request is created as asked, a top-level request is created as the asker's child/.test(settings), settings);
 
     const again = build({ storage });
     again.api.notify("s2 replied", "", { source: "thread", key: "t2" });
