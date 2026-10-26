@@ -56829,7 +56829,9 @@ function noticeSave(key, value) {
    `gate` kinds are requests waiting on a person, polled from the daemon:
    `refresh` re-reads one and redraws its cards, `row` fills its panel row
    (row, head, actions, rec). `deadline` says what happens when nobody
-   answers, for the settings overlay's warning. The others are notices:
+   answers, for the settings overlay's warning. The dashboard's poll
+   refreshes every gate kind (noticeGatePoll) but one marked `polled:
+   false`, which another feed keeps current. The others are notices:
    `notify()` takes the kind as `source`, and a history row keeps it.
 
    The order is the settings overlay's order. */
@@ -56853,6 +56855,8 @@ const NOTICE_SOURCES = [
   { id: "meshjoin", label: "mesh join requests from other machines", gate: true,
     refresh: () => refreshMeshJoinGate(), row: noticeRowMeshJoin },
   { id: "ask", label: "run questions (urgent asks)", gate: true,
+    // Fed by the rail's cflow poll, which hands it the rows.
+    polled: false,
     refresh: () => urgentAskSync(urgentAskRows), row: noticeRowAsk },
   { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
@@ -57385,6 +57389,14 @@ function gateHideButton(type, rid, key, title) {
 function noticeGateRefresh(type) {
   const source = NOTICE_SOURCE.get(type);
   return source && source.gate ? source.refresh() : null;
+}
+
+/* The dashboard poll's share of the gates: every gate kind NOTICE_SOURCES
+   lists, so a kind added there is polled without a second list to keep
+   (claunch-efpoi.2: the mesh join gate was drawn only once the panel
+   opened until it was named here). */
+function noticeGatePoll() {
+  return NOTICE_SOURCES.filter((s) => s.gate && s.polled !== false).map((s) => s.refresh());
 }
 
 /* The waiting requests of the kinds this reader shows; a hidden kind's are
@@ -60602,12 +60614,10 @@ async function pollOnce() {
   }
   // Other daemons' mesh members: a list of its own, at its own pace.
   refreshes.push(refreshShadows());
-  // The restart gate can be opened from any session's terminal, so the card
-  // is fed by the same heartbeat as the registry — and the goto gate beside
-  // it: a leader files from its own terminal, the person answers here.
-  const gateRefresh = refreshRestartGate();
-  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate(),
-    refreshKillGate(), refreshSpawnGate(), refreshNudgeGate(), refreshMeshJoinGate());
+  // A gate can be opened from any session's terminal (or another daemon,
+  // for a mesh join), so its card is fed by the same heartbeat as the
+  // registry.
+  refreshes.push(...noticeGatePoll());
   await Promise.all(refreshes);
 }
 

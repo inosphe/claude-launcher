@@ -234,7 +234,7 @@ function build(opts) {
     "__doc", "__win",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
-    " refreshNudgeGate, refreshMeshJoinGate," +
+    " refreshNudgeGate, refreshMeshJoinGate, noticeGatePoll," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " killReapedNotify," +
@@ -1733,6 +1733,25 @@ function gotoRec(rec) {
           w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "meshjoin")
             .every((e) => e.status !== "pending"),
           w.api.noticeHistory.filter((e) => e.gate).map((e) => [e.gate.rid, e.status]));
+  }
+  /* --- the dashboard poll refreshes every gate kind (claunch-efpoi.2) --
+     Without it a kind's card and bell count come only once the panel is
+     opened; the mesh join gate shipped that way at first. */
+  {
+    const w = build();
+    const called = [];
+    for (const s of w.api.NOTICE_SOURCES) {
+      if (s.gate) s.refresh = () => { called.push(s.id); return null; };
+    }
+    w.api.noticeGatePoll();
+    const want = w.api.NOTICE_SOURCES.filter((s) => s.gate && s.id !== "ask").map((s) => s.id);
+    check("the poll refreshes every gate kind but the one another feed keeps",
+          JSON.stringify(called) === JSON.stringify(want), [called, want]);
+    check("only the urgent asks are left to their own feed",
+          w.api.NOTICE_SOURCES.filter((s) => s.polled === false).map((s) => s.id).join() === "ask");
+    const tick = slice("async function pollTick(", "pollTimer = setInterval(pollTick");
+    check("pollTick takes its gates from that list", /\.\.\.noticeGatePoll\(\)/.test(tick) &&
+          !/refresh(Restart|Goto|Reposync|Resume|Kill|Spawn|Nudge|MeshJoin)Gate\(\)/.test(tick));
   }
   {
     const w = build();
