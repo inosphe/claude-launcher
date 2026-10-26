@@ -2570,6 +2570,13 @@ probe(`run_probe`)는 daemon의 환경을 그대로 물려받지 않는다
   뒤 `LOST_WATCH`(900초) 동안 표식을 가진 자식이 나타나면 부모-자식 kill 경로
   (`POST /api/sessions/<parent>/children/<child>/kill`)로 종료하고 `orphan_child`
   이벤트를 남긴다. 같은 브리프로 두 곳에서 작업이 진행되는 것을 막는 쪽을 택했다.
+- `session`·`fork` 위임이 `cancelled`가 되면(인스턴스 drop, 형제 실패, 런 abort)
+  clock은 기록된 `child`가 살아 있을 때 같은 kill 경로로 한 번 종료하고
+  `cancelled_child` 이벤트(`outcome`: `killed` 또는 `kill failed: ...`)를 남긴다.
+  kill 전에 위임에 `child_ended`·`child_end`를 기록하므로(`runtime.delegate_child_ended`,
+  런 상태와 무관한 compare-and-set) 실패한 kill은 반복하지 않는다. 이미 종료된
+  자식은 kill하지 않고 `child_end: already exited`만 기록한다. fork 자식은 드라이버와
+  같은 체크아웃을 쓰므로 취소 뒤 편집을 막기 위한 조치다(claunch-dm09i.4).
 - 부팅 시 자식 기록이 없는 `running` 위임: 표식을 가진 자식이 있으면 채택하고,
   없으면 `queued`로 한 번 되돌린다(`respawns`). 두 번째에는 다음 실행 주체로 넘긴다.
 - 영수증 파일(`receipts/<did>.child.json`): MCP 없이 실행되는 평탄한 `session`
