@@ -451,6 +451,14 @@ function gotoRec(rec) {
     check("an ordinary notice stays 8 s and stays unread",
           w.timers.length === 1 && w.timers[0].ms === 8000 && ordinary.read === false && w.badge() === "1",
           [w.timers, ordinary.read, w.badge()]);
+
+    // The copy confirmation (claunch-ewk3x.1): routine AND an explicit 1500 ms,
+    // so the short card is kept and only the unread row goes away.
+    w.api.notify("Copied session name", "s1", { key: "term-title-copy", ms: 1500, routine: true });
+    const copied = w.api.noticeHistory.find((e) => e.title === "Copied session name");
+    check("a routine notice keeps its explicit ms and is born read",
+          w.timers[w.timers.length - 1].ms === 1500 && copied.read === true && w.badge() === "1",
+          [w.timers, copied.read, w.badge()]);
   }
 
   /* --- the session link inside a history row (claunch-49fvl) ----------- */
