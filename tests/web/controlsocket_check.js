@@ -543,6 +543,64 @@ async function aFailedProbeIsNotAnAbsentDaemon() {
   assert.strictEqual(app.phase(), null, "the window still closes on a good answer");
 }
 
+/* The failed-probe answer carries the last boot the probe actually saw.
+
+   Two things here are load-bearing and neither is implied by "the answer is
+   not null" above: the probe's answer is remembered when it succeeds, and it
+   is handed back when a later probe fails. Drop the remember and the failure
+   carries nothing, so syncBootProgress reads "not restoring" and the rail
+   drops the restore banner in the middle of a restore; drop the hand-back and
+   the same thing happens for a different reason. Each is one line in
+   probeFailed, and the check above passes with both of them removed -- which
+   is why this one asserts the value rather than its presence (claunch-r35k1,
+   leader review of #531). */
+async function aFailedProbeHandsBackTheLastBootItSaw() {
+  const app = build();
+  app.ensureControlSocket();
+  const sock = app.sockets[0];
+  sock.opened();
+  sock.say({
+    type: "init", boot_id: "b7", version: "9.9", started_at: "t-7",
+    // Init carries a boot, and the page deliberately does not replay it --
+    // it is the snapshot of the handshake, not the live phase.
+    boot: { phase: "restoring", done: 1, total: 10 },
+  });
+
+  // No probe has succeeded yet, so the failure has nothing to hand back.
+  // This is the second mutation's assertion: without it a page that invents
+  // a boot on the failure path would still pass everything below.
+  app.fetch = async () => { throw new Error("the probe timed out"); };
+  const before = await app.daemonHealth();
+  assert.ok(before, "the socket still vouches for the daemon");
+  assert.strictEqual(before.boot, undefined,
+    "no probe has answered, so the failure carries no boot");
+
+  // A probe answers with a live boot. The page must remember it. The boot is
+  // `restoring`, which is also what keeps the window open -- the only state
+  // in which a later failure reaches probeFailed at all, since a closed
+  // window is answered by the socket alone.
+  app.fetch = async () => ({ ok: true, json: async () => ({
+    boot_id: "b7", boot: { phase: "restoring", done: 4, total: 10 },
+  }) });
+  const good = await app.daemonHealth();
+  assert.deepStrictEqual(good.boot, { phase: "restoring", done: 4, total: 10 },
+    "the answering probe is what the page reports");
+
+  // Now it fails. The answer must carry the boot the probe last gave -- the
+  // same value, not merely some boot.
+  app.fetch = async () => { throw new Error("the probe timed out again"); };
+  const failed = await app.daemonHealth();
+  assert.ok(failed, "the socket still vouches for the daemon");
+  assert.strictEqual(failed.boot_id, "b7");
+  assert.deepStrictEqual(failed.boot, { phase: "restoring", done: 4, total: 10 },
+    "a failed probe hands back the last boot the probe saw");
+
+  // And it keeps doing so while the probe stays down.
+  const again = await app.daemonHealth();
+  assert.deepStrictEqual(again.boot, { phase: "restoring", done: 4, total: 10 },
+    "the remembered boot survives repeated failures");
+}
+
 /* An `init` that names no daemon (an older daemon) leaves the page with
    nothing to compare, so the probe keeps answering -- the page must not
    invent a boot id, which would read every tick as "same daemon". */
@@ -895,6 +953,7 @@ async function healthProbeIsBounded() {
   await livenessComesFromTheSocket();
   await theBootPhaseIsNotFrozenAtInit();
   await aFailedProbeIsNotAnAbsentDaemon();
+  await aFailedProbeHandsBackTheLastBootItSaw();
   await anInitWithNoBootIdDoesNotFakeOne();
   await flushPrefersSocketThenFallsBack();
   await deadSocketIsRecycled();
