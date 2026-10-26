@@ -23812,6 +23812,23 @@ function shimEnded(b, by, detail) {
   }
 }
 
+/* The other telling, on a parked terminal: the socket this bundle's child is
+   bound to says it is running, so the exit note the shim recorded earlier is
+   no longer true. Without this the bundle comes back to restoreTerminal
+   still reading `exited`, and the terminal returns to the idle branch with
+   "session ended" over a running session and no socket to hear the truth
+   from — the same shape as claunch-8d9fg on the live path, which
+   reviveSession fixes there (claunch-8d9fg.1). */
+function shimRevived(b, by, detail) {
+  if (!b.exited) return;
+  b.exited = false;
+  b.endedBy = null;
+  b.endedAt = null;
+  if (typeof linkLog === "function") {
+    linkLog("term.revived", { session: b.name, by, parked: true, pid: b.pid, boot: b.boot, ...detail });
+  }
+}
+
 /* The passive handler a parked terminal's socket runs. Binary output keeps
    refreshing the hidden buffer — that is the whole point of leaving the
    socket up — and the control frames update only the parked state so the
@@ -23835,6 +23852,7 @@ function shimFrame(b, ev) {
       // session has not ended, and doing that to one that has is where the
       // loop above starts.
       if (msg.exited) shimEnded(b, "init", { status: msg.status, code: msg.exit_code });
+      else shimRevived(b, "init", { status: msg.status });
     } else if (msg.type === "buffer") {
       b.alt = !!msg.alt;
     } else if (msg.type === "mouse") {

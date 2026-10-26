@@ -376,6 +376,91 @@ return {
         [w.api.kept("a").exited, aTerm.writes.length]);
 }
 
+/* --- a parked terminal told the session is running again ------------------
+   The shim keeps a bundle current, and `exited` is part of that current
+   state — in both directions. An exit frame heard while parked sets it, and
+   a live `init` (`exited: false`) says the session the socket is bound to is
+   running, so a bundle still carrying the earlier telling must come back
+   live rather than exited. Read the other way, the parked terminal returns
+   carrying "session ended", restoreTerminal takes its idle branch, no socket
+   is opened, and the notice sits over a running session with nothing left to
+   lift it (claunch-8d9fg.1 — the handoff from claunch-8d9fg's review, where
+   only the live `handleFrame` path was fixed). Unreachable while
+   PARKED_SOCKET_MAX is zero; pinned so raising that constant is one line. */
+{
+  const w = build();
+  w.api.attach("a");
+  const aSock = w.api.ws;
+  aSock.opened();
+  w.api.attach("b");
+  const parked = w.api.kept("a");
+  parked.ws = aSock;
+  aSock.readyState = 1;
+  aSock.onmessage = (ev) => w.api.shimFrame(parked, ev);
+
+  aSock.text({ type: "exit", code: 0 });
+  check("the exit frame marks the parked bundle exited",
+        parked.exited === true, parked.exited);
+  aSock.text({ type: "init", cols: 80, rows: 24, exited: false, status: "busy", pid: 7 });
+  check("a live init clears it — the parked bundle reads running again",
+        parked.exited === false, parked.exited);
+  check("...and the origin it came back from is cleared with it",
+        parked.endedBy === null || parked.endedBy === undefined,
+        parked.endedBy);
+
+  // And it is the same bundle the terminal returns as: no idle branch. The
+  // socket kept alive here is re-wired rather than replaced, so the link
+  // coming up is what says the terminal did not take the exited path.
+  w.api.attach("a");
+  check("returning to it comes back live, not ended",
+        w.api.sessionEnded === false, w.api.sessionEnded);
+  check("...and the link is live rather than idle",
+        w.api.linkState === "live", w.api.linkState);
+
+  // The other direction still holds: an init that says exited ends it.
+  const w2 = build();
+  w2.api.attach("a");
+  const s2 = w2.api.ws;
+  s2.opened();
+  w2.api.attach("b");
+  const p2 = w2.api.kept("a");
+  p2.ws = s2;
+  s2.readyState = 1;
+  s2.onmessage = (ev) => w2.api.shimFrame(p2, ev);
+  s2.text({ type: "init", cols: 80, rows: 24, exited: true, exit_code: 0 });
+  check("an init that says exited still marks the parked bundle ended",
+        p2.exited === true, p2.exited);
+
+  // A bundle already live is not logged again: there is nothing to lift.
+  const w3 = build();
+  w3.api.attach("a");
+  const s3 = w3.api.ws;
+  s3.opened();
+  w3.api.attach("b");
+  const p3 = w3.api.kept("a");
+  p3.ws = s3;
+  s3.readyState = 1;
+  s3.onmessage = (ev) => w3.api.shimFrame(p3, ev);
+  s3.text({ type: "init", cols: 80, rows: 24, exited: false, status: "idle", pid: 8 });
+  check("a live parked bundle stays live across a re-init",
+        p3.exited === false, p3.exited);
+}
+
+/* The frame wiring, read off the shipped shim: an init that says exited ends
+   the parked bundle, one that does not lifts it. */
+{
+  check("the shim lifts the parked bundle on a live init",
+        /else shimRevived\(b, "init"/.test(slice("shimFrame")));
+  check("...after the exited test, in the same init branch",
+        slice("shimFrame").indexOf('shimEnded(b, "init"')
+          < slice("shimFrame").indexOf('shimRevived(b, "init"'));
+  const revived = src.indexOf("function shimRevived(") >= 0 ? slice("shimRevived") : "";
+  check("shimRevived records the telling it lifted",
+        /linkLog\("term\.revived"/.test(revived), revived.slice(0, 80));
+  check("...and clears exited on the bundle",
+        /b\.exited = false/.test(revived));
+}
+
 /* --- the oldest parked terminal is evicted when the cache fills --------- */
 {
   const w = build();
