@@ -7,7 +7,7 @@
    between the header and the terminal is drawn by the same renderer. Without
    an llm: block it goes inert, its tooltip pointing at the config to write
    (a louder echo of the disabled row toggle) and its pane folded away; the
-   detail panel's section fetches on first open and, off, becomes a static
+   detail panel's section fetches only on explicit refresh and, off, becomes a static
    pointer at the config instead of a dead card. */
 const fs = require("fs");
 const path = require("path");
@@ -282,9 +282,7 @@ function findTag(node, tag) {
   check("configuring brings the button back",
         [btn.disabled, btn.attrs["aria-pressed"]], [false, "false"]);
 
-  /* The detail panel section: a session the ▸ never opened asks the daemon
-     on first draw, says the same thing the card does, under a "Briefing"
-     head. */
+  /* The detail panel is also read-only until its refresh is clicked. */
   answer = { status: 200, body: {
     session: "dt1", generated_at: new Date().toISOString(), cached: false,
     source: { jsonl: true, cflow: false },
@@ -294,11 +292,14 @@ function findTag(node, tag) {
   } };
   const before = calls.length;
   const box = ctx.section("dt1");
-  check("the section renders a head and pulls the briefing",
-        [findTag(box, "h3").textContent, calls.length > before,
-         box.className], ["Briefing", true, "sess-brief-section"]);
-  check("it asked for the panel's own session, not the terminal's",
-        calls[calls.length - 1], "/api/sessions/dt1/briefing?cached=1");
+  check("opening the detail section makes no request",
+        [findTag(box, "h3").textContent, calls.length,
+         box.className], ["Briefing", before, "sess-brief-section"]);
+  check("the section explains how to request a summary", noteOf(box).textContent,
+        "No summary yet · use ⟳ to request one");
+  box.querySelector(".sess-brief-refresh").listeners.click({ stopPropagation() {} });
+  check("explicit refresh requests the panel's own session",
+        calls[calls.length - 1], "/api/sessions/dt1/briefing?refresh=1");
   await flush();
   check("the section's card carries the fetched summary",
         ctx.section("dt1").querySelector(".sess-brief-k").textContent, "goal");
