@@ -67,6 +67,7 @@ from . import opening_images
 from . import uploads
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
+from . import pools
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
@@ -2342,6 +2343,9 @@ async def h_daemon_info(request: web.Request) -> web.Response:
             # The PTY host and whether it runs the daemon's code
             # (claunch-xnnct.3; daemon/host_code.py).
             "pty_host": host_code.info(),
+            # The interpreter build and the live state of its GIL
+            # (claunch-d18v8.3; daemon/pools.py).
+            "gil": pools.gil_state(),
             # What this boot has left to do; "ready" on a serving daemon
             # (claunch-9akgh).
             "boot": boot_status(request.app),

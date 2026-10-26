@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import sys
+import sysconfig
 import threading
 
 import pytest
@@ -98,3 +100,21 @@ def test_background_exceptions_reach_the_caller():
 
     with pytest.raises(ValueError):
         asyncio.run(main())
+
+
+@pytest.mark.parametrize("free_threaded, gil_on, build, reenabled", [
+    (0, True, "gil", False),
+    (1, False, "free-threaded", False),
+    (1, True, "free-threaded", True),
+])
+def test_gil_state_names_the_build_and_the_live_gil(monkeypatch, free_threaded, gil_on, build, reenabled):
+    real = sysconfig.get_config_var
+    monkeypatch.setattr(
+        sysconfig, "get_config_var",
+        lambda name: free_threaded if name == "Py_GIL_DISABLED" else real(name))
+    monkeypatch.setattr(sys, "_is_gil_enabled", lambda: gil_on, raising=False)
+    state = pools.gil_state()
+    assert state["build"] == build
+    assert state["gil"] is gil_on
+    assert state["reenabled"] is reenabled
+    assert state["python"].count(".") == 2

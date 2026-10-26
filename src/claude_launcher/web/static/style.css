@@ -5513,6 +5513,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .badge.pty-host-unreachable { background: #442022; color: #ff7b72; }
 .badge.p2p-off { background: #30363d; color: #8b949e; }
 #p2p-badge { cursor: pointer; }
+/* The daemon's interpreter build and GIL (claunch-d18v8.3). "reenabled" is a
+   free-threaded build running with the GIL on: it works, without the
+   parallelism the build is chosen for. */
+#gil-badge { flex: none; white-space: nowrap; }
+.badge.gil-on { background: #30363d; color: #c9d1d9; }
+.badge.gil-off { background: #1f4428; color: #3fb950; }
+.badge.gil-reenabled { background: #46350f; color: #e3b341; }
 /* The badge's controls (claunch-k1z4z): a row of its own under the badges,
    so it never has to fit beside them in a narrow rail. */
 #p2p-menu {

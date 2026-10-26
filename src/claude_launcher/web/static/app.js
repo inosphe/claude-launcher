@@ -51864,6 +51864,38 @@ function renderPtyHostBadge(state) {
   globalThis.StatusLine?.sync();
 }
 
+/* The GIL badge (claunch-d18v8.3), from GET /api/daemon's gil: the
+   interpreter build and whether its GIL is on. Drawn on every load and
+   recovery with the PTY host badge; the answer cannot change while the daemon
+   runs except by an extension turning the GIL on at its first import. */
+const GIL_TEXT = { on: "GIL", off: "no-GIL", reenabled: "no-GIL: GIL on" };
+
+function renderGilBadge(state) {
+  const badge = $("gil-badge");
+  if (!badge) return;
+  // A daemon older than the field has nothing to say about it.
+  if (!state || typeof state !== "object") {
+    badge.classList.add("hidden");
+    globalThis.StatusLine?.sync();
+    return;
+  }
+  const kind = state.reenabled ? "reenabled" : state.gil ? "on" : "off";
+  badge.textContent = GIL_TEXT[kind];
+  badge.className = `badge gil-${kind}`;
+  const lines = [
+    kind === "off" ? "free-threaded Python, the GIL is off: threads run in parallel"
+      : kind === "reenabled"
+        ? "free-threaded Python, but the GIL is on: an extension (zvec) turned it back on; set PYTHON_GIL=0 on the daemon to keep it off"
+        : "regular Python build with the GIL: threads take turns running Python code",
+    "",
+    `build: ${state.build === "free-threaded" ? "free-threaded (3.14t)" : "GIL"}`,
+    `GIL: ${state.gil ? "on" : "off"}`,
+  ];
+  if (state.python) lines.push(`python: ${state.python}`);
+  badge.title = lines.join("\n");
+  globalThis.StatusLine?.sync();
+}
+
 async function refreshMeshList(options) {
   // `cached`: redraw from the last answer, with no request -- a project
   // pick, which only changes which of the meshes in hand are drawn.
@@ -59758,6 +59790,7 @@ async function boot() {
   if (info.boot_id) daemonBoot = info.boot_id;
   renderRelayBadge(info.relay);
   renderPtyHostBadge(info.pty_host);
+  renderGilBadge(info.gil);
   // The rail's reads first, ahead of the rest of the dashboard's.
   // `refreshSessions` builds every row itself, so the reader's content is on
   // the page the moment its answer lands -- and that answer used to wait for

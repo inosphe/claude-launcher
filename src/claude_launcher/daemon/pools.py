@@ -25,12 +25,33 @@ import asyncio
 import contextvars
 import functools
 import os
+import sys
+import sysconfig
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional, TypeVar
 
 T = TypeVar("T")
 
 _background: Optional[ThreadPoolExecutor] = None
+
+
+def gil_state() -> dict:
+    """Which interpreter build this daemon runs on and whether its GIL is on.
+
+    ``build`` is ``free-threaded`` for a 3.14t interpreter and ``gil`` for the
+    regular one. ``gil`` is the live state: a free-threaded build turns it back
+    on when it imports an extension that does not declare itself safe without
+    it (zvec's ``_zvec``), unless ``PYTHON_GIL=0`` is set. ``reenabled`` is that
+    case, a free-threaded build that is running with the GIL on.
+    """
+    free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    enabled = bool(sys._is_gil_enabled()) if hasattr(sys, "_is_gil_enabled") else True
+    return {
+        "build": "free-threaded" if free_threaded else "gil",
+        "gil": enabled,
+        "reenabled": free_threaded and enabled,
+        "python": ".".join(str(p) for p in sys.version_info[:3]),
+    }
 
 
 def interactive_size(configured: int = 0) -> int:

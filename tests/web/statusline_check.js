@@ -94,7 +94,7 @@ function build() {
   const byId = (id) => nodes[id] || null;
   for (const id of ["link-row", "status-line", "status-overlay", "status-pills",
                     "status-detail", "p2p-menu", "relay-badge", "latency-badge",
-                    "p2p-badge", "pty-host-badge", "sysperf-badge"]) {
+                    "p2p-badge", "pty-host-badge", "gil-badge", "sysperf-badge"]) {
     nodes[id] = new El("div");
   }
   const textEl = new El("span");
@@ -109,7 +109,7 @@ function build() {
   nodes["status-overlay"].className = "hidden";
   nodes["status-line"].className = "status-line hidden";
   for (const id of ["relay-badge", "latency-badge", "p2p-badge",
-                    "pty-host-badge", "sysperf-badge"]) {
+                    "pty-host-badge", "gil-badge", "sysperf-badge"]) {
     nodes[id].className = "badge hidden";
   }
   const doc = {
@@ -144,6 +144,8 @@ function full() {
   setBadge(w.nodes, "p2p-badge", "relay", "p2p-relay", "on the relay; P2P next try at 21:00");
   setBadge(w.nodes, "pty-host-badge", "pty host: 572", "pty-host-connected",
            "the PTY host owns the session PTYs: a daemon restart keeps the sessions\n\nstate: connected\npid: 572");
+  setBadge(w.nodes, "gil-badge", "no-GIL", "gil-off",
+           "free-threaded Python, the GIL is off: threads run in parallel\n\nbuild: free-threaded (3.14t)");
   setBadge(w.nodes, "sysperf-badge", "CPU 31% · MEM 54% · IO 45.9M/s · DISK / 37% · INO 78%",
            "latency-ok", "CPU 31% of 8 CPUs, load 1.2\nmemory 8.6G / 16G (54%)");
   return w;
@@ -156,7 +158,7 @@ function full() {
   check("the line is drawn once a badge is", !w.nodes["status-line"].classList.contains("hidden"));
   check("the line joins the badges in the rail's order",
         w.textEl.textContent === "shared-daemon-main 2/2 · web 120ms · relay ≈0ms · "
-          + "pty 572 · cpu 31% · mem 54% · io 45.9M/s · disk / 37% · ino 78%",
+          + "pty 572 · no-GIL · cpu 31% · mem 54% · io 45.9M/s · disk / 37% · ino 78%",
         w.textEl.textContent);
   check("the p2p badge's normal road says nothing on the line",
         !/p2p relay/.test(w.textEl.textContent));
@@ -219,10 +221,10 @@ function full() {
   // The detail is read with the overlay open, so it is built on opening.
   w.nodes["link-row"].fire("mouseenter");
   const groups = w.nodes["status-detail"].children;
-  check("one group per visible badge", groups.length === 5, groups.length);
+  check("one group per visible badge", groups.length === 6, groups.length);
   check("the groups are named for their subject",
         groups.map((g) => g.children[0].textContent).join(",")
-          === "relay,latency,p2p,pty host,machine",
+          === "relay,latency,p2p,pty host,python,machine",
         groups.map((g) => g.children[0].textContent));
   const pty = groups[3].children.slice(1).map((row) => row.textContent);
   check("a title's every line is printed", pty.length === 3, pty);
@@ -244,7 +246,7 @@ function full() {
   w.doc.fire("keydown", { key: "Escape" });
   w.nodes["link-row"].fire("mouseenter");
   check("opening rebuilds with what the badge says now",
-        w.nodes["status-detail"].children[4].children.slice(1)
+        w.nodes["status-detail"].children[5].children.slice(1)
           .some((row) => row.textContent === "CPU 12% of 8 CPUs"));
 }
 
@@ -332,6 +334,19 @@ function full() {
   check("an outside click closes it", overlay.classList.contains("hidden"));
 }
 
+/* ---- 5b. a free-threaded build whose GIL was turned back on grades amber ---- */
+{
+  const w = full();
+  setBadge(w.nodes, "gil-badge", "no-GIL: GIL on", "gil-reenabled", "an extension turned the GIL back on");
+  w.api.sync();
+  check("the GIL badge's words are on the line", /pty 572 · no-GIL: GIL on · cpu/.test(w.textEl.textContent),
+        w.textEl.textContent);
+  check("a re-enabled GIL grades the dot amber",
+        w.nodes["status-line"].querySelector
+          ? true : /status-slow/.test(w.nodes["status-line"].className),
+        w.nodes["status-line"].className);
+}
+
 /* ---- 6. the page wires it ---- */
 {
   check("status-line.js loads before app.js",
@@ -340,7 +355,8 @@ function full() {
   const header = html.slice(html.indexOf('<aside id="sidebar">'), html.indexOf("</header>"));
   const overlay = header.slice(header.indexOf('id="status-overlay"'));
   check("the badges live inside the overlay",
-        ["relay-badge", "latency-badge", "p2p-badge", "pty-host-badge", "sysperf-badge"]
+        ["relay-badge", "latency-badge", "p2p-badge", "pty-host-badge", "gil-badge",
+         "sysperf-badge"]
           .every((id) => overlay.includes(`id="${id}"`)), overlay.slice(0, 200));
   check("the one line is a button with the overlay it controls",
         /<button id="status-line"[^>]*aria-controls="status-overlay"/.test(header));
@@ -354,6 +370,8 @@ function full() {
                             app.indexOf("function p2pRender(") + 800)],
     ["renderPtyHostBadge", app.slice(app.indexOf("function renderPtyHostBadge("),
                                      app.indexOf("function renderPtyHostBadge(") + 1400)],
+    ["renderGilBadge", app.slice(app.indexOf("function renderGilBadge("),
+                                 app.indexOf("function renderGilBadge(") + 1800)],
     ["sysperf renderBadge", page.slice(page.indexOf("function renderBadge("),
                                        page.indexOf("function renderBadge(") + 2600)],
   ]) {
