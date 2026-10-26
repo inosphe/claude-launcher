@@ -286,4 +286,20 @@ const ended3 = P.arrangeSiblings([
 assert.deepStrictEqual(plain(ended3.decks).map((d) => [d.label, d.count]), [['끝난 세션', 3]]);
 assert.deepStrictEqual(plain(ended3.nodes).map((n) => n.name), ['d']);
 
+// A session's briefing digest, as the hover overlay draws it: the filled
+// rows in the session tab's order, none for an empty or missing digest.
+assert.deepStrictEqual(plain(P.briefingOf({ briefing: { one_line: ' doing x ', state: 'fresh', progress: '2/3', goal: 'g' } })),
+  { state: 'fresh', rows: [{ key: 'one_line', label: '', text: 'doing x' }, { key: 'goal', label: 'goal', text: 'g' },
+                           { key: 'progress', label: 'progress', text: '2/3' }] });
+assert.strictEqual(P.briefingOf({ briefing: { state: 'fresh', one_line: '  ' } }), null);
+assert.strictEqual(P.briefingOf({}), null);
+assert.strictEqual(P.briefingOf({ briefing: 'text' }), null);
+const briefed = plain(P.buildModel([{ name: 'b1', status: 'idle', created_at: new Date(now).toISOString(),
+                                      briefing: { one_line: 'on it', state: 'stale' } },
+                                    { name: 'b2', status: 'idle', created_at: new Date(now).toISOString() }],
+                                   null, { now }));
+const bnodes = briefed.projects[0].meshes[0].roots;
+assert.deepStrictEqual(bnodes.find((n) => n.name === 'b1').briefing, { state: 'stale', rows: [{ key: 'one_line', label: '', text: 'on it' }] });
+assert.strictEqual(bnodes.find((n) => n.name === 'b2').briefing, null);
+
 console.log('hivepage ok');

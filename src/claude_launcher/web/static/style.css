@@ -10255,3 +10255,20 @@ a.category-ref:hover { text-decoration: underline; }
 /* A deck's face lifts nothing: a transform would make it a stacking context
    and pull the two cards drawn behind it in front of its own background. */
 .hive-deck-face:hover { transform: none; }
+
+/* Hive: a session chip's briefing overlay (claunch-yzgqb.2.1). In the port
+   and outside the stage, so it keeps its size at every zoom. */
+.hive-brief {
+  position: absolute; z-index: 6; max-width: 380px; min-width: 220px;
+  background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); padding: 8px 10px; font-size: 12px; line-height: 1.45;
+  pointer-events: none; white-space: normal; overflow-wrap: anywhere;
+}
+.hive-brief.hidden { display: none; }
+.hive-brief-name { display: block; color: #e6edf3; font-size: 13px; }
+.hive-brief-meta { color: #8b949e; margin-top: 2px; }
+.hive-brief-head { margin-top: 6px; padding-top: 6px; border-top: 1px solid #262c36; color: #58a6ff; font-size: 11px; }
+.hive-brief-rows { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; margin-top: 4px; }
+.hive-brief-row { display: contents; }
+.hive-brief-row.b-one_line .hive-brief-text { grid-column: 1 / -1; color: #e6edf3; }
+.hive-brief-label { color: #8b949e; }

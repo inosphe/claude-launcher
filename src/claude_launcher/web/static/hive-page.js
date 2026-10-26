@@ -39,6 +39,12 @@
    chip, while its own chip stays where it is held. Picking a chip lights
    what it is tied to and runs a dashed line to each.
 
+   Resting the pointer on a session chip (or focusing it) opens an overlay
+   with what the session is doing now: its briefing's one-line, goal, now
+   and progress (claunch-yzgqb.2.1). That is the digest the /api/sessions
+   poll already carries (daemon/briefing.digest), so a hover composes
+   nothing and calls no LLM; a session with no cached briefing says so.
+
    The model (buildModel and the helpers before it) takes plain data so
    tests/web/hivepage_check.js runs it without a page. The canvas is rebuilt
    only when the model changed: a timer redraw that would draw the same
@@ -187,6 +193,23 @@ globalThis.HivePage = (() => {
     join: "세션이 이 이슈로 시작했고 assignee는 다른 세션이다",
     created: "세션이 만들었다(created_by)",
   };
+
+  /* A session record's briefing digest as the overlay draws it: the
+     summariser's state and the filled rows in the session tab's order and
+     labels (app.js briefingTabTooltip), or null when no briefing is cached
+     or it holds no text. */
+  const BRIEF_ROWS = [["one_line", ""], ["goal", "goal"], ["now", "now"], ["progress", "progress"]];
+  function briefingOf(s) {
+    const b = s && s.briefing;
+    if (!b || typeof b !== "object") return null;
+    const rows = [];
+    for (const [key, label] of BRIEF_ROWS) {
+      const text = String(b[key] || "").trim();
+      if (text) rows.push({ key, label, text });
+    }
+    if (!rows.length) return null;
+    return { state: String(b.state || "").trim(), rows };
+  }
 
   /* The ties between session `name`, started on issue `link`, and the
      issue `row`. `filed` says the row came from the session's lane's
@@ -495,7 +518,7 @@ globalThis.HivePage = (() => {
         compacting: !!s.compacting,
         cflow: cflow ? { state: cflow.state, label: cflow.label } : null,
         created: lane ? lane.created : 0, categories: catsOf("session", name),
-        issues, refs, rels, children: [], decks: [],
+        briefing: briefingOf(s), issues, refs, rels, children: [], decks: [],
       });
     }
     const roots = [];
@@ -813,7 +836,10 @@ globalThis.HivePage = (() => {
     c.dataset.kind = "session";
     c.dataset.id = n.name;
     c.tabIndex = 0;
-    c.title = sessionTitle(n);
+    // No native title: the briefing overlay is this chip's tooltip, and the
+    // browser's would cover it. Search reads the same text from here.
+    c.dataset.find = sessionTitle(n) + (n.briefing ? "\n" + n.briefing.rows.map((r) => r.text).join("\n") : "");
+    c.setAttribute("aria-label", sessionTitle(n).split("\n")[0]);
     const core = node("span", "hive-core");
     core.appendChild(node("i", null, STATE_GLYPH[n.state]));
     c.appendChild(core);
@@ -1289,6 +1315,110 @@ globalThis.HivePage = (() => {
     });
   }
 
+  /* -- briefing overlay -------------------------------------------- */
+
+  // The session chip the overlay is for, kept by name: the stage is
+  // rebuilt on a redraw and the overlay follows the new chip.
+  let briefFor = "";
+  let briefTimer = null;
+  const BRIEF_DELAY_MS = 250;
+
+  function sessionNode(model, name) {
+    let hit = null;
+    const visit = (n) => {
+      if (hit) return;
+      if (n.name === name) { hit = n; return; }
+      for (const k of n.children) visit(k);
+      for (const d of n.decks) for (const k of d.items) visit(k);
+    };
+    for (const p of model ? model.projects : []) {
+      for (const m of p.meshes) { m.roots.forEach(visit); m.decks.forEach((d) => d.items.forEach(visit)); }
+    }
+    return hit;
+  }
+
+  function briefEl(n) {
+    const box = document.createDocumentFragment();
+    const lines = sessionTitle(n).split("\n");
+    box.appendChild(node("b", "hive-brief-name", lines[0]));
+    if (lines.length > 1) box.appendChild(node("div", "hive-brief-meta", lines.slice(1).join(" · ")));
+    const b = n.briefing;
+    box.appendChild(node("div", "hive-brief-head", b ? `briefing${b.state ? ` · ${b.state}` : ""}` : "briefing 없음"));
+    if (!b) {
+      box.appendChild(node("div", "hive-muted", "이 세션의 briefing이 아직 만들어지지 않았다."));
+      return box;
+    }
+    const list = node("div", "hive-brief-rows");
+    for (const r of b.rows) {
+      const row = node("div", `hive-brief-row b-${r.key}`);
+      if (r.label) row.appendChild(node("span", "hive-brief-label", r.label));
+      row.appendChild(node("span", "hive-brief-text", r.text));
+      list.appendChild(row);
+    }
+    box.appendChild(list);
+    return box;
+  }
+
+  function hideBrief() {
+    if (briefTimer) { clearTimeout(briefTimer); briefTimer = null; }
+    briefFor = "";
+    if (shell) shell.brief.classList.add("hidden");
+  }
+
+  /* Draws the overlay for `name` beside its chip: below it when there is
+     room in the port, above it otherwise, kept inside the port. */
+  function placeBrief() {
+    if (!shell || !briefFor) return;
+    const chip = [...shell.stage.querySelectorAll('.hive-chip[data-kind="session"]')]
+      .find((c) => c.dataset.id === briefFor);
+    const n = chip && sessionNode(lastModel, briefFor);
+    if (!n) { hideBrief(); return; }
+    const box = shell.brief;
+    box.dataset.session = briefFor;
+    box.replaceChildren(briefEl(n));
+    box.classList.remove("hidden");
+    const port = shell.port.getBoundingClientRect();
+    const c = chip.getBoundingClientRect();
+    const w = box.offsetWidth, h = box.offsetHeight;
+    let left = c.left - port.left;
+    left = Math.max(4, Math.min(left, port.width - w - 4));
+    let top = c.bottom - port.top + 6;
+    if (top + h > port.height - 4) top = Math.max(4, c.top - port.top - h - 6);
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+  }
+
+  function showBrief(name, delay) {
+    if (briefTimer) { clearTimeout(briefTimer); briefTimer = null; }
+    briefFor = name;
+    if (!delay) { placeBrief(); return; }
+    briefTimer = setTimeout(() => { briefTimer = null; placeBrief(); }, delay);
+  }
+
+  function wireBrief(port) {
+    const sessionChipOf = (t) => t && t.closest && t.closest('.hive-chip[data-kind="session"]');
+    port.addEventListener("pointerover", (e) => {
+      const chip = sessionChipOf(e.target);
+      if (!chip || port.classList.contains("panning")) return;
+      if (chip.dataset.id !== briefFor) showBrief(chip.dataset.id, BRIEF_DELAY_MS);
+    });
+    port.addEventListener("pointerout", (e) => {
+      const chip = sessionChipOf(e.target);
+      if (!chip || chip.contains(e.relatedTarget)) return;
+      if (document.activeElement === chip) return;
+      hideBrief();
+    });
+    port.addEventListener("focusin", (e) => {
+      const chip = sessionChipOf(e.target);
+      if (chip) showBrief(chip.dataset.id, 0); else hideBrief();
+    });
+    port.addEventListener("focusout", (e) => {
+      if (sessionChipOf(e.target) && !sessionChipOf(e.relatedTarget)) hideBrief();
+    });
+    port.addEventListener("pointerdown", hideBrief);
+    port.addEventListener("wheel", hideBrief, { passive: true });
+  }
+
   /* -- shell --------------------------------------------------------- */
 
   function select(options, value, onChange, title) {
@@ -1381,12 +1511,16 @@ globalThis.HivePage = (() => {
     zb("⤢", "전체 맞춤 (0)", fit);
     port.appendChild(zoom);
     port.appendChild(legend());
+    const brief = node("div", "hive-brief hidden");
+    brief.setAttribute("role", "tooltip");
+    port.appendChild(brief);
     frame.appendChild(port);
     const detail = node("aside", "hive-detail hidden");
     frame.appendChild(detail);
     root.appendChild(frame);
     wirePort(port);
-    shell = { root, project, status, port, stage, detail, zoomLabel, search, archiveBtn };
+    wireBrief(port);
+    shell = { root, project, status, port, stage, detail, zoomLabel, search, archiveBtn, brief };
     applyView();
   }
 
@@ -1488,14 +1622,16 @@ globalThis.HivePage = (() => {
     shell.stage.replaceChildren(frag);
     shell.port.classList.toggle("searching", !!q);
     if (q) {
-      // A chip's title already names everything worth finding it by: the
-      // session's role, meshes and issue, the issue's title and assignee.
+      // A chip's title (a session chip's data-find) already names everything
+      // worth finding it by: the session's role, meshes, issue and briefing,
+      // the issue's title and assignee.
       for (const chip of shell.stage.querySelectorAll(".hive-chip[data-kind]")) {
-        if (chip.title.toLowerCase().includes(q)) chip.classList.add("hit");
+        if ((chip.dataset.find || chip.title).toLowerCase().includes(q)) chip.classList.add("hit");
       }
     }
     markRelations(model);
     renderDetail(model);
+    placeBrief();
   }
 
   function open() {
@@ -1520,6 +1656,6 @@ globalThis.HivePage = (() => {
 
   return { open, stop, render, fit, category, stateOf, keep, isMinor, roleOf,
            issueParentId, nestIssues, readQueues, readCategories, boardWorkspaces, buildModel, tally,
-           relationKinds, issueRows, RELS,
+           relationKinds, issueRows, RELS, briefingOf,
            arrangeSiblings, ENDED_WINDOWS, STATES, get model() { return lastModel; } };
 })();

@@ -30,7 +30,12 @@
         filed; picking the issue lights its sessions, fades the rest and
         draws a line to each drawn one; the detail pane lists them by kind;
         a legend button hides one kind and the toolbar switch hides all;
-    12. no page errors. */
+    12. briefing overlay (claunch-yzgqb.2.1): resting the pointer on the
+        worker's chip opens an overlay with its briefing rows in the
+        session tab's order, a session with no briefing says so, leaving
+        the chip closes it, focusing a chip opens it, the chip carries no
+        native title under it, and search finds a chip by its briefing;
+    13. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -43,7 +48,9 @@ const now = Date.now();
 const ago = (h) => new Date(now - h * 3600000).toISOString();
 const SESSIONS = [
   { name: "lead", status: "busy", created_at: ago(5), project: "claunch", cwd: "/w/claunch" },
-  { name: "wk", status: "idle", parent: "lead", created_at: ago(4), project: "claunch", cwd: "/w/claunch", issue: "c-1" },
+  { name: "wk", status: "idle", parent: "lead", created_at: ago(4), project: "claunch", cwd: "/w/claunch", issue: "c-1",
+    briefing: { one_line: "wiring the relation chips", state: "fresh", goal: "show session-issue ties",
+                now: "writing the browser step", progress: "model done, view half" } },
   { name: "wk-rev", status: "idle", parent: "wk", created_at: ago(1), project: "claunch", cwd: "/w/claunch" },
   { name: "wk-rev2", status: "busy", parent: "wk", created_at: ago(1), project: "claunch", cwd: "/w/claunch", issue: "c-1" },
   { name: "parked", status: "exited", held_at: ago(3), created_at: ago(9), project: "gds", cwd: "/w/gds" },
@@ -307,7 +314,36 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     await relSwitch.check();
     await page.waitForSelector(ref);
 
-    // 12.
+    // 12. The briefing overlay.
+    const brief = "#hive-view .hive-brief";
+    const wkChip = '#hive-view .hive-chip[data-kind="session"][data-id="wk"]';
+    assert.equal(await page.getAttribute(wkChip, "title"), null, "no native tooltip under the overlay");
+    await page.hover(wkChip);
+    await page.waitForSelector(`${brief}:not(.hidden)[data-session="wk"]`);
+    assert.deepEqual(await page.$$eval(`${brief} .hive-brief-row`, (rs) => rs.map((r) => r.textContent)),
+      ["wiring the relation chips", "goalshow session-issue ties", "nowwriting the browser step",
+       "progressmodel done, view half"]);
+    assert.equal(await page.textContent(`${brief} .hive-brief-head`), "briefing · fresh");
+    assert.match(await page.textContent(`${brief} .hive-brief-name`), /^wk — idle/);
+    const inPort = await page.$eval(brief, (b) => {
+      const p = b.parentElement.getBoundingClientRect(), r = b.getBoundingClientRect();
+      return r.left >= p.left && r.right <= p.right && r.top >= p.top && r.bottom <= p.bottom;
+    });
+    assert.ok(inPort, "the overlay stays inside the canvas");
+    await page.hover('#hive-view .hive-chip[data-kind="session"][data-id="lead"]');
+    await page.waitForSelector(`${brief}:not(.hidden)[data-session="lead"]`);
+    assert.equal(await page.textContent(`${brief} .hive-brief-head`), "briefing 없음");
+    await page.hover("#hive-view .hive-status");
+    await page.waitForSelector(brief, { state: "hidden" });
+    await page.focus(wkChip);
+    await page.waitForSelector(`${brief}:not(.hidden)[data-session="wk"]`);
+    await page.focus("#hive-view .hive-search");
+    await page.waitForSelector(brief, { state: "hidden" });
+    await page.fill("#hive-view .hive-search", "browser step");
+    await page.waitForSelector('#hive-view .hive-chip.hit[data-id="wk"]');
+    await page.fill("#hive-view .hive-search", "");
+
+    // 13.
     assert.deepEqual(errors, []);
     console.log("hive browser ok");
   } finally {
