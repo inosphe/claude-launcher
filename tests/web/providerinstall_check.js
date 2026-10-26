@@ -129,9 +129,16 @@ const LISTING = {
 /* The daemon spells the neutral lists it validates against, and the page must
    offer those rather than its own copy -- a level added to provider_spec has to
    reach this select without an edit to app.js. The empty lists above are what a
-   daemon that published nothing looks like; the lists here are the real ones. */
-LISTING.fields.reasoning_efforts = ["low", "medium", "high"];
-LISTING.fields.openai_reasoning_formats = ["deepseek", "openai"];
+   daemon that published nothing looks like.
+
+   The published lists below are deliberately NOT the ones app.js hardcodes
+   (`low/medium/high`, `deepseek/openai`): each carries one value the fallback
+   does not. With equal lists both paths render the same select, so a page that
+   ignored the daemon would still pass -- measured on 6f2ecdad, where deleting
+   the read left this file green (reviewer s1396-rev2). One extra value each
+   makes the assertion fail on exactly that mutation. */
+LISTING.fields.reasoning_efforts = ["low", "medium", "high", "xhigh"];
+LISTING.fields.openai_reasoning_formats = ["deepseek", "openai", "responses"];
 
 (async () => {
   context.providersState.data = LISTING;
@@ -172,17 +179,22 @@ LISTING.fields.openai_reasoning_formats = ["deepseek", "openai"];
       return row.kids.find((k) => k.tag === "select");
     };
     const values = (select) => select.kids.map((o) => o.value);
+    // `xhigh` and `responses` are only in the daemon's published lists, not in
+    // the constants app.js falls back to. A page that ignored the daemon and
+    // drew its own copy would come up two values short here.
     check("reasoning_effort offers the daemon's levels, plus unset",
-          values(selectFor("reasoning_effort")), ["", "low", "medium", "high"]);
+          values(selectFor("reasoning_effort")),
+          ["", "low", "medium", "high", "xhigh"]);
     check("openai_reasoning_format offers the daemon's formats, plus none",
-          values(selectFor("openai_reasoning_format")), ["", "deepseek", "openai"]);
+          values(selectFor("openai_reasoning_format")),
+          ["", "deepseek", "openai", "responses"]);
     ok("the format's empty choice says none rather than (unset)",
        selectFor("openai_reasoning_format").kids[0].textContent === "none");
 
-    // A level the daemon stopped publishing but the file still holds stays
-    // selectable: dropping it would show the select on a value that is not the
-    // one on disk, and the next Save would rewrite the provider silently.
-    const kept = context.providerDraftFromEntry({ reasoning_effort: "xhigh",
+    // A level neither list carries but the file still holds stays selectable:
+    // dropping it would show the select on a value that is not the one on disk,
+    // and the next Save would rewrite the provider silently.
+    const kept = context.providerDraftFromEntry({ reasoning_effort: "minimal",
                                           openai_reasoning_format: "openai" });
     context.providersState.draft = kept;
     const card3 = context.providersPanel();
@@ -190,8 +202,9 @@ LISTING.fields.openai_reasoning_formats = ["deepseek", "openai"];
       (n) => n.tag === "label" && (n.kids[0] || {}).textContent === "reasoning_effort");
     const select3 = row3.kids.find((k) => k.tag === "select");
     check("a stored level outside the published list stays selectable",
-          select3.kids.map((o) => o.value), ["", "low", "medium", "high", "xhigh"]);
-    check("and it is the selected value", select3.value, "xhigh");
+          select3.kids.map((o) => o.value),
+          ["", "low", "medium", "high", "xhigh", "minimal"]);
+    check("and it is the selected value", select3.value, "minimal");
     context.providersState.draft = before;
 
     // The installed row shows the pair, because neither half alone says what a
