@@ -280,7 +280,7 @@ class Cleanup:
 
     def _candidates(self, session, scratch, root, repo):
         sessions = self.manager.list()
-        names = [s.sdef.name for s in sessions]
+        names = {s.sdef.name for s in sessions}
         foreign = _foreign_names()
         registered = _registered_worktrees(repo) if scratch.exists() else set()
         result = []

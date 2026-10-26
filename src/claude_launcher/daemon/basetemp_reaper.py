@@ -232,12 +232,21 @@ def settings() -> Tuple[float, float]:
 
 
 def owner(name: str, sessions: Iterable[str]) -> Optional[str]:
-    """The longest of ``sessions`` whose shape ``name`` has, or ``None``."""
-    best: Optional[str] = None
-    for session in sessions:
-        if matches(name, session) and (best is None or len(session) > len(best)):
-            best = session
-    return best
+    """The longest of ``sessions`` whose shape ``name`` has, or ``None``.
+
+    A session ``name`` matches is a prefix of it, so the candidates are
+    ``name``'s own prefixes, longest first, looked up in a set: the cost
+    follows the name's length, not the registry's size. Scanning every
+    session for every directory held the GIL for minutes at boot with 2563
+    sessions and 1047 root entries (claunch-2r7vj). Callers judging many
+    names pass a set; any other iterable is copied into one per call.
+    """
+    known = sessions if isinstance(sessions, (set, frozenset)) else set(sessions)
+    for end in range(len(name), 0, -1):
+        session = name[:end]
+        if session in known and matches(name, session):
+            return session
+    return None
 
 
 def live_name(entry: dict) -> Optional[str]:
@@ -484,17 +493,29 @@ class BasetempReaper:
 
     def owned(self, session: str) -> List[Path]:
         """``session``'s basetemps under the root, attributed by longest name."""
-        names = [name for name, _ in self._sessions()]
-        if session not in names:
-            names.append(session)
+        return self._owned_by([session]).get(session, [])
+
+    def _owned_by(self, targets: Iterable[str]) -> dict:
+        """``{session: [its basetemps]}`` for ``targets``, from one scan.
+
+        One listing of the root serves every target: the boot pass names
+        every ended session, and listing the root once per name repeated the
+        whole scan thousands of times (claunch-2r7vj). The targets join the
+        registry's names, so an exited session the registry no longer lists
+        still claims its own directories.
+        """
+        wanted = set(targets)
+        known = {name for name, _ in self._sessions()} | wanted
         try:
-            entries = list(self.root.iterdir())
+            entries = sorted(self.root.iterdir())
         except OSError:
-            return []
-        return sorted(
-            p for p in entries
-            if p.is_dir() and owner(p.name, names) == session
-        )
+            return {}
+        found: dict = {}
+        for path in entries:
+            who = owner(path.name, known)
+            if who in wanted and path.is_dir():
+                found.setdefault(who, []).append(path)
+        return found
 
     # ---- the two entry points -------------------------------------------- #
 
@@ -521,7 +542,7 @@ class BasetempReaper:
         rows: List[dict] = []
         with self._lock:
             sessions = list(self._sessions())
-            names = [name for name, _ in sessions]
+            names = {name for name, _ in sessions}
             elsewhere = self._foreign()
             held = self._grants()
             try:
@@ -545,7 +566,7 @@ class BasetempReaper:
         self,
         entries: List[Path],
         sessions: List[tuple],
-        names: List[str],
+        names: set,
         elsewhere: set,
         held: set,
         cutoff: float,
@@ -588,7 +609,7 @@ class BasetempReaper:
     def _reap_orphans(
         self,
         entries: List[Path],
-        names: List[str],
+        names: set,
         elsewhere: set,
         cutoff: float,
     ) -> List[dict]:
@@ -632,11 +653,13 @@ class BasetempReaper:
         rows: List[dict] = []
         with self._lock:
             elsewhere = self._foreign()
+            kept = [name for name in names if name not in elsewhere]
             for name in names:
                 if name in elsewhere:
                     log.info("basetemp: %r is live in another daemon instance; kept", name)
-                    continue
-                for path in self.owned(name):
+            owned = self._owned_by(kept) if kept else {}
+            for name in kept:
+                for path in owned.get(name, []):
                     rows.append(self._reap_one(name, path))
             if rows:
                 self._append(rows)
