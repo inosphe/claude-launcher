@@ -97,7 +97,28 @@
    run's intervals would squeeze the part being watched. The tree's export
    carries what the tree shows.
 
-   ``model(events, live, progress)`` and ``sequence(events, live, now)`` are
+   A launcher may restart a run that broke before it began (claunch-xyzf6,
+   event contract shared with gds6-gjkd.9). ``session_start`` may carry
+   ``attempt`` (from 1) and ``attemptMax``: the start node then reads
+   ``시도 1/5`` and later ones ``재시도 n/5`` -- without them, 시작 and 재개
+   as before. An ``agent_end`` with ``started: false`` and ``stopReason:
+   "error"`` before anything else was drawn for its session is a failed
+   start: its start node turns red, ``시작 실패``, with the ``error?`` line as
+   its sub and the whole error in its tip, and its shutdown adds no end
+   node. Failed starts in a row fold into one ``재시도 실패 ×N`` node (the
+   first one's), whose tip lists each attempt; the later ones are absorbed
+   -- hidden, their edge kept and hidden, out of their column's rows -- so
+   the attempt after them takes the absorbed one's place and every node
+   drawn keeps its place. A click on the fold opens it (``opts.unfold``,
+   the fold keys opened, both views): each attempt is its own red node, and
+   since that re-places them the tree is drawn again from scratch. The
+   sequence view does the same with lanes: one red lane with an interval
+   per attempt, or a lane each when opened. A new ``session_start`` also
+   reopens the run there, so work after a failed attempt is not closed at
+   that attempt's shutdown.
+
+   ``model(events, live, progress, opts)`` and ``sequence(events, live, now,
+   opts)`` are
    the pure halves (tests/web/durableflow_check.js); ``withAncestors`` is the
    pure half of the shadowed run; ``mount(host, session)`` owns the poll, the
    view switch and the SVG. */
@@ -199,10 +220,22 @@
     return id.split("/").pop() || "?";
   }
 
+  /* "2/5" for a session_start that says which launcher attempt it is, ""
+     for one that does not (every log before gds6-gjkd.9). */
+  function attemptTag(ev) {
+    const n = Number(ev && ev.attempt), max = Number(ev && ev.attemptMax);
+    if (!Number.isInteger(n) || n < 1) return "";
+    return n + (Number.isInteger(max) && max >= 1 ? "/" + max : "");
+  }
+  const FOLD_OPEN = "클릭하면 시도마다 펼친다";
+  const FOLD_CLOSE = "클릭하면 접는다";
+
   /* The diagram for an event list. Deterministic and append-stable: the
      nodes for a prefix of the log are a prefix of the nodes for the whole
      log, at the same (col, row), with the same id. */
-  function model(events, live, progress) {
+  function model(events, live, progress, opts) {
+    const unfold = opts && opts.unfold; // fold keys the reader opened
+    const opened = (key) => !!(unfold && unfold.has(key));
     const cols = [];        // {phase, title, nodes: [id]}
     const nodes = [];       // {id, col, row, label, sub, status, tip, key}
     const byId = new Map();
@@ -213,6 +246,8 @@
     const keyUnit = new Map(); // ask key -> the unit its last ask_start named
     let running = 0, peak = 0, starts = 0;
     let plan = null;         // unit ids of the latest plan event
+    const tries = [];        // one per session_start: {n, node, tag, failed, error, head, members}
+    let attempt = null;      // the newest of them
 
     // A phase entered again gets a new column -- except a grouped (sim2)
     // stage, whose questions interleave: it keeps the column it opened.
@@ -245,7 +280,50 @@
       return null;
     }
     function tail() {
-      return nodes[nodes.length - 1] || null;
+      for (let i = nodes.length - 1; i >= 0; i--) if (!nodes[i].absorbed) return nodes[i];
+      return null;
+    }
+    // An attempt that ended before its first model call. Alone it is one red
+    // node; right after another such attempt it joins that one's fold, and
+    // unless the reader opened the fold its own node is absorbed: hidden and
+    // out of its column's rows, so the next attempt takes its place.
+    function startFailed(a, ev, when) {
+      const err = String(ev.error || "");
+      a.failed = true;
+      a.error = err.split("\n")[0];
+      a.node.tip.push(when + " agent_end started:false · stopReason error", ...(err ? [err.slice(0, 400)] : []));
+      const prev = tries[tries.length - 2];
+      const head = prev && prev.failed && nodes.indexOf(a.node) === nodes.indexOf(prev.node) + 1
+        ? (prev.head || prev) : null;
+      paintFailed(a);
+      if (!head) return;
+      a.head = head;
+      head.members = head.members || [head];
+      head.members.push(a);
+      const key = "try:" + head.n;
+      if (opened(key)) {
+        for (const x of head.members) {
+          x.node.fold = key;
+          if (!x.node.tip.includes(FOLD_CLOSE)) x.node.tip.push(FOLD_CLOSE);
+        }
+        return;
+      }
+      a.node.status = "gone";
+      a.node.absorbed = true;
+      const c = cols[a.node.col].nodes;
+      c.splice(c.indexOf(a.node.id), 1);
+      const h = head.node;
+      h.fold = key;
+      h.status = "fail";
+      h.label = "재시도 실패 ×" + head.members.length;
+      h.sub = a.error || "모델 호출 없이 종료";
+      h.tip = [...head.members.map((x) => x.when + " " + (x.tag ? "시도 " + x.tag : "#" + x.n) +
+                                           " 시작 실패" + (x.error ? ": " + x.error : "")), FOLD_OPEN];
+    }
+    function paintFailed(a) {
+      a.node.status = "fail";
+      a.node.label = "시작 실패" + (a.tag ? " · " + a.tag : "");
+      a.node.sub = a.error || "모델 호출 없이 종료";
     }
     function settle(node, ok, note, phase, label) {
       if (!node) {
@@ -342,12 +420,20 @@
       if (at) lastAt = at;
       const when = at ? clock(at) : "";
       switch (ev.event) {
-        case "session_start":
-          add("start", "start", {
-            label: nodes.some((x) => x.id.startsWith("start")) ? "재개" : "시작",
-            sub: ev.reason || "", tip: [when, "session_start " + (ev.reason || "")],
+        case "session_start": {
+          // attempt/attemptMax (gds6-gjkd.9): the launcher's retry count.
+          // Without them the first start is 시작 and every later one 재개.
+          const tag = attemptTag(ev);
+          const label = tag ? (Number(ev.attempt) === 1 ? "시도 " : "재시도 ") + tag
+            : nodes.some((x) => x.id.startsWith("start")) ? "재개" : "시작";
+          const node = add("start", "start", {
+            label, sub: ev.reason || "",
+            tip: [when, "session_start " + (ev.reason || "") + (tag ? " · 시도 " + tag : "")],
           });
+          attempt = { n: tries.length + 1, node, tag, when, failed: false, error: "", head: null };
+          tries.push(attempt);
           break;
+        }
         case "harness_open":
         case "run_start": {
           const host = [...nodes].reverse().find((x) => x.id.startsWith("start"));
@@ -550,6 +636,14 @@
           break;
         }
         case "agent_end":
+          // No model call was made and the attempt broke: nothing was drawn
+          // after its start, so the start node is the attempt.
+          if (ev.started === false && ev.stopReason === "error" && attempt && !attempt.failed &&
+              nodes[nodes.length - 1] === attempt.node) {
+            startFailed(attempt, ev, when);
+            break;
+          }
+          // falls through
         case "harness_closed": {
           const t = tail();
           if (t) t.tip.push(when + " " + ev.event);
@@ -557,6 +651,12 @@
         }
         case "session_shutdown": {
           closeOpen();
+          // A failed start's shutdown is part of that attempt, not the run's end.
+          if (attempt && attempt.failed && nodes[nodes.length - 1] === attempt.node) {
+            (attempt.node.absorbed ? attempt.head.node : attempt.node).tip
+              .push(when + " session_shutdown " + (ev.reason || ""));
+            break;
+          }
           const tail = nodes[nodes.length - 1];
           if (tail && cols[tail.col].phase === "end") {
             tail.tip.push(when + " session_shutdown " + (ev.reason || ""));
@@ -617,6 +717,12 @@
     }
     let prev = null, crossed = false;
     for (const to of nodes) {
+      // An absorbed attempt keeps the edge it had while it was drawn, hidden;
+      // the next node hangs off its fold.
+      if (to.absorbed) {
+        if (prev && !crossed) edges.push({ id: prev.id + ">" + to.id, from: prev, to, gone: true });
+        continue;
+      }
       if (to.unit !== undefined) {
         for (const a of to.after) {
           const from = units.get(a);
@@ -636,8 +742,9 @@
       prev = to;
       crossed = false;
     }
-    if (pending && nodes.length && nodes[nodes.length - 1].unit === undefined) {
-      edges.push({ id: "live-edge", from: nodes[nodes.length - 1], to: pending });
+    const last = tail();
+    if (pending && last && last.unit === undefined) {
+      edges.push({ id: "live-edge", from: last, to: pending });
     }
     // done/total over the latest plan's units.
     const planned = plan && { total: plan.length, done: plan.filter((id) => units.get(id).state === "done").length };
@@ -661,14 +768,58 @@
      A lane with no end yet is open: the view draws it out to `now`.
      Missing timestamps leave a null edge; the view clamps those to the
      axis's own ends rather than dropping the lane. */
-  function sequence(events, live, now) {
+  function sequence(events, live, now, opts) {
     now = Number.isFinite(now) ? now : Date.now();
+    const unfold = opts && opts.unfold;
+    const opened = (key) => !!(unfold && unfold.has(key));
     const atOf = (ev) => {
       const t = Date.parse((ev && ev.at) || "");
       return Number.isFinite(t) ? t : null;
     };
     const lanes = [], byUnit = new Map(), byGroup = new Map(), open = new Map();
     let t0 = null, t1 = null, no = 0, asks = 0, endedAt = null;
+    // Launcher attempts, as in the tree: an attempt that failed before its
+    // first model call is a lane of its own, and a run of them is one lane
+    // with an interval per attempt unless the reader opened it. ``work``
+    // counts the unit, plan and question events, so an attempt that did any
+    // work is never read as a failed start.
+    const tries = [];
+    let attempt = null, work = 0;
+    function startFailed(a, ev, when) {
+      a.failed = true;
+      a.end = when;
+      a.error = String(ev.error || "").split("\n")[0];
+      const prev = tries[tries.length - 2];
+      const head = prev && prev.failed && prev.work === a.work ? (prev.head || prev) : null;
+      const one = (x, fold) => {
+        x.lane = addLane("try:" + x.n, x.start, {
+          label: "시작 실패" + (x.tag ? " · " + x.tag : ""), state: "fail", fold, attempt: x.n,
+          tip: [x.error || "모델 호출 없이 종료"],
+        });
+        x.lane.end = x.end;
+      };
+      if (!head) { one(a, null); return; }
+      a.head = head;
+      head.members = head.members || [head];
+      head.members.push(a);
+      const key = "try:" + head.n;
+      if (opened(key)) {
+        head.lane.fold = key;
+        head.lane.tip = [head.error || "모델 호출 없이 종료", FOLD_CLOSE];
+        one(a, key);
+        a.lane.tip.push(FOLD_CLOSE);
+        return;
+      }
+      const lane = head.lane;
+      lane.fold = key;
+      lane.label = "재시도 실패 ×" + head.members.length;
+      lane.end = a.end;
+      lane.tries = head.members.length;
+      lane.asks = head.members.map((x) => ({ key: x.tag ? "시도 " + x.tag : "#" + x.n,
+                                              start: x.start, end: x.end, status: "fail" }));
+      lane.tip = [...head.members.map((x) => (x.tag ? "시도 " + x.tag : "#" + x.n) + " 시작 실패" +
+                                            (x.error ? ": " + x.error : "")), FOLD_OPEN];
+    }
 
     const touch = (t) => {
       if (t === null) return;
@@ -728,7 +879,22 @@
       if (!ev || typeof ev !== "object") continue;
       const when = atOf(ev);
       touch(when);
+      // The events that draw a node of their own in the tree: after one of
+      // them an attempt is not a failed start in either view.
+      if (ev.event === "unit" || ev.event === "ask_start" || ev.event === "ask" || ev.event === "plan") work += 1;
       switch (ev.event) {
+        case "session_start":
+          // A new session after a shutdown: the run goes on, and what it
+          // opens from here is not closed at that earlier shutdown.
+          endedAt = null;
+          attempt = { n: tries.length + 1, tag: attemptTag(ev), start: when, end: null,
+                      work, failed: false, error: "", head: null };
+          tries.push(attempt);
+          break;
+        case "agent_end":
+          if (ev.started === false && ev.stopReason === "error" && attempt && !attempt.failed &&
+              attempt.work === work) startFailed(attempt, ev, when);
+          break;
         case "unit": {
           if (ev.unit == null) break;
           const lane = unitLane(String(ev.unit), ev);
@@ -813,7 +979,8 @@
     // its stage) is not a lane any more.
     for (let i = lanes.length - 1; i >= 0; i--) {
       const lane = lanes[i];
-      if (!lane.asks.length && lane.unit === undefined && lane.group === undefined) {
+      if (!lane.asks.length && lane.unit === undefined && lane.group === undefined &&
+          lane.attempt === undefined) {
         lanes.splice(i, 1);
       }
     }
@@ -967,7 +1134,8 @@
 
   /* The view: one SVG, kept. ``draw(m)`` brings it to model ``m`` by adding
      what is new and rewriting what changed; it never empties the SVG. */
-  function makeView(doc, host) {
+  function makeView(doc, host, opts = {}) {
+    const folds = new Map();   // node id -> the fold key a click opens or closes
     const svg = doc.createElementNS(NS, "svg");
     svg.setAttribute("class", "dfl");
     svg.setAttribute("xmlns", NS);
@@ -1005,8 +1173,14 @@
         v = { g, tip, rect, title, sub };
         nodes.set(n.id, v);
         g.setAttribute("data-id", n.id);
+        const id = n.id;
+        g.addEventListener("click", () => {
+          const key = folds.get(id);
+          if (key && opts.onToggle) opts.onToggle(key);
+        });
       }
-      set(v.g, "class", "dfl-node st-" + n.status + (n.cls ? " " + n.cls : ""));
+      folds.set(n.id, n.fold || null);
+      set(v.g, "class", "dfl-node st-" + n.status + (n.cls ? " " + n.cls : "") + (n.fold ? " fold" : ""));
       set(v.g, "transform", `translate(${p.x},${p.y})`);
       text(v.title, clip(n.label, 24));
       text(v.sub, clip(n.sub, 30));
@@ -1083,7 +1257,8 @@
      row is written every draw (its bar grows as the axis does), and a lane
      whose unit is not in the model any more is dropped -- the only lanes
      that ever go away are the ones the cap hides. */
-  function makeSequenceView(doc) {
+  function makeSequenceView(doc, opts = {}) {
+    const folds = new Map();   // lane id -> the fold key a click opens or closes
     const svg = doc.createElementNS(NS, "svg");
     svg.setAttribute("class", "dfl dfl-seq");
     svg.setAttribute("xmlns", NS);
@@ -1167,6 +1342,11 @@
                                       y: (SEQ_ROW - SEQ_BAR) / 2, height: SEQ_BAR });
           v = { g, line, label, tip, bar, asks: [] };
           rows.set(lane.id, v);
+          const id = lane.id;
+          g.addEventListener("click", () => {
+            const key = folds.get(id);
+            if (key && opts.onToggle) opts.onToggle(key);
+          });
         }
         set(v.g, "transform", `translate(0,${SEQ_AXIS + SEQ_PAD + i * SEQ_ROW})`);
         text(v.label, clip(lane.label, 30));
@@ -1181,8 +1361,11 @@
           lane.label, lane.phase ? `phase ${lane.phase}` : "",
           `시작 ${clock(start)}` + (lane.end === null || lane.end === undefined
             ? " · 진행 중" : ` · 끝 ${clock(end)}`),
-          lane.asks.length ? `물음 ${lane.asks.length}` : "",
+          lane.tries ? `시도 ${lane.tries}` : lane.asks.length ? `물음 ${lane.asks.length}` : "",
+          ...(lane.tip || []),
         ].filter(Boolean).join("\n"));
+        folds.set(lane.id, lane.fold || null);
+        set(v.g, "class", "dfl-seq-row" + (lane.fold ? " fold" : ""));
         lane.asks.forEach((a, j) => {
           let r = v.asks[j];
           if (!r) {
@@ -1484,7 +1667,9 @@
     host.appendChild(head); host.appendChild(note); host.appendChild(scroller);
 
     let view = null, seqView = null, events = [], gone = false, busy = false, timer = null;
-    let lastTree = null, lastSeq = null;
+    let lastTree = null, lastSeq = null, lastData = null;
+    // The retry folds the reader opened (by fold key, shared by both views).
+    const unfold = new Set();
     // The runs this one continued from, and their layer (built once: the
     // first poll carries them, later polls carry the tail alone).
     let ancestors = [], ancLayer = null, ancFor = null;
@@ -1518,6 +1703,15 @@
       paintMode();
       drawShown();
       scroller.scrollLeft = scroller.scrollWidth;
+    }
+    // Opening or closing a fold re-places the attempts in it, which is the
+    // one change the tree's append-only drawing cannot take in place: the
+    // tree is drawn again from scratch, the sequence view (re-placed every
+    // draw) just redraws.
+    function toggle(key) {
+      if (unfold.has(key)) unfold.delete(key); else unfold.add(key);
+      if (view) { view.svg.remove(); view = null; }
+      if (lastData) build(lastData);
     }
     treeBtn.addEventListener("click", () => setMode("tree"));
     seqBtn.addEventListener("click", () => setMode("sequence"));
@@ -1557,41 +1751,46 @@
         // Ancestors ride the first answer only; keep the ones already read.
         if (Array.isArray(data.ancestors) && data.ancestors !== ancestors) ancestors = data.ancestors;
         if (ancFor !== ancestors) { ancLayer = ancestorLayer(ancestors); ancFor = ancestors; }
-        const m = model(events, !!data.live, data.progress);
-        const tree = compose(m, ancLayer);
-        // A run that ended does not grow with its session: only a run still
-        // going is drawn out to now.
-        const s = sequence(events, !!data.live && !m.ended, Date.now());
-        lastTree = tree; lastSeq = s;
-        if (!events.length) {
-          note.textContent = data.live ? "아직 기록된 사건이 없다 — 실행 세션이 시작하는 중" : "기록된 사건이 없다";
-        } else {
-          note.textContent = data.live && data.progress && !m.ended
-            ? "진행: " + [data.progress.stage, data.progress.text].filter(Boolean).join(" — ")
-            : "";
-        }
-        if (!view) view = makeView(doc, holder);
-        if (!seqView) seqView = makeSequenceView(doc);
-        paintMode();
-        const before = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
-        const atEnd = scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 8;
-        if (mode === "sequence") seqView.draw(s); else view.draw(tree);
-        // Follow the run while the reader is at its end.
-        const after = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
-        if (atEnd && before !== after && (mode !== "sequence" || before !== "")) {
-          scroller.scrollLeft = scroller.scrollWidth;
-        }
-        meta.textContent = summary(m, data) +
-          (ancLayer ? ` · 이전 run ${ancLayer.count}` : "") +
-          (mode === "sequence" && s.lanes.length
-            ? ` · 레인 ${s.lanes.length}` + (s.hidden ? ` (+${s.hidden} 이전)` : "")
-            : "");
+        lastData = data;
+        build(data);
         if (!data.live && timer) { timers.clearInterval(timer); timer = null; }
       } catch {
         /* the poll comes back round */
       } finally {
         busy = false;
       }
+    }
+
+    function build(data) {
+      const m = model(events, !!data.live, data.progress, { unfold });
+      const tree = compose(m, ancLayer);
+      // A run that ended does not grow with its session: only a run still
+      // going is drawn out to now.
+      const s = sequence(events, !!data.live && !m.ended, Date.now(), { unfold });
+      lastTree = tree; lastSeq = s;
+      if (!events.length) {
+        note.textContent = data.live ? "아직 기록된 사건이 없다 — 실행 세션이 시작하는 중" : "기록된 사건이 없다";
+      } else {
+        note.textContent = data.live && data.progress && !m.ended
+          ? "진행: " + [data.progress.stage, data.progress.text].filter(Boolean).join(" — ")
+          : "";
+      }
+      if (!view) view = makeView(doc, holder, { onToggle: toggle });
+      if (!seqView) seqView = makeSequenceView(doc, { onToggle: toggle });
+      paintMode();
+      const before = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
+      const atEnd = scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 8;
+      if (mode === "sequence") seqView.draw(s); else view.draw(tree);
+      // Follow the run while the reader is at its end.
+      const after = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
+      if (atEnd && before !== after && (mode !== "sequence" || before !== "")) {
+        scroller.scrollLeft = scroller.scrollWidth;
+      }
+      meta.textContent = summary(m, data) +
+        (ancLayer ? ` · 이전 run ${ancLayer.count}` : "") +
+        (mode === "sequence" && s.lanes.length
+          ? ` · 레인 ${s.lanes.length}` + (s.hidden ? ` (+${s.hidden} 이전)` : "")
+          : "");
     }
 
     if (interval) timer = timers.setInterval(refresh, interval);
