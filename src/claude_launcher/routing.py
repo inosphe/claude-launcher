@@ -1148,19 +1148,39 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
         # provider's own config. The shim is mandatory — same failure class
         # as a routing pin, not as metering.
         #
-        # A borrow keys the route on the *lender*: the shim reads the model
-        # table off the route, so a route naming the borrower would resolve
-        # the borrower's ``models:`` per request — the one table a borrow is
-        # supposed to replace. Keying on the lender makes the per-request
-        # table the lender's, which is what a borrow means (see
-        # :func:`providers.launch_spec`). The token form is unchanged, so a
-        # route already on the wire keeps resolving.
-        route_profile = borrow.name if borrow is not None else profile
-        route = (
-            f"{PROFILE_ROUTE_PREFIX}{route_profile}"
-            if route_profile is not None
-            else f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
-        )
+        # A borrow keys the route on the *lender* when the lender's provider is
+        # the one in play: the shim reads the model table off the route, so a
+        # route naming the borrower would resolve the borrower's ``models:``
+        # per request — the one table a borrow is supposed to replace. This
+        # mirrors :func:`providers.launch_spec`, whose rule is that the table
+        # comes from the lender only while the backend is the lender's own.
+        #
+        # An explicit ``--provider`` swings the backend away from both
+        # profiles, and ``provider_name`` already carries that choice (the
+        # caller resolves it as ``provider_override or lender's provider``).
+        # A ``profile:`` token would override it with the token's own provider
+        # (``_split_route`` derives the provider from the named profile), so in
+        # that case the route must name the provider — otherwise the override
+        # loses upstream *and* credentials to the lender's backend
+        # (claunch-75kfl.1 review). Both token forms already exist, so a route
+        # on the wire keeps resolving either way.
+        # A ``profile:`` token also lets the route follow a live provider
+        # change (``claunch set-provider``), which is why it is the form used
+        # whenever the profile's own provider is the one in play. A borrow
+        # whose provider is not, is on an explicit override: then nothing may
+        # re-derive the provider from a profile, so the route names it.
+        route = None
+        if borrow is not None:
+            from . import providers  # late: providers pulls translators
+
+            if providers.resolve_name(borrow, doc) == provider_name:
+                route = f"{PROFILE_ROUTE_PREFIX}{borrow.name}"
+            else:
+                route = f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
+        elif profile is not None:
+            route = f"{PROFILE_ROUTE_PREFIX}{profile}"
+        else:
+            route = f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
         return ensure_shim(upstream, block or {}, provider_name, route=route)
     if block or requires_shim(provider_name, doc):
         return ensure_shim(upstream, block or {}, provider_name)

@@ -413,6 +413,84 @@ def test_a_borrow_keys_the_dynamic_route_on_the_lender(home, monkeypatch):
     assert seen[1] == f"profile:{lender.name}"
 
 
+def test_a_provider_override_beats_the_lender_for_the_dynamic_route(home):
+    """``--provider`` keeps the backend when the launch also borrows.
+
+    ``_split_route`` derives the provider from the profile a ``profile:``
+    token names, so keying the route on the lender unconditionally would make
+    the token decide upstream *and* credentials — the override would lose both
+    to the lender's backend. ``provider_name`` already carries the override
+    (the caller resolves it as ``provider_override or lender's provider``), so
+    a route naming the provider is the form that keeps it. This is the same
+    rule ``providers.launch_spec`` states: an explicit ``--provider`` swings
+    the backend away from both profiles.
+    """
+    _provider("dynA", {"dynamic": True,
+                       "api_key": "KA",
+                       "endpoints": {"anthropic": "https://a.example.com"}})
+    _provider("dynB", {"dynamic": True,
+                       "api_key": "KB",
+                       "endpoints": {"anthropic": "https://b.example.com"},
+                       "models": {"default": "b-default"}})
+    seat = create_profile("seat")
+    lender = create_profile("lender")
+    store.set_profile_field(seat.name, "provider", "dynA")
+    store.set_profile_field(lender.name, "provider", "dynB")
+
+    seen = []
+
+    def _capture(upstream, block, provider=None, route=None):
+        seen.append((upstream, provider, route))
+        return "http://127.0.0.1:1"
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(routing, "ensure_shim", _capture)
+    try:
+        env = {"ANTHROPIC_BASE_URL": "https://a.example.com"}
+        # The override (dynA) is what ``runner.child_env`` passes as
+        # ``provider``; the lender is on dynB.
+        routing.apply(env, "dynA", profile=seat.name, borrow=lender)
+    finally:
+        monkeypatch.undo()
+
+    upstream_arg, provider_arg, route = seen[0]
+    assert upstream_arg == "https://a.example.com"
+    assert provider_arg == "dynA"
+    assert route == "provider:dynA", route
+
+    # What the shim resolves per request from that route: the override's
+    # endpoint and key, not the lender's.
+    assert routing.route_upstream(route) == "https://a.example.com"
+    assert routing.route_auth(route, None) == "KA"
+
+
+def test_the_lenders_name_is_still_used_when_the_backend_is_its_own(home, monkeypatch):
+    """The other half: no override, so the lender's provider is in play.
+
+    The route must name the lender here — otherwise the shim would read the
+    borrower's ``models:``, which is the defect this round fixed.
+    """
+    _provider("dyn", {"dynamic": True,
+                      "api_key": "k",
+                      "endpoints": {"anthropic": "https://dyn.example.com"}})
+    seat = create_profile("seat")
+    lender = create_profile("lender")
+    store.set_profile_field(seat.name, "provider", "dyn")
+    store.set_profile_field(lender.name, "provider", "dyn")
+
+    seen = []
+
+    def _capture(upstream, block, provider=None, route=None):
+        seen.append(route)
+        return "http://127.0.0.1:1"
+
+    monkeypatch.setattr(routing, "ensure_shim", _capture)
+    env = {"ANTHROPIC_BASE_URL": "https://dyn.example.com"}
+    routing.apply(env, "dyn", profile=seat.name, borrow=lender)
+
+    assert seen == [f"profile:{lender.name}"]
+
+
 def test_the_route_a_borrow_installs_resolves_the_lenders_table(home):
     """End to end of the same fact, without a shim: what the route resolves.
 
