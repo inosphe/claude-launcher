@@ -201,8 +201,13 @@ function makeCategoryView({root, workspace: fixed = ""}) {
       e.preventDefault();
       const parts = splitParts(text.value, sel.items);
       if (!parts.length) { err.textContent = "`이름: 항목` 형태로 한 줄 이상 적으세요."; return; }
+      // `items` is the selection the form told the person to choose from, sent
+      // as {kind, ref} (the route's `_items` shape, not the part refs' strings).
+      // Without it the route falls back to the whole parent subtree, which
+      // would move items nobody picked out to the catch-all line.
       act(() => categoryRequest(url("/api/category/split"), "POST", {
-        parent_id: form.at, parts}), "하위 카테고리를 만들었습니다");
+        parent_id: form.at, items: sel.items.map(i => ({kind: i.kind, ref: i.ref})), parts}),
+        "하위 카테고리를 만들었습니다");
     };
     setTimeout(() => text.focus?.(), 0);
     return f;

@@ -157,6 +157,11 @@ const last = () => calls[calls.length - 1];
   assert.deepStrictEqual(split.body.parts, [
     {label: 'beads page', items: ['session:s1']},
     {label: 'sims page', items: ['session:s2']}]);
+  // The selection the form told the person to choose from rides along as
+  // `items`, in {kind, ref}: without it the server would draw candidates from
+  // the whole parent subtree and the catch-all line would move unpicked items.
+  assert.deepStrictEqual(split.body.items,
+    [{kind: 'session', ref: 's1'}, {kind: 'session', ref: 's2'}]);
   // A line with no refs is the catch-all: the label goes alone and the server
   // gives that part whatever the earlier lines left.
   pick('session s1 선택'); pick('session s2 선택');

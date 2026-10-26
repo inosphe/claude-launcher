@@ -539,6 +539,37 @@ def test_the_split_route_takes_the_items_from_the_parent_or_from_the_call(home, 
     _run(scenario, tmp_path)
 
 
+def test_the_split_route_leaves_items_outside_the_call_where_they_were(home, tmp_path):
+    """The form tells the person to choose from their selection, and sends that
+    selection as `items`. Without it the route would draw candidates from the
+    whole parent subtree and the catch-all line would sweep up items nobody
+    picked -- the form's promise and the server's behaviour drifting apart."""
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        for ref in ("s1", "s2", "s3"):
+            category.assign(ws, [{"kind": "session", "ref": ref}], web_["id"], "user")
+        # The selection is s1 and s2; s3 is not in it.
+        doc = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "items": [{"kind": "session", "ref": "s1"}, {"kind": "session", "ref": "s2"}],
+            "parts": [{"label": "a", "items": ["session:s1"]}, {"label": "rest"}]})
+        assert [ch["items"] for ch in doc["children"]] == [
+            [{"kind": "session", "ref": "s1"}], [{"kind": "session", "ref": "s2"}]]
+        # s3 stayed where it was.
+        assert category.where(ws, "session", "s3")["node"]["id"] == web_["id"]
+        # An item inside a child category is not dragged out either.
+        inner = category.create_node(ws, {"label": "inner", "parent_id": web_["id"]}, "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-deep"}], inner["id"], "user")
+        await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "items": [{"kind": "session", "ref": "s3"}],
+            "parts": [{"label": "b"}]})
+        assert category.where(ws, "issue", "claunch-deep")["node"]["id"] == inner["id"]
+
+    _run(scenario, tmp_path)
+
+
 def test_a_second_catch_all_part_is_refused(home, tmp_path, typed):
     async def scenario(mgr, client):
         # Two parts that name no items would each take "the rest": the first
