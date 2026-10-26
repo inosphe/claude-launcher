@@ -138,6 +138,52 @@ const last = () => calls[calls.length - 1];
   // Two sessions inside "web": extract goes under web.
   pick('session s1 선택'); pick('session s2 선택');
   assert(!button('Extract…').disabled && !button('Merge…').disabled);
+  // Split needs two items and one parent; the button is offered here but not
+  // for a selection spread over two top-level categories (checked below).
+  assert(!button('Split…').disabled);
+  button('Split…').onclick();
+  assert(all().some(n => n.textContent === '새 카테고리 위치: web'));
+  const sf = formWith('분할');
+  const lines = sf.children.find(c => c.tag === 'textarea');
+  // The box is empty -- the person writes the lines -- and the picked items are
+  // offered as a placeholder in the `kind:ref` spelling the route accepts.
+  // Prefilled on one line they would read as a part labelled "session".
+  assert.strictEqual(lines.value, '');
+  assert.strictEqual(lines.attributes.placeholder, '새 이름: session:s1, session:s2\n나머지');
+  lines.value = 'beads page: session:s1\nsims page: session:s2'; lines.oninput();
+  sf.onsubmit({preventDefault() {}}); await settle();
+  const split = calls.find(c => c.url.pathname === '/api/category/split');
+  assert.strictEqual(split.body.parent_id, 'n1');
+  assert.deepStrictEqual(split.body.parts, [
+    {label: 'beads page', items: ['session:s1']},
+    {label: 'sims page', items: ['session:s2']}]);
+  // The selection the form told the person to choose from rides along as
+  // `items`, in {kind, ref}: without it the server would draw candidates from
+  // the whole parent subtree and the catch-all line would move unpicked items.
+  assert.deepStrictEqual(split.body.items,
+    [{kind: 'session', ref: 's1'}, {kind: 'session', ref: 's2'}]);
+  // A line with no refs is the catch-all: the label goes alone and the server
+  // gives that part whatever the earlier lines left.
+  pick('session s1 선택'); pick('session s2 선택');
+  button('Split…').onclick();
+  const sf2 = formWith('분할');
+  const lines2 = sf2.children.find(c => c.tag === 'textarea');
+  lines2.value = 'beads page: session:s1\nrest'; lines2.oninput();
+  sf2.onsubmit({preventDefault() {}}); await settle();
+  const split2 = calls.filter(c => c.url.pathname === '/api/category/split')[1];
+  assert.deepStrictEqual(split2.body.parts,
+    [{label: 'beads page', items: ['session:s1']}, {label: 'rest'}]);
+  // An empty form is refused before any request goes out.
+  pick('session s1 선택'); pick('session s2 선택');
+  button('Split…').onclick();
+  const sf3 = formWith('분할');
+  const callsBefore = calls.length;
+  const blank = sf3.children.find(c => c.tag === 'textarea');
+  blank.value = '\n\n'; blank.oninput();
+  sf3.onsubmit({preventDefault() {}}); await settle();
+  assert.strictEqual(calls.length, callsBefore, 'an empty split sends nothing');
+  assert(all().some(n => n.textContent.includes('이름: 항목')));
+
   button('Extract…').onclick();
   assert(all().some(n => n.textContent === '새 카테고리 위치: web'));
   const f = formWith('만들기');

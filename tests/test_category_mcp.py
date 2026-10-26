@@ -73,3 +73,23 @@ def test_assign_outside_a_session_and_unknown_tools_are_refused(client, monkeypa
         category_mcp.call_tool("category_review", {})
     category_mcp.call_tool("category_tree", {})
     assert parse_qs(urlsplit(client.calls[0][1]).query)["cwd"] == [os.getcwd()]
+
+
+def test_fold_and_split_reach_the_agent_route(client, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    category_mcp.call_tool("category_assign", {
+        "fold": {"label": "pages", "nodes": ["n1", "n2"]}, "reason": "flat"})
+    body = client.calls[-1][2]
+    assert body["fold"] == {"label": "pages", "nodes": ["n1", "n2"]}
+    assert body["session"] == "s1"
+    category_mcp.call_tool("category_assign", {
+        "split": {"parts": [{"label": "a"}, {"label": "b"}]}, "reason": "two"})
+    assert client.calls[-1][2]["split"]["parts"] == [{"label": "a"}, {"label": "b"}]
+
+
+def test_the_tools_name_fold_and_split(client, monkeypatch):
+    assign = next(t for t in category_mcp.TOOLS if t["name"] == "category_assign")
+    props = assign["inputSchema"]["properties"]
+    assert {"fold", "split"} <= set(props)
+    assert assign["inputSchema"]["properties"]["fold"]["required"] == ["label", "nodes"]
+    assert assign["inputSchema"]["properties"]["split"]["required"] == ["parts"]

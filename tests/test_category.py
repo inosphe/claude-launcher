@@ -337,3 +337,98 @@ def test_only_an_unfinished_in_place_job_is_replaced(ws):
     c.job_start(ws, "a", "fork", "a-cat1")
     with pytest.raises(c.CategoryError):
         c.job_start(ws, "a", "inplace", replace_inplace=True)
+
+
+def test_split_makes_several_children_and_places_the_items_among_them(ws):
+    web = node(ws, "web")
+    c.assign(ws, [S("s1"), S("s2"), S("s3")], web["id"])
+    out = c.split(ws, web["id"], [
+        {"label": "beads page", "items": [S("s1")]},
+        {"label": "sims page", "aliases": ["시뮬"], "items": [S("s2"), S("s3")]},
+    ], "user", "two subjects under one page")
+    assert out["parent_id"] == web["id"]
+    assert [ch["node"]["label"] for ch in out["children"]] == ["beads page", "sims page"]
+    assert out["children"][1]["node"]["path"] == ["web", "sims page"]
+    assert place(ws, S("s1"))["label"] == "beads page"
+    assert place(ws, S("s2"))["label"] == "sims page"
+    # The item that was not named stays where it was.
+    assert place(ws, S("s3"))["label"] == "sims page"
+
+
+def test_split_refuses_an_item_outside_the_parent_or_in_two_parts(ws):
+    web = node(ws, "web")
+    other = node(ws, "cflow")
+    c.assign(ws, [S("s1")], web["id"])
+    c.assign(ws, [S("s2")], other["id"])
+    with pytest.raises(c.CategoryError):
+        c.split(ws, web["id"], [{"label": "x", "items": [S("s2")]}], "user")
+    with pytest.raises(c.CategoryError):
+        c.split(ws, web["id"], [{"label": "x", "items": [S("s1")]},
+                                {"label": "y", "items": [S("s1")]}], "user")
+    with pytest.raises(c.CategoryError):
+        c.split(ws, web["id"], [], "user")
+
+
+def test_split_at_the_top_level_and_with_no_items(ws):
+    web = node(ws, "web")
+    c.assign(ws, [S("s1")], web["id"])
+    out = c.split(ws, None, [{"label": "ui"}, {"label": "daemon"}], "user")
+    assert out["parent_id"] is None
+    assert [ch["node"]["path"] for ch in out["children"]] == [["ui"], ["daemon"]]
+    assert place(ws, S("s1"))["id"] == web["id"]
+
+
+def test_spread_is_the_one_split_part_rule_both_paths_call(ws):
+    items = [S("s1"), {"kind": "issue", "ref": "i-1"}]
+    # A later part with no items takes what the earlier ones left.
+    out = c.spread(items, [{"label": "beads page", "items": ["session:s1"]},
+                           {"label": "rest"}])
+    assert out == [{"label": "beads page", "items": [S("s1")]},
+                   {"label": "rest", "items": [{"kind": "issue", "ref": "i-1"}]}]
+    # A {kind, ref} entry and a bare ref both resolve; the bare one is matched
+    # against the call's items.
+    assert c.spread([S("s1")], [{"label": "x", "items": [S("s1")]}])[0]["items"] == [S("s1")]
+    assert c.spread([S("s1")], [{"label": "x", "items": ["s1"]}])[0]["items"] == [S("s1")]
+    # A bare ref that names both a session and an issue is refused rather than
+    # guessed: a wrong kind places nothing and the caller sees no error.
+    with pytest.raises(c.CategoryError, match="both a session and an issue"):
+        c.spread([S("same"), {"kind": "issue", "ref": "same"}],
+                 [{"label": "x", "items": ["same"]}])
+    with pytest.raises(c.CategoryError, match="only one split part"):
+        c.spread(items, [{"label": "x"}, {"label": "y"}])
+    with pytest.raises(c.CategoryError, match="in no split part"):
+        c.spread(items, [{"label": "x", "items": ["session:s1"]}])
+    with pytest.raises(c.CategoryError, match="not one of this call's items"):
+        c.spread(items, [{"label": "x", "items": ["zzz"]}, {"label": "rest"}])
+    # A `kind:ref` that parses but names nothing this call is placing says so
+    # differently: the kind was given, the item was not.
+    with pytest.raises(c.CategoryError, match="not an item this call is placing"):
+        c.spread(items, [{"label": "x", "items": ["session:zzz"]}, {"label": "rest"}])
+    with pytest.raises(c.CategoryError, match="at least one new category"):
+        c.spread(items, [])
+
+
+def test_merge_takes_an_explicit_parent_for_registration(ws):
+    ui = node(ws, "web")
+    a = node(ws, "beads page")
+    b = node(ws, "sims page")
+    c.assign(ws, [S("x")], a["id"])
+    c.assign(ws, [S("y")], b["id"])
+    # Without parent_id the two flat nodes meet at the root.
+    assert c.merge(ws, {"nodes": [a["id"], b["id"]], "label": "pages"},
+                   "user")["node"]["parent_id"] is None
+    a2 = node(ws, "chart page")
+    c.assign(ws, [S("p")], a2["id"])
+    out = c.merge(ws, {"nodes": [a2["id"]], "items": [S("y")], "label": "charts",
+                       "parent_id": ui["id"]}, "user")
+    assert out["node"]["parent_id"] == ui["id"]
+    assert place(ws, S("p"))["id"] == out["node"]["id"]
+
+
+def test_merge_into_a_node_inside_a_folded_one_is_refused(ws):
+    outer = node(ws, "web")
+    inner = node(ws, "beads page", parent=outer["id"])
+    c.assign(ws, [S("a")], inner["id"])
+    with pytest.raises(c.CategoryError):
+        c.merge(ws, {"nodes": [outer["id"]], "items": [S("b")],
+                     "label": "squash", "parent_id": inner["id"]}, "user")

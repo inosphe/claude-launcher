@@ -175,6 +175,28 @@ def install(app):
         return {"workspace": ws.name, **await asyncio.to_thread(
             category.merge, ws, body, _actor(request))}
 
+    async def split(request, body):
+        ws = ws_of(request, body)
+
+        def make():
+            # The page writes one line per new child and a line with no refs is
+            # the catch-all; the parts select from what is inside the parent.
+            # `category.spread` is that rule, and the agent's
+            # `category_assign {split}` calls it too, so the form's promise and
+            # the server's behaviour cannot drift apart.
+            parent_id = body.get("parent_id")
+            items = body.get("items")
+            if items is None:
+                if parent_id in (None, "", "root"):
+                    raise category.CategoryError(
+                        "a top-level split cannot tell what 'the remaining items' are; "
+                        "name items explicitly or give parent_id")
+                items = category.items_of(ws, parent_id, descendants=True)
+            children = category.spread(items, body.get("parts") or body.get("children") or [])
+            return category.split(ws, parent_id, children, _actor(request), body.get("reason", ""))
+
+        return {"workspace": ws.name, **await asyncio.to_thread(make)}
+
     async def proposals(request, body):
         ws = ws_of(request, body)
         return {"workspace": ws.name, "proposals": await asyncio.to_thread(
@@ -232,6 +254,7 @@ def install(app):
     r.add_post("/api/category/unassign", route(unassign))
     r.add_post("/api/category/extract", route(extract))
     r.add_post("/api/category/merge", route(merge))
+    r.add_post("/api/category/split", route(split))
     r.add_post("/api/category/agent-assign", route(agent_assign))
     r.add_post("/api/category/nodes", route(create))
     r.add_get("/api/category/nodes/{id}/items", route(node_items))

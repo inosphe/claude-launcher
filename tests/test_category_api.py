@@ -387,3 +387,196 @@ def test_tree_details_carry_the_session_partition(home, tmp_path):
         assert doc["details"]["session:dead"]["status"] == "idle"
 
     asyncio.run(scenario())
+
+
+def test_agent_split_places_the_items_across_several_new_children(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        root = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], root["id"], "user")
+        # The session is in the tree already; its issue is not -- a split is a
+        # registration path, so placing an item that has no node yet is its job.
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "two subjects",
+            "split": {"parent_id": root["id"], "parts": [
+                {"label": "beads page", "items": ["session:a"]},
+                {"label": "issue side"}]}})
+        assert out["created"] == ["beads page", "issue side"]
+        assert out["paths"] == ["web / beads page", "web / issue side"]
+        assert category.where(ws, "session", "a")["node"]["label"] == "beads page"
+        # The part with no items took what was left.
+        assert category.where(ws, "issue", "claunch-x1")["node"]["label"] == "issue side"
+
+    _run(scenario, tmp_path)
+
+
+def test_agent_fold_absorbs_flat_nodes_into_one(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        one = category.create_node(ws, {"label": "beads page"}, "user")
+        two = category.create_node(ws, {"label": "sims page", "aliases": ["시뮬"]}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], two["id"], "user")
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "one subject",
+            "fold": {"label": "pages", "nodes": [one["id"], two["id"]]}})
+        assert out["folded_into"] == "pages"
+        assert set(out["folded"]) == {one["id"], two["id"]}
+        assert category.where(ws, "session", "a")["node"]["label"] == "pages"
+        # The absorbed labels are the new node's vocabulary.
+        hit = category.search(ws, "시뮬", 5)[0]
+        assert hit["label"] == "pages"
+
+    _run(scenario, tmp_path)
+
+
+def test_agent_refuses_a_fold_with_nothing_to_absorb_and_a_partial_split(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        bad = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r", "fold": {"label": "pages", "nodes": []}}, status=400)
+        assert "at least one existing category" in bad["error"]
+        # Every named part leaves this call's issue unclaimed, and no part is
+        # the catch-all (a part with no items), so the call is refused rather
+        # than silently dropping it.
+        short = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "split": {"parts": [{"label": "one", "items": ["a"]}]}}, status=400)
+        assert "in no split part" in short["error"]
+        stray = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "split": {"parts": [{"label": "one", "items": ["zzz"]}]}}, status=400)
+        assert "not one of this call's items" in stray["error"]
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_makes_the_children_for_a_person(home, tmp_path):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        root = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], root["id"], "user")
+        doc = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": root["id"],
+            "parts": [{"label": "beads page", "items": [{"kind": "session", "ref": "a"}]},
+                      {"label": "sims page"}]})
+        assert [ch["node"]["label"] for ch in doc["children"]] == ["beads page", "sims page"]
+        assert doc["parent_id"] == root["id"]
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_applies_the_catch_all_rule_the_form_promises(home, tmp_path):
+    """The page's own route and the agent's `category_assign {split}` run one
+    rule (`category.spread`). Before that, the form promised "a line with no
+    refs takes the rest" while this route made an empty node and left the rest
+    where it was -- and nothing caught it, because the page check stops at the
+    request body."""
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], web_["id"], "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-x1"}], web_["id"], "user")
+        doc = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "parts": [{"label": "beads page", "items": ["session:a"]},
+                      {"label": "issue side"}]})
+        assert [ch["node"]["label"] for ch in doc["children"]] == ["beads page", "issue side"]
+        # The part with no items took what the first one left.
+        assert [ch["items"] for ch in doc["children"]] == [
+            [{"kind": "session", "ref": "a"}], [{"kind": "issue", "ref": "claunch-x1"}]]
+        assert category.where(ws, "issue", "claunch-x1")["node"]["label"] == "issue side"
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_refuses_two_catch_all_parts_and_unclaimed_items(home, tmp_path):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], web_["id"], "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-x1"}], web_["id"], "user")
+        # Two parts with no items would each take "the rest": the first empties
+        # it and the second makes an empty node, silently.
+        two = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "parts": [{"label": "x"}, {"label": "y"}]}, status=400)
+        assert "only one split part" in two["error"]
+        # A part that names everything but one item leaves that item claimed by
+        # no part: refused rather than left where it was.
+        short = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "parts": [{"label": "beads page", "items": ["session:a"]}]}, status=400)
+        assert "in no split part" in short["error"]
+        # Nothing was made by either refusal.
+        assert category.items_of(ws, web_["id"]) and len(category.tree(ws)["nodes"]) == 1
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_takes_the_items_from_the_parent_or_from_the_call(home, tmp_path):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        other = category.create_node(ws, {"label": "beads"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], web_["id"], "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-x1"}], other["id"], "user")
+        # Items given explicitly: the call decides the set, the same as the
+        # agent path, and an item inside another category is refused by
+        # `category.split` rather than moved across the tree.
+        crossed = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "items": [{"kind": "session", "ref": "a"}, {"kind": "issue", "ref": "claunch-x1"}],
+            "parts": [{"label": "beads page", "items": ["session:a"]}, {"label": "rest"}]},
+            status=400)
+        assert "not inside the category being split" in crossed["error"]
+        # Top-level children have no parent to draw "the rest" from, so that
+        # form is refused with a message instead of making an empty node.
+        top = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parts": [{"label": "beads page", "items": ["session:a"]}, {"label": "rest"}]},
+            status=400)
+        assert "top-level split" in top["error"]
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_leaves_items_outside_the_call_where_they_were(home, tmp_path):
+    """The form tells the person to choose from their selection, and sends that
+    selection as `items`. Without it the route would draw candidates from the
+    whole parent subtree and the catch-all line would sweep up items nobody
+    picked -- the form's promise and the server's behaviour drifting apart."""
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        for ref in ("s1", "s2", "s3"):
+            category.assign(ws, [{"kind": "session", "ref": ref}], web_["id"], "user")
+        # The selection is s1 and s2; s3 is not in it.
+        doc = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "items": [{"kind": "session", "ref": "s1"}, {"kind": "session", "ref": "s2"}],
+            "parts": [{"label": "a", "items": ["session:s1"]}, {"label": "rest"}]})
+        assert [ch["items"] for ch in doc["children"]] == [
+            [{"kind": "session", "ref": "s1"}], [{"kind": "session", "ref": "s2"}]]
+        # s3 stayed where it was.
+        assert category.where(ws, "session", "s3")["node"]["id"] == web_["id"]
+        # An item inside a child category is not dragged out either.
+        inner = category.create_node(ws, {"label": "inner", "parent_id": web_["id"]}, "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-deep"}], inner["id"], "user")
+        await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "items": [{"kind": "session", "ref": "s3"}],
+            "parts": [{"label": "b"}]})
+        assert category.where(ws, "issue", "claunch-deep")["node"]["id"] == inner["id"]
+
+    _run(scenario, tmp_path)
+
+
+def test_a_second_catch_all_part_is_refused(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        # Two parts that name no items would each take "the rest": the first
+        # empties it and the second makes an empty node, silently.
+        bad = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "split": {"parts": [{"label": "one"}, {"label": "two"}]}}, status=400)
+        assert "only one split part" in bad["error"]
+
+    _run(scenario, tmp_path)

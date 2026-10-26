@@ -269,6 +269,36 @@ async def start(request: web.Request, name: str, body: Optional[dict] = None) ->
             "proposal": proposal, "job": category.job(ws, name)}
 
 
+def _fold(ws, fold: dict, items: list, actor: str, reason: str) -> dict:
+    """Registration-time merge: absorb the nodes named in ``fold.nodes`` into
+    one new node (labelled by ``fold``), under ``fold.parent_id`` when given,
+    and place ``items`` there. An empty ``fold.nodes`` refuses -- a fold with
+    nothing to absorb is just a create, which ``new`` already does."""
+    nodes = fold.get("nodes") or []
+    if not isinstance(nodes, list) or not nodes:
+        raise AssignError(400, "fold.nodes must name at least one existing category to absorb")
+    body = {k: fold[k] for k in ("label", "aliases", "description", "parent_id") if k in fold}
+    body["items"] = items
+    body["nodes"] = nodes
+    merged = category.merge(ws, body, actor)
+    return {"folded_into": merged["node"]["label"], "node_id": merged["node"]["id"],
+            "path": merged["node"]["path"], "folded": merged["folded"]}
+
+
+def _split(ws, split: dict, items: list, actor: str, reason: str) -> dict:
+    """Registration-time split: make several children under ``split.parent_id``
+    and put ``items`` across them by ``split.parts``.
+
+    The part rule itself (which part takes what, and what is refused) lives in
+    :func:`category.spread`, which the page's own route calls too, so the two
+    paths cannot drift apart."""
+    children = category.spread(items, split.get("parts") or [])
+    made = category.split(ws, split.get("parent_id"), children, actor, reason)
+    return {"parent_id": made["parent_id"],
+            "created": [c["node"]["label"] for c in made["children"]],
+            "paths": [" / ".join(c["node"]["path"]) for c in made["children"]]}
+
+
 def agent_assign(manager, caller: str, body: dict) -> dict:
     """The ``category_assign`` MCP call. ``caller`` is the calling session: a
     category fork assigns its origin's items, anyone else its own."""
@@ -294,6 +324,10 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
         if body.get("node_id"):
             placed = category.assign(ws, items, body["node_id"], actor, reason)
             result = {"path": placed["node"]["path"], "node_id": placed["node"]["id"]}
+        elif isinstance(body.get("fold"), dict):
+            result = _fold(ws, body["fold"], items, actor, reason)
+        elif isinstance(body.get("split"), dict):
+            result = _split(ws, body["split"], items, actor, reason)
         elif isinstance(body.get("new"), dict):
             new = dict(body["new"])
             # The job -- opened by "Assign to tree" -- records what the person
@@ -318,7 +352,8 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
                 result = {"created": node["label"], "node_id": node["id"],
                           "path": node["path"]}
         else:
-            raise AssignError(400, "give node_id (an existing category) or new {label, ...}")
+            raise AssignError(400, "give node_id (an existing category), new {label, ...}, "
+                                    "fold {label, nodes, ...} or split {parts, ...}")
     except category.CategoryError as exc:
         err = AssignError(exc.status, str(exc))
         err.extra = exc.extra  # type: ignore[attr-defined]

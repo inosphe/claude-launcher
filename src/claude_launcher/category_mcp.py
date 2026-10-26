@@ -40,9 +40,18 @@ TOOLS = [
      "description}, reason} creates a new category and places the items in it at once; pass "
      "proposal: true to file it for review on the Category page instead (until then the items "
      "wait in parent_id). An existing label or alias is refused with the node that owns it -- "
-     "assign to that node. Without 'items' it places the session this job is about (and its "
-     "issue). A request started from the session pane's 'Assign to tree' follows that pane's "
-     "'제안으로 등록' checkbox instead of this argument.",
+     "assign to that node. "
+     "MERGE at registration: {fold: {label, nodes: [id...], parent_id?, aliases?, description?}, "
+     "reason} absorbs the named nodes into one new category (their items and child categories "
+     "move there, their labels become aliases) and places the items in it -- use it when this "
+     "work belongs to subjects already split across several flat nodes. "
+     "SPLIT at registration: {split: {parent_id?, parts: [{label, aliases?, description?, "
+     "items?: [ref...]}]}, reason} makes several children of one parent and puts the items "
+     "across them; at most one part may name no items, and that part takes whatever the "
+     "others left. "
+     "Without 'items' it places the session this job is about (and its issue). A request "
+     "started from the session pane's 'Assign to tree' follows that pane's '제안으로 등록' "
+     "checkbox instead of this argument.",
      "inputSchema": {"type": "object", "properties": {
          "node_id": {"type": "string"},
          "new": {"type": "object", "properties": {
@@ -50,8 +59,31 @@ TOOLS = [
              "label": {"type": "string"},
              "aliases": {"type": "array", "items": {"type": "string"}},
              "description": {"type": "string"}}, "required": ["label"]},
+         "fold": {"type": "object", "description":
+                  "merge existing categories into one new one at registration; the new category "
+                  "lands under this work's closest common ancestor unless parent_id says otherwise",
+                  "properties": {
+                      "parent_id": {"type": "string", "description": "existing node id; omit to use the lowest common ancestor of the folded nodes"},
+                      "label": {"type": "string"},
+                      "aliases": {"type": "array", "items": {"type": "string"}},
+                      "description": {"type": "string"},
+                      "nodes": {"type": "array", "items": {"type": "string"},
+                                "description": "ids of the existing categories to absorb"}},
+                  "required": ["label", "nodes"]},
+         "split": {"type": "object", "description":
+                   "make several subcategories in one call and put this work's items across them",
+                   "properties": {
+                       "parent_id": {"type": "string", "description": "existing node id; omit for top-level children"},
+                       "parts": {"type": "array", "items": {"type": "object", "properties": {
+                           "label": {"type": "string"},
+                           "aliases": {"type": "array", "items": {"type": "string"}},
+                           "description": {"type": "string"},
+                           "items": {"type": "array", "items": {"type": "string"},
+                                     "description": "refs (session name or issue id) from this call's items; omit to take the rest"}},
+                           "required": ["label"]}}},
+                  "required": ["parts"]},
          "proposal": {"type": "boolean", "description":
-                      "file the new category for a person to review instead of creating it now "
+                      "file a new category for a person to review instead of creating it now "
                       "(default false: create now)"},
          "reason": {"type": "string", "description": "why this category (required for a proposal)"},
          "items": _ITEMS}}},
@@ -74,7 +106,7 @@ def call_tool(name, args):
     if name == "category_assign":
         if not session:
             raise CategoryMcpError("category_assign needs a claunch session (CLAUNCH_SESSION)")
-        body = {k: args[k] for k in ("node_id", "new", "proposal", "reason", "items")
+        body = {k: args[k] for k in ("node_id", "new", "fold", "split", "proposal", "reason", "items")
                 if args.get(k)}
         return client.post("/api/category/agent-assign", {**body, "session": session})
     selection = {"workspace": args["workspace"]} if args.get("workspace") else {"cwd": os.getcwd()}
