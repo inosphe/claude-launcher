@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -298,10 +299,74 @@ CHILD_KEYS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+class LazyNodes(MutableMapping):
+    """``Chart.nodes`` read back from JSON: each :class:`Node` is built the
+    first time it is looked up.
+
+    A run snapshot holds every node of its workflow (~800 for improv-worker-v2)
+    while one pass of the daemon's clock looks up only the active instances'
+    nodes (11-13 in the runs measured on 2026-10-26). Building all of them was
+    most of a chart read: the clock re-read each live run's chart on every
+    pass, and :class:`Node` construction was 132 of the 184 py-spy samples
+    under those reads (``json.loads`` 26). Iterating ``values()``/``items()``
+    still builds every node, as before.
+
+    The shape every node needs (a mapping with ``id`` and ``type``) is checked
+    here, so a damaged snapshot still fails where it is read. A chart shared
+    between readers (:func:`..checkpoint.read_chart`) builds into one mapping:
+    ``setdefault`` keeps the first node built when two threads race.
+    """
+
+    __slots__ = ("_raw", "_built")
+
+    def __init__(self, raw: Dict[str, Any]) -> None:
+        for nid, node in raw.items():
+            if not isinstance(node, dict):
+                raise IRError(f"node {nid!r} is not a mapping")
+            if "id" not in node or "type" not in node:
+                raise KeyError("id" if "id" not in node else "type")
+        #: id -> its raw mapping, or None once a node was assigned directly;
+        #: the key order is the chart's.
+        self._raw: Dict[str, Optional[Dict[str, Any]]] = dict(raw)
+        self._built: Dict[str, Node] = {}
+
+    def __getitem__(self, node_id: str) -> Node:
+        node = self._built.get(node_id)
+        if node is None:
+            node = self._built.setdefault(node_id, Node.from_dict(self._raw[node_id]))
+        return node
+
+    def __setitem__(self, node_id: str, node: Node) -> None:
+        self._built[node_id] = node
+        self._raw[node_id] = None
+
+    def __delitem__(self, node_id: str) -> None:
+        del self._raw[node_id]
+        self._built.pop(node_id, None)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._raw)
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def __contains__(self, node_id: object) -> bool:
+        return node_id in self._raw
+
+    def labels(self) -> Iterator[str]:
+        """Every node's label in chart order, without building the nodes."""
+        for nid, raw in self._raw.items():
+            node = self._built.get(nid)
+            yield node.label if node is not None else str(raw.get("label") or "")
+
+    def __repr__(self) -> str:
+        return f"LazyNodes({len(self._raw)} nodes, {len(self._built)} built)"
+
+
 @dataclass
 class Chart:
     name: str
-    nodes: Dict[str, Node]
+    nodes: MutableMapping[str, Node]
     root: str
     kind: str = KIND_WORKFLOW
     description: str = ""
@@ -356,6 +421,12 @@ class Chart:
             cur = self.node(cur).parent
         return out
 
+    def labels(self) -> Iterator[str]:
+        """Every node's label, in chart order (unbuilt nodes stay unbuilt)."""
+        if isinstance(self.nodes, LazyNodes):
+            return self.nodes.labels()
+        return (n.label for n in self.nodes.values())
+
     def by_label(self, label: str) -> Optional[Node]:
         for node in self.nodes.values():
             if node.label == label or node.id == label:
@@ -408,7 +479,7 @@ class Chart:
             source=str(raw.get("source") or ""),
             warnings=list(raw.get("warnings") or []),
             root=str(raw["root"]),
-            nodes={nid: Node.from_dict(n) for nid, n in (raw.get("nodes") or {}).items()},
+            nodes=LazyNodes(raw.get("nodes") or {}),
         )
 
     @classmethod

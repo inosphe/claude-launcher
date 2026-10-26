@@ -440,7 +440,7 @@ def shown_label(chart: ir.Chart, node: ir.Node) -> Optional[str]:
     """
     if not node.label:
         return None
-    if sum(1 for n in chart.nodes.values() if n.label == node.label) < 2:
+    if sum(1 for label in chart.labels() if label == node.label) < 2:
         return node.label
     segs = node.id.split("/")[:-1]
     names = [_authored(chart, "/".join(segs[:i]), seg) for i, seg in enumerate(segs)]

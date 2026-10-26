@@ -13,12 +13,13 @@ the CLI, another daemon -- bumps the revision and rewrites the file, so a write
 anywhere makes the next read verify the checksums and parse again. A state read
 verifies only the state; the chart is verified when the chart is read.
 
-A parsed chart is kept apart from that, by the checksum of its text: a commit
-that moves only the state, or a pass that reads more slots than the path cache
-holds, re-verifies the chart text but does not parse it again. The clock reads
-every slot's state on each pass (167 slots in one workspace on 2026-10-26,
-against :data:`CACHE_MAX`), which used to push every live run's chart out
-before its next pass and re-parse charts of up to ~700 KB every ten seconds.
+A parsed chart is kept apart from that, by the checksum of its text
+(:data:`CHART_CACHE_MAX` texts): a commit that moves only the state
+re-verifies the chart text but does not parse it again. It does not cover a
+clock pass over more live runs than that: on 2026-10-26 the daemon's clock
+ticked 163 live runs with 163 distinct chart texts (97.8 MB), so each pass
+reads every one of them again. What keeps that read cheap is
+:class:`..ir.LazyNodes` (a node is built when it is looked up).
 """
 from __future__ import annotations
 
