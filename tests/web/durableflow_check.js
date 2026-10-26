@@ -1167,6 +1167,11 @@ const SQ = DF.sequence(SLOG, true, SNOW);
   assert.deepStrictEqual([stop.nodes[0].label, stop.nodes[0].status], ["시작", "done"]);
   const late = DF.model([START5, ...work, { event: "agent_end", started: false, stopReason: "error", error: "x" }], false);
   assert.ok(!late.nodes.some((n) => n.status === "fail"), "an attempt that did work is not a failed start");
+  // A plan before the failed agent_end: both views agree it is not a failed start.
+  const PLANNED = [START5, { at: RT("39:50"), event: "plan", units: [{ unit: "u1", label: "x" }] },
+                   { at: RT("39:51"), event: "agent_end", started: false, stopReason: "error", error: "x" }];
+  assert.ok(!DF.model(PLANNED, false).nodes.some((n) => n.status === "fail"), "tree: planned attempt");
+  assert.ok(!DF.sequence(PLANNED, false, Date.parse(RT("40:00"))).lanes.some((l) => l.attempt), "sequence: planned attempt");
 
   // A log from before the contract (20261026-073527: no attempt, no error)
   // keeps 시작/재개 and still shows its failed starts as one red fold.

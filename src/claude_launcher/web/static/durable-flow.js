@@ -781,8 +781,8 @@
     // Launcher attempts, as in the tree: an attempt that failed before its
     // first model call is a lane of its own, and a run of them is one lane
     // with an interval per attempt unless the reader opened it. ``work``
-    // counts the unit and question events, so an attempt that did any work
-    // is never read as a failed start.
+    // counts the unit, plan and question events, so an attempt that did any
+    // work is never read as a failed start.
     const tries = [];
     let attempt = null, work = 0;
     function startFailed(a, ev, when) {
@@ -879,7 +879,9 @@
       if (!ev || typeof ev !== "object") continue;
       const when = atOf(ev);
       touch(when);
-      if (ev.event === "unit" || ev.event === "ask_start" || ev.event === "ask") work += 1;
+      // The events that draw a node of their own in the tree: after one of
+      // them an attempt is not a failed start in either view.
+      if (ev.event === "unit" || ev.event === "ask_start" || ev.event === "ask" || ev.event === "plan") work += 1;
       switch (ev.event) {
         case "session_start":
           // A new session after a shutdown: the run goes on, and what it
