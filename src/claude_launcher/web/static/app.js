@@ -27668,6 +27668,17 @@ function syncOnboardPickers() {
     const picked = options.find((o) => (o.value || o.name) === wf.value);
     v1Note.classList.toggle("hidden", !(picked && picked.deprecated));
   }
+  // The package copy behind the pick moved on disk, or new package workflows
+  // wait for a restart (claunch-nzrdb). Guarded like the note above.
+  const driftNote = $("new-workflow-drift");
+  if (driftNote && typeof cflowDriftNote === "function") {
+    const entry = wf.value ? cflowPickEntry(wf.value, workflowsCache) : null;
+    const pin = typeof packagePinCache !== "undefined" ? packagePinCache : null;
+    const text = [cflowDriftNote(entry), cflowPinAddedNote(pin)]
+      .filter(Boolean).join(" ");
+    driftNote.textContent = text;
+    driftNote.classList.toggle("hidden", !text);
+  }
   // Guarded: harnesses that slice this function alone do not carry it.
   if (typeof syncCflowInputs === "function") syncCflowInputs();
   if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
@@ -28183,6 +28194,9 @@ function cflowInputsErrors(box, errors) {
 let workflowsCache = [];
 /* Settings' per-role auto-pick overrides, served with the list. */
 let roleWorkflowsCache = {};
+/* The list's `package_pin`: what the package's v2 directory changed on disk
+   since the daemon started (claunch-nzrdb), or null. */
+let packagePinCache = null;
 let workflowsFor = null;
 /* Whether the Workflow row has been touched by hand. Until it has, the
    picked role decides it (see syncOnboardPickers). */
@@ -28288,10 +28302,12 @@ async function refreshWorkflowChoices() {
     const doc = resp.ok ? await resp.json() : {};
     workflowsCache = doc.workflows || [];
     roleWorkflowsCache = doc.role_workflows || {};
+    packagePinCache = doc.package_pin || null;
     answered = resp.ok;
   } catch {
     workflowsCache = [];
     roleWorkflowsCache = {};
+    packagePinCache = null;
   }
   // Only this call's own claim is released: a later cwd change that already
   // re-claimed it owns the memo now, and its fetch is the one that answers.
@@ -42048,6 +42064,29 @@ const CFLOW_V1_NOTE =
   "cflow v1 format is deprecated; v2 runs beside it (docs/cflow-v2.md). " +
   "The run still starts and works as before.";
 
+/* The line a picker or the run page shows when the package files behind a
+   v2 workflow changed on disk after the daemon started (claunch-nzrdb): the
+   daemon serves the package workflows it copied at its start until it
+   restarts. `w.package_drift` is {files, pinned_at}; "" when nothing moved. */
+function cflowDriftNote(w) {
+  const d = w && w.package_drift;
+  const files = (d && d.files) || [];
+  if (!files.length) return "";
+  const at = d.pinned_at ? ` (${new Date(d.pinned_at * 1000).toLocaleString()})` : "";
+  return `Changed on disk since the daemon started: ${files.join(", ")}. ` +
+    `The daemon runs the copy it took at its start${at} until it is restarted.`;
+}
+
+/* The line for package workflows added on disk since the daemon started:
+   the list does not offer them until it restarts. `pin` is the workflow
+   list's `package_pin`; "" when nothing was added. */
+function cflowPinAddedNote(pin) {
+  const added = ((pin && pin.added) || []).map((f) => String(f).replace(/\.yaml$/, ""));
+  if (!added.length) return "";
+  return `New package workflow${added.length > 1 ? "s" : ""} on disk, not listed until ` +
+    `the daemon restarts: ${added.join(", ")}.`;
+}
+
 /* The marker an option label ends with: " · v2", " · v1 (deprecated)", or
    nothing for an entry that says neither (an older daemon). */
 function cflowVersionTag(w) {
@@ -43477,6 +43516,10 @@ function renderCflow2Into(box, data, ui, force = false) {
   title.appendChild(el("span", "cf2-status " + (CFLOW2_STATUS_CLS[status] || ""),
                        status.replace("_", " ")));
   root.appendChild(title);
+  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
+  // the harness that slices this view does not carry the helper.
+  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
+  if (drift) root.appendChild(el("p", "wf-note wf-warning cf2-drift-note", drift));
   const meta = el("div", "cf2-meta");
   const metaItem = (k, v, cls) => {
     const s = el("span", "cf2-fact");
@@ -44210,9 +44253,12 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     scope !== "default" ? `Start a workflow — session ${scope}` : "Start a workflow"));
 
   let flows = [];
+  let pin = null;
   try {
     const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
-    flows = ((await resp.json()).workflows || []).filter((w) => !w.error);
+    const doc = await resp.json();
+    flows = (doc.workflows || []).filter((w) => !w.error);
+    pin = doc.package_pin || null;
   } catch { return; }
   if (stillHere && !stillHere()) return; // navigated away while loading
   if (!flows.length) {
@@ -44240,6 +44286,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
      option cannot wrap, and these are absolute paths. */
   const source = el("p", "wf-source mono");
   const versionNote = el("p", "wf-note cf2-v1-note hidden", CFLOW_V1_NOTE);
+  const driftNote = el("p", "wf-note wf-warning cf2-drift-note hidden");
   /* A v2 pick's start inputs, the same box the new-session form draws
      (claunch-fqkqt): whatever is typed here is the run's data.inputs at
      start. Redrawn -- so cleared -- only when the pick changes. */
@@ -44256,6 +44303,11 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     source.replaceChildren();
     desc.textContent = w && w.description ? w.description : "";
     versionNote.classList.toggle("hidden", !(w && w.deprecated));
+    // Guarded: the harness that slices this panel alone does not carry them.
+    const drift = typeof cflowDriftNote === "function"
+      ? [cflowDriftNote(w), cflowPinAddedNote(pin)].filter(Boolean).join(" ") : "";
+    driftNote.textContent = drift;
+    driftNote.classList.toggle("hidden", !drift);
     if (!w) return;
     source.appendChild(el("span", "wf-source-path", w.path));
     if (w.shadowed && w.shadowed.length) {
@@ -44375,6 +44427,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   box.appendChild(row);
   box.appendChild(desc);
   box.appendChild(versionNote);
+  box.appendChild(driftNote);
   box.appendChild(source);
   box.appendChild(inputsBox);
   box.appendChild(el(

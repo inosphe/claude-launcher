@@ -10,12 +10,22 @@ a path, so ``include``/``call``, the definition API and a start by name
 read nothing outside these three directories. The one path-based load is
 starting a generated file (``.cflow2/generated/*.yaml``), whose containment
 the daemon checks (``daemon/cflow2_web.choose``) before :func:`load_file`.
+
+A long-lived process (the daemon) pins the package layer at its start
+(:func:`pin_package`): its compiler is the code it imported then, and a
+checkout that moves on underneath an editable install would otherwise hand
+that compiler definitions written for newer code (claunch-qjgfr,
+claunch-nzrdb). :func:`package_drift` says what the package directory on
+disk has changed since.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import shutil
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +50,17 @@ _COMPILED: "OrderedDict[tuple, ir.Chart]" = OrderedDict()
 _COMPILED_MAX = 256
 _COMPILED_LOCK = threading.Lock()
 
+#: the definition names each compiled file resolved (its includes and
+#: calls, transitively) by path -- what :func:`drift_of` checks
+_DEPS: Dict[str, frozenset] = {}
+
+#: the package layer as :func:`pin_package` copied it: ``(dir, {file name:
+#: sha256}, pinned at)``; ``None`` reads the package directory itself
+_PINNED: Optional[Tuple[Path, Dict[str, str], float]] = None
+
+#: :func:`_digests` of the live package directory, by its stat stamp
+_LIVE: Optional[Tuple[tuple, Dict[str, str]]] = None
+
 
 @dataclass
 class Located2:
@@ -53,8 +74,107 @@ class Located2:
     description: str = ""
 
 
-def package_dir() -> Path:
+def live_package_dir() -> Path:
+    """The package's ``workflows/v2`` on disk, pinned or not."""
     return Path(__file__).resolve().parent.parent / "workflows" / "v2"
+
+
+def package_dir() -> Path:
+    """The package layer this process reads: the pinned copy once
+    :func:`pin_package` ran, the package directory before."""
+    return _PINNED[0] if _PINNED is not None else live_package_dir()
+
+
+def _digests(base: Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    try:
+        paths = sorted(base.glob("*.yaml"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            out[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
+def pin_package(dest: Union[str, Path]) -> Path:
+    """Copy the package layer's ``*.yaml`` into ``dest`` (replacing what is
+    there) and read the package layer from that copy for the rest of this
+    process. Meant for the daemon's start, so the definitions it serves are
+    the ones its compiler and runtime were written for."""
+    global _PINNED
+    dest = Path(dest)
+    src = live_package_dir()
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    for path in sorted(src.glob("*.yaml")):
+        shutil.copy2(path, tmp / path.name)
+    shutil.rmtree(dest, ignore_errors=True)
+    os.replace(tmp, dest)
+    _PINNED = (dest, _digests(dest), time.time())
+    return dest
+
+
+def _live_digests() -> Dict[str, str]:
+    global _LIVE
+    base = live_package_dir()
+    stamp = []
+    try:
+        for path in sorted(base.glob("*.yaml")):
+            st = os.stat(path)
+            stamp.append((path.name, st.st_mtime_ns, st.st_size))
+    except OSError:
+        pass
+    key = tuple(stamp)
+    if _LIVE is None or _LIVE[0] != key:
+        _LIVE = (key, _digests(base))
+    return _LIVE[1]
+
+
+def package_drift() -> Optional[dict]:
+    """What the package directory on disk changed since :func:`pin_package`:
+    ``{"pinned_at", "changed", "added", "removed"}`` (file names), ``None``
+    when nothing is pinned."""
+    if _PINNED is None:
+        return None
+    pinned, live = _PINNED[1], _live_digests()
+    return {
+        "pinned_at": _PINNED[2],
+        "changed": sorted(n for n in pinned if n in live and live[n] != pinned[n]),
+        "added": sorted(n for n in live if n not in pinned),
+        "removed": sorted(n for n in pinned if n not in live),
+    }
+
+
+def drift_of(name: str, cwd: Optional[str] = None) -> List[str]:
+    """The package files behind definition ``name`` -- its own file and every
+    definition it includes or calls, as far as they come from the package
+    layer -- whose copy on disk differs from the pinned one. Empty when
+    nothing is pinned or nothing behind ``name`` moved."""
+    drift = package_drift()
+    if not drift:
+        return []
+    moved = set(drift["changed"]) | set(drift["removed"])
+    if not moved:
+        return []
+    path = find(name, cwd)
+    if path is None:
+        return []
+    if str(path) not in _DEPS:
+        try:
+            _compile(path, cwd)
+        except Exception:  # noqa: BLE001 - a file that does not compile has its own error
+            pass
+    names = {name} | set(_DEPS.get(str(path), ()))
+    out = []
+    for dep in sorted(names):
+        hit = find(dep, cwd)
+        if hit is not None and hit.parent == package_dir() and hit.name in moved:
+            out.append(hit.name)
+    return out
 
 
 def global_dir() -> Path:
@@ -140,21 +260,34 @@ def layer_stamp(cwd: Optional[str] = None) -> tuple:
     return tuple(out)
 
 
+def _recording(cwd: Optional[str], seen: set):
+    base = resolver(cwd)
+
+    def resolve(name: str):
+        seen.add(name)
+        return base(name)
+    return resolve
+
+
 def _compile(path: Path, cwd: Optional[str]) -> ir.Chart:
     from . import frontend
 
+    seen: set = set()
     try:
         st = os.stat(path)
     except OSError:
-        return frontend.compile_file(path, resolve_include=resolver(cwd))
+        chart = frontend.compile_file(path, resolve_include=_recording(cwd, seen))
+        _DEPS[str(path)] = frozenset(seen)
+        return chart
     key = (str(path), st.st_mtime_ns, st.st_size, layer_stamp(cwd))
     with _COMPILED_LOCK:
         hit = _COMPILED.get(key)
         if hit is not None:
             _COMPILED.move_to_end(key)
             return hit
-    chart = frontend.compile_file(path, resolve_include=resolver(cwd))
+    chart = frontend.compile_file(path, resolve_include=_recording(cwd, seen))
     with _COMPILED_LOCK:
+        _DEPS[str(path)] = frozenset(seen)
         _COMPILED[key] = chart
         while len(_COMPILED) > _COMPILED_MAX:
             _COMPILED.popitem(last=False)

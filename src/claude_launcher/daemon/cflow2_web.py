@@ -142,13 +142,40 @@ def startable(cwd: str) -> List[dict]:
     stamp = _stamp(cwd)
     hit = _LISTS.get(cwd)
     if hit is not None and hit[0] == stamp:
-        return hit[1]
+        return _with_drift(hit[1], cwd)
     out = []
     for item in layers.list_definitions(cwd):
         entry = _entry(item, cwd)
         if entry is not None:
             out.append(entry)
     _LISTS[cwd] = (stamp, out)
+    return _with_drift(out, cwd)
+
+
+def drift_view(name: str, cwd: str) -> Optional[dict]:
+    """``{"files", "pinned_at"}`` when the package files behind ``name``
+    changed on disk after the daemon pinned them (claunch-nzrdb): the
+    daemon still serves its copy, and a picker or the run page says so."""
+    if not layers.is_name(str(name or "")):
+        return None
+    files = layers.drift_of(str(name), cwd)
+    if not files:
+        return None
+    drift = layers.package_drift() or {}
+    return {"files": files, "pinned_at": drift.get("pinned_at")}
+
+
+def _with_drift(entries: List[dict], cwd: str) -> List[dict]:
+    """``entries`` with ``package_drift`` (:func:`drift_view`) on each one
+    whose package files moved. Outside the list cache, whose stamp covers the
+    pinned copy and not the package directory that moves."""
+    drift = layers.package_drift()
+    if not drift or not (drift["changed"] or drift["removed"]):
+        return entries
+    out = []
+    for entry in entries:
+        view = None if entry.get("error") else drift_view(entry["name"], cwd)
+        out.append(dict(entry, package_drift=view) if view else entry)
     return out
 
 
@@ -704,6 +731,9 @@ def run_detail(cwd: str, scope: str, prompts: bool = False,
         # What the editors of inputs with options: offer now (claunch-iq1xc).
         "input_options": _run_input_options(chart, state, profile),
         "history": run_history(st, state),
+        # The package files behind this workflow changed on disk after the
+        # daemon pinned them; the daemon keeps serving its copy (claunch-nzrdb).
+        "package_drift": drift_view(str(state.get("workflow") or ""), str(st.cwd)),
         "throughput": cflow2_metrics.observations(st),
         # Which nodes have a live instance (the active configuration and its
         # ancestors), and which of those wait on the outside.
