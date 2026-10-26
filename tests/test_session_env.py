@@ -92,6 +92,33 @@ def test_a_successors_env_is_scrubbed_too(monkeypatch):
     assert seen["env"] == {"X": "1"}
 
 
+def test_the_hand_off_marker_stops_at_the_restart_it_was_set_for(
+    home, tmp_path, monkeypatch
+):
+    """``_hand_off_restart`` marks the child it starts so that child takes the
+    ordinary path. The child then spawns the successor daemon, which inherited
+    the marker and gave it to every session and CLI tab shell; in a tab it
+    read as "this process already is the child", so the next restart there
+    took the path the hand-off exists to avoid and died with its shell
+    (claunch-cli-tab-restart-marker-leak-0kz8o). It belongs to one process."""
+    seen = {}
+
+    def fake_popen(argv, **kw):
+        seen.update(kw)
+        raise OSError("not really")
+
+    monkeypatch.setenv("CLAUNCH_RESTART_DETACHED", "1")
+    monkeypatch.setattr(daemon_client.subprocess, "Popen", fake_popen)
+    with pytest.raises(OSError):
+        daemon_client.spawn_daemon(reason="test")
+    assert "CLAUNCH_RESTART_DETACHED" not in seen["env"]
+
+    profile_mod.create("work")
+    sdef = harness_mod.normalize(SessionDef(name="s701", profile="work", cwd=str(tmp_path)))
+    _, env, _ = harness_mod.build_command(sdef)
+    assert "CLAUNCH_RESTART_DETACHED" not in env
+
+
 class _Booted(Exception):
     pass
 
