@@ -45,6 +45,18 @@ SHELL_BUFFER_MAX = 256 * 1024
 #: copy the whole ring into one response and a slow reader stays cheap.
 READ_MAX = 64 * 1024
 
+#: Set for the CLI tab's shell only. The shell is a session leader that the
+#: daemon terminates as part of its own shutdown (``api._close_cli_shell``),
+#: so a ``claunch daemon restart`` typed into this tab is SIGHUPed between its
+#: stop and its start and never brings the successor up (claunch-k9fpi).
+#: ``cli_sessions._cmd_daemon`` reads the marker and, on POSIX, hands that
+#: restart to a process in a session of its own. On Windows the daemon's job
+#: object allows no breakaway, so the hand-off would not leave it and the
+#: start is still lost there (claunch-k9fpi: unresolved on win32). Nothing
+#: else in the tree sets the marker, and a session's shell is not marked
+#: because a session survives a keep restart.
+CLI_TAB_ENV = "CLAUNCH_CLI_TAB"
+
 #: A proposed line's own limits: long enough for a compound command or a
 #: short script, short enough that the pane stays readable. The per-session
 #: cap keeps one agent from filling the user's strip; the total cap bounds
@@ -189,6 +201,9 @@ class ShellPty:
         if sys.platform != "win32":   # cmd.exe has no termios to service
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
+        # This shell dies with the daemon; anything it must outlive has to
+        # know it was started here (see CLI_TAB_ENV).
+        env[CLI_TAB_ENV] = "1"
         try:
             # In this process even with the PTY host on (claunch-xnnct.1):
             # the shell has no record for a successor to adopt it by, so it
