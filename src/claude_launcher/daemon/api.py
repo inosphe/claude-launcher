@@ -1850,7 +1850,21 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
         )
 
     try:
-        init = {"type": "init"}
+        init = {
+            "type": "init",
+            # Which daemon this socket reached, in the same shape
+            # /api/health publishes it (claunch-r35k1). The page's tick rides
+            # this socket and skips the health probe while it is open, so
+            # without the identity here the tick has nothing to compare
+            # against after a restart: `boot_id` is the only value that says
+            # a different daemon is serving, and a page that cannot see it
+            # keeps drawing the previous daemon's read as current until
+            # someone reloads.
+            "boot_id": request.app["boot_id"],
+            "version": __version__,
+            "started_at": request.app["started_wall"],
+            "boot": boot_status(request.app),
+        }
         if hub is not None and p2p.available():
             init["p2p"] = hub.browser_info()
         await carrier.send_str(json.dumps(init))

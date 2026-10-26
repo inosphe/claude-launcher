@@ -60,6 +60,14 @@ function constOf(name) {
   return m[1];
 }
 
+/* A slice that may be missing, as "" — so a harness written against the fix
+   still loads against the commit before it and fails on its assertions
+   rather than on a missing function. What that costs is the reason to run
+   it there: a harness that cannot load reports nothing about behaviour. */
+function maybeSlice(name) {
+  return src.includes(`function ${name}(`) ? slice(name) : "";
+}
+
 /* ---- the harness ------------------------------------------------------- */
 /* Timers are driven by hand: every setTimeout is recorded and fired only
    when a check asks for it, so a backoff is a value to assert rather than a
@@ -123,6 +131,11 @@ function build() {
     "let controlTry = 0;",
     "let controlTimer = null;",
     "let controlSeq = 0;",
+    // Which daemon the open socket reached, from its init (claunch-r35k1).
+    // Absent before that fix, and the harness still runs there: what it
+    // then measures is the old page answering "up" with no identity.
+    maybeSlice("controlBootFrom"),
+    "let controlBoot = null;",
     "const controlWaiting = new Map();",
     slice("controlUp"),
     slice("controlAbort"),
@@ -341,7 +354,14 @@ async function reportsAndPings() {
 /* ---- 7. liveness is the socket being open ------------------------------ */
 /* The probe was a connection spent to learn what an open socket already
    says. It is still there for when the socket is not: `fetch` throws in this
-   harness, so a null answer proves the HTTP path was the one taken. */
+   harness, so a null answer proves the HTTP path was the one taken.
+
+   What an open socket answers is its own `init` (claunch-r35k1). The dump
+   below is the shape that matters: `boot_id` is the one field that says a
+   *different* daemon is serving, and the tick reads it to notice a restart.
+   A socket that has not had its init yet cannot answer "up" -- the page
+   would then have no identity to compare and would read the next tick as
+   the same daemon. */
 async function livenessComesFromTheSocket() {
   const app = build();
   app.ensureControlSocket();
@@ -351,13 +371,45 @@ async function livenessComesFromTheSocket() {
   assert.strictEqual(app.probed, 1, "and the probe was actually sent");
 
   sock.opened();
+  assert.strictEqual(
+    await app.daemonHealth(), null,
+    "open but not yet greeted: no identity to report, so the probe answers"
+  );
+  assert.strictEqual(app.probed, 2, "and that probe really went out");
+
+  sock.say({
+    type: "init", boot_id: "b2", version: "9.9", started_at: "t-2",
+    boot: { phase: "restoring", done: 3, total: 10 },
+  });
   const health = await app.daemonHealth();
-  assert.deepStrictEqual(health, { ok: true, via: "control" });
-  assert.strictEqual(app.probed, 1, "no connection spent while the socket is up");
+  assert.deepStrictEqual(health, {
+    boot_id: "b2", via: "control", version: "9.9", started_at: "t-2",
+    boot: { phase: "restoring", done: 3, total: 10 },
+  }, "the socket's init, in the shape /api/health publishes");
+  assert.strictEqual(app.probed, 2, "no connection spent while the socket is up");
+
+  // The identity is per daemon, not per frame: the next tick must not read
+  // it as a change, and must not spend a probe either.
+  assert.deepStrictEqual((await app.daemonHealth()).boot_id, "b2");
+  assert.strictEqual(app.probed, 2);
 
   sock.died();
+  assert.strictEqual(await app.daemonHealth(), null,
+    "a closed socket has no identity to report: the probe answers again");
+  assert.strictEqual(app.probed, 3, "and the probe comes back when it is needed");
+}
+
+/* An `init` that names no daemon (an older daemon) leaves the page with
+   nothing to compare, so the probe keeps answering -- the page must not
+   invent a boot id, which would read every tick as "same daemon". */
+async function anInitWithNoBootIdDoesNotFakeOne() {
+  const app = build();
+  app.ensureControlSocket();
+  const sock = app.sockets[0];
+  sock.opened();
+  sock.say({ type: "init" });
   assert.strictEqual(await app.daemonHealth(), null);
-  assert.strictEqual(app.probed, 2, "and the probe comes back when it is needed");
+  assert.strictEqual(app.probed, 1, "the HTTP probe still answers");
 }
 
 /* ---- 8. batchFlush prefers the socket and falls back ------------------- */
@@ -697,6 +749,7 @@ async function healthProbeIsBounded() {
   await unansweredReadTimesOut();
   await reportsAndPings();
   await livenessComesFromTheSocket();
+  await anInitWithNoBootIdDoesNotFakeOne();
   await flushPrefersSocketThenFallsBack();
   await deadSocketIsRecycled();
   await wakeReopensAtOnce();

@@ -296,6 +296,12 @@ let controlTimer = null;
 let controlSeq = 0;
 let controlOpenedAt = null;   // Date.now() the current socket opened (the link panel reads it)
 let controlLastRx = null;     // Date.now() of its last frame, of any kind
+// Which daemon this socket is attached to, from its `init` frame: the same
+// identity /api/health publishes, carried on the transport the tick already
+// holds (claunch-r35k1). Null until an init has arrived on the current
+// socket and cleared when it closes, so a socket that is merely opening never
+// answers with the previous daemon's identity.
+let controlBoot = null;
 const controlWaiting = new Map();
 
 function controlUp() {
@@ -327,6 +333,10 @@ function openControlSocket() {
   const sock = new WebSocket(`${proto}://${location.host}` + url("/api/control/ws"));
   sock.binaryType = "arraybuffer";
   controlSock = sock;
+  // A fresh socket is not yet attached to anything: it says which daemon it
+  // reached in its own `init` (claunch-r35k1), and until that frame lands
+  // there is no identity to report.
+  controlBoot = null;
   if (typeof linkLog === "function") linkLog("control.open", { try: controlTry });
 
   sock.onopen = () => {
@@ -359,8 +369,28 @@ function controlMessage(sock, ev) {
   if (msg.type === "pong") { latencyPong(msg); return; }
   if (msg.type === "read_part") { controlPart(sock, msg); return; }
   if (msg.type === "read_result") { controlAnswer(msg, ev.data); return; }
-  if (msg.type === "init") { p2pInit(sock, msg); return; }
+  if (msg.type === "init") {
+    // Which daemon answered on this socket. The page reads its identity off
+    // /api/health -- boot_id above all, which is how a restart is noticed --
+    // and that probe is skipped while this socket is open, so the identity
+    // has to ride the frame that opens it (claunch-r35k1).
+    controlBoot = controlBootFrom(msg);
+    p2pInit(sock, msg);
+    return;
+  }
   if (msg.type === "p2p_answer" || msg.type === "p2p_error") p2pSignal(msg);
+}
+
+/* A control socket's `init` as the health answer /api/health would give, or
+   null when the frame does not name a daemon (an older daemon, or a P2P
+   socket whose init the negotiation consumed). */
+function controlBootFrom(msg) {
+  if (!msg || typeof msg.boot_id !== "string" || !msg.boot_id) return null;
+  const out = { boot_id: msg.boot_id, via: "control" };
+  if (typeof msg.version === "string") out.version = msg.version;
+  if (typeof msg.started_at === "string") out.started_at = msg.started_at;
+  if (msg.boot && typeof msg.boot === "object") out.boot = msg.boot;
+  return out;
 }
 
 function controlClosed(sock, ev) {
@@ -373,6 +403,7 @@ function controlClosed(sock, ev) {
     });
   }
   controlSock = null;
+  controlBoot = null;
   controlAbort("control socket closed");
   latencyStop();
   channelsCarrierGone();
@@ -590,6 +621,11 @@ function controlAdopt(direct, link) {
   controlSock = direct;
   direct.onmessage = (ev) => controlMessage(direct, ev);
   direct.onclose = (ev) => controlClosed(direct, ev);
+  // The negotiation consumed this socket's `init` before adopting it, so
+  // controlBoot is left as it stands: the retired relay socket reached the
+  // same daemon (a DataChannel only replaces the road to it), and its init is
+  // the identity this one reports (claunch-r35k1). Clearing it here would
+  // spend an HTTP probe per tick on a transport the page is already holding.
   p2pTry = 0;
   p2pLastFail = null;
   controlRetire(old);
@@ -19265,9 +19301,18 @@ async function daemonHealth() {
   // An open control socket has already answered this. It was opened against
   // this daemon, the daemon has not closed it, and its ping deadline
   // (controlOverdue) closes it when it stops answering -- so probing over
-  // HTTP would spend a
-  // connection to learn what the page is already holding.
-  if (controlUp()) return { ok: true, via: "control" };
+  // HTTP would spend a connection to learn what the page is already holding.
+  //
+  // What it answers is the socket's `init`, not a bare "up" (claunch-r35k1).
+  // pollOnce() reads the daemon's identity off this answer -- boot_id above
+  // all, which is the one thing that says a different daemon is serving --
+  // and a bare "up" left it with nothing to compare: the tick that followed
+  // a restart took the ordinary refresh path, the page never re-read the
+  // fleet through boot(), and a reload was the only way to see it. A socket
+  // with no init yet (still opening) falls through to the probe below, which
+  // answers the same shape, so the tick is never told "down" by a socket
+  // that is merely early.
+  if (controlUp() && controlBoot) return { ...controlBoot };
   // Bounded: pollTick runs one of these at a time, so a request that hangs
   // -- one sent as the machine went to sleep, say -- would hold every later
   // tick behind it (claunch-fm3ud).

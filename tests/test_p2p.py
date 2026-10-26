@@ -230,10 +230,16 @@ def test_the_init_frame_names_p2p_only_when_the_daemon_can_do_it(home, tmp_path,
         client, hub = await _serve(tmp_path)
         try:
             async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
-                assert await _next(ws, "init") == {"type": "init", "p2p": {"stun": []}}
+                hello = await _next(ws, "init")
+                # The frame carries the daemon's identity as well as the
+                # offer (claunch-r35k1), so what is pinned here is whether
+                # `p2p` rides it -- not the whole frame.
+                assert hello["type"] == "init"
+                assert hello["p2p"] == {"stun": []}
             monkeypatch.setattr(p2p, "_AIORTC", False)
             async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
-                assert await _next(ws, "init") == {"type": "init"}
+                hello = await _next(ws, "init")
+                assert hello["type"] == "init" and "p2p" not in hello
                 await ws.send_json({"type": "p2p_offer", "id": "x", "sdp": "v=0"})
                 err = await _next(ws, "p2p_error")
                 assert err["id"] == "x" and err["error"] == "p2p unavailable"
@@ -248,7 +254,7 @@ def test_without_a_hub_an_offer_is_refused_and_nothing_else_changes(home, tmp_pa
         client, _ = await _serve(tmp_path, hub=False)
         try:
             async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
-                assert await _next(ws, "init") == {"type": "init"}
+                assert (await _next(ws, "init"))["type"] == "init"
                 await ws.send_json({"type": "p2p_offer", "id": "a", "sdp": "v=0"})
                 assert (await _next(ws, "p2p_error"))["error"] == "p2p unavailable"
                 await ws.send_json({"type": "p2p_ice", "id": "a", "candidate": None})
@@ -374,7 +380,8 @@ def test_the_datachannel_is_the_control_socket(home, tmp_path, monkeypatch):
                 page = _Browser(ws, "t1")
                 answer = await page.negotiate()
                 page.send(answer["nonce"])
-                assert await page.frame("init") == {"type": "init"}, \
+                bridged = await page.frame("init")
+                assert bridged["type"] == "init" and "p2p" not in bridged, \
                     "a bridged socket is not offered P2P again"
 
                 page.send(json.dumps({"type": "ping", "t": 42}))
