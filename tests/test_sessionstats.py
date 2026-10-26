@@ -480,22 +480,38 @@ def test_series_groups_requests_past_the_point_limit_and_keeps_the_largest(tmp_p
     assert got["requests"] == 7 and got["count"] == 7
 
 
-def test_series_cap_window_keeps_the_last_twelve_hours_and_full_keeps_all(tmp_path):
+def test_series_cap_window_keeps_the_last_requests_and_full_keeps_all(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessionstats, "SERIES_CAP_REQUESTS", 2)
     path = write(tmp_path / "t.jsonl",
                  reply("a", at(0), read=5),
                  compaction(at(1)),
-                 reply("b", at(20), read=7))
-    now = _epoch(at(21))
+                 reply("b", at(20), read=7),
+                 reply("c", at(21), read=9))
+    # A day after the last request: the cap counts requests, not hours, so an
+    # idle session still draws its last ones (claunch-bx7o2).
+    now = _epoch(at(21, day=28))
     capped = read_series(path, "cap", now=now)
-    assert capped["start"] == now - sessionstats.SERIES_CAP_S
-    # The request keeps its number from the start of the conversation.
-    assert [(p["n"], p["cache_read"]) for p in capped["points"]] == [(2, 7)]
-    assert capped["compactions"] == []          # the compaction is older than the cap
-    assert capped["requests"] == 2 and capped["count"] == 1
+    assert capped["start"] == _epoch(at(20))
+    # The requests keep their numbers from the start of the conversation.
+    assert [(p["n"], p["cache_read"]) for p in capped["points"]] == [(2, 7), (3, 9)]
+    assert capped["compactions"] == []          # the compaction is before the kept requests
+    assert capped["requests"] == 3 and capped["count"] == 2
     full = read_series(path, "full", now=now)
     assert full["start"] == _epoch(at(0))
-    assert [(p["n"], p["cache_read"]) for p in full["points"]] == [(1, 5), (2, 7)]
+    assert [(p["n"], p["cache_read"]) for p in full["points"]] == [(1, 5), (2, 7), (3, 9)]
     assert full["compactions"] == [_epoch(at(1))]
+
+
+def test_series_cap_window_keeps_a_compaction_between_the_kept_requests(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessionstats, "SERIES_CAP_REQUESTS", 2)
+    path = write(tmp_path / "t.jsonl",
+                 reply("a", at(0), read=5),
+                 reply("b", at(1), read=50),
+                 compaction(at(2)),
+                 reply("c", at(3), read=9))
+    capped = read_series(path, "cap", now=_epoch(at(4)))
+    assert [p["n"] for p in capped["points"]] == [2, 3]
+    assert capped["compactions"] == [_epoch(at(2))]
 
 
 def test_series_of_a_transcript_without_requests_has_no_points(tmp_path):
