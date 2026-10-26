@@ -4993,6 +4993,15 @@ function sessionRowDigests(state) {
   return out;
 }
 
+/* The text a row was parsed from, carried on the row for the redraw stamp
+   (claunch-hwbuc.2). Non-enumerable: every reader that serialises a row --
+   the stamp itself, rowSignature, the poll's own text -- sees the row it
+   always saw. */
+function keepRowText(row, text) {
+  if (!row || typeof row !== "object" || typeof text !== "string") return;
+  Object.defineProperty(row, "_pollText", { value: text, configurable: true, enumerable: false });
+}
+
 /* The poll's rows, whole, from an answer that may carry only the changed
    ones. null when the answer names a row this page does not hold -- the
    keep is dropped, so the next poll sends no digests and gets every row. */
@@ -5001,6 +5010,7 @@ function sessionRowsTake(state, data) {
   if (!data.delta || !Array.isArray(data.names)) {
     // A whole answer without digests: HTTP, or an older daemon.
     sessionRowsKept.delete(state);
+    for (const row of rows) keepRowText(row, JSON.stringify(row));
     return rows;
   }
   const kept = sessionRowsKept.get(state) || new Map();
@@ -5011,7 +5021,9 @@ function sessionRowsTake(state, data) {
   for (const name of data.names) {
     const row = changed.get(name);
     if (row) {
-      fresh.set(name, { hash: digests[name], text: JSON.stringify(row) });
+      const text = JSON.stringify(row);
+      fresh.set(name, { hash: digests[name], text });
+      keepRowText(row, text);
       out.push(row);
       continue;
     }
@@ -5021,10 +5033,35 @@ function sessionRowsTake(state, data) {
       return null;
     }
     fresh.set(name, held);
-    out.push(JSON.parse(held.text));
+    const again = JSON.parse(held.text);
+    keepRowText(again, held.text);
+    out.push(again);
   }
   sessionRowsKept.set(state, fresh);
   return out;
+}
+
+/* The redraw stamp of one poll row, memoised by the row's own text
+   (claunch-hwbuc.2).
+
+   `refreshSessions` used to stringify the whole cache every poll -- 6.0/4.7 ms
+   of the main thread on a working fleet (Trace-20261021T194912). A delta poll
+   hands back the rows the daemon called unchanged re-parsed from the text this
+   page kept, so the text is the row's identity: the stamp computed for a text
+   is the answer for every row that text produces, and a poll that changed
+   nothing stringifies nothing. The text itself is carried on the row
+   (`_pollText`, non-enumerable) by sessionRowsTake. */
+function sessionRowStamp(row, unstamped) {
+  const text = row && row._pollText;
+  if (typeof text !== "string") return JSON.stringify(row, unstamped);
+  const memo = sessionRowStamp._byText || (sessionRowStamp._byText = new Map());
+  let stamp = memo.get(text);
+  if (stamp === undefined) {
+    stamp = JSON.stringify(JSON.parse(text), unstamped);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(text, stamp);
+  }
+  return stamp;
 }
 
 /* The rail list names each status check once (`status_check_defs`, id ->
@@ -5680,10 +5717,16 @@ async function refreshSessions(options) {
     // flight; the tps line below is swapped in place for it.
     (key === "live" && value && typeof value === "object" && "bin_s" in value)
   ) ? undefined : value;
+  // A row's stamp comes from sessionRowStamp when the harness carries it (the
+  // poll path), and from the whole row otherwise -- a sliced refreshSessions
+  // alone still serialises what it used to (claunch-hwbuc.2).
+  const rowStamp = (row) => (typeof sessionRowStamp === "function"
+    ? sessionRowStamp(row, unstamped)
+    : JSON.stringify(row, unstamped));
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
-    [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
+    [[briefingLLM, sessionsCache.map(rowStamp), groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList,
      // The open tab picks which rows are drawn.
      typeof sessionGroupTab === "object" ? sessionGroupTab : null,

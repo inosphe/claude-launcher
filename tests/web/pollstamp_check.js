@@ -1,0 +1,155 @@
+/* What one poll costs the rail's redraw check.
+
+   `refreshSessions` compares a signature of the whole session cache to decide
+   whether to redraw, and that signature used to be a `JSON.stringify` of the
+   cache itself -- every poll re-serialised every row (6.0/4.7 ms of the main
+   thread in Trace-20261021T194912, claunch-hwbuc.2).
+
+   A delta poll hands back the rows the daemon called unchanged re-parsed from
+   the text the page kept, so that text is the row's identity: the stamp
+   computed for a text is the answer for every row that text produces. Held
+   here, against the real `sessionRowsTake` and `sessionRowStamp`:
+
+   - a poll that only re-parses unchanged rows stringifies nothing, and
+   - stamping every row of such a poll stringifies nothing either, because
+     the memo already holds that text,
+   - a poll with one changed row pays for that row and not the fleet,
+   - and the stamp still carries the row, filtered exactly as before (the
+     volatile keys dropped), so what counts as a redraw does not move.
+
+   The last property is the one that keeps this from being a speed-up that
+   changes what the page does: it compares the stamp against
+   `JSON.stringify(parsedRow, unstamped)`. */
+const fs = require("fs");
+const path = require("path");
+const src = fs.readFileSync(
+  process.env.POLLSTAMP_APP_JS || path.join(
+    __dirname, "..", "..", "src", "claude_launcher", "web", "static", "app.js"),
+  "utf8"
+);
+
+function slice(name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`cannot locate ${name} in app.js`);
+  const head = src.lastIndexOf("async ", start) === start - 6 ? start - 6 : start;
+  let depth = 0;
+  for (let j = src.indexOf("{", start); j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (!depth) return src.slice(head, j + 1); }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+function constLine(name) {
+  const m = src.match(new RegExp(`^const ${name} = .+$`, "m"));
+  if (!m) throw new Error(`cannot locate ${name} in app.js`);
+  return m[0] + "\n";
+}
+
+const api = {};
+new Function(
+  "exports",
+  constLine("sessionRowsKept")
+  + slice("keepRowText") + slice("sessionRowStamp") + slice("sessionRowsTake")
+  + `
+Object.assign(exports, {
+  take: sessionRowsTake,
+  stamp: sessionRowStamp,
+});`)(api);
+
+/* The filter the redraw signature uses, as refreshSessions writes it. Kept
+   here as a copy only so the harness can ask what the stamp should equal; the
+   production filter lives in refreshSessions and is exercised by the rail
+   harnesses. */
+function unstamped(key, value) {
+  return (
+    key === "due_in" || key === "fired_ago" ||
+    key === "due_at" || key === "fired_at" ||
+    key === "last_visited_at" || key === "last_input_at" ||
+    key === "last_activity_at" || key === "last_output_at" ||
+    key === "viewers" || key === "moved_rows" || key === "tool_calls" ||
+    key === "age_s" ||
+    (key === "live" && value && typeof value === "object" && "bin_s" in value)
+  ) ? undefined : value;
+}
+
+let failures = 0;
+function check(what, got, want) {
+  const g = JSON.stringify(got), w = JSON.stringify(want);
+  if (g !== w) {
+    console.error(`FAIL ${what}\n  got  ${g}\n  want ${w}`);
+    failures++;
+  }
+}
+
+const ROWS = Number(process.env.POLLSTAMP_ROWS || 40);
+const fleet = (tokens, age) => Array.from({ length: ROWS }, (_, i) => ({
+  name: `s${i}`, status: "busy", harness: "claude", project: "default",
+  age_s: age + i, viewers: 1,
+  context: { tokens: tokens + i, model: "opus" },
+}));
+
+function countStringify(fn) {
+  const real = JSON.stringify;
+  let calls = 0;
+  JSON.stringify = function (...a) { calls++; return real.apply(this, a); };
+  try { const value = fn(); return { calls, value }; }
+  finally { JSON.stringify = real; }
+}
+
+const state = "s1";
+const first = fleet(154_706, 0);
+const taken1 = countStringify(() => api.take(state, {
+  delta: true, names: first.map((r) => r.name), sessions: first,
+  row_hashes: Object.fromEntries(first.map((r) => [r.name, `h1-${r.name}`])),
+}));
+check("the first poll takes every row", taken1.value.length, ROWS);
+check("...and writes each row's text once", taken1.calls, ROWS);
+
+/* The signature pass over that fleet: each distinct text is stamped once. */
+const stamped1 = countStringify(() => taken1.value.map((r) => api.stamp(r, unstamped)));
+const sig1 = JSON.stringify(stamped1.value);
+
+/* The next poll calls every row unchanged: the page re-parses them from the
+   kept text and nothing new is serialised. */
+const second = countStringify(() => api.take(state, {
+  delta: true, names: first.map((r) => r.name), sessions: [],
+  row_hashes: Object.fromEntries(first.map((r) => [r.name, `h1-${r.name}`])),
+}));
+check("a poll that re-parses unchanged rows stringifies nothing", second.calls, 0);
+check("...and still returns every row", second.value.length, ROWS);
+const stamped2 = countStringify(() => second.value.map((r) => api.stamp(r, unstamped)));
+check("...and its redraw signature stringifies nothing", stamped2.calls, 0);
+check("...and is the same signature as before", JSON.stringify(stamped2.value), sig1);
+
+/* One row really moved. */
+const one = fleet(154_706, 0).map((r, i) => (
+  i === 0 ? { ...r, context: { ...r.context, tokens: 999_999 } } : r));
+const third = countStringify(() => api.take(state, {
+  delta: true, names: one.map((r) => r.name), sessions: [one[0]],
+  row_hashes: { s0: "h1-s0-2" },
+}));
+check("a poll with one changed row stringifies that row only", third.calls, 1);
+const stamped3 = countStringify(() => third.value.map((r) => api.stamp(r, unstamped)));
+check("...and its signature pass stamps that row only", stamped3.calls, 1);
+check("...and the signature moved", JSON.stringify(stamped3.value) === sig1, false);
+
+/* The stamp is the whole-row serialisation under the same filter. */
+const whole = JSON.stringify(JSON.parse(JSON.stringify(one[0])), unstamped);
+check("a stamp equals the filtered whole-row serialisation",
+      api.stamp(one[0], unstamped), whole);
+check("...and drops the volatile keys",
+      "age_s" in JSON.parse(api.stamp(one[0], unstamped)), false);
+
+/* A volatile-only move is not a redraw. */
+const volatile = { ...one[0], age_s: 900, viewers: 7 };
+check("a volatile-only move stamps the same", api.stamp(volatile, unstamped), whole);
+
+console.log(`pollstamp_check: ${ROWS} rows — first poll ${taken1.calls} stringify calls ` +
+            `(stamps ${stamped1.calls} + ${stamped1.value.length}), an unchanged poll ` +
+            `${second.calls} + ${stamped2.calls}, a one-row poll ${third.calls} + ${stamped3.calls}`);
+
+if (failures) {
+  console.error(`${failures} check(s) failed`);
+  process.exit(1);
+}
+console.log("pollstamp_check: ok");
