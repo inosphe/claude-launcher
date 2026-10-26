@@ -176,7 +176,7 @@ function build(opts) {
 
   const apiCalls = [];
   const apiBodies = [];
-  const gate = { restart: null, goto: [], reposync: [], nudges: [] };
+  const gate = { restart: null, goto: [], reposync: [], nudges: [], meshjoin: [] };
   const apiStub = async (p, opts) => {
     apiCalls.push(p);
     if (opts && opts.body) apiBodies.push([p, JSON.parse(opts.body)]);
@@ -186,6 +186,7 @@ function build(opts) {
     if (p === "/api/cflow/goto-requests") return answer({ requests: gate.goto });
     if (p === "/api/reposync/requests") return answer({ requests: gate.reposync });
     if (p === "/api/flow-nudges") return answer({ requests: gate.nudges });
+    if (p === "/api/mesh-join-requests") return answer({ requests: gate.meshjoin });
     if (p === "/api/daemon/restart-request/reject") {
       gate.restart = { ...gate.restart, status: "rejected" };
       return answer({ ok: true });
@@ -233,7 +234,7 @@ function build(opts) {
     "__doc", "__win",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
-    " refreshNudgeGate," +
+    " refreshNudgeGate, refreshMeshJoinGate, noticeGatePoll," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " killReapedNotify," +
@@ -1687,6 +1688,78 @@ function gotoRec(rec) {
           [open("notice-settings"), open("notice-panel")]);
     onKey({ key: "Escape" });
     check("and the panel next", !open("notice-panel"));
+  }
+  /* --- mesh join requests from other machines (claunch-efpoi.2) ------ */
+  {
+    const w = build();
+    const joinRec = (extra) => ({
+      mesh: "m", id: "req-1", machine: "pcB", session: "sb", handle: "bob",
+      role: "worker", requested_at: new Date(BASE).toISOString(), attach: false,
+      ...(extra || {}),
+    });
+    // Two meshes may each hold a request of the same id.
+    w.gate.meshjoin = [joinRec(), joinRec({ mesh: "n", machine: "pcC", session: "", attach: true })];
+    await w.api.refreshMeshJoinGate();
+    check("each mesh's join request draws its own card", w.strip().length === 2, w.said());
+    check("the card names who asks and which mesh",
+          /bob asks to join mesh m/.test(w.said()) && /pcB\/sb as worker/.test(w.said()), w.said());
+    check("an attach request says it is a daemon",
+          /daemon pcC asks to attach to mesh n/.test(w.said()), w.said());
+    check("the bell counts both", w.badge() === "2", w.badge());
+    check("the history keys them by mesh and id",
+          ["m/req-1", "n/req-1"].every((rid) =>
+            w.api.noticeHistory.some((e) => e.gate && e.gate.type === "meshjoin" && e.gate.rid === rid)),
+          w.api.noticeHistory.map((e) => e.gate));
+    const card = w.strip().find((c) => /mesh m/.test(c.text()));
+    w.press(card, "Approve").click();
+    await new Promise((r) => setImmediate(r));
+    check("Approve calls the mesh's own request route",
+          w.apiCalls.includes("/api/mesh/m/requests/req-1/approve"), w.apiCalls);
+    check("and the answered card goes", w.strip().length === 1, w.said());
+
+    w.gate.meshjoin = [joinRec({ mesh: "n" })];
+    await w.api.refreshMeshJoinGate();
+    w.api.noticePanelToggle(true);
+    await new Promise((r) => setImmediate(r));
+    const row = w.panelRows().find((r) => r.classList.contains("pending") && /mesh n/.test(r.text()));
+    check("the panel lists the waiting request", !!row, w.panel());
+    w.press(row, "Deny").click();
+    await new Promise((r) => setImmediate(r));
+    check("Deny in the panel calls the deny route",
+          w.apiCalls.includes("/api/mesh/n/requests/req-1/deny"), w.apiCalls);
+    w.gate.meshjoin = [];
+    await w.api.refreshMeshJoinGate();
+    check("a request gone from the poll settles its history row",
+          w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "meshjoin")
+            .every((e) => e.status !== "pending"),
+          w.api.noticeHistory.filter((e) => e.gate).map((e) => [e.gate.rid, e.status]));
+  }
+  /* --- the dashboard poll refreshes every gate kind (claunch-efpoi.2) --
+     Without it a kind's card and bell count come only once the panel is
+     opened; the mesh join gate shipped that way at first. */
+  {
+    const w = build();
+    const called = [];
+    for (const s of w.api.NOTICE_SOURCES) {
+      if (s.gate) s.refresh = () => { called.push(s.id); return null; };
+    }
+    w.api.noticeGatePoll();
+    const want = w.api.NOTICE_SOURCES.filter((s) => s.gate && s.id !== "ask").map((s) => s.id);
+    check("the poll refreshes every gate kind but the one another feed keeps",
+          JSON.stringify(called) === JSON.stringify(want), [called, want]);
+    check("only the urgent asks are left to their own feed",
+          w.api.NOTICE_SOURCES.filter((s) => s.polled === false).map((s) => s.id).join() === "ask");
+    const tick = slice("async function pollTick(", "pollTimer = setInterval(pollTick");
+    check("pollTick takes its gates from that list", /\.\.\.noticeGatePoll\(\)/.test(tick) &&
+          !/refresh(Restart|Goto|Reposync|Resume|Kill|Spawn|Nudge|MeshJoin)Gate\(\)/.test(tick));
+  }
+  {
+    const w = build();
+    w.api.noticeSourceSet("meshjoin", false);
+    w.gate.meshjoin = [{ mesh: "m", id: "req-1", machine: "pcB", session: "sb",
+                         handle: "bob", requested_at: new Date(BASE).toISOString() }];
+    await w.api.refreshMeshJoinGate();
+    check("a hidden mesh join kind draws no card", w.strip().length === 0, w.said());
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }

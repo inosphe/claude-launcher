@@ -301,6 +301,40 @@ def test_codeless_join_pends_then_approve_and_deny(home, tmp_path):
     asyncio.run(run())
 
 
+def test_join_requests_all_lists_every_mesh_and_skips_mirrors(home, tmp_path):
+    """The notice panel's poll (claunch-efpoi.2): one list across meshes."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        mm_a.create("n")
+        mgr.create(SessionDef(name="sc", harness="py", cwd=str(tmp_path), rows=80))
+        rid_m = (await mm_b.join("m@pcA", "sb", handle="bob"))["request_id"]
+        rid_n = (await mm_b.join("n@pcA", "sc", handle="carol"))["request_id"]
+
+        rows = mm_a.join_requests_all()
+        assert {(r["mesh"], r["id"], r["handle"]) for r in rows} == {
+            ("m", rid_m, "bob"), ("n", rid_n, "carol"),
+        }
+        # the same fields as request_list, with the mesh added
+        assert {k for k in rows[0]} == {"mesh"} | set(mm_a.request_list("m")[0])
+        assert all("reply_token" not in r for r in rows)
+
+        await mm_a.approve_request("m", rid_m)
+        assert [(r["mesh"], r["id"]) for r in mm_a.join_requests_all()] == [("n", rid_n)]
+
+        # a mirror's requests are its authority's to decide
+        mirror = mm_b.get("m")
+        assert mirror.primary == "pcA"
+        mirror.pending_requests["req-x"] = {"id": "req-x", "machine": "pcZ"}
+        assert mm_b.join_requests_all() == []
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # J5: grant survives an unreachable guest
 # --------------------------------------------------------------------------- #

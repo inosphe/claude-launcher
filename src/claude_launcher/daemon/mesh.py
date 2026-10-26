@@ -6977,10 +6977,12 @@ class MeshManager:
             return False
         return True
 
-    def request_list(self, name: str) -> List[dict]:
-        """Pending inbound join requests, oldest first (primary only)."""
-        mesh = self.get(name)
-        self._require_authority(mesh, "membership")
+    @staticmethod
+    def _join_request_rows(mesh: Mesh) -> List[dict]:
+        """``mesh``'s pending join requests as shown, oldest first.
+
+        The reply token stays out: it is the requester's credential.
+        """
         return [
             {
                 k: r.get(k)
@@ -6992,6 +6994,30 @@ class MeshManager:
                 key=lambda r: r.get("requested_at", ""),
             )
         ]
+
+    def request_list(self, name: str) -> List[dict]:
+        """Pending inbound join requests, oldest first (primary only)."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "membership")
+        return self._join_request_rows(mesh)
+
+    def join_requests_all(self) -> List[dict]:
+        """Every mesh's pending inbound join requests, each with its mesh.
+
+        What the dashboard's notice panel polls (claunch-efpoi.2): the
+        requests waiting on a person here, without building every mesh's
+        member graph the way ``/api/mesh`` does. A mirror is skipped — its
+        authority decides its joins, not this daemon.
+        """
+        rows = []
+        for mesh in self.list():
+            if mesh.primary:
+                continue
+            rows.extend(
+                {"mesh": mesh.name} | r for r in self._join_request_rows(mesh)
+            )
+        rows.sort(key=lambda r: r.get("requested_at") or "")
+        return rows
 
     async def approve_request(self, name: str, rid: str) -> dict:
         """Admit a pended join and deliver the grant (retried if needed)."""
@@ -9236,19 +9262,7 @@ class MeshManager:
                     ),
                 }
             )
-        requests = []
-        if not mesh.primary:
-            for r in sorted(
-                mesh.pending_requests.values(),
-                key=lambda r: r.get("requested_at", ""),
-            ):
-                requests.append(
-                    {
-                        k: r.get(k)
-                        for k in ("id", "machine", "session", "handle", "role",
-                                  "requested_at")
-                    } | {"attach": not r.get("session")}
-                )
+        requests = [] if mesh.primary else self._join_request_rows(mesh)
         # Who the asking session is, resolved here rather than guessed by the
         # reader. `None` is a real answer — "this daemon has no member for
         # that session" — and is what a caller must report; it is not the

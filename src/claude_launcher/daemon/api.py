@@ -1069,6 +1069,7 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}/invites/{prefix}", h_mesh_invite_revoke)
     r.add_post("/api/mesh/{mesh}/requests/{rid}/approve", h_mesh_request_approve)
     r.add_post("/api/mesh/{mesh}/requests/{rid}/deny", h_mesh_request_deny)
+    r.add_get("/api/mesh-join-requests", h_mesh_join_requests_all)
     r.add_delete("/api/mesh/{mesh}/guests/{machine}", h_mesh_guest_revoke)
     r.add_put("/api/mesh/{mesh}/peers", h_mesh_peers_reorder)
     r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
@@ -8313,6 +8314,12 @@ async def h_mesh_invite_revoke(request: web.Request) -> web.Response:
         request.match_info["mesh"], request.match_info["prefix"]
     )
     return json_response({"revoked": revoked})
+
+
+async def h_mesh_join_requests_all(request: web.Request) -> web.Response:
+    # The notice panel's poll (claunch-efpoi.2): every mesh's waiting join
+    # requests in one list, each row naming its mesh for approve/deny.
+    return json_response({"requests": _mesh_mgr(request).join_requests_all()})
 
 
 async def h_mesh_request_approve(request: web.Request) -> web.Response:
