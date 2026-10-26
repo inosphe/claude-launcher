@@ -87,8 +87,18 @@ HERDR_PANE_ENV = (
     "HERDR_WORKSPACE_ID",
 )
 
+#: A marker a command sets on one process of its own, which must not outlive
+#: that process. ``cli_sessions._hand_off_restart`` sets it in the restart it
+#: hands to a detached child, so the child takes the ordinary path instead of
+#: handing off again; the child then spawns the successor daemon, which
+#: inherited the marker and gave it to every session shell and CLI tab. In a
+#: tab that marker answered "this process already is the detached child", so
+#: the next restart there took the path the hand-off exists to avoid and died
+#: between stop and start, leaving no daemon (claunch-cli-tab-restart-marker-leak-0kz8o).
+ONE_SHOT_ENV = ("CLAUNCH_RESTART_DETACHED",)
+
 #: Every name removed unconditionally.
-SESSION_ENV = CLAUNCH_SESSION_ENV + HARNESS_SESSION_ENV + HERDR_PANE_ENV
+SESSION_ENV = CLAUNCH_SESSION_ENV + HARNESS_SESSION_ENV + HERDR_PANE_ENV + ONE_SHOT_ENV
 
 #: The request headers that name a session to the routing shim: one line of
 #: Claude's ``ANTHROPIC_CUSTOM_HEADERS`` (``metering.CUSTOM_HEADERS_ENV``) and

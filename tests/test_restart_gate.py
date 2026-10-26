@@ -574,12 +574,23 @@ def test_a_cli_tab_hand_off_carries_the_flags(home, monkeypatch, tmp_path):
     )
 
     args = argparse.Namespace(action="restart", all=False, force=True,
-                              with_pty_host=True, keep_stale_host=True,
+                              with_pty_host=True, keep_stale_host=False,
                               reason="apply the merges")
     assert cli_sessions._cmd_daemon(args) == 0
     assert spawned["argv"][3:] == [
         "daemon", "restart", "--force", "--with-pty-host",
-        "--keep-stale-host", "--reason", "apply the merges",
+        "--reason", "apply the merges",
+    ]
+    # --keep-stale-host travels on its own: with --with-pty-host the two
+    # contradict each other and the command is refused (see
+    # test_with_pty_host_and_keep_stale_are_refused).
+    args = argparse.Namespace(action="restart", all=False, force=True,
+                              with_pty_host=False, keep_stale_host=True,
+                              reason="apply the merges")
+    assert cli_sessions._cmd_daemon(args) == 0
+    assert spawned["argv"][3:] == [
+        "daemon", "restart", "--force", "--keep-stale-host",
+        "--reason", "apply the merges",
     ]
     assert fake.stop_calls == 0
 
@@ -684,11 +695,12 @@ def test_the_tab_refuses_a_stale_keep_before_handing_off(
     assert "--with-pty-host" in err
 
 
-def test_windows_keeps_the_immediate_path(home, monkeypatch, capsys):
+def test_the_tab_refuses_a_restart_it_cannot_finish(home, monkeypatch, capsys):
     """Windows children live in a job object with no breakaway, so a detached
-    child is still killed with the daemon. Handing off there would move the
-    failure rather than fix it: the tab keeps the old path until the job
-    allows a breakaway (claunch-k9fpi: unresolved on win32)."""
+    child is still killed with the daemon -- the tab cannot move its restart
+    outside the shutdown. Stopping anyway would leave no daemon at all, so
+    the command refuses before it touches anything and says why
+    (claunch-cli-tab-restart-windows-bheas)."""
     from claude_launcher import cli_sessions
     from claude_launcher.daemon import clipty
 
@@ -705,14 +717,18 @@ def test_windows_keeps_the_immediate_path(home, monkeypatch, capsys):
 
     monkeypatch.setattr(cli_sessions.subprocess, "Popen", _no_spawn)
 
-    assert cli_sessions._cmd_daemon(_daemon_args()) == 0
-    assert fake.stop_calls == 1          # the immediate path, as before
-    assert "daemon restarted" in capsys.readouterr().out
+    assert cli_sessions._cmd_daemon(_daemon_args()) == cli_sessions.RESTART_REFUSED
+    assert fake.stop_calls == 0          # nothing was stopped
+    assert fake.client.posted == []
+    err = capsys.readouterr().err
+    assert "Nothing was stopped" in err
+    assert "SSH or desktop shell" in err
 
 
 def test_the_detached_child_takes_the_ordinary_path(home, monkeypatch, capsys):
-    """The handed-off process has the marker cleared and the detached flag
-    set; it must actually restart rather than hand off again."""
+    """The handed-off process has the tab marker removed (that is what tells
+    it apart, see ``_hand_off_restart``); it must actually restart rather
+    than hand off again."""
     from claude_launcher import cli_sessions
     from claude_launcher.daemon import clipty
 
@@ -721,7 +737,7 @@ def test_the_detached_child_takes_the_ordinary_path(home, monkeypatch, capsys):
     monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     monkeypatch.setenv(cli_sessions.RESTART_DETACHED_ENV, "1")
-    monkeypatch.setenv(clipty.CLI_TAB_ENV, "1")
+    monkeypatch.delenv(clipty.CLI_TAB_ENV, raising=False)
 
     def _no_spawn(*a, **kw):   # a second hand-off would be the bug
         raise AssertionError("the detached child handed off again")
@@ -731,6 +747,84 @@ def test_the_detached_child_takes_the_ordinary_path(home, monkeypatch, capsys):
     assert cli_sessions._cmd_daemon(_daemon_args()) == 0
     assert fake.stop_calls == 1
     assert "daemon restarted" in capsys.readouterr().out
+
+
+def test_a_tab_carrying_an_inherited_marker_still_hands_off(
+    home, monkeypatch, tmp_path, capsys
+):
+    """The successor daemon a hand-off starts inherits the child's
+    environment, so its CLI tab shells carried ``CLAUNCH_RESTART_DETACHED``
+    too. Reading that marker as "I am the child" turned the hand-off off in
+    exactly the shell that needs it, and the second restart in a row died
+    between stop and start, leaving no daemon
+    (claunch-cli-tab-restart-marker-leak-0kz8o). A tab is a tab: the marker
+    is set in the child, which does not carry the tab marker at all --
+    ``session_env`` now also keeps it from reaching a daemon in the first
+    place."""
+    from claude_launcher import cli_sessions
+    from claude_launcher.daemon import clipty
+
+    fake = _FakeDaemon(record={"id": "g10", "session": "x", "deadline": _future()})
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.daemon_paths, "log_file",
+                        lambda: tmp_path / "daemon.log")
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setenv(clipty.CLI_TAB_ENV, "1")
+    monkeypatch.setenv(cli_sessions.RESTART_DETACHED_ENV, "1")
+    monkeypatch.setattr(cli_sessions, "_detach_supported", lambda: True)
+
+    spawned = {}
+
+    class _Child:
+        pid = 4343
+
+    monkeypatch.setattr(cli_sessions.subprocess, "Popen",
+                        lambda argv, **kw: spawned.update(argv=argv, **kw) or _Child())
+
+    assert cli_sessions._cmd_daemon(_daemon_args()) == 0
+    assert fake.stop_calls == 0
+    assert spawned["argv"][3:] == ["daemon", "restart"]
+    assert clipty.CLI_TAB_ENV not in spawned["env"]
+
+
+def test_all_and_force_together_are_refused(home, monkeypatch, capsys):
+    """The per-instance loop reads neither --force nor the wedged branch, so
+    the flag would be dropped without a word. Refused before anything is
+    stopped, with the reason."""
+    from claude_launcher import cli_sessions
+
+    fake = _FakeDaemon(record={"id": "g11", "session": "x", "deadline": _future()})
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.delenv("CLAUNCH_CLI_TAB", raising=False)
+
+    args = _daemon_args()
+    args.all = True
+    args.force = True
+
+    assert cli_sessions._cmd_daemon(args) == cli_sessions.RESTART_REFUSED
+    assert fake.stop_calls == 0
+    err = capsys.readouterr().err
+    assert "--all and --force cannot be combined" in err
+
+
+def test_with_pty_host_and_keep_stale_are_refused(home, monkeypatch, capsys):
+    """One ends the PTY host so the successor starts one on the code on disk,
+    the other keeps a host that runs older code. Both cannot be honoured."""
+    from claude_launcher import cli_sessions
+
+    fake = _FakeDaemon(record={"id": "g12", "session": "x", "deadline": _future()})
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.delenv("CLAUNCH_CLI_TAB", raising=False)
+
+    args = _daemon_args()
+    args.with_pty_host = True
+    args.keep_stale_host = True
+
+    assert cli_sessions._cmd_daemon(args) == cli_sessions.RESTART_REFUSED
+    assert fake.stop_calls == 0
+    assert "contradict each other" in capsys.readouterr().err
 
 
 class _Child:

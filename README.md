@@ -4033,6 +4033,15 @@ prints why. `tools/restart_live.py` asks the daemon the same question before
 it falls back to comparing the git trees. A host from before the code id
 reports none and counts as stale.
 
+**A restart that cannot finish is refused before it stops anything.** The
+dashboard's CLI tab runs in a shell the daemon ends as part of its own
+shutdown, so a restart typed there is handed to a process in a session of its
+own and the tab prints that it did. On a platform where that child stays
+inside the daemon's job, and for flag combinations the command cannot honour
+(`--all` with `--force`, `--with-pty-host` with `--keep-stale-host`), it
+prints why and exits 3 without touching the daemon — a restart that stopped it
+and then could not start a successor would leave nothing running.
+
 **A restart never loses a session.** Whatever is *not* relaunched — it had
 already exited, it was created `--no-restore`, or its relaunch failed — comes
 back as an **exited record** rather than being forgotten: still listed, still

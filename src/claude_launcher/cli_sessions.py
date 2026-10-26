@@ -2056,10 +2056,18 @@ def _report_compact_problems() -> None:
         )
 
 
-#: Set on the detached child a CLI tab's restart hands itself to. The child
-#: still sees ``CLI_TAB_ENV`` nowhere else, so this is the only thing telling
-#: it to take the ordinary path instead of handing off again.
+#: Set on the detached child a CLI tab's restart hands itself to, as a record
+#: of what that process is. The decision to hand off is not made from it: the
+#: child is already told apart by having the tab marker removed
+#: (``_hand_off_restart``), and an inherited copy of this one used to disable
+#: the hand-off in the shells that need it (see ``_restart_must_run_detached``
+#: and ``session_env.ONE_SHOT_ENV``).
 RESTART_DETACHED_ENV = "CLAUNCH_RESTART_DETACHED"
+
+#: Exit status of a restart refused before it stopped anything, because the
+#: command as given could not finish here. Distinct from 1 (the command ran
+#: and failed) and 2 (the PTY host runs older code).
+RESTART_REFUSED = 3
 
 
 def _detach_supported() -> bool:
@@ -2080,17 +2088,73 @@ def _detach_supported() -> bool:
 def _restart_must_run_detached() -> bool:
     """Whether this restart cannot run in the shell that is asking for it.
 
-    True in the dashboard's CLI tab (``clipty.CLI_TAB_ENV``) unless this
-    process already IS the detached child (``RESTART_DETACHED_ENV``). Any
-    other shell -- an operator's terminal, a session's shell -- keeps the
-    ordinary immediate path, and so does every shell on a platform where the
-    hand-off cannot leave the daemon's job (see ``_detach_supported``).
+    True in the dashboard's CLI tab (``clipty.CLI_TAB_ENV``). Any other shell
+    -- an operator's terminal, a session's shell -- keeps the ordinary
+    immediate path, and so does every shell on a platform where the hand-off
+    cannot leave the daemon's job (see ``_detach_supported``; there the tab
+    refuses the restart instead, see ``_restart_refusal``).
+
+    The question is asked of the tab marker alone. ``RESTART_DETACHED_ENV``
+    marks the handed-off child, and the child is told apart by not carrying
+    the tab marker at all -- it is removed on the way in. Consulting the
+    detached marker here as well made an inherited copy switch the hand-off
+    off in the shells that need it: the child spawns the successor daemon,
+    which passes its environment to every session and tab shell, so the
+    second restart in a row ran in a tab that "was" the detached child, died
+    with its shell, and left no daemon (claunch-cli-tab-restart-marker-leak-0kz8o).
     """
-    return (
-        _detach_supported()
-        and bool(os.environ.get(CLI_TAB_ENV))
-        and not os.environ.get(RESTART_DETACHED_ENV)
-    )
+    return _detach_supported() and bool(os.environ.get(CLI_TAB_ENV))
+
+
+def _restart_refusal(args: argparse.Namespace) -> Optional[str]:
+    """Why this restart cannot do what it was asked, or None to go ahead.
+
+    Asked before anything is stopped. A restart that stops the daemon and
+    cannot start a successor leaves nothing running, so the combinations that
+    would end that way are refused up front, with the reason, instead of being
+    attempted and lost:
+
+    - the dashboard's CLI tab on a platform without a working hand-off: the
+      shutdown ends the shell this command runs in, and the child that would
+      outlive it cannot leave the daemon's job (claunch-k9fpi on win32,
+      claunch-cli-tab-restart-windows-bheas);
+    - ``--all`` with ``--force``: the per-instance loop takes the ordinary
+      path for each instance and reads neither the wedged branch nor a force;
+      the flag would be dropped without a word;
+    - ``--with-pty-host`` with ``--keep-stale-host``: one replaces the PTY
+      host and relaunches its sessions, the other keeps a host running older
+      code as it is.
+    """
+    with_host = bool(getattr(args, "with_pty_host", False))
+    keep_stale = bool(getattr(args, "keep_stale_host", False))
+    if getattr(args, "all", False) and getattr(args, "force", False):
+        return (
+            "--all and --force cannot be combined: --all restarts every "
+            "instance that answers, one ordinary restart each, while --force "
+            "is about the single daemon that does not answer. Nothing was "
+            "stopped -- force that instance first, then run --all, or drop "
+            "one of the two."
+        )
+    if with_host and keep_stale:
+        return (
+            "--with-pty-host and --keep-stale-host contradict each other: "
+            "the first ends the PTY host so the new daemon starts one on the "
+            "code on disk, the second keeps a host that runs older code. "
+            "Nothing was stopped -- pick one."
+        )
+    if os.environ.get(CLI_TAB_ENV) and not _detach_supported():
+        return (
+            "refused: this is the dashboard's CLI tab, and the daemon ends "
+            "that shell as part of the shutdown this command asks for. On "
+            "this platform the restart cannot move itself outside that shell "
+            "(a child of the tab stays inside the daemon's job, which does "
+            "not allow a breakaway -- claunch-cli-tab-restart-windows-bheas), "
+            "so it would stop the daemon and never start the successor. "
+            "Nothing was stopped. Run the restart from a terminal that does "
+            "not belong to the daemon -- an SSH or desktop shell -- and add "
+            "--force there if the daemon has stopped answering."
+        )
+    return None
 
 
 def _hand_off_restart(*, force: bool = False, with_pty_host: bool = False,
@@ -2199,6 +2263,12 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             print("daemon is not running")
         return 0
     if action == "restart":
+        # Nothing below is worth doing if the command as given cannot finish:
+        # it would stop a daemon that no process left here can start again.
+        refusal = _restart_refusal(args)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return RESTART_REFUSED
         with_host = bool(getattr(args, "with_pty_host", False))
         keep_stale = bool(getattr(args, "keep_stale_host", False))
         # The CLI tab's shell is killed by the shutdown this command asks
