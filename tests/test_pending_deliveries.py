@@ -166,9 +166,13 @@ def test_a_closed_session_loop_refuses_and_leaves_nothing_waiting():
     - ``False`` comes back -- ``True`` would tell the caller its message was
       accepted while nothing was scheduled.
 
-    Called from a thread away from any loop: a live caller loop would win
-    the ``_loop or running`` fallback and this branch would never be reached
-    (that is ``test_a_delivery_from_a_worker_thread_is_still_typed``).
+    Called from a thread away from any loop for symmetry with the test
+    above; this branch is reached from a live loop too, because ``_loop``
+    is chosen even when it is closed (a closed loop is still truthy), so a
+    live caller loop never wins the ``_loop or running`` fallback. The
+    thread is *required* only by
+    ``test_a_session_without_a_loop_refuses_instead_of_losing_the_message``,
+    where ``_loop`` is ``None`` and a live caller loop really would win.
     """
 
     async def run():
