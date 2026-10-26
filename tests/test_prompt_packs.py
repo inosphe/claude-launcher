@@ -44,6 +44,7 @@ def test_the_catalog_ships_the_packs_and_the_default_packs():
     # In catalog order (the pack files' own order), not the old list's.
     assert prompt_packs.shipped_default_packs() == [
         "asking-the-user", "common", "korean-replies", "mcp-qa", "mcp-sim", "mcp-threads",
+        "obvious-decisions",
     ]
     for pack in prompt_packs.catalog():
         assert pack.title and pack.body and not pack.body.startswith("---")
@@ -158,7 +159,7 @@ def test_an_empty_role_row_means_that_role_requires_none(home):
 
 def test_default_packs_come_from_the_headers_until_saved(home):
     shipped = prompt_packs.shipped_default_packs()
-    assert len(shipped) == 6
+    assert len(shipped) == 7
     assert prompt_packs.default_packs() == shipped
     # A list states the whole set: the ids it names are on, the shipped
     # defaults it leaves out are off, and everything else keeps its header.
