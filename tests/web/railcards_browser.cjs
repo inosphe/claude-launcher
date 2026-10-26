@@ -43,6 +43,7 @@ const fixtureChecks = [
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
     parent: null, keep_alive: true, status_checks: fixtureChecks,
+    created_at: "2026-10-25T12:00:00Z",
     context: { tokens: 177000, input: 2, cache_read: 176000, cache_write: 1090,
       output: 210, model: "claude-opus-4-5", at: new Date().toISOString(),
       compact_window: 200000 },
