@@ -48,8 +48,22 @@ const server = http.createServer((req, res) => {
     res.end(fs.readFileSync(file));
   } catch { res.statusCode = 404; res.end(); }
 });
+/* What the tip's card draws, by density. The tip is a CLONE of the list's row
+   (app.js sessionCardCopy), so it wears whatever density that row has — the
+   default compact card — and the per-density rules reach it because
+   sessionGridTipStyles re-scopes every `#session-list …` rule onto `#sg-tip`
+   verbatim, `[data-rail-mode="compact"]` and all.
+   A compact card hides the action buttons and keeps the controls that are not
+   an action on the session (the key chip, and the two refreshes, style.css).
+   So the questions this file asks are the density's, not a flat list of seven:
+   what is painted shares the line it is on, and the two refreshes are painted
+   on BOTH densities. Listing all seven as "on the buttons line" is what this
+   file used to do; it went on passing through the round that hid two of them
+   only because no round before that had hidden any (claunch-6ezw3.1). */
 const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info",
   ".sess-status-check-rowref", ".sess-brief-rowref"];
+const ACTIONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info"];
+const ALWAYS_PAINTED = [".sess-status-check-rowref", ".sess-brief-rowref"];
 (async () => {
   await safeListen(server);
   const browser = await chromium.launch({ headless: true });
@@ -77,24 +91,48 @@ const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", 
       const card = tip.querySelector("li.sess-card");
       const actions = card && card.querySelector(".rail-actions");
       const name = card && card.querySelector(".rail-name");
+      const box = (el) => { const r = el.getBoundingClientRect(); return { w: r.width, h: r.height, y: mid(el) }; };
       return {
         pinned: tip.classList.contains("pinned"),
+        mode: card && card.dataset.railMode,
         width: tip.getBoundingClientRect().width,
         actions: actions && mid(actions),
         nameWidth: name && name.getBoundingClientRect().width,
         buttons: Object.fromEntries(buttons.map((sel) => {
           const el = card && card.querySelector(sel);
-          return [sel, el ? mid(el) : null];
+          return [sel, el ? box(el) : null];
         })),
       };
     }, { width, buttons: BUTTONS });
+    /* A button that is not painted has no line to share, and two unpainted
+       boxes agree at any tolerance -- the vacuous pass this file shares with
+       railchildline_browser. Buttons are only compared once they have a box. */
     const offActions = (got) => Object.entries(got.buttons)
-      .filter(([, y]) => y === null || Math.abs(y - got.actions) > 4).map(([sel]) => sel);
+      .filter(([, b]) => b && b.w > 0 && b.h > 0)
+      .filter(([, b]) => got.actions === null || Math.abs(b.y - got.actions) > 4)
+      .map(([sel]) => sel);
+    const painted = (got) => Object.entries(got.buttons)
+      .filter(([, b]) => b && b.w > 0 && b.h > 0).map(([sel]) => sel);
+    const unpainted = (got) => Object.entries(got.buttons)
+      .filter(([, b]) => !b || b.w === 0 || b.h === 0).map(([sel]) => sel);
 
     const got = await pinned(null);
     assert.ok(got.pinned, "a right-click pins the card");
     assert.ok(got.actions !== null, "the pinned card holds the list's row");
-    assert.deepEqual(offActions(got), [], `every button sits on the buttons line at ${got.width}px`);
+    assert.deepEqual(offActions(got), [], `every painted button sits on the buttons line at ${got.width}px`);
+    // The five actions are only drawn on the extended card; the tip is a copy
+    // of a compact row, so at this density they are expected absent -- and
+    // that expectation is pinned, so this file cannot quietly stop covering
+    // them by having them disappear for another reason.
+    assert.equal(got.mode, "compact", "the tip copies the list row's compact density");
+    for (const sel of ACTIONS) {
+      assert.ok(unpainted(got).includes(sel),
+        `${sel} is the expanded card's, so the compact tip does not draw it`);
+    }
+    for (const sel of ALWAYS_PAINTED) {
+      const b = got.buttons[sel];
+      assert.ok(b && b.w > 0 && b.h > 0, `${sel} is painted on the ${got.mode} card (${b ? `${b.w}x${b.h}` : "absent"})`);
+    }
 
     // The same card at the old width wraps; the buttons still share their
     // line, and the name keeps a readable width instead of stacking a
@@ -102,6 +140,11 @@ const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", 
     await page.keyboard.press("Escape");
     const narrow = await pinned("320px");
     assert.deepEqual(offActions(narrow), [], "at 320px the buttons still share the buttons line");
+    for (const sel of ALWAYS_PAINTED) {
+      const b = narrow.buttons[sel];
+      assert.ok(b && b.w > 0 && b.h > 0, `${sel} survives the 320px wrap (${b ? `${b.w}x${b.h}` : "absent"})`);
+    }
+    assert.deepEqual(painted(narrow), painted(got), "narrowing does not take a control away");
     assert.ok(narrow.nameWidth >= 100,
       `at 320px the name keeps a readable width (${narrow.nameWidth}px)`);
     assert.deepEqual(errors, []);
