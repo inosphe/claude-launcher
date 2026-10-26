@@ -55,7 +55,16 @@ SESSION_SPAWN = "session.spawn"
 EXECUTOR_REQUIRES: Dict[str, Optional[str]] = {
     ir.EXEC_SUBAGENT: "subagent.spawn",
     ir.EXEC_SESSION: SESSION_SPAWN,
+    # A quick-fork is a child session under the same spawn policy.
+    ir.EXEC_FORK: SESSION_SPAWN,
     ir.EXEC_INLINE: None,
+}
+#: Capabilities an executor needs besides :data:`EXECUTOR_REQUIRES`. A fork
+#: has no receipt-file route: it is a copy of the driver, so it drives the
+#: nested run (or submits) with the same claunch MCP tools the driver has,
+#: and without them it is skipped.
+EXECUTOR_ALSO_REQUIRES: Dict[str, Tuple[str, ...]] = {
+    ir.EXEC_FORK: ("mcp.claunch",),
 }
 
 
@@ -359,7 +368,9 @@ def need_applies(cap_id: str, executor: str) -> bool:
         return False
     family = cap_id.split(".", 1)[0]
     if family in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
-        return family == executor
+        # a fork is a session: ``session.*`` needs constrain it too
+        return family == executor or (family == ir.EXEC_SESSION
+                                      and executor == ir.EXEC_FORK)
     return True
 
 
@@ -382,6 +393,9 @@ def _missing_for(executor: str, caps: CapsLike, needs: Iterable[str],
     required = EXECUTOR_REQUIRES[executor]
     if required and not enabled(caps, required):
         return required
+    for cap_id in EXECUTOR_ALSO_REQUIRES.get(executor, ()):
+        if not enabled(caps, cap_id):
+            return cap_id
     for cap_id in needs:
         if need_applies(cap_id, executor) and not enabled(caps, cap_id):
             return cap_id
@@ -408,7 +422,7 @@ def choose_executor(
 
 def plan_return(executor: str, caps: CapsLike, has_schema: bool) -> ReturnPlan:
     """How the delegate's result comes back (doc 6.4, return values)."""
-    if executor in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
+    if executor in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION, ir.EXEC_FORK):
         if enabled(caps, "mcp.claunch"):
             return ReturnPlan("mcp-submit", capability="mcp.claunch")
         return ReturnPlan("receipt-file", [
@@ -432,6 +446,10 @@ def plan_readonly(executor: str, caps: CapsLike) -> ReadonlyPlan:
             "the brief and checked by git status --porcelain afterwards"])
     if executor == ir.EXEC_SESSION:
         return ReadonlyPlan("child-worktree")
+    if executor == ir.EXEC_FORK:
+        return ReadonlyPlan("brief-only", [
+            "fork: the copy stands in the driver's checkout; read-only is stated "
+            "in the brief only"])
     return ReadonlyPlan("brief-only", ["inline: read-only is stated in the brief only"])
 
 
@@ -448,6 +466,15 @@ def plan_parallel(
         return ParallelPlan("parallel")
     if executor == ir.EXEC_SESSION:
         concurrent, why = True, ""
+    elif executor == ir.EXEC_FORK:
+        # Every fork stands in the driver's checkout: there is no worktree to
+        # isolate overlapping writes in. They run at once anyway, and the
+        # workflow keeps them apart by giving each its own paths.
+        if write_overlap:
+            return ParallelPlan("parallel-shared-checkout", [
+                "fork: branches share the driver's checkout; writes are kept apart "
+                "only by the paths the workflow gives each fork"], concurrent=True)
+        return ParallelPlan("parallel")
     elif executor == ir.EXEC_SUBAGENT:
         concurrent = enabled(caps, "subagent.parallel")
         why = "subagent.parallel unavailable"

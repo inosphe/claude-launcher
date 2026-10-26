@@ -114,7 +114,13 @@ RETURN_RUN = "$run"
 EXEC_INLINE = "inline"
 EXEC_SUBAGENT = "subagent"
 EXEC_SESSION = "session"
-EXECUTORS = (EXEC_INLINE, EXEC_SUBAGENT, EXEC_SESSION)
+#: A quick-fork of the run's driver: a child session that starts with a copy
+#: of the driver's whole conversation and stands in the driver's own
+#: checkout (docs/cflow-v2.md 6.4, claunch-dm09i.1).
+EXEC_FORK = "fork"
+EXECUTORS = (EXEC_INLINE, EXEC_SUBAGENT, EXEC_SESSION, EXEC_FORK)
+#: Executors whose delegate is a child session the daemon starts.
+SESSION_EXECUTORS = (EXEC_SESSION, EXEC_FORK)
 #: Executors a definition or a snapshotted run may still name but the engine
 #: no longer has (claunch-xjbrh removed ``headless``): the frontend drops
 #: them with a warning and a loaded IR drops them silently, so a stale copy

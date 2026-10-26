@@ -8,6 +8,11 @@ and owns the delegation record; this module is the hook through which a
 - ``subagent`` -- no dispatch: the driver reads the brief from ``flow_status``
   / ``flow_delegate``, runs it with its harness's sub-agent feature and
   submits the result with ``flow_delegate``.
+- ``fork``     -- like ``session``, but the child is a quick-fork of the
+  run's driver (``daemon/handoff.py``): it starts with a copy of the driver's
+  whole conversation and stands in the driver's own checkout. Its opening is
+  :func:`fork_task`, and it ends itself with a quick-fork merge once its
+  result is in.
 - ``session`` -- needs a child session the daemon starts. The daemon
   registers a dispatcher with :func:`register`; until one is registered
   (stage 3/4 of the plan, or a run driven without a daemon) :class:`InlineFallback`
@@ -50,7 +55,7 @@ from . import ir
 Dispatcher = Callable[[dict, Any], Optional[str]]
 
 #: Executors that need a dispatcher (a process someone else starts).
-DISPATCHED = (ir.EXEC_SESSION,)
+DISPATCHED = (ir.EXEC_SESSION, ir.EXEC_FORK)
 
 _dispatcher: Optional[Dispatcher] = None
 
@@ -181,13 +186,15 @@ def return_instruction(returns: Mapping[str, Any]) -> str:
 
 def build_prompt(brief: Mapping[str, Any], *, errors: Optional[List[str]] = None,
                  readonly: bool = False, extra: str = "",
-                 result: Optional[str] = None) -> str:
+                 result: Optional[str] = None, intro: Optional[str] = None) -> str:
     """The text a delegate gets: the brief's tasks in order, the rules, the
-    return format; and on a re-run, the previous attempt's problems."""
+    return format; and on a re-run, the previous attempt's problems.
+    ``intro`` replaces the opening line (a fork has the main run's context)."""
     lines: List[str] = [
-        f"You are running delegation {brief.get('delegation')} of a cflow workflow "
-        f"(node {brief.get('label') or brief.get('node')}). Work only on what is "
-        "below; you have no other context from the main run.",
+        intro or (
+            f"You are running delegation {brief.get('delegation')} of a cflow workflow "
+            f"(node {brief.get('label') or brief.get('node')}). Work only on what is "
+            "below; you have no other context from the main run."),
     ]
     if brief.get("with"):
         lines.append("Inputs: " + json.dumps(brief["with"], ensure_ascii=False))
@@ -262,3 +269,48 @@ def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path
             f"the daemon ends this session when it is done, so nobody has to kill it."
         )
     return build_prompt(brief, result=shape + submit)
+
+
+def fork_task(brief: Mapping[str, Any], *, cwd: str, scope: str, driver: str) -> str:
+    """The task under the marker block of a quick-fork running a ``fork``
+    delegation (claunch-dm09i.1).
+
+    The fork has the driver's conversation up to the fork, so the brief does
+    not say "no other context"; what it has to learn is where its own part
+    starts and ends. It is told three things the driver's conversation does
+    not: the delegation is its whole job, its result reaches the main run on
+    its own (the nested run's finish, or one ``flow_delegate``), and once that
+    is in it ends itself with the ``handoff`` tool, whose text is typed into
+    the driver. A fork forks nothing itself: the daemon refuses a ``fork``
+    delegation whose driver is a quick-fork.
+    """
+    did = brief.get("delegation")
+    label = brief.get("label") or brief.get("node")
+    intro = (
+        f"You are a quick-fork of {driver!r}, started to carry out delegation {did} "
+        f"(node {label}) of {driver!r}'s cflow run in {cwd} (scope {scope!r}). The "
+        f"conversation above is {driver!r}'s up to the moment of the fork: use it, but "
+        f"from here on this delegation is your whole job. {driver!r} goes on with the "
+        f"rest of its run (and other forks may be working beside you in this same "
+        f"checkout) -- do not carry on {driver!r}'s own tasks."
+    )
+    if brief.get("nested"):
+        result = str(brief.get("submit") or "")
+    else:
+        result = (
+            f"When done, submit ONE result with the claunch MCP tool flow_delegate("
+            f"delegation=\"{did}\", scope=\"{scope}\", cwd=\"{cwd}\", outcome=..., "
+            "value={...}). If the result is refused, fix the listed problems and submit "
+            "once more. Declared returns: " + json.dumps(dict(brief.get("returns") or {}))
+        )
+    result += (
+        "\n\nWhen your result is in (the nested run finished, or flow_delegate accepted "
+        f"it), end this session with the claunch MCP tool handoff(text=...): a few lines "
+        f"for {driver!r} -- the outcome, the files you changed, anything left open. "
+        "That text is typed into its terminal and this copy then ends; nobody else ends "
+        "it. Do not call handoff before the result is in: a fork that ends without a "
+        "result fails its delegation. If the flow tools answer that the delegation "
+        "was cancelled or its nested run aborted, stop editing at once and end with "
+        "handoff, saying what you had changed."
+    )
+    return build_prompt(brief, result=result, intro=intro)

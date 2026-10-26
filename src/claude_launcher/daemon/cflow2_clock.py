@@ -241,6 +241,9 @@ class Cflow2Clock:
         platform: Optional[str] = None,
         mesh: Any = None,
         renudge_interval: Optional[float] = None,
+        fork: Optional[Callable[[str, Dict[str, Any]], str]] = None,
+        context_left: Optional[Callable[[Any], Tuple[Optional[int], str]]] = None,
+        fork_min_context: Optional[int] = None,
     ) -> None:
         self.manager = manager
         #: The mesh manager a landing request's leader fallback reads
@@ -248,6 +251,15 @@ class Cflow2Clock:
         self.mesh = mesh
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
         self.spawn = spawn or cflow2_exec.default_spawn
+        #: ``(driver, body) -> copy name`` for a ``fork`` delegation, and the
+        #: reading its gate takes (tests stub both; None is the daemon's
+        #: quick-fork route and the transcript's context size).
+        self.fork = fork or cflow2_exec.default_quick_fork
+        self.context_left = context_left or cflow2_exec.context_left
+        #: Tokens a fork needs left before the driver's auto-compact (None:
+        #: ``cflow2_fork_min_context`` from the daemon config, else
+        #: :data:`.cflow2_exec.FORK_MIN_CONTEXT`).
+        self.fork_min_context = fork_min_context
         self.probe_runner = probe_runner
         self.heartbeat = heartbeat
         self.threaded = threaded
@@ -741,7 +753,7 @@ class Cflow2Clock:
             ex = rec.get("executor")
             if ex in ir.REMOVED_EXECUTORS:
                 self._removed(cwd, scope, did, rec)
-            elif ex == ir.EXEC_SESSION:
+            elif ex in ir.SESSION_EXECUTORS:
                 self._session(cwd, scope, did, rec, clock_now, notices, halted,
                               driver=driver)
             elif ex == ir.EXEC_SUBAGENT:
@@ -991,6 +1003,11 @@ class Cflow2Clock:
                     cwd=cwd, scope=scope)
                 return
             state = st.load_state()
+            fork_parent = None
+            if rec.get("executor") == ir.EXEC_FORK:
+                fork_parent = str(state.get("driver") or "") or cstore.session_of(scope)
+                if self._fork_refused(cwd, scope, did, rec, fork_parent, state, notices):
+                    return
             run_id = state.get("run_id")
             runner = {"boot": self.boot, "phase": cflow2_exec.PHASE_SPAWNING,
                       "marker": cflow2_exec.delegation_marker(st, run_id, did)}
@@ -1004,7 +1021,8 @@ class Cflow2Clock:
                 self._beat()
                 result = cflow2_exec.spawn_session(
                     cwd, scope, did, spawn=self.spawn, find_child=self.find_child,
-                    runner=runner, lost=lambda marker: self._remember_lost(st, did, marker))
+                    runner=runner, lost=lambda marker: self._remember_lost(st, did, marker),
+                    fork=self.fork, fork_parent=fork_parent)
                 with self._lock:
                     self.results.append(result)
                 # The fallback is journaled by the runtime, but a journal is
@@ -1013,12 +1031,14 @@ class Cflow2Clock:
                 # The recipient is the run's driver, not the scope slot: a
                 # child session driving a run whose scope names the parent's
                 # slot would otherwise be told nothing (claunch-emft6).
-                if (result.get("result") == "rerouted"
-                        and result.get("executor") == ir.EXEC_SUBAGENT):
+                if result.get("result") == "rerouted" and (
+                        result.get("executor") == ir.EXEC_SUBAGENT
+                        or rec.get("executor") == ir.EXEC_FORK):
                     driver = str(state.get("driver") or "") or _name(scope)
                     notices.append((cwd, driver, fallback_block(
                         scope, did, rec.get("label") or rec.get("node") or did,
-                        str(result.get("error") or ""))))
+                        str(result.get("error") or ""),
+                        executor=str(result.get("executor") or ir.EXEC_SUBAGENT))))
             return
         if status != "running":
             return
@@ -1034,7 +1054,8 @@ class Cflow2Clock:
             if found:
                 cflow2_exec._record_child(cwd, scope, did, found,
                                           dict(runner, boot=self.boot), marker,
-                                          adopted="spawn interrupted")
+                                          adopted="spawn interrupted",
+                                          executor=str(rec.get("executor") or ir.EXEC_SESSION))
                 return
             if int(rec.get("respawns") or 0) >= 1:
                 runtime.delegate_reroute(
@@ -1056,6 +1077,43 @@ class Cflow2Clock:
             runtime.delegate_fail(
                 did, f"child session {child!r} ended without submitting a result",
                 cwd=cwd, scope=scope)
+
+    def _fork_min(self) -> int:
+        if self.fork_min_context is not None:
+            return int(self.fork_min_context)
+        try:
+            value = store.daemon_config().get("cflow2_fork_min_context")
+        except Exception:  # noqa: BLE001 - a broken config must not stop the tick
+            value = None
+        try:
+            return int(value) if value is not None else cflow2_exec.FORK_MIN_CONTEXT
+        except (TypeError, ValueError):
+            return cflow2_exec.FORK_MIN_CONTEXT
+
+    def _fork_refused(self, cwd: str, scope: str, did: str, rec: dict, parent: str,
+                      state: Dict[str, Any], notices: List[Notice]) -> bool:
+        """The gate of a queued ``fork`` delegation (claunch-dm09i.1): the
+        driver must be live, not a quick-fork itself, and have
+        :meth:`_fork_min` tokens left before its auto-compact. A refusal moves
+        the delegation to the node's next executor and tells the driver,
+        which then runs that member itself (inline)."""
+        session = self._live(parent)
+        if session is None:
+            why = f"no live session {parent!r} to quick-fork"
+        else:
+            why = cflow2_exec.fork_refusal(session, min_left=self._fork_min(),
+                                           left=self.context_left)
+        if not why:
+            return False
+        nxt = runtime.delegate_reroute(did, f"fork refused: {why}", cwd=cwd, scope=scope)
+        with self._lock:
+            self.results.append({"delegation": did, "result": "rerouted",
+                                 "executor": nxt, "error": why})
+        driver = str(state.get("driver") or "") or _name(scope)
+        notices.append((cwd, driver, fallback_block(
+            scope, did, rec.get("label") or rec.get("node") or did, f"fork refused: {why}",
+            executor=nxt)))
+        return True
 
     def _child_receipt(self, cwd: str, scope: str, did: str, rec: dict,
                        notices: List[Notice]) -> bool:
@@ -1293,12 +1351,26 @@ def moved_block(scope: str, payload: Dict[str, Any], why: str = WHY_CLOCK) -> st
         "---"])
 
 
-def fallback_block(scope: str, delegation: str, label: str, cause: str) -> str:
+def fallback_block(scope: str, delegation: str, label: str, cause: str,
+                   executor: str = ir.EXEC_SUBAGENT) -> str:
     """The one line a driver needs when its delegation's child could not be
     spawned and the node fell back to a sub-agent: that brief is now its own
-    work, and nothing else will tell it (claunch-7u8as)."""
+    work, and nothing else will tell it (claunch-7u8as). ``executor`` is
+    where it went: a refused ``fork`` that fell back further than a
+    sub-agent is expanded in the driver's own run (claunch-dm09i.1)."""
     if len(cause) > 200:
         cause = cause[:197] + "..."
+    if executor != ir.EXEC_SUBAGENT:
+        return "\n".join([
+            "---",
+            "# claunch cflow2: a delegation fell back to your own run -- "
+            "machine-generated, not typed by the user",
+            f"run: {scope}",
+            f"delegation: {delegation} ({label})",
+            f"fallback: child session -> {executor} ({cause})",
+            "protocol: no child runs this part, so its tasks are now yours in this run. "
+            "Call flow_status and carry them out like any other task.",
+            "---"])
     return "\n".join([
         "---",
         "# claunch cflow2: a delegation fell back to a sub-agent -- "

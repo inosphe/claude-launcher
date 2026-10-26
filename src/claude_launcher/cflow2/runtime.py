@@ -2557,10 +2557,10 @@ def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str,
 
 def _assignee(state: Dict[str, Any], rec: Dict[str, Any]) -> str:
     """Who carries out a delegation: the driver for a sub-agent, the child
-    session for a session delegation (``assignee``, else ``child``)."""
+    session for a session or fork delegation (``assignee``, else ``child``)."""
     if rec.get("executor") == ir.EXEC_SUBAGENT:
         return driver_of(state)
-    if rec.get("executor") == ir.EXEC_SESSION:
+    if rec.get("executor") in ir.SESSION_EXECUTORS:
         return str(rec.get("assignee") or rec.get("child") or "")
     return ""
 
@@ -2639,7 +2639,7 @@ def _check_delegation_authority(r: Run, rec: Dict[str, Any], session: str,
     if ex == ir.EXEC_SUBAGENT:
         if may_drive(r.state, session):
             return
-    elif ex == ir.EXEC_SESSION:
+    elif ex in ir.SESSION_EXECUTORS:
         assignee = _assignee(r.state, rec)
         if session and session == assignee:
             return
