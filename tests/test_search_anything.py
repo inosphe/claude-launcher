@@ -1028,6 +1028,64 @@ def test_a_legacy_stale_profile_name_does_not_block_the_first_save():
     assert store.rag_config(doc)["embedding_model"] == "embed"
 
 
+def test_an_empty_password_in_the_row_keeps_the_saved_secret():
+    """The card's rows carry ``api_key: ""`` when the field was left blank.
+
+    That blank means "unchanged", not "erase": the reader never sees the saved
+    key, so posting the field back empty is the only thing the form can do. The
+    row shape reaches this through its own branch (``sources``), which is why
+    one test covers the flat body's ``api_key: ""`` and this one the rows'
+    (claunch-pxxn4 leader review: a mutation dropping that branch passed).
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "local-secret",
+                   "embedding_model": "omlx-embed", "rerank_model": ""},
+        "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "custom"}})
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "",
+                   "embedding_model": "omlx-2", "rerank_model": ""}}})
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "local-secret"
+    assert doc["rag"]["sources"]["custom"]["embedding_model"] == "omlx-2"
+    # A row that omits the key entirely keeps it too.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "embedding_model": "omlx-3"}}})
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "local-secret"
+    # A non-empty value replaces it.
+    doc = search_anything.proposed({"source": "custom", "sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "new-secret"}}})
+    assert doc["rag"]["sources"]["custom"]["api_key"] == "new-secret"
+
+
+def test_the_settings_card_is_told_both_rows_and_no_secret():
+    """``public_settings()`` feeds each path's model ids to the card.
+
+    Without ``sources`` the card cannot show the ids of the path that is not in
+    force, so switching the radio would appear to have changed the models --
+    the defect claunch-pxxn4 fixes. ``api_key`` must not ride along in the row:
+    the card posts these rows straight back and ``_check_source_row`` refuses an
+    unknown key, so a secret in the row would also break every save
+    (claunch-pxxn4 leader review: a mutation dropping ``sources`` passed).
+    """
+    _rag_profile()
+    store.save({**store.load(), "rag": {"sources": {
+        "custom": {"base_url": "http://localhost:8000/v1", "api_key": "local-secret",
+                   "embedding_model": "omlx-embed", "rerank_model": "omlx-rerank"},
+        "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
+    }, "source": "profile"}})
+    public = search_anything.public_settings()
+    assert set(public["sources"]) == {"custom", "profile"}
+    assert public["sources"]["custom"]["embedding_model"] == "omlx-embed"
+    assert public["sources"]["custom"]["rerank_model"] == "omlx-rerank"
+    assert public["sources"]["profile"] == {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""}
+    assert "api_key" not in public["sources"]["custom"]
+    assert "local-secret" not in str(public) and "fw-secret" not in str(public)
+    assert public["api_key_set"]
+    # Every row sails through the save's own check, since the card posts it back.
+    assert search_anything.proposed({"source": "profile", "sources": public["sources"]})["rag"]["source"] == "profile"
+
+
 def test_profile_source_validation():
     _rag_profile()
     _rag_profile("anthropic-only", provider="anth", endpoints={"anthropic": "https://example.test/anthropic"})
