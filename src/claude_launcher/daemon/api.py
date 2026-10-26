@@ -11833,7 +11833,7 @@ async def h_session_stats(request: web.Request) -> web.Response:
 async def h_session_token_series(request: web.Request) -> web.Response:
     """The terminal overlay's chart: the context size of each request (fresh
     input, cache read and cache write) in request order, with the compaction
-    times (``?window=cap|full``, default ``cap`` = at most the last 12 hours;
+    times (``?window=cap|full``, default ``cap`` = the last 200 requests;
     the overlay's hover view asks for ``full``; ``?points=`` bounds the number
     of points, past which consecutive requests are grouped) and the times the
     session swapped its profile's token for a borrowed one or back

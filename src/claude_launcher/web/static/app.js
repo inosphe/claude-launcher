@@ -9256,8 +9256,8 @@ function tpsSparkline(series) {
    fresh input, cache read and cache write stacked (GET
    /api/sessions/<name>/token-series), one value per request on an axis of
    request order (every request the same width; the time of a request is in
-   the tick labels and the readout). The small chart shows the conversation
-   from its first request, at most the last twelve hours (window=cap); while
+   the tick labels and the readout). The small chart shows the last 200
+   requests of the conversation (window=cap, claunch-bx7o2); while
    the pointer is over the chart it grows and shows the whole conversation
    (window=full). A compaction is a vertical mark where the context falls.
    The overlay takes no pointer events, so only the charts switch them on. */
@@ -9629,7 +9629,8 @@ function termSeriesChart(data, zoom) {
   const compactions = (data.compactions || []).length;
   const last = pts[pts.length - 1];
   const asked = data.count || pts.length;
-  box.title = `context of ${asked} request${asked > 1 ? "s" : ""} over ${fmtAge(span)}; ` +
+  const of = data.requests > asked ? `the last ${asked} of ${data.requests}` : String(asked);
+  box.title = `context of ${of} request${asked > 1 ? "s" : ""} over ${fmtAge(span)}; ` +
     `last ${usageShort(termSeriesTotal(last))}, largest ${usageShort(peak)}` +
     (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
     (swaps.length ? `; ${swaps.length} profile swap${swaps.length > 1 ? "s" : ""}` : "") +

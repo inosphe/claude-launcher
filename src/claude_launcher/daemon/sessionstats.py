@@ -593,19 +593,23 @@ def summarize(main: StatsReader, sides: List[StatsReader], unit: str,
 
 # -- timeline ---------------------------------------------------------------
 
-#: The terminal overlay's chart: how many requests it draws at most, and the
-#: longest span the small chart shows (the hover view shows the whole
-#: conversation).
+#: The terminal overlay's chart: how many requests it draws at most, and how
+#: many of the last requests the small chart shows (the hover view shows the
+#: whole conversation). The small chart counts requests, not hours: a time
+#: span showed nothing for a session idle longer than it, and a busy one only
+#: a flat slice of its last compaction cycle. Measured gaps between
+#: compactions were 99 to 308 requests (s1020, s29, s1937; claunch-bx7o2), so
+#: 200 usually holds the last fall.
 SERIES_POINTS = 600
 SERIES_POINTS_MAX = 2000
-SERIES_CAP_S = 12 * 3600.0
+SERIES_CAP_REQUESTS = 200
 SERIES_WINDOWS = ("cap", "full")
 
 
 def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
            points: int = SERIES_POINTS, now: Optional[float] = None) -> dict:
     """The context size of each request of the conversation, in request order,
-    from its first request (at most :data:`SERIES_CAP_S` back for
+    from its first request (only the last :data:`SERIES_CAP_REQUESTS` for
     ``window="cap"``) up to ``now``, plus the times of its compactions.
 
     A request's context is what it sent to the model: fresh input, cache read
@@ -629,10 +633,12 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
         return {"window": window, "points": [], "compactions": [], "count": 0,
                 "since": None, "until": end}
     first = requests[0][0]
-    start = first if window == "full" else max(first, end - SERIES_CAP_S)
+    numbered = list(enumerate(requests, 1))
+    if window == "cap":
+        numbered = numbered[-SERIES_CAP_REQUESTS:]
+    start = numbered[0][1][0]
     end = max(end, requests[-1][0])
     start = min(start, end - 60.0)
-    numbered = [(n, r) for n, r in enumerate(requests, 1) if r[0] >= start]
     step = max(1, -(-len(numbered) // points))
     rows = []
     for i in range(0, len(numbered), step):
