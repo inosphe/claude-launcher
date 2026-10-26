@@ -2056,3 +2056,36 @@ def test_a_strict_cp949_stdout_does_not_cost_the_receipt(repo, receipts, monkeyp
     filed = json.loads(sweep.receipt_path(repo, commit, receipts).read_text("utf-8"))
     assert filed["counts"] == {"failed": 1, "passed": 2}
     assert filed["exit_code"] == 1
+
+
+def test_a_borrowed_sweep_files_the_remote_runs_receipt(repo, receipts, monkeypatch):
+    """claunch-ohsyx: another machine ran this sweep; the receipt is filed
+    from its output and junit report and names where it ran."""
+    junit = ('<testsuite><testcase file="tests/test_a.py" classname="tests.test_a" '
+             'name="test_s"><skipped message="no tool"/></testcase></testsuite>')
+    remote = {"exit_code": 0, "output": "3 passed, 1 skipped in 2.0s\n", "junit": junit,
+              "machine": "other", "platform": "Linux", "python": "3.12", "recipe": "commit",
+              "tree": "t" * 40, "duration": 2.0, "argv": ["python", "-m", "pytest", "tests"]}
+    offered = []
+
+    def borrowed(cls, **kwargs):
+        offered.append(kwargs)
+        raise sweep.test_window.RemoteResult(remote)
+
+    monkeypatch.setattr(sweep.test_window, "acquire", borrowed)
+    assert _run(repo, receipts) == 0
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "master"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    receipt = json.loads(sweep.receipt_path(repo, commit, receipts).read_text())
+    assert receipt["counts"] == {"passed": 3, "skipped": 1}
+    assert receipt["window"]["source"] == "borrowed"
+    assert receipt["window"]["borrowed"]["machine"] == "other"
+    assert receipt["skips"] == [{"nodeid": "tests/test_a.py::test_s", "reason": "no tool"}]
+    assert receipt["command"].startswith("borrowed by other:")
+    # The sweep offered its pytest arguments; borrow_info drops this
+    # machine's basetemp before they travel.
+    args = offered[0]["borrow_args"]
+    assert args[0] == "tests"
+    portable = sweep.test_window.portable_args(args, repo, repo)
+    assert portable[0] == "tests" and not any(a.startswith("--basetemp") for a in portable)
+    assert offered[0]["borrow_cwd"] == str(repo.resolve())

@@ -147,7 +147,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -778,6 +778,41 @@ def _say(text: str, *, file=None) -> None:
               file=stream, flush=True)
 
 
+def _remote_run(remote: dict):
+    """A sweep another machine ran for this one (claunch-ohsyx), in the shape
+    the local run leaves: the command, a finished process, the skips from
+    its junit report, when it started and the window part of the receipt.
+    The lender's window recorded the run's result when it handed it over."""
+    from types import SimpleNamespace
+
+    seconds = float(remote.get("duration") or 0.0)
+    started = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    proc = SimpleNamespace(returncode=test_window.RemoteResult(remote).exit_code,
+                           stdout=remote.get("output") or "", stderr="")
+    skips = None
+    if remote.get("junit"):
+        junit_dir = Path(tempfile.mkdtemp(prefix="sweep-borrowed-",
+                                          dir=os.environ.get("CLAUNCH_SCRATCH") or None))
+        try:
+            junit_file = junit_dir / "junit.xml"
+            junit_file.write_text(remote["junit"], encoding="utf-8")
+            skips = parse_skips(junit_file)
+        finally:
+            shutil.rmtree(junit_dir, ignore_errors=True)
+    machine = remote.get("machine") or "?"
+    command = "borrowed by {}: {}".format(machine, " ".join(remote.get("argv") or []))
+    _say(f"sweep: borrowed and run on {machine} ({remote.get('platform') or '?'}); "
+         f"exit {proc.returncode}")
+    window = {
+        "class": test_window.SWEEP,
+        "holder": f"borrowed by {machine}",
+        "source": "borrowed",
+        "borrowed": {k: remote.get(k) for k in
+                     ("machine", "platform", "python", "recipe", "tree", "output_truncated")},
+    }
+    return command, proc, skips, started, window
+
+
 def cmd_run(args) -> int:
     repo = (args.repo or Path(".")).resolve()
     try:
@@ -823,65 +858,84 @@ def cmd_run(args) -> int:
         return CANNOT_TELL
 
     session = os.environ.get("CLAUNCH_SESSION", "sweep")
+    # Another machine may run this sweep while it waits (claunch-ohsyx); it
+    # rebuilds this tree from the shared remote and runs these arguments.
+    # Looked up, not imported: the delayed-sweep runner loads this file into
+    # a daemon whose test_window may predate borrowing.
+    pytest_args_of = getattr(test_window, "pytest_args_of", None)
+    borrow = {}
+    if pytest_args_of is not None and not dirty:
+        found = pytest_args_of(args.command or default_command(session))
+        if found is not None:
+            borrow = {"borrow_args": found, "borrow_cwd": str(repo)}
+    remote = None
     try:
         grant = test_window.acquire(
             test_window.SWEEP,
             label=f"sweep.py run --branch {args.branch}",
             priority=getattr(args, "priority", 0),
+            **borrow,
         )
     except test_window.WindowUnavailable as exc:
         print(f"cannot sweep: {exc}", file=sys.stderr)
         return CANNOT_TELL
+    except getattr(test_window, "RemoteResult", ()) as exc:
+        remote, grant = exc.remote, None
 
-    command = args.command or default_command(session, grant.advisory_n)
-    if not args.command:
-        # pytest creates the basetemp but not the root it sits in.
-        pytest_basetemp.ensure(pytest_basetemp.root())
+    if remote is None:
+        command = args.command or default_command(session, grant.advisory_n)
+        if not args.command:
+            # pytest creates the basetemp but not the root it sits in.
+            pytest_basetemp.ensure(pytest_basetemp.root())
 
-    started = datetime.now(timezone.utc)
-    _say(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}")
-    # The suite's output is read as utf-8 with undecodable bytes replaced,
-    # never with the locale ``text=True`` picks. Measured at 5516c651c732 on a
-    # cp949 machine: the first Korean byte in a failure dump
-    # (``ec 9d bd``, position 3772) raised UnicodeDecodeError inside
-    # subprocess.run's reader thread, which left ``proc.stdout`` at ``None``
-    # and filed a receipt with ``counts {}``, ``failures []`` and a 0-byte
-    # output file. The gate reads that as red -- correctly -- but nothing on
-    # disk could say WHAT was red, so a real failure and a broken judge looked
-    # identical. ``errors="replace"`` is what keeps the summary line (ASCII)
-    # readable even when the bytes around it are not.
-    #
-    # The child's own encoding is deliberately left alone. Handing the suite
-    # ``PYTHONIOENCODING``/``PYTHONUTF8`` would make the sweep judge a process
-    # the operator's own ``pytest`` never runs, which is how a sweep goes green
-    # over a tip that is red in the default environment.
-    suite_home = Path(tempfile.mkdtemp(
-        prefix="sweep-home-", dir=os.environ.get("CLAUNCH_SCRATCH") or None))
-    result_file = suite_home.with_name(suite_home.name + ".result.json")
-    junit_file = suite_home.with_name(suite_home.name + ".junit.xml")
-    clock = time.monotonic()
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=junit_env(suite_env(grant, suite_home, result_file), junit_file),
-        )
-        _report_window(grant, result_file, proc.returncode,
-                       (proc.stdout or "") + (proc.stderr or ""), time.monotonic() - clock)
-        skips = parse_skips(junit_file)
-    finally:
-        grant.release()
-        # Anything left here is a test that wrote to the launcher home it was
-        # handed instead of its own; the receipt names it.
-        home_writes = sorted(p.name for p in suite_home.iterdir())
-        shutil.rmtree(suite_home, ignore_errors=True)
-        result_file.unlink(missing_ok=True)
-        junit_file.unlink(missing_ok=True)
+        started = datetime.now(timezone.utc)
+        _say(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}")
+        # The suite's output is read as utf-8 with undecodable bytes replaced,
+        # never with the locale ``text=True`` picks. Measured at 5516c651c732 on a
+        # cp949 machine: the first Korean byte in a failure dump
+        # (``ec 9d bd``, position 3772) raised UnicodeDecodeError inside
+        # subprocess.run's reader thread, which left ``proc.stdout`` at ``None``
+        # and filed a receipt with ``counts {}``, ``failures []`` and a 0-byte
+        # output file. The gate reads that as red -- correctly -- but nothing on
+        # disk could say WHAT was red, so a real failure and a broken judge looked
+        # identical. ``errors="replace"`` is what keeps the summary line (ASCII)
+        # readable even when the bytes around it are not.
+        #
+        # The child's own encoding is deliberately left alone. Handing the suite
+        # ``PYTHONIOENCODING``/``PYTHONUTF8`` would make the sweep judge a process
+        # the operator's own ``pytest`` never runs, which is how a sweep goes green
+        # over a tip that is red in the default environment.
+        suite_home = Path(tempfile.mkdtemp(
+            prefix="sweep-home-", dir=os.environ.get("CLAUNCH_SCRATCH") or None))
+        result_file = suite_home.with_name(suite_home.name + ".result.json")
+        junit_file = suite_home.with_name(suite_home.name + ".junit.xml")
+        clock = time.monotonic()
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=junit_env(suite_env(grant, suite_home, result_file), junit_file),
+            )
+            _report_window(grant, result_file, proc.returncode,
+                           (proc.stdout or "") + (proc.stderr or ""), time.monotonic() - clock)
+            skips = parse_skips(junit_file)
+        finally:
+            grant.release()
+            # Anything left here is a test that wrote to the launcher home it was
+            # handed instead of its own; the receipt names it.
+            home_writes = sorted(p.name for p in suite_home.iterdir())
+            shutil.rmtree(suite_home, ignore_errors=True)
+            result_file.unlink(missing_ok=True)
+            junit_file.unlink(missing_ok=True)
+        window_receipt = grant.receipt()
+    else:
+        command, proc, skips, started, window_receipt = _remote_run(remote)
+        home_writes = []
     finished = datetime.now(timezone.utc)
     # A stream that came back as ``None`` is not an empty stream: the reader
     # died and took the output with it. Both states parse to ``counts {}``, and
@@ -903,7 +957,7 @@ def cmd_run(args) -> int:
         "failures": _failure_lines(output),
         "dirty": bool(dirty),
         "session": session,
-        "window": grant.receipt(),
+        "window": window_receipt,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),

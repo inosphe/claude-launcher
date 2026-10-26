@@ -19,14 +19,16 @@ switching it off for itself is the case the window was built against.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, Iterator, Mapping, Optional
+from typing import BinaryIO, Iterator, Mapping, Optional, Sequence
 
 from . import daemon_client
 from .daemon import paths
@@ -52,6 +54,8 @@ WINDOW_RESULT_FILE_ENV = "CLAUNCH_WINDOW_RESULT_FILE"
 #: ``CLAUNCH_SESSION`` so it outlives its leader). Shown on the Window page and
 #: in the run history; the daemon never treats it as the grant's owner.
 WINDOW_REQUESTED_BY_ENV = "CLAUNCH_WINDOW_REQUESTED_BY"
+#: ``0`` keeps a run from being offered to other machines (claunch-ohsyx).
+WINDOW_BORROW_ENV = "CLAUNCH_WINDOW_BORROW"
 
 DEFAULT_WAIT = 1800.0
 DEFAULT_SWEEP_WORKERS = 8
@@ -63,6 +67,27 @@ FALLBACK_TARGETED_SLOTS = 3
 
 class WindowUnavailable(RuntimeError):
     """The arbiter answered but did not grant the requested window."""
+
+
+class RemoteResult(Exception):
+    """Another machine ran this request and sent its result (claunch-ohsyx).
+
+    Raised by :func:`acquire` instead of returning a grant: there is nothing
+    left to run here. ``remote`` carries ``exit_code``, the output's tail,
+    the junit report and the window result; :func:`replay_remote` turns it
+    into this pytest's own ending.
+    """
+
+    def __init__(self, remote: dict):
+        self.remote = remote
+        try:
+            self.exit_code = int(remote.get("exit_code"))
+        except (TypeError, ValueError):
+            self.exit_code = 3
+        super().__init__(
+            f"this run was borrowed by {remote.get('machine') or 'another machine'} "
+            f"and finished there with exit {self.exit_code}"
+        )
 
 
 @dataclass
@@ -149,12 +174,19 @@ def acquire(
     session: Optional[str] = None,
     workers: int = 0,
     priority: int = 0,
+    borrow_args: Optional[Sequence[str]] = None,
+    borrow_cwd: Optional[str] = None,
 ) -> WindowGrant:
     """Acquire a daemon grant, or the documented deployment fallback.
 
     ``workers`` is the xdist width the run wants (0 = the class ceiling); a
     run that will not use xdist should say 1, so the machine's worker budget
     is charged what the run actually spends.
+
+    ``borrow_args`` are the run's pytest arguments. With them a queued
+    request may be borrowed by another machine (claunch-ohsyx): the answer
+    is then that machine's result, raised as :class:`RemoteResult`.
+    ``borrow_cwd`` is where the run runs (default: this process's cwd).
     """
     if cls not in CLASSES:
         raise ValueError(f"unknown test window class {cls!r}")
@@ -210,6 +242,10 @@ def acquire(
         requested_by = os.environ.get(WINDOW_REQUESTED_BY_ENV, "").strip()
         if requested_by and not owner:
             body["requested_by"] = requested_by
+        if borrow_args is not None and wait > 0 and _borrow_on():
+            info = borrow_info(borrow_args, cwd=borrow_cwd)
+            if info is not None:
+                body["borrow"] = info
         # Said before the POST, which blocks until the grant or the budget runs
         # out. Without it a run that queues on the machine's window and is then
         # killed by its own shell `timeout` leaves no output at all, and
@@ -235,6 +271,10 @@ def acquire(
             if priority < 0:
                 raise WindowUnavailable("background tests require the daemon priority queue") from exc
             return _fallback(cls, owner, started, wait, reason=str(exc))
+        if result.get("borrowed"):
+            result = _await_borrowed(client, result, cls, owner, started, wait, priority)
+            if isinstance(result, WindowGrant):
+                return result
         if result.get("granted"):
             fallback = (
                 DEFAULT_SWEEP_WORKERS if cls == SWEEP else DEFAULT_TARGETED_WORKERS
@@ -267,6 +307,211 @@ def acquire(
     if priority < 0:
         raise WindowUnavailable("background tests require the daemon priority queue")
     return _fallback(cls, owner, started, wait, reason="daemon unavailable")
+
+
+# ---- remote borrowing (claunch-ohsyx) --------------------------------------- #
+
+#: How long one await step may keep the connection (daemon/window.py
+#: ``AWAIT_STEP``), and how many failed steps in a row end the wait.
+AWAIT_STEP = 60.0
+AWAIT_RETRIES = 3
+
+#: pytest options whose value is a path of this machine's run, not of the
+#: test selection; another machine sets its own.
+_MACHINE_OPTIONS = ("--basetemp", "--junit-xml", "--junitxml", "--result-log")
+
+
+def _borrow_on() -> bool:
+    return os.environ.get(WINDOW_BORROW_ENV, "").strip().lower() not in ("0", "off", "no", "false")
+
+
+def _git_out(cwd: Path, *args: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def portable_args(args: Sequence[str], cwd: Path, top: Path) -> Optional[list]:
+    """``args`` as another checkout of the repository can run them, or None.
+
+    The machine's own outputs (basetemp, a junit path) are dropped; an
+    absolute path inside the repository becomes relative to ``cwd``; one
+    outside it cannot be reproduced elsewhere, so the run is not portable.
+    """
+    out: list = []
+    skip = False
+    for raw in [str(a) for a in args]:
+        if skip:
+            skip = False
+            continue
+        name, eq, value = raw.partition("=")
+        if name in _MACHINE_OPTIONS:
+            skip = not eq
+            continue
+        target = value if (eq and raw.startswith("-")) else raw
+        path_part = target.split("::", 1)[0]
+        if path_part and os.path.isabs(path_part):
+            try:
+                rel = Path(path_part).resolve().relative_to(top)
+            except ValueError:
+                return None
+            fixed = os.path.relpath(top / rel, cwd).replace(os.sep, "/")
+            target = fixed + target[len(path_part):]
+            raw = f"{name}={target}" if (eq and raw.startswith("-")) else target
+        out.append(raw)
+    return out
+
+
+def borrow_info(args: Sequence[str], cwd: Optional[str] = None) -> Optional[dict]:
+    """What another machine needs to run this pytest in its own checkout.
+
+    None outside a git repository. A dirty tree is still described, with
+    ``dirty``: the lender's page then says why it cannot be borrowed.
+    """
+    here = Path(cwd or os.getcwd()).resolve()
+    top_s = _git_out(here, "rev-parse", "--show-toplevel")
+    if not top_s:
+        return None
+    top = Path(top_s).resolve()
+    head = _git_out(top, "rev-parse", "HEAD")
+    tree = _git_out(top, "rev-parse", "HEAD^{tree}")
+    status = _git_out(top, "status", "--porcelain")
+    if not head or not tree or status is None:
+        return None
+    try:
+        rel = here.relative_to(top).as_posix()
+    except ValueError:
+        return None
+    return {
+        "v": 1,
+        "toplevel": str(top),
+        "rel_cwd": "" if rel == "." else rel,
+        "head": head,
+        "tree": tree,
+        "dirty": bool(status),
+        "pytest_args": portable_args(args, here, top),
+    }
+
+
+def pytest_args_of(command: str) -> Optional[list]:
+    """The pytest arguments of a shell command line that runs pytest
+    (``uv run --no-sync pytest ...``, ``<python> -m pytest ...``); None for
+    any other command."""
+    import shlex
+
+    try:
+        words = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        return None
+    for index, word in enumerate(words):
+        stem = Path(word.strip('"')).name.lower()
+        if stem in ("pytest", "pytest.exe", "py.test"):
+            return words[index + 1:]
+        if word == "-m" and index + 1 < len(words) and words[index + 1] == "pytest":
+            return words[index + 2:]
+    return None
+
+
+def requested_width_of(args: Sequence[str]) -> int:
+    """The xdist width ``args`` ask for: 1 without ``-n``, 0 for ``auto``."""
+    args = [str(a) for a in args]
+    for index, arg in enumerate(args):
+        value = None
+        if arg in ("-n", "--numprocesses") and index + 1 < len(args):
+            value = args[index + 1]
+        elif arg.startswith("--numprocesses="):
+            value = arg.split("=", 1)[1]
+        elif arg.startswith("-n") and len(arg) > 2:
+            value = arg[2:]
+        if value is not None:
+            return int(value) if value.isdigit() else 0
+    return 1
+
+
+def _await_borrowed(client, answer: dict, cls: str, owner: Optional[str],
+                    started: float, wait: float, priority: int):
+    """Wait for a borrowed request: its remote result, or a grant here once
+    the borrow ends. Returns a grant or the final answer dict; raises
+    :class:`RemoteResult` for a result."""
+    grant_id = str(answer.get("grant_id") or "")
+    seen = None
+    failures = 0
+    while True:
+        borrowed = answer.get("borrowed")
+        if borrowed:
+            line = (borrowed.get("machine"), borrowed.get("phase"))
+            if line != seen:
+                seen = line
+                print(f"test window: this run is borrowed by {line[0]} ({line[1]}); "
+                      "waiting for its result…", file=sys.stderr, flush=True)
+        elif seen is not None:
+            seen = None
+            print("test window: the borrow ended; waiting here again…",
+                  file=sys.stderr, flush=True)
+        try:
+            answer = client.post("/api/window/await",
+                                 {"grant_id": grant_id, "wait": AWAIT_STEP},
+                                 timeout=AWAIT_STEP + 15.0)
+            failures = 0
+        except daemon_client.DaemonClientError as exc:
+            failures += 1
+            if failures < AWAIT_RETRIES:
+                time.sleep(5.0)
+                continue
+            if priority < 0:
+                raise WindowUnavailable("background tests require the daemon priority queue") from exc
+            left = max(0.0, wait - (time.monotonic() - started))
+            return _fallback(cls, owner, started, left, reason=str(exc))
+        if answer.get("remote"):
+            raise RemoteResult(answer["remote"])
+        if answer.get("pending"):
+            continue
+        return answer
+
+
+def replay_remote(config, remote: dict, *, result_file: Optional[str] = None) -> None:
+    """End this pytest as the borrowed run ended: its output, its junit
+    report at this run's ``--junit-xml``, its window result in the result
+    file, and its exit code. Does not return (``pytest.exit``)."""
+    import json
+
+    import pytest
+
+    machine = remote.get("machine") or "another machine"
+    header = (f"claunch window: this run was borrowed and ran on {machine} "
+              f"({remote.get('platform') or '?'}, Python {remote.get('python') or '?'}, "
+              f"{remote.get('recipe') or '?'} recipe, tree {str(remote.get('tree') or '')[:12]})")
+    text = remote.get("output") or ""
+    if remote.get("output_truncated"):
+        text = "[… earlier output cut; the tail follows]\n" + text
+    capman = config.pluginmanager.get_plugin("capturemanager")
+    ctx = capman.global_and_fixture_disabled() if capman is not None else contextlib.nullcontext()
+    with ctx:
+        sys.stdout.write(header + "\n" + text + ("" if text.endswith("\n") else "\n"))
+        sys.stdout.flush()
+    xmlpath = getattr(config.option, "xmlpath", None)
+    if xmlpath:
+        try:
+            from _pytest.junitxml import xml_key
+
+            xml = config.stash.get(xml_key, None)
+            if xml is not None:
+                # Its sessionfinish would write an empty report over this one.
+                config.pluginmanager.unregister(xml)
+        except Exception:  # noqa: BLE001 — a pytest without that internal
+            pass
+        if remote.get("junit"):
+            Path(xmlpath).parent.mkdir(parents=True, exist_ok=True)
+            Path(xmlpath).write_text(remote["junit"], encoding="utf-8")
+    if result_file and remote.get("window_result"):
+        Path(result_file).write_text(json.dumps(remote["window_result"]), encoding="utf-8")
+    code = RemoteResult(remote).exit_code
+    pytest.exit(f"borrowed run on {machine} finished with exit {code}", returncode=code)
 
 
 def _fallback(
