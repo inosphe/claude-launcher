@@ -159,14 +159,19 @@ def child_env(
 
     The same reasoning bounds the profile's own final say. A profile that pins
     model ids or a base URL is describing *its* backend, so those pins stop
-    being true the moment this run talks to another one -- a borrow of a
-    lender on a different provider, or an explicit ``--provider``. Keeping
-    them then produces the one combination that cannot work: the lender's
-    endpoint asked for the borrower's model ids. So the profile layer keeps
-    final say over every key, except that :data:`BACKEND_ENV_KEYS` are dropped
-    from it when the backend in play is not the profile's own (see
-    :func:`_profile_backend_pins_apply`). Borrowing inside one provider is
-    unchanged: the pins still describe the backend being used.
+    being true the moment this run talks to another one -- a borrow, or an
+    explicit ``--provider``. Keeping them then produces the one combination
+    that cannot work: the lender's endpoint asked for the borrower's model ids.
+    So the profile layer keeps final say over every key, except that
+    :data:`BACKEND_ENV_KEYS` are dropped from it when the backend in play is
+    not the profile's own (see :func:`_profile_backend_pins_apply`).
+
+    Model ids go one step further on a borrow: they are the lender's, role for
+    role (:func:`_borrowed_model_env`), because the ids name the backend and a
+    borrow moves the backend to the lender. That is what sends ``haiku`` to
+    the lender's ``small`` and ``opus`` to its ``large``. A dynamic provider
+    is the exception — there the shim resolves models per request, so no
+    launch-time id is written at all.
     """
     harness = harnesses.get(harnesses.CLAUDE_HARNESS)
     if harness is None:
@@ -200,6 +205,7 @@ def child_env(
     env.update(template_env)
     provider_env: dict = {}
     lender_env: dict = {}
+    borrowed_models: dict = {}
     if with_token:
         # A `--borrow` swaps auth, and the backend it talks to, to the lender:
         # the running profile's config dir and skills stay put, but the lender's
@@ -250,7 +256,36 @@ def child_env(
         profile_env = {
             k: v for k, v in profile_env.items() if k not in BACKEND_ENV_KEYS
         }
+    lender_models = with_token and borrow is not None and not routing.dynamic(provider)
+    if lender_models:
+        # A borrow moves the backend to the lender, so the model ids come from
+        # the lender too — the running profile's pins describe the other
+        # profile's tiers, and passing them on asks the lender's endpoint for
+        # ids it may not serve. They go entirely, including the ones the lender
+        # leaves unset, and the lender's own resolution takes their place:
+        # ``small``/``haiku`` from its ``small``, ``large``/``opus`` from its
+        # ``large``. This holds inside one provider as well, because the point
+        # of a borrow is to run as the lender does. A dynamic provider keeps
+        # its model vars off the wire entirely (see above), and the shim
+        # resolves the aliases per request instead.
+        borrowed_models = _borrowed_model_env(borrow, provider)
+        profile_env = {
+            k: v
+            for k, v in profile_env.items()
+            if k not in provider_spec.CLAUDE_MODEL_KEYS
+        }
     env.update(profile_env)
+    if lender_models:
+        # Every model key still standing came from the running profile's own
+        # ``models:`` (through the provider translation) or from the lender's
+        # raw env, and the second source is already folded into
+        # ``borrowed_models``. Clearing them all before the lender's
+        # resolution goes on leaves no role to the running profile — the ones
+        # the lender leaves unset stay unset instead of falling back to the
+        # borrower's ids on the lender's endpoint.
+        for key in provider_spec.CLAUDE_MODEL_KEYS:
+            env.pop(key, None)
+        env.update(borrowed_models)
     if with_token:
         if not providers.uses_anthropic_oauth(provider):
             # A provider is overriding the backend: auth comes from the
@@ -319,6 +354,41 @@ def child_env(
     return env
 
 
+def _borrowed_model_env(
+    lender: Profile, provider: str, doc: Optional[dict] = None
+) -> dict:
+    """The model variables a borrow of ``lender`` puts in play, and nothing else.
+
+    A borrow runs on the lender's backend, so the ids must come from the
+    lender: the answer is the model half of what a launch *of the lender* would
+    assemble — the provider's translation over the template, each profile layer
+    in the lender's chain (its ``models:``, its ``context_window`` tag), and
+    finally the lender's own env, which keeps its usual final say. Cutting that
+    down to :data:`provider_spec.CLAUDE_MODEL_KEYS` is what keeps everything
+    else the lender holds — settings, flags, its other backend keys — on its
+    own side of the borrow.
+
+    ``provider`` is the backend in play; it is the lender's own unless an
+    explicit ``--provider`` moved the launch elsewhere, in which case the
+    lender's pins stop describing it and its backend's table answers.
+    """
+    try:
+        env = providers.claude_env(
+            lender,
+            provider,
+            doc,
+            overlay_models=(provider == providers.resolve_name(lender, doc)),
+        )
+    except providers.ProviderError as exc:
+        raise RunnerError(str(exc)) from exc
+    env.update(lineage.chain_env(lender, doc))
+    return {
+        key: value
+        for key, value in env.items()
+        if key in provider_spec.CLAUDE_MODEL_KEYS
+    }
+
+
 def claude_model_env(
     profile: Profile,
     *,
@@ -329,10 +399,11 @@ def claude_model_env(
     """The model keys a claude launch on ``profile`` ends up with.
 
     The layers :func:`child_env` applies, in the same order and with the same
-    two rules — a lender's env when borrowing, and the profile's own backend
-    pins dropped when the backend in play is not its own — but only the model
-    keys (:data:`provider_spec.CLAUDE_MODEL_KEYS`), and none of the token work
-    a launch needs.
+    three rules — a lender's env when borrowing, the profile's own backend
+    pins dropped when the backend in play is not its own, and the lender's
+    own model resolution last on a borrow — but only the model keys
+    (:data:`provider_spec.CLAUDE_MODEL_KEYS`), and none of the token work a
+    launch needs.
 
     A session-start form asks this to say which backend model a *choice*
     (``sonnet``) actually reaches. That is a fact nothing else on the surface
@@ -362,7 +433,23 @@ def claude_model_env(
             for key, value in profile_env.items()
             if key not in BACKEND_ENV_KEYS
         }
+    borrowed_models: dict = {}
+    lender_models = borrow is not None and not routing.dynamic(provider)
+    if lender_models:
+        borrowed_models = _borrowed_model_env(borrow, provider, doc)
+        profile_env = {
+            key: value
+            for key, value in profile_env.items()
+            if key not in provider_spec.CLAUDE_MODEL_KEYS
+        }
     env.update(profile_env)
+    if lender_models:
+        # Same rule as :func:`child_env`: nothing the running profile put on
+        # the wire survives a borrow's model resolution, so a role the lender
+        # leaves unset stays unset.
+        for key in provider_spec.CLAUDE_MODEL_KEYS:
+            env.pop(key, None)
+    env.update(borrowed_models)
     return {
         key: value
         for key, value in env.items()
@@ -483,14 +570,16 @@ def harness_translation(
     ``settings.json``): the caller's choice wins over the profile's, and a
     profile effort the provider cannot encode is dropped here exactly as in
     the env projection, so both surfaces stay in step.
+
+    ``borrow`` takes the model table from the lender (``providers.launch_spec``)
+    while every other spec field stays the running profile's, so a declared
+    harness lists the lender's models the same way a Claude launch asks for
+    them.
     """
     auth_source = borrow if borrow is not None else profile
     try:
-        own = providers.resolve_name(profile)
         provider = providers.resolve_name(auth_source)
-        spec = providers.spec_for(
-            profile, provider, overlay_models=(provider == own)
-        )
+        spec = providers.launch_spec(profile, provider, borrow=borrow)
     except providers.ProviderError as exc:
         raise RunnerError(str(exc)) from exc
     if harness.provider_adapter == pi_provider.ADAPTER:
@@ -517,20 +606,31 @@ def harness_launch_args(
     *,
     tools: Optional[Sequence[str]] = None,
     effort: Optional[str] = None,
+    borrow: Optional[Profile] = None,
 ) -> list[str]:
     """Prepend the harness's translated launch arguments, then its adapter.
 
     Translated arguments (Codex's ``-c`` overrides) go first so anything the
     session passes explicitly is seen later by the harness and wins.
     ``tools`` is a session's explicit builtin-tool choice; ``None`` takes the
-    profile's default.
+    profile's default. ``borrow`` is the profile whose token the launch
+    spends, and it decides which model table the translated arguments and the
+    adapter's default model come from — the same answer
+    :func:`harness_translation` and :func:`harness_child_env` reach.
     """
     if harness.builtin:
         return list(args)
-    translated = harness_translation(profile, harness, effort=effort).args
+    translated = harness_translation(
+        profile, harness, borrow=borrow, effort=effort
+    ).args
     try:
         return pi_provider.launch_args(
-            profile, harness, [*translated, *args], tools=tools, effort=effort
+            profile,
+            harness,
+            [*translated, *args],
+            tools=tools,
+            effort=effort,
+            borrow=borrow,
         )
     except pi_provider.PiProviderError as exc:
         raise RunnerError(str(exc)) from exc
@@ -685,7 +785,7 @@ def _plain_spawn(
     cmd = [
         *harness.launch_command(),
         *harness_launch_args(
-            profile, harness, [*harness.args, *args], tools=tools
+            profile, harness, [*harness.args, *args], tools=tools, borrow=borrow
         ),
     ]
     try:

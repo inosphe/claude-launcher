@@ -218,8 +218,8 @@ def test_the_model_list_is_what_spawn_resolves(monkeypatch, harness):
         prof = _codex()
         monkeypatch.setattr(input_options.providers, "spec_for",
                             lambda p, **kw: _Declares({"large": "gpt-big"}))
-        monkeypatch.setattr(spawn.providers, "spec_for",
-                            lambda p, **kw: _Declares({"large": "gpt-big"}))
+        monkeypatch.setattr(spawn.providers, "launch_spec",
+                            lambda p, *a, **kw: _Declares({"large": "gpt-big"}))
     else:
         prof = profile.create("work")
     listed = set(input_options.Catalog().models(prof.name))

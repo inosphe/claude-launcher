@@ -1583,10 +1583,48 @@ def test_a_codex_preset_needs_the_id_its_profile_declares(monkeypatch):
         def model(self, role):
             return {"small": "gpt-mini"}.get(role)
 
-    monkeypatch.setattr(spawn.providers, "spec_for", lambda prof: _Spec())
+    monkeypatch.setattr(
+        spawn.providers, "launch_spec", lambda prof, *a, **k: _Spec()
+    )
     child = spawn.check(_policy(allow_args=True), {"model": "small"},
                         parent=parent, depth=0, children=0)
     assert child["model"] == "gpt-mini"
+
+
+def test_a_borrowing_child_reads_its_preset_from_the_lender(home):
+    """A preset names a slot of the table the launch will run on.
+
+    A borrowing child runs on the lender's backend, so ``small`` is the
+    lender's id — the same answer :func:`providers.launch_spec` gives the env
+    and the harness arguments. The seat and the lender declare different ids
+    on purpose: with one id on both sides a preset read from the wrong table
+    would still look correct.
+    """
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"shared": {"models": {"small": "provider-small"}}}
+        )
+    )
+    seat = profile.create("cx")
+    lineage.set_harness(seat, "codex")
+    store.set_profile_field("cx", "provider", "shared")
+    store.set_profile_field("cx", "models", {"small": "seat-small"})
+    lender = profile.create("lender")
+    store.set_profile_field("lender", "provider", "shared")
+    store.set_profile_field("lender", "models", {"small": "lender-small"})
+
+    parent = {**PARENT, "harness": "codex", "profile": "cx:codex"}
+    policy = _policy(allow_args=True, allow_profile=True)
+
+    own = spawn.check(policy, {"model": "small"}, parent=parent, depth=0, children=0)
+    borrowed = spawn.check(
+        policy, {"model": "small", "borrow": "lender"},
+        parent=parent, depth=0, children=0,
+    )
+
+    assert own["model"] == "seat-small"
+    assert borrowed["borrow"] == "lender"
+    assert borrowed["model"] == "lender-small"
 
 
 def test_a_claude_fork_onto_another_profile_carries_the_transcript(short_cwd):

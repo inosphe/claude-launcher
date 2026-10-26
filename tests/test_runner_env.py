@@ -5,6 +5,7 @@ the stored ``set-token`` secret must override any plaintext
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -404,18 +405,15 @@ def test_borrow_keeps_running_profile_env_over_lender_provider(home):
     assert env["ANTHROPIC_MODEL"] == "lender-model"
 
 
-def test_borrow_lends_profile_env_above_provider_below_runner(home):
-    # Borrow carries the lender's provider *and* its env: the lender's env is a
-    # fill layer above the provider's defaults, so a key the runner never sets
-    # shows through the way the lender's own backend would use it natively —
-    # while the runner's env still wins for any key it does set, and a key
-    # neither profile sets falls through to the provider.
+def test_borrow_lends_model_ids_from_the_lender_only(home):
+    # Borrow carries the lender's provider, its env *and its model ids*: a
+    # borrow runs as the lender's backend does, so every model variable is the
+    # lender's — its own env where it sets one, the provider's translation
+    # where it does not. The running profile's model pins are the other
+    # profile's tiers and never cross into the lender's backend.
     runner_p = profile.create("work")
     settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-model"})
     lender = profile.create("glmprof")
-    # Same provider on both sides, so the runner's pins still describe the
-    # backend in play and keep their final say. Across providers they do not:
-    # test_borrow_across_providers_drops_running_profile_model_pins.
     settings.set_env(
         lender,
         {
@@ -441,9 +439,51 @@ def test_borrow_lends_profile_env_above_provider_below_runner(home):
     store.set_profile_field("work", "provider", "backend")
     store.set_profile_field("glmprof", "provider", "backend")
     env = runner.child_env(runner_p, with_token=True, borrow=lender)
-    assert env["ANTHROPIC_MODEL"] == "runner-model"  # runner's own key still wins
-    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "lender-opus"  # lender fills the gap
-    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-sonnet"  # provider falls through
+    assert env["ANTHROPIC_MODEL"] == "lender-model"  # lender's own key wins
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "lender-opus"  # lender's own key
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-sonnet"  # lender's backend
+    assert "runner-model" not in env.values()  # the seat's pins do not cross
+
+
+def test_borrow_carries_model_ids_by_role(home):
+    """The requested mapping: same tier to same tier, read off the lender.
+
+    The lender declares its backend's roles in ``models:``; the launch that
+    borrows it asks the backend for those ids, not for whatever the running
+    profile happens to pin. ``small``/``haiku`` reach the lender's ``small``,
+    ``large``/``opus`` its ``large``, and ``default``/``sonnet`` its default.
+    """
+    runner_p = profile.create("ds4")
+    settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-large"})
+    lender = profile.create("glm-flash")
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "fireworks": {
+                        "models": {
+                            "default": "provider-default",
+                            "small": "provider-small",
+                            "large": "provider-large",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field("glm-flash", "models", {"large": "lender-large"})
+    store.set_profile_field("ds4", "provider", "fireworks")
+    store.set_profile_field("glm-flash", "provider", "fireworks")
+
+    env = runner.child_env(runner_p, with_token=True, borrow=lender)
+
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "provider-small"  # small
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "lender-large"  # large
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "lender-large"  # xlarge -> large
+    assert env["ANTHROPIC_MODEL"] == "provider-default"  # default
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-default"
+    # subagent follows small.
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "provider-small"
 
 
 def test_borrow_across_providers_drops_running_profile_model_pins(home):
@@ -499,11 +539,11 @@ def test_borrow_across_providers_drops_running_profile_model_pins(home):
     assert env["CLAUDE_CONFIG_DIR"] == str(runner_p.config_dir)
 
 
-def test_borrow_within_one_provider_keeps_model_pins(home):
-    # The carve-out: when the lender resolves to the *same* provider, the
-    # runner's pins still describe the backend being talked to, so they keep
-    # their final say exactly as before. This is the case that must not
-    # regress when the cross-provider one is fixed.
+def test_borrow_within_one_provider_takes_the_lenders_model(home):
+    # Inside one provider the backend is the same, but the *profile* whose
+    # models are used is still the lender's: a borrow runs the way that
+    # profile's launch does. Here the lender pins nothing, so its backend's
+    # translation answers -- the seat's own pin does not.
     store.update(
         lambda doc: doc.update(
             {"providers": {"backend": {"env": {"ANTHROPIC_MODEL": "provider-model"}}}}
@@ -517,7 +557,83 @@ def test_borrow_within_one_provider_keeps_model_pins(home):
 
     env = runner.child_env(runner_p, with_token=True, borrow=lender)
 
-    assert env["ANTHROPIC_MODEL"] == "runner-model"
+    assert env["ANTHROPIC_MODEL"] == "provider-model"
+
+
+def test_borrow_of_a_legacy_provider_lends_what_its_own_launch_would(home):
+    """A not-yet-migrated provider: the borrow lends its launch's model keys.
+
+    ``_borrowed_model_env`` promises the model half of what a launch *of the
+    lender* would assemble. For a provider still declared as a raw ``env``
+    block, a launch of the lender assembles that block verbatim — so the
+    borrow must lend exactly the model keys in it, no more. (A reverse
+    translation of the block would instead re-emit every role's variable and
+    claim the lender sets ids it never wrote.)
+    """
+    legacy = {
+        "ANTHROPIC_BASE_URL": "https://old.example/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "sk-old",
+        "ANTHROPIC_MODEL": "old-default",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old-small",
+    }
+    store.update(lambda doc: doc.update({"providers": {"old": {"env": legacy}}}))
+    lender = profile.create("old-lender")
+    store.set_profile_field("old-lender", "provider", "old")
+    seat = profile.create("seat")
+    store.set_profile_field("seat", "provider", "old")
+
+    borrowed = runner.child_env(seat, with_token=True, borrow=lender)
+    own_launch = runner.child_env(lender, with_token=True)
+
+    def model_keys(env):
+        return {k: v for k, v in env.items() if k in provider_spec.CLAUDE_MODEL_KEYS}
+
+    assert model_keys(borrowed) == model_keys(own_launch)
+    assert model_keys(borrowed) == {
+        "ANTHROPIC_MODEL": "old-default",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old-small",
+    }
+
+
+def test_borrow_inside_one_provider_leaves_unset_roles_unset(home):
+    """A role the lender leaves unset stays unset, not the seat's id.
+
+    Inside one provider the provider translation is the same on both sides, so
+    only the two ``models:`` tables differ. The seat pins ``large`` and the
+    lender pins ``small``: the launch must ask for the lender's ``small`` and
+    leave ``large`` alone, because the seat's id names a tier of the profile
+    being borrowed *from*, not of the one being borrowed. Both launch surfaces
+    that report model keys — :func:`child_env` and :func:`claude_model_env` —
+    must answer the same way; ``providers.launch_spec`` already does.
+    """
+    store.update(
+        lambda doc: doc.update(
+            {"providers": {"backend": {"models": {"default": "provider-default"}}}}
+        )
+    )
+    seat = profile.create("seat")
+    store.set_profile_field("seat", "provider", "backend")
+    store.set_profile_field("seat", "models", {"large": "seat-large"})
+    lender = profile.create("lender")
+    store.set_profile_field("lender", "provider", "backend")
+    store.set_profile_field("lender", "models", {"small": "lender-small"})
+
+    env = runner.child_env(seat, with_token=True, borrow=lender)
+    model_env = runner.claude_model_env(seat, borrow=lender)
+
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "lender-small"
+    assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in env  # the seat's large does not cross
+    assert "ANTHROPIC_DEFAULT_FABLE_MODEL" not in env
+    # The other surface agrees, key for key, with the one a launch env reads.
+    model_keys = {
+        k: v for k, v in env.items() if k in provider_spec.CLAUDE_MODEL_KEYS
+    }
+    assert model_env == model_keys
+    # And both agree with the spec the declared harnesses read.
+    assert providers.launch_spec(seat, borrow=lender).models == {
+        "default": "provider-default",
+        "small": "lender-small",
+    }
 
 
 def test_provider_override_drops_running_profile_model_pins(home):
@@ -846,6 +962,130 @@ def test_pi_can_borrow_a_base_profiles_token_without_borrowing_its_env(home):
     assert env["RUNTIME_SETTING"] == "kept"
     assert "LENDER_SETTING" not in env
     assert env["PI_CODING_AGENT_DIR"] == str(runtime.config_dir / "pi")
+
+
+def test_pi_borrow_lists_the_lenders_models(home):
+    """A borrowed Pi session offers the lender's models, not its own.
+
+    The model table is the backend's, and a borrow moves the backend to the
+    lender — the same rule :func:`runner.child_env` applies to Claude's model
+    variables. Context stays the running profile's: a borrow changes whose
+    credential is spent, not how much room the session keeps.
+    """
+    runtime = profile.create("pi-work")
+    lender = profile.create("pi-lender")
+    lineage.set_harness(runtime, "pi")
+    lineage.set_harness(lender, "pi")
+    credentials.save_token(lender, "lender-secret")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "shared": {
+                    "endpoints": {"openai": "https://shared.example/v1"},
+                    "models": {"default": "provider-default", "large": "provider-large"},
+                }
+            }
+        )
+    )
+    store.set_profile_field("pi-work", "provider", "shared")
+    store.set_profile_field("pi-lender", "provider", "shared")
+    store.set_profile_field("pi-lender", "models", {"large": "lender-large"})
+
+    env = runner.harness_child_env(
+        runtime, harnesses.get("pi"), base_env={}, borrow=lender
+    )
+
+    assert json.loads(env[pi_provider.ENV_MODELS]) == ["provider-default", "lender-large"]
+
+
+def test_pi_borrow_launch_args_and_env_name_the_same_default(home, monkeypatch):
+    """The default model in ``--model`` and in the env are one answer.
+
+    ``_plain_spawn`` assembles the command line and the environment separately;
+    both must read the lender on a borrow or the process starts with a
+    ``--model`` from the running profile overriding a provider list that came
+    from the lender. This is the CLI path (``claunch run X:pi --borrow Y``);
+    the daemon assembles through the same two functions.
+    """
+    seat = profile.create("pi-seat")
+    lender = profile.create("pi-lender")
+    lineage.set_harness(seat, "pi")
+    lineage.set_harness(lender, "pi")
+    credentials.save_token(lender, "lender-secret")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "shared": {
+                    "endpoints": {"openai": "https://shared.example/v1"},
+                    "models": {"default": "provider-default"},
+                }
+            }
+        )
+    )
+    store.set_profile_field("pi-seat", "provider", "shared")
+    # Distinct ids on the two sides: with the same ones a broken command line
+    # would still read as correct.
+    store.set_profile_field("pi-seat", "models", {"default": "seat-default"})
+    store.set_profile_field("pi-lender", "provider", "shared")
+    store.set_profile_field("pi-lender", "models", {"default": "lender-default"})
+
+    entry = harnesses.get("pi")
+    seen = {}
+
+    def fake_run(cmd, *, cwd=None, env=None):
+        seen["cmd"], seen["env"] = list(cmd), dict(env)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(harnesses.Harness, "available", lambda self: True)
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert runner.run(seat, ["--no-worktree"], borrow=lender) == 0
+
+    cmd = seen["cmd"]
+    assert "--model" in cmd
+    default_in_cmd = cmd[cmd.index("--model") + 1]
+    default_in_env = json.loads(seen["env"][pi_provider.ENV_MODELS])[0]
+    assert default_in_cmd == "lender-default"
+    assert default_in_cmd == default_in_env
+    assert entry.name == "pi"
+
+
+def test_borrow_keeps_the_dynamic_route_off_the_model_keys(home, monkeypatch):
+    """A dynamic provider resolves models per request; a borrow must not pin them.
+
+    The shim reads the table at request time, so launch-time ids would freeze
+    exactly the picture that mechanism exists to move. The borrow's own model
+    resolution therefore stays off the wire here, as the provider translation
+    already does.
+
+    Only the daemon starts shims; this test stands in for it, as
+    ``tests/test_routing_dynamic.py``'s launch-env tests do.
+    """
+    from claude_launcher import routing
+
+    monkeypatch.setattr(routing, "_OWNER", True)
+    try:
+        store.update(
+            lambda doc: doc.setdefault("providers", {}).update(
+                {
+                    "dynamic-one": {
+                        "endpoints": {"anthropic": "https://dyn.example/"},
+                        "models": {"default": "dyn-model", "large": "dyn-large"},
+                        "dynamic": True,
+                    }
+                }
+            )
+        )
+        runner_p = profile.create("work")
+        store.set_profile_field("work", "provider", "dynamic-one")
+        lender = profile.create("lender")
+        store.set_profile_field("lender", "provider", "dynamic-one")
+
+        env = runner.child_env(runner_p, with_token=True, borrow=lender)
+
+        for key in provider_spec.CLAUDE_MODEL_KEYS:
+            assert key not in env, f"{key} would freeze a route the shim resolves"
+    finally:
+        routing.stop()
 
 
 def test_runner_enforces_profile_provider_harness_policy_on_direct_calls(home):

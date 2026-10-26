@@ -184,6 +184,45 @@ def spec_for(
     return merged
 
 
+def launch_spec(
+    profile: Profile,
+    name: Optional[str] = None,
+    doc: Optional[dict] = None,
+    *,
+    borrow: Optional[Profile] = None,
+) -> ProviderSpec:
+    """The spec a launch acts on: the running profile's, with a borrow's models.
+
+    Every field the running profile contributes — context window, compaction
+    threshold, reasoning effort — stays its own: a borrow swaps whose
+    credential and backend the launch uses, not how much context it keeps.
+    The model table is the exception, because those ids name the backend.
+
+    Without ``borrow`` this is :func:`spec_for` unchanged. With one, the table
+    is read from the lender, role for role — what makes ``haiku`` reach the
+    lender's ``small`` and ``opus`` its ``large``. Declared harnesses (Pi,
+    Codex) go through this too, so their model lists follow one rule.
+
+    ``lender``'s own pins apply only while the backend in play is the
+    lender's own provider, exactly as they would for a launch of that profile:
+    an explicit ``--provider`` swings the backend away from both profiles and
+    leaves the provider's table to answer.
+    """
+    doc = store.load() if doc is None else doc
+    own = resolve_name(profile, doc)
+    provider = (resolve_name(borrow, doc) if borrow is not None else own) if name is None else name
+    spec = spec_for(profile, provider, doc, overlay_models=(provider == own))
+    if borrow is None:
+        return spec
+    models = spec_for(
+        borrow,
+        provider,
+        doc,
+        overlay_models=(provider == resolve_name(borrow, doc)),
+    ).models
+    return provider_spec.replace(spec, models=dict(models))
+
+
 def compact_problem(
     profile: Profile, name: Optional[str] = None, doc: Optional[dict] = None
 ) -> Optional[str]:

@@ -592,6 +592,11 @@ def _resolve_model_preset(child: dict) -> None:
       slot has no answer, and passing the word through would launch
       ``-c model=small``. That is refused, naming the profile.
 
+    A child that borrows reads the slot from the **lender**: the launch runs
+    on that profile's backend, so its ``models:`` table is the one that names
+    the id. Claude's aliases stay aliases either way — the env resolves them,
+    and on a borrow it is the lender's env.
+
     Any other value is a model name the harness takes as it is.
     """
     role = str(child.get("model") or "").strip()
@@ -608,8 +613,19 @@ def _resolve_model_preset(child: dict) -> None:
     declared = None
     if selector:
         try:
-            declared = providers.spec_for(profile_mod.require_selector(selector)).model(role)
-        except (profile_mod.ProfileError, providers.ProviderError) as exc:
+            spec = providers.launch_spec(
+                profile_mod.require_selector(selector),
+                borrow=(
+                    profile_mod.require(child["borrow"])
+                    if child.get("borrow")
+                    else None
+                ),
+            )
+            declared = spec.model(role)
+        except (
+            profile_mod.ProfileError,
+            providers.ProviderError,
+        ) as exc:
             raise SpawnDenied(
                 f"model preset {role!r} could not be read from profile "
                 f"{selector!r}: {exc}"
