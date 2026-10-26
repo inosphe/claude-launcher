@@ -538,6 +538,12 @@ class VectorIndex:
         self.keywords = search_keywords.KeywordIndex()
         self.updated_at: Optional[str] = None
         self._loaded = False
+        #: Set by :meth:`close` and never cleared: a closed index is finished.
+        #: A sync's worker thread outlives the task cancelled at shutdown, so
+        #: a ``put`` or ``load`` that reaches the index after ``close`` would
+        #: otherwise reopen the collection and hold its directory lock again.
+        #: Read and written under ``_mutex``.
+        self._closed = False
         self._lock: Optional[asyncio.Lock] = None
         self._col = None
         #: Guards ``entries``, ``updated_at`` and the collection handle swap. A sync writes from a
@@ -588,6 +594,8 @@ class VectorIndex:
     def _open_locked(self, *, create: bool):
         if self._col is not None:
             return self._col
+        if self._closed:
+            return None
         zvec = _zvec()
         if self.path.is_dir():
             try:
@@ -624,9 +632,12 @@ class VectorIndex:
         return self._col
 
     def load(self) -> None:
-        if self._loaded:
-            return
-        self._loaded = True
+        with self._mutex:
+            if self._loaded or self._closed:
+                return
+            self._loaded = True
+        # The rest reads the collection, which is zvec I/O, so it runs outside
+        # the mutex; ``_open`` takes it again and refuses once ``close`` ran.
         try:
             data = json.loads(self.meta_path.read_text(encoding="utf-8")) if self.meta_path.is_file() else None
         except (OSError, ValueError):
@@ -705,11 +716,14 @@ class VectorIndex:
         zvec holds a read-write lock per collection path, so a second
         ``open`` of the same directory raises while the first object still
         holds it. Anything that replaces an index (a changed model, a test
-        reading back what it wrote) closes the old one first.
+        reading back what it wrote) closes the old one first. Closing is final:
+        a later ``put`` raises :class:`RagError` and a later ``load`` does
+        nothing, so a worker that was cancelled mid-pass cannot reopen it.
         """
         with self._mutex:
             col, self._col = self._col, None
             self._loaded = False
+            self._closed = True
         if col is not None:
             with contextlib.suppress(Exception):
                 col.close()
@@ -754,6 +768,8 @@ class VectorIndex:
     def put(self, doc: Doc, vecs: List[array]) -> None:
         if not vecs:
             return
+        if self._closed:
+            raise RagError("rag: index is closed")
         if not self.dims:
             self.dims = len(vecs[0])
         if any(len(v) != self.dims for v in vecs):
