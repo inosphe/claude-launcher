@@ -309,6 +309,12 @@ let controlBoot = null;
 // /api/health for a live one; that window is the seconds a successor spends
 // filling its fleet, and after it the socket answers alone again.
 let controlBootRestoring = false;
+// The last `boot` an HTTP probe answered. While the restoring window is open
+// the probe is the only live source, and it can fail there -- the window is
+// the moment right after a restart, which is the busiest the daemon ever is.
+// A failed probe means "could not ask", not "no daemon", so the last answer
+// is what the page keeps showing instead of going dark.
+let lastBootSeen = null;
 const controlWaiting = new Map();
 
 function controlUp() {
@@ -347,6 +353,7 @@ function openControlSocket() {
   // Its init has not arrived, so nothing is known about the phase either;
   // the probe answers until the frame says otherwise.
   controlBootRestoring = false;
+  lastBootSeen = null;
   if (typeof linkLog === "function") linkLog("control.open", { try: controlTry });
 
   sock.onopen = () => {
@@ -417,6 +424,7 @@ function controlClosed(sock, ev) {
   controlSock = null;
   controlBoot = null;
   controlBootRestoring = false;
+  lastBootSeen = null;
   controlAbort("control socket closed");
   latencyStop();
   channelsCarrierGone();
@@ -19347,19 +19355,41 @@ async function daemonHealth() {
     // requests that are failing because it is not.
     const resp = await fetch(url("/api/health"),
       { cache: "no-store", signal: abort ? abort.signal : undefined });
-    if (!resp.ok) return null;
+    if (!resp.ok) return probeFailed();
     const live = await resp.json();
     // The probe is what ends the restoring window: the next tick reads this
     // phase and, once the fleet is back, leaves the socket to answer again.
     // Without this line the window would never close and every tick would
     // spend a connection for as long as the page stayed open.
     controlBootRestoring = !!(live && live.boot && live.boot.phase === "restoring");
+    if (live && typeof live.boot === "object" && live.boot) lastBootSeen = live.boot;
     return live;
   } catch {
-    return null;
+    return probeFailed();
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
+}
+
+/* The probe could not answer. That is a fact about the probe, not about the
+   daemon: while the control socket is OPEN the daemon is demonstrably there
+   -- it opened the socket and has not closed it -- so the page must not read
+   a failed probe as "no daemon" (pollOnce turns null into offline, and
+   tryReconnect postpones on it). The restoring window makes this reachable
+   rather than theoretical: it opens exactly when the daemon is busiest, and
+   the probe is what the page leans on inside it.
+
+   So: keep answering with the identity the socket gave, carrying the last
+   boot it saw -- or none, which syncBootProgress already treats as "not
+   restoring". A null from here still means what it always meant: no open
+   socket to vouch for the daemon, so HTTP was the only source and it failed. */
+function probeFailed() {
+  if (controlUp() && controlBoot) {
+    const out = { ...controlBoot };
+    if (lastBootSeen) out.boot = lastBootSeen;
+    return out;
+  }
+  return null;
 }
 
 /* Open (or re-open) the socket for `name`. The terminal object is deliberately

@@ -150,6 +150,7 @@ function build() {
     // fix that added it, and the harness still runs there -- which is what
     // lets the check below fail on the older page instead of on a `ReferenceError`.
     "let controlBootRestoring = false;",
+    "let lastBootSeen = null;",
     "const controlWaiting = new Map();",
     slice("controlUp"),
     slice("controlAbort"),
@@ -187,6 +188,9 @@ function build() {
     // daemonHealth -> syncBootProgress(health.boot). restartboot_check.js
     // feeds syncBootProgress directly and so cannot see this seam move.
     sliceRange("let daemonBootPhase", "function railMetaText(", "daemon progress block"),
+    // A failed probe while the socket is open keeps answering with what the
+    // page has instead of null; the check below is that path.
+    maybeSlice("probeFailed"),
     slice("controlRecycle"),
     slice("controlProbe"),
     // The ping half (the deadline, the probe's ping) is latency_check.js's.
@@ -488,6 +492,55 @@ async function theBootPhaseIsNotFrozenAtInit() {
   assert.strictEqual(app.probed, spent, "with no probe spent on it");
   assert.strictEqual(app.sockets[0], sock, "on the same socket");
   assert.strictEqual(app.sockets.length, 1, "and no second socket was opened");
+}
+
+/* A probe that cannot answer while the socket is up is not "no daemon"
+   (claunch-r35k1, from the second review).
+
+   The restoring window is answered over HTTP by design, and it opens exactly
+   when the daemon is busiest -- right after a restart. A probe that times out
+   there used to fall into the same `return null` a genuinely absent daemon
+   does, and pollOnce reads null as offline: the page went dark every tick the
+   window was open, which is the symptom this round was meant to remove,
+   replaced by a worse one. tryReconnect postponed on the same null.
+
+   The socket is the fact that settles it: it is OPEN, the daemon opened it and
+   has not closed it. So the answer stays up, carrying the last boot the page
+   saw. A null from daemonHealth still means what it always did -- no socket to
+   vouch for the daemon, HTTP was the only source, and it failed. */
+async function aFailedProbeIsNotAnAbsentDaemon() {
+  const app = build();
+  app.fetch = async () => { throw new Error("the probe timed out"); };
+
+  // No socket: the probe was the only source, so this really is "no answer".
+  assert.strictEqual(await app.daemonHealth(), null,
+    "with no socket, a failed probe is still no answer");
+
+  app.ensureControlSocket();
+  const sock = app.sockets[0];
+  sock.opened();
+  sock.say({
+    type: "init", boot_id: "b2", version: "9.9", started_at: "t-2",
+    boot: { phase: "restoring", done: 3, total: 10 },
+  });
+
+  // Inside the window, and the probe is down. The page must stay up.
+  const first = await app.daemonHealth();
+  assert.ok(first, "a failed probe does not read as an absent daemon");
+  assert.strictEqual(first.boot_id, "b2", "the socket's identity still answers");
+  assert.strictEqual(first.via, "control");
+
+  // Repeated failures do not accumulate into anything worse.
+  const second = await app.daemonHealth();
+  assert.ok(second, "and it stays up while the probe keeps failing");
+  assert.strictEqual(second.boot_id, "b2");
+
+  // A probe that succeeds again still ends the window.
+  app.fetch = async () => ({ ok: true, json: async () => ({
+    boot_id: "b2", boot: { phase: "ready", done: 10, total: 10 },
+  }) });
+  app.syncBootProgress((await app.daemonHealth()).boot);
+  assert.strictEqual(app.phase(), null, "the window still closes on a good answer");
 }
 
 /* An `init` that names no daemon (an older daemon) leaves the page with
@@ -841,6 +894,7 @@ async function healthProbeIsBounded() {
   await reportsAndPings();
   await livenessComesFromTheSocket();
   await theBootPhaseIsNotFrozenAtInit();
+  await aFailedProbeIsNotAnAbsentDaemon();
   await anInitWithNoBootIdDoesNotFakeOne();
   await flushPrefersSocketThenFallsBack();
   await deadSocketIsRecycled();
