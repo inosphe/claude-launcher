@@ -81,6 +81,18 @@ ENV_VARS = (APPLIED_ENV, BASE_ENV, PREV_ENV, *_KEY_ENV.values())
 #: not inherit them from the daemon as they are -- see :func:`engine_env`.
 IDENTITY_ENV = (paths.INSTANCE_ENV, PORT_ENV, APPLIED_ENV, PREV_ENV, BASE_ENV)
 
+#: Variables the daemon's *interpreter* was started with, which a child must
+#: not inherit. ``PYTHON_GIL=0`` is how a free-threading build turns the GIL
+#: off, and a plain (GIL) CPython refuses it during preinit -- before any of
+#: our code runs, so the child cannot recover and no handler of ours can
+#: report it. A ``claunch`` installed from the ordinary tool venv therefore
+#: dies the moment it inherits the daemon's setting (claunch-t9xko: under a
+#: daemon started by the free-threading wrapper, every session's ``claunch``,
+#: the CLI tab's shell and the engine's own probes died with ``Fatal Python
+#: error: config_read_gil``). The daemon keeps its setting; children get the
+#: interpreter they were installed with.
+INTERPRETER_ONLY_ENV = ("PYTHON_GIL",)
+
 
 def engine_env(env: Dict[str, str], instance: Optional[str]) -> Dict[str, str]:
     """``env`` for a command the cflow engine runs on a session's behalf.
@@ -112,6 +124,10 @@ def engine_env(env: Dict[str, str], instance: Optional[str]) -> Dict[str, str]:
                 else:
                     out[str(var)] = str(value)
     for var in IDENTITY_ENV:
+        out.pop(var, None)
+    # The daemon's interpreter configuration stays with the daemon: a probe
+    # that inherited it never started at all (see INTERPRETER_ONLY_ENV).
+    for var in INTERPRETER_ONLY_ENV:
         out.pop(var, None)
     if instance:
         out[paths.INSTANCE_ENV] = instance

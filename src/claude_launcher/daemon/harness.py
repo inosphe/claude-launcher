@@ -52,7 +52,13 @@ CLAUDE_HARNESS = harness_registry.CLAUDE_HARNESS
 #: daemon its ``claunch -L other`` auto-started, which then tried to bind this
 #: instance's port (claunch-d55af). Where it came from cannot be told apart
 #: from inside the daemon, so it is dropped here whatever its origin.
-_DAEMON_ONLY_ENV = (instance_manifest.PORT_ENV,)
+#: The daemon's interpreter settings join it: a ``claunch`` from the ordinary
+#: tool venv cannot even start with ``PYTHON_GIL=0`` in its environment
+#: (see ``instance_manifest.INTERPRETER_ONLY_ENV``, claunch-t9xko).
+_DAEMON_ONLY_ENV = (
+    instance_manifest.PORT_ENV,
+    *instance_manifest.INTERPRETER_ONLY_ENV,
+)
 
 #: Injected on every claude spawn (``--settings``): a SessionStart hook that
 #: fires on ``compact`` and ``clear`` — the two moments the transcript-carried

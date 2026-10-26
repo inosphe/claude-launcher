@@ -165,6 +165,46 @@ def test_the_cli_shell_is_marked_so_a_restart_can_leave_it(
     assert clipty.CLI_TAB_ENV == "CLAUNCH_CLI_TAB"
 
 
+def test_the_cli_shell_does_not_inherit_the_daemons_interpreter_settings(
+    home, monkeypatch, tmp_path
+):
+    """A ``claunch`` typed into this tab is the one from the ordinary tool
+    venv, and it cannot start with ``PYTHON_GIL=0`` in its environment --
+    CPython refuses the setting in preinit, before our code runs
+    (claunch-t9xko). The shell's environment must not carry it.
+    """
+    from claude_launcher.daemon import clipty, pty_backend
+
+    seen = {}
+
+    class _Fake:
+        pid = 1
+
+        def read(self):
+            return b""
+
+        def terminate(self, force=False):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_spawn(argv, *, env, cwd, cols, rows):
+        seen.update(env)
+        return _Fake()
+
+    monkeypatch.setattr(pty_backend, "spawn_local", fake_spawn)
+    monkeypatch.setenv("PYTHON_GIL", "0")
+
+    async def run():
+        shell = clipty.ShellPty(argv=REPL, cwd=str(tmp_path))
+        assert shell.restart()
+
+    asyncio.run(run())
+
+    assert "PYTHON_GIL" not in seen
+
+
 #: A session leader that starts one child in its own process group and one in
 #: a session of its own, then waits to be killed. The two children write a
 #: marker after a delay, so what survives is visible after the leader is gone.

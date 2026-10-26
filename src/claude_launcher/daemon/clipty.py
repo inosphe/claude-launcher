@@ -31,7 +31,7 @@ from collections import deque
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import store
-from . import pty_backend
+from . import instance_manifest, pty_backend
 
 log = logging.getLogger(__name__)
 
@@ -196,8 +196,13 @@ class ShellPty:
         self.exited = False
         self.exit_code = None
         # Same inheritance the session harness gets, and the same correction:
-        # this shell also draws into a terminal on the other end.
+        # this shell also draws into a terminal on the other end. The daemon's
+        # interpreter settings come out for the same reason as there -- a
+        # ``claunch`` typed into this tab cannot start with ``PYTHON_GIL=0``
+        # (see ``instance_manifest.INTERPRETER_ONLY_ENV``, claunch-t9xko).
         env = pty_backend.strip_inherited_color_answers(dict(os.environ))
+        for var in instance_manifest.INTERPRETER_ONLY_ENV:
+            env.pop(var, None)
         if sys.platform != "win32":   # cmd.exe has no termios to service
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
