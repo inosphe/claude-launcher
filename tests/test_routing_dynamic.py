@@ -590,3 +590,51 @@ def test_the_pi_path_keys_a_dynamic_route_on_the_lender_too(home, monkeypatch):
     pi_provider.apply_env(seat, declared, {}, borrow=lender)
 
     assert seen == [f"profile:{lender.name}"]
+
+
+def test_the_pi_path_without_a_borrow_keys_the_route_on_the_profile(
+        home, monkeypatch):
+    """Pi's own route follows its profile's provider selection.
+
+    Without a borrow the base URL is the *seat's* backend, so the route names
+    the seat and the shim re-derives the provider from it per request — that
+    is what makes ``claunch set-provider`` reach a Pi session already running,
+    and it is the reason ``apply_env`` hands ``profile`` down at all. Before
+    that, the Pi path alone keyed the route on the provider name and stayed
+    on the provider it launched with (claunch-75kfl.1 review).
+    """
+    from claude_launcher import pi_provider
+
+    _provider("dynA", {"dynamic": True, "api_key": "KA",
+                       "endpoints": {"anthropic": "https://a.example.com",
+                                     "openai": "https://a.example.com/v1"},
+                       "models": {"default": "a-default"}})
+    _provider("dynB", {"dynamic": True, "api_key": "KB",
+                       "endpoints": {"anthropic": "https://b.example.com",
+                                     "openai": "https://b.example.com/v1"},
+                       "models": {"default": "b-default"}})
+    seat = create_profile("seat")
+    store.set_profile_field(seat.name, "provider", "dynA")
+
+    seen = []
+
+    def _capture(upstream, block, provider=None, route=None):
+        seen.append(route)
+        return "http://127.0.0.1:1"
+
+    monkeypatch.setattr(routing, "ensure_shim", _capture)
+    from claude_launcher import harnesses
+
+    store.update(lambda doc: doc.setdefault("harnesses", {}).update(
+        {"pikeyed2": {"command": sys.executable, "provider_adapter": "pi",
+                      "auth": "api-key", "token_env": "PI_KEYED_KEY"}}
+    ))
+    pi_provider.apply_env(seat, harnesses.get("pikeyed2"), {})
+
+    assert seen == [f"profile:{seat.name}"], seen
+    # The point of keying on the profile: the same route resolves the *new*
+    # provider once the profile moves, without relaunching the session.
+    assert routing.route_upstream(seen[0]) == "https://a.example.com"
+    store.set_profile_field(seat.name, "provider", "dynB")
+    assert routing.route_upstream(seen[0]) == "https://b.example.com"
+    assert routing.route_auth(seen[0], None) == "KB"
