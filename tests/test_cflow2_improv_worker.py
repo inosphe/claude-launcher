@@ -271,42 +271,89 @@ def test_coding_approval_disabled_preserves_direct_work(tmp_path, monkeypatch, a
     assert not st.get("asks")
 
 
-def test_coding_approval_requires_user_each_item_visit(tmp_path, monkeypatch):
+def _approve_item(st, kw, visit, decision):
+    """One item through the plain gate: plan, a person's answer, work, done."""
+    from claude_launcher.cflow2 import runtime
+
+    [plan] = st["tasks"]
+    assert plan["label"] == "coding-plan"
+    brief = f"item {visit}: edit workflow and test true/false routing"
+    st = runtime.report(plan["instance"], "ok", {"brief": brief}, **kw)
+    assert not st["tasks"]
+    [ask] = st["asks"]
+    assert ask["label"] == "coding-approval"
+    assert brief in ask["prompt"]
+    # urgent: the dashboard raises it on its notification channel (claunch-x76l8.1)
+    assert ask["urgent"] is True and ask["resolution"] == "human"
+    # both approvals and the reject are the person's answers (claunch-sxdnc)
+    assert [o["name"] for o in ask["options"]][:3] == [
+        "approve-once", "approve-always", "reject"]
+    with pytest.raises(runtime.FlowError, match="not yours to answer"):
+        runtime.approve(None, decision=decision, caller="agent", **kw)
+    with pytest.raises(runtime.FlowError):
+        runtime.report(ask["instance"], "ok", {}, **kw)
+    # Time alone must not release a human gate.
+    later = runtime.status(**{**kw, "now": 100000.0})
+    assert not later["tasks"] and later["asks"]
+    runtime.approve(None, decision=decision, reason="plan accepted", **kw)
+    return _work_item(runtime.status(**kw), kw)
+
+
+def _approval_data(kw):
+    """The run's $data.coding_approval, read off its state file."""
+    import json
+
+    from claude_launcher.cflow2.store import RunStore
+
+    state = json.loads(RunStore(kw["cwd"], kw["scope"]).state_path.read_text(encoding="utf-8"))
+    return state["data"]["coding_approval"]
+
+
+def _work_item(st, kw):
+    from claude_launcher.cflow2 import runtime
+
+    [work] = st["tasks"]
+    assert work["label"] == "work"
+    st = runtime.report(work["instance"], "ok", {}, **kw)
+    st = runtime.select(st["choices"][0]["instance"], "skip", reason="fixture", **kw)
+    for label in ("test-skipped", "commit"):
+        [task] = st["tasks"]
+        assert task["label"] == label
+        st = runtime.report(task["instance"], "ok", {}, **kw)
+    return st
+
+
+def test_coding_approval_once_asks_again_on_the_next_item(tmp_path, monkeypatch):
+    st, kw = _coding_item(tmp_path, monkeypatch, True)
+    for visit in (1, 2):
+        st = _approve_item(st, kw, visit, "approve-once")
+    assert st["status"] == "done"
+    assert _approval_data(kw)["decision"] == "approve-once"
+
+
+def test_coding_approval_always_skips_the_gate_for_later_items(tmp_path, monkeypatch):
+    st, kw = _coding_item(tmp_path, monkeypatch, True)
+    st = _approve_item(st, kw, 1, "approve-always")
+    assert _approval_data(kw)["decision"] == "approve-always"
+    # the second item goes straight to work: no plan, no ask
+    assert not st.get("asks")
+    st = _work_item(st, kw)
+    assert st["status"] == "done"
+
+
+def test_coding_approval_always_holds_after_a_reject(tmp_path, monkeypatch):
+    """A reject before the approval does not stand in the way of 'always'."""
     from claude_launcher.cflow2 import runtime
 
     st, kw = _coding_item(tmp_path, monkeypatch, True)
-    for visit in (1, 2):
-        [plan] = st["tasks"]
-        assert plan["label"] == "coding-plan"
-        brief = f"item {visit}: edit workflow and test true/false routing"
-        st = runtime.report(plan["instance"], "ok", {"brief": brief}, **kw)
-        assert not st["tasks"]
-        [ask] = st["asks"]
-        assert ask["label"] == "coding-approval"
-        assert brief in ask["prompt"]
-        # urgent: the dashboard raises it on its notification channel (claunch-x76l8.1)
-        assert ask["urgent"] is True and ask["resolution"] == "human"
-        with pytest.raises(runtime.FlowError, match="not yours to answer"):
-            runtime.approve(None, caller="agent", **kw)
-        with pytest.raises(runtime.FlowError):
-            runtime.report(ask["instance"], "ok", {}, **kw)
-        # Time alone must not release a human gate.
-        later = runtime.status(**{**kw, "now": 100000.0})
-        assert not later["tasks"] and later["asks"]
-        runtime.approve(None, reason="plan accepted", **kw)
-        st = runtime.status(**kw)
-        [gate] = st["tasks"]
-        assert gate["label"] == "coding-approval"
-        st = runtime.report(gate["instance"], "ok", {}, **kw)
-        [work] = st["tasks"]
-        assert work["label"] == "work"
-        st = runtime.report(work["instance"], "ok", {}, **kw)
-        st = runtime.select(st["choices"][0]["instance"], "skip", reason="fixture", **kw)
-        for label in ("test-skipped", "commit"):
-            [task] = st["tasks"]
-            assert task["label"] == label
-            st = runtime.report(task["instance"], "ok", {}, **kw)
-    assert st["status"] == "done"
+    [plan] = st["tasks"]
+    st = runtime.report(plan["instance"], "ok", {"brief": "first"}, **kw)
+    runtime.approve(None, decision="reject", reason="too broad", **kw)
+    st = runtime.status(**kw)
+    assert _approval_data(kw)["decision"] == "reject"
+    st = _approve_item(st, kw, 1, "approve-always")
+    assert not st.get("asks")
+    assert _work_item(st, kw)["status"] == "done"
 
 
 def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
@@ -323,7 +370,7 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
 # -- session routing (claunch-yl0to) ----------------------------------------
 
 
-def _routing_item(tmp_path, monkeypatch, values, data=None):
+def _routing_item(tmp_path, monkeypatch, values, data=None, items=1):
     """The real item route with the implementation tasks stubbed, as above,
     plus delegate-work: the routing decisions are what is under test."""
     import json
@@ -332,7 +379,7 @@ def _routing_item(tmp_path, monkeypatch, values, data=None):
 
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
-    doc["body"] = [{"call": "item"}]
+    doc["body"] = [{"call": "item"}] * items
     doc.pop("spec", None)
     for name in ("work", "test-skipped", "commit", "review"):
         doc["nodes"][name] = {"prompt": name}
@@ -403,8 +450,9 @@ def test_routing_hard_plan_keeps_the_work_here(tmp_path, monkeypatch):
     ("approve-as-planned", "route-planned", "delegate-work"),
     ("approve-no-delegate", "route-direct", "work"),
     ("approve-down-delegate", "route-delegate", "delegate-work"),
+    ("approve-always", "route-planned", "delegate-work"),
 ])
-def test_routing_gate_offers_four_answers(tmp_path, monkeypatch, answer, route, worker):
+def test_routing_gate_offers_five_answers(tmp_path, monkeypatch, answer, route, worker):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch,
@@ -413,8 +461,9 @@ def test_routing_gate_offers_four_answers(tmp_path, monkeypatch, answer, route, 
                         {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
     [ask] = st["asks"]
     assert ask["label"] == "coding-approval-routing" and ask["urgent"] is True
-    assert [o["name"] for o in ask["options"]][:4] == [
-        "approve-as-planned", "approve-no-delegate", "approve-down-delegate", "reject"]
+    assert [o["name"] for o in ask["options"]][:5] == [
+        "approve-as-planned", "approve-no-delegate", "approve-down-delegate",
+        "approve-always", "reject"]
     with pytest.raises(runtime.FlowError, match="not yours to answer"):
         runtime.approve(None, decision=answer, caller="agent", **kw)
     runtime.approve(None, decision=answer, reason="r", **kw)
@@ -422,6 +471,27 @@ def test_routing_gate_offers_four_answers(tmp_path, monkeypatch, answer, route, 
     value = DIRECT if route == "route-direct" else DELEGATE
     st = runtime.report(_one(st, route), "ok", value, **kw)
     st = runtime.report(_one(st, worker), "ok", DONE, **kw)
+    assert _finish_skip(st, kw)["status"] == "done"
+
+
+def test_routing_gate_always_follows_the_plan_without_asking_again(tmp_path, monkeypatch):
+    """approve-always on the routing gate: later items go the plan's way and
+    nobody is asked (claunch-sxdnc)."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch,
+                           {"session_routing": True, "require_coding_approval": True}, items=2)
+    st = runtime.report(_one(st, "coding-plan"), "ok",
+                        {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw)
+    runtime.approve(None, decision="approve-always", reason="r", **kw)
+    st = runtime.report(_one(runtime.status(**kw), "route-planned"), "ok", DIRECT, **kw)
+    st = _finish_skip(runtime.report(_one(st, "work"), "ok", {}, **kw), kw)
+    # the second item: the plan is still written (routing needs it), the gate is not
+    st = runtime.report(_one(st, "coding-plan"), "ok",
+                        {"brief": "b2", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    assert not st.get("asks")
+    st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
+    st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
     assert _finish_skip(st, kw)["status"] == "done"
 
 
@@ -439,8 +509,8 @@ def test_reject_rewrites_the_plan(tmp_path, monkeypatch, routing):
             if routing:
                 runtime.approve(None, decision="reject", reason="too broad", **kw)
             else:
-                # the plain approval's decline is the reject
-                runtime.approve(None, decline=True, reason="too broad", **kw)
+                # the plain approval's reject is an option too (claunch-sxdnc)
+                runtime.approve(None, decision="reject", reason="too broad", **kw)
             st = runtime.status(**kw)
     assert ask["label"] == ("coding-approval-routing" if routing else "coding-approval")
 
