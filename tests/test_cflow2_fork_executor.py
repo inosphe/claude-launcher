@@ -338,3 +338,31 @@ def test_a_group_whose_allow_is_true_takes_members(tmp_path):
                   params={"on": True})
     assert runtime.status(cwd=str(tmp_path), scope="own", tick=False)["groups"][0]["can_fork"]
     _fork_members(tmp_path, 1)
+
+
+def test_a_group_inside_a_forks_nested_run_is_not_forked_from_the_origin(tmp_path):
+    """The session a nested run's fork would copy is the delegation's assignee
+    (a quick-fork), so it is refused -- never a second copy of the origin."""
+    nested_src = CHART.replace(
+        "      piece: {prompt: \"do ${params.what}\", returns: {ok: {files: list}}}\n"
+        "    body:\n      - piece\n",
+        "      piece: {prompt: \"do ${params.what}\", returns: {ok: {files: list}}}\n"
+        "      inner: {prompt: inner}\n"
+        "    body:\n"
+        "      - id: deeper\n"
+        "        group: {name: deeper, run: leaf, member_executor: [fork, inline], do: piece}\n",
+    ).replace("procedures:\n", "procedures:\n  leaf:\n    nodes:\n      lf: {prompt: lf}\n"
+              "    body: [lf, {return: ok}]\n")
+    mgr = FakeManager(FakeSession("own", str(tmp_path)))
+    clock, forks = _clock(mgr)
+    clock.scan()
+    _start(tmp_path, nested_src)
+    _fork_members(tmp_path, 1)
+    clock.scan()
+    assert [n for _, _, n in forks] == ["own-qf1"]
+    nested = next(iter(_dels(tmp_path).values()))["nested"]["scope"]
+    runtime.fork("deeper", None, cwd=str(tmp_path), scope=nested, now=T0)
+    clock.scan()
+    assert [n for _, _, n in forks] == ["own-qf1"]
+    fb = [e for e in runtime.journal(cwd=str(tmp_path), scope=nested) if e["event"] == "fallback"]
+    assert any("does not fork again" in (e.get("cause") or "") for e in fb)

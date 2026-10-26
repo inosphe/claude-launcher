@@ -1005,7 +1005,10 @@ class Cflow2Clock:
             state = st.load_state()
             fork_parent = None
             if rec.get("executor") == ir.EXEC_FORK:
-                fork_parent = str(state.get("driver") or "") or cstore.session_of(scope)
+                # the session that carries the run: its driver, or in a nested
+                # run the delegation's assignee -- a fork there is refused as a
+                # fork of a fork, never turned into a copy of the origin
+                fork_parent = runtime.acting_session(state) or cstore.session_of(scope)
                 if self._fork_refused(cwd, scope, did, rec, fork_parent, state, notices):
                     return
             run_id = state.get("run_id")
