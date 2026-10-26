@@ -124,6 +124,28 @@ def test_owner_is_the_longest_matching_name():
     assert br.owner("s99w", names) == "s99"
     assert br.owner("s995", names) == "s995"
     assert br.owner("unrelated", names) is None
+    assert br.owner("s995-rev2c1011010955", set(names)) == "s995-rev2"
+
+
+def test_owner_by_prefix_lookup_agrees_with_scanning_every_session():
+    # claunch-2r7vj replaced the scan over every session with a lookup of the
+    # name's prefixes; the answer has to be the one the scan gave.
+    def scanned(name, sessions):
+        best = None
+        for session in sessions:
+            if br.matches(name, session) and (best is None or len(session) > len(best)):
+                best = session
+        return best
+
+    sessions = ["s9", "s99", "s995", "s995-rev2", "s29", "s29-egr6y", "sweep", ""]
+    dirs = [
+        "s995-rev2c1011010955", "s995-iso", "s99w", "s99w15", "s9-x", "s9",
+        "s29-07cd9bfd7e2cbe0dfc551b74w", "s29-egr6yt1014051949", "s29w",
+        "s995x", "s9950", "sweepw", "dfv2-a", "s1162tree3", "", "s",
+    ]
+    for name in dirs:
+        assert br.owner(name, sessions) == scanned(name, sessions), name
+        assert br.owner(name, set(sessions)) == scanned(name, sessions), name
 
 
 # ---- the exit hook ---------------------------------------------------------- #
@@ -301,6 +323,34 @@ def test_boot_reaps_ended_sessions_and_spares_running_ones(tmp_path):
 
     assert list(root.iterdir()) == [alive]
     assert [r["session"] for r in _rows(tmp_path)] == ["s1"]
+
+
+def test_boot_lists_the_root_once_for_every_ended_session(tmp_path, monkeypatch):
+    # claunch-2r7vj: a listing per ended session made the boot pass
+    # (names x entries x sessions); one listing serves them all.
+    root = tmp_path / "t"
+    for name in ("s1", "s2", "s3", "s30"):
+        _run_tree(root, f"{name}c1011010955")
+    alive = _run_tree(root, "s4c1011010955")
+    sessions = [("s1", True), ("s2", True), ("s3", True), ("s30", True), ("s4", False)]
+    listed = []
+    real = Path.iterdir
+
+    def counting(self):
+        if self == root:
+            listed.append(self)
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting)
+    _reaper(tmp_path, sessions).reap_ended()
+
+    assert len(listed) == 1
+    assert list(root.iterdir()) == [alive]
+    by_session = {r["session"]: Path(r["path"]).name for r in _rows(tmp_path)}
+    assert by_session == {
+        "s1": "s1c1011010955", "s2": "s2c1011010955",
+        "s3": "s3c1011010955", "s30": "s30c1011010955",
+    }
 
 
 def test_registry_view_treats_held_and_os_ended_sessions_as_running():
