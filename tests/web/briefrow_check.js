@@ -94,9 +94,24 @@ function mkel(tag) {
 }
 
 const list = mkel("ul");
+/* The row the page builds, not a bare `li`: `buildSessionCard` (app.js) makes
+   the buttons box `.rail-actions` and `decorateBriefingRow` appends both
+   refreshes INTO it. This harness used to hand-build a bare `li`, so the
+   per-density rules that key on that box were never exercised against the row
+   it measured — and a rule that hid the box's children took both refreshes
+   off every compact card while this file stayed green (claunch-6ezw3.1). What
+   a stub DOM can pin is the shape those rules select: that the two controls
+   live inside `.rail-actions`. paint is railcards_browser's and
+   railchildline_browser's to measure. */
 function row(name) {
   const li = mkel("li");
   li.dataset.name = name;
+  const head = mkel("div");
+  head.className = "rail-head";
+  li.appendChild(head);
+  const actions = mkel("span");
+  actions.className = "rail-actions";
+  li.appendChild(actions);
   list.appendChild(li);
   return li;
 }
@@ -306,9 +321,37 @@ const ago = (secs) => new Date(Date.now() - secs * 1000).toISOString();
   ctx.decorate(s1, { name: "s1", briefing: { one_line: "한 줄", state: "working" }, task: "테스크" });
   ctx.decorate(s1, { name: "s1", briefing: { one_line: "한 줄", state: "working" }, task: "테스크" });
   const onLine = s1.children.filter((c) => c.className.split(" ").includes("rail-brief"));
-  const refs = s1.children.filter((c) => c.className.split(" ").includes("sess-brief-rowref"));
+  /* Counted wherever it sits (it sits in `.rail-actions`): re-decorating must
+     not append a second one. */
+  const refs = (li) => {
+    const found = [];
+    const walk = (n) => {
+      for (const c of n.children) {
+        if (c.className.split(" ").includes("sess-brief-rowref")) found.push(c);
+        walk(c);
+      }
+    };
+    walk(li);
+    return found;
+  };
   check("idempotent: one one-line and one ⟳ after repeated decoration",
-        [onLine.length, refs.length], [1, 1]);
+        [onLine.length, refs(s1).length], [1, 1]);
+
+  /* Where the two refreshes live is a contract, not an implementation
+     detail: style.css hides `.rail-actions`' other children on a compact
+     card, and lists these two as exceptions BY NAME. A rule that stopped
+     naming them would take them off every collapsed card — which is what
+     happened — so the box they are appended into is asserted here. */
+  const box = (li) => li.querySelector(".rail-actions");
+  check("the row ⟳ lives inside the buttons box the density rules select",
+        !!box(s1) && box(s1).children.some(
+          (c) => c.className.split(" ").includes("sess-brief-rowref")), true);
+  check("the checks ⟳ lives there too, beside the chips it refreshes",
+        !!box(sChecks) && box(sChecks).children.some(
+          (c) => c.className.split(" ").includes("sess-status-check-rowref")), true);
+  check("...and neither is the row's own child, which no density rule hides",
+        [s1.children.some((c) => c.className.includes("rowref")),
+         sChecks.children.some((c) => c.className.includes("rowref"))], [false, false]);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

@@ -80,9 +80,14 @@ const server = http.createServer((req, res) => {
         rows: [...document.querySelectorAll("#session-list li.sess-card")].map((li) => {
           const name = li.querySelector(".rail-name").getBoundingClientRect();
           const dot = li.querySelector(".dot").getBoundingClientRect();
-          const info = li.querySelector(".sess-info").getBoundingClientRect();
-          // The briefing ⟳ stays on the buttons line at every density; the
-          // old ▸ fold is gone (app.js railCardMode expands a picked card).
+          const infoNode = li.querySelector(".sess-info");
+          const info = infoNode.getBoundingClientRect();
+          // The briefing ⟳ stays on the row at every density; the old ▸ fold is
+          // gone (app.js railCardMode expands a picked card). It is not
+          // necessarily on the buttons line, though: on a compact card that
+          // line is not drawn and the ⟳ rides the meta line, so the two are
+          // compared only when both are painted. Widths come back separately
+          // so "both are 0x0" cannot read as "they agree".
           const toggle = li.querySelector(".sess-brief-rowref").getBoundingClientRect();
           const tick = getComputedStyle(li, "::before");
           const liBox = li.getBoundingClientRect();
@@ -91,6 +96,7 @@ const server = http.createServer((req, res) => {
             name: li.dataset.name, child: li.classList.contains("child"),
             nameMid: mid(name), dotMid: mid(dot), nameWidth: name.width,
             infoMid: mid(info), refreshMid: mid(toggle),
+            infoBox: [info.width, info.height], refreshBox: [toggle.width, toggle.height],
             // The pseudo-element has no box of its own to measure; the name
             // leaving the row's first line is how its wrap shows.
             firstLine: liBox.top + padTop, nameTop: name.top,
@@ -111,8 +117,20 @@ const server = http.createServer((req, res) => {
         assert.ok(r.nameTop - r.firstLine <= 8,
           `${where}: the name sits on the row's first line (${r.nameTop - r.firstLine}px below it)`);
         assert.ok(r.nameWidth >= 20, `${where}: the name keeps some width (${r.nameWidth}px)`);
-        assert.ok(Math.abs(r.refreshMid - r.infoMid) <= 4,
-          `${where}: the ⟳ shares the buttons' line (⟳ ${r.refreshMid}, ⓘ ${r.infoMid})`);
+        // Two unpainted boxes are 0x0 and their midpoints agree perfectly, so
+        // the comparison only means something once both have been drawn. This
+        // assertion passed vacuously for one round when a compact rule hid the
+        // ⟳: |0 - 0| is 0, and nothing else here looked at the size.
+        assert.ok(r.refreshBox[0] > 0 && r.refreshBox[1] > 0,
+          `${where}: the briefing ⟳ is painted (${r.refreshBox.join("x")})`);
+        // The ⓘ is a button and only the expanded card draws those, so on a
+        // compact row the line this asserts about does not exist. Where it
+        // does exist, the ⟳ must be on it.
+        const infoPainted = r.infoBox[0] > 0 && r.infoBox[1] > 0;
+        if (infoPainted) {
+          assert.ok(Math.abs(r.refreshMid - r.infoMid) <= 4,
+            `${where}: the ⟳ shares the buttons' line (⟳ ${r.refreshMid}, ⓘ ${r.infoMid})`);
+        }
       }
     }
     assert.deepEqual(errors, []);

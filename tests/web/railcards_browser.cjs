@@ -136,6 +136,15 @@ const READ = `(() => {
         ctx: shown(li.querySelector(".rail-ctx-line")),
         seen: shown(li.querySelector(".rail-seen")),
         actions: shown(li.querySelector(".rail-actions")),
+        /* The five action buttons, separately from the box: a compact card
+           keeps the box (it holds the key chip and the two refreshes, which
+           are not actions on the session) but none of these. */
+        actionButtons: [...li.querySelectorAll(
+          ".sess-plus, .sess-pin, .sess-observe, .sess-note-edit, .sess-info")]
+          .filter((b) => b.getBoundingClientRect().width > 0).length,
+        rowRefreshes: [...li.querySelectorAll(
+          ".sess-brief-rowref, .sess-status-check-rowref")]
+          .filter((b) => b.getBoundingClientRect().width > 0).length,
         meta: shown(li.querySelector(".meta")),
         card: shown(li.querySelector(".sess-brief")),
         checks: shown(li.querySelector(".rail-status-checks")),
@@ -207,12 +216,28 @@ const READ = `(() => {
 
     assert.deepEqual(by("rev-a").lines,
       { brief: false, cwd: false, ctx: false, seen: false, actions: false,
+        actionButtons: 0, rowRefreshes: 0,
         meta: false, card: false, checks: false },
       "a one-line card draws the name and the role, nothing else");
     assert.deepEqual(by("lead").lines,
-      { brief: true, cwd: false, ctx: false, seen: false, actions: false,
+      { brief: true, cwd: false, ctx: false, seen: false, actions: true,
+        actionButtons: 0, rowRefreshes: 2,
         meta: true, card: false, checks: true },
-      "a compact card draws the briefing one-line and the chips, and no buttons");
+      "a compact card draws the briefing one-line and the chips");
+    /* No action buttons on the compact card -- measured by painted buttons,
+       not by the box. The box stays because it also holds the key chip and
+       the two refreshes, which say something about the row rather than
+       offering an action on it. */
+    assert.equal(by("lead").lines.actionButtons, 0,
+      "a compact card draws no action buttons (spawn, pin, observe, note, ⓘ)");
+    /* ...and the refreshes it DOES draw are painted, not just present: the
+       round that hid them left every selector reading as written. Two of
+       them belong to a card with reported checks (the briefing ⟳ and the
+       checks ⟳); w1b has no checks and so has only the briefing one. */
+    assert.equal(by("lead").lines.rowRefreshes, 2,
+      "a compact card keeps the ⟳ for the briefing and for the chips");
+    assert.equal(by("w1b").lines.rowRefreshes, 1,
+      "with no reported checks there is no checks ⟳, only the briefing one");
     assert.ok(by("lead").briefText.length > 4,
       "the compact card's line is the briefing digest");
     assert.equal(by("lead").lines.card, false, "a compact card carries no briefing card");

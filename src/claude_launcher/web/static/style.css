@@ -669,12 +669,26 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
              The default.
    expanded  every line the row has, plus the briefing card.
 
-   `.rail-actions` is the expanded card's alone, with one exception that says
-   rather than does (`.sess-key`, below). The buttons in it offer the reader
-   things to DO — spawn, pin, observe, note, the two refreshes — and a row of
-   them under every name is paid for by every row on the rail, which is the
-   vertical budget the compact density exists to save. The reader who wants
-   to act on a session is on it, and being on it is what expands it.
+   `.rail-actions` is mostly the expanded card's. Two of its children are not:
+   `.sess-key` (below) and the two row refreshes. The rest offer the reader
+   things to DO — spawn, pin, observe, note, ⓘ — and a row of them under every
+   name is paid for by every row on the rail, which is the vertical budget the
+   compact density exists to save. The reader who wants to act on a session is
+   on it, and being on it is what expands it.
+
+   The two refreshes stay because they are the only controls whose meaning is
+   the collapsed card. `.sess-brief-rowref` re-summarises the one-line the
+   compact card is showing, and `.sess-status-check-rowref` asks the agent to
+   re-report the chips this density just promoted onto the card. Hiding them
+   left a reader looking at "× M · 1h33m" with no way to ask for a fresher
+   answer except opening the session — the chips and their refresh went to
+   opposite densities in one change. Both are icon buttons (17px and 15px
+   wide), so they cost one short glyph on a line that already exists for the
+   key chip, not a line of their own.
+
+   Checked by paint, not by reading the rule: `briefrow_check` builds rows
+   with a real `.rail-actions` and `railchildline_browser` asserts the ⟳ has a
+   box, because two 0x0 elements satisfy "they share a line" perfectly.
 
    `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
    case: they SAY something the name and the dot cannot, so both survive the
@@ -747,22 +761,49 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .sess-brief {
   display: none;
 }
-/* The buttons line is the expanded card's, EXCEPT the one child that says
-   something rather than offering something. `.sess-key` names the API key the
-   session is running on and is the only way into its picker — a fact about
-   the session, like the chips and the fault pill, not an action on it.
+/* The buttons line is the expanded card's, EXCEPT the three children that
+   are not an action on the session. `.sess-key` names the API key the session
+   is running on and is the only way into its picker — a fact about the
+   session, like the chips and the fault pill. The two refreshes are how the
+   reader asks the collapsed card's own content to be re-fetched; on the
+   expanded card that content is already open beside the buttons.
    Placing the visible part by exclusion, not by hiding the box, is what keeps
-   the chip reachable: an ancestor `display: none` would take it with the
-   buttons (sessionkey_browser caught exactly that). */
-#session-list li[data-rail-mode="compact"] .rail-actions > :not(.sess-key) {
+   them reachable: an ancestor `display: none` would take them with the
+   buttons (sessionkey_browser caught exactly that).
+   The exceptions are listed by name rather than left implicit, so a fourth
+   control added to this box has to be decided about rather than inherited. */
+#session-list li[data-rail-mode="compact"] .rail-actions
+  > :not(.sess-key, .sess-brief-rowref, .sess-status-check-rowref) {
   display: none;
+}
+/* A compact card's buttons box does not get a line of its own. What is left
+   in it is one to three short glyphs (`sess-key` is a label, the two ⟳ are
+   17px and 15px), and giving them a full-width row cost 20px on every card in
+   the rail — the exact budget dropping the buttons was supposed to buy.
+   Measured on the same fixture: compact 102px with the line, 122px when the
+   line came back for the two refreshes alone.
+   Instead it rides the meta line: `order: 0` moves it before the first
+   full-width line (`.rail-actions` keeps `order: 1` at the other densities,
+   where it IS a line), and `flex-basis: auto` sizes the box to the glyphs it
+   holds so it takes the space `.meta`'s `margin-left: auto` leaves.
+   `flex-basis: 0` was tried first and is wrong: a zero basis gives the box no
+   width to lay its children out in, so they overflowed it and the key chip
+   measured 60px wide starting at x=249 in a 260px rail — drawn past the
+   sidebar, with the page behind it taking the clicks (sessionkey_browser
+   caught it: "home-view intercepts pointer events"). */
+#session-list li[data-rail-mode="compact"] .rail-actions {
+  flex: 0 1 auto; order: 0;
+  padding-left: 0; margin-left: 2px; gap: 3px;
+  min-width: 0; max-width: 100%; overflow: hidden;
 }
 /* ...and a box that holds nothing visible must not cost height. It does:
    `.rail-actions` is a flex row with `order: 1`, and its own padding and gap
    are a line even with every child hidden. Measured on a compact card with no
    key chip: 102px unguarded, 97px with the guard (and 80px -> 75px for a row
-   with no checks either). `:has()` is the same guard `.rail-quiet` uses. */
-#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(.sess-key)) {
+   with no checks either). `:has()` is the same guard `.rail-quiet` uses. A box
+   whose every child is hidden measures as holding nothing. */
+#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(
+    .sess-key, .sess-brief-rowref, .sess-status-check-rowref)) {
   display: none;
 }
 /* Cflow badges are the exception on a compact card: a run that wants the
