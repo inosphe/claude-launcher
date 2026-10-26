@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -41,4 +42,38 @@ def test_http_crud_search_export_and_errors(home, tmp_path):
             await request("DELETE", "/" + row["id"])
             await request("DELETE", "/" + row["id"], status=404)
             assert (await client.get("/api/knowledge?workspace=missing")).status == 404
+    asyncio.run(scenario())
+
+
+def test_the_daemon_app_registers_the_knowledge_routes(home):
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def build():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        return build_app(mgr, "sekrit", started_at=time.monotonic())
+
+    app = asyncio.run(build())
+    routes = {(r.method, r.resource.canonical) for r in app.router.routes() if r.resource is not None}
+    assert {("GET", "/api/knowledge"), ("POST", "/api/knowledge"), ("PUT", "/api/knowledge/{id}"),
+            ("DELETE", "/api/knowledge/{id}")} <= routes
+
+
+def test_a_listing_without_status_shows_active_records_only(home, tmp_path):
+    ws = workspaces.add(str(tmp_path), "alpha")
+    old = knowledge.create(ws, {"kind": "decision", "title": "옛 결정", "body": "이유"})
+    new = knowledge.create(ws, {"kind": "decision", "title": "새 결정", "body": "이유",
+                                "supersedes": old["id"]})
+
+    async def scenario():
+        app = web.Application()
+        knowledge_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            async def ids(query=""):
+                response = await client.get("/api/knowledge?workspace=alpha" + query)
+                assert response.status == 200
+                return {r["id"] for r in (await response.json())["records"]}
+            assert await ids() == {new["id"]}
+            assert await ids("&status=all") == {old["id"], new["id"]}
+            assert await ids("&status=superseded") == {old["id"]}
     asyncio.run(scenario())

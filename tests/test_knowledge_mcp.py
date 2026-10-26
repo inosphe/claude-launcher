@@ -44,3 +44,11 @@ def test_search_with_explicit_workspace(monkeypatch):
     assert params == {"workspace": ["alpha"], "q": ["착지"], "kind": ["decision"], "limit": ["10"]}
     with pytest.raises(knowledge_mcp.KnowledgeMcpError):
         knowledge_mcp.call_tool("knowledge_delete", {})
+
+
+def test_search_passes_the_given_limit(monkeypatch):
+    client = Client()
+    monkeypatch.setattr(knowledge_mcp, "_client", lambda: client)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    knowledge_mcp.call_tool("knowledge_search", {"workspace": "alpha", "query": "착지", "limit": 3})
+    assert parse_qs(urlsplit(client.calls[0][1]).query)["limit"] == ["3"]
