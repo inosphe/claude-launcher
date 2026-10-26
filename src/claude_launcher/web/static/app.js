@@ -43158,6 +43158,579 @@ function cflow2LayoutControls(root, cols, main, chart, host) {
   return group;
 }
 
+/* ---- the chart's graph view (claunch-g6uma) -----------------------------
+   The callstack lists a run's frames in the order they were entered. What it
+   cannot show is the shape of the definition: that a `par` runs its branches
+   at once, that a `choose` takes one of them, or that two `call`s of one
+   procedure are the same body compiled twice — the frontend inlines every
+   call, so each site gets node ids of its own.
+
+   This view lays the same chart out as a flow. Down is a `seq`; side by side
+   is a branch group (`par`, `group`, `cond`, `choose`, `try`, `timeout`),
+   forked above and joined below; every `loop` is a box around its body with
+   the retry running back up; and every `call` is a node of its own, whose
+   body is drawn once where it is shared and referenced from the rest.
+
+   Geometry is computed once (cflow2GraphLayout) and turned into markup by
+   cflow2GraphSvg — the split the v1 diagram uses — so the layout is
+   checkable without a browser. */
+
+const CF2G_NODE_W = 200;   // one box
+const CF2G_NODE_H = 44;
+const CF2G_GAP = 32;       // between siblings that run in order
+const CF2G_LANE = 18;      // between branches that run at once
+const CF2G_PAD = 12;       // a frame's inner margin
+const CF2G_HEAD = 30;      // a frame's title band, two lines
+const CF2G_CHIP = 16;      // a branch group's caption row
+const CF2G_RAIL = 14;      // a branch group's fork and join rails
+const CF2G_EDGE = 8;       // the room each rail asks for
+const CF2G_MARGIN = 14;    // around the whole drawing
+const CF2G_GUTTER = 6;     // where a shared-body reference runs
+/* The engine completes these from their children; every other type is drawn
+   as one box. A box that still has children (`on` outcomes) stacks them. */
+const CF2G_ATOMIC = new Set(["task", "wait", "control"]);
+/* Containers whose children are alternatives or concurrent branches. */
+const CF2G_BRANCHES = new Set(["par", "group", "cond", "choose", "try", "timeout"]);
+
+/* One line, at most `max` characters: an SVG <text> collapses whitespace but
+   a newline would still push the rest of a label out of its box. */
+function cflow2GraphClip(s, max) {
+  s = String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+  return s.length > max ? s.slice(0, Math.max(1, max - 1)) + "…" : s;
+}
+
+function cflow2GraphLoopText(n) {
+  const parts = [`↻ ${n.mode || "loop"}`];
+  if (n.max != null) parts.push(`≤ ${n.max}`);
+  if (n.guard) parts.push(cflow2GraphClip(n.guard, 48));
+  else if (n.items) parts.push(`in ${cflow2GraphClip(n.items, 28)}` + (n.parallel ? " ×par" : ""));
+  return parts.join(" ");
+}
+
+function cflow2GraphChip(n) {
+  const t = n.type;
+  if (t === "par") return `∥ par · settle ${n.settle || "all"}`;
+  if (t === "group") return `⧉ group${n.name ? " " + n.name : ""} · settle ${n.settle || "all"}`;
+  if (t === "choose") return `◇ choose · by ${n.chooser || "agent"}`;
+  if (t === "cond") return "? cond · one branch runs";
+  if (t === "try") return "⚑ try · a catch joins after the body";
+  if (t === "timeout") return `⏱ timeout ${n.seconds}s · else after the wait`;
+  return t;
+}
+
+/* An id-free signature of one subtree. Two call sites of a procedure compile
+   the same body text into different node ids, so this is what tells "the
+   same body" apart from "the same procedure called with different blocks" —
+   a block parameter is compiled at its call site, and its shape travels
+   here. */
+function cflow2GraphSig(chart, id, memo, path) {
+  memo = memo || {};
+  path = path || new Set();
+  if (memo[id] !== undefined) return memo[id];
+  if (path.has(id)) return "";
+  const nodes = (chart && chart.nodes) || {};
+  const n = nodes[id];
+  if (!n) return "";
+  const next = new Set(path);
+  next.add(id);
+  const parts = [n.type || "", n.label || "", n.title || "", n.proc || "",
+                 (n.executor || []).join("/"), (n.roles || []).join(",")];
+  for (const c of n.children || []) parts.push(cflow2GraphSig(chart, c, memo, next));
+  memo[id] = parts.join(";");
+  return memo[id];
+}
+
+/* Where a `call` is written: the step's own name, taken from the node id the
+   frontend built (`<site>.call`). The call site is what tells two calls of
+   one procedure apart — the parameters they differ by are props on the scope
+   node, and the body is the same text either way. */
+function cflow2GraphSite(id) {
+  const parts = String(id == null ? "" : id).split("/").filter(Boolean);
+  const tail = (parts.pop() || String(id == null ? "" : id) || "").replace(/\.call$/, "");
+  if (!tail) return "";
+  /* A bare `0` or `1.2` is a position, not a name: keep one segment of
+     context so two call sites never read alike. */
+  return /^[0-9.]+$/.test(tail) && parts.length ? `${parts.pop()}/${tail}` : tail;
+}
+
+/* Which `call` sites are one body: procedure name plus compiled shape. Which
+   of them draws the body is the layout's call, not this one's — a group is
+   owned by the first site that is actually on screen (see the drawn set
+   below). `first` is only the chart-order first, which is what groups are
+   keyed by so the site list survives a re-layout. */
+function cflow2GraphProcs(chart) {
+  const nodes = (chart && chart.nodes) || {};
+  const order = [], seen = new Set();
+  const walk = (id) => {
+    if (!id || seen.has(id) || !nodes[id]) return;
+    seen.add(id);
+    order.push(id);
+    for (const c of nodes[id].children || []) walk(c);
+  };
+  walk(chart && chart.root);
+  for (const id of Object.keys(nodes)) walk(id);
+  const memo = {}, groups = new Map();
+  for (const id of order) {
+    const n = nodes[id];
+    if (!n || n.type !== "scope") continue;
+    const body = (n.children || []).find((c) => nodes[c]);
+    const key = `${n.proc || "?"}@${body ? cflow2GraphSig(chart, body, memo) : ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(id);
+  }
+  const first = new Map(), sites = new Map(), key = new Map();
+  for (const [k, ids] of groups) {
+    sites.set(ids[0], ids);
+    for (const id of ids) { first.set(id, ids[0]); key.set(id, k); }
+  }
+  return { first, sites, order, groups, key };
+}
+
+/* Which containers the graph draws open: the root, every ancestor of the
+   run's position (a live or awaiting instance) and of the selection, then
+   the person's own toggles — the rule cflow2TreeOpen applies. */
+function cflow2GraphOpen(chart, detail, selected, overrides) {
+  const nodes = (chart && chart.nodes) || {};
+  const open = new Set();
+  if (chart && chart.root && nodes[chart.root]) open.add(chart.root);
+  const parent = {};
+  for (const [id, n] of Object.entries(nodes)) {
+    for (const c of (n && n.children) || []) {
+      if (nodes[c] && parent[c] === undefined) parent[c] = id;
+    }
+  }
+  const lift = (id) => { for (let p = parent[id]; p; p = parent[p]) open.add(p); };
+  for (const i of (detail && detail.instances) || []) if (nodes[i.node]) lift(i.node);
+  if (selected && nodes[selected]) lift(selected);
+  for (const [id, on] of Object.entries(overrides || {})) {
+    if (on) open.add(id); else open.delete(id);
+  }
+  return open;
+}
+
+/* The chart as boxes and edges. Pure: no DOM, no state — the caller hands in
+   which containers are open, and gets back everything the drawing needs. */
+function cflow2GraphLayout(chart, detail, opts) {
+  opts = opts || {};
+  const nodes = (chart && chart.nodes) || {};
+  const open = opts.open instanceof Set ? opts.open : new Set(opts.open || []);
+  const procs = cflow2GraphProcs(chart);
+  const live = {}, awaiting = {};
+  for (const i of (detail && detail.instances) || []) {
+    live[i.node] = (live[i.node] || 0) + 1;
+    if (i.await) awaiting[i.node] = i.await;
+  }
+  const visits = (detail && detail.visits) || {};
+  const at = (id) => nodes[id] || { id, type: "?" };
+  const r = (v) => Math.round(v * 10) / 10;
+
+  const roots = [];
+  if (chart && chart.root && nodes[chart.root]) roots.push(chart.root);
+  else {
+    const claimed = new Set();
+    for (const id of Object.keys(nodes)) {
+      for (const c of nodes[id].children || []) claimed.add(c);
+    }
+    for (const id of Object.keys(nodes)) if (!claimed.has(id)) roots.push(id);
+  }
+  const bodyKids = (id) => (at(id).children || []).filter((c) => nodes[c] && c !== id);
+
+  /* Which nodes reach the screen. Ownership has to settle first: a call site
+     that does not own its body draws none of it, so the sites written inside
+     that body are not on screen either. Picking the owner from the whole
+     chart instead leaves a reference node pointing at a body nobody can see
+     (s2273-rev, claunch-g6uma: 24 of 24 partially expanded sites drew a ref
+     node and no line). Each group is owned once — by the first of its sites
+     that is drawn and would show the body, else the first drawn — and frozen
+     after the pick, so the drawn set only grows and the loop ends. */
+  const drawnSet = (own) => {
+    const seen = new Set();
+    const visit = (id) => {
+      if (!id || seen.has(id) || !nodes[id]) return;
+      seen.add(id);
+      const n = nodes[id];
+      if (n.type === "scope" && procs.key.has(id) && own.get(procs.key.get(id)) !== id) return;
+      if (!bodyKids(id).length) return;
+      if (!(CF2G_ATOMIC.has(n.type) || open.has(id))) return;
+      for (const c of n.children || []) visit(c);
+    };
+    for (const id of roots) visit(id);
+    return seen;
+  };
+  const owners = new Map();
+  let drawn = drawnSet(owners);
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (const [key, ids] of procs.groups) {
+      if (owners.has(key)) continue;
+      const here = ids.filter((i) => drawn.has(i));
+      if (!here.length) continue;
+      owners.set(key, here.find((i) => open.has(i) && bodyKids(i).length) || here[0]);
+      changed = true;
+    }
+    drawn = drawnSet(owners);
+    if (!changed) break;
+  }
+  /* an owner the walk never reached owns nothing after all: its sites read as
+     plain calls rather than pointing at an invisible body */
+  for (const [key, id] of [...owners]) if (!drawn.has(id)) owners.delete(key);
+
+  /* A site that is not its body's owner draws no children: the body is the
+     shared node, reached by a reference edge. */
+  const ownerOf = (id) => at(id).type === "scope" && procs.key.has(id)
+    ? owners.get(procs.key.get(id)) || "" : "";
+  const shared = (id) => { const o = ownerOf(id); return !!o && o !== id; };
+  const kids = (id) => shared(id) ? [] : bodyKids(id);
+  const groupOf = (id) => (procs.key.has(id) ? procs.groups.get(procs.key.get(id)) || [] : []);
+  const atomic = (id) => CF2G_ATOMIC.has(at(id).type);
+  const shown = (id) => kids(id).length > 0 && (atomic(id) || open.has(id));
+  const stackH = (boxes) => boxes.reduce((a, b) => a + b.h, 0) +
+    CF2G_GAP * Math.max(0, boxes.length - 1);
+
+  const size = new Map();
+  const measure = (id) => {
+    if (size.has(id)) return size.get(id);
+    const n = at(id);
+    const k = shown(id) ? kids(id) : [];
+    let s;
+    if (!k.length) s = { w: CF2G_NODE_W, h: CF2G_NODE_H };
+    else if (atomic(id)) {
+      const boxes = k.map(measure);
+      s = { w: Math.max(CF2G_NODE_W, ...boxes.map((b) => b.w)),
+            h: CF2G_NODE_H + CF2G_GAP + stackH(boxes) };
+    } else if (n.type === "loop" || n.type === "scope") {
+      const boxes = k.map(measure);
+      s = { w: Math.max(...boxes.map((b) => b.w)) + 2 * CF2G_PAD,
+            h: stackH(boxes) + CF2G_HEAD + CF2G_PAD };
+    } else if (CF2G_BRANCHES.has(n.type)) {
+      const boxes = k.map(measure);
+      s = { w: boxes.reduce((a, b) => a + b.w, 0) + CF2G_LANE * (k.length - 1),
+            h: Math.max(...boxes.map((b) => b.h)) + CF2G_CHIP + 2 * CF2G_EDGE + 2 * CF2G_RAIL };
+    } else {
+      const boxes = k.map(measure);
+      s = { w: Math.max(...boxes.map((b) => b.w)), h: stackH(boxes) };
+    }
+    size.set(id, s);
+    return s;
+  };
+
+  const out = { w: 0, h: 0, nodes: [], edges: [], boxes: [], chips: [] };
+  const geo = new Map();
+  const roleOf = (id, child) => {
+    const n = at(id);
+    const i = (n.children || []).indexOf(child);
+    return i >= 0 ? ((n.roles || [])[i] || "") : "";
+  };
+  const edge = (from, to, kind, d, label, lx, ly) => {
+    out.edges.push({ from, to, kind, d, label: label || "", lx: lx || 0, ly: ly || 0 });
+  };
+  const vpath = (x1, y1, x2, y2) => {
+    if (Math.abs(x1 - x2) < 0.6) return `M${r(x1)} ${r(y1)}L${r(x2)} ${r(y2)}`;
+    const my = y1 + Math.max(9, (y2 - y1) / 2);
+    return `M${r(x1)} ${r(y1)}L${r(x1)} ${r(my)}L${r(x2)} ${r(my)}L${r(x2)} ${r(y2)}`;
+  };
+
+  const box = (id, x, y, w, h, kind) => {
+    const n = at(id);
+    const bits = cflow2NodeBits(n);
+    const ref = shared(id) ? ownerOf(id) : "";
+    const count = groupOf(id).length;
+    const nkids = kids(id).length;
+    /* a call is a call whether its body is drawn inside it or not */
+    const head = ref || n.type === "scope" ? `call ${n.proc || "?"}`
+      : (bits.head || n.label || n.id);
+    const site = n.type === "scope" ? cflow2GraphSite(id) : "";
+    let sub = ref ? [site, `shared ×${count}`].filter(Boolean).join(" · ")
+      : [bits.sub, n.type === "scope" ? site : ""].filter(Boolean).join(" · ");
+    if (!ref && nkids && !shown(id)) sub = [sub, `+${nkids} collapsed`].filter(Boolean).join(" · ");
+    out.nodes.push({
+      id, type: n.type || "?", x, y, w, h, kind: ref ? "ref" : kind,
+      head: cflow2GraphClip(head, 26), sub: cflow2GraphClip(sub, 34),
+      full: `${head}${bits.sub ? " · " + bits.sub : ""}${ref ? ` · the same body as ${ref}` : ""}`,
+      live: !!live[id], awaiting: awaiting[id] || "",
+      visits: Number(visits[n.label || n.id] || 0),
+      force: !!n.force_target,
+      toggle: !shown(id) && nkids > 0,
+      ref,
+    });
+  };
+
+  const place = (id, x, y) => {
+    const n = at(id);
+    const s = measure(id);
+    const k = shown(id) ? kids(id) : [];
+    geo.set(id, { x, y, w: s.w, h: s.h });
+
+    /* one box: a leaf, a collapsed container, or a shared-body call */
+    if (!k.length) { box(id, x, y, s.w, s.h, "leaf"); return; }
+
+    /* a task with `on` outcomes: its own box, then the outcomes below */
+    if (atomic(id)) {
+      box(id, x, y, s.w, CF2G_NODE_H, "leaf");
+      let cy = y + CF2G_NODE_H + CF2G_GAP;
+      let prev = { id, cx: x + s.w / 2, bottom: y + CF2G_NODE_H };
+      for (const c of k) {
+        const cs = measure(c);
+        const cx = x + (s.w - cs.w) / 2;
+        place(c, cx, cy);
+        const nx = { id: c, cx: cx + cs.w / 2, bottom: cy + cs.h };
+        edge(prev.id, c, "seq", vpath(prev.cx, prev.bottom, nx.cx, cy), roleOf(id, c),
+             (prev.cx + nx.cx) / 2 + 4, (prev.bottom + cy) / 2 + 3);
+        prev = nx;
+        cy += cs.h + CF2G_GAP;
+      }
+      return;
+    }
+
+    /* a loop or a call: a titled frame around the body */
+    if (n.type === "loop" || n.type === "scope") {
+      const sites = groupOf(id);
+      out.boxes.push({
+        id, kind: n.type === "loop" ? "loop" : "call", x, y, w: s.w, h: s.h,
+        text: n.type === "loop" ? cflow2GraphLoopText(n)
+          : `call ${n.proc || "?"}${sites.length > 1 ? ` · shared ×${sites.length}` : ""}`,
+        sub: n.type === "scope" ? cflow2GraphSite(id) : "",
+        shared: sites.length > 1,
+      });
+      const inner = x + CF2G_PAD, iw = s.w - 2 * CF2G_PAD;
+      let cy = y + CF2G_HEAD, prev = null, first = null;
+      for (const c of k) {
+        const cs = measure(c);
+        const cx = inner + (iw - cs.w) / 2;
+        place(c, cx, cy);
+        const nx = { id: c, cx: cx + cs.w / 2, top: cy, bottom: cy + cs.h };
+        if (!first) first = nx;
+        if (prev) {
+          edge(prev.id, c, "seq", vpath(prev.cx, prev.bottom, nx.cx, cy), roleOf(id, c),
+               (prev.cx + nx.cx) / 2 + 4, (prev.bottom + cy) / 2 + 3);
+        }
+        prev = nx;
+        cy += cs.h + CF2G_GAP;
+      }
+      /* the retry: the body's bottom runs back up to its top, inside the box */
+      if (n.type === "loop" && prev && first) {
+        const rx = x + s.w - CF2G_PAD / 2;
+        edge(prev.id, first.id, "back",
+          `M${r(prev.cx)} ${r(prev.bottom)}L${r(prev.cx)} ${r(prev.bottom + 8)}` +
+          `L${r(rx)} ${r(prev.bottom + 8)}L${r(rx)} ${r(first.top - 8)}` +
+          `L${r(first.cx)} ${r(first.top - 8)}L${r(first.cx)} ${r(first.top)}`);
+      }
+      return;
+    }
+
+    /* branches: side by side, one fork above and one join below */
+    if (CF2G_BRANCHES.has(n.type)) {
+      const boxes = k.map(measure);
+      const maxH = Math.max(...boxes.map((b) => b.h));
+      const topRail = y + CF2G_CHIP + CF2G_EDGE;
+      const branchTop = topRail + CF2G_RAIL;
+      const botRail = branchTop + maxH + CF2G_RAIL;
+      const ax = x + s.w / 2;
+      out.chips.push({ id, x, y, w: s.w, type: n.type, text: cflow2GraphChip(n) });
+      out.boxes.push({ id, kind: "group", x, y, w: s.w, h: s.h, text: "" });
+      let lx = x;
+      k.forEach((c, i) => {
+        const cs = boxes[i];
+        const by = branchTop + (maxH - cs.h) / 2;
+        place(c, lx, by);
+        const cxc = lx + cs.w / 2;
+        edge(id, c, "fork",
+          `M${r(ax)} ${r(y + CF2G_CHIP)}L${r(ax)} ${r(topRail)}` +
+          `L${r(cxc)} ${r(topRail)}L${r(cxc)} ${r(by)}`,
+          roleOf(id, c), cxc + 5, topRail - 4);
+        edge(c, id, "join",
+          `M${r(cxc)} ${r(by + cs.h)}L${r(cxc)} ${r(botRail)}` +
+          `L${r(ax)} ${r(botRail)}L${r(ax)} ${r(y + s.h)}`);
+        lx += cs.w + CF2G_LANE;
+      });
+      return;
+    }
+
+    /* everything else runs in order, top to bottom */
+    let cy = y, prev = null;
+    for (const c of k) {
+      const cs = measure(c);
+      const cx = x + (s.w - cs.w) / 2;
+      place(c, cx, cy);
+      const nx = { id: c, cx: cx + cs.w / 2, bottom: cy + cs.h };
+      if (prev) {
+        edge(prev.id, c, "seq", vpath(prev.cx, prev.bottom, nx.cx, cy), roleOf(id, c),
+             (prev.cx + nx.cx) / 2 + 4, (prev.bottom + cy) / 2 + 3);
+      }
+      prev = nx;
+      cy += cs.h + CF2G_GAP;
+    }
+  };
+
+  let oy = CF2G_MARGIN;
+  for (const id of roots) {
+    place(id, CF2G_MARGIN, oy);
+    oy += measure(id).h + CF2G_GAP;
+  }
+
+  /* Every other site of a shared body points at the one that drew it. The
+     lines run in the left gutter, outside the drawing: one procedure called
+     in eighteen places is eighteen lines, and drawn over the flow they would
+     cross every box between the two sites. Sharing one column is the point —
+     the gutter reads as one reference bus, and each box keeps its own site
+     name so the reader can tell which call is which. Both ends are on screen
+     by construction: an owner that the walk did not reach was dropped above,
+     and a site that is drawn has its owner drawn too (it owns this body, so
+     it is on the path that showed the site). */
+  for (const [key, ownerId] of owners) {
+    const b = geo.get(ownerId);
+    for (const id of procs.groups.get(key) || []) {
+      if (id === ownerId) continue;
+      const a = geo.get(id);
+      if (!a || !b) continue;
+      const y1 = a.y + a.h / 2, y2 = b.y + CF2G_HEAD / 2;
+      edge(id, ownerId, "ref",
+        `M${r(a.x)} ${r(y1)}L${r(CF2G_GUTTER)} ${r(y1)}` +
+        `L${r(CF2G_GUTTER)} ${r(y2)}L${r(b.x)} ${r(y2)}`);
+    }
+  }
+
+  let maxX = 0, maxY = 0;
+  for (const b of out.nodes.concat(out.boxes)) {
+    maxX = Math.max(maxX, b.x + b.w);
+    maxY = Math.max(maxY, b.y + b.h);
+  }
+  out.w = Math.ceil(maxX + CF2G_MARGIN);
+  out.h = Math.ceil(maxY + CF2G_MARGIN);
+  return out;
+}
+
+/* The layout as SVG markup. Every box carries `data-node`, so the caller
+   attaches the presses to the drawing, not the other way round. */
+function cflow2GraphSvg(g) {
+  const num = (v) => Math.round(v * 10) / 10;
+  const W = Math.max(1, Math.ceil(g.w)), H = Math.max(1, Math.ceil(g.h));
+  const p = [];
+  p.push(`<svg class="cf2g" xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" ` +
+         `viewBox="0 0 ${W} ${H}" role="img" aria-label="Workflow graph">`);
+  p.push('<defs><marker id="cf2g-arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
+         'markerWidth="7" markerHeight="7" orient="auto">' +
+         '<path class="cf2g-head" d="M0 0L10 5L0 10z"/></marker></defs>');
+  for (const b of g.boxes) {
+    p.push(`<rect class="cf2g-box ${b.kind}${b.shared ? " shared" : ""}" ` +
+           `x="${num(b.x)}" y="${num(b.y)}" width="${num(b.w)}" height="${num(b.h)}" rx="8"/>`);
+    if (b.text) {
+      p.push(`<text class="cf2g-boxt ${b.kind}" x="${num(b.x + 9)}" ` +
+             `y="${num(b.y + 13)}">${escXml(b.text)}</text>`);
+    }
+    if (b.sub) {
+      p.push(`<text class="cf2g-boxs ${b.kind}" x="${num(b.x + 9)}" ` +
+             `y="${num(b.y + 26)}">${escXml(b.sub)}</text>`);
+    }
+  }
+  for (const c of g.chips) {
+    p.push(`<text class="cf2g-chip t-${escXml(c.type || "")}" x="${num(c.x + 2)}" ` +
+           `y="${num(c.y + 11)}">${escXml(c.text)}</text>`);
+  }
+  for (const e of g.edges) {
+    p.push(`<path class="cf2g-edge ${e.kind}" d="${e.d}" marker-end="url(#cf2g-arrow)"/>`);
+    if (e.label) {
+      p.push(`<text class="cf2g-elabel" x="${num(e.lx)}" ` +
+             `y="${num(e.ly)}">${escXml(e.label)}</text>`);
+    }
+  }
+  for (const n of g.nodes) {
+    const cls = ["cf2g-node", `t-${n.type}`, n.kind,
+                 n.live ? "live" : "", n.awaiting ? "awaiting" : "",
+                 n.force ? "force" : "", n.ref ? "ref" : ""].filter(Boolean).join(" ");
+    p.push(`<g class="${cls}" data-node="${escXml(n.id)}"` +
+           (n.toggle ? ' data-toggle="1"' : "") +
+           ` tabindex="0" role="button" aria-label="${escXml(n.full || n.head)}">`);
+    p.push(`<title>${escXml(n.full || n.head)}</title>`);
+    p.push(`<rect x="${num(n.x)}" y="${num(n.y)}" width="${num(n.w)}" ` +
+           `height="${num(n.h)}" rx="6"/>`);
+    p.push(`<text class="cf2g-t" x="${num(n.x + 10)}" y="${num(n.y + 18)}">${escXml(n.head)}</text>`);
+    if (n.sub) {
+      p.push(`<text class="cf2g-s" x="${num(n.x + 10)}" y="${num(n.y + 32)}">${escXml(n.sub)}</text>`);
+    }
+    const badge = n.awaiting ? n.awaiting : n.live ? "live" : "";
+    if (badge) {
+      p.push(`<text class="cf2g-badge ${n.awaiting ? "await" : "live"}" ` +
+             `x="${num(n.x + n.w - 8)}" y="${num(n.y + 18)}" text-anchor="end">` +
+             `${escXml(badge)}</text>`);
+    }
+    if (n.visits > 1) {
+      p.push(`<text class="cf2g-badge visits" x="${num(n.x + n.w - 8)}" ` +
+             `y="${num(n.y + n.h - 8)}" text-anchor="end">×${n.visits}</text>`);
+    }
+    p.push("</g>");
+  }
+  p.push("</svg>");
+  return p.join("");
+}
+
+/* What the two axes mean, so the picture does not have to be guessed. */
+function cflow2GraphLegend() {
+  return el("p", "wf-note cf2g-legend",
+    "Down: steps in order · side by side: branches, forked above and joined below · " +
+    "boxed: a loop, its retry running back up · call: a procedure, drawn once " +
+    "where several steps call it");
+}
+
+/* `opts`: selected, open (overrides), onSelect(id, collapsed). */
+function cflow2GraphInto(host, chart, detail, opts) {
+  opts = opts || {};
+  const open = cflow2GraphOpen(chart, detail, opts.selected, opts.open);
+  const layout = cflow2GraphLayout(chart, detail, { open });
+  const wrap = el("div", "cf2g-wrap");
+  wrap.tabIndex = 0;
+  wrap.innerHTML = cflow2GraphSvg(layout);
+  const pick = (target) => {
+    const node = target && target.closest ? target.closest("[data-node]") : null;
+    if (!node || !opts.onSelect) return;
+    opts.onSelect(node.dataset.node, !!node.dataset.toggle);
+  };
+  wrap.addEventListener("click", (e) => pick(e.target));
+  wrap.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    pick(e.target);
+  });
+  host.appendChild(wrap);
+  return { wrap, layout };
+}
+
+/* The chart's two views as a radio group of tabs: the callstack lists
+   frames, the graph draws the definition. The choice is kept per host, like
+   the panel layout is. */
+const cf2ChartModes = {};
+function cflow2ChartMode(host) {
+  let mode = cf2ChartModes[host];
+  if (!mode) {
+    try { mode = localStorage.getItem("claunch.cflow2.chartmode." + host); } catch {}
+    mode = mode === "graph" ? "graph" : "callstack";
+  }
+  return mode;
+}
+function cflow2ChartModeTabs(host, mode, redraw) {
+  const group = el("div", "cf2-modes");
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", "Chart view");
+  for (const [value, label, hint] of [
+    ["callstack", "Callstack", "Frames in the order the run entered them"],
+    ["graph", "Graph", "The definition as a flow: loops boxed, branches side by side, " +
+                       "a shared procedure drawn once"],
+  ]) {
+    const button = el("button", "cf2-mode", label);
+    button.type = "button";
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", String(mode === value));
+    button.title = hint;
+    button.addEventListener("click", () => {
+      cf2ChartModes[host] = value;
+      try { localStorage.setItem("claunch.cflow2.chartmode." + host, value); } catch {}
+      redraw();
+    });
+    group.appendChild(button);
+  }
+  return group;
+}
+
 function cflow2StackRows(data) {
   const nodes = (data.chart || {}).nodes || {};
   const instances = data.instances || [];
@@ -43280,7 +43853,7 @@ function captureCflow2View(box) {
   for (let node = box; node; node = node.parentElement) {
     scrolls.push([node, node.scrollTop, node.scrollLeft]);
   }
-  const inner = [".cf2-tree", ".cf2-pane-body", ".cf2-col-main", ".cf2-col-chart"]
+  const inner = [".cf2-tree", ".cf2g-wrap", ".cf2-pane-body", ".cf2-col-main", ".cf2-col-chart"]
     .map((selector) => {
       const node = box.querySelector(selector);
       return node ? [selector, node.scrollTop, node.scrollLeft] : null;
@@ -44052,12 +44625,14 @@ function renderCflow2Into(box, data, ui, force = false) {
   if (data.chart) {
     const nodes = data.chart.nodes || {};
     const sec = cf2Section("Chart", undefined, "cf2-chart");
+    const redraw = () => renderCflow2Into(box, box._cf2Data, ui, true);
+    const chartMode = cflow2ChartMode(host);
+    sec.appendChild(cflow2ChartModeTabs(host, chartMode, redraw));
     const tools = el("div", "cf2-chart-tools");
     const marked = Object.values(nodes).filter((n) => n.force_target).length;
     tools.appendChild(el("span", "wf-note", marked
       ? `${marked} node(s) marked ⇥ can be moved to — click one`
       : "no node is marked force_target"));
-    const redraw = () => renderCflow2Into(box, box._cf2Data, ui, true);
     const current = el("button", "wf-btn sm", "Current state");
     current.disabled = !(data.instances || []).length;
     current.title = "expand and scroll to the current execution state";
@@ -44071,7 +44646,9 @@ function renderCflow2Into(box, data, ui, force = false) {
       for (let p = parents[target.id]; p; p = parents[p]) opened[p] = true;
       cf2Open[host] = opened;
       redraw();
-      const row = Array.from(box.querySelectorAll(".cf2-row")).find((r) => r.dataset.node === target.id);
+      const scope = chartMode === "graph" ? ".cf2g-wrap [data-node]" : ".cf2-tree [data-node]";
+      const row = Array.from(box.querySelectorAll(scope))
+        .find((r) => r.dataset.node === target.id);
       if (row) row.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
     });
     const expand = el("button", "wf-btn sm clear", "Expand all");
@@ -44086,25 +44663,46 @@ function renderCflow2Into(box, data, ui, force = false) {
     sec.appendChild(tools);
     let sel = cf2Selected[host] || null;
     if (sel && !nodes[sel]) sel = cf2Selected[host] = null;
-    const treeSignature = JSON.stringify([identity, data.chart, data.visits,
-      (data.instances || []).map((i) => [i.node, i.await]), sel, cf2Open[host]]);
-    if (box._cf2TreeSignature === treeSignature && box._cf2Tree) {
-      sec.appendChild(box._cf2Tree);
+    if (chartMode === "graph") {
+      sec.appendChild(cflow2GraphLegend());
+      const opened = cflow2GraphOpen(data.chart, data, sel, cf2Open[host]);
+      const graphSignature = JSON.stringify([identity, data.chart, data.visits,
+        (data.instances || []).map((i) => [i.node, i.await]), sel, [...opened].sort()]);
+      if (box._cf2GraphSignature === graphSignature && box._cf2Graph) {
+        sec.appendChild(box._cf2Graph);
+      } else {
+        box._cf2Graph = cflow2GraphInto(sec, data.chart, data, {
+          selected: sel,
+          open: cf2Open[host] || {},
+          onSelect: (id, collapsed) => {
+            if (collapsed) cf2Open[host] = { ...(cf2Open[host] || {}), [id]: true };
+            cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
+            redraw();
+          },
+        }).wrap;
+        box._cf2GraphSignature = graphSignature;
+      }
     } else {
-      cflow2TreeInto(sec, data.chart, data, {
-        selected: sel,
-        open: cf2Open[host] || {},
-        onSelect: (id) => {
-          cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
-          redraw();
-        },
-        onToggle: (id, on) => {
-          cf2Open[host] = { ...(cf2Open[host] || {}), [id]: on };
-          redraw();
-        },
-      });
-      box._cf2Tree = sec.querySelector(".cf2-tree");
-      box._cf2TreeSignature = treeSignature;
+      const treeSignature = JSON.stringify([identity, data.chart, data.visits,
+        (data.instances || []).map((i) => [i.node, i.await]), sel, cf2Open[host]]);
+      if (box._cf2TreeSignature === treeSignature && box._cf2Tree) {
+        sec.appendChild(box._cf2Tree);
+      } else {
+        cflow2TreeInto(sec, data.chart, data, {
+          selected: sel,
+          open: cf2Open[host] || {},
+          onSelect: (id) => {
+            cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
+            redraw();
+          },
+          onToggle: (id, on) => {
+            cf2Open[host] = { ...(cf2Open[host] || {}), [id]: on };
+            redraw();
+          },
+        });
+        box._cf2Tree = sec.querySelector(".cf2-tree");
+        box._cf2TreeSignature = treeSignature;
+      }
     }
     side.appendChild(sec);
     if (sel) {

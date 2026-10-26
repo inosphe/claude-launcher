@@ -8916,6 +8916,71 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-row.selectable { cursor: pointer; }
 .cf2-row.selectable:hover { background: rgba(110, 118, 129, .12); }
 .cf2-row.selected { background: rgba(56, 139, 253, .18); }
+
+/* the chart's two views as a radio group of tabs (claunch-g6uma) */
+.cf2-modes {
+  display: inline-flex; margin: 0 0 6px; border: 1px solid #30363d;
+  border-radius: 7px; overflow: hidden;
+}
+.cf2-mode {
+  background: transparent; color: #8b949e; border: 0; padding: 3px 12px;
+  font: inherit; font-size: 11.5px; line-height: 18px; cursor: pointer;
+}
+.cf2-mode + .cf2-mode { border-left: 1px solid #30363d; }
+.cf2-mode:hover { color: #e6edf3; background: rgba(110, 118, 129, .14); }
+.cf2-mode[aria-checked="true"] { color: #e6edf3; background: rgba(56, 139, 253, .24); }
+.cf2-mode:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+
+/* the graph view: the same chart as a flow — down is sequence, side by side
+   is branches, a box is a loop, a call frame is a procedure drawn once */
+.cf2g-legend { margin: 0 0 6px; }
+.cf2g-wrap {
+  overflow: auto; padding: 4px; background: #121418;
+  border: 1px solid #262b33; border-radius: 8px;
+}
+@container (min-width: 980px) {
+  .cf2-chart .cf2g-wrap { max-height: calc(100vh - 140px); }
+}
+.cf2g { display: block; }
+.cf2g-box { fill: none; }
+.cf2g-box.loop {
+  fill: rgba(137, 87, 229, .07); stroke: #8957e5;
+  stroke-width: 1.4; stroke-dasharray: 7 4;
+}
+.cf2g-box.call { fill: rgba(46, 160, 67, .06); stroke: #2ea043; stroke-width: 1.4; }
+.cf2g-box.call.shared { stroke-width: 2; }
+.cf2g-box.group { fill: rgba(86, 212, 221, .04); stroke: #21262d; stroke-width: 1; stroke-dasharray: 3 4; }
+.cf2g-boxt { fill: #d2a8ff; font-size: 10.5px; font-family: Cascadia Mono, Consolas, monospace; }
+.cf2g-boxt.call, .cf2g-boxs.call { fill: #7ee787; }
+.cf2g-boxs { fill: #6e7681; font-size: 10px; font-family: Cascadia Mono, Consolas, monospace; }
+.cf2g-chip { fill: #8b949e; font-size: 10.5px; font-family: Cascadia Mono, Consolas, monospace; }
+.cf2g-edge { fill: none; stroke: #4d5566; stroke-width: 1.4; }
+.cf2g-edge.fork, .cf2g-edge.join { stroke: #56d4dd; }
+.cf2g-edge.back { stroke: #8957e5; stroke-dasharray: 5 4; }
+.cf2g-edge.ref { stroke: #7ee787; stroke-dasharray: 4 4; }
+.cf2g-head { fill: #6e7681; }
+.cf2g-elabel { fill: #8fa1b3; font-size: 9.5px; }
+.cf2g-node { cursor: pointer; }
+.cf2g-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.4; }
+.cf2g-node:hover rect { stroke: #8fa1b3; }
+.cf2g-node:focus-visible rect { stroke: #58a6ff; stroke-width: 2.4; }
+.cf2g-node.t-task rect { stroke: #1f6febaa; }
+.cf2g-node.t-task .cf2g-t { fill: #e6edf3; font-weight: 600; }
+.cf2g-node.t-scope rect, .cf2g-node.ref rect { stroke: #2ea043; }
+.cf2g-node.ref rect { stroke-dasharray: 5 4; }
+.cf2g-node.t-par rect, .cf2g-node.t-group rect { stroke: #56d4ddaa; }
+.cf2g-node.t-choose rect, .cf2g-node.t-cond rect { stroke: #e3b341aa; }
+.cf2g-node.t-loop rect, .cf2g-node.t-try rect { stroke: #8957e5aa; }
+.cf2g-node.t-wait rect, .cf2g-node.t-timeout rect { stroke: #f0883eaa; }
+.cf2g-node.live rect { stroke: #2ea043; stroke-width: 2; }
+.cf2g-node.awaiting rect { fill: #14233a; stroke: #58a6ff; stroke-width: 2; }
+.cf2g-node.force rect { stroke-dasharray: 2 3; }
+.cf2g-t { fill: #c9d1d9; font-size: 12px; }
+.cf2g-s { fill: #6e7681; font-size: 10.5px; }
+.cf2g-badge { fill: #8b949e; font-size: 9.5px; font-weight: 700; }
+.cf2g-badge.live { fill: #56d364; }
+.cf2g-badge.await { fill: #79c0ff; }
+.cf2g-badge.visits { fill: #d29922; }
 .cf2-node {
   margin: 4px 10px 8px; padding: 8px 10px; border: 1px solid #30363d; border-radius: 6px;
   background: #181b20; white-space: normal;
