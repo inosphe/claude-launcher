@@ -264,13 +264,10 @@ const compactActions = plain.match(
 ok("a compact card hides the buttons inside the buttons line",
    compactActions && /display:\s*none/.test(compactActions[2]),
    compactActions ? compactActions[2].trim() : "no rule");
-/* The exclusion list is the whole defence: every name NOT in it loses its
-   button on the default card. `.sess-key` names one fact, the two refreshes
-   are the only controls whose subject is the collapsed card's own content —
-   all three have to be spared by name, and a rule that drops one of them is
-   the defect this round shipped once already (claunch-6ezw3.1). */
+/* Only the key picker remains on compact cards. Refreshes become available
+   after opening the card, so asynchronous labels cannot squeeze the profile. */
 const spared = compactActions ? compactActions[1] : "";
-for (const keep of ["sess-key", "sess-brief-rowref", "sess-status-check-rowref"]) {
+for (const keep of ["sess-key"]) {
   ok(`...and .${keep} inside it is spared by name`,
      spared.includes(`.${keep}`),
      `the compact exclusion list is "${spared.trim()}" — it does not name .${keep}`);

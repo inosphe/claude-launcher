@@ -82,12 +82,7 @@ const server = http.createServer((req, res) => {
           const dot = li.querySelector(".dot").getBoundingClientRect();
           const infoNode = li.querySelector(".sess-info");
           const info = infoNode.getBoundingClientRect();
-          // The briefing ⟳ stays on the row at every density; the old ▸ fold is
-          // gone (app.js railCardMode expands a picked card). It is not
-          // necessarily on the buttons line, though: on a compact card that
-          // line is not drawn and the ⟳ rides the meta line, so the two are
-          // compared only when both are painted. Widths come back separately
-          // so "both are 0x0" cannot read as "they agree".
+          // Compact cards retain their name geometry with refreshes hidden.
           const toggle = li.querySelector(".sess-brief-rowref").getBoundingClientRect();
           const tick = getComputedStyle(li, "::before");
           const liBox = li.getBoundingClientRect();
@@ -117,20 +112,8 @@ const server = http.createServer((req, res) => {
         assert.ok(r.nameTop - r.firstLine <= 8,
           `${where}: the name sits on the row's first line (${r.nameTop - r.firstLine}px below it)`);
         assert.ok(r.nameWidth >= 20, `${where}: the name keeps some width (${r.nameWidth}px)`);
-        // Two unpainted boxes are 0x0 and their midpoints agree perfectly, so
-        // the comparison only means something once both have been drawn. This
-        // assertion passed vacuously for one round when a compact rule hid the
-        // ⟳: |0 - 0| is 0, and nothing else here looked at the size.
-        assert.ok(r.refreshBox[0] > 0 && r.refreshBox[1] > 0,
-          `${where}: the briefing ⟳ is painted (${r.refreshBox.join("x")})`);
-        // The ⓘ is a button and only the expanded card draws those, so on a
-        // compact row the line this asserts about does not exist. Where it
-        // does exist, the ⟳ must be on it.
-        const infoPainted = r.infoBox[0] > 0 && r.infoBox[1] > 0;
-        if (infoPainted) {
-          assert.ok(Math.abs(r.refreshMid - r.infoMid) <= 4,
-            `${where}: the ⟳ shares the buttons' line (⟳ ${r.refreshMid}, ⓘ ${r.infoMid})`);
-        }
+        assert.deepEqual(r.refreshBox, [0,0],
+          `${where}: compact cards hide the briefing refresh`);
       }
     }
     assert.deepEqual(errors, []);

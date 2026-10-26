@@ -228,24 +228,16 @@ const READ = `(() => {
         meta: false, card: false, checks: false },
       "a one-line card draws the name and the role, nothing else");
     assert.deepEqual(by("lead").lines,
-      { brief: true, cwd: false, ctx: false, seen: false, actions: true,
-        actionButtons: 0, rowRefreshes: 2,
+      { brief: true, cwd: false, ctx: false, seen: false, actions: false,
+        actionButtons: 0, rowRefreshes: 0,
         meta: true, card: false, checks: true },
       "a compact card draws the briefing one-line and the chips");
-    /* No action buttons on the compact card -- measured by painted buttons,
-       not by the box. The box stays because it also holds the key chip and
-       the two refreshes, which say something about the row rather than
-       offering an action on it. */
     assert.equal(by("lead").lines.actionButtons, 0,
-      "a compact card draws no action buttons (spawn, pin, observe, note, ⓘ)");
-    /* ...and the refreshes it DOES draw are painted, not just present: the
-       round that hid them left every selector reading as written. Two of
-       them belong to a card with reported checks (the briefing ⟳ and the
-       checks ⟳); w1b has no checks and so has only the briefing one. */
-    assert.equal(by("lead").lines.rowRefreshes, 2,
-      "a compact card keeps the ⟳ for the briefing and for the chips");
-    assert.equal(by("w1b").lines.rowRefreshes, 1,
-      "with no reported checks there is no checks ⟳, only the briefing one");
+      "a compact card draws no session action buttons");
+    assert.equal(by("lead").lines.rowRefreshes, 0,
+      "a compact card has no briefing/check refresh buttons");
+    assert.equal(by("w1b").lines.rowRefreshes, 0,
+      "a compact card without checks also hides its refresh button");
     assert.ok(by("lead").briefText.length > 4,
       "the compact card's line is the briefing digest");
     assert.equal(by("lead").lines.card, false, "a compact card carries no briefing card");
@@ -468,6 +460,19 @@ const READ = `(() => {
       { path: "/api/sessions/lead/briefing?refresh=1", method: "GET" },
       { path: "/api/sessions/lead/status-checks/refresh", method: "POST" },
     ], "the two visible refresh controls retain their distinct functions");
+
+    await page.evaluate(() => { document.getElementById("sidebar").style.width = "260px"; });
+    const narrowMetadata = await lead.evaluate(li => {
+      const edge = li.getBoundingClientRect().right;
+      return [...li.querySelectorAll(".rct-part, .rail-seen-pair")].map(e => {
+        const r=e.getBoundingClientRect();
+        return {text:e.textContent,painted:r.width>0 && r.height>0,contained:r.right<=edge};
+      });
+    });
+    assert.ok(narrowMetadata.length>=5, "the narrow fixture includes tokens and lifetime metrics");
+    for (const m of narrowMetadata) assert.ok(m.painted && m.contained,
+      `260px metadata stays inside the card: ${m.text}`);
+    await page.evaluate(() => { document.getElementById("sidebar").style.width = ""; });
 
     /* Its children stay one-line cards while their parent is expanded: the
        density is the card's own, not inherited down the tree. */
