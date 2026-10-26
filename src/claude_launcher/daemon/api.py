@@ -834,6 +834,7 @@ def build_app(
     window = window if window is not None else window_mod.WindowManager(manager)
     app["window"] = window
     manager.exit_hooks.append(window.session_exited)
+    _install_window_borrow(app)
     from . import artifact_cleanup_api
     artifact_cleanup_api.install(app)
     # A restart never lets some endings reach the hook above: restore_all
@@ -862,6 +863,14 @@ def build_app(
     r.add_post("/api/window/force", h_window_force)
     r.add_post("/api/window/report", h_window_report)
     r.add_get("/api/window/history", h_window_history)
+    # Remote borrowing (daemon/window_borrow.py, claunch-ohsyx): a waiter's
+    # client awaits a borrowed run here; this daemon's operator lists the
+    # peers' queues, borrows one and follows the runs it borrowed.
+    r.add_post("/api/window/await", h_window_await)
+    r.add_get("/api/window/remote", h_window_remote)
+    r.add_post("/api/window/borrow", h_window_borrow)
+    r.add_get("/api/window/borrows", h_window_borrows)
+    r.add_post("/api/window/borrows/{run_id}/stop", h_window_borrow_stop)
     r.add_get("/api/window/limits", h_window_limits)
     r.add_put("/api/window/limits", h_window_set_limits)
     r.add_post("/api/auth/session", h_auth_session)
@@ -1188,6 +1197,14 @@ def build_app(
     # registered with): workspace names, remote address KEYS (never URLs, so
     # no credentials) and branch tips. Read-only; nothing is fetched.
     r.add_post("/peer/repos", h_peer_repos)
+    # The window's lender side (claunch-ohsyx), the same relay trust as
+    # /peer/repos for the queue and a borrow; a beat, a result and a release
+    # must carry the token the borrow returned.
+    r.add_post("/peer/window/queue", h_peer_window_queue)
+    r.add_post("/peer/window/borrow", h_peer_window_borrow)
+    r.add_post("/peer/window/beat", h_peer_window_beat)
+    r.add_post("/peer/window/result", h_peer_window_result)
+    r.add_post("/peer/window/release", h_peer_window_release)
     # Remote-shadow sessions (daemon/shadow.py): a linked peer's operator
     # LOOKS at this daemon's members of the mesh that link belongs to -- a
     # card, an output-only terminal, the session line, the transcript.
@@ -2146,10 +2163,186 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         bound=bool(body.get("bound")) and request.remote in ("127.0.0.1", "::1"),
         gone=gone,
         requested_by=body.get("requested_by") or None,
+        # Paths and a commit of this machine: only a local client's to state.
+        borrow=body.get("borrow") if request.remote in ("127.0.0.1", "::1")
+        and isinstance(body.get("borrow"), dict) else None,
     )
     if result.get("error"):
         return json_response(result, status=400)
     return json_response(result)
+
+
+# ---- remote borrowing (daemon/window_borrow.py, claunch-ohsyx) ------------ #
+
+def _install_window_borrow(app: web.Application) -> None:
+    from . import window_borrow
+
+    mesh = app["mesh"]
+
+    async def transport(machine: str, path: str, body: dict) -> dict:
+        if mesh.peer_transport is None:
+            raise RuntimeError("relay uplink is not running")
+        return await mesh.peer_transport(machine, path, body)
+
+    async def lister():
+        if mesh.peer_lister is None:
+            raise RuntimeError("relay uplink is not running")
+        return await mesh.peer_lister()
+
+    def machine() -> str:
+        return str((app["relay_state"]() or {}).get("name") or socket.gethostname())
+
+    runner = window_borrow.BorrowRunner(app["window"], transport, machine, lister=lister)
+    app["window_borrow"] = runner
+
+    async def recover(app: web.Application) -> None:
+        async def later() -> None:
+            # The relay connects after startup; a release sent before it is
+            # lost and the lender's heartbeat deadline recovers instead.
+            await asyncio.sleep(20.0)
+            await runner.recover()
+        app["window_borrow_recover"] = asyncio.ensure_future(later())
+
+    async def close(app: web.Application) -> None:
+        task = app.get("window_borrow_recover")
+        if task is not None:
+            task.cancel()
+        await runner.close()
+
+    app.on_startup.append(recover)
+    app.on_shutdown.append(close)
+
+
+async def h_window_await(request: web.Request) -> web.Response:
+    """One step of a borrowed waiter's wait (``WindowManager.await_entry``)."""
+    body = await _json_body(request)
+    grant_id = body.get("grant_id")
+    if not grant_id:
+        return json_response({"error": "await wants a grant_id"}, status=400)
+
+    def gone() -> bool:
+        transport = request.transport
+        return transport is None or transport.is_closing()
+
+    try:
+        wait = float(body.get("wait") or window_mod.AWAIT_STEP)
+    except (TypeError, ValueError):
+        return json_response({"error": "wait must be a number"}, status=400)
+    return json_response(
+        await request.app["window"].await_entry(str(grant_id), wait=wait, gone=gone)
+    )
+
+
+async def h_window_remote(request: web.Request) -> web.Response:
+    """The relay peers' waiting requests, each row told whether this machine
+    could borrow it, for the Window page's Other machines section."""
+    from . import window_borrow
+
+    return json_response({
+        "machine": _machine_name(request),
+        "enabled": window_borrow.enabled(),
+        "peers": await request.app["window_borrow"].remote_queues(),
+    })
+
+
+async def h_window_borrow(request: web.Request) -> web.Response:
+    """Borrow one peer's waiting request and run it here: a person's action.
+
+    A session's request is refused (D8): the user asked for the manual
+    trigger only, and automatic borrowing is a later decision.
+    """
+    if actors.from_request(request).get("kind") in (actors.AGENT, actors.CFLOW):
+        return json_error(403, "a borrow is started by a person on the Window page, "
+                               "not by a session")
+    body = await _json_body(request)
+    machine, grant_id = body.get("machine"), body.get("grant_id")
+    if not machine or not grant_id:
+        return json_error(400, "borrow wants a machine and a grant_id")
+    try:
+        run = await request.app["window_borrow"].start(str(machine), str(grant_id))
+    except (ValueError, RuntimeError, asyncio.TimeoutError) as exc:
+        return json_error(409, str(exc) or "the lender did not answer")
+    except Exception as exc:  # noqa: BLE001 — PeerUnreachable, MeshError
+        return json_error(502, f"{machine}: {exc}")
+    return json_response({"run": run})
+
+
+async def h_window_borrows(request: web.Request) -> web.Response:
+    return json_response({"runs": request.app["window_borrow"].runs()})
+
+
+async def h_window_borrow_stop(request: web.Request) -> web.Response:
+    if actors.from_request(request).get("kind") in (actors.AGENT, actors.CFLOW):
+        return json_error(403, "a borrowed run is stopped by a person")
+    stopped = request.app["window_borrow"].stop(request.match_info["run_id"])
+    return json_response({"stopped": stopped})
+
+
+def _lending() -> bool:
+    from . import window_borrow
+
+    return window_borrow.enabled()
+
+
+async def h_peer_window_queue(request: web.Request) -> web.Response:
+    from . import window_borrow
+
+    rows = await asyncio.to_thread(window_borrow.queue_rows, request.app["window"])
+    if not _lending():
+        for row in rows:
+            row.update(borrowable=False, reason="window_borrow is off on the lender")
+    return json_response({"queue": rows, "lending": _lending()})
+
+
+async def h_peer_window_borrow(request: web.Request) -> web.Response:
+    from . import window_borrow
+
+    if not _lending():
+        return json_response({"ok": False, "error": "window_borrow is off on the lender"})
+    body = await _json_body(request)
+    grant_id = str(body.get("grant_id") or "")
+    window = request.app["window"]
+    entry = next((q for q in window.borrowable() if q.get("grant_id") == grant_id), None)
+    if entry is None:
+        return json_response({"ok": False, "error": f"no borrowable request {grant_id}"})
+    made = await asyncio.to_thread(window_borrow.recipe, entry.get("borrow_info") or {})
+    if not made.get("ok"):
+        return json_response({"ok": False, "error": made.get("reason") or "not reproducible"})
+    answer = window.borrow(grant_id, str(body.get("machine") or "?"))
+    if answer.get("ok"):
+        answer["recipe"] = made
+    return json_response(answer)
+
+
+async def h_peer_window_beat(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    verdict = request.app["window"].borrow_beat(
+        str(body.get("grant_id") or ""), str(body.get("token") or ""),
+        str(body.get("phase") or ""))
+    return json_response({"beat": verdict})
+
+
+async def h_peer_window_result(request: web.Request) -> web.Response:
+    from . import window_borrow
+
+    try:
+        body = await request.clone(client_max_size=window_borrow.RESULT_BODY_MAX).json()
+    except Exception:  # noqa: BLE001 — too large or not JSON
+        return json_response({"result": "unreadable"}, status=400)
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return json_response({"result": "unreadable"}, status=400)
+    verdict = request.app["window"].borrow_result(
+        str(body.get("grant_id") or ""), str(body.get("token") or ""), result)
+    return json_response({"result": verdict})
+
+
+async def h_peer_window_release(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    released = request.app["window"].borrow_release(
+        str(body.get("grant_id") or ""), str(body.get("token") or ""),
+        str(body.get("reason") or ""))
+    return json_response({"released": released})
 
 
 async def h_window_prioritize(request: web.Request) -> web.Response:
