@@ -17,6 +17,11 @@
    - and the stamp still carries the row, filtered exactly as before (the
      volatile keys dropped), so what counts as a redraw does not move.
 
+   The re-parse itself was the other half of the poll (2.1 ms, claunch-hwbuc.3):
+   a held text is parsed once, every later poll gets a fresh shallow copy of
+   that parse, and a caller editing its row does not reach the copy the next
+   poll is built from.
+
    The last property is the one that keeps this from being a speed-up that
    changes what the page does: it compares the stamp against
    `JSON.stringify(parsedRow, unstamped)`. */
@@ -96,6 +101,18 @@ function countStringify(fn) {
   finally { JSON.stringify = real; }
 }
 
+/* A poll costs two things: its row text (`JSON.stringify`) and the re-parse of
+   the rows it did not change (`JSON.parse`). The second is what
+   claunch-hwbuc.3 memoises, so a poll counts both. */
+function countWork(fn) {
+  const str = JSON.stringify, parse = JSON.parse;
+  let strings = 0, parses = 0;
+  JSON.stringify = function (...a) { strings++; return str.apply(this, a); };
+  JSON.parse = function (...a) { parses++; return parse.apply(this, a); };
+  try { const value = fn(); return { strings, parses, value }; }
+  finally { JSON.stringify = str; JSON.parse = parse; }
+}
+
 const state = "s1";
 const first = fleet(154_706, 0);
 const taken1 = countStringify(() => api.take(state, {
@@ -111,12 +128,28 @@ const sig1 = JSON.stringify(stamped1.value);
 
 /* The next poll calls every row unchanged: the page re-parses them from the
    kept text and nothing new is serialised. */
-const second = countStringify(() => api.take(state, {
+const answer = () => ({
   delta: true, names: first.map((r) => r.name), sessions: [],
   row_hashes: Object.fromEntries(first.map((r) => [r.name, `h1-${r.name}`])),
-}));
-check("a poll that re-parses unchanged rows stringifies nothing", second.calls, 0);
+});
+const second = countWork(() => api.take(state, answer()));
+check("a poll that re-parses unchanged rows stringifies nothing", second.strings, 0);
+check("...and parses each held text for the first time", second.parses, ROWS);
 check("...and still returns every row", second.value.length, ROWS);
+
+/* The poll after that: the same texts again, so the memo answers all of them.
+   Without the memo this is one parse per row per poll, forever. */
+const repeat = countWork(() => api.take(state, answer()));
+check("a repeated unchanged poll parses nothing", repeat.parses, 0);
+check("...and returns the same rows", JSON.stringify(repeat.value.map((r) => r.name)),
+      JSON.stringify(second.value.map((r) => r.name)));
+
+/* The rows are the caller's: a page that writes to one (sessionRowsJoin
+   replaces status_checks) must not write into the memo the next poll reads. */
+repeat.value[0].status = "edited-by-the-page";
+const afterEdit = countWork(() => api.take(state, answer()));
+check("a caller's edit does not reach the next poll", afterEdit.value[0].status, "busy");
+check("...and that poll parses nothing either", afterEdit.parses, 0);
 const stamped2 = countStringify(() => second.value.map((r) => api.stamp(r, unstamped)));
 check("...and its redraw signature stringifies nothing", stamped2.calls, 0);
 check("...and is the same signature as before", JSON.stringify(stamped2.value), sig1);
@@ -124,11 +157,14 @@ check("...and is the same signature as before", JSON.stringify(stamped2.value), 
 /* One row really moved. */
 const one = fleet(154_706, 0).map((r, i) => (
   i === 0 ? { ...r, context: { ...r.context, tokens: 999_999 } } : r));
-const third = countStringify(() => api.take(state, {
+const third = countWork(() => api.take(state, {
   delta: true, names: one.map((r) => r.name), sessions: [one[0]],
   row_hashes: { s0: "h1-s0-2" },
 }));
-check("a poll with one changed row stringifies that row only", third.calls, 1);
+check("a poll with one changed row stringifies that row only", third.strings, 1);
+/* The changed row arrives already parsed and the other 39 were parsed once
+   above, so this poll does no parsing at all. */
+check("...and parses nothing (the held rows are memoised)", third.parses, 0);
 const stamped3 = countStringify(() => third.value.map((r) => api.stamp(r, unstamped)));
 check("...and its signature pass stamps that row only", stamped3.calls, 1);
 check("...and the signature moved", JSON.stringify(stamped3.value) === sig1, false);
@@ -146,7 +182,9 @@ check("a volatile-only move stamps the same", api.stamp(volatile, unstamped), wh
 
 console.log(`pollstamp_check: ${ROWS} rows — first poll ${taken1.calls} stringify calls ` +
             `(stamps ${stamped1.calls} + ${stamped1.value.length}), an unchanged poll ` +
-            `${second.calls} + ${stamped2.calls}, a one-row poll ${third.calls} + ${stamped3.calls}`);
+            `${second.strings} + ${stamped2.calls} (parses ${second.parses}, then ` +
+            `${repeat.parses}, then ${afterEdit.parses}), a one-row poll ` +
+            `${third.strings} + ${stamped3.calls} (parses ${third.parses})`);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);
