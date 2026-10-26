@@ -42,6 +42,24 @@ def _actor(request):
     return actors.label(actors.from_request(request))
 
 
+def _item_ref(entry):
+    """A split part's item -> ``{kind, ref}``.
+
+    The page sends ``{kind, ref}`` (it has the kind); it may also send the
+    ``"session:<name>"`` / ``"issue:<id>"`` spelling, which the item key uses
+    everywhere else. A bare ref is refused rather than guessed -- the wrong
+    kind places nothing and the person sees no error.
+    """
+    if isinstance(entry, dict):
+        return entry
+    if isinstance(entry, str) and ":" in entry:
+        kind, _, ref = entry.partition(":")
+        if kind in ("session", "issue") and ref:
+            return {"kind": kind, "ref": ref}
+    raise category.CategoryError(
+        f"a split part's item must be {{kind, ref}} or 'session:<name>'/'issue:<id>', not {entry!r}")
+
+
 async def _details(app, ws, items):
     """``{"session:<name>": {...}, "issue:<id>": {...}}`` for display.
 
@@ -175,6 +193,20 @@ def install(app):
         return {"workspace": ws.name, **await asyncio.to_thread(
             category.merge, ws, body, _actor(request))}
 
+    async def split(request, body):
+        ws = ws_of(request, body)
+        # The page writes one line per new child and names items by ref alone
+        # (`{label, items: ["s1", "s2"]}`); an item entry that is not a ref
+        # string is {kind, ref}. ``children`` is the plain-array spelling the
+        # route has always taken.
+        parts = body.get("parts") or body.get("children")
+        if isinstance(parts, list):
+            parts = [{**p, "items": [_item_ref(i) for i in p.get("items") or []]}
+                     if isinstance(p, dict) else p for p in parts]
+        return {"workspace": ws.name, **await asyncio.to_thread(
+            category.split, ws, body.get("parent_id"), parts,
+            _actor(request), body.get("reason", ""))}
+
     async def proposals(request, body):
         ws = ws_of(request, body)
         return {"workspace": ws.name, "proposals": await asyncio.to_thread(
@@ -232,6 +264,7 @@ def install(app):
     r.add_post("/api/category/unassign", route(unassign))
     r.add_post("/api/category/extract", route(extract))
     r.add_post("/api/category/merge", route(merge))
+    r.add_post("/api/category/split", route(split))
     r.add_post("/api/category/agent-assign", route(agent_assign))
     r.add_post("/api/category/nodes", route(create))
     r.add_get("/api/category/nodes/{id}/items", route(node_items))

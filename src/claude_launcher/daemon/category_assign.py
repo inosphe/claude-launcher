@@ -269,6 +269,79 @@ async def start(request: web.Request, name: str, body: Optional[dict] = None) ->
             "proposal": proposal, "job": category.job(ws, name)}
 
 
+def _fold(ws, fold: dict, items: list, actor: str, reason: str) -> dict:
+    """Registration-time merge: absorb the nodes named in ``fold.nodes`` into
+    one new node (labelled by ``fold``), under ``fold.parent_id`` when given,
+    and place ``items`` there. An empty ``fold.nodes`` refuses -- a fold with
+    nothing to absorb is just a create, which ``new`` already does."""
+    nodes = fold.get("nodes") or []
+    if not isinstance(nodes, list) or not nodes:
+        raise AssignError(400, "fold.nodes must name at least one existing category to absorb")
+    body = {k: fold[k] for k in ("label", "aliases", "description", "parent_id") if k in fold}
+    body["items"] = items
+    body["nodes"] = nodes
+    merged = category.merge(ws, body, actor)
+    return {"folded_into": merged["node"]["label"], "node_id": merged["node"]["id"],
+            "path": merged["node"]["path"], "folded": merged["folded"]}
+
+
+def _split(ws, split: dict, items: list, actor: str, reason: str) -> dict:
+    """Registration-time split: make several children under ``split.parent_id``
+    and put ``items`` across them by ``split.parts``.
+
+    Each part is ``{label, aliases, description, items}``; a part's ``items``
+    select from the call's ``items`` (as refs, ``{kind, ref}``, or the bare ref
+    string the registration normally talks in). A part with no ``items`` takes
+    everything not yet claimed, so the common shape -- "these go here, the
+    rest go there" -- needs no refs repeated."""
+    parts = split.get("parts") or []
+    if not isinstance(parts, list) or not parts:
+        raise AssignError(400, "split.parts must name at least one new category")
+    remaining = {(i["kind"], i["ref"]) for i in items}
+    children = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise AssignError(400, "each split part must be {label, ..., items}")
+        claimed = _claim(part.get("items"), remaining)
+        if part.get("items") is None:
+            claimed, remaining = sorted(remaining), set()
+        else:
+            remaining -= set(claimed)
+        children.append({**{k: part[k] for k in ("label", "aliases", "description") if k in part},
+                         "items": [{"kind": k, "ref": r} for k, r in claimed]})
+    if remaining:
+        raise AssignError(400, "these items are in no split part: "
+                          + ", ".join(f"{k} {r}" for k, r in sorted(remaining)))
+    made = category.split(ws, split.get("parent_id"), children, actor, reason)
+    return {"parent_id": made["parent_id"],
+            "created": [c["node"]["label"] for c in made["children"]],
+            "paths": [" / ".join(c["node"]["path"]) for c in made["children"]]}
+
+
+def _claim(refs, remaining) -> list:
+    """``refs`` from a split part -> ``[(kind, ref)]`` that are in ``remaining``."""
+    if refs is None:
+        return []
+    if not isinstance(refs, list):
+        raise AssignError(400, "a split part's items must be an array")
+    out = []
+    for entry in refs:
+        if isinstance(entry, str):
+            kinds = [k for k, r in remaining if r == entry]
+            if not kinds:
+                raise AssignError(400, f"{entry} is not one of this call's items")
+            kind, ref = kinds[0], entry
+        elif isinstance(entry, dict):
+            kind, ref = entry.get("kind"), entry.get("ref")
+        else:
+            raise AssignError(400, "a split part's items must be refs or {kind, ref}")
+        if (kind, ref) not in remaining:
+            raise AssignError(400, f"{kind} {ref} is not an item this call is placing")
+        if (kind, ref) not in out:
+            out.append((kind, ref))
+    return out
+
+
 def agent_assign(manager, caller: str, body: dict) -> dict:
     """The ``category_assign`` MCP call. ``caller`` is the calling session: a
     category fork assigns its origin's items, anyone else its own."""
@@ -294,6 +367,10 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
         if body.get("node_id"):
             placed = category.assign(ws, items, body["node_id"], actor, reason)
             result = {"path": placed["node"]["path"], "node_id": placed["node"]["id"]}
+        elif isinstance(body.get("fold"), dict):
+            result = _fold(ws, body["fold"], items, actor, reason)
+        elif isinstance(body.get("split"), dict):
+            result = _split(ws, body["split"], items, actor, reason)
         elif isinstance(body.get("new"), dict):
             new = dict(body["new"])
             # The job -- opened by "Assign to tree" -- records what the person
@@ -318,7 +395,8 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
                 result = {"created": node["label"], "node_id": node["id"],
                           "path": node["path"]}
         else:
-            raise AssignError(400, "give node_id (an existing category) or new {label, ...}")
+            raise AssignError(400, "give node_id (an existing category), new {label, ...}, "
+                                    "fold {label, nodes, ...} or split {parts, ...}")
     except category.CategoryError as exc:
         err = AssignError(exc.status, str(exc))
         err.extra = exc.extra  # type: ignore[attr-defined]

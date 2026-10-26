@@ -387,3 +387,79 @@ def test_tree_details_carry_the_session_partition(home, tmp_path):
         assert doc["details"]["session:dead"]["status"] == "idle"
 
     asyncio.run(scenario())
+
+
+def test_agent_split_places_the_items_across_several_new_children(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        root = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], root["id"], "user")
+        # The session is in the tree already; its issue is not -- a split is a
+        # registration path, so placing an item that has no node yet is its job.
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "two subjects",
+            "split": {"parent_id": root["id"], "parts": [
+                {"label": "beads page", "items": ["a"]},
+                {"label": "issue side"}]}})
+        assert out["created"] == ["beads page", "issue side"]
+        assert out["paths"] == ["web / beads page", "web / issue side"]
+        assert category.where(ws, "session", "a")["node"]["label"] == "beads page"
+        # The part with no items took what was left.
+        assert category.where(ws, "issue", "claunch-x1")["node"]["label"] == "issue side"
+
+    _run(scenario, tmp_path)
+
+
+def test_agent_fold_absorbs_flat_nodes_into_one(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        one = category.create_node(ws, {"label": "beads page"}, "user")
+        two = category.create_node(ws, {"label": "sims page", "aliases": ["시뮬"]}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], two["id"], "user")
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "one subject",
+            "fold": {"label": "pages", "nodes": [one["id"], two["id"]]}})
+        assert out["folded_into"] == "pages"
+        assert set(out["folded"]) == {one["id"], two["id"]}
+        assert category.where(ws, "session", "a")["node"]["label"] == "pages"
+        # The absorbed labels are the new node's vocabulary.
+        hit = category.search(ws, "시뮬", 5)[0]
+        assert hit["label"] == "pages"
+
+    _run(scenario, tmp_path)
+
+
+def test_agent_refuses_a_fold_with_nothing_to_absorb_and_a_partial_split(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        bad = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r", "fold": {"label": "pages", "nodes": []}}, status=400)
+        assert "at least one existing category" in bad["error"]
+        # Every named part leaves this call's issue unclaimed, and no part is
+        # the catch-all (a part with no items), so the call is refused rather
+        # than silently dropping it.
+        short = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "split": {"parts": [{"label": "one", "items": ["a"]}]}}, status=400)
+        assert "in no split part" in short["error"]
+        stray = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "split": {"parts": [{"label": "one", "items": ["zzz"]}]}}, status=400)
+        assert "not one of this call's items" in stray["error"]
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_makes_the_children_for_a_person(home, tmp_path):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        root = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], root["id"], "user")
+        doc = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": root["id"],
+            "parts": [{"label": "beads page", "items": [{"kind": "session", "ref": "a"}]},
+                      {"label": "sims page"}]})
+        assert [ch["node"]["label"] for ch in doc["children"]] == ["beads page", "sims page"]
+        assert doc["parent_id"] == root["id"]
+
+    _run(scenario, tmp_path)

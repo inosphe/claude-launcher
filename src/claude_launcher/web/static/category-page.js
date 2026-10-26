@@ -139,6 +139,7 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     bar.append(node("span", count ? `선택: 항목 ${sel.items.length}개 · 카테고리 ${sel.nodes.length}개` : "항목이나 카테고리를 선택하세요", "category-muted"));
     bar.append(
       button("Extract…", () => { form = {kind: "extract", at: sel.extractAt}; render(); }, "", !sel.extractAt),
+      button("Split…", () => { form = {kind: "split", at: sel.extractAt, lines: ""}; render(); }, "", !sel.extractAt || sel.items.length < 2),
       button("Merge…", () => { form = {kind: "merge", at: sel.mergeAt}; render(); }, "", !sel.canMerge),
       button("Move to…", () => { form = {kind: "move", target: ""}; render(); }, "", !sel.items.length || sel.nodes.length > 0),
       button("Remove from tree", () => act(() => categoryRequest(url("/api/category/unassign"), "POST", {items: sel.items}), "트리에서 뺐습니다"), "", !sel.items.length || sel.nodes.length > 0),
@@ -149,6 +150,8 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     if (form?.kind === "extract") {
       wrap.append(newCategoryForm("Extract: 선택한 항목을 새 하위 카테고리로", pathOf(form.at), (v) => act(() =>
         categoryRequest(url("/api/category/extract"), "POST", {node_id: form.at, items: sel.items, ...v}), "새 하위 카테고리를 만들었습니다")));
+    } else if (form?.kind === "split") {
+      wrap.append(splitForm(sel));
     } else if (form?.kind === "merge") {
       wrap.append(newCategoryForm("Merge: 선택한 항목·카테고리를 공통 부모 아래 하나로", pathOf(form.at), (v) => act(() =>
         categoryRequest(url("/api/category/merge"), "POST", {items: sel.items, nodes: sel.nodes, ...v}), "합쳤습니다")));
@@ -168,6 +171,62 @@ function makeCategoryView({root, workspace: fixed = ""}) {
       wrap.append(f);
     }
     return wrap;
+  }
+
+  /* Split: several new children in one write, and each picked item goes to the
+     part whose name is on its line. A line without a ref list takes whatever
+     the earlier lines left -- the server applies the same rule
+     (category_assign._split). */
+  function splitForm(sel) {
+    const f = node("form", null, "category-form");
+    f.append(node("h4", "Split: 선택한 항목을 여러 하위 카테고리로 한 번에"),
+      node("p", "새 카테고리 위치: " + pathOf(form.at), "category-muted"),
+      node("p", "한 줄에 하나씩 `이름: 항목, 항목`. 항목을 안 적은 줄이 나머지를 가져갑니다. 항목은 " +
+        sel.items.map(i => i.ref).join(", ") + " 가운데에서 고릅니다.", "category-muted"));
+    const text = node("textarea"); text.rows = Math.max(3, sel.items.length);
+    // The refs it lists are session:<name> / issue:<id> so the route needs no
+    // guessing (category_api._item_ref).
+    text.value = form.lines || sel.items.map(categoryKey).join(", ");
+    text.setAttribute("aria-label", "분할 줄");
+    text.oninput = () => { form.lines = text.value; };
+    const err = node("p", "", "category-error");
+    const ok = node("button", "분할", "wf-btn category-primary"); ok.disabled = busy;
+    f.append(text, err, ok, button("취소", () => { form = null; render(); }));
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      const parts = splitParts(text.value, sel.items);
+      if (!parts.length) { err.textContent = "`이름: 항목` 형태로 한 줄 이상 적으세요."; return; }
+      act(() => categoryRequest(url("/api/category/split"), "POST", {
+        parent_id: form.at, parts}), "하위 카테고리를 만들었습니다");
+    };
+    setTimeout(() => text.focus?.(), 0);
+    return f;
+  }
+
+  /* "이름: session:s1, issue:i-1" per line -> [{label, items: [{kind, ref}]}].
+     A line with no refs sends the label alone: the server treats a part with
+     no items as the catch-all. A ref that is not in this selection is passed
+     through and the server refuses the whole call -- better than placing it
+     somewhere the person did not mean. */
+  function splitParts(text, items = []) {
+    const known = new Map(items.map(i => [categoryKey(i), i]));
+    const out = [];
+    for (const line of String(text || "").split("\n")) {
+      if (!line.trim()) continue;
+      const at = line.indexOf(":");
+      // No colon: the whole line is a label with no refs -- the catch-all.
+      if (at < 0) { out.push({label: line.trim()}); continue; }
+      const label = line.slice(0, at).trim();
+      if (!label) continue;
+      const refs = line.slice(at + 1).split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+      if (!refs.length) { out.push({label}); continue; }
+      const placed = refs.map(ref => {
+        const hit = known.get(ref) || known.get("session:" + ref) || known.get("issue:" + ref);
+        return hit ? categoryKey(hit) : ref;
+      });
+      out.push({label, items: placed});
+    }
+    return out;
   }
 
   /* Sessions the page is hiding until their box is ticked. `life` is the

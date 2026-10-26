@@ -9626,6 +9626,12 @@ body.split-max #term-wf { flex: 1 1 0; }
 .category-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 8px 0; padding: 8px 10px; background: var(--cat-panel); border: 1px solid var(--cat-border); border-radius: 8px; }
 .category-form h4 { margin: 0 8px 0 0; font-size: 13px; }
 .category-form p { margin: 0 8px 0 0; }
+/* Split writes one line per new child, so its textarea takes the whole row:
+   the form is a flex-wrap row and a bare textarea would be squeezed to the
+   height of the inputs beside it. */
+.category-form textarea { flex: 1 1 100%; min-height: 64px; resize: vertical;
+  font: inherit; padding: 6px 8px; color: inherit; background: #0d1117;
+  border: 1px solid var(--cat-border); border-radius: 6px; }
 .category-roots, .category-children { list-style: none; margin: 0; padding: 0; }
 .category-children { padding-left: 22px; border-left: 1px solid #262d36; margin-left: 11px; }
 .category-node-head { display: flex; align-items: center; gap: 6px; padding: 3px 0; }

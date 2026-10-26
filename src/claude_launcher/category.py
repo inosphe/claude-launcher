@@ -524,6 +524,65 @@ def extract(ws, node_id, items, body, actor=""):
                 "items": [{"kind": k, "ref": r} for k, r in items]}
 
 
+def split(ws, parent_id, children, actor="", reason=""):
+    """Create several children of one node and place the items among them.
+
+    ``children`` is ``[{label, aliases, description, items}, ...]``: each entry
+    makes one new node under ``parent_id`` and puts its ``items`` there. This
+    is the registration-time form of what the page's "Extract…" does one new
+    node at a time -- an agent that sees its items belong to two subjects
+    makes both nodes in one call instead of dropping them in one flat node.
+
+    Every item may appear in at most one child; an item that is in none stays
+    where it is. This is a registration path as well as a rearrangement, so an
+    item that is not in the tree yet is placed (it is being registered by this
+    call). An item that is already placed must sit inside ``parent_id``'s
+    subtree, the same rule :func:`extract` applies. ``parent_id`` may be
+    ``None`` for top-level children.
+    """
+    if not isinstance(children, list) or not children:
+        raise CategoryError("children must be a non-empty array")
+    if len(children) > 50:
+        raise CategoryError("children must hold at most 50 entries")
+    parent = _parent_arg(parent_id)
+    reason = _text(reason, "reason", 2000)
+    prepared, seen = [], set()
+    for entry in children:
+        if not isinstance(entry, dict):
+            raise CategoryError("each child must be {label, ..., items}")
+        label, aliases, description = _new_node_body(entry)
+        placed = _items(entry.get("items") or [])
+        for kind, ref in placed:
+            if (kind, ref) in seen:
+                raise CategoryError(f"{kind} {ref} is in more than one new category")
+            seen.add((kind, ref))
+        prepared.append((label, aliases, description, placed))
+    with connection(ws) as db:
+        db.execute("BEGIN IMMEDIATE")
+        if parent is not None:
+            _get_node(db, parent)
+        for _, _, _, placed in prepared:
+            for kind, ref in placed:
+                row = db.execute("SELECT node_id FROM items WHERE kind=? AND ref=?",
+                                 (kind, ref)).fetchone()
+                # An item with no row is not in the tree yet: registering it is
+                # what this split does, so it has no node to be checked against.
+                if row is not None and parent is not None \
+                        and parent not in _ancestors(db, row["node_id"]):
+                    raise CategoryError(f"{kind} {ref} is not inside the category being split")
+        made = []
+        for label, aliases, description, placed in prepared:
+            node = _insert_node(db, parent, label, aliases, description, actor)
+            for kind, ref in placed:
+                _place(db, kind, ref, node["id"], actor, reason or "split")
+            made.append({"node": {**node, "path": _path(db, node["id"])},
+                         "items": [{"kind": k, "ref": r} for k, r in placed]})
+        _event(db, actor, "split", parent=parent, reason=reason,
+               nodes=[{"id": m["node"]["id"], "label": m["node"]["label"],
+                       "items": m["items"]} for m in made])
+        return {"parent_id": parent, "children": made}
+
+
 def merge(ws, body, actor=""):
     """Gather items and/or whole nodes spread over the tree into one new node
     under their lowest common ancestor.
@@ -532,6 +591,11 @@ def merge(ws, body, actor=""):
     the root). Each of ``nodes`` is folded in: its items and child categories
     move to the new node, its label and aliases become the new node's aliases,
     and it is deleted. A selected node may not contain another selected one.
+
+    ``parent_id`` (optional) puts the new node at that node instead of the
+    lowest common ancestor -- what an agent registering its items asks for
+    when it already knows which axis the merged work belongs to
+    (:func:`create_fold`).
     """
     if not isinstance(body, dict):
         raise CategoryError("body must be an object")
@@ -557,7 +621,16 @@ def merge(ws, body, actor=""):
             row = db.execute("SELECT node_id FROM items WHERE kind=? AND ref=?",
                              (kind, ref)).fetchone()
             anchors.append(row["node_id"] if row else None)
-        parent = _lca(db, anchors)
+        if "parent_id" in body:
+            parent = _parent_arg(body.get("parent_id"))
+            if parent is not None:
+                _get_node(db, parent)
+                for node in nodes:
+                    if node["id"] in _ancestors(db, parent):
+                        raise CategoryError(
+                            f"cannot fold {node['label']}: the new category would sit inside it")
+        else:
+            parent = _lca(db, anchors)
         # The folded nodes' spellings move to the new node; free them first.
         absorbed = []
         for node in nodes:
