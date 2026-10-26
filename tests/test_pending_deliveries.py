@@ -21,6 +21,7 @@ daemon.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from claude_launcher.daemon import session as session_mod
 
@@ -32,6 +33,7 @@ class _Fake(session_mod.Session):
     def __init__(self):
         self.sdef = type("D", (), {"name": "s1", "to_dict": lambda self: {"name": "s1"}})()
         self.exited = False
+        self._loop = asyncio.get_running_loop()
         self._deferred_deliveries = set()
         self._deferred_delivery_lock = asyncio.Lock()
         self._pending_deliveries = []
@@ -118,6 +120,104 @@ def test_a_preview_names_the_message_rather_than_its_header():
     preview = session_mod._delivery_preview(long)
     assert len(preview) == session_mod.DELIVERY_PREVIEW_CHARS
     assert preview.endswith("\u2026")
+
+
+def test_a_delivery_from_a_worker_thread_is_still_typed():
+    """claunch-0ccn4.1: ``queue_delivery`` reached through
+    ``asyncio.to_thread`` was a silent loss.
+
+    Guest thread messages and mega-thread deliveries take exactly this route
+    (``threads_api.mention_delivery`` -> ``deliver`` -> ``queue_delivery``),
+    and ``asyncio.create_task`` raises "no running event loop" on a worker
+    thread. The coroutine was never awaited, the message was never typed,
+    and the caller's ``except Exception`` swallowed it -- so the thread row
+    reported the message as accepted while nothing arrived.
+
+    The task belongs to the session's loop, not the caller's: it is created
+    there, whichever thread asked for it.
+    """
+
+    async def run():
+        s = _Fake()
+        s.gate.set()
+        assert await asyncio.to_thread(s.queue_delivery, "guest: 확인 부탁") is True
+        assert len(s.pending_deliveries()) == 1    # accepted from this thread
+
+        # The task is created on the loop's next pass, not in the worker
+        # thread -- one turn is enough for the send to finish.
+        await asyncio.sleep(0)
+        await asyncio.gather(*tuple(s._deferred_deliveries))
+        assert s.delivered == ["guest: 확인 부탁"], "a worker-thread delivery was lost"
+        assert s.pending_deliveries() == []
+
+    asyncio.run(run())
+
+
+def test_a_closed_session_loop_refuses_and_leaves_nothing_waiting():
+    """The third branch: the session holds a loop, but it is closed.
+
+    ``call_soon_threadsafe`` raises ``RuntimeError`` on a closed loop, and
+    the record has already been appended to the queue by then. Both halves
+    of the answer are load-bearing, and neither was pinned before:
+
+    - the record is removed -- otherwise the dashboard shows a message
+      waiting that nothing will ever type, which is the same silent loss
+      this whole change is about, only visible;
+    - ``False`` comes back -- ``True`` would tell the caller its message was
+      accepted while nothing was scheduled.
+
+    Called from a thread away from any loop for symmetry with the test
+    above; this branch is reached from a live loop too, because ``_loop``
+    is chosen even when it is closed (a closed loop is still truthy), so a
+    live caller loop never wins the ``_loop or running`` fallback. The
+    thread is *required* only by
+    ``test_a_session_without_a_loop_refuses_instead_of_losing_the_message``,
+    where ``_loop`` is ``None`` and a live caller loop really would win.
+    """
+
+    async def run():
+        s = _Fake()
+        dead = asyncio.new_event_loop()
+        dead.close()
+        s._loop = dead
+        seen = {}
+
+        def off_loop():
+            seen["accepted"] = s.queue_delivery("nudge")
+            seen["pending"] = s.pending_deliveries()
+
+        thread = threading.Thread(target=off_loop)
+        thread.start()
+        thread.join()
+        assert seen["accepted"] is False, "a closed loop must not read as accepted"
+        assert seen["pending"] == [], "a refused delivery must not stay in the queue"
+
+    asyncio.run(run())
+
+
+def test_a_session_without_a_loop_refuses_instead_of_losing_the_message():
+    """A double, or a session reached from a thread with no loop behind it,
+    cannot run the send. Accepting it would be the same silent loss: say no,
+    and leave nothing waiting that nobody will type.
+
+    A session that does hold a loop is not this case -- it is scheduled
+    there, whichever thread asked (the test above)."""
+
+    async def run():
+        s = _Fake()
+        s._loop = None
+        seen = {}
+
+        def off_loop():
+            seen["accepted"] = s.queue_delivery("nudge")
+
+        thread = threading.Thread(target=off_loop)
+        thread.start()
+        thread.join()
+        assert seen["accepted"] is False
+        assert s.pending_deliveries() == []
+
+    asyncio.run(run())
 
 
 def test_a_session_that_ended_accepts_nothing():
