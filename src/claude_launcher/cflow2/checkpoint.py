@@ -12,6 +12,13 @@ stat (device, inode, size, mtime) are unchanged. Every write -- this process,
 the CLI, another daemon -- bumps the revision and rewrites the file, so a write
 anywhere makes the next read verify the checksums and parse again. A state read
 verifies only the state; the chart is verified when the chart is read.
+
+A parsed chart is kept apart from that, by the checksum of its text: a commit
+that moves only the state, or a pass that reads more slots than the path cache
+holds, re-verifies the chart text but does not parse it again. The clock reads
+every slot's state on each pass (167 slots in one workspace on 2026-10-26,
+against :data:`CACHE_MAX`), which used to push every live run's chart out
+before its next pass and re-parse charts of up to ~700 KB every ten seconds.
 """
 from __future__ import annotations
 
@@ -139,6 +146,28 @@ def _remember(path: Path, part: str, identity, value) -> None:
             _cache.popitem(last=False)
 
 
+#: Parsed charts by the checksum of their text (least recently used dropped).
+#: Runs of one workflow version share the entry.
+CHART_CACHE_MAX = 32
+_charts: "OrderedDict[str, Any]" = OrderedDict()
+
+
+def _parsed_chart(sha: str):
+    with _cache_lock:
+        value = _charts.get(sha)
+        if value is not None:
+            _charts.move_to_end(sha)
+        return value
+
+
+def _keep_chart(sha: str, value) -> None:
+    with _cache_lock:
+        _charts[sha] = value
+        _charts.move_to_end(sha)
+        while len(_charts) > CHART_CACHE_MAX:
+            _charts.popitem(last=False)
+
+
 def _state(path: Path) -> Tuple[str, Any]:
     """The committed state text, and its parsed object on a fresh verify
     (None when the text came from the cache)."""
@@ -171,21 +200,26 @@ def read_state_text(path: Path) -> str:
 
 def read_chart(path: Path, parse: Callable[[str], Any]):
     """``parse(chart text)`` of the committed chart. The parsed value is
-    shared between callers of the same generation: treat it as read-only."""
+    shared between callers of the same chart text: treat it as read-only."""
     with connect(path) as conn:
         conn.execute("BEGIN")
         identity = _identity(conn, path)
         hit = _cached(path, "chart", identity)
         if hit is not None:
-            return hit[1]
+            value = _parsed_chart(hit[1])
+            if value is not None:
+                return value
         row = conn.execute("SELECT body,sha FROM definition WHERE id=1").fetchone()
         if row is None:
             raise CheckpointError("checkpoint has no committed state")
         chart, chart_sha = row
         if not isinstance(chart, str) or digest(chart) != chart_sha:
             raise CheckpointError("checkpoint checksum mismatch")
-    value = parse(chart)
-    _remember(path, "chart", identity, value)
+    value = _parsed_chart(chart_sha)
+    if value is None:
+        value = parse(chart)
+        _keep_chart(chart_sha, value)
+    _remember(path, "chart", identity, chart_sha)
     return value
 
 

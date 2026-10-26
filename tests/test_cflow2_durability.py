@@ -3,11 +3,12 @@ import json
 import os
 import subprocess
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
 
-from claude_launcher.cflow2 import checkpoint, frontend, runtime, store
+from claude_launcher.cflow2 import checkpoint, frontend, ir, runtime, store
 
 
 @pytest.fixture
@@ -429,6 +430,54 @@ def test_cache_skips_verification_of_an_unchanged_revision(run_store, monkeypatc
     calls.clear()
     st.load_state()
     assert len(calls) == 1  # the new state only; the chart is verified when read
+
+
+def _count_parses(monkeypatch) -> list:
+    monkeypatch.setattr(checkpoint, "_charts", OrderedDict(), raising=False)
+    calls = []
+    original = ir.Chart.from_json
+    monkeypatch.setattr(ir.Chart, "from_json",
+                        classmethod(lambda cls, text: calls.append(1) or original(text)))
+    return calls
+
+
+def test_state_commit_reverifies_the_chart_without_parsing_it(run_store, monkeypatch):
+    st = run_store
+    parses = _count_parses(monkeypatch)
+    first = st.load_chart()
+    assert parses == [1]
+    with st.lock():
+        st.commit(dict(st.load_state(), marker=1), [])
+    digests = []
+    original = checkpoint.digest
+    monkeypatch.setattr(checkpoint, "digest", lambda text: digests.append(1) or original(text))
+    assert st.load_chart() is first
+    assert parses == [1] and len(digests) == 1
+
+
+def test_a_pass_over_more_slots_than_the_path_cache_keeps_the_chart(run_store, monkeypatch):
+    # The clock reads every slot's state each pass; more slots than CACHE_MAX
+    # pushed the live run's chart out before its next pass (2026-10-26).
+    st = run_store
+    parses = _count_parses(monkeypatch)
+    st.load_chart()
+    parses.clear()
+    for n in range(checkpoint.CACHE_MAX * 3):
+        checkpoint._remember(Path(f"other-{n}"), "state", (n,), "{}")
+    st.load_chart()
+    assert parses == []
+
+
+def test_chart_tampered_after_a_state_commit_is_still_refused(run_store, monkeypatch):
+    st = run_store
+    _count_parses(monkeypatch)
+    st.load_chart()
+    with st.lock():
+        st.commit(dict(st.load_state(), marker=1), [])
+    with checkpoint.connect(st.checkpoint_path) as db:
+        db.execute("UPDATE definition SET body=body||' ' WHERE id=1")
+    with pytest.raises(store.StoreError, match="checksum"):
+        st.load_chart()
 
 
 def test_save_that_changes_only_the_updated_stamp_writes_nothing(run_store):
