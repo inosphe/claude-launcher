@@ -207,6 +207,34 @@ LISTING.fields.openai_reasoning_formats = ["deepseek", "openai", "responses"];
     check("and it is the selected value", select3.value, "minimal");
     context.providersState.draft = before;
 
+    // A daemon that publishes nothing still draws a usable select: the
+    // constants in this file are the last resort, not dead code. Without this
+    // branch the two selects would be empty on an older daemon.
+    const published = context.providersState.data.fields;
+    context.providersState.data.fields = {
+      ...published, reasoning_efforts: [], openai_reasoning_formats: [],
+    };
+    const card4 = context.providersPanel();
+    const selectIn = (label) => all(card4).find(
+      (n) => n.tag === "label" && (n.kids[0] || {}).textContent === label,
+    ).kids.find((k) => k.tag === "select");
+    check("an empty published list falls back to the form's own levels",
+          selectIn("reasoning_effort").kids.map((o) => o.value),
+          ["", "low", "medium", "high"]);
+    check("an empty published list falls back to the form's own formats",
+          selectIn("openai_reasoning_format").kids.map((o) => o.value),
+          ["", "deepseek", "openai"]);
+    const missing = context.providersState.data.fields;
+    context.providersState.data.fields = {};
+    const card5 = context.providersPanel();
+    const selectIn5 = (label) => all(card5).find(
+      (n) => n.tag === "label" && (n.kids[0] || {}).textContent === label,
+    ).kids.find((k) => k.tag === "select");
+    check("a daemon that sends no fields block draws the same fallback",
+          selectIn5("reasoning_effort").kids.map((o) => o.value),
+          ["", "low", "medium", "high"]);
+    context.providersState.data.fields = published;
+
     // The installed row shows the pair, because neither half alone says what a
     // launch will do.
     const facts = text(context.providersPanel());

@@ -579,7 +579,11 @@ def test_a_pi_provider_without_a_format_points_at_the_provider_field(home):
     assert row["reasoning_effort"] == "high"
     assert row["reasoning_effort_refused"] is False
     assert "openai_reasoning_format" in row["reasoning_effort_problem"]
+    # The message names the provider it came from, not a placeholder: the row
+    # asks the launch's own projection and shows its sentence, so passing no
+    # name through would leave the reader without the field to go and edit.
     assert "gateway" in row["reasoning_effort_problem"]
+    assert "the selected provider" not in row["reasoning_effort_problem"]
 
     # The same provider with the format declared is carried: nothing to say.
     store.update(lambda doc: doc["providers"]["gateway"].update(
@@ -590,6 +594,30 @@ def test_a_pi_provider_without_a_format_points_at_the_provider_field(home):
     )
     assert row["reasoning_effort"] == "high"
     assert row["reasoning_effort_problem"] is None
+
+
+def test_a_row_whose_spec_cannot_be_read_reports_a_refusal(home):
+    """An unreadable chain is a launch that stops, so its row says refused.
+
+    ``spec_for`` raises for a malformed provider entry, and a launch on that
+    profile dies on the same error. The row carries the error and
+    ``reasoning_effort_refused`` True -- a False here would tell the page to
+    offer a provider field to fix, when the entry itself is what is broken.
+    """
+    store.update(lambda doc: doc.setdefault("providers", {}).update({
+        "broken": {"endpoints": {"openai": "https://gw.example.com/v1"},
+                   "models": {"default": "owner/model"},
+                   "openai_reasoning_format": "guessed"},
+    }))
+    p = profile.create("work")
+    store.set_profile_field(p.name, "provider", "broken")
+    row = next(
+        row for row in listing()["profile_details"]
+        if row["profile"] == "work" and row.get("explicit") is False
+    )
+    assert row["reasoning_effort"] is None
+    assert "openai_reasoning_format" in row["reasoning_effort_problem"]
+    assert row["reasoning_effort_refused"] is True
 
 
 def test_a_harness_that_cannot_carry_the_effort_has_no_problem_when_unset(home):

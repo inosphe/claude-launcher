@@ -2588,19 +2588,15 @@ class _EffortSource:
         if value:
             entry = harness_registry.get(harness_name)
             if entry is not None and entry.provider_adapter == pi_provider.ADAPTER:
-                # Ask the launch's own projection, not a copy of its rule.
+                # Ask the launch's own projection, not a copy of its rule -- and
+                # show its sentence rather than a second copy of the same
+                # wording: the message names the provider, so the name has to
+                # come from the projection that was asked.
                 _projected, warning = pi_provider.projected_effort(
                     self.spec, None, provider=self.provider or None
                 )
                 if warning:
-                    name = self.provider or "the provider"
-                    problem = (
-                        f"provider {name!r} declares no openai_reasoning_format, "
-                        f"so a launch on it runs without the {value!r} effort this "
-                        "profile resolves to. Set that provider's "
-                        "openai_reasoning_format (Settings ▸ Providers: none, "
-                        "deepseek or openai) to carry the level."
-                    )
+                    problem = warning
             elif "reasoning_effort" in (
                 translators.for_harness(harness_name, self.spec).missing
             ):
