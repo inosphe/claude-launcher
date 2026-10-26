@@ -183,6 +183,34 @@ def test_a_provider_with_a_routing_spec_is_not_reported_as_broken(home):
     assert rows[0]["problems"] == []
 
 
+def test_the_reasoning_pair_is_checked_by_provider_spec(home):
+    """The Settings ▸ Providers selects post strings; provider_spec judges them.
+
+    Both fields are drawn in the form and validated here, so a value the launch
+    could not use is refused before the config is written -- the page's only
+    write path is :func:`provider_install.save`, which validates first.
+    """
+    import pytest
+
+    assert provider_install.validate(
+        "demo", _valid(reasoning_effort="high", openai_reasoning_format="openai")
+    ) == []
+    for effort in ("none", "xhigh"):
+        problems = provider_install.validate("demo", _valid(reasoning_effort=effort))
+        assert any("reasoning_effort" in p for p in problems), (effort, problems)
+    # Clearing the select is not a value: the page leaves the key out, and an
+    # empty string that arrives anyway reads as "not declared".
+    assert provider_install.validate("demo", _valid(reasoning_effort="")) == []
+    for fmt in ("openai-standard", "none"):
+        problems = provider_install.validate("demo", _valid(openai_reasoning_format=fmt))
+        assert any("openai_reasoning_format" in p for p in problems), (fmt, problems)
+    # A refusal writes nothing: the file is the same before and after.
+    before = store.load()
+    with pytest.raises(provider_install.InstallError):
+        provider_install.save("demo", _valid(openai_reasoning_format="none"))
+    assert store.load() == before
+
+
 def test_the_facts_other_modules_own_are_checked_by_them(home):
     """session_affinity/session_header/allowed_harnesses are not re-implemented here."""
     problems = provider_install.validate("demo", _valid(session_affinity="yes"))

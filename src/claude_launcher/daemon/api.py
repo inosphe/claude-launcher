@@ -2522,6 +2522,8 @@ class _EffortSource:
     ``claude_env`` is the chain's Claude-vocabulary env, which the Claude
     launch applies *after* the provider translation, so a
     ``CLAUDE_CODE_EFFORT_LEVEL`` written there is the one Claude Code reads.
+    ``provider`` is the name the chain resolved to, so a message can send the
+    reader to that provider's own fields (Settings ▸ Providers) by name.
     ``error`` is why either could not be read -- a launch of this profile
     fails on the same error.
     """
@@ -2529,10 +2531,12 @@ class _EffortSource:
     def __init__(self, profile_obj, doc: dict):
         self.spec = None
         self.claude_env: dict = {}
+        self.provider = ""
         self.error: Optional[str] = None
         try:
             self.spec = providers.spec_for(profile_obj, doc=doc)
             self.claude_env = runner._claude_profile_env(profile_obj)
+            self.provider = providers.resolve_name(profile_obj, doc)
         except (
             providers.ProviderError,
             lineage.LineageError,
@@ -2546,14 +2550,28 @@ class _EffortSource:
 
         ``reasoning_effort`` is the value a launch on ``harness_name`` applies,
         None when nothing is configured (the harness's own default decides).
-        ``reasoning_effort_problem`` is None unless that launch is refused
-        over it: a harness with no translation for the field cannot launch a
-        profile that sets one (:func:`runner.harness_translation`), so its row
-        carries the configured value *and* says why it will not run, rather
-        than reading as "unset".
+        ``reasoning_effort_problem`` is None unless that launch cannot carry
+        the value, and ``reasoning_effort_refused`` tells the two reasons
+        apart, because they ask the person for different things:
+
+        * a harness with no translation for the field cannot launch a profile
+          that sets one (:func:`runner.harness_translation`); the row carries
+          the configured value, says why it will not run, and is refused.
+        * the Pi adapter drops a provider's effort that it cannot encode --
+          the provider declares no ``openai_reasoning_format`` -- and launches
+          without it, logging a warning (claunch-2pthl). That is not a
+          refusal, so the message points at the provider field to fill in
+          rather than at the profile value to clear.
+
+        A row whose spec cannot be read at all reports the launch's error and
+        is refused, which is what a launch on it does.
         """
         if self.spec is None:
-            return {"reasoning_effort": None, "reasoning_effort_problem": self.error}
+            return {
+                "reasoning_effort": None,
+                "reasoning_effort_problem": self.error,
+                "reasoning_effort_refused": True,
+            }
         if harness_name == harness_registry.CLAUDE_HARNESS:
             var = provider_spec.CLAUDE_REASONING_EFFORT
             env = translators.claude(self.spec).env
@@ -2562,17 +2580,40 @@ class _EffortSource:
             return {
                 "reasoning_effort": str(env.get(var) or "").strip() or None,
                 "reasoning_effort_problem": None,
+                "reasoning_effort_refused": False,
             }
         value = self.spec.reasoning_effort or None
         problem = None
-        if value and "reasoning_effort" in (
-            translators.for_harness(harness_name, self.spec).missing
-        ):
-            problem = (
-                f"harness {harness_name!r} cannot translate configured "
-                "provider field(s): reasoning_effort"
-            )
-        return {"reasoning_effort": value, "reasoning_effort_problem": problem}
+        refused = False
+        if value:
+            entry = harness_registry.get(harness_name)
+            if entry is not None and entry.provider_adapter == pi_provider.ADAPTER:
+                # Ask the launch's own projection, not a copy of its rule.
+                _projected, warning = pi_provider.projected_effort(
+                    self.spec, None, provider=self.provider or None
+                )
+                if warning:
+                    name = self.provider or "the provider"
+                    problem = (
+                        f"provider {name!r} declares no openai_reasoning_format, "
+                        f"so a launch on it runs without the {value!r} effort this "
+                        "profile resolves to. Set that provider's "
+                        "openai_reasoning_format (Settings ▸ Providers: none, "
+                        "deepseek or openai) to carry the level."
+                    )
+            elif "reasoning_effort" in (
+                translators.for_harness(harness_name, self.spec).missing
+            ):
+                problem = (
+                    f"harness {harness_name!r} cannot translate configured "
+                    "provider field(s): reasoning_effort"
+                )
+                refused = True
+        return {
+            "reasoning_effort": value,
+            "reasoning_effort_problem": problem,
+            "reasoning_effort_refused": refused,
+        }
 
 
 def _profile_default_tools(profile_obj, entry) -> Optional[list]:

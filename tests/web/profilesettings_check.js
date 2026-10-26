@@ -245,6 +245,27 @@ vm.runInContext(
   assert.equal(refused.cls, "profile-pending");
   assert.match(refused.title, /cannot translate/);
 
+  // Since claunch-2pthl a Pi provider that declares no openai_reasoning_format
+  // launches without the level instead of being refused. The cell says which of
+  // the two it is, and the message is the provider field to fill in -- a person
+  // reading "launch refused" would go looking for a profile value to clear.
+  effortRow.reasoning_effort_problem =
+    "provider 'opengateway' declares reasoning_effort 'high' but no " +
+    "openai_reasoning_format, so a launch runs without a reasoning level.";
+  effortRow.reasoning_effort_refused = false;
+  const omitted = context.reasoningEffortLabel(effortRow);
+  assert.match(omitted.text, /omitted at launch/);
+  assert.doesNotMatch(omitted.text, /refused/);
+  assert.match(omitted.title, /openai_reasoning_format/);
+  const omittedEditor = context.reasoningEffortEditor(effortRow);
+  const omittedNote = all(omittedEditor).find((n) => /openai_reasoning_format/.test(n.text || ""));
+  assert.equal(omittedNote.cls, "wf-warning");
+  effortRow.reasoning_effort_refused = true;
+  const refusedEditor = context.reasoningEffortEditor(effortRow);
+  assert.equal(all(refusedEditor).find((n) => /openai_reasoning_format/.test(n.text || "")).cls,
+               "wf-error");
+  delete effortRow.reasoning_effort_refused;
+
   // The selector edits the profile's own key: the levels are the ones the
   // daemon published, and "harness default" is the undeclaration.
   response = { profiles: [], profile_details: details(),

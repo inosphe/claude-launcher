@@ -504,12 +504,15 @@ def test_a_profile_effort_is_reported_on_its_rows_and_options(home):
     assert _default_row(body, "plain")["reasoning_effort"] is None
 
 
-def test_a_harness_that_cannot_carry_the_effort_says_its_launch_is_refused(home):
-    """No translator for the field: the launch is refused, not run on a default.
+def test_a_harness_that_cannot_carry_the_effort_reports_what_it_does(home):
+    """Three outcomes, told apart by ``reasoning_effort_refused``.
 
-    ``runner.harness_translation`` raises for a profile that sets an effort on
-    such a harness, so the row keeps the configured value and names the
-    refusal -- a null here would read as "unset, the harness decides".
+    A harness with no translator refuses the launch
+    (``runner.harness_translation`` raises), so the row keeps the configured
+    value and names the refusal -- a null here would read as "unset, the
+    harness decides". The Pi adapter instead drops a level the provider has no
+    format to encode and launches without it, so its row carries the value it
+    will not apply plus the field to set; claude and codex carry it.
     """
     profile.create("work")
     store.set_profile_field("work", "reasoning_effort", "high")
@@ -521,8 +524,72 @@ def test_a_harness_that_cannot_carry_the_effort_says_its_launch_is_refused(home)
     for harness_name in ("agent", "devin", "kimi"):
         assert rows[harness_name]["reasoning_effort"] == "high"
         assert "reasoning_effort" in rows[harness_name]["reasoning_effort_problem"]
-    for harness_name in ("claude", "codex", "pi"):
+        assert rows[harness_name]["reasoning_effort_refused"] is True
+    for harness_name in ("claude", "codex"):
         assert rows[harness_name]["reasoning_effort_problem"] is None
+    # Pi is neither: the adapter drops a level the provider cannot encode and
+    # launches anyway (claunch-2pthl), so the row reports the omission and
+    # points at the provider field rather than claiming a refusal.
+    assert "openai_reasoning_format" in rows["pi"]["reasoning_effort_problem"]
+    assert rows["pi"]["reasoning_effort_refused"] is False
+
+
+def test_a_refused_row_says_so_on_its_own_field(home):
+    """``reasoning_effort_refused`` splits "will not run" from "will not apply".
+
+    The page paints the two differently: a refusal is an error the person
+    clears here, while a Pi provider's missing format is fixed on the
+    provider. The flag is what it reads instead of guessing from the message.
+    """
+    profile.create("work")
+    store.set_profile_field("work", "reasoning_effort", "high")
+    rows = {
+        row["harness"]: row
+        for row in listing()["profile_details"]
+        if row["profile"] == "work" and row.get("explicit") is True
+    }
+    for harness_name in ("agent", "devin", "kimi"):
+        assert rows[harness_name]["reasoning_effort_refused"] is True
+    for harness_name in ("claude", "codex", "pi"):
+        assert rows[harness_name]["reasoning_effort_refused"] is False
+
+
+def test_a_pi_provider_without_a_format_points_at_the_provider_field(home):
+    """A provider that declares an effort but no encoding drops it (claunch-2pthl).
+
+    The launch proceeds without reasoning, so the row reports the value it
+    will *not* apply and names the provider field to fill in. Reading
+    "launch refused" here would send the person to clear a profile value that
+    is not the problem.
+    """
+    from claude_launcher import lineage
+
+    store.update(lambda doc: doc.setdefault("providers", {}).update({
+        "gateway": {"endpoints": {"openai": "https://gw.example.com/v1"},
+                    "models": {"default": "owner/model"},
+                    "reasoning_effort": "high"},
+    }))
+    p = profile.create("work")
+    store.set_profile_field(p.name, "provider", "gateway")
+    lineage.set_harness(p, "pi")
+    row = next(
+        row for row in listing()["profile_details"]
+        if row["profile"] == "work" and row.get("explicit") is False
+    )
+    assert row["reasoning_effort"] == "high"
+    assert row["reasoning_effort_refused"] is False
+    assert "openai_reasoning_format" in row["reasoning_effort_problem"]
+    assert "gateway" in row["reasoning_effort_problem"]
+
+    # The same provider with the format declared is carried: nothing to say.
+    store.update(lambda doc: doc["providers"]["gateway"].update(
+        {"openai_reasoning_format": "openai"}))
+    row = next(
+        row for row in listing()["profile_details"]
+        if row["profile"] == "work" and row.get("explicit") is False
+    )
+    assert row["reasoning_effort"] == "high"
+    assert row["reasoning_effort_problem"] is None
 
 
 def test_a_harness_that_cannot_carry_the_effort_has_no_problem_when_unset(home):
