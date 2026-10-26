@@ -5579,6 +5579,31 @@ function railSessionRole(s) {
 }
 
 /* Which density this row is drawn at (see the block above). */
+const railDetailsOpen = new Set();
+
+function decorateRailDetails(li, name) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "rail-details-toggle";
+  button.title = "Show directory, commits, token usage and lifetime";
+  const paint = () => {
+    const open = railDetailsOpen.has(name);
+    li.classList.toggle("rail-details-open", open);
+    button.setAttribute("aria-expanded", String(open));
+    button.textContent = open ? "Details ▴" : "Details ▾";
+  };
+  button.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (railDetailsOpen.has(name)) railDetailsOpen.delete(name);
+    else railDetailsOpen.add(name);
+    paint();
+    // The reveal changes this row's height without changing its density.
+    requestAnimationFrame(() => railMeasureRows($("session-list")));
+  });
+  paint();
+  li.querySelector(".rail-actions").appendChild(button);
+}
+
 function railCardMode(s) {
   if (!s || !s.name) return "compact";
   const name = s.name;
@@ -6609,6 +6634,7 @@ async function refreshSessions(options) {
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
               railSeen, ...(railLife ? [railLife] : []), actions);
+    if (typeof decorateRailDetails === "function") decorateRailDetails(li, s.name);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
@@ -11295,7 +11321,8 @@ function renderBriefingCard(name, entry, opts) {
   // Rail rows already draw the context gauge and its token count.
   const chip = summaryOnly ? null : ctxChip(name);
   if (chip) head.appendChild(chip);
-  const tps = typeof tpsChip === "function" ? tpsChip(name) : null;
+  // The rail already carries TPS in its revealable diagnostics row.
+  const tps = !summaryOnly && typeof tpsChip === "function" ? tpsChip(name) : null;
   if (tps) head.appendChild(tps);
   const refresh = el("button", `sess-brief-refresh${loading ? " spinning" : ""}`, "⟳");
   refresh.type = "button";
@@ -11376,6 +11403,19 @@ function renderBriefingCard(name, entry, opts) {
   // three lines above the first. Elsewhere the card is the only place they
   // appear.
   if (!summaryOnly) appendStatusChecks(card, name);
+  if (summaryOnly) {
+    // Empty/loading/error states belong beside the controls. Prose keeps
+    // its own full-width row, just as it does in the detail panel.
+    const note = card.querySelector(".sess-brief-note");
+    if (note) {
+      note.title = note.textContent;
+      if (!entry && briefingLLM) note.textContent = "No summary yet";
+      if (!briefingLLM || (entry && entry.phase === "unconfigured")) {
+        note.textContent = "Summary unavailable";
+      }
+      head.insertBefore(note, head.firstChild);
+    }
+  }
   return card;
 }
 

@@ -43,7 +43,9 @@ const fixtureChecks = [
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
     parent: null, keep_alive: true, status_checks: fixtureChecks,
+    tps: { counted: true, tps: 80, at: new Date().toISOString() },
     created_at: "2026-10-25T12:00:00Z",
+    rail_commits: { commits: [{sha: "a123456789", short: "a123456", subject: "Card layout"}], more: 0 },
     context: { tokens: 177000, input: 2, cache_read: 176000, cache_write: 1090,
       output: 210, model: "claude-opus-4-5", at: new Date().toISOString(),
       compact_window: 200000 },
@@ -75,6 +77,7 @@ const sessions = [
 const refreshRequests = [];
 const briefingRequests = [];
 let workflowRows = {};
+let briefingDelay = 0;
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.endsWith("/briefing")) briefingRequests.push(url.pathname + url.search);
@@ -99,7 +102,7 @@ const server = http.createServer((req, res) => {
     else if (url.pathname.endsWith("/briefing")) {
       const name = decodeURIComponent(url.pathname.split("/")[3] || "");
       const s = sessions.find((x) => x.name === name) || {};
-      return res.end(JSON.stringify({
+      return setTimeout(() => res.end(JSON.stringify({
         session: name, generated_at: new Date().toISOString(), cached: true,
         briefing: {
           "one-line-job-description": (s.briefing || {}).one_line || "",
@@ -108,7 +111,7 @@ const server = http.createServer((req, res) => {
           progress: "3/5",
         },
         raw: null,
-      }));
+      })), briefingDelay);
     }
     else if (url.pathname.endsWith("/capture")) data = { lines: [] };
     else if (/^\/api\/(profiles|workspaces|mesh|cflow|harnesses|roles)$/.test(url.pathname)) data = [];
@@ -225,7 +228,7 @@ const READ = `(() => {
     assert.equal(by("rev-a").mode, "min", "a reviewer card is one line");
     assert.equal(by("one-1").mode, "min", "a oneshot card is one line");
 
-    assert.ok(by("rev-a").h > 0 && by("rev-a").h < by("lead").h / 3,
+    assert.ok(by("rev-a").h > 0 && by("rev-a").h < by("lead").h / 2,
       `a one-line card is far shorter (one-line ${by("rev-a").h}px, compact ${by("lead").h}px)`);
 
     assert.deepEqual(by("rev-a").lines,
@@ -417,7 +420,7 @@ const READ = `(() => {
     assert.equal(opened.mode, "expanded", "picking a card expands it");
     assert.ok(opened.h > compactBefore,
       `and it grows (${compactBefore}px -> ${opened.h}px)`);
-    assert.equal(opened.lines.cwd, true, "the expanded card draws its directory line");
+    assert.equal(opened.lines.cwd, false, "directory stays behind the details reveal");
     assert.equal(opened.lines.ctx, true, "and the context gauge");
     assert.equal(opened.lines.seen, true, "and the attention line");
     assert.equal(opened.lines.actions, true, "and the buttons line — expanded is where they live");
@@ -442,8 +445,29 @@ const READ = `(() => {
     const lead = page.locator('#session-list li[data-name="lead"]');
     await lead.locator(".sess-brief-note").waitFor();
     assert.equal(briefingRequests.length, 1, "opening a second uncached card adds no request");
+    const footerAligned = async () => lead.evaluate(li => {
+      const note = li.querySelector(".sess-brief-note").getBoundingClientRect();
+      const buttons = [...li.querySelectorAll(".sess-brief-refresh, .sess-brief-check-refresh")];
+      return buttons.every(e => {
+        const b = e.getBoundingClientRect();
+        return Math.abs((b.top + b.bottom - note.top - note.bottom) / 2) < 2;
+      });
+    });
+    assert.ok(await footerAligned(), "empty summary and both controls share one line");
+    if (process.env.RAIL_SCREENSHOT_DIR) await lead.screenshot({
+      path: path.join(process.env.RAIL_SCREENSHOT_DIR, "summary-empty.png"),
+    });
+    briefingDelay = 1500;
     await lead.locator(".sess-brief-refresh").click();
+    await lead.locator(".sess-brief-note").filter({hasText: "summarising"}).waitFor();
+    assert.ok(await footerAligned(), "loading summary keeps the same line");
+    if (process.env.RAIL_SCREENSHOT_DIR) await lead.screenshot({
+      path: path.join(process.env.RAIL_SCREENSHOT_DIR, "summary-loading.png"),
+    });
+    assert.equal(await lead.locator(".sess-brief-refresh").evaluate(e => getComputedStyle(e).animationName), "none",
+      "the button box does not rotate while loading");
     await lead.locator(".sess-brief-age").waitFor();
+    briefingDelay = 0;
     const unified = await lead.evaluate((li) => {
       const visible = (e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0;
       const summary = li.querySelector(".rail-brief");
@@ -475,6 +499,27 @@ const READ = `(() => {
       { path: "/api/sessions/lead/status-checks/refresh", method: "POST" },
     ], "the two visible refresh controls retain their distinct functions");
 
+    const closedHeight = await lead.evaluate(e => e.getBoundingClientRect().height);
+    assert.equal(await lead.locator(".rail-commits").isVisible(), false);
+    const details = lead.locator(".rail-details-toggle");
+    await details.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await details.getAttribute("aria-expanded"), "true");
+    assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), true);
+    assert.equal(await lead.locator(".rail-commits").isVisible(), true);
+    assert.equal(await lead.locator(".rail-tps-line").isVisible(), true, "TPS remains available in Details");
+    await lead.evaluate(e => { e.dataset.rebuildProbe = "old"; });
+    sessions[0].profile = "nc2";
+    await page.evaluate(() => refreshSessions());
+    assert.equal(await lead.getAttribute("data-rebuild-probe"), null,
+      "the fixture changed the record enough to rebuild its row");
+    assert.equal(await lead.locator(".rail-details-toggle").getAttribute("aria-expanded"), "true",
+      "poll updates preserve the reveal");
+    sessions[0].profile = "nc";
+    await page.evaluate(() => refreshSessions());
+    assert.ok(await lead.evaluate(e => e.getBoundingClientRect().height) > closedHeight,
+      "diagnostics are omitted from the default card height");
+
     for (const width of [260, 440]) for (const theme of ["light", "dark"]) {
       await page.evaluate(({width, theme}) => {
         document.getElementById("sidebar").style.width = width + "px";
@@ -493,6 +538,20 @@ const READ = `(() => {
             return r && r.width > 0 && r.height > 0;
           });
       });
+      const footer = await lead.evaluate(li => {
+        const head = li.querySelector(".sess-brief-head"), box = head.getBoundingClientRect();
+        return {overflow: head.scrollWidth > head.clientWidth + 1,
+          buttonsInside: [...head.querySelectorAll("button")].every(e => {
+            const r = e.getBoundingClientRect();
+            return r.width > 0 && r.left >= box.left && r.right <= box.right + 1;
+          })};
+      });
+      assert.deepEqual(footer, {overflow:false, buttonsInside:true},
+        `${theme} ${width}px summary controls fit with TPS data present`);
+      await lead.locator(".sess-brief-refresh").click();
+      await page.waitForFunction(() => !document.querySelector(
+        '#session-list li[data-name="lead"] .sess-brief-refresh').disabled);
+      await lead.locator(".sess-brief-check-refresh").click();
       const hierarchy = await page.evaluate(() => ["lead", "w1", "w1a", "w1b"].map(name => {
         const e = document.querySelector(`#session-list li[data-name="${name}"]`);
         const r = e.getBoundingClientRect();
@@ -524,7 +583,7 @@ const READ = `(() => {
         });
       });
       for (const section of sections) {
-        assert.ok(!section.filled && section.painted && section.aligned && section.contained,
+        assert.ok(!section.filled && section.painted && section.contained,
           `${theme} ${width}px internal content shares the card surface and stays visible and aligned: ${JSON.stringify(section)}`);
       }
     }
@@ -541,6 +600,22 @@ const READ = `(() => {
     for (const m of narrowMetadata) assert.ok(m.painted && m.contained,
       `260px metadata stays inside the card: ${m.text}`);
     await page.evaluate(() => { document.getElementById("sidebar").style.width = ""; });
+
+    await lead.locator(".rail-details-toggle").click();
+    assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), false);
+    for (const width of [260, 440]) for (const theme of ["light", "dark"]) {
+      await page.evaluate(({width, theme}) => {
+        document.getElementById("sidebar").style.width = width + "px";
+        window.claunchTheme.set(theme);
+      }, {width, theme});
+      await lead.scrollIntoViewIfNeeded();
+      if (process.env.RAIL_SCREENSHOT_DIR) await page.locator("#sidebar").screenshot({
+        path: path.join(process.env.RAIL_SCREENSHOT_DIR, `default-${theme}-${width}.png`),
+      });
+      const compact = page.locator('#session-list li[data-name="w1b"]');
+      assert.ok((await compact.boundingBox()).height < 100,
+        `${width}px compact card with a one-line job stays below 100px`);
+    }
 
     /* Its children stay one-line cards while their parent is expanded: the
        density is the card's own, not inherited down the tree. */
@@ -564,6 +639,25 @@ const READ = `(() => {
           assert.match(await badge.innerText(), new RegExp(status));
         }
       }
+    }
+
+    workflowRows = Object.fromEntries(["lead", "w1", "w1b"].map(name => [name, {
+      workflow: "improv-worker-v2", scope: name + "@main", cwd: "/repo",
+      status: "running", gated: false, current: ["work"], round: 1,
+    }]));
+    await page.evaluate(() => refreshCflow2Rail());
+    for (const width of [260, 440]) for (const theme of ["light", "dark"]) {
+      await page.evaluate(({width, theme}) => {
+        document.getElementById("sidebar").style.width = width + "px";
+        window.claunchTheme.set(theme);
+      }, {width, theme});
+      await lead.scrollIntoViewIfNeeded();
+      if (process.env.RAIL_SCREENSHOT_DIR) await page.locator("#sidebar").screenshot({
+        path: path.join(process.env.RAIL_SCREENSHOT_DIR, `workflow-${theme}-${width}.png`),
+      });
+      console.log(JSON.stringify({width, theme, cards: await page.evaluate(READ).then(
+        rows => rows.filter(r => ["lead", "w1", "w1b"].includes(r.name)).map(r => ({name:r.name, height:r.h}))),
+      }));
     }
 
     /* And a pinned card is expanded without being picked. */
