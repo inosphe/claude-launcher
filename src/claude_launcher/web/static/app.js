@@ -296,6 +296,25 @@ let controlTimer = null;
 let controlSeq = 0;
 let controlOpenedAt = null;   // Date.now() the current socket opened (the link panel reads it)
 let controlLastRx = null;     // Date.now() of its last frame, of any kind
+// Which daemon this socket is attached to, from its `init` frame: the same
+// identity /api/health publishes, carried on the transport the tick already
+// holds (claunch-r35k1). Null until an init has arrived on the current
+// socket and cleared when it closes, so a socket that is merely opening never
+// answers with the previous daemon's identity.
+let controlBoot = null;
+// Whether the last `boot.phase` this page read was "restoring". `boot` is the
+// one field of that frame that moves -- boot_id, version and started_at are
+// constants of a daemon -- so the identity above may be replayed tick after
+// tick but the phase may not. While it says restoring, daemonHealth asks
+// /api/health for a live one; that window is the seconds a successor spends
+// filling its fleet, and after it the socket answers alone again.
+let controlBootRestoring = false;
+// The last `boot` an HTTP probe answered. While the restoring window is open
+// the probe is the only live source, and it can fail there -- the window is
+// the moment right after a restart, which is the busiest the daemon ever is.
+// A failed probe means "could not ask", not "no daemon", so the last answer
+// is what the page keeps showing instead of going dark.
+let lastBootSeen = null;
 const controlWaiting = new Map();
 
 function controlUp() {
@@ -327,6 +346,14 @@ function openControlSocket() {
   const sock = new WebSocket(`${proto}://${location.host}` + url("/api/control/ws"));
   sock.binaryType = "arraybuffer";
   controlSock = sock;
+  // A fresh socket is not yet attached to anything: it says which daemon it
+  // reached in its own `init` (claunch-r35k1), and until that frame lands
+  // there is no identity to report.
+  controlBoot = null;
+  // Its init has not arrived, so nothing is known about the phase either;
+  // the probe answers until the frame says otherwise.
+  controlBootRestoring = false;
+  lastBootSeen = null;
   if (typeof linkLog === "function") linkLog("control.open", { try: controlTry });
 
   sock.onopen = () => {
@@ -359,8 +386,30 @@ function controlMessage(sock, ev) {
   if (msg.type === "pong") { latencyPong(msg); return; }
   if (msg.type === "read_part") { controlPart(sock, msg); return; }
   if (msg.type === "read_result") { controlAnswer(msg, ev.data); return; }
-  if (msg.type === "init") { p2pInit(sock, msg); return; }
+  if (msg.type === "init") {
+    // Which daemon answered on this socket. The page reads its identity off
+    // /api/health -- boot_id above all, which is how a restart is noticed --
+    // and that probe is skipped while this socket is open, so the identity
+    // has to ride the frame that opens it (claunch-r35k1).
+    controlBoot = controlBootFrom(msg);
+    // Only the phase is read here, never replayed: it is the field that
+    // changes under this socket (claunch-r35k1).
+    controlBootRestoring = !!(msg.boot && msg.boot.phase === "restoring");
+    p2pInit(sock, msg);
+    return;
+  }
   if (msg.type === "p2p_answer" || msg.type === "p2p_error") p2pSignal(msg);
+}
+
+/* A control socket's `init` as the health answer /api/health would give, or
+   null when the frame does not name a daemon (an older daemon, or a P2P
+   socket whose init the negotiation consumed). */
+function controlBootFrom(msg) {
+  if (!msg || typeof msg.boot_id !== "string" || !msg.boot_id) return null;
+  const out = { boot_id: msg.boot_id, via: "control" };
+  if (typeof msg.version === "string") out.version = msg.version;
+  if (typeof msg.started_at === "string") out.started_at = msg.started_at;
+  return out;
 }
 
 function controlClosed(sock, ev) {
@@ -373,6 +422,9 @@ function controlClosed(sock, ev) {
     });
   }
   controlSock = null;
+  controlBoot = null;
+  controlBootRestoring = false;
+  lastBootSeen = null;
   controlAbort("control socket closed");
   latencyStop();
   channelsCarrierGone();
@@ -590,6 +642,11 @@ function controlAdopt(direct, link) {
   controlSock = direct;
   direct.onmessage = (ev) => controlMessage(direct, ev);
   direct.onclose = (ev) => controlClosed(direct, ev);
+  // The negotiation consumed this socket's `init` before adopting it, so
+  // controlBoot is left as it stands: the retired relay socket reached the
+  // same daemon (a DataChannel only replaces the road to it), and its init is
+  // the identity this one reports (claunch-r35k1). Clearing it here would
+  // spend an HTTP probe per tick on a transport the page is already holding.
   p2pTry = 0;
   p2pLastFail = null;
   controlRetire(old);
@@ -19257,9 +19314,27 @@ async function daemonHealth() {
   // An open control socket has already answered this. It was opened against
   // this daemon, the daemon has not closed it, and its ping deadline
   // (controlOverdue) closes it when it stops answering -- so probing over
-  // HTTP would spend a
-  // connection to learn what the page is already holding.
-  if (controlUp()) return { ok: true, via: "control" };
+  // HTTP would spend a connection to learn what the page is already holding.
+  //
+  // What it answers is the socket's `init`, not a bare "up" (claunch-r35k1).
+  // pollOnce() reads the daemon's identity off this answer -- boot_id above
+  // all, which is the one thing that says a different daemon is serving --
+  // and a bare "up" left it with nothing to compare: the tick that followed
+  // a restart took the ordinary refresh path, the page never re-read the
+  // fleet through boot(), and a reload was the only way to see it. A socket
+  // with no init yet (still opening) falls through to the probe below, which
+  // answers the same shape, so the tick is never told "down" by a socket
+  // that is merely early.
+  // A socket that is up answers, except for the one field its frame froze.
+  // `boot` moves while a successor fills its fleet, and the frame carrying it
+  // arrived once, when the socket opened -- which after a restart is inside
+  // that very window (the port binds before restore finishes, and the page
+  // reopens with a 500ms backoff). Replaying it would pin "restoring 3/33" on
+  // the rail for as long as the socket lives, and keep
+  // renderRestoreQueueBanner suppressed with it. So while the last phase read
+  // said restoring, the live value comes from the probe; past that edge the
+  // socket answers alone, which is the case this exists for.
+  if (controlUp() && controlBoot && !controlBootRestoring) return { ...controlBoot };
   // Bounded: pollTick runs one of these at a time, so a request that hangs
   // -- one sent as the machine went to sleep, say -- would hold every later
   // tick behind it (claunch-fm3ud).
@@ -19272,13 +19347,41 @@ async function daemonHealth() {
     // requests that are failing because it is not.
     const resp = await fetch(url("/api/health"),
       { cache: "no-store", signal: abort ? abort.signal : undefined });
-    if (!resp.ok) return null;
-    return await resp.json();
+    if (!resp.ok) return probeFailed();
+    const live = await resp.json();
+    // The probe is what ends the restoring window: the next tick reads this
+    // phase and, once the fleet is back, leaves the socket to answer again.
+    // Without this line the window would never close and every tick would
+    // spend a connection for as long as the page stayed open.
+    controlBootRestoring = !!(live && live.boot && live.boot.phase === "restoring");
+    if (live && typeof live.boot === "object" && live.boot) lastBootSeen = live.boot;
+    return live;
   } catch {
-    return null;
+    return probeFailed();
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
+}
+
+/* The probe could not answer. That is a fact about the probe, not about the
+   daemon: while the control socket is OPEN the daemon is demonstrably there
+   -- it opened the socket and has not closed it -- so the page must not read
+   a failed probe as "no daemon" (pollOnce turns null into offline, and
+   tryReconnect postpones on it). The restoring window makes this reachable
+   rather than theoretical: it opens exactly when the daemon is busiest, and
+   the probe is what the page leans on inside it.
+
+   So: keep answering with the identity the socket gave, carrying the last
+   boot it saw -- or none, which syncBootProgress already treats as "not
+   restoring". A null from here still means what it always meant: no open
+   socket to vouch for the daemon, so HTTP was the only source and it failed. */
+function probeFailed() {
+  if (controlUp() && controlBoot) {
+    const out = { ...controlBoot };
+    if (lastBootSeen) out.boot = lastBootSeen;
+    return out;
+  }
+  return null;
 }
 
 /* Open (or re-open) the socket for `name`. The terminal object is deliberately

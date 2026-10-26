@@ -139,13 +139,30 @@ def test_a_delivery_from_a_worker_thread_is_still_typed():
 
     async def run():
         s = _Fake()
-        s.gate.set()
+        # The gate stays shut: `_Fake.deliver` waits on it, which is what
+        # "the agent is mid-turn" stands for. It used to be opened BEFORE
+        # queueing, and then nothing held the send back -- the record could be
+        # appended and removed again before `to_thread` even returned, so
+        # `len(pending_deliveries()) == 1` read an empty queue and the test
+        # failed as "accepted from this thread" (seen once under `-n 4` in a
+        # 184-module gate run, twice on the same tree; the delivery had in
+        # fact succeeded). Whether the send has started by the time the
+        # worker thread returns is not something this test can decide, so it
+        # does not depend on it: a shut gate makes the wait real.
         assert await asyncio.to_thread(s.queue_delivery, "guest: 확인 부탁") is True
         assert len(s.pending_deliveries()) == 1    # accepted from this thread
 
-        # The task is created on the loop's next pass, not in the worker
-        # thread -- one turn is enough for the send to finish.
-        await asyncio.sleep(0)
+        # And it is typed once the turn ends. The task is created on the
+        # loop, not in the worker thread, so wait for the send rather than
+        # for a turn to pass: the callback the worker thread schedules lands
+        # in whatever batch the loop is on, so a turn count is not a
+        # guarantee. The record leaves the queue when the send is done,
+        # whichever way it went, which makes the queue the thing to wait on.
+        s.gate.set()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        while s.pending_deliveries() and loop.time() < deadline:
+            await asyncio.sleep(0.005)
         await asyncio.gather(*tuple(s._deferred_deliveries))
         assert s.delivered == ["guest: 확인 부탁"], "a worker-thread delivery was lost"
         assert s.pending_deliveries() == []

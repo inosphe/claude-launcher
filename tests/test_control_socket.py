@@ -50,6 +50,55 @@ async def _read(ws, paths, read_id=1):
             return frame
 
 
+def test_the_init_frame_names_the_daemon_it_reached(home, tmp_path):
+    """The page's tick rides this socket and skips the health probe while it
+    is open, so the socket's first frame has to carry what that probe would
+    have said (claunch-r35k1).
+
+    ``boot_id`` is the load-bearing field: it is the only value that tells a
+    page a *different* daemon is serving. Without it a page that lived through
+    a restart compared nothing, took the ordinary refresh path, and kept
+    drawing the previous daemon's read until someone reloaded.
+    """
+
+    async def run():
+        client = await _serve(tmp_path)
+        try:
+            async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                hello = await asyncio.wait_for(ws.receive_json(), 5)
+                assert hello["type"] == "init"
+                health = await (await client.get("/api/health")).json()
+                # The same identity /api/health publishes, field for field
+                # the page reads: boot_id, version, started_at, boot.
+                assert hello["boot_id"] == health["boot_id"]
+                assert hello["version"] == health["version"]
+                assert hello["started_at"] == health["started_at"]
+                assert hello["boot"] == health["boot"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_two_sockets_to_one_daemon_name_the_same_boot(home, tmp_path):
+    """A page that reopens its socket (a drop, a P2P adopt) must not read the
+    new one as a different daemon: the identity is the daemon's, not the
+    socket's."""
+
+    async def run():
+        client = await _serve(tmp_path)
+        try:
+            boots = []
+            for _ in range(2):
+                async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                    boots.append((await asyncio.wait_for(ws.receive_json(), 5))["boot_id"])
+            assert boots[0] and boots[0] == boots[1]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_the_socket_answers_the_reads_a_batch_would(home, tmp_path):
     """Four reads on one socket, each answer under the path that asked, and
     the same routes answering as a direct read gets."""
@@ -59,7 +108,7 @@ def test_the_socket_answers_the_reads_a_batch_would(home, tmp_path):
         try:
             async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
                 hello = await asyncio.wait_for(ws.receive_json(), 5)
-                assert hello == {"type": "init"}
+                assert hello["type"] == "init"
 
                 paths = ["/api/sessions", "/api/mesh?view=rail",
                          "/api/workspaces", "/api/cflow"]

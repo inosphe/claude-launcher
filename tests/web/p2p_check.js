@@ -355,6 +355,13 @@ function build(opts = {}) {
     "let controlTry = 0;",
     "let controlTimer = null;",
     "let controlSeq = 0;",
+    // Which daemon the open socket reached, from its init (claunch-r35k1).
+    // controlAdopt carries it across a P2P adopt, so the machine under test
+    // reaches for it.
+    "let controlBoot = null;",
+    // The rest of what its init leaves behind (claunch-r35k1): controlMessage
+    // reads the phase off the frame, and an adopt leaves both as they stand.
+    "let controlBootRestoring = false;",
     "const controlWaiting = new Map();",
     "let p2pLink = null;",
     "let p2pConfig = null;",
@@ -368,7 +375,8 @@ function build(opts = {}) {
     `const P2P_ACTION = ${constOf("P2P_ACTION")};`,
     "const controlRetired = new Set();",
     "const channelLinks = new Map();",
-    ...["controlUp", "controlAbort", "openControlSocket", "controlMessage", "controlClosed",
+    ...["controlUp", "controlAbort", "openControlSocket", "controlMessage",
+        "controlBootFrom", "controlClosed",
         "p2pTunnel", "p2pInit", "p2pSchedule", "p2pAttempt", "p2pSignal", "p2pFailed",
         "controlAdopt", "controlRetire", "controlRetiredMessage", "controlRetireCheck",
         "scheduleControlReopen", "ensureControlSocket", "controlRead", "controlAnswer",
