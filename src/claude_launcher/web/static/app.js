@@ -302,6 +302,13 @@ let controlLastRx = null;     // Date.now() of its last frame, of any kind
 // socket and cleared when it closes, so a socket that is merely opening never
 // answers with the previous daemon's identity.
 let controlBoot = null;
+// Whether the last `boot.phase` this page read was "restoring". `boot` is the
+// one field of that frame that moves -- boot_id, version and started_at are
+// constants of a daemon -- so the identity above may be replayed tick after
+// tick but the phase may not. While it says restoring, daemonHealth asks
+// /api/health for a live one; that window is the seconds a successor spends
+// filling its fleet, and after it the socket answers alone again.
+let controlBootRestoring = false;
 const controlWaiting = new Map();
 
 function controlUp() {
@@ -337,6 +344,9 @@ function openControlSocket() {
   // reached in its own `init` (claunch-r35k1), and until that frame lands
   // there is no identity to report.
   controlBoot = null;
+  // Its init has not arrived, so nothing is known about the phase either;
+  // the probe answers until the frame says otherwise.
+  controlBootRestoring = false;
   if (typeof linkLog === "function") linkLog("control.open", { try: controlTry });
 
   sock.onopen = () => {
@@ -375,6 +385,9 @@ function controlMessage(sock, ev) {
     // and that probe is skipped while this socket is open, so the identity
     // has to ride the frame that opens it (claunch-r35k1).
     controlBoot = controlBootFrom(msg);
+    // Only the phase is read here, never replayed: it is the field that
+    // changes under this socket (claunch-r35k1).
+    controlBootRestoring = !!(msg.boot && msg.boot.phase === "restoring");
     p2pInit(sock, msg);
     return;
   }
@@ -389,7 +402,6 @@ function controlBootFrom(msg) {
   const out = { boot_id: msg.boot_id, via: "control" };
   if (typeof msg.version === "string") out.version = msg.version;
   if (typeof msg.started_at === "string") out.started_at = msg.started_at;
-  if (msg.boot && typeof msg.boot === "object") out.boot = msg.boot;
   return out;
 }
 
@@ -404,6 +416,7 @@ function controlClosed(sock, ev) {
   }
   controlSock = null;
   controlBoot = null;
+  controlBootRestoring = false;
   controlAbort("control socket closed");
   latencyStop();
   channelsCarrierGone();
@@ -19312,7 +19325,16 @@ async function daemonHealth() {
   // with no init yet (still opening) falls through to the probe below, which
   // answers the same shape, so the tick is never told "down" by a socket
   // that is merely early.
-  if (controlUp() && controlBoot) return { ...controlBoot };
+  // A socket that is up answers, except for the one field its frame froze.
+  // `boot` moves while a successor fills its fleet, and the frame carrying it
+  // arrived once, when the socket opened -- which after a restart is inside
+  // that very window (the port binds before restore finishes, and the page
+  // reopens with a 500ms backoff). Replaying it would pin "restoring 3/33" on
+  // the rail for as long as the socket lives, and keep
+  // renderRestoreQueueBanner suppressed with it. So while the last phase read
+  // said restoring, the live value comes from the probe; past that edge the
+  // socket answers alone, which is the case this exists for.
+  if (controlUp() && controlBoot && !controlBootRestoring) return { ...controlBoot };
   // Bounded: pollTick runs one of these at a time, so a request that hangs
   // -- one sent as the machine went to sleep, say -- would hold every later
   // tick behind it (claunch-fm3ud).
@@ -19326,7 +19348,13 @@ async function daemonHealth() {
     const resp = await fetch(url("/api/health"),
       { cache: "no-store", signal: abort ? abort.signal : undefined });
     if (!resp.ok) return null;
-    return await resp.json();
+    const live = await resp.json();
+    // The probe is what ends the restoring window: the next tick reads this
+    // phase and, once the fleet is back, leaves the socket to answer again.
+    // Without this line the window would never close and every tick would
+    // spend a connection for as long as the page stayed open.
+    controlBootRestoring = !!(live && live.boot && live.boot.phase === "restoring");
+    return live;
   } catch {
     return null;
   } finally {

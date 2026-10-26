@@ -359,6 +359,9 @@ function build(opts = {}) {
     // controlAdopt carries it across a P2P adopt, so the machine under test
     // reaches for it.
     "let controlBoot = null;",
+    // The rest of what its init leaves behind (claunch-r35k1): controlMessage
+    // reads the phase off the frame, and an adopt leaves both as they stand.
+    "let controlBootRestoring = false;",
     "const controlWaiting = new Map();",
     "let p2pLink = null;",
     "let p2pConfig = null;",
