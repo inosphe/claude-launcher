@@ -43433,7 +43433,7 @@ function cflow2GraphLayout(chart, detail, opts) {
   const box = (id, x, y, w, h, kind) => {
     const n = at(id);
     const bits = cflow2NodeBits(n);
-    const ref = ownerOf(id) && ownerOf(id) !== id ? ownerOf(id) : "";
+    const ref = shared(id) ? ownerOf(id) : "";
     const count = groupOf(id).length;
     const nkids = kids(id).length;
     /* a call is a call whether its body is drawn inside it or not */
