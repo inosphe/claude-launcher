@@ -439,3 +439,59 @@ def test_an_allow_that_fails_to_evaluate_takes_no_member(tmp_path, monkeypatch):
         "can_fork"] is False
     with pytest.raises(runtime.FlowError, match="does not take members"):
         _fork_members(tmp_path, 1)
+
+
+# -- a cancelled member ends its fork (claunch-dm09i.4) ---------------------------
+
+CAUGHT = CHART.replace("""body:
+  - id: forks
+    group: {name: forks, run: part, limit: 5, member_executor: [fork, inline], do: plan}
+  - after
+""", """body:
+  try:
+    id: forks
+    group: {name: forks, run: part, limit: 5, member_executor: [fork, inline], do: plan}
+  catch: {fail: after}
+""")
+
+
+def _cancelled_child_events(cwd):
+    return [e for e in runtime.journal(cwd=str(cwd), scope="own")
+            if e["event"] == "cancelled_child"]
+
+
+def test_a_member_cancelled_in_a_live_run_ends_its_fork(tmp_path):
+    mgr = FakeManager(FakeSession("own", str(tmp_path)))
+    killed = []
+    clock, _ = _clock(mgr, kill_child=lambda p, c: killed.append((p, c)))
+    clock.scan()
+    _start(tmp_path, CAUGHT)
+    _fork_members(tmp_path, 1)
+    clock.scan()
+    did, rec = next(iter(_dels(tmp_path).items()))
+    assert rec["child"] == "own-qf1" and rec["executor"] == "fork"
+    # the do-part fails: the group's member is cancelled, the run goes on
+    runtime.report("plan", outcome="fail", cwd=str(tmp_path), scope="own", now=T0)
+    state = RunStore(str(tmp_path), "own").load_state()
+    assert state["status"] == "running" and _labels(tmp_path) == ["after"]
+    assert state["delegations"][did]["status"] == "cancelled"
+    clock.scan()
+    assert killed == [("own", "own-qf1")]
+    ev = _cancelled_child_events(tmp_path)
+    assert len(ev) == 1 and ev[0]["child"] == "own-qf1" and ev[0]["outcome"] == "killed"
+    clock.scan()
+    assert killed == [("own", "own-qf1")]
+
+
+def test_an_aborted_run_ends_its_forks(tmp_path):
+    mgr = FakeManager(FakeSession("own", str(tmp_path)))
+    killed = []
+    clock, _ = _clock(mgr, kill_child=lambda p, c: killed.append((p, c)))
+    clock.scan()
+    _start(tmp_path)
+    _fork_members(tmp_path, 2)
+    clock.scan()
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    clock.scan()
+    assert sorted(killed) == [("own", "own-qf1"), ("own", "own-qf2")]
+    assert sorted(e["child"] for e in _cancelled_child_events(tmp_path)) == ["own-qf1", "own-qf2"]
