@@ -236,14 +236,12 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-ctx-tokens",
 }
 
 /* The compact card keeps the one-line summary AND the status-check chips, and
-   drops the rest of the detail lines — the buttons line among them. The two
-   halves of that sentence are one decision: the chips say what the agent
-   reported about its own work, which the name and the dot cannot, so hiding
-   them would make them a reason to expand a row; the actions offer the reader
-   things to DO, and a row of buttons under every name is paid for by every
-   row on the rail. */
-for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-seen",
-                    ".sess-brief", ".rail-actions"]) {
+   drops the rest of the detail lines. The two halves of that sentence are one
+   decision: the chips say what the agent reported about its own work, which
+   the name and the dot cannot, so hiding them would make them a reason to
+   expand a row; the actions offer the reader things to DO, and a row of
+   buttons under every name is paid for by every row on the rail. */
+for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-seen", ".sess-brief"]) {
   const body = plain.match(new RegExp(
     `#session-list li\\[data-rail-mode="compact"\\][^{]*\\${line}[^{]*\\{([^}]*)\\}`));
   ok(`a compact card does not draw ${line}`,
@@ -253,6 +251,25 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-seen",
 ok("a compact card keeps the briefing one-line — it is the card's summary",
    !/#session-list li\[data-rail-mode="compact"\][^{]*\.rail-brief[^{]*\{/.test(plain),
    "a rule hides .rail-brief on a compact card");
+
+/* The buttons line on a compact card: the box survives, the buttons in it do
+   not. `.sess-key` is the exception, and it is the reason the rule is written
+   by exclusion — that chip NAMES the key the session runs on and is the only
+   entry to its picker, so it says something rather than offering something.
+   Hiding the box itself would take the chip with it; sessionkey_browser
+   caught exactly that, which is why this check pins the shape of the rule and
+   not just its effect. */
+const compactActions = plain.match(
+  /#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions > :not\(\.sess-key\)\s*\{([^}]*)\}/);
+ok("a compact card hides the buttons inside the buttons line",
+   compactActions && /display:\s*none/.test(compactActions[1]),
+   compactActions ? compactActions[1].trim() : "no rule");
+ok("...by exclusion, so the key chip inside it is spared",
+   !/#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions\s*\{[^}]*display:\s*none/.test(plain),
+   "the whole .rail-actions box is hidden on a compact card, which takes .sess-key with it");
+ok("...and an empty buttons line still costs no height",
+   /#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions:not\(:has\(\.sess-key\)\)/.test(plain),
+   "no :has(.sess-key) guard on the compact buttons line");
 /* Written the same shape as the `.rail-quiet` defence below: the chips are
    drawn because NO rule hides them, so a later `display: none` added for the
    compact density fails here rather than quietly taking them off the default

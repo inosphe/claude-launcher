@@ -669,9 +669,10 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
              The default.
    expanded  every line the row has, plus the briefing card.
 
-   `.rail-actions` is the expanded card's alone. It offers the reader things
-   to DO — spawn, pin, observe, note, the two refreshes — and a row of them
-   under every name is paid for by every row on the rail, which is the
+   `.rail-actions` is the expanded card's alone, with one exception that says
+   rather than does (`.sess-key`, below). The buttons in it offer the reader
+   things to DO — spawn, pin, observe, note, the two refreshes — and a row of
+   them under every name is paid for by every row on the rail, which is the
    vertical budget the compact density exists to save. The reader who wants
    to act on a session is on it, and being on it is what expands it.
 
@@ -727,13 +728,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   display: none;
 }
 /* The compact card: the name line, the one-line summary, and the status-check
-   chips. No buttons line -- the actions are the expanded card's, because a
-   line of buttons under the name is a line of the reader's vertical budget
-   that says nothing about the session (the compact card is the default for
-   every row the reader is not on, so it is the one multiplied by the fleet).
-   The profile meta stays -- "nc" / "ds4" is how a reader tells two sessions
-   of the same job apart. */
-#session-list li[data-rail-mode="compact"] .rail-actions,
+   chips. The profile meta stays -- "nc" / "ds4" is how a reader tells two
+   sessions of the same job apart. */
 #session-list li[data-rail-mode="compact"] .rail-cwd,
 #session-list li[data-rail-mode="compact"] .rail-ctx-line,
 #session-list li[data-rail-mode="compact"] .rail-ctx-tokens,
@@ -749,6 +745,24 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .rail-talk,
 #session-list li[data-rail-mode="compact"] .sess-sims,
 #session-list li[data-rail-mode="compact"] .sess-brief {
+  display: none;
+}
+/* The buttons line is the expanded card's, EXCEPT the one child that says
+   something rather than offering something. `.sess-key` names the API key the
+   session is running on and is the only way into its picker — a fact about
+   the session, like the chips and the fault pill, not an action on it.
+   Placing the visible part by exclusion, not by hiding the box, is what keeps
+   the chip reachable: an ancestor `display: none` would take it with the
+   buttons (sessionkey_browser caught exactly that). */
+#session-list li[data-rail-mode="compact"] .rail-actions > :not(.sess-key) {
+  display: none;
+}
+/* ...and a box that holds nothing visible must not cost height. It does:
+   `.rail-actions` is a flex row with `order: 1`, and its own padding and gap
+   are a line even with every child hidden. Measured on a compact card with no
+   key chip: 102px unguarded, 97px with the guard (and 80px -> 75px for a row
+   with no checks either). `:has()` is the same guard `.rail-quiet` uses. */
+#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(.sess-key)) {
   display: none;
 }
 /* Cflow badges are the exception on a compact card: a run that wants the
