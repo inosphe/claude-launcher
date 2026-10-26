@@ -10,6 +10,17 @@ ends in, so policy, worktree and onboarding are the usual ones), with the
 brief as its task, no workflow (``-``) and no board issue. The child submits
 with ``flow_delegate(scope=<parent>, cwd=<run dir>)``.
 
+**Fork.** A quick-fork of the run's driver (``POST
+/api/sessions/<driver>/quick-fork``, the route the operator's press and
+``deep_think`` take): the child starts with the driver's whole conversation
+and stands in the driver's checkout. It may merge on its own
+(``self_merge_allowed``), which is how it ends once its result is in. The
+clock refuses a fork (:func:`fork_refusal`) when the driver is itself a
+quick-fork, or when fewer than :data:`FORK_MIN_CONTEXT` tokens are left
+before the driver's auto-compact -- the copy would start that close to it
+too -- and the delegation moves to the node's next executor
+(claunch-dm09i.1).
+
 The ``headless`` executor (one non-interactive harness process per attempt)
 was removed (claunch-xjbrh); :func:`kill_tree` stays for the clock's probes.
 """
@@ -24,7 +35,7 @@ import secrets
 import signal
 import subprocess
 import sys
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..cflow2 import executors, ir, runtime
 from ..cflow2.store import RunStore, unqualified
@@ -78,6 +89,85 @@ def default_spawn(parent: str, body: Dict[str, Any]) -> str:
     if not name:
         raise SpawnRefused(f"spawn answered without a session name: {doc!r}")
     return str(name)
+
+
+def default_quick_fork(parent: str, body: Dict[str, Any]) -> str:
+    """Quick-fork ``parent`` through the daemon's own route; returns the
+    copy's name. Blocking, like :func:`default_spawn`."""
+    from .. import daemon_client
+
+    client = daemon_client.connect()
+    if client is None:
+        raise SpawnRefused("the daemon API is not reachable")
+    client.actor = actors.header_value(actors.CFLOW, parent)
+    try:
+        doc = client.post(f"/api/sessions/{parent}/quick-fork", body, timeout=120.0)
+    except daemon_client.DaemonClientError as exc:
+        raise SpawnRefused(str(exc)) from exc
+    name = ((doc or {}).get("session") or {}).get("name")
+    if not name:
+        raise SpawnRefused(f"quick-fork answered without a session name: {doc!r}")
+    return str(name)
+
+
+#: Tokens that must be left before the driver's auto-compact for a ``fork``
+#: delegation to start (claunch-dm09i, user decision qa-7abc7113). The copy
+#: begins with the driver's whole conversation, so it would be that close to
+#: compacting too. Daemon setting ``cflow2_fork_min_context`` overrides it.
+FORK_MIN_CONTEXT = 100_000
+
+
+def context_left(session: Any) -> Tuple[Optional[int], str]:
+    """``(tokens left before auto-compact, how it was read)`` for a live
+    session: the auto-compact threshold (``compact_window``), else the
+    model's context window, minus the latest request's context size.
+    ``None`` when either number is not known."""
+    from . import ctxsize
+
+    sdef = getattr(session, "sdef", None)
+    try:
+        reading = ctxsize.context_of(sdef, ctxsize.for_session(sdef))
+    except Exception as exc:  # noqa: BLE001 - not known is the answer
+        return None, f"context reading failed: {exc}"
+    if not reading or not reading.get("tokens"):
+        return None, "no context reading (no request in the transcript yet)"
+    used = int(reading["tokens"])
+    window = reading.get("compact_window")
+    what = "auto-compact threshold"
+    if not window:
+        window = reading.get("model_context_window")
+        what = "model context window"
+    if not window:
+        return None, "neither an auto-compact threshold nor a context window is known"
+    return int(window) - used, f"{what} {int(window)} - context {used}"
+
+
+def fork_refusal(session: Any, *, min_left: int = FORK_MIN_CONTEXT,
+                 left: Optional[Callable[[Any], Tuple[Optional[int], str]]] = None) -> str:
+    """Why ``session`` (the run's driver) may not be quick-forked for a
+    ``fork`` delegation now, or "" when it may."""
+    sdef = getattr(session, "sdef", None)
+    if getattr(sdef, "quick_fork_of", None):
+        return (f"the driver {getattr(sdef, 'name', '?')!r} is itself a quick-fork "
+                f"(of {sdef.quick_fork_of!r}); a fork does not fork again")
+    tokens, how = (left or context_left)(session)
+    if tokens is None:
+        return f"context left before auto-compact is not known ({how})"
+    if tokens < int(min_left):
+        return (f"{tokens} tokens left before the driver's auto-compact ({how}), "
+                f"below the {int(min_left)} a fork needs")
+    return ""
+
+
+def fork_body(brief: Dict[str, Any], *, cwd: str, scope: str, driver: str,
+              marker: Optional[str] = None) -> Dict[str, Any]:
+    """The quick-fork request of a ``fork`` delegation: its task under the
+    marker block, the delegation marker (by which the clock finds a copy
+    whose answer was lost), and the copy's leave to end itself."""
+    task = executors.fork_task(brief, cwd=cwd, scope=scope, driver=driver)
+    if marker:
+        task = f"{task}\n\n{marker}"
+    return {"task": task, "self_merge_allowed": True}
 
 
 def delegation_marker(st: RunStore, run_id: Optional[str], did: str) -> str:
@@ -186,7 +276,9 @@ def spawn_session(cwd: str, scope: str, did: str, *,
                   spawn: Callable[[str, Dict[str, Any]], str] = default_spawn,
                   find_child: Optional[FindChild] = None,
                   runner: Optional[Dict[str, Any]] = None,
-                  lost: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+                  lost: Optional[Callable[[str], None]] = None,
+                  fork: Callable[[str, Dict[str, Any]], str] = default_quick_fork,
+                  fork_parent: Optional[str] = None) -> Dict[str, Any]:
     """Start a claimed ``session`` delegation: spawn the child and record it.
 
     The claim (status ``running``, ``runner.phase: spawning`` with the
@@ -202,6 +294,9 @@ def spawn_session(cwd: str, scope: str, did: str, *,
     rec = r.state["delegations"][did]
     brief = runtime.brief(r, did)
     marker = (runner or {}).get("marker") or delegation_marker(st, r.state.get("run_id"), did)
+    if rec.get("executor") == ir.EXEC_FORK:
+        return _spawn_fork(st, r, did, brief, marker, runner, fork=fork,
+                           find_child=find_child, lost=lost, parent=fork_parent)
     mcp = ((rec.get("route") or {}).get("returns") or {}).get("route") != "receipt-file"
     st.receipts_dir.mkdir(parents=True, exist_ok=True)  # the child writes there
     # A child without MCP returns its result as a file. The file must carry
@@ -247,13 +342,44 @@ def spawn_session(cwd: str, scope: str, did: str, *,
     return {"delegation": did, "result": "spawned", "child": child}
 
 
+def _spawn_fork(st: RunStore, r: Any, did: str, brief: Dict[str, Any], marker: str,
+                runner: Optional[Dict[str, Any]], *,
+                fork: Callable[[str, Dict[str, Any]], str],
+                find_child: Optional[FindChild], lost: Optional[Callable[[str], None]],
+                parent: Optional[str]) -> Dict[str, Any]:
+    """The ``fork`` half of :func:`spawn_session`: quick-fork the driver
+    (``parent``, else the slot's session) with :func:`fork_body`."""
+    cwd, scope = str(st.cwd), st.scope
+    parent = parent or runtime.driver_of(r.state) or unqualified(scope)
+    body = fork_body(brief, cwd=cwd, scope=scope, driver=parent, marker=marker)
+    try:
+        child = fork(parent, body)
+    except Exception as exc:  # noqa: BLE001 - every refusal reroutes
+        found = None
+        if find_child is not None:
+            with contextlib.suppress(Exception):
+                found = find_child(parent, marker)
+        if found:
+            _record_child(cwd, scope, did, found, runner, marker, adopted=str(exc),
+                          executor=ir.EXEC_FORK)
+            return {"delegation": did, "result": "adopted", "child": found, "error": str(exc)}
+        refused = isinstance(exc, SpawnRefused) and "not reachable" in str(exc)
+        if lost is not None and not refused:
+            lost(marker)
+        nxt = runtime.delegate_reroute(did, f"quick-fork refused: {exc}", cwd=cwd, scope=scope)
+        return {"delegation": did, "result": "rerouted", "executor": nxt, "error": str(exc)}
+    _record_child(cwd, scope, did, child, runner, marker, executor=ir.EXEC_FORK)
+    return {"delegation": did, "result": "spawned", "child": child}
+
+
 def _record_child(cwd: str, scope: str, did: str, child: str,
                   runner: Optional[Dict[str, Any]], marker: str,
-                  adopted: Optional[str] = None) -> bool:
+                  adopted: Optional[str] = None,
+                  executor: str = ir.EXEC_SESSION) -> bool:
     marker_doc = dict(runner or {})
     marker_doc.update(phase=PHASE_SPAWNED, marker=marker)
     event: Dict[str, Any] = {"event": "delegate_started", "phase": "spawned",
-                             "executor": ir.EXEC_SESSION, "child": child}
+                             "executor": executor, "child": child}
     if adopted:
         event["adopted"] = f"spawn call failed ({adopted[:200]}) but the child exists"
     # ``assignee`` is who may submit for a session delegation (C2): the

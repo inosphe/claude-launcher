@@ -30,13 +30,19 @@ SELF_IMPROVE = WF_DIR / "v2" / "self-improve-common.yaml"
 BLOCK_START = "── beads(br) 규칙 — 공통 ──"
 BLOCK_END = "것만은 금지다."
 
-# The only finding the checker reports. It is accepted, with this reason:
+# The findings the checker reports. They are accepted, with these reasons:
 #   par-write-overlap [round/item/work-group] — the `found` group runs the
 #   work task next to found-issue members. The members write the board only
 #   through `claunch beads` (one DB, its own lock) and spawn sessions; they do
 #   not write the worktree, so there is no path to declare and no overlap
 #   with `work`'s fs.write. The checker cannot see that from undeclared paths.
+#   par-write-overlap [round/item/slices] — the parallel_fork group
+#   (claunch-dm09i). Its members write the checkout, but each one only the
+#   paths work hands it at flow_fork (`with.paths`), which are decided per
+#   item and cannot be declared in the chart; slice-merge checks the boundary
+#   with `git status` before it commits.
 ACCEPTED_WARNINGS = {("par-write-overlap", "round/item/work-group"),
+                     ("par-write-overlap", "round/item/slices"),
                      # claunch-0b8dx: no cap on the number of rounds
                      ("unbounded-visits", None)}
 
@@ -2874,3 +2880,92 @@ def test_chart_prose_reaches_a_done_when():
     assert anchor not in _words(" ".join(without_done_when))
 
     assert anchor in _chart_prose(chart)
+
+
+# -- parallel_fork (claunch-dm09i) --------------------------------------------------
+
+
+def _fork_item(tmp_path, monkeypatch, parallel):
+    """The real item route with parallel_fork set, implementation tasks stubbed."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, inputs, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["body"] = [{"call": "item"}]
+    doc.pop("spec", None)
+    for name in ("test-skipped", "commit"):
+        doc["nodes"][name] = {"prompt": name}
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    chart = inputs.apply(chart, {} if parallel is None else {"parallel_fork": parallel})
+    kw = {"cwd": str(tmp_path), "scope": "forking", "now": 1.0}
+    return runtime.start(chart, caps={}, **kw), kw
+
+
+WORK_OK = {"files": ["a.py"], "summary": "s", "tried": []}
+
+
+def test_parallel_fork_is_a_user_settable_bool_off_by_default():
+    decl = _chart().meta["inputs"]["parallel_fork"]
+    assert decl["type"] == "bool" and decl["default"] is False
+    assert decl.get("set_by") == ["user"] and decl.get("group") == "병렬 작업"
+
+
+@pytest.mark.parametrize("parallel", [None, False])
+def test_parallel_fork_off_keeps_work_alone_and_skips_slice_merge(tmp_path, monkeypatch,
+                                                                  parallel):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _fork_item(tmp_path, monkeypatch, parallel)
+    assert [t["label"] for t in st["tasks"]] == ["work"]
+    slices = next(g for g in st["groups"] if g["name"] == "slices")
+    assert slices["can_fork"] is False and slices["limit"] == 5
+    with pytest.raises(runtime.FlowError, match="does not take members"):
+        runtime.fork("slices", {"goal": "g", "paths": ["a.py"]}, **kw)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", WORK_OK, **kw)
+    assert not st["tasks"]
+    assert [c["label"] for c in st["choices"]] == ["test-decision"]
+
+
+def test_parallel_fork_on_joins_every_slice_before_slice_merge(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _fork_item(tmp_path, monkeypatch, True)
+    slices = next(g for g in st["groups"] if g["name"] == "slices")
+    assert slices["can_fork"] is True and slices["member_executor"] == ["fork", "inline"]
+    for i in range(2):
+        runtime.fork("slices", {"goal": f"g{i}", "paths": [f"p{i}/"]}, **kw)
+    st = runtime.status(**kw)
+    # no daemon in a test: fork falls back inline and the slices come back here
+    assert sorted(t["label"] for t in st["tasks"]) == ["slice-work", "slice-work", "work"]
+    assert "p0/" in " ".join(t["prompt"] for t in st["tasks"])
+    work = next(t for t in st["tasks"] if t["label"] == "work")
+    st = runtime.report(work["instance"], "ok", WORK_OK, **kw)
+    # the group waits for both slices
+    assert [t["label"] for t in st["tasks"]] == ["slice-work", "slice-work"]
+    for t in st["tasks"]:
+        st = runtime.report(t["instance"], "ok",
+                            {"files": ["p.py"], "summary": "x", "tests": "none"}, **kw)
+    [merge] = st["tasks"]
+    assert merge["label"] == "slice-merge" and "g0" in merge["prompt"]
+    st = runtime.report(merge["instance"], "ok", WORK_OK, **kw)
+    assert [c["label"] for c in st["choices"]] == ["test-decision"]
+
+
+def test_parallel_fork_limit_is_five_slices(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    _, kw = _fork_item(tmp_path, monkeypatch, True)
+    for i in range(5):
+        runtime.fork("slices", {"goal": f"g{i}", "paths": [f"p{i}/"]}, **kw)
+    with pytest.raises(runtime.FlowError, match="limit of 5"):
+        runtime.fork("slices", {"goal": "g5", "paths": ["p5/"]}, **kw)
+
+
+def test_the_work_prompt_holds_the_parallel_fork_rules():
+    prose = _chart_prose(_chart())
+    for anchor in ("group: slices", "조각을 하나라도 세웠으면 이 작업에서 커밋하지 않는다",
+                   "auto-compact까지 100k 토큰 미만"):
+        assert _words(anchor) in prose, anchor

@@ -953,6 +953,8 @@ def _node_exprs(chart: ir.Chart, node: ir.Node) -> List[Tuple[str, str, bool]]:
                 add(f"return value {k}", v.get("expr"))
     elif node.type == ir.T_WAIT:
         add("wait until", node.get("until"))
+    elif node.type == ir.T_GROUP:
+        add("group allow", node.get("allow"))
     for i, op in enumerate(node.get("do") or []):
         what = f"do[{i}] {op.get('op')}"
         add(f"{what} when", op.get("when"))

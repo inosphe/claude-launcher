@@ -735,6 +735,12 @@ DAEMON_DEFAULTS = {
     # silent from its entry until a restart's resume nudge. 0 or less
     # disables the re-nudge. Read live by the clock on every pass.
     "cflow2_renudge_interval": 600.0,
+    # A cflow v2 ``fork`` delegation (a quick-fork of the run's driver per
+    # group member, claunch-dm09i): the tokens that must be left before the
+    # driver's auto-compact for the copy to start. Below it, or when the
+    # number cannot be read, the member runs in the driver itself (the node's
+    # next executor). Read live by the clock on every pass.
+    "cflow2_fork_min_context": 100000,
     # claunch reposync (claunch-dh73y): "ask" -- a sync that pushes to the
     # shared remote waits for a person (a y/N prompt at the user's own
     # terminal, the web UI's approval card for an agent session); "auto" --

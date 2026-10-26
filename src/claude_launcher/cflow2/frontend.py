@@ -1816,7 +1816,8 @@ def _consume_entry(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> An
 def _b_group(ctx, sc, node, value, m, line):
     node.type = ir.T_GROUP
     spec = _need_map(ctx, sc.file, value, "group", line)
-    _check_keys(ctx, sc.file, spec, ("name", "run", "limit", "settle", "do"), "group")
+    _check_keys(ctx, sc.file, spec, ("name", "run", "limit", "settle", "do",
+                                      "member_executor", "allow"), "group")
     run = _require(ctx, sc, spec, "run", "group", line)
     if not isinstance(run, str):
         raise ctx.err(sc.file, line, "group.run must be a procedure name")
@@ -1825,6 +1826,11 @@ def _b_group(ctx, sc, node, value, m, line):
         "name": str(name), "child": None, "member": None,
         "limit": _int(ctx, sc.file, spec.get("limit", 3), "group.limit", line, 1),
         "settle": _settle(ctx, sc, spec.get("settle"), ir.SETTLE_ALL_SETTLED, "group", line),
+        # ``allow``: a guard read at each ``flow_fork``; false refuses the
+        # member (the group still runs its do-part and joins, with fewer or
+        # no members). A run input switches a group on and off this way.
+        "allow": (_expr_text(ctx, sc.file, spec["allow"], "group.allow", line)
+                  if spec.get("allow") is not None else None),
     }
     node.props["child"] = _sub(ctx, sc, node, _require(ctx, sc, spec, "do", "group", line), "do", line)
     mid = _alloc(ctx, f"{node.id}.member")
@@ -1834,6 +1840,12 @@ def _b_group(ctx, sc, node, value, m, line):
     _inline(ctx, _Scope(**{**sc.__dict__, "loops": ()}), member, run, None, line,
             check_required=False)
     node.props["member"] = mid
+    # ``member_executor``: where each member runs, as a node's ``executor``
+    # does for that node -- the member scope is the delegation point, so every
+    # ``flow_fork`` opens a delegation of its own (``fork``: a quick-fork of
+    # the driver per member, claunch-dm09i.1). The group itself stays inline.
+    if spec.get("member_executor") is not None:
+        member.executor = _executor(ctx, sc.file, spec.get("member_executor"), line)
 
 
 def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int) -> Dict[str, Any]:

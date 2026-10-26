@@ -173,8 +173,14 @@ TOOLS = [
             "Add a member to a running group (flow_status 'groups' with "
             "can_fork). The member runs the group's procedure with 'with' as its "
             "params, in parallel with the rest of the run; its tasks appear in "
-            "flow_status under their own instance ids. Refused past the group's "
-            "limit or once its do-part finished."
+            "flow_status under their own instance ids. A group with "
+            "'member_executor' delegates each member instead: with 'fork' the "
+            "daemon quick-forks you for it (a copy of this conversation in this "
+            "checkout) and the copy drives the member; when the copy cannot be "
+            "started (fewer than cflow2_fork_min_context tokens left before your "
+            "auto-compact, you are a quick-fork yourself, the spawn policy "
+            "refuses) the member's tasks come back to you. Refused past the "
+            "group's limit or once its do-part finished."
         ),
         "inputSchema": {
             "type": "object",
@@ -220,11 +226,11 @@ TOOLS = [
             "sub-agent wrote). The engine validates it against 'returns': the "
             "first invalid result is refused with the problems (re-run once with "
             "them), the second fails the node. A child session spawned for a "
-            "'session' delegation calls this with the 'scope' and 'cwd' of its "
+            "'session' or 'fork' delegation calls this with the 'scope' and 'cwd' of its "
             "parent's run. A delegation whose brief names a 'nested' run is not "
             "submitted here: drive that run with the flow_* tools under its scope. "
             "Only the run's driver submits a subagent delegation and only the "
-            "assigned child session a session delegation. "
+            "assigned child session a session or fork delegation. "
             "'receipt_path' must be in the run's receipts directory "
             "or this session's $CLAUNCH_SCRATCH."
         ),

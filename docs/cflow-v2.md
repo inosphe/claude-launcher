@@ -521,7 +521,7 @@ body:
 | `try` | `try: T, catch: {OUTCOME: T}, finally: T` | 결과 종류로 예외 경로를 처리하고, 마지막에 정리 트리를 실행 |
 | `call` | `call: PROC, with: {…}, bind: VAR` | 프로시저 호출. 컴파일 시 펼친다 |
 | `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}`, `wait: {checks: [{id, describe, probe}], …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
-| `group` | `group: {name, run: PROC, limit, settle, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류 |
+| `group` | `group: {name, run: PROC, limit, settle, member_executor, allow, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류. `member_executor`(실행 주체 목록)가 있으면 멤버마다 위임 지점이 된다(6.4의 `fork`). `allow`(식)가 거짓이면 `flow_fork`를 거절하고 `can_fork`가 false다 — `do`는 그대로 돌고 멤버 없이 합류한다 |
 
 모든 조합자 매핑에 붙일 수 있는 공통 키:
 
@@ -2442,6 +2442,7 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 | 실행 주체 | 필요 조건 | 조건이 깨졌을 때 |
 |---|---|---|
 | `session` | `session.spawn` (데몬이 정책으로 판정) | 목록의 다음 항목 |
+| `fork` | `session.spawn`, `mcp.claunch`. 데몬 시점 판정: 드라이버가 살아 있고, quick-fork가 아니며, auto-compact까지 남은 토큰이 `cflow2_fork_min_context`(기본 100000) 이상 | 목록의 다음 항목. clock이 드라이버에게 알린다 |
 | `subagent` | `subagent.spawn` | 목록의 다음 항목 |
 | `inline` | 없음 | — |
 
@@ -2452,6 +2453,7 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 | subagent + `mcp.claunch` | 하위 에이전트가 `flow_delegate`로 직접 제출. 엔진이 스키마 검증 |
 | subagent, `mcp.claunch` 없음 | 하위 에이전트가 영수증 파일(`receipts/<id>.json`)을 쓰고, 드라이버가 `flow_delegate`로 그 경로를 제출. 엔진이 파일을 읽어 검증 |
 | session | 자식 세션이 `flow_delegate`로 제출(자식이 claunch 세션이므로 MCP가 있다). 없으면 영수증 파일 |
+| fork | 복사본이 `flow_delegate`로 제출하거나 중첩 런을 끝낸다. 영수증 파일 경로는 없다 |
 
 **효과 제한(`effects`가 쓰기를 포함하지 않는 위임, 즉 읽기 전용).**
 
@@ -2459,6 +2461,7 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 |---|---|---|---|
 | subagent | `subagent.tools.restrict` | `subagent.worktree` | 브리프에 읽기 전용 규칙을 적고, 끝난 뒤 `git status --porcelain`이 위임 전과 같은지 검사. 다르면 `monitor_violation` |
 | session | 자식 세션의 worktree | — | — |
+| fork | 브리프에만 적는다(복사본은 드라이버의 체크아웃에 선다) | — | — |
 
 **쓰기 효과가 있는 병렬 위임.**
 
@@ -2467,12 +2470,14 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 | 분기들의 `paths`가 서로 겹치지 않음(정적 검사) | 그대로 병렬 |
 | 겹치거나 `paths` 미선언, 실행 주체가 worktree 격리 가능(subagent: `subagent.worktree`, session: 항상) | 분기마다 worktree에서 실행하고 결과 브랜치를 순서대로 머지 |
 | 격리 불가 | 직렬 실행(`settle` 의미는 유지) |
+| fork | 격리하지 않고 병렬(`parallel-shared-checkout`). 경로 분리는 워크플로가 멤버마다 소유 경로를 주는 것으로만 선다 |
 
 **병렬 실행 수.**
 
 | 조건 | 경로 |
 |---|---|
 | session | 데몬이 분기마다 자식 세션을 띄운다 |
+| fork | 데몬이 멤버마다 드라이버의 quick-fork를 띄운다 |
 | subagent + `subagent.parallel` | 드라이버에게 한 번에 여러 개를 띄우라고 지시 |
 | subagent, 병렬 없음 | 직렬. `race`는 선언 순서대로 실행해 첫 성공에서 멈춘다 |
 
@@ -2488,6 +2493,25 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 | 조건 | 경로 |
 |---|---|
 | 모든 경우 | 새 실행에 이전 결과의 요약(`carry`)만 실어 보낸다. `carry: resume`은 끝난 실행을 재개할 수단이 없어 요약으로 내려가고 `fallback`을 남긴다 |
+
+**`fork` 실행 주체** (claunch-dm09i.1). `group`의 `member_executor: [fork,
+inline]`처럼 쓴다. `flow_fork`가 멤버를 세우면 멤버의 scope 노드가 위임
+지점이 되고, 평탄하지 않은 프로시저는 중첩 런(`<scope>~<위임 id>`)이 된다.
+clock은 위임을 집기 전에 드라이버를 판정한다(`cflow2_exec.fork_refusal`):
+
+- 드라이버가 quick-fork면 거절한다 — fork는 다시 fork하지 않는다.
+- `context_left`(`daemon/ctxsize.py`의 최신 요청 크기를 auto-compact 임계값,
+  없으면 모델 context window에서 뺀 값)가 `cflow2_fork_min_context`보다 작거나
+  읽을 수 없으면 거절한다. 복사본은 드라이버의 대화 전체로 시작하므로 같은
+  자리에서 곧 compact된다.
+
+거절하면 `delegate_reroute`로 다음 실행 주체로 옮기고(`inline`이면 멤버의
+task가 드라이버의 `flow_status`에 나타난다) 드라이버 터미널에 fallback 블록을
+보낸다. 통과하면 `POST /api/sessions/<driver>/quick-fork`로 복사본을 만든다.
+본문은 `executors.fork_task`(위임 표지 줄 포함)와 `self_merge_allowed: true`다.
+복사본은 위임의 assignee로 기록되어 그 중첩 런을 몬다. 결과가 들어가면 MCP
+`handoff`로 드라이버에게 요약을 넘기고 스스로 끝난다. 결과 없이 끝나면 위임은
+`failed`다. group은 `do`와 모든 멤버가 끝난 뒤에 합류한다.
 
 ### 6.5 데몬 실행기의 수명
 

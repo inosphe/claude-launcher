@@ -272,6 +272,23 @@ inputs:
       직접/위임을 고른다. 끄면 기존처럼 이 세션이 직접 구현한다
     # item이 일감마다 읽으므로 사람이 런 도중에 켜면 다음 일감부터 적용된다.
     set_by: [user]
+  # 작업 병렬 fork(claunch-dm09i). 켜면 work가 일감을 조각(최대 5개)으로 나눠
+  # 이 세션의 quick-fork(대화 전체를 복사한 자식, 같은 체크아웃)에 맡기고, 모든
+  # fork가 돌아온 뒤 slice-merge가 모아 커밋한다. 끄면 지금처럼 work 혼자 구현한다.
+  parallel_fork:
+    type: bool
+    default: false
+    label: 작업 병렬 fork
+    # 코딩 승인처럼 자기 블록을 쓴다: 라우팅의 위임 자식과는 다른 결정이다.
+    group: 병렬 작업
+    help: >-
+      켜면 work가 일감을 서로 겹치지 않는 파일 집합의 조각(최대 5개)으로 나눠, 이 세션의
+      대화를 복사한 quick-fork 세션들에게 동시에 맡긴다(같은 워크트리·브랜치). fork는
+      자기 조각의 파일만 고치고 커밋하지 않으며, 전부 돌아오면 이 세션이 모아서 검토하고
+      커밋한다. auto-compact까지 100k 토큰 미만이 남았으면 fork를 만들지 않고 이 세션이
+      그 조각을 직접 한다. 끄면 기존처럼 이 세션이 혼자 구현한다
+    # item이 일감마다 읽으므로 사람이 런 도중에 켜면 다음 일감부터 적용된다.
+    set_by: [user]
   # 위임 자식의 profile과 model preset. 비우면 데몬 설정(웹 Settings의
   # daemon.delegate_profile / daemon.delegate_model), 그것도 비면 내장
   # 기본값(store.DAEMON_DEFAULTS)이다. route-delegate가 그 순서로 정한다.
@@ -1548,6 +1565,26 @@ nodes:
       id들만 옮겨 적는다 — wrapup의 생성 이슈 정산이 그 판정을 읽는다.
       (stack side 런은 세션 수명이라 이 그룹에 들지 않는다.)
 
+      ── 작업 병렬 fork: 그룹 `slices` (지금 parallel_fork=${data.inputs.parallel_fork}) ──
+      parallel_fork가 true일 때만 이 절이 적용된다. false면 그룹 `slices`는
+      멤버를 받지 않으므로(`can_fork: false`) 아래를 건너뛰고 혼자 구현한다.
+      true면 구현에 들어가기 전에 일감을 조각으로 나눌 수 있는지 먼저 본다.
+      조각은 서로 겹치지 않는 파일 집합(소유 경로)을 가진 독립 작업이다 —
+      같은 파일을 두 조각이 고쳐야 하거나 앞 조각의 결과가 있어야 시작할 수
+      있는 일은 한 조각이다. 나눌 것이 없으면 혼자 구현한다(조각 0개).
+      나누면 조각마다 `flow_fork`에 `group: slices`와 `with: {goal: <조각의
+      목표 한두 문장>, paths: [<소유 경로>...], tests: <그 조각의 표적 테스트
+      파일, 없으면 "">}`를 준다. 한 회차에 다섯 조각까지다(group limit 5).
+      fork는 이 세션의 대화를 복사한 quick-fork이고 이 체크아웃에서 동시에
+      돈다 — 엔진이 조각마다 그 세션을 세우고, 세울 수 없으면(auto-compact까지
+      100k 토큰 미만, 스폰 정책 거절) 그 조각의 task가 이 런에 돌아온다: 그때는
+      그 조각을 직접 한다. 이 세션은 남은 부분(어느 조각에도 주지 않은 파일)만
+      고친다. **조각을 하나라도 세웠으면 이 작업에서 커밋하지 않는다** — fork가
+      같은 index를 쓰는 동안 커밋하면 남의 staged 변경이 섞이고, 커밋은 모든
+      조각이 돌아온 뒤 slice-merge가 한 번에 한다. 조각을 세우지 않았으면
+      지금처럼 이 작업에서 커밋한다. 보고의 summary에 조각 목록(goal·paths)을
+      적는다.
+
       ── 발견 즉시 가르는 것 하나: 위임(child) ──
       만든 이슈가 다음 넷을 전부 만족하면 지금 자식 세션에 넘긴다 — spawn
       `--issue <id>`(데몬이 자식을 assignee로 쓴다; 스폰은 공통 규칙이
@@ -1629,6 +1666,41 @@ nodes:
       ok: {files: list, summary: str, tried: list, found: "list?", delegated: "list?",
            stack_open: "bool?"}
     effects: [fs.write, git.commit, board.write, session.spawn, mesh.send]
+
+  slice-merge:
+    title: 병렬 조각 모으기
+    prompt: |
+      work가 세운 조각(그룹 `slices`)이 전부 돌아왔다. 조각마다 with(goal·paths·
+      tests)와 결과(outcome, value의 files·summary·tests): ${result.slices.value.members} 조각이 없었으면(members가
+      비었다) 할 일은 work의 보고를 그대로 옮기는 것뿐이다 — 커밋도 확인도
+      하지 않는다.
+
+      조각이 있었으면 이 체크아웃의 변경 전부가 아직 커밋되지 않은 상태다.
+      1. 경계 검사: `git status --porcelain`의 경로 각각이 어느 조각의 paths
+         또는 work가 직접 고친 파일에 드는지 대조한다. 어느 쪽에도 들지 않는
+         경로, 두 조각에 걸친 경로가 있으면 그 diff를 읽고 이 회차의 범위
+         안인지 판정한다 — 범위 밖이면 되돌리지 말고 그 조각을 맡았던
+         fork의 요약과 함께 이슈 코멘트에 남긴 뒤 사용자·상위에 묻는다.
+      2. 실패한 조각(outcome이 ok가 아닌 것): 그 조각의 paths에 남은 변경을
+         읽고 직접 마무리하거나, 마무리할 수 없으면 그 사유를 보고에 적는다.
+      3. 검토: 조각마다 `git diff -- <paths>`를 읽고 그 조각의 목표와 맞는지,
+         조각 사이의 인터페이스(함수 이름·인자·데이터 형태)가 서로 맞는지 본다.
+         어긋나면 여기서 고친다.
+      4. 커밋: 조각 단위로 커밋한다 — `git add -- <그 조각의 paths>` 뒤
+         `git commit`(메시지에 조각의 목표). work가 직접 고친 부분도 따로
+         커밋한다. 이 시점에는 fork가 모두 끝났으므로 index를 쓰는 것은 이
+         세션뿐이다.
+      보고의 files는 work의 files와 조각들의 files를 합친 목록, summary는 조각별
+      한 줄 요지와 커밋 해시, tried는 위 1~3에서 고치거나 되돌린 것이다. found·
+      delegated·stack_open은 work의 보고에서 옮긴다.
+    done_when: |
+      조각이 없었으면 work의 보고가 옮겨져 있다. 조각이 있었으면 `git status
+      --porcelain`이 비었고(이 회차 범위의 변경이 전부 커밋됐다), 조각별 커밋
+      해시와 경계 검사 결과가 보고에 있다.
+    returns:
+      ok: {files: list, summary: str, tried: list, found: "list?", delegated: "list?",
+           stack_open: "bool?"}
+    effects: [fs.write, git.commit, board.write]
 
   test-skipped:
     title: 표적 테스트 생략 기록
@@ -3859,6 +3931,56 @@ nodes:
     effects: [board.write, mesh.send]
 
 procedures:
+  fork-slice:
+    description: >-
+      작업 병렬 fork의 조각 하나(claunch-dm09i). work가 그룹 `slices`에
+      flow_fork로 세우고, 엔진이 이 세션의 quick-fork에 맡긴다(member_executor
+      fork). goal = 조각의 목표, paths = 이 조각만 고치는 파일·디렉터리, tests =
+      조각의 표적 테스트 파일. 그 세션이 이 프로시저의 중첩 런을 몰고, 끝나면
+      결과가 그룹으로 돌아간다.
+    params:
+      goal: {type: str, required: true}
+      paths: {type: list, required: true}
+      tests: {type: str, default: ""}
+    returns:
+      ok: {files: list, summary: str, tests: str}
+    nodes:
+      slice-work:
+        title: 조각 구현
+        prompt: |
+          이 조각의 목표: ${params.goal}
+          소유 경로: ${params.paths}
+          표적 테스트: ${params.tests}
+
+          이 세션은 원 세션의 대화를 복사한 quick-fork이고, 원 세션과 다른
+          fork들이 같은 체크아웃에서 동시에 일한다. 그래서 다음을 지킨다.
+          - 소유 경로 안의 파일만 만들고 고친다. 소유 경로 밖을 고쳐야 할 것
+            같으면 고치지 않고 보고의 summary에 무엇이 왜 필요한지 적는다 —
+            원 세션의 slice-merge가 판정한다.
+          - git의 index·HEAD·작업 트리 전체를 바꾸는 명령을 치지 않는다: `git
+            add`, `commit`, `stash`, `checkout`, `switch`, `reset`, `rebase`,
+            `merge`, `restore`(소유 경로 밖), `clean`. 커밋은 원 세션이 모든
+            조각이 돌아온 뒤에 한다. 읽기(`git diff -- <소유 경로>`,
+            `git status`)는 된다.
+          - 표적 테스트가 있으면 그 파일만 돌린다(전체 스윕 금지). 다른
+            fork가 아직 고치는 중인 파일 때문에 실패하면 그 사실을 tests에 적고
+            멈추지 않는다.
+          보고의 files는 이 조각에서 만들거나 고친 파일(소유 경로 안), summary는
+          접근 방식과 소유 경로 밖에 필요한 것, tests는 돌린 명령과 결과다.
+        done_when: |
+          소유 경로 안에서 목표가 구현되어 있고(커밋 없음), 바꾼 파일·요지·테스트
+          결과가 보고에 있다.
+        returns:
+          ok: {files: list, summary: str, tests: str}
+        effects: [fs.write]
+    body:
+      - slice-work
+      - return: ok
+        value:
+          files: "$result['slice-work'].value.files"
+          summary: "$result['slice-work'].value.summary"
+          tests: "$result['slice-work'].value.tests"
+
   sim-idle:
     description: >-
       이 회차에 sim-check가 돌지 않았을 때 data.sim을 초기값으로 되돌린다(claunch-qrh0a).
@@ -4292,9 +4414,24 @@ procedures:
                   # work는 이 자리 하나에서만 부른다: 라벨이 하나여야 `work`로
                   # 보이고 result['work']로 읽힌다. 위임이 끝까지 갔으면 경로가
                   # delegate로 남아 건너뛴다.
+                  # parallel_fork(claunch-dm09i): work가 조각마다 slices에 멤버를
+                  # 세우면 엔진이 이 세션의 quick-fork에 맡긴다. 끄면 allow가
+                  # 거짓이라 멤버 없이 합류하고, slice-merge는 work 보고를 옮긴다.
                   - cond:
                     - if: "$data.inputs.session_routing != true or $data.route.mode != 'delegate'"
-                      then: {seq: [work], bind: work_report}
+                      then:
+                        - id: slices
+                          group:
+                            name: slices
+                            run: fork-slice
+                            limit: 5
+                            member_executor: [fork, inline]
+                            allow: "$data.inputs.parallel_fork == true"
+                            do: {seq: [work], bind: work_report}
+                        - cond:
+                          - if: "$data.inputs.parallel_fork == true"
+                            then: {seq: [slice-merge], bind: work_report}
+                          - else: []
                     - else: []
             - id: test-decision
               choose:
