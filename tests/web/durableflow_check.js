@@ -1172,6 +1172,23 @@ const SQ = DF.sequence(SLOG, true, SNOW);
                    { at: RT("39:51"), event: "agent_end", started: false, stopReason: "error", error: "x" }];
   assert.ok(!DF.model(PLANNED, false).nodes.some((n) => n.status === "fail"), "tree: planned attempt");
   assert.ok(!DF.sequence(PLANNED, false, Date.parse(RT("40:00"))).lanes.some((l) => l.attempt), "sequence: planned attempt");
+  // A question opened before the failed agent_end is work in the sequence view too.
+  const ASKED = [START5, { at: RT("39:50"), event: "ask_start", key: "B:x:0", unit: "u1" },
+                 { at: RT("39:51"), event: "agent_end", started: false, stopReason: "error", error: "x" }];
+  assert.ok(!DF.model(ASKED, false).nodes.some((n) => n.status === "fail"), "tree: asked attempt");
+  assert.ok(!DF.sequence(ASKED, false, Date.parse(RT("40:00"))).lanes.some((l) => l.attempt), "sequence: asked attempt");
+  // Two failed starts with a unit drawn between them are two red starts, not
+  // one fold: only failed starts that follow each other fold, in both views.
+  const APART = [...failed(1, "35", CREDIT),
+                 { at: RT("35:30"), event: "unit", unit: "u0", state: "start", label: "x", phase: "model", after: [] },
+                 ...failed(2, "36", "402 still out")];
+  const ap = DF.model(APART, false);
+  const apFail = ap.nodes.filter((n) => n.status === "fail");
+  assert.deepStrictEqual(plain(apFail.map((n) => [n.label, n.fold || null, !!n.absorbed])),
+    [["시작 실패 · 1/5", null, false], ["시작 실패 · 2/5", null, false]], "tree: apart failures do not fold");
+  const aps = DF.sequence(APART, false, Date.parse(RT("40:00")));
+  assert.deepStrictEqual(plain(aps.lanes.filter((l) => l.attempt).map((l) => [l.id, l.label, l.fold || null, l.tries || null])),
+    [["try:1", "시작 실패 · 1/5", null, null], ["try:2", "시작 실패 · 2/5", null, null]], "sequence: apart failures do not fold");
 
   // A log from before the contract (20261026-073527: no attempt, no error)
   // keeps 시작/재개 and still shows its failed starts as one red fold.
