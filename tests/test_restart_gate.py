@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 import time
 
 import pytest
@@ -497,6 +498,120 @@ def test_a_human_shell_stays_on_the_immediate_path(home, monkeypatch, capsys):
     assert fake.client.posted == []
     assert fake.stop_calls == 1
     assert "daemon restarted" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# the CLI tab: a restart that outlives the shell it was typed into
+# --------------------------------------------------------------------------- #
+def test_a_cli_tab_restart_hands_off_to_a_detached_process(
+    home, monkeypatch, tmp_path, capsys
+):
+    """The tab's shell is killed by the shutdown this command asks for, so
+    the command must not do the stopping itself (claunch-k9fpi). It starts a
+    copy in a session of its own and returns."""
+    from claude_launcher import cli_sessions
+    from claude_launcher.daemon import clipty
+
+    fake = _FakeDaemon(record={"id": "g4", "session": "x", "deadline": _future()})
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli_sessions.daemon_paths, "log_file",
+                        lambda: tmp_path / "daemon.log")
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setenv(clipty.CLI_TAB_ENV, "1")
+    monkeypatch.delenv(cli_sessions.RESTART_DETACHED_ENV, raising=False)
+
+    spawned = {}
+
+    class _Child:
+        pid = 4242
+
+    def fake_popen(argv, **kwargs):
+        spawned["argv"] = argv
+        spawned["kwargs"] = kwargs
+        return _Child()
+
+    monkeypatch.setattr(cli_sessions.subprocess, "Popen", fake_popen)
+
+    assert cli_sessions._cmd_daemon(_daemon_args()) == 0
+
+    # Nothing was stopped in this process: the shell dies the moment it is.
+    assert fake.stop_calls == 0
+    assert fake.client.posted == []
+    # The child runs the same command, in a session of its own.
+    argv = spawned["argv"]
+    assert argv[:2] == [sys.executable, "-c"]
+    assert argv[3:] == ["daemon", "restart"]
+    kwargs = spawned["kwargs"]
+    assert kwargs["env"].get(cli_sessions.RESTART_DETACHED_ENV) == "1"
+    assert clipty.CLI_TAB_ENV not in kwargs["env"]
+    assert kwargs["stdin"] == cli_sessions.subprocess.DEVNULL
+    if sys.platform == "win32":
+        assert kwargs["creationflags"] & 0x00000008     # DETACHED_PROCESS
+    else:
+        assert kwargs["start_new_session"] is True
+    assert "handed to a detached process" in capsys.readouterr().out
+
+
+def test_a_cli_tab_hand_off_carries_the_flags(home, monkeypatch, tmp_path):
+    """--force and --with-pty-host stop the daemon too and die the same way,
+    so they are handed over as well -- the child must run the same restart."""
+    from claude_launcher import cli_sessions
+    from claude_launcher.daemon import clipty
+
+    fake = _FakeDaemon(record={"id": "g5", "session": "x", "deadline": _future()})
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli_sessions.daemon_paths, "log_file",
+                        lambda: tmp_path / "daemon.log")
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setenv(clipty.CLI_TAB_ENV, "1")
+    monkeypatch.delenv(cli_sessions.RESTART_DETACHED_ENV, raising=False)
+
+    spawned = {}
+    monkeypatch.setattr(
+        cli_sessions.subprocess, "Popen",
+        lambda argv, **kw: spawned.update(argv=argv) or _Child(),
+    )
+
+    args = argparse.Namespace(action="restart", all=False, force=True,
+                              with_pty_host=True, keep_stale_host=True,
+                              reason="apply the merges")
+    assert cli_sessions._cmd_daemon(args) == 0
+    assert spawned["argv"][3:] == [
+        "daemon", "restart", "--force", "--with-pty-host",
+        "--keep-stale-host", "--reason", "apply the merges",
+    ]
+    assert fake.stop_calls == 0
+
+
+def test_the_detached_child_takes_the_ordinary_path(home, monkeypatch, capsys):
+    """The handed-off process has the marker cleared and the detached flag
+    set; it must actually restart rather than hand off again."""
+    from claude_launcher import cli_sessions
+    from claude_launcher.daemon import clipty
+
+    fake = _FakeDaemon(record={"id": "g6", "session": "x", "deadline": _future()})
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setenv(cli_sessions.RESTART_DETACHED_ENV, "1")
+    monkeypatch.setenv(clipty.CLI_TAB_ENV, "1")
+
+    def _no_spawn(*a, **kw):   # a second hand-off would be the bug
+        raise AssertionError("the detached child handed off again")
+
+    monkeypatch.setattr(cli_sessions.subprocess, "Popen", _no_spawn)
+
+    assert cli_sessions._cmd_daemon(_daemon_args()) == 0
+    assert fake.stop_calls == 1
+    assert "daemon restarted" in capsys.readouterr().out
+
+
+class _Child:
+    """A Popen look-alike: the code only needs it to spawn."""
+
+    pid = 4242
 
 
 # --------------------------------------------------------------------------- #

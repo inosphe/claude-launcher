@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import webbrowser
@@ -48,6 +49,7 @@ from .daemon import instance_manifest
 from .daemon import paths as daemon_paths
 from .daemon import restart_notice
 from .daemon import runtime_state
+from .daemon.clipty import CLI_TAB_ENV
 from .daemon_client import DaemonClientError
 
 #: How every hint in this module names the restart command. Agents read these
@@ -2054,6 +2056,102 @@ def _report_compact_problems() -> None:
         )
 
 
+#: Set on the detached child a CLI tab's restart hands itself to. The child
+#: still sees ``CLI_TAB_ENV`` nowhere else, so this is the only thing telling
+#: it to take the ordinary path instead of handing off again.
+RESTART_DETACHED_ENV = "CLAUNCH_RESTART_DETACHED"
+
+
+def _restart_must_run_detached() -> bool:
+    """Whether this restart cannot run in the shell that is asking for it.
+
+    True in the dashboard's CLI tab (``clipty.CLI_TAB_ENV``) unless this
+    process already IS the detached child (``RESTART_DETACHED_ENV``). Any
+    other shell -- an operator's terminal, a session's shell -- keeps the
+    ordinary immediate path.
+    """
+    return bool(os.environ.get(CLI_TAB_ENV)) and not os.environ.get(
+        RESTART_DETACHED_ENV
+    )
+
+
+def _hand_off_restart(*, force: bool = False, with_pty_host: bool = False,
+                      keep_stale: bool = False,
+                      reason: Optional[str] = None) -> int:
+    """Continue this restart in a process the daemon's shutdown cannot reach.
+
+    The CLI tab's shell is spawned as a session leader (``pty_backend.
+    _UnixPty`` runs ``os.setsid`` + ``TIOCSCTTY``) and the daemon terminates
+    it as part of its own shutdown (``api._close_cli_shell``). When a session
+    leader dies the kernel sends SIGHUP to its foreground process group --
+    which is this very command -- so a restart typed into that tab dies
+    between ``stop()`` and the successor spawn and the daemon stays down
+    (claunch-k9fpi: shutdown requested 23:11:14, ``_close_cli_shell`` took its
+    full 2s grace at 23:11:18, teardown ended 23:11:29, and no
+    ``spawn_daemon`` line ever followed).
+
+    So the tab does what a shell cannot: it starts the same command again with
+    ``start_new_session`` (or ``DETACHED_PROCESS`` on Windows), which leaves
+    the child in a session of its own, out of the dying shell's process
+    group. The child runs the ordinary path -- record the notice, stop, retry
+    the successor spawn -- and this process returns immediately, because it
+    is about to be killed and has nothing left to report.
+
+    The flags travel with it; ``--all`` does not, because its per-instance
+    loop wants to stay in one process (see its branch in ``_cmd_daemon``).
+    """
+    argv = ["daemon", "restart"]
+    if force:
+        argv.append("--force")
+    if with_pty_host:
+        argv.append("--with-pty-host")
+    if keep_stale:
+        argv.append("--keep-stale-host")
+    if reason:
+        argv += ["--reason", reason]
+    env = dict(os.environ)
+    env.pop(CLI_TAB_ENV, None)     # so the child takes the ordinary path
+    env[RESTART_DETACHED_ENV] = "1"
+    # The child outlives the pty, so its stdout/stderr go to the daemon log
+    # rather than a terminal that is being torn down with the daemon.
+    try:
+        sink: object = open(daemon_paths.log_file(), "ab")
+    except OSError:
+        sink = subprocess.DEVNULL
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
+                  env=env, close_fds=True)
+    if sys.platform == "win32":
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys; from claude_launcher.cli import main; sys.exit(main())",
+             *argv],
+            **kwargs,
+        )
+    except OSError as exc:
+        print(f"could not hand the restart to a detached process: {exc}",
+              file=sys.stderr)
+        return 1
+    finally:
+        if sink is not subprocess.DEVNULL:
+            try:
+                sink.close()      # the child keeps its own copy of the fd
+            except OSError:
+                pass
+    print(
+        "restart handed to a detached process: this CLI tab's shell is "
+        "killed as part of the daemon's shutdown, so the restart cannot run "
+        "in it (claunch-k9fpi). The successor's log goes to "
+        f"{daemon_paths.log_file()}; check it with 'claunch daemon status'."
+    )
+    return 0
+
+
 def _cmd_daemon(args: argparse.Namespace) -> int:
     action = args.action
     if action in ("start", "restart"):
@@ -2085,6 +2183,17 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if getattr(args, "all", False):
             return _restart_all_instances(with_pty_host=with_host,
                                           keep_stale=keep_stale)
+        # The CLI tab's shell is killed by the shutdown this command asks
+        # for, so the start half has to run somewhere that shutdown cannot
+        # reach (claunch-k9fpi). Before --force: that branch stops the daemon
+        # too, and dies the same way.
+        if _restart_must_run_detached():
+            return _hand_off_restart(
+                force=bool(getattr(args, "force", False)),
+                with_pty_host=with_host,
+                keep_stale=keep_stale,
+                reason=getattr(args, "reason", None),
+            )
         if getattr(args, "force", False):
             return _force_replace(getattr(args, "reason", None) or "",
                                   with_pty_host=with_host, keep_stale=keep_stale)

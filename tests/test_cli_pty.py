@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 
@@ -122,6 +123,88 @@ def test_cli_shell_does_not_inherit_the_daemons_no_colour_answers(
 
     assert "NO_COLOR" not in seen
     assert seen.get("TERM") != "dumb"
+
+
+def test_the_cli_shell_is_marked_so_a_restart_can_leave_it(
+    home, monkeypatch, tmp_path
+):
+    """The tab's shell dies with the daemon, and so does anything it starts in
+    its process group. The marker is what lets a restart typed here hand
+    itself to a detached process instead of dying between stop and start
+    (claunch-k9fpi)."""
+    from claude_launcher.daemon import clipty, pty_backend
+
+    seen = {}
+
+    class _Fake:
+        pid = 1
+
+        def read(self):
+            return b""
+
+        def terminate(self, force=False):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_spawn(argv, *, env, cwd, cols, rows):
+        seen.update(env)
+        return _Fake()
+
+    monkeypatch.setattr(pty_backend, "spawn_local", fake_spawn)
+    monkeypatch.delenv(clipty.CLI_TAB_ENV, raising=False)
+
+    async def run():
+        shell = clipty.ShellPty(argv=REPL, cwd=str(tmp_path))
+        assert shell.restart()
+
+    asyncio.run(run())
+
+    assert seen.get(clipty.CLI_TAB_ENV) == "1"
+    assert clipty.CLI_TAB_ENV == "CLAUNCH_CLI_TAB"
+
+
+#: A session leader that starts one child in its own process group and one in
+#: a session of its own, then waits to be killed. The two children write a
+#: marker after a delay, so what survives is visible after the leader is gone.
+_LEADER = r"""
+import subprocess, sys, time
+attached, detached = sys.argv[1], sys.argv[2]
+child = "import sys, time; time.sleep(1.2); open(sys.argv[1], 'w').write('x')"
+subprocess.Popen([sys.executable, "-c", child, attached])
+subprocess.Popen([sys.executable, "-c", child, detached], start_new_session=True)
+time.sleep(30)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX session/process group")
+def test_a_child_of_the_tab_shell_dies_with_it_unless_detached(home, tmp_path):
+    """The mechanism behind claunch-k9fpi, measured rather than assumed.
+
+    The CLI tab's shell is a session leader; the daemon terminates it as part
+    of its own shutdown. When a session leader dies the kernel SIGHUPs its
+    foreground process group, so a child that stayed in that group dies too —
+    which is how a restart typed into the tab lost its start half. A child
+    started in its own session (what ``_hand_off_restart`` does) lives on.
+    """
+    from claude_launcher.daemon import pty_backend
+
+    attached = tmp_path / "attached"
+    detached = tmp_path / "detached"
+    pty = pty_backend.spawn_local(
+        [sys.executable, "-c", _LEADER, str(attached), str(detached)],
+        env=dict(os.environ), cwd=str(tmp_path), cols=80, rows=24,
+    )
+    try:
+        time.sleep(0.6)          # let it start both children
+        pty.terminate(force=False)   # the session leader dies here
+        time.sleep(2.5)          # both children's delays have passed
+    finally:
+        pty.close()
+
+    assert detached.exists(), "the detached child must outlive the leader"
+    assert not attached.exists(), "an ordinary child dies with the leader"
 
 
 def test_cli_terminal_roundtrip_and_persistence(home, tmp_path):
