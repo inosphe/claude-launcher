@@ -49,7 +49,7 @@ const api = {};
 new Function(
   "exports",
   constLine("sessionRowsKept")
-  + slice("keepRowText") + slice("sessionRowStamp") + slice("sessionRowsTake")
+  + slice("takeParsed") + slice("keepRowText") + slice("sessionRowStamp") + slice("sessionRowsTake")
   + `
 Object.assign(exports, {
   take: sessionRowsTake,

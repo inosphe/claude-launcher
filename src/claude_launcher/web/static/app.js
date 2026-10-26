@@ -4993,6 +4993,21 @@ function sessionRowDigests(state) {
   return out;
 }
 
+/* One parse per distinct row text, and a shallow copy per poll
+   (claunch-hwbuc.3): the parsed row is the cache, the copy is what callers
+   may write to. Nested values are shared, which is what they were before --
+   every caller that mutates a row assigns a new value. */
+function takeParsed(text) {
+  const memo = takeParsed._byText || (takeParsed._byText = new Map());
+  let row = memo.get(text);
+  if (row === undefined) {
+    row = JSON.parse(text);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(text, row);
+  }
+  return Object.assign({}, row);
+}
+
 /* The text a row was parsed from, carried on the row for the redraw stamp
    (claunch-hwbuc.2). Non-enumerable: every reader that serialises a row --
    the stamp itself, rowSignature, the poll's own text -- sees the row it
@@ -5033,7 +5048,12 @@ function sessionRowsTake(state, data) {
       return null;
     }
     fresh.set(name, held);
-    const again = JSON.parse(held.text);
+    // Parsing the same text again every poll was 2.1 ms of a working poll
+    // (Trace-20261021T194912, claunch-hwbuc.3). The parse is memoised by the
+    // text it came from and the poll hands back a fresh shallow copy, so a
+    // caller that writes to its row (sessionRowsJoin replaces status_checks)
+    // still writes to its own object and not to the next poll's.
+    const again = takeParsed(held.text);
     keepRowText(again, held.text);
     out.push(again);
   }
