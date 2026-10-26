@@ -481,7 +481,18 @@ const READ = `(() => {
         window.claunchTheme.set(theme);
       }, {width, theme});
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      await lead.locator(".rail-brief").waitFor({state: "visible"});
+      // Earlier navigation can leave the expanded root outside the rail's
+      // viewport. Bring it into view before measuring content-visibility rows,
+      // and wait for all measured sections after the theme/width transition.
+      await lead.scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => {
+        const li = document.querySelector('#session-list li[data-name="lead"]');
+        return li && [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"]
+          .every(selector => {
+            const e = li.querySelector(selector), r = e && e.getBoundingClientRect();
+            return r && r.width > 0 && r.height > 0;
+          });
+      });
       const hierarchy = await page.evaluate(() => ["lead", "w1", "w1a", "w1b"].map(name => {
         const e = document.querySelector(`#session-list li[data-name="${name}"]`);
         const r = e.getBoundingClientRect();
@@ -503,7 +514,10 @@ const READ = `(() => {
         return names.map(selector => {
           const e = li.querySelector(selector), c = getComputedStyle(e), box = e.getBoundingClientRect();
           const cells = [...e.querySelectorAll(".rail-seen-pair")].map(x => x.getBoundingClientRect());
-          return {selector, filled: c.backgroundColor !== "rgba(0, 0, 0, 0)" && c.backgroundColor !== rowBg,
+          return {selector, display: c.display, connected: e.isConnected,
+            mode: li.dataset.railMode, scroll: document.getElementById("session-list").scrollTop,
+            cardTop: li.getBoundingClientRect().top, cardHeight: li.getBoundingClientRect().height,
+            filled: c.backgroundColor !== "rgba(0, 0, 0, 0)" && c.backgroundColor !== rowBg,
             painted: box.width > 0 && box.height > 0,
             aligned: cells.every(x => Math.abs(x.width - cells[0].width) < 1),
             contained: cells.every(x => x.left >= box.left && x.right <= box.right + 1)};
