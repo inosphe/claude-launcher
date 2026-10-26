@@ -189,6 +189,7 @@ def test_the_daemon_info_and_the_restart_check_carry_it(loaded, monkeypatch):
         try:
             info = await (await client.get("/api/daemon", headers=AUTH)).json()
             assert info["pty_host"]["state"] == "stale"
+            assert info["gil"]["build"] in ("gil", "free-threaded")
             check = await (await client.get("/api/daemon/restart-check", headers=AUTH)).json()
             assert check["stale"] is True and check["changed"] == ["ptyhost/server.py"]
             assert "refused" in check["message"] and "--keep-stale-host" in check["hint"]

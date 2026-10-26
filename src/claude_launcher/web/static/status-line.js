@@ -20,7 +20,8 @@
   "use strict";
 
   const BADGES = [
-    "relay-badge", "latency-badge", "p2p-badge", "pty-host-badge", "sysperf-badge",
+    "relay-badge", "latency-badge", "p2p-badge", "pty-host-badge", "gil-badge",
+    "sysperf-badge",
   ];
   // What each group of detail is about, in the overlay's own words.
   const NAME = {
@@ -28,6 +29,7 @@
     "latency-badge": "latency",
     "p2p-badge": "p2p",
     "pty-host-badge": "pty host",
+    "gil-badge": "python",
     "sysperf-badge": "machine",
   };
   // The class each badge grades itself with, and what that grade is worth
@@ -35,7 +37,7 @@
   const GRADES = [
     ["latency-bad", 3], ["relay-down", 3], ["pty-host-unreachable", 3],
     ["latency-slow", 2], ["relay-partial", 2], ["pty-host-stale", 2],
-    ["p2p-connecting", 2],
+    ["p2p-connecting", 2], ["gil-reenabled", 2],
     ["latency-ok", 1], ["relay-on", 1], ["pty-host-connected", 1], ["p2p-on", 1],
   ];
   const DOTS = ["status-calm", "status-ok", "status-slow", "status-bad"];

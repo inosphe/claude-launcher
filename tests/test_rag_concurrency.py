@@ -119,3 +119,27 @@ def test_close_waits_for_a_put_in_flight(tmp_path):
     closer.join(10)
     assert not writer.is_alive() and not closer.is_alive()
     assert "d1" in index.ids()
+
+
+def test_closed_index_is_not_reopened_by_a_late_put_or_load(tmp_path):
+    """A sync worker that outlives the cancelled task can call put or load after
+    shutdown closed the index; neither may reopen the collection."""
+    path = tmp_path / "idx.zvec"
+    index = rag.VectorIndex(path, model="m", dims=8)
+    index.load()
+    index.put(rag.Doc("seed", "h", ["seed"], {"title": "seed"}), [_vec(0)])
+    index.save()
+    index.close()
+
+    with pytest.raises(rag.RagError):
+        index.put(rag.Doc("late", "h2", ["late"], {"title": "late"}), [_vec(1)])
+    index.load()
+    assert index._col is None
+    assert "late" not in index.ids()
+
+    # the directory lock is free: another index opens the same path and sees
+    # only what was written before the close
+    other = rag.VectorIndex(path, model="m", dims=8)
+    other.load()
+    assert other.ids() == {"seed"}
+    other.close()

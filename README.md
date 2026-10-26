@@ -66,6 +66,23 @@ uv pip install -p .venv-ft/bin/python --no-deps -e .
 PYTHON_GIL=0 .venv-ft/bin/python -m claude_launcher.daemon
 ```
 
+To install the CLI and daemon as a separate `claunch-nogil` command instead,
+run `tools/install_freethreaded.sh` (Linux, WSL) or
+`tools\install_freethreaded.ps1` (Windows). The script builds a `zvec` wheel
+from source once and caches it, installs this checkout editable on `3.14t` with
+`uv tool install` with `--editable ".[p2p]"`, `--reinstall` and `--overrides` pointing at the wheel, and
+writes a `claunch-nogil` wrapper that sets `PYTHON_GIL=0`. The tool environment
+lives under `~/.local/share/claunch-nogil` (`%LOCALAPPDATA%\claunch-nogil` on
+Windows), so the regular `claunch` tool is not replaced. `pyproject.toml` is not
+changed: its `zvec>=0.7,<0.8` cap conflicts with the `0.8.x` source build, which
+the override replaces. `aiortc` has no `cp314t` wheels and needs `libsrtp2-dev`
+to build, so the `p2p` extra falls back to being left out (`--no-p2p` skips the
+attempt). The script does not restart the daemon: both commands share
+`~/.claude-launcher` and port 8378, so run `claunch-nogil daemon restart` to
+move the daemon to `3.14t` and `claunch daemon restart` to move it back. The
+`.ps1` script has not been run: it was written without access to a Windows
+machine or PowerShell.
+
 `zvec`'s extension does not declare that it runs without the GIL, so importing
 it turns the GIL back on for the whole process unless `PYTHON_GIL=0` is set.
 The daemon logs a warning at start when that happened. Without `PYTHON_GIL=0`

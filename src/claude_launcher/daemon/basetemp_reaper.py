@@ -106,6 +106,15 @@ ORPHAN_DAYS = 7.0
 #: busy machine's back.
 TICK = 3600.0
 
+#: What the boot pass waits for before it starts (claunch-d18v8.4): the first
+#: minute of a daemon is when every browser, terminal and session reconnects,
+#: and the trees it reclaims have waited since the previous run anyway.
+BOOT_DELAY = 60.0
+
+#: Seconds a reaping run rests between two directories, so a long list of
+#: large trees leaves the disk and the interpreter free for requests in between.
+DIR_PAUSE = 0.2
+
 _STAMP = re.compile(r"c\d{10}")
 #: ``tools/sweep.py``'s basetemp under the root: ``<session>w``, the numbered
 #: generations a fixed name leaves behind when a later run cannot reuse it
@@ -331,26 +340,45 @@ def foreign_live() -> set:
 
 
 def describe(path: Path) -> dict:
-    """Start, end, worker count, file count and size of one basetemp."""
-    times: List[float] = []
+    """Start, end, worker count, file count and size of one basetemp.
+
+    One ``scandir`` per directory and one ``stat`` per file, with the times
+    reduced to a minimum and a maximum as the walk goes rather than collected
+    into a list that holds a float for every file of a 55,000-file tree.
+    """
+    first = last = None
     files = size = 0
-    workers = set()
-    for root, dirs, names in os.walk(path):
-        workers.update(d for d in dirs if d.startswith("popen-gw"))
-        for name in names:
-            try:
-                st = os.stat(os.path.join(root, name))
-            except OSError:
-                continue
-            times.append(st.st_mtime)
-            files += 1
-            size += st.st_size
+    workers = 0
+    stack = [os.fspath(path)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name.startswith(_XDIST_WORKER):
+                                workers += 1
+                            stack.append(entry.path)
+                            continue
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if first is None or st.st_mtime < first:
+                        first = st.st_mtime
+                    if last is None or st.st_mtime > last:
+                        last = st.st_mtime
+                    files += 1
+                    size += st.st_size
+        except OSError:
+            continue
+    times: List[float] = [] if first is None else [first, last]
     if not times:
         try:
             times = [path.stat().st_mtime]
         except OSError:
             times = []
-    row: dict = {"workers": len(workers), "files": files, "bytes": size}
+    row: dict = {"workers": workers, "files": files, "bytes": size}
     if times:
         row["started_at"] = _iso(min(times))
         row["ended_at"] = _iso(max(times))
@@ -459,8 +487,10 @@ class BasetempReaper:
 
     ``sessions`` returns ``(name, ended)`` for every session the registry
     knows. ``background=False`` runs deletions inline (tests); the daemon
-    runs them on a thread, because a 25,000-file tree takes seconds to
-    remove and the exit funnel is called on the event loop.
+    runs them on the background pool (:func:`pools.submit_background`),
+    because a 25,000-file tree takes seconds to remove and the exit funnel is
+    called on the event loop. ``boot_delay`` holds the boot pass back and
+    ``pause`` is the rest between two trees of one run (claunch-d18v8.4).
     """
 
     def __init__(
@@ -472,6 +502,8 @@ class BasetempReaper:
         background: bool = True,
         foreign: Callable[[], set] = foreign_live,
         grants: Optional[Callable[[], set]] = None,
+        boot_delay: Optional[float] = None,
+        pause: Optional[float] = None,
     ) -> None:
         self._sessions = sessions
         self._foreign = foreign
@@ -480,6 +512,9 @@ class BasetempReaper:
         self._history = history
         self._background = background
         self._lock = threading.Lock()
+        # Inline runs (tests) neither wait at boot nor rest between trees.
+        self._boot_delay = boot_delay if boot_delay is not None else (BOOT_DELAY if background else 0.0)
+        self._pause = pause if pause is not None else (DIR_PAUSE if background else 0.0)
 
     @property
     def root(self) -> Path:
@@ -524,8 +559,22 @@ class BasetempReaper:
         self._submit([session.sdef.name])
 
     def reap_ended(self) -> None:
-        """At boot: reap every session the registry holds as ended."""
-        self._submit([name for name, ended in self._sessions() if ended])
+        """At boot: reap every session the registry holds as ended.
+
+        The pass starts ``boot_delay`` seconds after the call (``BOOT_DELAY``
+        in the daemon) and reads the registry then, so a session that ended
+        in between is part of it.
+        """
+        def run() -> None:
+            self._submit([name for name, ended in self._sessions() if ended])
+
+        if self._boot_delay > 0:
+            timer = threading.Timer(self._boot_delay, run)
+            timer.name = "basetemp-boot"
+            timer.daemon = True
+            timer.start()
+            return
+        run()
 
     def reap_live(self, *, now: Optional[float] = None) -> List[dict]:
         """The periodic pass: old sweep generations of live sessions, and
@@ -642,9 +691,7 @@ class BasetempReaper:
         if not self._background:
             self.reap(names)
             return
-        threading.Thread(
-            target=self.reap, args=(names,), name="basetemp-reaper", daemon=True
-        ).start()
+        pools.submit_background(self.reap, names)
 
     # ---- the work --------------------------------------------------------- #
 
@@ -661,6 +708,8 @@ class BasetempReaper:
             for name in kept:
                 for path in owned.get(name, []):
                     rows.append(self._reap_one(name, path))
+                    if self._pause > 0:
+                        time.sleep(self._pause)
             if rows:
                 self._append(rows)
         return rows

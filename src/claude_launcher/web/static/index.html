@@ -137,6 +137,10 @@
             <!-- Who owns the session PTYs (claunch-xnnct.3): off, a connected
                  host, a host on older code (stale), or set on but unreachable. -->
             <span id="pty-host-badge" class="badge hidden"></span>
+            <!-- The daemon's interpreter build and whether its GIL is on
+                 (claunch-d18v8.3): GIL, no-GIL, or a free-threaded build that
+                 an extension turned the GIL back on for. -->
+            <span id="gil-badge" class="badge hidden"></span>
             <!-- The machine's CPU, memory, disk I/O and disk capacity
                  (claunch-zuk0b, claunch-frgt1), drawn by sysperf-page.js; a link
                  to the System performance page. -->

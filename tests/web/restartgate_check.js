@@ -204,6 +204,7 @@ function build(opts) {
     "restoreNewFormDraft",
     // The sidebar PTY host badge boot() draws (claunch-xnnct.3).
     "renderPtyHostBadge",
+    "renderGilBadge",
     // A steady poll (same boot, no restart) runs the whole batch; the
     // retirement checks below reach it (claunch-hdp4j).
     "refreshTermProcs", "refreshShadows",
@@ -235,6 +236,7 @@ function build(opts) {
     () => {},   // refreshTermTimers (the timer line; termtimers_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
     () => {},   // renderPtyHostBadge
+    () => {},   // renderGilBadge
     () => {},   // refreshTermProcs
     () => {},   // refreshShadows
   );
