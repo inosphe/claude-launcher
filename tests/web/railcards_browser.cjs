@@ -27,7 +27,7 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 const { safeListen } = require("./safe_listen.cjs");
 
-const root = path.join(__dirname, "../../src/claude_launcher/web/static");
+const root = process.env.STATIC_ROOT || path.join(__dirname, "../../src/claude_launcher/web/static");
 
 /* The chips a compact card draws: `lead` is compact, so its two checks cover
    the density the request named ("collapsed form"). Answers differ so a
@@ -43,6 +43,9 @@ const fixtureChecks = [
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
     parent: null, keep_alive: true, status_checks: fixtureChecks,
+    context: { tokens: 177000, input: 2, cache_read: 176000, cache_write: 1090,
+      output: 210, model: "claude-opus-4-5", at: new Date().toISOString(),
+      compact_window: 200000 },
     briefing: { one_line: "착지를 관리하고 자식을 배분한다", state: "working" } },
   { name: "w1", status: "busy", role: "worker", profile: "nc",
     cwd: "/repo/.claude/worktrees/w1", parent: "lead",
@@ -68,8 +71,12 @@ const sessions = [
     briefing: { one_line: "지시를 기다린다", state: "idle" } },
 ];
 
+const refreshRequests = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
+  if (url.searchParams.get("refresh") === "1" || url.pathname.endsWith("/status-checks/refresh")) {
+    refreshRequests.push({ path: url.pathname + url.search, method: req.method });
+  }
   if (url.pathname === "/boot.html") {
     res.setHeader("Content-Type", "text/html");
     return res.end(`<!doctype html><script>
@@ -83,6 +90,7 @@ const server = http.createServer((req, res) => {
     let data = {};
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "card" };
     else if (url.pathname === "/api/sessions") data = { sessions, llm_configured: true };
+    else if (url.pathname.endsWith("/status-checks/refresh")) data = { delivered: true };
     else if (url.pathname.endsWith("/briefing")) {
       const name = decodeURIComponent(url.pathname.split("/")[3] || "");
       const s = sessions.find((x) => x.name === name) || {};
@@ -401,7 +409,7 @@ const READ = `(() => {
        the summary is what this block is about, so wait for it. */
     await page.waitForFunction(() => {
       const li = document.querySelector('#session-list li[data-name="w1"]');
-      return li && li.querySelector(".sess-brief .sess-brief-one");
+      return li && li.querySelector(".sess-brief .sess-brief-age");
     });
     rows = await page.evaluate(READ);
     const opened = rows.find((r) => r.name === "w1");
@@ -421,8 +429,45 @@ const READ = `(() => {
        chips are the row's, not the card's — so nothing doubles. w1 has no
        checks in the fixture, so this reads the summary with nothing under it. */
     assert.deepEqual(opened.cardParts,
-      { one: 1, rows: 0, faq: 0, checkRows: 0 },
-      "the expanded card draws the one-line summary and no detail rows");
+      { one: 0, rows: 0, faq: 0, checkRows: 0 },
+      "the row summary appears once; the rail card adds no duplicate title or details");
+
+    /* Open the fixture with checks and context, then measure and exercise
+       the remaining controls. A hidden duplicate must have a 0x0 box, and
+       the visible button must still reach its own API. */
+    // The ancestor overlay may cover the name after the previous scroll;
+    // the summary is another ordinary target of the row's navigation.
+    await page.locator('#session-list li[data-name="lead"] .rail-brief').click();
+    await page.waitForFunction(() => document.querySelector(
+      '#session-list li[data-name="lead"][data-rail-mode="expanded"] .sess-brief-age'));
+    const lead = page.locator('#session-list li[data-name="lead"]');
+    const unified = await lead.evaluate((li) => {
+      const visible = (e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0;
+      const summary = li.querySelector(".rail-brief");
+      const actions = li.querySelector(".rail-actions");
+      const meta = li.querySelector(".rail-cwd");
+      return {
+        titles: li.querySelectorAll(".sess-brief-one").length,
+        ctx: li.querySelectorAll(".sess-brief-ctx").length,
+        gauge: visible(li.querySelector(".rail-ctx-line")),
+        rowRefreshes: [...li.querySelectorAll(".sess-brief-rowref, .sess-status-check-rowref")].filter(visible).length,
+        cardRefreshes: [...li.querySelectorAll(".sess-brief-refresh, .sess-brief-check-refresh")].filter(visible).length,
+        summaryBeforeActions: summary.getBoundingClientRect().bottom <= actions.getBoundingClientRect().top,
+        inset: [summary, actions, meta].map((e) => getComputedStyle(e).paddingLeft),
+      };
+    });
+    assert.deepEqual(unified, { titles: 0, ctx: 0, gauge: true,
+      rowRefreshes: 0, cardRefreshes: 2, summaryBeforeActions: true,
+      inset: ["16px", "16px", "16px"] }, "expanded rail has one summary, one context reading and one pair of refreshes");
+    refreshRequests.length = 0;
+    await lead.locator(".sess-brief-refresh").click();
+    await page.waitForFunction(() => !document.querySelector(
+      '#session-list li[data-name="lead"] .sess-brief-refresh').disabled);
+    await lead.locator(".sess-brief-check-refresh").click();
+    assert.deepEqual(refreshRequests, [
+      { path: "/api/sessions/lead/briefing?refresh=1", method: "GET" },
+      { path: "/api/sessions/lead/status-checks/refresh", method: "POST" },
+    ], "the two visible refresh controls retain their distinct functions");
 
     /* Its children stay one-line cards while their parent is expanded: the
        density is the card's own, not inherited down the tree. */

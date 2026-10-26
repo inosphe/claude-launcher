@@ -11245,7 +11245,8 @@ function renderBriefingCard(name, entry, opts) {
   }
   // The card is the row's "what is this session doing"; how much room it has
   // left to keep doing it belongs on the same line.
-  const chip = ctxChip(name);
+  // Rail rows already draw the context gauge and its token count.
+  const chip = summaryOnly ? null : ctxChip(name);
   if (chip) head.appendChild(chip);
   const tps = typeof tpsChip === "function" ? tpsChip(name) : null;
   if (tps) head.appendChild(tps);
@@ -11287,10 +11288,10 @@ function renderBriefingCard(name, entry, opts) {
   } else if (entry.phase === "error") {
     card.appendChild(el("div", "sess-brief-note error", entry.error || "briefing failed"));
   } else if (brief) {
-    // The one line that says what this session is FOR sits at the top of the
-    // card too — the row's under-name line shows it always, this is the same
-    // fact where the rest of the summary is read.
-    if (brief["one-line-job-description"]) {
+    // Keep a title when the row has none, or while the digest differs from
+    // the cached briefing. An identical row summary needs only one copy.
+    if (brief["one-line-job-description"]
+        && (!summaryOnly || opts.rowSummary !== brief["one-line-job-description"])) {
       card.appendChild(el("div", "sess-brief-one", brief["one-line-job-description"]));
     }
     if (!summaryOnly) {
@@ -11373,7 +11374,9 @@ function applyBriefingCards() {
     // exists to be read, and an unasked card would say "nothing yet" under a
     // reader who never had a control to ask with.
     if (briefingLLM && !briefingCache.has(name)) ask.push(name);
-    li.appendChild(renderBriefingCard(name, briefingCache.get(name), { rail: true }));
+    li.appendChild(renderBriefingCard(name, briefingCache.get(name), {
+      rail: true, rowSummary: oline ? oline.textContent : "",
+    }));
   }
   // And the current session's top-bar button + pane, now the rail exists.
   applyBriefingTop();

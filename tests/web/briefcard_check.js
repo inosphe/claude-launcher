@@ -227,6 +227,19 @@ const kv = (li) => kvOf(card(li));
   check("the answer's age is said in words",
         card(rows.s1).querySelector(".sess-brief-age").textContent, "1m ago");
 
+  // A row with no digest still needs the card title (checked above). Once
+  // the digest exists, the same title is rendered once, on that row.
+  const digest = mkel("div");
+  digest.className = "rail-brief";
+  digest.textContent = "착지를 관리한다";
+  rows.s1.appendChild(digest);
+  ctx.apply();
+  check("a row digest suppresses the identical card title", one(rows.s1), null);
+  check("the full card retains its title", ctx.fullCard("s1").querySelector(".sess-brief-one").textContent,
+        "착지를 관리한다");
+  digest.remove();
+  ctx.apply();
+
   /* A card at another density carries none: the compact card says what the
      session is doing with the one-line it already has, and the one-line
      roles have a single line of their own. Moving the row's density is what
