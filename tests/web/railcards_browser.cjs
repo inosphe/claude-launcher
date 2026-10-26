@@ -407,9 +407,9 @@ const READ = `(() => {
       return li && li.dataset.railMode === "expanded";
     });
     const worker = page.locator('#session-list li[data-name="w1"]');
-    await worker.locator(".sess-brief-note").waitFor();
+    await worker.locator(".sess-brief-refresh").waitFor();
     assert.deepEqual(briefingRequests, [], "opening a never-summarised card makes no briefing request");
-    assert.match(await worker.locator(".sess-brief-note").innerText(), /No summary yet/);
+    assert.equal(await worker.locator(".sess-brief-note").count(), 0, "row summary is already present");
     assert.equal(await worker.locator(".sess-brief-refresh").isEnabled(), true);
     await worker.locator(".sess-brief-refresh").click();
     await worker.locator(".sess-brief-age").waitFor();
@@ -443,7 +443,9 @@ const READ = `(() => {
     // the summary is another ordinary target of the row's navigation.
     await page.locator('#session-list li[data-name="lead"] .rail-brief').click();
     const lead = page.locator('#session-list li[data-name="lead"]');
-    await lead.locator(".sess-brief-note").waitFor();
+    await lead.locator(".sess-brief-refresh").waitFor();
+    assert.equal(await lead.locator(".sess-brief-note").count(), 0,
+      "an existing row summary suppresses the empty summary notice");
     assert.equal(briefingRequests.length, 1, "opening a second uncached card adds no request");
     const footerAligned = async () => lead.evaluate(li => {
       const note = li.querySelector(".sess-brief-note").getBoundingClientRect();
@@ -453,7 +455,8 @@ const READ = `(() => {
         return Math.abs((b.top + b.bottom - note.top - note.bottom) / 2) < 2;
       });
     });
-    assert.ok(await footerAligned(), "empty summary and both controls share one line");
+    assert.equal(await lead.locator(".sess-brief-check-refresh").isVisible(), true,
+      "summary presence preserves both refresh controls");
     if (process.env.RAIL_SCREENSHOT_DIR) await lead.screenshot({
       path: path.join(process.env.RAIL_SCREENSHOT_DIR, "summary-empty.png"),
     });
@@ -502,7 +505,16 @@ const READ = `(() => {
     const closedHeight = await lead.evaluate(e => e.getBoundingClientRect().height);
     assert.equal(await lead.locator(".rail-commits").isVisible(), false);
     const details = lead.locator(".rail-details-toggle");
+    await lead.focus();
+    await page.keyboard.press("c");
+    assert.equal(await details.getAttribute("aria-expanded"), "true", "c opens Details");
+    await page.keyboard.press("Control+c");
+    assert.equal(await details.getAttribute("aria-expanded"), "true", "copy does not toggle Details");
+    await page.keyboard.press("c");
+    assert.equal(await details.getAttribute("aria-expanded"), "false", "c closes Details");
     await details.focus();
+    await page.keyboard.press("c");
+    assert.equal(await details.getAttribute("aria-expanded"), "false", "a control keeps its own keys");
     await page.keyboard.press("Enter");
     assert.equal(await details.getAttribute("aria-expanded"), "true");
     assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), true);

@@ -4941,6 +4941,18 @@ function railCardApprove(name) {
    means the card's state denies that verb. */
 const RAIL_CARD_KEYS = [
   {
+    keys: ["c"],
+    label: "c",
+    what: "toggle card details",
+    when: "a card with Details available",
+    act: (name) => {
+      const button = sessionGridListCard(name)?.querySelector(".rail-details-toggle");
+      if (!button) return false;
+      button.click();
+      return true;
+    },
+  },
+  {
     keys: ["Enter", " ", "Spacebar"],
     label: "Enter / Space",
     what: "open the session",
@@ -5585,7 +5597,7 @@ function decorateRailDetails(li, name) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "rail-details-toggle";
-  button.title = "Show directory, commits, token usage and lifetime";
+  button.title = "Show directory, commits, token usage and lifetime (c on the card)";
   const paint = () => {
     const open = railDetailsOpen.has(name);
     li.classList.toggle("rail-details-open", open);
@@ -11351,7 +11363,9 @@ function renderBriefingCard(name, entry, opts) {
     // put one: the row has no control of its own to explain that on.
     card.appendChild(el("div", "sess-brief-note", BRIEFING_OFF_HINT));
   } else if (!entry) {
-    card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
+    if (!summaryOnly || !String(opts.rowSummary || "").trim()) {
+      card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
+    }
   } else if (loading && !data) {
     card.appendChild(el("div", "sess-brief-note", "summarising…"));
   } else if (entry.phase === "unconfigured") {
