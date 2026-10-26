@@ -3040,6 +3040,15 @@ PR은 닫고 브랜치는 지웠다.
 이전과 같고, 추가된 동작은 하나다 — `coding-approval`의 거절(reject)이 `coding-plan`으로
 돌아가 계획을 다시 쓴다.
 
+`coding-approval`은 결정 형태의 ask이고 답은 셋이다(claunch-sxdnc):
+`approve-once`(이번 일감만 승인, 다음 일감에서 다시 묻는다), `approve-always`(이번
+일감을 승인하고 이 런의 이후 일감·회차에서는 묻지 않는다), `reject`(결과 `rejected`,
+계획을 다시 쓴다). 두 승인은 결과 `ok`로 끝나 바로 `work`로 간다. item은 게이트의 답을
+`$data.coding_approval`(`{decision, reason, by, ask}`)에 묶고, `coding-approval-check`는
+`decision`이 `approve-always`이면 두 승인 게이트를 세우지 않는다 — `session_routing`이
+꺼져 있으면 `coding-plan`도 건너뛰고, 켜져 있으면 계획의 권장대로 간다. 이 값은 런이
+끝날 때까지 유지되며 되돌리는 답은 없다.
+
 | 입력 | 값 | 비었을 때 |
 |---|---|---|
 | `session_routing` | true/false | false |
@@ -3049,7 +3058,9 @@ PR은 닫고 브랜치는 지웠다.
 - 판정: `session_routing`이 켜지면 `coding-plan`은 `require_coding_approval`과 무관하게
   돌고 `difficulty`(easy/hard), `recommend`(direct/delegate), `why`를 반환한다.
 - 게이트: `require_coding_approval`도 켜져 있으면 `coding-approval-routing`이
-  `approve-as-planned`/`approve-no-delegate`/`approve-down-delegate`/`reject`를 묻는다.
+  `approve-as-planned`/`approve-no-delegate`/`approve-down-delegate`/`approve-always`/`reject`를
+  묻는다. 앞의 셋은 이번 일감만의 승인이고, `approve-always`는 계획의 권장대로 가면서
+  위의 `coding-approval`과 같이 이후 일감의 게이트를 끈다.
   `approve`는 질문 옵션의 예약어(`cflow2/question.RESERVED_NAMES`)라서
   `approve-as-planned`로 쓴다. 게이트가 꺼져 있으면 계획의 `recommend`대로 간다.
 - 기록: 경로가 정해질 때마다 이슈에 `ROUTED: <easy|hard> → <direct|PROFILE:model> — <근거>`

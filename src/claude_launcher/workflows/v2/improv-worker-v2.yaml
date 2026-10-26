@@ -189,7 +189,7 @@ inputs:
     type: bool
     default: false
     label: 코딩 시작 전 사용자 승인
-    help: 켜면 일감별 구현·재작업 전에 변경 계획을 제시하고 사용자 승인을 기다린다. 끄면 기존처럼 자동 진행한다
+    help: 켜면 일감별 구현·재작업 전에 변경 계획을 제시하고 사용자 승인을 기다린다. 승인은 이번만 허용(approve-once)과 앞으로도 허용(approve-always — 이 런의 이후 일감은 묻지 않는다) 중에서 고른다. 끄면 기존처럼 자동 진행한다
     # 회차 상한과 다른 결정이라 폼에서 자기 블록을 쓴다(claunch-kzun2).
     # 무그룹으로 두면 max_rounds와 한 블록에 짝지어 서서 무엇에 대한
     # 스위치인지가 블록 제목으로 드러나지 않았다.
@@ -420,6 +420,11 @@ data:
   # 덮어쓴다: mode는 direct(이 세션) | delegate(하위 설정 자식). 위임 작업의
   # 재작업(delegated-rework-approval)은 mode가 delegate인지로 가른다.
   route: {mode: direct, profile: null, model: null, difficulty: null}
+  # 코딩 승인 게이트(coding-approval, coding-approval-routing)의 마지막 답
+  # {decision, reason, by, ask}(claunch-sxdnc). 답할 때마다 덮어쓴다.
+  # decision이 approve-always면 이 런의 이후 일감·회차에서 게이트가 서지
+  # 않는다 — 런이 끝날 때까지 유지되고, 되돌리는 답은 없다.
+  coding_approval: {decision: null}
   round: {}
   # 이 회차의 선행 맥락 검색 결과(prior-context, 그것이 실패하면
   # prior-context-fallback). intake-issue가 읽는다. 회차마다 덮어쓴다.
@@ -1360,20 +1365,30 @@ nodes:
 
         ${result['coding-plan'].value.brief}
 
-        승인: 위 범위의 구현과 검증을 진행한다. 변경으로 인한 리스크는
-        계획에 기재된 내용과 같다.
-        거절: 구현하지 않고 거절 사유를 반영해 변경 계획을 다시 쓴다
+        approve-once: 이번 일감만 승인한다. 위 범위의 구현과 검증을
+        진행하고, 다음 일감에서는 다시 묻는다.
+        approve-always: 이번 일감을 승인하고, 이 런의 이후 일감·회차에서는
+        이 승인을 다시 묻지 않는다(변경 계획도 다시 쓰지 않는다).
+        reject: 구현하지 않고 거절 사유를 반영해 변경 계획을 다시 쓴다
         (coding-plan으로 돌아간다). 이유를 함께 적는다.
         보류: 답하지 않으면 코드 변경 없이 이 단계에서 기다린다.
+        변경으로 인한 리스크는 계획에 기재된 내용과 같다.
       otherwise: human
-      # 거절은 계획을 다시 쓰라는 답이다(claunch-yl0to): item의 plan-loop가
-      # 이 결과를 받아 coding-plan으로 돌아간다.
-      on_decline: rejected
       # 사용자의 응답을 바로 기다리는 승인: 대시보드 알림 채널(코너 카드·알림
       # 기록·종의 대기 수)에 다른 승인 게이트와 같이 뜬다(claunch-x76l8.1).
       urgent: true
-    prompt: 사용자의 코딩 착수 승인을 확인했다. 이 작업을 보고하고 구현을 진행한다.
-    done_when: 이번 방문의 사용자 승인이 기록되어 있다.
+      # 승인 답이 둘이라 승인 형태가 아니라 결정 형태다(claunch-sxdnc).
+      # `approve`는 질문의 내장 답이라 선택지 이름이 될 수 없다
+      # (cflow2/question.RESERVED_NAMES). 두 승인은 결과 ok로 끝나 work로
+      # 가고, item이 그 답을 $data.coding_approval에 묶는다 — approve-always면
+      # coding-approval-check가 이후 일감에서 이 게이트를 세우지 않는다.
+      # 거절은 계획을 다시 쓰라는 답이다(claunch-yl0to): item의 plan-loop가
+      # 결과 rejected를 받아 coding-plan으로 돌아간다.
+      options:
+        approve-once: {outcome: ok, description: 이번 일감만 승인한다 — 다음 일감에서 다시 묻는다}
+        approve-always: {outcome: ok, description: 이번 일감을 승인하고 이 런의 이후 일감에서는 묻지 않는다}
+        reject: {outcome: rejected, description: 구현하지 않고 계획을 다시 쓴다}
+    prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
     effects: [fs.read]
 
   coding-approval-routing:
@@ -1398,14 +1413,21 @@ nodes:
         approve-no-delegate: 이 세션이 직접 구현한다.
         approve-down-delegate: 이 세션의 대화를 fork한 자식이 하위 profile·
         모델로 구현한다(이 브랜치에 직접 커밋, 리뷰·착지는 이 세션).
+        approve-always: 계획의 권장대로 구현하고, 이 런의 이후 일감·회차에서는
+        이 승인을 다시 묻지 않는다(이후 일감도 계획의 권장대로 간다).
         reject: 구현하지 않고 이유를 반영해 계획을 다시 쓴다.
+        위의 세 승인은 이번 일감만의 승인이다 — 다음 일감에서 다시 묻는다.
         답하지 않으면 코드 변경 없이 이 단계에서 기다린다.
       otherwise: human
       urgent: true
+      # approve-always는 coding-approval의 것과 같은 이름·뜻이다(claunch-sxdnc):
+      # item이 답을 $data.coding_approval에 묶고, coding-approval-check가
+      # 이후 일감에서 두 승인 게이트를 세우지 않는다.
       options:
-        approve-as-planned: {description: 계획의 권장(직접 또는 위임)대로 구현한다}
-        approve-no-delegate: {description: 이 세션이 직접 구현한다}
-        approve-down-delegate: {description: 하위 설정 자식에게 fork 위임한다}
+        approve-as-planned: {description: 계획의 권장(직접 또는 위임)대로 구현한다 — 이번 일감만}
+        approve-no-delegate: {description: 이 세션이 직접 구현한다 — 이번 일감만}
+        approve-down-delegate: {description: 하위 설정 자식에게 fork 위임한다 — 이번 일감만}
+        approve-always: {description: 계획의 권장대로 구현하고 이 런의 이후 일감에서는 묻지 않는다}
         reject: {description: 구현하지 않고 계획을 다시 쓴다}
     prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
     effects: [fs.read]
@@ -4326,7 +4348,8 @@ procedures:
       위임 측정(실패가 0이 될 때까지) 또는 생략 기록 -> 커밋·보고(v1 work,
       test-decision, review, test-skipped, commit). work의 반환값은
       $data.work_report에 남는다. require_coding_approval이 켜져 있으면
-      방문마다 변경 계획을 제시하고 사용자 승인을 받은 뒤 work에 진입한다.
+      방문마다 변경 계획을 제시하고 사용자 승인을 받은 뒤 work에 진입한다 —
+      사용자가 approve-always로 답했으면 이 런의 이후 방문은 묻지 않는다.
       session_routing이 켜져 있으면(claunch-yl0to) 계획이 난이도와 위임 권장을
       내고, 쉬운 일감은 fork한 하위 설정 자식이 구현한다(delegate-work). 위임
       작업을 다시 진행해야 하면 delegated-rework-approval이 사람에게 묻는다.
@@ -4355,23 +4378,28 @@ procedures:
                         # 계획부터 다시 쓴다
                         - {seq: [route-direct], bind: route}
                         - {continue: plan-work}
-                - if: "$data.inputs.session_routing == true or $data.inputs.require_coding_approval == true"
+                # 승인 게이트가 서는 조건: require_coding_approval이 켜져 있고 이 런에서
+                # 아직 approve-always를 답하지 않았다(claunch-sxdnc). approve-always 뒤에는
+                # 게이트가 꺼진 것과 같다 — session_routing이면 계획의 권장대로, 아니면
+                # 계획 없이 work로 간다.
+                - if: "$data.inputs.session_routing == true or ($data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always')"
                   then:
                     - coding-plan
                     - cond:
-                        - if: "$data.inputs.require_coding_approval == true and $data.inputs.session_routing == true"
+                        - if: "$data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always' and $data.inputs.session_routing == true"
                           then:
                             id: routing-approval
-                            try: [coding-approval-routing]
+                            try: [{seq: [coding-approval-routing], bind: coding_approval}]
                             catch:
                               approve-as-planned: {seq: [route-planned], bind: route}
                               approve-no-delegate: {seq: [route-direct], bind: route}
                               approve-down-delegate: {seq: [route-delegate], bind: route}
+                              approve-always: {seq: [route-planned], bind: route}
                               reject: {continue: plan-work}
-                        - if: "$data.inputs.require_coding_approval == true"
+                        - if: "$data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always'"
                           then:
                             id: plain-approval
-                            try: [coding-approval]
+                            try: [{seq: [coding-approval], bind: coding_approval}]
                             catch:
                               rejected: {continue: plan-work}
                         - else: {seq: [route-planned], bind: route}
