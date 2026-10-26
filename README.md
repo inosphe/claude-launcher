@@ -3522,9 +3522,9 @@ Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` 
   stop. Installed or not makes no difference: a session gets the workspace's
   copy, or claunch's when the workspace has not installed it, and the form
   says which. Each pack's own header says whether it starts ticked
-  (`check_default: true`; the six shipped packs that say so are
-  `asking-the-user`, `common`, `korean-replies`, `mcp-qa`, `mcp-sim` and
-  `mcp-threads`), and the setting holds **one statement per pack**
+  (`check_default: true`; the seven shipped packs that say so are
+  `asking-the-user`, `common`, `korean-replies`, `mcp-qa`, `mcp-sim`,
+  `mcp-threads` and `obvious-decisions`), and the setting holds **one statement per pack**
   (`{pack id: true|false}`) that wins over that header for the packs it
   names. A pack the setting does not mention keeps its header's answer, so a
   pack added to the package later starts ticked without anyone editing this
