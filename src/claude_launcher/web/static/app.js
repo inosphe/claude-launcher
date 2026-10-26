@@ -20486,7 +20486,9 @@ async function copyTermTitle() {
   const name = title ? title.textContent.trim() : "";
   if (!name) return;
   const ok = await copyToBrowserClipboard(name, document.body);
-  if (ok) notify("Copied session name", name, { source: "page", key: "term-title-copy", ms: 1500 });
+  // `routine`: a copy that worked needs no answer, so its history row must not
+  // turn the bell into a backlog (claunch-ewk3x.1); the 1500 ms card stays.
+  if (ok) notify("Copied session name", name, { source: "page", key: "term-title-copy", ms: 1500, routine: true });
   else notify("Copy failed", "The browser refused it — select the name and copy it by hand.", { source: "page", key: "term-title-copy" });
 }
 
