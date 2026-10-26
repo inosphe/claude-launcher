@@ -869,28 +869,58 @@ globalThis.HivePage = (() => {
     remember();
   }
 
+  // A press that travels less than this many pixels is a click; past it,
+  // the same press is a pan, wherever it started.
+  const PAN_SLOP = 4;
+
   function wirePort(port) {
+    // A pan may start on a chip or a deck face, since they cover most of
+    // the stage; only the zoom buttons and form controls keep their press.
+    // Capture waits for the slop: a captured press clicks the port, not the
+    // chip under it.
     let drag = null;
+    let swallowClick = false;
     port.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.target.closest(".hive-chip, button, a, select, input")) return;
-      drag = { x: e.clientX, y: e.clientY, vx: state.view.x, vy: state.view.y, id: e.pointerId };
-      port.classList.add("panning");
-      try { port.setPointerCapture(e.pointerId); } catch {}
+      swallowClick = false;
+      if (e.button !== 0 || e.target.closest("button, select, input, textarea")) return;
+      drag = { x: e.clientX, y: e.clientY, vx: state.view.x, vy: state.view.y, id: e.pointerId, panning: false };
     });
     port.addEventListener("pointermove", (e) => {
       if (!drag || e.pointerId !== drag.id) return;
-      state.view.x = drag.vx + e.clientX - drag.x;
-      state.view.y = drag.vy + e.clientY - drag.y;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.panning) {
+        if (Math.hypot(dx, dy) < PAN_SLOP) return;
+        drag.panning = true;
+        port.classList.add("panning");
+        try { port.setPointerCapture(e.pointerId); } catch {}
+      }
+      state.view.x = drag.vx + dx;
+      state.view.y = drag.vy + dy;
       applyView();
     });
-    const end = () => {
-      if (!drag) return;
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const panned = drag.panning;
       drag = null;
+      if (!panned) return;
+      swallowClick = e.type === "pointerup";
       port.classList.remove("panning");
       remember();
     };
     port.addEventListener("pointerup", end);
     port.addEventListener("pointercancel", end);
+    // The click that ends a pan is not a pick.
+    port.addEventListener("click", (e) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    }, true);
+    // A press on chip text would otherwise start a text selection or a
+    // native drag of a link, and the browser cancels the pointer for it.
+    const native = (e) => { if (!e.target.closest("input, textarea")) e.preventDefault(); };
+    port.addEventListener("selectstart", native);
+    port.addEventListener("dragstart", native);
     port.addEventListener("wheel", (e) => {
       e.preventDefault();
       const box = port.getBoundingClientRect();
