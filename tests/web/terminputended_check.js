@@ -50,6 +50,11 @@ const $ = (id) => (id === "term-input-field" ? FIELD : null);
 
 const ctx = {};
 const logged = [];
+/* A source without reviveSession (the commit this check was written against)
+   still has to reach the checks below and fail them on their own merits: a
+   slice list that throws here reports a missing function, not the behaviour
+   that was wrong. A no-op stands in for it. */
+const HAVE_REVIVE = src.indexOf("function reviveSession(") >= 0;
 new Function(
   "exports", "$", "logged",
   `let currentName = null, sessionEnded = false, snapshotName = null;
@@ -59,11 +64,16 @@ let sessionsCache = [];
 let lineSync = { session: null, mode: "local" };
 let termInputVerdictKey = null;
 function linkLog(kind, detail) { logged.push({ k: kind, ...(detail || {}) }); }
+function renderSizeChip() {}
+function refreshTermInput() { renderTermInputState(); }
 ` + ["lineSyncShared", "termInputQueueNote", "termInputEnded", "termInputEndedWhy",
-     "termInputLogVerdict", "noteSessionEnded", "shimEnded",
+     "termInputLogVerdict", "noteSessionEnded"].map(slice).join("\n") + "\n"
+  + (HAVE_REVIVE ? slice("reviveSession") : "function reviveSession(by, detail) {}\n")
+  + ["shimEnded",
      "renderTermInputField", "renderTermInputState"].map(slice).join("\n") + `
 Object.assign(exports, {
-  termInputEnded, renderTermInputState, noteSessionEnded, shimEnded,
+  termInputEnded, renderTermInputState, noteSessionEnded, reviveSession, shimEnded,
+  ended: () => sessionEnded,
   origin: () => ({ by: sessionEndedBy, at: sessionEndedAt }),
   set: (o) => {
     if ("name" in o) currentName = o.name;
@@ -207,6 +217,54 @@ check("a parked terminal records the first origin",
 check("and logs every telling as parked",
       logged.length === 2 && logged.every((e) => e.k === "term.ended" && e.parked === true
         && e.session === "s8" && e.pid === 700), logged);
+
+/* --- the reported bug (claunch-8d9fg): a live init never lifted it ------
+   A snapshot of an ended session sets the flag, and the poll then replaces
+   the snapshot with a live terminal once the record shows a running session
+   — a fresh socket whose `init` says `exited: false`. The record still
+   carries the same pid, so termInputEnded's "the poll lagging an exit frame"
+   branch held the notice up over a running session for as long as the reader
+   stayed on it. The link log from the report shows exactly that pair:
+
+     term.init session="s1892" pid=2485880 status="busy" exited=false same=false
+     input.verdict session="s1892" ended=true why="record running, same pid" by="snapshot"
+
+   The daemon's own word for the child this socket is on has to lift it. */
+logged.length = 0;
+ctx.set({ name: "s1", ended: true, snapshot: null, pid: 2485880, shared: false,
+          rows: [{ name: "s1", status: "busy", pid: 2485880 }] });
+check("a snapshot's ended flag holds the notice over a same-pid running record",
+      ENDED.test(paint({})), FIELD.placeholder);
+ctx.reviveSession("init", { status: "busy" });
+check("a live init lifts the ended flag", ctx.ended() === false, ctx.ended());
+check("...and the line goes back to the plain placeholder",
+      /^type for this session/.test(FIELD.placeholder) && !classes.has("queued"),
+      [FIELD.placeholder, classes.has("queued")]);
+check("...and the lift is logged with the telling it came from",
+      logged.filter((e) => e.k === "term.revived").length === 1
+        && logged.find((e) => e.k === "term.revived").by === "init"
+        && logged.find((e) => e.k === "term.revived").session === "s1"
+        && logged.find((e) => e.k === "term.revived").status === "busy",
+      logged);
+logged.length = 0;
+ctx.reviveSession("init", { status: "busy" });
+check("a live terminal is not logged again — there is nothing to lift",
+      logged.length === 0, logged);
+ctx.set({ ended: true, pid: 2485880,
+          rows: [{ name: "s1", status: "idle", pid: 2485880 }] });
+ctx.reviveSession("init", { status: "idle" });
+check("a snapshot that ends again before an init is still lifted by the next one",
+      ctx.ended() === false && /^type for this session/.test(FIELD.placeholder),
+      FIELD.placeholder);
+ctx.set({ ended: false, rows: [] });
+
+/* The frame wiring: an `init` that says exited ends it, one that does not
+   lifts it. Both are read off the shipped handler. */
+check("a live init revives the session line",
+      /else reviveSession\("init"/.test(slice("handleFrame")));
+check("an exited init still ends it first",
+      slice("handleFrame").indexOf('endSession("init"')
+        < slice("handleFrame").indexOf('reviveSession("init"'));
 
 /* Every place that sets the flag names its origin. */
 for (const [fn, re] of [
