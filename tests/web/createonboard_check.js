@@ -122,7 +122,7 @@ const onboardFailureNotices =
   // leg into a sentence the operator reads before the page leaves.
   assert.ok(/for \(const bad of onboardFailureNotices\(info\)\)/.test(src),
     "the create/spawn flow must report the legs the answer says failed");
-  assert.ok(/notify\(bad\.title, bad\.sub, \{ kind: "warn", sticky: true \}\)/.test(src),
+  assert.ok(/notify\(bad\.title, bad\.sub, \{ source: "page", kind: "warn", sticky: true \}\)/.test(src),
     "each failed leg is shown as a sticky card");
 }
 

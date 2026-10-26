@@ -1694,9 +1694,26 @@
     <div id="notice-split" title="drag to resize · double-click to reset"></div>
     <div id="notice-panel-head">
       <h2>Notifications</h2>
+      <button id="notice-panel-settings" type="button"
+              title="which kinds of notice to show">⚙</button>
       <button id="notice-panel-close" type="button" title="close (Esc)">×</button>
     </div>
     <div id="notice-panel-body"></div>
+    <!-- The kinds this browser shows (claunch-efpoi.1): laid over the
+         panel's lists by the ⚙ press, filled by noticeSettingsPaint() from
+         NOTICE_SOURCES and kept in localStorage. -->
+    <div id="notice-settings" class="hidden" role="dialog"
+         aria-label="notification settings">
+      <div id="notice-settings-head">
+        <h3>Show in notifications</h3>
+        <button id="notice-settings-close" type="button" title="close (Esc)">×</button>
+      </div>
+      <p class="wf-note">An unchecked kind puts up no card, leaves the panel's
+        lists and the bell, and is still recorded: checking it again shows
+        what came meanwhile. Hiding mesh chat messages does not stop their sound
+        or desktop notification. Kept in this browser.</p>
+      <div id="notice-settings-body"></div>
+    </div>
   </aside>
 </div>
 
