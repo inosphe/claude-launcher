@@ -812,7 +812,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li.sess-card[data-rail-mode="min"] {
   padding-top: 7px; padding-bottom: 7px;
 }
-#session-list .sess-card.active {
+#session-list .sess-card.active:not(.goto-flash) {
   background: #202b3a; box-shadow: inset 0 0 0 1px #426286;
 }
 #session-list li.sess-card .rail-name {
@@ -888,7 +888,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    (that row is the terminal on screen; this one is where you just looked).
    An inset ring rather than a border so the row does not move by a pixel
    when it lights. */
-#session-list li.sess-card.goto-flash {
+#session-list li.goto-flash {
   background: #1b2a44; box-shadow: inset 0 0 0 1px #1f6feb;
 }
 /* A spawned session sits under the one that spawned it.
