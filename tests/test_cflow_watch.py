@@ -134,6 +134,41 @@ def test_a_gate_is_delivered_by_default_and_a_pacing_wait_is_not(tmp_path):
     assert explicit["events"], explicit
 
 
+def _hold(scope, cwd, *approvals):
+    """Write approvals onto a started run (the shape ``store``/``runtime`` hold)."""
+    st = v2_store.RunStore(str(cwd), scope)
+    with st.lock():
+        state = st.load_state()
+        state["approvals"] = list(approvals)
+        st.commit(state, [])
+    return st.load_state().get("approvals") or []
+
+
+def test_a_storage_recovery_hold_is_not_owed_to_a_person(tmp_path):
+    """A run the store took back from corruption holds itself; that is not a gate.
+
+    The hold kind is written as ``monitor_violation`` with
+    ``monitor="storage-recovery"`` (``store.RunStore._recover``,
+    ``store.RECOVERY_MONITOR``). The owed list must skip exactly that one and
+    still carry the others, and reading the slot must not raise: the constant
+    lives in ``cflow2.store``, not in ``cflow2.runtime``.
+    """
+    scope = _start(tmp_path)
+    written = _hold(scope, tmp_path,
+                    {"kind": "monitor_violation", "monitor": "storage-recovery",
+                     "instance": None},
+                    # Another halted monitor is a person's to release, so it stays.
+                    {"kind": "monitor_violation", "monitor": "gate-budget",
+                     "instance": None},
+                    {"kind": "loop_limit", "instance": "i1", "node": "a"})
+    assert [a["kind"] for a in written] == ["monitor_violation", "monitor_violation",
+                                            "loop_limit"]
+
+    found = cflow_watch.slot(str(tmp_path), scope)
+    assert found is not None
+    assert found["owed"] == ["monitor_violation:", "loop_limit: a"], found["owed"]
+
+
 def test_the_reading_token_changes_only_when_the_run_moves(tmp_path):
     scope = _start(tmp_path)
     first = cflow_watch.token(str(tmp_path), scope)

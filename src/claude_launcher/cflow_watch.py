@@ -141,7 +141,10 @@ def _v2_slot(cwd: str, scope: str) -> Optional[dict]:
                 owed.append(f"choose: {title}")
     for approval in state.get("approvals") or []:
         kind = str(approval.get("kind") or "")
-        if kind == v2_runtime.RECOVERY_MONITOR:
+        # A run the store took back from corruption holds itself
+        # (``store.RunStore._recover``): the record's ``kind`` is the generic
+        # hold kind, and the monitor it names is what makes it not a gate.
+        if approval.get("monitor") == v2_store.RECOVERY_MONITOR:
             continue
         owed.append(f"{kind}: {approval.get('label') or approval.get('node') or ''}".strip())
     return {
