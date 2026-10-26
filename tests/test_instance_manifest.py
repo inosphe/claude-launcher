@@ -201,6 +201,43 @@ def test_a_session_does_not_carry_its_daemons_port(home, tmp_path, monkeypatch, 
         os.environ.update(saved)
 
 
+def test_a_session_does_not_carry_its_daemons_interpreter_settings(
+    home, tmp_path, monkeypatch
+):
+    """``PYTHON_GIL=0`` is how a free-threading daemon was started, and a
+    ``claunch`` from the ordinary tool venv refuses it during preinit --
+    before any of our code runs, so the session cannot recover (claunch-t9xko:
+    its CLI and its MCP server both died that way). The session's environment
+    must not carry the daemon's setting.
+    """
+    from claude_launcher import profile
+    from claude_launcher.daemon import harness
+
+    monkeypatch.setenv("PYTHON_GIL", "0")
+    profile.create("work")
+
+    sdef = harness.normalize(
+        harness.SessionDef(name="sx", profile="work", cwd=str(tmp_path))
+    )
+    _, env, _ = harness.build_command(sdef)
+
+    assert "PYTHON_GIL" not in env
+    assert im.INTERPRETER_ONLY_ENV == ("PYTHON_GIL",)
+
+
+def test_engine_env_drops_the_daemons_interpreter_settings(home):
+    """The engine runs gates and probes on a session's behalf, and one that
+    inherits ``PYTHON_GIL=0`` never starts at all: the wait it backs polls a
+    command that dies in preinit (claunch-t9xko: a landed-wait polled seven
+    times without firing). Everything else in the environment is left as it
+    was -- the engine's own variables still reach the command.
+    """
+    env = im.engine_env({"PYTHON_GIL": "0", "PATH": "/usr/bin"}, None)
+
+    assert "PYTHON_GIL" not in env
+    assert env["PATH"] == "/usr/bin"
+
+
 def test_a_daemon_started_from_a_session_binds_its_manifests_port(
     home, tmp_path, monkeypatch
 ):
