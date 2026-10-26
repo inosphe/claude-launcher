@@ -845,6 +845,51 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   flex-wrap: wrap; white-space: normal; overflow: visible;
 }
 #session-list li.sess-card .rail-ctx-tokens { flex-wrap: wrap; }
+/* Internal surfaces align to the same 16px inset. The metric rows remain
+   ordinary children so the incremental poll can replace them in place. */
+#session-list li.sess-card .rail-brief {
+  background: #172331; border-left: 3px solid #456a91;
+  border-radius: 0 6px 6px 0; padding: 8px 10px 8px 13px;
+}
+#session-list li[data-rail-mode="expanded"] .rail-actions {
+  background: #171e27; border-block: 1px solid #344050;
+  padding-top: 4px; padding-bottom: 4px; border-radius: 4px;
+}
+#session-list li[data-rail-mode="expanded"] :is(.rail-ctx-line, .rail-ctx-tokens) {
+  background: #151d27; border-left: 2px solid #344050;
+  padding: 7px 8px 7px 14px; border-radius: 4px;
+  box-sizing: border-box;
+}
+#session-list li[data-rail-mode="expanded"] :is(.rail-seen, .rail-life) {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0; padding-left: 0; background: #171e27;
+  border: 1px solid #344050; border-radius: 5px;
+}
+#session-list li[data-rail-mode="expanded"] .rail-life {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+#session-list li[data-rail-mode="expanded"] .rail-seen-pair {
+  min-width: 0; padding: 5px 8px; flex-wrap: wrap; gap: 2px 5px;
+}
+#session-list li[data-rail-mode="expanded"] .rail-seen-pair + .rail-seen-pair {
+  border-left: 1px solid #344050;
+}
+#session-list li.sess-card .rail-status-check {
+  background: #151d27; border: 1px solid #344050;
+}
+#session-list li.sess-card :is(.sess-cflow, .sess-cflow2) {
+  background: #171e27; border: 1px solid #344050;
+  border-radius: 5px; padding: 5px 8px; box-sizing: border-box;
+}
+#session-list li.sess-card .sess-brief {
+  background: #171e27; border: 1px solid #344050;
+  border-radius: 6px; padding: 8px; margin-left: 0; flex-basis: 100%;
+}
+#session-list li.sess-card .sess-brief-note { margin-top: 5px; }
+#session-list li.sess-card .sess-brief-refresh {
+  min-width: 24px; min-height: 24px; border: 1px solid #41536a;
+  border-radius: 4px; background: #223249;
+}
 /* A stand-in row for the rows the rail does not draw (app.js, claunch-thuwx):
    it holds their height so the list keeps its full length and the scrollbar
    does not move. `#session-list li` above would add its padding and border to

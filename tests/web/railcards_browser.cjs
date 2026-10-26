@@ -72,8 +72,10 @@ const sessions = [
 ];
 
 const refreshRequests = [];
+const briefingRequests = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
+  if (url.pathname.endsWith("/briefing")) briefingRequests.push(url.pathname + url.search);
   if (url.searchParams.get("refresh") === "1" || url.pathname.endsWith("/status-checks/refresh")) {
     refreshRequests.push({ path: url.pathname + url.search, method: req.method });
   }
@@ -397,12 +399,15 @@ const READ = `(() => {
       const li = document.querySelector('#session-list li[data-name="w1"]');
       return li && li.dataset.railMode === "expanded";
     });
-    /* The card asks the daemon on sight and is drawn "summarising…" first;
-       the summary is what this block is about, so wait for it. */
-    await page.waitForFunction(() => {
-      const li = document.querySelector('#session-list li[data-name="w1"]');
-      return li && li.querySelector(".sess-brief .sess-brief-age");
-    });
+    const worker = page.locator('#session-list li[data-name="w1"]');
+    await worker.locator(".sess-brief-note").waitFor();
+    assert.deepEqual(briefingRequests, [], "opening a never-summarised card makes no briefing request");
+    assert.match(await worker.locator(".sess-brief-note").innerText(), /No summary yet/);
+    assert.equal(await worker.locator(".sess-brief-refresh").isEnabled(), true);
+    await worker.locator(".sess-brief-refresh").click();
+    await worker.locator(".sess-brief-age").waitFor();
+    assert.deepEqual(briefingRequests, ["/api/sessions/w1/briefing?refresh=1"],
+      "only the explicit refresh requests a summary");
     rows = await page.evaluate(READ);
     const opened = rows.find((r) => r.name === "w1");
     assert.equal(opened.mode, "expanded", "picking a card expands it");
@@ -430,9 +435,11 @@ const READ = `(() => {
     // The ancestor overlay may cover the name after the previous scroll;
     // the summary is another ordinary target of the row's navigation.
     await page.locator('#session-list li[data-name="lead"] .rail-brief').click();
-    await page.waitForFunction(() => document.querySelector(
-      '#session-list li[data-name="lead"][data-rail-mode="expanded"] .sess-brief-age'));
     const lead = page.locator('#session-list li[data-name="lead"]');
+    await lead.locator(".sess-brief-note").waitFor();
+    assert.equal(briefingRequests.length, 1, "opening a second uncached card adds no request");
+    await lead.locator(".sess-brief-refresh").click();
+    await lead.locator(".sess-brief-age").waitFor();
     const unified = await lead.evaluate((li) => {
       const visible = (e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0;
       const summary = li.querySelector(".rail-brief");
@@ -445,12 +452,15 @@ const READ = `(() => {
         rowRefreshes: [...li.querySelectorAll(".sess-brief-rowref, .sess-status-check-rowref")].filter(visible).length,
         cardRefreshes: [...li.querySelectorAll(".sess-brief-refresh, .sess-brief-check-refresh")].filter(visible).length,
         summaryBeforeActions: summary.getBoundingClientRect().bottom <= actions.getBoundingClientRect().top,
-        inset: [summary, actions, meta].map((e) => getComputedStyle(e).paddingLeft),
+        inset: [summary, actions, meta].map((e) => {
+          const c = getComputedStyle(e);
+          return parseFloat(c.paddingLeft) + parseFloat(c.borderLeftWidth);
+        }),
       };
     });
     assert.deepEqual(unified, { titles: 0, ctx: 0, gauge: true,
       rowRefreshes: 0, cardRefreshes: 2, summaryBeforeActions: true,
-      inset: ["16px", "16px", "16px"] }, "expanded rail has one summary, one context reading and one pair of refreshes");
+      inset: [16, 16, 16] }, "expanded rail has one summary, one context reading and one pair of refreshes");
     refreshRequests.length = 0;
     await lead.locator(".sess-brief-refresh").click();
     await page.waitForFunction(() => !document.querySelector(
@@ -460,6 +470,29 @@ const READ = `(() => {
       { path: "/api/sessions/lead/briefing?refresh=1", method: "GET" },
       { path: "/api/sessions/lead/status-checks/refresh", method: "POST" },
     ], "the two visible refresh controls retain their distinct functions");
+
+    for (const width of [260, 440]) for (const theme of ["light", "dark"]) {
+      await page.evaluate(({width, theme}) => {
+        document.getElementById("sidebar").style.width = width + "px";
+        window.claunchTheme.set(theme);
+      }, {width, theme});
+      const sections = await lead.evaluate(li => {
+        const rowBg = getComputedStyle(li).backgroundColor;
+        const names = [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"];
+        return names.map(selector => {
+          const e = li.querySelector(selector), c = getComputedStyle(e), box = e.getBoundingClientRect();
+          const cells = [...e.querySelectorAll(".rail-seen-pair")].map(x => x.getBoundingClientRect());
+          return {selector, filled: c.backgroundColor !== "rgba(0, 0, 0, 0)" && c.backgroundColor !== rowBg,
+            painted: box.width > 0 && box.height > 0,
+            aligned: cells.every(x => Math.abs(x.width - cells[0].width) < 1),
+            contained: cells.every(x => x.left >= box.left && x.right <= box.right + 1)};
+        });
+      });
+      for (const section of sections) {
+        assert.ok(section.filled && section.painted && section.aligned && section.contained,
+          `${theme} ${width}px internal surface stays filled, visible and aligned: ${JSON.stringify(section)}`);
+      }
+    }
 
     await page.evaluate(() => { document.getElementById("sidebar").style.width = "260px"; });
     const narrowMetadata = await lead.evaluate(li => {
@@ -480,6 +513,7 @@ const READ = `(() => {
       "a child card keeps its own density when its parent opens");
 
     /* And a pinned card is expanded without being picked. */
+    const beforeReload = briefingRequests.length;
     const reload = page.waitForEvent("load");
     await page.evaluate(() => {
       localStorage.setItem("claunch_session_pins:/", JSON.stringify(["rev-a"]));
@@ -494,6 +528,7 @@ const READ = `(() => {
     rows = await page.evaluate(READ);
     assert.equal(rows.find((r) => r.name === "rev-a").mode, "expanded",
       "a pinned one-line role is expanded by the pin alone");
+    assert.equal(briefingRequests.length, beforeReload, "restoring pinned cards never requests a summary");
     assert.equal(rows.find((r) => r.name === "rev-b").mode, "min",
       "and its unpinned neighbour stays a one-line card");
 
