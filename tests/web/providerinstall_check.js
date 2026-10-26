@@ -105,6 +105,11 @@ const LISTING = {
       api_key_set: true,
       problems: [], kept: ["routing"] },
     { name: "broken", entry: {}, problems: ["endpoints is required"] },
+    { name: "fx-reasoning",
+      entry: { endpoints: { openai: "https://api.fireworks.ai/inference/v1" },
+               models: { default: "accounts/fireworks/models/x" },
+               reasoning_effort: "high", openai_reasoning_format: "openai" },
+      problems: [], kept: [] },
   ],
   presets: [
     { name: "gateway", label: "Example gateway", note: "", error: "",
@@ -121,6 +126,19 @@ const LISTING = {
             openai_reasoning_formats: [], anthropic_auth_headers: [], fields: [],
             reserved: ["default", "claude"] },
 };
+/* The daemon spells the neutral lists it validates against, and the page must
+   offer those rather than its own copy -- a level added to provider_spec has to
+   reach this select without an edit to app.js. The empty lists above are what a
+   daemon that published nothing looks like.
+
+   The published lists below are deliberately NOT the ones app.js hardcodes
+   (`low/medium/high`, `deepseek/openai`): each carries one value the fallback
+   does not. With equal lists both paths render the same select, so a page that
+   ignored the daemon would still pass -- measured on 6f2ecdad, where deleting
+   the read left this file green (reviewer s1396-rev2). One extra value each
+   makes the assertion fail on exactly that mutation. */
+LISTING.fields.reasoning_efforts = ["low", "medium", "high", "xhigh"];
+LISTING.fields.openai_reasoning_formats = ["deepseek", "openai", "responses"];
 
 (async () => {
   context.providersState.data = LISTING;
@@ -143,6 +161,100 @@ const LISTING = {
   ok("an installed provider with a problem shows the reason", page.includes("endpoints is required"));
   ok("an installed provider's facts are drawn",
      page.includes("anthropic: https://apis.opengateway.ai"));
+
+  // --- the two reasoning selects -------------------------------------------
+  // provider_reasoning: a provider's reasoning_effort is only carried when the
+  // same entry declares how to encode it (openai_reasoning_format). Both are
+  // edited here, both are validated by provider_spec on save, and the page
+  // reads the choices from the daemon rather than restating them.
+  {
+    const card2 = context.providersPanel();
+    // The preset block below drives the draft this first panel captured, so the
+    // draft installed for the checks here is put back before leaving.
+    const before = context.providersState.draft;
+    const selectFor = (label) => {
+      const row = all(card2).find(
+        (n) => n.tag === "label" && (n.kids[0] || {}).textContent === label);
+      if (!row) throw new Error(`no form row for ${label}`);
+      return row.kids.find((k) => k.tag === "select");
+    };
+    const values = (select) => select.kids.map((o) => o.value);
+    // `xhigh` and `responses` are only in the daemon's published lists, not in
+    // the constants app.js falls back to. A page that ignored the daemon and
+    // drew its own copy would come up two values short here.
+    check("reasoning_effort offers the daemon's levels, plus unset",
+          values(selectFor("reasoning_effort")),
+          ["", "low", "medium", "high", "xhigh"]);
+    check("openai_reasoning_format offers the daemon's formats, plus none",
+          values(selectFor("openai_reasoning_format")),
+          ["", "deepseek", "openai", "responses"]);
+    ok("the format's empty choice says none rather than (unset)",
+       selectFor("openai_reasoning_format").kids[0].textContent === "none");
+
+    // A level neither list carries but the file still holds stays selectable:
+    // dropping it would show the select on a value that is not the one on disk,
+    // and the next Save would rewrite the provider silently.
+    const kept = context.providerDraftFromEntry({ reasoning_effort: "minimal",
+                                          openai_reasoning_format: "openai" });
+    context.providersState.draft = kept;
+    const card3 = context.providersPanel();
+    const row3 = all(card3).find(
+      (n) => n.tag === "label" && (n.kids[0] || {}).textContent === "reasoning_effort");
+    const select3 = row3.kids.find((k) => k.tag === "select");
+    check("a stored level outside the published list stays selectable",
+          select3.kids.map((o) => o.value),
+          ["", "low", "medium", "high", "xhigh", "minimal"]);
+    check("and it is the selected value", select3.value, "minimal");
+    context.providersState.draft = before;
+
+    // A daemon that publishes nothing still draws a usable select: the
+    // constants in this file are the last resort, not dead code. Without this
+    // branch the two selects would be empty on an older daemon.
+    const published = context.providersState.data.fields;
+    context.providersState.data.fields = {
+      ...published, reasoning_efforts: [], openai_reasoning_formats: [],
+    };
+    const card4 = context.providersPanel();
+    const selectIn = (label) => all(card4).find(
+      (n) => n.tag === "label" && (n.kids[0] || {}).textContent === label,
+    ).kids.find((k) => k.tag === "select");
+    check("an empty published list falls back to the form's own levels",
+          selectIn("reasoning_effort").kids.map((o) => o.value),
+          ["", "low", "medium", "high"]);
+    check("an empty published list falls back to the form's own formats",
+          selectIn("openai_reasoning_format").kids.map((o) => o.value),
+          ["", "deepseek", "openai"]);
+    const missing = context.providersState.data.fields;
+    context.providersState.data.fields = {};
+    const card5 = context.providersPanel();
+    const selectIn5 = (label) => all(card5).find(
+      (n) => n.tag === "label" && (n.kids[0] || {}).textContent === label,
+    ).kids.find((k) => k.tag === "select");
+    check("a daemon that sends no fields block draws the same fallback",
+          selectIn5("reasoning_effort").kids.map((o) => o.value),
+          ["", "low", "medium", "high"]);
+    context.providersState.data.fields = published;
+
+    // The installed row shows the pair, because neither half alone says what a
+    // launch will do.
+    const facts = text(context.providersPanel());
+    ok("an installed provider shows its reasoning pair",
+       facts.includes("reasoning high / openai"));
+    // A save keeps both keys: they are form fields, so the round trip is lossy
+    // exactly here if the controls are not wired to the draft.
+    const loaded = context.providerDraftFromEntry(LISTING.providers[2].entry);
+    const back = context.providerEntryFromDraft(loaded);
+    check("openai_reasoning_format survives a load and a save",
+          back.openai_reasoning_format, "openai");
+    check("reasoning_effort survives a load and a save",
+          back.reasoning_effort, "high");
+    // Clearing one select is how a person removes the key, and the entry sent
+    // then has to leave it out rather than send "".
+    loaded.openai_reasoning_format = "";
+    const cleared = context.providerEntryFromDraft(loaded);
+    ok("clearing the format removes the key instead of writing an empty one",
+       !("openai_reasoning_format" in cleared));
+  }
 
   // --- loading a provider and saving it back is lossless -------------------
   // The reviewed defect: the form drew no control for `routing`, `dynamic`,

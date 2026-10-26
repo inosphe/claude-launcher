@@ -191,11 +191,13 @@ def projected_effort(
         return caller, None
     if spec.reasoning_effort and not spec.openai_reasoning_format:
         name = provider or "the selected provider"
+        # The effort may have come from the profile rather than from the
+        # provider entry, so this names the missing field instead of saying
+        # which layer set the level it cannot carry.
         return None, (
-            f"provider {name!r} declares reasoning_effort "
-            f"{spec.reasoning_effort!r} but no openai_reasoning_format; "
-            "launching without explicit reasoning rather than refusing the "
-            "session. Add openai_reasoning_format to the provider, or pass "
+            f"provider {name!r} has no openai_reasoning_format, so the "
+            f"reasoning effort {spec.reasoning_effort!r} is not sent; launching "
+            "without it. Add openai_reasoning_format to the provider, or pass "
             "'--effort off' to run without a launcher-imposed effort."
         )
     return spec.reasoning_effort, None

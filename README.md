@@ -946,6 +946,15 @@ cannot carry):
 | `reasoning_effort` | `CLAUDE_CODE_EFFORT_LEVEL` | `-c model_reasoning_effort=...` | `--thinking ...`, `defaultThinkingLevel`, and the outgoing request |
 | `openai_reasoning_format` | -- | -- | the registered model's OpenAI Chat Completions reasoning encoding |
 
+A `reasoning_effort` reaches a Pi launch only together with
+`openai_reasoning_format`, which says how the level is encoded in the request
+(`deepseek` adds a thinking envelope, `openai` sends `reasoning_effort`
+alone). A provider that carries the effort without a format is not refused:
+the launch runs without reasoning, the daemon logs a warning, and the Profiles
+page names the provider field to set. A session launched with an explicit
+`--effort <level>` is refused instead, because that level was asked for.
+Both fields are edited on the Settings ▸ Providers tab.
+
 `harness_options.<harness>` is the one place keyed by harness name, for what
 no neutral field expresses. Each translator accepts its own channels and
 rejects any other key at load time:

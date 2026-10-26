@@ -34537,12 +34537,16 @@ function piTuiModeEditor(row) {
    the cell has to tell apart, because they answer different questions: nothing
    configured (the harness's own default decides), declared on this profile, and
    inherited from the provider/template/profile env. `reasoning_effort_problem`
-   is the fourth: the profile's harness has no translation for the field, so the
-   launch is refused rather than run on a default nobody read. */
+   is the fourth, and `reasoning_effort_refused` says which of two things it
+   means: a harness with no translation for the field refuses the launch, while
+   a Pi provider that declares no openai_reasoning_format launches without the
+   level and the message points at the provider field to fill in. */
 function reasoningEffortLabel(row) {
   const value = row.reasoning_effort;
   if (row.reasoning_effort_problem) {
-    return { text: `${value || "?"} — launch refused`, cls: "profile-pending",
+    const fate = row.reasoning_effort_refused === false
+      ? "omitted at launch" : "launch refused";
+    return { text: `${value || "?"} — ${fate}`, cls: "profile-pending",
              title: row.reasoning_effort_problem };
   }
   if (!value) {
@@ -34613,7 +34617,10 @@ function reasoningEffortEditor(row) {
   box.appendChild(el("p", "wf-note",
     "Applies to new sessions; an effort chosen when a session is created wins."));
   if (row.reasoning_effort_problem) {
-    box.appendChild(el("p", "wf-error", row.reasoning_effort_problem));
+    // Refused is an error; omitted is a warning the provider form can fix.
+    box.appendChild(el("p",
+      row.reasoning_effort_refused === false ? "wf-warning" : "wf-error",
+      row.reasoning_effort_problem));
   }
   if (effortError.profile === row.profile) {
     box.appendChild(el("p", "wf-error", effortError.text));
@@ -38580,9 +38587,12 @@ const PROVIDER_FORM_FIELDS = [
   { key: "service", label: "service", note: "anthropic, custom, or a backend's own name" },
   { key: "harness", label: "harness", note: "the harness this provider is meant for" },
   { key: "reasoning_effort", label: "reasoning_effort", kind: "select",
-    choices: ["", "low", "medium", "high"] },
+    choices: ["", "low", "medium", "high"], choicesFrom: "reasoning_efforts",
+    note: "the level a launch asks for; a Pi launch also needs the format below to send it" },
   { key: "openai_reasoning_format", label: "openai_reasoning_format", kind: "select",
-    choices: ["", "deepseek", "openai"] },
+    choices: ["", "deepseek", "openai"], choicesFrom: "openai_reasoning_formats",
+    blank: "none",
+    note: "how the level is encoded: alone (openai) or with a thinking envelope (deepseek); none means reasoning_effort is not sent at all" },
 ];
 
 /* ``options.kept`` names the keys of the loaded entry this form does not draw.
@@ -38711,6 +38721,22 @@ async function refreshProviders() {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The values a select offers. The daemon publishes the neutral lists it
+   validates against (``provider_spec.REASONING_EFFORTS`` and
+   ``OPENAI_REASONING_FORMATS`` through ``provider_install.listing``), so a
+   level added there is offered without an edit here -- and a value already
+   stored stays selectable even when the published list does not carry it, so
+   the control never sits on a value that is not the one on disk. */
+function providerSelectChoices(field, current) {
+  const published = ((providersState.data || {}).fields || {})[field.choicesFrom];
+  const names = Array.isArray(published) && published.length
+    ? published.map(String) : (field.choices || []).filter(Boolean);
+  const choices = [""].concat(names);
+  const value = String(current === undefined || current === null ? "" : current).trim();
+  if (value && !choices.includes(value)) choices.push(value);
+  return choices;
+}
+
 function providerFormRow(field, draft) {
   const row = el("label", "provider-form-row");
   const caption = el("span", "provider-form-label", field.label);
@@ -38723,10 +38749,10 @@ function providerFormRow(field, draft) {
     control.addEventListener("change", () => { draft[field.key] = control.checked; });
   } else if (field.kind === "select") {
     control = document.createElement("select");
-    for (const choice of field.choices || []) {
+    for (const choice of providerSelectChoices(field, draft[field.key])) {
       const option = document.createElement("option");
       option.value = choice;
-      option.textContent = choice || "(unset)";
+      option.textContent = choice || (field.blank || "(unset)");
       control.appendChild(option);
     }
     control.value = draft[field.key] || "";
@@ -38794,6 +38820,13 @@ function providersPanel() {
     const model = ((row.entry || {}).models || {}).default;
     if (model) bits.push(`default: ${model}`);
     if (row.entry && row.entry.context_window) bits.push(`ctx ${row.entry.context_window}`);
+    // The reasoning pair reads together because neither works alone for Pi:
+    // the level without a format is dropped at launch.
+    const level = (row.entry || {}).reasoning_effort;
+    const format = (row.entry || {}).openai_reasoning_format;
+    if (level || format) {
+      bits.push(`reasoning ${level || "—"} / ${format || "no format"}`);
+    }
     line.appendChild(el("span", "provider-installed-facts", bits.join(" · ")));
     for (const problem of row.problems || []) {
       line.appendChild(el("span", "provider-installed-problem", problem));
