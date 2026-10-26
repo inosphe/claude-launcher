@@ -26,7 +26,8 @@ function element() {
 const body = element();
 const ctx = vm.createContext({
   $: id => nodes[id],
-  notify: (title, sub, opts) => notices.push({ title, sub, key: opts && opts.key }),
+  notify: (title, sub, opts) => notices.push({ title, sub, key: opts && opts.key,
+    routine: !!(opts && opts.routine) }),
   navigator: { clipboard: { writeText: async text => { written.push(text); } } },
   document: {
     body, activeElement: null,
@@ -43,6 +44,9 @@ vm.runInContext(source.slice(source.indexOf('async function copyToBrowserClipboa
   assert.deepEqual(written, ['s459'], 'the trimmed name reaches the clipboard');
   assert.equal(notices.at(-1).title, 'Copied session name');
   assert.equal(notices.at(-1).sub, 's459');
+  // claunch-ewk3x.1: the confirmation is `routine`, so its history row is born
+  // read and the bell never counts it — asserted on the real call site.
+  assert.equal(notices.at(-1).routine, true, 'the copy confirmation is a routine notice');
 
   // Read at click time: a later attach rewrites the title.
   nodes['term-title'].textContent = 's460';
@@ -68,5 +72,6 @@ vm.runInContext(source.slice(source.indexOf('async function copyToBrowserClipboa
   ctx.document.execCommand = () => false;
   await ctx.copyTermTitle();
   assert.equal(notices.at(-1).title, 'Copy failed');
-  console.log('termtitlecopy: markup, click copies name, read at click, empty no-op, fallback, refusal passed');
+  assert.equal(notices.at(-1).routine, false, 'a refusal is not routine: it stays unread');
+  console.log('termtitlecopy: markup, click copies name, read at click, empty no-op, fallback, refusal, routine confirmation passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
