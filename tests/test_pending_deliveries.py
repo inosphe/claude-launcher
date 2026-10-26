@@ -153,6 +153,44 @@ def test_a_delivery_from_a_worker_thread_is_still_typed():
     asyncio.run(run())
 
 
+def test_a_closed_session_loop_refuses_and_leaves_nothing_waiting():
+    """The third branch: the session holds a loop, but it is closed.
+
+    ``call_soon_threadsafe`` raises ``RuntimeError`` on a closed loop, and
+    the record has already been appended to the queue by then. Both halves
+    of the answer are load-bearing, and neither was pinned before:
+
+    - the record is removed -- otherwise the dashboard shows a message
+      waiting that nothing will ever type, which is the same silent loss
+      this whole change is about, only visible;
+    - ``False`` comes back -- ``True`` would tell the caller its message was
+      accepted while nothing was scheduled.
+
+    Called from a thread away from any loop: a live caller loop would win
+    the ``_loop or running`` fallback and this branch would never be reached
+    (that is ``test_a_delivery_from_a_worker_thread_is_still_typed``).
+    """
+
+    async def run():
+        s = _Fake()
+        dead = asyncio.new_event_loop()
+        dead.close()
+        s._loop = dead
+        seen = {}
+
+        def off_loop():
+            seen["accepted"] = s.queue_delivery("nudge")
+            seen["pending"] = s.pending_deliveries()
+
+        thread = threading.Thread(target=off_loop)
+        thread.start()
+        thread.join()
+        assert seen["accepted"] is False, "a closed loop must not read as accepted"
+        assert seen["pending"] == [], "a refused delivery must not stay in the queue"
+
+    asyncio.run(run())
+
+
 def test_a_session_without_a_loop_refuses_instead_of_losing_the_message():
     """A double, or a session reached from a thread with no loop behind it,
     cannot run the send. Accepting it would be the same silent loss: say no,

@@ -582,9 +582,14 @@ def test_a_guest_delivery_that_raises_is_not_swallowed(home, tmp_path, caplog):
     ate it. The daemon log showed only a never-awaited warning; the thread
     row said the message was accepted.
 
-    Two assertions, one per half of the defect: the guest is actually typed
-    into from the handler's worker thread, and a delivery that raises anyway
-    leaves a line in the log rather than reading as "nowhere to go".
+    What this pins is the *reporting* half: a delivery that raises is on the
+    record (an ERROR line naming the session) and the thread row says
+    ``False`` rather than claiming the message went in. The typing half --
+    that a worker-thread delivery is actually typed -- is
+    ``tests/test_pending_deliveries.py::
+    test_a_delivery_from_a_worker_thread_is_still_typed``, which drives the
+    real ``queue_delivery``; this test replaces it with a raising double on
+    purpose, so it never observes a message arriving.
     """
     import logging
 
