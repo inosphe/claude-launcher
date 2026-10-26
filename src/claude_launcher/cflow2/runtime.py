@@ -3838,6 +3838,29 @@ def delegate_update(delegation: str, *, expect: Optional[Tuple[str, ...]] = None
     return out["ok"]
 
 
+def delegate_child_ended(delegation: str, *, cwd: Optional[str] = None,
+                         scope: Optional[str] = None, now: Optional[float] = None,
+                         **fields: Any) -> bool:
+    """Mark the child session of a cancelled delegation as dealt with
+    (``child_ended`` plus ``fields``), in a run of any status -- an aborted
+    run cancels its delegations as it ends. A compare-and-set: False when
+    the record is not cancelled, has no child, or was marked already, so
+    the caller that gets True is the one that ends the child (claunch-dm09i.4)."""
+    out = {"ok": False}
+
+    def op(r: Run) -> None:
+        rec = r.state.get("delegations", {}).get(delegation)
+        if rec is None or rec.get("status") != "cancelled" or not rec.get("child"):
+            return
+        if rec.get("child_ended"):
+            return
+        rec["child_ended"] = store_mod.utcnow()
+        rec.update(fields)
+        out["ok"] = True
+    _mutate(cwd, scope, now, op)
+    return out["ok"]
+
+
 def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
                      scope: Optional[str] = None, now: Optional[float] = None) -> str:
     """The executor a delegation got cannot run it after all (spawn policy

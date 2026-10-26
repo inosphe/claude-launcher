@@ -834,6 +834,82 @@ def test_orphan_child_appearing_after_reroute_is_killed(tmp_path):
     assert killed == [("own", "late")]  # once
 
 
+def _running_child(tmp_path, killed):
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+
+    def spawn(parent, body):
+        mgr.add_kid("kid", parent, body["task"], str(tmp_path))
+        return "kid"
+
+    clock = _clock(mgr, spawn=spawn, kill_child=lambda p, c: killed.append((p, c)))
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    assert _rec(tmp_path, did)["child"] == "kid"
+    return mgr, clock, did
+
+
+def test_cancelled_session_delegation_ends_its_child_once(tmp_path):
+    killed = []
+    mgr, clock, did = _running_child(tmp_path, killed)
+    clock.scan()
+    assert killed == []  # an open delegation's child is left alone
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    assert _rec(tmp_path, did)["status"] == "cancelled"
+    clock.scan()
+    assert killed == [("own", "kid")]
+    ev = _events(tmp_path, "cancelled_child")
+    assert len(ev) == 1 and ev[0]["child"] == "kid" and ev[0]["outcome"] == "killed"
+    assert _rec(tmp_path, did)["child_ended"]
+    clock.scan()
+    assert killed == [("own", "kid")]  # once
+
+
+def test_cancelled_delegation_kill_failure_is_journaled_not_repeated(tmp_path):
+    mgr, clock, did = _running_child(tmp_path, [])
+    calls = []
+
+    def refuse(parent, child):
+        calls.append(child)
+        raise RuntimeError("refused")
+
+    clock.kill_child = refuse
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    clock.scan()
+    clock.scan()
+    assert calls == ["kid"]
+    ev = _events(tmp_path, "cancelled_child")
+    assert len(ev) == 1 and ev[0]["outcome"] == "kill failed: refused"
+
+
+def test_cancelled_delegation_whose_child_exited_is_not_killed(tmp_path):
+    killed = []
+    mgr, clock, did = _running_child(tmp_path, killed)
+    mgr.sessions["kid"].exited = True
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    clock.scan()
+    assert killed == []
+    assert not _events(tmp_path, "cancelled_child")
+    rec = _rec(tmp_path, did)
+    assert rec["child_ended"] and rec["child_end"] == "already exited"
+
+
+def test_cancelled_delegation_without_child_or_session_executor_is_skipped(tmp_path):
+    killed = []
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+    clock = _clock(mgr, spawn=lambda p, b: (_ for _ in ()).throw(
+        cflow2_exec.SpawnRefused("no")), kill_child=lambda p, c: killed.append(c))
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    assert _rec(tmp_path, did)["executor"] == "subagent"
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    clock.scan()
+    assert killed == [] and not _events(tmp_path, "cancelled_child")
+
+
 def test_boot_requeues_spawning_without_child_once_then_reroutes(tmp_path):
     mgr = KidManager(FakeSession("own", str(tmp_path)))
     clock = _clock(mgr, spawn=lambda p, b: (_ for _ in ()).throw(AssertionError("no spawn")))

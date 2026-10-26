@@ -699,6 +699,9 @@ class Cflow2Clock:
             # Before the liveness check: a trigger recorded as the run
             # finished (a leave of the last node) is still performed.
             self._claim(cwd, scope, first)
+        # Before the liveness check: an abort cancels its delegations as it
+        # ends the run, and their children are still running.
+        self._end_cancelled_children(cwd, scope, first)
         if first.get("status") not in runtime.LIVE_STATUSES:
             self._open_delegations.pop((cwd, scope), None)
             self._driver_nudged.pop((cwd, scope), None)
@@ -1183,6 +1186,54 @@ class Cflow2Clock:
         with contextlib.suppress(OSError):
             st.write_receipt(did, json.dumps({"marker": marker, "since": time.time(),
                                               "parent": st.scope}), ".lost.json")
+
+    def _end_cancelled_children(self, cwd: str, scope: str, state: Dict[str, Any]) -> None:
+        """End the child session of a cancelled session/fork delegation.
+
+        Cancelling a delegation (its instance dropped: a group member
+        cancelled, a sibling failed, the run aborted) only closes the record;
+        the child it recorded kept running, and a fork child shares the
+        driver's checkout (claunch-dm09i.4). Each such child is ended once
+        through the daemon's kill path, which winds down a session holding an
+        issue. The record is marked before the kill, so a failed kill is
+        journaled and not repeated; a child that already exited is only
+        marked."""
+        for did, rec in (state.get("delegations") or {}).items():
+            if self.stop.is_set():
+                return
+            if (rec.get("status") != "cancelled" or rec.get("child_ended")
+                    or rec.get("executor") not in ir.SESSION_EXECUTORS):
+                continue
+            child = rec.get("child")
+            if not child:
+                continue
+            alive = self._child_alive(child)
+            try:
+                marked = runtime.delegate_child_ended(
+                    did, cwd=cwd, scope=scope,
+                    child_end="kill" if alive else "already exited")
+            except (runtime.FlowError, cstore.StoreError):
+                continue
+            if not marked or not alive:
+                continue
+            outcome = "killed"
+            try:
+                self.kill_child(cstore.session_of(scope), child)
+            except Exception as exc:  # noqa: BLE001 - journal what we could not do
+                outcome = f"kill failed: {exc}"
+            with contextlib.suppress(Exception):
+                runtime.note("cancelled_child", cwd=cwd, scope=scope, delegation=did,
+                             node=rec.get("node"), child=child, outcome=outcome,
+                             detail="the delegation was cancelled while its child session "
+                                    "was running; the child was ended through the "
+                                    "daemon's kill path")
+
+    def _child_alive(self, name: str) -> bool:
+        try:
+            session = self.manager.get(name)
+        except Exception:
+            return False
+        return not getattr(session, "exited", True)
 
     def _watch_lost(self, cwd: str, scope: str) -> None:
         st = cstore.RunStore(cwd, scope)
