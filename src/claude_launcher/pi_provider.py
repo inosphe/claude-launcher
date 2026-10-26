@@ -321,7 +321,8 @@ def apply_env(
         log.warning("%s", projection.warning)
     auth_source = borrow if borrow is not None else profile
     base_url = fronted_base_url(
-        projection.base_url, providers.resolve_name(auth_source)
+        projection.base_url, providers.resolve_name(auth_source),
+        profile=profile.name, borrow=borrow,
     )
     env.update(
         {
@@ -347,14 +348,18 @@ def apply_env(
 
 
 def fronted_base_url(base_url: str, provider_name: str,
-                     profile: "Optional[str]" = None) -> str:
+                     profile: "Optional[str]" = None,
+                     borrow: Optional[Profile] = None) -> str:
     """``base_url`` swung to the shim when the provider goes through one.
 
     The shim's URL comes back without a trailing slash: Pi hands it to the
     OpenAI client as ``baseURL``, which appends ``/chat/completions`` itself,
     and the shim forwards that path onto the backend's declared API base.
+    ``borrow`` (the lender) keys a dynamic route on the lender, so the shim
+    resolves the lender's model table per request.
     """
-    fronted = routing.front(base_url, provider_name, profile=profile)
+    fronted = routing.front(base_url, provider_name, profile=profile,
+                            borrow=borrow)
     return fronted.rstrip("/") if fronted != base_url else base_url
 
 

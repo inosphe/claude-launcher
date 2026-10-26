@@ -338,7 +338,7 @@ def child_env(
         # provider pinning) cannot be reached by environment alone. When the
         # provider declares one, the base URL is swung to a local shim that
         # merges the spec into every request — see :mod:`routing`.
-        routing.apply(env, provider, profile=profile.name)
+        routing.apply(env, provider, profile=profile.name, borrow=borrow)
         # A run from inside a managed session meters (and keeps its affinity
         # key) under that session; outside one the URL carries no name. The
         # daemon sets its sessions' name itself, after this
