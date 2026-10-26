@@ -366,3 +366,76 @@ def test_a_group_inside_a_forks_nested_run_is_not_forked_from_the_origin(tmp_pat
     assert [n for _, _, n in forks] == ["own-qf1"]
     fb = [e for e in runtime.journal(cwd=str(tmp_path), scope=nested) if e["event"] == "fallback"]
     assert any("does not fork again" in (e.get("cause") or "") for e in fb)
+
+
+# -- pins for the review's surviving mutants (PR #529) ---------------------------
+
+
+def test_a_fork_delegation_answers_to_its_fork_like_a_session_one():
+    """``_check_delegation_authority``: a fork is a session executor -- only
+    its assignee submits; the driver may still brief it."""
+    r = SimpleNamespace(state={"driver": "own", "status": "running"})
+    rec = {"id": "d1", "executor": "fork", "child": "own-qf1"}
+    runtime._check_delegation_authority(r, rec, "own-qf1", "submit")
+    runtime._check_delegation_authority(r, rec, "own", "brief")
+    with pytest.raises(runtime.FlowError, match="carried out by session own-qf1"):
+        runtime._check_delegation_authority(r, rec, "own", "submit")
+    with pytest.raises(runtime.FlowError, match="carried out by session own-qf1"):
+        runtime._check_delegation_authority(r, rec, "someone-else", "brief")
+
+
+def test_the_fork_floor_comes_from_the_daemon_config(monkeypatch):
+    mgr = FakeManager(FakeSession("own", "."))
+    clock, _ = _clock(mgr, fork_min_context=None)
+    monkeypatch.setattr(cflow2_clock.store, "daemon_config",
+                        lambda: {"cflow2_fork_min_context": 250_000})
+    assert clock._fork_min() == 250_000
+    monkeypatch.setattr(cflow2_clock.store, "daemon_config",
+                        lambda: {"cflow2_fork_min_context": "lots"})
+    assert clock._fork_min() == cflow2_exec.FORK_MIN_CONTEXT
+
+    def broken():
+        raise OSError("config unreadable")
+
+    monkeypatch.setattr(cflow2_clock.store, "daemon_config", broken)
+    assert clock._fork_min() == cflow2_exec.FORK_MIN_CONTEXT
+    monkeypatch.setattr(cflow2_clock.store, "daemon_config", lambda: {})
+    assert clock._fork_min() == cflow2_exec.FORK_MIN_CONTEXT
+
+
+def test_the_fork_floor_defaults_to_100k():
+    from claude_launcher import store
+
+    assert store.DAEMON_DEFAULTS["cflow2_fork_min_context"] == 100_000
+    assert cflow2_exec.FORK_MIN_CONTEXT == 100_000
+
+
+def test_session_needs_constrain_a_fork_and_subagent_needs_do_not():
+    assert caps_mod.need_applies("session.spawn", "fork")
+    assert caps_mod.need_applies("session.spawn", "session")
+    assert not caps_mod.need_applies("subagent.spawn", "fork")
+    assert not caps_mod.need_applies("session.spawn", "subagent")
+    assert not caps_mod.need_applies("session.spawn", "inline")
+
+
+def test_check_reads_the_group_allow_expression():
+    from claude_launcher.cflow2 import check
+
+    src = CHART.replace("member_executor: [fork, inline], do: plan}",
+                        "member_executor: [fork, inline], allow: \"$facts.on\", do: plan}")
+    chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent(src))
+    found = [f for f in check.check(chart) if f.code == "facts-outside-trigger"]
+    assert found and "group allow" in found[0].message
+
+
+def test_an_allow_that_fails_to_evaluate_takes_no_member(tmp_path, monkeypatch):
+    _start(tmp_path, ALLOW)
+
+    def fails(r, iid, text):
+        raise runtime.expr_mod.ExprError("cannot evaluate")
+
+    monkeypatch.setattr(runtime, "_guard", fails)
+    assert runtime.status(cwd=str(tmp_path), scope="own", tick=False)["groups"][0][
+        "can_fork"] is False
+    with pytest.raises(runtime.FlowError, match="does not take members"):
+        _fork_members(tmp_path, 1)
