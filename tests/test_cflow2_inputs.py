@@ -174,7 +174,9 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
         "require_coding_approval": "코딩 승인",
         "reviewer_profile": "리뷰어", "reviewer_harness": "리뷰어",
         "session_routing": "라우팅", "delegate_profile": "라우팅", "delegate_model": "라우팅",
-        "force_pr": "PR", "force_no_pr": "PR"}
+        "force_pr": "PR", "force_no_pr": "PR",
+        # claunch-269q1: the knowledge recall/record switches share a block.
+        "knowledge_recall": "지식 기록", "knowledge_record": "지식 기록"}
     # A block of one: it does not share a grid with the inputs declared around
     # it, so the switch no longer pairs with the round limit above it.
     assert [n for n, d in sch.items() if d["group"] == "코딩 승인"] == [

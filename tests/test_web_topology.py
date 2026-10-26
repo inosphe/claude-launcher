@@ -646,6 +646,7 @@ CHECKS = [
         "hivepage_check.js",
         "profileusage_check.js",
         "glossarypage_check.js",
+        "knowledgepage_check.js",
         "categorypage_check.js",
         "packspane_check.js",
         "simpage_check.js",
