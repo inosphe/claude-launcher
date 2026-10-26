@@ -388,7 +388,7 @@ def inventory(manager) -> dict:
     cached = load()
     active = set(running())
     sessions = list(manager.list())
-    names = [row.sdef.name for row in sessions]
+    names = {row.sdef.name for row in sessions}
     root = basetemp.default_root()
     reserved_names = _foreign()
     registered: Dict[str, set] = {}
