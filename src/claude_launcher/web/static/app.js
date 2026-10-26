@@ -11321,7 +11321,8 @@ function renderBriefingCard(name, entry, opts) {
   // Rail rows already draw the context gauge and its token count.
   const chip = summaryOnly ? null : ctxChip(name);
   if (chip) head.appendChild(chip);
-  const tps = typeof tpsChip === "function" ? tpsChip(name) : null;
+  // The rail already carries TPS in its revealable diagnostics row.
+  const tps = !summaryOnly && typeof tpsChip === "function" ? tpsChip(name) : null;
   if (tps) head.appendChild(tps);
   const refresh = el("button", `sess-brief-refresh${loading ? " spinning" : ""}`, "⟳");
   refresh.type = "button";

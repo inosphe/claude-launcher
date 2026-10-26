@@ -43,6 +43,7 @@ const fixtureChecks = [
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
     parent: null, keep_alive: true, status_checks: fixtureChecks,
+    tps: { counted: true, tps: 80, at: new Date().toISOString() },
     created_at: "2026-10-25T12:00:00Z",
     rail_commits: { commits: [{sha: "a123456789", short: "a123456", subject: "Card layout"}], more: 0 },
     context: { tokens: 177000, input: 2, cache_read: 176000, cache_write: 1090,
@@ -506,6 +507,7 @@ const READ = `(() => {
     assert.equal(await details.getAttribute("aria-expanded"), "true");
     assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), true);
     assert.equal(await lead.locator(".rail-commits").isVisible(), true);
+    assert.equal(await lead.locator(".rail-tps-line").isVisible(), true, "TPS remains available in Details");
     await lead.evaluate(e => { e.dataset.rebuildProbe = "old"; });
     sessions[0].profile = "nc2";
     await page.evaluate(() => refreshSessions());
@@ -536,6 +538,20 @@ const READ = `(() => {
             return r && r.width > 0 && r.height > 0;
           });
       });
+      const footer = await lead.evaluate(li => {
+        const head = li.querySelector(".sess-brief-head"), box = head.getBoundingClientRect();
+        return {overflow: head.scrollWidth > head.clientWidth + 1,
+          buttonsInside: [...head.querySelectorAll("button")].every(e => {
+            const r = e.getBoundingClientRect();
+            return r.width > 0 && r.left >= box.left && r.right <= box.right + 1;
+          })};
+      });
+      assert.deepEqual(footer, {overflow:false, buttonsInside:true},
+        `${theme} ${width}px summary controls fit with TPS data present`);
+      await lead.locator(".sess-brief-refresh").click();
+      await page.waitForFunction(() => !document.querySelector(
+        '#session-list li[data-name="lead"] .sess-brief-refresh').disabled);
+      await lead.locator(".sess-brief-check-refresh").click();
       const hierarchy = await page.evaluate(() => ["lead", "w1", "w1a", "w1b"].map(name => {
         const e = document.querySelector(`#session-list li[data-name="${name}"]`);
         const r = e.getBoundingClientRect();
