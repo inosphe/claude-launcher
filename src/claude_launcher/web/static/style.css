@@ -9960,6 +9960,7 @@ a.category-ref:hover { text-decoration: underline; }
   position: absolute; left: 0; top: 0; transform-origin: 0 0;
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: 28px;
   width: max-content; max-width: 3600px; font-size: 13px;
+  user-select: none; -webkit-user-select: none;
 }
 
 /* -- cells: the wide hexagon a project and a mesh are drawn as. The border

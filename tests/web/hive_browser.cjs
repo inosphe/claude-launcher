@@ -18,7 +18,9 @@
      7. the zoom buttons change the scale, and fit brings the whole stage
         into the viewport;
      8. the unassigned pool is a deck under the board's cell;
-     9. no page errors. */
+     9. a drag pans from a chip and from header text without picking or
+        selecting anything, and a press inside the slop is still a click;
+    10. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -164,7 +166,41 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     assert.match(pool, /claunch 보드/);
     assert.match(pool, /미배정 P3 ×2/);
 
-    // 9.
+    // 9. A drag pans from wherever it starts: on a chip it moves the stage
+    // and picks nothing, on header text it selects nothing, and a press
+    // that moves less than the slop is still a click.
+    const shift = () => page.$eval("#hive-view .hive-stage", (s) => {
+      const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(s.style.transform);
+      return [Number(m[1]), Number(m[2])];
+    });
+    const drag = async (sel, dx, dy) => {
+      const box = await page.locator(sel).boundingBox();
+      const x = box.x + Math.min(20, box.width / 2), y = box.y + box.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + dx, y + dy, { steps: 6 });
+      await page.mouse.up();
+    };
+    const detailHidden = () => page.$eval("#hive-view .hive-detail", (d) => d.classList.contains("hidden"));
+    assert.ok(await detailHidden());
+    let [x0, y0] = await shift();
+    await drag('#hive-view .hive-chip[data-id="wk"]', 60, 40);
+    let [x1, y1] = await shift();
+    assert.equal(Math.round(x1 - x0), 60, "a drag on a chip pans");
+    assert.equal(Math.round(y1 - y0), 40);
+    assert.ok(await detailHidden(), "the click that ends a pan picks nothing");
+    await drag("#hive-view .hive-project > .hive-cell-head h3 >> nth=0", -50, 30);
+    const [x2, y2] = await shift();
+    assert.equal(Math.round(x2 - x1), -50, "a drag on header text pans");
+    assert.equal(Math.round(y2 - y1), 30);
+    assert.equal(await page.evaluate(() => String(getSelection())), "", "no text was selected");
+    await drag('#hive-view .hive-chip[data-id="wk"]', 2, 1);
+    await page.waitForSelector("#hive-view .hive-detail:not(.hidden) h3");
+    assert.deepEqual(await shift(), [x2, y2], "a press inside the slop does not pan");
+    await page.click('#hive-view .hive-chip[data-id="wk"]');
+    await page.waitForSelector("#hive-view .hive-detail.hidden", { state: "attached" });
+
+    // 10.
     assert.deepEqual(errors, []);
     console.log("hive browser ok");
   } finally {
