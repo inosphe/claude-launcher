@@ -49,9 +49,12 @@ READ_MAX = 64 * 1024
 #: daemon terminates as part of its own shutdown (``api._close_cli_shell``),
 #: so a ``claunch daemon restart`` typed into this tab is SIGHUPed between its
 #: stop and its start and never brings the successor up (claunch-k9fpi).
-#: ``cli_sessions._cmd_daemon`` reads the marker and hands that restart to a
-#: detached process; nothing else in the tree sets it, and a session's shell
-#: is not marked because a session survives a keep restart.
+#: ``cli_sessions._cmd_daemon`` reads the marker and, on POSIX, hands that
+#: restart to a process in a session of its own. On Windows the daemon's job
+#: object allows no breakaway, so the hand-off would not leave it and the
+#: start is still lost there (claunch-k9fpi: unresolved on win32). Nothing
+#: else in the tree sets the marker, and a session's shell is not marked
+#: because a session survives a keep restart.
 CLI_TAB_ENV = "CLAUNCH_CLI_TAB"
 
 #: A proposed line's own limits: long enough for a compound command or a

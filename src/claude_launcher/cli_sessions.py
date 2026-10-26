@@ -2062,21 +2062,39 @@ def _report_compact_problems() -> None:
 RESTART_DETACHED_ENV = "CLAUNCH_RESTART_DETACHED"
 
 
+def _detach_supported() -> bool:
+    """Whether this platform can start the restart outside the daemon's tree.
+
+    POSIX only. On Windows every session child is put in a job object
+    (``pty_backend`` -> ``win_job.ProcessJob.for_pid``) whose limits are
+    ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` with no ``BREAKAWAY_OK``, so a
+    ``DETACHED_PROCESS`` child stays a job member and dies with the daemon
+    exactly as an attached one does. Handing off there would move the
+    failure rather than fix it, so the tab keeps the immediate path on
+    Windows and the start is still lost there (claunch-k9fpi: unresolved on
+    win32).
+    """
+    return sys.platform != "win32"
+
+
 def _restart_must_run_detached() -> bool:
     """Whether this restart cannot run in the shell that is asking for it.
 
     True in the dashboard's CLI tab (``clipty.CLI_TAB_ENV``) unless this
     process already IS the detached child (``RESTART_DETACHED_ENV``). Any
     other shell -- an operator's terminal, a session's shell -- keeps the
-    ordinary immediate path.
+    ordinary immediate path, and so does every shell on a platform where the
+    hand-off cannot leave the daemon's job (see ``_detach_supported``).
     """
-    return bool(os.environ.get(CLI_TAB_ENV)) and not os.environ.get(
-        RESTART_DETACHED_ENV
+    return (
+        _detach_supported()
+        and bool(os.environ.get(CLI_TAB_ENV))
+        and not os.environ.get(RESTART_DETACHED_ENV)
     )
 
 
 def _hand_off_restart(*, force: bool = False, with_pty_host: bool = False,
-                      keep_stale: bool = False,
+                      keep_stale: bool = False, all_instances: bool = False,
                       reason: Optional[str] = None) -> int:
     """Continue this restart in a process the daemon's shutdown cannot reach.
 
@@ -2091,16 +2109,25 @@ def _hand_off_restart(*, force: bool = False, with_pty_host: bool = False,
     ``spawn_daemon`` line ever followed).
 
     So the tab does what a shell cannot: it starts the same command again with
-    ``start_new_session`` (or ``DETACHED_PROCESS`` on Windows), which leaves
-    the child in a session of its own, out of the dying shell's process
-    group. The child runs the ordinary path -- record the notice, stop, retry
-    the successor spawn -- and this process returns immediately, because it
-    is about to be killed and has nothing left to report.
+    ``start_new_session``, which leaves the child in a session of its own, out
+    of the dying shell's process group. The child runs the ordinary path --
+    record the notice, stop, retry the successor spawn -- and this process
+    returns immediately, because it is about to be killed and has nothing
+    left to report.
 
-    The flags travel with it; ``--all`` does not, because its per-instance
-    loop wants to stay in one process (see its branch in ``_cmd_daemon``).
+    Every flag travels with it, ``--all`` included: that loop restarts each
+    instance in turn, and the instance the tab is attached to is one of them,
+    so running the loop in the tab would lose the start and every instance
+    after it (claunch-k9fpi). The checks that refuse a restart -- the WEDGED
+    verdict with its ``--force`` recommendation, the stale-keep refusal --
+    have already run in this process and printed to the tab before it gets
+    here; the child re-runs them against the state it finds.
+
+    Windows is deliberately not detached here (see ``_detach_supported``).
     """
     argv = ["daemon", "restart"]
+    if all_instances:
+        argv.append("--all")
     if force:
         argv.append("--force")
     if with_pty_host:
@@ -2119,13 +2146,7 @@ def _hand_off_restart(*, force: bool = False, with_pty_host: bool = False,
     except OSError:
         sink = subprocess.DEVNULL
     kwargs = dict(stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
-                  env=env, close_fds=True)
-    if sys.platform == "win32":
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
+                  env=env, close_fds=True, start_new_session=True)
     try:
         subprocess.Popen(
             [sys.executable, "-c",
@@ -2180,21 +2201,30 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     if action == "restart":
         with_host = bool(getattr(args, "with_pty_host", False))
         keep_stale = bool(getattr(args, "keep_stale_host", False))
+        # The CLI tab's shell is killed by the shutdown this command asks
+        # for, so whatever half runs after the stop has to run somewhere that
+        # shutdown cannot reach (claunch-k9fpi). --all takes the whole loop
+        # with it: the instance the tab is attached to is in that loop, so a
+        # loop left here loses that instance's start and every one after it.
         if getattr(args, "all", False):
+            if _restart_must_run_detached():
+                return _hand_off_restart(
+                    all_instances=True,
+                    with_pty_host=with_host,
+                    keep_stale=keep_stale,
+                )
             return _restart_all_instances(with_pty_host=with_host,
                                           keep_stale=keep_stale)
-        # The CLI tab's shell is killed by the shutdown this command asks
-        # for, so the start half has to run somewhere that shutdown cannot
-        # reach (claunch-k9fpi). Before --force: that branch stops the daemon
-        # too, and dies the same way.
-        if _restart_must_run_detached():
-            return _hand_off_restart(
-                force=bool(getattr(args, "force", False)),
-                with_pty_host=with_host,
-                keep_stale=keep_stale,
-                reason=getattr(args, "reason", None),
-            )
+        # --force stops the daemon directly too, so it is handed off before
+        # anything talks to a daemon that this process is about to lose.
         if getattr(args, "force", False):
+            if _restart_must_run_detached():
+                return _hand_off_restart(
+                    force=True,
+                    with_pty_host=with_host,
+                    keep_stale=keep_stale,
+                    reason=getattr(args, "reason", None),
+                )
             return _force_replace(getattr(args, "reason", None) or "",
                                   with_pty_host=with_host, keep_stale=keep_stale)
         # The ordinary path talks to the daemon, so it only works while the
@@ -2231,6 +2261,18 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if os.environ.get("CLAUNCH_SESSION"):
             return _gated_restart(getattr(args, "reason", None) or "",
                                   with_pty_host=with_host, keep_stale=keep_stale)
+        # The checks above are the ones whose output the operator has to see,
+        # so they ran in the shell the operator is looking at. Everything
+        # below this line is a stop followed by a start, and this shell does
+        # not survive the stop -- so from the tab, the two are handed to a
+        # process in a session of its own (claunch-k9fpi). The child repeats
+        # the checks against whatever state it finds, writing to the log.
+        if _restart_must_run_detached():
+            return _hand_off_restart(
+                with_pty_host=with_host,
+                keep_stale=keep_stale,
+                reason=getattr(args, "reason", None),
+            )
         # Written first, and this order is the whole fix. Everything below
         # this line runs in a turn that is about to die: the daemon takes
         # every terminal attached to it down, so the print at the end reaches
