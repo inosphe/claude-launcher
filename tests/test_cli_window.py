@@ -213,3 +213,10 @@ def test_the_parser_takes_window_run_with_its_command():
     args = parser.parse_args(["window", "run", "--class", "sweep", "--", "npm", "test", "-w", "x"])
     assert args.func is cli_window._cmd_run
     assert (args.cls, args.command) == ("sweep", ["--", "npm", "test", "-w", "x"])
+
+
+def test_status_tags_a_request_lent_to_another_machine():
+    line = cli_window._fmt_holder({
+        "grant_id": "q1", "cls": "sweep", "session": "s1", "enqueued_at": "t",
+        "borrow": {"machine": "box2", "phase": "testing"}})
+    assert "borrowed by box2 (testing)" in line

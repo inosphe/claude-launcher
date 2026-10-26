@@ -77,6 +77,10 @@ def _fmt_holder(entry: dict) -> str:
         extra.append("forced")
     if entry.get("priority"):
         extra.append(f"priority {entry['priority']}")
+    borrow = entry.get("borrow")
+    if borrow:
+        # Lent to another machine's daemon (claunch-ohsyx); it keeps its place.
+        extra.append(f"borrowed by {borrow.get('machine') or '?'} ({borrow.get('phase') or '?'})")
     tags = f" [{', '.join(extra)}]" if extra else ""
     return (
         f"{entry.get('grant_id', '?')} {entry.get('cls', '?')}:{who} since {since}"
