@@ -104,12 +104,15 @@ keep-alive that makes switching between sessions cheap — the terminal you
 walk away from stays up with its socket shimmed to buffer-only, and
 returning to it is a swap of state and a re-fit rather than a new socket
 and a full-screen repaint —, ``briefcard_check`` on the rail's briefing
-card — the session summary a row
-folds open, and which of the daemon's answers (a briefing, unshaped prose,
-no LLM, no record) it is showing — ``briefingtop_check`` on the same card's
-two other homes, the top header's toggle (whose pane sits between the
-header and the terminal) and the detail panel's section, bound to the same
-open-set and off-state — ``briefrow_check`` on the row's always-on face —
+card — the summary an expanded row carries, which of the daemon's answers
+(a briefing, unshaped prose, no LLM, no record) it is showing, and that the
+rail's copy is the summary ALONE: the goal / now / progress rows and the
+chips are the same builder's, kept for the two surfaces that have the room
+and dropped on the rail, where the session body and the row itself already
+carry them — ``briefingtop_check`` on that card's two other homes, the top
+header's toggle (whose pane sits between the header and the terminal) and
+the detail panel's section, bound to the same open-set and off-state —
+``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
 (the briefing digest — the recorded opening task is detail-panel-only) and
 the collapsed ⟳ that refreshes without opening — ``briefmodel_check`` on the

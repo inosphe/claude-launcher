@@ -29,9 +29,20 @@ const { safeListen } = require("./safe_listen.cjs");
 
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 
+/* The chips a compact card draws: `lead` is compact, so its two checks cover
+   the density the request named ("collapsed form"). Answers differ so a
+   chip's text is checkable, not just its box. `w1` deliberately reports none,
+   so the "no checks, no chips line" case is in the same fixture. */
+const fixtureChecks = [
+  { id: "tests", name: "Tests", question: "Did the targeted tests pass?",
+    answer: "yes", reported_at: "2026-10-26T03:00:00Z", source: "agent" },
+  { id: "tmpl", name: "Template", question: "Was the template followed?",
+    answer: "no", reported_at: "2026-10-26T03:00:00Z", source: "agent" },
+];
+
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
-    parent: null, keep_alive: true,
+    parent: null, keep_alive: true, status_checks: fixtureChecks,
     briefing: { one_line: "착지를 관리하고 자식을 배분한다", state: "working" } },
   { name: "w1", status: "busy", role: "worker", profile: "nc",
     cwd: "/repo/.claude/worktrees/w1", parent: "lead",
@@ -127,7 +138,28 @@ const READ = `(() => {
         actions: shown(li.querySelector(".rail-actions")),
         meta: shown(li.querySelector(".meta")),
         card: shown(li.querySelector(".sess-brief")),
+        checks: shown(li.querySelector(".rail-status-checks")),
       },
+      /* The chips are measured by their PAINTED box as well as by the
+         selector: display:none leaves a 0x0 rect, and "the rule was not
+         written" and "the row drew nothing" are different failures. */
+      checkChips: [...li.querySelectorAll(".rail-status-check")].map((c) => {
+        const b = c.getBoundingClientRect();
+        return { text: c.textContent, h: Math.round(b.height), w: Math.round(b.width) };
+      }),
+      /* What the briefing card actually holds, by class: the rail's card is
+         the summary alone (app.js renderBriefingCard, opts.rail), so a row or
+         a faq item appearing here is the failure — not the absence of one. */
+      cardParts: (() => {
+        const c = li.querySelector(".sess-brief");
+        if (!c) return null;
+        return {
+          one: c.querySelectorAll(".sess-brief-one").length,
+          rows: c.querySelectorAll(".sess-brief-row").length,
+          faq: c.querySelectorAll(".sess-brief-faq").length,
+          checkRows: c.querySelectorAll(".sess-brief-check").length,
+        };
+      })(),
       briefText: brief ? brief.textContent.slice(0, 32) : "",
       /* The line that says why a session is silent. Measured by the PAINTED
          box, not by the selector: display:none leaves a 0x0 rect, and the
@@ -175,15 +207,33 @@ const READ = `(() => {
 
     assert.deepEqual(by("rev-a").lines,
       { brief: false, cwd: false, ctx: false, seen: false, actions: false,
-        meta: false, card: false },
+        meta: false, card: false, checks: false },
       "a one-line card draws the name and the role, nothing else");
     assert.deepEqual(by("lead").lines,
-      { brief: true, cwd: false, ctx: false, seen: false, actions: true,
-        meta: true, card: false },
-      "a compact card draws the briefing one-line and the buttons line");
+      { brief: true, cwd: false, ctx: false, seen: false, actions: false,
+        meta: true, card: false, checks: true },
+      "a compact card draws the briefing one-line and the chips, and no buttons");
     assert.ok(by("lead").briefText.length > 4,
       "the compact card's line is the briefing digest");
     assert.equal(by("lead").lines.card, false, "a compact card carries no briefing card");
+
+    /* The chips are DRAWN on the compact card, not merely unhidden: the
+       regression this pins is a rule that reads as written while the box is
+       0x0, so the PAINTED box is what is measured. */
+    assert.equal(by("lead").checkChips.length, 2,
+      "the compact card carries one chip per reported check");
+    for (const chip of by("lead").checkChips) {
+      assert.ok(chip.h > 0 && chip.w > 0,
+        `the chip "${chip.text}" is painted (${chip.w}x${chip.h})`);
+    }
+    /* The chip is `<icon> <name> · <age since reported>`; the age moves with
+       the fixture's clock, so the icon and the name are what is pinned. */
+    assert.deepEqual(by("lead").checkChips.map((c) => c.text.split(" · ")[0]),
+      ["✓ Tests", "× Template"],
+      "the compact card's chips are the reported answers, in order");
+    /* A row with no checks draws no empty chips line. */
+    assert.equal(by("w1b").lines.checks, false,
+      "a session with no reported checks draws no chips line");
 
     /* The fold is gone: no card carries a briefing toggle. */
     assert.deepEqual(rows.filter((r) => r.toggle).map((r) => r.name), [],
@@ -322,6 +372,12 @@ const READ = `(() => {
       const li = document.querySelector('#session-list li[data-name="w1"]');
       return li && li.dataset.railMode === "expanded";
     });
+    /* The card asks the daemon on sight and is drawn "summarising…" first;
+       the summary is what this block is about, so wait for it. */
+    await page.waitForFunction(() => {
+      const li = document.querySelector('#session-list li[data-name="w1"]');
+      return li && li.querySelector(".sess-brief .sess-brief-one");
+    });
     rows = await page.evaluate(READ);
     const opened = rows.find((r) => r.name === "w1");
     assert.equal(opened.mode, "expanded", "picking a card expands it");
@@ -330,8 +386,18 @@ const READ = `(() => {
     assert.equal(opened.lines.cwd, true, "the expanded card draws its directory line");
     assert.equal(opened.lines.ctx, true, "and the context gauge");
     assert.equal(opened.lines.seen, true, "and the attention line");
+    assert.equal(opened.lines.actions, true, "and the buttons line — expanded is where they live");
     assert.equal(opened.lines.card, true, "and the briefing card");
     assert.equal(opened.lines.brief, true, "the one-line is still there too");
+    assert.equal(opened.lines.checks, false,
+      "and no chips line — w1 reports no checks, so it has none at either density");
+    /* The card is the summary alone: the goal / now / progress rows and the
+       faq are gone from the rail (the session's own body holds them), and the
+       chips are the row's, not the card's — so nothing doubles. w1 has no
+       checks in the fixture, so this reads the summary with nothing under it. */
+    assert.deepEqual(opened.cardParts,
+      { one: 1, rows: 0, faq: 0, checkRows: 0 },
+      "the expanded card draws the one-line summary and no detail rows");
 
     /* Its children stay one-line cards while their parent is expanded: the
        density is the card's own, not inherited down the tree. */

@@ -7,8 +7,8 @@
      min      one line: the dot, the name, the role. Reviewer and oneshot
               rows: a fleet holds many of them and their cards differ only
               in the name.
-     compact  the name line, the briefing one-line and the buttons. Every
-              other row.
+     compact  the name line, the briefing one-line and the status-check
+              chips. Every other row.
      expanded every line, plus the briefing card. The session the reader is
               on — the terminal on screen, the detail panel's subject, or a
               pinned one.
@@ -235,10 +235,15 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-ctx-tokens",
      body ? body[1].trim() : "no rule");
 }
 
-/* The compact card keeps the one-line summary and the buttons, and drops the
-   rest of the detail lines. */
+/* The compact card keeps the one-line summary AND the status-check chips, and
+   drops the rest of the detail lines — the buttons line among them. The two
+   halves of that sentence are one decision: the chips say what the agent
+   reported about its own work, which the name and the dot cannot, so hiding
+   them would make them a reason to expand a row; the actions offer the reader
+   things to DO, and a row of buttons under every name is paid for by every
+   row on the rail. */
 for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-seen",
-                    ".sess-brief", ".rail-status-checks"]) {
+                    ".sess-brief", ".rail-actions"]) {
   const body = plain.match(new RegExp(
     `#session-list li\\[data-rail-mode="compact"\\][^{]*\\${line}[^{]*\\{([^}]*)\\}`));
   ok(`a compact card does not draw ${line}`,
@@ -248,9 +253,15 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-seen",
 ok("a compact card keeps the briefing one-line — it is the card's summary",
    !/#session-list li\[data-rail-mode="compact"\][^{]*\.rail-brief[^{]*\{/.test(plain),
    "a rule hides .rail-brief on a compact card");
-ok("a compact card keeps the buttons line",
-   !/#session-list li\[data-rail-mode="compact"\][^{]*\.rail-actions[^{]*\{/.test(plain),
-   "a rule hides .rail-actions on a compact card");
+/* Written the same shape as the `.rail-quiet` defence below: the chips are
+   drawn because NO rule hides them, so a later `display: none` added for the
+   compact density fails here rather than quietly taking them off the default
+   card that most of the fleet wears. */
+const compactChecks = plain.match(
+  /#session-list li\[data-rail-mode="compact"\][^{]*\.rail-status-checks[^{]*\{([^}]*)\}/);
+ok("a compact card keeps the status-check chips — no rule hides them",
+   !compactChecks || !/display:\s*none/.test(compactChecks[1]),
+   compactChecks ? compactChecks[1].trim() : "no rule");
 
 /* A run that wants the reader's keyboard survives every density: hiding it
    on the short cards is how a gated session goes unnoticed. */

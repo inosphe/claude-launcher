@@ -1,10 +1,19 @@
 /* The rail's briefing card, run against the real functions from app.js.
 
-   An EXPANDED rail row carries a card summarising the session — goal /
-   now / state / progress, produced by the daemon's LLM. There is no fold any
-   more (app.js railCardMode): a card is expanded because the reader is on it
-   — the terminal on screen, the detail panel's subject, a pinned session —
-   and a card at another density carries no briefing at all.
+   An EXPANDED rail row carries a card summarising the session, produced by
+   the daemon's LLM. There is no fold any more (app.js railCardMode): a card
+   is expanded because the reader is on it — the terminal on screen, the
+   detail panel's subject, a pinned session — and a card at another density
+   carries no briefing at all.
+
+   The rail's copy of the card is the SUMMARY alone: the one-line job
+   description, with the goal / now / progress rows, the faq and the chips
+   left off (renderBriefingCard's `rail` option). All of that is in the
+   session's own body, which the reader is two inches from, and the chips are
+   drawn on the row itself at every density. The full card still exists for
+   the surfaces that have the room and exist to be READ — the detail panel and
+   the terminal's top pane — and the second half of this file checks that the
+   option did not take it away from them.
 
    What has to hold: an expanded card asks the daemon once, on sight, because
    no control is left to ask with; it shows what came back; the ⟳ re-asks
@@ -130,9 +139,12 @@ let briefingLLM = true;
 exports.apply = applyBriefingCards;
 exports.setLLM = (v) => { briefingLLM = v; };
 exports.statusSessions = sessionsCache;
+/* The same builder without the rail's trim — what the detail panel and the
+   terminal's top pane draw. Exposed rather than rebuilt here so the checks
+   below run the shipped function, not a copy of it. */
+exports.fullCard = (name) => renderBriefingCard(name, briefingCache.get(name));
 `)(ctx, (id) => (id === "session-list" ? list : null),
    { createElement: mkel }, api, noChip);
-
 let failures = 0;
 function check(what, got, want) {
   const g = JSON.stringify(got), w = JSON.stringify(want);
@@ -145,15 +157,20 @@ function check(what, got, want) {
 
 const card = (li) => li.querySelector(".sess-brief");
 const note = (li) => li.querySelector(".sess-brief-note");
+const one = (li) => card(li).querySelector(".sess-brief-one");
 const click = (n) => n.listeners.click({ stopPropagation() {} });
-const kv = (li) => {
+/* A card's labelled rows, read off the card itself so the same helper works
+   for the rail's copy and the full one. */
+function kvOf(cardNode) {
   const out = {};
-  for (const r of card(li).children) {
+  if (!cardNode) return out;
+  for (const r of cardNode.children) {
     if (r.className !== "sess-brief-row") continue;
     out[r.children[0].textContent] = r.children[1].textContent;
   }
   return out;
-};
+}
+const kv = (li) => kvOf(card(li));
 
 (async () => {
   const rows = { s1: row("s1"), s2: row("s2") };
@@ -169,7 +186,8 @@ const kv = (li) => {
   answer = { status: 200, body: {
     session: "s1", generated_at: new Date(Date.now() - 90_000).toISOString(),
     cached: false, source: { jsonl: true, cflow: true },
-    briefing: { goal: "ship the card", now: "wiring CSS",
+    briefing: { "one-line-job-description": "착지를 관리한다",
+                goal: "ship the card", now: "wiring CSS",
                 state: "working", progress: "2 of 3 pieces done" },
     raw: null,
   } };
@@ -184,20 +202,30 @@ const kv = (li) => {
   check("the card says it is summarising while the answer is out",
         note(rows.s1).textContent, "summarising…");
   await flush();
-  check("goal, now and progress land as labelled rows", kv(rows.s1),
+  /* The rail's card is the summary. The rows the daemon sent back for goal /
+     now / progress are dropped HERE and kept for the surfaces below — so the
+     two assertions together say the option trims rather than that the data
+     went missing. */
+  check("the rail card carries the summary line", one(rows.s1).textContent,
+        "착지를 관리한다");
+  check("...and no goal / now / progress rows", kv(rows.s1), {});
+  check("...and no chips — the row draws those at every density",
+        card(rows.s1).querySelector(".status-check-icon"), null);
+  const full = ctx.fullCard("s1");
+  check("the same card outside the rail keeps goal, now and progress", kvOf(full),
         { goal: "ship the card", now: "wiring CSS",
           progress: "2 of 3 pieces done" });
-  const pill = card(rows.s1).querySelector(".sess-brief-state");
-  check("the state rides the head as a working-coloured pill",
-        [pill.textContent, pill.className],
-        ["working", "sess-brief-state st-working"]);
-  check("the answer's age is said in words",
-        card(rows.s1).querySelector(".sess-brief-age").textContent, "1m ago");
-  const statusIcon = card(rows.s1).querySelector(".status-check-icon");
+  const statusIcon = full.querySelector(".status-check-icon");
   check("a briefing status check shows its named icon and keeps its sentence on hover",
         [statusIcon.textContent, statusIcon.className, statusIcon.title,
          statusIcon.parent.children[1].textContent],
         ["✓", "status-check-icon check-yes", "Did the targeted tests pass?", "Tests"]);
+  const pill = card(rows.s1).querySelector(".sess-brief-state");
+  check("the state still rides the rail card's head as a working-coloured pill",
+        [pill.textContent, pill.className],
+        ["working", "sess-brief-state st-working"]);
+  check("the answer's age is said in words",
+        card(rows.s1).querySelector(".sess-brief-age").textContent, "1m ago");
 
   /* A card at another density carries none: the compact card says what the
      session is doing with the one-line it already has, and the one-line
@@ -214,14 +242,15 @@ const kv = (li) => {
   const before = calls.length;
   ctx.apply();
   check("going back to expanded draws the card from cache, asking nothing new",
-        [calls.length, kv(rows.s1).goal], [before, "ship the card"]);
+        [calls.length, one(rows.s1).textContent], [before, "착지를 관리한다"]);
 
   /* ⟳ re-asks with refresh=1; the stale text stays readable, dimmed, and
      the button spins so a second click can't stack a second request. */
   answer = { status: 200, body: {
     session: "s1", generated_at: new Date().toISOString(), cached: true,
     source: { jsonl: true, cflow: false },
-    briefing: { goal: "ship the card", now: "verifying",
+    briefing: { "one-line-job-description": "착지 상태를 검토한다",
+                goal: "ship the card", now: "verifying",
                 state: "blocked", progress: "waiting on review" },
     raw: null,
   } };
@@ -229,8 +258,8 @@ const kv = (li) => {
   check("the refresh asks again, uncached",
         calls.at(-1), "/api/sessions/s1/briefing?refresh=1");
   check("the stale text stays readable under the refresh",
-        [card(rows.s1).className, kv(rows.s1).goal],
-        ["sess-brief refreshing", "ship the card"]);
+        [card(rows.s1).className, one(rows.s1).textContent],
+        ["sess-brief refreshing", "착지를 관리한다"]);
   const spin = card(rows.s1).querySelector(".sess-brief-refresh");
   check("the button spins and refuses a second click while out",
         [spin.className, spin.disabled],
@@ -249,7 +278,7 @@ const kv = (li) => {
   const rebuiltFrom = calls.length;
   ctx.apply();
   check("a rebuilt row gets its card back from cache",
-        kv(rows.s1).now, "verifying");
+        one(rows.s1).textContent, "착지 상태를 검토한다");
   check("the rebuild asked the daemon nothing", calls.length, rebuiltFrom);
 
   /* The daemon's other answers, each told apart.  Prose that missed the
@@ -299,7 +328,8 @@ const kv = (li) => {
   answer = { status: 200, body: {
     session: "s6", generated_at: new Date().toISOString(), cached: false,
     source: { jsonl: false, cflow: true },
-    briefing: { goal: "g", now: "n", state: "puzzled", progress: "" },
+    briefing: { "one-line-job-description": "여섯 번째 카드",
+                goal: "g", now: "n", state: "puzzled", progress: "" },
     raw: null,
   } };
   ctx.apply();
@@ -307,7 +337,10 @@ const kv = (li) => {
   check("an unrecognised state stays neutral",
         card(s6).querySelector(".sess-brief-state").className,
         "sess-brief-state st-other");
-  check("an empty progress grows no row", kv(s6), { goal: "g", now: "n" });
+  /* The empty-progress rule is the full card's, where the rows are: the rail's
+     copy draws none of them at all, which the s1 checks above already pin. */
+  check("an empty progress grows no row",
+        kvOf(ctx.fullCard("s6")), { goal: "g", now: "n" });
 
   /* No llm: block. The card is still drawn — the expanded row is what the
      reader is on, and it is where the missing setting is explained — but it
@@ -326,7 +359,7 @@ const kv = (li) => {
   ctx.setLLM(true);
   ctx.apply();
   check("configuring brings the summary back from cache without a reload",
-        kv(s6).goal, "g");
+        one(s6).textContent, "여섯 번째 카드");
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

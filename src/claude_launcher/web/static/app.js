@@ -11214,7 +11214,14 @@ function toggleBriefing(name) {
   applyBriefingCards();
 }
 
-function renderBriefingCard(name, entry) {
+/* `rail` trims the card to its summary — the one-line job description — and
+   leaves the goal / now / progress rows and the faq off it. Only the rail
+   asks for that (applyBriefingCards): a 260px column of cards is answering
+   "which of these is which", and the prose behind the summary is in the
+   session's own body. The detail panel and the terminal's top pane have the
+   room and exist to be READ, so they get the whole card. */
+function renderBriefingCard(name, entry, opts) {
+  const summaryOnly = !!(opts && opts.rail);
   const card = el("div", "sess-brief");
   // The row underneath navigates; the card is for reading.
   card.addEventListener("click", (e) => e.stopPropagation());
@@ -11286,23 +11293,25 @@ function renderBriefingCard(name, entry) {
     if (brief["one-line-job-description"]) {
       card.appendChild(el("div", "sess-brief-one", brief["one-line-job-description"]));
     }
-    for (const [key, val] of [
-      ["goal", brief.goal], ["now", brief.now], ["progress", brief.progress],
-    ]) {
-      if (val === undefined || val === null || val === "") continue;
-      const row = el("div", "sess-brief-row");
-      row.append(el("span", "sess-brief-k", key), el("span", "sess-brief-v", String(val)));
-      card.appendChild(row);
-    }
-    if (Array.isArray(brief.faq)) {
-      for (const item of brief.faq) {
-        if (!item || !item.question || item.answer === undefined) continue;
-        const row = el("div", "sess-brief-row sess-brief-faq");
-        row.append(
-          el("span", "sess-brief-k", String(item.question)),
-          el("span", "sess-brief-v", String(item.answer)),
-        );
+    if (!summaryOnly) {
+      for (const [key, val] of [
+        ["goal", brief.goal], ["now", brief.now], ["progress", brief.progress],
+      ]) {
+        if (val === undefined || val === null || val === "") continue;
+        const row = el("div", "sess-brief-row");
+        row.append(el("span", "sess-brief-k", key), el("span", "sess-brief-v", String(val)));
         card.appendChild(row);
+      }
+      if (Array.isArray(brief.faq)) {
+        for (const item of brief.faq) {
+          if (!item || !item.question || item.answer === undefined) continue;
+          const row = el("div", "sess-brief-row sess-brief-faq");
+          row.append(
+            el("span", "sess-brief-k", String(item.question)),
+            el("span", "sess-brief-v", String(item.answer)),
+          );
+          card.appendChild(row);
+        }
       }
     }
   } else if (data && data.raw) {
@@ -11312,7 +11321,11 @@ function renderBriefingCard(name, entry) {
   } else {
     card.appendChild(el("div", "sess-brief-note", "empty briefing"));
   }
-  appendStatusChecks(card, name);
+  // The rail's row draws the chips itself on every card that can carry them
+  // (style.css, card density), so on the rail this would be a second copy
+  // three lines above the first. Elsewhere the card is the only place they
+  // appear.
+  if (!summaryOnly) appendStatusChecks(card, name);
   return card;
 }
 
@@ -11360,7 +11373,7 @@ function applyBriefingCards() {
     // exists to be read, and an unasked card would say "nothing yet" under a
     // reader who never had a control to ask with.
     if (briefingLLM && !briefingCache.has(name)) ask.push(name);
-    li.appendChild(renderBriefingCard(name, briefingCache.get(name)));
+    li.appendChild(renderBriefingCard(name, briefingCache.get(name), { rail: true }));
   }
   // And the current session's top-bar button + pane, now the rail exists.
   applyBriefingTop();
