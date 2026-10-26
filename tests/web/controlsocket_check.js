@@ -601,6 +601,65 @@ async function aFailedProbeHandsBackTheLastBootItSaw() {
     "the remembered boot survives repeated failures");
 }
 
+/* A probe that ANSWERS with an error status is a failed probe too
+   (claunch-f2ffc, from the leader's review of #531).
+
+   There are two ways the probe fails and they are different lines:
+   `fetch` throwing lands in the `catch`, and a response that arrives with
+   `ok === false` -- a 502 from the proxy in front of a daemon that is still
+   binding, say -- lands on `if (!resp.ok)`. Both mean "the probe could not
+   answer", so both must leave the socket's identity standing; a page that
+   answers one of them with null goes dark on exactly the restart it was
+   taught to survive.
+
+   Every other check in this file reaches the failure through `throw`, which
+   is why replacing that line's `probeFailed()` with a bare `null` left the
+   harness green. The restoring window is open here for the usual reason:
+   past its edge the socket answers alone and the probe is never called. */
+async function anErrorStatusIsAFailedProbe() {
+  const app = build();
+  app.ensureControlSocket();
+  const sock = app.sockets[0];
+  sock.opened();
+  sock.say({
+    type: "init", boot_id: "b8", version: "9.9", started_at: "t-8",
+    boot: { phase: "restoring", done: 2, total: 10 },
+  });
+
+  // The window is open (the init above said restoring), so this tick spends
+  // the probe. It answers -- with a status the page must read as failure.
+  app.fetch = async () => ({ ok: false, status: 502, json: async () => ({}) });
+  const answered = await app.daemonHealth();
+  assert.ok(answered, "an error status is not an absent daemon");
+  assert.strictEqual(answered.boot_id, "b8",
+    "the socket's identity still answers when the probe returns 502");
+  assert.strictEqual(answered.via, "control",
+    "and it answers as the socket's, not as a probe result");
+
+  // The same must hold for every later tick the window stays open -- a page
+  // that recovers on the second try hides the first one going dark.
+  const next = await app.daemonHealth();
+  assert.ok(next, "and it keeps answering while the probe keeps erroring");
+  assert.strictEqual(next.boot_id, "b8");
+
+  // A 502 is not an answer, so it must not close the HTTP-probe window: the
+  // next tick must spend the probe again rather than let the socket answer
+  // alone. (What the rail shows is syncBootProgress's business and
+  // restartboot_check.js measures that; here the question is only whether
+  // this tick was read as "the fleet is back".)
+  const spent = app.probed;
+  await app.daemonHealth();
+  assert.strictEqual(app.probed, spent + 1,
+    "an error status does not close the window the probe answers in");
+
+  // With no socket to vouch for the daemon the same status is a real
+  // "no answer" -- the branch did not change what null means.
+  const bare = build();
+  bare.fetch = async () => ({ ok: false, status: 502, json: async () => ({}) });
+  assert.strictEqual(await bare.daemonHealth(), null,
+    "with no socket, an error status is still no answer");
+}
+
 /* An `init` that names no daemon (an older daemon) leaves the page with
    nothing to compare, so the probe keeps answering -- the page must not
    invent a boot id, which would read every tick as "same daemon". */
@@ -954,6 +1013,7 @@ async function healthProbeIsBounded() {
   await theBootPhaseIsNotFrozenAtInit();
   await aFailedProbeIsNotAnAbsentDaemon();
   await aFailedProbeHandsBackTheLastBootItSaw();
+  await anErrorStatusIsAFailedProbe();
   await anInitWithNoBootIdDoesNotFakeOne();
   await flushPrefersSocketThenFallsBack();
   await deadSocketIsRecycled();
