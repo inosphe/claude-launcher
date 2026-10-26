@@ -137,6 +137,12 @@ def ptyhost_dir() -> Path:
     return daemon_dir() / "ptyhost"
 
 
+def cflow2_package_dir() -> Path:
+    """The daemon's copy of the package's v2 workflows, taken at its start
+    (``cflow2.layers.pin_package``, claunch-nzrdb)."""
+    return daemon_dir() / "cflow2-package"
+
+
 def sessions_json() -> Path:
     """Legacy JSON registry of session definitions.
 

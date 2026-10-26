@@ -6444,6 +6444,10 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     cwd = cflow_state.resolve_cwd(raw)
     return json_response({
         "workflows": await asyncio.to_thread(_startable_all, cwd),
+        # What the package's v2 directory changed on disk since this daemon
+        # pinned it at start, or null (claunch-nzrdb): an added file is a
+        # workflow the list above does not offer until the daemon restarts.
+        "package_pin": await asyncio.to_thread(cflow2_layers.package_drift),
         # Settings' per-role auto-pick overrides, served with the list they
         # pick from so the form and the CLI wizard apply them in one read.
         "role_workflows": _role_workflows_or_none(),

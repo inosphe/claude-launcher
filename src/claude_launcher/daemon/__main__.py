@@ -939,6 +939,24 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
     mesh_manager.peer_lister = uplink.peer_list
 
 
+def _pin_cflow2_package() -> None:
+    """Serve the package's v2 workflows as they are now, for this daemon's
+    whole life (claunch-nzrdb). The daemon runs an editable install: its
+    Python is what it imported at start, while a checkout that moves on
+    afterwards changes the YAML under it, and the old compiler then refused
+    the new definitions ("unknown key ..."). The run page and the workflow
+    pickers say when the copy on disk has moved on (``layers.drift_of``).
+    A copy that cannot be made leaves the package directory in use."""
+    from ..cflow2 import layers
+
+    try:
+        dest = layers.pin_package(paths.cflow2_package_dir())
+    except OSError as exc:
+        log.warning("could not pin the cflow v2 package workflows: %s", exc)
+    else:
+        log.info("cflow v2 package workflows pinned at %s", dest)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="claunch-daemon")
     parser.add_argument(
@@ -1016,6 +1034,7 @@ def main(argv=None) -> int:
     # does (routing.own_lifecycle, claunch-19liw.2.3). After the lock, so a
     # daemon that lost the race never starts one.
     routing.own_lifecycle()
+    _pin_cflow2_package()
 
     cfg = store.daemon_config()
     host = str(cfg["host"])

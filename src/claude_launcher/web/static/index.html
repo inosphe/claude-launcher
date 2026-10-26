@@ -1125,6 +1125,10 @@
                Drawn by renderWorkflowRecent from localStorage. -->
           <div id="new-workflow-recent" class="new-check-row hidden"></div>
           <p id="new-workflow-note" class="wf-note hidden">cflow v1 format is deprecated; v2 runs beside it (docs/cflow-v2.md). The run still starts and works as before.</p>
+          <!-- the package copy behind the pick changed on disk since the
+               daemon started, or new package workflows wait for a restart
+               (claunch-nzrdb); written by the workflow row's sync -->
+          <p id="new-workflow-drift" class="wf-warning hidden"></p>
           <label id="new-context-row" class="hidden">
             Context <input name="context" placeholder="context for the run (optional)">
           </label>

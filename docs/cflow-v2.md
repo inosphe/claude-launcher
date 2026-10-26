@@ -22,6 +22,20 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
   - 전역: `~/.claude-launcher/workflows/v2/*.yaml`
   - 프로젝트: `<repo>/.claunch/workflows/v2/*.yaml`
 - 우선순위는 v1과 같다: 프로젝트 → 전역 → 패키지.
+- 데몬은 기동할 때 패키지 레이어를 `<데몬 디렉터리>/cflow2-package/`로 복사하고,
+  종료할 때까지 패키지 레이어를 그 사본에서 읽는다(`layers.pin_package`,
+  claunch-nzrdb). 데몬은 editable 설치로 돌기 때문에 Python 코드는 기동 시점의
+  것이 유지되고, YAML은 체크아웃이 갱신될 때 함께 바뀐다. 사본이 없으면 기동 뒤
+  master가 fast-forward될 때 구 컴파일러가 새 키를 쓴 정의를 거절한다(예:
+  `unknown key 'member_executor' in group`). 디스크의 패키지 파일이 사본과
+  달라지면 정의 목록(`GET /api/cflow/workflows`)의 항목이 `package_drift`
+  (`files`, `pinned_at`)를 싣는다. 여기에는 그 정의 자신의 파일과 그 정의가
+  include·call하는 패키지 파일이 포함된다. 같은 응답의 `package_pin`에는
+  `changed`·`added`·`removed` 파일 목록이 들어가고, 런 상세
+  (`GET /api/cflow2/run`)에는 `package_drift`가 들어간다. 새 세션·spawn 폼과
+  런 페이지의 시작 패널, 런 화면은 이 값을 안내 줄로 표시한다. 새 정의를
+  적용하려면 데몬을 재기동한다. 전역·프로젝트 레이어는 고정하지 않는다.
+  세션의 MCP 프로세스와 CLI는 고정하지 않고 디스크의 패키지 디렉터리를 읽는다.
 - 생성 파일(PM이 자식마다 쓰는 절차 파일): `<세션 디렉터리>/.cflow2/generated/*.yaml`.
   레이어 탐색 대상이 아니며 spawn의 `workflow`에 절대 경로로 넘긴다(v1의
   `.cflow/generated/`와 같은 규칙). 데몬은 그 경로가 요청 세션(또는 부모 세션)의

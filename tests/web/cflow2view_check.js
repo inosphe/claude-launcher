@@ -36,13 +36,14 @@ function sliceConst(name) {
 }
 
 const fns = new Function(
-  [sliceConst("CFLOW2_ICONS"), slice("cflowVersionTag"), slice("cflowPickValue"),
+  [sliceConst("CFLOW2_ICONS"), slice("cflowDriftNote"), slice("cflowPinAddedNote"),
+   slice("cflowVersionTag"), slice("cflowPickValue"),
    slice("cflowPickBody"), slice("cflowPickEntry"), slice("cflow2NodeText"),
    slice("cflow2NodeBits"), slice("cflow2TreeRows"), slice("cflow2TreeOpen"),
    slice("localStamp"), slice("cflow2Reports"), slice("wfOptionLabel"), slice("spawnWorkflowEntry"),
    slice("spawnWorkflowAdmits"), slice("spawnRankWorkflows"),
    slice("cflow2RunActions"), slice("cflow2ForceOutcomes")].join("\n") +
-  "\nreturn { cflowVersionTag, cflowPickValue, cflowPickBody, cflowPickEntry," +
+  "\nreturn { cflowDriftNote, cflowPinAddedNote, cflowVersionTag, cflowPickValue, cflowPickBody, cflowPickEntry," +
   " cflow2TreeRows, wfOptionLabel, spawnRankWorkflows, cflow2RunActions," +
   " cflow2ForceOutcomes, cflow2TreeOpen, cflow2NodeBits, cflow2Reports };"
 )();
@@ -55,6 +56,19 @@ function check(what, got, want) {
     failures++;
   }
 }
+
+/* ---- the package copy the daemon pinned at start (claunch-nzrdb) ---- */
+check("no drift, no line", fns.cflowDriftNote({ name: "w", version: 2 }), "");
+check("no entry, no line", fns.cflowDriftNote(null), "");
+check("drift names the moved files",
+      fns.cflowDriftNote({ package_drift: { files: ["w.yaml", "lib.yaml"] } }),
+      "Changed on disk since the daemon started: w.yaml, lib.yaml. " +
+      "The daemon runs the copy it took at its start until it is restarted.");
+check("nothing added, no line", fns.cflowPinAddedNote({ added: [] }), "");
+check("an older daemon sends no pin", fns.cflowPinAddedNote(undefined), "");
+check("added workflows are named without the suffix",
+      fns.cflowPinAddedNote({ added: ["a.yaml", "b.yaml"] }),
+      "New package workflows on disk, not listed until the daemon restarts: a, b.");
 
 /* ---- markers ---- */
 check("a v2 entry is marked v2", fns.cflowVersionTag({ name: "a", version: 2 }), " · v2");
