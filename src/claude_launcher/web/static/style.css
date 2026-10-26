@@ -2078,6 +2078,11 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   #session-list .meta {
     margin-left: 0; margin-right: auto; flex: 1 1 0; min-width: 0;
   }
+  /* Compact controls share this second line. Give the identity the space
+     left after those controls, rather than capping it at 42% of an already
+     indented child card: opencode/claude and opencode/codex must keep their
+     distinguishing suffix. Long annotations can still ellipse. */
+  #session-list li[data-rail-mode="compact"] .meta { max-width: none; }
 }
 
 /* ---- the pages that live in #main ---- */

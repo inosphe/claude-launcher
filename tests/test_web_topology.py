@@ -702,6 +702,7 @@ BROWSER_CHECKS = [
         "detailroute_browser.cjs",
         "sessiongridtip_browser.cjs",
         "railcards_browser.cjs",
+        "railmeta_browser.cjs",
         "sessiongridlineage_browser.cjs",
         "railchildline_browser.cjs",
         "termfit_browser.cjs",
