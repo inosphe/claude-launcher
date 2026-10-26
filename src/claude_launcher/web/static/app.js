@@ -17695,7 +17695,7 @@ $("new-session").addEventListener("submit", async (e) => {
     // one) is said now, as a card: the box that would have shown it is closed
     // on the next line and the page leaves for the new terminal.
     for (const bad of onboardFailureNotices(info)) {
-      notify(bad.title, bad.sub, { kind: "warn", sticky: true });
+      notify(bad.title, bad.sub, { source: "page", kind: "warn", sticky: true });
     }
     // The form is in the modal when it was opened as one, and the page it was
     // opened over is not where the operator is going: the new session is.
@@ -18299,9 +18299,37 @@ for (const id of ["notice-bell", "m-notice-bell"]) {
 if ($("notice-panel-close")) {
   $("notice-panel-close").addEventListener("click", () => noticePanelToggle(false));
 }
+// The kinds to show (claunch-efpoi.1): the ⚙ press opens the overlay, Esc
+// closes it before the panel.
+if ($("notice-panel-settings")) {
+  $("notice-panel-settings").addEventListener("click", () => noticeSettingsToggle());
+}
+if ($("notice-settings-close")) {
+  $("notice-settings-close").addEventListener("click", () => noticeSettingsToggle(false));
+}
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && noticePanelOpen()) noticePanelToggle(false);
+  if (ev.key !== "Escape") return;
+  if (noticeSettingsOpen()) noticeSettingsToggle(false);
+  else if (noticePanelOpen()) noticePanelToggle(false);
 });
+// Another tab of this browser changed the kinds: take its set and redraw.
+window.addEventListener("storage", (ev) => {
+  if (ev.key !== NOTICE_SOURCES_HIDDEN_KEY) return;
+  let saved = [];
+  try { saved = JSON.parse(ev.newValue || "[]"); } catch { saved = []; }
+  noticeSourcesHidden.clear();
+  for (const k of Array.isArray(saved) ? saved : []) {
+    if (NOTICE_SOURCE.has(k)) noticeSourcesHidden.add(k);
+  }
+  noticeSourcesApplied();
+});
+// chat.js puts up its own toast (bottom right, with a reply box); it records
+// it here and asks whether its kind is shown, so the history and the
+// settings cover it like every other card (claunch-efpoi.1).
+window.claunchNotices = {
+  shown: (id) => noticeSourceShown(id),
+  record: (entry) => noticeRecord(Object.assign({ kind: "" }, entry)),
+};
 
 $("refresh-all").addEventListener("click", async () => {
   const btn = $("refresh-all");
@@ -19399,7 +19427,7 @@ function handleFrame(msg) {
         "daemon stopping",
         "the daemon said it is stopping — nothing relaunches it on its own, " +
           "so this page goes quiet until someone starts one",
-        { key: NOTICE_LINK, kind: "bad", sticky: true }
+        { source: "daemon", key: NOTICE_LINK, kind: "bad", sticky: true }
       );
       setDaemonOnline(false);
     } else {
@@ -20366,8 +20394,8 @@ async function copyTermTitle() {
   const name = title ? title.textContent.trim() : "";
   if (!name) return;
   const ok = await copyToBrowserClipboard(name, document.body);
-  if (ok) notify("Copied session name", name, { key: "term-title-copy", ms: 1500 });
-  else notify("Copy failed", "The browser refused it — select the name and copy it by hand.", { key: "term-title-copy" });
+  if (ok) notify("Copied session name", name, { source: "page", key: "term-title-copy", ms: 1500 });
+  else notify("Copy failed", "The browser refused it — select the name and copy it by hand.", { source: "page", key: "term-title-copy" });
 }
 
 /* OSC 52 (`ESC ] 52 ; <targets> ; <base64> BEL`): a program in the terminal
@@ -20437,7 +20465,7 @@ function installOsc52(t) {
     if (Date.now() - since > OSC52_INPUT_MS) return true;
     const sep = data.indexOf(";");
     if (sep >= 0 && data.slice(sep + 1).replace(/\s+/g, "").length > OSC52_MAX_BASE64) {
-      notify("Copy not taken", "The text is larger than this page copies from a terminal.", { key: "osc52" });
+      notify("Copy not taken", "The text is larger than this page copies from a terminal.", { source: "page", key: "osc52" });
       return true;
     }
     const text = decodeOsc52(data);
@@ -20456,7 +20484,7 @@ function installOsc52(t) {
         notify(
           "Copy did not reach this computer's clipboard",
           "The browser refused it — select the text and copy it by hand.",
-          { key: "osc52" },
+          { source: "page", key: "osc52" },
         );
       }
     });
@@ -20653,7 +20681,7 @@ function installTerminalCommandCopy(t) {
       rect.right - parent.left - badge.offsetWidth))}px`;
     clearTimeout(badgeTimer);
     badgeTimer = setTimeout(hideBadge, 1500);
-    if (!ok) notify("Copy failed", "Select the command and copy it by hand.", { key: "command-copy" });
+    if (!ok) notify("Copy failed", "Select the command and copy it by hand.", { source: "page", key: "command-copy" });
   };
   const leave = () => { pointer = null; if (!down) hide(); };
   const reset = () => { down = null; hide(); hideBadge(); };
@@ -44167,13 +44195,13 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
       notify(
         "Workflow start requested",
         `The request was recorded; delivery to session ${nudged.join(", ")} is scheduled.`,
-        { key: `cflow-start-${scope}|${cwd}` }
+        { source: "page", key: `cflow-start-${scope}|${cwd}` }
       );
     } else if (doc) {
       notify(
         "Workflow start requested",
         "The request was recorded, but no live session could receive it.",
-        { key: `cflow-start-${scope}|${cwd}`, kind: "warn" }
+        { source: "page", key: `cflow-start-${scope}|${cwd}`, kind: "warn" }
       );
     } else {
       ask.disabled = false;
@@ -44211,13 +44239,13 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
       notify(
         "Workflow started",
         `The run was created; delivery to session ${nudged.join(", ")} is scheduled.`,
-        { key: `cflow-start-${scope}|${cwd}` }
+        { source: "page", key: `cflow-start-${scope}|${cwd}` }
       );
     } else if (doc) {
       notify(
         "Workflow started",
         "The run was created, but no live session could receive it.",
-        { key: `cflow-start-${scope}|${cwd}`, kind: "warn" }
+        { source: "page", key: `cflow-start-${scope}|${cwd}`, kind: "warn" }
       );
     } else {
       direct.disabled = false;
@@ -56505,8 +56533,11 @@ function notify(title, sub, opts) {
   // `sync` names the event for the other browsers (claunch-mfzlv): one that
   // was already read or put away there is written as such and puts up no card.
   const remote = o.sync ? noticeSync.remote.get(o.sync) : null;
+  // `source` is the kind in NOTICE_SOURCES (claunch-efpoi.1): the settings
+  // overlay hides by it. A call that names none is this page's own result.
+  const source = NOTICE_SOURCE.has(o.source) ? o.source : "page";
   const rec = noticeRecord(Object.assign(
-    { title, sub: sub || "", kind: o.kind || "" },
+    { title, sub: sub || "", kind: o.kind || "", source },
     o.session ? { session: o.session } : {},
     o.session && o.target ? { target: o.target } : {},
     o.sync ? { sync: o.sync } : {},
@@ -56517,6 +56548,8 @@ function notify(title, sub, opts) {
   // With the history panel open the notice goes to the panel only: no card
   // now, and none left behind to pop up once the panel closes (claunch-k2khb).
   if (noticePanelOpen()) return null;
+  // A hidden kind is recorded and puts up no card.
+  if (!noticeSourceShown(source)) return null;
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   // A click on the card goes where it points; × only puts it away
   // (claunch-x76l8). The history keeps the row either way.
@@ -56541,11 +56574,11 @@ function notify(title, sub, opts) {
     if (o.open) o.open();
     else if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
   });
-  host.appendChild(node);
+  noticeCardAdd(host, node);
   const timer = o.sticky
     ? null
     : setTimeout(() => dismissNotice(key), o.ms || (o.routine ? ROUTINE_MS : NOTICE_MS));
-  notices.set(key, { node, timer, sync: o.sync || "", title, sub: sub || "", at: rec.at });
+  notices.set(key, { node, timer, sync: o.sync || "", title, sub: sub || "", at: rec.at, source });
   return node;
 }
 
@@ -56668,6 +56701,96 @@ function noticeSave(key, value) {
   }
 }
 
+/* Every kind of notice the page puts up, in one list (claunch-efpoi.1).
+   The gate kinds used to be spelled out in each place that walked them —
+   the pending store, the bell's sum, the refresh switch, the panel's row
+   switch and the panel's waiting list — and the spawn gate was added to
+   four of the five: its requests counted on the bell and showed in no
+   list. Everything that walks the kinds now walks this list, so a kind is
+   added here or nowhere, and a gate kind without its panel row is refused
+   at load.
+
+   `gate` kinds are requests waiting on a person, polled from the daemon:
+   `refresh` re-reads one and redraws its cards, `row` fills its panel row
+   (row, head, actions, rec). `deadline` says what happens when nobody
+   answers, for the settings overlay's warning. The others are notices:
+   `notify()` takes the kind as `source`, and a history row keeps it.
+
+   The order is the settings overlay's order. */
+const NOTICE_SOURCES = [
+  { id: "restart", label: "daemon restart requests", gate: true,
+    deadline: "approves itself at its deadline",
+    refresh: () => refreshRestartGate(), row: noticeRowRestart },
+  { id: "goto", label: "run move requests", gate: true,
+    deadline: "approves itself at its deadline",
+    refresh: () => refreshGotoGate(), row: noticeRowGoto },
+  { id: "reposync", label: "repository sync pushes", gate: true,
+    deadline: "expires as a refusal at its deadline",
+    refresh: () => refreshReposyncGate(), row: noticeRowReposync },
+  { id: "spawn", label: "spawn requests", gate: true,
+    deadline: "creates the session as asked after its countdown",
+    refresh: () => refreshSpawnGate(), row: noticeRowSpawn },
+  { id: "resume", label: "session resume requests", gate: true,
+    refresh: () => refreshResumeGate(), row: noticeRowResume },
+  { id: "kill", label: "session kill requests", gate: true,
+    refresh: () => refreshKillGate(), row: noticeRowKill },
+  { id: "ask", label: "run questions (urgent asks)", gate: true,
+    refresh: () => urgentAskSync(urgentAskRows), row: noticeRowAsk },
+  { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
+    refresh: () => refreshNudgeGate(), row: noticeRowNudge },
+  { id: "qa", label: "QA questions" },
+  { id: "thread", label: "thread replies" },
+  { id: "chat", label: "mesh chat messages" },
+  { id: "daemon", label: "daemon connection" },
+  { id: "reviewer", label: "reviewers ended by a workflow" },
+  { id: "page", label: "this page's own results (copies, refused answers, failures)" },
+];
+const NOTICE_SOURCE = new Map(NOTICE_SOURCES.map((s) => [s.id, s]));
+for (const s of NOTICE_SOURCES) {
+  if (s.gate && (typeof s.refresh !== "function" || typeof s.row !== "function")) {
+    throw new Error(`notice source ${s.id}: a gate kind needs refresh and row`);
+  }
+}
+
+/* The kind a history row belongs to. Rows saved before rows carried it
+   are placed by what they do carry. */
+function noticeSourceOf(entry) {
+  if (entry.source && NOTICE_SOURCE.has(entry.source)) return entry.source;
+  if (entry.gate && NOTICE_SOURCE.has(entry.gate.type)) return entry.gate.type;
+  const t = entry.target || {};
+  if (t.thread) return "thread";
+  if (t.qa) return "qa";
+  return "page";
+}
+
+/* The kinds this reader chose not to see (claunch-efpoi.1), from the
+   panel's settings overlay. A hidden kind puts up no card, is left out of
+   the panel's lists and the bell, and is still recorded, so showing it
+   again brings back what came meanwhile. The panel says how many rows it
+   leaves out, so a hidden kind is never silently missing. */
+const NOTICE_SOURCES_HIDDEN_KEY = "claunch.noticeSourcesHidden";
+const noticeSourcesHidden = new Set(
+  (() => {
+    const saved = noticeLoad(NOTICE_SOURCES_HIDDEN_KEY, []);
+    return Array.isArray(saved) ? saved.filter((k) => NOTICE_SOURCE.has(k)) : [];
+  })()
+);
+
+function noticeSourceShown(id) {
+  return !noticeSourcesHidden.has(id);
+}
+
+function noticeEntryShown(entry) {
+  return noticeSourceShown(noticeSourceOf(entry));
+}
+
+/* New cards go on top of the corner strip (claunch-efpoi), the history's
+   order. Every card of the strip is put up through here. */
+function noticeCardAdd(host, node) {
+  if (host.firstChild) host.insertBefore(node, host.firstChild);
+  else host.appendChild(node);
+}
+
 /* Each row carries `read` (claunch-x76l8): set by a click on its card or
    its row, or by Mark read / Mark all read, cleared by Mark unread. A row
    saved before rows carried it is read when the panel was opened after it
@@ -56708,8 +56831,9 @@ function noticeFilterOf(value) {
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], spawn: [], ask: [],
-  nudge: [] };
+const gatePending = Object.fromEntries(
+  NOTICE_SOURCES.filter((s) => s.gate).map((s) => [s.id, []])
+);
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -57028,7 +57152,7 @@ function gateHistoryOpen(type, rid, title, sub, extra) {
   // and a request just answered should not come back as unread. `extra`
   // carries the session an urgent ask belongs to.
   noticeRecord(Object.assign(
-    { title, sub, kind: "warn", gate: { type, rid }, status: "pending", read: true },
+    { title, sub, kind: "warn", source: type, gate: { type, rid }, status: "pending", read: true },
     extra || {}
   ));
 }
@@ -57071,8 +57195,11 @@ function gateHistorySync(type, pending, all) {
   noticePanelPaint();
 }
 
+/* True when the request's card is not to be shown: put away by hand, or
+   its kind hidden in the settings overlay (claunch-efpoi.1). Every gate's
+   refresh asks this before drawing a card. */
 function gateIsHidden(type, rid) {
-  return gateHiddenIds.has(`${type}:${rid}`);
+  return gateHiddenIds.has(`${type}:${rid}`) || !noticeSourceShown(type);
 }
 
 function gateHide(type, rid) {
@@ -57138,21 +57265,26 @@ function gateHideButton(type, rid, key, title) {
 }
 
 function noticeGateRefresh(type) {
-  if (type === "restart") return refreshRestartGate();
-  if (type === "goto") return refreshGotoGate();
-  if (type === "reposync") return refreshReposyncGate();
-  if (type === "resume") return refreshResumeGate();
-  if (type === "kill") return refreshKillGate();
-  if (type === "spawn") return refreshSpawnGate();
-  if (type === "ask") return urgentAskSync(urgentAskRows);
-  if (type === "nudge") return refreshNudgeGate();
-  return null;
+  const source = NOTICE_SOURCE.get(type);
+  return source && source.gate ? source.refresh() : null;
 }
 
+/* The waiting requests of the kinds this reader shows; a hidden kind's are
+   counted apart (gateHiddenKindCount). */
 function gatePendingCount() {
-  return gatePending.restart.length + gatePending.goto.length +
-    gatePending.reposync.length + gatePending.resume.length + gatePending.kill.length +
-    gatePending.spawn.length + gatePending.ask.length + gatePending.nudge.length;
+  let n = 0;
+  for (const [type, recs] of Object.entries(gatePending)) {
+    if (noticeSourceShown(type)) n += recs.length;
+  }
+  return n;
+}
+
+function gateHiddenKindCount() {
+  let n = 0;
+  for (const [type, recs] of Object.entries(gatePending)) {
+    if (!noticeSourceShown(type)) n += recs.length;
+  }
+  return n;
 }
 
 /* The waiting requests not yet marked read: what the panel's "Waiting on
@@ -57161,6 +57293,7 @@ function gatePendingCount() {
 function gateWaitingCount() {
   let n = 0;
   for (const [type, recs] of Object.entries(gatePending)) {
+    if (!noticeSourceShown(type)) continue;
     for (const rec of recs) if (!gateIsRead(type, String(rec.id))) n += 1;
   }
   return n;
@@ -57174,8 +57307,9 @@ function gateWaitingCount() {
 function noticeBellPaint() {
   const waiting = gateWaitingCount();
   const read = gatePendingCount() - waiting;
-  const unread = noticeHistory.filter(noticeUnread).length;
+  const unread = noticeHistory.filter((e) => noticeUnread(e) && noticeEntryShown(e)).length;
   const hidden = [...gateHiddenIds].length > 0;
+  const kindHidden = gateHiddenKindCount();
   const total = waiting + unread;
   for (const id of ["notice-bell", "m-notice-bell"]) {
     const bell = $(id);
@@ -57192,6 +57326,7 @@ function noticeBellPaint() {
     }
     if (read) parts.push(`${read} read, still open`);
     if (unread) parts.push(`${unread} unread`);
+    if (kindHidden) parts.push(`${kindHidden} waiting in kinds you hid`);
     parts.push("notification history");
     bell.title = parts.join(" · ");
   }
@@ -57285,215 +57420,7 @@ function noticePanelGateRow(type, rec) {
   const hidden = gateIsHidden(type, rid);
   const head = el("div", "notice-row-head");
   const actions = el("div", "gate-actions");
-  if (type === "restart") {
-    head.appendChild(el("span", "notice-title", "daemon restart requested"));
-    row.appendChild(head);
-    row.appendChild(el(
-      "div", "notice-sub",
-      `session ${rec.session || "?"}` +
-        (rec.requested_at
-          ? ` asked at ${noticeStamp(new Date(rec.requested_at).getTime())}`
-          : "") +
-        ((rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "")
-    ));
-    if ((rec.reason || "").trim()) {
-      row.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason.trim()}`));
-    }
-    row.appendChild(el("div", "notice-sub gate-mode", restartModeText(rec)));
-    row.appendChild(el(
-      "div", "notice-sub gate-clock",
-      `auto-approves in ${gateCountdown(rec.deadline)}`
-    ));
-    // A stale refusal (claunch-xnnct.3) replaces Approve with its two answers.
-    const stale = restartGateStale && restartGateStale.rid === rid
-      ? restartGateStale
-      : (rec.stale ? { error: "", check: rec.stale } : null);
-    if (stale) row.appendChild(el("div", "notice-sub gate-stale", restartStaleText(stale)));
-    const approveWith = (body) => async (btn) => {
-      if (await restartGateApprove(btn, body) === "ok") {
-        announceRestartAsked(
-          `approved at ${noticeClock()} — the page reconnects on its own ` +
-            "once the successor is up"
-        );
-        restartGateStale = null;
-        refreshRestartGate();
-      }
-    };
-    if (stale) {
-      actions.appendChild(noticePanelButton(
-        "Restart with PTY host", "approve",
-        "the sessions end and are relaunched on a new host that runs the current code",
-        approveWith({ pty_host: "full" })
-      ));
-      actions.appendChild(noticePanelButton(
-        "Keep anyway", "force",
-        "a keep restart anyway: the PTY host keeps running its older code",
-        approveWith({ keep_stale: true })
-      ));
-    } else {
-      actions.appendChild(noticePanelButton(
-        "Approve", "approve",
-        "the daemon restarts now — every attached terminal goes down with it",
-        approveWith({})
-      ));
-    }
-    actions.appendChild(noticePanelButton(
-      "+5 min", "gate-extend",
-      "not a decision: the deadline moves out and the request stays open",
-      async (btn) => {
-        if (await gatePost("/api/daemon/restart-request/extend", btn)) {
-          refreshRestartGate();
-        }
-      }
-    ));
-    actions.appendChild(noticePanelButton(
-      "Reject", "clear", "nothing restarts; the asking session keeps working",
-      async (btn) => {
-        if (await gatePost("/api/daemon/restart-request/reject", btn)) {
-          refreshRestartGate();
-        }
-      }
-    ));
-  } else if (type === "goto") {
-    head.appendChild(el("span", "notice-title", "run move requested: "));
-    head.appendChild(gateSessionLink(rec.target_session));
-    row.appendChild(head);
-    const sub = el("div", "notice-sub");
-    sub.appendChild(gateSessionLink(rec.session));
-    sub.appendChild(el("span", null, " asks to move "));
-    sub.appendChild(gateSessionLink(rec.target_session));
-    sub.appendChild(el("span", null, ` — ${rec.from || "?"} → ${rec.step || "?"}`));
-    row.appendChild(sub);
-    row.appendChild(el(
-      "div", "notice-sub",
-      `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
-    ));
-    row.appendChild(el(
-      "div", "notice-sub gate-clock",
-      `auto-approves in ${gateCountdown(rec.deadline)}`
-    ));
-    actions.appendChild(noticePanelButton(
-      "Approve", "approve", `move this run to '${rec.step}' now`,
-      async (btn) => {
-        if (await gatePost(`/api/cflow/goto-requests/${rec.id}/approve`, btn)) {
-          refreshGotoGate();
-        }
-      }
-    ));
-    actions.appendChild(noticePanelButton(
-      "Deny", "clear", "nothing moves; the refusal is handed to the run's driver",
-      async (btn) => {
-        if (await gatePost(`/api/cflow/goto-requests/${rec.id}/deny`, btn)) {
-          refreshGotoGate();
-        }
-      }
-    ));
-  } else if (type === "resume") {
-    head.appendChild(el("span", "notice-title", "session resume requested: "));
-    head.appendChild(gateSessionLink(rec.target));
-    row.appendChild(head);
-    row.appendChild(resumeGateSub(rec));
-    row.appendChild(el(
-      "div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`
-    ));
-    row.appendChild(el("div", "notice-sub gate-clock", RESUME_GATE_WAIT));
-    actions.appendChild(noticePanelButton(
-      "Approve", "approve", RESUME_GATE_APPROVE_TITLE,
-      async (btn) => {
-        await resumeGatePost(rec, "approve", btn);
-        refreshResumeGate();
-      }
-    ));
-    actions.appendChild(noticePanelButton(
-      "Reject", "clear", RESUME_GATE_REJECT_TITLE,
-      async (btn) => {
-        await resumeGatePost(rec, "reject", btn);
-        refreshResumeGate();
-      }
-    ));
-  } else if (type === "kill") {
-    head.appendChild(el("span", "notice-title", "session kill requested: "));
-    head.appendChild(gateSessionLink(rec.target));
-    row.appendChild(head);
-    row.appendChild(killGateSub(rec));
-    row.appendChild(el(
-      "div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`
-    ));
-    row.appendChild(el("div", "notice-sub gate-clock", KILL_GATE_WAIT));
-    actions.appendChild(noticePanelButton(
-      "Approve", "approve", KILL_GATE_APPROVE_TITLE,
-      async (btn) => {
-        await killGatePost(rec, "approve", btn);
-        refreshKillGate();
-      }
-    ));
-    actions.appendChild(noticePanelButton(
-      "Reject", "clear", KILL_GATE_REJECT_TITLE,
-      async (btn) => {
-        await killGatePost(rec, "reject", btn);
-        refreshKillGate();
-      }
-    ));
-  } else if (type === "spawn") {
-    spawnGateBody(row, rec, head);
-    for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
-  } else if (type === "ask") {
-    head.appendChild(gateSessionLink(rec.session));
-    head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
-    row.appendChild(head);
-    const prompt = (rec.answer && rec.answer.prompt) || "";
-    if (prompt) row.appendChild(el("div", "notice-sub gate-reason", prompt));
-    for (const btn of urgentAskButtons(rec, () => urgentAskSync(urgentAskRows))) {
-      actions.appendChild(btn);
-    }
-    actions.appendChild(noticePanelButton(
-      "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
-        "the panel stays open beside it",
-      () => urgentAskOpen(rec)
-    ));
-  } else if (type === "nudge") {
-    head.appendChild(gateSessionLink(rec.session));
-    head.appendChild(el("span", "notice-title", ` needs you: ${nudgeWhat(rec)}`));
-    row.appendChild(head);
-    if (rec.message) row.appendChild(el("div", "notice-sub gate-reason", rec.message));
-    actions.appendChild(noticePanelButton(
-      "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
-        "the panel stays open beside it",
-      () => nudgeOpen(rec)
-    ));
-  } else {
-    const plan = rec.plan || {};
-    head.appendChild(el(
-      "span", "notice-title",
-      `repository sync wants to push: ${plan.workspace || plan.repo || "?"}`
-    ));
-    row.appendChild(head);
-    row.appendChild(el(
-      "div", "notice-sub",
-      (rec.session ? `${rec.session} asks: ` : "") +
-        (plan.summary || plan.action || "?")
-    ));
-    row.appendChild(el(
-      "div", "notice-sub gate-clock",
-      `expires (as a refusal) in ${gateCountdown(rec.deadline)}`
-    ));
-    actions.appendChild(noticePanelButton(
-      "Approve", "approve", "the asking session pushes exactly this plan",
-      async (btn) => {
-        if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, btn)) {
-          refreshReposyncGate();
-        }
-      }
-    ));
-    actions.appendChild(noticePanelButton(
-      "Reject", "clear", "nothing is pushed; the asking session is told no",
-      async (btn) => {
-        if (await gatePost(`/api/reposync/requests/${rec.id}/reject`, btn)) {
-          refreshReposyncGate();
-        }
-      }
-    ));
-  }
+  NOTICE_SOURCE.get(type).row(row, head, actions, rec);
   if (hidden) {
     head.appendChild(el("span", "notice-chip", "hidden"));
     actions.appendChild(noticePanelButton(
@@ -57510,6 +57437,233 @@ function noticePanelGateRow(type, rec) {
   ));
   row.appendChild(actions);
   return row;
+}
+
+/* The panel rows of the gate kinds, one per kind, each named by its
+   NOTICE_SOURCES entry: what the card says, with the card's buttons. */
+function noticeRowRestart(row, head, actions, rec) {
+  const rid = String(rec.id);
+  head.appendChild(el("span", "notice-title", "daemon restart requested"));
+  row.appendChild(head);
+  row.appendChild(el(
+    "div", "notice-sub",
+    `session ${rec.session || "?"}` +
+      (rec.requested_at
+        ? ` asked at ${noticeStamp(new Date(rec.requested_at).getTime())}`
+        : "") +
+      ((rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "")
+  ));
+  if ((rec.reason || "").trim()) {
+    row.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason.trim()}`));
+  }
+  row.appendChild(el("div", "notice-sub gate-mode", restartModeText(rec)));
+  row.appendChild(el(
+    "div", "notice-sub gate-clock",
+    `auto-approves in ${gateCountdown(rec.deadline)}`
+  ));
+  // A stale refusal (claunch-xnnct.3) replaces Approve with its two answers.
+  const stale = restartGateStale && restartGateStale.rid === rid
+    ? restartGateStale
+    : (rec.stale ? { error: "", check: rec.stale } : null);
+  if (stale) row.appendChild(el("div", "notice-sub gate-stale", restartStaleText(stale)));
+  const approveWith = (body) => async (btn) => {
+    if (await restartGateApprove(btn, body) === "ok") {
+      announceRestartAsked(
+        `approved at ${noticeClock()} — the page reconnects on its own ` +
+          "once the successor is up"
+      );
+      restartGateStale = null;
+      refreshRestartGate();
+    }
+  };
+  if (stale) {
+    actions.appendChild(noticePanelButton(
+      "Restart with PTY host", "approve",
+      "the sessions end and are relaunched on a new host that runs the current code",
+      approveWith({ pty_host: "full" })
+    ));
+    actions.appendChild(noticePanelButton(
+      "Keep anyway", "force",
+      "a keep restart anyway: the PTY host keeps running its older code",
+      approveWith({ keep_stale: true })
+    ));
+  } else {
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve",
+      "the daemon restarts now — every attached terminal goes down with it",
+      approveWith({})
+    ));
+  }
+  actions.appendChild(noticePanelButton(
+    "+5 min", "gate-extend",
+    "not a decision: the deadline moves out and the request stays open",
+    async (btn) => {
+      if (await gatePost("/api/daemon/restart-request/extend", btn)) {
+        refreshRestartGate();
+      }
+    }
+  ));
+  actions.appendChild(noticePanelButton(
+    "Reject", "clear", "nothing restarts; the asking session keeps working",
+    async (btn) => {
+      if (await gatePost("/api/daemon/restart-request/reject", btn)) {
+        refreshRestartGate();
+      }
+    }
+  ));
+}
+
+function noticeRowGoto(row, head, actions, rec) {
+  head.appendChild(el("span", "notice-title", "run move requested: "));
+  head.appendChild(gateSessionLink(rec.target_session));
+  row.appendChild(head);
+  const sub = el("div", "notice-sub");
+  sub.appendChild(gateSessionLink(rec.session));
+  sub.appendChild(el("span", null, " asks to move "));
+  sub.appendChild(gateSessionLink(rec.target_session));
+  sub.appendChild(el("span", null, ` — ${rec.from || "?"} → ${rec.step || "?"}`));
+  row.appendChild(sub);
+  row.appendChild(el(
+    "div", "notice-sub",
+    `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
+  ));
+  row.appendChild(el(
+    "div", "notice-sub gate-clock",
+    `auto-approves in ${gateCountdown(rec.deadline)}`
+  ));
+  actions.appendChild(noticePanelButton(
+    "Approve", "approve", `move this run to '${rec.step}' now`,
+    async (btn) => {
+      if (await gatePost(`/api/cflow/goto-requests/${rec.id}/approve`, btn)) {
+        refreshGotoGate();
+      }
+    }
+  ));
+  actions.appendChild(noticePanelButton(
+    "Deny", "clear", "nothing moves; the refusal is handed to the run's driver",
+    async (btn) => {
+      if (await gatePost(`/api/cflow/goto-requests/${rec.id}/deny`, btn)) {
+        refreshGotoGate();
+      }
+    }
+  ));
+}
+
+function noticeRowResume(row, head, actions, rec) {
+  head.appendChild(el("span", "notice-title", "session resume requested: "));
+  head.appendChild(gateSessionLink(rec.target));
+  row.appendChild(head);
+  row.appendChild(resumeGateSub(rec));
+  row.appendChild(el(
+    "div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`
+  ));
+  row.appendChild(el("div", "notice-sub gate-clock", RESUME_GATE_WAIT));
+  actions.appendChild(noticePanelButton(
+    "Approve", "approve", RESUME_GATE_APPROVE_TITLE,
+    async (btn) => {
+      await resumeGatePost(rec, "approve", btn);
+      refreshResumeGate();
+    }
+  ));
+  actions.appendChild(noticePanelButton(
+    "Reject", "clear", RESUME_GATE_REJECT_TITLE,
+    async (btn) => {
+      await resumeGatePost(rec, "reject", btn);
+      refreshResumeGate();
+    }
+  ));
+}
+
+function noticeRowKill(row, head, actions, rec) {
+  head.appendChild(el("span", "notice-title", "session kill requested: "));
+  head.appendChild(gateSessionLink(rec.target));
+  row.appendChild(head);
+  row.appendChild(killGateSub(rec));
+  row.appendChild(el(
+    "div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`
+  ));
+  row.appendChild(el("div", "notice-sub gate-clock", KILL_GATE_WAIT));
+  actions.appendChild(noticePanelButton(
+    "Approve", "approve", KILL_GATE_APPROVE_TITLE,
+    async (btn) => {
+      await killGatePost(rec, "approve", btn);
+      refreshKillGate();
+    }
+  ));
+  actions.appendChild(noticePanelButton(
+    "Reject", "clear", KILL_GATE_REJECT_TITLE,
+    async (btn) => {
+      await killGatePost(rec, "reject", btn);
+      refreshKillGate();
+    }
+  ));
+}
+
+function noticeRowSpawn(row, head, actions, rec) {
+  spawnGateBody(row, rec, head);
+  for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
+}
+
+function noticeRowAsk(row, head, actions, rec) {
+  head.appendChild(gateSessionLink(rec.session));
+  head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
+  row.appendChild(head);
+  const prompt = (rec.answer && rec.answer.prompt) || "";
+  if (prompt) row.appendChild(el("div", "notice-sub gate-reason", prompt));
+  for (const btn of urgentAskButtons(rec, () => urgentAskSync(urgentAskRows))) {
+    actions.appendChild(btn);
+  }
+  actions.appendChild(noticePanelButton(
+    "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
+      "the panel stays open beside it",
+    () => urgentAskOpen(rec)
+  ));
+}
+
+function noticeRowNudge(row, head, actions, rec) {
+  head.appendChild(gateSessionLink(rec.session));
+  head.appendChild(el("span", "notice-title", ` needs you: ${nudgeWhat(rec)}`));
+  row.appendChild(head);
+  if (rec.message) row.appendChild(el("div", "notice-sub gate-reason", rec.message));
+  actions.appendChild(noticePanelButton(
+    "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
+      "the panel stays open beside it",
+    () => nudgeOpen(rec)
+  ));
+}
+
+function noticeRowReposync(row, head, actions, rec) {
+  const plan = rec.plan || {};
+  head.appendChild(el(
+    "span", "notice-title",
+    `repository sync wants to push: ${plan.workspace || plan.repo || "?"}`
+  ));
+  row.appendChild(head);
+  row.appendChild(el(
+    "div", "notice-sub",
+    (rec.session ? `${rec.session} asks: ` : "") +
+      (plan.summary || plan.action || "?")
+  ));
+  row.appendChild(el(
+    "div", "notice-sub gate-clock",
+    `expires (as a refusal) in ${gateCountdown(rec.deadline)}`
+  ));
+  actions.appendChild(noticePanelButton(
+    "Approve", "approve", "the asking session pushes exactly this plan",
+    async (btn) => {
+      if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, btn)) {
+        refreshReposyncGate();
+      }
+    }
+  ));
+  actions.appendChild(noticePanelButton(
+    "Reject", "clear", "nothing is pushed; the asking session is told no",
+    async (btn) => {
+      if (await gatePost(`/api/reposync/requests/${rec.id}/reject`, btn)) {
+        refreshReposyncGate();
+      }
+    }
+  ));
 }
 
 /* A history row about one thread reply or one QA request opens it, the way
@@ -57576,6 +57730,93 @@ function noticePanelHistoryRow(entry) {
   return row;
 }
 
+/* While a kind is hidden the panel says so above its lists, with how much
+   it leaves out and a press that opens the settings (claunch-efpoi.1): a
+   hidden kind that nothing mentions is the missing row this replaced. */
+function noticePanelHiddenLine(body) {
+  if (!noticeSourcesHidden.size) return;
+  const rows = noticeHistory.filter((e) => !noticeEntryShown(e)).length;
+  const waiting = gateHiddenKindCount();
+  const line = el("div", "notice-hidden-line");
+  line.appendChild(el(
+    "span", null,
+    `${noticeSourcesHidden.size} kind(s) hidden · ${rows} row(s) not shown` +
+      (waiting ? ` · ${waiting} request(s) of them still waiting` : "")
+  ));
+  line.appendChild(noticePanelButton(
+    "Settings", "", "choose which kinds the panel, the bell and the corner show",
+    () => noticeSettingsToggle(true)
+  ));
+  body.appendChild(line);
+}
+
+/* The settings overlay over the panel (claunch-efpoi.1): a checkbox per
+   kind of NOTICE_SOURCES, saved in this browser. A gate kind left
+   unchecked carries what its requests do when nobody answers. */
+function noticeSettingsOpen() {
+  const box = $("notice-settings");
+  return !!box && !box.classList.contains("hidden");
+}
+
+function noticeSettingsToggle(force) {
+  const box = $("notice-settings");
+  if (!box) return;
+  const open = force === undefined ? !noticeSettingsOpen() : !!force;
+  box.classList.toggle("hidden", !open);
+  if (open) noticeSettingsPaint();
+}
+
+function noticeSettingsPaint() {
+  const body = $("notice-settings-body");
+  if (!body) return;
+  body.innerHTML = "";
+  for (const [title, gate] of [["Requests waiting on you", true], ["Notices", false]]) {
+    body.appendChild(el("h3", "notice-panel-section", title));
+    for (const s of NOTICE_SOURCES.filter((x) => !!x.gate === gate)) {
+      const label = el("label", "notice-settings-row");
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = noticeSourceShown(s.id);
+      box.addEventListener("change", () => noticeSourceSet(s.id, box.checked));
+      label.appendChild(box);
+      label.appendChild(el("span", null, s.label));
+      body.appendChild(label);
+      if (gate && !noticeSourceShown(s.id)) {
+        body.appendChild(el(
+          "p", "notice-settings-warn",
+          "hidden: no card and no row shows these — each one " +
+            (s.deadline || "waits until someone answers it")
+        ));
+      }
+    }
+  }
+}
+
+/* Shows or hides one kind, saves the choice and redraws what it touches:
+   a hidden kind's cards go now, a shown gate kind's cards come back from
+   its next refresh, which this one is. */
+function noticeSourceSet(id, shown) {
+  if (!NOTICE_SOURCE.has(id) || noticeSourceShown(id) === !!shown) return;
+  if (shown) noticeSourcesHidden.delete(id);
+  else noticeSourcesHidden.add(id);
+  noticeSave(NOTICE_SOURCES_HIDDEN_KEY, [...noticeSourcesHidden]);
+  noticeSourcesApplied(id);
+}
+
+/* Redraws after the hidden set changed, here or in another tab (the
+   `storage` event). `only` names the kind that changed, when one did. */
+function noticeSourcesApplied(only) {
+  for (const [key, card] of [...notices]) {
+    if (card.source && !noticeSourceShown(card.source)) dismissNotice(key);
+  }
+  for (const s of NOTICE_SOURCES) {
+    if (s.gate && (!only || only === s.id)) noticeGateRefresh(s.id);
+  }
+  noticeSettingsPaint();
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
 /* Rebuilt from the state above on every gate poll while the panel is open,
    so the countdowns move and a request settled elsewhere drops out of the
    waiting list on its own. */
@@ -57587,10 +57828,20 @@ function noticePanelPaint() {
   // Read waiting requests are listed too, apart from the ones not yet seen:
   // their rows keep the buttons and the countdown, and Mark unread puts them
   // back under the count (claunch-qqy2i).
+  // Every gate kind of NOTICE_SOURCES the reader shows, newest first: when
+  // this browser first saw the request, which is its history row's time
+  // (claunch-efpoi).
   const waiting = [];
-  for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask", "nudge"]) {
-    for (const rec of gatePending[type]) waiting.push([type, rec]);
+  for (const [type, recs] of Object.entries(gatePending)) {
+    if (!noticeSourceShown(type)) continue;
+    for (const rec of recs) waiting.push([type, rec]);
   }
+  const seenAt = ([type, rec]) => {
+    const entry = gateHistoryEntry(type, String(rec.id));
+    return entry ? entry.at || 0 : 0;
+  };
+  waiting.sort((a, b) => seenAt(b) - seenAt(a));
+  noticePanelHiddenLine(body);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
   body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
@@ -57607,7 +57858,9 @@ function noticePanelPaint() {
     for (const [type, rec] of read) body.appendChild(noticePanelGateRow(type, rec));
   }
 
-  const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
+  const past = noticeHistory.filter(
+    (e) => !(e.gate && e.status === "pending") && noticeEntryShown(e)
+  );
   const markedCount = past.filter((e) => e.marked).length;
   const unreadCount = past.filter(noticeUnread).length;
   const shown = noticeFilter === "marked" ? past.filter((e) => e.marked)
@@ -57637,11 +57890,14 @@ function noticePanelPaint() {
   if (noticeFilter === "all" && past.length > markedCount) {
     sectionHead.appendChild(noticePanelButton(
       "Clear", "clear",
-      "forget the history in this browser (waiting requests and ★ rows stay)",
+      "forget the history in this browser (waiting requests, ★ rows and " +
+        "the rows of hidden kinds stay)",
       () => {
         for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
           const e = noticeHistory[i];
-          if (!(e.gate && e.status === "pending") && !e.marked) noticeHistory.splice(i, 1);
+          if (!(e.gate && e.status === "pending") && !e.marked && noticeEntryShown(e)) {
+            noticeHistory.splice(i, 1);
+          }
         }
         noticeHistorySave();
         noticePanelPaint();
@@ -57711,7 +57967,7 @@ function qaNoticeCard(session, q) {
       : `${session} asks you`,
     q.title,
     {
-      key: `qa-${q.id}`, sticky: true, session, target: { qa: q.id },
+      source: "qa", key: `qa-${q.id}`, sticky: true, session, target: { qa: q.id },
       sync: `qa:${qaNoticeKey(q)}`,
       open: () => qaNoticeOpen(session, q.id),
     }
@@ -57791,7 +58047,7 @@ globalThis.claunchOpenThread = async (session, tid) => {
 function threadNoticeCard(session, r) {
   const key = `thread-${r.thread}`;
   notify(`${session} replied in “${r.title}”`, r.excerpt || "", {
-    key, sticky: true, session, target: { thread: r.thread },
+    source: "thread", key, sticky: true, session, target: { thread: r.thread },
     sync: `thread:${r.thread}:${r.seq}`,
     open: () => threadNoticeOpen(session, r.thread),
   });
@@ -58080,7 +58336,7 @@ async function refreshRestartGate() {
     node.appendChild(modeLine);
     node.appendChild(staleLine);
     node.appendChild(actions);
-    host.appendChild(node);
+    noticeCardAdd(host, node);
     const entry = { node, timer: null, boot: daemonBoot };
     notices.set(NOTICE_GATE, entry);
     card = entry;   // the freshly built card carries this poll's countdown too
@@ -58237,7 +58493,7 @@ async function refreshGotoGate() {
       node.appendChild(clock);
       node.appendChild(why);
       node.appendChild(actions);
-      host.appendChild(node);
+      noticeCardAdd(host, node);
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
@@ -58356,7 +58612,7 @@ async function refreshReposyncGate() {
         "history"));
       node.appendChild(clock);
       node.appendChild(actions);
-      host.appendChild(node);
+      noticeCardAdd(host, node);
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
@@ -58419,12 +58675,12 @@ async function resumeGatePost(rec, verb, btn) {
   if (!resp.ok) {
     btn.disabled = false;
     notify(`resume request ${rec.id}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
-      { kind: "warn" });
+      { source: "page", kind: "warn" });
     return false;
   }
   if (settled.status === "failed") {
     notify(`resume of ${rec.target} failed`, settled.error || "unknown error",
-      { kind: "warn", session: rec.target, sticky: true });
+      { source: "page", kind: "warn", session: rec.target, sticky: true });
   }
   return true;
 }
@@ -58488,7 +58744,7 @@ async function refreshResumeGate() {
     node.appendChild(why);
     node.appendChild(el("div", "notice-sub gate-clock", RESUME_GATE_WAIT));
     node.appendChild(actions);
-    host.appendChild(node);
+    noticeCardAdd(host, node);
     notices.set(key, { node, timer: null });
   }
   // Settled, withdrawn or moot requests lose their card on this pass.
@@ -58653,14 +58909,14 @@ async function spawnGatePost(rec, verb, btn, body) {
   if (!resp.ok) {
     btn.disabled = false;
     notify(`spawn request ${rec.id}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
-      { kind: "warn" });
+      { source: "page", kind: "warn" });
     return null;
   }
   const settled = doc.request || {};
   noticeTabsGates();
   if (settled.status === "failed") {
     notify(rec.kind === "resume" ? `resume of ${rec.target} failed` : "session create failed",
-      settled.error || "unknown error", { kind: "warn", sticky: true });
+      settled.error || "unknown error", { source: "page", kind: "warn", sticky: true });
   }
   return settled;
 }
@@ -58847,7 +59103,7 @@ async function refreshSpawnGate() {
           : "close this card only — the request stays open and its deadline runs; " +
             "the bell keeps it in the notification history"));
       node.appendChild(actions);
-      host.appendChild(node);
+      noticeCardAdd(host, node);
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
@@ -58907,12 +59163,12 @@ async function killGatePost(rec, verb, btn) {
   if (!resp.ok) {
     btn.disabled = false;
     notify(`kill request ${rec.id}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
-      { kind: "warn" });
+      { source: "page", kind: "warn" });
     return false;
   }
   if (settled.status === "failed") {
     notify(`ending ${rec.target} failed`, settled.error || "unknown error",
-      { kind: "warn", session: rec.target, sticky: true });
+      { source: "page", kind: "warn", session: rec.target, sticky: true });
   }
   return true;
 }
@@ -58941,7 +59197,7 @@ function killReapedNotify(all) {
     notify(
       `reviewer ended by its workflow: ${rec.target || "?"}`,
       `${rec.session || "?"}'s run ended it (${rec.reason || "cflow"}) — no approval needed`,
-      { kind: "info", session: rec.session, routine: true }
+      { source: "reviewer", kind: "info", session: rec.session, routine: true }
     );
   }
   if (changed) {
@@ -59010,7 +59266,7 @@ async function refreshKillGate() {
     node.appendChild(why);
     node.appendChild(el("div", "notice-sub gate-clock", KILL_GATE_WAIT));
     node.appendChild(actions);
-    host.appendChild(node);
+    noticeCardAdd(host, node);
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -59167,7 +59423,7 @@ function urgentAskSync(rows) {
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
     node.addEventListener("click", () => urgentAskGo(rec, key));
-    host.appendChild(node);
+    noticeCardAdd(host, node);
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -59266,7 +59522,7 @@ async function refreshNudgeGate() {
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
     node.addEventListener("click", () => nudgeGo(rec, key));
-    host.appendChild(node);
+    noticeCardAdd(host, node);
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -59314,7 +59570,7 @@ function announceRestartAsked(sub) {
   // setDaemonOnline just posted "daemon offline", which is true and, here,
   // alarming for no reason: this outage was asked for. Same key, so the
   // card is replaced rather than joined by a second one.
-  notify("restarting the daemon", sub, { key: NOTICE_LINK, kind: "warn", sticky: true });
+  notify("restarting the daemon", sub, { source: "daemon", key: NOTICE_LINK, kind: "warn", sticky: true });
   // Without a boot id there is nothing to tell the successor apart by, and
   // the ordinary link events are all this page has.
   restartAsked = daemonBoot ? { boot: daemonBoot, at: Date.now() } : null;
@@ -59345,7 +59601,7 @@ function setDaemonOnline(up) {
         "daemon offline",
         `nothing has answered since ${noticeClock()} — what is on screen is ` +
           "the last thing it said, not what is happening now",
-        { key: NOTICE_LINK, kind: "bad", sticky: true }
+        { source: "daemon", key: NOTICE_LINK, kind: "bad", sticky: true }
       );
     }
   } else {
@@ -60060,14 +60316,14 @@ async function pollOnce() {
           (health.version ? ` (v${health.version})` : "") +
           " — sessions were relaunched, this page re-read everything, and " +
           "your login cookie died with the old process",
-        { key: NOTICE_BOOT, kind: "warn", sticky: true }
+        { source: "daemon", key: NOTICE_BOOT, kind: "warn", sticky: true }
       );
     } else if (booted && wasDown) {
       notify(
         "daemon back",
         `the same daemon answered again at ${noticeClock()} — it never ` +
           "restarted, so nothing was relaunched",
-        { key: NOTICE_LINK }
+        { source: "daemon", key: NOTICE_LINK }
       );
     }
     await boot();     // re-read everything this daemon publishes, from scratch

@@ -111,6 +111,14 @@ function build(opts) {
         remove: (c) => n.classList.toggle(c, false),
       },
       appendChild: (c) => { c.parentNode = n; n.children.push(c); return c; },
+      // The corner strip puts a new card on top (claunch-efpoi).
+      insertBefore: (c, ref) => {
+        const i = n.children.indexOf(ref);
+        c.parentNode = n;
+        if (i < 0) n.children.push(c); else n.children.splice(i, 0, c);
+        return c;
+      },
+      get firstChild() { return n.children[0] || null; },
       removeChild: (c) => {
         const i = n.children.indexOf(c);
         if (i >= 0) n.children.splice(i, 1);
@@ -148,6 +156,8 @@ function build(opts) {
     "notice-bell": bell,
     "notice-panel": node("hidden"),
     "notice-panel-body": node(),
+    "notice-settings": node("hidden"),
+    "notice-settings-body": node(),
   };
 
   const timers = [];
@@ -216,6 +226,8 @@ function build(opts) {
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " killReapedNotify," +
+    " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
+    " noticeSettingsToggle, noticeBellPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -1446,6 +1458,141 @@ function gotoRec(rec) {
   check("the open panel hides the strip", /#notices\.panel-open\s*\{[^}]*display:\s*none/.test(css));
   check("the card's × is styled", /\.notice-close\s*\{/.test(css));
   check("the bell opens the panel", /noticePanelToggle\(\)/.test(src));
+
+  /* --- one list of notice kinds (claunch-efpoi, claunch-efpoi.1) --------
+     The spawn gate was added to four of the five places that spelled the
+     gate kinds out, and its waiting requests counted on the bell and showed
+     in no list. Every gate kind of NOTICE_SOURCES now has a row in the
+     panel, whatever kind is added next. */
+  function gateRec(type, id, extra) {
+    return {
+      id, status: "pending", session: "s1", target: "w1", target_session: "w1",
+      from: "work", step: "rebase", reason: "because", label: "approve plan",
+      message: "waits", kind: "new", hold: "", plan: { workspace: "ws", summary: "push" },
+      requested_at: new Date(BASE).toISOString(),
+      deadline: new Date(BASE + 300000).toISOString(), ...(extra || {}),
+    };
+  }
+  {
+    const w = build();
+    const gates = w.api.NOTICE_SOURCES.filter((s) => s.gate).map((s) => s.id);
+    check("spawn is a gate kind", gates.includes("spawn"), gates);
+    check("the pending store has every gate kind and no other",
+          JSON.stringify(Object.keys(w.api.gatePending).sort()) === JSON.stringify([...gates].sort()),
+          Object.keys(w.api.gatePending));
+    // Opened first: opening re-polls the gates, which would empty the store.
+    w.api.noticePanelToggle(true);
+    for (const type of gates) {
+      w.api.gatePending[type] = [gateRec(type, `${type}-1`)];
+      w.api.gateHistoryOpen(type, `${type}-1`, `${type} asked`, "", {});
+    }
+    w.api.noticeBellPaint();
+    w.api.noticePanelPaint();
+    const rows = w.panelRows().filter((r) => r.classList.contains("pending"));
+    check("every gate kind's waiting request has a panel row", rows.length === gates.length,
+          [rows.length, gates.length]);
+    check("the bell counts what the panel lists", w.badge() === String(gates.length), w.badge());
+    check("a waiting spawn request is in the panel",
+          /spawn|session/i.test(rows.map((r) => r.text()).join(" ")));
+  }
+
+  /* --- newest on top: the strip, the waiting list, the history -------- */
+  {
+    const w = build();
+    w.api.notify("first", "", { source: "page", key: "a" });
+    w.clock.at += 1000;
+    w.api.notify("second", "", { source: "page", key: "b" });
+    check("a new card goes on top of the strip", /second/.test(w.strip()[0].text()),
+          w.strip().map((c) => c.text()));
+    check("the history has the newest row first", w.api.noticeHistory[0].title === "second");
+    w.api.noticePanelToggle(true);
+    w.api.gatePending.kill = [gateRec("kill", "k-old")];
+    w.api.gateHistoryOpen("kill", "k-old", "kill old", "", {});
+    w.clock.at += 1000;
+    w.api.gatePending.spawn = [gateRec("spawn", "s-new")];
+    w.api.gateHistoryOpen("spawn", "s-new", "spawn new", "", {});
+    w.api.noticePanelPaint();
+    const rows = w.panelRows().filter((r) => r.classList.contains("pending"));
+    check("the waiting list has the newest request first, whatever its kind",
+          rows.length === 2 && /kill/i.test(rows[1].text()) && !/kill/i.test(rows[0].text()),
+          rows.map((r) => r.text()));
+  }
+
+  /* --- every card names its kind and goes through one door ------------ */
+  {
+    const calls = [];
+    for (let i = src.indexOf("notify("); i >= 0; i = src.indexOf("notify(", i + 1)) {
+      if (/function\s+$/.test(src.slice(Math.max(0, i - 9), i)) || /[\w.]$/.test(src[i - 1] || "")) continue;
+      let depth = 0;
+      let j = i + "notify".length;
+      for (; j < src.length; j += 1) {
+        if (src[j] === "(") depth += 1;
+        else if (src[j] === ")" && --depth === 0) break;
+      }
+      const call = src.slice(i, j + 1);
+      if (/^notify\(\)/.test(call)) continue;   // prose: "notify()"
+      calls.push(call);
+    }
+    const bare = calls.filter((c) => !/source:\s*"\w+"/.test(c));
+    check("every notify() call names its kind", calls.length > 10 && !bare.length,
+          bare.map((c) => c.slice(0, 80)));
+    const kinds = new Set(build().api.NOTICE_SOURCES.map((s) => s.id));
+    const unknown = calls.map((c) => (c.match(/source:\s*"(\w+)"/) || [])[1]).filter((k) => !kinds.has(k));
+    check("and the kind is one NOTICE_SOURCES lists", !unknown.length, unknown);
+    const section = slice("/* notices — the page's own voice",
+                          "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
+    const direct = section.split("\n").filter((l) => /host\.appendChild\(node\)/.test(l));
+    check("a card reaches the strip only through noticeCardAdd", direct.length === 1,
+          direct);
+    check("chat's toast is recorded through the page's notices",
+          /claunchNotices/.test(fs.readFileSync(path.join(STATIC, "chat.js"), "utf8")) &&
+            /window\.claunchNotices\s*=/.test(src));
+  }
+
+  /* --- hiding a kind (claunch-efpoi.1) --------------------------------- */
+  {
+    const storage = memoryStorage();
+    const w = build({ storage });
+    w.api.noticeSourceSet("thread", false);
+    check("the choice is kept in this browser",
+          storage.getItem("claunch.noticeSourcesHidden") === JSON.stringify(["thread"]),
+          storage.getItem("claunch.noticeSourcesHidden"));
+    w.api.notify("s1 replied", "hello", { source: "thread", key: "t1", session: "s1" });
+    check("a hidden kind puts up no card", w.strip().length === 0, w.said());
+    check("and is still recorded", w.api.noticeHistory.some((e) => e.title === "s1 replied"));
+    check("and is not on the bell", w.badge() === "", w.badge());
+    w.api.notify("copy failed", "", { source: "page", key: "c1" });
+    w.api.noticePanelToggle(true);
+    check("the panel leaves the hidden kind out", !/s1 replied/.test(w.panel()) && /copy failed/.test(w.panel()),
+          w.panel());
+    check("and says how much it leaves out", /1 kind\(s\) hidden · 1 row\(s\) not shown/.test(w.panel()),
+          w.panel());
+    w.api.gatePending.spawn = [gateRec("spawn", "s-h")];
+    w.api.gateHistoryOpen("spawn", "s-h", "spawn hidden", "", {});
+    w.api.noticeBellPaint();
+    const before = w.badge();
+    w.api.noticeSourceSet("spawn", false);
+    check("a hidden gate kind is off the bell", before === "2" && w.badge() === "1",
+          [before, w.badge()]);
+    check("the panel names the requests still waiting in it", /1 request\(s\) of them still waiting/.test(w.panel()),
+          w.panel());
+    w.api.noticeSettingsToggle(true);
+    const settings = w.nodes["notice-settings-body"].text();
+    check("the settings list every kind", w.api.NOTICE_SOURCES.every((s) => settings.includes(s.label)),
+          settings);
+    check("a hidden gate kind says what happens when nobody answers",
+          /creates the session as asked after its countdown/.test(settings), settings);
+
+    const again = build({ storage });
+    again.api.notify("s2 replied", "", { source: "thread", key: "t2" });
+    check("the choice survives a reload", again.strip().length === 0, again.said());
+    again.api.noticeSourceSet("thread", true);
+    again.api.noticePanelToggle(true);
+    check("showing the kind again brings back what came meanwhile", /s2 replied/.test(again.panel()),
+          again.panel());
+    check("the panel has its settings press and overlay",
+          /id="notice-panel-settings"/.test(html) && /id="notice-settings"/.test(html));
+  }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
   else console.log("noticehistory_check: ok");

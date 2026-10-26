@@ -234,6 +234,15 @@ const toasts = node("div", null, "chat-toasts");
 toasts.setAttribute("aria-live", "polite");
 document.body.append(toasts);
 function toast(mesh, message, count) {
+  // The dashboard's notification history keeps the toast and its settings
+  // can hide the kind (app.js, NOTICE_SOURCES "chat"). Recorded read: a busy
+  // room should not fill the bell, the row is there to be looked up.
+  const notices = globalThis.claunchNotices;
+  if (notices) {
+    notices.record({source: "chat", read: true, title: `${message.name} · ${mesh}` + (count > 1 ? ` (+${count - 1})` : ""),
+                    sub: message.body.length > 240 ? message.body.slice(0, 240) + "…" : message.body});
+    if (!notices.shown("chat")) return;
+  }
   toasts.querySelector(`[data-mesh="${CSS.escape(mesh)}"]`)?.remove();
   const card = node("div", null, "chat-toast");
   card.dataset.mesh = mesh;
