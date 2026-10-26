@@ -298,14 +298,20 @@ def _split(ws, split: dict, items: list, actor: str, reason: str) -> dict:
     if not isinstance(parts, list) or not parts:
         raise AssignError(400, "split.parts must name at least one new category")
     remaining = {(i["kind"], i["ref"]) for i in items}
-    children = []
+    children, absorbed = [], False
     for part in parts:
         if not isinstance(part, dict):
             raise AssignError(400, "each split part must be {label, ..., items}")
-        claimed = _claim(part.get("items"), remaining)
-        if part.get("items") is None:
+        if part.get("items") in (None, []):
+            # A part that names no items is the catch-all: it takes everything
+            # the earlier parts left. A second one would make an empty node and
+            # quietly drop the first one's intent, so it is refused.
+            if absorbed:
+                raise AssignError(400, "only one split part may take the remaining items")
+            absorbed = True
             claimed, remaining = sorted(remaining), set()
         else:
+            claimed = _claim(part.get("items"), remaining)
             remaining -= set(claimed)
         children.append({**{k: part[k] for k in ("label", "aliases", "description") if k in part},
                          "items": [{"kind": k, "ref": r} for k, r in claimed]})
@@ -326,6 +332,11 @@ def _claim(refs, remaining) -> list:
         raise AssignError(400, "a split part's items must be an array")
     out = []
     for entry in refs:
+        if isinstance(entry, str) and entry.split(":", 1)[0] in ("session", "issue") \
+                and ":" in entry:
+            # The `kind:ref` spelling the page and categoryKey use.
+            kind, _, entry_ref = entry.partition(":")
+            entry = {"kind": kind, "ref": entry_ref}
         if isinstance(entry, str):
             kinds = [k for k, r in remaining if r == entry]
             if not kinds:

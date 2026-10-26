@@ -47,7 +47,8 @@ TOOLS = [
      "work belongs to subjects already split across several flat nodes. "
      "SPLIT at registration: {split: {parent_id?, parts: [{label, aliases?, description?, "
      "items?: [ref...]}]}, reason} makes several children of one parent and puts the items "
-     "across them; a part with no items takes whatever the earlier parts left. "
+     "across them; at most one part may name no items, and that part takes whatever the "
+     "others left. "
      "Without 'items' it places the session this job is about (and its issue). A request "
      "started from the session pane's 'Assign to tree' follows that pane's '제안으로 등록' "
      "checkbox instead of this argument.",

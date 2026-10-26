@@ -399,7 +399,7 @@ def test_agent_split_places_the_items_across_several_new_children(home, tmp_path
         out = await _call(client, "POST", "/api/category/agent-assign", {
             "session": "a", "reason": "two subjects",
             "split": {"parent_id": root["id"], "parts": [
-                {"label": "beads page", "items": ["a"]},
+                {"label": "beads page", "items": ["session:a"]},
                 {"label": "issue side"}]}})
         assert out["created"] == ["beads page", "issue side"]
         assert out["paths"] == ["web / beads page", "web / issue side"]
@@ -461,5 +461,17 @@ def test_the_split_route_makes_the_children_for_a_person(home, tmp_path):
                       {"label": "sims page"}]})
         assert [ch["node"]["label"] for ch in doc["children"]] == ["beads page", "sims page"]
         assert doc["parent_id"] == root["id"]
+
+    _run(scenario, tmp_path)
+
+
+def test_a_second_catch_all_part_is_refused(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        # Two parts that name no items would each take "the rest": the first
+        # empties it and the second makes an empty node, silently.
+        bad = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "split": {"parts": [{"label": "one"}, {"label": "two"}]}}, status=400)
+        assert "only one split part" in bad["error"]
 
     _run(scenario, tmp_path)
