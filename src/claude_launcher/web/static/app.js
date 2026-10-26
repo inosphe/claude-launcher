@@ -19462,7 +19462,19 @@ function handleFrame(msg) {
     // takes for an outage by reconnecting, repainting, and being closed again
     // a moment later. That loop is what a reader sees as a terminal that will
     // not sit still.
+    // ...and a live one is the same word for the other direction: the child
+    // this socket is on is running, so nothing about this terminal is over.
+    // The flag is not only the socket's, though — snapshotAttach sets it from
+    // an ended record, and the poll then replaces the snapshot with this live
+    // terminal once the record shows a running session. That record carries
+    // the same pid, so termInputEnded's "the poll lagging an `exit` frame"
+    // branch held "session ended — a line sent now is queued ..." up over a
+    // running session for as long as the reader stayed on it (claunch-8d9fg;
+    // the link log shows `term.init ... exited=false` followed by
+    // `input.verdict ... ended=true why="record running, same pid"
+    // by="snapshot"`). The daemon's own word for this socket's child lifts it.
     if (msg.exited) endSession("init", { status: msg.status, code: msg.exit_code });
+    else reviveSession("init", { status: msg.status });
   } else if (msg.type === "buffer") {
     altScreen = !!msg.alt;
     if (!altScreen) {
@@ -19564,6 +19576,31 @@ function endSession(by, detail) {
   mouseTracking = false;
   scrollOffset = 0;
   updateScrollChip();
+  refreshTermInput();
+}
+
+/* The opposite telling: the socket this terminal just opened is bound to a
+   child that is running, so nothing about this terminal is over. endSession
+   sets the flag from a snapshot's ended record or an `exit`/`init` frame, and
+   a snapshot's flag outlives the snapshot: the poll replaces it with a live
+   attach once the record shows a running session, and the fresh socket's
+   `init` is where the daemon says which child that socket is on. Reverse the
+   same three things endSession set, so the send-keys strip, the link and the
+   badge speak for the child that is there now.
+
+   `by` is the telling that released it, logged like endSession's is, so a
+   link log says which frame lifted the notice (claunch-8d9fg). */
+function reviveSession(by, detail) {
+  if (!sessionEnded) return;
+  const was = { by: sessionEndedBy, at: sessionEndedAt };
+  sessionEnded = false;
+  sessionEndedBy = null;
+  sessionEndedAt = null;
+  if (typeof linkLog === "function") {
+    linkLog("term.revived", { session: currentName, by, was: was.by,
+                              attachedPid, ...detail });
+  }
+  renderSizeChip();
   refreshTermInput();
 }
 
