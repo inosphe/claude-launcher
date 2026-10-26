@@ -43519,7 +43519,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
   // the harness that slices this view does not carry the helper.
   const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
-  if (drift) root.appendChild(el("p", "wf-note wf-warning cf2-drift-note", drift));
+  if (drift) root.appendChild(el("p", "wf-warning cf2-drift-note", drift));
   const meta = el("div", "cf2-meta");
   const metaItem = (k, v, cls) => {
     const s = el("span", "cf2-fact");
@@ -44286,7 +44286,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
      option cannot wrap, and these are absolute paths. */
   const source = el("p", "wf-source mono");
   const versionNote = el("p", "wf-note cf2-v1-note hidden", CFLOW_V1_NOTE);
-  const driftNote = el("p", "wf-note wf-warning cf2-drift-note hidden");
+  const driftNote = el("p", "wf-warning cf2-drift-note hidden");
   /* A v2 pick's start inputs, the same box the new-session form draws
      (claunch-fqkqt): whatever is typed here is the run's data.inputs at
      start. Redrawn -- so cleared -- only when the pick changes. */
