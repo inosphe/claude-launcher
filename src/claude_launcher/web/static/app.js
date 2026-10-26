@@ -56850,6 +56850,8 @@ const NOTICE_SOURCES = [
     refresh: () => refreshResumeGate(), row: noticeRowResume },
   { id: "kill", label: "session kill requests", gate: true,
     refresh: () => refreshKillGate(), row: noticeRowKill },
+  { id: "meshjoin", label: "mesh join requests from other machines", gate: true,
+    refresh: () => refreshMeshJoinGate(), row: noticeRowMeshJoin },
   { id: "ask", label: "run questions (urgent asks)", gate: true,
     refresh: () => urgentAskSync(urgentAskRows), row: noticeRowAsk },
   { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
@@ -57713,6 +57715,19 @@ function noticeRowKill(row, head, actions, rec) {
       refreshKillGate();
     }
   ));
+}
+
+function noticeRowMeshJoin(row, head, actions, rec) {
+  head.appendChild(el("span", "notice-title", meshJoinTitle(rec)));
+  row.appendChild(head);
+  row.appendChild(meshJoinSub(rec));
+  row.appendChild(el("div", "notice-sub gate-clock", MESH_JOIN_WAIT));
+  for (const [label, verb, cls, title] of MESH_JOIN_VERBS) {
+    actions.appendChild(noticePanelButton(label, cls, title, async (btn) => {
+      await meshJoinGatePost(rec, verb, btn);
+      refreshMeshJoinGate();
+    }));
+  }
 }
 
 function noticeRowSpawn(row, head, actions, rec) {
@@ -59393,6 +59408,119 @@ async function refreshKillGate() {
 }
 
 /* ------------------------------------------------------------------ */
+/* mesh join requests: another machine asks to join a mesh here       */
+/* ------------------------------------------------------------------ */
+/* A session on another daemon that joins one of this daemon's meshes
+   without a ticket files a request; a daemon that asks to attach does the
+   same (claunch-efpoi.2). The mesh page lists them with Approve and Deny,
+   but nothing told a person who was not looking at that page. They are a
+   gate kind like the others: `/api/mesh-join-requests` returns every
+   mesh's waiting requests, each naming its mesh, and the buttons call the
+   mesh page's own routes. A request has no deadline. Its id is unique only
+   within its mesh, so the card and the history key it by mesh and id. */
+const MESH_JOIN_PREFIX = "meshjoin-gate-";
+const MESH_JOIN_WAIT = "no deadline: waits until you answer";
+const MESH_JOIN_VERBS = [
+  ["Approve", "approve", "approve",
+   "admit it: a session joins as the member it asked to be, a daemon " +
+     "attaches and its sessions then join without asking"],
+  ["Deny", "deny", "clear", "nothing joins; the asking machine is told no"],
+];
+
+function meshJoinTitle(rec) {
+  return rec.attach
+    ? `daemon ${rec.machine || "?"} asks to attach to mesh ${rec.mesh || "?"}`
+    : `${rec.handle || "?"} asks to join mesh ${rec.mesh || "?"}`;
+}
+
+function meshJoinSub(rec) {
+  const when = rec.requested_at ? new Date(rec.requested_at).getTime() : NaN;
+  const who = rec.attach
+    ? "its sessions join without approval once it is attached"
+    : `${rec.machine || "?"}/${rec.session || "?"}` + (rec.role ? ` as ${rec.role}` : "");
+  return el("div", "notice-sub",
+    who + (isNaN(when) ? "" : ` — asked at ${noticeStamp(when)}`));
+}
+
+async function meshJoinGatePost(rec, verb, btn) {
+  btn.disabled = true;
+  let resp;
+  let doc = {};
+  try {
+    resp = await api(
+      `/api/mesh/${encodeURIComponent(rec.mesh)}/requests/` +
+        `${encodeURIComponent(rec.rid)}/${verb}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+    );
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    btn.disabled = false;
+    return false;
+  }
+  if (!resp.ok) {
+    btn.disabled = false;
+    notify(`mesh join request ${rec.rid}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
+      { source: "page", kind: "warn" });
+    return false;
+  }
+  if (verb === "approve" && doc.delivered === false) {
+    const who = doc.attach ? `daemon ${doc.machine}` : `'${doc.handle}'`;
+    notify(`admitted ${who} to ${rec.mesh}`,
+      `${doc.machine} is unreachable — the grant is queued and retried`,
+      { source: "page", kind: "warn" });
+  }
+  noticeTabsGates();
+  return true;
+}
+
+async function refreshMeshJoinGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/mesh-join-requests")).json();
+  } catch {
+    return;
+  }
+  const pending = (body && body.requests ? body.requests : [])
+    .map((r) => ({ ...r, rid: r.id, id: `${r.mesh}/${r.id}` }));
+  gateHistorySync("meshjoin", pending, pending);
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = MESH_JOIN_PREFIX + rec.id;
+    gateHistoryOpen("meshjoin", rec.id, meshJoinTitle(rec), meshJoinSub(rec).textContent, {});
+    if (gateIsHidden("meshjoin", rec.id)) continue;
+    seen.add(key);
+    const card = notices.get(key);
+    if (card && card.node.isConnected) continue;   // nothing on it changes
+    dismissNotice(key);
+    const node = el("div", "notice warn gate");
+    node.appendChild(el("div", "notice-title", meshJoinTitle(rec)));
+    node.appendChild(meshJoinSub(rec));
+    node.appendChild(el("div", "notice-sub gate-clock", MESH_JOIN_WAIT));
+    const actions = el("div", "gate-actions");
+    for (const [label, verb, cls, title] of MESH_JOIN_VERBS) {
+      const btn = el("button", `wf-btn ${cls}`, label);
+      btn.title = title;
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (await meshJoinGatePost(rec, verb, btn)) dismissNotice(key);
+      });
+      actions.appendChild(btn);
+    }
+    actions.appendChild(gateHideButton("meshjoin", rec.id, key,
+      "close this card only — the request stays open with no deadline; the " +
+      "bell keeps it in the notification history"));
+    node.appendChild(actions);
+    noticeCardAdd(host, node);
+    notices.set(key, { node, timer: null });
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(MESH_JOIN_PREFIX) && !seen.has(key)) dismissNotice(key);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* urgent asks: a cflow v2 ask that wants a person's answer now       */
 /* ------------------------------------------------------------------ */
 /* An ask declared `urgent: true` in its workflow (claunch-x76l8.1; e.g.
@@ -60479,7 +60607,7 @@ async function pollOnce() {
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
   refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate(),
-    refreshKillGate(), refreshSpawnGate(), refreshNudgeGate());
+    refreshKillGate(), refreshSpawnGate(), refreshNudgeGate(), refreshMeshJoinGate());
   await Promise.all(refreshes);
 }
 

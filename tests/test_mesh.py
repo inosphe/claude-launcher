@@ -825,6 +825,21 @@ def test_mesh_api(home, tmp_path):
                 "/api/mesh/fed/requests/nope/approve", headers=bearer
             )
             assert resp.status == 400
+            # the notice panel's poll: every mesh's waiting joins, each named
+            # by its mesh (claunch-efpoi.2)
+            mm.get("fed").pending_requests["req-1"] = {
+                "id": "req-1", "machine": "pcX", "session": "sx", "handle": "x",
+                "role": "worker", "requested_at": "2026-10-26T00:00:00Z",
+                "reply_token": "secret",
+            }
+            resp = await client.get("/api/mesh-join-requests", headers=bearer)
+            assert resp.status == 200
+            rows = (await resp.json())["requests"]
+            assert [(r["mesh"], r["id"], r["attach"]) for r in rows] == [
+                ("fed", "req-1", False)
+            ]
+            assert "reply_token" not in rows[0]
+            mm.get("fed").pending_requests.clear()
 
             # peer endpoints sit outside /api: no daemon auth needed, the
             # per-link mesh token is the (only) gate — a bad one is a 400
