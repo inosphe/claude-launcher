@@ -79,7 +79,8 @@ sides:
 #   landing-withdraw      -> landing-withdraw
 #   landing-nudge         -> landing-nudge          (await-landing의 nudge 갈래)
 #   landing-declined      -> landing-declined
-#   rework-gate           -> rework-decision(ask-user), rework-gate
+#   rework-gate           -> rework-auto(자율 예산 안), rework-decision(예산 소진 뒤),
+#                            rework-budget, rework-gate
 #   landing-declined-hold -> landing-declined-hold
 #   landed                -> landed-wait(wait), landed   (confirm-landed)
 #   wrapup                -> wrapup, round-report(위임)
@@ -119,6 +120,9 @@ sides:
 #   수 있어야 한다(claunch-jbk5w). 상한 25에 닿으면 런이 사람의 승인(loop_limit)에 선다.
 # - rework 간선(peer-review changes, landing-withdraw, rework-gate -> work) ->
 #   land가 rework로 끝나고 worker-round의 try/catch가 배치 루프를 다시 돈다.
+#   착지 거절(declined) 뒤의 되감기는 `rework-budget`이 `$visits['rework-gate']`로
+#   예산을 보고 가른다: 3회까지는 `rework-auto`(사람 없이) -> `rework-gate`,
+#   그 뒤는 `rework-decision`(사람 승인) -> `rework-gate`. 사용자 지시 2026-10-26.
 # - settle-wait의 timer(every 600, max 6, after settle-stall) -> retry
 #   settle-poll(max 7 = 첫 확인 + 여섯 번 깨움)과 catch unsettled. 10분 간격은
 #   retry의 every가 아니라 settle-check의 unsettled 옵션 interval이 진다 --
@@ -3077,7 +3081,7 @@ nodes:
 
       보고에는 거절 사유(상위의 원문 그대로), 되돌린 이슈 id 목록과 그
       전이 출력, 남긴 `DECLINED:` 코멘트, 그리고 재작업의 범위 요지를
-      적는다 — 다음 스텝의 사람 게이트가 읽는 것이 그 요지다.
+      적는다 — 다음 스텝(재작업을 재개할지 정하는 자리)이 읽는 것이 그 요지다.
     done_when: |
       거절 사유가 상위의 원문으로 보고에 있고(사유가 서지 않아 되물었으면
       그 사실과 보낸 메시지 id), 이 브랜치에 실린 이슈가 전부 in_review에서
@@ -3088,20 +3092,47 @@ nodes:
       ok: {reason: str, issues: list}
     effects: [board.write, mesh.send]
 
-  rework-gate:
-    title: 재작업 재개 (사용자 승인 뒤)
+  rework-auto:
+    title: 재작업 재개 예고 (자율 예산 안)
     prompt: |
-      사용자가 재작업 재개를 승인했다. 이 스텝에서 할 일은 인계 한 줄이다.
+      이 런은 아직 자율 재작업 예산 안이다 — 사용자 지시(2026-10-26)로 재작업
+      되감기를 3회까지 사람 승인 없이 돈다. 이 스텝은 그 되감기 앞의 예고 한
+      줄이고, 승인을 기다리지 않는다.
+
+      상위 세션에 fyi를 보낸다: 거절을 받아 재작업으로 돌아간다는 사실과,
+      이슈 id, 무엇을 고칠 것인지 한 줄, 그리고 이번이 자율 예산의 몇 번째인지
+      (`claunch cflow2 status --json`의 `visits["rework-gate"]` 값 + 1).
+      상위의 통합 대기 표에서 이 행이 왜 사라졌는지를 아는 자리가 그 한 줄뿐이다.
+
+      그리고 **같은 턴에서** 결과를 보고한다 — 예고만 쓰고 턴을 끝내면 아무것도
+      진행되지 않는다. 다음 노드(`rework-gate`)는 예산을 세는 자리이므로 그
+      보고까지 마친다. 보고한 뒤 예산을 다 썼으면(이번이 3번째) 상위에게
+      「이 회차가 예산의 마지막이다 — 다음 거절부터는 사용자 승인을 받는다」를
+      같은 fyi에 붙인다.
+    done_when: |
+      상위 세션에 재작업 사실과 이번이 자율 예산의 몇 번째인지 알리는 fyi가
+      나갔다(메시지 id를 보고에 적는다). 상위가 없거나 닿지 않으면 그 사실을
+      대신 적는다. 예산의 마지막 회차였으면 그 사실도 보고에 있다.
+    effects: [mesh.send]
+
+  rework-gate:
+    title: 재작업 예산 계수 (되감기 한 번)
+    # 이 노드의 방문 수가 곧 이 런이 이미 쓴 자율 재작업 예산이다 —
+    # `rework-budget`(land의 declined 갈래)이 `$visits['rework-gate']`로 읽는다.
+    # 그래서 여기에 사람의 답을 기다리는 일을 두지 않는다: 승인은 앞의
+    # `rework-auto`(자율 구간)나 `rework-decision`(예산 소진 뒤)이 이미 받았고,
+    # 이 노드는 세는 자리이면서 인계 한 줄을 남기는 자리다.
+    prompt: |
+      재작업이 재개됐다. 이 스텝에서 할 일은 인계 한 줄이다.
 
       상위 세션에 fyi를 보낸다: 거절을 받아 재작업으로 돌아간다는 사실과,
       이슈 id, 무엇을 고칠 것인지 한 줄. 상위의 통합 대기 표에서 이 행이
       왜 사라졌는지를 아는 자리가 그 한 줄뿐이다.
       그리고 **같은 턴에서** 결과를 보고한다 — 예고만 쓰고 턴을 끝내면
-      승인은 났는데 아무것도 진행되지 않는다.
+      아무것도 진행되지 않는다.
     done_when: |
-      사용자가 재작업 재개를 승인했고, 상위 세션에 재작업 사실을 알리는
-      fyi가 나갔다(메시지 id를 보고에 적는다). 상위가 없거나 닿지 않으면 그
-      사실을 대신 적는다.
+      상위 세션에 재작업 사실을 알리는 fyi가 나갔다(메시지 id를 보고에
+      적는다). 상위가 없거나 닿지 않으면 그 사실을 대신 적는다.
     effects: [mesh.send]
 
   landing-declined-hold:
@@ -4707,43 +4738,68 @@ procedures:
                         interval: 600
                         then: [landing-nudge]
                       declined:
-                        description: 상위가 이 회차에 싣지 않기로 했다(HOLD / CHANGES REQUESTED) — 거절을 정산하고 사용자 승인을 거쳐 재작업으로
+                        description: 상위가 이 회차에 싣지 않기로 했다(HOLD / CHANGES REQUESTED) — 거절을 정산하고 재작업으로(예산 3회까지 자율, 그 뒤는 사용자 승인)
                         then:
                           - landing-declined
-                          - id: rework-decision
-                            # 회차가 앞으로 되감기는 유일한 전이라 사람이 연다
-                            # (claunch-693w). 상위는 방금 거절한 당사자라 위임하지
-                            # 않는다(ask-user의 기본 응답자는 사람뿐). timeout을 두지 않는다.
-                            call: ask-user
-                            bind: rework_decision
-                            with:
-                              require_reason: true
-                              topic: |
-                                상위 세션이 이 회차의 착지를 거절했고, 워커가 그 거절을
-                                정산했다(이슈는 in_progress로 돌아갔고 브랜치 동결은 풀렸다).
-                                이 브랜치 위에서 재작업을 재개할지 정한다.
+                          # 재작업 예산(사용자 지시 2026-10-26): 되감기는 두 갈래이고,
+                          # 어느 갈래인지는 `rework-gate`가 지금까지 몇 번 돌았는지가
+                          # 정한다. 그 노드는 재작업이 재개될 때마다 한 번 들어가므로
+                          # 방문 수가 곧 이미 쓴 예산이다. 3회까지는 사람을 세우지 않고
+                          # (rework-auto), 3회를 다 쓴 뒤에는 회차마다 사람이 승인한다
+                          # (rework-decision) — 그 승인 하나가 다음 재작업 하나를 연다.
+                          # 방문 수는 노드별로 런 전체에서 세므로 회차가 바뀌어도
+                          # 이어지고, 새 런은 0에서 시작한다.
+                          - id: rework-budget
+                            cond:
+                              # `$visits[...]`는 그 노드에 아직 들어간 적이 없으면
+                              # null이다(null < 3은 식 오류다 — 먼저 null을 본다).
+                              - if: "$visits['rework-gate'] == null or $visits['rework-gate'] < 3"
+                                then:
+                                  - rework-auto
+                                  - rework-gate
+                                  - return: rework
+                                    value: {reason: "$result['landing-declined'].value.reason", rework: true}
+                              - else:
+                                  - id: rework-decision
+                                    # 예산을 다 쓴 뒤의 재작업은 회차마다 사람이 연다
+                                    # (claunch-693w: 자동으로 되감으면 거절 → 재작업 →
+                                    # 같은 거절이 사람 눈에 안 띈 채 돈다). 상위는 방금
+                                    # 거절한 당사자라 위임하지 않는다(ask-user의 기본
+                                    # 응답자는 사람뿐). timeout을 두지 않는다.
+                                    call: ask-user
+                                    bind: rework_decision
+                                    with:
+                                      require_reason: true
+                                      topic: |
+                                        상위 세션이 이 회차의 착지를 거절했고, 워커가 그 거절을
+                                        정산했다(이슈는 in_progress로 돌아갔고 브랜치 동결은 풀렸다).
+                                        이 브랜치 위에서 재작업을 재개할지 정한다.
 
-                                rework: 런이 작업 단계로 되감기고, 같은 브랜치 위에서 작업·
-                                테스트·커밋·착지 요청을 한 바퀴 더 돈다. 세션 슬롯과 상위의 심사
-                                턴이 한 번 더 든다.
-                                hold: 착지 없이 이 회차를 마감한다(재작업이 이 세션의 일이
-                                아니라고 판단될 때) — 브랜치를 인수인계 이슈로 넘기고 정리로 간다.
-                                답하지 않는 동안 런은 이 질문에 서 있고 세션은 살아 있다. 브랜치와
-                                커밋은 그대로 남으므로 잃는 것은 없다.
+                                        이 런의 재작업 예산(자율 3회)은 이미 다 썼다 —
+                                        `claunch cflow2 status --json`의
+                                        `visits["rework-gate"]`가 3 이상이다. 그래서 이
+                                        회차부터는 재작업 하나마다 이 승인이 선다.
+                                        rework: 런이 작업 단계로 되감기고, 같은 브랜치 위에서 작업·
+                                        테스트·커밋·착지 요청을 한 바퀴 더 돈다. 세션 슬롯과 상위의 심사
+                                        턴이 한 번 더 든다.
+                                        hold: 착지 없이 이 회차를 마감한다(재작업이 이 세션의 일이
+                                        아니라고 판단될 때) — 브랜치를 인수인계 이슈로 넘기고 정리로 간다.
+                                        답하지 않는 동안 런은 이 질문에 서 있고 세션은 살아 있다. 브랜치와
+                                        커밋은 그대로 남으므로 잃는 것은 없다.
 
-                                판단 근거: 거절 사유와 재작업 범위 요지가 앞 스텝의 보고에 있다
-                                (`claunch cflow2 journal`), 거절 마커는
-                                `claunch beads comments <이슈 id>`에 있다.
-                            # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp).
-                            cases:
-                              rework:
-                              - rework-gate
-                              - return: rework
-                                value: {reason: "$result['landing-declined'].value.reason", rework: true}
-                              hold:
-                              - landing-declined-hold
-                              - return: held
-                                value: {reason: declined, rework: false}
+                                        판단 근거: 거절 사유와 재작업 범위 요지가 앞 스텝의 보고에 있다
+                                        (`claunch cflow2 journal`), 거절 마커는
+                                        `claunch beads comments <이슈 id>`에 있다.
+                                    # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp).
+                                    cases:
+                                      rework:
+                                      - rework-gate
+                                      - return: rework
+                                        value: {reason: "$result['landing-declined'].value.reason", rework: true}
+                                      hold:
+                                      - landing-declined-hold
+                                      - return: held
+                                        value: {reason: declined, rework: false}
                       reopen:
                         description: 요청을 철회하고 브랜치를 다시 연다(넘어간 자식을 싣거나 더 실을 것이 생겼다) — 철회를 정산한 뒤 작업으로
                         then:
