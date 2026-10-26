@@ -30,6 +30,21 @@
    board's workspace (/api/category) and tags each session and issue chip
    with the node it is filed under (claunch-yzgqb.1.1).
 
+   A session and an issue are tied four ways (claunch-yzgqb.2): the session
+   holds it (assignee), was started on it (its record's `issue`), was
+   started on it while another session holds it (the daemon's JOINED
+   adoption), or filed it (created_by, and the lane's `created`). Every
+   issue chip marks the ties of the drawn sessions; an issue a session is
+   tied to without holding it gets a reference chip beside that session's
+   chip, while its own chip stays where it is held. Picking a chip lights
+   what it is tied to and runs a dashed line to each.
+
+   Resting the pointer on a session chip (or focusing it) opens an overlay
+   with what the session is doing now: its briefing's one-line, goal, now
+   and progress (claunch-yzgqb.2.1). That is the digest the /api/sessions
+   poll already carries (daemon/briefing.digest), so a hover composes
+   nothing and calls no LLM; a session with no cached briefing says so.
+
    The model (buildModel and the helpers before it) takes plain data so
    tests/web/hivepage_check.js runs it without a page. The canvas is rebuilt
    only when the model changed: a timer redraw that would draw the same
@@ -160,9 +175,63 @@ globalThis.HivePage = (() => {
     return {
       kind: "issue", id: String(row.id), title: String(row.title || ""),
       status: String(row.status || "open"), priority: Number.isFinite(row.priority) ? row.priority : 2,
-      type: String(row.issue_type || "task"), assignee: row.assignee || "", children: [],
-      categories: [],
+      type: String(row.issue_type || "task"), assignee: row.assignee || "", createdBy: row.created_by || "",
+      children: [], categories: [], links: [],
     };
+  }
+
+  /* How a session is tied to an issue (claunch-yzgqb.2), in the order a
+     chip lists them: it holds it (assignee), it was started on it and holds
+     it or nobody does (link), it was started on it while another session
+     holds it (join -- the daemon's JOINED adoption), it filed it
+     (created_by). */
+  const RELS = ["assignee", "link", "join", "created"];
+  const REL_LABEL = { assignee: "담당", link: "시작", join: "참가", created: "생성" };
+  const REL_NOTE = {
+    assignee: "assignee: 세션의 큐에 있다",
+    link: "세션이 이 이슈로 시작했다",
+    join: "세션이 이 이슈로 시작했고 assignee는 다른 세션이다",
+    created: "세션이 만들었다(created_by)",
+  };
+
+  /* A session record's briefing digest as the overlay draws it: the
+     summariser's state and the filled rows in the session tab's order and
+     labels (app.js briefingTabTooltip), or null when no briefing is cached
+     or it holds no text. */
+  const BRIEF_ROWS = [["one_line", ""], ["goal", "goal"], ["now", "now"], ["progress", "progress"]];
+  function briefingOf(s) {
+    const b = s && s.briefing;
+    if (!b || typeof b !== "object") return null;
+    const rows = [];
+    for (const [key, label] of BRIEF_ROWS) {
+      const text = String(b[key] || "").trim();
+      if (text) rows.push({ key, label, text });
+    }
+    if (!rows.length) return null;
+    return { state: String(b.state || "").trim(), rows };
+  }
+
+  /* The ties between session `name`, started on issue `link`, and the
+     issue `row`. `filed` says the row came from the session's lane's
+     `created` list, which the daemon fills with what it created. */
+  function relationKinds(name, link, row, filed = false) {
+    const out = [];
+    const holder = String((row && row.assignee) || "");
+    if (holder && holder === name) out.push("assignee");
+    if (link && link === String(row && row.id)) out.push(holder && holder !== name ? "join" : "link");
+    if (filed || (row && row.created_by && row.created_by === name)) out.push("created");
+    return out;
+  }
+
+  /* id -> issue row, over every active row a queues payload carries. */
+  function issueRows(queues) {
+    const rows = new Map();
+    const add = (r) => { if (r && r.id && !rows.has(String(r.id))) rows.set(String(r.id), r); };
+    for (const b of (queues && queues.boards) || []) {
+      for (const lane of b.lanes || []) { laneIssues(lane).forEach(add); (lane.created || []).forEach(add); }
+      (b.unassigned || []).forEach(add);
+    }
+    return rows;
   }
 
   function sortIssues(list) {
@@ -242,6 +311,12 @@ globalThis.HivePage = (() => {
     return (n.children || []).some(hasLive) || (n.decks || []).some((d) => d.items.some(hasLive));
   }
 
+  /* A lane's queue: the issues the board assigns to the lane's session, so
+     a row that leaves its assignee out names that session. */
+  function laneIssues(lane) {
+    return (lane.issues || []).map((r) => (r.assignee ? r : { ...r, assignee: lane.session }));
+  }
+
   /* session name -> {issues, created} from a /api/beads/queues payload, and
      each board's pool. Lanes of sessions the daemon does not know (a person
      such as `operator`, a name on another machine) are kept apart: their
@@ -254,12 +329,13 @@ globalThis.HivePage = (() => {
       for (const lane of b.lanes || []) {
         if (!lane.session) continue;
         if (!lane.known) {
-          for (const i of lane.issues || []) foreign.push(i);
+          for (const i of laneIssues(lane)) foreign.push(i);
           continue;
         }
-        const cur = lanes.get(lane.session) || { issues: [], created: 0, board: b.root };
-        cur.issues = cur.issues.concat(lane.issues || []);
+        const cur = lanes.get(lane.session) || { issues: [], created: 0, createdRows: [], board: b.root };
+        cur.issues = cur.issues.concat(laneIssues(lane));
         cur.created += (lane.created || []).length;
+        cur.createdRows = cur.createdRows.concat(lane.created || []);
         lanes.set(lane.session, cur);
       }
       boards.push({
@@ -323,14 +399,19 @@ globalThis.HivePage = (() => {
     const cflowOf = opts.cflowOf || (() => null);
     const cats = opts.categories instanceof Map ? opts.categories : new Map();
     const catsOf = (kind, ref) => cats.get(`${kind}:${ref}`) || [];
+    // issue id -> the drawn sessions tied to it, filled before any chip is
+    // made so every chip of an issue lists the same ties.
+    const relations = new Map();
     const issueChip = (row) => {
       const c = issueChipOf(row);
       c.categories = catsOf("issue", c.id);
+      c.links = relations.get(c.id) || [];
       return c;
     };
     const all = new Map();
     for (const s of sessions || []) if (s && s.name) all.set(s.name, s);
     const { lanes, boards } = readQueues(queues);
+    const rows = issueRows(queues);
     const counts = Object.fromEntries(STATES.map((s) => [s, 0]));
     let hiddenEnded = 0, hiddenArchived = 0, killedTotal = 0, archivable = 0;
     const shown = new Set();
@@ -363,6 +444,47 @@ globalThis.HivePage = (() => {
       if (st === "archived") hiddenArchived--; else hiddenEnded--;
     }
     const wantIssues = opts.issues !== false;
+    // Each drawn session's ties: what it holds, what it was started on, what
+    // it filed. A start issue the board's active rows do not carry (closed,
+    // or on a board not read) is kept as `missing`: the detail pane names
+    // it, no chip is drawn for it.
+    const ties = new Map();  // session -> [{id, kinds, row, missing}]
+    const filedBy = new Map();  // created_by -> rows, for a session with no lane of its own
+    for (const r of rows.values()) {
+      if (!r.created_by) continue;
+      if (!filedBy.has(r.created_by)) filedBy.set(r.created_by, []);
+      filedBy.get(r.created_by).push(r);
+    }
+    if (wantIssues) {
+      for (const name of [...shown].sort()) {
+        const s = all.get(name);
+        const lane = lanes.get(name);
+        const link = String(s.issue || "");
+        const mine = new Map();
+        const add = (row, filed) => {
+          const id = String(row.id);
+          if (mine.has(id)) return;
+          const kinds = relationKinds(name, link, row, filed);
+          if (kinds.length) mine.set(id, { id, kinds, row, missing: false });
+        };
+        if (lane) {
+          for (const r of lane.issues) add(r, false);
+          for (const r of lane.createdRows) add(r, true);
+        }
+        for (const r of filedBy.get(name) || []) add(r, true);
+        if (link && !mine.has(link)) {
+          if (rows.has(link)) add(rows.get(link), false);
+          else mine.set(link, { id: link, kinds: ["link"], row: null, missing: true });
+        }
+        const list = [...mine.values()];
+        ties.set(name, list);
+        for (const t of list) {
+          if (t.missing) continue;
+          if (!relations.has(t.id)) relations.set(t.id, []);
+          relations.get(t.id).push({ session: name, kinds: t.kinds });
+        }
+      }
+    }
     const heldIssue = new Set();
     const nodes = new Map();
     for (const name of shown) {
@@ -378,6 +500,16 @@ globalThis.HivePage = (() => {
         for (const i of lane.issues) heldIssue.add(String(i.id));
       }
       const cflow = cflowOf(name);
+      // The ties this session has to work it does not hold: a reference
+      // chip each, beside its own work; the issue's own chip is drawn where
+      // it is held (another session's chip, or the board's pool).
+      const mine = ties.get(name) || [];
+      const refs = mine.filter((t) => !t.missing && !t.kinds.includes("assignee"))
+        .map((t) => ({ ...issueChip(t.row), ref: true, own: t.kinds }));
+      const rels = {};
+      for (const t of mine) {
+        for (const k of t.kinds) (rels[k] = rels[k] || []).push({ id: t.id, missing: t.missing });
+      }
       nodes.set(name, {
         kind: "session", name, state, role, minor: isMinor(s, role),
         ghost: ghosts.has(name), project: projectOf(s), parent: s.parent || "",
@@ -386,7 +518,7 @@ globalThis.HivePage = (() => {
         compacting: !!s.compacting,
         cflow: cflow ? { state: cflow.state, label: cflow.label } : null,
         created: lane ? lane.created : 0, categories: catsOf("session", name),
-        issues, children: [], decks: [],
+        briefing: briefingOf(s), issues, refs, rels, children: [], decks: [],
       });
     }
     const roots = [];
@@ -476,6 +608,7 @@ globalThis.HivePage = (() => {
     }
     out.sort((a, b) => (b.counts.live - a.counts.live) || a.name.localeCompare(b.name));
     return { projects: out, counts, hiddenEnded, hiddenArchived, killedTotal, archivable,
+             relations: Object.fromEntries(relations),
              projectNames: [...new Set([...all.values()].map(projectOf))].sort() };
   }
 
@@ -528,12 +661,13 @@ globalThis.HivePage = (() => {
   let shell = null;            // the elements built once per page life
 
   function loadState() {
-    const base = { ended: "0", archived: false, issues: true, pool: true, categories: true, stackMinor: true,
-                   stackIdle: true, project: "", view: { x: 24, y: 16, k: 1 } };
+    const base = { ended: "0", archived: false, issues: true, pool: true, categories: true, relations: true,
+                   relHide: [], stackMinor: true, stackIdle: true, project: "", view: { x: 24, y: 16, k: 1 } };
     try {
       const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
       const v = raw.view || {};
       return { ...base, ...raw,
+               relHide: Array.isArray(raw.relHide) ? raw.relHide.filter((k) => RELS.includes(k)) : [],
                view: { x: Number(v.x) || 24, y: Number(v.y) || 16,
                        k: clampZoom(Number(v.k) || 1) } };
     } catch { return base; }
@@ -670,12 +804,42 @@ globalThis.HivePage = (() => {
     return t;
   }
 
+  /* The kinds of tie drawn: none with the relations switch off, and none
+     of a kind switched off in the legend. */
+  function shownKinds(kinds) {
+    if (!state.relations) return [];
+    return kinds.filter((k) => !state.relHide.includes(k));
+  }
+
+  function relText(links) {
+    return links.map((l) => `${l.kinds.map((k) => REL_LABEL[k]).join("·")} ${l.session}`).join(", ");
+  }
+
+  /* An issue's ties as marks under its title: the holder's first and
+     without its name (the chip hangs off the holder's chip), every other
+     session's with its name. */
+  function relMarks(links, holder) {
+    const box = node("span", "hive-rels");
+    const ordered = links.filter((l) => l.session === holder).concat(links.filter((l) => l.session !== holder));
+    for (const l of ordered) {
+      for (const k of shownKinds(l.kinds)) {
+        const m = node("span", `hive-rel r-${k}`, l.session === holder ? REL_LABEL[k] : `${REL_LABEL[k]} ${l.session}`);
+        m.title = `${l.session}: ${REL_NOTE[k]}`;
+        box.appendChild(m);
+      }
+    }
+    return box.childNodes.length ? box : null;
+  }
+
   function sessionChip(n) {
     const c = node("div", `hive-chip s-${n.state}${n.minor ? " minor" : ""}${n.ghost ? " ghost" : ""}`);
     c.dataset.kind = "session";
     c.dataset.id = n.name;
     c.tabIndex = 0;
-    c.title = sessionTitle(n);
+    // No native title: the briefing overlay is this chip's tooltip, and the
+    // browser's would cover it. Search reads the same text from here.
+    c.dataset.find = sessionTitle(n) + (n.briefing ? "\n" + n.briefing.rows.map((r) => r.text).join("\n") : "");
+    c.setAttribute("aria-label", sessionTitle(n).split("\n")[0]);
     const core = node("span", "hive-core");
     core.appendChild(node("i", null, STATE_GLYPH[n.state]));
     c.appendChild(core);
@@ -708,6 +872,7 @@ globalThis.HivePage = (() => {
     c.dataset.id = i.id;
     c.tabIndex = 0;
     c.title = `${i.id} — ${i.status} · P${i.priority} · ${i.type}\n${i.title}${i.assignee ? `\nassignee: ${i.assignee}` : ""}`
+      + (i.links.length ? `\n관계: ${relText(i.links)}` : "")
       + (i.categories.length ? `\ncategory: ${i.categories.join("; ")}` : "");
     const core = node("span", "hive-core");
     core.appendChild(node("i", null, `P${i.priority}`));
@@ -715,10 +880,41 @@ globalThis.HivePage = (() => {
     const body = node("span", "hive-body");
     body.appendChild(node("b", "hive-name", i.id));
     body.appendChild(node("span", "hive-sub", i.title));
+    const marks = relMarks(i.links, i.assignee);
+    if (marks) body.appendChild(marks);
     const tag = catTag(i.categories);
     if (tag) body.appendChild(tag);
     c.appendChild(body);
     if (picked && picked.kind === "issue" && picked.id === i.id) c.classList.add("picked");
+    return c;
+  }
+
+  /* A reference chip: an issue session `owner` is tied to without holding
+     it, beside the owner's chip. Its marks say how the owner is tied and
+     where the issue itself is held; the issue's own chip is drawn there. */
+  function refChipEl(r, owner) {
+    const kinds = shownKinds(r.own);
+    if (!kinds.length) return null;
+    const c = node("div", `hive-chip hive-issue hive-ref st-${r.status} p-${Math.min(4, Math.max(0, r.priority))}`);
+    c.dataset.kind = "issue";
+    c.dataset.id = r.id;
+    c.dataset.ref = owner;
+    c.tabIndex = 0;
+    const where = r.assignee ? `담당 ${r.assignee}` : "미배정";
+    c.title = `${r.id} — ${owner}: ${kinds.map((k) => REL_NOTE[k]).join(", ")}\n${r.title}\n${where}`
+      + (r.categories.length ? `\ncategory: ${r.categories.join("; ")}` : "");
+    const core = node("span", "hive-core");
+    core.appendChild(node("i", null, "↗"));
+    c.appendChild(core);
+    const body = node("span", "hive-body");
+    body.appendChild(node("b", "hive-name", r.id));
+    body.appendChild(node("span", "hive-sub", r.title));
+    const marks = node("span", "hive-rels");
+    for (const k of kinds) marks.appendChild(node("span", `hive-rel r-${k}`, REL_LABEL[k]));
+    marks.appendChild(node("span", "hive-rel r-where", where));
+    body.appendChild(marks);
+    c.appendChild(body);
+    if (picked && picked.kind === "issue" && picked.id === r.id) c.classList.add("picked");
     return c;
   }
 
@@ -767,8 +963,9 @@ globalThis.HivePage = (() => {
     return el;
   }
 
-  /* One session and everything under it: its issues beside it, its
-     children and their decks one level smaller below. */
+  /* One session and everything under it: its issues beside it, then the
+     issues it is tied to without holding them, its children and their decks
+     one level smaller below. */
   function treeEl(n) {
     const t = node("div", `hive-tree${n.minor ? " minor" : ""}`);
     const head = node("div", "hive-head");
@@ -777,6 +974,12 @@ globalThis.HivePage = (() => {
       const att = node("div", "hive-attach");
       for (const i of n.issues) att.appendChild(issueTree(i));
       head.appendChild(att);
+    }
+    const refs = n.refs.map((r) => refChipEl(r, n.name)).filter(Boolean);
+    if (refs.length) {
+      const box = node("div", "hive-refs");
+      for (const r of refs) box.appendChild(r);
+      head.appendChild(box);
     }
     t.appendChild(head);
     if (n.children.length || n.decks.length) {
@@ -850,6 +1053,7 @@ globalThis.HivePage = (() => {
       if (hit) return;
       if (picked.kind === "session" && n.name === picked.id) { hit = n; return; }
       n.issues.forEach(visitIssue);
+      n.refs.forEach(visitIssue);
       n.children.forEach(visit);
       n.decks.forEach((d) => d.items.forEach(visit));
     };
@@ -885,9 +1089,11 @@ globalThis.HivePage = (() => {
       row("mesh", it.meshes.join(", "));
       row("parent", it.parent);
       row("자식", it.children.length + it.decks.reduce((n, d) => n + d.items.length, 0) || "");
-      row("issue", it.issue);
+      if (!Object.keys(it.rels).length) row("issue", it.issue);
       row("큐", it.issues.length ? `${countIssues(it.issues)}건` : "");
-      row("만든 후속 일감", it.created || "");
+      for (const k of RELS) {
+        row(REL_LABEL[k], (it.rels[k] || []).map((t) => (t.missing ? `${t.id} (활성 목록에 없음)` : t.id)).join("\n"));
+      }
       row("cflow", it.cflow ? it.cflow.label : "");
       row("카테고리", it.categories.join("\n"));
       row("fault", it.fault);
@@ -914,6 +1120,10 @@ globalThis.HivePage = (() => {
       row("우선순위", `P${it.priority}`);
       row("type", it.type);
       row("assignee", it.assignee || "(없음)");
+      row("created_by", it.createdBy);
+      for (const k of RELS) {
+        row(`${REL_LABEL[k]} 세션`, it.links.filter((l) => l.kinds.includes(k)).map((l) => l.session).join("\n"));
+      }
       row("하위 일감", it.children.length ? `${countIssues(it.children)}건` : "");
       row("카테고리", it.categories.join("\n"));
       side.appendChild(dl);
@@ -923,6 +1133,64 @@ globalThis.HivePage = (() => {
       actions.appendChild(open);
       side.appendChild(actions);
     }
+  }
+
+  /* -- relations ----------------------------------------------------- */
+
+  /* What the picked chip is tied to, "kind:id" -> the kinds drawn: the
+     issues of a picked session, the sessions of a picked issue. */
+  function relatedOf(model) {
+    const out = new Map();
+    if (!picked || !model) return out;
+    for (const [id, links] of Object.entries(model.relations || {})) {
+      for (const l of links) {
+        const kinds = shownKinds(l.kinds);
+        if (!kinds.length) continue;
+        if (picked.kind === "session" && l.session === picked.id) out.set(`issue:${id}`, kinds);
+        else if (picked.kind === "issue" && id === picked.id) out.set(`session:${l.session}`, kinds);
+      }
+    }
+    return out;
+  }
+
+  /* Light what the pick is tied to, fade the rest, and run a dashed line
+     from the picked chip to each tied chip that is drawn. Reference chips
+     already sit beside their session, so they are lit and get no line. The
+     lines live in the stage, in its own untransformed units, so a pan or a
+     zoom moves them with the chips. */
+  function markRelations(model) {
+    const rel = relatedOf(model);
+    shell.port.classList.toggle("relating", rel.size > 0);
+    if (!rel.size) return;
+    const chips = [...shell.stage.querySelectorAll(".hive-chip[data-kind]")];
+    for (const c of chips) if (rel.has(`${c.dataset.kind}:${c.dataset.id}`)) c.classList.add("rel");
+    const from = chips.find((c) => c.classList.contains("picked") && !c.dataset.ref)
+      || chips.find((c) => c.classList.contains("picked"));
+    if (!from) return;
+    const k = state.view.k || 1;
+    const box = shell.stage.getBoundingClientRect();
+    const at = (el) => {
+      const r = el.getBoundingClientRect();
+      return [(r.left + r.width / 2 - box.left) / k, (r.top + r.height / 2 - box.top) / k];
+    };
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "hive-links");
+    svg.setAttribute("width", String(shell.stage.scrollWidth));
+    svg.setAttribute("height", String(shell.stage.scrollHeight));
+    const [x0, y0] = at(from);
+    for (const c of chips) {
+      if (c === from || c.dataset.ref || !c.classList.contains("rel")) continue;
+      const key = `${c.dataset.kind}:${c.dataset.id}`;
+      const [x1, y1] = at(c);
+      const mx = (x0 + x1) / 2;
+      const p = document.createElementNS(NS, "path");
+      p.setAttribute("d", `M${x0.toFixed(1)} ${y0.toFixed(1)} C${mx.toFixed(1)} ${y0.toFixed(1)} ${mx.toFixed(1)} ${y1.toFixed(1)} ${x1.toFixed(1)} ${y1.toFixed(1)}`);
+      p.setAttribute("class", `r-${rel.get(key)[0]}`);
+      p.dataset.to = key;
+      svg.appendChild(p);
+    }
+    if (svg.childNodes.length) shell.stage.appendChild(svg);
   }
 
   /* -- pan & zoom ---------------------------------------------------- */
@@ -1047,6 +1315,110 @@ globalThis.HivePage = (() => {
     });
   }
 
+  /* -- briefing overlay -------------------------------------------- */
+
+  // The session chip the overlay is for, kept by name: the stage is
+  // rebuilt on a redraw and the overlay follows the new chip.
+  let briefFor = "";
+  let briefTimer = null;
+  const BRIEF_DELAY_MS = 250;
+
+  function sessionNode(model, name) {
+    let hit = null;
+    const visit = (n) => {
+      if (hit) return;
+      if (n.name === name) { hit = n; return; }
+      for (const k of n.children) visit(k);
+      for (const d of n.decks) for (const k of d.items) visit(k);
+    };
+    for (const p of model ? model.projects : []) {
+      for (const m of p.meshes) { m.roots.forEach(visit); m.decks.forEach((d) => d.items.forEach(visit)); }
+    }
+    return hit;
+  }
+
+  function briefEl(n) {
+    const box = document.createDocumentFragment();
+    const lines = sessionTitle(n).split("\n");
+    box.appendChild(node("b", "hive-brief-name", lines[0]));
+    if (lines.length > 1) box.appendChild(node("div", "hive-brief-meta", lines.slice(1).join(" · ")));
+    const b = n.briefing;
+    box.appendChild(node("div", "hive-brief-head", b ? `briefing${b.state ? ` · ${b.state}` : ""}` : "briefing 없음"));
+    if (!b) {
+      box.appendChild(node("div", "hive-muted", "이 세션의 briefing이 아직 만들어지지 않았다."));
+      return box;
+    }
+    const list = node("div", "hive-brief-rows");
+    for (const r of b.rows) {
+      const row = node("div", `hive-brief-row b-${r.key}`);
+      if (r.label) row.appendChild(node("span", "hive-brief-label", r.label));
+      row.appendChild(node("span", "hive-brief-text", r.text));
+      list.appendChild(row);
+    }
+    box.appendChild(list);
+    return box;
+  }
+
+  function hideBrief() {
+    if (briefTimer) { clearTimeout(briefTimer); briefTimer = null; }
+    briefFor = "";
+    if (shell) shell.brief.classList.add("hidden");
+  }
+
+  /* Draws the overlay for `name` beside its chip: below it when there is
+     room in the port, above it otherwise, kept inside the port. */
+  function placeBrief() {
+    if (!shell || !briefFor) return;
+    const chip = [...shell.stage.querySelectorAll('.hive-chip[data-kind="session"]')]
+      .find((c) => c.dataset.id === briefFor);
+    const n = chip && sessionNode(lastModel, briefFor);
+    if (!n) { hideBrief(); return; }
+    const box = shell.brief;
+    box.dataset.session = briefFor;
+    box.replaceChildren(briefEl(n));
+    box.classList.remove("hidden");
+    const port = shell.port.getBoundingClientRect();
+    const c = chip.getBoundingClientRect();
+    const w = box.offsetWidth, h = box.offsetHeight;
+    let left = c.left - port.left;
+    left = Math.max(4, Math.min(left, port.width - w - 4));
+    let top = c.bottom - port.top + 6;
+    if (top + h > port.height - 4) top = Math.max(4, c.top - port.top - h - 6);
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+  }
+
+  function showBrief(name, delay) {
+    if (briefTimer) { clearTimeout(briefTimer); briefTimer = null; }
+    briefFor = name;
+    if (!delay) { placeBrief(); return; }
+    briefTimer = setTimeout(() => { briefTimer = null; placeBrief(); }, delay);
+  }
+
+  function wireBrief(port) {
+    const sessionChipOf = (t) => t && t.closest && t.closest('.hive-chip[data-kind="session"]');
+    port.addEventListener("pointerover", (e) => {
+      const chip = sessionChipOf(e.target);
+      if (!chip || port.classList.contains("panning")) return;
+      if (chip.dataset.id !== briefFor) showBrief(chip.dataset.id, BRIEF_DELAY_MS);
+    });
+    port.addEventListener("pointerout", (e) => {
+      const chip = sessionChipOf(e.target);
+      if (!chip || chip.contains(e.relatedTarget)) return;
+      if (document.activeElement === chip) return;
+      hideBrief();
+    });
+    port.addEventListener("focusin", (e) => {
+      const chip = sessionChipOf(e.target);
+      if (chip) showBrief(chip.dataset.id, 0); else hideBrief();
+    });
+    port.addEventListener("focusout", (e) => {
+      if (sessionChipOf(e.target) && !sessionChipOf(e.relatedTarget)) hideBrief();
+    });
+    port.addEventListener("pointerdown", hideBrief);
+    port.addEventListener("wheel", hideBrief, { passive: true });
+  }
+
   /* -- shell --------------------------------------------------------- */
 
   function select(options, value, onChange, title) {
@@ -1096,6 +1468,8 @@ globalThis.HivePage = (() => {
     bar.appendChild(toggle("풀", "pool", "보드의 미배정 일감을 우선순위별 묶음으로 그린다"));
     bar.appendChild(toggle("카테고리", "categories", "세션·일감 칩에 카테고리 트리(#/category)의 배정을 표시한다",
       () => { if (state.categories) readCategoriesNow(); }));
+    bar.appendChild(toggle("관계", "relations",
+      "세션과 일감의 관계(담당·시작·참가·생성)를 표식·참조 칩·선택 시 연결선으로 그린다"));
     bar.appendChild(toggle("보조 role 묶기", "stackMinor", "reviewer·oneshot 세션을 형제끼리 한 묶음으로 접는다"));
     bar.appendChild(toggle("쉬는 세션 묶기", "stackIdle", "살아 있는 자손이 없는 hold·paused 형제를 한 묶음으로 접는다"));
     const search = node("input", "hive-search");
@@ -1137,12 +1511,16 @@ globalThis.HivePage = (() => {
     zb("⤢", "전체 맞춤 (0)", fit);
     port.appendChild(zoom);
     port.appendChild(legend());
+    const brief = node("div", "hive-brief hidden");
+    brief.setAttribute("role", "tooltip");
+    port.appendChild(brief);
     frame.appendChild(port);
     const detail = node("aside", "hive-detail hidden");
     frame.appendChild(detail);
     root.appendChild(frame);
     wirePort(port);
-    shell = { root, project, status, port, stage, detail, zoomLabel, search, archiveBtn };
+    wireBrief(port);
+    shell = { root, project, status, port, stage, detail, zoomLabel, search, archiveBtn, brief };
     applyView();
   }
 
@@ -1159,6 +1537,23 @@ globalThis.HivePage = (() => {
     box.appendChild(node("span", "hive-legend-note", "compacting"));
     box.appendChild(node("span", "hive-badge flow f-yours", "◆"));
     box.appendChild(node("span", "hive-legend-note", "응답 대기"));
+    box.appendChild(node("span", "hive-legend-sep", "|"));
+    box.appendChild(node("span", "hive-legend-note", "관계"));
+    // Each kind of tie is a button: pressing one stops drawing that kind.
+    for (const k of RELS) {
+      const b = node("button", `hive-rel r-${k}${state.relHide.includes(k) ? " off" : ""}`, REL_LABEL[k]);
+      b.type = "button";
+      b.dataset.rel = k;
+      b.title = `${REL_NOTE[k]} — 눌러서 이 관계를 숨기거나 다시 그린다`;
+      b.onclick = () => {
+        const off = !state.relHide.includes(k);
+        state.relHide = off ? [...state.relHide, k] : state.relHide.filter((x) => x !== k);
+        b.classList.toggle("off", off);
+        remember();
+        render(true);
+      };
+      box.appendChild(b);
+    }
     return box;
   }
 
@@ -1203,7 +1598,8 @@ globalThis.HivePage = (() => {
     lastModel = model;
     renderProjectPick(model);
     const q = shell.search.value.trim().toLowerCase();
-    const key = JSON.stringify([model.projects, q, picked, [...openDecks], state.categories]);
+    const key = JSON.stringify([model.projects, q, picked, [...openDecks], state.categories,
+                                state.relations, state.relHide]);
     const c = model.counts;
     const live = c.busy + c.idle + c.starting;
     const bits = [`살아 있음 ${live} (busy ${c.busy} · idle ${c.idle})`,
@@ -1226,13 +1622,16 @@ globalThis.HivePage = (() => {
     shell.stage.replaceChildren(frag);
     shell.port.classList.toggle("searching", !!q);
     if (q) {
-      // A chip's title already names everything worth finding it by: the
-      // session's role, meshes and issue, the issue's title and assignee.
+      // A chip's title (a session chip's data-find) already names everything
+      // worth finding it by: the session's role, meshes, issue and briefing,
+      // the issue's title and assignee.
       for (const chip of shell.stage.querySelectorAll(".hive-chip[data-kind]")) {
-        if (chip.title.toLowerCase().includes(q)) chip.classList.add("hit");
+        if ((chip.dataset.find || chip.title).toLowerCase().includes(q)) chip.classList.add("hit");
       }
     }
+    markRelations(model);
     renderDetail(model);
+    placeBrief();
   }
 
   function open() {
@@ -1257,5 +1656,6 @@ globalThis.HivePage = (() => {
 
   return { open, stop, render, fit, category, stateOf, keep, isMinor, roleOf,
            issueParentId, nestIssues, readQueues, readCategories, boardWorkspaces, buildModel, tally,
+           relationKinds, issueRows, RELS, briefingOf,
            arrangeSiblings, ENDED_WINDOWS, STATES, get model() { return lastModel; } };
 })();

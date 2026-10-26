@@ -10109,6 +10109,23 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-badge.flow.f-yours { background: #d29922; color: #0d1117; border-color: #d29922; }
 .hive-badge.flow.f-error { color: #ff7b72; }
 .hive-badge.created { background: transparent; color: #8b949e; border: 1px dashed #484f58; }
+/* relation marks: how a session is tied to an issue (claunch-yzgqb.2) */
+.hive-rels { display: flex; flex-wrap: wrap; gap: 2px 3px; margin-top: 2px; }
+.hive-rel {
+  --rel: #8b949e; display: inline-flex; align-items: center; padding: 0 0.45em; border-radius: 0.6em;
+  font-size: 0.72em; line-height: 1.45; white-space: nowrap; color: var(--rel);
+  border: 1px solid color-mix(in srgb, var(--rel) 55%, transparent);
+  background: color-mix(in srgb, var(--rel) 13%, transparent);
+}
+.hive-rel.r-assignee { --rel: #3fb950; }
+.hive-rel.r-link { --rel: #58a6ff; }
+.hive-rel.r-join { --rel: #f0883e; }
+.hive-rel.r-created { --rel: #39c5cf; }
+.hive-rel.r-where { --rel: #8b949e; border-style: dashed; }
+/* a reference chip: an issue a session is tied to without holding it */
+.hive-refs { display: flex; flex-wrap: wrap; gap: 4px; align-items: flex-start; max-width: 40em; }
+.hive-issue.hive-ref { --core: #30363d; border-style: dashed; background: rgba(22, 27, 34, 0.7); box-shadow: none; }
+.hive-issue.hive-ref .hive-core { color: #c9d1d9; }
 
 /* session states */
 .hive-chip.s-busy { --core: #3fb950; --rim: #2e6b3a; }
@@ -10203,6 +10220,15 @@ a.category-ref:hover { text-decoration: underline; }
 /* -- search: everything else dims */
 .hive-port.searching .hive-chip { opacity: 0.25; }
 .hive-port.searching .hive-chip.hit { opacity: 1; border-color: #f0883e; box-shadow: 0 0 0 2px rgba(240, 136, 62, 0.4); }
+/* a picked chip: what it is tied to stays lit, a dashed line runs to each */
+.hive-port.relating .hive-chip:not(.rel):not(.picked) { opacity: 0.3; }
+.hive-port.relating .hive-chip.rel { opacity: 1; border-color: #8b949e; }
+.hive-links { position: absolute; left: 0; top: 0; z-index: 3; overflow: visible; pointer-events: none; }
+.hive-links path { fill: none; stroke: #8b949e; stroke-width: 1.6; stroke-dasharray: 6 4; opacity: 0.9; }
+.hive-links path.r-assignee { stroke: #3fb950; }
+.hive-links path.r-link { stroke: #58a6ff; }
+.hive-links path.r-join { stroke: #f0883e; }
+.hive-links path.r-created { stroke: #39c5cf; }
 
 /* -- overlays */
 .hive-zoom { position: absolute; right: 10px; top: 10px; display: flex; gap: 4px; align-items: center; z-index: 2; }
@@ -10214,6 +10240,8 @@ a.category-ref:hover { text-decoration: underline; }
 }
 .hive-legend-sep { color: #484f58; margin: 0 2px; }
 .hive-legend-note { color: #8b949e; font-size: 11px; margin-right: 4px; }
+.hive-legend button.hive-rel { font-size: 11px; cursor: pointer; font-family: inherit; }
+.hive-legend button.hive-rel.off { opacity: 0.4; text-decoration: line-through; }
 .hive-detail {
   flex: none; width: 300px; overflow: auto; position: relative;
   border: 1px solid #262c36; border-radius: 10px; background: #12161d; padding: 14px 16px; font-size: 12px;
@@ -10233,3 +10261,20 @@ a.category-ref:hover { text-decoration: underline; }
 /* A deck's face lifts nothing: a transform would make it a stacking context
    and pull the two cards drawn behind it in front of its own background. */
 .hive-deck-face:hover { transform: none; }
+
+/* Hive: a session chip's briefing overlay (claunch-yzgqb.2.1). In the port
+   and outside the stage, so it keeps its size at every zoom. */
+.hive-brief {
+  position: absolute; z-index: 6; max-width: 380px; min-width: 220px;
+  background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); padding: 8px 10px; font-size: 12px; line-height: 1.45;
+  pointer-events: none; white-space: normal; overflow-wrap: anywhere;
+}
+.hive-brief.hidden { display: none; }
+.hive-brief-name { display: block; color: #e6edf3; font-size: 13px; }
+.hive-brief-meta { color: #8b949e; margin-top: 2px; }
+.hive-brief-head { margin-top: 6px; padding-top: 6px; border-top: 1px solid #262c36; color: #58a6ff; font-size: 11px; }
+.hive-brief-rows { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; margin-top: 4px; }
+.hive-brief-row { display: contents; }
+.hive-brief-row.b-one_line .hive-brief-text { grid-column: 1 / -1; color: #e6edf3; }
+.hive-brief-label { color: #8b949e; }

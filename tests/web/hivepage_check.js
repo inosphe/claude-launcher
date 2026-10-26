@@ -216,6 +216,65 @@ const tp1 = tagged.projects[0].pool[0].decks.find((d) => d.label === '미배정 
 assert.deepStrictEqual(tp1.items[0].categories, ['web']);
 assert.deepStrictEqual(w1.categories, [], 'no categories given: none drawn');
 
+// Relations (claunch-yzgqb.2): how a session is tied to an issue -- it
+// holds it, was started on it (and holds it or nobody does), was started
+// on it while another session holds it (joined), or filed it.
+assert.deepStrictEqual(plain(P.relationKinds('w', 'c-1', { id: 'c-1', assignee: 'w' })), ['assignee', 'link']);
+assert.deepStrictEqual(plain(P.relationKinds('r', 'c-1', { id: 'c-1', assignee: 'w' })), ['join']);
+assert.deepStrictEqual(plain(P.relationKinds('r', 'c-1', { id: 'c-1' })), ['link']);
+assert.deepStrictEqual(plain(P.relationKinds('l', '', { id: 'c-2', assignee: 'w', created_by: 'l' })), ['created']);
+assert.deepStrictEqual(plain(P.relationKinds('l', '', { id: 'c-9' }, true)), ['created'], "a lane's created row");
+assert.deepStrictEqual(plain(P.relationKinds('x', 'c-3', { id: 'c-1', assignee: 'w' })), []);
+assert.deepStrictEqual(plain([...P.issueRows(queues).keys()]), ['c-1', 'c-1.1', 'c-9', 'c-2', 'c-3', 'c-4', 'c-5', 'c-5.1']);
+
+// The fleet again, with ties: w1 was started on c-1 and holds it, w1-kid
+// joined it, w1 filed c-9 (held by nobody drawn) and lead filed c-1.1,
+// lead was started on c-4 (in the pool), h1 on an issue the board no
+// longer lists.
+const tied = fleet.map((x) => {
+  if (x.name === 'w1') return { ...x, issue: 'c-1' };
+  if (x.name === 'w1-kid') return { ...x, issue: 'c-1' };
+  if (x.name === 'lead') return { ...x, issue: 'c-4' };
+  if (x.name === 'h1') return { ...x, issue: 'c-gone' };
+  return x;
+});
+const tq = plain(queues);
+tq.boards[0].lanes[0].issues[1].created_by = 'lead';
+const rel = plain(P.buildModel(tied, tq, { now, endedMs: 6 * H, meshesOf: (n) => MESH[n] || [] }));
+const rlead = rel.projects[0].meshes[0].roots[0];
+const rw1 = rlead.children[0];
+const rkid = rw1.children[0];
+assert.strictEqual(rkid.name, 'w1-kid');
+// Every chip of an issue lists the drawn sessions tied to it.
+assert.deepStrictEqual(rw1.issues[0].links, [
+  { session: 'w1', kinds: ['assignee', 'link'] }, { session: 'w1-kid', kinds: ['join'] },
+]);
+assert.deepStrictEqual(rw1.issues[0].children[0].links, [
+  { session: 'lead', kinds: ['created'] }, { session: 'w1', kinds: ['assignee'] },
+]);
+// What a session is tied to without holding it is a reference chip beside
+// it, saying how; what it holds is not repeated there.
+assert.deepStrictEqual(rkid.refs.map((r) => [r.id, r.own, r.assignee]), [['c-1', ['join'], 'w1']]);
+assert.deepStrictEqual(rw1.refs.map((r) => [r.id, r.own]), [['c-9', ['created']]]);
+assert.deepStrictEqual(rlead.refs.map((r) => [r.id, r.own]).sort(), [['c-1.1', ['created']], ['c-4', ['link']]]);
+// The pool chip of c-4 says lead was started on it.
+const rp1 = rel.projects[0].pool[0].decks.find((d) => d.label === '미배정 P1');
+assert.deepStrictEqual(rp1.items[0].links, [{ session: 'lead', kinds: ['link'] }]);
+// The detail pane's lists, by kind; a start issue the board does not list
+// is kept as missing and draws no chip.
+assert.deepStrictEqual(rw1.rels, { assignee: [{ id: 'c-1', missing: false }, { id: 'c-1.1', missing: false }],
+                                   link: [{ id: 'c-1', missing: false }], created: [{ id: 'c-9', missing: false }] });
+const rh1 = rel.projects[0].meshes[1].decks[0].items.find((n) => n.name === 'h1');
+assert.deepStrictEqual(rh1.rels, { link: [{ id: 'c-gone', missing: true }] });
+assert.deepStrictEqual(rh1.refs, []);
+assert.deepStrictEqual(Object.keys(rel.relations).sort(), ['c-1', 'c-1.1', 'c-4', 'c-9']);
+// Held work still counts once: references are not the session's queue.
+assert.strictEqual(rel.projects[0].counts.issues, model.projects[0].counts.issues);
+// With work switched off there are no ties either.
+const rbare = plain(P.buildModel(tied, tq, { now, endedMs: 6 * H, issues: false, meshesOf: (n) => MESH[n] || [] }));
+assert.deepStrictEqual(rbare.projects[0].meshes[0].roots[0].refs, []);
+assert.deepStrictEqual(rbare.relations, {});
+
 // An ended sibling group folds from three on, but one with work in hand
 // keeps its own place.
 const ended3 = P.arrangeSiblings([
@@ -226,5 +285,21 @@ const ended3 = P.arrangeSiblings([
 ], 'k', true, true);
 assert.deepStrictEqual(plain(ended3.decks).map((d) => [d.label, d.count]), [['끝난 세션', 3]]);
 assert.deepStrictEqual(plain(ended3.nodes).map((n) => n.name), ['d']);
+
+// A session's briefing digest, as the hover overlay draws it: the filled
+// rows in the session tab's order, none for an empty or missing digest.
+assert.deepStrictEqual(plain(P.briefingOf({ briefing: { one_line: ' doing x ', state: 'fresh', progress: '2/3', goal: 'g' } })),
+  { state: 'fresh', rows: [{ key: 'one_line', label: '', text: 'doing x' }, { key: 'goal', label: 'goal', text: 'g' },
+                           { key: 'progress', label: 'progress', text: '2/3' }] });
+assert.strictEqual(P.briefingOf({ briefing: { state: 'fresh', one_line: '  ' } }), null);
+assert.strictEqual(P.briefingOf({}), null);
+assert.strictEqual(P.briefingOf({ briefing: 'text' }), null);
+const briefed = plain(P.buildModel([{ name: 'b1', status: 'idle', created_at: new Date(now).toISOString(),
+                                      briefing: { one_line: 'on it', state: 'stale' } },
+                                    { name: 'b2', status: 'idle', created_at: new Date(now).toISOString() }],
+                                   null, { now }));
+const bnodes = briefed.projects[0].meshes[0].roots;
+assert.deepStrictEqual(bnodes.find((n) => n.name === 'b1').briefing, { state: 'stale', rows: [{ key: 'one_line', label: '', text: 'on it' }] });
+assert.strictEqual(bnodes.find((n) => n.name === 'b2').briefing, null);
 
 console.log('hivepage ok');
