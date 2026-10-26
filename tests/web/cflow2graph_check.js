@@ -39,16 +39,36 @@ function sliceConst(name) {
 
 const CONSTS = ["CF2G_NODE_W", "CF2G_NODE_H", "CF2G_GAP", "CF2G_LANE", "CF2G_PAD",
                 "CF2G_HEAD", "CF2G_CHIP", "CF2G_RAIL", "CF2G_EDGE", "CF2G_MARGIN",
-                "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES"];
+                "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes"];
+
+/* ---- stub DOM, just enough for the mode tabs -------------------------- */
+function stubNode(tag) {
+  return {
+    tag, children: [], attrs: {}, listeners: {}, className: "", textContent: "",
+    type: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k]; },
+    addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); },
+    appendChild(c) { this.children.push(c); return c; },
+    click() { for (const fn of this.listeners.click || []) fn(); },
+  };
+}
+const store = {};
+globalThis.document = { createElement: (t) => stubNode(t) };
+globalThis.localStorage = {
+  getItem: (k) => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); },
+};
 
 const fns = new Function(
   CONSTS.map(sliceConst).join("\n") + "\n" +
   [slice("cflow2GraphClip"), slice("cflow2GraphLoopText"), slice("cflow2GraphChip"),
    slice("cflow2GraphSig"), slice("cflow2GraphSite"), slice("cflow2GraphProcs"), slice("cflow2GraphOpen"),
    slice("cflow2GraphLayout"), slice("cflow2GraphSvg"), slice("cflow2NodeBits"),
-   slice("escXml")].join("\n") +
+   slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs")].join("\n") +
   "\nreturn { cflow2GraphLayout, cflow2GraphProcs, cflow2GraphOpen, cflow2GraphSvg," +
-  " cflow2GraphSig, cflow2GraphSite, cflow2NodeBits, CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD };"
+  " cflow2GraphSig, cflow2GraphSite, cflow2NodeBits, cflow2ChartMode, cflow2ChartModeTabs," +
+  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD };"
 )();
 
 let failures = 0;
@@ -301,6 +321,86 @@ const inside = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y &&
     nodes: { r: { id: "r", type: "task", label: "<b>&\"x\"", children: [], roles: [] } },
   }, {}, { open: new Set() }));
   ok("labels are escaped for the svg", escaped.includes("&lt;b&gt;&amp;&quot;x&quot;"));
+}
+
+/* A body is drawn where the reader can see it: a site that is not on screen
+   cannot be the node the other sites point at (s2273-rev, claunch-g6uma — the
+   owner used to be the chart-order first whatever the collapse state, so 24
+   of 24 partially expanded sites drew a reference node with no line). */
+{
+  const chart = {
+    root: "root",
+    nodes: {
+      root: { id: "root", type: "seq", children: ["lp", "cb", "cc"], roles: ["", "", ""] },
+      lp: { id: "lp", type: "loop", mode: "until", max: 2, children: ["ca"], roles: ["do"] },
+      ca: { id: "ca", type: "scope", proc: "P", children: ["ba"], roles: [""] },
+      ba: { id: "ba", type: "task", label: "step", children: [], roles: [] },
+      cb: { id: "cb", type: "scope", proc: "P", children: ["bb"], roles: [""] },
+      bb: { id: "bb", type: "task", label: "step", children: [], roles: [] },
+      cc: { id: "cc", type: "scope", proc: "P", children: ["bc"], roles: [""] },
+      bc: { id: "bc", type: "task", label: "step", children: [], roles: [] },
+    },
+  };
+  check("the chart-order first site is still where the group is keyed",
+        fns.cflow2GraphProcs(chart).first.get("cc"), "ca");
+
+  const g = fns.cflow2GraphLayout(chart, {}, { open: new Set(["root"]) });
+  check("only the sites on screen are drawn",
+        [!!nodeOf(g, "ca"), !!nodeOf(g, "cb"), !!nodeOf(g, "cc")], [false, true, true]);
+  check("the first site on screen owns the body", nodeOf(g, "cb").ref, "");
+  check("the next site on screen points at it", nodeOf(g, "cc").ref, "cb");
+  check("one reference edge, between the two drawn sites",
+        edges(g, "ref").map((e) => [e.from, e.to]), [["cc", "cb"]]);
+
+  /* opening one site's ancestors and nothing else: no node is left pointing
+     at a body that is not drawn */
+  const dangling = [];
+  for (const site of ["ca", "cb", "cc"]) {
+    const opened = fns.cflow2GraphOpen(chart, {}, site, null);
+    const gs = fns.cflow2GraphLayout(chart, {}, { open: opened });
+    for (const n of gs.nodes) {
+      if (n.ref && !gs.nodes.some((m) => m.id === n.ref)) dangling.push([site, n.id]);
+    }
+  }
+  check("no drawn site points at a node that is not drawn", dangling, []);
+
+  const wide = fns.cflow2GraphLayout(chart, {}, { open: new Set(Object.keys(chart.nodes)) });
+  check("with everything open the chart-order first draws the body again",
+        [boxOf(wide, "ca").kind, nodeOf(wide, "cb").ref, nodeOf(wide, "cc").ref],
+        ["call", "ca", "ca"]);
+  check("and both other sites reach it", edges(wide, "ref").map((e) => e.to), ["ca", "ca"]);
+}
+
+/* ---- the two views are a radio group, and the choice is remembered --- */
+{
+  check("a host nobody has switched starts on the callstack",
+        fns.cflow2ChartMode("fresh"), "callstack");
+  store["claunch.cflow2.chartmode.odd"] = "diagram";
+  check("a stored value that is neither view falls back to the callstack",
+        fns.cflow2ChartMode("odd"), "callstack");
+
+  let draws = 0;
+  const group = fns.cflow2ChartModeTabs("host-a", "callstack", () => { draws++; });
+  check("it is one radio group of two", [group.attrs.role, group.children.length], ["radiogroup", 2]);
+  ok("each button is a radio", group.children.every((b) => b.attrs.role === "radio"));
+  check("the callstack is the checked one",
+        group.children.map((b) => [b.textContent, b.attrs["aria-checked"]]),
+        [["Callstack", "true"], ["Graph", "false"]]);
+
+  group.children[1].click();
+  check("pressing Graph switches the mode", fns.cflow2ChartMode("host-a"), "graph");
+  check("…remembered for this viewer", store["claunch.cflow2.chartmode.host-a"], "graph");
+  check("…and asks for one redraw", draws, 1);
+
+  const back = fns.cflow2ChartModeTabs("host-a", fns.cflow2ChartMode("host-a"), () => { draws++; });
+  check("the redrawn tabs check the mode that was picked",
+        back.children.map((b) => b.attrs["aria-checked"]), ["false", "true"]);
+
+  ok("the chart section reads the stored mode and draws the tabs from it",
+     src.includes("const chartMode = cflow2ChartMode(host);") &&
+     src.includes("sec.appendChild(cflow2ChartModeTabs(host, chartMode, redraw));"));
+  ok("the graph and the callstack are the branches the mode picks between",
+     src.includes('chartMode === "graph"'));
 }
 
 /* ---- nothing to draw ------------------------------------------------- */

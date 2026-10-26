@@ -43253,9 +43253,11 @@ function cflow2GraphSite(id) {
   return /^[0-9.]+$/.test(tail) && parts.length ? `${parts.pop()}/${tail}` : tail;
 }
 
-/* Which `call` sites are one body: procedure name plus compiled shape. The
-   first site in flow order draws it; the rest are call nodes that point at
-   it — one shared node, not one copy per site. */
+/* Which `call` sites are one body: procedure name plus compiled shape. Which
+   of them draws the body is the layout's call, not this one's — a group is
+   owned by the first site that is actually on screen (see the drawn set
+   below). `first` is only the chart-order first, which is what groups are
+   keyed by so the site list survives a re-layout. */
 function cflow2GraphProcs(chart) {
   const nodes = (chart && chart.nodes) || {};
   const order = [], seen = new Set();
@@ -43276,12 +43278,12 @@ function cflow2GraphProcs(chart) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(id);
   }
-  const first = new Map(), sites = new Map();
-  for (const ids of groups.values()) {
+  const first = new Map(), sites = new Map(), key = new Map();
+  for (const [k, ids] of groups) {
     sites.set(ids[0], ids);
-    for (const id of ids) first.set(id, ids[0]);
+    for (const id of ids) { first.set(id, ids[0]); key.set(id, k); }
   }
-  return { first, sites, order };
+  return { first, sites, order, groups, key };
 }
 
 /* Which containers the graph draws open: the root, every ancestor of the
@@ -43322,12 +43324,64 @@ function cflow2GraphLayout(chart, detail, opts) {
   const at = (id) => nodes[id] || { id, type: "?" };
   const r = (v) => Math.round(v * 10) / 10;
 
-  /* A site that is not its body's first draws no children: the body is the
+  const roots = [];
+  if (chart && chart.root && nodes[chart.root]) roots.push(chart.root);
+  else {
+    const claimed = new Set();
+    for (const id of Object.keys(nodes)) {
+      for (const c of nodes[id].children || []) claimed.add(c);
+    }
+    for (const id of Object.keys(nodes)) if (!claimed.has(id)) roots.push(id);
+  }
+  const bodyKids = (id) => (at(id).children || []).filter((c) => nodes[c] && c !== id);
+
+  /* Which nodes reach the screen. Ownership has to settle first: a call site
+     that does not own its body draws none of it, so the sites written inside
+     that body are not on screen either. Picking the owner from the whole
+     chart instead leaves a reference node pointing at a body nobody can see
+     (s2273-rev, claunch-g6uma: 24 of 24 partially expanded sites drew a ref
+     node and no line). Each group is owned once — by the first of its sites
+     that is drawn and would show the body, else the first drawn — and frozen
+     after the pick, so the drawn set only grows and the loop ends. */
+  const drawnSet = (own) => {
+    const seen = new Set();
+    const visit = (id) => {
+      if (!id || seen.has(id) || !nodes[id]) return;
+      seen.add(id);
+      const n = nodes[id];
+      if (n.type === "scope" && procs.key.has(id) && own.get(procs.key.get(id)) !== id) return;
+      if (!bodyKids(id).length) return;
+      if (!(CF2G_ATOMIC.has(n.type) || open.has(id))) return;
+      for (const c of n.children || []) visit(c);
+    };
+    for (const id of roots) visit(id);
+    return seen;
+  };
+  const owners = new Map();
+  let drawn = drawnSet(owners);
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (const [key, ids] of procs.groups) {
+      if (owners.has(key)) continue;
+      const here = ids.filter((i) => drawn.has(i));
+      if (!here.length) continue;
+      owners.set(key, here.find((i) => open.has(i) && bodyKids(i).length) || here[0]);
+      changed = true;
+    }
+    drawn = drawnSet(owners);
+    if (!changed) break;
+  }
+  /* an owner the walk never reached owns nothing after all: its sites read as
+     plain calls rather than pointing at an invisible body */
+  for (const [key, id] of [...owners]) if (!drawn.has(id)) owners.delete(key);
+
+  /* A site that is not its body's owner draws no children: the body is the
      shared node, reached by a reference edge. */
-  const shared = (id) => at(id).type === "scope" && procs.first.has(id) &&
-    procs.first.get(id) !== id;
-  const kids = (id) => shared(id) ? []
-    : (at(id).children || []).filter((c) => nodes[c] && c !== id);
+  const ownerOf = (id) => at(id).type === "scope" && procs.key.has(id)
+    ? owners.get(procs.key.get(id)) || "" : "";
+  const shared = (id) => { const o = ownerOf(id); return !!o && o !== id; };
+  const kids = (id) => shared(id) ? [] : bodyKids(id);
+  const groupOf = (id) => (procs.key.has(id) ? procs.groups.get(procs.key.get(id)) || [] : []);
   const atomic = (id) => CF2G_ATOMIC.has(at(id).type);
   const shown = (id) => kids(id).length > 0 && (atomic(id) || open.has(id));
   const stackH = (boxes) => boxes.reduce((a, b) => a + b.h, 0) +
@@ -43379,8 +43433,8 @@ function cflow2GraphLayout(chart, detail, opts) {
   const box = (id, x, y, w, h, kind) => {
     const n = at(id);
     const bits = cflow2NodeBits(n);
-    const ref = shared(id);
-    const count = (procs.sites.get(procs.first.get(id)) || []).length;
+    const ref = ownerOf(id) && ownerOf(id) !== id ? ownerOf(id) : "";
+    const count = groupOf(id).length;
     const nkids = kids(id).length;
     /* a call is a call whether its body is drawn inside it or not */
     const head = ref || n.type === "scope" ? `call ${n.proc || "?"}`
@@ -43392,12 +43446,12 @@ function cflow2GraphLayout(chart, detail, opts) {
     out.nodes.push({
       id, type: n.type || "?", x, y, w, h, kind: ref ? "ref" : kind,
       head: cflow2GraphClip(head, 26), sub: cflow2GraphClip(sub, 34),
-      full: `${head}${bits.sub ? " · " + bits.sub : ""}${ref ? ` · the same body as ${procs.first.get(id)}` : ""}`,
+      full: `${head}${bits.sub ? " · " + bits.sub : ""}${ref ? ` · the same body as ${ref}` : ""}`,
       live: !!live[id], awaiting: awaiting[id] || "",
       visits: Number(visits[n.label || n.id] || 0),
       force: !!n.force_target,
       toggle: !shown(id) && nkids > 0,
-      ref: ref ? procs.first.get(id) : "",
+      ref,
     });
   };
 
@@ -43430,7 +43484,7 @@ function cflow2GraphLayout(chart, detail, opts) {
 
     /* a loop or a call: a titled frame around the body */
     if (n.type === "loop" || n.type === "scope") {
-      const sites = procs.sites.get(id) || [];
+      const sites = groupOf(id);
       out.boxes.push({
         id, kind: n.type === "loop" ? "loop" : "call", x, y, w: s.w, h: s.h,
         text: n.type === "loop" ? cflow2GraphLoopText(n)
@@ -43508,15 +43562,6 @@ function cflow2GraphLayout(chart, detail, opts) {
     }
   };
 
-  const roots = [];
-  if (chart && chart.root && nodes[chart.root]) roots.push(chart.root);
-  else {
-    const claimed = new Set();
-    for (const id of Object.keys(nodes)) {
-      for (const c of nodes[id].children || []) claimed.add(c);
-    }
-    for (const id of Object.keys(nodes)) if (!claimed.has(id)) roots.push(id);
-  }
   let oy = CF2G_MARGIN;
   for (const id of roots) {
     place(id, CF2G_MARGIN, oy);
@@ -43528,15 +43573,21 @@ function cflow2GraphLayout(chart, detail, opts) {
      in eighteen places is eighteen lines, and drawn over the flow they would
      cross every box between the two sites. Sharing one column is the point —
      the gutter reads as one reference bus, and each box keeps its own site
-     name so the reader can tell which call is which. */
-  for (const [id, firstId] of procs.first) {
-    if (id === firstId) continue;
-    const a = geo.get(id), b = geo.get(firstId);
-    if (!a || !b) continue;
-    const y1 = a.y + a.h / 2, y2 = b.y + CF2G_HEAD / 2;
-    edge(id, firstId, "ref",
-      `M${r(a.x)} ${r(y1)}L${r(CF2G_GUTTER)} ${r(y1)}` +
-      `L${r(CF2G_GUTTER)} ${r(y2)}L${r(b.x)} ${r(y2)}`);
+     name so the reader can tell which call is which. Both ends are on screen
+     by construction: an owner that the walk did not reach was dropped above,
+     and a site that is drawn has its owner drawn too (it owns this body, so
+     it is on the path that showed the site). */
+  for (const [key, ownerId] of owners) {
+    const b = geo.get(ownerId);
+    for (const id of procs.groups.get(key) || []) {
+      if (id === ownerId) continue;
+      const a = geo.get(id);
+      if (!a || !b) continue;
+      const y1 = a.y + a.h / 2, y2 = b.y + CF2G_HEAD / 2;
+      edge(id, ownerId, "ref",
+        `M${r(a.x)} ${r(y1)}L${r(CF2G_GUTTER)} ${r(y1)}` +
+        `L${r(CF2G_GUTTER)} ${r(y2)}L${r(b.x)} ${r(y2)}`);
+    }
   }
 
   let maxX = 0, maxY = 0;
