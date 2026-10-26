@@ -209,7 +209,17 @@ function build(opts) {
   const code = slice("/* notices — the page's own voice",
                      "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);") +
     // commitRef / commitText (claunch-tb145): the gate's tips line uses them.
-    "\n" + slice("/* A commit hash drawn as a link", "function wsWorktreeList(");
+    "\n" + slice("/* A commit hash drawn as a link", "function wsWorktreeList(") +
+    // The page-wide Escape and `storage` listeners of the panel
+    // (claunch-efpoi.1) sit with the other top-level listeners, outside the
+    // notices section; they run here against a document and window of
+    // their own, so the section above still sees no `document`.
+    "\n;(function (document, window) {\n" +
+    slice('document.addEventListener("keydown", (ev) => {\n  if (ev.key !== "Escape") return;\n',
+          '$("refresh-all").addEventListener') +
+    "\n})(__doc, __win);";
+  const listeners = { document: {}, window: {} };
+  const target = (on) => ({ addEventListener: (ev, fn) => { on[ev] = fn; } });
   const noop = () => {};
   const api = new Function(
     "$", "el", "setTimeout", "clearTimeout", "Date", "api", "location",
@@ -220,6 +230,7 @@ function build(opts) {
     "refreshProjects", "ensureControlSocket", "refreshCflow2Rail",
     "refreshTermWindow", "refreshTermTimers",
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
+    "__doc", "__win",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
     " refreshNudgeGate," +
@@ -227,7 +238,7 @@ function build(opts) {
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " killReapedNotify," +
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
-    " noticeSettingsToggle, noticeBellPaint," +
+    " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -242,11 +253,12 @@ function build(opts) {
     // Node has a real BroadcastChannel; a world joins a tab hub only when
     // the test gives it one, so worlds never hear each other by accident.
     o.hub ? o.hub.Channel : undefined,
+    target(listeners.document), target(listeners.window),
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
   return {
-    api, nodes, clock, gate, apiCalls, apiBodies, storage, loc, layouts, timers,
+    api, nodes, clock, gate, apiCalls, apiBodies, storage, loc, layouts, timers, listeners,
     strip: () => nodes.notices.children,
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
@@ -1592,6 +1604,81 @@ function gotoRec(rec) {
           again.panel());
     check("the panel has its settings press and overlay",
           /id="notice-panel-settings"/.test(html) && /id="notice-settings"/.test(html));
+  }
+  /* --- what hides a kind, one guard at a time (claunch-efpoi.1) -------
+     Each check below is the one that fails when its guard is taken out
+     of app.js; the review that asked for them removed each guard and saw
+     the checks above still pass. */
+  {
+    const w = build();
+    w.api.noticeSourceSet("goto", false);
+    check("a hidden gate kind's request is hidden though nobody put it away",
+          w.api.gateIsHidden("goto", "g1") === true && w.api.gateIsHidden("kill", "k1") === false);
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    check("a hidden gate kind's refresh draws no card", w.strip().length === 0, w.said());
+    w.api.noticeBellPaint();
+    const title = w.nodes["notice-bell"].title;
+    check("the bell names the requests waiting in a hidden kind",
+          /1 waiting in kinds you hid/.test(title), title);
+    check("and counts none of them as read, still open", !/read, still open/.test(title), title);
+    check("nor on its number", w.badge() === "", w.badge());
+  }
+  {
+    const w = build();
+    const of = (entry) => w.api.noticeSourceOf(entry);
+    check("an old row is placed by what it carries",
+          of({ gate: { type: "spawn", rid: "s1" } }) === "spawn" &&
+            of({ target: { thread: "th-1" } }) === "thread" &&
+            of({ target: { qa: "q-1" } }) === "qa" &&
+            of({ target: {} }) === "page" && of({}) === "page" &&
+            of({ gate: { type: "bogus" } }) === "page",
+          [of({ gate: { type: "spawn" } }), of({ target: { thread: "th-1" } }),
+           of({ target: { qa: "q-1" } }), of({ gate: { type: "bogus" } })]);
+    check("a named kind wins, an unknown one falls back",
+          of({ source: "chat", target: { thread: "th-1" } }) === "chat" &&
+            of({ source: "bogus", target: { qa: "q-1" } }) === "qa");
+  }
+  {
+    const w = build();
+    w.api.notify("odd", "", { source: "bogus", key: "o1" });
+    check("a kind NOTICE_SOURCES does not list is recorded as the page's",
+          w.api.noticeHistory[0].source === "page", w.api.noticeHistory[0]);
+    let threw = null;
+    let got;
+    try { got = w.api.noticeGateRefresh("qa"); } catch (e) { threw = String(e); }
+    check("a notice kind has no gate refresh to run", threw === null && got === null, threw);
+    check("nor does an unknown one", w.api.noticeGateRefresh("bogus") === null);
+  }
+  {
+    const storage = memoryStorage();
+    const w = build({ storage });
+    const onStorage = w.listeners.window.storage;
+    check("the page listens for another tab's choice", typeof onStorage === "function");
+    w.api.noticeSourceSet("spawn", false);
+    onStorage({ key: "claunch.noticeHistory", newValue: "[]" });
+    check("another key's change leaves the hidden kinds alone",
+          w.api.gateIsHidden("spawn", "x") === true);
+    onStorage({ key: "claunch.noticeSourcesHidden", newValue: JSON.stringify(["bogus", "thread"]) });
+    check("another tab's choice is taken", w.api.gateIsHidden("spawn", "x") === false);
+    w.api.notify("s1 replied", "", { source: "thread", key: "t1" });
+    w.api.noticePanelToggle(true);
+    w.api.noticePanelPaint();
+    check("and a kind it names that this page lacks is dropped",
+          /1 kind\(s\) hidden/.test(w.panel()), w.panel());
+  }
+  {
+    const w = build();
+    const onKey = w.listeners.document.keydown;
+    check("the page listens for Escape", typeof onKey === "function");
+    w.api.noticePanelToggle(true);
+    w.api.noticeSettingsToggle(true);
+    const open = (id) => !w.nodes[id].classList.contains("hidden");
+    onKey({ key: "Escape" });
+    check("Escape closes the settings first", !open("notice-settings") && open("notice-panel"),
+          [open("notice-settings"), open("notice-panel")]);
+    onKey({ key: "Escape" });
+    check("and the panel next", !open("notice-panel"));
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
