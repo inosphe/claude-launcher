@@ -465,6 +465,80 @@ def test_the_split_route_makes_the_children_for_a_person(home, tmp_path):
     _run(scenario, tmp_path)
 
 
+def test_the_split_route_applies_the_catch_all_rule_the_form_promises(home, tmp_path):
+    """The page's own route and the agent's `category_assign {split}` run one
+    rule (`category.spread`). Before that, the form promised "a line with no
+    refs takes the rest" while this route made an empty node and left the rest
+    where it was -- and nothing caught it, because the page check stops at the
+    request body."""
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], web_["id"], "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-x1"}], web_["id"], "user")
+        doc = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "parts": [{"label": "beads page", "items": ["session:a"]},
+                      {"label": "issue side"}]})
+        assert [ch["node"]["label"] for ch in doc["children"]] == ["beads page", "issue side"]
+        # The part with no items took what the first one left.
+        assert [ch["items"] for ch in doc["children"]] == [
+            [{"kind": "session", "ref": "a"}], [{"kind": "issue", "ref": "claunch-x1"}]]
+        assert category.where(ws, "issue", "claunch-x1")["node"]["label"] == "issue side"
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_refuses_two_catch_all_parts_and_unclaimed_items(home, tmp_path):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], web_["id"], "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-x1"}], web_["id"], "user")
+        # Two parts with no items would each take "the rest": the first empties
+        # it and the second makes an empty node, silently.
+        two = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "parts": [{"label": "x"}, {"label": "y"}]}, status=400)
+        assert "only one split part" in two["error"]
+        # A part that names everything but one item leaves that item claimed by
+        # no part: refused rather than left where it was.
+        short = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "parts": [{"label": "beads page", "items": ["session:a"]}]}, status=400)
+        assert "in no split part" in short["error"]
+        # Nothing was made by either refusal.
+        assert category.items_of(ws, web_["id"]) and len(category.tree(ws)["nodes"]) == 1
+
+    _run(scenario, tmp_path)
+
+
+def test_the_split_route_takes_the_items_from_the_parent_or_from_the_call(home, tmp_path):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        web_ = category.create_node(ws, {"label": "web"}, "user")
+        other = category.create_node(ws, {"label": "beads"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "a"}], web_["id"], "user")
+        category.assign(ws, [{"kind": "issue", "ref": "claunch-x1"}], other["id"], "user")
+        # Items given explicitly: the call decides the set, the same as the
+        # agent path, and an item inside another category is refused by
+        # `category.split` rather than moved across the tree.
+        crossed = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parent_id": web_["id"],
+            "items": [{"kind": "session", "ref": "a"}, {"kind": "issue", "ref": "claunch-x1"}],
+            "parts": [{"label": "beads page", "items": ["session:a"]}, {"label": "rest"}]},
+            status=400)
+        assert "not inside the category being split" in crossed["error"]
+        # Top-level children have no parent to draw "the rest" from, so that
+        # form is refused with a message instead of making an empty node.
+        top = await _call(client, "POST", "/api/category/split?workspace=alpha", {
+            "parts": [{"label": "beads page", "items": ["session:a"]}, {"label": "rest"}]},
+            status=400)
+        assert "top-level split" in top["error"]
+
+    _run(scenario, tmp_path)
+
+
 def test_a_second_catch_all_part_is_refused(home, tmp_path, typed):
     async def scenario(mgr, client):
         # Two parts that name no items would each take "the rest": the first

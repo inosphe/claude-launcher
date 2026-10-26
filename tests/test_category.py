@@ -378,6 +378,36 @@ def test_split_at_the_top_level_and_with_no_items(ws):
     assert place(ws, S("s1"))["id"] == web["id"]
 
 
+def test_spread_is_the_one_split_part_rule_both_paths_call(ws):
+    items = [S("s1"), {"kind": "issue", "ref": "i-1"}]
+    # A later part with no items takes what the earlier ones left.
+    out = c.spread(items, [{"label": "beads page", "items": ["session:s1"]},
+                           {"label": "rest"}])
+    assert out == [{"label": "beads page", "items": [S("s1")]},
+                   {"label": "rest", "items": [{"kind": "issue", "ref": "i-1"}]}]
+    # A {kind, ref} entry and a bare ref both resolve; the bare one is matched
+    # against the call's items.
+    assert c.spread([S("s1")], [{"label": "x", "items": [S("s1")]}])[0]["items"] == [S("s1")]
+    assert c.spread([S("s1")], [{"label": "x", "items": ["s1"]}])[0]["items"] == [S("s1")]
+    # A bare ref that names both a session and an issue is refused rather than
+    # guessed: a wrong kind places nothing and the caller sees no error.
+    with pytest.raises(c.CategoryError, match="both a session and an issue"):
+        c.spread([S("same"), {"kind": "issue", "ref": "same"}],
+                 [{"label": "x", "items": ["same"]}])
+    with pytest.raises(c.CategoryError, match="only one split part"):
+        c.spread(items, [{"label": "x"}, {"label": "y"}])
+    with pytest.raises(c.CategoryError, match="in no split part"):
+        c.spread(items, [{"label": "x", "items": ["session:s1"]}])
+    with pytest.raises(c.CategoryError, match="not one of this call's items"):
+        c.spread(items, [{"label": "x", "items": ["zzz"]}, {"label": "rest"}])
+    # A `kind:ref` that parses but names nothing this call is placing says so
+    # differently: the kind was given, the item was not.
+    with pytest.raises(c.CategoryError, match="not an item this call is placing"):
+        c.spread(items, [{"label": "x", "items": ["session:zzz"]}, {"label": "rest"}])
+    with pytest.raises(c.CategoryError, match="at least one new category"):
+        c.spread(items, [])
+
+
 def test_merge_takes_an_explicit_parent_for_registration(ws):
     ui = node(ws, "web")
     a = node(ws, "beads page")

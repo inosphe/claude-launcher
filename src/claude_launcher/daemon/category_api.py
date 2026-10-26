@@ -42,24 +42,6 @@ def _actor(request):
     return actors.label(actors.from_request(request))
 
 
-def _item_ref(entry):
-    """A split part's item -> ``{kind, ref}``.
-
-    The page sends ``{kind, ref}`` (it has the kind); it may also send the
-    ``"session:<name>"`` / ``"issue:<id>"`` spelling, which the item key uses
-    everywhere else. A bare ref is refused rather than guessed -- the wrong
-    kind places nothing and the person sees no error.
-    """
-    if isinstance(entry, dict):
-        return entry
-    if isinstance(entry, str) and ":" in entry:
-        kind, _, ref = entry.partition(":")
-        if kind in ("session", "issue") and ref:
-            return {"kind": kind, "ref": ref}
-    raise category.CategoryError(
-        f"a split part's item must be {{kind, ref}} or 'session:<name>'/'issue:<id>', not {entry!r}")
-
-
 async def _details(app, ws, items):
     """``{"session:<name>": {...}, "issue:<id>": {...}}`` for display.
 
@@ -195,17 +177,25 @@ def install(app):
 
     async def split(request, body):
         ws = ws_of(request, body)
-        # The page writes one line per new child and names items by ref alone
-        # (`{label, items: ["s1", "s2"]}`); an item entry that is not a ref
-        # string is {kind, ref}. ``children`` is the plain-array spelling the
-        # route has always taken.
-        parts = body.get("parts") or body.get("children")
-        if isinstance(parts, list):
-            parts = [{**p, "items": [_item_ref(i) for i in p.get("items") or []]}
-                     if isinstance(p, dict) else p for p in parts]
-        return {"workspace": ws.name, **await asyncio.to_thread(
-            category.split, ws, body.get("parent_id"), parts,
-            _actor(request), body.get("reason", ""))}
+
+        def make():
+            # The page writes one line per new child and a line with no refs is
+            # the catch-all; the parts select from what is inside the parent.
+            # `category.spread` is that rule, and the agent's
+            # `category_assign {split}` calls it too, so the form's promise and
+            # the server's behaviour cannot drift apart.
+            parent_id = body.get("parent_id")
+            items = body.get("items")
+            if items is None:
+                if parent_id in (None, "", "root"):
+                    raise category.CategoryError(
+                        "a top-level split cannot tell what 'the remaining items' are; "
+                        "name items explicitly or give parent_id")
+                items = category.items_of(ws, parent_id, descendants=True)
+            children = category.spread(items, body.get("parts") or body.get("children") or [])
+            return category.split(ws, parent_id, children, _actor(request), body.get("reason", ""))
+
+        return {"workspace": ws.name, **await asyncio.to_thread(make)}
 
     async def proposals(request, body):
         ws = ws_of(request, body)

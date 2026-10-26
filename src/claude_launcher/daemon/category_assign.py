@@ -289,68 +289,14 @@ def _split(ws, split: dict, items: list, actor: str, reason: str) -> dict:
     """Registration-time split: make several children under ``split.parent_id``
     and put ``items`` across them by ``split.parts``.
 
-    Each part is ``{label, aliases, description, items}``; a part's ``items``
-    select from the call's ``items`` (as refs, ``{kind, ref}``, or the bare ref
-    string the registration normally talks in). A part with no ``items`` takes
-    everything not yet claimed, so the common shape -- "these go here, the
-    rest go there" -- needs no refs repeated."""
-    parts = split.get("parts") or []
-    if not isinstance(parts, list) or not parts:
-        raise AssignError(400, "split.parts must name at least one new category")
-    remaining = {(i["kind"], i["ref"]) for i in items}
-    children, absorbed = [], False
-    for part in parts:
-        if not isinstance(part, dict):
-            raise AssignError(400, "each split part must be {label, ..., items}")
-        if part.get("items") in (None, []):
-            # A part that names no items is the catch-all: it takes everything
-            # the earlier parts left. A second one would make an empty node and
-            # quietly drop the first one's intent, so it is refused.
-            if absorbed:
-                raise AssignError(400, "only one split part may take the remaining items")
-            absorbed = True
-            claimed, remaining = sorted(remaining), set()
-        else:
-            claimed = _claim(part.get("items"), remaining)
-            remaining -= set(claimed)
-        children.append({**{k: part[k] for k in ("label", "aliases", "description") if k in part},
-                         "items": [{"kind": k, "ref": r} for k, r in claimed]})
-    if remaining:
-        raise AssignError(400, "these items are in no split part: "
-                          + ", ".join(f"{k} {r}" for k, r in sorted(remaining)))
+    The part rule itself (which part takes what, and what is refused) lives in
+    :func:`category.spread`, which the page's own route calls too, so the two
+    paths cannot drift apart."""
+    children = category.spread(items, split.get("parts") or [])
     made = category.split(ws, split.get("parent_id"), children, actor, reason)
     return {"parent_id": made["parent_id"],
             "created": [c["node"]["label"] for c in made["children"]],
             "paths": [" / ".join(c["node"]["path"]) for c in made["children"]]}
-
-
-def _claim(refs, remaining) -> list:
-    """``refs`` from a split part -> ``[(kind, ref)]`` that are in ``remaining``."""
-    if refs is None:
-        return []
-    if not isinstance(refs, list):
-        raise AssignError(400, "a split part's items must be an array")
-    out = []
-    for entry in refs:
-        if isinstance(entry, str) and entry.split(":", 1)[0] in ("session", "issue") \
-                and ":" in entry:
-            # The `kind:ref` spelling the page and categoryKey use.
-            kind, _, entry_ref = entry.partition(":")
-            entry = {"kind": kind, "ref": entry_ref}
-        if isinstance(entry, str):
-            kinds = [k for k, r in remaining if r == entry]
-            if not kinds:
-                raise AssignError(400, f"{entry} is not one of this call's items")
-            kind, ref = kinds[0], entry
-        elif isinstance(entry, dict):
-            kind, ref = entry.get("kind"), entry.get("ref")
-        else:
-            raise AssignError(400, "a split part's items must be refs or {kind, ref}")
-        if (kind, ref) not in remaining:
-            raise AssignError(400, f"{kind} {ref} is not an item this call is placing")
-        if (kind, ref) not in out:
-            out.append((kind, ref))
-    return out
 
 
 def agent_assign(manager, caller: str, body: dict) -> dict:

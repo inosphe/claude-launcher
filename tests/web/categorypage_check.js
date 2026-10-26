@@ -145,9 +145,11 @@ const last = () => calls[calls.length - 1];
   assert(all().some(n => n.textContent === '새 카테고리 위치: web'));
   const sf = formWith('분할');
   const lines = sf.children.find(c => c.tag === 'textarea');
-  // The prefilled line names every picked item by its `kind:ref` key, and the
-  // person rewrites it into one line per new child.
-  assert.strictEqual(lines.value, 'session:s1, session:s2');
+  // The box is empty -- the person writes the lines -- and the picked items are
+  // offered as a placeholder in the `kind:ref` spelling the route accepts.
+  // Prefilled on one line they would read as a part labelled "session".
+  assert.strictEqual(lines.value, '');
+  assert.strictEqual(lines.attributes.placeholder, '새 이름: session:s1, session:s2\n나머지');
   lines.value = 'beads page: session:s1\nsims page: session:s2'; lines.oninput();
   sf.onsubmit({preventDefault() {}}); await settle();
   const split = calls.find(c => c.url.pathname === '/api/category/split');

@@ -184,9 +184,14 @@ function makeCategoryView({root, workspace: fixed = ""}) {
       node("p", "한 줄에 하나씩 `이름: 항목, 항목`. 항목을 안 적은 줄이 나머지를 가져갑니다. 항목은 " +
         sel.items.map(i => i.ref).join(", ") + " 가운데에서 고릅니다.", "category-muted"));
     const text = node("textarea"); text.rows = Math.max(3, sel.items.length);
-    // The refs it lists are session:<name> / issue:<id> so the route needs no
-    // guessing (category_api._item_ref).
-    text.value = form.lines || sel.items.map(categoryKey).join(", ");
+    // Left empty on purpose: the person writes the lines, and each line's label
+    // is theirs to choose. The example shows the shape -- a labelled line, then
+    // a line that takes what is left -- with the refs in the `kind:ref` spelling
+    // the route accepts. Prefilling the refs alone would read as one part
+    // labelled "session", which the server refuses.
+    text.value = form.lines || "";
+    text.setAttribute("placeholder", "새 이름: " + sel.items.map(categoryKey).join(", ")
+      + "\n나머지");
     text.setAttribute("aria-label", "분할 줄");
     text.oninput = () => { form.lines = text.value; };
     const err = node("p", "", "category-error");
