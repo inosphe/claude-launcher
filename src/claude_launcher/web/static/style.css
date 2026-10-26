@@ -5189,6 +5189,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-node.st-plan { opacity: 0.45; }
 .dfl-node.st-plan rect { fill: none; stroke: #4d5566; stroke-dasharray: 5 4; }
 .dfl-node.st-gone, .dfl-edge.gone { display: none; }
+/* A retry fold (claunch-xyzf6): a click opens it into its attempts and closes it again. */
+.dfl-node.fold, .dfl-seq-row.fold { cursor: pointer; }
 .dfl-edge.plan { stroke-dasharray: 4 4; opacity: 0.45; }
 .dfl-node.round rect { fill: #14233a; stroke: #3b6ea8; }
 .dfl-node.st-live rect { fill: none; stroke: #58a6ff; stroke-dasharray: 6 4; animation: dfl-march 1s linear infinite; }

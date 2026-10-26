@@ -1089,3 +1089,151 @@ const SQ = DF.sequence(SLOG, true, SNOW);
   mnt.unmount();
   console.log("durableflow_check: legend from the first frame ok");
 }
+
+// (l) launcher retries (claunch-xyzf6, event contract shared with gds6-gjkd.9):
+// session_start {attempt?, attemptMax?}, agent_end {started, stopReason, error?}.
+{
+  const RT = (s) => "2026-10-26T07:" + s + ".000Z";
+  const CREDIT = "402 insufficient credits\nat provider";
+  const failed = (n, mm, err) => [
+    { at: RT(mm + ":00"), event: "session_start", reason: "startup", attempt: n, attemptMax: 5 },
+    { at: RT(mm + ":00"), event: "harness_open", file: "/r/durable.sqlite" },
+    { at: RT(mm + ":01"), event: "agent_end", started: false, stopReason: "error", ...(err ? { error: err } : {}) },
+    { at: RT(mm + ":02"), event: "session_shutdown", reason: "quit" },
+  ];
+  const work = [
+    { at: RT("39:44"), event: "run_start", preset: "game/zombie" },
+    { at: RT("39:55"), event: "unit", unit: "u1", state: "start", label: "zombie/_system", phase: "model", after: [] },
+    { at: RT("39:56"), event: "ask_start", key: "B:x:0", unit: "u1" },
+    { at: RT("40:10"), event: "ask", key: "B:x:0", unit: "u1", usage: u(10), stop: "stop" },
+  ];
+  const tail = [
+    { at: RT("41:44"), event: "unit", unit: "u1", state: "done" },
+    { at: RT("41:50"), event: "run_end", state: "done" },
+    { at: RT("41:51"), event: "session_shutdown", reason: "quit" },
+  ];
+  const START5 = { at: RT("39:41"), event: "session_start", reason: "startup", attempt: 5, attemptMax: 5 };
+  const RETRY = [...failed(1, "35", CREDIT), ...failed(2, "36", CREDIT), ...failed(3, "37", CREDIT),
+                 ...failed(4, "38", "402 still out"), START5, ...work, ...tail];
+  const byOf = (mm) => Object.fromEntries(mm.nodes.map((n) => [n.id, n]));
+
+  // Folded: one red node for the four failed starts, then the fifth attempt.
+  const f = DF.model(RETRY, false);
+  const fb = byOf(f);
+  const startCol = f.cols[0];
+  assert.deepStrictEqual(plain(startCol.nodes), ["start", "start#5"], "the start column holds the fold and attempt 5");
+  assert.deepStrictEqual([fb.start.label, fb.start.status, fb.start.sub, fb.start.fold],
+    ["재시도 실패 ×4", "fail", "402 still out", "try:1"]);
+  assert.strictEqual(fb.start.tip.filter((t) => / 시작 실패: /.test(t)).length, 4, "the tip lists each attempt");
+  assert.ok(fb.start.tip.some((t) => /시도 1\/5 시작 실패: 402 insufficient credits$/.test(t)));
+  for (const id of ["start#2", "start#3", "start#4"]) {
+    assert.deepStrictEqual([fb[id].status, fb[id].absorbed], ["gone", true], id + " is absorbed");
+  }
+  assert.deepStrictEqual([fb["start#5"].label, fb["start#5"].row], ["재시도 5/5", 1]);
+  assert.ok(!f.nodes.some((n) => n.id.startsWith("shutdown") && n.status !== "gone" && n.row === 0 &&
+                                  f.cols[n.col].phase === "end" && n !== f.nodes.at(-1)),
+            "a failed start's shutdown adds no end node");
+  assert.strictEqual(f.nodes.filter((n) => f.cols[n.col].phase === "end").length, 1, "only the run's own end");
+  const vis = ids(f).filter((e) => !f.edges.find((x) => x.id === e).gone);
+  assert.ok(vis.includes("start>start#5"), "attempt 5 hangs off the fold");
+  stable(RETRY, "retry");
+
+  // Opened: every attempt is its own red node, in time order.
+  const unfold = new Set(["try:1"]);
+  const o = DF.model(RETRY, false, null, { unfold });
+  const ob = byOf(o);
+  assert.deepStrictEqual(plain(o.cols[0].nodes), ["start", "start#2", "start#3", "start#4", "start#5"]);
+  assert.deepStrictEqual(plain(["start", "start#2", "start#3", "start#4"].map((id) => [ob[id].label, ob[id].status, ob[id].fold])),
+    [["시작 실패 · 1/5", "fail", "try:1"], ["시작 실패 · 2/5", "fail", "try:1"],
+     ["시작 실패 · 3/5", "fail", "try:1"], ["시작 실패 · 4/5", "fail", "try:1"]]);
+  assert.strictEqual(ob["start#4"].sub, "402 still out");
+  assert.ok(ob["start#2"].tip.includes("402 insufficient credits\nat provider"), "the tip carries the error");
+  for (let k = 1; k <= RETRY.length; k++) {
+    const part = DF.model(RETRY.slice(0, k), true, null, { unfold });
+    for (const n of part.nodes) assert.deepStrictEqual([n.col, n.row], [ob[n.id].col, ob[n.id].row], `opened prefix ${k}: ${n.id} moved`);
+  }
+
+  // One failed start alone: a red 시작 실패 node, no fold; the attempt numbers.
+  const one = DF.model([...failed(1, "35", CREDIT), { ...START5, attempt: 2, attemptMax: 3 }, ...work], true);
+  assert.deepStrictEqual(plain(one.nodes.slice(0, 2).map((n) => [n.label, n.status, n.sub, n.fold || null])),
+    [["시작 실패 · 1/5", "fail", "402 insufficient credits", null], ["재시도 2/3", "done", "startup", null]]);
+  const first = DF.model(RETRY.slice(0, 2), true);
+  assert.deepStrictEqual([first.nodes[0].label, first.nodes[0].status], ["시도 1/5", "done"]);
+  const nomax = DF.model([{ event: "session_start", reason: "startup", attempt: 3 }], true);
+  assert.strictEqual(nomax.nodes[0].label, "재시도 3");
+
+  // Not a failed start: a stop without error, or an attempt that already asked.
+  const stop = DF.model([LOG[0], { event: "agent_end", started: false, stopReason: "stop" }], false);
+  assert.deepStrictEqual([stop.nodes[0].label, stop.nodes[0].status], ["시작", "done"]);
+  const late = DF.model([START5, ...work, { event: "agent_end", started: false, stopReason: "error", error: "x" }], false);
+  assert.ok(!late.nodes.some((n) => n.status === "fail"), "an attempt that did work is not a failed start");
+
+  // A log from before the contract (20261026-073527: no attempt, no error)
+  // keeps 시작/재개 and still shows its failed starts as one red fold.
+  const OLD = RETRY.map((e) => {
+    if (e.event === "session_start") { const { attempt, attemptMax, ...rest } = e; return rest; }
+    if (e.event === "agent_end") { const { error, ...rest } = e; return rest; }
+    return e;
+  });
+  const old = DF.model(OLD, false);
+  const oldb = byOf(old);
+  assert.deepStrictEqual([oldb.start.label, oldb.start.sub, oldb["start#5"].label],
+    ["재시도 실패 ×4", "모델 호출 없이 종료", "재개"]);
+  assert.ok(oldb.start.tip.some((t) => /#1 시작 실패$/.test(t)));
+  const oldOpen = DF.model(OLD, false, null, { unfold });
+  assert.strictEqual(byOf(oldOpen).start.label, "시작 실패", "no attempt number to show");
+  stable(OLD, "retry-old");
+  // A log with no failed start draws exactly as it did.
+  assert.deepStrictEqual(plain(DF.model(LOG, false).nodes.map((n) => [n.id, n.label, n.col, n.row])),
+    plain(m.nodes.map((n) => [n.id, n.label, n.col, n.row])));
+
+  // Sequence: the failed starts are one red lane with an interval per
+  // attempt; opened, a lane each. The work after them is not cut off at the
+  // last failed attempt's shutdown.
+  const NOW = Date.parse(RT("40:30"));
+  const live = [...RETRY.slice(0, 16), START5, ...work];
+  const s = DF.sequence(live, true, NOW);
+  const fold = s.lanes.find((l) => l.id === "try:1");
+  assert.deepStrictEqual([fold.label, fold.state, fold.fold, fold.asks.length, fold.tries],
+    ["재시도 실패 ×4", "fail", "try:1", 4, 4]);
+  assert.ok(fold.asks.every((a) => a.status === "fail"));
+  assert.strictEqual(fold.end, Date.parse(RT("38:01")));
+  assert.ok(fold.tip.some((t) => /시도 4\/5 시작 실패: 402 still out/.test(t)));
+  assert.strictEqual(s.lanes[0].id, "try:1", "the failed starts come first");
+  const unit = s.lanes.find((l) => l.unit === "u1");
+  assert.strictEqual(unit.end, null, "a live unit stays open past an earlier attempt's shutdown");
+  const oldSeq = DF.sequence(OLD.slice(0, 16).concat([{ ...START5, attempt: undefined }], work), true, NOW);
+  assert.strictEqual(oldSeq.lanes.find((l) => l.unit === "u1").end, null, "the old log too");
+  const so = DF.sequence(live, true, NOW, { unfold });
+  assert.deepStrictEqual(plain(so.lanes.filter((l) => l.attempt).map((l) => [l.id, l.label, l.fold])),
+    [["try:1", "시작 실패 · 1/5", "try:1"], ["try:2", "시작 실패 · 2/5", "try:1"],
+     ["try:3", "시작 실패 · 3/5", "try:1"], ["try:4", "시작 실패 · 4/5", "try:1"]]);
+  const lone = DF.sequence([...failed(1, "35", CREDIT), START5, ...work], true, NOW);
+  assert.deepStrictEqual(plain(lone.lanes.filter((l) => l.attempt).map((l) => [l.label, l.fold, l.tip])),
+    [["시작 실패 · 1/5", null, ["402 insufficient credits"]]]);
+  console.log("durableflow_check: retries ok");
+
+  // The pane: a click on the fold opens it in both views, a second closes it.
+  (async () => {
+    const host = new El("div");
+    const api = async () => ({ ok: true, json: async () => ({
+      sim: "retry", live: false, total: RETRY.length, since: 0, events: RETRY }) });
+    const mnt = DF.mount(host, "retry", {
+      doc, api, timers: { setInterval: () => 1, clearInterval() {} }, interval: 0 });
+    await new Promise((r) => setTimeout(r, 0));
+    const shown = (v) => [...v.nodes.entries()].filter(([, x]) => !/st-gone/.test(x.g.getAttribute("class"))).map(([id]) => id);
+    assert.ok(/ fold/.test(mnt.view.nodes.get("start").g.getAttribute("class")));
+    assert.ok(!shown(mnt.view).includes("start#2"));
+    mnt.view.nodes.get("start").g.click();
+    assert.ok(shown(mnt.view).includes("start#2"), "opened: each attempt is drawn");
+    assert.strictEqual(mnt.view.nodes.get("start").title.textContent, "시작 실패 · 1/5");
+    mnt.setMode("sequence");
+    assert.ok(mnt.sequence.rows.has("try:4"), "the sequence view follows the same fold");
+    mnt.sequence.rows.get("try:3").g.click();
+    assert.ok(!mnt.sequence.rows.has("try:4"), "closed from a member lane");
+    mnt.setMode("tree");
+    assert.ok(!shown(mnt.view).includes("start#2"), "and the tree is folded again");
+    mnt.unmount();
+    console.log("durableflow_check: retry fold toggle ok");
+  })().catch((e) => { console.error(e); process.exit(1); });
+}
