@@ -10,6 +10,7 @@ reaches already-running sessions without a relaunch.
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
@@ -375,3 +376,139 @@ def test_route_shim_reports_a_route_without_an_endpoint(home, upstreams, shims):
         status, body = exc.code, exc.read()
     assert status == 502
     assert "endpoints.anthropic" in body.decode()
+
+
+# --- a borrow's lender names the route ---------------------------------------
+
+
+def test_a_borrow_keys_the_dynamic_route_on_the_lender(home, monkeypatch):
+    """The route a borrow installs names the lender, so the shim reads its table.
+
+    The shim resolves the model table off the route per request. A route
+    naming the borrower would resolve the borrower's ``models:`` — the one
+    table a borrow exists to replace. The token form stays ``profile:<name>``;
+    only *which* name changes, so a route already on the wire still resolves.
+    """
+    _provider("dyn", {"dynamic": True,
+                      "api_key": "k",
+                      "endpoints": {"anthropic": "https://dyn.example.com"}})
+    seat = create_profile("seat")
+    lender = create_profile("lender")
+    store.set_profile_field(seat.name, "provider", "dyn")
+    store.set_profile_field(lender.name, "provider", "dyn")
+
+    seen = []
+
+    def _capture(upstream, block, provider=None, route=None):
+        seen.append(route)
+        return "http://127.0.0.1:1"
+
+    monkeypatch.setattr(routing, "ensure_shim", _capture)
+    env = {"ANTHROPIC_BASE_URL": "https://dyn.example.com"}
+
+    routing.apply(env, "dyn", profile=seat.name)
+    routing.apply(env, "dyn", profile=seat.name, borrow=lender)
+
+    assert seen[0] == f"profile:{seat.name}"
+    assert seen[1] == f"profile:{lender.name}"
+
+
+def test_the_route_a_borrow_installs_resolves_the_lenders_table(home):
+    """End to end of the same fact, without a shim: what the route resolves.
+
+    ``route_models`` is what the shim calls per request. Reading the route a
+    borrow installs must give the lender's ids, and the seat's ids must not
+    win — the ids differ so a wrong table shows up as a different value.
+    """
+    _provider("dyn", {"dynamic": True,
+                      "api_key": "k",
+                      "endpoints": {"anthropic": "https://dyn.example.com"}})
+    seat = create_profile("seat")
+    lender = create_profile("lender")
+    store.set_profile_field(seat.name, "provider", "dyn")
+    store.set_profile_field(seat.name, "models", {"small": "seat-small",
+                                                 "default": "seat-default"})
+    store.set_profile_field(lender.name, "provider", "dyn")
+    store.set_profile_field(lender.name, "models", {"small": "lender-small",
+                                                   "default": "lender-default"})
+
+    assert routing.route_models(f"profile:{seat.name}")["small"] == "seat-small"
+    # What the borrow installs: the lender's route, so the lender's table.
+    assert routing.route_models(f"profile:{lender.name}")["small"] == "lender-small"
+    assert routing.route_models(f"profile:{lender.name}")["default"] == "lender-default"
+
+
+@pytest.mark.slow_shim
+def test_a_borrowing_session_talks_to_a_shim_that_resolves_the_lenders_table(
+    home, upstreams, shims
+):
+    """The launch path, not ``routing.apply`` called by hand.
+
+    ``runner.child_env`` is what a real launch runs; it has to hand the borrow
+    to ``routing.apply``. Testing ``apply`` directly would keep passing if the
+    runner forgot — that is exactly the uncovered call path a mutation finds.
+    The seat and the lender declare different ids, so reading the wrong table
+    shows up as a different model on the wire.
+    """
+    server = _add_upstream(upstreams)
+    _provider("dyn", {"dynamic": True,
+                      "api_key": "k",
+                      "endpoints": {"anthropic": server.url},
+                      "models": {"default": "provider-default"}})
+    seat = create_profile("seat")
+    lender = create_profile("lender")
+    store.set_profile_field(seat.name, "provider", "dyn")
+    store.set_profile_field(seat.name, "models", {"small": "seat-small"})
+    store.set_profile_field(lender.name, "provider", "dyn")
+    store.set_profile_field(lender.name, "models", {"small": "lender-small"})
+
+    env = runner.child_env(seat, with_token=True, borrow=lender,
+                           base_env={"PATH": "/usr/bin", "HOME": str(home)})
+    base = env["ANTHROPIC_BASE_URL"]
+    assert routing.is_shim_url(base), base
+
+    status, _ = _post(base + "v1/messages", {"model": "small", "max_tokens": 1})
+    assert status == 200
+    assert json.loads(server.requests[-1]["body"])["model"] == "lender-small"
+
+
+def test_the_pi_path_keys_a_dynamic_route_on_the_lender_too(home, monkeypatch):
+    """Pi's base URL goes through the same route choice as Claude's.
+
+    Both harnesses share one policy (``routing.front``), so a Pi session
+    borrowing a profile must reach a shim keyed on the lender as well. Pi
+    sends concrete model ids in ``CLAUNCH_PI_MODELS``, so the sized effect is
+    the route here, not the resolved ids: this pins which table the shim that
+    fronted the launch will read.
+    """
+    from claude_launcher import pi_provider
+
+    _provider("dyn", {"dynamic": True,
+                      "api_key": "k",
+                      "endpoints": {"anthropic": "https://dyn.example.com",
+                                    "openai": "https://dyn.example.com/v1"},
+                      "models": {"default": "provider-default"}})
+    seat = create_profile("seat")
+    lender = create_profile("lender")
+    store.set_profile_field(seat.name, "provider", "dyn")
+    store.set_profile_field(lender.name, "provider", "dyn")
+
+    seen = []
+
+    def _capture(upstream, block, provider=None, route=None):
+        seen.append(route)
+        return "http://127.0.0.1:1"
+
+    monkeypatch.setattr(routing, "ensure_shim", _capture)
+    # ``apply_env`` is the launch path -- calling ``fronted_base_url`` by hand
+    # would keep passing if the caller forgot to hand the borrow down.
+    from claude_launcher import harnesses
+
+    store.update(lambda doc: doc.setdefault("harnesses", {}).update(
+        {"pikeyed": {"command": sys.executable, "provider_adapter": "pi",
+                     "auth": "api-key", "token_env": "PI_KEYED_KEY"}}
+    ))
+    declared = harnesses.get("pikeyed")
+    pi_provider.apply_env(seat, declared, {}, borrow=lender)
+
+    assert seen == [f"profile:{lender.name}"]

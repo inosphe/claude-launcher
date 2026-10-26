@@ -71,9 +71,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from . import config, metering, store
+
+if TYPE_CHECKING:  # a borrow's lender, for the annotations only
+    from .profile import Profile
 
 #: Per-provider config key holding the body spec (``providers.<name>.routing``).
 SPEC_KEY = "routing"
@@ -1111,7 +1114,8 @@ def ensure_shim(upstream: str, block: Dict, provider: Optional[str] = None,
 
 
 def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
-          profile: Optional[str] = None) -> str:
+          profile: Optional[str] = None,
+          borrow: Optional["Profile"] = None) -> str:
     """The base URL a harness should talk to for ``provider_name``'s ``upstream``.
 
     Two reasons send a provider through the shim, and they differ in what a
@@ -1143,9 +1147,18 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
         # follows its provider selection live; without, it sticks to this
         # provider's own config. The shim is mandatory — same failure class
         # as a routing pin, not as metering.
+        #
+        # A borrow keys the route on the *lender*: the shim reads the model
+        # table off the route, so a route naming the borrower would resolve
+        # the borrower's ``models:`` per request — the one table a borrow is
+        # supposed to replace. Keying on the lender makes the per-request
+        # table the lender's, which is what a borrow means (see
+        # :func:`providers.launch_spec`). The token form is unchanged, so a
+        # route already on the wire keeps resolving.
+        route_profile = borrow.name if borrow is not None else profile
         route = (
-            f"{PROFILE_ROUTE_PREFIX}{profile}"
-            if profile is not None
+            f"{PROFILE_ROUTE_PREFIX}{route_profile}"
+            if route_profile is not None
             else f"{PROVIDER_ROUTE_PREFIX}{provider_name}"
         )
         return ensure_shim(upstream, block or {}, provider_name, route=route)
@@ -1167,7 +1180,8 @@ def front(upstream: str, provider_name: str, doc: Optional[dict] = None,
 
 
 def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
-          profile: Optional[str] = None) -> None:
+          profile: Optional[str] = None,
+          borrow: Optional["Profile"] = None) -> None:
     """Point ``env``'s ``ANTHROPIC_BASE_URL`` at a shim when ``provider_name``
     goes through one (see :func:`front` for the policy).
 
@@ -1175,7 +1189,9 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
     no ``ANTHROPIC_BASE_URL`` from the config file, and that key is the whole
     handle this function has. ``profile`` (a profile name) lets a dynamic
     route follow the profile's provider selection; callers without profile
-    context pass ``None`` and the route sticks to the provider.
+    context pass ``None`` and the route sticks to the provider. ``borrow``
+    (the lender) makes a dynamic route resolve the *lender's* model table per
+    request, matching what :func:`providers.launch_spec` does at launch time.
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
@@ -1205,7 +1221,9 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
     # from the config file. A guard keyed on "looks like loopback" would
     # instead skip the rewrite for a locally hosted upstream — silently
     # dropping the pin, which is the failure this whole module exists to stop.
-    env["ANTHROPIC_BASE_URL"] = front(upstream, provider_name, doc, profile=profile)
+    env["ANTHROPIC_BASE_URL"] = front(
+        upstream, provider_name, doc, profile=profile, borrow=borrow
+    )
 
 
 # --------------------------------------------------------------------------- #
