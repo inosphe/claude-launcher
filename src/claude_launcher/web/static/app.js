@@ -28007,6 +28007,12 @@ let newWfPicked = false;
    select's own (a name, or "v2:<name>"), so a click is an assignment. */
 const WORKFLOW_RECENT_KEY = `claunch_workflow_recent:${BASE}`;
 const WORKFLOW_RECENT_MAX = 5;
+/* The stored spelling of "no workflow" (claunch-4kzc2). The Workflow row's
+   (none) option holds "", which workflowRecentPush reads as "no pick at all",
+   so a launch with the row cleared is kept under this token and mapped back
+   to "" when the row is drawn. Without it, starting a session with no run
+   left no trace and (none) could never be handed back as a recent pick. */
+const WORKFLOW_RECENT_NONE = "-";
 function workflowRecentPush(list, value, max) {
   const kept = (Array.isArray(list) ? list : [])
     .filter((v) => typeof v === "string" && v && v !== value);
@@ -28018,21 +28024,29 @@ function workflowRecentLoad() {
     return workflowRecentPush(list, "", WORKFLOW_RECENT_MAX);
   } catch { return []; }
 }
+/* "" and "-" are the same answer at the row — no workflow — so a launch that
+   picked (none) is recorded under the stored token rather than dropped. */
 function workflowRecentRecord(value) {
-  if (!value || value === "-") return;
-  const list = workflowRecentPush(workflowRecentLoad(), value, WORKFLOW_RECENT_MAX);
+  const stored = value === "" || value === "-" ? WORKFLOW_RECENT_NONE : value;
+  if (!stored) return;
+  const list = workflowRecentPush(workflowRecentLoad(), stored, WORKFLOW_RECENT_MAX);
   try { localStorage.setItem(WORKFLOW_RECENT_KEY, JSON.stringify(list)); } catch {}
 }
 /* Only the recent picks the row offers right now get a button: one the
    picked role's filter_roles refuses, or one not declared in this
-   directory, would set a value the select cannot hold. */
+   directory, would set a value the select cannot hold. The (none) option is
+   offered whenever the row is (its value is ""), which is how a recent
+   "no workflow" comes back as a button that clears the row. */
 function renderWorkflowRecent() {
   const row = $("new-workflow-recent");
   const form = $("new-session");
   if (!row || !form) return;
   const wf = form.workflow;
-  const offered = new Map([...wf.options].filter((o) => o.value)
-    .map((o) => [o.value, o]));
+  const offered = new Map();
+  for (const o of wf.options) {
+    if (o.value) offered.set(o.value, o);
+    else if (!offered.has(WORKFLOW_RECENT_NONE)) offered.set(WORKFLOW_RECENT_NONE, o);
+  }
   const recent = workflowRecentLoad().filter((v) => offered.has(v));
   row.innerHTML = "";
   row.classList.toggle("hidden", !recent.length);
@@ -28040,14 +28054,17 @@ function renderWorkflowRecent() {
   row.appendChild(el("span", "new-check-label", "Recent"));
   const list = el("div", "new-check-list wf-recent-list");
   for (const value of recent) {
+    // The token is the stored spelling of (none); the select's own value for
+    // that answer is the empty string.
+    const held = value === WORKFLOW_RECENT_NONE ? "" : value;
     // The option's label without its " — detail" tail.
     const label = String(offered.get(value).textContent || value).split(" — ")[0];
     const btn = el("button", "wf-recent", label);
     btn.type = "button";
     btn.title = `set Workflow to ${label}`;
-    btn.setAttribute("aria-pressed", String(wf.value === value));
+    btn.setAttribute("aria-pressed", String(wf.value === held));
     btn.addEventListener("click", () => {
-      wf.value = value;
+      wf.value = held;
       wf.dispatchEvent(new Event("change"));
     });
     list.appendChild(btn);

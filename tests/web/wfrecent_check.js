@@ -77,17 +77,20 @@ const api = new Function(
   `const BASE = "/";
    const WORKFLOW_RECENT_KEY = \`claunch_workflow_recent:\${BASE}\`;
    const WORKFLOW_RECENT_MAX = 5;
+   const WORKFLOW_RECENT_NONE = "-";
    ${slice("workflowRecentPush")}
    ${slice("workflowRecentLoad")}
    ${slice("workflowRecentRecord")}
    ${slice("renderWorkflowRecent")}
    return { workflowRecentPush, workflowRecentLoad, workflowRecentRecord,
-            renderWorkflowRecent, KEY: WORKFLOW_RECENT_KEY };`
+            renderWorkflowRecent, KEY: WORKFLOW_RECENT_KEY,
+            NONE: WORKFLOW_RECENT_NONE };`
 )(localStorage, $, el, Event);
 
 // The constants the test re-declares must match app.js.
 check("key spelling", /const WORKFLOW_RECENT_KEY = `claunch_workflow_recent:\$\{BASE\}`;/.test(src), true);
 check("max is five", /const WORKFLOW_RECENT_MAX = 5;/.test(src), true);
+check("none token is '-'", /const WORKFLOW_RECENT_NONE = "-";/.test(src), true);
 
 /* ---- LRU order ---- */
 const push = api.workflowRecentPush;
@@ -102,9 +105,13 @@ check("junk entries are dropped", push(["a", 3, "", null, "b"], "", 5), ["a", "b
 check("empty store reads empty", api.workflowRecentLoad(), []);
 for (const v of ["a", "b", "c", "d", "e", "f", "b"]) api.workflowRecentRecord(v);
 check("stored under the dashboard key", JSON.parse(store.get(api.KEY)), ["b", "f", "e", "d", "c"]);
+/* (none) is a pick (claunch-4kzc2): the row's "" is stored as the token so a
+   launch with no workflow leaves a trace and can be handed back. */
 api.workflowRecentRecord("");
+check("clearing the row records (none)", api.workflowRecentLoad(), ["-", "b", "f", "e", "d"]);
 api.workflowRecentRecord("-");
-check("no pick and an explicit refusal are not uses", api.workflowRecentLoad(), ["b", "f", "e", "d", "c"]);
+check("the explicit '-' spelling is the same answer, once",
+      api.workflowRecentLoad(), ["-", "b", "f", "e", "d"]);
 store.set(api.KEY, "{not json");
 check("a corrupt store reads empty", api.workflowRecentLoad(), []);
 store.set(api.KEY, JSON.stringify({ a: 1 }));
@@ -132,6 +139,29 @@ check("...and fires its change event", select.events, ["change"]);
 offer([["other", "other"]]);
 api.renderWorkflowRecent();
 check("nothing offered: row hidden and empty", [row.classes.has("hidden"), row.children.length], [true, 0]);
+
+/* ---- (none) as a button (claunch-4kzc2) ---- */
+store.set(api.KEY, JSON.stringify(["-", "v2:flow"]));
+offer([["(none)", ""], ["flow · v2", "v2:flow"]]);
+select.value = "";
+api.renderWorkflowRecent();
+check("a recent (none) is a button, first",
+      buttons().map((b) => b.textContent), ["(none)", "flow · v2"]);
+check("(none) is lit only when the row is empty",
+      buttons().map((b) => b.attrs["aria-pressed"]), ["true", "false"]);
+select.value = "v2:flow";
+api.renderWorkflowRecent();
+check("(none) unlit while a workflow is held",
+      buttons().map((b) => b.attrs["aria-pressed"]), ["false", "true"]);
+buttons()[0].listeners.click();
+check("clicking (none) clears the row", select.value, "");
+check("...and fires its change event", select.events, ["change", "change"]);
+/* A row that holds no empty-valued option at all: the button has nothing to
+   set, so it is dropped rather than drawn dead. */
+select.options = [{ textContent: "flow · v2", value: "v2:flow" }];
+api.renderWorkflowRecent();
+check("a row without the (none) option drops that button",
+      buttons().map((b) => b.textContent), ["flow · v2"]);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);
