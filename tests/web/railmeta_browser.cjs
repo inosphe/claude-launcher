@@ -10,7 +10,7 @@ const { safeListen } = require("./safe_listen.cjs");
 
 const root = process.env.STATIC_ROOT || path.join(__dirname, "../../src/claude_launcher/web/static");
 
-/* Both refresh controls share the meta line, as on real compact cards. */
+/* Checks include asynchronous refresh states, hidden on compact cards. */
 const fixtureChecks = [
   { id: "tests", name: "Tests", question: "Did the targeted tests pass?",
     answer: "yes", reported_at: "2026-10-26T03:00:00Z", source: "agent" },
@@ -77,10 +77,17 @@ const server = http.createServer((req, res) => {
     const meta=li.querySelector(".meta");
     const b=meta.getBoundingClientRect();
     const rb=li.getBoundingClientRect();
-    const actions = li.querySelector(".rail-actions").getBoundingClientRect();
+    const refreshes = [...li.querySelectorAll(".sess-brief-rowref,.sess-status-check-rowref")];
+    const position = () => { const r=meta.getBoundingClientRect(); return [r.x,r.y,r.width,r.height]; };
+    const positions = [position()];
+    for (const text of ["checking…", "checks · waiting", "checks ✓", "checks ⟳"]) {
+      refreshes.forEach(e => { e.textContent=text; e.classList.add("requesting"); });
+      positions.push(position());
+    }
+    const hidden = refreshes.every(e => e.getBoundingClientRect().width===0);
     return {name,text:meta.textContent,width:b.width,needed:meta.scrollWidth,available:meta.clientWidth,
       contained:b.width > 0 && b.height > 0 && b.left>=rb.left && b.right<=rb.right,
-      noOverlap:b.right<=actions.left,mode:li.dataset.railMode,depth:li.dataset.railDepth};
+      hidden,positions,mode:li.dataset.railMode,depth:li.dataset.railDepth};
    }));
    console.log(JSON.stringify({width, theme, measured}));
    for (const m of measured) {
@@ -88,7 +95,9 @@ const server = http.createServer((req, res) => {
      assert.equal(m.depth, "4");
      assert.equal(m.text, `opencode/${m.name}`);
      assert.ok(m.contained, "the identity is painted inside its card");
-     assert.ok(m.noOverlap, "the identity leaves room for the refresh controls");
+     assert.ok(m.hidden, "compact refresh controls have no painted box");
+     for (const pos of m.positions) assert.deepEqual(pos,m.positions[0],
+       "the profile box stays fixed throughout refresh-label changes");
      assert.ok(m.available >= m.needed,
        `${theme} ${width}px ${m.text}: ${m.available}px clips ${m.needed}px`);
    }

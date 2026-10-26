@@ -227,7 +227,7 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-ctx-tokens",
                     ".rail-tps-line", ".rail-usage-line", ".rail-seen",
                     ".rail-life", ".rail-brief", ".rail-note", ".rail-beads",
                     ".rail-status-checks", ".rail-commits", ".rail-actions",
-                    ".sess-cflow", ".sess-cflow2", ".sess-brief", ".meta"]) {
+                    ".sess-brief", ".meta"]) {
   const body = plain.match(new RegExp(
     `#session-list li\\[data-rail-mode="min"\\][^{]*\\${line}[^{]*\\{([^}]*)\\}`));
   ok(`a one-line card does not draw ${line}`,
@@ -264,13 +264,10 @@ const compactActions = plain.match(
 ok("a compact card hides the buttons inside the buttons line",
    compactActions && /display:\s*none/.test(compactActions[2]),
    compactActions ? compactActions[2].trim() : "no rule");
-/* The exclusion list is the whole defence: every name NOT in it loses its
-   button on the default card. `.sess-key` names one fact, the two refreshes
-   are the only controls whose subject is the collapsed card's own content —
-   all three have to be spared by name, and a rule that drops one of them is
-   the defect this round shipped once already (claunch-6ezw3.1). */
+/* Only the key picker remains on compact cards. Refreshes become available
+   after opening the card, so asynchronous labels cannot squeeze the profile. */
 const spared = compactActions ? compactActions[1] : "";
-for (const keep of ["sess-key", "sess-brief-rowref", "sess-status-check-rowref"]) {
+for (const keep of ["sess-key"]) {
   ok(`...and .${keep} inside it is spared by name`,
      spared.includes(`.${keep}`),
      `the compact exclusion list is "${spared.trim()}" — it does not name .${keep}`);
@@ -313,9 +310,13 @@ ok("a compact card keeps the status-check chips — no rule hides them",
 
 /* A run that wants the reader's keyboard survives every density: hiding it
    on the short cards is how a gated session goes unnoticed. */
-ok("a gated cflow badge is drawn even on a compact card",
-   /#session-list li\[data-rail-mode="compact"\] \.sess-cflow:not\(\.gated\)/.test(plain),
-   "the compact rule does not exempt .gated");
+for (const mode of ["min", "compact"]) for (const badge of ["sess-cflow", "sess-cflow2"]) {
+  const rules = [...plain.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  ok(`${mode} cards keep every ${badge} state visible`,
+     !rules.some(([, selectors, body]) => selectors.includes(`data-rail-mode="${mode}"`)
+       && selectors.includes(`.${badge}`) && /display:\s*none/.test(body)),
+     "workflow state must not be hidden by card density");
+}
 
 /* The same defence, for the line that says why a session is silent. A short
    card may drop what a reader can infer from the name and the dot; it may

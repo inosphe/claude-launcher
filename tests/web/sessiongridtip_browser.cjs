@@ -53,17 +53,13 @@ const server = http.createServer((req, res) => {
    default compact card — and the per-density rules reach it because
    sessionGridTipStyles re-scopes every `#session-list …` rule onto `#sg-tip`
    verbatim, `[data-rail-mode="compact"]` and all.
-   A compact card hides the action buttons and keeps the controls that are not
-   an action on the session (the key chip, and the two refreshes, style.css).
-   So the questions this file asks are the density's, not a flat list of seven:
-   what is painted shares the line it is on, and the two refreshes are painted
-   on BOTH densities. Listing all seven as "on the buttons line" is what this
-   file used to do; it went on passing through the round that hid two of them
-   only because no round before that had hidden any (claunch-6ezw3.1). */
+   Compact tips hide session actions and both refreshes; the key picker is
+   independently covered by sessionkey_browser. Hidden controls must stay
+   hidden when the copied card narrows. */
 const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info",
   ".sess-status-check-rowref", ".sess-brief-rowref"];
 const ACTIONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info"];
-const ALWAYS_PAINTED = [".sess-status-check-rowref", ".sess-brief-rowref"];
+const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
 (async () => {
   await safeListen(server);
   const browser = await chromium.launch({ headless: true });
@@ -129,9 +125,8 @@ const ALWAYS_PAINTED = [".sess-status-check-rowref", ".sess-brief-rowref"];
       assert.ok(unpainted(got).includes(sel),
         `${sel} is the expanded card's, so the compact tip does not draw it`);
     }
-    for (const sel of ALWAYS_PAINTED) {
-      const b = got.buttons[sel];
-      assert.ok(b && b.w > 0 && b.h > 0, `${sel} is painted on the ${got.mode} card (${b ? `${b.w}x${b.h}` : "absent"})`);
+    for (const sel of REFRESHES) {
+      assert.ok(unpainted(got).includes(sel), `${sel} stays hidden on compact tips`);
     }
 
     // The same card at the old width wraps; the buttons still share their
@@ -140,9 +135,8 @@ const ALWAYS_PAINTED = [".sess-status-check-rowref", ".sess-brief-rowref"];
     await page.keyboard.press("Escape");
     const narrow = await pinned("320px");
     assert.deepEqual(offActions(narrow), [], "at 320px the buttons still share the buttons line");
-    for (const sel of ALWAYS_PAINTED) {
-      const b = narrow.buttons[sel];
-      assert.ok(b && b.w > 0 && b.h > 0, `${sel} survives the 320px wrap (${b ? `${b.w}x${b.h}` : "absent"})`);
+    for (const sel of REFRESHES) {
+      assert.ok(unpainted(narrow).includes(sel), `${sel} stays hidden at 320px`);
     }
     assert.deepEqual(painted(narrow), painted(got), "narrowing does not take a control away");
     assert.ok(narrow.nameWidth >= 100,

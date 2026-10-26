@@ -11228,7 +11228,7 @@ function renderBriefingCard(name, entry, opts) {
   card.addEventListener("click", (e) => e.stopPropagation());
   const data = entry && entry.data;
   const brief = data && data.briefing;
-  const loading = !entry || entry.phase === "loading";
+  const loading = !!entry && entry.phase === "loading";
   if (loading && data) card.className += " refreshing";
 
   const head = el("div", "sess-brief-head");
@@ -11254,7 +11254,7 @@ function renderBriefingCard(name, entry, opts) {
   const refresh = el("button", `sess-brief-refresh${loading ? " spinning" : ""}`, "⟳");
   refresh.type = "button";
   refresh.title = "re-summarise now";
-  refresh.disabled = loading;
+  refresh.disabled = !briefingLLM || loading;
   refresh.addEventListener("click", (e) => {
     e.stopPropagation();
     fetchBriefing(name, true);
@@ -11277,9 +11277,11 @@ function renderBriefingCard(name, entry, opts) {
     // An expanded card with no summariser behind it says so, and where to
     // put one: the row has no control of its own to explain that on.
     card.appendChild(el("div", "sess-brief-note", BRIEFING_OFF_HINT));
+  } else if (!entry) {
+    card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
   } else if (loading && !data) {
     card.appendChild(el("div", "sess-brief-note", "summarising…"));
-  } else if (!entry || entry.phase === "unconfigured") {
+  } else if (entry.phase === "unconfigured") {
     card.appendChild(el(
       "div", "sess-brief-note",
       `no LLM configured — ${BRIEFING_OFF_HINT}`
@@ -11347,11 +11349,6 @@ function renderBriefingCard(name, entry, opts) {
 function applyBriefingCards() {
   const list = $("session-list");
   if (!list) return;
-  // The sessions this pass has to ask about, collected rather than asked for
-  // in the loop: fetchBriefing repaints the cards when it starts, so asking
-  // from inside a paint would re-enter this function and let the inner pass
-  // finish the outer one's rows.
-  const ask = [];
   for (const li of list.querySelectorAll("li[data-name]")) {
     const name = li.dataset.name;
     // A stale fold left by a build that predates this change is not a card
@@ -11371,21 +11368,13 @@ function applyBriefingCards() {
     const oline = li.querySelector(".rail-brief");
     if (one && oline) oline.textContent = one;
     if (li.dataset.railMode !== "expanded") continue;
-    // Asking on sight is the point of the fold's removal: the expanded card
-    // exists to be read, and an unasked card would say "nothing yet" under a
-    // reader who never had a control to ask with.
-    if (briefingLLM && !briefingCache.has(name)) ask.push(name);
+    // Rendering never starts a summary job. Only explicit controls request one.
     li.appendChild(renderBriefingCard(name, briefingCache.get(name), {
       rail: true, rowSummary: oline ? oline.textContent : "",
     }));
   }
   // And the current session's top-bar button + pane, now the rail exists.
   applyBriefingTop();
-  for (const name of ask) {
-    // One already in hand by the time the loop ended (a fetch started by the
-    // card's own ⟳, or by the header) is not asked for again.
-    if (!briefingCache.has(name)) fetchBriefing(name, false);
-  }
 }
 
 /* The top header's briefing control: the same feature the row ▸ carries,
@@ -11835,8 +11824,8 @@ function refreshBriefingRow(name) {
 
 /* The detail panel's copy of the summary: the same card the ▸ toggles open,
    drawn under the session's facts so the panel says what the session is
-   DOING instead of only what it is. Fetches on first open — the 2s poll
-   repaints from the cache, and the card's own ⟳ still refreshes it. Without
+   DOING instead of only what it is. Opening only paints cached data;
+   the card's own ⟳ explicitly requests a summary. Without
    a backend the drawer is a static pointer at the Settings card that sets
    one, so someone who just saved it there sees it acknowledged. */
 function sessBriefSection(name) {
@@ -11846,7 +11835,6 @@ function sessBriefSection(name) {
     box.appendChild(el("p", "sess-brief-note", BRIEFING_OFF_HINT));
     return box;
   }
-  if (!briefingCache.has(name)) fetchBriefing(name, false);
   box.appendChild(renderBriefingCard(name, briefingCache.get(name)));
   return box;
 }

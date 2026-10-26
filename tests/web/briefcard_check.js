@@ -15,8 +15,8 @@
    the terminal's top pane — and the second half of this file checks that the
    option did not take it away from them.
 
-   What has to hold: an expanded card asks the daemon once, on sight, because
-   no control is left to ask with; it shows what came back; the ⟳ re-asks
+   What has to hold: opening an expanded card never requests a summary;
+   its empty state offers an enabled ⟳ control; the ⟳ requests
    with refresh=1 while keeping the stale text readable underneath; the card
    tells apart the daemon's four answers (a briefing, prose that missed the
    shape, "no LLM configured", "no record"); blocked/waiting wear the loud
@@ -178,11 +178,7 @@ const kv = (li) => kvOf(card(li));
     { id: "tests", name: "Tests", question: "Did the targeted tests pass?", answer: "yes" },
   ] });
 
-  /* The rail has no fold. The card is what an EXPANDED row carries, so the
-     first apply asks the daemon for that session's briefing unprompted —
-     there is no control left to ask with, and an expanded card that said
-     "nothing yet" under a reader who could not open it would be worse than
-     no card. */
+  /* Opening a card is a read action, including a never-summarised session. */
   answer = { status: 200, body: {
     session: "s1", generated_at: new Date(Date.now() - 90_000).toISOString(),
     cached: false, source: { jsonl: true, cflow: true },
@@ -192,15 +188,15 @@ const kv = (li) => kvOf(card(li));
     raw: null,
   } };
   ctx.apply();
-  /* Order is not the contract: fetchBriefing repaints the cards when it
-     starts, and that repaint asks for the sessions still uncached, so the
-     second row can reach the daemon before the first. What matters is that
-     every expanded row asked once, uncached. */
-  check("every expanded row asks for its session's briefing on sight",
-        [...calls].sort(), ["/api/sessions/s1/briefing?cached=1",
-                            "/api/sessions/s2/briefing?cached=1"]);
-  check("the card says it is summarising while the answer is out",
-        note(rows.s1).textContent, "summarising…");
+  check("opening uncached expanded rows makes no request", calls, []);
+  check("the empty card explains the explicit action", note(rows.s1).textContent,
+        "No summary yet · use ⟳ to request one");
+  check("the empty card has an enabled refresh", card(rows.s1).querySelector(".sess-brief-refresh").disabled, false);
+  ctx.apply();
+  check("repainting empty rows still makes no request", calls, []);
+  click(card(rows.s1).querySelector(".sess-brief-refresh"));
+  check("an explicit request starts summarising", note(rows.s1).textContent, "summarising…");
+  check("the explicit action uses refresh=1", calls, ["/api/sessions/s1/briefing?refresh=1"]);
   await flush();
   /* The rail's card is the summary. The rows the daemon sent back for goal /
      now / progress are dropped HERE and kept for the surfaces below — so the
@@ -303,6 +299,7 @@ const kv = (li) => kvOf(card(li));
   } };
   const s2row = row("s2b");
   ctx.apply();
+  click(card(s2row).querySelector(".sess-brief-refresh"));
   await flush();
   const raw = card(s2row).querySelector(".sess-brief-raw");
   check("unshaped prose is shown as it came",
@@ -313,6 +310,7 @@ const kv = (li) => kvOf(card(li));
   const s3 = row("s3");
   answer = { status: 400, body: { error: "llm not configured" } };
   ctx.apply();
+  click(card(s3).querySelector(".sess-brief-refresh"));
   await flush();
   check("no LLM points at the config to write",
         note(s3).textContent,
@@ -322,6 +320,7 @@ const kv = (li) => kvOf(card(li));
   const s4 = row("s4");
   answer = { status: 404, body: { error: "no record" } };
   ctx.apply();
+  click(card(s4).querySelector(".sess-brief-refresh"));
   await flush();
   check("a session with no record says that, not an error",
         note(s4).textContent, "no session record to summarise");
@@ -329,6 +328,7 @@ const kv = (li) => kvOf(card(li));
   const s5 = row("s5");
   answer = { status: 500, body: { error: "summariser fell over" } };
   ctx.apply();
+  click(card(s5).querySelector(".sess-brief-refresh"));
   await flush();
   check("a real failure is reported in the daemon's words",
         [note(s5).textContent, note(s5).className],
@@ -346,6 +346,7 @@ const kv = (li) => kvOf(card(li));
     raw: null,
   } };
   ctx.apply();
+  click(card(s6).querySelector(".sess-brief-refresh"));
   await flush();
   check("an unrecognised state stays neutral",
         card(s6).querySelector(".sess-brief-state").className,
