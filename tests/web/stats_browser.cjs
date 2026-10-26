@@ -269,6 +269,43 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
     assert.match(page.url(), /#\/stats$/);
     assert.ok((await names(page)).length === 3);
 
+    // 7. On a window too small for the page, the page scrolls down inside
+    //    its own view and the table scrolls sideways inside its own box:
+    //    the view had no rule of its own, so it neither scrolled nor kept
+    //    its padding, and #main cut off both edges (claunch-8m2hy).
+    await page.setViewportSize({ width: 480, height: 420 });
+    await page.waitForFunction(() =>
+      document.getElementById("stats-view").getBoundingClientRect().bottom <= window.innerHeight);
+    const box = await page.evaluate(() => {
+      const view = document.getElementById("stats-view");
+      const scroll = view.querySelector(".stats-main .stats-scroll");
+      const head = view.querySelector(".wf-head");
+      view.scrollTop = 1e6;
+      scroll.scrollLeft = 1e6;
+      const v = view.getBoundingClientRect();
+      const s = scroll.getBoundingClientRect();
+      const ths = scroll.querySelectorAll("th");
+      const last = ths[ths.length - 1].getBoundingClientRect();
+      return {
+        overflowY: getComputedStyle(view).overflowY,
+        scrolledDown: view.scrollTop,
+        viewBottom: v.bottom, windowHeight: window.innerHeight,
+        viewWide: view.scrollWidth - view.clientWidth,
+        pageWide: document.documentElement.scrollWidth - window.innerWidth,
+        tableWide: scroll.scrollWidth - scroll.clientWidth,
+        lastRight: last.right, boxRight: s.right,
+        headInset: head.getBoundingClientRect().left - v.left,
+      };
+    });
+    assert.ok(["auto", "scroll"].includes(box.overflowY), JSON.stringify(box));
+    assert.ok(box.scrolledDown > 0, "the view scrolls down: " + JSON.stringify(box));
+    assert.ok(box.viewBottom <= box.windowHeight, "the view ends inside the window: " + JSON.stringify(box));
+    assert.ok(box.viewWide <= 0 && box.pageWide <= 0, "nothing widens the page: " + JSON.stringify(box));
+    assert.ok(box.tableWide > 0, "the table scrolls inside its box: " + JSON.stringify(box));
+    assert.ok(box.lastRight <= box.boxRight + 1, "the last column is reachable: " + JSON.stringify(box));
+    assert.ok(box.headInset > 0, "the view keeps its padding: " + JSON.stringify(box));
+    await page.setViewportSize({ width: 1400, height: 950 });
+
     assert.deepEqual(errors, [], "page errors: " + errors.join(" | "));
     if (process.env.STATS_SHOT) {
       await page.screenshot({ path: process.env.STATS_SHOT, fullPage: true });
