@@ -27,6 +27,7 @@ import functools
 import os
 import sys
 import sysconfig
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional, TypeVar
 
@@ -98,6 +99,22 @@ def shutdown() -> None:
     pool, _background = _background, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+def submit_background(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> None:
+    """Run ``func`` on the background pool without waiting for it.
+
+    For callers that are not coroutines (a boot step, an exit hook). With no
+    pool installed (tests that drive a component without ``_serve``) the call
+    gets a daemon thread of its own, so callers need no guard.
+    """
+    pool = _background
+    ctx = contextvars.copy_context()
+    call = functools.partial(ctx.run, func, *args, **kwargs)
+    if pool is None:
+        threading.Thread(target=call, name="background-submit", daemon=True).start()
+        return
+    pool.submit(call)
 
 
 async def background(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:

@@ -573,3 +573,54 @@ def test_foreign_live_survives_unreadable_registries(home, monkeypatch):
     (home / "daemon" / "sessions.db").write_bytes(b"not a database")
 
     assert br.foreign_live() == set()
+
+
+# ---- load on the daemon (claunch-d18v8.4) ----------------------------------- #
+
+def test_describe_counts_files_bytes_workers_and_times_in_one_walk(tmp_path):
+    path = _run_tree(tmp_path / "t", "s1c0101000000", workers=3)
+    for i, when in enumerate((1_000_000_000, 1_000_000_300, 1_000_000_600)):
+        os.utime(path / f"popen-gw{i}" / "test_x0" / "out.txt", (when, when))
+    row = br.describe(path)
+    assert (row["workers"], row["files"], row["bytes"]) == (3, 3, 30)
+    assert row["seconds"] == 600.0
+    assert row["started_at"] < row["ended_at"]
+
+
+def test_describe_of_an_empty_tree_falls_back_to_its_own_time(tmp_path):
+    path = tmp_path / "t" / "s1c0101000001"
+    path.mkdir(parents=True)
+    row = br.describe(path)
+    assert (row["workers"], row["files"], row["bytes"]) == (0, 0, 0)
+    assert "started_at" in row
+
+
+def test_boot_pass_waits_for_its_delay_and_reads_the_registry_then(tmp_path):
+    root = tmp_path / "t"
+    gone = _run_tree(root, "s7c0101000000")
+    sessions: list = []
+    reaper = br.BasetempReaper(
+        lambda: list(sessions), root=root, history=tmp_path / "daemon" / br.HISTORY_NAME,
+        background=False, foreign=lambda: set(), boot_delay=0.3,
+    )
+    reaper.reap_ended()
+    assert gone.exists(), "the boot pass ran before its delay"
+    sessions.append(("s7", True))   # ended while the pass was waiting
+    deadline = time.time() + 10
+    while gone.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert not gone.exists()
+
+
+def test_a_run_rests_between_trees(tmp_path, monkeypatch):
+    root = tmp_path / "t"
+    _run_tree(root, "s8c0101000000")
+    _run_tree(root, "s8c0101000001")
+    rests: list = []
+    monkeypatch.setattr(br.time, "sleep", lambda seconds: rests.append(seconds))
+    reaper = br.BasetempReaper(
+        lambda: [("s8", True)], root=root, history=tmp_path / "daemon" / br.HISTORY_NAME,
+        background=False, foreign=lambda: set(), pause=0.7,
+    )
+    assert len(reaper.reap(["s8"])) == 2
+    assert rests == [0.7, 0.7]
