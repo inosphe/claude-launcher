@@ -910,6 +910,14 @@ def test_cancelled_delegation_without_child_or_session_executor_is_skipped(tmp_p
     assert killed == [] and not _events(tmp_path, "cancelled_child")
 
 
+def test_child_ended_mark_is_taken_once(tmp_path):
+    # the compare-and-set that keeps two passes from both killing the child
+    mgr, clock, did = _running_child(tmp_path, [])
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    assert runtime.delegate_child_ended(did, cwd=str(tmp_path), scope="own")
+    assert not runtime.delegate_child_ended(did, cwd=str(tmp_path), scope="own")
+
+
 def test_boot_requeues_spawning_without_child_once_then_reroutes(tmp_path):
     mgr = KidManager(FakeSession("own", str(tmp_path)))
     clock = _clock(mgr, spawn=lambda p, b: (_ for _ in ()).throw(AssertionError("no spawn")))
