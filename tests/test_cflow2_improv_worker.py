@@ -72,7 +72,7 @@ V1_TO_V2 = {
     "landing-withdraw": ["landing-withdraw"],
     "landing-nudge": ["landing-nudge"],
     "landing-declined": ["landing-declined"],
-    "rework-gate": ["rework-decision", "rework-gate"],
+    "rework-gate": ["rework-budget", "rework-auto", "rework-decision", "rework-gate"],
     "landing-declined-hold": ["landing-declined-hold"],
     "landed": ["landed-wait", "landed"],
     "wrapup": ["wrapup", "round-report"],
@@ -2655,3 +2655,180 @@ def test_chart_prose_reaches_a_procedure_description():
 
     assert anchor in _chart_prose(chart)
     assert included in _chart_prose(chart)
+
+# -- 재작업 예산: 3회까지 자율, 그 뒤는 사람 승인 (사용자 지시 2026-10-26) -----
+#
+# 「rework를 최대 3회까지 자율적으로 진행할 수 있도록 해줘. 이후에는 사용자
+# 허가하에 추가 1회, 진행.」 예산의 계수는 ``rework-gate``의 방문 수다 — 그
+# 노드는 재작업 한 바퀴마다 정확히 한 번 들어가고, 방문 수는 회차가 바뀌어도
+# 런 전체에서 이어진다.
+
+REWORK_BUDGET = 3
+
+
+def _declined_tree(doc):
+    """``land``의 declined 갈래(await-landing의 선택지 ``then``) 그대로."""
+    def find(o):
+        if isinstance(o, dict):
+            branch = o.get("declined")
+            if isinstance(branch, dict) and "then" in branch:
+                return branch["then"]
+            o = list(o.values())
+        if isinstance(o, list):
+            for item in o:
+                hit = find(item)
+                if hit:
+                    return hit
+        return None
+
+    tree = find(doc["procedures"]["land"]["body"])
+    assert tree, "land의 declined 갈래를 찾지 못했다"
+    return tree
+
+
+def _rework_budget_chart(tmp_path):
+    """정의의 declined 갈래를, 그 갈래가 실제로 사는 모양(``land`` 프로시저 +
+    batch 루프의 try/catch)으로 감싼 작은 차트."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    nodes = {k: doc["nodes"][k] for k in
+             ("landing-declined", "rework-auto", "rework-gate", "landing-declined-hold")}
+    flow = {
+        "cflow": 2, "name": "rework-budget", "include": ["ask-common"],
+        "procedures": {"land": {
+            "params": {"mode": {"type": "str", "default": "full"}},
+            "returns": {"rework": {"reason": "str", "rework": "bool"},
+                        "held": {"reason": "str", "rework": "bool"}},
+            "body": _declined_tree(doc)}},
+        "nodes": nodes,
+        "body": [{"id": "batch", "loop": {
+            "while": "true", "max": 20,
+            "do": [{"try": {"seq": [{"id": "land", "call": "land", "bind": "land_out",
+                                     "with": {"mode": "'full'"}}]},
+                    "catch": {"rework": {"continue": "batch"},
+                              "held": {"break": "batch"}}}]}}],
+    }
+    return frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                 resolve_include=layers.resolver(str(tmp_path)))
+
+
+BRIEF_REWORK = {"problem": "재작업을 재개할지 정한다", "recommendation": "rework", "why": "w",
+                "options": [{"name": name, "summary": "s", "risk": "r", "outcome": "o",
+                             "reversibility": "reversible"}
+                            for name in ("rework", "hold")]}
+
+
+def _drive_rework(tmp_path, monkeypatch, refusals):
+    """착지 거절을 ``refusals`` 번 지나며 지나간 노드 라벨을 순서대로 낸다.
+
+    지나간 노드는 짧은 라벨이고 ``ASK:<label>``은 사람 게이트에 선 자리다.
+    게이트에 서면 ``rework``로 답하고 계속한다. 예산 안(3회)을 넘는 거절은
+    게이트를 지나므로, 그 수만큼 게이트가 서는 것을 보고 멈춘다.
+    """
+    from claude_launcher.cflow2 import runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_rework_budget_chart(tmp_path), caps={}, **kw)
+    gates_expected = max(0, refusals - REWORK_BUDGET)
+    path = []
+    for _ in range(200):
+        if st.get("asks"):
+            ask = st["asks"][0]
+            path.append("ASK:" + ask["label"].rsplit("/", 1)[-1])
+            if path.count("ASK:ask-pose") == gates_expected:
+                break
+            runtime.approve(ask["instance"], decision="rework", reason="go", **kw)
+            st = runtime.status(**kw)
+            continue
+        if not st.get("tasks"):
+            break
+        task = st["tasks"][0]
+        label = task["label"].rsplit("/", 1)[-1]
+        if label == "ask-frame":
+            runtime.report(task["instance"], "ok", {"brief": BRIEF_REWORK}, **kw)
+        else:
+            path.append(label)
+            runtime.report(task["instance"], "ok",
+                           {"reason": "declined", "issues": [], "msg": "x"}, **kw)
+            if label == "landing-declined" and path.count("landing-declined") == refusals \
+                    and gates_expected == 0:
+                break
+        st = runtime.status(**kw)
+    return path
+
+
+def test_the_autonomous_rework_budget_is_three_refusals(tmp_path, monkeypatch):
+    """예산 안의 거절 세 번은 사람을 세우지 않는다 — ``rework-auto``가 예고하고
+    ``rework-gate``가 예산을 센다. 네 번째 거절부터 게이트가 선다.
+
+    s1895 실측: 이 게이트 하나가 회차를 20:28Z~03:29Z(약 7시간) 세웠다.
+    """
+    path = _drive_rework(tmp_path, monkeypatch, refusals=4)
+    before_gate = path[:path.index("ASK:ask-pose")]
+    assert before_gate.count("rework-gate") == REWORK_BUDGET, before_gate
+    assert before_gate.count("rework-auto") == REWORK_BUDGET, before_gate
+    assert "ASK:ask-pose" in path
+
+
+def test_the_budget_gate_reads_the_gate_visits():
+    """게이트의 조건은 ``$visits['rework-gate']``이고, 아직 방문이 없을 때(null)를
+    먼저 본다 — ``null < 3``은 식 오류라 순서가 뒤집히면 첫 거절이 런을 죽인다."""
+    from claude_launcher.cflow2 import runtime
+
+    guard = runtime.load_definition("improv-worker-v2").node("round/land/rework-budget") \
+        .props["branches"][0]["guard"]
+    assert "$visits['rework-gate']" in guard
+    assert guard.index("== null") < guard.index("<")
+    assert f"< {REWORK_BUDGET}" in guard
+
+
+def test_the_budget_does_not_reset_between_rounds(tmp_path, monkeypatch):
+    """방문 수는 런 전체에서 세므로 배치 패스가 바뀌어도 예산이 되살아나지
+    않는다 — 예산을 쓴 뒤의 거절은 모두 게이트를 지난다."""
+    path = _drive_rework(tmp_path, monkeypatch, refusals=5)
+    assert path.count("ASK:ask-pose") == 2, path
+    assert path.count("rework-auto") == REWORK_BUDGET, path
+
+
+def test_hold_at_the_gate_ends_without_rework(tmp_path, monkeypatch):
+    """예산을 다 쓴 뒤 사람이 hold를 고르면 되감지 않고 마감한다 — 승인 1회가
+    「추가 1회」이고, 그 답이 hold면 그 1회는 쓰이지 않는다."""
+    from claude_launcher.cflow2 import runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_rework_budget_chart(tmp_path), caps={}, **kw)
+    answered = False
+    for _ in range(60):
+        if st.get("asks"):
+            ask = st["asks"][0]
+            if ask["label"].endswith("ask-pose"):
+                runtime.approve(ask["instance"], decision="hold", reason="별건으로 넘긴다", **kw)
+                answered = True
+            else:
+                runtime.approve(ask["instance"], decision="rework", reason="go", **kw)
+            st = runtime.status(**kw)
+            continue
+        if not st.get("tasks"):
+            break
+        task = st["tasks"][0]
+        if task["label"].endswith("ask-frame"):
+            runtime.report(task["instance"], "ok", {"brief": BRIEF_REWORK}, **kw)
+        else:
+            runtime.report(task["instance"], "ok",
+                           {"reason": "declined", "issues": [], "msg": "x"}, **kw)
+        st = runtime.status(**kw)
+    assert answered
+
+    state = runtime.RunStore(str(tmp_path), "m").load_state()
+    assert state["status"] == "done"
+    assert state["visits"]["rework-gate"] == REWORK_BUDGET
+    # hold 갈래는 사람 게이트를 지나 곧바로 마감 절차로 간다 (rework-gate 없이)
+    entered = [e["node"] for e in runtime.journal(cwd=str(tmp_path), scope="m")
+               if e["event"] == "entered"]
+    assert "land/landing-declined-hold" in entered
+    assert entered.count("land/rework-gate") == REWORK_BUDGET
+    assert state["data"]["land_out"] == {"reason": "declined", "rework": False}
+

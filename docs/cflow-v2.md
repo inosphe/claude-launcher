@@ -1684,6 +1684,17 @@ Finding이다.
 대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
 바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
 
+`rework-decision`은 이 여섯 중 유일하게 **조건부**다(사용자 지시 2026-10-26). 착지
+거절 뒤의 되감기는 `rework-budget`(cond)이 `$visits['rework-gate']`로 가른다: 3회까지는
+`rework-auto`를 지나 사람 없이 되감고, 3회를 다 쓴 뒤부터 `rework-decision`이 선다.
+그 승인 하나가 다음 재작업 하나를 연다 — 승인도 같은 `rework-gate`를 지나므로
+예산은 그대로 소진된 채로 남는다. `rework-gate`는 예산을 세는 자리이지 답을
+기다리는 자리가 아니다(그래서 제목이 「재작업 예산 계수」다).
+
+근거는 s1895의 실측이다: 이 게이트 하나가 회차를 20:28Z~03:29Z(약 7시간) 세웠다.
+원래 사람 게이트로 둔 이유(`claunch-693w`)는 「자동으로 되감으면 거절 → 재작업 →
+같은 거절이 사람 눈에 안 띈 채 돈다」였고, 예산 3회는 그 우려를 유한하게 만든다.
+
 #### `self-improve-common.yaml` (claunch-c4e6f.1)
 
 `kind: library`. 프로시저 `self-improve` 하나를 둔다: 세션이 스스로를 리뷰해
