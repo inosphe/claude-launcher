@@ -309,3 +309,32 @@ def test_context_left_reads_the_compact_threshold_first(monkeypatch):
     assert cflow2_exec.context_left(FakeSession("own", "/w"))[0] == 300_000
     monkeypatch.setattr(ctxsize, "context_of", lambda sdef, r: dict(r))
     assert cflow2_exec.context_left(FakeSession("own", "/w"))[0] is None
+
+
+# -- group.allow -------------------------------------------------------------------
+
+
+ALLOW = CHART.replace(
+    "member_executor: [fork, inline], do: plan}",
+    "member_executor: [fork, inline], allow: \"$params.on == true\", do: plan}",
+).replace("nodes:\n  plan:", "params: {on: {default: false}}\nnodes:\n  plan:")
+
+
+def test_a_group_whose_allow_is_false_takes_no_member(tmp_path):
+    _start(tmp_path, ALLOW)
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    assert st["groups"][0]["can_fork"] is False
+    assert st["groups"][0]["member_executor"] == ["fork", "inline"]
+    with pytest.raises(runtime.FlowError, match="does not take members"):
+        _fork_members(tmp_path, 1)
+    # the do-part still runs and the group joins with no member
+    runtime.report("plan", cwd=str(tmp_path), scope="own", now=T0)
+    assert _labels(tmp_path) == ["after"]
+
+
+def test_a_group_whose_allow_is_true_takes_members(tmp_path):
+    chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent(ALLOW))
+    runtime.start(chart, cwd=str(tmp_path), scope="own", caps=CAPS, now=T0, driver="own",
+                  params={"on": True})
+    assert runtime.status(cwd=str(tmp_path), scope="own", tick=False)["groups"][0]["can_fork"]
+    _fork_members(tmp_path, 1)

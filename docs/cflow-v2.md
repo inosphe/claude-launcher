@@ -521,7 +521,7 @@ body:
 | `try` | `try: T, catch: {OUTCOME: T}, finally: T` | 결과 종류로 예외 경로를 처리하고, 마지막에 정리 트리를 실행 |
 | `call` | `call: PROC, with: {…}, bind: VAR` | 프로시저 호출. 컴파일 시 펼친다 |
 | `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}`, `wait: {checks: [{id, describe, probe}], …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
-| `group` | `group: {name, run: PROC, limit, settle, member_executor, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류. `member_executor`(실행 주체 목록)가 있으면 멤버마다 위임 지점이 된다(6.4의 `fork`) |
+| `group` | `group: {name, run: PROC, limit, settle, member_executor, allow, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류. `member_executor`(실행 주체 목록)가 있으면 멤버마다 위임 지점이 된다(6.4의 `fork`). `allow`(식)가 거짓이면 `flow_fork`를 거절하고 `can_fork`가 false다 — `do`는 그대로 돌고 멤버 없이 합류한다 |
 
 모든 조합자 매핑에 붙일 수 있는 공통 키:
 

@@ -3370,6 +3370,9 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
         limit = int(n.get("limit") or 0)
         if limit and len(frame["members"]) >= limit:
             raise FlowError(f"group {n.get('name')} is at its limit of {limit} members")
+        if not _group_allows(r, gid, n):
+            raise FlowError(f"group {n.get('name')} does not take members in this run "
+                            f"(allow: {n.get('allow')} is false)")
         if with_ is not None and not isinstance(with_, dict):
             raise FlowError("'with' must be an object of parameter -> value")
         args = dict(with_ or {})
@@ -3396,6 +3399,17 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
     payload["forked"] = out
     return payload
+
+
+def _group_allows(r: Run, gid: str, node: ir.Node) -> bool:
+    """A group's ``allow`` guard, read in the group's own environment (no
+    guard: it takes members). An expression that fails to evaluate refuses,
+    like a false one: a member the definition did not mean to admit costs a
+    copy of the driver."""
+    try:
+        return _guard(r, gid, node.get("allow"))
+    except expr_mod.ExprError:
+        return False
 
 
 # -- dynamic calls (doc 2.12) ---------------------------------------------------
@@ -5525,8 +5539,10 @@ def describe(r: Run) -> Dict[str, Any]:
                 "instance": iid, "node": node.id, "name": node.get("name"),
                 "limit": node.get("limit"), "members": len(frame.get("members") or []),
                 "can_fork": frame.get("phase") == "do" and len(frame.get("members") or [])
-                < int(node.get("limit") or 1 << 30),
+                < int(node.get("limit") or 1 << 30) and _group_allows(r, iid, node),
             })
+            if r.chart.node(node.get("member")).executor:
+                groups[-1]["member_executor"] = list(r.chart.node(node.get("member")).executor)
     dels = []
     for did, rec in (s.get("delegations") or {}).items():
         entry = {k: rec.get(k) for k in ("id", "node", "label", "executor", "status",

@@ -253,6 +253,19 @@ probe·`verify`에는 `${...}`를 쓸 수 없다(컴파일 오류). 런의 값�
   답하거나 게이트를 건너뛰게 되기 때문이다. 사람을 기다리는 게이트는 위임 노드
   밖에 둔다.
 
+- 앞 단계의 맥락이 필요한 구현을 나눠 동시에 돌리려면 `group`의
+  `member_executor: [fork, inline]`을 쓴다(cflow-v2.md 6.4). 멤버마다 데몬이
+  드라이버의 quick-fork를 띄우므로 위임받은 쪽도 대화 전체를 가진다. 복사본은
+  드라이버의 체크아웃을 함께 쓰므로 멤버마다 겹치지 않는 경로를 `with`로 주고,
+  커밋은 합류 뒤 드라이버가 한다. 끄고 켜는 시작 입력은 `allow`로 건다. 예:
+  `improv-worker-v2`의 `slices`(`parallel_fork`, `fork-slice`, `slice-merge`).
+
+  ```yaml
+  - id: slices
+    group: {name: slices, run: fork-slice, limit: 5, member_executor: [fork, inline],
+            allow: "$data.inputs.parallel_fork == true", do: {seq: [work], bind: work_report}}
+  ```
+
 모든 것을 위임하면 메인의 공유 맥락이 사라지고, 같은 파일을 여러 컨텍스트가
 다시 읽느라 전체 토큰 사용량은 늘어난다. 위임은 메인 컨텍스트를 줄이는
 수단이고, 전체 비용을 줄이는 수단은 아니다.
