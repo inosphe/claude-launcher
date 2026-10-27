@@ -286,6 +286,61 @@ def test_endpoints_enable_validate_and_ack(setup, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_a_locked_index_does_not_turn_the_observer_routes_into_500(setup, monkeypatch, caplog):
+    """A locked index DB is a derived-store failure, not a route failure.
+
+    ``Observer.save`` (reached by ``POST /api/observer/settings`` and by
+    ``acknowledge``) and ``load_session`` (reached by ``GET /api/observer``)
+    both mirror into ``search_records``. That mirror opens SQLite, so the
+    failure that arrives is ``sqlite3.OperationalError`` -- not an ``OSError``
+    -- and with no guard it escapes the route as a 500. The acknowledgement
+    case is the one that costs the user: the event is already marked read in
+    the cached row when save() raises, so a 500 there reports a failure that
+    did not happen.
+
+    The route is what is asserted on, not the call: three routes, one failure
+    mode. Mutation: removing the guards makes all three assertions red.
+    """
+    import sqlite3
+    from claude_launcher.daemon import search_records
+
+    service, _ = setup
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(search_records, "remember", locked)
+    monkeypatch.setattr(search_records, "capture", locked)
+    monkeypatch.setattr(search_records, "rows", locked)
+    # The settings route validates the observer profile before it writes; a
+    # real endpoint here would make the 400 come from the network, not the
+    # index this test is about.
+    monkeypatch.setattr(observer, "configuration", lambda: CFG)
+
+    async def scenario():
+        app = web.Application()
+        app["manager"] = service.manager
+        app["mesh"] = service.mesh
+        observer.install(app)
+        async with TestClient(TestServer(app)) as client:
+            settings = await client.post("/api/observer/settings", json={"enabled": True})
+            snapshot = await client.get("/api/observer")
+            # The row carries a summary, so the settings write above also goes
+            # through `capture` -- the same database, reached by a different
+            # call. Without this field the `_capture` guard is never exercised
+            # and its removal would leave every assertion here green.
+            app["observer"].data["sessions"]["s1"] = {
+                "summary": "테스트 완료", "state": "working", "generated_at": "2026-10-28T00:00:00+00:00",
+                "events": [{"id": "e1", "acknowledged": False}]}
+            ack = await client.post("/api/observer/s1/acknowledge", json={"id": "e1"})
+            marked = app["observer"].data["sessions"]["s1"]["events"][0]["acknowledged"]
+        return settings.status, snapshot.status, ack.status, marked
+
+    statuses = asyncio.run(scenario())
+    assert statuses == (200, 200, 200, True)
+    assert "could not index observer events for s1" in caplog.text
+
+
 def test_one_shot_refresh_observes_only_the_named_session(setup, monkeypatch):
     """The button is per session: pressing s2's must not spend on s1's."""
     service, first = setup

@@ -5,12 +5,16 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from aiohttp import web
 from .. import atomic
 
 MAX_IMAGE = 5 * 1024 * 1024
+
+log = logging.getLogger(__name__)
 
 
 def now():
@@ -37,7 +41,16 @@ class Reports:
 
     def save(self, name):
         from . import search_records
-        search_records.remember(name, self.rows(name))
+        try:
+            search_records.remember(name, self.rows(name))
+        except (OSError, sqlite3.Error):
+            # The index is derived; this file is not. A locked index database
+            # must not stop the report from reaching disk -- and it must not
+            # reach the caller either: `answer` has already put the human's
+            # answer in `self.cache`, so raising here would turn an answer the
+            # daemon accepted into a 500 that the person reads as "not saved".
+            # (claunch-mxar3 fixed the same shape in session_events.record.)
+            log.exception("could not index the observer reports for %s", name)
         path = self.path(name)
         with atomic.scratch(path) as scratch:
             scratch.write_text(json.dumps(self.rows(name), ensure_ascii=False), encoding="utf-8")

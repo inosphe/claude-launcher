@@ -47,6 +47,7 @@ import copy
 import hashlib
 import json
 import logging
+import sqlite3
 import ssl
 from datetime import datetime, timezone
 from typing import Dict
@@ -324,6 +325,54 @@ async def complete(cfg, messages):
         raise ValueError("관찰 API 연결 또는 응답 형식 오류") from exc
 
 
+def _index(name, events):
+    """Mirror one session's events into the search index, never raising.
+
+    The index is a derived store: ``search_records.database()`` opens SQLite,
+    creates the table if missing and commits, so the failure that arrives here
+    is a ``sqlite3.Error`` (a locked database, a full disk) -- not an
+    ``OSError``, which is what a file write would raise. Neither may travel
+    out of this call. These rows are saved to disk by the caller already, and a
+    caller that is a route would turn a real ``snapshot`` or ``acknowledge``
+    into a 500 that says nothing about the index. (claunch-mxar3 widened the
+    same guard in ``session_events.record``; claunch-remember-callers-guard
+    brought the observer's callers to it.)
+
+    ``capture`` reaches this same database, so the summary snapshot gets the
+    same treatment: losing one index row is recoverable by the next write,
+    while failing the route is not.
+    """
+    try:
+        search_records.remember(name, events)
+    except (OSError, sqlite3.Error):
+        log.exception("could not index observer events for %s", name)
+
+
+def _capture(name, kind, payload, at):
+    """Store one structured snapshot in the index, never raising (see _index)."""
+    try:
+        search_records.capture(name, kind, payload, at)
+    except (OSError, sqlite3.Error):
+        log.exception("could not index the observer %s snapshot for %s", kind, name)
+
+
+def _recorded(name):
+    """The index's briefing/check rows for one session, or none if it is locked.
+
+    This is a *read* of the same derived store, and it runs on the snapshot
+    route, which serves the whole dashboard. A locked index database must cost
+    that route the recorded rows, not the entire answer: the timeline still has
+    the observed events, the direct reports and the session events to draw
+    from, and the page has no way to show "some of the index is unavailable".
+    Raising here took the whole ``/api/observer`` answer down.
+    """
+    try:
+        return search_records.rows(name, kinds=("briefing", "checks"), limit=200)
+    except (OSError, sqlite3.Error):
+        log.exception("could not read the recorded observer rows for %s", name)
+        return []
+
+
 class Observer:
     def __init__(self, manager, mesh):
         self.manager, self.mesh = manager, mesh
@@ -388,11 +437,11 @@ class Observer:
             self.loaded.add(name)
             try:
                 row = json.loads(self.session_path(name).read_text(encoding="utf-8"))
-                if isinstance(row, dict):
-                    self.data["sessions"][name] = row
-                    search_records.remember(name, row.get("events", []))
             except (OSError, ValueError):
-                pass
+                row = None
+            if isinstance(row, dict):
+                self.data["sessions"][name] = row
+                _index(name, row.get("events", []))
         return self.data["sessions"].get(name, {})
 
     def session_path(self, name):
@@ -401,9 +450,9 @@ class Observer:
     def save(self, name=None):
         for n, row in self.data["sessions"].items():
             if name is None or n == name:
-                search_records.remember(n, row.get("events", []))
+                _index(n, row.get("events", []))
                 if row.get("summary"):
-                    search_records.capture(n, "summary", {"summary": row["summary"], "state": row.get("state")}, row.get("generated_at", ""))
+                    _capture(n, "summary", {"summary": row["summary"], "state": row.get("state")}, row.get("generated_at", ""))
         # A busy session never rewrites every other session's conversation.
         writes = [(self.session_path(name), self.data["sessions"][name])] if name else [
             (self.path, self.settings_state()),
@@ -684,7 +733,7 @@ class Observer:
                 result.append(self._light_row(session, row, info))
                 continue
             direct = [event for event in self.reports.rows(name) if visible(event)]
-            recorded = search_records.rows(name, kinds=("briefing", "checks"), limit=200)
+            recorded = _recorded(name)
             observed = [on_timeline(event) for event in row.get("events", [])]
             events = sorted(observed + direct + recorded + self.session_events.rows(session),
                             key=lambda e: session_events.timestamp(e.get("at")))
