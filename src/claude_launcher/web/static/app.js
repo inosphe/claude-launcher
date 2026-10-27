@@ -57848,23 +57848,60 @@ function noticeStripTop() {
   return bottom > 0 ? bottom + NOTICE_TOP_GAP : NOTICE_TOP;
 }
 
+/* The right edge has the same problem from the other side (claunch-chwt1).
+   On a wide screen the session detail docks as the right-hand column of
+   #layout (syncDetailPanel): #sess-view.docked with its drag bar
+   #detail-split on its left edge. The strip is fixed to the viewport's
+   right, so with the rail up every card was drawn over the rail's head —
+   the session's identity and the controls under it. The strip moves to the
+   rail's left edge instead, and comes back to the corner when the rail goes.
+
+   Measured for the same reasons as the top: the rail's width is whatever
+   the drag bar last left in --detail-w, and the rail comes and goes with
+   the route. A phone never docks it (there the detail is a page), so the
+   media rule there keeps its own inset. */
+const NOTICE_RAILS = "#detail-split, #sess-view.docked";
+const NOTICE_RIGHT = 14;       // no rail: the inset it always had
+
+function noticeStripRight(top) {
+  if (typeof document === "undefined" || !document.querySelectorAll) return NOTICE_RIGHT;
+  const width = window.innerWidth || document.documentElement.clientWidth || 0;
+  let left = Infinity;
+  document.querySelectorAll(NOTICE_RAILS).forEach((rail) => {
+    if (!rail.getClientRects().length) return;
+    const box = rail.getBoundingClientRect();
+    // A rail counts only where the strip is: one that ends above the
+    // strip's top is not in its way.
+    if (box.width > 0 && box.bottom > top) left = Math.min(left, box.left);
+  });
+  if (!(left < width)) return NOTICE_RIGHT;
+  return width - left + NOTICE_RIGHT;
+}
+
 function placeNoticeStrip() {
   const host = $("notices");
   // The node harnesses hand in a stub element for #notices (notice_check
   // and the gate checks slice this block); there is nothing to place there.
   if (!host || !host.style || typeof host.style.setProperty !== "function") return;
-  host.style.setProperty("--notices-top", `${Math.round(noticeStripTop())}px`);
+  const top = noticeStripTop();
+  host.style.setProperty("--notices-top", `${Math.round(top)}px`);
+  host.style.setProperty("--notices-right", `${Math.round(noticeStripRight(top))}px`);
 }
 
 /* The bars move without telling anyone — the tabs row wraps as sessions
    are opened, the header leaves with the page, the phone's status line
    comes and goes with the breakpoint — so a card already on screen is
    re-placed when they do. One observer over every candidate: a hidden bar
-   reports a size of 0, so it comes *and* goes through here. */
+   reports a size of 0, so it comes *and* goes through here. The detail
+   rail is watched the same way: opening and closing it is a size of 0 and
+   back, and dragging its bar is a change of width. */
 function watchNoticeStrip() {
   if (typeof document === "undefined" || typeof ResizeObserver !== "function") return;
   const watch = new ResizeObserver(() => placeNoticeStrip());
   document.querySelectorAll(NOTICE_BARS).forEach((bar) => watch.observe(bar));
+  // By id rather than NOTICE_RAILS: .docked is a class the rail gains after
+  // this runs, and an observer is attached to the node, not the selector.
+  ["detail-split", "sess-view"].forEach((id) => { if ($(id)) watch.observe($(id)); });
   window.addEventListener("resize", placeNoticeStrip);
   placeNoticeStrip();
 }
