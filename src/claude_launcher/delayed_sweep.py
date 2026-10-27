@@ -39,7 +39,7 @@ AUTO_REMEASURE_LIMIT = 1
 #: newest one in a batch is the tree that contains all of them: one sweep answers
 #: for the batch, and a failure is narrowed afterwards with ``unbatch``.
 BATCH_SIZE = 5
-BATCH_SETTLE = 600.0
+BATCH_SETTLE = 300.0
 #: Results the originating session is told about.
 NOTIFIED = ("passed", "failed", "stuck")
 

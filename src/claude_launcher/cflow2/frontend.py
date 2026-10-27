@@ -1437,7 +1437,7 @@ def _b_choose(ctx, sc, node, value, m, line):
     for name, opt in opts.items():
         oline = _key_line(opts, name, line)
         opt = _need_map(ctx, sc.file, opt, f"choose option {name!r}", oline)
-        _check_keys(ctx, sc.file, opt, ("description", "then", "when", "interval"),
+        _check_keys(ctx, sc.file, opt, ("description", "then", "when", "interval", "batch"),
                     f"choose option {name!r}")
         guard = (_expr_text(ctx, sc.file, opt["when"], f"choose.options.{name}.when", oline)
                  if opt.get("when") is not None else None)
@@ -1451,14 +1451,41 @@ def _b_choose(ctx, sc, node, value, m, line):
             if interval <= 0:
                 raise ctx.err(sc.file, oline, f"choose option {name!r}: interval must be "
                                               f"greater than 0")
+        batch = None
+        if opt.get("batch") is not None:
+            if interval is None:
+                raise ctx.err(sc.file, oline, f"choose option {name!r}: batch counts the "
+                                              f"candidates a window gathers; it needs an interval")
+            batch = _batch_spec(ctx, sc, opt["batch"], f"choose option {name!r} batch", oline)
         then = _require(ctx, sc, opt, "then", f"choose option {name!r}", oline)
         entry = {"name": str(name), "description": opt.get("description") or "",
                  "guard": guard, "child": _sub(ctx, sc, node, then, str(name), oline)}
         if interval is not None:
             entry["interval"] = interval
+        if batch is not None:
+            entry["batch"] = batch
         options.append(entry)
     if not options:
         raise ctx.err(sc.file, line, "choose needs at least one option")
+
+
+def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
+    """``batch: {collection, status, size}`` of a paced choose option: the window
+    opens when ``size`` records of ``collection`` hold ``status``, or ``interval``
+    seconds after the oldest of them arrived, whichever comes first."""
+    raw = _need_map(ctx, sc.file, raw, what, line)
+    _check_keys(ctx, sc.file, raw, ("collection", "status", "size"), what)
+    out: Dict[str, Any] = {}
+    for key in ("collection", "status"):
+        val = raw.get(key)
+        if not isinstance(val, str) or not val:
+            raise ctx.err(sc.file, line, f"{what}: {key} must be a non-empty string")
+        out[key] = val
+    size = _number(ctx, sc.file, raw.get("size"), f"{what} size", line)
+    if size < 1 or size != int(size):
+        raise ctx.err(sc.file, line, f"{what}: size must be a whole number of at least 1")
+    out["size"] = int(size)
+    return out
 
 
 def _loop_props(**kw: Any) -> Dict[str, Any]:

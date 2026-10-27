@@ -119,6 +119,30 @@ def test_run_timers_reads_every_kind_from_a_status_payload():
     assert len(got) == 5
 
 
+def test_run_timers_shows_a_batch_chip_in_place_of_the_window_and_hold_chips():
+    # claunch-1o6az: "integrate batch 2/5" counts down to 300 s after the first request
+    batch = {"collection": "landing", "status": "requested", "count": 2, "size": 5,
+             "interval": 300, "first_at": "1970-01-01T00:01:40Z",
+             "opens_at": "1970-01-01T00:06:40Z", "opens_epoch": 400.0}
+    choice = {"instance": "r/standby@9", "node": "r/standby", "label": "standby",
+              "options": [{"name": "integrate", "interval": 300,
+                           "window_opens_at": "1970-01-01T00:06:40Z", "batch": batch},
+                          {"name": "wind-down"}]}
+    got = {t["kind"] + ":" + t["id"]: t
+           for t in cflow2_web.run_timers({"choices": [choice]}, "s1")}
+    chip = got["batch:s1:r/standby@9:integrate:batch"]
+    assert chip["label"] == "integrate batch 2/5" and chip["due"] == 400.0
+    assert chip["since"] == 100.0 and chip["state"] == "closed"
+    assert len(got) == 1                      # no second chip for the same window
+    choice["held"] = {"option": "integrate", "reason": "r", "since": 150.0,
+                      "opens_at": "1970-01-01T00:06:40Z"}
+    got = {t["kind"]: t for t in cflow2_web.run_timers({"choices": [choice]}, "s1")}
+    assert list(got) == ["batch"] and got["batch"]["state"] == "held"
+    # a batch the full size already opened has no countdown
+    batch.update(count=5, opens_at=None, opens_epoch=None)
+    assert cflow2_web.run_timers({"choices": [choice]}, "s1") == []
+
+
 # -- a real run ----------------------------------------------------------------------------
 
 AWAIT = """

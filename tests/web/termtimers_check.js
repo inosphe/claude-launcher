@@ -164,6 +164,15 @@ check("an unknown kind gets the default glyph",
       byClass(chips[2], "tt-glyph")[0].text === "⏱", byClass(chips[2], "tt-glyph")[0].text);
 check("a chip without a link is not a button to nowhere", chips[1].disabled === true);
 
+/* ---- the integration batch (claunch-1o6az) ---- */
+const batchRows = ctx.termTimerRows(VIEW([
+  { source: "cflow2", kind: "batch", id: "b", label: "integrate batch 2/5",
+    due: T + 200, since: T - 100, state: "closed" },
+]), NOW);
+check("a batch chip carries its n/size label and a countdown",
+      batchRows.length === 1 && batchRows[0].label === "integrate batch 2/5" &&
+      batchRows[0].glyph === "▤" && batchRows[0].clock !== "due", batchRows);
+
 /* ---- past due ---- */
 const rows = ctx.termTimerRows(VIEW([
   HOLD({ due: T - 5 }),

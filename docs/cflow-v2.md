@@ -647,6 +647,17 @@ v1 `checklist:`의 대응:
   `selected`에 `override: true`가 붙는다. 사람의 선택도 기록을 갱신한다.
 - 고를 수 있는 옵션 목록의 항목에 `interval`과, 창이 닫혀 있으면
   `window_opens_at`이 실린다.
+- `batch: {collection, status, size}`(claunch-1o6az): `interval`을 가진 옵션에 붙이면
+  창의 기준이 「마지막 선택」에서 「모이는 배치」로 바뀐다. `collection`에서 `status`인
+  항목이 `size`건이면 창이 바로 열리고, 그보다 적으면 그중 가장 이른 항목의 `at`(밀려
+  들어온 시각) + `interval`에 열린다. 항목이 0건이면 기다릴 것이 없으므로 닫히지 않는다.
+  보류 중에 항목이 `size`건에 닿으면 `opens_at`을 기다리지 않고 다음 시간 틱에 확정된다
+  (`opens_at`은 틱마다 컬렉션에서 다시 계산한다). `batch`가 없는 옵션은 위 규칙 그대로다.
+  옵션 항목에 `batch: {count, size, first_at, opens_at, opens_epoch}`가 실리고, 세션
+  상단 타이머 줄(`#term-timers`)이 `batch n/size`로 보여 준다. improv-leader-v2의
+  `integrate`가 쓴다(`size: 5`, `interval: 300`) — 후속 스윕 배치(`delayed_sweep_batch_*`,
+  기본 5건·300초)와 같은 규칙이다. 두 값은 워크플로 정본과 데몬 설정 기본값에 각각
+  적혀 있고 `tests/test_cflow2_improv_leader.py`가 둘이 같은지 잰다.
 
 #### 명령 안의 값 참조
 
@@ -3202,7 +3213,7 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
 
 - 묶기(`Queue.dispatch`): 같은 git common directory의 대기 중 일반 작업(priority<0,
   `queued`)을 `delayed_sweep_batch_size`(기본 5)건 또는 가장 오래된 작업이
-  `delayed_sweep_batch_settle`(기본 600초) 대기했을 때 한 묶음으로 만든다. 체크포인트는
+  `delayed_sweep_batch_settle`(기본 300초) 대기했을 때 한 묶음으로 만든다. 체크포인트는
   누적(A, A+B, A+B+C)이므로 묶음의 가장 새 작업이 tip이고, tip이 포함하는 앞선 작업은
   `covered`(`covered_by`=tip)가 된다. 스윕은 tip 스냅샷(detached 워크트리) 하나만 돈다.
   수정 머지(priority 0)와 재시도는 묶지 않는다. size 0이면 묶지 않는다(머지마다 따로).
