@@ -57860,6 +57860,48 @@ function noticeClock() {
   return new Date().toLocaleTimeString();
 }
 
+/* How long ago a notice arrived (claunch-egqrq), in the short form the rail
+   already uses for its readings: seconds under a minute, then minutes, then
+   hours and minutes. Both halves of the pair matter and neither replaces the
+   other — the clock reading stays true after the card is gone, and the age
+   is what a sticky card still says an hour later. */
+function noticeElapsed(at) {
+  const secs = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  const h = Math.floor(secs / 3600);
+  return `${h}h${String(Math.floor((secs % 3600) / 60)).padStart(2, "0")}m`;
+}
+
+function noticeAgeText(at) {
+  return `${noticeStamp(at)} · ${noticeElapsed(at)} ago`;
+}
+
+/* The pair sits at the bottom of every card and every panel row, and it
+   counts up while it is being read: noticeAgesPaint is the page's own
+   one-second tick over these, so a card that has waited an hour says so
+   without waiting for a repaint. The set keeps the text span rather than
+   the line, because a history row draws "ended …" beside it
+   (noticePanelHistoryRow). */
+const noticeAges = new Set();      // {node, at}
+function noticeAgeLine(at) {
+  const line = el("div", "notice-sub notice-when");
+  const text = el("span", null, noticeAgeText(at));
+  line.appendChild(text);
+  noticeAges.add({ node: text, at });
+  return line;
+}
+
+function noticeAgesPaint() {
+  for (const rec of [...noticeAges]) {
+    // A card put away or a panel redrawn leaves its node behind; the tick
+    // drops it here rather than every painter having to remember to.
+    if (rec.node.isConnected === false) { noticeAges.delete(rec); continue; }
+    const text = noticeAgeText(rec.at);
+    if (rec.node.textContent !== text) rec.node.textContent = text;
+  }
+}
+
 function notify(title, sub, opts) {
   const o = opts || {};
   const host = $("notices");
@@ -57925,7 +57967,7 @@ function notify(title, sub, opts) {
     if (o.open) o.open();
     else if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
   });
-  noticeCardAdd(host, node);
+  noticeCardAdd(host, node, rec.at);
   const timer = o.sticky
     ? null
     : setTimeout(() => dismissNotice(key), o.ms || (o.routine ? ROUTINE_MS : NOTICE_MS));
@@ -58143,8 +58185,14 @@ function noticeEntryShown(entry) {
 }
 
 /* New cards go on top of the corner strip (claunch-efpoi), the history's
-   order. Every card of the strip is put up through here. */
-function noticeCardAdd(host, node) {
+   order. Every card of the strip is put up through here, and the card's
+   bottom line — when the thing it is about arrived at this browser, and how
+   long ago that was — is drawn here too (claunch-egqrq), so a card added
+   later carries it without its own author remembering. `at` is the history
+   row's stamp (`gateSeenAt` for a gate request, `rec.at` for a notice); a
+   card raised as it is drawn passes nothing and is stamped now. */
+function noticeCardAdd(host, node, at) {
+  node.appendChild(noticeAgeLine(Number.isFinite(at) ? at : Date.now()));
   if (host.firstChild) host.insertBefore(node, host.firstChild);
   else host.appendChild(node);
 }
@@ -58503,6 +58551,15 @@ function gateHistoryEntry(type, rid) {
   ) || null;
 }
 
+/* When a gate request reached this browser — its history row's stamp, which
+   is the arrival its panel row and its card both show (claunch-egqrq). A
+   card drawn while the row does not exist yet (no id on an older daemon)
+   is stamped now, the same way its row would be. */
+function gateSeenAt(type, rid) {
+  const entry = gateHistoryEntry(type, String(rid));
+  return entry && Number.isFinite(entry.at) ? entry.at : Date.now();
+}
+
 /* One history row per request, written the first time a poll sees it. */
 function gateHistoryOpen(type, rid, title, sub, extra) {
   if (gateHistoryEntry(type, rid)) return;
@@ -58802,6 +58859,9 @@ function noticePanelGateRow(type, rec) {
     () => gateMarkRead(type, rid, !read)
   ));
   row.appendChild(actions);
+  // The same bottom line the card carries (claunch-egqrq): a request that
+  // has waited an hour says so here as well as in the corner.
+  row.appendChild(noticeAgeLine(gateSeenAt(type, rid)));
   return row;
 }
 
@@ -59101,11 +59161,13 @@ function noticePanelHistoryRow(entry) {
     who.appendChild(gateSessionLink(entry.session, () => noticeMarkRead([entry.id], true)));
     row.appendChild(who);
   }
-  row.appendChild(el(
-    "div", "notice-sub notice-when",
-    noticeStamp(entry.at) +
-      (entry.settledAt ? ` · ended ${noticeStamp(entry.settledAt)}` : "")
-  ));
+  // Arrival and age, the same pair a card carries (claunch-egqrq); a settled
+  // row says when it ended beside them.
+  const when = noticeAgeLine(entry.at);
+  if (entry.settledAt) {
+    when.appendChild(el("span", null, ` · ended ${noticeStamp(entry.settledAt)}`));
+  }
+  row.appendChild(when);
   return row;
 }
 
@@ -59715,7 +59777,7 @@ async function refreshRestartGate() {
     node.appendChild(modeLine);
     node.appendChild(staleLine);
     node.appendChild(actions);
-    noticeCardAdd(host, node);
+    noticeCardAdd(host, node, gateSeenAt("restart", rid));
     const entry = { node, timer: null, boot: daemonBoot };
     notices.set(NOTICE_GATE, entry);
     card = entry;   // the freshly built card carries this poll's countdown too
@@ -59872,7 +59934,7 @@ async function refreshGotoGate() {
       node.appendChild(clock);
       node.appendChild(why);
       node.appendChild(actions);
-      noticeCardAdd(host, node);
+      noticeCardAdd(host, node, gateSeenAt("goto", rec.id));
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
@@ -59991,7 +60053,7 @@ async function refreshReposyncGate() {
         "history"));
       node.appendChild(clock);
       node.appendChild(actions);
-      noticeCardAdd(host, node);
+      noticeCardAdd(host, node, gateSeenAt("reposync", rec.id));
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
@@ -60123,7 +60185,7 @@ async function refreshResumeGate() {
     node.appendChild(why);
     node.appendChild(el("div", "notice-sub gate-clock", RESUME_GATE_WAIT));
     node.appendChild(actions);
-    noticeCardAdd(host, node);
+    noticeCardAdd(host, node, gateSeenAt("resume", rec.id));
     notices.set(key, { node, timer: null });
   }
   // Settled, withdrawn or moot requests lose their card on this pass.
@@ -60482,7 +60544,7 @@ async function refreshSpawnGate() {
           : "close this card only — the request stays open and its deadline runs; " +
             "the bell keeps it in the notification history"));
       node.appendChild(actions);
-      noticeCardAdd(host, node);
+      noticeCardAdd(host, node, gateSeenAt("spawn", rec.id));
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
@@ -60645,7 +60707,7 @@ async function refreshKillGate() {
     node.appendChild(why);
     node.appendChild(el("div", "notice-sub gate-clock", KILL_GATE_WAIT));
     node.appendChild(actions);
-    noticeCardAdd(host, node);
+    noticeCardAdd(host, node, gateSeenAt("kill", rec.id));
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -60760,7 +60822,7 @@ async function refreshMeshJoinGate() {
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
-    noticeCardAdd(host, node);
+    noticeCardAdd(host, node, gateSeenAt("meshjoin", rec.id));
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -60915,7 +60977,7 @@ function urgentAskSync(rows) {
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
     node.addEventListener("click", () => urgentAskGo(rec, key));
-    noticeCardAdd(host, node);
+    noticeCardAdd(host, node, gateSeenAt("ask", rec.id));
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -61096,7 +61158,7 @@ async function refreshNudgeGate() {
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
     node.addEventListener("click", () => nudgeGo(rec, key));
-    noticeCardAdd(host, node);
+    noticeCardAdd(host, node, gateSeenAt("nudge", rec.id));
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -61952,6 +62014,11 @@ document.addEventListener("visibilitychange", () => {
 // loose pace, and once now so a card dealt with elsewhere goes down soon.
 setInterval(noticeSyncTick, NOTICE_SYNC_MS);
 noticeSyncTick();
+// The age on every card and panel row counts up between repaints
+// (claunch-egqrq). It fetches nothing — it is a second's worth of
+// subtraction over the few nodes currently on screen — and the cards that
+// need it are exactly the sticky ones that can sit for an hour.
+setInterval(noticeAgesPaint, 1000);
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and

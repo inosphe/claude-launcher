@@ -7315,6 +7315,13 @@ body.embed #main { width: 100%; }
 .notice.fatal .notice-sub { color: #e6b3ae; }
 .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-sub { font-size: 11px; color: #9da5b0; margin-top: 3px; line-height: 1.4; }
+/* The card's own footer (claunch-egqrq): when the thing it is about arrived
+   at this browser and how long ago that was. Read, never pressed, so it sits
+   below the buttons and stays quieter than everything above it. */
+.notice .notice-when {
+  color: #8b949e; font-size: 10.5px; margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
 /* The restart-gate card decides with buttons, not with a click-anywhere
    dismiss: the notice's default pointer/cursor belongs to toasts that can
    just be swatted away, and a stray click on a decision is a restart. */
