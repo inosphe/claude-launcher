@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -56,6 +57,23 @@ class Events:
     reentrant lock because :meth:`record` reads through :meth:`rows` -- the
     same thread takes it twice, and a plain ``Lock`` would deadlock there.
 
+    The lock **ends before the index mirror** (claunch-tsmqd).
+    :func:`search_records.remember` opens SQLite and commits, and that is the
+    dominant cost of a ``record`` call -- on this host the index write alone
+    measured 21 ms against 43 ms for the whole call, and 230 ms against 227 ms
+    when the write was slowed to 200 ms. :meth:`rows` is what the event loop
+    calls for its observer snapshot, so holding the lock across that write
+    parks the loop behind a worker thread's disk I/O. By the time the index
+    write starts the row is already in the cache and in the file, so a reader
+    sees it immediately.
+
+    Losing an index write costs more than "the next event re-delivers it": the
+    next :meth:`record` for that session sends only its *own* row, so a dropped
+    row stays out of the index until something rewrites it. That is why the
+    index guard logs (``could not index session event``) rather than passing
+    silently, and why the guard is narrower than the row's: the row is the
+    record of what happened, the index is a searchable copy of it.
+
     ``rows`` still returns the cached list itself. Callers read it; one that
     appended to it outside this class would bypass both the bound and the
     write, which is why :meth:`record` is the only supported writer.
@@ -101,10 +119,23 @@ class Events:
                 with atomic.scratch(path) as tmp:
                     tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
                     atomic.replace(tmp, path)
-                from . import search_records
-                search_records.remember(session.sdef.name, [event])
             except OSError:
                 # A successful control operation must not appear to fail because
                 # its history could not be persisted (which would invite retries).
                 log.exception("could not persist session event for %s", session.sdef.name)
+        # Mirrored outside the lock: the row is in the cache and the file by now,
+        # and this call is the slow part (SQLite open + commit). The event loop
+        # reads through ``rows``, which takes the same lock, so doing this inside
+        # would park the loop behind this worker's disk write (claunch-tsmqd).
+        try:
+            from . import search_records
+            search_records.remember(session.sdef.name, [event])
+        except (OSError, sqlite3.Error):
+            # The index is a mirror, so losing one write costs only an entry
+            # until something rewrites it -- and it must not turn a completed
+            # control operation into a failure. ``sqlite3.Error`` is not an
+            # ``OSError`` (its MRO is OperationalError -> DatabaseError ->
+            # Error -> Exception), so a locked or full index database would
+            # escape an ``OSError``-only guard (claunch-mxar3).
+            log.exception("could not index session event for %s", session.sdef.name)
         return event
