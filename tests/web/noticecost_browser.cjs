@@ -17,18 +17,30 @@
 
    1. **A settled feed does not keep rewriting history.** Once the panel has
       drawn the pending gates, further polls of the same set write nothing
-      to `claunch.noticeHistory`. This is the regression guard for
-      claunch-qnq1c: before it, a pending row trimmed at the 100-row cap was
-      re-recorded on the next poll, and with 133 asks waiting that was 33+
-      whole-history writes per feed.
+      to `claunch.noticeHistory`. Before claunch-qnq1c a pending row trimmed
+      at the 100-row cap was re-recorded on the next poll, and with 133 asks
+      waiting that was 33+ whole-history writes per feed.
    2. **A card's age does not restart.** The age a card shows is the run's
       own `opened` stamp, not when this browser first saw it, so it counts
       up across polls instead of falling back to 0s. Held as "the age is at
       least what the fixture's stamp implies", which is the shape the bug
       broke.
-   3. **The steady state is bounded.** Over a window of polls the whole
-      history stays under `NOTICE_HISTORY_MAX + 1`, and the number of nodes
-      under #notices does not grow with the poll count.
+   3. **The steady state is bounded.** Over a window of polls the history
+      stays at the pending set's size — `NOTICE_HISTORY_MAX` rows, plus the
+      rows of requests still waiting that noticeTrim keeps past the cap —
+      and does not climb with the poll count. The cards under #notices stay
+      equal to the pending set's size for the same window.
+
+   None of these three is first held here. `noticehistory_check.js` holds
+   the same three against a sliced `app.js` and a fake DOM (the cap and the
+   quiet feed at "more waiting requests than the cap", the opened stamp at
+   "a gate's age is when it opened"), and those checks run without a
+   browser. What this file adds is the layer: the real `app.js`, booted by
+   the real page, polling on its own timer, writing the real localStorage,
+   drawing into the real `#notices` — so the numbers below are what a
+   browser actually spends rather than what the sliced functions do. A
+   change that kept the unit checks green while the assembled page looped
+   would land here.
 
    The fixture serves 133 pending gates on purpose: past the 100-row cap, so
    a trim-and-re-record loop has something to loop on. A smaller fixture
