@@ -256,7 +256,9 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
    - **미리보기의 상태 문서** (claunch-wlk6g): 라우팅과 같은 문서에서 세 가지가 다르다. 판정 대상은
      `message` 대신 `topic` 키에 들어간다. `session`에는 `draft_facts`가 더해진다: 등록 워크스페이스
      이름, git 파일에서 읽은 브랜치(프로세스를 띄우지 않는다), `parent`, 그 세션의 보드 이슈
-     (`beads.match` 순서로 최대 4개, id·status·title만). 보드 목록은 레일이 쓰는 캐시
+     (`beads.match` 순서로 최대 4개, id·status·title). 그중 닫히지 않은 앞 2개는 description도 600자로
+     잘라 싣는다(claunch-gqt6w: 같은 문서를 description 유무만 바꿔 채점했을 때 정답 세션의 logit이
+     주제 3개 중 2개에서 1.26·1.30 올랐고, 같은 문서를 두 번 채점한 차이는 최대 0.61이었다). 보드 목록은 레일이 쓰는 캐시
      (`issues_or_stale`)를 보드당 한 번 읽고, 보드를 못 읽으면 이슈만 빠진다. `briefing`에는
      `progress`가 더해진다. 판정 기준은 이미 한 일도 `mine`으로 센다(예전 기준은 "already finished
      here"를 `not_mine`에 넣었고, 실제 세션 40개 × 주제 4개 측정에서 맞는 세션이 logit 1.5~2.4에 머물러

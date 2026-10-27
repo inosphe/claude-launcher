@@ -18,7 +18,8 @@ T8 a preview failure names the session that failed even when neither session
    has a thread (every unthreaded member shares thread "")
 T9 the preview's record (claunch-wlk6g): the branch is read from git's own
    files in a plain checkout and in a linked worktree; draft_facts carries
-   workspace, branch, parent and at most DRAFT_ISSUES issue titles
+   workspace, branch, parent and at most DRAFT_ISSUES issue titles, the
+   first DRAFT_ISSUE_BODIES non-closed ones with their description
 T10 the preview asks about a topic: the document names it "topic", carries
    the facts and the briefing's progress, and the criteria no longer send
    finished work to not_mine; a routing's document is unchanged
@@ -290,9 +291,23 @@ def test_t9_draft_facts_and_the_branch_from_git_files(tmp_path):
     assert facts["workspace"] == "claunch" and facts["branch"] == "master"
     assert facts["parent"] == "s0"
     assert [i["id"] for i in facts["issues"]] == [f"x-{i}" for i in range(P.DRAFT_ISSUES)]
-    # Only id, status and title travel -- a description would be the whole
-    # board in every prompt.
-    assert facts["issues"][0] == {"id": "x-0", "status": "open", "title": "title 0"}
+    # The first DRAFT_ISSUE_BODIES rows carry their description (claunch-gqt6w);
+    # the rest carry id, status and title only.
+    assert facts["issues"][0] == {"id": "x-0", "status": "open", "title": "title 0",
+                                  "description": "long"}
+    assert [("description" in i) for i in facts["issues"]] == (
+        [True] * P.DRAFT_ISSUE_BODIES + [False] * (P.DRAFT_ISSUES - P.DRAFT_ISSUE_BODIES))
+    # A closed issue is listed but carries no body, and does not use up a
+    # slot; an empty description is no body either. A long one is clipped.
+    mixed = [{"id": "c", "status": "closed", "title": "done", "description": "old"},
+             {"id": "e", "status": "open", "title": "empty", "description": "  "},
+             {"id": "a", "status": "in_progress", "title": "a", "description": "x" * 5000},
+             {"id": "b", "status": "open", "title": "b", "description": "bee"}]
+    rows = P.draft_facts("s1", sdef, issues=mixed)["issues"]
+    assert [r["id"] for r in rows] == ["c", "e", "a", "b"]
+    assert "description" not in rows[0] and "description" not in rows[1]
+    assert rows[2]["description"] == P.clip("x" * 5000, P.ISSUE_BODY_CHARS) != "x" * 5000
+    assert rows[3]["description"] == "bee"
     # Nothing known is nothing sent.
     assert P.draft_facts("s1", SimpleNamespace(name="s1", cwd="")) == {}
 
