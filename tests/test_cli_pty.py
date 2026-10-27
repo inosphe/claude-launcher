@@ -219,6 +219,13 @@ def test_the_cli_shell_does_not_inherit_the_daemons_interpreter_settings(
 #: only once both children have reported, so the test never kills it while a
 #: child is still booting — a SIGHUP that arrives before the reset is ignored,
 #: and a child forked after the group's SIGHUP is sent never receives it.
+#:
+#: The 10s deadline has to *fail*, not fall through: writing ``ready`` after it
+#: expires would put back exactly the hole this handshake closes, silently, on
+#: the slow runs where it matters most. A child measured 10.01s to start once
+#: in three under load (s1262-rev, claunch-c1yst), so the window is real. When
+#: it expires the leader exits without ``ready`` and the test fails at its own
+#: message instead — "the leader must start both children before it is killed".
 _LEADER = r"""
 import os, subprocess, sys, time
 attached, detached, ready = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -235,6 +242,8 @@ subprocess.Popen([sys.executable, "-c", child, detached, up[1]], start_new_sessi
 deadline = time.time() + 10.0
 while time.time() < deadline and not all(os.path.exists(p) for p in up):
     time.sleep(0.02)
+if not all(os.path.exists(p) for p in up):
+    sys.exit("children did not report their SIGHUP reset within 10s")
 open(ready, "w").write("x")
 time.sleep(30)
 """
