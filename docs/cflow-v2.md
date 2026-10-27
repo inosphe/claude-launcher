@@ -1577,13 +1577,14 @@ procedures:
       choices: {type: list, default: null}   # 선택지 이름을 고정할 때
       from:    {type: list, default: null}   # ask.from과 같은 후보 목록. null이면 사람만
       require_reason: {type: bool, default: false}
+      nudge:   {type: str, default: ""}      # ask-pose 프롬프트에 실을 지시 문구. 빈 값이면 없음
     returns:
       ok:      {decision: str, reason: "str?", by: str, brief: dict}
       reframe: {reason: str, brief: dict}    # 세 번째 답도 reframe인 경우
     nodes:
       ask-frame:   {prompt: …${guide($params.format)}…, returns: {ok: {brief: "question:$params.format"}}}
       ask-reframe: {prompt: …앞 답의 이유와 앞 질문…, returns: {ok: {brief: "question:$params.format"}}}
-      ask-pose:
+      ask-pose:   # prompt: 사용자의 답을 기다린다. … ${params.nudge}
         ask: {brief: "${prev.brief}", format: "${params.format}", choices: "${params.choices}",
               from: "${params.from}", otherwise: human}
     body:
