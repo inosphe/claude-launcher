@@ -1301,28 +1301,45 @@ def test_landing_review_question_reads_for_a_person_too():
 # -- claunch-106mn: the peer-review question names the round's issue --------
 
 
-def _peer_review_ask(tmp_path, issue):
+def _peer_review_ask(tmp_path, issue, items=None):
     """The peer-review node as it is in the definition, after a stub
     branch-setup, with data.claim set to ``issue``; returns the rendered
-    question."""
+    question.
+
+    ``items`` stands for the batch this round carried: the items loop reports
+    the issues ``item-intake`` added beyond the claim issue as
+    ``[{issue, n}, ...]`` and ``[]`` for a single-item round, under the result
+    key of the loop node. A stub node with that id reports the value, so the
+    rendered reference reads exactly what the real loop would have written.
+    Left at None no such node runs, which is what a round looks like whose
+    items loop never started.
+    """
     import json
 
     from claude_launcher.cflow2 import frontend, runtime
 
     doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
     setup = {k: v for k, v in doc["nodes"]["branch-setup"].items() if k in ("title", "returns")}
+    nodes = {"branch-setup": {**setup, "prompt": "branch-setup"},
+             "peer-review": doc["nodes"]["peer-review"],
+             "after": {"prompt": "after"}}
+    body = ["branch-setup", "peer-review", "after"]
+    if items is not None:
+        # No ``returns``: an undeclared schema accepts any value, which is how
+        # a loop's list of item records can be reported here.
+        nodes["items"] = {"prompt": "items"}
+        body = ["branch-setup", "items", "peer-review", "after"]
     flow = {"cflow": 2, "name": "peer-review-ask",
             "data": {"claim": {"issue": issue, "how": "claimed" if issue else "no-issue-wait"}},
-            "nodes": {"branch-setup": {**setup, "prompt": "branch-setup"},
-                      "peer-review": doc["nodes"]["peer-review"],
-                      "after": {"prompt": "after"}},
-            "body": ["branch-setup", "peer-review", "after"]}
+            "nodes": nodes, "body": body}
     chart = frontend.compile_text(json.dumps(flow, ensure_ascii=False))
     kw = dict(cwd=str(tmp_path), scope="m")
     st = runtime.start(chart, caps={}, now=1.0, **kw)
     st = runtime.report(st["tasks"][0]["instance"], "ok",
                         {"branch": "s1-gist", "base": "master", "base_hash": "0" * 40,
                          "shared": False}, now=2.0, **kw)
+    if items is not None:
+        st = runtime.report(st["tasks"][0]["instance"], "ok", items, now=3.0, **kw)
     [ask] = st["asks"]
     assert ask["label"] == "peer-review"
     return ask["prompt"]
@@ -1336,7 +1353,7 @@ def test_peer_review_question_names_the_round_issue_and_branch(tmp_path, monkeyp
     and the branch, and tells the reader not to pick from the board list."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     prompt = _peer_review_ask(tmp_path, "claunch-zzz")
-    assert "이슈: claunch-zzz" in prompt
+    assert "주 이슈: claunch-zzz" in prompt
     assert "브랜치: s1-gist" in prompt
     assert "보드 목록에서 고르지 않는다" in prompt
     assert "${data.claim.issue}" not in prompt
@@ -1348,9 +1365,52 @@ def test_peer_review_question_without_an_issue_falls_back_to_both_statuses(tmp_p
     candidates."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     prompt = _peer_review_ask(tmp_path, None)
-    assert "이슈: ${data.claim.issue}" in prompt
+    assert "주 이슈: ${data.claim.issue}" in prompt
     assert "--status in_progress --status in_review" in prompt
     assert "후보가 둘 이상이면 추측하지 말고 abstain한다" in prompt
+
+
+# -- claunch-peer-review-batch-scope-x05sq: the ask names every batched issue -
+
+
+def test_peer_review_question_lists_every_issue_the_batch_carried(tmp_path, monkeypatch):
+    """A batch round commits several issues to one branch (claunch-7r1qr). The
+    ask named only ``data.claim.issue``, so on PR #636 the reviewer read two
+    of three commits as out of scope and judged them only after the worker
+    told it otherwise — the judgement was right, and the question was what
+    made it nearly not. The rendered question now carries the loop's own
+    report of what else went in, and asks for a verdict comment per issue."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    prompt = _peer_review_ask(
+        tmp_path, "claunch-aaa",
+        [{"issue": "claunch-bbb", "n": 2}, {"issue": "claunch-ccc", "n": 3}],
+    )
+    assert "주 이슈: claunch-aaa" in prompt
+    assert '"issue": "claunch-bbb"' in prompt
+    assert '"issue": "claunch-ccc"' in prompt
+    assert "그 전부가 이번 심사 범위" in prompt
+    assert "판정 코멘트도 이슈마다 남긴다" in prompt
+    assert "**이슈마다 남긴다**" in prompt
+    assert "batch: <id1,id2,...>" in prompt
+
+
+def test_peer_review_question_calls_a_single_item_round_single(tmp_path, monkeypatch):
+    """The regression half: a round that carried only its claim issue reads
+    the empty list and is told in words that the scope is that one issue."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    prompt = _peer_review_ask(tmp_path, "claunch-zzz", [])
+    assert "브랜치에 함께 실린 이슈: []" in prompt
+    assert "단일 일감" in prompt
+    assert "주 이슈: claunch-zzz" in prompt
+
+
+def test_peer_review_question_says_how_to_read_an_unrendered_item_list(tmp_path, monkeypatch):
+    """When the items loop never ran the reference stays as written — the
+    reader is told what that means rather than being left with `${...}`."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    prompt = _peer_review_ask(tmp_path, "claunch-zzz")
+    assert "${result['items'].value}" in prompt
+    assert "위 줄이 `${...}` 그대로 보이면" in prompt
 
 
 # -- claunch-0b8dx: no round cap, end on every issue closed ------------------
