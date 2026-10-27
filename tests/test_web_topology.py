@@ -732,6 +732,7 @@ BROWSER_CHECKS = [
         "linkpanel_browser.cjs",
         "termseries_browser.cjs",
         "sessionkey_browser.cjs",
+        "noticeplace_browser.cjs",
 ]
 
 
