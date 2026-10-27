@@ -629,6 +629,39 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   host.querySelector(".th-new").fire("click");   // close the form
   await settle();
 
+  // claunch-x5n0r.1: a refused create used to leave the start button off for
+  // good. submit() writes go.disabled = true itself and create() only clears
+  // composing on success, so the form stays -- but the repaint that would put
+  // the button back is the one typingIn() skips while the title holds the
+  // focus. syncForkRow is the only repaint that runs in that state, and it
+  // must write the button's disabled state, not just its label.
+  document.activeElement = null;
+  host.querySelector(".th-new").fire("click");   // a fresh form
+  await settle();
+  host.querySelector(".th-newform .th-title-input").focus();
+  failCreate = true;
+  host.querySelector(".th-newform .th-send").fire("click");
+  assert.equal(host.querySelector(".th-newform .th-send").disabled, true,
+               "the button is off while the post is out");
+  await settle();
+  failCreate = false;
+  const stuck = host.querySelector(".th-newform .th-send");
+  assert.equal(stuck.textContent, "시작",
+               "the refusal leaves the same form, its notice set, the label back");
+  assert.equal(stuck.disabled, false,
+               "and the button must be usable again without the focus leaving the form");
+  fbox = host.querySelector(".th-newform .th-fork-box");
+  fbox.checked = true;
+  fbox.fire("change");
+  assert.equal(host.querySelector(".th-newform .th-send").textContent, "포크하고 시작",
+               "the in-place repaint writes the label");
+  assert.equal(host.querySelector(".th-newform .th-send").disabled, false,
+               "and the disabled state with it, not the label alone");
+
+  document.activeElement = null;
+  host.querySelector(".th-new").fire("click");   // close the form
+  await settle();
+
   assert.ok(!host.querySelector(".th-pane").classList.contains("th-solo"), "a shown thread keeps the two halves");
 
   // unmount stops the poll and empties the host
