@@ -43194,10 +43194,14 @@ const CF2G_ATOMIC = new Set(["task", "wait", "control"]);
 /* Containers whose children are alternatives or concurrent branches. */
 const CF2G_BRANCHES = new Set(["par", "group", "cond", "choose", "try", "timeout"]);
 /* How much of the definition a preset unfolds, as a sub radio group inside the
-   graph view (claunch-g6uma.2). The ladder runs from the state the panel opens
-   in to everything: `simple` follows the run, `lvN` unfolds every block less
-   than N deep from its root, `all` unfolds every block. Each step opens at
-   least what the step before it does. */
+   graph view (claunch-g6uma.2). The row answers two different questions, and
+   only the levels are a ladder: `simple` is WHERE the run is — the root plus
+   the path down to every live instance and to the selection — while `lvN` is
+   HOW DEEP the picture goes, counted from each block's root, and `all` opens
+   every block. Each level opens at least what the level below it does; a
+   level is not comparable to `simple`, because a run sitting deeper than the
+   level is folded away by it. That is not silent: cflow2GraphHidden finds the
+   steps the drawing left out and the panel says so under the picture. */
 const CF2G_PRESETS = [
   ["simple", "Simplified", "every block folded but the path to the run's position"],
   ["lv1", "1 level", "the root's own steps, with the blocks below them folded"],
@@ -43388,7 +43392,8 @@ function cflow2GraphLayout(chart, detail, opts) {
      node and no line). Each group is owned once — by the first of its sites
      that is drawn and would show the body, else the first drawn — and frozen
      after the pick, so the drawn set only grows and the loop ends. */
-  const drawnSet = (own) => {
+  const drawnSet = (own, set) => {
+    const shownHere = set || open;
     const seen = new Set();
     const visit = (id) => {
       if (!id || seen.has(id) || !nodes[id]) return;
@@ -43396,7 +43401,7 @@ function cflow2GraphLayout(chart, detail, opts) {
       const n = nodes[id];
       if (n.type === "scope" && procs.key.has(id) && own.get(procs.key.get(id)) !== id) return;
       if (!bodyKids(id).length) return;
-      if (!(CF2G_ATOMIC.has(n.type) || open.has(id))) return;
+      if (!(CF2G_ATOMIC.has(n.type) || shownHere.has(id))) return;
       for (const c of n.children || []) visit(c);
     };
     for (const id of roots) visit(id);
@@ -43419,6 +43424,19 @@ function cflow2GraphLayout(chart, detail, opts) {
   /* an owner the walk never reached owns nothing after all: its sites read as
      plain calls rather than pointing at an invisible body */
   for (const [key, id] of [...owners]) if (!drawn.has(id)) owners.delete(key);
+
+  /* Which steps the drawing could ever reach, so that "not drawn" can be told
+     apart from "not drawn because it is folded". A step inside a shared body
+     the run happens to be in is never drawn — the body is drawn once, at the
+     site that owns it — and that is not something unfolding would fix. One
+     more traversal with every container open answers it; no measuring, no
+     placing. */
+  const everyOpen = new Set();
+  for (const id of Object.keys(nodes)) {
+    const n = nodes[id];
+    if (n && !CF2G_ATOMIC.has(n.type) && (n.children || []).length) everyOpen.add(id);
+  }
+  const everything = drawnSet(owners, everyOpen);
 
   /* A site that is not its body's owner draws no children: the body is the
      shared node, reached by a reference edge. */
@@ -43577,7 +43595,11 @@ function cflow2GraphLayout(chart, detail, opts) {
       const branchTop = topRail + CF2G_RAIL;
       const botRail = branchTop + maxH + CF2G_RAIL;
       const ax = x + s.w / 2;
-      out.chips.push({ id, x, y, w: s.w, type: n.type, text: cflow2GraphChip(n) });
+      /* a group's caption is cut to the room left beside the fold control, the
+         same way a loop's title is: a one-branch group is only one box wide */
+      out.chips.push({ id, x, y, w: s.w, type: n.type,
+        text: cflow2GraphClip(cflow2GraphChip(n),
+                              Math.max(8, Math.floor((s.w - 46) / 6.1))) });
       out.boxes.push({ id, kind: "group", x, y, w: s.w, h: s.h, text: "" });
       out.folds.push({ id, kind: "group", x: x + s.w - 20, y: y + 2 });
       let lx = x;
@@ -43652,6 +43674,13 @@ function cflow2GraphLayout(chart, detail, opts) {
   }
   out.w = Math.ceil(maxX + CF2G_MARGIN);
   out.h = Math.ceil(maxY + CF2G_MARGIN);
+  /* Two answers, and they are not the same set. `drawn` is what the walk
+     reached with this open set — a plain run has no box of its own, so the
+     box lists cannot answer "is this step on screen", while a shared-body
+     reference does need a box to point at. `everything` is the same walk with
+     every block open: the steps no unfolding would show. */
+  out.drawn = drawn;
+  out.everything = everything;
   return out;
 }
 
@@ -43740,6 +43769,34 @@ function cflow2GraphLegend() {
     "where several steps call it · − folds a block, a box reading +n collapsed opens one");
 }
 
+/* Which of the run's own steps the drawing left out, leaving out the ones no
+   unfolding would show. A level preset counts depth and does not follow the
+   run, so the step the reader came for can be inside a folded block; the
+   caller says so under the picture instead of leaving a run panel that shows
+   no run.
+
+   "On screen" is the layout's own walk (`layout.drawn`), not the boxes: a
+   plain run emits no box of its own — its children are placed in its place —
+   so counting boxes would call every `seq` on the path hidden. A step that is
+   not drawn because its body is drawn at another site is not in
+   `layout.everything` either, and is not hidden by a fold, so it is not
+   reported. Pure. */
+function cflow2GraphHidden(layout, detail) {
+  const drawn = new Set();
+  if (layout && layout.drawn) for (const id of layout.drawn) drawn.add(id);
+  else {
+    for (const b of (layout && layout.nodes) || []) drawn.add(b.id);
+    for (const b of (layout && layout.boxes) || []) drawn.add(b.id);
+  }
+  const ever = (layout && layout.everything) || drawn;
+  const out = [];
+  for (const i of (detail && detail.instances) || []) {
+    if (!i || !i.node || drawn.has(i.node) || !ever.has(i.node)) continue;
+    if (out.indexOf(i.node) < 0) out.push(i.node);
+  }
+  return out;
+}
+
 /* `opts`: selected, open (the person's own folds), preset, onSelect(id,
    collapsed), onToggle(id, open). */
 function cflow2GraphInto(host, chart, detail, opts) {
@@ -43823,6 +43880,12 @@ function cflow2GraphPresetSet(host, preset) {
   cf2GraphPresets[host] = preset;
   try { localStorage.setItem("claunch.cflow2.graphpreset." + host, preset); } catch {}
 }
+/* Picking a preset starts the chart over from it: the person's own folds are
+   what they laid on top of the last preset, not on top of this one. */
+function cflow2GraphPresetPick(host, preset) {
+  cflow2GraphPresetSet(host, preset);
+  cf2GraphFolds[host] = {};
+}
 function cflow2GraphPresetTabs(host, preset, redraw) {
   const group = el("div", "cf2-modes sub");
   group.setAttribute("role", "radiogroup");
@@ -43834,7 +43897,7 @@ function cflow2GraphPresetTabs(host, preset, redraw) {
     button.setAttribute("aria-checked", String(preset === value));
     button.title = hint;
     button.addEventListener("click", () => {
-      cflow2GraphPresetSet(host, value);
+      cflow2GraphPresetPick(host, value);
       redraw();
     });
     group.appendChild(button);
@@ -44743,30 +44806,25 @@ function renderCflow2Into(box, data, ui, force = false) {
        In graph mode the presets are what Expand all and Collapse were, so
        those two buttons stay with the callstack, which has no presets. */
     if (chartMode === "graph") {
-      sec.appendChild(cflow2GraphPresetTabs(host, cflow2GraphPreset(host), () => {
-        cf2GraphFolds[host] = {};   // a preset is a starting point, not a step
-        redraw();
-      }));
+      sec.appendChild(cflow2GraphPresetTabs(host, cflow2GraphPreset(host), redraw));
     }
     const tools = el("div", "cf2-chart-tools");
     const marked = Object.values(nodes).filter((n) => n.force_target).length;
     tools.appendChild(el("span", "wf-note", marked
       ? `${marked} node(s) marked ⇥ can be moved to — click one`
       : "no node is marked force_target"));
-    const current = el("button", "wf-btn sm", "Current state");
-    current.disabled = !(data.instances || []).length;
-    current.title = "expand and scroll to the current execution state";
-    current.addEventListener("click", () => {
+    /* One motion for both places that go to the run: the button below the
+       tabs, and the note under the graph when a level preset has folded the
+       run away. */
+    const goCurrent = () => {
       const rows = cflow2TreeRows(data.chart, data);
       const active = rows.filter((r) => r.awaiting);
       const target = active[0] || rows.filter((r) => r.active).at(-1);
       if (!target) return;
       /* in the graph the run's position is what the Simplified preset is, so
          reaching it is picking that preset rather than opening boxes by hand */
-      if (chartMode === "graph") {
-        cflow2GraphPresetSet(host, "simple");
-        cf2GraphFolds[host] = {};
-      } else {
+      if (chartMode === "graph") cflow2GraphPresetPick(host, "simple");
+      else {
         const parents = Object.fromEntries(rows.map((r) => [r.id, r.parent]));
         const opened = { ...(cf2Open[host] || {}) };
         for (let p = parents[target.id]; p; p = parents[p]) opened[p] = true;
@@ -44777,7 +44835,11 @@ function renderCflow2Into(box, data, ui, force = false) {
       const row = Array.from(box.querySelectorAll(scope))
         .find((r) => r.dataset.node === target.id);
       if (row) row.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-    });
+    };
+    const current = el("button", "wf-btn sm", "Current state");
+    current.disabled = !(data.instances || []).length;
+    current.title = "expand and scroll to the current execution state";
+    current.addEventListener("click", goCurrent);
     const expand = el("button", "wf-btn sm clear", "Expand all");
     expand.addEventListener("click", () => {
       cf2Open[host] = Object.fromEntries(Object.keys(nodes).map((id) => [id, true]));
@@ -44800,7 +44862,7 @@ function renderCflow2Into(box, data, ui, force = false) {
       if (box._cf2GraphSignature === graphSignature && box._cf2Graph) {
         sec.appendChild(box._cf2Graph);
       } else {
-        box._cf2Graph = cflow2GraphInto(sec, data.chart, data, {
+        const drawn = cflow2GraphInto(sec, data.chart, data, {
           selected: sel,
           open: cf2GraphFolds[host] || {},
           preset,
@@ -44813,8 +44875,27 @@ function renderCflow2Into(box, data, ui, force = false) {
             cf2GraphFolds[host] = { ...(cf2GraphFolds[host] || {}), [id]: on };
             redraw();
           },
-        }).wrap;
+        });
+        box._cf2Graph = drawn.wrap;
+        box._cf2GraphLayout = drawn.layout;
         box._cf2GraphSignature = graphSignature;
+      }
+      /* A level preset counts depth and does not follow the run, so the step
+         the reader came for can be off the picture — folded, or its body drawn
+         where it is shared. Say what is true either way (which steps are
+         missing), not why, and make the way back one press. */
+      const away = cflow2GraphHidden(box._cf2GraphLayout, data);
+      if (away.length) {
+        const note = el("div", "wf-note cf2g-hidden");
+        note.appendChild(el("span", null, away.length === 1
+          ? "1 step of the run is not in this view"
+          : `${away.length} steps of the run are not in this view`));
+        const show = el("button", "wf-btn sm", "Show the run");
+        show.type = "button";
+        show.title = "switch to Simplified, which follows the run";
+        show.addEventListener("click", goCurrent);
+        note.appendChild(show);
+        sec.appendChild(note);
       }
     } else {
       const treeSignature = JSON.stringify([identity, data.chart, data.visits,
