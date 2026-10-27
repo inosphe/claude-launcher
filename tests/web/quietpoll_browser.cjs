@@ -131,20 +131,39 @@ const server = http.createServer((req, res) => {
       b.classList.remove("absent");
       b.classList.toggle("on", true);
       const same = mo.takeRecords().length + records.length;
+      const node = b.firstChild;
       b.title = "u";
       b.textContent = "other";
       b.classList.toggle("on", false);
-      const changed = mo.takeRecords().length;
+      const changedRecs = mo.takeRecords();
+      const changedText = b.textContent;
+      const keptNode = b.firstChild === node;
+      // Emptied, the element has no child left (`:empty` still matches);
+      // written again, it gets a text node back.
+      b.textContent = "";
+      const emptied = b.childNodes.length;
+      b.textContent = "back";
+      const refilled = b.childNodes.length === 1 && b.firstChild.nodeType === 3;
+      mo.takeRecords();
       mo.disconnect();
       box.remove();
-      return { installed: !!Element.prototype.__quietDom, same, changed,
-               title: b.title, text: b.textContent, on: b.classList.contains("on") };
+      return { installed: !!Element.prototype.__quietDom, same, changed: changedRecs.length,
+               textRecords: changedRecs.filter((r) => r.type !== "attributes").map((r) => r.type),
+               keptNode, emptied, refilled,
+               title: b.title, text: changedText, on: b.classList.contains("on") };
     });
     assert.equal(quiet.installed, true, "quietdom.js is loaded ahead of the page's scripts");
     assert.equal(quiet.same, 0, "same-value writes make no mutation record");
     assert.equal(quiet.changed, 3, "a write that changes the value still records it");
     assert.deepEqual([quiet.title, quiet.text, quiet.on], ["u", "other", false],
       "the writes that change something still land");
+    // A changed text keeps its text node: one characterData record, no node
+    // removed or added for a page-watching extension to scan (claunch-qnq1c).
+    assert.equal(quiet.keptNode, true, "a changed text is written into the node it had");
+    assert.deepEqual(quiet.textRecords, ["characterData"],
+      "and is one characterData record, not a childList swap");
+    assert.equal(quiet.emptied, 0, "an emptied element has no child left");
+    assert.equal(quiet.refilled, true, "and written again it holds one text node");
 
     /* ---- 2. an idle poll leaves the rail alone ------------------------- */
     await page.evaluate(() => refreshSessions());

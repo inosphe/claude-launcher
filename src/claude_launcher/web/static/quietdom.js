@@ -66,16 +66,39 @@ function installQuietDom(g) {
 
   // Text: an element whose only child is a text node holding the same string
   // keeps that node; a text node keeps its data.
+  //
+  // And when the string differs, the element still keeps that node and only
+  // its data changes (claunch-qnq1c). The native setter replaces the text
+  // node with a new one: a childList record, one node removed and one added,
+  // for a clock that moved a digit. An extension watching the page takes
+  // added nodes as new content to scan (1Password walks each batch with a
+  // TreeWalker), and the dashboard's clocks and ages tick every second -- 132
+  // such records a second with 134 notice cards up. A data change is one
+  // characterData record and adds no node. An empty string still goes to the
+  // native setter, which leaves no child, so `:empty` matches as before.
   const N = g.Node && g.Node.prototype;
   const TEXT = 3;
-  guard(N, "textContent", (node, v) => {
-    const text = v === null || v === undefined ? "" : String(v);
-    if (node.nodeType === TEXT) return node.data === text;
-    if (node.nodeType !== 1) return false;
+  const onlyText = (node) => {
     const first = node.firstChild;
-    if (!first) return text === "";
-    return first === node.lastChild && first.nodeType === TEXT && first.data === text;
-  });
+    return first && first === node.lastChild && first.nodeType === TEXT ? first : null;
+  };
+  const text = N && Object.getOwnPropertyDescriptor(N, "textContent");
+  if (text && text.set && text.get) {
+    Object.defineProperty(N, "textContent", {
+      configurable: true, enumerable: text.enumerable,
+      get: text.get,
+      set(v) {
+        const s = v === null || v === undefined ? "" : String(v);
+        if (this.nodeType === TEXT) { if (this.data !== s) text.set.call(this, s); return; }
+        if (this.nodeType === 1) {
+          const t = onlyText(this);
+          if (t ? t.data === s : !this.firstChild && s === "") return;
+          if (t && s !== "") { t.data = s; return; }
+        }
+        text.set.call(this, v);
+      },
+    });
+  }
   const C = g.CharacterData && g.CharacterData.prototype;
   guard(C, "data", (node, v) => node.data === String(v));
 
