@@ -187,7 +187,46 @@ const server = http.createServer((req, res) => {
     for (let i = 0; i < 300 && !fleetHeld.length; i++) await new Promise((ok) => setTimeout(ok, 10));
     assert.ok(fleetHeld.length >= 1, "the page asks for the fleet after drawing the clusters");
     assert.deepEqual(await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.length), 0);
+
+    // The create panel opened before the fleet arrives (claunch-wbs0i.2):
+    // its list says the fleet is being read, and a preview asked for now
+    // waits for it instead of sending an empty candidate list, which the
+    // daemon refuses ("no sessions to score").
+    const early = "#megathreads-view .mt-create-card";
+    await page.click("#megathreads-view .mt-new-open");
+    await page.waitForSelector(early);
+    assert.equal(await page.textContent(`${early} .mt-new-loading`), "세션 목록을 읽는 중…",
+      "the list says the fleet is on its way");
+    assert.deepEqual(await page.$$eval(`${early} .mt-create-project option`, (els) => els.map((e) => e.value)), [""],
+      "no project is offered before the fleet");
+    await page.fill(`${early} .mt-create-topic-input`, "이른 주제");
+    await page.press(`${early} .mt-create-topic-input`, "Enter");
+    assert.ok((await page.textContent(`${early} .mt-create-draft-note`)).includes("세션 목록을 읽는 중"),
+      "the preview says what it waits for");
+    assert.equal(drafts.length, 0, "no preview is sent before the fleet");
+    // The panel the reader is in is repainted in place when the fleet
+    // arrives: the same card, the topic input still focused, and the
+    // project / mesh / role selects filled.
+    await page.$eval(early, (card) => { card.dataset.before = "1"; });
     releaseFleet();
+    for (let i = 0; i < 300 && !drafts.length; i++) await new Promise((ok) => setTimeout(ok, 10));
+    assert.equal(drafts.length, 1, "the waiting preview is sent once the fleet is in");
+    assert.deepEqual(drafts[0].sessions.sort(), ["s1", "s2"], "with the fleet as its candidates");
+    await page.waitForFunction((sel) => {
+      const btn = document.querySelector(`${sel} .mt-create-draft`);
+      return btn && btn.textContent === "Jev로 멤버 추천";
+    }, early, { timeout: 15000 });
+    assert.equal(await page.$eval(early, (card) => card.dataset.before), "1", "the panel was not rebuilt");
+    assert.equal(await page.evaluate(() => document.activeElement.className), "mt-create-topic-input",
+      "the topic input keeps its focus");
+    assert.deepEqual(await page.$$eval(`${early} .mt-create-project option`, (els) => els.map((e) => e.value)),
+      ["", "claunch"], "the project select is filled in place");
+    assert.deepEqual(await page.$$eval(`${early} .mt-create-mesh option`, (els) => els.map((e) => e.value)),
+      ["", "claunch", "-"], "the mesh select is filled in place");
+    assert.deepEqual(await page.$$eval(`${early} .mt-create-role-opt`, (els) => els.map((e) => e.value)),
+      ["reviewer", "worker", "-"], "the role list is filled in place");
+    await page.click(`${early} .mt-create-close`);
+
     await page.waitForFunction(() => document.querySelectorAll("#megathreads-view .mt-add-session option").length === 2,
       null, { timeout: 15000 });
     const joinable = await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.map((e) => e.value));
@@ -253,21 +292,61 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await pickerNames(), ["s1", "s2"]);
     await page.selectOption(`${picker} .mt-create-sort`, "activity-desc");
 
-    // The role filter (claunch-kzudj): a select on the project/mesh row,
-    // offering the roles the roster gives, narrowing at once from the
-    // records in hand — no read of the fleet or the roster.
-    const roleOptions = await page.$$eval(`${picker} .mt-create-controls .mt-create-role option`,
-      (els) => els.map((e) => e.value));
-    assert.deepEqual(roleOptions, ["", "reviewer", "worker", "-"], `the roles on offer: ${roleOptions}`);
+    // The role filter (claunch-kzudj), a multi-select combobox: a button on
+    // the project/mesh row opens the roles the roster gives as checkboxes,
+    // and each tick narrows at once from the records in hand — no read of
+    // the fleet or the roster.
+    const role = `${picker} .mt-create-role`;
+    const roleTick = (value) => page.click(`${role} .mt-create-role-opt[value="${value}"]`);
+    assert.equal(await page.textContent(`${role} .mt-create-role-btn`), "역할: 전체");
+    assert.equal(await page.isVisible(`${role} .mt-create-role-pop`), false, "the list starts closed");
+    await page.click(`${role} .mt-create-role-btn`);
+    assert.equal(await page.isVisible(`${role} .mt-create-role-pop`), true);
+    const roleOptions = await page.$$eval(`${role} .mt-create-role-opt`, (els) => els.map((e) => e.value));
+    assert.deepEqual(roleOptions, ["reviewer", "worker", "-"], `the roles on offer: ${roleOptions}`);
     const readsBefore = { ...reads };
-    await page.selectOption(`${picker} .mt-create-role`, "reviewer");
+    await roleTick("reviewer");
     assert.deepEqual(await pickerNames(), ["s2"], "only the reviewer is kept");
-    await page.selectOption(`${picker} .mt-create-role`, "-");
+    await roleTick("worker");
+    assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"], "two roles keep both");
+    assert.equal(await page.textContent(`${role} .mt-create-role-btn`), "역할: reviewer, worker");
+    assert.equal(await page.isVisible(`${role} .mt-create-role-pop`), true, "the list stays open while ticking");
+    await roleTick("worker");
+    // The search box narrows the list, not the ticks.
+    await page.fill(`${role} .mt-create-role-search`, "work");
+    assert.deepEqual(await page.$$eval(`${role} .mt-create-role-opt`, (els) => els.map((e) => e.value)), ["worker"]);
+    await page.fill(`${role} .mt-create-role-search`, "");
+    // Escape closes the list and leaves the panel open.
+    await page.press(`${role} .mt-create-role-search`, "Escape");
+    assert.equal(await page.isVisible(`${role} .mt-create-role-pop`), false, "Escape closes the list");
+    assert.equal(await page.$$eval(picker, (els) => els.length), 1, "the panel stays open");
+    assert.deepEqual(await pickerNames(), ["s2"], "the tick survives the close");
+    assert.deepEqual(reads, readsBefore, "the role filter read nothing from the daemon");
+
+    // A preview asked under the role filter scores the rows on screen. The
+    // filter reads the roster, so a request without it had no candidates
+    // left and the daemon refused it.
+    await page.fill(`${picker} .mt-create-topic-input`, "리뷰");
+    await page.click(`${picker} .mt-create-draft`);
+    for (let i = 0; i < 300 && drafts.length < 2; i++) await new Promise((ok) => setTimeout(ok, 10));
+    assert.equal(drafts.length, 2);
+    assert.deepEqual(drafts[1].sessions, ["s2"], "the role filter reaches the preview");
+    await page.waitForFunction((sel) => {
+      const btn = document.querySelector(`${sel} .mt-create-draft`);
+      return btn && btn.textContent === "Jev로 멤버 추천";
+    }, picker, { timeout: 15000 });
+
+    await page.click(`${role} .mt-create-role-btn`);
+    await roleTick("reviewer");
+    await roleTick("-");
     assert.ok((await page.textContent(`${picker} .mt-new-sessions`)).includes("거른 결과가 없습니다"),
       "every fixture session has a role");
-    await page.selectOption(`${picker} .mt-create-role`, "");
+    await page.click(`${role} .mt-create-role-clear`);
+    // A click outside the combobox closes its list.
+    await page.click(`${picker} .mt-create-head h2`);
+    assert.equal(await page.isVisible(`${role} .mt-create-role-pop`), false, "a click outside closes the list");
+    assert.equal(await page.textContent(`${role} .mt-create-role-btn`), "역할: 전체");
     assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"]);
-    assert.deepEqual(reads, readsBefore, "the role filter read nothing from the daemon");
 
     await page.fill(`${picker} .mt-new-filter`, "s2-deploy");
     assert.deepEqual(await pickerNames(), ["s2"], "the branch is searchable");
@@ -282,11 +361,17 @@ const server = http.createServer((req, res) => {
     // The Jev preview: type a topic, ask, and the recommended member comes
     // back ticked and flagged. The user edits from there.
     await page.fill(`${picker} .mt-create-topic-input`, "배포 로그 형식");
+    // The early preview above already flagged rows, so the wait is on this
+    // request and its answer being painted.
     await page.click(`${picker} .mt-create-draft`);
-    await page.waitForSelector(`${picker} .mt-new-flag`);
-    assert.equal(drafts.length, 1, "one preview request");
-    assert.equal(drafts[0].topic, "배포 로그 형식");
-    assert.deepEqual(drafts[0].sessions.sort(), ["s1", "s2"], "the preview scores what is on screen");
+    for (let i = 0; i < 300 && drafts.length < 3; i++) await new Promise((ok) => setTimeout(ok, 10));
+    await page.waitForFunction((sel) => {
+      const btn = document.querySelector(`${sel} .mt-create-draft`);
+      return btn && btn.textContent === "Jev로 멤버 추천";
+    }, picker, { timeout: 15000 });
+    assert.equal(drafts.length, 3, "one preview request");
+    assert.equal(drafts[2].topic, "배포 로그 형식");
+    assert.deepEqual(drafts[2].sessions.sort(), ["s1", "s2"], "the preview scores what is on screen");
     assert.equal(await page.textContent(`${picker} .mt-new-count`), "1개 선택",
       "the recommendation arrives ticked");
     // Every scored member carries a flag; only the recommended one carries
@@ -340,7 +425,7 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await bands(), ["s1:band-warm", "s2:band-hit"], "s1 is under the bar but over even");
     const colours = await page.$$eval(`${picker} .mt-new-flag`, (els) => els.map((e) => getComputedStyle(e).color));
     assert.notEqual(colours[0], colours[1], `the two bands are drawn in different colours: ${colours}`);
-    assert.equal(drafts.length, 1, "moving the threshold asked Jev nothing");
+    assert.equal(drafts.length, 3, "moving the threshold asked Jev nothing");
 
     await page.check(`${picker} .mt-new-session[value="s1"]`);
     assert.equal(await page.textContent(`${picker} .mt-new-count`), "2개 선택");

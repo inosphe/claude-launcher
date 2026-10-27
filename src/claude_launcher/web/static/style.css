@@ -10210,6 +10210,25 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-create-controls select { background: #161b22; color: #d8dbe0; border: 1px solid #30363d;
   border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
 .mt-create-controls .mt-new-filter { flex: 1 1 220px; }
+/* The role filter's multi-select combobox (megathread-page.js). The button
+   reads like the selects beside it; the list opens under it. */
+.mt-create-role { position: relative; }
+.mt-create-role-btn { background: #161b22; color: #d8dbe0; border: 1px solid #30363d;
+  border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; cursor: pointer;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-create-role-btn.on { border-color: #58a6ff; }
+.mt-create-role-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 200px;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px; background: #161b22;
+  border: 1px solid #30363d; border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4); }
+.mt-create-role-pop[hidden] { display: none; }
+.mt-create-role-search { background: #0b0f14; color: #d8dbe0; border: 1px solid #30363d;
+  border-radius: 6px; padding: 4px 6px; font: inherit; font-size: 12px; }
+.mt-create-role-list { display: flex; flex-direction: column; max-height: 220px; overflow-y: auto; }
+.mt-create-role-item { display: flex; align-items: center; gap: 6px; padding: 3px 4px;
+  border-radius: 4px; font-size: 12px; color: #d8dbe0; cursor: pointer; }
+.mt-create-role-item:hover { background: #21262d; }
+.mt-create-role-clear { align-self: flex-end; background: none; border: none; color: #8b949e;
+  font-size: 11px; cursor: pointer; padding: 2px 4px; }
 .mt-create-tree { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #c6cdd5; cursor: pointer; }
 .mt-create-statuses { display: flex; flex-wrap: wrap; gap: 5px; }
 .mt-create-status { background: none; border: 1px solid #30363d; border-radius: 11px; color: #8b949e;
