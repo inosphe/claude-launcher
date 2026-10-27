@@ -219,7 +219,7 @@ class _FakeBrowser:
         page = {"context_id": "ctx-1", "target_id": "tgt-1", "session_id": f"sess-{len(self.pages) + 1}"}
         self.pages.append({**page, "insecure_tls": insecure_tls})
         self.tls.append((page["session_id"], insecure_tls))
-        return page
+        return {**page, "insecure_tls": insecure_tls}
 
     async def set_insecure_tls(self, session_id, value):
         self.tls.append((session_id, bool(value)))
@@ -879,6 +879,46 @@ def test_the_page_is_told_the_certificate_answer_before_it_loads(home, monkeypat
             ("Security.setIgnoreCertificateErrors", {"ignore": False}, "sess-1")]
 
     asyncio.run(run())
+
+
+def test_a_browser_that_refuses_the_answer_still_opens_the_window(home, monkeypatch):
+    """The certificate answer is a per-window convenience, so a browser without
+    that domain method must not be able to stop a window from opening -- and the
+    window then reports checks on rather than a flag its page never took."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug, "AGENT_FILE", Path("/nonexistent/webdebug-agent.js"))
+
+    async def run():
+        browser = webdebug.Browser(lambda event: None)
+        fake = _FakeCDP()
+        refusals = []
+
+        async def refuse(session_id, value):
+            refusals.append(value)
+            return None
+
+        fake.send = _refusing(fake, refuse)
+        browser._cdp = fake
+        page = await browser.new_page(insecure_tls=True)
+        assert refusals, "the answer was never attempted"
+        assert page["insecure_tls"] is False
+        assert page["session_id"], "the page was still created"
+
+    asyncio.run(run())
+
+
+def _refusing(fake, refuse):
+    """A CDP whose Security.setIgnoreCertificateErrors answers with an error."""
+    original = fake.send
+
+    async def send(method, params=None, *, session="", timeout=20):
+        if method == "Security.setIgnoreCertificateErrors":
+            await refuse(session, (params or {}).get("ignore"))
+            raise webdebug.WebDebugError(
+                502, f"{method}: 'Security.setIgnoreCertificateErrors' wasn't found")
+        return await original(method, params, session=session, timeout=timeout)
+
+    return send
 
 
 def test_the_saved_keys_are_what_a_window_uses(home, monkeypatch):

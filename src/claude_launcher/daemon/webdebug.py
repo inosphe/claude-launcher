@@ -519,7 +519,17 @@ class Browser:
         # answer and no other's (claunch-o8pb7.2.1). A browser started with the
         # environment's --ignore-certificate-errors is wider than this, and
         # the false here does not narrow it back.
-        await self.set_insecure_tls(session_id, insecure_tls)
+        #
+        # A browser that does not know this domain method must still open a
+        # window: the answer is a per-window convenience, and a browser without
+        # it is no worse off than before the setting existed. The caller's flag
+        # is returned so the window records what its page actually got.
+        try:
+            await self.set_insecure_tls(session_id, insecure_tls)
+        except WebDebugError as exc:
+            log.warning("webdebug: this browser would not take the certificate "
+                        "answer (%s); the window opens with checks on", exc)
+            insecure_tls = False
         await cdp.send("Emulation.setDeviceMetricsOverride", {
             "width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT,
             "deviceScaleFactor": 1, "mobile": False,
@@ -528,7 +538,8 @@ class Browser:
         if source:
             await cdp.send("Page.addScriptToEvaluateOnNewDocument",
                            {"source": source}, session=session_id)
-        return {"context_id": context_id, "target_id": target["targetId"], "session_id": session_id}
+        return {"context_id": context_id, "target_id": target["targetId"],
+                "session_id": session_id, "insecure_tls": insecure_tls}
 
     async def set_insecure_tls(self, session_id: str, value: bool) -> None:
         """Whether this page accepts any certificate. The security agent is
@@ -680,7 +691,11 @@ class Hub:
                     await self._close_page(oldest)
                 flag = insecure_tls_default() if insecure is None else bool(insecure)
                 page = await self.browser.new_page(insecure_tls=flag)
-                win = Window(id=window, page=page, session=session, insecure_tls=flag)
+                # The page says what it actually got: a browser that refused the
+                # domain method opened with checks on, and the window reports
+                # that rather than the flag the caller hoped for.
+                win = Window(id=window, page=page, session=session,
+                             insecure_tls=bool(page.get("insecure_tls", flag)))
                 self.windows[window] = win
             elif insecure is not None and bool(insecure) != win.insecure_tls:
                 win.insecure_tls = bool(insecure)
