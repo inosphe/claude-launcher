@@ -803,10 +803,12 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li.sess-card :is(.rail-beads, .rail-status-checks) {
   order: 3; margin-top: 0; padding-left: var(--rail-inset);
 }
-#session-list li.sess-card .rail-status-checks { gap: 2px 8px; padding-top: 0; }
+/* The chips keep the label shape of the base rule (border, tint) on a card:
+   bare coloured text read as part of the briefing line above it
+   (claunch-9txuo). Only the box is tightened to the card's density. */
+#session-list li.sess-card .rail-status-checks { gap: 2px 4px; padding-top: 1px; }
 #session-list li.sess-card .rail-status-check {
-  padding: 0; border: 0; border-radius: 0; background: transparent;
-  font-size: 10px; line-height: 17px; font-variant-numeric: tabular-nums;
+  padding: 0 5px; font-size: 10px; line-height: 15px; font-variant-numeric: tabular-nums;
 }
 #session-list li.sess-card .mesh-role { border-radius: 3px; font-size: 10px; }
 #session-list li[data-rail-mode="expanded"] .rail-ctx-line {
@@ -1862,18 +1864,25 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list .rail-bead:hover { border-color: #58a6ff; color: #e6edf3; }
 #session-list .rail-bead-more { cursor: default; }
 /* the work count at the head of the line (claunch-9f8ag): what is left,
-   split by status in the pills' own tints, then what is done */
+   split by status in the pills' own tints, then what is done. Each count is
+   a label (border and tint, claunch-9txuo) so it reads apart from the issue
+   pills beside it and from the rail's plain text. */
 #session-list .rail-beads-count {
-  display: inline-flex; gap: 6px; align-items: baseline; font-size: 10.5px;
+  display: inline-flex; gap: 4px; align-items: center; font-size: 10px;
   color: #8b949e; white-space: nowrap; margin-right: 2px; cursor: default;
 }
+#session-list :is(.rail-beads-left, .rail-beads-n) {
+  padding: 0 5px; border-radius: 8px; line-height: 15px;
+  border: 1px solid #30363d; background: #191d24;
+  font-variant-numeric: tabular-nums;
+}
 #session-list .rail-beads-left { color: #e6edf3; font-weight: 600; }
-#session-list .rail-beads-left.none { color: #56d364; }
-#session-list .rail-beads-n.waiting { color: #79c0ff; }
-#session-list .rail-beads-n.working { color: #d29922; }
-#session-list .rail-beads-n.landing { color: #d2a8ff; }
-#session-list .rail-beads-n.blocked { color: #ff7b72; }
-#session-list .rail-beads-n.done { color: #6e7681; }
+#session-list .rail-beads-left.none { color: #3fb950; border-color: #1f6f3f; background: #10251a; }
+#session-list .rail-beads-n.waiting { color: #79c0ff; border-color: #1f4a7a; background: #111d2e; }
+#session-list .rail-beads-n.working { color: #d29922; border-color: #6b4f14; background: #2b230f; }
+#session-list .rail-beads-n.landing { color: #d2a8ff; border-color: #5a3f86; background: #1f1730; }
+#session-list .rail-beads-n.blocked { color: #ff7b72; border-color: #8b3030; background: #2d1719; }
+#session-list .rail-beads-n.done { color: #8b949e; }
 /* the hover card: fixed beside the pill, over everything */
 .rail-bead-pop {
   position: fixed; z-index: 60; width: 320px; max-width: calc(100vw - 16px);

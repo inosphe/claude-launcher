@@ -268,6 +268,23 @@ ok("a compact card keeps the status-check chips — no rule hides them",
    !compactChecks || !/display:\s*none/.test(compactChecks[1]),
    compactChecks ? compactChecks[1].trim() : "no rule");
 
+/* The chips and the bead counts are labels on a card: a border and a tint
+   set them apart from the briefing line. A card rule that strips either
+   leaves bare coloured text that reads as part of that line (claunch-9txuo). */
+const cardLabelRules = [...plain.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selectors]) =>
+  /\.sess-card|data-rail-mode/.test(selectors)
+  && /\.rail-status-check\b(?!s)|\.rail-beads-(left|n)\b/.test(selectors));
+ok("a card keeps the label border and tint on status checks and bead counts",
+   !cardLabelRules.some(([, , body]) =>
+     /border:\s*0|border:\s*none|background:\s*transparent/.test(body)),
+   cardLabelRules.map(([s, , b]) => `${s.trim()} { ${b.trim()} }`).join("\n") || "no card rule");
+const beadLabel = plain.match(
+  /#session-list :is\(\.rail-beads-left, \.rail-beads-n\)\s*\{([^}]*)\}/);
+ok("each bead count is drawn as a label (border, radius, tint)",
+   !!beadLabel && /border:\s*1px solid/.test(beadLabel[1])
+     && /border-radius:/.test(beadLabel[1]) && /background:/.test(beadLabel[1]),
+   beadLabel ? beadLabel[1].trim() : "no bead count label rule");
+
 /* A run that wants the reader's keyboard survives every density: hiding it
    on the short cards is how a gated session goes unnoticed. */
 for (const mode of ["min", "compact"]) for (const badge of ["sess-cflow", "sess-cflow2"]) {
