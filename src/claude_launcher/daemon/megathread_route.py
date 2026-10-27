@@ -108,7 +108,18 @@ THREAD_MESSAGES = 12
 #: to say it instead: which workspace the session works in, which branch it
 #: stands on, and the titles of the issues it holds -- an issue id alone says
 #: nothing to a model that has never read the board.
-DRAFT_ISSUES = 4
+#:
+#: Twelve titles, not four (claunch-rzrig). ``beads.match`` puts the linked
+#: issue first and then closed ones newest first, so a session that moved on
+#: to other work showed only its latest few, and the subject it spent the day
+#: on fell off the end: the answer session held 17 issues, four named the
+#: topic, and three of those were cut. Scored twice per variant over the 40
+#: candidates of three topics, its mean logit rose 0.37, 0.32 and 0.49, and on
+#: every topic both twelve-title scores were above both four-title ones; the
+#: other candidates moved by 0.21-0.24 on average, the same as two scorings
+#: of one document (0.22-0.26). It still stayed under ln 9 (at most 0.97).
+#: About 70 more input tokens per call.
+DRAFT_ISSUES = 12
 ISSUE_TITLE_CHARS = 200
 #: The first non-closed issues among those also carry their description
 #: (claunch-gqt6w). A title says what an issue is called; the description
