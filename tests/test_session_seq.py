@@ -50,6 +50,28 @@ def _manager() -> SessionManager:
     return SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
 
 
+def _init_repo(path) -> None:
+    """A repository to cut a worktree from.
+
+    ``POST /api/sessions`` with a generated worktree name resolves the checkout
+    against ``cwd``, so a request whose ``cwd`` is not a repository is refused
+    before the session is staged. The worktree path is exercised only where
+    there is something to cut from.
+    """
+    import subprocess
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=path, check=True,
+                       capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "probe@example.invalid")
+    git("config", "user.name", "probe")
+    (path / "f.txt").write_text("x\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "init")
+
+
 def _record(mgr: SessionManager, name: str) -> DeadSession:
     """A record holding ``name``, without a PTY or a directory.
 
@@ -63,6 +85,17 @@ def _record(mgr: SessionManager, name: str) -> DeadSession:
 
 def _seq() -> int:
     return session_seq.read()[0]
+
+
+def _filed_seq() -> int:
+    """The number the counter *file* holds.
+
+    :func:`_seq` answers a number even with no file, because it rebuilds one
+    from the directories — which means it answers the same number whether or
+    not the stage wrote anything. A test holding "the stage spent its number"
+    must read the file, or it passes on the recovery path alone.
+    """
+    return json.loads(session_seq.file().read_text())[session_seq.NEXT]
 
 
 def _take(mgr: SessionManager) -> str:
@@ -244,8 +277,10 @@ def test_a_child_that_named_no_child_still_spends_its_number(home, tmp_path):
         parent = mgr.stage(SessionDef(name="boss", harness="py", cwd=str(tmp_path)))
         child = mgr.stage_child("boss", {"profile": "py", "cwd": str(tmp_path)})
         assert child.sdef.name == "s0", child.sdef.name
-        # The number was spent, not merely used for a directory.
-        assert _seq() == 1
+        # The number was spent, not merely used for a directory: the file must
+        # say so (``_seq`` would answer 1 either way, by recovery).
+        assert session_seq.file().exists(), "the child's stage wrote no counter"
+        assert _filed_seq() == 1
 
         # And the next auto assignment is consecutive, not s2.
         assert mgr.auto_name() == "s1"
@@ -257,11 +292,18 @@ def test_a_child_that_named_no_child_still_spends_its_number(home, tmp_path):
     asyncio.run(run())
 
 
-def test_the_web_worktree_path_still_spends_its_number(home):
+def test_the_web_worktree_path_still_spends_its_number(home, tmp_path):
     """``POST /api/sessions`` with a generated worktree name settles a
     candidate into ``body["name"]`` before ``stage`` sees it. That is a
     counter name, so the counter must move — otherwise every web session made
-    with a worktree would leave a number behind."""
+    with a worktree would leave a number behind.
+
+    The request must actually succeed here. An earlier version of this test
+    wrapped its assertion in ``if resp.status in (200, 201)``, which reads as a
+    pass when the route refuses the request: the path it exists to hold never
+    ran. ``cwd`` is a real repository, because the route cuts a checkout from
+    it, and a directory that is not one refuses the request with 400.
+    """
     import asyncio as _asyncio
 
     from aiohttp.test_utils import TestClient, TestServer
@@ -269,6 +311,7 @@ def test_the_web_worktree_path_still_spends_its_number(home):
     from claude_launcher.daemon.api import build_app
 
     _register_py_harness()
+    _init_repo(tmp_path)
 
     async def run():
         mgr = _manager()
@@ -279,17 +322,19 @@ def test_the_web_worktree_path_still_spends_its_number(home):
             resp = await client.post(
                 "/api/sessions",
                 json={"name": "", "worktree": "", "profile": "py",
-                      "cwd": str(home), "task": ""},
+                      "cwd": str(tmp_path), "task": ""},
                 headers={"Authorization": "Bearer sekrit"},
             )
-            # Whatever the request did, the auto path must not have used a
-            # number without spending it: either a session exists and the
-            # counter moved past it, or nothing was created and the counter
-            # is untouched.
-            body = await resp.json()
-            name = str(body.get("name") or "")
-            if resp.status in (200, 201) and name.startswith("s"):
-                assert _seq() >= int(name[1:]) + 1, (name, session_seq.read())
+            assert resp.status in (200, 201), (resp.status, await resp.text())
+            name = str((await resp.json()).get("name") or "")
+            assert name.startswith("s"), name
+            assert paths.session_dir(name).is_dir()
+            # The counter *file* has to carry it, not just the directory: with
+            # no file ``session_seq.read()`` rebuilds the number from the
+            # directories and answers the same value whether or not the stage
+            # ever wrote one.
+            assert session_seq.file().exists(), "the stage never wrote the counter"
+            assert _filed_seq() == int(name[1:]) + 1
         finally:
             await client.close()
             await mgr.shutdown_all()
