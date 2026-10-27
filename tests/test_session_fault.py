@@ -323,11 +323,69 @@ def test_the_exhausted_retry_line_is_the_one_recorded():
     assert view["message"] == PI_RETRIES_EXHAUSTED
 
 
+API_WAIT = "* Waiting for API response · will retry in 1m 24s · check your network"
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_the_api_wait_line_is_read_in_every_harness(harness):
+    """s3568 (2026-10-27) painted this line between attempts. The entry sits
+    in `common` like the timeout wording above it, so a harness added later
+    reads it without a list of its own."""
+    found = session_fault.default().match(harness, API_WAIT)
+    assert found is not None, f"{harness}: the wait line matched nothing"
+    assert found[0].name == "network"
+
+
+def test_the_api_wait_line_is_recorded_with_its_countdown():
+    """The countdown is the one value the line carries that the kind does not:
+    it says when the next attempt is, so the tooltip keeps the whole row."""
+    det, now = _detector("claude")
+    det.scan(_Screen(API_WAIT), now=now["t"])
+    view = det.view()
+    assert view["kind"] == "network"
+    assert view["harness"] == "claude"
+    assert view["message"] == API_WAIT
+
+
 SAFEGUARDS = (
     "API Error: Opus 5.5's safeguards flagged this message "
     "(https://www.anthropic.com/legal/aup)."
 )
+
+
+@pytest.mark.parametrize("rows, kind", [
+    ((WEEKLY, API_WAIT), "usage_limit"),
+    ((API_WAIT, WEEKLY), "usage_limit"),
+    ((SAFEGUARDS, API_WAIT), "policy_blocked"),
+    ((API_WAIT, SAFEGUARDS), "policy_blocked"),
+])
+def test_a_named_cause_beats_the_api_wait_line_on_either_side(rows, kind):
+    """The wait line is `fallback`: it says the client is still waiting, not
+    why. Without the marker a session stuck behind an exhausted plan would be
+    reported as a 15-minute network fault whenever this row sat below the
+    quota sentence."""
+    det, now = _detector("claude")
+    det.scan(_Screen(*rows), now=now["t"])
+    view = det.view()
+    assert view["kind"] == kind, f"{rows} read {view['kind']}"
+
+
+def test_the_api_wait_line_and_a_bare_code_are_both_fallbacks_so_position_decides():
+    """Neither line names a cause, so nothing outranks the other: the lower
+    row wins. Below the code the wait line reads `network`; above it the code
+    reads `api_status`. Measured 2026-10-27 and written up in
+    docs/session-faults.md's limits."""
+    catalog = session_fault.default()
+    code = "API Error: 500 Internal Server Error"
+    below = catalog.match("claude", " ".join((code, API_WAIT)))
+    above = catalog.match("claude", " ".join((API_WAIT, code)))
+    assert below is not None and above is not None
+    assert below[0].name == "network"
+    assert above[0].name == "api_status"
+
+
 PI_LOGIN = "Use /login to log into a provider via OAuth or API key. See: ..."
+
 
 
 @pytest.mark.parametrize("harness, rows, kind", [
