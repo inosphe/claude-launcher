@@ -4962,7 +4962,8 @@ nothing. **Start** picks a profile
 session running the bundled `operator-v2` workflow with the operator's id as
 its input; **Stop** ends it (an agent may not stop an operator — that is the
 user's). The same conversation opens as a dialog over any page from the
-Operator segment of the floating dock at the bottom right, or **Alt+O**; the
+Operator segment of the floating dock at the bottom right, or **Alt+O**
+(Escape, the × button or a click on the dimmed backdrop around it closes it); the
 dialog preselects an operator whose scope covers the session on screen, and
 its management lives on the Observer page. Above the conversation, in the
 dock and the dialog alike, a session line that does not scroll names the

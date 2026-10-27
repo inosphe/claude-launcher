@@ -2,7 +2,8 @@
    a dialog over any page with the operator v2 tabs and conversation that the
    Observer page draws (observer_operator.js, one OperatorView per host) and
    an input row of its own. Opened on a session's page it selects the operator
-   whose scope holds that session. Alt+O opens and closes it.
+   whose scope holds that session. Alt+O opens and closes it; Escape, the ×
+   button and a click on the backdrop close it.
    The badge counts the asks waiting across every operator: the ones not
    shown yet when there are any (and the segment turns red), else all that
    are unanswered. Creating, scoping, starting and stopping operators stay on
@@ -99,6 +100,22 @@ const view = OperatorView.create({
 // would otherwise stay over it.
 root.addEventListener("click", event => {
   if (event.target.closest?.('a[href^="#/"]')) modal.close();
+});
+// A click on the backdrop closes the dialog (claunch-ho56l). The backdrop has
+// no element of its own: a click there lands on the dialog itself, outside
+// its box. A press that starts inside (selecting text, dragging a handle) and
+// is let go outside also lands on the dialog, so the press must start
+// outside too.
+const outside = event => {
+  const box = modal.getBoundingClientRect();
+  return event.target === modal && (event.clientX < box.left || event.clientX > box.right
+    || event.clientY < box.top || event.clientY > box.bottom);
+};
+let pressedOutside = false;
+modal.addEventListener("pointerdown", event => { pressedOutside = outside(event); });
+modal.addEventListener("click", event => {
+  if (pressedOutside && outside(event)) modal.close();
+  pressedOutside = false;
 });
 
 /* The dock: one control in the corner that Chat (chat.js) joins too. */
