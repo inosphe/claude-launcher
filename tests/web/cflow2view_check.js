@@ -66,9 +66,12 @@ check("drift names the moved files",
       "The daemon runs the copy it took at its start until it is restarted.");
 check("nothing added, no line", fns.cflowPinAddedNote({ added: [] }), "");
 check("an older daemon sends no pin", fns.cflowPinAddedNote(undefined), "");
-check("added workflows are named without the suffix",
-      fns.cflowPinAddedNote({ added: ["a.yaml", "b.yaml"] }),
-      "New package workflows on disk, not listed until the daemon restarts: a, b.");
+check("added files are named as files",
+      fns.cflowPinAddedNote({ added: ["a.yaml", "lib.yaml"] }),
+      "New package files on disk, not used until the daemon restarts: a.yaml, lib.yaml.");
+check("one added file",
+      fns.cflowPinAddedNote({ added: ["a.yaml"] }),
+      "New package file on disk, not used until the daemon restarts: a.yaml.");
 
 /* ---- markers ---- */
 check("a v2 entry is marked v2", fns.cflowVersionTag({ name: "a", version: 2 }), " · v2");

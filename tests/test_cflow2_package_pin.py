@@ -12,12 +12,16 @@ which the pickers and the run page show.
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import OrderedDict
 
 import pytest
 
-from claude_launcher.cflow2 import layers
-from claude_launcher.daemon import cflow2_web
+from claude_launcher.cflow2 import layers, runtime
+from claude_launcher.daemon import __main__ as daemon_main
+from claude_launcher.daemon import api as api_mod, cflow2_web, paths
+from claude_launcher.daemon.manager import SessionManager
 
 LIB = "cflow: 2\nname: lib\nkind: library\ndescription: shared\n"
 FLOW = """\
@@ -44,6 +48,9 @@ def package(home, tmp_path, monkeypatch):
     monkeypatch.setattr(layers, "_DEPS", {})
     monkeypatch.setattr(layers, "_COMPILED", OrderedDict())
     monkeypatch.setattr(cflow2_web, "_LISTS", {})
+    monkeypatch.setattr(api_mod, "_WORKFLOW_LISTS", {})
+    monkeypatch.setattr(api_mod, "_WORKFLOW_BASES", {})
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     cwd = tmp_path / "proj"
     cwd.mkdir()
     return live, str(cwd), tmp_path / "pinned"
@@ -122,3 +129,47 @@ def test_a_project_copy_is_not_drift(package, tmp_path):
     layers.pin_package(pinned)
     (live / "other.yaml").write_text(OTHER + "# moved\n", encoding="utf-8")
     assert layers.drift_of("other", cwd) == []
+
+
+def _http(fn):
+    """Run ``fn(client, bearer)`` against a real app with no sessions."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
+        app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            return await fn(client, {"Authorization": "Bearer sekrit"})
+        finally:
+            await client.close()
+
+    return asyncio.run(run())
+
+
+def test_the_daemon_start_pin_reaches_the_pickers_and_the_run_page(package):
+    """The daemon's start hook pins into its own directory, and what moves on
+    disk afterwards is what the workflow list and the run page report."""
+    live, cwd, _ = package
+    daemon_main._pin_cflow2_package()
+    assert layers.package_dir() == paths.cflow2_package_dir()
+    runtime.start(layers.load("flow", cwd), cwd=cwd, scope="s1", caps={})
+    (live / "flow.yaml").write_text(FLOW + "# moved\n", encoding="utf-8")
+    (live / "fresh.yaml").write_text(OTHER.replace("name: other", "name: fresh"),
+                                     encoding="utf-8")
+
+    async def go(client, bearer):
+        lst = await (await client.get(f"/api/cflow/workflows?cwd={cwd}",
+                                      headers=bearer)).json()
+        run = await (await client.get(f"/api/cflow2/run?cwd={cwd}&scope=s1",
+                                      headers=bearer)).json()
+        return lst, run
+
+    lst, run = _http(go)
+    assert lst["package_pin"]["changed"] == ["flow.yaml"]
+    assert lst["package_pin"]["added"] == ["fresh.yaml"]
+    v2 = {e["name"]: e for e in lst["workflows"] if e.get("version") == 2}
+    assert v2["flow"]["package_drift"]["files"] == ["flow.yaml"]
+    assert "fresh" not in v2
+    assert run["package_drift"]["files"] == ["flow.yaml"]
