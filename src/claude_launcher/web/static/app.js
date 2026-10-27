@@ -42311,13 +42311,14 @@ function cflowDriftNote(w) {
     `The daemon runs the copy it took at its start${at} until it is restarted.`;
 }
 
-/* The line for package workflows added on disk since the daemon started:
-   the list does not offer them until it restarts. `pin` is the workflow
-   list's `package_pin`; "" when nothing was added. */
+/* The line for package files added on disk since the daemon started: the
+   daemon does not read them until it restarts. A file is a workflow, a
+   library or a procedure alike, so the line names files. `pin` is the
+   workflow list's `package_pin`; "" when nothing was added. */
 function cflowPinAddedNote(pin) {
-  const added = ((pin && pin.added) || []).map((f) => String(f).replace(/\.yaml$/, ""));
+  const added = ((pin && pin.added) || []).map(String);
   if (!added.length) return "";
-  return `New package workflow${added.length > 1 ? "s" : ""} on disk, not listed until ` +
+  return `New package file${added.length > 1 ? "s" : ""} on disk, not used until ` +
     `the daemon restarts: ${added.join(", ")}.`;
 }
 
