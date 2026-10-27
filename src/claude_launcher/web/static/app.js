@@ -18574,7 +18574,7 @@ $("term-observer").addEventListener("click", () => {
    its own, already showing this session; the user may switch it to another
    session in its top bar. The page under development runs in the daemon's
    browser and this window shows its screen, so a second window closes the
-   first (daemon/webdebug.py MAX_WINDOWS). */
+   first (daemon/webdebug.py max_windows, daemon.webdebug_max_windows). */
 $("term-webdebug").addEventListener("click", () => {
   if (!currentName) return;
   window.open(url("webdebug") + "?session=" + encodeURIComponent(currentName), "_blank");
@@ -29530,6 +29530,7 @@ function openSettings(section) {
   refreshTestOutputDir();
   refreshDelegateSetting();
   refreshSweepBatchSetting();
+  refreshWebdebugSetting();
   refreshModelTiers();
   refreshProviderAffinity();
 }
@@ -35918,6 +35919,7 @@ function renderWorkspaces() {
   view.appendChild(testOutputDirCard());
   view.appendChild(delegateSettingCard());
   view.appendChild(sweepBatchSettingCard());
+  view.appendChild(webdebugSettingCard());
   view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
 
@@ -38659,6 +38661,182 @@ function sweepBatchSettingCard() {
     "it out of the way of a leader preview requested in between. Lowering it " +
     "gets results sooner and sweeps more often. 0 closes a group at the next " +
     "tick. Range 0-86400."));
+  return card;
+}
+
+/* The web debug browser -- daemon.webdebug_max_windows / webdebug_no_sandbox /
+   webdebug_insecure_tls (claunch-o8pb7.2.1), read and written with GET/PUT
+   /api/webdebug-setting. The three were environment-only, so changing one meant
+   editing the daemon's environment and restarting it; the variables still win
+   where an operator has set them, and the card says so. All three are read when
+   a window is opened, so a saved value applies to the next window. */
+let webdebugSetting = {
+  values: { max_windows: 1, no_sandbox: false, insecure_tls: false },
+  effective: { max_windows: 1, no_sandbox: false, insecure_tls: false },
+  defaults: { max_windows: 1, no_sandbox: false, insecure_tls: false },
+  env: {},
+  loaded: false, error: "", busy: false,
+};
+
+function takeWebdebugSetting(data) {
+  Object.assign(webdebugSetting, {
+    values: data.values || webdebugSetting.values,
+    effective: data.effective || webdebugSetting.effective,
+    defaults: data.defaults || webdebugSetting.defaults,
+    env: data.env || {},
+    loaded: true, error: "",
+  });
+}
+
+async function refreshWebdebugSetting() {
+  try {
+    const resp = await api("/api/webdebug-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeWebdebugSetting(data);
+  } catch (err) {
+    webdebugSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveWebdebugSetting(field, value) {
+  webdebugSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/webdebug-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [field]: value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeWebdebugSetting(data);
+  } catch (err) {
+    webdebugSetting.error = String(err);
+  }
+  webdebugSetting.busy = false;
+  renderWorkspaces();
+}
+
+function webdebugEnvNote(field) {
+  // Only for the cases the "In effect now" sentence does not already explain.
+  // Where the environment flips the value, that sentence names the variable;
+  // repeating it here would say the same thing twice.
+  const env = webdebugSetting.env[field];
+  if (!env || !env.set) return null;
+  if (!!webdebugSetting.effective[field] !== !!webdebugSetting.values[field]) return null;
+  return el("p", "wf-note",
+    `${env.name} is set in the daemon's environment. It decides this value; ` +
+    "the saved value applies once that variable is unset for the daemon.");
+}
+
+function webdebugSwitchRow(field, label, detail) {
+  const st = webdebugSetting;
+  const row = el("div", "sweep-batch-field");
+  const head = el("label", "sweep-batch-label");
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.id = `webdebug-${field}`;
+  input.checked = !!st.values[field];
+  input.disabled = st.busy;
+  input.addEventListener("change", () => saveWebdebugSetting(field, input.checked));
+  const reset = el("button", "wf-btn clear", "Reset");
+  reset.type = "button";
+  reset.disabled = st.busy || !!st.values[field] === !!st.defaults[field];
+  reset.title = `back to the default, ${st.defaults[field] ? "on" : "off"}`;
+  reset.addEventListener("click", () => saveWebdebugSetting(field, null));
+  head.append(input, el("span", null, ` ${label}`), reset);
+  row.appendChild(head);
+  const env = st.env[field];
+  const overridden = !!st.effective[field] !== !!st.values[field];
+  let why = "";
+  if (overridden && env && env.set) {
+    why = ` In effect now: ${st.effective[field] ? "on" : "off"}; ${env.name} decides.`;
+  } else if (overridden && field === "no_sandbox" && st.effective[field]) {
+    why = " In effect now: on; the daemon runs as root, where Chrome's sandbox " +
+          "cannot work.";
+  } else if (overridden) {
+    why = ` In effect now: ${st.effective[field] ? "on" : "off"}.`;
+  }
+  const note = el("p", "wf-note", detail + why);
+  row.appendChild(note);
+  const envNote = webdebugEnvNote(field);
+  if (envNote) row.appendChild(envNote);
+  return row;
+}
+
+function webdebugSettingCard() {
+  const st = webdebugSetting;
+  const card = el("section", "ws-add sweep-batch-settings");
+  card.appendChild(el("h3", null, "Web debug browser"));
+  card.appendChild(el("p", "wf-note",
+    "The browser behind /webdebug (the 'web' button in a session's terminal " +
+    "header) and the webdebug_* tools. These three used to be environment-only, " +
+    "so changing one meant editing the daemon's environment and restarting it; " +
+    "the variables still win where they are set. All three are read when a " +
+    "window is opened, so a saved value applies to the next window without a " +
+    "restart. Same settings as daemon.webdebug_max_windows / " +
+    "webdebug_no_sandbox / webdebug_insecure_tls in ~/.claude-launcher/.claunch.yaml."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+
+  const row = el("div", "sweep-batch-field");
+  const head = el(
+    "label",
+    "sweep-batch-label",
+    "Windows at once "
+  );
+  const input = document.createElement("input");
+  input.type = "number";
+  input.id = "webdebug-max-windows";
+  input.min = "1";
+  input.max = "8";
+  input.step = "1";
+  input.disabled = st.busy;
+  input.value = String(st.values.max_windows);
+  input.addEventListener("change", () => {
+    const text = String(input.value).trim();
+    if (text === "") return saveWebdebugSetting("max_windows", null);
+    return saveWebdebugSetting("max_windows", Number(text));
+  });
+  const reset = el("button", "wf-btn clear", "Reset");
+  reset.type = "button";
+  reset.disabled = st.busy || st.values.max_windows === st.defaults.max_windows;
+  reset.title = `back to the default, ${st.defaults.max_windows}`;
+  reset.addEventListener("click", () => saveWebdebugSetting("max_windows", null));
+  head.append(input,
+    el("span", "sweep-batch-unit",
+      ` (default ${st.defaults.max_windows})`), reset);
+  row.appendChild(head);
+  row.appendChild(el("p", "wf-note",
+    "Windows the debug browser keeps alive at once; opening one more closes the " +
+    "oldest. One page costs about 1.3 GiB across the browser's process tree " +
+    "(measured 2026-10-27, Chrome for Testing 156, headless, 1280x800, " +
+    "streaming). Range 1-8." +
+    (st.effective.max_windows !== st.values.max_windows
+      ? ` In effect now: ${st.effective.max_windows}.` : "")));
+  const maxEnv = webdebugEnvNote("max_windows");
+  if (maxEnv) row.appendChild(maxEnv);
+  card.appendChild(row);
+
+  card.appendChild(webdebugSwitchRow("no_sandbox", "Start the browser without Chrome's sandbox",
+    "Chrome's sandbox stays on by default: this browser renders whatever page a " +
+    "user or agent names, so without it a renderer bug is code execution as the " +
+    "daemon's user. Turn it off only where it cannot work (some containers and " +
+    "older kernels have no user namespaces). Read at browser start, which is " +
+    "the next window opened after the idle stop."));
+  card.appendChild(webdebugSwitchRow("insecure_tls", "New windows accept any certificate",
+    "A dev server on https with a self-signed certificate fails every navigation " +
+    "with ERR_CERT_AUTHORITY_INVALID. This is the DEFAULT for a newly opened " +
+    "window: that window accepts any certificate through its own CDP page, so a " +
+    "self-signed site opens without disarming the check for every other window. " +
+    "The top bar of each window has a switch that overrides this for that " +
+    "window alone. The environment variable of the same name is different: it " +
+    "is a browser flag covering every window, and no window can narrow it."));
   return card;
 }
 

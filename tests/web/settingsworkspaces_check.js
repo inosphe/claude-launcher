@@ -57,7 +57,8 @@ const CARDS = [
   "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard", "ptyHostSettingCard",
   "testOutputDirCard",
-  "delegateSettingCard", "sweepBatchSettingCard", "modelTiersCard", "providerAffinityCard",
+  "delegateSettingCard", "sweepBatchSettingCard", "webdebugSettingCard", "modelTiersCard",
+  "providerAffinityCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
 const WORKSPACE_CARDS = ["wsAddCard", "projectsCard", "beadsBoardsCard"];
@@ -160,7 +161,8 @@ const REFRESHERS = [
   "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
   "refreshRoleWorkflowSettings", "refreshWslRegStub", "refreshPtyHostSetting",
   "refreshTestOutputDir",
-  "refreshDelegateSetting", "refreshSweepBatchSetting", "refreshProviderAffinity", "refreshModelTiers",
+  "refreshDelegateSetting", "refreshSweepBatchSetting", "refreshWebdebugSetting",
+  "refreshProviderAffinity", "refreshModelTiers",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
