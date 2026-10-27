@@ -54,7 +54,9 @@ TOOLS = [
      "(F -> (D, E)) and keeps them whole -- their items and children move with them -- then "
      "places the items at 'place' (one of those nodes or a node inside one; omitted: the new "
      "parent). Use it when sibling categories share a subject, so the level does not keep "
-     "widening; fold is the call that dissolves them instead. "
+     "widening; fold is the call that dissolves them instead. The nodes must share one parent; "
+     "categories from different parents are refused unless across: true, which pulls them out "
+     "of their parents (a parent left empty is reported in 'emptied', not deleted). "
      "Without 'items' it places the session this job is about (and its issue). A request "
      "started from the session pane's 'Assign to tree' follows that pane's '제안으로 등록' "
      "checkbox instead of this argument.",
@@ -97,7 +99,8 @@ TOOLS = [
                        "description": {"type": "string"},
                        "nodes": {"type": "array", "items": {"type": "string"},
                                  "description": "ids of two or more existing categories to put under the new one"},
-                       "place": {"type": "string", "description": "node id for this call's items: one of nodes or inside one; omit for the new parent"}},
+                       "place": {"type": "string", "description": "node id for this call's items: one of nodes or inside one; omit for the new parent"},
+                       "across": {"type": "boolean", "description": "accept nodes with different parents (default false: siblings only)"}},
                    "required": ["label", "nodes"]},
          "proposal": {"type": "boolean", "description":
                       "file a new category for a person to review instead of creating it now "

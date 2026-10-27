@@ -304,13 +304,16 @@ def _group(ws, group: dict, items: list, actor: str, reason: str) -> dict:
     one new parent (labelled by ``group``) and place ``items`` at
     ``group.place`` -- one of those nodes or below one -- or at the new parent
     when it is omitted. The nodes keep their items and children
-    (:func:`category.group`); ``fold`` is the call that dissolves them."""
-    body = {k: group[k] for k in ("label", "aliases", "description", "parent_id", "nodes", "place")
+    (:func:`category.group`); ``fold`` is the call that dissolves them. The
+    nodes must be siblings unless ``group.across`` is true."""
+    body = {k: group[k] for k in ("label", "aliases", "description", "parent_id", "nodes", "place",
+                                  "across")
             if k in group}
     made = category.group(ws, body, items, actor, reason)
     return {"grouped_under": made["node"]["label"], "node_id": made["node"]["id"],
             "path": made["placed_in"]["path"],
-            "grouped": [" / ".join(g["path"]) for g in made["grouped"]]}
+            "grouped": [" / ".join(g["path"]) for g in made["grouped"]],
+            "emptied": [" / ".join(e["path"]) for e in made["emptied"]]}
 
 
 def agent_assign(manager, caller: str, body: dict) -> dict:

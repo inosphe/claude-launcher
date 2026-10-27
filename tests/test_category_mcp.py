@@ -95,5 +95,6 @@ def test_the_tools_name_fold_and_split(client, monkeypatch):
     props = assign["inputSchema"]["properties"]
     assert {"fold", "split", "group"} <= set(props)
     assert props["group"]["required"] == ["label", "nodes"]
+    assert props["group"]["properties"]["across"]["type"] == "boolean"
     assert assign["inputSchema"]["properties"]["fold"]["required"] == ["label", "nodes"]
     assert assign["inputSchema"]["properties"]["split"]["required"] == ["parts"]
