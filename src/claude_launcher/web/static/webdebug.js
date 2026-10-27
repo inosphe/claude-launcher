@@ -24,16 +24,37 @@ function newWindowId() {
 }
 let windowId = /^w-[0-9a-z]{4,16}$/.test(params.get("w") || "") ? params.get("w") : newWindowId();
 let session = params.get("session") || "";
+let insecureTls = params.get("insecure") === "1" || params.get("insecure") === "true";
 const target = { url: params.get("url") || "", title: "" };
 function syncQuery() {
   const q = new URLSearchParams(location.search);
   q.set("w", windowId);
   if (session) q.set("session", session); else q.delete("session");
   if (target.url) q.set("url", target.url); else q.delete("url");
+  if (insecureTls) q.set("insecure", "1"); else q.delete("insecure");
   history.replaceState(null, "", location.pathname + "?" + q.toString());
   $("wd-window").textContent = windowId;
   document.title = session ? `claunch web · ${session}` : "claunch web";
 }
+
+/* The per-window certificate switch. A self-signed dev server fails every
+   navigation with ERR_CERT_AUTHORITY_INVALID, and the daemon-wide answer (the
+   browser started with --ignore-certificate-errors) widens every window. This
+   one covers this window's page alone: it is part of the socket's query so a
+   reload keeps it, and a message keeps it in step while the socket is up. */
+function setInsecureTls(on) {
+  insecureTls = !!on;
+  const button = $("wd-tls");
+  button.setAttribute("aria-pressed", insecureTls ? "true" : "false");
+  syncQuery();
+}
+$("wd-tls").addEventListener("click", () => {
+  setInsecureTls(!insecureTls);
+  const sent = send({ type: "insecure", insecure: insecureTls });
+  activity(insecureTls
+    ? `이 창만 인증서 검사를 끕니다${sent ? "" : " (연결되면 적용됩니다)"}.`
+    : `이 창의 인증서 검사를 다시 켭니다${sent ? "" : " (연결되면 적용됩니다)"}.`);
+});
 
 /* ---- daemon API ---- */
 async function tryStoredLogin() {
@@ -111,6 +132,7 @@ function connect() {
   const q = new URLSearchParams({ window: windowId });
   if (session) q.set("session", session);
   if (target.url) q.set("url", target.url);
+  if (insecureTls) q.set("insecure", "1");
   ws = new WebSocket(`${proto}//${location.host}${url("api/webdebug/ws")}?${q}`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
@@ -176,6 +198,10 @@ function handle(msg) {
     target.title = msg.title || "";
     if (!$("wd-url").matches(":focus") && target.url) $("wd-url").value = target.url;
     if (msg.session) { session = msg.session; $("wd-session").value = session; }
+    // The daemon answers with the window's own answer: a window opened before
+    // the switch was flipped keeps what the daemon knows, not what this tab
+    // hoped for.
+    if (typeof msg.insecure_tls === "boolean") setInsecureTls(msg.insecure_tls);
     $("wd-busy").classList.add("hidden");
     syncQuery();
   } else if (kind === "picked") {

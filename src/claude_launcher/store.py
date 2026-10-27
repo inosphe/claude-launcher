@@ -774,6 +774,29 @@ DAEMON_DEFAULTS = {
     # (running sessions keep how they started); the Settings page writes it
     # (PUT /api/wsl-reg-stub).
     "wsl_hide_reg_exe": True,
+    # The web debug page's browser (daemon/webdebug.py, claunch-o8pb7.2.1):
+    # the three knobs that used to be environment-only, so changing one
+    # meant editing the daemon's environment and restarting it.
+    #   webdebug_max_windows -- windows alive at once; opening one more
+    #     closes the oldest. Read LIVE when a window is opened.
+    #   webdebug_no_sandbox -- start the browser with --no-sandbox. Read at
+    #     browser start, i.e. the next window opened after the idle stop (or
+    #     after a daemon restart).
+    #   webdebug_insecure_tls -- the DEFAULT for a newly opened window: that
+    #     window accepts any certificate, through
+    #     Security.setIgnoreCertificateErrors on its own page, so a
+    #     self-signed site is opened without disarming certificate checks for
+    #     every other window. A window may override the default (the page's
+    #     top bar has the per-window switch). Read LIVE when a window opens.
+    # The environment variables of the same meanings still win over these
+    # (CLAUNCH_WEBDEBUG_MAX_WINDOWS / _NO_SANDBOX / _INSECURE_TLS), and the
+    # last one is a browser flag covering every window: it is the operator's
+    # old daemon-wide switch and no window can narrow it.
+    # The Settings page reads and writes the three (GET/PUT
+    # /api/webdebug-setting).
+    "webdebug_max_windows": 1,
+    "webdebug_no_sandbox": False,
+    "webdebug_insecure_tls": False,
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.
