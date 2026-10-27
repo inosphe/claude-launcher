@@ -1006,6 +1006,10 @@ globalThis.MegaThreadPage = (() => {
   function paintRows(parts) {
     if (!parts || !parts.list) return;
     parts.list.innerHTML = "";
+    if (state.sessions === null) {
+      parts.list.appendChild(node("p", "wf-note mt-new-loading", "세션 목록을 읽는 중…"));
+      return;
+    }
     const rows = pickerRows(state.sessions || [], {
       query: state.filter,
       picked: state.picked,
@@ -1354,10 +1358,22 @@ globalThis.MegaThreadPage = (() => {
       root.innerHTML = "";
       root.appendChild(node("p", "wf-note", "읽는 중…"));
     }
-    await loadSessions();
+    // The clusters first, the fleet after. Only the create panel and the
+    // add-member select read the fleet, and its first read is the slow one:
+    // `/api/sessions?view=rail` with no state is every record, archived ones
+    // included, which no other poll keeps warm (measured 1.5-2.3 s on a
+    // 2303-record daemon, against 3 ms for /api/megathreads, claunch-wbs0i).
+    // Awaiting it first held the whole page on "읽는 중…" for that long, and
+    // reading both at once put them in one /api/batch, which answers its
+    // paths one after another.
     await load();
     if (timer) clearInterval(timer);
     timer = setInterval(() => load(true), POLL_MS);
+    loadSessions().then(() => {
+      if (!timer) return;  // the reader left the page meanwhile
+      if (typing() && createParts) { paintRows(createParts); paintCounters(createParts); }
+      else if (!typing()) render();
+    });
   }
 
   function stop() {
