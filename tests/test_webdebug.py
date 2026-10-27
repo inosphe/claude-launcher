@@ -5,6 +5,7 @@ commands go through, the user's explicit send, and the MCP tools."""
 import asyncio
 import json
 
+import aiohttp
 import pytest
 from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
@@ -157,6 +158,85 @@ def test_the_proxy_injects_the_probe_and_guards_its_port():
             await up.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the scheme the address was typed with (claunch-o8pb7)
+# --------------------------------------------------------------------------- #
+def test_the_scheme_probe_reads_a_plaintext_peer():
+    async def run():
+        up = TestServer(_upstream_app([]))
+        await up.start_server()
+        try:
+            assert await webdebug._speaks_tls("127.0.0.1", up.port) is False
+        finally:
+            await up.close()
+
+    asyncio.run(run())
+
+
+def test_an_unreachable_address_keeps_the_scheme_it_was_typed_with():
+    async def run():
+        # Nothing listens: no answer is not a verdict about TLS.
+        assert await webdebug.alternate_scheme("https://127.0.0.1:1/") is None
+
+    asyncio.run(run())
+
+
+def test_an_https_address_for_a_plaintext_server_is_opened_as_http():
+    async def run():
+        up = TestServer(_upstream_app([]))
+        await up.start_server()
+        client = TestClient(TestServer(_app(_Manager())))
+        await client.start_server()
+        try:
+            r = await client.post("/api/webdebug/proxy", json={"url": f"https://127.0.0.1:{up.port}/x"})
+            body = await r.json()
+            assert r.status == 200
+            assert body["origin"] == f"http://127.0.0.1:{up.port}"
+            assert body["switched_from"] == f"https://127.0.0.1:{up.port}"
+            assert body["path"] == "/x"
+            # The frame's base is what the browser that asked can reach.
+            assert body["proxy_origin"] == f"http://127.0.0.1:{body['port']}"
+        finally:
+            await client.close()
+            await up.close()
+
+    asyncio.run(run())
+
+
+def test_a_plain_http_address_is_not_probed_or_rewritten():
+    async def run():
+        client = TestClient(TestServer(_app(_Manager())))
+        await client.start_server()
+        try:
+            body = await (await client.post("/api/webdebug/proxy",
+                                            json={"url": "http://127.0.0.1:5173/"})).json()
+            assert body["origin"] == "http://127.0.0.1:5173"
+            assert body["switched_from"] is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_scheme_mismatch_page_names_the_fix():
+    text = webdebug._upstream_failure(
+        "https://dev.test:5173/",
+        OSError("Cannot connect to host dev.test:5173 ssl:False "
+                "[[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)]"))
+    assert "http://dev.test:5173/" in text and "TLS" in text
+    text = webdebug._upstream_failure("http://dev.test:8443/", aiohttp.ServerDisconnectedError())
+    assert "https://dev.test:8443/" in text
+
+
+def test_the_page_frames_the_proxy_origin_the_daemon_returned():
+    """The frame must not be built from location.protocol: the proxy speaks
+    plain http, so an https dashboard built an https frame address that no
+    listener answers (claunch-o8pb7)."""
+    page = (webdebug.PAGE_FILE.parent / "webdebug.js").read_text(encoding="utf-8")
+    assert "res.proxy_origin" in page
+    assert "${location.protocol}" not in page
 
 
 # --------------------------------------------------------------------------- #

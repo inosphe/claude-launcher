@@ -16,6 +16,12 @@ const TOKEN_KEY = `claunch_token:${BASE}`;
 const $ = (id) => document.getElementById(id);
 const url = (path) => BASE + String(path).replace(/^\//, "");
 const params = new URLSearchParams(location.search);
+// The daemon's proxy listener speaks plain http, always (daemon/webdebug.py).
+// A dashboard opened over https cannot frame it: the browser blocks the
+// mixed content and the proxy has no certificate to offer. The page says so
+// and gives a new-tab link instead of pointing the frame at a port that is
+// not speaking TLS (claunch-o8pb7).
+const PROXY_SCHEME = "http:";
 
 /* ---- this window's id ---- */
 function newWindowId() {
@@ -130,26 +136,75 @@ window.addEventListener("focus", () => sendState({ focused: true }));
 
 /* ---- the frame and its target ---- */
 const frame = $("wd-frame");
-const target = { url: "", title: "", origin: "", proxyOrigin: "", probe: false };
+const target = { url: "", title: "", origin: "", proxyOrigin: "", probe: false, blocked: "" };
 let readyWaiters = [];
 function displayUrl(href) {
   if (target.proxyOrigin && href.startsWith(target.proxyOrigin)) return target.origin + href.slice(target.proxyOrigin.length);
   return href;
 }
+function enterLink(res) {
+  return target.proxyOrigin + res.enter + "&parent=" + encodeURIComponent(location.origin);
+}
+/* Is this origin the dashboard's own? The scheme may differ (the daemon is
+   plain http and the address may have been typed https), so the host and
+   port decide. */
+function isDashboard(origin) {
+  try { return new URL(origin).host === location.host; } catch (_) { return false; }
+}
+/* The dashboard is https: the plain-http proxy cannot go in the frame.
+   Replace the empty stage with why, and a link that opens the same proxied
+   page as a top-level tab (a top-level navigation to http is not mixed
+   content -- only framing it is). */
+function showMixedContent(res) {
+  const stage = $("wd-empty");
+  stage.replaceChildren();
+  stage.classList.remove("hidden");
+  const why = document.createElement("p");
+  why.textContent = "대시보드가 https로 열려 있습니다. webdebug 프록시는 평문 http라 브라우저가 프레임을 혼합 콘텐츠로 차단합니다.";
+  const open = document.createElement("p");
+  const a = document.createElement("a");
+  a.href = enterLink(res);
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.textContent = "새 탭에서 이 페이지 열기";
+  open.appendChild(a);
+  const note = document.createElement("p");
+  note.className = "wd-muted";
+  note.textContent = "새 탭으로 연 페이지에서는 이 창의 요소 선택·스크린샷·세션 조작이 동작하지 않습니다. 그것이 필요하면 대시보드를 http로 열거나, 세션에 브라우저 확장 방향을 요청하십시오.";
+  stage.append(why, open, note);
+}
 async function navigate(raw) {
   const text = String(raw || "").trim();
   if (!text) return;
-  if (location.protocol === "https:") {
-    activity("대시보드가 https로 열려 있어 http 프록시 페이지를 프레임에 넣을 수 없습니다.", "error");
-  }
   const res = await postJSON("api/webdebug/proxy", { url: text });
   target.origin = res.origin;
-  target.proxyOrigin = `${location.protocol}//${location.hostname}:${res.port}`;
+  // proxy_origin is the address the daemon was reached on plus the proxy's
+  // port: the browser that made this request can reach it, which the typed
+  // host name may not be (one forwarded port maps the name for the daemon's
+  // port only).
+  target.proxyOrigin = res.proxy_origin || `${PROXY_SCHEME}//${location.hostname}:${res.port}`;
   target.url = res.origin + res.path;
   target.probe = false;
+  target.blocked = "";
   $("wd-url").value = target.url;
   $("wd-empty").classList.add("hidden");
-  frame.src = target.proxyOrigin + res.enter + "&parent=" + encodeURIComponent(location.origin);
+  const notes = [];
+  if (res.switched_from) {
+    notes.push(`${res.switched_from} 은(는) TLS로 응답하지 않아 ${res.origin} 로 열었습니다.`);
+  }
+  if (isDashboard(res.origin)) {
+    // The proxy strips the daemon's login cookie before it goes upstream,
+    // so the dashboard's shell loads in the frame but its API answers 401.
+    notes.push("이 주소는 대시보드 자신입니다. 프록시는 로그인 쿠키를 넘기지 않으므로 프레임 안의 대시보드 화면은 API를 쓸 수 없습니다 — 대시보드는 그 탭에서 보십시오.");
+  }
+  if (notes.length) activity(notes.join(" "), "error");
+  if (location.protocol === "https:") {
+    target.blocked = "mixed content";
+    frame.removeAttribute("src");
+    showMixedContent(res);
+  } else {
+    frame.src = enterLink(res);
+  }
   syncQuery();
   sendState({ url: target.url });
   try { localStorage.setItem("claunch_webdebug_url:" + (session || ""), target.url); } catch (_) { /* ignore */ }
@@ -163,6 +218,7 @@ function waitReady(ms = 15000) {
 frame.addEventListener("load", () => {
   // A page that left the proxy (another origin) loads without the probe.
   setTimeout(() => {
+    if (target.blocked) return;
     if (!target.probe) activity("이 프레임에는 probe가 없습니다 (프록시 밖 주소로 이동했거나 HTML이 아닌 응답).", "error");
   }, 2500);
 });
@@ -465,7 +521,17 @@ async function runCommand(msg) {
     let value;
     if (op === "navigate") {
       const ready = waitReady();
-      await navigate(args.url);
+      try {
+        await navigate(args.url);
+      } catch (err) {
+        ready.catch(() => {});
+        throw err;
+      }
+      if (target.blocked) {
+        ready.catch(() => {});
+        throw new Error("the dashboard is open over https, so the browser blocks the plain-http "
+          + "proxy frame; ask the user to open the dashboard over http (or to open the address in a new tab)");
+      }
       await ready;
       value = { url: target.url, title: target.title };
     } else if (op === "screenshot") {
