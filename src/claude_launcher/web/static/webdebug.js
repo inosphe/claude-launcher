@@ -235,17 +235,23 @@ screen.addEventListener("mouseup", (e) => {
     buttons: e.buttons, clickCount: 1, modifiers: modifiers(e) } });
   e.preventDefault();
 });
+// A move carries the state of the pointer, and Chrome reads two things from
+// its `button` field: the page's e.buttons (a named button counts as held even
+// when the mask says otherwise) and its own drag gesture (a move that names no
+// button ends a text selection, so a drag never starts). Both halves are
+// measured against this browser (s490-rev, s648-rev), and they pull opposite
+// ways: name the held button, and nothing when no button is held.
+const HELD_BUTTONS = [[1, "left"], [2, "right"], [4, "middle"], [8, "back"], [16, "forward"]];
+function heldButton(mask) {
+  for (const [bit, name] of HELD_BUTTONS) if (mask & bit) return name;
+  return "none";
+}
 let moveAt = 0;
 let movePending = null;
 screen.addEventListener("mousemove", (e) => {
   if (picking) return;
   const p = pagePoint(e);
-  // A move names no button of its own. Chrome takes e.buttons on the page from
-  // this field, not from the mask: "left" with buttons 0 arrives as buttons 1,
-  // so reading e.button (always 0 on a move) turned every hover into a drag
-  // (s490-rev, s648-rev). "none" plus the real mask reproduces both states --
-  // hover as buttons 0, a pressed button carried along as buttons 1.
-  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: "none",
+  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: heldButton(e.buttons),
     buttons: e.buttons, modifiers: modifiers(e) };
   const now = performance.now();
   if (now - moveAt > 33) {  // ~30 moves/s is enough to feel live

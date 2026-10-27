@@ -639,26 +639,36 @@ def test_the_tools_carry_the_session_and_the_op(monkeypatch):
     assert body["op"] == "navigate" and body["window"] == "w-abcd" and body["timeout"] == 30
 
 
-def _tab_move_button():
-    """Whatever `button` the browser tab names on a mouse move, read from the
-    shipped source, so the browser test below measures what the tab really
-    sends rather than what the test assumes it sends."""
+def _tab_move_source():
+    """What the tab's move does with the button, read from the shipped source:
+    ("table", <table source>) when it names the held button through the table,
+    ("none", ...) when it names no button at all, ("e.button", ...) when it
+    reads the move's own e.button. The table source is returned so the browser
+    test can run the shipped mapping instead of a copy."""
     script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
     start = script.index('screen.addEventListener("mousemove"')
     end = script.index("screen.addEventListener(", start + 1)
     move = script[start:end]
     assert 'type: "mouseMoved"' in move and "buttons: e.buttons" in move
+    table = script[script.index("const HELD_BUTTONS"):
+                   script.index("}", script.index("function heldButton(")) + 1]
+    assert "function heldButton" in table and 'return "none"' in table
+    if "heldButton(e.buttons)" in move:
+        return "table", table
     if 'button: "none"' in move:
-        return "none"
+        return "none", table
     if "buttonName(e.button)" in move:
-        return "left"  # a move's own e.button is 0, which names the left button
-    raise AssertionError("the move does not name its button in a shape this test reads")
+        return "e.button", table
+    return "unknown", table
 
 
 def test_a_hover_reaches_the_page_as_no_button_held(tmp_path, monkeypatch):
-    """A move names no button: Chrome takes the page's e.buttons from the
-    event's `button` field, so "left" with buttons 0 arrives as buttons 1 and
-    every hover became a drag in a page that tracks one (s490-rev, s648-rev)."""
+    """The two halves of one field. Chrome takes the page's e.buttons from a
+    move's `button`, so naming a button with an empty mask made every hover a
+    drag (s490-rev). It also takes its own drag gesture from there, so naming
+    no button while one is held kills the drag -- a text selection never starts
+    (s648-rev measured range 0 against 66). The move must name the held button
+    and nothing when none is held."""
     try:
         webdebug.find_browser()
     except webdebug.WebDebugError:
@@ -671,6 +681,7 @@ def test_a_hover_reaches_the_page_as_no_button_held(tmp_path, monkeypatch):
     page = tmp_path / "moves.html"
     page.write_text(
         "<!doctype html><meta charset=utf-8><title>moves</title>"
+        "<body style='margin:0;font:16px monospace'><p id=t>hello world selection</p>"
         "<script>window.__moves=[];document.addEventListener('mousemove',"
         "e=>{window.__moves.push({button:e.button,buttons:e.buttons});});</script>",
         encoding="utf-8")
@@ -708,13 +719,64 @@ def test_a_hover_reaches_the_page_as_no_button_held(tmp_path, monkeypatch):
                     f"no move reached the page for button={button!r} buttons={buttons}: {seen} "
                     f"at {await hub.evaluate(win, 'location.href')}")
 
-            # the shape the tab really sends, with the mask carrying the state
-            assert await move(_tab_move_button(), 0, 1) == {"button": 0, "buttons": 0}
-            assert await move(_tab_move_button(), 1, 2) == {"button": 0, "buttons": 1}
+            # what the tab puts on a move of this mask, taken from its own rule
+            shape, table = _tab_move_source()
 
-            # naming a button fabricates a press out of an empty mask, which is
-            # how a hover became a drag (s490-rev, s648-rev)
-            assert await move("left", 0, 3) == {"button": 0, "buttons": 1}
+            async def tab_button(mask):
+                if shape == "table":
+                    return await hub.evaluate(
+                        win, "(() => {" + table + f"\nreturn heldButton({mask}); }})()")
+                if shape == "none":
+                    return "none"   # names no button whatever is held
+                if shape == "e.button":
+                    return "left"   # a move's own e.button is 0, which is left
+                raise AssertionError(f"the move's button shape is {shape!r}")
+
+            assert await tab_button(0) == "none"
+
+            # a hover names nothing and the page sees no button held
+            assert await move(await tab_button(0), 0, 1) == {"button": 0, "buttons": 0}
+
+            # naming a button out of an empty mask fabricates a press
+            assert await move("left", 0, 2) == {"button": 0, "buttons": 1}
+
+            # a drag keeps the mask and the name, and the page selects text
+            box = (await hub.agent(win, "rect", {"selector": "#t"}))["rect"]
+            y = box["y"] + box["height"] / 2
+            left, right = box["x"] + 2, box["x"] + box["width"] - 2
+
+            async def drag(name):
+                await hub.evaluate(win, "getSelection().removeAllRanges()")
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "mouse", "type": "mousePressed", "x": left, "y": y,
+                    "button": "left", "buttons": 1, "clickCount": 1}})
+                for frac in (0.3, 0.6, 1.0):
+                    await ws.send_json({"type": "input", "event": {
+                        "kind": "mouse", "type": "mouseMoved",
+                        "x": left + (right - left) * frac, "y": y,
+                        "button": name, "buttons": 1}})
+                    await asyncio.sleep(0.05)
+                for _ in range(50):
+                    seen = await hub.evaluate(
+                        win, "JSON.stringify({type: getSelection().type, "
+                             "text: String(getSelection())})")
+                    if json.loads(seen)["type"] != "None":
+                        break
+                    await asyncio.sleep(0.1)
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "mouse", "type": "mouseReleased", "x": right, "y": y,
+                    "button": "left", "buttons": 0, "clickCount": 1}})
+                return json.loads(seen)
+
+            selected = await drag(await tab_button(1))
+            assert selected["type"] == "Range" and "hello world" in selected["text"], selected
+
+            # the shape this fix had before: the mask is right, the drag is dead
+            stalled = await drag("none")
+            assert stalled == {"type": "Caret", "text": ""}, stalled
+
+            # the table names each held button, and nothing when none is held
+            assert [await tab_button(m) for m in (0, 1, 2, 4)] == ["none", "left", "right", "middle"]
             await ws.close()
         finally:
             await client.close()
@@ -722,7 +784,9 @@ def test_a_hover_reaches_the_page_as_no_button_held(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_a_move_names_no_button():
-    """The tab builds the move itself; it must say "none" and let the mask
-    carry the held button (the browser-level test above measures why)."""
-    assert _tab_move_button() == "none"
+def test_a_move_names_the_button_that_is_held():
+    """The tab builds the move itself: the name comes from the mask, never from
+    the move's own e.button (which is always 0)."""
+    shape, table = _tab_move_source()
+    assert shape == "table", f"the move takes its button from {shape!r}"
+    assert "e.button" not in table
