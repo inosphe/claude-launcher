@@ -186,3 +186,54 @@ def test_the_spec_import_sees_ended_members(monkeypatch):
     backend.client = client
     backend.get_mesh("m")
     assert client.paths == ["/api/mesh/m?state=all"]
+
+
+def test_a_left_out_parent_folds_to_the_nearest_sent_ancestor(home, tmp_path):
+    """lead -> mid -> kid with mid killed: the default roster leaves mid out,
+    so kid's ``parent`` is lead (the nearest ancestor it sends), and cflow's
+    responders walk kid -> lead instead of stopping at a handle that is not
+    there. ``state=all`` keeps the real chain."""
+    from claude_launcher.cflow import responders
+    from claude_launcher.daemon.manager import SessionManager
+
+    _register_py_harness()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            for name, parent in (("lead", None), ("mid", "lead"), ("kid", "mid")):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(proj), parent=parent))
+                await mm.join("team", name, handle=name)
+            mgr.kill("mid")
+            await _wait_exited(mgr.get("mid"))
+
+            async def get(path):
+                resp = await client.get(path, headers=BEARER)
+                assert resp.status == 200, await resp.text()
+                return await resp.json()
+
+            def parents(doc):
+                return {m["handle"]: m["parent"] for m in doc["members"]}
+
+            current = await get("/api/mesh/team")
+            assert parents(current) == {"lead": None, "kid": "lead"}
+            assert responders._pool_from(current, "kid").ancestors == ["lead"]
+
+            every = await get("/api/mesh/team?state=all")
+            assert parents(every) == {"lead": None, "mid": "lead", "kid": "mid"}
+            assert responders._pool_from(every, "kid").ancestors == ["mid", "lead"]
+
+            # Only the ended one asked for: nothing it sends is above it.
+            killed = await get("/api/mesh/team?state=killed")
+            assert parents(killed) == {"mid": None}
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

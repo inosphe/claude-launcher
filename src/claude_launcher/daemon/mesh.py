@@ -9173,6 +9173,7 @@ class MeshManager:
             "delayed": 0, "failed": 0, "killed": 0, "paused": 0, "archived": 0,
             "missing": 0,
         }
+        chosen: Dict[str, str] = {}
         for handle in sorted(mesh.members):
             m = mesh.members[handle]
             category = self._member_category(mesh, m)
@@ -9181,8 +9182,34 @@ class MeshManager:
                 counts[category] += 1
             if category in CURRENT_CATEGORIES:
                 counts["current"] += 1
-            if not member_in_state(category, state):
-                continue
+            if member_in_state(category, state):
+                chosen[handle] = category
+
+        def raw_parent(handle: str) -> Optional[str]:
+            m = mesh.members.get(handle)
+            if m is None:
+                return None
+            if self._is_local(mesh, m):
+                return lineage.get(handle)
+            return mesh.remote_lineage.get(handle)
+
+        def sent_parent(handle: str) -> Optional[str]:
+            # The nearest ancestor this answer carries. A filtered-out member
+            # in the middle of a chain (an ended mid lead) is stepped over,
+            # so lead -> mid(killed) -> kid reads kid.parent == lead under
+            # the current default: a parent the reader cannot see would cut
+            # the lineage cflow's responders walk (claunch-cj2th review).
+            seen = {handle}
+            parent = raw_parent(handle)
+            while parent and parent in mesh.members and parent not in seen:
+                if parent in chosen:
+                    return parent
+                seen.add(parent)
+                parent = raw_parent(parent)
+            return None
+
+        for handle, category in chosen.items():
+            m = mesh.members[handle]
             local = self._is_local(mesh, m)
             # Unanswered mail alongside undelivered: 'pending' is the daemon's
             # debt to the member, 'owed' the member's debt to the mesh. Remote
@@ -9200,8 +9227,9 @@ class MeshManager:
             # daemon last told us. A parent that has since left reads as no
             # parent at all — the same rule the session tree uses for a
             # dangling one, so a departure cannot leave an edge pointing at
-            # nobody.
-            parent = lineage.get(handle) if local else mesh.remote_lineage.get(handle)
+            # nobody. One this answer leaves out is folded to the nearest
+            # ancestor it does carry (`sent_parent`).
+            parent = sent_parent(handle)
             members.append(
                 {
                     **m.to_dict(),
@@ -9219,7 +9247,7 @@ class MeshManager:
                     # — see `_member_category`). `reachability` stays exactly
                     # as it was: the CLI prints it and the spawn tests read it.
                     "category": category,
-                    "parent": parent if parent in mesh.members else None,
+                    "parent": parent,
                     # The member's user said no to a cflow run for it
                     # (claunch-val3l.2): the leader reads this to stop asking
                     # it for what only a run produces. Ours only -- another
