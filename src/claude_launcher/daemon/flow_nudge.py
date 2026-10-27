@@ -112,9 +112,10 @@ def v2_presses(entry: dict, answer: dict) -> list:
     """The presses that settle one of a v2 rail row's ``answers``
     (cflow2_web ``_rail_answers``): ``{label, path, body}`` each, the same
     endpoint and body the terminal strip posts (app.js ``termCflow2Answers``).
-    ``reason_required`` marks a press that is refused without a reason
-    (``reframe``, or every option of a ``require_reason`` ask or choice);
-    ``reason_optional`` one whose reason the driver reads. A
+    ``reason_required`` marks the press that needs text from the person:
+    ``reframe``, as on the strip. ``require_reason`` is the agent's
+    constraint -- a person may answer without it (docs 2.11), so it marks
+    nothing. ``reason_optional`` marks one whose reason the driver reads. A
     halt and an acceptance hold have none -- the dashboard has no endpoint
     for them."""
     slot = {"cwd": entry.get("cwd"), "scope": entry.get("scope")}
@@ -139,7 +140,7 @@ def v2_presses(entry: dict, answer: dict) -> list:
                       "body": {**body, "decision": name, "reason": ""}} if kind == "ask" else
                      {"label": name, "path": "/api/cflow2/select",
                       "body": {**body, "option": name, "reason": ""}})
-            if answer.get("require_reason") or (kind == "ask" and name == "reframe"):
+            if kind == "ask" and name == "reframe":
                 press["reason_required"] = True
             if kind == "ask" and answer.get("recommended") == name:
                 press["recommended"] = True

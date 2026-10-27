@@ -517,14 +517,17 @@ def test_v2_presses_for_a_move_request_and_a_halt():
     assert flow_nudge.v2_gates({**row, "gated": False}) == []
 
 
-def test_v2_presses_mark_every_option_of_a_require_reason_ask():
+def test_v2_presses_ask_a_person_for_text_only_on_reframe():
+    """require_reason binds the agent; a person answers without it (docs 2.11,
+    runtime ``_ask_need_reason``), so only reframe needs text -- as on the strip."""
     from claude_launcher.daemon import flow_nudge
 
     row = {"cwd": "/w", "scope": "s1", "gated": True}
     ask = {"kind": "ask", "instance": "i1", "require_reason": True, "recommended": "full",
-           "options": [{"name": "narrow"}, {"name": "full"}]}
-    narrow, full = flow_nudge.v2_presses(row, ask)
-    assert narrow["reason_required"] and full["reason_required"] and full["recommended"]
-    plain = flow_nudge.v2_presses(row, {**ask, "require_reason": False,
-                                        "options": [{"name": "approve"}, {"name": "reframe"}]})
-    assert "reason_required" not in plain[0] and plain[1]["reason_required"]
+           "options": [{"name": "narrow"}, {"name": "full"}, {"name": "reframe"}]}
+    narrow, full, reframe = flow_nudge.v2_presses(row, ask)
+    assert "reason_required" not in narrow and "reason_required" not in full
+    assert full["recommended"] and reframe["reason_required"]
+    choice = {"kind": "choose", "instance": "c1", "require_reason": True,
+              "options": [{"name": "end"}, {"name": "continue"}]}
+    assert not any(p.get("reason_required") for p in flow_nudge.v2_presses(row, choice))
