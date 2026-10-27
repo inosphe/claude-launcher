@@ -739,6 +739,7 @@ BROWSER_CHECKS = [
         "termseries_browser.cjs",
         "sessionkey_browser.cjs",
         "noticeplace_browser.cjs",
+        "noticecost_browser.cjs",
 ]
 
 
