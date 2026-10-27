@@ -26,7 +26,7 @@
      `compact` height — that is what keeps the virtual scrollbar from
      drifting when the reader picks a card;
    * the stylesheet hides the dense lines per density with `display: none`,
-     and draws a child row as a card with a spine at its own level.
+     and draws a child row as a card with no guide line down its edge.
 
    The real functions from app.js build the rows, against a stub DOM. */
 const fs = require("fs");
@@ -315,7 +315,7 @@ check("the briefing toggle has no rule on the rail",
       rule("#session-list .sess-brief-toggle"), "");
 
 /* ---- the child hierarchy ----------------------------------------------
-   The card's own margin supplies nesting; the guide follows that edge. */
+   The card's own margin supplies nesting; the depth shade marks that edge. */
 const child = rule("#session-list li.child");
 ok("a child shares the root card surface", !/background:|box-shadow:/.test(child));
 ok("the tick that hangs it off its parent is still drawn",
@@ -360,13 +360,10 @@ ok("the tick that hangs it off its parent is still drawn",
      childFlash && /box-shadow:\s*inset 0 0 0 1px #1f6feb/.test(childFlash[1]),
      childFlash ? childFlash[1].trim().slice(0, 80) : "no rule");
 }
-const spine = rule("#session-list li.child::after");
-ok("a child row draws a spine at its level",
-   /position:\s*absolute/.test(spine) && /width:/.test(spine),
-   spine.trim().slice(0, 80));
-ok("...that runs the height of the row",
-   /top:\s*0/.test(spine) && /bottom:\s*0/.test(spine), spine.trim().slice(0, 80));
-ok("the guide is a single pixel", /width:\s*1px/.test(spine));
+/* The depth shade marks the child's leading edge on its own
+   (claunch-zijwn.1): no guide line is drawn over it. */
+ok("a child row draws no guide line down its edge",
+   !/li\.child::after/.test(plain), rule("#session-list li.child::after").trim().slice(0, 80));
 
 /* ---- the role pills ----------------------------------------------------
    One colour per family, and only the colours change: the pill's size, floor
