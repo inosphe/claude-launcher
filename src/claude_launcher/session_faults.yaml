@@ -243,6 +243,24 @@ common:
       Request timed out
     sample: |-
       Error: Request timed out.
+  # Claude Code, 2026-10-27 (s3568): "* Waiting for API response · will retry
+  # in 1m 24s · check your network". The client is between attempts and
+  # counting down, so this is the same stop the two entries above describe: no
+  # answer arrived, and whatever explains it is elsewhere on the screen (a
+  # quota sentence, a status code). It stays a `fallback` for that reason --
+  # a state it enters only decides when nothing in the window names a cause,
+  # or the named cause is itself a fallback and sits above it. `network` and
+  # not `api_status`: the line says the transport is the suspect ("check your
+  # network"), and the provider has not answered with a status at all.
+  # `common`, by the same rule as the plan line above: only `claude` has been
+  # seen to paint it, and a harness added later reads it without a list
+  # (claunch-pczoc.2.1).
+  - kind: network
+    fallback: true
+    pattern: |-
+      Waiting for API response
+    sample: |-
+      * Waiting for API response · will retry in 1m 24s · check your network
   # The generic status fallback: any "API Error: <code>", reached only when
   # nothing above matched. It lives here, last in `common`, so a provider's
   # status error is read in every harness and not only in `claude` (where it

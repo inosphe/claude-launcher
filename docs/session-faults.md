@@ -160,6 +160,23 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 
 이 kind에는 자동 동작이 없다. 검출은 기록과 표시까지이고, 키를 대신 보내거나 세션을 끝내지 않는다. 키를 기다리는 화면은 이 둘 외에도 있다(도구 승인 프롬프트가 같은 푸터를 그린다). 반대로 이 목록에 넣지 않는 정지가 있다: 리더·상위의 답을 기다리는 mesh ask, compaction, 작업 실패 재시도 루프 — 셋 다 키 입력을 기다리지 않고 사람이 풀 일도 없다.
 
+### API 응답을 기다리는 줄: `network`
+
+관측된 화면 하나(2026-10-27, `s3568`, `claude`):
+
+```
+* Waiting for API response · will retry in 1m 24s · check your network
+```
+
+클라이언트가 다음 시도를 세고 있는 상태다. kind는 `network`, 항목은 `fallback: true`, 목록은 `common:`이다.
+
+- `api_status`가 아니라 `network`인 이유: 이 줄은 상태 코드를 받은 뒤의 판독이 아니다. 응답이 오지 않아 전송 계층을 의심한다고 스스로 적는다. `api_status`는 제공자가 코드로 답했을 때의 판독이다.
+- `fallback`인 이유: 이 줄은 클라이언트가 아직 기다린다는 것만 말하고 왜인지는 말하지 않는다. 같은 창의 `You've hit your weekly limit`이나 `safeguards flagged`가 위아래 어디에 있든 그쪽이 이긴다. 표시가 없으면 이 줄이 더 아래에 있을 때 플랜 소진을 15분짜리 network fault로 읽는다.
+- `common:`인 이유: 관측이 `claude` 하나뿐이지만, 위의 플랜 소진 줄과 같은 규칙을 쓴다 — 나중에 추가된 하네스도 자기 목록 없이 읽는다(claunch-pczoc.2.1).
+- 툴팁은 그 줄을 통째로 남긴다. 재시도까지 남은 시간(`will retry in 1m 24s`)은 kind가 담지 않는 값이다.
+
+폴백끼리 같은 창에 서면 위치가 가른다. 맨 상태 코드(`API Error: 500`) 아래에 이 줄이 있으면 `network`, 위에 있으면 그 코드의 kind(`api_status`)다 — 둘 다 원인을 말하지 않는 판독이라 규칙이 정한 순서대로 아래 행이 이긴다.
+
 ## 판정 규칙
 
 한 스캔 창(아래 16행)에 fault 문구가 둘 이상 있으면 어느 것이 kind를 정하는지가
@@ -167,9 +184,10 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 
 - **폴백은 원인을 말한 문구에 진다.** 항목에 `fallback: true`가 붙으면 그 항목은
   원인을 말하지 않는 판독이다 — 맨 상태 코드(`API Error: 401`·`412`·`429`·`529`,
-  `API Error: <숫자>`)와 클라이언트가 포기했다는 줄(`Error: Request timed out.`,
-  `Error: Retry failed after N attempts`)이 그렇다. 창 안에 폴백이 아닌 매칭이
-  하나라도 있으면 폴백은 후보에서 빠진다. 그래서 `You've hit your weekly limit`이
+  `API Error: <숫자>`), 클라이언트가 포기했다는 줄(`Error: Request timed out.`,
+  `Error: Retry failed after N attempts`), 그리고 응답을 기다리는 중이라는 줄
+  (`* Waiting for API response … check your network`)이 그렇다. 창 안에 폴백이 아닌
+  매칭이 하나라도 있으면 폴백은 후보에서 빠진다. 그래서 `You've hit your weekly limit`이
   `Request timed out`과 같은 화면에 있어도 플랜 소진으로 읽힌다 — 두 줄의 위아래
   순서와 무관하다(claunch-pczoc.2.1.1).
 - **남은 후보 중에서는 가장 아래 행이 이긴다.** 화면은 위에서 아래로 그려지므로
@@ -304,6 +322,10 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   문구가 더 오래 남는 원인이면 그 판정은 틀린다(예: 아래쪽에 찍힌 `network`
   한 줄이 위쪽의 `usage_limit`을 이긴다). 폴백 표시는 이 추정에서 원인을 말하지
   않는 문구만 빼는 장치이고, 원인 문구끼리의 우열은 데이터로 정하지 않는다.
+- 폴백끼리 같은 창에 서면 위치가 가른다. 맨 상태 코드(`API Error: 500`) 아래에
+  `* Waiting for API response …`가 있으면 `network`(15분)로, 위에 있으면 그 코드의
+  kind(`api_status`, 30분)로 읽힌다(2026-10-27 실측). 둘 다 원인을 말하지 않는
+  판독이라 어느 쪽이 실제 원인인지는 이 규칙이 답하지 않는다.
 - `awaiting_input`의 기록은 화면에서 프롬프트가 사라진 뒤에도 window(15분)
   동안 남는다. 검출기는 화면만 읽으므로 "사람이 키를 눌렀다"를 별도로 알지
   못한다. 조기 해제를 넣지 않은 것은 의도다 — 근거가 되는 관측이 아직 없다.
