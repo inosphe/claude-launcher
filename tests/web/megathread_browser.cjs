@@ -52,6 +52,9 @@ function releaseFleet() {
   for (const go of fleetHeld.splice(0)) go();
 }
 const drafts = [];
+// How often the fleet and the roster were read: the role filter must answer
+// from what the page already holds (claunch-kzudj).
+const reads = { sessions: 0, mesh: 0 };
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
@@ -68,6 +71,7 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (url.pathname === "/api/sessions") {
+      reads.sessions += 1;
       // The fields the rail poll really sends: branch and issue, no `task`,
       // and the two activity stamps the picker sorts by. `role` is left out
       // on purpose — the real rail sends it empty on every live row
@@ -85,6 +89,7 @@ const server = http.createServer((req, res) => {
     // The two joins the picker makes: the mesh roster (role + mesh) and the
     // v2 run each session drives.
     if (url.pathname === "/api/mesh") {
+      reads.mesh += 1;
       return res.end(JSON.stringify({ meshes: [{
         name: "claunch", project: "claunch",
         members: [{ session: "s1", role: "worker" }, { session: "s2", role: "reviewer" }],
@@ -248,6 +253,22 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await pickerNames(), ["s1", "s2"]);
     await page.selectOption(`${picker} .mt-create-sort`, "activity-desc");
 
+    // The role filter (claunch-kzudj): a select on the project/mesh row,
+    // offering the roles the roster gives, narrowing at once from the
+    // records in hand — no read of the fleet or the roster.
+    const roleOptions = await page.$$eval(`${picker} .mt-create-controls .mt-create-role option`,
+      (els) => els.map((e) => e.value));
+    assert.deepEqual(roleOptions, ["", "reviewer", "worker", "-"], `the roles on offer: ${roleOptions}`);
+    const readsBefore = { ...reads };
+    await page.selectOption(`${picker} .mt-create-role`, "reviewer");
+    assert.deepEqual(await pickerNames(), ["s2"], "only the reviewer is kept");
+    await page.selectOption(`${picker} .mt-create-role`, "-");
+    assert.ok((await page.textContent(`${picker} .mt-new-sessions`)).includes("거른 결과가 없습니다"),
+      "every fixture session has a role");
+    await page.selectOption(`${picker} .mt-create-role`, "");
+    assert.deepEqual((await pickerNames()).sort(), ["s1", "s2"]);
+    assert.deepEqual(reads, readsBefore, "the role filter read nothing from the daemon");
+
     await page.fill(`${picker} .mt-new-filter`, "s2-deploy");
     assert.deepEqual(await pickerNames(), ["s2"], "the branch is searchable");
     await page.fill(`${picker} .mt-new-filter`, "s2");
@@ -303,11 +324,22 @@ const server = http.createServer((req, res) => {
     assert.equal((await page.$$eval(`${picker} .mt-new-flag:not(.weak)`, (els) => els.length)), 2,
       "both rows now carry the recommendation flag");
     assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("2명을 추천"));
+    // The pills are coloured by band against the bar the slider sets: at
+    // 60% both are hits; at 90% s1 (p 70%) drops to warm.
+    const bands = () => page.$$eval(`${picker} .mt-new-session-row`, (rows) => rows.map((row) => {
+      const flag = row.querySelector(".mt-new-flag");
+      const band = flag ? [...flag.classList].find((c) => c.startsWith("band-")) : "";
+      return `${row.querySelector(".mt-new-name").textContent}:${band || ""}`;
+    }).sort());
+    assert.deepEqual(await bands(), ["s1:band-hit", "s2:band-hit"]);
     await slide(95);
     assert.deepEqual(await ticked(), [], "a bar over every score ticks nobody");
     assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("넘은 세션이 없습니다"));
     await slide(90);
     assert.deepEqual(await ticked(), ["s2"]);
+    assert.deepEqual(await bands(), ["s1:band-warm", "s2:band-hit"], "s1 is under the bar but over even");
+    const colours = await page.$$eval(`${picker} .mt-new-flag`, (els) => els.map((e) => getComputedStyle(e).color));
+    assert.notEqual(colours[0], colours[1], `the two bands are drawn in different colours: ${colours}`);
     assert.equal(drafts.length, 1, "moving the threshold asked Jev nothing");
 
     await page.check(`${picker} .mt-new-session[value="s1"]`);

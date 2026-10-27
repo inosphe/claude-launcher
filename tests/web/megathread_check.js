@@ -33,7 +33,9 @@ const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
   "sessionCategory", "metaLine", "briefLine", "sortRows", "hierarchyOrder",
   "keepsRow", "filterChoices",
   // the preview's threshold slider (claunch-wlk6g)
-  "probLogit", "logitProb", "draftPicks"];
+  "probLogit", "logitProb", "draftPicks",
+  // score colours and the role filter (claunch-kzudj)
+  "scoreBand", "roleOf"];
 const ctx = {};
 vm.createContext(ctx);
 // ringLayout's defaults read the page's own stage constants; take them from
@@ -280,6 +282,46 @@ const choices = plain(ctx.filterChoices(
 assert.deepEqual(choices.projects, ["a", "b"]);
 assert.deepEqual(choices.meshes, ["m1", "m2"]);
 
+/* ---- the role filter (claunch-kzudj) -------------------------------------
+   A row's role is the record's own, else the mesh teamRoster's — the same
+   reading the meta line shows, so the filter keeps exactly the rows that
+   name the role. "-" is the sessions with none. With the tree on, a kept
+   child whose parent the filter drops becomes a root instead of vanishing. */
+const team = [
+  { name: "w1", last_activity_at: "2026-01-05T00:00:00Z" },
+  { name: "r1", parent: "w1", last_activity_at: "2026-01-04T00:00:00Z" },
+  { name: "w2", role: "worker", last_activity_at: "2026-01-03T00:00:00Z" },
+  { name: "r2", parent: "w2", last_activity_at: "2026-01-02T00:00:00Z" },
+  { name: "x", last_activity_at: "2026-01-01T00:00:00Z" },
+];
+const teamRoster = { w1: { mesh: "m", role: "worker" }, r1: { mesh: "m", role: "reviewer" },
+  r2: { mesh: "m", role: "reviewer" } };
+assert.equal(ctx.roleOf(team[0], teamRoster), "worker", "the teamRoster's role");
+assert.equal(ctx.roleOf({ name: "w1", role: "leader" }, teamRoster), "leader", "the record's own wins");
+assert.equal(ctx.roleOf(team[4], teamRoster), "");
+const byRole = (role, hierarchy) => plain(ctx.pickerRows(team, { role, meshOf: teamRoster, hierarchy }))
+  .map((r) => `${r.name}:${r.depth}`);
+assert.deepEqual(byRole("", true), ["w1:0", "r1:1", "w2:0", "r2:1", "x:0"], "no role filter keeps the tree");
+assert.deepEqual(byRole("worker", true), ["w1:0", "w2:0"]);
+assert.deepEqual(byRole("reviewer", true), ["r1:0", "r2:0"],
+  "a reviewer whose parent is filtered out is a root, not a lost row");
+assert.deepEqual(byRole("-", false), ["x:0"], "'역할 없음' is the sessions with no role");
+assert.deepEqual(plain(ctx.filterChoices(team, teamRoster)).roles, ["reviewer", "worker"],
+  "the choices come from every record, not the filtered list");
+
+/* ---- score colours (claunch-kzudj) --------------------------------------
+   Over the threshold is its own band; under it, p >= 0.5, p >= 0.2 and the
+   rest. The bar is the reader's logit, so the slider recolours the pills. */
+const bar = Math.log(9);
+assert.equal(ctx.scoreBand(Math.log(9), bar), "hit", "the threshold itself is a hit, as in draftPicks");
+assert.equal(ctx.scoreBand(Math.log(3), bar), "warm");
+assert.equal(ctx.scoreBand(0, bar), "warm", "p 0.5 is warm");
+assert.equal(ctx.scoreBand(Math.log(0.25), bar), "mild", "p 0.2 is mild");
+assert.equal(ctx.scoreBand(-3, bar), "cold");
+assert.equal(ctx.scoreBand(Math.log(3), Math.log(2)), "hit", "a lower bar moves a member into hit");
+assert.equal(ctx.scoreBand(null, bar), "", "an unscored member has no band");
+assert.equal(ctx.scoreBand(undefined, bar), "");
+
 // The line above the button says why it is off instead of staying silent.
 assert.equal(ctx.createHint("", 2), "제목을 입력하세요");
 assert.ok(ctx.createHint("cluster", 0).includes("빈"), "no member is warned about, not blocked");
@@ -349,6 +391,49 @@ for (const cls of [".mt-new-filter", ".mt-new-count", ".mt-new-session-row.on", 
   // the preview's threshold slider (claunch-wlk6g)
   ".mt-create-threshold", ".mt-create-threshold-input", ".mt-create-threshold-value"]) {
   assert.ok(styles.includes(cls), `the picker draws ${cls}`);
+}
+
+/* The score bands have to read on both themes (claunch-kzudj). The light
+   theme is derived from these rules by theme.js, so the check runs the
+   stylesheet's own band colours through it and measures WCAG contrast of
+   the pill text against what it sits on: its own fill when it has one,
+   else the card and the ticked row. 4.5:1 is the bar for 10px text. */
+{
+  const theme = require(path.join(WEB, "theme.js"));
+  const lum = (c) => {
+    const rgb = theme.parseColor(c).slice(0, 3).map((v) => {
+      const x = v / 255;
+      return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  };
+  const contrast = (a, b) => {
+    const [x, y] = [lum(a), lum(b)];
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  };
+  const decl = (selector, prop) => {
+    const m = new RegExp(`${selector.replace(/[.]/g, "\\.")}\\s*\\{([^}]*)\\}`).exec(styles);
+    assert.ok(m, `${selector} is in style.css`);
+    const d = new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`).exec(m[1]);
+    return d ? d[1].trim() : null;
+  };
+  const card = decl(".mt-create-card", "background");
+  const ticked = decl(".mt-new-session-row.on", "background");
+  for (const band of ["hit", "warm", "mild", "cold"]) {
+    const sel = `.mt-new-flag.band-${band}`;
+    const fg = decl(sel, "color");
+    const fill = decl(sel, "background");
+    for (const under of fill ? [fill] : [card, ticked]) {
+      const dark = contrast(fg, under);
+      const light = contrast(theme.lightColor(fg, "color"), theme.lightColor(under, "background"));
+      assert.ok(dark >= 4.5, `${band} on ${under} reads in the dark theme (${dark.toFixed(2)})`);
+      assert.ok(light >= 4.5, `${band} on ${under} reads in the light theme (${light.toFixed(2)})`);
+    }
+  }
+  const fgs = ["hit", "warm", "mild", "cold"].map((b) => decl(`.mt-new-flag.band-${b}`, "color"));
+  assert.equal(new Set(fgs).size, 4, "every band has its own text colour");
+  // Written after .weak, which a band row below the bar also carries.
+  assert.ok(styles.indexOf(".mt-new-flag.band-warm") > styles.indexOf(".mt-new-flag.weak"));
 }
 
 console.log("megathread_check ok");
