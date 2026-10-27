@@ -1,344 +1,139 @@
-"""The web debug page's daemon side (daemon/webdebug.py, claunch-dsb28): the
-per-origin proxy that injects the probe, the window registry the session's
-commands go through, the user's explicit send, and the MCP tools."""
+"""The web debug page: a browser the daemon runs, and the screen of it the
+user watches (claunch-o8pb7.2).
+
+The proxy, the injected probe and the iframe are gone; these tests hold the
+shape that replaced them:
+
+* no second listener and no framing -- the module and the page assets carry
+  no proxy, probe or iframe;
+* the browser is found the way the design says ($CLAUNCH_CHROMIUM, then the
+  Playwright cache, then the system), and an address is normalised before it
+  is opened;
+* a window belongs to the session the user picked and to no other;
+* the agent script is installed into every document before the page's own
+  scripts, and commands run through it;
+* one browser-level test drives the real Chromium -- frames, input and a
+  screenshot -- and skips when this machine has no browser.
+"""
+from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import ssl
+import pathlib
+import re
+import stat
+from pathlib import Path
 
-import aiohttp
 import pytest
-from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher import mcp_server, webdebug_mcp
 from claude_launcher.daemon import webdebug
 
+STATIC = Path(webdebug.__file__).resolve().parent.parent / "web" / "static"
+
 
 # --------------------------------------------------------------------------- #
-# pure helpers
+# the shape that replaced the proxy
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("raw, origin, path", [
-    ("localhost:5173", "http://localhost:5173", "/"),
-    ("http://LocalHost:3000/a/b?x=1#top", "http://localhost:3000", "/a/b?x=1#top"),
-    ("https://example.test", "https://example.test", "/"),
-    ("http://[::1]:8080/x", "http://[::1]:8080", "/x"),
+def test_the_page_is_a_screen_and_not_a_frame():
+    html = (STATIC / "webdebug.html").read_text(encoding="utf-8")
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    assert "<iframe" not in html and "iframe" not in script
+    assert "wd-screen" in html and "wd-frame" not in html
+    assert "postMessage" not in script
+    assert "webdebug-probe.js" not in html and not (STATIC / "webdebug-probe.js").exists()
+
+
+def test_the_daemon_carries_no_proxy_and_no_probe_injection():
+    source = pathlib.Path(webdebug.__file__).read_text(encoding="utf-8")
+    for gone in ("class Proxy", "def _location(", "def alternate_scheme(",
+                 "def _speaks_tls(", "def inject_probe(", "_DROP_RESPONSE",
+                 "/api/webdebug/proxy"):
+        assert gone not in source, f"{gone} should be gone with the framed design"
+
+
+def test_the_agent_is_installed_into_every_document_before_the_page_runs():
+    source = pathlib.Path(webdebug.__file__).read_text(encoding="utf-8")
+    assert "Page.addScriptToEvaluateOnNewDocument" in source
+    agent = (STATIC / "webdebug-agent.js").read_text(encoding="utf-8")
+    assert "__claunchWebdebug" in agent and "postMessage" not in agent
+
+
+def test_the_browser_tab_sends_the_text_an_editing_key_produces():
+    """Backspace and Enter only act on the page when Chrome is told what they
+    produce; the tab therefore carries text for them too (s1262-rev)."""
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    assert "EDIT_TEXT" in script
+    for key, text in (("Backspace", r'"\b"'), ("Enter", r'"\r"')):
+        assert re.search(rf'{key}:\s*"{re.escape(text.strip(chr(34)))}"', script), key
+
+
+def test_a_drag_and_a_right_click_keep_their_button():
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    assert "buttonName(e.button)" in script and "buttons: e.buttons" in script
+    assert 'button: "left"' not in script
+
+
+# --------------------------------------------------------------------------- #
+# the browser
+# --------------------------------------------------------------------------- #
+def test_the_browser_is_taken_from_the_environment_first(tmp_path, monkeypatch):
+    binary = tmp_path / "chrome"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv(webdebug.BROWSER_ENV, str(binary))
+    assert webdebug.find_browser() == str(binary)
+
+
+def test_a_browser_that_is_not_there_is_named_not_guessed(monkeypatch):
+    monkeypatch.setenv(webdebug.BROWSER_ENV, "/nonexistent/chrome")
+    monkeypatch.setattr(webdebug, "browser_candidates", lambda: ["/nonexistent/chrome"])
+    with pytest.raises(webdebug.WebDebugError) as caught:
+        webdebug.find_browser()
+    assert caught.value.status == 503
+    assert webdebug.BROWSER_ENV in str(caught.value)
+
+
+@pytest.mark.parametrize("raw,opened", [
+    ("localhost:5173/", "http://localhost:5173/"),
+    ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+    ("https://example.test/x", "https://example.test/x"),
+    ("about:blank", "about:blank"),
 ])
-def test_split_target(raw, origin, path):
-    assert webdebug.split_target(raw) == (origin, path)
+def test_an_address_gets_a_scheme_before_it_is_opened(raw, opened):
+    assert webdebug.target_url(raw) == opened
 
 
-@pytest.mark.parametrize("raw", ["", "file:///etc/passwd", "ftp://x/", "http://", "http://h:99999/"])
-def test_split_target_refuses(raw):
-    with pytest.raises(webdebug.WebDebugError):
-        webdebug.split_target(raw)
+@pytest.mark.parametrize("raw", ["", "   ", "javascript:alert(1)", "ftp://host/file"])
+def test_only_addresses_a_browser_can_open_are_accepted(raw):
+    with pytest.raises(webdebug.WebDebugError) as caught:
+        webdebug.target_url(raw)
+    assert caught.value.status == 400
 
 
-def test_probe_goes_first_in_head_and_never_before_the_doctype():
-    tag = webdebug.PROBE_TAG
-    assert webdebug.inject_probe(b"<!doctype html><html><head><title>t</title>") == (
-        b"<!doctype html><html><head>" + tag + b"<title>t</title>")
-    assert webdebug.inject_probe(b'<HTML lang="ko"><body>x') == b'<HTML lang="ko">' + tag + b"<body>x"
-    assert webdebug.inject_probe(b"<!DOCTYPE html><p>x") == b"<!DOCTYPE html>" + tag + b"<p>x"
-    assert webdebug.inject_probe(b"<p>x") == tag + b"<p>x"
-    # <header> is not <head>
-    assert webdebug.inject_probe(b"<html><header>").startswith(b"<html>" + tag)
+def test_the_refusal_names_what_is_accepted(monkeypatch):
+    monkeypatch.delenv(webdebug.NO_SANDBOX_ENV, raising=False)
+    with pytest.raises(webdebug.WebDebugError) as caught:
+        webdebug.target_url("javascript:alert(1)")
+    assert "javascript" in str(caught.value) and "file" in str(caught.value)
 
 
-def test_set_cookie_is_made_to_stick_on_the_proxy():
-    out = webdebug._clean_set_cookie("sid=1; Domain=example.test; Path=/; Secure; SameSite=None; HttpOnly")
-    assert out == "sid=1; Path=/; HttpOnly"
+def test_the_browser_keeps_chrome_s_sandbox_unless_the_operator_turns_it_off(monkeypatch):
+    """This browser renders whatever page someone names, so its renderer runs
+    sandboxed; the flag is dropped only where the sandbox cannot work."""
+    monkeypatch.delenv(webdebug.NO_SANDBOX_ENV, raising=False)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+    args = webdebug.browser_args("/usr/bin/chrome", "/profile")
+    assert "--no-sandbox" not in args
+    assert args[0] == "/usr/bin/chrome" and args[-1] == "about:blank"
 
+    monkeypatch.setenv(webdebug.NO_SANDBOX_ENV, "1")
+    assert "--no-sandbox" in webdebug.browser_args("/usr/bin/chrome", "/profile")
 
-def test_the_send_block_names_the_window_and_the_element(tmp_path):
-    img = tmp_path / "a.png"
-    text = webdebug.compose_send("w-abcd", {
-        "kind": "element", "url": "http://localhost:5173/x", "title": "X", "note": "이 버튼이\n안 눌린다",
-        "element": {"label": "button#save", "selector": "#save", "text": "Save",
-                    "rect": {"x": 1, "y": 2, "width": 3, "height": 4}, "html": "<button id=save>Save</button>"},
-    }, img)
-    lines = text.splitlines()
-    assert lines[0] == "[claunch webdebug w-abcd] The user sent you an element they picked from the web debug page."
-    assert "  > 이 버튼이" in lines and "  > 안 눌린다" in lines
-    assert "  selector: #save" in lines
-    assert f"  image: {img} (open it to see what the user means)" in lines
-    assert 'window="w-abcd"' in lines[-1]
-
-
-# --------------------------------------------------------------------------- #
-# the proxy, end to end against a real upstream
-# --------------------------------------------------------------------------- #
-def _upstream_app(seen):
-    async def page(request):
-        seen.append(dict(request.headers))
-        resp = web.Response(text="<!doctype html><html><head><title>dev</title></head><body>hi</body></html>",
-                            content_type="text/html")
-        resp.headers["Content-Security-Policy"] = "default-src 'self'"
-        resp.headers["X-Frame-Options"] = "DENY"
-        resp.headers["Set-Cookie"] = "sid=1; Domain=localhost; Secure; Path=/"
-        return resp
-
-    async def asset(request):
-        return web.Response(text="console.log(1)", content_type="application/javascript")
-
-    async def moved(request):
-        raise web.HTTPFound(f"http://{request.host}/asset.js")
-
-    async def sock(request):
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                await ws.send_str("echo:" + msg.data)
-        return ws
-
-    app = web.Application()
-    app.router.add_get("/", page)
-    app.router.add_get("/asset.js", asset)
-    app.router.add_get("/moved", moved)
-    app.router.add_get("/ws", sock)
-    return app
-
-
-def test_the_proxy_injects_the_probe_and_guards_its_port():
-    async def run():
-        seen = []
-        up = TestServer(_upstream_app(seen))
-        await up.start_server()
-        proxy = webdebug.Proxy(f"http://127.0.0.1:{up.port}", "127.0.0.1")
-        await proxy.start()
-        try:
-            client = TestClient(TestServer(web.Application()))  # only for its session
-            await client.start_server()
-            http = client.session
-            base = f"http://127.0.0.1:{proxy.port}"
-
-            r = await http.get(base + "/", allow_redirects=False)
-            assert r.status == 403  # no cookie: not served
-            r = await http.get(base + webdebug.ENTER_PATH + "?k=wrong&to=/", allow_redirects=False)
-            assert r.status == 403
-
-            enter = proxy.enter_path("/") + "&parent=" + "http%3A%2F%2Fdash.test%3A8378"
-            r = await http.get(base + enter, allow_redirects=False)
-            assert r.status == 302 and r.headers["Location"] == "/"
-            assert proxy.cookie in r.cookies
-            assert proxy.parents == {"http://dash.test:8378"}
-
-            # The daemon's login cookie rides along to every port of the host;
-            # it must not reach the page under test.
-            r = await http.get(base + "/", headers={"Cookie": f"{proxy.cookie}={proxy.secret}; "
-                                                              "claunch_session_abc=SECRET; app=1"})
-            body = await r.text()
-            assert r.status == 200
-            assert "<head>" + webdebug.PROBE_TAG.decode() + "<title>" in body
-            assert "Content-Security-Policy" not in r.headers and "X-Frame-Options" not in r.headers
-            assert "Domain" not in r.headers["Set-Cookie"] and "Secure" not in r.headers["Set-Cookie"]
-            sent = seen[-1]
-            assert sent.get("Cookie") == "app=1"
-            assert sent["Host"] == f"127.0.0.1:{up.port}"
-
-            cookie = {"Cookie": f"{proxy.cookie}={proxy.secret}"}
-            r = await http.get(base + "/asset.js", headers=cookie)
-            assert await r.text() == "console.log(1)"  # not HTML: untouched
-            r = await http.get(base + "/moved", headers=cookie, allow_redirects=False)
-            assert r.headers["Location"] == "/asset.js"  # kept on the proxy
-
-            r = await http.get(base + webdebug.PROBE_PATH, headers=cookie)
-            probe = await r.text()
-            assert probe.startswith("(function(CONFIG){")
-            assert '"parents": ["http://dash.test:8378"]' in probe
-
-            ws = await http.ws_connect(base.replace("http", "ws") + "/ws", headers=cookie)
-            await ws.send_str("x")
-            msg = await ws.receive(timeout=5)
-            assert msg.data == "echo:x"
-            await ws.close()
-            await client.close()
-        finally:
-            await proxy.stop()
-            await up.close()
-
-    asyncio.run(run())
-
-
-# --------------------------------------------------------------------------- #
-# the scheme the address was typed with (claunch-o8pb7)
-# --------------------------------------------------------------------------- #
-def test_the_scheme_probe_reads_a_plaintext_peer():
-    async def run():
-        up = TestServer(_upstream_app([]))
-        await up.start_server()
-        try:
-            assert await webdebug._speaks_tls("127.0.0.1", up.port) is False
-        finally:
-            await up.close()
-
-    asyncio.run(run())
-
-
-# A self-signed pair for the TLS-speaking peer below. The probe does not judge
-# certificates (verify_mode=CERT_NONE), so the pair only has to complete a
-# handshake; it is embedded here so the test needs no openssl and no fixture.
-_TLS_KEY = """\
------BEGIN PRIVATE KEY-----
-MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCIAIZq3KCXfEQd
-DPC8x39ikNC2pokosO8MT83kvy7tlODytamEYJ+ou21TMUmetONQrXfl1MyiRSyK
-9nu62eaAJ3xcvj5o8vcRiB/OgDa93v7UxQT6azyCfSuo0jCgAw5++sX/SMc5wEms
-o2kPaRdmu4gxUy0zdQpGWjUYxBR5q/+TTx8RIBGGEdLKD2cQC9/5laIn7taucKJY
-TTW7PJNsIo7T5omvJbvCJrGeYqVy4sO3X33RUR0HvuFghrCpYbxJNu4A5A+U7Vx7
-y84xXU1iSHtevFMUJRVaK76SHuNrn9jAKzwHh9STJEcfUQriMH/6pCMeXwtf5dZE
-KiXyVAdPAgMBAAECggEAKMQjho+okY/dqOmSlbuk+uoWrdFAhtJ2bTXUrS8DhZKd
-VRNQA06lPQIldIzvGOP2yV2d9WXyiud6QRM+JlWfiqWLWQ9rjLDbj0VC53a2MfbQ
-Yv3FjryrMCAOALY0fho8c6J+zBVIJo71Zoq6+LQTICexXLumbmi0Uj9C8DACRS/x
-9OXmMPz8amIzhz0EAJpB31bGZQQBybRgV39g10gb7ApQw7eRtY7dGU3TRpjK6EYB
-fPZKKDYjXLxvoqI5yhSl1Nt7mC6tlatzNgcV2ei0+2JHqVHGzVgoKbSLoDB7EOFR
-HJSNGWNppxuyxqIulb5MAUpK7g99mzvFBh+hoBsY6QKBgQC9qt0e2bD//c+Q/OVS
-Nu5qY+r0ird3rTEC0N3bbgYAAzH5MDl1XTSLZHvAPcc2yek6pZOcGVfTDMETW7F7
-MkSeecXA49lwurQa38VXBpYo10py4nUWwxpsBdgefHFhT+MMIq6bKnb/Y74DueOQ
-5fK0OidW8j27MJWui8tHAD6vRwKBgQC3kPCTcw7Ma7EjS47Cv0vH1SKoTMlLoW5n
-+GWYGiE73jIDLSYk7WBEwG9906z1sxT4WoW5bmtcR0tWkepIMbvvJNqW+vXP4SLw
-7/pLp4/EJztSAjfepmzrfil6CScpaQruOaE5swnfkjNlUdrLytpf0p+ngNY5BlEz
-auA9PU47uQKBgDhH1luML1iXARu933J4+GA7jAHKk8yAaPWz8tFlIYSpbg/KfpJT
-+P6P76TI8C9S1NFhRp7gak4nD7fl0pGDBhecfNDTC7fGvyDmW9GKE87Eq8PRbPs3
-I8UAKvRI6v/8S5xTQkqq3CrGdyD17RAXG+DdDMVhFm5QaWok80n7SZ6LAoGAeeuC
-Xeylf5BnbpHYl/CGXItrIW0epWTq95M7pvJz8Fd70DBEjXI75m4JnwDgd7Ah1XIK
-L0bvd7LCjxULDjg6InPP20eDzDY0BuLc0zLPgfCsraNbiD3xSdfZpHw/znk+EUul
-kbUgcaWhDUJ4l7J7p/k0oQQpRGa1t/jcRtBZDcECgYA0m1OEncyblZfWB9zPoCOX
-oPSkuIW1m/AImTHWlG0Bp3gHA2VOWGaGp1AX2LEo+3U8w0//hAZWUG141FgIqrko
-3yMQpGjIr/mYDRwDVw1NiXVLxf7fk2v3FuQNUKGRSEGYmEQbP4P9QlAgfVj6QnfR
-rQ8qZ+cxqNrn1a4f7WlfcQ==
------END PRIVATE KEY-----
-"""
-
-_TLS_CERT = """\
------BEGIN CERTIFICATE-----
-MIIDCzCCAfOgAwIBAgIUcMzgmtK4tGYcEWJllDHGnGJ6PywwDQYJKoZIhvcNAQEL
-BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MTAyNzA1MTU0M1oYDzIxMjYx
-MDAzMDUxNTQzWjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwggEiMA0GCSqGSIb3DQEB
-AQUAA4IBDwAwggEKAoIBAQCIAIZq3KCXfEQdDPC8x39ikNC2pokosO8MT83kvy7t
-lODytamEYJ+ou21TMUmetONQrXfl1MyiRSyK9nu62eaAJ3xcvj5o8vcRiB/OgDa9
-3v7UxQT6azyCfSuo0jCgAw5++sX/SMc5wEmso2kPaRdmu4gxUy0zdQpGWjUYxBR5
-q/+TTx8RIBGGEdLKD2cQC9/5laIn7taucKJYTTW7PJNsIo7T5omvJbvCJrGeYqVy
-4sO3X33RUR0HvuFghrCpYbxJNu4A5A+U7Vx7y84xXU1iSHtevFMUJRVaK76SHuNr
-n9jAKzwHh9STJEcfUQriMH/6pCMeXwtf5dZEKiXyVAdPAgMBAAGjUzBRMB0GA1Ud
-DgQWBBRPrr7w91uwqquTkqGkXCqHPS5dqjAfBgNVHSMEGDAWgBRPrr7w91uwqquT
-kqGkXCqHPS5dqjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBI
-EreOMaKCGM+I1qa4JjkAyi9YiTagOG5Kj6SWszmcgufaFZeOpNP1e/8L7zw8gwtB
-4V4zNYfixvCFgz97kBqpu9PHw7PVjKon1FG8qDla+7NS3YDKNaQ2QCZTSPzFEU4J
-p5dFsy8csENmzA6Mq6RYxxG5yXWSSou7iAFo3rv9gGdzsgmkm6Q2YOKrGnihtU0h
-jJgt9c3FhcBVJhy4DoUD5fEdzqhAOPpb0KcK6lmVffMdO18N+aPzxkniVZldVOUW
-Qx8xXZcjRBjCs7jUh8g5dV1iYqW5tzRLQn+OWcHhxVftzbJZoHoryCYukzIxdsdK
-uQaxGWJGVfbKAGJppxse
------END CERTIFICATE-----
-"""
-
-
-def test_a_tls_server_keeps_the_https_it_was_typed_with(tmp_path):
-    """The probe answer is three-way: a peer that completes the handshake
-    speaks TLS, so its https address is left alone. Reading a successful
-    handshake as "no verdict" rewrites a working https address to http."""
-    key, cert = tmp_path / "tls-key.pem", tmp_path / "tls-cert.pem"
-    key.write_text(_TLS_KEY, encoding="ascii")
-    cert.write_text(_TLS_CERT, encoding="ascii")
-
-    async def run():
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(cert, key)
-
-        async def greet(reader, writer):
-            with contextlib.suppress(Exception):
-                writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
-                await writer.drain()
-            writer.close()
-
-        server = await asyncio.start_server(greet, "127.0.0.1", 0, ssl=context)
-        port = server.sockets[0].getsockname()[1]
-        try:
-            assert await webdebug._speaks_tls("127.0.0.1", port) is True
-            assert await webdebug.alternate_scheme(f"https://127.0.0.1:{port}") is None
-        finally:
-            server.close()
-            await server.wait_closed()
-
-    asyncio.run(run())
-
-
-def test_an_unreachable_address_keeps_the_scheme_it_was_typed_with():
-    async def run():
-        # Nothing listens: no answer is not a verdict about TLS.
-        assert await webdebug.alternate_scheme("https://127.0.0.1:1/") is None
-
-    asyncio.run(run())
-
-
-def test_an_https_address_for_a_plaintext_server_is_opened_as_http():
-    async def run():
-        up = TestServer(_upstream_app([]))
-        await up.start_server()
-        client = TestClient(TestServer(_app(_Manager())))
-        await client.start_server()
-        try:
-            r = await client.post("/api/webdebug/proxy", json={"url": f"https://127.0.0.1:{up.port}/x"})
-            body = await r.json()
-            assert r.status == 200
-            assert body["origin"] == f"http://127.0.0.1:{up.port}"
-            assert body["switched_from"] == f"https://127.0.0.1:{up.port}"
-            assert body["path"] == "/x"
-            # The frame's base is what the browser that asked can reach.
-            assert body["proxy_origin"] == f"http://127.0.0.1:{body['port']}"
-        finally:
-            await client.close()
-            await up.close()
-
-    asyncio.run(run())
-
-
-def test_a_plain_http_address_is_not_probed_or_rewritten(monkeypatch):
-    """An http address is never handed to the TLS probe: the proxy would send a
-    stray ClientHello to every page opened through it. The scheme check is the
-    only thing that keeps the probe to https addresses."""
-    probed = []
-
-    async def spy(host, port, timeout=webdebug.SCHEME_PROBE_TIMEOUT):
-        probed.append((host, port))
-        return False
-
-    monkeypatch.setattr(webdebug, "_speaks_tls", spy)
-
-    async def run():
-        client = TestClient(TestServer(_app(_Manager())))
-        await client.start_server()
-        try:
-            body = await (await client.post("/api/webdebug/proxy",
-                                            json={"url": "http://127.0.0.1:5173/"})).json()
-            assert body["origin"] == "http://127.0.0.1:5173"
-            assert body["switched_from"] is None
-        finally:
-            await client.close()
-        assert await webdebug.alternate_scheme("http://127.0.0.1:5173") is None
-
-    asyncio.run(run())
-    assert probed == []
-
-
-def test_the_scheme_mismatch_page_names_the_fix():
-    text = webdebug._upstream_failure(
-        "https://dev.test:5173/",
-        OSError("Cannot connect to host dev.test:5173 ssl:False "
-                "[[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)]"))
-    assert "http://dev.test:5173/" in text and "TLS" in text
-    text = webdebug._upstream_failure("http://dev.test:8443/", aiohttp.ServerDisconnectedError())
-    assert "https://dev.test:8443/" in text
-
-
-def test_the_page_frames_the_proxy_origin_the_daemon_returned():
-    """The frame must not be built from location.protocol: the proxy speaks
-    plain http, so an https dashboard built an https frame address that no
-    listener answers (claunch-o8pb7)."""
-    page = (webdebug.PAGE_FILE.parent / "webdebug.js").read_text(encoding="utf-8")
-    assert "res.proxy_origin" in page
-    assert "${location.protocol}" not in page
+    # root cannot use Chrome's sandbox at all
+    monkeypatch.delenv(webdebug.NO_SANDBOX_ENV)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 0, raising=False)
+    assert "--no-sandbox" in webdebug.browser_args("/usr/bin/chrome", "/profile")
 
 
 # --------------------------------------------------------------------------- #
@@ -373,69 +168,148 @@ class _Manager:
         return False
 
 
+class _FakeCDP:
+    """Answers like the browser would, and records what was asked."""
+
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    async def send(self, method, params=None, *, session="", timeout=20):
+        self.sent.append((method, params or {}, session))
+        if method == "Target.createBrowserContext":
+            return {"browserContextId": "ctx-1"}
+        if method == "Target.createTarget":
+            return {"targetId": "tgt-1"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "sess-1"}
+        if method == "Page.navigate":
+            return {"url": (params or {}).get("url", "")}
+        if method == "Runtime.evaluate":
+            expression = (params or {}).get("expression", "")
+            if "document.title" in expression and "location.href" in expression:
+                return {"result": {"value": json.dumps({"url": "http://localhost:5173/",
+                                                        "title": "under test"})}}
+            if "__claunchWebdebug" in expression:
+                return {"result": {"value": {"elements": 'e1 button "go" @10,10 40x20',
+                                             "url": "http://localhost:5173/", "title": "under test"}}}
+            return {"result": {"value": None}}
+        if method == "Page.captureScreenshot":
+            return {"data": "aGVsbG8="}  # b"hello"
+        return {}
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeBrowser:
+    def __init__(self):
+        self.cdp = _FakeCDP()
+
+    @property
+    def live(self):
+        return True
+
+    async def ensure(self):
+        return self.cdp
+
+    async def new_page(self, url="about:blank"):
+        return {"context_id": "ctx-1", "target_id": "tgt-1", "session_id": "sess-1"}
+
+    async def close_page(self, page):
+        return None
+
+    async def stop(self):
+        return None
+
+
+class _Viewer:
+    transport = None
+
+    def __init__(self):
+        self.json = []
+        self.binary = []
+        self.closed = False
+
+    async def send_json(self, data):
+        self.json.append(data)
+
+    async def send_bytes(self, data):
+        self.binary.append(data)
+
+    async def close(self, **kw):
+        self.closed = True
+
+
 def _app(manager):
-    app = web.Application()
+    app = webdebug.web.Application()
     app["manager"] = manager
     app["websockets"] = set()
     webdebug.install(app)
     return app
 
 
-def test_a_command_reaches_the_window_showing_that_session_and_only_it(tmp_path, monkeypatch):
+def test_a_window_belongs_to_the_session_the_user_picked(tmp_path, monkeypatch):
     monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
 
     async def run():
-        client = TestClient(TestServer(_app(_Manager("s1", "s2"))))
+        hub = webdebug.Hub()
+        hub.browser = _FakeBrowser()
+        app = webdebug.web.Application()
+        app["manager"] = _Manager("s1", "s2")
+        app["websockets"] = set()
+        webdebug.install(app, hub)
+        client = TestClient(TestServer(app))
         await client.start_server()
         try:
             r = await client.post("/api/webdebug/command", json={"session": "s1", "op": "snapshot"})
             assert r.status == 404 and "web" in (await r.json())["error"]
 
-            ws = await client.ws_connect("/api/webdebug/ws?window=w-abcd")
-            await ws.send_json({"type": "hello", "session": "s1", "url": "http://localhost:5173/"})
-            await asyncio.sleep(0.05)
-
+            win = await hub.attach("w-abcd", "s1", _Viewer())
+            await hub.navigate(win, "localhost:5173/")
             listed = await (await client.get("/api/webdebug/windows?session=s1")).json()
             assert [w["window"] for w in listed["windows"]] == ["w-abcd"]
+            assert listed["windows"][0]["url"].startswith("http://localhost:5173")
 
-            # another session may not drive it
+            # another session may not drive it, and an unknown op never reaches
+            # the browser at all
             r = await client.post("/api/webdebug/command",
                                   json={"session": "s2", "op": "click", "window": "w-abcd"})
             assert r.status == 403
             r = await client.post("/api/webdebug/command", json={"session": "s1", "op": "rm -rf"})
             assert r.status == 400
 
-            async def page():
-                msg = await ws.receive_json(timeout=5)
-                assert msg["type"] == "command" and msg["op"] == "click" and msg["args"] == {"ref": "e3"}
-                await ws.send_json({"type": "result", "id": msg["id"], "ok": True, "value": {"clicked": "e3"}})
-                msg = await ws.receive_json(timeout=5)
-                (tmp_path / "0123456789abcdef0123.png").write_bytes(b"png")
-                await ws.send_json({"type": "result", "id": msg["id"], "ok": True,
-                                    "value": {"image": "0123456789abcdef0123.png"}})
-                msg = await ws.receive_json(timeout=5)
-                await ws.send_json({"type": "result", "id": msg["id"], "ok": False, "error": "no screen share"})
-
-            task = asyncio.ensure_future(page())
             r = await client.post("/api/webdebug/command",
-                                  json={"session": "s1", "op": "click", "args": {"ref": "e3"}})
-            assert r.status == 200
-            assert (await r.json())["value"] == {"clicked": "e3"}
-            r = await client.post("/api/webdebug/command", json={"session": "s1", "op": "screenshot"})
-            assert (await r.json())["value"]["image"] == str(tmp_path / "0123456789abcdef0123.png")
-            r = await client.post("/api/webdebug/command", json={"session": "s1", "op": "screenshot"})
-            assert r.status == 422 and (await r.json())["error"] == "no screen share"
-            await task
+                                  json={"session": "s1", "op": "snapshot", "window": "w-abcd"})
+            body = await r.json()
+            assert r.status == 200 and "e1 button" in body["value"]["elements"]
 
-            # the page that never answers
             r = await client.post("/api/webdebug/command",
-                                  json={"session": "s1", "op": "snapshot", "timeout": 1})
-            assert r.status == 504
-            await ws.close()
-            await asyncio.sleep(0.05)
-            assert (await (await client.get("/api/webdebug/windows")).json())["windows"] == []
+                                  json={"session": "s1", "op": "navigate",
+                                        "args": {"url": "https://example.test/"}, "window": "w-abcd"})
+            body = await r.json()
+            assert r.status == 200 and body["value"]["url"] == "http://localhost:5173/"
         finally:
+            await hub.stop_all()
             await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_screenshot_is_the_browsers_own_capture(tmp_path, monkeypatch):
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _FakeBrowser()
+        try:
+            win = await hub.attach("w-abcd", "s1", _Viewer())
+            result = await hub.command("s1", "screenshot", {}, window="w-abcd")
+            image = Path(result["value"]["image"])
+            assert image.is_file() and image.read_bytes() == b"hello"
+            assert result["value"]["bytes"] == 5
+        finally:
+            await hub.stop_all()
 
     asyncio.run(run())
 
@@ -476,83 +350,253 @@ def test_send_types_the_block_into_the_session(tmp_path, monkeypatch):
             sessions = await (await client.get("/api/webdebug/sessions")).json()
             assert sessions == {"sessions": [{"name": "s1", "status": "idle", "cwd": "/w"}]}
             r = await client.get("/webdebug")
-            assert r.status == 200 and "wd-frame" in await r.text()
+            assert r.status == 200 and "wd-screen" in await r.text()
         finally:
             await client.close()
 
     asyncio.run(run())
 
 
-def test_the_proxy_route_opens_one_listener_per_origin():
+def test_the_send_block_names_the_window_and_the_element(tmp_path):
+    image = tmp_path / "0123456789abcdef0123.png"
+    image.write_bytes(b"png")
+    text = webdebug.compose_send("w-abcd", {
+        "kind": "element", "url": "http://localhost:5173/", "title": "under test", "note": "고쳐 주세요",
+        "element": {"label": "button#save", "selector": "#save", "text": "저장",
+                    "rect": {"x": 10, "y": 20, "width": 80, "height": 30},
+                    "html": "<button id=save>저장</button>"},
+    }, image)
+    assert text.startswith("[claunch webdebug w-abcd] The user sent you an element they picked")
+    assert "  page: http://localhost:5173/  (under test)" in text
+    assert "  > 고쳐 주세요" in text
+    assert "  selector: #save" in text and "  rect: x=10 y=20 width=80 height=30" in text
+    assert str(image) in text
+    assert "webdebug_screenshot" in text
+
+
+# --------------------------------------------------------------------------- #
+# the browser itself
+# --------------------------------------------------------------------------- #
+def test_a_real_browser_streams_frames_takes_input_and_screenshots(tmp_path, monkeypatch):
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    page = tmp_path / "under_test.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>under test</title>"
+        "<style>body{margin:0;background:#fff}#b{margin:40px;width:200px;height:60px}</style>"
+        "<button id=b>go</button><script>window.__hits=0;"
+        "document.getElementById('b').addEventListener('click',()=>{window.__hits++;"
+        "document.getElementById('b').textContent='clicked';});</script>",
+        encoding="utf-8")
+
     async def run():
-        client = TestClient(TestServer(_app(_Manager())))
+        hub = webdebug.Hub()
+        viewer = _Viewer()
+        try:
+            win = await hub.attach("w-real1", "s1", viewer)
+            await hub.navigate(win, page.as_uri())
+            for _ in range(100):
+                if viewer.binary:
+                    break
+                await asyncio.sleep(0.1)
+            assert viewer.binary, "no screencast frame arrived"
+            assert viewer.binary[-1][:2] == b"\xff\xd8"  # JPEG
+
+            snap = await hub.command("s1", "snapshot", {}, window=win.id)
+            assert "button" in snap["value"]["elements"]
+
+            rect = await hub.agent(win, "rect", {"selector": "#b"})
+            box = rect["rect"]
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            for kind, extra in (("mousePressed", {"buttons": 1}), ("mouseReleased", {"buttons": 0})):
+                await hub.input_event(win, {"kind": "mouse", "type": kind, "x": x, "y": y,
+                                            "button": "left", "clickCount": 1, **extra})
+            assert await hub.evaluate(win, "window.__hits") == 1
+
+            shot = await hub.command("s1", "screenshot", {}, window=win.id)
+            assert Path(shot["value"]["image"]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_scrolled_element_is_captured_where_it_is(tmp_path, monkeypatch):
+    """The clip of an element screenshot is in page coordinates while the
+    agent's rect is viewport-relative; without the offset a scrolled element
+    captured the empty region above it (s1236-rev2, s511-rev)."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    page = tmp_path / "scrolled.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>scrolled</title><style>"
+        "html,body{margin:0;padding:0}body{height:5000px}"
+        ".box{position:absolute;left:0;width:120px;height:120px;background:#ff0000}"
+        "#top{top:0}#deep{top:2000px}</style>"
+        "<div id=top class=box></div><div id=deep class=box></div>", encoding="utf-8")
+
+    async def run():
+        hub = webdebug.Hub()
+        try:
+            win = await hub.attach("w-scrl", "s1", _Viewer())
+            await hub.navigate(win, page.as_uri())
+            near = await hub.command("s1", "screenshot", {"selector": "#top"}, window="w-scrl")
+            far = await hub.command("s1", "screenshot", {"selector": "#deep"}, window="w-scrl")
+            info = await hub.agent(win, "rect", {"selector": "#deep"})
+            # the element is deep in the document but on screen once scrolled
+            assert info["page"]["y"] >= 1500 and info["rect"]["y"] < 800
+            # two identical red squares: the captures must show the same thing
+            assert (Path(far["value"]["image"]).read_bytes()
+                    == Path(near["value"]["image"]).read_bytes())
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_the_agent_installs_itself_into_a_document_that_predates_it(tmp_path, monkeypatch):
+    """The first document (about:blank) exists before the agent is injected;
+    a command there must install it and answer, not return null."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+
+    async def run():
+        hub = webdebug.Hub()
+        try:
+            win = await hub.attach("w-fresh", "s1", _Viewer())
+            value = await hub.agent(win, "where", {})
+            assert isinstance(value, dict) and value.get("url") == "about:blank"
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_the_socket_carries_a_backspace_and_an_enter(tmp_path, monkeypatch):
+    """Keys that edit rather than print only act when Chrome is told what they
+    produce; without that text the page keeps the character and never submits
+    (s1262-rev measured both)."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    from urllib.parse import quote
+
+    from aiohttp import WSMsgType
+
+    page = tmp_path / "keys.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>keys</title>"
+        "<form id=f><input id=i></form><script>window.__submits=0;"
+        "document.getElementById('f').addEventListener('submit',e=>{e.preventDefault();"
+        "window.__submits++;});</script>", encoding="utf-8")
+
+    async def run():
+        client = TestClient(TestServer(_app(_Manager("s1"))))
         await client.start_server()
         try:
-            a = await (await client.post("/api/webdebug/proxy", json={"url": "localhost:5173/x"})).json()
-            b = await (await client.post("/api/webdebug/proxy", json={"url": "http://localhost:5173/y"})).json()
-            c = await (await client.post("/api/webdebug/proxy", json={"url": "localhost:5174"})).json()
-            assert a["origin"] == "http://localhost:5173" and a["path"] == "/x"
-            assert a["port"] == b["port"] != c["port"]
-            assert a["enter"].startswith(webdebug.ENTER_PATH + "?k=")
-            r = await client.post("/api/webdebug/proxy", json={"url": "javascript:alert(1)"})
-            assert r.status == 400
+            ws = await client.ws_connect(
+                "/api/webdebug/ws?window=w-keys&session=s1&url=" + quote(page.as_uri(), safe=""))
+            for _ in range(200):
+                msg = await ws.receive(timeout=10)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("type") == "state":
+                    break
+            hub = client.server.app["webdebug"]
+            await hub.command("s1", "click", {"selector": "#i"}, window="w-keys")
+            await ws.send_json({"type": "input", "event": {"kind": "text", "text": "abc"}})
+            for key, code, vk, text in (("Backspace", "Backspace", 8, "\b"),
+                                        ("Enter", "Enter", 13, "\r")):
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "key", "type": "keyDown", "key": key, "code": code,
+                    "keyCode": vk, "text": text}})
+            win = hub.window_for("s1", "w-keys")
+            for _ in range(50):
+                if await hub.evaluate(win, "window.__submits") == 1:
+                    break
+                await asyncio.sleep(0.1)
+            assert await hub.evaluate(win, "document.getElementById('i').value") == "ab"
+            assert await hub.evaluate(win, "window.__submits") == 1
+            await ws.close()
         finally:
             await client.close()
 
     asyncio.run(run())
 
 
-# --------------------------------------------------------------------------- #
-# the daemon refuses the login cookie from a proxied page
-# --------------------------------------------------------------------------- #
-def test_the_login_cookie_does_not_work_from_another_port_of_the_host(home):
-    """A proxied page is on the dashboard's host at another port: the same
-    site, so the browser attaches the SameSite=Strict login cookie to what it
-    sends the daemon. The daemon must refuse it there (claunch-dsb28 review)."""
-    import time
+def test_a_bad_value_from_the_viewer_is_an_error_and_not_the_end_of_the_socket():
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _FakeBrowser()
+        try:
+            viewer = _Viewer()
+            win = await hub.attach("w-abcd", "s1", viewer)
+            await webdebug._viewer_message(hub, win, {"type": "quality", "quality": "high"})
+            assert any(m.get("type") == "error" for m in viewer.json)
+        finally:
+            await hub.stop_all()
 
-    from claude_launcher.daemon.api import build_app, cookie_name
-    from claude_launcher.daemon.manager import SessionManager
+    asyncio.run(run())
 
-    token = "token-x"
+
+def test_the_socket_carries_the_screen_and_the_users_typing(tmp_path, monkeypatch):
+    """The path the user reported broken: open the page, watch its screen,
+    type into it. Real browser, real WebSocket, no stub in between."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    from urllib.parse import quote
+
+    from aiohttp import WSMsgType
+
+    page = tmp_path / "form.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>form</title>"
+        "<input id=i><script>window.__typed=0;"
+        "document.getElementById('i').addEventListener('input',e=>{window.__typed=e.target.value;});"
+        "</script>", encoding="utf-8")
 
     async def run():
-        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
-        client = TestClient(TestServer(build_app(mgr, token, started_at=time.monotonic())))
+        client = TestClient(TestServer(_app(_Manager("s1"))))
         await client.start_server()
         try:
-            login = await client.post("/api/auth/session", json={"token": token})
-            assert login.status == 200
-            jar = {cookie_name(token): login.cookies[cookie_name(token)].value}
-            client.session.cookie_jar.clear()
-            own = f"http://{client.host}:{client.port}"
-            proxy = f"http://{client.host}:{client.port + 1}"
+            ws = await client.ws_connect(
+                "/api/webdebug/ws?window=w-abcd&session=s1&url=" + quote(page.as_uri(), safe=""))
+            state = None
+            frame = None
+            for _ in range(200):
+                msg = await ws.receive(timeout=10)
+                if msg.type == WSMsgType.BINARY:
+                    frame = msg.data
+                    break
+                if msg.type == WSMsgType.TEXT:
+                    state = json.loads(msg.data)
+            assert frame is not None and frame[:2] == b"\xff\xd8"
+            assert state and state["type"] == "state"
 
-            async def status(method, path, headers, cookies=jar, **kw):
-                async with client.request(method, path, headers=headers, cookies=cookies, **kw) as r:
-                    return r.status
-
-            # A write from the proxied page: no-cors text/plain POST, cookie attached.
-            body = {"data": '{"url": "localhost:1"}'}
-            assert await status("POST", "/api/webdebug/proxy", {"Origin": proxy}, **body) == 403
-            assert await status("POST", "/api/webdebug/proxy",
-                                {"Sec-Fetch-Site": "same-site", "Origin": proxy}, **body) == 403
-            assert await status("GET", "/api/sessions", {"Sec-Fetch-Site": "cross-site"}) == 403
-            # A WebSocket is outside CORS altogether; the upgrade is refused before it opens.
-            ws_headers = {"Origin": proxy, "Sec-Fetch-Site": "same-site", "Connection": "Upgrade",
-                          "Upgrade": "websocket", "Sec-WebSocket-Version": "13",
-                          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
-            assert await status("GET", "/api/webdebug/ws?window=w-1", ws_headers) == 403
-            # What can change something under /vscode/ is refused too.
-            assert await status("POST", "/vscode/x", {"Sec-Fetch-Site": "same-site"}) == 403
-
-            # The dashboard's own requests, a typed address and shells still pass.
-            assert await status("GET", "/api/sessions", {"Sec-Fetch-Site": "same-origin"}) == 200
-            assert await status("GET", "/api/sessions", {"Sec-Fetch-Site": "none"}) == 200
-            assert await status("GET", "/api/sessions", {"Origin": own}) == 200
-            assert await status("GET", "/api/sessions", {}) == 200
-            bearer = {"Authorization": f"Bearer {token}", "Origin": proxy, "Sec-Fetch-Site": "same-site"}
-            assert await status("GET", "/api/sessions", bearer, cookies=None) == 200
+            hub = client.server.app["webdebug"]
+            await hub.command("s1", "click", {"selector": "#i"}, window="w-abcd")
+            await ws.send_json({"type": "input", "event": {"kind": "text", "text": "hello"}})
+            for _ in range(50):
+                if await hub.evaluate(hub.window_for("s1", "w-abcd"),
+                                      "document.getElementById('i').value") == "hello":
+                    break
+                await asyncio.sleep(0.1)
+            win = hub.window_for("s1", "w-abcd")
+            assert await hub.evaluate(win, "document.getElementById('i').value") == "hello"
+            await ws.close()
         finally:
             await client.close()
 
@@ -566,30 +610,183 @@ class _Client:
     def __init__(self):
         self.calls = []
 
-    def get(self, path, **kw):
+    def get(self, path):
         self.calls.append(("GET", path, None))
-        return {}
+        return {"windows": []}
 
-    def post(self, path, body=None, **kw):
-        self.calls.append(("POST", path, body, kw))
-        return {}
+    def post(self, path, body, timeout=None):
+        self.calls.append(("POST", path, body))
+        return {"ok": True}
 
 
 def test_the_tools_carry_the_session_and_the_op(monkeypatch):
+    from claude_launcher import webdebug_mcp
+
     client = _Client()
     monkeypatch.setattr(webdebug_mcp, "_client", lambda: client)
-    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
-    webdebug_mcp.call_tool("webdebug_windows", {})
-    assert client.calls[-1][:2] == ("GET", "/api/webdebug/windows?session=s7")
-    webdebug_mcp.call_tool("webdebug_click", {"ref": "e2", "window": "w-abcd"})
-    _, path, body, kw = client.calls[-1]
-    assert path == "/api/webdebug/command"
-    assert body == {"session": "s7", "op": "click", "args": {"ref": "e2"}, "timeout": 20, "window": "w-abcd"}
-    assert kw["timeout"] > body["timeout"]
-    webdebug_mcp.call_tool("webdebug_navigate", {"url": "localhost:3000"})
-    assert client.calls[-1][2]["timeout"] == 30
-    for tool in webdebug_mcp.TOOLS:
-        if tool["name"] != "webdebug_windows":
-            assert webdebug_mcp._OPS[tool["name"]] in webdebug.OPS
-    names = {t["name"] for t in mcp_server.TOOLS}
-    assert {t["name"] for t in webdebug_mcp.TOOLS} <= names
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+
+    assert webdebug_mcp.call_tool("webdebug_windows", {}) == {"windows": []}
+    assert client.calls[-1] == ("GET", "/api/webdebug/windows?session=s1", None)
+
+    webdebug_mcp.call_tool("webdebug_click", {"ref": "e3"})
+    method, path, body = client.calls[-1]
+    assert (method, path) == ("POST", "/api/webdebug/command")
+    assert body == {"session": "s1", "op": "click", "args": {"ref": "e3"}, "timeout": 20}
+
+    webdebug_mcp.call_tool("webdebug_navigate", {"url": "http://x/", "window": "w-abcd"})
+    _method, _path, body = client.calls[-1]
+    assert body["op"] == "navigate" and body["window"] == "w-abcd" and body["timeout"] == 30
+
+
+def _tab_move_source():
+    """What the tab's move does with the button, read from the shipped source:
+    ("table", <table source>) when it names the held button through the table,
+    ("none", ...) when it names no button at all, ("e.button", ...) when it
+    reads the move's own e.button. The table source is returned so the browser
+    test can run the shipped mapping instead of a copy."""
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    start = script.index('screen.addEventListener("mousemove"')
+    end = script.index("screen.addEventListener(", start + 1)
+    move = script[start:end]
+    assert 'type: "mouseMoved"' in move and "buttons: e.buttons" in move
+    table = script[script.index("const HELD_BUTTONS"):
+                   script.index("}", script.index("function heldButton(")) + 1]
+    assert "function heldButton" in table and 'return "none"' in table
+    if "heldButton(e.buttons)" in move:
+        return "table", table
+    if 'button: "none"' in move:
+        return "none", table
+    if "buttonName(e.button)" in move:
+        return "e.button", table
+    return "unknown", table
+
+
+def test_a_hover_reaches_the_page_as_no_button_held(tmp_path, monkeypatch):
+    """The two halves of one field. Chrome takes the page's e.buttons from a
+    move's `button`, so naming a button with an empty mask made every hover a
+    drag (s490-rev). It also takes its own drag gesture from there, so naming
+    no button while one is held kills the drag -- a text selection never starts
+    (s648-rev measured range 0 against 66). The move must name the held button
+    and nothing when none is held."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    from urllib.parse import quote
+
+    from aiohttp import WSMsgType
+
+    page = tmp_path / "moves.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>moves</title>"
+        "<body style='margin:0;font:16px monospace'><p id=t>hello world selection</p>"
+        "<script>window.__moves=[];document.addEventListener('mousemove',"
+        "e=>{window.__moves.push({button:e.button,buttons:e.buttons});});</script>",
+        encoding="utf-8")
+
+    async def run():
+        client = TestClient(TestServer(_app(_Manager("s1"))))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                "/api/webdebug/ws?window=w-moves&session=s1&url=" + quote(page.as_uri(), safe=""))
+            for _ in range(200):
+                msg = await ws.receive(timeout=10)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("type") == "state":
+                    break
+            hub = client.server.app["webdebug"]
+            win = hub.window_for("s1", "w-moves")
+            # the state message goes out at attach, before the navigation lands
+            for _ in range(100):
+                if await hub.evaluate(win, "document.title") == "moves":
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError("the page never loaded")
+
+            async def move(button, buttons, want):
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "mouse", "type": "mouseMoved", "x": 10, "y": 10,
+                    "button": button, "buttons": buttons}})
+                for _ in range(50):
+                    seen = json.loads(await hub.evaluate(win, "JSON.stringify(window.__moves)"))
+                    if seen and len(seen) == want:
+                        return seen[-1]
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    f"no move reached the page for button={button!r} buttons={buttons}: {seen} "
+                    f"at {await hub.evaluate(win, 'location.href')}")
+
+            # what the tab puts on a move of this mask, taken from its own rule
+            shape, table = _tab_move_source()
+
+            async def tab_button(mask):
+                if shape == "table":
+                    return await hub.evaluate(
+                        win, "(() => {" + table + f"\nreturn heldButton({mask}); }})()")
+                if shape == "none":
+                    return "none"   # names no button whatever is held
+                if shape == "e.button":
+                    return "left"   # a move's own e.button is 0, which is left
+                raise AssertionError(f"the move's button shape is {shape!r}")
+
+            assert await tab_button(0) == "none"
+
+            # a hover names nothing and the page sees no button held
+            assert await move(await tab_button(0), 0, 1) == {"button": 0, "buttons": 0}
+
+            # naming a button out of an empty mask fabricates a press
+            assert await move("left", 0, 2) == {"button": 0, "buttons": 1}
+
+            # a drag keeps the mask and the name, and the page selects text
+            box = (await hub.agent(win, "rect", {"selector": "#t"}))["rect"]
+            y = box["y"] + box["height"] / 2
+            left, right = box["x"] + 2, box["x"] + box["width"] - 2
+
+            async def drag(name):
+                await hub.evaluate(win, "getSelection().removeAllRanges()")
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "mouse", "type": "mousePressed", "x": left, "y": y,
+                    "button": "left", "buttons": 1, "clickCount": 1}})
+                for frac in (0.3, 0.6, 1.0):
+                    await ws.send_json({"type": "input", "event": {
+                        "kind": "mouse", "type": "mouseMoved",
+                        "x": left + (right - left) * frac, "y": y,
+                        "button": name, "buttons": 1}})
+                    await asyncio.sleep(0.05)
+                for _ in range(50):
+                    seen = await hub.evaluate(
+                        win, "JSON.stringify({type: getSelection().type, "
+                             "text: String(getSelection())})")
+                    if json.loads(seen)["type"] != "None":
+                        break
+                    await asyncio.sleep(0.1)
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "mouse", "type": "mouseReleased", "x": right, "y": y,
+                    "button": "left", "buttons": 0, "clickCount": 1}})
+                return json.loads(seen)
+
+            selected = await drag(await tab_button(1))
+            assert selected["type"] == "Range" and "hello world" in selected["text"], selected
+
+            # the shape this fix had before: the mask is right, the drag is dead
+            stalled = await drag("none")
+            assert stalled == {"type": "Caret", "text": ""}, stalled
+
+            # the table names each held button, and nothing when none is held
+            assert [await tab_button(m) for m in (0, 1, 2, 4)] == ["none", "left", "right", "middle"]
+            await ws.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_move_names_the_button_that_is_held():
+    """The tab builds the move itself: the name comes from the mask, never from
+    the move's own e.button (which is always 0)."""
+    shape, table = _tab_move_source()
+    assert shape == "table", f"the move takes its button from {shape!r}"
+    assert "e.button" not in table

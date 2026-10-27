@@ -1,77 +1,67 @@
-"""The web debug page (claunch-dsb28): a page under development, framed by
-the dashboard so the user and a session can both see and act on it.
+"""The web debug page (claunch-o8pb7.2): a browser the daemon runs, and the
+screen of it the user watches.
+
+The page under development is opened **inside the daemon's own headless
+Chromium**, and what the user sees is that browser's screen -- CDP
+``Page.startScreencast`` frames pushed over the page's WebSocket. Nothing is
+framed, so none of the failures of the framed design can happen: there is no
+second port to reach (claunch-dsb28's relay gap), no ``X-Frame-Options`` to
+strip, no mixed content between an https dashboard and an http listener, and a
+redirect to another origin is just a navigation inside the same browser
+(claunch-o8pb7: ``_location`` could not rewrite an absolute redirect, so the
+frame left the proxy and the probe with it).
 
 Three parts, all in this module:
 
-* **The proxy.** The page under test is never framed directly. A dev server
-  at ``http://localhost:5173`` is another origin than the dashboard, and a
-  parent page cannot read or drive a cross-origin frame. So the daemon opens
-  one listener per target origin (``Proxy``), on a port of its own, and the
-  frame loads the target through it. Every HTML response gets one script tag,
-  ``/__claunch/probe.js`` (web/static/webdebug-probe.js), and the probe
-  answers the parent page over ``postMessage``: outline the DOM, pick an
-  element, click, type, read the console.
+* **The browser.** One Chromium process for the whole daemon, launched on
+  first use, found through ``$CLAUNCH_CHROMIUM``, then the Playwright browser
+  cache, then the system installations (:func:`find_browser`). Each window
+  gets its own browser context, so cookies and storage of one window never
+  reach another. It is stopped after the last window closes
+  (:data:`IDLE_SECONDS`), or with the daemon.
 
-  A port of its own rather than a path under the daemon (as /vscode/ is):
-  * root-absolute URLs (``/src/main.ts``, ``/@vite/client``, ES module
-    imports) resolve against the proxy's root, which *is* the target's root,
-    so nothing in the page needs rewriting;
-  * the proxied page runs at an origin that is not the dashboard's, so its
-    scripts cannot read the daemon's API with the user's login. A same-origin
-    proxy would hand every script on the page under test -- its CDN and
-    analytics tags included -- the daemon's authority.
+  Pure CDP over the connection aiohttp already provides (``web/static/
+  webdebug-agent.js`` is the page-side half). No Playwright: it would add a
+  Python dependency pinned to a browser revision, and the daemon's event loop
+  is the only thing that needs to drive the browser.
 
-  That origin is still the dashboard's *site* (same host, another port), and
-  the login cookie's SameSite=Strict does not tell ports apart: a POST or a
-  WebSocket the proxied page opens to the daemon carries the cookie, and CORS
-  hides only the response. What refuses it is the daemon's auth middleware,
-  which turns away a cookie-authenticated request whose Sec-Fetch-Site (or,
-  without that, Origin) names another page (api._foreign_origin).
+* **Windows.** A window is one browser page plus the viewer tab that shows it.
+  The viewer attaches to ``/api/webdebug/ws?window=w-xxxx``; the daemon pushes
+  JPEG frames down that socket (binary) and receives the user's mouse, wheel
+  and key events back up (JSON), which it turns into ``Input.dispatch*``. The
+  window says which claunch session it is showing; only that session's agent
+  can drive it. A viewer that goes away for longer than
+  :data:`VIEWER_GRACE` closes its page; a reload inside that window re-attaches
+  to the same page, so a login in the browser survives it.
 
-  The listener is not open to whoever reaches the port: a request needs the
-  proxy's cookie, which only ``/__claunch/enter?k=<secret>`` sets, and the
-  secret is only handed out by an authenticated ``/api/webdebug/proxy``
-  call. The daemon's own login cookie (host-scoped, so the browser sends it
-  to every port) and the proxy cookies are stripped before a request goes
-  upstream.
-
-  The listener speaks plain HTTP, always. Two consequences were reported as
-  one bug (claunch-o8pb7: "페이지가 연결도 안되고"): an ``https://`` address
-  for a server that answers in plaintext failed in the upstream client with
-  ``SSL: WRONG_VERSION_NUMBER`` (now read once at proxy time by
-  :func:`alternate_scheme`, which opens it as ``http://``), and a dashboard
-  opened over https cannot frame an http listener at all -- the browser
-  blocks it as mixed content, so the page says so and offers a new tab
-  instead of pointing the frame at a port that is not speaking TLS.
-
-* **Windows.** Each open web debug page holds one WebSocket
-  (``/api/webdebug/ws``) and says which session it is showing. The user
-  picks that session in the page's top bar; only that session's agent can
-  drive the window.
-
-* **Commands and sends.** A session's MCP tools (webdebug_mcp.py) post a
-  command to ``/api/webdebug/command``; the daemon forwards it to the window
-  and waits for the page's answer. The other direction is always the user's
-  explicit act: a picked element or a screenshot goes to the session only
-  when the user presses Send (``/api/webdebug/send``), typed into the
-  session as a ``[claunch webdebug w-...]`` block.
+* **Commands.** A session's MCP tools (webdebug_mcp.py) post a command to
+  ``/api/webdebug/command``; the daemon runs it in the window's page -- DOM
+  reads and element-level actions through the injected agent script, input
+  and screenshots through CDP. The tool names, arguments and answer shapes are
+  unchanged from the framed design. The other direction is always the user's
+  explicit act: a picked element or a screenshot goes to the session only when
+  the user presses Send (``/api/webdebug/send``), typed into the session as a
+  ``[claunch webdebug w-...]`` block.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
-import hashlib
+import glob
 import json
 import logging
+import os
 import re
 import secrets
-import ssl
+import shutil
+import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 import aiohttp
 from aiohttp import WSMsgType, web
@@ -80,53 +70,65 @@ from . import paths
 
 log = logging.getLogger(__name__)
 
-PROBE_PATH = "/__claunch/probe.js"
-ENTER_PATH = "/__claunch/enter"
-PROBE_FILE = Path(__file__).resolve().parent.parent / "web" / "static" / "webdebug-probe.js"
 PAGE_FILE = Path(__file__).resolve().parent.parent / "web" / "static" / "webdebug.html"
-
-#: Cookies the browser sends to every port of this host that must never
-#: reach the page under test: the daemon's login (api.COOKIE_PREFIX) and the
-#: proxies' own.
-_PRIVATE_COOKIE_PREFIXES = ("claunch_session", "claunch_wd_")
-
-#: Request headers not forwarded upstream. ``accept-encoding`` too: the
-#: client decompresses and the response is passed on decoded (the probe is
-#: injected into the decoded HTML).
-_HOP = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "host",
-    "accept-encoding", "content-length",
-}
-_WS_OWN = {"sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions",
-           "sec-websocket-protocol"}
-#: Response headers dropped: framing refusals (the page must load in the
-#: frame, and the probe is a script the page's CSP does not list) and the
-#: encoding the client already undid.
-_DROP_RESPONSE = {
-    "x-frame-options", "content-security-policy", "content-security-policy-report-only",
-    "content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive",
-}
-
-#: What the MCP tools may ask a window to do. The page and the probe
-#: implement them; anything else is refused here before it reaches a page.
-OPS = frozenset({
-    "snapshot", "query", "click", "type", "press", "scroll", "navigate",
-    "eval", "console", "screenshot", "highlight",
-})
+AGENT_FILE = Path(__file__).resolve().parent.parent / "web" / "static" / "webdebug-agent.js"
 
 COMMAND_TIMEOUT = 20.0
 MAX_COMMAND_TIMEOUT = 120.0
-#: How long the scheme probe (alternate_scheme) may take before the address
-#: keeps the scheme it was typed with.
-SCHEME_PROBE_TIMEOUT = 2.5
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 _IMAGE_ID = re.compile(r"^[0-9a-f]{20}\.(png|jpg|webp)$")
 _WINDOW_ID = re.compile(r"^w-[0-9a-z]{4,16}$")
-_ORIGIN = re.compile(r"^https?://[^/\s]+$")
 
 PREFIX = "[claunch webdebug"
+
+#: What the MCP tools may ask a window to do. The agent script implements the
+#: DOM ones; navigate, screenshot and the input domain are the daemon's.
+OPS = frozenset({
+    "snapshot", "query", "click", "type", "press", "scroll", "navigate",
+    "eval", "console", "screenshot", "highlight", "rect",
+})
+AGENT_OPS = frozenset({"snapshot", "query", "click", "type", "press", "scroll",
+                       "eval", "console", "highlight", "rect"})
+
+#: The viewport every window renders at. The screencast is capped to it, so a
+#: frame's pixel size is the page's CSS size and a click in the viewer maps to
+#: page coordinates by ratio alone.
+VIEWPORT_WIDTH = 1280
+VIEWPORT_HEIGHT = 800
+DEFAULT_QUALITY = 60
+MIN_QUALITY = 10
+MAX_QUALITY = 90
+
+#: Windows alive at once. One page costs ~1.3 GiB across the browser's whole
+#: process tree (measured 2026-10-27, Chrome for Testing 156, headless, 1280x800,
+#: streaming); opening one more closes the oldest.
+MAX_WINDOWS = max(1, int(os.environ.get("CLAUNCH_WEBDEBUG_MAX_WINDOWS") or 1))
+#: The browser is stopped this long after its last window closed.
+IDLE_SECONDS = float(os.environ.get("CLAUNCH_WEBDEBUG_IDLE") or 300)
+#: A viewer tab that goes away keeps its page this long (a reload comes back).
+VIEWER_GRACE = 45.0
+#: Frames are dropped rather than queued when a viewer lags this far behind.
+MAX_WRITE_BUFFER = 4 * 1024 * 1024
+
+BROWSER_ENV = "CLAUNCH_CHROMIUM"
+#: A dev server on https with a self-signed certificate (or a proxy whose CA the
+#: browser does not trust) fails every navigation with
+#: ERR_CERT_AUTHORITY_INVALID. Turning this on makes the debug browser accept
+#: any certificate; it is off by default because that browser then also trusts
+#: whatever a real site's attacker presents.
+INSECURE_TLS_ENV = "CLAUNCH_WEBDEBUG_INSECURE_TLS"
+#: Chrome's sandbox stays on by default: this browser renders whatever page a
+#: user or agent names, so without it a renderer bug is code execution as the
+#: daemon's user. It is turned off only where it cannot work (running as root)
+#: or when the operator says so -- some containers and older kernels have no
+#: user namespaces, and there Chrome refuses to start.
+NO_SANDBOX_ENV = "CLAUNCH_WEBDEBUG_NO_SANDBOX"
+#: What the page-side agent throws when the document has not got it yet.
+MISSING_AGENT = "the web debug agent is not in this document"
+_LAUNCH_TIMEOUT = 25.0
+
+_KEY_MODIFIERS = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
 
 
 class WebDebugError(Exception):
@@ -135,392 +137,391 @@ class WebDebugError(Exception):
         self.status = status
 
 
-# --------------------------------------------------------------------------- #
-# URLs and HTML
-# --------------------------------------------------------------------------- #
-def split_target(raw: str) -> Tuple[str, str]:
-    """``(origin, path)`` of a URL the user typed in the address bar.
+def _on(value: str) -> bool:
+    return os.environ.get(value) not in (None, "", "0", "false", "no")
 
-    A bare ``localhost:3000/x`` is read as http. Only http(s) is proxied.
-    """
+
+def sandbox_off() -> bool:
+    """Whether to start the browser with ``--no-sandbox``."""
+    if _on(NO_SANDBOX_ENV):
+        return True
+    getuid = getattr(os, "geteuid", None)
+    return bool(getuid and getuid() == 0)
+
+
+def browser_args(binary: str, profile: str) -> List[str]:
+    """The browser's command line. Split out so a test can hold the flags
+    without starting anything."""
+    args = [
+        binary,
+        "--headless=new",
+        "--remote-debugging-port=0",
+        f"--user-data-dir={profile}",
+        f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT}",
+        "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
+        "--disable-gpu", "--hide-scrollbars", "--mute-audio", "--disable-dev-shm-usage",
+        "--disable-extensions", "--disable-sync",
+    ]
+    if _on(INSECURE_TLS_ENV):
+        args.append("--ignore-certificate-errors")
+    if sandbox_off():
+        args.append("--no-sandbox")
+    args.append("about:blank")
+    return args
+
+
+def target_url(raw: str) -> str:
+    """The address to open: a bare ``localhost:3000/x`` is read as http, and
+    only what a browser can open is accepted. Addresses resolve on the
+    daemon's machine -- ``localhost`` is the daemon's own."""
     text = str(raw or "").strip()
     if not text:
         raise WebDebugError(400, "an address is required")
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", text):
+    allowed = ("http", "https", "about", "data", "file")
+    scheme = urllib.parse.urlsplit(text).scheme.lower()
+    if scheme and scheme not in allowed:
+        # ``example.com:8080/x`` reads as a scheme too; a port after the colon
+        # (digits, then the path or nothing) means the user typed an address.
+        rest = text.split(":", 1)[1]
+        if not re.match(r"^\d+(/|$|\?)", rest):
+            raise WebDebugError(400, (
+                f"a browser cannot open {scheme}: addresses -- only "
+                + ", ".join(allowed) + " are"))
         text = "http://" + text
-    parts = urllib.parse.urlsplit(text)
-    scheme = parts.scheme.lower()
-    if scheme not in ("http", "https"):
-        raise WebDebugError(400, f"only http and https pages can be opened, not {scheme}:")
-    if not parts.hostname:
-        raise WebDebugError(400, f"{raw!r} names no host")
-    host = parts.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parts.port
-    except ValueError:
-        raise WebDebugError(400, f"{raw!r} has an invalid port") from None
-    origin = f"{scheme}://{host}" + (f":{port}" if port else "")
-    path = parts.path or "/"
-    if parts.query:
-        path += "?" + parts.query
-    if parts.fragment:
-        path += "#" + parts.fragment
-    return origin, path
-
-
-def _authority(host: str, port: int) -> str:
-    """``host:port`` with an IPv6 host bracketed, for a URL or a bind."""
-    return (f"[{host}]" if ":" in host else host) + f":{port}"
-
-
-async def _speaks_tls(host: str, port: int, timeout: float = SCHEME_PROBE_TIMEOUT) -> Optional[bool]:
-    """Whether ``host:port`` answers a TLS handshake.
-
-    ``True``: the handshake completed (the certificate is not judged -- the
-    proxy does not verify it either). ``False``: TLS was attempted and the
-    peer answered something else, which is a plain HTTP server sending its
-    error page back (``SSL: WRONG_VERSION_NUMBER``). ``None``: no verdict --
-    the address did not answer at all, which says nothing about the scheme.
-    """
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    writer = None
-    try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=context, server_hostname=host), timeout)
-        return True
-    except ssl.SSLError:  # an OSError subclass: keep this branch first
-        return False
-    except (asyncio.TimeoutError, OSError):
-        return None
-    finally:
-        if writer is not None:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-
-async def alternate_scheme(origin: str) -> Optional[str]:
-    """``origin`` with ``http://`` when its ``https://`` host speaks plaintext.
-
-    Only an https address is read: that is the failure claunch-o8pb7 reported
-    (a dev server at ``http://host:port`` opened as ``https://host:port``),
-    and the probe is cheap and local in the common case -- a TLS handshake
-    that the plaintext server answers with its HTTP error page. An http
-    address is left alone: probing it would send a stray ClientHello to every
-    page opened through the proxy, for a failure (a TLS-only dev server typed
-    without a scheme) that the 502 page names.
-    """
-    parts = urllib.parse.urlsplit(origin)
-    if parts.scheme != "https" or not parts.hostname:
-        return None
-    if await _speaks_tls(parts.hostname, parts.port or 443) is not False:
-        return None
-    return "http://" + origin[len("https://"):]
-
-
-_HEAD = re.compile(rb"<head(\s[^>]*)?>", re.IGNORECASE)
-_HTML = re.compile(rb"<html(\s[^>]*)?>", re.IGNORECASE)
-_DOCTYPE = re.compile(rb"<!doctype[^>]*>", re.IGNORECASE)
-PROBE_TAG = b'<script src="' + PROBE_PATH.encode() + b'"></script>'
-
-
-def inject_probe(body: bytes) -> bytes:
-    """``body`` with the probe's script tag as early as it can go: first in
-    ``<head>``, so it sees the page's own console output and errors from the
-    start. Never before the doctype (that would put the page in quirks
-    mode)."""
-    for pattern in (_HEAD, _HTML, _DOCTYPE):
-        m = pattern.search(body)
-        if m:
-            return body[:m.end()] + PROBE_TAG + body[m.end():]
-    return PROBE_TAG + body
-
-
-def _private_cookie(name: str) -> bool:
-    return name.startswith(_PRIVATE_COOKIE_PREFIXES)
-
-
-def _clean_set_cookie(value: str) -> str:
-    """A target's Set-Cookie made to stick on the proxy's origin: no
-    ``Domain`` (the proxy is another host name than the target may be) and no
-    ``Secure``/``SameSite=None`` (the proxy speaks plain http)."""
-    parts = [p for p in value.split(";")]
-    keep = [parts[0]]
-    for p in parts[1:]:
-        low = p.strip().lower()
-        if low.startswith("domain=") or low == "secure" or low == "samesite=none":
-            continue
-        keep.append(p)
-    return ";".join(keep)
-
-
-def _page(status: int, text: str) -> web.Response:
-    body = ("<!doctype html><meta charset=utf-8><title>claunch webdebug</title>"
-            f"<p style='font:14px system-ui;margin:2em'>{text}</p>")
-    return web.Response(status=status, text=body, content_type="text/html")
-
-
-def _upstream_failure(origin: str, exc: BaseException) -> str:
-    """What the frame says when the target did not answer.
-
-    The two scheme mismatches get a sentence naming the fix: the OpenSSL text
-    ("WRONG_VERSION_NUMBER") reads as a claunch failure when the address is
-    simply the wrong scheme (claunch-o8pb7).
-    """
-    text = str(exc)
-    low = text.lower()
-    if origin.startswith("https://") and ("wrong_version_number" in low or "wrong version number" in low):
-        return (f"{origin} 은(는) TLS로 응답하지 않습니다. 이 포트는 평문 HTTP일 수 있습니다 — "
-                f"http://{origin[len('https://'):]} 로 여십시오.")
-    if origin.startswith("http://") and isinstance(exc, aiohttp.ServerDisconnectedError):
-        return (f"{origin} 이(가) 연결을 닫았습니다. 이 포트가 TLS를 요구할 수 있습니다 — "
-                f"https://{origin[len('http://'):]} 로 시도해 보십시오.")
-    return f"{origin} did not answer: {text}"
+    elif not scheme:
+        text = "http://" + text
+    return text
 
 
 # --------------------------------------------------------------------------- #
-# the proxy
+# the browser
 # --------------------------------------------------------------------------- #
-class Proxy:
-    """One listener in front of one target origin."""
+def browser_candidates() -> List[str]:
+    """Every browser this machine might have, best first.
 
-    def __init__(self, origin: str, bind: str) -> None:
-        self.origin = origin
-        self.bind = bind
-        self.secret = secrets.token_urlsafe(24)
-        self.cookie = "claunch_wd_" + hashlib.sha256(self.secret.encode()).hexdigest()[:10]
-        self.parents: set = set()
-        self.port: Optional[int] = None
-        self.runner: Optional[web.AppRunner] = None
-        self.http: Optional[aiohttp.ClientSession] = None
-        self.used_at = time.time()
+    The environment wins; then the Playwright cache (a browser an earlier
+    Playwright download left here -- reusing it avoids a 400 MB download and
+    pins nothing); then what the distribution installed.
+    """
+    out: List[str] = []
+    env = os.environ.get(BROWSER_ENV)
+    if env:
+        out.append(env)
+    home = Path.home()
+    for pattern in ("chromium-*/chrome-linux64/chrome", "chromium-*/chrome-linux/chrome",
+                    "chromium_headless_shell-*/chrome-linux*/headless_shell"):
+        out.extend(sorted(glob.glob(str(home / ".cache" / "ms-playwright" / pattern)), reverse=True))
+    out.extend(["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable", "/snap/bin/chromium"])
+    return [p for p in out if p]
 
-    async def start(self) -> None:
-        app = web.Application(client_max_size=64 * 1024 * 1024)
-        app.router.add_route("*", "/{tail:.*}", self.handle)
-        self.runner = web.AppRunner(app, access_log=None, shutdown_timeout=1.0)
-        await self.runner.setup()
-        site = web.TCPSite(self.runner, self.bind, 0)
-        await site.start()
-        self.port = self.runner.addresses[0][1]
-        self.http = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
-            cookie_jar=aiohttp.DummyCookieJar(),
-        )
-        log.info("webdebug: proxy for %s on %s:%s", self.origin, self.bind, self.port)
+
+def find_browser() -> str:
+    for candidate in browser_candidates():
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    raise WebDebugError(503, (
+        "no Chromium on this machine for the web debug page. Install one, or point "
+        f"${BROWSER_ENV} at its binary (looked at: "
+        + ", ".join(browser_candidates()[:6]) + ")"))
+
+
+class CDP:
+    """One DevTools connection: numbered requests, events to a callback."""
+
+    def __init__(self, ws: aiohttp.ClientWebSocketResponse,
+                 on_event: Callable[[dict], None]) -> None:
+        self.ws = ws
+        self._on_event = on_event
+        self._seq = 0
+        self._pending: Dict[int, asyncio.Future] = {}
+        self._write_lock = asyncio.Lock()
+        self._task: Optional[asyncio.Task] = None
+        self.closed = False
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._pump())
+
+    async def _pump(self) -> None:
+        try:
+            async for msg in self.ws:
+                if msg.type != WSMsgType.TEXT:
+                    if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR, WSMsgType.CLOSED):
+                        break
+                    continue
+                try:
+                    data = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    continue
+                if "id" in data:
+                    fut = self._pending.pop(int(data["id"]), None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(data)
+                else:
+                    try:
+                        self._on_event(data)
+                    except Exception:  # noqa: BLE001 -- an event must not kill the pump
+                        log.exception("webdebug: event handler failed")
+        finally:
+            self.closed = True
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(ConnectionResetError("the browser connection closed"))
+            self._pending.clear()
+
+    async def send(self, method: str, params: Optional[dict] = None, *,
+                   session: str = "", timeout: float = COMMAND_TIMEOUT) -> dict:
+        if self.closed:
+            raise WebDebugError(503, "the browser connection is closed")
+        self._seq += 1
+        mid = self._seq
+        payload: Dict[str, object] = {"id": mid, "method": method, "params": params or {}}
+        if session:
+            payload["sessionId"] = session
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[mid] = fut
+        try:
+            async with self._write_lock:
+                await self.ws.send_json(payload)
+            reply = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise WebDebugError(504, f"the browser did not answer {method} within {timeout:g}s") from None
+        except (ConnectionResetError, RuntimeError) as exc:
+            raise WebDebugError(503, f"the browser went away: {exc}") from None
+        finally:
+            self._pending.pop(mid, None)
+        error = reply.get("error")
+        if error:
+            raise WebDebugError(502, f"{method}: {error.get('message') or error}")
+        return reply.get("result") or {}
+
+    async def close(self) -> None:
+        self.closed = True
+        with contextlib.suppress(Exception):
+            await self.ws.close()
+        if self._task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._task, timeout=5)
+
+
+class Browser:
+    """The Chromium process and its DevTools connection (one per daemon)."""
+
+    def __init__(self, on_event: Callable[[dict], None]) -> None:
+        self._on_event = on_event
+        self._proc: Optional[asyncio.subprocess.Process] = None
+        self._cdp: Optional[CDP] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._profile: Optional[str] = None
+        self._lock = asyncio.Lock()
+        self.path = ""
+
+    @property
+    def live(self) -> bool:
+        return self._cdp is not None and not self._cdp.closed
+
+    @property
+    def cdp(self) -> Optional["CDP"]:
+        return self._cdp
+
+    async def ensure(self) -> CDP:
+        async with self._lock:
+            if self.live:
+                return self._cdp  # type: ignore[return-value]
+            await self._start_locked()
+            return self._cdp  # type: ignore[return-value]
+
+    async def _start_locked(self) -> None:
+        await self._stop_locked()
+        self.path = find_browser()
+        # Not /tmp: that is one directory for the whole machine, and several
+        # daemons (a test run's included) may have a browser at once. Under
+        # the daemon's own home the profile is ours to name and to sweep.
+        root = paths.daemon_dir() / "webdebug"
+        root.mkdir(parents=True, exist_ok=True)
+        for stale in root.glob("browser-*"):
+            with contextlib.suppress(OSError):
+                if time.time() - stale.stat().st_mtime > 3600:
+                    shutil.rmtree(stale, ignore_errors=True)
+        self._profile = tempfile.mkdtemp(prefix="browser-", dir=str(root))
+        port_file = Path(self._profile) / "DevToolsActivePort"
+        args = browser_args(self.path, self._profile)
+        log.info("webdebug: starting browser %s", self.path)
+        self._proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        deadline = time.monotonic() + _LAUNCH_TIMEOUT
+        port = 0
+        # Chrome's sandbox needs user namespaces; a container without them fails
+        # here. Say so, because the fix is an opt-out the operator chooses.
+        sandbox_hint = "" if sandbox_off() else (
+            f" -- if this machine cannot run Chrome's sandbox, set {NO_SANDBOX_ENV}=1")
+        while time.monotonic() < deadline:
+            if self._proc.returncode is not None:
+                raise WebDebugError(503, (
+                    f"the browser {self.path} exited with {self._proc.returncode} before it "
+                    "opened a DevTools port" + sandbox_hint))
+            if port_file.is_file():
+                text = port_file.read_text(errors="replace").split()
+                if text:
+                    port = int(text[0])
+                    break
+            await asyncio.sleep(0.05)
+        if not port:
+            raise WebDebugError(503, f"the browser {self.path} did not open a DevTools port "
+                                     f"within {_LAUNCH_TIMEOUT:g}s" + sandbox_hint)
+        self._session = aiohttp.ClientSession()
+        try:
+            async with self._session.get(f"http://127.0.0.1:{port}/json/version") as resp:
+                version = await resp.json()
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
+            raise WebDebugError(503, f"could not read the browser's DevTools endpoint: {exc}") from None
+        ws = await self._session.ws_connect(version["webSocketDebuggerUrl"],
+                                            max_msg_size=64 * 1024 * 1024, heartbeat=30)
+        self._cdp = CDP(ws, self._on_event)
+        self._cdp.start()
+        log.info("webdebug: browser %s up (%s)", version.get("Browser"), self.path)
 
     async def stop(self) -> None:
-        if self.http is not None:
+        async with self._lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
+        cdp, self._cdp = self._cdp, None
+        if cdp is not None:
+            await cdp.close()
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        session, self._session = self._session, None
+        if session is not None:
             with contextlib.suppress(Exception):
-                await self.http.close()
-        if self.runner is not None:
-            with contextlib.suppress(Exception):
-                await self.runner.cleanup()
+                await session.close()
+        profile, self._profile = self._profile, None
+        if profile:
+            shutil.rmtree(profile, ignore_errors=True)
 
-    def enter_path(self, path: str) -> str:
-        return ENTER_PATH + "?" + urllib.parse.urlencode({"k": self.secret, "to": path})
+    async def new_page(self, url: str = "about:blank") -> Dict[str, str]:
+        cdp = await self.ensure()
+        context = await cdp.send("Target.createBrowserContext", {"disposeOnDetach": False})
+        context_id = context["browserContextId"]
+        target = await cdp.send("Target.createTarget",
+                                {"url": "about:blank", "browserContextId": context_id})
+        attach = await cdp.send("Target.attachToTarget",
+                                {"targetId": target["targetId"], "flatten": True})
+        session_id = attach["sessionId"]
+        await cdp.send("Page.enable", session=session_id)
+        await cdp.send("Runtime.enable", session=session_id)
+        await cdp.send("Log.enable", session=session_id)
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+            "width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT,
+            "deviceScaleFactor": 1, "mobile": False,
+        }, session=session_id)
+        source = AGENT_FILE.read_text(encoding="utf-8") if AGENT_FILE.is_file() else ""
+        if source:
+            await cdp.send("Page.addScriptToEvaluateOnNewDocument",
+                           {"source": source}, session=session_id)
+        return {"context_id": context_id, "target_id": target["targetId"], "session_id": session_id}
 
-    def _authorized(self, request: web.Request) -> bool:
-        value = request.cookies.get(self.cookie, "")
-        return bool(value) and secrets.compare_digest(value, self.secret)
-
-    async def handle(self, request: web.Request) -> web.StreamResponse:
-        self.used_at = time.time()
-        if request.path == ENTER_PATH:
-            return self._enter(request)
-        if not self._authorized(request):
-            return _page(403, "This page is served by the claunch web debug proxy. "
-                              "Open it from the dashboard's web debug page.")
-        if request.path == PROBE_PATH:
-            return self._probe()
-        if request.headers.get("Upgrade", "").lower() == "websocket":
-            return await self._websocket(request)
-        return await self._http(request)
-
-    def _enter(self, request: web.Request) -> web.Response:
-        key = request.query.get("k", "")
-        if not key or not secrets.compare_digest(key, self.secret):
-            return _page(403, "This web debug link is not valid (the daemon may have restarted). "
-                              "Open the page again from the dashboard.")
-        to = request.query.get("to", "/")
-        if not to.startswith("/") or to.startswith("//"):
-            to = "/"
-        parent = request.query.get("parent", "")
-        if _ORIGIN.match(parent):
-            self.parents.add(parent)
-        resp = web.Response(status=302, headers={"Location": to})
-        resp.set_cookie(self.cookie, self.secret, httponly=True, samesite="Lax", path="/")
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
-
-    def _probe(self) -> web.Response:
-        try:
-            body = PROBE_FILE.read_text(encoding="utf-8")
-        except OSError:
-            body = "console.warn('claunch webdebug: probe missing');"
-        config = json.dumps({"parents": sorted(self.parents), "target": self.origin})
-        text = f"(function(CONFIG){{\n{body}\n}})({config});\n"
-        return web.Response(text=text, content_type="application/javascript",
-                            headers={"Cache-Control": "no-store"})
-
-    def _proxy_origin(self, request: web.Request) -> str:
-        return f"{request.scheme}://{request.host}"
-
-    def _headers(self, request: web.Request, *, websocket: bool) -> Dict[str, str]:
-        mine = self._proxy_origin(request)
-        out: Dict[str, str] = {}
-        for name, value in request.headers.items():
-            low = name.lower()
-            if low in _HOP or low == "cookie" or (websocket and low in _WS_OWN):
-                continue
-            if low == "origin" and value == mine:
-                value = self.origin
-            elif low == "referer" and value.startswith(mine):
-                value = self.origin + value[len(mine):]
-            out[name] = value
-        cookies = [
-            part.strip() for part in request.headers.get("Cookie", "").split(";")
-            if part.strip() and not _private_cookie(part.split("=", 1)[0].strip())
-        ]
-        if cookies:
-            out["Cookie"] = "; ".join(cookies)
-        out["Host"] = urllib.parse.urlsplit(self.origin).netloc
-        return out
-
-    def _location(self, value: str) -> str:
-        if value.startswith(self.origin + "/") or value == self.origin:
-            return value[len(self.origin):] or "/"
-        return value
-
-    async def _http(self, request: web.Request) -> web.StreamResponse:
-        assert self.http is not None
-        upstream = self.origin + request.rel_url.raw_path_qs
-        data = request.content if request.body_exists else None
-        try:
-            async with self.http.request(
-                request.method, upstream, headers=self._headers(request, websocket=False),
-                data=data, allow_redirects=False, ssl=False,
-            ) as up:
-                html = (up.headers.get("Content-Type", "").lower().startswith("text/html")
-                        and request.method != "HEAD")
-                headers = []
-                for name, value in up.headers.items():
-                    low = name.lower()
-                    if low in _DROP_RESPONSE:
-                        continue
-                    if low == "location":
-                        value = self._location(value)
-                    elif low == "set-cookie":
-                        value = _clean_set_cookie(value)
-                    headers.append((name, value))
-                if html:
-                    body = inject_probe(await up.read())
-                    resp = web.Response(status=up.status, reason=up.reason, body=body)
-                    for name, value in headers:
-                        resp.headers.add(name, value)
-                    return resp
-                resp = web.StreamResponse(status=up.status, reason=up.reason)
-                for name, value in headers:
-                    resp.headers.add(name, value)
-                await resp.prepare(request)
-                async for chunk in up.content.iter_chunked(64 * 1024):
-                    await resp.write(chunk)
-                await resp.write_eof()
-                return resp
-        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
-            return _page(502, _upstream_failure(self.origin, exc))
-
-    async def _websocket(self, request: web.Request) -> web.StreamResponse:
-        assert self.http is not None
-        upstream = self.origin.replace("http", "ws", 1) + request.rel_url.raw_path_qs
-        protocols = [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
-                     if p.strip()]
-        try:
-            up = await self.http.ws_connect(
-                upstream, headers=self._headers(request, websocket=True), protocols=protocols,
-                max_msg_size=0, autoping=True, ssl=False,
-            )
-        except (aiohttp.ClientError, OSError) as exc:
-            return _page(502, f"{self.origin} refused the socket: {exc}")
-        down = web.WebSocketResponse(protocols=[up.protocol] if up.protocol else (),
-                                     max_msg_size=0, autoping=True)
-        await down.prepare(request)
-
-        async def pump(src, dst) -> None:
-            async for msg in src:
-                if msg.type == WSMsgType.TEXT:
-                    await dst.send_str(msg.data)
-                elif msg.type == WSMsgType.BINARY:
-                    await dst.send_bytes(msg.data)
-                else:
-                    break
-
-        tasks = [asyncio.ensure_future(pump(down, up)), asyncio.ensure_future(pump(up, down))]
-        try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for task in tasks:
-                task.cancel()
-            with contextlib.suppress(Exception):
-                await up.close()
-            with contextlib.suppress(Exception):
-                await down.close()
-        return down
+    async def close_page(self, page: Dict[str, str]) -> None:
+        cdp = self._cdp
+        if cdp is None or cdp.closed:
+            return
+        with contextlib.suppress(WebDebugError, Exception):
+            await cdp.send("Target.disposeBrowserContext",
+                           {"browserContextId": page.get("context_id", "")}, timeout=5)
 
 
 # --------------------------------------------------------------------------- #
-# windows and commands
+# windows
 # --------------------------------------------------------------------------- #
-@dataclass
-class Window:
-    id: str
-    ws: web.WebSocketResponse
-    session: str = ""
-    url: str = ""
-    title: str = ""
-    sharing: bool = False
-    opened_at: float = field(default_factory=time.time)
-    focused_at: float = field(default_factory=time.time)
-    pending: Dict[str, asyncio.Future] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {"window": self.id, "session": self.session, "url": self.url, "title": self.title,
-                "screen_shared": self.sharing,
-                "opened_at": _iso(self.opened_at), "focused_at": _iso(self.focused_at)}
-
-
 def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
+@dataclass
+class Window:
+    id: str
+    page: Dict[str, str]
+    session: str = ""
+    url: str = ""
+    title: str = ""
+    quality: int = DEFAULT_QUALITY
+    viewers: List[web.WebSocketResponse] = field(default_factory=list)
+    frame_size: tuple = (0, 0)
+    last_frame: bytes = b""
+    frames: int = 0
+    opened_at: float = field(default_factory=time.time)
+    focused_at: float = field(default_factory=time.time)
+    closing: bool = False
+    #: Resolved by the browser's Page.loadEventFired for this window, so a
+    #: navigate waits for the page it asked for and not for the one before it.
+    loading: Optional[asyncio.Future] = None
+
+    @property
+    def cdp_session(self) -> str:
+        return self.page.get("session_id", "")
+
+    def to_dict(self) -> dict:
+        return {"window": self.id, "session": self.session, "url": self.url, "title": self.title,
+                "screen_shared": True, "frames": self.frames,
+                "viewport": {"width": self.frame_size[0], "height": self.frame_size[1]},
+                "opened_at": _iso(self.opened_at), "focused_at": _iso(self.focused_at)}
+
+
 class Hub:
-    """The proxies and windows of one daemon."""
+    """The browser and the windows of one daemon."""
 
     def __init__(self) -> None:
-        self.proxies: Dict[Tuple[str, str], Proxy] = {}
+        self.browser = Browser(self._event)
         self.windows: Dict[str, Window] = {}
         self._lock = asyncio.Lock()
+        self._reapers: Dict[str, asyncio.Task] = {}
+        self._idle: Optional[asyncio.Task] = None
 
-    async def proxy_for(self, origin: str, bind: str) -> Proxy:
-        async with self._lock:
-            proxy = self.proxies.get((origin, bind))
-            if proxy is None:
-                proxy = Proxy(origin, bind)
-                await proxy.start()
-                self.proxies[(origin, bind)] = proxy
-            return proxy
-
+    # -- lifecycle ------------------------------------------------------- #
     async def stop_all(self) -> None:
-        proxies, self.proxies = list(self.proxies.values()), {}
-        for proxy in proxies:
-            await proxy.stop()
-        for win in list(self.windows.values()):
-            self._drop(win)
+        for task in list(self._reapers.values()):
+            task.cancel()
+        self._reapers.clear()
+        if self._idle is not None:
+            self._idle.cancel()
+            self._idle = None
+        windows, self.windows = list(self.windows.values()), {}
+        for win in windows:
+            await self._close_page(win)
+        await self.browser.stop()
 
+    async def _close_page(self, win: Window) -> None:
+        win.closing = True
+        for ws in list(win.viewers):
+            with contextlib.suppress(Exception):
+                await ws.close(code=4001, message=b"the window closed")
+        win.viewers.clear()
+        await self.browser.close_page(win.page)
+
+    def _schedule_idle(self) -> None:
+        if self._idle is not None:
+            self._idle.cancel()
+
+        async def stop_later() -> None:
+            try:
+                await asyncio.sleep(IDLE_SECONDS)
+                if not self.windows:
+                    log.info("webdebug: no window for %gs, stopping the browser", IDLE_SECONDS)
+                    await self.browser.stop()
+            except asyncio.CancelledError:
+                pass
+
+        self._idle = asyncio.create_task(stop_later())
+
+    # -- windows --------------------------------------------------------- #
     def windows_of(self, session: str) -> List[Window]:
         return sorted((w for w in self.windows.values() if w.session == session),
                       key=lambda w: w.focused_at, reverse=True)
@@ -543,56 +544,298 @@ class Hub:
                 "its top bar."))
         return mine[0]
 
+    async def attach(self, window: str, session: str, ws: web.WebSocketResponse) -> Window:
+        async with self._lock:
+            win = self.windows.get(window)
+            reaper = self._reapers.pop(window, None)
+            if reaper is not None:
+                reaper.cancel()
+            if win is None:
+                while len(self.windows) >= MAX_WINDOWS:
+                    oldest = min(self.windows.values(), key=lambda w: w.opened_at)
+                    log.info("webdebug: %d window(s) already open, closing %s", len(self.windows), oldest.id)
+                    self.windows.pop(oldest.id, None)
+                    await self._close_page(oldest)
+                page = await self.browser.new_page()
+                win = Window(id=window, page=page, session=session)
+                self.windows[window] = win
+            win.viewers.append(ws)
+            if session:
+                win.session = session
+            if self._idle is not None:
+                self._idle.cancel()
+                self._idle = None
+        await self.ensure_screencast(win)
+        if win.last_frame:
+            with contextlib.suppress(Exception):
+                await ws.send_bytes(win.last_frame)
+        await self.send_state(win)
+        return win
+
+    async def detach(self, win: Window, ws: web.WebSocketResponse) -> None:
+        with contextlib.suppress(ValueError):
+            win.viewers.remove(ws)
+        if win.viewers or win.closing:
+            return
+
+        async def reap() -> None:
+            try:
+                await asyncio.sleep(VIEWER_GRACE)
+            except asyncio.CancelledError:
+                return
+            if win.viewers or win.closing:
+                return
+            async with self._lock:
+                if self.windows.get(win.id) is win:
+                    self.windows.pop(win.id, None)
+                    await self._close_page(win)
+                self._reapers.pop(win.id, None)
+            if not self.windows:
+                self._schedule_idle()
+
+        self._reapers[win.id] = asyncio.create_task(reap())
+
+    async def ensure_screencast(self, win: Window, quality: int = 0) -> None:
+        cdp = await self.browser.ensure()
+        if quality and max(MIN_QUALITY, min(MAX_QUALITY, int(quality))) != win.quality:
+            win.quality = max(MIN_QUALITY, min(MAX_QUALITY, int(quality)))
+            # A stream already running keeps its encoder settings; changing the
+            # quality means stopping it and starting again.
+            with contextlib.suppress(WebDebugError):
+                await cdp.send("Page.stopScreencast", session=win.cdp_session, timeout=10)
+        with contextlib.suppress(WebDebugError):
+            await cdp.send("Page.startScreencast", {
+                "format": "jpeg", "quality": win.quality,
+                "maxWidth": VIEWPORT_WIDTH, "maxHeight": VIEWPORT_HEIGHT,
+                "everyNthFrame": 1,
+            }, session=win.cdp_session, timeout=10)
+
+    # -- events from the browser ------------------------------------------ #
+    def _event(self, data: dict) -> None:
+        method = data.get("method")
+        session_id = data.get("sessionId") or ""
+        params = data.get("params") or {}
+        win = self._win_of(session_id)
+        if win is None:
+            return
+        if method == "Page.screencastFrame":
+            asyncio.create_task(self._on_frame(win, params))
+        elif method == "Page.frameNavigated":
+            frame = params.get("frame") or {}
+            if not frame.get("parentId"):
+                win.url = str(frame.get("url") or "")[:2000]
+                if win.url and win.url != "about:blank":
+                    asyncio.create_task(self.send_state(win))
+        elif method == "Page.navigatedWithinDocument":
+            win.url = str(params.get("url") or "")[:2000]
+            asyncio.create_task(self.send_state(win))
+        elif method == "Page.loadEventFired":
+            waiter, win.loading = win.loading, None
+            if waiter is not None and not waiter.done():
+                waiter.set_result(True)
+            asyncio.create_task(self._refresh_title(win))
+            asyncio.create_task(self.ensure_screencast(win))
+
+    def _win_of(self, session_id: str) -> Optional[Window]:
+        for win in self.windows.values():
+            if win.cdp_session == session_id:
+                return win
+        return None
+
+    async def _on_frame(self, win: Window, params: dict) -> None:
+        data = params.get("data") or ""
+        metadata = params.get("metadata") or {}
+        cdp = self.browser.cdp
+        if cdp is not None:
+            with contextlib.suppress(WebDebugError, Exception):
+                await cdp.send("Page.screencastFrameAck", {"sessionId": params.get("sessionId")},
+                               session=win.cdp_session, timeout=5)
+        try:
+            jpeg = base64.b64decode(data)
+        except (ValueError, TypeError):
+            return
+        win.last_frame = jpeg
+        win.frames += 1
+        size = (int(metadata.get("deviceWidth") or 0), int(metadata.get("deviceHeight") or 0))
+        if size[0] and size != win.frame_size:
+            win.frame_size = size
+        for ws in list(win.viewers):
+            transport = getattr(getattr(ws, "_req", None), "transport", None)
+            if transport is not None and transport.get_write_buffer_size() > MAX_WRITE_BUFFER:
+                continue  # a slow viewer loses frames instead of growing the queue
+            try:
+                await ws.send_bytes(jpeg)
+            except (ConnectionResetError, RuntimeError):
+                with contextlib.suppress(ValueError):
+                    win.viewers.remove(ws)
+
+    async def _refresh_title(self, win: Window) -> None:
+        try:
+            value = await self.evaluate(win, "JSON.stringify({url: location.href, title: document.title})",
+                                        timeout=5)
+            state = json.loads(value) if isinstance(value, str) else {}
+        except (WebDebugError, ValueError):
+            return
+        win.url = str(state.get("url") or win.url)[:2000]
+        win.title = str(state.get("title") or "")[:2000]
+        await self.send_state(win)
+
+    async def send_state(self, win: Window) -> None:
+        payload = {"type": "state", "window": win.id, "session": win.session, "url": win.url,
+                   "title": win.title, "frames": win.frames,
+                   "viewport": {"width": win.frame_size[0] or VIEWPORT_WIDTH,
+                                "height": win.frame_size[1] or VIEWPORT_HEIGHT}}
+        for ws in list(win.viewers):
+            with contextlib.suppress(Exception):
+                await ws.send_json(payload)
+
+    async def broadcast(self, win: Window, payload: dict) -> None:
+        for ws in list(win.viewers):
+            with contextlib.suppress(Exception):
+                await ws.send_json(payload)
+
+    # -- running things in the page --------------------------------------- #
+    async def evaluate(self, win: Window, expression: str, *, timeout: float = COMMAND_TIMEOUT,
+                       await_promise: bool = False) -> object:
+        cdp = await self.browser.ensure()
+        result = await cdp.send("Runtime.evaluate", {
+            "expression": expression, "returnByValue": True, "awaitPromise": await_promise,
+            "userGesture": True,
+        }, session=win.cdp_session, timeout=timeout)
+        if result.get("exceptionDetails"):
+            details = result["exceptionDetails"]
+            message = details.get("exception", {}).get("description") or details.get("text") or "failed"
+            raise WebDebugError(422, str(message).strip().splitlines()[0][:1000])
+        return (result.get("result") or {}).get("value")
+
+    async def agent(self, win: Window, op: str, args: dict, *, timeout: float = COMMAND_TIMEOUT) -> object:
+        # A guard that throws, not `window.__claunchWebdebug && ...`: the latter
+        # answers undefined for a document that predates the injection, and the
+        # retry below would never run (s1389-rev, s511-rev, s648-rev).
+        expr = ("(() => { if (!window.__claunchWebdebug) { throw new Error("
+                + json.dumps(MISSING_AGENT) + "); } return window.__claunchWebdebug.op("
+                + json.dumps(op) + ", " + json.dumps(args or {}) + "); })()")
+        try:
+            return await self.evaluate(win, expr, timeout=timeout, await_promise=True)
+        except WebDebugError as exc:
+            if MISSING_AGENT not in str(exc):
+                raise
+            # The document predates the injection (about:blank, or a page opened
+            # before the agent existed): install it once, then retry.
+            source = AGENT_FILE.read_text(encoding="utf-8") if AGENT_FILE.is_file() else ""
+            if not source:
+                raise
+            await self.evaluate(win, source, timeout=timeout)
+            return await self.evaluate(win, expr, timeout=timeout, await_promise=True)
+
+    async def navigate(self, win: Window, url: str, *, timeout: float = 30) -> dict:
+        target = target_url(url)
+        cdp = await self.browser.ensure()
+        loaded = asyncio.get_running_loop().create_future()
+        win.loading = loaded
+        try:
+            result = await cdp.send("Page.navigate", {"url": target},
+                                    session=win.cdp_session, timeout=timeout)
+            if result.get("errorText"):
+                raise WebDebugError(502, f"the browser refused {target}: {result['errorText']}")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(loaded), timeout=timeout)
+        finally:
+            if win.loading is loaded and not loaded.done():
+                win.loading = None
+        win.url = str(result.get("url") or target)[:2000]
+        await self._refresh_title(win)
+        await self.ensure_screencast(win)
+        return {"url": win.url, "title": win.title}
+
+    async def input_event(self, win: Window, event: dict) -> None:
+        cdp = await self.browser.ensure()
+        kind = str(event.get("kind") or "")
+        modifiers = int(event.get("modifiers") or 0)
+        if kind == "mouse":
+            what = str(event.get("type") or "mouseMoved")
+            params: Dict[str, object] = {
+                "type": what, "x": float(event.get("x") or 0), "y": float(event.get("y") or 0),
+                "modifiers": modifiers,
+            }
+            if what == "mouseWheel":
+                params["deltaX"] = float(event.get("deltaX") or 0)
+                params["deltaY"] = float(event.get("deltaY") or 0)
+            else:
+                params["button"] = str(event.get("button") or "none")
+                params["buttons"] = int(event.get("buttons") or 0)
+                params["clickCount"] = int(event.get("clickCount") or (1 if what in ("mousePressed", "mouseReleased") else 0))
+            await cdp.send("Input.dispatchMouseEvent", params, session=win.cdp_session)
+        elif kind == "key":
+            what = "keyDown" if str(event.get("type")) == "keyDown" else "keyUp"
+            key = str(event.get("key") or "")
+            params = {"type": what, "key": key, "code": str(event.get("code") or ""),
+                      "modifiers": modifiers, "windowsVirtualKeyCode": int(event.get("keyCode") or 0)}
+            text = event.get("text")
+            if what == "keyDown" and text:
+                params["text"] = str(text)[:8]
+            await cdp.send("Input.dispatchKeyEvent", params, session=win.cdp_session)
+        elif kind == "text":
+            await cdp.send("Input.insertText", {"text": str(event.get("text") or "")[:4000]},
+                           session=win.cdp_session)
+        elif kind == "focus":
+            await cdp.send("Page.bringToFront", session=win.cdp_session)
+
+    # -- commands from MCP ------------------------------------------------ #
     async def command(self, session: str, op: str, args: dict, *, window: str = "",
                       timeout: float = COMMAND_TIMEOUT) -> dict:
         if op not in OPS:
             raise WebDebugError(400, f"unknown operation {op!r}")
         win = self.window_for(session, window)
-        cid = secrets.token_hex(6)
-        fut = asyncio.get_running_loop().create_future()
-        win.pending[cid] = fut
-        try:
-            await win.ws.send_json({"type": "command", "id": cid, "op": op, "args": args or {}})
-            result = await asyncio.wait_for(fut, timeout=max(1.0, min(timeout, MAX_COMMAND_TIMEOUT)))
-        except asyncio.TimeoutError:
-            raise WebDebugError(504, f"window {win.id} did not answer {op} within {timeout:g}s") from None
-        except (ConnectionResetError, RuntimeError) as exc:
-            raise WebDebugError(410, f"window {win.id} went away: {exc}") from None
-        finally:
-            win.pending.pop(cid, None)
-        if not isinstance(result, dict):
-            raise WebDebugError(502, "the page sent a malformed answer")
-        if not result.get("ok"):
-            raise WebDebugError(422, str(result.get("error") or f"{op} failed in the page"))
-        value = result.get("value")
+        wait = max(1.0, min(timeout, MAX_COMMAND_TIMEOUT))
+        win.focused_at = time.time()
+        if op == "navigate":
+            value = await self.navigate(win, str(args.get("url") or ""), timeout=max(5.0, wait))
+        elif op == "screenshot":
+            value = await self.screenshot(win, args, timeout=wait)
+        elif op in AGENT_OPS:
+            value = await self.agent(win, op, args, timeout=wait)
+        else:
+            raise WebDebugError(400, f"unknown operation {op!r}")
         if isinstance(value, dict) and value.get("image"):
             value = dict(value)
             value["image"] = str(image_path(value["image"]))
+        await self.broadcast(win, {"type": "activity", "text": f"agent: {op}"})
         return {"window": win.id, "op": op, "url": win.url, "value": value}
 
-    def _drop(self, win: Window) -> None:
-        self.windows.pop(win.id, None)
-        for fut in win.pending.values():
-            if not fut.done():
-                fut.set_exception(ConnectionResetError("the page closed"))
-        win.pending.clear()
-
-    def receive(self, win: Window, msg: dict) -> None:
-        kind = msg.get("type")
-        if kind in ("hello", "state"):
-            if "session" in msg:
-                win.session = str(msg.get("session") or "")
-            for key in ("url", "title"):
-                if key in msg:
-                    setattr(win, key, str(msg.get(key) or "")[:2000])
-            if "sharing" in msg:
-                win.sharing = bool(msg.get("sharing"))
-            if msg.get("focused") or kind == "hello":
-                win.focused_at = time.time()
-        elif kind == "result":
-            fut = win.pending.get(str(msg.get("id") or ""))
-            if fut is not None and not fut.done():
-                fut.set_result(msg)
+    async def screenshot(self, win: Window, args: dict, *, timeout: float = 30) -> dict:
+        cdp = await self.browser.ensure()
+        params: Dict[str, object] = {"format": "png", "captureBeyondViewport": False}
+        element = None
+        if args.get("ref") or args.get("selector"):
+            info = await self.agent(win, "rect", {"ref": args.get("ref"),
+                                                  "selector": args.get("selector")}, timeout=timeout)
+            rect = (info or {}).get("rect") or {}
+            # getBoundingClientRect is viewport-relative and the rect op scrolls
+            # the element to the middle of the screen; a CDP clip is in page
+            # coordinates. Without the offset a scrolled element captures the
+            # region above it (s1236-rev2 measured a white PNG for a red div).
+            page = (info or {}).get("page") or {}
+            element = (info or {}).get("element")
+            if rect.get("width") and rect.get("height"):
+                left = page.get("x", rect["x"])
+                top = page.get("y", rect["y"])
+                params["clip"] = {"x": max(0, left), "y": max(0, top),
+                                  "width": rect["width"], "height": rect["height"], "scale": 1}
+        shot = await cdp.send("Page.captureScreenshot", params,
+                              session=win.cdp_session, timeout=timeout)
+        data = base64.b64decode(shot.get("data") or "")
+        if not data:
+            raise WebDebugError(502, "the browser returned an empty screenshot")
+        folder = image_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        name = secrets.token_hex(10) + ".png"
+        with open(folder / name, "wb") as fh:
+            fh.write(data)
+        out = {"image": name, "bytes": len(data), "url": win.url, "title": win.title}
+        if element:
+            out["element"] = element
+        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -649,7 +892,7 @@ def compose_send(window: str, body: dict, image: Optional[Path]) -> str:
     lines.append(
         f"You can look at and act on this page with the webdebug_* tools (window=\"{window}\"): "
         "webdebug_snapshot to read it, webdebug_click / webdebug_type to act, webdebug_console "
-        "for its log, webdebug_screenshot when the user shares the screen.")
+        "for its log, webdebug_screenshot to capture what the user is looking at.")
     return "\n".join(lines)
 
 
@@ -676,41 +919,8 @@ async def _json_body(request: web.Request) -> dict:
 
 async def h_page(_request: web.Request) -> web.StreamResponse:
     if not PAGE_FILE.is_file():
-        return _page(404, "web debug page assets are missing")
+        return web.Response(status=404, text="web debug page assets are missing")
     return web.FileResponse(PAGE_FILE, headers={"Cache-Control": "no-cache"})
-
-
-def _bind_of(request: web.Request) -> str:
-    """The address the dashboard reached the daemon on: the proxy listens
-    there too, so the same browser reaches it."""
-    sock = request.transport.get_extra_info("sockname") if request.transport else None
-    host = sock[0] if sock else "127.0.0.1"
-    return host if host not in ("", "0.0.0.0", "::") else "127.0.0.1"
-
-
-async def h_proxy(request: web.Request) -> web.Response:
-    try:
-        body = await _json_body(request)
-        origin, path = split_target(body.get("url"))
-        switched_from = None
-        alternate = await alternate_scheme(origin)
-        if alternate:
-            switched_from, origin = origin, alternate
-        proxy = await _hub(request).proxy_for(origin, _bind_of(request))
-    except WebDebugError as exc:
-        return _err(exc)
-    except OSError as exc:
-        return web.json_response({"error": f"could not open a proxy port: {exc}"}, status=500)
-    return web.json_response({
-        "origin": origin, "path": path, "port": proxy.port,
-        "enter": proxy.enter_path(path),
-        # The listener speaks plain http and binds the address this request
-        # arrived on, so this is the base the browser that made the request
-        # can reach -- not necessarily the host name it typed (a WSL host
-        # with one forwarded port resolves the name for 8378 only).
-        "proxy_origin": f"http://{_authority(proxy.bind, proxy.port)}",
-        "switched_from": switched_from,
-    })
 
 
 async def h_sessions(request: web.Request) -> web.Response:
@@ -742,18 +952,20 @@ async def h_ws(request: web.Request) -> web.StreamResponse:
     wid = request.query.get("window", "")
     if not _WINDOW_ID.match(wid):
         return web.json_response({"error": "window must look like w-xxxx"}, status=400)
-    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=4 * 1024 * 1024)
+    session = request.query.get("session", "")
+    first_url = request.query.get("url", "")
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
-    old = hub.windows.get(wid)
-    if old is not None:
-        hub._drop(old)
+    try:
+        win = await hub.attach(wid, session, ws)
+    except WebDebugError as exc:
         with contextlib.suppress(Exception):
-            # 4000: the page reopens under a new id (a duplicated tab carries
-            # the same ?w= in its address).
-            await old.ws.close(code=4000, message=b"replaced")
-    win = Window(id=wid, ws=ws)
-    hub.windows[wid] = win
+            await ws.send_json({"type": "error", "message": str(exc)})
+            await ws.close()
+        return ws
     request.app["websockets"].add(ws)
+    if first_url:
+        asyncio.create_task(_open_quietly(hub, win, first_url))
     try:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
@@ -764,13 +976,61 @@ async def h_ws(request: web.Request) -> web.StreamResponse:
                 data = json.loads(msg.data)
             except json.JSONDecodeError:
                 continue
-            if isinstance(data, dict):
-                hub.receive(win, data)
+            if not isinstance(data, dict):
+                continue
+            await _viewer_message(hub, win, data)
     finally:
         request.app["websockets"].discard(ws)
-        if hub.windows.get(wid) is win:
-            hub._drop(win)
+        await hub.detach(win, ws)
     return ws
+
+
+async def _open_quietly(hub: Hub, win: Window, url: str) -> None:
+    try:
+        await hub.navigate(win, url)
+    except WebDebugError as exc:
+        await hub.broadcast(win, {"type": "error", "message": str(exc)})
+
+
+async def _viewer_message(hub: Hub, win: Window, msg: dict) -> None:
+    kind = str(msg.get("type") or "")
+    win.focused_at = time.time()
+    try:
+        if kind in ("hello", "session"):
+            session = str(msg.get("session") or "")
+            if session != win.session:
+                win.session = session
+            await hub.send_state(win)
+        elif kind == "navigate":
+            await hub.navigate(win, str(msg.get("url") or ""))
+        elif kind == "input" and isinstance(msg.get("event"), dict):
+            await hub.input_event(win, msg["event"])
+        elif kind == "pick":
+            value = await hub.agent(win, "pickAt", {"x": msg.get("x"), "y": msg.get("y")})
+            await hub.broadcast(win, {"type": "picked", **(value or {})})
+        elif kind == "quality":
+            await hub.ensure_screencast(win, int(msg.get("quality") or 0))
+        elif kind == "reload":
+            await hub.navigate(win, win.url or "about:blank")
+        elif kind == "back":
+            await hub.evaluate(win, "history.back()")
+        elif kind == "forward":
+            await hub.evaluate(win, "history.forward()")
+        elif kind == "snapshot":
+            value = await hub.agent(win, "snapshot", {"max": 200})
+            await hub.broadcast(win, {"type": "snapshot", "value": value})
+        elif kind == "console":
+            value = await hub.agent(win, "console", {"max": 100})
+            await hub.broadcast(win, {"type": "console", "value": value})
+        elif kind == "screenshot":
+            value = await hub.screenshot(win, {"ref": msg.get("ref"), "selector": msg.get("selector")})
+            await hub.broadcast(win, {"type": "screenshot", **value})
+    except WebDebugError as exc:
+        await hub.broadcast(win, {"type": "error", "message": str(exc)})
+    except (ValueError, TypeError) as exc:
+        # A viewer's own value was unusable (quality "high", x "left"). Answer
+        # it; letting it escape would end that viewer's socket loop.
+        await hub.broadcast(win, {"type": "error", "message": f"{kind}: {exc}"})
 
 
 async def h_command(request: web.Request) -> web.Response:
@@ -895,7 +1155,6 @@ def install(app: web.Application, hub: Optional[Hub] = None) -> None:
     app.cleanup_ctx.append(_lifecycle)
     r = app.router
     r.add_get("/webdebug", h_page)
-    r.add_post("/api/webdebug/proxy", h_proxy)
     r.add_get("/api/webdebug/sessions", h_sessions)
     r.add_get("/api/webdebug/windows", h_windows)
     r.add_get("/api/webdebug/ws", h_ws)

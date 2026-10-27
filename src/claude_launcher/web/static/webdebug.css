@@ -53,19 +53,49 @@ button[aria-pressed="true"] { border-color: var(--wd-accent); color: var(--wd-ac
 }
 #wd-url:focus { outline: none; border-color: var(--wd-accent); }
 
-#wd-stage { position: relative; flex: 1; min-height: 0; }
-#wd-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
-#wd-frame:not([src]) { visibility: hidden; }
+#wd-stage { display: flex; flex: 1; min-height: 0; }
+#wd-screen-wrap {
+  position: relative; flex: 1; min-width: 0; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 8px; background: #0b0d0f; overflow: hidden;
+}
+/* The screencast frame. `image-rendering: auto` keeps text readable when the
+   window is wider than the 1280px viewport the daemon renders at. */
+#wd-screen {
+  max-width: 100%; max-height: 100%; width: auto; height: auto;
+  object-fit: contain; background: #fff; border: 1px solid var(--wd-line);
+  cursor: default; outline: none;
+}
+#wd-screen:not([src]) { visibility: hidden; }
+#wd-screen.picking { cursor: crosshair; }
+#wd-screen:focus { border-color: var(--wd-accent); }
 .wd-empty { position: absolute; inset: 0; padding: 32px; color: var(--wd-muted); }
 .wd-muted { color: var(--wd-muted); }
 .wd-empty code { color: var(--wd-text); }
-
-.wd-region { position: absolute; inset: 0; cursor: crosshair; background: rgba(0, 0, 0, .15); z-index: 5; }
-#wd-region-box { position: absolute; border: 2px dashed var(--wd-accent); background: rgba(232, 89, 12, .1); display: none; }
-.wd-region-hint {
-  position: absolute; left: 50%; top: 8px; transform: translateX(-50%); margin: 0;
-  padding: 4px 10px; border-radius: 4px; background: var(--wd-bar); color: var(--wd-text);
+.wd-busy {
+  position: absolute; right: 16px; top: 16px; padding: 4px 10px; border-radius: 4px;
+  background: var(--wd-bar); border: 1px solid var(--wd-line); color: var(--wd-text);
 }
+
+#wd-side {
+  flex: none; width: min(420px, 40vw); display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--wd-line); background: var(--wd-bar);
+}
+.wd-side-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--wd-line); }
+.wd-side-head strong { flex: 1; }
+.wd-side-head button { height: 22px; padding: 0 6px; }
+#wd-side-body { flex: 1; min-height: 0; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+#wd-side-body pre {
+  margin: 0; padding: 6px; background: var(--wd-bg); border: 1px solid var(--wd-line);
+  border-radius: 4px; font: 11px/1.35 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word;
+}
+#wd-side-body pre.wd-text { max-height: 40vh; overflow: auto; }
+#wd-status {
+  display: flex; align-items: center; gap: 12px; flex: none; height: 24px; padding: 0 8px;
+  border-top: 1px solid var(--wd-line); background: var(--wd-bar); font-size: 11px;
+}
+#wd-stat { font-family: ui-monospace, monospace; white-space: nowrap; }
+#wd-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .wd-composer {
   position: fixed; right: 12px; top: 72px; z-index: 10; width: min(440px, calc(100vw - 24px));
