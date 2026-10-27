@@ -46,8 +46,23 @@ def install(app):
         except knowledge.KnowledgeError as exc:
             return web.json_response({"error": str(exc)}, status=exc.status)
 
+    async def history(request):
+        try:
+            ws = knowledge.workspace(request.query.get("workspace"), request.query.get("cwd"))
+            try:
+                limit = int(request.query.get("limit", "20"))
+            except ValueError:
+                raise knowledge.KnowledgeError("limit must be an integer 1..100")
+            versions = await asyncio.to_thread(knowledge.history, ws,
+                                               request.match_info["id"], limit)
+            return web.json_response({"workspace": ws.name, "versions": versions},
+                                     dumps=lambda d: json.dumps(d, ensure_ascii=False))
+        except knowledge.KnowledgeError as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
+
     r = app.router
     r.add_get("/api/knowledge/{operation:export}", handle)
+    r.add_get("/api/knowledge/{id}/history", history)
     r.add_get("/api/knowledge", handle)
     r.add_post("/api/knowledge", handle)
     r.add_put("/api/knowledge/{id}", handle)

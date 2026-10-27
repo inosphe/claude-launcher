@@ -8432,10 +8432,21 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
   .glossary-card, .glossary-form { padding: 16px; }
   .glossary-card-footer { align-items: flex-start; flex-direction: column; }
 }
-/* Knowledge records reuse the glossary layout; the body keeps its line breaks. */
+/* Knowledge records reuse the glossary layout; the body keeps its line breaks
+   when it is drawn as plain text. A body the page's markdown renderer took
+   (class md) is laid out by the .md rules instead. */
 #knowledge-view .knowledge-body { white-space: pre-wrap; }
+#knowledge-view .knowledge-body.md, #knowledge-view .knowledge-version-body.md { white-space: normal; }
 #knowledge-view .knowledge-card h4 .glossary-badge { margin-right: 6px; }
 #knowledge-view .glossary-toolbar select { width: auto; }
+/* A record's versions (knowledge-page.js historyPanel): newest first, the
+   current one marked, each with its own markdown body. */
+#knowledge-view .knowledge-history { margin-top: 18px; border-top: 1px dashed #3d4a5d; padding-top: 14px; }
+#knowledge-view .knowledge-history h5 { font-size: 13px; font-weight: 600; color: #c3d3e8; margin-bottom: 10px; }
+#knowledge-view .knowledge-version { border-left: 2px solid #3b4c63; padding: 2px 0 2px 12px; margin: 0 0 14px; }
+#knowledge-view .knowledge-version.is-current { border-left-color: #6f9ad8; }
+#knowledge-view .knowledge-version > p { font-size: 12px; margin-bottom: 6px; }
+#knowledge-view .knowledge-version-body { color: #c6d1df; font-size: 13px; line-height: 1.7; }
 /* Composer suggestions remain outside the textarea and preserve its caret. */
 .glossary-composer { position: absolute; bottom: calc(100% + 6px); left: 12px; right: 12px; z-index: 45; max-height: min(440px, 48vh); overflow: auto; padding: 16px; border: 1px solid #455771; border-radius: 12px; color: #dce5f2; background: #1b2330; box-shadow: 0 12px 32px #0006; font-size: 13px; }
 .glossary-composer[hidden] { display: none; }

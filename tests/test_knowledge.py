@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -99,3 +100,94 @@ def test_this_repositorys_seed_records_all_parse():
     parsed = [knowledge.parse_file(p) for p in files]
     assert [p.name for p, r in zip(files, parsed) if r is None] == []
     assert {r["kind"] for r in parsed} == set(knowledge.KINDS)
+
+
+def test_an_update_keeps_the_previous_version_and_its_editor(home, tmp_path):
+    ws = _ws(tmp_path)
+    first = knowledge.create(ws, {"kind": "decision", "title": "결정", "body": "# 처음\n- 이유"}, author="s1")
+    assert first["version"] == 1
+    second = knowledge.update(ws, first["id"], {"body": "## 고침"}, author="s2")
+    assert second["version"] == 2 and second["body"] == "## 고침"
+    versions = knowledge.history(ws, first["id"])
+    assert [v["version"] for v in versions] == [1, 2]
+    assert [v["body"] for v in versions] == ["# 처음\n- 이유", "## 고침"]
+    assert versions[0]["archived_by"] == "s2" and versions[0]["updated_at"]
+    assert [v["current"] for v in versions] == [False, True]
+    # Saving the same content again is not a new version.
+    assert knowledge.update(ws, first["id"], {"body": "## 고침"}, author="s2")["version"] == 2
+    assert len(knowledge.history(ws, first["id"])) == 2
+
+
+def test_superseding_is_a_version_of_the_old_record(home, tmp_path):
+    ws = _ws(tmp_path)
+    old = knowledge.create(ws, {"kind": "decision", "title": "옛 결정", "body": "이유"}, author="s1")
+    knowledge.create(ws, {"kind": "decision", "title": "새 결정", "body": "새 이유",
+                          "supersedes": old["id"]}, author="s2")
+    versions = knowledge.history(ws, old["id"])
+    assert [(v["version"], v["status"]) for v in versions] == [(1, "active"), (2, "superseded")]
+    assert versions[0]["archived_by"] == "s2" and versions[1]["archived_by"] == ""
+    # A second supersede of an already superseded record adds no version.
+    knowledge.create(ws, {"kind": "decision", "title": "셋째 결정", "body": "이유",
+                          "supersedes": old["id"]}, author="s3")
+    assert len(knowledge.history(ws, old["id"])) == 2
+
+
+def test_a_superseded_record_can_be_revived_with_a_version(home, tmp_path):
+    ws = _ws(tmp_path)
+    old = knowledge.create(ws, {"kind": "decision", "title": "옛 결정", "body": "이유"}, author="s1")
+    knowledge.create(ws, {"kind": "decision", "title": "새 결정", "body": "새 이유",
+                          "supersedes": old["id"]}, author="s2")
+    revived = knowledge.update(ws, old["id"], {"status": "active"}, author="s3")
+    assert revived["status"] == "active" and revived["version"] == 3
+    assert [(v["version"], v["status"]) for v in knowledge.history(ws, old["id"])] == [
+        (1, "active"), (2, "superseded"), (3, "active")]
+
+
+def test_history_limit_and_unknown_records(home, tmp_path):
+    ws = _ws(tmp_path)
+    row = knowledge.create(ws, {"kind": "lesson", "title": "t", "body": "v1"}, author="s1")
+    for i in range(2, 5):
+        knowledge.update(ws, row["id"], {"body": f"v{i}"}, author="s1")
+    assert [v["version"] for v in knowledge.history(ws, row["id"], limit=2)] == [3, 4]
+    assert [v["version"] for v in knowledge.history(ws, row["id"], limit=1)] == [4]
+    for bad in (0, 101, True):
+        with pytest.raises(knowledge.KnowledgeError):
+            knowledge.history(ws, row["id"], limit=bad)
+    with pytest.raises(knowledge.KnowledgeError) as err:
+        knowledge.history(ws, "nope")
+    assert err.value.status == 404
+
+
+def test_history_of_a_file_record_is_its_single_version(home, tmp_path):
+    ws = _ws(tmp_path)
+    _file(ws, "need-x.md", "---\nkind: need\ntitle: 니즈\n---\n본문\n")
+    [version] = knowledge.history(ws, "md:need-x")
+    assert version["version"] == 1 and version["current"] is True and version["origin"] == "file"
+
+
+def test_a_store_written_before_versions_gains_the_column(home, tmp_path):
+    ws = _ws(tmp_path)
+    path = knowledge.db_path(ws)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path))
+    db.execute("CREATE TABLE records (id TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+               "title TEXT NOT NULL, body TEXT NOT NULL, tags TEXT NOT NULL, refs TEXT NOT NULL, "
+               "source TEXT NOT NULL, author TEXT NOT NULL, status TEXT NOT NULL, "
+               "supersedes TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    db.execute("INSERT INTO records VALUES ('old1','decision','옛 결정','본문','[]','[]','',"
+               "'s1','active','','2026-10-01','2026-10-01')")
+    db.commit()
+    db.close()
+    assert knowledge.entries(ws)[0]["version"] == 1
+    knowledge.update(ws, "old1", {"body": "새 본문"}, author="s2")
+    assert [(v["version"], v["body"]) for v in knowledge.history(ws, "old1")] == [
+        (1, "본문"), (2, "새 본문")]
+
+
+def test_delete_drops_the_versions_too(home, tmp_path):
+    ws = _ws(tmp_path)
+    row = knowledge.create(ws, {"kind": "decision", "title": "t", "body": "v1"}, author="s1")
+    knowledge.update(ws, row["id"], {"body": "v2"}, author="s1")
+    knowledge.delete(ws, row["id"])
+    with knowledge.connection(ws) as db:
+        assert db.execute("SELECT count(*) FROM revisions").fetchone()[0] == 0
