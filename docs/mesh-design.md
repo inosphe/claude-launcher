@@ -1779,9 +1779,19 @@ pair. A parent in no mesh gets one opened for the two of them, named after
 it — so the subtree converges on one mesh rather than one per spawn — and the
 parent is briefed about it in the ordinary way, because a session that learns
 of its own membership from a child's first message has been told by the wrong
-party. A parent in *several* is refused with them listed: the wrong guess
-here does not fail, it broadcasts, and the child would report its work to
-strangers. `mesh: "-"` opts out of the team mesh; omission means inherit.
+party. A parent in *several* hands the child its **main mesh** — the one it
+joined first (`joined_at`, then the name). A session collects a second mesh
+the moment it opens one for its own children, so "several" is the ordinary
+state of a session that has spawned before, and refusing it made every later
+spawn from that session fail: the cflow2 delegation above the spawn fell back
+to a sub-agent without saying so, and the delayed sweep re-asked the same
+refusal every five minutes (claunch-ull6m, claunch-k3acp, 2026-10-27). The
+first join is the team the session was created into, and it is recorded, so
+this is a fact to read rather than a guess to make; a session that means its
+other mesh names it on the request. When the parent is in no mesh at all and
+one is opened for it, the child joins as `free-role`: there is no team there
+to hold a place in. `mesh: "-"` opts out of the team mesh; omission means
+inherit.
 
 Every spawned child also has a parent/child route, including when the two
 sessions belong to different projects or team meshes. Onboarding reuses a
