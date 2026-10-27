@@ -551,13 +551,17 @@ globalThis.MegaThreadPage = (() => {
   /* The briefing digest the daemon cached for the session: one line, already
      written for a row (briefing.digest). It is the only field that says what
      the session believes it is doing, so it is drawn apart from the branch
-     and issue instead of being joined into them. */
+     and issue instead of being joined into them. The digest names the
+     one-liner `one_line` (the summariser's own key is
+     "one-line-job-description"); reading only the latter left `now` on every
+     row, a step-by-step sentence that goes stale against the live cflow
+     line beside it (claunch-g07ra.1). */
   function briefLine(session) {
     const s = session || {};
     const b = s.briefing;
     if (!b) return "";
     if (typeof b === "string") return String(b).trim();
-    return String(b["one-line-job-description"] || b.now || b.goal || "").trim();
+    return String(b.one_line || b["one-line-job-description"] || b.now || b.goal || "").trim();
   }
 
   /* The filter matches any field a reader might remember the session by.

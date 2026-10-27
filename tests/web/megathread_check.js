@@ -255,7 +255,10 @@ assert.deepEqual(plain(ctx.pickerRows(fleet, { sort: "created-asc", hierarchy: t
    the session. */
 const rich = {
   name: "s9", project: "claunch", issue: "claunch-abc", branch: "s9-work",
-  briefing: { "one-line-job-description": "정렬 UI를 만든다" },
+  // The shape briefing.digest() puts on the rail: `one_line`, `state`, and
+  // goal/now/progress only when filled (claunch-g07ra.1).
+  briefing: { one_line: "정렬 UI를 만든다", state: "working",
+    now: "데몬 실시간 상태는 busy이다", goal: "피커를 정렬한다" },
 };
 const meta = ctx.metaLine(rich, { s9: { mesh: "claunch", role: "worker" } },
   { s9: { workflow: "improv-worker-v2", status: "running", current: ["work"] } });
@@ -263,7 +266,9 @@ assert.ok(meta.includes("worker"), "the roster's role is on the row");
 assert.ok(meta.includes("claunch"), "the project and the mesh are on the row");
 assert.ok(meta.includes("improv-worker-v2") && meta.includes("work"), "the cflow run is on the row");
 assert.equal(ctx.metaLine({ name: "s9" }, {}, {}), "", "no joins, no line — not a row of separators");
-assert.equal(ctx.briefLine(rich), "정렬 UI를 만든다");
+assert.equal(ctx.briefLine(rich), "정렬 UI를 만든다", "the one-line summary, not `now`");
+assert.equal(ctx.briefLine({ briefing: { one_line: "", state: "working", now: "지금 하는 일" } }),
+  "지금 하는 일", "an empty one-liner falls back to now");
 assert.equal(ctx.briefLine({ briefing: "a string digest" }), "a string digest");
 assert.equal(ctx.briefLine({}), "");
 

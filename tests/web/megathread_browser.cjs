@@ -57,7 +57,8 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ sessions: [
         { name: "s1", status: "idle", branch: "s1-log-format", project: "claunch",
           created_at: "2026-01-01T00:00:00Z", last_activity_at: "2026-01-02T00:00:00Z",
-          briefing: { "one-line-job-description": "로그 형식을 정한다" } },
+          briefing: { one_line: "로그 형식을 정한다", state: "working",
+            now: "flow_report로 랜딩 상태를 확인하는 중" } },
         { name: "s2", status: "exited", paused_at: "2026-01-03T00:00:00Z",
           issue: "claunch-cn8v6", branch: "s2-deploy", project: "claunch",
           created_at: "2026-01-02T00:00:00Z", last_activity_at: "2026-01-03T00:00:00Z" },
