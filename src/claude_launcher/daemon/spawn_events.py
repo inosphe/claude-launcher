@@ -156,6 +156,7 @@ class Failures:
         reason: Any = "",
         site: str = "",
         notify_on: str = "",
+        notice: bool = True,
         **details,
     ) -> Optional[dict]:
         """Record one event for ``target``, or fold it into the last report.
@@ -165,6 +166,13 @@ class Failures:
         ``notify_on`` names the session that gets the notice when it is not
         ``target`` -- a fallback child has no viewer yet, while the parent
         that asked for it does.
+
+        ``notice=False`` records the event and skips the transient line. A
+        caller that already reached the person another way sets it, so one
+        failure does not arrive twice: :meth:`delayed_sweep.Clock._spawn_failure`
+        types a block into the owner for a *permanent* refusal
+        (claunch-k3acp), while the event here is still worth keeping -- that
+        block is typed text, and the history outlives it.
 
         Returns the recorded event, or ``None`` when this failure was folded
         into an earlier report.
@@ -207,7 +215,8 @@ class Failures:
             # reverse case in :meth:`_notice`.
             log.exception("could not record the spawn %s event for %r: %s", kind, target, reason)
             event = None
-        self._notice(notify_on or target, text)
+        if notice:
+            self._notice(notify_on or target, text)
         return event
 
     def _session(self, name: str):
@@ -283,6 +292,7 @@ def report(
     reason: Any = "",
     site: str = "",
     notify_on: str = "",
+    notice: bool = True,
     **details,
 ) -> Optional[dict]:
     """Record one event through the installed reporter.
@@ -293,6 +303,9 @@ def report(
     places being edited around it. Silent (and harmless) when no reporter is
     installed: a failure must not grow a second failure out of its own
     report.
+
+    ``notice=False`` (see :meth:`Failures.report`) skips the transient line
+    for a caller that already told the person itself.
     """
     failures = _installed
     if failures is None:
@@ -300,7 +313,8 @@ def report(
         return None
     try:
         return failures.report(
-            target, kind=kind, reason=reason, site=site, notify_on=notify_on, **details
+            target, kind=kind, reason=reason, site=site, notify_on=notify_on,
+            notice=notice, **details
         )
     except Exception:  # noqa: BLE001 - see the docstring
         log.exception("spawn event for %r could not be recorded", target)

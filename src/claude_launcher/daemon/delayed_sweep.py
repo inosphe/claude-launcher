@@ -312,22 +312,24 @@ class Clock:
             try:
                 name = await asyncio.to_thread(spawn, job["owner"], self.watch_body(job))
             except Exception as exc:  # noqa: BLE001 - refused or unreachable alike
+                permanent = bool(getattr(exc, "permanent", False))
                 await self._spawn_failed(job, exc)
                 # ``_spawn_failed`` decides what the *sweep* does about this
                 # attempt -- log once per reason, and stop retrying a refusal
-                # a retry cannot change -- and tells the owner in a typed
-                # block when it is permanent (claunch-k3acp). This is the
-                # other half: the same failure as a warning-grade event in
-                # the session history, for the retry loop that never becomes
-                # permanent and so would otherwise be visible only in the log
-                # (claunch-is4o4: 34 failures a minute, one session number
-                # burned each time). Repeats of one (owner, reason) fold into
-                # a single report, so the two do not multiply.
+                # a retry cannot change -- and types a block into the owner's
+                # terminal when the refusal is permanent (claunch-k3acp). This
+                # is the durable half of the same fact: one warning-grade
+                # event in the session history, which outlives that block.
+                # The transient line is skipped when the block already went
+                # out, so one refusal does not arrive on screen twice; for a
+                # retry that keeps failing but never becomes permanent (the
+                # claunch-is4o4 case: 34 failures a minute) there is no block,
+                # so the line is what the person sees.
                 spawn_events.report(
                     job["owner"], kind="fail", reason=str(exc),
                     site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
-                    generation=job.get("generation"),
-                    permanent=bool(getattr(exc, "permanent", False)),
+                    generation=job.get("generation"), permanent=permanent,
+                    notice=not permanent,
                 )
                 continue
             queue.attach_child(job["id"], name)

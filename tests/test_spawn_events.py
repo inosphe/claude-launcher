@@ -305,6 +305,7 @@ def test_a_watcher_spawn_that_fails_is_reported_to_the_job_owner(tmp_path, monke
     recorded = rows("leader")
     assert len(recorded) == 1
     assert recorded[0]["details"]["site"] == "delayed_sweep.attend"
+    assert recorded[0]["details"]["permanent"] is False
     assert recorded[0]["details"]["level"] == "warning"
     assert recorded[0]["details"]["target"] == "leader"
     assert recorded[0]["details"]["job"] == jobs[-1]["id"]
@@ -465,3 +466,28 @@ def test_a_refusal_that_names_no_reason_is_still_one_report(tmp_path):
     assert failures.report("s1", reason="HTTP 502", site="cflow2.spawn") is None
     assert len(events.rows(session)) == 1
     assert events.rows(session)[0]["details"]["reason"] == spawn_events.NO_REASON
+
+
+def test_a_failure_already_told_another_way_keeps_the_event_but_not_the_line(tmp_path):
+    """Two reporters meet on one permanent refusal (claunch-k3acp +
+    claunch-is4o4): the sweep types a block into the owner's terminal itself,
+    so the transient line is suppressed while the durable event stays.
+
+    The history is the half with no substitute -- a typed block scrolls away,
+    and a retry loop that never becomes permanent has no block at all, which
+    is why the default is to show the line."""
+    seen = []
+    session = SimpleNamespace(
+        sdef=SimpleNamespace(name="owner"), created_at="t",
+        notify=lambda text, **kw: seen.append(text))
+    events = _events(tmp_path)
+    failures = spawn_events.Failures(events, lambda name: session, clock=lambda: 100.0)
+
+    event = failures.report("owner", reason="denied", site="delayed_sweep.attend",
+                            notice=False)
+    assert event is not None, "the event is the part that has no substitute"
+    assert event["details"]["level"] == "warning"
+    assert seen == [], "the caller already put the refusal in front of the person"
+
+    failures.report("owner", reason="a different refusal", site="delayed_sweep.attend")
+    assert len(seen) == 1, "every other failure still shows its line"
