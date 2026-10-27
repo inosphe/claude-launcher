@@ -308,6 +308,17 @@ def test_t9_draft_facts_and_the_branch_from_git_files(tmp_path):
     assert "description" not in rows[0] and "description" not in rows[1]
     assert rows[2]["description"] == P.clip("x" * 5000, P.ISSUE_BODY_CHARS) != "x" * 5000
     assert rows[3]["description"] == "bee"
+    # A session that moved on keeps its older subject in view (claunch-rzrig):
+    # the linked issue plus a long run of closed ones, in match order, shows
+    # DRAFT_ISSUES rows -- more than the four that cut the answer session's
+    # topic issues -- and the closed rows still carry only their titles.
+    moved = [{"id": "link", "status": "closed", "title": "now"}] + [
+        {"id": f"old-{i}", "status": "closed", "title": f"pi-durable {i}", "description": "d"}
+        for i in range(16)]
+    rows = P.draft_facts("s1", sdef, issues=moved)["issues"]
+    assert P.DRAFT_ISSUES > 4
+    assert [r["id"] for r in rows] == ["link"] + [f"old-{i}" for i in range(P.DRAFT_ISSUES - 1)]
+    assert not any("description" in r for r in rows)
     # Nothing known is nothing sent.
     assert P.draft_facts("s1", SimpleNamespace(name="s1", cwd="")) == {}
 
