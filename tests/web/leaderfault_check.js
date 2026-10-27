@@ -6,9 +6,11 @@
    cannot be dismissed while it is up; polling again raises nothing new; a
    card is re-raised only when what it says changed; the card comes down when
    the daemon stops listing the row (the fault cleared, or the session was
-   paused, killed or archived); a kind the reader hid raises nothing; and a
+   paused, killed or archived); a kind the reader hid raises nothing; a
    failed request leaves the cards that are up alone rather than taking them
-   down. */
+   down; and no signature is ever recorded for a card that was not drawn —
+   with the history panel open, or a notify that answers null, the alert
+   comes up on the first poll that can draw it instead of being swallowed. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -52,13 +54,19 @@ function harness() {
   let rows = [];
   let hidden = false;
   let failing = false;
+  let panel = false;
+  let drawing = true;
   const raised = [];
   const dismissed = [];
   const ctx = {
     LEADER_FAULT_PREFIX: "leader-fault-",
     leaderFaultRaised: new Map(),
     noticeSourceShown: () => !hidden,
-    notify: (title, sub, opts) => { raised.push({ title, sub, opts }); return {}; },
+    noticePanelOpen: () => panel,
+    notify: (title, sub, opts) => {
+      raised.push({ title, sub, opts });
+      return drawing ? {} : null;   // null = recorded but drew no card
+    },
     dismissNotice: (key) => { dismissed.push(key); },
     api: async () => {
       if (failing) throw new Error("no daemon");
@@ -74,6 +82,8 @@ function harness() {
     set(rowsIn) { rows = rowsIn; },
     hide(v) { hidden = v; },
     fail(v) { failing = v; },
+    panel(v) { panel = v; },
+    drawing(v) { drawing = v; },
     run: () => ctx.refreshLeaderFaults(),
   };
 }
@@ -168,6 +178,45 @@ async function refused() {
   is(h.raised.length === 1, "a failed request raises nothing either");
 }
 
+/* The regression s2926-rev reproduced on the real functions: an alert that
+   appears while the history panel is open drew no card, so nothing may be
+   recorded as raised — otherwise the panel closes and the fatal card never
+   stands. */
+async function paneled() {
+  const h = harness();
+  h.panel(true);
+  h.set([alert("s29")]);
+  await h.run();
+  is(h.raised.length === 0, "with the panel open no card is drawn");
+  is(h.ctx.leaderFaultRaised.size === 0,
+     "a panel-open poll records no signature it did not raise");
+  h.panel(false);
+  await h.run();
+  is(h.raised.length === 1,
+     `closing the panel raises the alert on the next poll, raised ${h.raised.length}`);
+  await h.run();
+  is(h.raised.length === 1, "and only once");
+  is(h.dismissed.length === 0, "the card stays up while the alert stands");
+}
+
+/* notify answers null when it records a row but draws no card (the panel, a
+   missing host, another browser's dismissal). Same rule: retry, do not
+   swallow. */
+async function undrawn() {
+  const h = harness();
+  h.drawing(false);
+  h.set([alert("s29")]);
+  await h.run();
+  is(h.ctx.leaderFaultRaised.size === 0,
+     "a signature is not recorded when notify drew no card");
+  h.drawing(true);
+  await h.run();
+  is(h.raised.length === 2,
+     `the alert is raised on the poll that draws a card, raised ${h.raised.length}`);
+  await h.run();
+  is(h.raised.length === 2, "and the drawn card is not raised again");
+}
+
 (async () => {
   await cards();
   await steady();
@@ -176,6 +225,8 @@ async function refused() {
   await many();
   await hidden();
   await refused();
+  await paneled();
+  await undrawn();
   if (FAIL.length) {
     console.error("FAIL");
     for (const line of FAIL) console.error(`  - ${line}`);

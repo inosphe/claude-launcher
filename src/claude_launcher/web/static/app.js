@@ -60689,11 +60689,21 @@ async function refreshLeaderFaults() {
     const sig = [a.category, f.kind, f.message, f.until, f.resolved_by, a.handle]
       .join("|");
     if (leaderFaultRaised.get(key) === sig) continue;
-    leaderFaultRaised.set(key, sig);
-    notify(`leader stopped: ${a.handle || session}`, leaderFaultSub(a), {
+    // The signature is recorded only for a card that actually went up. With
+    // the history panel open there is nowhere to draw one, and recording it
+    // anyway would swallow the alert: the next poll would see a signature it
+    // believes it raised, and closing the panel would bring back no card
+    // (s2926-rev, claunch-9djny). The panel is checked before the call so the
+    // retry costs no history row per poll; the card stands on the first poll
+    // after the panel closes. A notify that draws nothing for any other
+    // reason is retried the same way.
+    if (noticePanelOpen()) continue;
+    const drawn = notify(`leader stopped: ${a.handle || session}`, leaderFaultSub(a), {
       source: "fault", key, kind: "fatal", sticky: true, dismissable: false,
       session,
     });
+    if (!drawn) continue;
+    leaderFaultRaised.set(key, sig);
   }
   for (const key of [...leaderFaultRaised.keys()]) {
     if (live.has(key)) continue;
