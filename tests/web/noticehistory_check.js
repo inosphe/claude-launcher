@@ -262,6 +262,10 @@ function build(opts) {
     " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
     " railSkewOf, noteRailReconnect, openedOnThisClock," +
     " get railSkew() { return railClockSkew; }," +
+    // The rail poll is outside this slice, so a check that needs the page's
+    // clock to differ from the daemon's sets the reading here, exactly as
+    // refreshCflow2Rail does from an answer's `now`.
+    " setRailSkew(v) { railClockSkew = v; }," +
     " noticeClocksPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -2085,6 +2089,51 @@ function gotoRec(rec) {
           settledRow && { opened: settledRow.opened, status: settledRow.status });
   }
 
+  /* --- the correction reaches the age the card shows -------------------
+     (claunch-l9znm.1, review: s597-rev and s648-rev)
+
+     Every check above runs with the two clocks agreeing, which is why this
+     one exists: with the skew at 0, `openedOnThisClock` can drop the
+     correction entirely — or add it with the wrong sign — and every other
+     age check still passes. The correction is only worth having if a page
+     whose clock is off by minutes still shows the age the request actually
+     has, so the reading is set to a real value here and the age is asserted
+     against it.
+
+     The page's clock is 300 s ahead of the daemon's (skew +300). A request
+     the daemon stamped an hour ago reads 1h05m on this page's clock, so the
+     correction must take the 5 minutes back: 1h00m. Adding it would say
+     1h10m, and dropping it would say 1h05m — all three are distinguishable. */
+  {
+    const w = build();
+    w.api.setRailSkew(300);
+    const openRec = (atMs, id) => ({
+      id: `ask-${id}`, session: `s-${id}`, cwd: `/w/${id}`, scope: `s-${id}`,
+      workflow: "improv-worker-v2", version: 2, kind: "ask", label: "landing-review",
+      prompt: "land it?", presses: [], opened: atMs / 1000 });
+    // The stamp is on the daemon's clock: an hour before *its* now, which is
+    // this page's now minus the skew. So on this page's clock it reads as
+    // 1h05m old, and the corrected age is 1h00m.
+    const daemonNow = w.clock.at / 1000 - 300;
+    const stampSecs = daemonNow - 3600;
+    w.api.runGateSync([openRec(stampSecs * 1000, "skewed")], []);
+    const card = w.strip().find((c) => /landing-review/.test(c.text()));
+    const when = card && card.querySelector(".notice-when");
+    check("a page whose clock runs ahead still shows the request's real age",
+          !!when && /1h00m ago/.test(when.text()), when && when.text());
+
+    // The same stamp through `gateSeenAt`, the other reader of the row.
+    check("and the reading behind it is corrected the same way",
+          Math.abs(w.api.gateSeenAt("ask", "ask-skewed") - (stampSecs + 300) * 1000) < 2,
+          w.api.gateSeenAt("ask", "ask-skewed"));
+
+    // A page running behind corrects the other direction on the same stamp.
+    w.api.setRailSkew(-300);
+    const behind = w.api.openedOnThisClock(stampSecs);
+    check("a page behind the daemon corrects in the other direction",
+          Math.abs(behind - (stampSecs - 300) * 1000) < 2, behind);
+  }
+
   /* --- the waiting list re-orders when a stamp arrives late ------------
      (claunch-l9znm.1)
 
@@ -2109,7 +2158,7 @@ function gotoRec(rec) {
     w.api.runGateSync([rec("new", undefined), rec("old", undefined)], []);
     const order = () => w.panelRows().filter((r) => r.classList.contains("pending"))
       .map((r) => (r.text().match(/s-(new|old)/) || [])[1]);
-    check("without stamps the list is ordered by arrival, newest first",
+    check("without stamps the list falls back to arrival, longest-waiting first",
           order().join(",") === "new,old", order());
 
     w.clock.at += 1000;

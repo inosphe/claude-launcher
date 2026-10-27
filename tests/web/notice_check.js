@@ -113,6 +113,9 @@ function build(opts) {
     (daemon.up ? { status: "ok", version: daemon.version, boot_id: daemon.boot,
                    started_at: daemon.started } : null);
   const apiCalls = [];
+  // pollOnce's recovery path tells the rail its clock reading is stale
+  // (claunch-l9znm.1); the count is how the check sees the call happen.
+  const calls = { railReconnect: 0 };
   const apiStub = async (p) => {
     apiCalls.push(p);
     if (!daemon.up) throw new Error("down");
@@ -154,7 +157,14 @@ function build(opts) {
     "restoreNewFormDraft",
     // The sidebar PTY host badge boot() draws (claunch-xnnct.3).
     "renderPtyHostBadge",
+    // Render the GIL badge boot() draws (claunch-xnnct.3).
     "renderGilBadge",
+    // pollOnce's recovery path drops the rail's clock correction here, since
+    // the successor may be a different process than the one the reading was
+    // measured against (claunch-l9znm.1). The counter is how the check below
+    // sees that the call happens at all — the value itself is
+    // noticehistory_check's to hold.
+    "noteRailReconnect",
     // Left without an argument: Node's real BroadcastChannel would hold the
     // process open (claunch-j6lg0).
     "BroadcastChannel",
@@ -190,9 +200,11 @@ function build(opts) {
     async () => {},   // restoreNewFormDraft (newformdraft_check)
     () => {},   // renderPtyHostBadge
     () => {},   // renderGilBadge
+    // noteRailReconnect: counted, so the recovery path's call is pinned.
+    () => { calls.railReconnect += 1; },
   );
 
-  return { api, nodes, daemon, clock, apiCalls, timers,
+  return { api, nodes, daemon, clock, apiCalls, calls, timers,
            fireAll, pending: () => timers.length,
            strip: () => nodes.notices.children,
            said: () => nodes.notices.children.map((c) => c.text()).join(" | ") };
@@ -241,6 +253,14 @@ function build(opts) {
     check("so no timeout can clear it", w.strip().length === 1, w.said());
     check("the page still recovered — the card is a sentence, not a gate",
           w.api.bootId === "b2" && w.apiCalls.includes("/api/daemon"), w.apiCalls);
+    // The successor may be a different process than the one the rail's clock
+    // was measured against, and either clock may have been stepped while the
+    // page was away, so the correction is re-read from the next answer
+    // rather than carried across (claunch-l9znm.1). Counted across the
+    // restart poll: the same call also runs on the first load (where there
+    // is no reading to drop), so an absolute total would pin that instead.
+    check("and the rail's clock reading was dropped with the old daemon",
+          w.calls.railReconnect === 2, w.calls.railReconnect);
     w.strip()[0].click();
     check("and a person clicking it is how it goes away",
           w.strip().length === 0, w.said());
