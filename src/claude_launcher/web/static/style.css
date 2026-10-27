@@ -7303,11 +7303,14 @@ body.embed #main { width: 100%; }
 /* the controls a person keeps reaching for. app.js's placeNoticeStrip */
 /* writes --notices-top from those bars; the fallback is the old      */
 /* corner, for a page that has no bar at all.                          */
+/* The right edge is measured too (claunch-chwt1): with the session    */
+/* detail docked as the right-hand column, the strip moves to that     */
+/* rail's left edge (--notices-right) instead of covering its head.    */
 /* ------------------------------------------------------------------ */
 #notices {
-  position: fixed; top: var(--notices-top, 12px); right: 14px; z-index: 30;
+  position: fixed; top: var(--notices-top, 12px); right: var(--notices-right, 14px); z-index: 30;
   display: flex; flex-direction: column; gap: 8px;
-  width: min(340px, calc(100vw - 28px));
+  width: min(340px, calc(100vw - var(--notices-right, 14px) - 14px));
   pointer-events: none;
 }
 .notice {

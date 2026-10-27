@@ -225,6 +225,58 @@ const server = http.createServer((req, res) => {
     console.log(`rows gone again: strip ${backUp} (was ${under.notices.top}), `
       + `header ${headerBottom}`);
 
+    // --- the session detail docked on the right (claunch-chwt1) ----------
+    // On a wide screen the detail is the right-hand column of the layout,
+    // and the strip is fixed to the viewport's right: with the rail up the
+    // cards were drawn over its head. The strip moves to the rail's left
+    // edge, follows the rail when its bar is dragged, and goes back to the
+    // corner when the rail closes — all on a card that is already up.
+    const side = () => page.evaluate(() => {
+      const r = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el || !el.getClientRects().length) return null;
+        const b = el.getBoundingClientRect();
+        return b.width > 0 ? { left: b.left, right: b.right } : null;
+      };
+      return { card: r("#notices .notice"), strip: r("#notices"),
+               split: r("#detail-split"), rail: r("#sess-view.docked"),
+               width: window.innerWidth };
+    });
+    const cornerRight = (await side()).strip.right;
+    await page.evaluate(() => openDetail("s1"));
+    await page.waitForFunction(() => {
+      const v = document.getElementById("sess-view");
+      return v.classList.contains("docked") && v.getClientRects().length > 0;
+    });
+    await settle();
+    let d = await side();
+    assert(d.split && d.rail, "the detail rail is docked on the right");
+    assert(d.card.right <= d.split.left + 0.5,
+      "the card stays left of the docked detail rail "
+      + `(card right ${d.card.right}, rail starts ${d.split.left})`);
+    assert(d.card.right >= d.split.left - 40,
+      "the card sits against the rail, not somewhere in the middle "
+      + `(card right ${d.card.right}, rail starts ${d.split.left})`);
+    console.log(`detail docked: card right ${d.card.right}, rail starts ${d.split.left}`);
+    // The drag bar writes --detail-w; a wider rail pushes the card along.
+    const narrowLeft = d.split.left;
+    await page.evaluate(() => document.getElementById("layout").style.setProperty("--detail-w", "520px"));
+    await settle();
+    d = await side();
+    assert(d.split.left < narrowLeft - 100, "the rail widened under the card");
+    assert(d.card.right <= d.split.left + 0.5,
+      "the card follows a widened rail "
+      + `(card right ${d.card.right}, rail starts ${d.split.left})`);
+    await page.evaluate(() => document.getElementById("layout").style.removeProperty("--detail-w"));
+    await page.evaluate(() => closeDetail());
+    await page.waitForFunction(() =>
+      document.getElementById("sess-view").getClientRects().length === 0);
+    await settle();
+    d = await side();
+    assert(Math.abs(d.strip.right - cornerRight) <= 0.5,
+      "with the rail closed the strip goes back to its corner "
+      + `(strip right ${d.strip.right}, corner ${cornerRight})`);
+
     // --- the tab row wraps under a card that is already up ----------------
     // The bars move after the card is drawn, which is why the placement is
     // watched rather than computed once at show time: a narrower column
