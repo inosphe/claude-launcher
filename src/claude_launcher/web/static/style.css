@@ -3808,13 +3808,34 @@ body.term-split[data-page="log"] #log-view { flex: var(--split-term, 0.6) 1 0; m
 #cli-term .xterm-viewport {
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
-/* Input agent sessions propose for this shell; the user runs or dismisses
-   each row. It sits above the terminal so it never pushes the prompt away
-   without the user's own scroll, and scrolls on its own when it grows. */
-#cli-suggest {
-  flex: none; max-height: 34vh; overflow-y: auto;
-  border-bottom: 1px solid #2a2e36; background: #161a20;
+/* A session's own shell in the terminal's split pane (cli-pane.js,
+   claunch-jg8pt, daemon/session_shells.py). The frame's body is a scroller
+   for the other panes; the pane claims it instead, because a terminal needs
+   a definite box, and puts the proposals above it so a growing strip never
+   pushes the prompt away without the user's own scroll. */
+.split-frame-body.cli-pane-host {
+  display: flex; flex-direction: column; min-height: 0;
+  overflow: hidden; padding: 0;
+}
+.cli-pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column;
+  padding: 0 10px 8px; }
+.cli-pane-head { flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 4px 0 6px; font-size: 12px; color: #8b949e; }
+.cli-pane-status { flex: none; }
+.cli-pane-act { margin-left: auto; }
+.cli-pane-suggest {
+  flex: none; max-height: 34vh; overflow-y: auto; margin-bottom: 6px;
+  border: 1px solid #2a2e36; border-radius: 6px; background: #161a20;
   padding: 4px 10px;
+}
+/* content-box for the same reason as #terminal: the fit addon reads this
+   element's computed size as the grid's room. */
+.cli-pane-term {
+  flex: 1 1 0; min-height: 0; overflow: hidden; box-sizing: content-box;
+}
+.cli-pane-term .xterm { height: 100%; }
+.cli-pane-term .xterm-viewport {
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
 .cli-suggest-row {
   display: flex; align-items: baseline; gap: 8px; padding: 4px 0;

@@ -618,7 +618,7 @@ async def attach_terminal(
 
 
 # --------------------------------------------------------------------------- #
-# the CLI tab: one raw, unmanaged shell (daemon/clipty.py)
+# raw shells: the CLI tab's, and one per session (daemon/clipty.py)
 #
 # A smaller protocol than the session terminal's, for exactly what a bare
 # shell needs. Same frame lanes: binary output both ways, JSON control
@@ -626,17 +626,52 @@ async def attach_terminal(
 # keeps xterm's own scrollback, the daemon keeps no screen — so the control
 # set is just init (may carry ``exited`` for a shell that is already dead
 # when a viewer attaches), resize and restart.
+#
+# The CLI tab's shell is the user's alone: no agent route reaches it, and its
+# frames carry nothing an agent wrote. A session's shell adds exactly one
+# frame, ``suggestions`` — the queue its agent proposed for the user to
+# decide in that session's pane.
 # --------------------------------------------------------------------------- #
 async def cli_ws(request: web.Request) -> web.WebSocketResponse:
+    """The dashboard's CLI tab: the user's own shell."""
+    return await _shell_ws(request, request.app["shell"], name="")
+
+
+async def session_shell_ws(request: web.Request) -> web.WebSocketResponse:
+    """A session's ``cli`` pane: that session's shell.
+
+    The session is the address. No shell is started for a session that has
+    never had one until this viewer asks — this is the one place a session
+    shell is spawned lazily — and nothing here can name another session.
+    """
+    name = request.match_info["name"]
+    try:
+        request.app["manager"].get(name)
+    except Exception:  # noqa: BLE001 -- no such session
+        raise web.HTTPNotFound(text="no such session")
+    shell = request.app["session_shells"].get_or_create(name)
+    return await _shell_ws(request, shell, name=name)
+
+
+async def _shell_ws(
+    request: web.Request, shell, *, name: str
+) -> web.WebSocketResponse:
+    """The frame loop both raw shells share.
+
+    ``name`` is the session whose shell this is, or ``""`` for the CLI tab.
+    It decides two things: what the connection record says, and whether the
+    ``suggestions`` frame is part of the dialect at all (only a session's
+    agent can propose, so only its pane draws a strip).
+    """
     # Auth already happened: /api/ prefix, so the shared middleware validated
     # a Bearer header (CLI/scripts) or the session cookie (the SPA).
-    shell = request.app["shell"]
+    shared = bool(name)
 
     ws = web.WebSocketResponse(heartbeat=HEARTBEAT)
     await ws.prepare(request)
     request.app["websockets"].add(ws)
     conns = conn_mod.install(request.app)
-    record = conns.opened("cli", "(cli shell)", request, ws=ws)
+    record = conns.opened("cli", name or "(cli shell)", request, ws=ws)
 
     # First viewer of this daemon incarnation brings the shell up; afterwards
     # it lives on its own until it exits (see ShellPty.start_once).
@@ -651,30 +686,31 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
         the write, and a receive loop that has not started yet answers no
         PONG -- which costs the socket after :data:`HEARTBEAT`/2.
         """
-        await ws.send_str(
-            json.dumps(
-                {
-                    "type": "init",
-                    "cols": shell.cols,
-                    "rows": shell.rows,
-                    "pid": shell.pid,
-                    # True when the viewer joined after the shell already
-                    # died — the client shows the restart control instead of
-                    # pretending keystrokes can land anywhere.
-                    "exited": shell.exited,
-                    # Proposals agents left while nobody was watching; the
-                    # strip shows them from the first frame on.
-                    "suggestions": shell.suggestions("pending"),
-                }
-            )
-        )
+        init = {
+            "type": "init",
+            "cols": shell.cols,
+            "rows": shell.rows,
+            "pid": shell.pid,
+            # True when the viewer joined after the shell already died — the
+            # client shows the restart control instead of pretending
+            # keystrokes can land anywhere.
+            "exited": shell.exited,
+        }
+        if shared:
+            init["session"] = name
+            # Proposals the agent left while nobody was watching; the pane's
+            # strip shows them from the first frame on.
+            init["suggestions"] = shell.suggestions("pending")
+        await ws.send_str(json.dumps(init))
         # The ring: what this shell printed while no one was watching, so a
         # fresh viewer is caught up before the live stream starts.
         if replay:
             await ws.send_bytes(replay)
 
     try:
-        sender = asyncio.ensure_future(_pump_cli(ws, queue, prologue=prologue))
+        sender = asyncio.ensure_future(
+            _pump_cli(ws, queue, prologue=prologue, suggestions=shared)
+        )
         sender.add_done_callback(
             lambda t: None if t.cancelled() else asyncio.ensure_future(ws.close())
         )
@@ -709,7 +745,8 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
 
 
 async def _pump_cli(
-    ws: web.WebSocketResponse, queue: asyncio.Queue, prologue=None
+    ws: web.WebSocketResponse, queue: asyncio.Queue, prologue=None,
+    *, suggestions: bool = False,
 ) -> None:
     if prologue is not None:
         await prologue()
@@ -724,9 +761,10 @@ async def _pump_cli(
             await ws.send_str(
                 json.dumps({"type": "resize", "cols": cols, "rows": rows})
             )
-        elif kind == "suggestions":
-            # An agent proposed input, or the user decided one. The CLI tab
-            # draws its strip from this; nothing here reaches the child.
+        elif kind == "suggestions" and suggestions:
+            # The session's agent proposed input, or the user decided one.
+            # The session's cli pane draws its strip from this; nothing here
+            # reaches the child. The CLI tab's socket never sees the frame.
             await ws.send_str(
                 json.dumps({"type": "suggestions", "items": payload})
             )

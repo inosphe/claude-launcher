@@ -1,22 +1,33 @@
-"""Shared user shell routes: the CLI tab's shell, opened to agents.
+"""A session's own shell: its output, and the input its agent proposes.
 
-The shell itself is :class:`claude_launcher.daemon.clipty.ShellPty` -- one
-persistent, unmanaged shell with the user's own privileges. This module is
-its HTTP face for everyone who is not the terminal: agent sessions may read
-what the shell printed, and may *propose* input the user can accept. Nothing
-an agent sends through these routes reaches the child except through
-``accept``, which is the user's control; a body that names ``session`` acts
-as that session (the ``shell_*`` MCP tools always send
-``$CLAUNCH_SESSION``), and a body without one acts as the user (the
-dashboard), the daemon's usual trust model.
+Every session has one shell (``daemon/session_shells.py``, shown in the
+session's ``cli`` split pane). The shell runs with the user's privileges, so
+an agent's share of it is deliberately two-faced: it may **read** what the
+shell printed, and it may **propose** input the user can accept in that
+pane. Nothing an agent sends reaches the child except through ``accept``,
+which is the user's control, and the route refuses an accept that comes in
+shaped like a session's call.
 
-  GET  /api/shell                                 status and read cursor
-  GET  /api/shell/output?offset=&limit=           output since a cursor
-  GET  /api/shell/suggestions?state=              the proposal queue
-  POST /api/shell/suggestions                     propose {session, text, why?}
-  POST /api/shell/suggestions/{id}/accept         user: type it and run it
-  POST /api/shell/suggestions/{id}/reject         user: decline it
-  POST /api/shell/suggestions/{id}/withdraw       proposer: take it back
+The address is the session: there is no route that reaches a shell by any
+other name, which is the whole permission boundary between sessions. A
+proposal is owned by the session whose shell it was made in — ``session`` in
+the body must be the path's name — so "propose to somebody else's shell" is
+not an operation that exists.
+
+  GET  /api/sessions/{name}/shell                     status and read cursor
+  GET  /api/sessions/{name}/shell/output?offset=&limit=  output since a cursor
+  GET  /api/sessions/{name}/shell/suggestions?state=  the proposal queue
+  POST /api/sessions/{name}/shell/suggestions         propose {session, text, why?}
+  POST /api/sessions/{name}/shell/suggestions/{id}/accept   user: type and run
+  POST /api/sessions/{name}/shell/suggestions/{id}/reject   user: decline
+  POST /api/sessions/{name}/shell/suggestions/{id}/withdraw proposer: take back
+
+Every route answers 404 when the session is unknown. Reading a session that
+never had a shell is a 404 too — a reader does not conjure a PTY, the
+``cli`` pane's viewer does (``ws.session_shell_ws``). ``suggest`` is the one
+exception: it creates the session's shell record (not its child) so an agent
+can propose before anyone has looked at the pane, which is the order this
+feature is normally used in.
 
 Reading is not rate-limited and carries no side effect; a reader that fell
 behind the ring is told how many bytes it missed (``dropped``) rather than
@@ -31,9 +42,6 @@ from typing import Optional
 from aiohttp import web
 
 log = logging.getLogger(__name__)
-
-#: The shell is one per daemon, so its id is fixed rather than generated.
-SHELL_ID = "cli"
 
 
 async def json_body(request) -> dict:
@@ -59,23 +67,43 @@ def _session_of(body: dict) -> Optional[str]:
     return session if isinstance(session, str) and session else None
 
 
-def _known_session(app, manager, name: str) -> bool:
+def _known_session(app, name: str) -> bool:
     """Whether ``name`` is a session this daemon knows (live or held)."""
     try:
-        manager.get(name)
+        app["manager"].get(name)
         return True
     except Exception:  # noqa: BLE001 -- no such session
         return False
 
 
 def install(app) -> None:
-    shell = app["shell"]
+    shells = app["session_shells"]
     manager = app["manager"]
 
-    def status() -> dict:
+    def _named(request) -> str:
+        """The session the path addresses, refusing one this daemon lacks."""
+        name = request.match_info["name"]
+        if not _known_session(app, name):
+            raise web.HTTPNotFound(
+                text='{"error": "no such session"}', content_type="application/json"
+            )
+        return name
+
+    def _shell(request):
+        """The addressed session's existing shell, or a 404."""
+        name = _named(request)
+        shell = shells.get(name)
+        if shell is None:
+            raise web.HTTPNotFound(
+                text='{"error": "this session has no shell yet"}',
+                content_type="application/json",
+            )
+        return name, shell
+
+    def status(name: str, shell) -> dict:
         pending = shell.suggestions("pending")
         return {
-            "id": SHELL_ID,
+            "id": name,
             "pid": shell.pid,
             "exited": bool(shell.exited),
             "exit_code": shell.exit_code,
@@ -85,23 +113,33 @@ def install(app) -> None:
             "pending": len(pending),
         }
 
-    def _required_session(body: dict) -> str:
+    def _own_session(body: dict, name: str) -> str:
+        """The proposing session: the path's session, and nobody else's.
+
+        An agent proposes to the shell of the session it is in; the MCP tool
+        and ``claunch shell`` both send ``$CLAUNCH_SESSION``. A body naming a
+        different session is refused rather than honoured — that is the
+        cross-session boundary, stated once, here.
+        """
         session = _session_of(body)
         if session is None:
             raise web.HTTPForbidden(
-                text='{"error": "this act belongs to an agent session (send session)"}',
+                text='{"error": "this act belongs to the session whose shell it is (send session)"}',
                 content_type="application/json",
             )
-        if not _known_session(app, manager, session):
-            raise web.HTTPNotFound(
-                text='{"error": "no such session"}', content_type="application/json"
+        if session != name:
+            raise web.HTTPForbidden(
+                text='{"error": "a proposal belongs to the session whose shell it is"}',
+                content_type="application/json",
             )
         return session
 
     async def h_status(request):
-        return web.json_response(status())
+        name, shell = _shell(request)
+        return web.json_response(status(name, shell))
 
     async def h_output(request):
+        _name, shell = _shell(request)
         raw_after = request.query.get("offset")
         raw_limit = request.query.get("limit")
         after: Optional[int] = None
@@ -120,12 +158,18 @@ def install(app) -> None:
         return web.json_response(shell.read_output(after, limit))
 
     async def h_suggestions(request):
+        _name, shell = _shell(request)
         state = request.query.get("state")
         return web.json_response({"suggestions": shell.suggestions(state or None)})
 
     async def h_suggest(request):
+        name = _named(request)
         body = await json_body(request)
-        session = _required_session(body)
+        session = _own_session(body, name)
+        # The queue is the daemon's memory, not the child's: proposing before
+        # anyone opened the pane is the normal order, so this creates the
+        # record. The child still starts with the pane's first viewer.
+        shell = shells.get_or_create(name)
         try:
             row = shell.suggest(session, str(body.get("text") or ""),
                                 str(body.get("why") or ""))
@@ -134,6 +178,7 @@ def install(app) -> None:
         return web.json_response({"suggestion": row}, status=201)
 
     async def h_accept(request):
+        _name, shell = _shell(request)
         body = await json_body(request)
         if _session_of(body):
             # The user decides; an agent proposing does not carry the right
@@ -154,6 +199,7 @@ def install(app) -> None:
         return web.json_response({"suggestion": row})
 
     async def h_reject(request):
+        _name, shell = _shell(request)
         body = await json_body(request)
         if _session_of(body):
             return web.json_response(
@@ -169,8 +215,9 @@ def install(app) -> None:
         return web.json_response({"suggestion": row})
 
     async def h_withdraw(request):
+        name, shell = _shell(request)
         body = await json_body(request)
-        session = _required_session(body)
+        session = _own_session(body, name)
         sid = request.match_info["sid"]
         try:
             row = shell.withdraw(sid, session)
@@ -182,11 +229,12 @@ def install(app) -> None:
             return web.json_response({"error": str(exc)}, status=409)
         return web.json_response({"suggestion": row})
 
+    base = "/api/sessions/{name}/shell"
     r = app.router
-    r.add_get("/api/shell", h_status)
-    r.add_get("/api/shell/output", h_output)
-    r.add_get("/api/shell/suggestions", h_suggestions)
-    r.add_post("/api/shell/suggestions", h_suggest)
-    r.add_post("/api/shell/suggestions/{sid}/accept", h_accept)
-    r.add_post("/api/shell/suggestions/{sid}/reject", h_reject)
-    r.add_post("/api/shell/suggestions/{sid}/withdraw", h_withdraw)
+    r.add_get(base, h_status)
+    r.add_get(base + "/output", h_output)
+    r.add_get(base + "/suggestions", h_suggestions)
+    r.add_post(base + "/suggestions", h_suggest)
+    r.add_post(base + "/suggestions/{sid}/accept", h_accept)
+    r.add_post(base + "/suggestions/{sid}/reject", h_reject)
+    r.add_post(base + "/suggestions/{sid}/withdraw", h_withdraw)

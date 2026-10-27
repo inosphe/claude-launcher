@@ -52,8 +52,8 @@ RAW_WRITER_ALLOWLIST = {
     ("daemon/api.py", "_deliver_pasted_image"): "the image-paste chord a human pressed in the web session line — a keystroke the harness reads its own clipboard with, carrying no message text",
     ("daemon/session_input.py", "type_line"): "the web session line's own keys/paste for a line a human queued while the session was exited, or typed in another daemon's shadow view (daemon/shadow.py, text only, never forced) — the same passthrough as h_session_keys; deliver() would stamp it as an automated message",
     ("daemon/ws.py", "_pump_from_client"): "raw keyboard passthrough over WebSocket (terminal_ws receive loop)",
-    ("daemon/ws.py", "cli_ws"): "raw keystroke passthrough to the CLI tab's own shell pty",
-    ("daemon/clipty.py", "accept"): "the user accepted a proposed line into the CLI tab's own shell — a keystroke-equivalent on an unmanaged pty, not an agent message; there is no Session.deliver here",
+    ("daemon/ws.py", "_shell_ws"): "raw keystroke passthrough to a raw shell pty — the CLI tab's (cli_ws) or a session's own (session_shell_ws)",
+    ("daemon/clipty.py", "accept"): "the user accepted a proposed line into a session's own shell — a keystroke-equivalent on an unmanaged pty, not an agent message; there is no Session.deliver here",
 }
 
 #: Same rule across the process boundary: the keys endpoint is the passthrough,

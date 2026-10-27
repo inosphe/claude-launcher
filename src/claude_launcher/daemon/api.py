@@ -740,9 +740,12 @@ def build_app(
     # conversations beside the terminal, typed into the session by id.
     from . import threads_api
     threads_api.install(app)
-    # The shared user shell (daemon/shell_api.py): the CLI tab's persistent
-    # shell, opened read-only to agent sessions and to their input proposals.
-    # Installed after app["shell"] exists (set above, clipty.ShellPty).
+    # Each session's own shell (daemon/session_shells.py), and its agent
+    # face (daemon/shell_api.py). The CLI tab's shell above is the user's
+    # alone — no agent route reaches it (claunch-jg8pt rolled that back).
+    # Installed before shell_api, which reads app["session_shells"].
+    from . import session_shells
+    session_shells.install(app)
     from . import shell_api
     shell_api.install(app)
     # Mega threads (daemon/megathread_api.py, claunch-v5nhp): one input box
@@ -1368,6 +1371,10 @@ def build_app(
     r.add_get("/api/sessions/{name}/ws", ws_mod.terminal_ws)
     # The CLI tab's raw shell — one socket per viewer, one child under it.
     r.add_get("/api/cli/ws", ws_mod.cli_ws)
+    # A session's own shell, under the session (its `cli` split pane). The
+    # address is the session, which is what keeps one session's shell out of
+    # another's reach (daemon/session_shells.py).
+    r.add_get("/api/sessions/{name}/shell/ws", ws_mod.session_shell_ws)
     # The board: every repository board the fleet touches, one issue in
     # full, and a session's own slice of it (GET), with the one write the
     # dashboard offers — an issue for a session that has none (POST).
