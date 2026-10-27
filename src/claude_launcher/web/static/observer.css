@@ -468,7 +468,9 @@
    of growing a horizontal scroller of their own. */
 :is(#observer-operators, #opfab-view) .op-text { margin-top: 2px; }
 :is(#observer-operators, #opfab-view) .op-text.md { white-space: normal; }
-:is(#observer-operators, #opfab-view) .op-text .md-pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+:is(#observer-operators, #opfab-view) .op-text .md-pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; position: relative; padding-right: 52px; }
+:is(#observer-operators, #opfab-view) .op-text .op-copy { position: absolute; top: 4px; right: 4px; min-height: 0; padding: 1px 7px; font-size: 11px; line-height: 16px; color: #8b949e; background: #1b1e24; border: 1px solid #3b424e; border-radius: 4px; cursor: pointer; user-select: none; }
+:is(#observer-operators, #opfab-view) .op-text .op-copy:hover { color: #d8dbe0; }
 :is(#observer-operators, #opfab-view) .op-text .md-table { display: table; table-layout: fixed; width: 100%; overflow: visible; }
 :is(#observer-operators, #opfab-view) .op-text .md-table :is(th, td) { overflow-wrap: anywhere; }
 :is(#observer-operators, #opfab-view) .op-answer-text { margin-top: 4px; padding-left: 8px; border-left: 2px solid #3d4451; }

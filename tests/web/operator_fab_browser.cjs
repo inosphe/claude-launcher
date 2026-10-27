@@ -22,7 +22,7 @@ const path = require("node:path");
 const { chromium } = require(process.env.CLAUNCH_PLAYWRIGHT || "playwright");
 const { safeListen } = require("./safe_listen.cjs");
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
-const sent = [];
+const sent = [], reads = [];
 const at = n => new Date(Date.UTC(2026, 9, 17, 9, 0, n)).toISOString();
 const sessions = [
   { name: "s1", status: "idle", running: true, project: "alpha" },
@@ -48,6 +48,7 @@ function operatorsApi(req, res, body) {
   const json = (value, status = 200) => { res.statusCode = status; return res.end(JSON.stringify(value)); };
   const data = body ? JSON.parse(body) : {};
   if (req.method !== "GET") sent.push({ method: req.method, url, body: data });
+  else reads.push(req.url);
   if (!parts.length) return json({ operators: Object.values(ops).map(summary) });
   const o = ops[parts[0]], rest = parts.slice(1).join("/");
   if (!o) return json({ error: "no such operator" }, 404);
@@ -137,7 +138,19 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     // On s2's page (project beta) the dialog opens on beta-ops.
     await page.evaluate(() => { location.hash = "#/s/s2"; });
     await page.waitForFunction(() => location.hash === "#/s/s2");
-    await page.click(".operator-fab");
+    // The closed dialog keeps the conversation read (claunch-fokj3), so the
+    // first open draws it in the same task as the press, before any read
+    // of its own; the read leaves the session panel out (panel=0).
+    for (let i = 0; i < 50 && !reads.some(u => /^\/api\/operators\/op[AB]\?/.test(u)); i++) await page.waitForTimeout(50);
+    const viewReads = reads.filter(u => /^\/api\/operators\/op[AB](\?|$)/.test(u));
+    assert(viewReads.length > 0, "the closed dialog read a conversation");
+    assert(viewReads.every(u => new URL(u, "http://x").searchParams.get("panel") === "0"), `panel=0 on every read: ${JSON.stringify(viewReads)}`);
+    const firstOpen = await page.evaluate(() => {
+      document.querySelector(".operator-fab").click();
+      return { open: document.querySelector(".opfab-modal").open, entries: document.querySelectorAll("#opfab-view .op-entry").length };
+    });
+    assert.equal(firstOpen.open, true);
+    assert(firstOpen.entries > 0, "the first open shows the conversation at once");
     await page.waitForSelector(".opfab-modal[open] #opfab-view .op-entry");
     const selectedTab = () => page.locator('#opfab-view .op-tab[aria-selected="true"]').innerText();
     await page.waitForFunction(() => document.querySelector('#opfab-view .op-tab[aria-selected="true"]')?.textContent.includes("beta-ops"));

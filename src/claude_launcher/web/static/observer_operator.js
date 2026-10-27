@@ -61,6 +61,9 @@ let listSignature = "", task = null;
    pointer is down the redraw waits; the next poll or the release picks it up
    (releaseRender, below). */
 let pressing = false;
+/* A poll's redraw that waited (a press, a field being typed in, text
+   selected in the view), and what the last drawn poll read. */
+let heldRender = false, drawnRead = "";
 /* Whether this view already listens for the release on the window (see
    mount). Per view: the page's dock and the floating dialog are two
    instances of this module, each with its own `pressing`. */
@@ -154,7 +157,10 @@ function refresh() {
     if(selected) {
       try {
         const id = selected, tid = threadOf.get(id);
-        const read = t => call(opPath(id, t ? `?thread=${encodeURIComponent(t)}` : ""));
+        // panel=0: the conversation only. The watched sessions' rows and
+        // gates the daemon can add take it seconds to read (3.7-25s
+        // measured), and nothing here draws them (claunch-fokj3).
+        const read = t => call(opPath(id, `?panel=0${t ? `&thread=${encodeURIComponent(t)}` : ""}`));
         // A thread that went away (its operator deleted it) gives way to
         // the most recently active one.
         detail = await read(tid).catch(err => { if(!tid) throw err; threadOf.delete(id); return read(""); });
@@ -174,9 +180,13 @@ function refresh() {
     // at all in 3 of 24 runs of the harness and would do the same to a
     // reader -- more often on a loaded machine, where the poll's read and
     // the reader's press are likelier to overlap.
-    const active = document.activeElement;
-    const held = pressing || (area?.contains(active) && active.matches("textarea,input,select"));
-    if(!held) render();
+    // A poll that read what is already drawn draws nothing: the rebuild
+    // would only throw away the reader's selection and scroll.
+    const drawn = JSON.stringify([list, detail, listError]);
+    if(drawn === drawnRead && !heldRender) return;
+    drawnRead = drawn;
+    if(holding()) heldRender = true;
+    else render();
   })().finally(() => { task = null; });
   return task;
 }
@@ -280,7 +290,26 @@ function bodyOf(text, cls) {
   const body = node("div", "", cls);
   if(typeof globalThis.mdInto === "function") { body.classList.add("md"); globalThis.mdInto(body, text || ""); }
   else { body.classList.add("plain"); body.textContent = text || ""; }
+  for(const pre of body.querySelectorAll("pre")) pre.append(copyButton(pre));
   return body;
+}
+/* A code block's copy button (claunch-fokj3): the block's text, without
+   the button's own label. app.js copyToBrowserClipboard falls back to
+   execCommand on plain http; its textarea goes inside the block, since a
+   modal dialog leaves the rest of the page inert. */
+function copyButton(pre) {
+  const b = node("button", "복사", "op-copy");
+  b.type = "button"; b.title = "코드 복사"; b.setAttribute("aria-label", "코드 복사");
+  b.onclick = async () => {
+    const code = pre.querySelector("code") || pre;
+    const text = code === pre ? [...pre.childNodes].filter(n => n !== b).map(n => n.textContent).join("") : code.textContent;
+    const done = typeof globalThis.copyToBrowserClipboard === "function"
+      ? await globalThis.copyToBrowserClipboard(text, pre)
+      : await navigator.clipboard?.writeText(text).then(() => true, () => false);
+    b.textContent = done ? "복사됨" : "복사 실패";
+    setTimeout(() => { b.textContent = "복사"; }, 1500);
+  };
+  return b;
 }
 function askAnswer(op, e) {
   const box = node("div", "", "op-ask-answer");
@@ -542,15 +571,31 @@ function render() {
 }
 /* The press that was held back: a redraw waits while a pointer is down, and
    the release draws what the poll had read instead of losing it. */
+/* Text selected inside the view: a rebuild replaces the nodes the
+   selection sits on and the browser drops it, so a reader who dragged over
+   an entry lost it before Ctrl+C (claunch-fokj3). */
+function selecting() {
+  const sel = globalThis.getSelection?.();
+  return !!sel && !sel.isCollapsed && sel.rangeCount > 0 && !!area?.contains(sel.getRangeAt(0).commonAncestorContainer);
+}
+function holding() {
+  const active = document.activeElement;
+  return pressing || selecting() || !!(area?.contains(active) && active.matches("textarea,input,select"));
+}
+/* The redraw a poll held back, once nothing holds it any more. Only a held
+   one: a release that ends a drag-select must not redraw over the text it
+   just selected. */
+function flushHeld() {
+  if(!heldRender || holding()) return;
+  heldRender = false;
+  render();
+}
 function releaseRender() {
   if(!pressing) return;
   pressing = false;
   // After the click, not before it: the browser dispatches it right after
   // the pointerup, and the press has to reach the node it was aimed at.
-  setTimeout(() => {
-    if(pressing) return;
-    if(!area?.contains(document.activeElement) || !document.activeElement.matches("textarea,input,select")) render();
-  }, 0);
+  setTimeout(() => { if(!pressing) flushHeld(); }, 0);
 }
 /* -- what observer.js uses --------------------------------------------- */
 const TARGET = "operator:";
@@ -573,6 +618,9 @@ function mount(element, changed) {
     windowListening = true;
     window.addEventListener("pointerup", releaseRender, true);
     window.addEventListener("pointercancel", releaseRender, true);
+    // The selection collapsing (a click elsewhere, Escape) lets the held
+    // redraw through.
+    document.addEventListener("selectionchange", () => { if(heldRender && !pressing) flushHeld(); });
   }
   if(opts.composer) {
     bar = node("div", "", "op-sessionbar"); bar.hidden = true;

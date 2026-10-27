@@ -17,7 +17,7 @@ const path = require("node:path");
 const { chromium } = require(process.env.CLAUNCH_PLAYWRIGHT || "playwright");
 const { safeListen } = require("./safe_listen.cjs");
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
-const sent = [];
+const sent = [], reads = [];
 const at = n => new Date(Date.UTC(2026, 9, 17, 9, 0, n)).toISOString();
 const observer = { enabled: false, scope: "all", sessions: [
   { name: "s1", status: "busy", running: true, meshes: ["team-a"], summary: "작업 중", events: [] },
@@ -70,6 +70,7 @@ function operatorsApi(req, res, body) {
   const json = (value, status = 200) => { res.statusCode = status; return res.end(JSON.stringify(value)); };
   const data = body ? JSON.parse(body) : {};
   if (req.method !== "GET") sent.push({ method: req.method, url, body: data });
+  else reads.push(req.url);
   if (!parts.length) {
     if (req.method === "GET") return json({ operators: Object.values(ops).map(summary).sort((a, b) => a.name.localeCompare(b.name)) });
     // The daemon raises a name clash as a 409 with a plain-text body.
@@ -185,7 +186,7 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
   await safeListen(server);
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CLAUNCH_CHROMIUM || undefined });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, permissions: ["clipboard-read", "clipboard-write"] });
     await page.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
       // The observer polls on a 10s interval (observer.js); waiting ten
@@ -269,6 +270,64 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       pre: e.querySelectorAll("pre").length, img: e.querySelectorAll("img").length, raw: /<img src=x/.test(e.textContent),
       pwned: !!window.__pwned, preFits: [...e.querySelectorAll("pre")].every(p => p.scrollWidth <= p.clientWidth + 1) }));
     assert.deepEqual(md, { md: true, h: 1, li: 2, strong: 1, code: 2, pre: 1, img: 0, raw: true, pwned: false, preFits: true });
+    // A code block carries a copy button (claunch-fokj3) that puts the
+    // block's own text on the clipboard, without the button's label.
+    const copy = page.locator('.op-entry[data-entry="p17"] pre .op-copy');
+    assert.equal(await copy.count(), 1, "one copy button on the one code block");
+    await copy.click();
+    await page.waitForFunction(() => document.querySelector('.op-entry[data-entry="p17"] pre .op-copy')?.textContent === "복사됨");
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()),
+      "FAILED tests/test_a.py::test_b - AssertionError: a very long line that would otherwise run past the narrow dock column");
+    // The conversation reads leave the session panel out (claunch-fokj3):
+    // the daemon spends seconds on it and nothing here draws it.
+    const viewReads = reads.filter(u => /^\/api\/operators\/op1(\?|$)/.test(u));
+    assert(viewReads.length > 0 && viewReads.every(u => new URL(u, "http://x").searchParams.get("panel") === "0"),
+      `every conversation read asks for panel=0: ${JSON.stringify(viewReads)}`);
+
+    // Text selected in the conversation survives until it is copied
+    // (claunch-fokj3). Every poll used to rebuild the section, and the
+    // release that ended a drag-select redrew it too, so the selection was
+    // gone before Ctrl+C.
+    {
+      await page.evaluate(() => getSelection().removeAllRanges());
+      // Whichever entry body is on screen now (the steps above moved
+      // between threads).
+      const text = await page.evaluate(() => {
+        const body = [...document.querySelectorAll("#observer-operators .op-entry .op-text")].reverse()
+          .find(e => e.getClientRects().length && e.textContent.trim().length > 4);
+        body.dataset.probe = "1";
+        return body.textContent.trim();
+      });
+      const entry = '#observer-operators .op-text[data-probe="1"]';
+      await page.locator(entry).scrollIntoViewIfNeeded();
+      const box = await page.locator(entry).boundingBox();
+      const selected = () => page.evaluate(() => getSelection().toString());
+      const connected = () => page.evaluate(() => window.__sel?.isConnected === true);
+      await page.evaluate(sel => { window.__sel = document.querySelector(sel); }, entry);
+      // A real drag across the entry's text: the release must not redraw.
+      await page.mouse.move(box.x + 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width - 2, box.y + box.height / 2, { steps: 5 });
+      await page.mouse.up();
+      await page.evaluate(() => new Promise(r => setTimeout(r, 50)));
+      assert(text.includes((await selected()).trim()) && (await selected()).trim().length > 2, `the drag selected the entry's text: ${await selected()}`);
+      assert.equal(await connected(), true, "the release after a drag-select redraws nothing");
+      // An unchanged poll draws nothing; a poll with news waits while the
+      // selection stands.
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      const probe = { id: "z2", at: at(41), kind: "system", role: "system", text: "probe", thread: "th-a" };
+      ops.op1.feed.push(probe);
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      assert((await selected()).trim().length > 2, "the selection outlives a poll that read news");
+      assert.equal(await connected(), true, "the held poll did not redraw");
+      // Letting go of the selection lets the held redraw through.
+      await page.evaluate(() => getSelection().removeAllRanges());
+      await page.waitForFunction(() => !!document.querySelector('#observer-operators .op-entry[data-entry="z2"]'), null, { timeout: 5000 });
+      assert.equal(await connected(), false);
+      ops.op1.feed.splice(ops.op1.feed.indexOf(probe), 1);
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.waitForFunction(() => !document.querySelector('#observer-operators .op-entry[data-entry="z2"]'));
+    }
 
     // Asks: approve/deny and a choice, each one press.
     await page.locator('.op-entry[data-entry="a1"] button', { hasText: "승인" }).click();
@@ -621,10 +680,17 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       await page.mouse.down();
       await page.mouse.move(spot.bx, spot.by);   // well outside the dock
       await page.mouse.up();
+      // A poll that reads what is drawn redraws nothing (claunch-fokj3), so
+      // the probe's poll reads something new.
+      const probe = { id: "z1", at: at(40), kind: "system", role: "system", text: "probe", thread: "th-a" };
+      ops.op1.feed.push(probe);
       await page.evaluate(() => globalThis.ObserverOperators.refresh());
       await page.evaluate(() => globalThis.ObserverOperators.refresh());
       await page.waitForFunction(() => window.__before && !window.__before.isConnected,
         null, { timeout: 5000 });
+      ops.op1.feed.splice(ops.op1.feed.indexOf(probe), 1);
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.waitForFunction(() => !document.querySelector('#observer-operators .op-entry[data-entry="z1"]'));
     }
 
     // A list read that FAILED says nothing about which operators exist, so it
