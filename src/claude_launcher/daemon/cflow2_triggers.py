@@ -620,8 +620,10 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
         if not driver:
             return False, "the run has no driver session"
         push = ENQUEUE_LANDING_PUSH if do == DO_ENQUEUE_LANDING else (trig.get("push") or {})
+        # A push to parent:landing / leader:landing is a landing request too
+        # and gets the same checks (claunch-c4zwi).
         return await asyncio.to_thread(
-            _push, manager, cwd, driver, push, do == DO_ENQUEUE_LANDING, list(cwds),
+            _push, manager, cwd, driver, push, is_landing(trig), list(cwds),
             facts_fn or session_facts(manager), trigger_tid(cwd, scope, trig),
             trig.get("data"), mesh)
     return False, f"this daemon has no trigger action named {do!r}"

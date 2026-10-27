@@ -273,6 +273,35 @@ def test_the_enqueue_landing_trigger_pushes_nothing_from_master(tmp_path):
     assert not ok
     assert "integration branch itself" in detail and "nothing was pushed" in detail
 
+
+@pytest.mark.parametrize("to", ["parent:landing", "leader:landing"])
+def test_a_landing_push_trigger_pushes_nothing_from_master(tmp_path, to):
+    """claunch-c4zwi: improv-worker-v2 files its request with ``do: push`` to
+    ``parent:landing`` / ``leader:landing``, not ``enqueue-landing``. That
+    push skipped the guard, and a request measured on master (tip 33a57783)
+    reached the leader's queue and was marked landed at once."""
+    facts = {"head": "abc", "branch": "master", "in_review": ["c-1"], "session": "w1",
+             "checkout": str(tmp_path)}
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to=to)
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        _Manager(_Session("w1", tmp_path)), str(tmp_path), "w1",
+        {"do": "push", "push": push}, driver="w1", facts_fn=lambda c, s: dict(facts)))
+    assert not ok
+    assert "integration branch itself" in detail and "nothing was pushed" in detail
+
+
+def test_a_push_to_another_collection_is_not_a_landing_request(tmp_path):
+    """The guard is for landing requests: a push of the same facts to a
+    collection that is not ``landing`` is not refused for the branch."""
+    facts = {"head": "abc", "branch": "master", "in_review": ["c-1"], "session": "w1",
+             "checkout": str(tmp_path)}
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="parent:notes")
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        _Manager(_Session("w1", tmp_path)), str(tmp_path), "w1",
+        {"do": "push", "push": push}, driver="w1", facts_fn=lambda c, s: dict(facts)))
+    assert not ok
+    assert "integration branch itself" not in detail
+
 # -- a move the transcript never recorded (claunch-1o6cs) ----------------------
 
 #: The shape a spawned worker hits: the run's cwd is the PARENT's checkout

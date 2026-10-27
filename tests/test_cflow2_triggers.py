@@ -488,8 +488,13 @@ def test_an_empty_each_is_a_skip(tmp_path):
     lead, work = _dirs(tmp_path)
     _start(lead, LEAD, "lead")
     mgr = Manager(Session("lead", lead), Session("w1", work, parent="lead"))
+    with pytest.raises(cflow2_triggers.PushError, match="empty list"):
+        cflow2_triggers.expand_push(dict(cflow2_triggers.ENQUEUE_LANDING_PUSH),
+                                    dict(FACTS, in_review=[]))
+    # A push to parent:landing is a landing request and is refused with the
+    # enqueue-landing reason before 'each' is read (claunch-c4zwi).
     ok, detail = _push(mgr, work, facts=dict(FACTS, in_review=[]))
-    assert not ok and "empty list" in detail
+    assert not ok and "holds no issue in_review" in detail
     ok, detail = asyncio.run(cflow2_triggers.perform(
         mgr, str(work), "w1", {"do": "enqueue-landing"}, driver="w1",
         facts_fn=lambda c, s: dict(FACTS, in_review=[])))
