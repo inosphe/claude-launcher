@@ -51,6 +51,10 @@ log = logging.getLogger(__name__)
 
 PREFIX = "[claunch simulation]"
 
+#: How long the startup sweep waits for the boot's restore before giving up
+#: on it (the same bound as the shims' first pass, claunch-esmr3).
+SWEEP_BOOT_WAIT_S = 600.0
+
 
 #: ``<simulation id>-run<n>``: the name launch_runner gives a run session.
 RUN_SESSION_RE = re.compile(r"^(sim-[0-9a-f]{6,12})-run[0-9]+$")
@@ -371,13 +375,41 @@ def install(app, store: Optional[sim_store.SimStore] = None):
 
     manager.exit_hooks.append(released)
 
-    async def sweep(_app):
+    async def sweep():
+        # The startup handlers run before __main__ restores the fleet, so a
+        # sweep from on_startup judged every owner gone and cut the claims
+        # and runs of live sessions (claunch-qg3x9). Wait for the restore,
+        # the way the shims' first pass does (claunch-esmr3) -- but where
+        # the restore never finishes, skip the sweep: releasing a live
+        # session's claim cannot be undone, and an owner that really is gone
+        # is released by the exit hook or the next start's sweep.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SWEEP_BOOT_WAIT_S
+        while (app.get("boot") or {}).get("phase", "ready") != "ready":
+            if loop.time() >= deadline:
+                log.warning("sim: boot still restoring after %ss; skipping the startup sweep",
+                            int(SWEEP_BOOT_WAIT_S))
+                return
+            await asyncio.sleep(0.2)
         try:
             await asyncio.to_thread(sims.sweep)
         except Exception:  # noqa: BLE001
             log.exception("sim: startup sweep failed")
 
-    app.on_startup.append(sweep)
+    async def start_sweep(_app):
+        app["sims_sweep_task"] = asyncio.get_running_loop().create_task(sweep(), name="sim-sweep")
+
+    async def stop_sweep(_app):
+        task = app.get("sims_sweep_task")
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    app.on_startup.append(start_sweep)
+    app.on_shutdown.append(stop_sweep)
 
     async def body_of(request) -> dict:
         try:

@@ -333,6 +333,28 @@ def test_triage_sorts_open_findings(env):
         st.configure(sim["id"], "s1", settings={"triage": 1})
 
 
+
+def test_listing_sorts_stuck_findings_with_dict_state(env):
+    # claunch-0lm0o: stuck rows carry the whole state as a dict and no machine,
+    # so they shared the "~" group with machine-less rows and the sort compared
+    # dict with str (TypeError, 500 on /findings and /work).
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    rows = [
+        {"kind": "stuck", "key": "stuck|a", "machine": None, "state": {"door": "open", "lock": "on"}},
+        {"kind": "stuck", "key": "stuck|b", "machine": None, "state": {"door": "closed"}},
+        {"kind": "invariant", "key": "invariant|i1", "machine": None, "state": None},
+        {"kind": "unhandled", "key": "unhandled|door|open|open", "machine": "door", "state": "open"},
+        {"kind": "unhandled", "key": "unhandled|x|run|go", "machine": None, "state": "running"},
+    ]
+    S._write_json(st._dir(sim["id"]) / "findings.json",
+                  {r["key"]: {**r, "status": "open", "count": 1} for r in rows})
+    listed = st.list_findings(sim["id"], "open")
+    assert listed["total"] == 5
+    assert listed["findings"][0]["key"] == "unhandled|door|open|open"
+    places = {g["place"]: len(g["findings"]) for g in st.gap_batches(sim["id"])}
+    assert places == {"stuck": 2, "invariant": 1, "door/open": 1, "-/running": 1}
+
 # -- edit proposals (S3d) ------------------------------------------------------
 
 def test_edit_proposals_are_checked_and_never_applied(env, tmp_path):
