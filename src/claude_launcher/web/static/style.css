@@ -754,7 +754,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   --rail-inset: 16px;
   margin: 0 8px; padding-top: 8px; padding-bottom: 8px;
   border: 0; border-bottom: 1px solid #262c35; border-radius: 0;
-  background: transparent; row-gap: 4px; box-shadow: none;
+  background: transparent; row-gap: 4px;
+  --rail-recess: 0 0 transparent; box-shadow: var(--rail-recess);
 }
 #session-list li.sess-card[data-rail-mode="min"] {
   padding-top: 7px; padding-bottom: 7px;
@@ -782,7 +783,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list .sess-card.active:not(.goto-flash) {
   background: #1d3550;
   box-shadow: inset 3px 0 0 #58a6ff,
-              inset 0 0 0 1px rgba(88, 166, 255, 0.28);
+              inset 0 0 0 1px rgba(88, 166, 255, 0.28),
+              var(--rail-recess, 0 0 transparent);
 }
 #session-list .sess-card.active:not(.goto-flash) .rail-name { color: #f0f6fc; }
 #session-list li.sess-card .rail-name {
@@ -933,6 +935,31 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 1px;
   background: #30363d; pointer-events: none;
 }
+/* A child card sits deeper in the rail than its parent (claunch-zijwn): an
+   inset shade along its top and leading edges, darker and wider at each
+   depth, so a nested stack reads as stepping into the screen. Only the
+   variable is set here; the card's own box-shadow and the state rings
+   (active, focus, kill, lineage) carry it, so a ring on a child keeps the
+   depth under it. The flash leaves it out on purpose: the row `⇱ card`
+   landed on wears the same ring at any depth (railcards_browser.cjs).
+   Translucent black is left as it is by the light theme (theme.js), so the
+   shade reads the same on both pages. */
+#session-list li.child[data-rail-depth="1"] {
+  --rail-recess: inset 0 2px 3px -1px rgba(0, 0, 0, 0.16),
+                 inset 2px 0 3px -1px rgba(0, 0, 0, 0.10);
+}
+#session-list li.child[data-rail-depth="2"] {
+  --rail-recess: inset 0 3px 5px -2px rgba(0, 0, 0, 0.24),
+                 inset 3px 0 5px -2px rgba(0, 0, 0, 0.16);
+}
+#session-list li.child[data-rail-depth="3"] {
+  --rail-recess: inset 0 4px 7px -3px rgba(0, 0, 0, 0.32),
+                 inset 4px 0 7px -3px rgba(0, 0, 0, 0.22);
+}
+#session-list li.child[data-rail-depth="4"] {
+  --rail-recess: inset 0 5px 9px -4px rgba(0, 0, 0, 0.40),
+                 inset 5px 0 9px -4px rgba(0, 0, 0, 0.28);
+}
 #session-list li.child:hover { background: #22262d; }
 #session-list li.child.active { background: #202b3a; }
 /* A child row that `⇱ card` just landed on still has to show the mark, and
@@ -972,7 +999,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    (claunch-mz09h, claunch-78p7b). A
    purple inset edge and tint mark it without moving the row by a pixel. */
 #session-list li.kin-outside {
-  background: rgba(163, 113, 247, 0.08); box-shadow: inset 2px 0 0 #a371f7;
+  background: rgba(163, 113, 247, 0.08);
+  box-shadow: inset 2px 0 0 #a371f7, var(--rail-recess, 0 0 transparent);
 }
 #session-list li.kin-outside:hover { background: rgba(163, 113, 247, 0.16); }
 #session-list li.kin-outside.active { background: #33294a; }
@@ -1221,7 +1249,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    rail is 260px of near-identical rows where losing it means losing the
    card that `k` is pointed at. */
 #session-list li.sess-card:focus {
-  outline: none; box-shadow: inset 0 0 0 1px #6e2c2c;
+  outline: none;
+  box-shadow: inset 0 0 0 1px #6e2c2c, var(--rail-recess, 0 0 transparent);
 }
 /* A kill pressed on this card and not yet seen through (decorateKillRow,
    claunch-5g6zp): the kill route can take a second or more to answer, and
@@ -1229,7 +1258,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    does not move, red like the kill control, and pulsing because it is a
    wait, not a state the session will stay in. */
 #session-list li.sess-card.rail-killing {
-  box-shadow: inset 3px 0 0 #f85149, inset 0 0 0 1px #6e2c2c;
+  box-shadow: inset 3px 0 0 #f85149, inset 0 0 0 1px #6e2c2c,
+              var(--rail-recess, 0 0 transparent);
   animation: rail-killing-pulse 1s ease-in-out infinite;
   cursor: progress;
 }
