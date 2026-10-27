@@ -405,6 +405,65 @@ def test_batch_status_reports_count_and_deadline(tmp_path):
     assert batch["opens_at"] == runtime._iso(T0 + 400) and batch["opens_epoch"] == T0 + 400
 
 
+EXPIRING = BATCHED.replace("size: 3}", "size: 3, expire: 1000}")
+
+
+def _set(cwd, key, status, now):
+    runtime.collection_op("set", "jobs", cwd=str(cwd), scope="own", principal="driver",
+                          key=key, fields={"status": status}, now=now)
+
+
+def test_batch_expire_is_checked_at_compile():
+    chart = _compile(EXPIRING)
+    choose = next(n for n in chart.nodes.values() if n.get("options"))
+    opts = {o["name"]: o for o in choose.get("options")}
+    assert opts["integrate"]["batch"]["expire"] == 1000
+    assert "expire must be" in _err("""
+        body:
+          choose:
+            options:
+              go: {then: end, interval: 5,
+                   batch: {collection: jobs, status: requested, size: 3, expire: 0}}
+    """)
+
+
+def test_stale_requested_rows_do_not_fill_the_batch(tmp_path):
+    _start(tmp_path, EXPIRING)
+    for i, key in enumerate("abc"):
+        _push(tmp_path, key, T0 + i)
+    # three rows nobody took for over 1000 s, then one real candidate
+    _push(tmp_path, "d", T0 + 5000)
+    st = runtime.select(None, "integrate", "one real", **_kw(tmp_path, T0 + 5010))
+    assert st["held"]["opens_at"] == T0 + 5300
+    _st, choice = _choice(tmp_path, T0 + 5020)
+    batch = [o for o in choice["options"] if o["name"] == "integrate"][0]["batch"]
+    assert batch["count"] == 1 and batch["first_at"] == runtime._iso(T0 + 5000)
+
+
+def test_only_stale_rows_leave_the_window_open(tmp_path):
+    _start(tmp_path, EXPIRING)
+    for i, key in enumerate("abc"):
+        _push(tmp_path, key, T0 + i)
+    st = runtime.select(None, "integrate", "nothing fresh", **_kw(tmp_path, T0 + 5000))
+    assert "held" not in st and [t["label"] for t in st["tasks"]] == ["merge"]
+
+
+def test_a_row_back_in_requested_is_timed_from_its_return(tmp_path):
+    _start(tmp_path, EXPIRING)
+    for i, key in enumerate("abc"):
+        _push(tmp_path, key, T0 + i)
+        _set(tmp_path, key, "done", T0 + 10 + i)
+    # deferred long ago, requested again now: not stale, and not due yet
+    _set(tmp_path, "a", "requested", T0 + 5000)
+    st = runtime.select(None, "integrate", "a is back", **_kw(tmp_path, T0 + 5010))
+    assert st["held"]["opens_at"] == T0 + 5300
+    # the same three returning together make a full batch
+    _set(tmp_path, "b", "requested", T0 + 5020)
+    _set(tmp_path, "c", "requested", T0 + 5030)
+    st = runtime.wait_tick(T0 + 5040, cwd=str(tmp_path), scope="own")
+    assert [t["label"] for t in st["tasks"]] == ["merge"]
+
+
 def test_no_candidate_means_nothing_to_wait_for(tmp_path):
     _start(tmp_path, BATCHED)
     runtime.select(None, "integrate", "first", **_kw(tmp_path))

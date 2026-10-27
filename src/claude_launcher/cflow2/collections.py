@@ -25,7 +25,7 @@ declaration survives a ``chart.json`` round trip unchanged)::
 Records: every record carries the declared item fields plus ``seq`` (the
 collection's running counter at push time), ``at`` (the ``now`` passed to the
 push) and ``by`` (the writer). A collection with ``status`` adds ``status``.
-Those four names are reserved and cannot be item fields.
+Those names are reserved and cannot be item fields.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ FIELD_TYPES = ("str", "int", "bool", "list", "map", "any")
 PRINCIPALS = ("driver", "daemon", "child", "peer", "person")
 OPS = ("push", "set", "remove")
 DROP = ("settled", "all", "none")
-RESERVED_FIELDS = ("seq", "at", "by", "status")
+RESERVED_FIELDS = ("seq", "at", "by", "status", "since")
 DECL_KEYS = ("kind", "key", "item", "status", "access", "env", "watch", "lifecycle", "type")
 WATCH_MIN_EVERY = 15
 WATCH_DEFAULT_EVERY = 60
@@ -495,6 +495,7 @@ def apply_push(col_state: Dict[str, Any], spec: Dict[str, Any], item: Any, *,
         record[TID] = tid
     if spec.get("status") is not None:
         record["status"] = spec["status"]["initial"]
+        record["since"] = now
     event: Dict[str, Any] = {"event": "collection_pushed", "collection": name,
                              "principal": principal, "by": by, "seq": seq}
     items_ = col_state.setdefault("items", [])
@@ -531,6 +532,8 @@ def apply_set(col_state: Dict[str, Any], spec: Dict[str, Any], key: Any,
         raise _fail(name, f"no record with {spec['key']} = {key!r}")
     rec = col_state["items"][idx]
     before = {f: copy.deepcopy(rec.get(f)) for f in fields}
+    if "status" in fields and fields["status"] != rec.get("status"):
+        rec["since"] = now
     for f, v in fields.items():
         if v is None:
             rec.pop(f, None)
@@ -559,7 +562,7 @@ def _ident(spec: Dict[str, Any], rec: Dict[str, Any]) -> Any:
     return rec.get(spec["key"]) if spec["kind"] == "queue" else rec.get("seq")
 
 
-def reset(col_state: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+def reset(col_state: Dict[str, Any], spec: Dict[str, Any], now: Any = None) -> Dict[str, Any]:
     """Run the lifecycle clean-up in place: drop records per ``lifecycle.drop``
     and remap the status of what stays. ``seq`` is kept, so log cursors stay
     valid. Returns a ``collection_reset`` summary."""
@@ -577,6 +580,8 @@ def reset(col_state: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
         st = rec.get("status")
         if st in lc["remap"]:
             rec["status"] = lc["remap"][st]
+            if now is not None:
+                rec["since"] = now
             remapped[str(_ident(spec, rec))] = [st, rec["status"]]
         kept.append(rec)
     col_state["items"] = kept
@@ -587,7 +592,7 @@ def reset(col_state: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def inherit_report(old_col_state: Optional[Dict[str, Any]],
-                   spec: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                   spec: Dict[str, Any], now: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """:func:`inherit` plus a ``collection_inherited`` summary."""
     summary: Dict[str, Any] = {"event": "collection_inherited", "collection": spec["name"],
                                "inherited": False, "dropped": [], "kept": [],
@@ -620,19 +625,22 @@ def inherit_report(old_col_state: Optional[Dict[str, Any]],
             rec.pop("status", None)
         elif rec.get("status") not in st["values"]:
             rec["status"] = st["initial"]
+            if now is not None:
+                rec["since"] = now
         valid.append(rec)
     new["items"] = valid
-    rs = reset(new, spec)
+    rs = reset(new, spec, now)
     summary.update(inherited=True, dropped=rs["dropped"], kept=rs["kept"],
                    remapped=rs["remapped"])
     return new, summary
 
 
-def inherit(old_col_state: Optional[Dict[str, Any]], spec: Dict[str, Any]) -> Dict[str, Any]:
+def inherit(old_col_state: Optional[Dict[str, Any]], spec: Dict[str, Any],
+            now: Any = None) -> Dict[str, Any]:
     """The ``col_state`` a new run starts with when the previous run in the
     same slot had ``old_col_state``: cleaned up (:func:`reset`) when the
     declaration has ``lifecycle.inherit: true``, empty otherwise."""
-    return inherit_report(old_col_state, spec)[0]
+    return inherit_report(old_col_state, spec, now)[0]
 
 
 # ------------------------------------------------------------------- reads

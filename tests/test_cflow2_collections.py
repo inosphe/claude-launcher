@@ -212,6 +212,31 @@ def test_queue_push_same_key_replaces_in_place_and_resets_status():
     assert st["seq"] == 3
 
 
+def test_status_change_stamps_since_and_other_fields_do_not():
+    spec = landing()
+    st = C.empty(spec)
+    C.apply_push(st, spec, item("a"), principal="child", by="w1", now=1)
+    assert st["items"][0]["since"] == 1
+    C.apply_set(st, spec, "a", {"note": "n"}, principal="driver", by="lead", now=5)
+    assert st["items"][0]["since"] == 1
+    C.apply_set(st, spec, "a", {"status": "waiting"}, principal="driver", by="lead", now=6)
+    assert st["items"][0]["since"] == 6 and st["items"][0]["at"] == 1
+    C.apply_set(st, spec, "a", {"status": "waiting"}, principal="driver", by="lead", now=9)
+    assert st["items"][0]["since"] == 6
+    with pytest.raises(CollectionError, match="set by the engine"):
+        C.apply_set(st, spec, "a", {"since": 3}, principal="driver", by="lead", now=10)
+
+
+def test_reset_remap_restamps_since_when_given_a_time():
+    spec = landing()
+    st = C.empty(spec)
+    C.apply_push(st, spec, item("a"), principal="child", by="w1", now=1)
+    C.apply_set(st, spec, "a", {"status": "deferred"}, principal="driver", by="lead", now=2)
+    C.reset(st, spec, 50)
+    assert st["items"][0]["status"] == "requested" and st["items"][0]["since"] == 50
+    assert st["items"][0]["at"] == 1
+
+
 def test_log_push_appends():
     spec = C.normalize("signals", SIGNALS)
     st = C.empty(spec)
