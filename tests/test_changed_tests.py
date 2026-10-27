@@ -2399,13 +2399,117 @@ def test_deselected_node_ids_reach_the_run_and_the_receipt(repo, split_gate, tmp
     )
 
 
-#: The receipt's keys before ``skips`` was added (claunch-1b2d7.1); a run
-#: with no comparison and a readable ``HEAD`` writes exactly these.
+# --------------------------------------------------------------------------- #
+# claunch-23r7d.1: a module the change never touches, named on the command line
+# --------------------------------------------------------------------------- #
+def test_include_adds_a_module_the_change_does_not_reach(repo, capsys):
+    """The tree axis is run because the workflow asks for it, not because a
+    change selected it -- so the diff is the wrong place to learn it must run.
+
+    Two rounds ran ``tests/test_tree_isolation.py`` by hand beside this gate
+    for exactly that reason, and the numbers never reached a receipt
+    (``claunch-23r7d``, ``claunch-23r7d.1``).
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    assert "tests/test_unrelated.py" not in capsys.readouterr().out
+
+    assert changed_tests.main(
+        ["--repo", str(repo), "--list", "--include", "tests/test_unrelated.py"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "2 test module(s) selected" in out
+    assert "tests/test_unrelated.py" in out
+    assert "1 of them named by --include" in out
+
+
+def test_a_missing_include_fails_before_anything_runs(repo, gate, capsys):
+    """A selection quietly smaller than what was asked for is the false green
+    this file is about: the caller would read the run as covering the module
+    it named, and nothing would say otherwise."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate("--include", "tests/test_nope.py") == changed_tests.CANNOT_TELL
+    assert gate.runs() == 0
+    out = capsys.readouterr().out
+    assert "tests/test_nope.py" in out
+    assert "not a file in this checkout" in out
+
+
+def test_an_include_outside_the_checkout_is_refused(repo, gate):
+    """``--include ../elsewhere.py`` would run a file this receipt says
+    nothing about."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate("--include", "../elsewhere.py") == changed_tests.CANNOT_TELL
+    assert gate("--include", "/etc/hostname") == changed_tests.CANNOT_TELL
+    assert gate.runs() == 0
+
+
+def test_an_included_module_is_in_the_receipt_and_its_key(repo, gate, capsys):
+    """The widened selection is the one the receipt speaks for, so a narrower
+    run can never answer for it (``claunch-p5n``)."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate.runs() == 1
+
+    tree = changed_tests.worktree_tree(repo)
+    derived = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    assert gate("--include", "tests/test_unrelated.py") == 0
+    assert gate.runs() == 2, "a wider selection is a different verdict, so it runs"
+
+    widened = sorted(derived + ["tests/test_unrelated.py"])
+    path = changed_tests.receipt_path(repo, tree, widened, gate.receipts)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    assert receipt["selection"] == widened
+    assert receipt["included"] == ["tests/test_unrelated.py"]
+    assert receipt["deselected"] == []
+    assert path != changed_tests.receipt_path(repo, tree, derived, gate.receipts)
+    assert changed_tests.find_receipt(repo, tree, derived, gate.receipts) is not None
+    assert changed_tests.find_receipt(repo, tree, widened, gate.receipts) is not None
+
+    # The reviewer's door reads the same list, so --check answers for the
+    # widened selection and abstains for the diff-only one.
+    assert gate("--check", "--include", "tests/test_unrelated.py") == 0
+    assert gate.runs() == 2
+    assert "named by --include" in capsys.readouterr().out
+
+
+def test_a_receipt_answers_even_with_a_field_this_build_does_not_know(repo, gate):
+    """The receipt is a format more than one build reads, so a field added to
+    it must not make a reader blind to the receipt (leader, ``claunch-23r7d.1``).
+
+    ``find_receipt``/``receipt_passes`` here and ``sweep.is_green`` ask for the
+    fields they judge and pass over the rest; ``merge_ready`` and
+    ``delayed_sweep`` read sweep receipts and the sweep job queue, not this
+    file. This pins that for ``included`` and for a field nobody has written.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate.runs() == 1
+
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    path = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt.pop("included")            # a receipt written before this field
+    receipt["some_field_from_a_later_build"] = {"shape": ["nobody", "knows"]}
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts) is not None
+    assert gate() == 0
+    assert gate.runs() == 1, "it stood on the receipt instead of re-running"
+
+
+#: The receipt's keys before ``skips`` was added (claunch-1b2d7.1) and before
+#: ``included`` was (claunch-23r7d.1); a run with no comparison and a readable
+#: ``HEAD`` writes exactly these plus ``skips``.
 _RECEIPT_KEYS = {
     "kind", "tree", "selection", "base", "repo", "command", "exit_code",
     "counts", "failures", "session", "basetemp", "workers", "window",
-    "started_at", "finished_at", "seconds", "deselected", "known_failures",
-    "commit",
+    "started_at", "finished_at", "seconds", "deselected", "included",
+    "known_failures", "commit",
 }
 
 

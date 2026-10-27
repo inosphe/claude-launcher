@@ -197,7 +197,14 @@ not end, and a person had to decide by hand to drop three modules and re-run
 -- by a pytest command that left no receipt. ``--no-compare-base`` turns the
 second run off. ``--deselect``/``--known-failures`` leave tests out on
 purpose, and say so in the receipt, which is where a hand-run pytest left
-nothing.
+nothing. ``--include`` is the same fact in the other direction: a module the
+caller needs run that the diff cannot reach is named on the command line, and
+the receipt's ``selection`` -- and so its key -- is the widened list. The
+round that asked for it ran the tree axis (``tests/test_tree_isolation.py``)
+beside the gate by hand, because no change touches it, and that run left no
+receipt (``claunch-23r7d.1``). A path that is not a file in this checkout is
+refused before anything runs: a selection quietly smaller than what was asked
+for is the false green this file is about.
 """
 
 from __future__ import annotations
@@ -216,7 +223,7 @@ import time
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # A gate runs the tree it is checking. This checkout's ``src`` goes in front of
 # every installed copy, so the ``claude_launcher`` imports below resolve HERE --
@@ -674,6 +681,40 @@ def select(repo: Path, paths: List[str]) -> List[str]:
     for rel in paths:
         picked.update(map_one(repo, rel))
     return sorted(picked)
+
+
+def resolve_includes(repo: Path, include: List[str]) -> Tuple[List[str], Optional[str]]:
+    """Modules named by ``--include``, checked before anything runs.
+
+    The diff is one way to reach a module, and used to be the only one. Some
+    modules belong to every round and touch the change nowhere: the tree axis
+    (``tests/test_tree_isolation.py``) is run because the workflow asks for
+    it, not because anything changed it, so it was run by hand beside the
+    gate and the numbers never reached a receipt (``claunch-23r7d.1``,
+    ``claunch-23r7d``).
+
+    Returns ``(modules, problem)``. A path that is absolute, escapes the
+    checkout or is not a file there is a ``problem``, never a skip: a
+    selection quietly smaller than the one asked for is the false green this
+    file is about, and the caller reads its run as covering what it named.
+    """
+    out: List[str] = []
+    root = repo.resolve()
+    for raw in include:
+        rel = raw.strip().replace("\\", "/")
+        if not rel:
+            return out, "an empty path names no module"
+        if Path(rel).is_absolute():
+            return out, f"{raw!r} is absolute; --include takes a path relative to the repository"
+        try:
+            (root / rel).resolve().relative_to(root)
+        except ValueError:
+            return out, f"{raw!r} is outside the repository"
+        if not (repo / rel).is_file():
+            return out, f"{raw!r} is not a file in this checkout"
+        if rel not in out:
+            out.append(rel)
+    return out, None
 
 
 def unmapped(repo: Path, paths: List[str]) -> List[str]:
@@ -1390,6 +1431,9 @@ def describe(receipt: dict) -> str:
     deselected = receipt.get("deselected") or []
     if deselected:
         text += f"; {len(deselected)} node id(s) deselected"
+    included = receipt.get("included") or []
+    if included:
+        text += f"; {len(included)} module(s) added by --include"
     return text
 
 
@@ -1711,6 +1755,7 @@ def run_and_record(
     environment: Optional[dict[str, str]] = None,
     window: Optional[dict] = None,
     deselect: tuple = (),
+    included: tuple = (),
     known_failures: Optional[str] = None,
     compare_at: Optional[str] = None,
 ) -> int:
@@ -1795,6 +1840,10 @@ def run_and_record(
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),
         "deselected": sorted(set(deselect)),
+        # Which modules the caller added on top of the diff's. `selection` is
+        # the whole list either way -- this says why part of it is there, for
+        # the reader who cannot find the change that selected it.
+        "included": sorted(set(included)),
         "known_failures": known_failures,
         # Which tests did not run, and why; ``counts`` only says how many.
         "skips": sweep.parse_skips(junit) if junit else None,
@@ -1992,6 +2041,17 @@ def main(argv: Optional[list] = None) -> int:
         ),
     )
     ap.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="MODULE",
+        help=(
+            "also run this module, which the change does not reach (repeatable); "
+            "recorded in the receipt's selection and part of its key. A path "
+            "that is not a file here fails before anything runs"
+        ),
+    )
+    ap.add_argument(
         "--known-failures",
         type=Path,
         default=None,
@@ -2064,6 +2124,16 @@ def main(argv: Optional[list] = None) -> int:
         return CANNOT_TELL
 
     files = select(repo, paths)
+    # Widened before anything reads the selection -- the hop list, the
+    # command, the receipt's `selection`, its key, and `--check`'s lookup all
+    # stand on this one list, so an included module is covered by the run or
+    # by the receipt that says a run happened.
+    included, problem = resolve_includes(repo, args.include)
+    if problem is not None:
+        print(f"cannot tell: --include {problem}")
+        return CANNOT_TELL
+    if included:
+        files = sorted(set(files) | set(included))
     deselect = list(args.deselect)
     if args.known_failures is not None:
         try:
@@ -2136,6 +2206,13 @@ def main(argv: Optional[list] = None) -> int:
     )
     for f in files:
         print(f"  {f}")
+    if included:
+        # Said apart from the derivation, because a reader who assumes every
+        # module came from the diff will look for the change that put it
+        # there and not find one.
+        print(f"{len(included)} of them named by --include, not derived from the change:")
+        for f in included:
+            print(f"  {f}")
     if deselect:
         print(f"{len(deselect)} node id(s) deselected (recorded in the receipt):")
         for nodeid in deselect:
@@ -2248,6 +2325,7 @@ def main(argv: Optional[list] = None) -> int:
             environment=grant.child_env(),
             window=grant.receipt(),
             deselect=deselect,
+            included=tuple(included),
             known_failures=(
                 str(args.known_failures) if args.known_failures is not None else None
             ),
