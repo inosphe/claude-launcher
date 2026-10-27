@@ -1125,6 +1125,41 @@ def test_the_series_carries_each_session_s_totals(tmp_path, ledger):
     assert day["unmetered"] == 1
 
 
+def test_the_series_carries_each_session_s_busy_buckets(tmp_path, ledger):
+    """A row draws when its session was spending, on the series' own grid, so
+    a live bar with no bucket under it reads as idle (claunch-58pvy). Only
+    buckets with something in them are listed, in time order, and they sum
+    to the row's figure."""
+    write_ledger(tmp_path / "metering", [
+        record("s1", hour=9, minute=0, fresh=10, cached=0, output=5),
+        record("s1", hour=9, minute=2, fresh=20, cached=0, output=7),
+        record("s1", hour=11, minute=30, fresh=4, cached=0, output=0),
+        record("s2", hour=9, minute=5, fresh=3, cached=0, output=0),
+    ])
+    ledger.refresh(NOW)
+    out = ledger.series("24h", sessions=[meta("s1"), meta("s2")], now=NOW)
+    width = out["bucket_s"]
+    grid = {p["t"] for p in out["points"]}
+    s1 = out["by_session"]["s1"]["points"]
+    assert [t for t, _, _ in s1] == sorted(t for t, _, _ in s1)
+    assert all(t in grid for t, _, _ in s1), "the row's buckets are the series'"
+    assert all(total or requests for _, total, requests in s1)
+    # 09:00 and 09:02 share a five-minute bucket; 11:30 is its own, and the
+    # two hours between them are absent -- the idle stretch.
+    assert width == 300
+    assert [(total, requests) for _, total, requests in s1] == [(42, 2), (4, 1)]
+    assert s1[1][0] - s1[0][0] == 2 * 3600 + 30 * 60
+    assert sum(v[1] for v in s1) == out["by_session"]["s1"]["total"]
+    assert sum(v[2] for v in s1) == out["by_session"]["s1"]["requests"]
+    assert [(v[1], v[2]) for v in out["by_session"]["s2"]["points"]] == [(3, 1)]
+    # A measured session with nothing in the window lists no bucket.
+    write_ledger(tmp_path / "metering",
+                 [record("old", day=20, hour=9, fresh=1)], name="older.jsonl")
+    ledger.refresh(NOW)
+    day = ledger.series("24h", sessions=[meta("old")], now=NOW)
+    assert day["by_session"]["old"]["points"] == []
+
+
 def test_the_series_totals_cover_only_their_window(tmp_path, ledger):
     """A record outside the window must not reach the row's figure: the
     column and the chart both speak about the same span."""

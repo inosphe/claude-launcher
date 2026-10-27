@@ -415,4 +415,101 @@ assert.strictEqual(unread.rows[0].tokens, undefined);
 assert.deepStrictEqual(Object.assign({}, unread.summary.tokens),
   { total: 0, requests: 0, metered: 0, unmetered: 0, unread: unread.rows.length });
 
+// ---- per-session activity and the row's hover card (claunch-58pvy) -------
+// The buckets a session spent in ride on its by_session entry; seconds become
+// the axis's milliseconds, empty and malformed buckets are dropped, and the
+// list is put in time order.
+const M5 = 300000;
+const actPayload = {
+  window: '24h', bucket_s: 300, start: sec(now - 2 * H), until: sec(now),
+  points: [{ t: sec(now - 2 * H), total: 0 }],
+  by_session: {
+    a: { total: 50, requests: 3, points: [
+      [sec(now - 30 * 60000), 20, 1], [sec(now - 2 * H), 30, 2],
+      [sec(now - H), 0, 0], 'junk'] },
+    b: { total: 0, requests: 0, points: [] },
+    old: { total: 7, requests: 1 },
+  },
+};
+const am = C.buildSeriesModel(actPayload);
+const aPts = am.bySession.get('a').points;
+assert.deepStrictEqual(Array.from(aPts, (p) => [p.t, p.total, p.requests]),
+  [[now - 2 * H, 30, 2], [now - 30 * 60000, 20, 1]]);
+assert.strictEqual(am.bySession.get('old').points.length, 0,
+  'a payload without the field reads as no busy bucket');
+
+// The share of the session's life with a request in it, on the same grid.
+const liveSpan = { start: now - 2 * H, end: now, alive: true };
+let act = C.activityStats(liveSpan, am.bySession.get('a'), am, now);
+assert.strictEqual(act.covered, 24, 'two hours of five-minute buckets');
+assert.strictEqual(act.busy, 2);
+assert.ok(Math.abs(act.ratio - 2 / 24) < 1e-9);
+assert.strictEqual(act.last, now - 30 * 60000 + M5);
+assert.strictEqual(act.idleFor, 25 * 60000, 'idle since its last busy bucket ended');
+// An ended session is not "idle now"; one that spent nothing has no last.
+act = C.activityStats({ start: now - H, end: now - 10 * 60000, alive: false },
+  am.bySession.get('a'), am, now);
+assert.strictEqual(act.busy, 1);
+assert.strictEqual(act.idleFor, null);
+act = C.activityStats(liveSpan, am.bySession.get('b'), am, now);
+assert.deepStrictEqual([act.busy, act.last, act.idleFor], [0, null, null]);
+// Unmeasured is not idle: no figures, no statistic.
+assert.strictEqual(C.activityStats(liveSpan, null, am, now), null);
+assert.strictEqual(C.activityStats(liveSpan, am.bySession.get('a'), null, now), null);
+
+// The bucket under the pointer: its figures, a zero where the session sat
+// idle, nothing outside the series.
+const hit = C.bucketAt(am.bySession.get('a'), am, now - 2 * H + 60000);
+assert.deepStrictEqual([hit.t, hit.total, hit.requests], [now - 2 * H, 30, 2]);
+const quiet = C.bucketAt(am.bySession.get('a'), am, now - H + 1);
+assert.deepStrictEqual([quiet.t, quiet.total, quiet.requests], [now - H, 0, 0]);
+assert.strictEqual(C.bucketAt(am.bySession.get('a'), am, now - 3 * H), null);
+
+// timeAt turns positionOf around on both scales.
+for (const scale of ['linear', 'log']) {
+  const m = { axisStart: now - 7 * 24 * H, t1: now, scale };
+  for (const t of [now - 5 * 24 * H, now - 3 * H, now - 60000]) {
+    assert.ok(Math.abs(C.timeAt(C.positionOf(t, m), m) - t) < 1,
+      `${scale}: timeAt(positionOf(t)) is t`);
+  }
+}
+
+// The briefing's one line: the digest's `one_line`, the summariser's own key
+// as a fallback, nothing when the session has no briefing.
+assert.strictEqual(C.briefOf({ briefing: { one_line: ' 차트 작업 ', now: 'x' } }), '차트 작업');
+assert.strictEqual(C.briefOf({ briefing: { 'one-line-job-description': 'y' } }), 'y');
+assert.strictEqual(C.briefOf({ briefing: 'plain' }), 'plain');
+assert.strictEqual(C.briefOf({}), '');
+
+// The card: who, what it believes it is doing, how long, how busy, and the
+// bucket under the pointer.
+const tipRow = { name: 'a', role: 'worker', category: 'running', span: liveSpan,
+  lifetime: 2 * H, tokens: am.bySession.get('a'), cflow: null,
+  session: { name: 'a', profile: 'nc', briefing: { one_line: 'Chart 유휴 표시' } } };
+const tipModel = { now, t1: now, axisStart: now - 24 * H, scale: 'linear' };
+let card = C.rowTip(tipRow, tipModel, am, now - 2 * H + 60000);
+const tipRows = (t) => Object.fromEntries(Array.from(t.rows, (x) => [x[0], x[1]]));
+assert.strictEqual(card.title, 'a');
+assert.strictEqual(card.role, 'worker');
+assert.strictEqual(card.brief, 'Chart 유휴 표시');
+let tr = tipRows(card);
+assert.strictEqual(tr['상태'], 'running');
+assert.strictEqual(tr['토큰(창)'], '50 · 요청 3');
+assert.ok(tr['활동 구간'].startsWith('2/24 버킷 (8.3%'), tr['활동 구간']);
+assert.ok(tr['마지막 요청'].includes('25m째 유휴'), tr['마지막 요청']);
+assert.ok(tr['커서 위치'].endsWith('30 · 요청 2'), tr['커서 위치']);
+assert.strictEqual(tr.profile, 'nc');
+// Over an idle bucket the card says so; over the name column there is no
+// pointer instant and no bucket line.
+tr = tipRows(C.rowTip(tipRow, tipModel, am, now - H + 1));
+assert.ok(tr['커서 위치'].endsWith('요청 없음'));
+assert.ok(!('커서 위치' in tipRows(C.rowTip(tipRow, tipModel, am, null))));
+// No briefing: no brief line. Unmeasured: said, and no activity line.
+card = C.rowTip(Object.assign({}, tipRow, { tokens: null, session: { name: 'a' } }),
+  tipModel, am, null);
+assert.strictEqual(card.brief, '');
+tr = tipRows(card);
+assert.ok(tr['토큰(창)'].startsWith('계측 없음'));
+assert.ok(!('활동 구간' in tr) && !('마지막 요청' in tr));
+
 console.log('ok');

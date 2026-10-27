@@ -23,7 +23,11 @@
     10. each row prints its own window figure in the token column -- one grid
         column with the header and the series row, a dash where the ledger has
         no record -- and the detail column lists the total with its four
-        parts (claunch-mlrga). */
+        parts (claunch-mlrga);
+    11. a measured row draws its busy buckets over a dimmed bar and an
+        unmeasured one draws neither, and hovering a row shows one card with
+        the briefing's one line, the activity share and the bucket under the
+        pointer (claunch-58pvy). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -35,7 +39,8 @@ const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 const now = Date.now();
 const ago = (h) => new Date(now - h * 3600000).toISOString();
 const CURRENT = [
-  { name: "alpha", status: "running", created_at: ago(2), project: "default", cwd: "F:/w/repo1", role: "worker" },
+  { name: "alpha", status: "running", created_at: ago(2), project: "default", cwd: "F:/w/repo1", role: "worker",
+    briefing: { one_line: "Chart 세션 행에 유휴 구간 표시", now: "step-level sentence" } },
   { name: "beta", status: "exited", created_at: ago(30), exited_at: ago(20), project: "default", cwd: "F:/w/repo2" },
   { name: "gamma", status: "running", created_at: ago(5), project: "other", cwd: "F:/w/repo1/.claude/worktrees/x" },
 ];
@@ -95,7 +100,7 @@ const server = http.createServer((req, res) => {
         // bucket, gamma is a session the ledger never saw.
         by_session: {
           alpha: { input: 100, cache_read: 2000, cache_write: 0, output: 50,
-                   total: 2150, requests: 2 },
+                   total: 2150, requests: 2, points: [[start, 2150, 2]] },
           beta: { input: 10000, cache_read: 0, cache_write: 0, output: 0,
                   total: 12500, requests: 9 },
         },
@@ -420,6 +425,75 @@ function assertTicksApart(ticks, where) {
     assert.ok(detail.includes("2.15k"), "the detail carries the total: " + detail.slice(0, 200));
     assert.ok(detail.includes("cache read 2.00k"), "and the parts: " + detail.slice(0, 200));
     await page.click("#chart-view .chart-row[data-name='alpha'] .chart-name");
+
+    // 11. Busy buckets over the bar, and the row's hover card (claunch-58pvy).
+    const strips = await page.evaluate(() => {
+      const row = (n) => document.querySelector(`#chart-view .chart-row[data-name='${n}']`);
+      const marks = (n) => Array.from(row(n).querySelectorAll(".chart-activity-mark"),
+        (e) => e.getBoundingClientRect());
+      return {
+        alpha: marks("alpha"), gamma: marks("gamma"),
+        alphaBar: row("alpha").querySelector(".chart-bar").getBoundingClientRect(),
+        alphaMetered: row("alpha").querySelector(".chart-bar").classList.contains("metered"),
+        gammaMetered: row("gamma").querySelector(".chart-bar").classList.contains("metered"),
+        titles: Array.from(row("alpha").querySelectorAll("[title]"), (e) => e.className),
+      };
+    });
+    assert.equal(strips.alpha.length, 1, "alpha's one busy bucket is one column");
+    assert.ok(strips.alpha[0].height > 3 && strips.alpha[0].width >= 1, "the column is visible");
+    assert.ok(Math.abs(strips.alpha[0].left - strips.alphaBar.left) < 8,
+      `the busy bucket sits where alpha's bar starts: ${JSON.stringify(strips)}`);
+    assert.ok(strips.alphaMetered && !strips.gammaMetered,
+      "only a measured bar is dimmed under its columns");
+    assert.deepEqual(strips.gamma, [], "an unmeasured row draws no activity");
+    assert.deepEqual(strips.titles, [], "no browser title tooltip competes with the card");
+    // A real pointer over the row's name shows the card; the name column
+    // has no instant under it, so no bucket line yet.
+    const aname = await page.$("#chart-view .chart-row[data-name='alpha'] .chart-name");
+    await aname.scrollIntoViewIfNeeded();
+    const nb = await aname.boundingBox();
+    await page.mouse.move(nb.x + 5, nb.y + nb.height / 2);
+    await page.waitForSelector(".chart-tip.shown", { timeout: 5000 });
+    let card = await page.$eval(".chart-tip.shown", (e) => e.textContent);
+    assert.ok(card.includes("alpha") && card.includes("worker"), card);
+    assert.ok(card.includes("Chart 세션 행에 유휴 구간 표시"), "the briefing's one line: " + card);
+    assert.ok(!card.includes("step-level sentence"), "the one line, not `now`");
+    assert.ok(card.includes("활동 구간") && card.includes("2.15k"), card);
+    assert.ok(!card.includes("커서 위치"), "no instant over the name column");
+    // Over the track, the bucket under the pointer: the busy one at the
+    // start of alpha's bar, a quiet one near now. The pointer is placed by
+    // the event at an exact place on the track (the pinned columns cover the
+    // right of a track this narrow, so a real pointer there lands on them).
+    const hoverAt = (frac) => page.$eval("#chart-view .chart-row[data-name='alpha'] .chart-bar",
+      (bar, f) => {
+        const b = bar.getBoundingClientRect();
+        // clientX is a whole pixel: round into the bar, not out of it.
+        const x = f < 0.5 ? Math.ceil(b.left + b.width * f) : Math.floor(b.left + b.width * f);
+        bar.dispatchEvent(new MouseEvent("mousemove", { bubbles: true,
+          clientX: x, clientY: b.top + b.height / 2 }));
+      }, frac);
+    await hoverAt(0);
+    card = await page.$eval(".chart-tip.shown", (e) => e.textContent);
+    assert.ok(/커서 위치.*2\.15k · 요청 2/.test(card), "the busy bucket under the pointer: " + card);
+    await hoverAt(0.98);
+    card = await page.$eval(".chart-tip.shown", (e) => e.textContent);
+    assert.ok(/커서 위치.*요청 없음/.test(card), "an idle bucket says so: " + card);
+    const gname = await page.$("#chart-view .chart-row[data-name='gamma'] .chart-name");
+    await gname.scrollIntoViewIfNeeded();
+    const gb = await gname.boundingBox();
+    await page.mouse.move(gb.x + 5, gb.y + gb.height / 2);
+    await page.waitForFunction(() =>
+      document.querySelector(".chart-tip.shown")?.textContent.includes("계측 없음"),
+      null, { timeout: 5000 });
+    if (process.env.CHART_TIP_SHOT) {
+      await page.mouse.move(nb.x + 5, nb.y + nb.height / 2);
+      await hoverAt(0);
+      await page.waitForSelector(".chart-tip.shown");
+      await page.screenshot({ path: process.env.CHART_TIP_SHOT, fullPage: false });
+    }
+    await page.mouse.move(2, 2);
+    await page.waitForSelector(".chart-tip.shown", { state: "detached", timeout: 5000 })
+      .catch(async () => assert.equal(await page.$(".chart-tip.shown"), null, "the card goes away"));
 
     // A screenshot on request, for looking at the page by hand: the harness
     // otherwise only asserts numbers (CHART_SHOT=<path>). Taken with alpha

@@ -224,6 +224,15 @@ globalThis.ChartPage = (() => {
       parts.requests = Number(value.requests) || 0;
       parts.total = Number(value.total) || (parts.input + parts.cache_read +
         parts.cache_write + parts.output);
+      // The buckets the session spent anything in, on the same grid as the
+      // fleet's points ([t seconds, total, requests]); what is not listed is
+      // a bucket it was measured in and sat idle (claunch-58pvy).
+      parts.points = (Array.isArray(value.points) ? value.points : [])
+        .filter((p) => Array.isArray(p) && Number.isFinite(Number(p[0])))
+        .map((p) => ({ t: toMs(p[0]), total: Number(p[1]) || 0,
+                       requests: Number(p[2]) || 0 }))
+        .filter((p) => p.total > 0 || p.requests > 0)
+        .sort((a, b) => a.t - b.t);
       bySession.set(name, parts);
     }
     return {
@@ -260,6 +269,115 @@ globalThis.ChartPage = (() => {
     const end = Math.min(point.t + smodel.widthMs, model.t1);
     const right = Math.max(left, positionOf(Math.max(end, point.t + 1000), model));
     return { left, right };
+  }
+
+  /* How much of a session's life on the series' grid had a request in it
+     (claunch-58pvy). ``covered`` counts the buckets its span touches inside
+     the series window, ``busy`` those it spent anything in, ``last`` the end
+     of its last busy bucket (ms) and ``idleFor`` how long a live session has
+     gone since then (null when it never spent anything in the window).
+     null when the row has no figures to say it with: no series read yet, or
+     a session the ledger never saw -- unmeasured is not idle. */
+  function activityStats(span, tokens, smodel, now) {
+    if (!span || !tokens || !smodel || !(smodel.widthMs > 0)) return null;
+    const w = smodel.widthMs;
+    const from = Math.max(span.start, smodel.start);
+    const to = Math.min(span.end, smodel.until);
+    const points = tokens.points || [];
+    let covered = 0;
+    if (to > from) {
+      const first = Math.floor((from - smodel.start) / w);
+      const last = Math.ceil((to - smodel.start) / w) - 1;
+      covered = Math.max(0, last - first + 1);
+    }
+    const busy = points.filter((p) => p.t + w > span.start && p.t < span.end).length;
+    const lastPoint = points.length ? points[points.length - 1] : null;
+    const last = lastPoint ? Math.min(lastPoint.t + w, smodel.until) : null;
+    const at = now ?? smodel.until;
+    return {
+      busy, covered: Math.max(covered, busy),
+      ratio: covered ? Math.min(1, busy / covered) : null,
+      last,
+      idleFor: span.alive && last !== null ? Math.max(0, at - last) : null,
+    };
+  }
+
+  /* The bucket of one session that holds instant ``t``: its figures, or a
+     zero bucket when the session was measured and spent nothing then, or
+     null when ``t`` is outside the series or the session is unmeasured. */
+  function bucketAt(tokens, smodel, t) {
+    if (!tokens || !smodel || t === null || t === undefined) return null;
+    if (t < smodel.start || t >= smodel.until) return null;
+    const w = smodel.widthMs;
+    const start = smodel.start + Math.floor((t - smodel.start) / w) * w;
+    const hit = (tokens.points || []).find((p) => p.t === start);
+    return { t: start, end: Math.min(start + w, smodel.until),
+             total: hit ? hit.total : 0, requests: hit ? hit.requests : 0 };
+  }
+
+  /* The briefing digest's one line (briefing.digest names it `one_line`;
+     the megathread picker reads the same field, claunch-g07ra.1). */
+  function briefOf(s) {
+    const b = s && s.briefing;
+    if (!b) return "";
+    if (typeof b === "string") return b.trim();
+    return String(b.one_line || b["one-line-job-description"] || "").trim();
+  }
+
+  /* The hover card of one row, as plain data so it can be tested bare:
+     a title line, the briefing's one line, and label/value rows. ``at`` is
+     the instant under the pointer (null over the name column), which adds
+     the bucket it falls in. */
+  function rowTip(r, model, smodel, at) {
+    const s = r.session || {};
+    const rows = [];
+    rows.push(["상태", CATEGORY_LABEL[r.category] || r.category]);
+    rows.push(["생성", formatTime(r.span.start)]);
+    rows.push(["종료", r.span.alive ? "(실행 중)" : formatTime(r.span.end)]);
+    rows.push(["생존 시간", formatDuration(r.lifetime)]);
+    if (r.tokens === null) {
+      rows.push(["토큰(창)", "계측 없음 (원장 기록 없음)"]);
+    } else if (r.tokens) {
+      rows.push(["토큰(창)", `${formatTokens(r.tokens.total)} · 요청 ` +
+        `${(Number(r.tokens.requests) || 0).toLocaleString()}`]);
+      const act = activityStats(r.span, r.tokens, smodel, model.now);
+      if (act && act.covered) {
+        rows.push(["활동 구간", `${act.busy}/${act.covered} 버킷 ` +
+          `(${formatPct(act.ratio)}, ${formatBucketWidth(smodel.width)} 단위)`]);
+      }
+      if (act && act.last !== null) {
+        rows.push(["마지막 요청", formatTime(act.last) +
+          (act.idleFor !== null && act.idleFor >= smodel.widthMs
+            ? ` · ${formatDuration(act.idleFor)}째 유휴` : "")]);
+      } else if (act) {
+        rows.push(["마지막 요청", "이 창에서 요청 없음"]);
+      }
+      const bucket = bucketAt(r.tokens, smodel, at);
+      if (bucket && at >= r.span.start && at <= r.span.end) {
+        rows.push(["커서 위치", `${formatTime(bucket.t)}~ · ` +
+          (bucket.total || bucket.requests
+            ? `${formatTokens(bucket.total)} · 요청 ${bucket.requests.toLocaleString()}`
+            : "요청 없음")]);
+      }
+    }
+    if (r.cflow) {
+      const age = cflowAge(r.cflow, model.now);
+      rows.push(["cflow", `${r.cflow.version} ${r.cflow.label}` +
+        (age.elapsed !== null ? ` · ${formatDuration(age.elapsed)} 전` : "") +
+        (age.stalled ? " ⚠" : "")]);
+    }
+    if (s.profile) rows.push(["profile", s.profile]);
+    return { title: r.name, role: r.role || "", brief: briefOf(s), rows };
+  }
+
+  /* The time at a horizontal place on the track, in percent: positionOf
+     turned around, for both scales. */
+  function timeAt(pct, model) {
+    const wide = model.t1 - model.axisStart;
+    if (!(wide > 0)) return model.t1;
+    if (model.scale !== "log") return model.axisStart + (pct / 100) * wide;
+    const den = Math.log1p(wide / LOG_UNIT_MS);
+    return model.t1 - Math.expm1((1 - pct / 100) * den) * LOG_UNIT_MS;
   }
 
   /* The rows the page draws, from plain records.
@@ -906,19 +1024,6 @@ globalThis.ChartPage = (() => {
     return Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : "—";
   }
 
-  /* One session's usage as hover text, in the four parts the Stats page
-     splits it into. Empty for a session with no figures, so a caller can
-     drop the line rather than print "0". */
-  function tokenTip(tokens) {
-    if (!tokens) return "";
-    const lines = [`토큰(창): ${formatTokens(tokens.total)} tokens` +
-      (tokens.requests ? ` · 요청 ${tokens.requests.toLocaleString()}` : "")];
-    for (const [key, label] of SERIES_PARTS) {
-      if (tokens[key]) lines.push(`  ${label} ${formatTokens(tokens[key])}`);
-    }
-    return lines.join("\n");
-  }
-
   function summary(model) {
     const s = model.summary;
     const box = node("div", "chart-summary");
@@ -1068,8 +1173,9 @@ globalThis.ChartPage = (() => {
     row.onkeydown = (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(r.name); }
     };
+    // The row's hover card (rowTip) replaces the browser's title tooltips on
+    // its cells: two tooltips over one row would cover each other.
     const name = node("div", "chart-name");
-    name.title = r.name;
     name.appendChild(node("span", `chart-dot cat-${r.category}`));
     name.appendChild(node("span", "chart-name-text", r.name));
     name.appendChild(node("span", "chart-role", r.role));
@@ -1077,24 +1183,34 @@ globalThis.ChartPage = (() => {
 
     const track = node("div", "chart-track");
     const geo = barGeometry(r.span, model);
+    const smodel = currentSeries();
+    const busy = r.tokens && smodel ? r.tokens.points || [] : null;
     const bar = node("span", `chart-bar cat-${r.category}${geo.clipped ? " clipped" : ""}` +
-      (r.span.alive ? " alive" : ""));
+      (r.span.alive ? " alive" : "") + (busy ? " metered" : ""));
     bar.style.left = `${geo.left}%`;
     bar.style.width = `${geo.width}%`;
-    const change = cflowAge(r.cflow, model.now);
-    bar.title = [
-      r.name,
-      `상태: ${CATEGORY_LABEL[r.category]}`,
-      `생성: ${formatTime(r.span.start)}`,
-      r.span.alive ? "종료: (실행 중)" : `종료: ${formatTime(r.span.end)}`,
-      `생존 시간: ${formatDuration(r.lifetime)}`,
-      tokenTip(r.tokens),
-      r.cflow ? `cflow ${r.cflow.version}: ${r.cflow.label}` +
-        (change.elapsed !== null ? ` · 마지막 갱신 ${formatDuration(change.elapsed)} 전` : "")
-        : "cflow: 없음",
-    ].filter(Boolean).join("\n");
     track.appendChild(bar);
+    /* The buckets the session spent in, drawn over its bar on the series'
+       grid (claunch-58pvy): a column per busy bucket, as tall as its tokens
+       against the row's own busiest bucket. The bar is dimmed under them, so
+       the stretches of a live bar with no column are the idle ones. */
+    if (busy && busy.length) {
+      const strip = node("span", "chart-activity");
+      const peak = Math.max(1, ...busy.map((p) => p.total));
+      for (const p of busy) {
+        const span = seriesSpan(p, smodel, model);
+        const mark = node("span", "chart-activity-mark");
+        mark.style.left = `${span.left}%`;
+        mark.style.width = `${Math.max(span.right - span.left, 0.15)}%`;
+        mark.style.height = `${Math.round(30 + 70 * Math.sqrt(p.total / peak))}%`;
+        strip.appendChild(mark);
+      }
+      track.appendChild(strip);
+    }
     row.appendChild(track);
+    row.onmouseenter = (e) => showTip(r, model, e);
+    row.onmousemove = (e) => showTip(r, model, e);
+    row.onmouseleave = hideTip;
 
     row.appendChild(node("div", "chart-life", formatDuration(r.lifetime)));
 
@@ -1110,10 +1226,8 @@ globalThis.ChartPage = (() => {
     } else if (r.tokens === null) {
       tokenCell.className = "chart-tokens chart-muted";
       tokenCell.textContent = "—";
-      tokenCell.title = "계측 원장에 이 세션의 기록이 없다 (OAuth 경로는 원장 줄을 쓰지 않는다)";
     } else {
       tokenCell.textContent = formatTokens(r.tokens.total);
-      tokenCell.title = tokenTip(r.tokens);
     }
     row.appendChild(tokenCell);
 
@@ -1128,18 +1242,77 @@ globalThis.ChartPage = (() => {
         flow.appendChild(node("span", "chart-flow-age",
           (age.stalled ? "⚠ " : "") + formatDuration(age.elapsed)));
       }
-      flow.title = [
-        r.cflow.label,
-        age.elapsed !== null
-          ? `마지막 갱신: ${formatDuration(age.elapsed)} 전` +
-            (age.stalled ? ` (${formatDuration(STALL_MS)} 이상 무변화)` : "")
-          : null,
-      ].filter(Boolean).join("\n");
     } else {
       flow.appendChild(node("span", "chart-muted", "—"));
     }
     row.appendChild(flow);
     return row;
+  }
+
+  /* One hover card for the whole page, moved and refilled as the pointer
+     crosses the rows. It lives on <body> so the grid's scroller does not
+     clip it, and a redraw (every REDRAW_MS) leaves it in place. */
+  let tipBox = null;
+  let tipPointer = null;
+  function showTip(r, model, e) {
+    if (typeof document === "undefined" || !document.body) return;
+    tipPointer = { x: e.clientX, y: e.clientY };
+    if (!tipBox || !tipBox.isConnected) {
+      tipBox = node("div", "chart-tip");
+      tipBox.setAttribute("role", "tooltip");
+      document.body.appendChild(tipBox);
+    }
+    let at = null;
+    const track = e.target && e.target.closest ? e.target.closest(".chart-track") : null;
+    if (track) {
+      const box = track.getBoundingClientRect();
+      if (box.width > 0) {
+        const pct = Math.max(0, Math.min(100, ((e.clientX - box.left) / box.width) * 100));
+        at = timeAt(pct, model);
+      }
+    }
+    const tip = rowTip(r, model, currentSeries(), at);
+    tipBox.innerHTML = "";
+    const head = node("div", "chart-tip-head");
+    head.appendChild(node("span", `chart-dot cat-${r.category}`));
+    head.appendChild(node("strong", null, tip.title));
+    if (tip.role) head.appendChild(node("span", "chart-role", tip.role));
+    tipBox.appendChild(head);
+    if (tip.brief) tipBox.appendChild(node("div", "chart-tip-brief", tip.brief));
+    const dl = node("dl", "chart-tip-list");
+    for (const [label, value] of tip.rows) {
+      dl.appendChild(node("dt", null, label));
+      dl.appendChild(node("dd", null, value));
+    }
+    tipBox.appendChild(dl);
+    tipBox.classList.add("shown");
+    // Beside the pointer, flipped to the other side near the window's edges.
+    const pad = 14;
+    const w = tipBox.offsetWidth, h = tipBox.offsetHeight;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = e.clientX + pad, y = e.clientY + pad;
+    if (x + w > vw - 4) x = Math.max(4, e.clientX - pad - w);
+    if (y + h > vh - 4) y = Math.max(4, e.clientY - pad - h);
+    tipBox.style.left = `${x}px`;
+    tipBox.style.top = `${y}px`;
+  }
+
+  function hideTip() {
+    tipPointer = null;
+    if (tipBox) tipBox.classList.remove("shown");
+  }
+
+  /* A redraw replaces the rows under a resting pointer, and the replaced
+     row never says the pointer left. Refill the card from whatever row is
+     now under it, or put it away. */
+  function refreshTip(model) {
+    if (!tipPointer || !tipBox || !tipBox.classList.contains("shown")) return;
+    const { x, y } = tipPointer;
+    const el = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+    const row = el && el.closest ? el.closest(".chart-row[data-name]") : null;
+    const r = row && model.rows.find((x2) => x2.name === row.dataset.name);
+    if (r) showTip(r, model, { clientX: x, clientY: y, target: el });
+    else hideTip();
   }
 
   /* The right column: everything known about the picked session. The record
@@ -1220,6 +1393,13 @@ globalThis.ChartPage = (() => {
     } else if (tokens === null) {
       item("토큰(창)", node("span", "chart-muted", "— 계측 원장에 기록이 없다"));
     }
+    const act = activityStats(r.span, tokens, currentSeries(), model.now);
+    if (act && act.covered) {
+      item("활동 구간", `${act.busy}/${act.covered} 버킷 (${formatPct(act.ratio)})` +
+        (act.idleFor !== null && act.idleFor >= currentSeries().widthMs
+          ? ` · ${formatDuration(act.idleFor)}째 유휴` : ""));
+    }
+    item("briefing", briefOf(s));
     item("프로젝트", projectOf(s));
     item("workspace", s.cwd || "");
     item("parent", s.parent && s.parent !== s.name ? s.parent : "");
@@ -1395,6 +1575,7 @@ globalThis.ChartPage = (() => {
     // cap changed) opens on the newest time -- the right edge.
     const sameWidth = prevPct !== null && prevPct === String(model.axisWidthPct);
     main.scrollLeft = sameWidth ? prevLeft : main.scrollWidth;
+    refreshTip(model);
     if (keepFocus === "divider") split.querySelector(".chart-divider").focus();
     else if (keepFocus) {
       const again = [...main.querySelectorAll(".chart-row")].find((x) => x.dataset.name === keepFocus);
@@ -1420,11 +1601,13 @@ globalThis.ChartPage = (() => {
   function stop() {
     if (timer) clearInterval(timer);
     timer = null;
+    hideTip();
   }
 
   return { open, stop, render, category, projectOf, spanOf, formatDuration,
            median, ticks, buildModel, barGeometry, roleOf, clampSplit,
            positionOf, axisTicks, cflowAge, cflowChangedAt,
            buildSeriesModel, seriesSpan, seriesTip, formatTokens, formatRate,
+           activityStats, bucketAt, briefOf, rowTip, timeAt,
            RANGES, STALL_MS, AXIS_CAP_MS, LOG_UNIT_MS, SERIES_PARTS };
 })();
