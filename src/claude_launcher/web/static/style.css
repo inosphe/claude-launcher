@@ -7302,6 +7302,17 @@ body.embed #main { width: 100%; }
 #notices.panel-open { display: none; }
 .notice.warn { border-left-color: #d29922; }
 .notice.bad { border-left-color: #ff7b72; }
+/* A leader the harness stopped (claunch-9djny): the grade above warn/bad.
+   It has no × and no timeout -- the whole point is that the project is
+   stopped until a person acts -- so it reads as a different thing from the
+   toasts beside it: a thick rule on a red ground, and a title that carries
+   the weight. The card goes away when the daemon stops reporting the fault,
+   never because it was swiped at. */
+.notice.fatal {
+  border-left: 5px solid #f85149; border-color: #6b2b28; background: #2a1615;
+}
+.notice.fatal .notice-title { color: #ffb3ad; font-weight: 600; }
+.notice.fatal .notice-sub { color: #e6b3ae; }
 .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-sub { font-size: 11px; color: #9da5b0; margin-top: 3px; line-height: 1.4; }
 /* The restart-gate card decides with buttons, not with a click-anywhere
@@ -7424,6 +7435,9 @@ body.embed #main { width: 100%; }
 }
 .notice-row.warn, .notice-row.pending { border-left-color: #d29922; }
 .notice-row.bad { border-left-color: #ff7b72; }
+/* The history keeps a raised leader fault (claunch-9djny) after the card is
+   gone, with the same grade the card carried. */
+.notice-row.fatal { border-left-color: #f85149; }
 .notice-row.openable { cursor: pointer; }
 .notice-row.openable:hover { background: #20242b; }
 /* Read marks (claunch-x76l8): an unread row has a dot and full colour, a
