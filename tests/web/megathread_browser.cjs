@@ -188,6 +188,28 @@ const server = http.createServer((req, res) => {
       (els) => els.map((e) => e.textContent));
     assert.deepEqual(briefs, ["로그 형식을 정한다"], "the briefing digest is its own line");
 
+    // The rows keep their own height when they outnumber the list. The list
+    // is a fixed-height column flexbox, so a row that may shrink is squeezed
+    // down to its 32px min-height and its meta/line/brief lines are drawn
+    // over the next row (claunch-g07ra). Two rows do not fill a full-size
+    // card, so the card is cut short until the list has to scroll.
+    await page.$eval(picker, (card) => { card.style.height = "320px"; });
+    const geometry = await page.$$eval(`${picker} .mt-new-session-row`, (rows) => rows.map((row) => ({
+      top: row.getBoundingClientRect().top,
+      bottom: row.getBoundingClientRect().bottom,
+      height: row.clientHeight,
+      content: row.scrollHeight,
+    })));
+    const list = await page.$eval(`${picker} .mt-create-list`, (el) => ({
+      height: el.clientHeight, content: el.scrollHeight,
+    }));
+    assert.ok(list.content > list.height, `the list overflows and scrolls: ${JSON.stringify(list)}`);
+    for (const row of geometry) {
+      assert.ok(row.content <= row.height, `a row is as tall as what it holds: ${JSON.stringify(geometry)}`);
+    }
+    assert.ok(geometry[0].bottom <= geometry[1].top, `the rows do not overlap: ${JSON.stringify(geometry)}`);
+    await page.$eval(picker, (card) => { card.style.height = ""; });
+
     // The lifecycle filter: s2 is paused, so only it survives.
     await page.click(`${picker} .mt-create-status[data-category="paused"]`);
     assert.deepEqual(await pickerNames(), ["s2"]);

@@ -10034,7 +10034,10 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-new-clear { background: none; border: 1px solid #30363d; border-radius: 5px; color: #c6cdd5; font-size: 11px; padding: 3px 6px; cursor: pointer; }
 .mt-new-clear:disabled { opacity: 0.4; cursor: default; }
 .mt-new-sessions { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #c6cdd5; }
-.mt-new-session-row { display: flex; align-items: flex-start; gap: 7px; min-height: 32px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
+/* flex: none — the list is a fixed-height column flexbox; a row allowed to
+   shrink is squeezed to its min-height and its lines overlap the next row
+   (claunch-g07ra). */
+.mt-new-session-row { flex: none; display: flex; align-items: flex-start; gap: 7px; min-height: 32px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
 .mt-new-session-row:hover { background: #22262d; }
 .mt-new-session-row.on { background: #16263a; }
 .mt-new-session-row input[type="checkbox"] { margin-top: 3px; flex: 0 0 auto; }
