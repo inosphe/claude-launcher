@@ -236,6 +236,65 @@ def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):
     assert err["started"] is None and err["updated"] is None and err["entered_at"] is None
 
 
+def test_rail_answers_carry_when_each_gate_opened(proj):
+    """``opened_at`` (claunch-l9znm.1): every owed item the run can date
+    carries the epoch second at which the run started waiting on a person.
+
+    The dashboard's notice counts a gate card's age from this instead of from
+    when that browser first saw the card, so a request that has stood an hour
+    says so the first time someone opens the page, and a card whose history
+    row is written again reads the same age rather than restarting at 0s.
+    Epoch seconds, not the ISO string the state stores, so the page never
+    parses one; a kind the run cannot date carries no field at all and the
+    card falls back to its arrival.
+    """
+    cwd = str(proj)
+    started = time.time()
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+
+    # A user choice: stamped when the node was entered.
+    (c,) = _rail(cwd, "s1")["s1"]["answers"]
+    assert c["kind"] == "choose"
+    assert isinstance(c["opened_at"], float) and c["opened_at"] >= started
+
+    runtime.select(c["instance"], "left", cwd=cwd, scope="s1", caller=runtime.CALLER_USER)
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s1")
+    (lim,) = _rail(cwd, "s1")["s1"]["answers"]
+    assert lim["kind"] == "loop_limit"
+    assert isinstance(lim["opened_at"], float) and lim["opened_at"] >= started
+    # It is the moment the run started waiting, not the poll that read it: a
+    # second poll a moment later must report the same stamp.
+    assert _rail(cwd, "s1")["s1"]["answers"][0]["opened_at"] == lim["opened_at"]
+
+
+def test_rail_ask_carries_the_stamp_the_run_opened_it_with(proj):
+    """An ask's own ``opened_at`` (claunch-l9znm.1) is the run's record of
+    when it opened, carried through to the rail unchanged; a run whose state
+    predates the stamp has none, and the rail leaves the field out rather
+    than inventing one."""
+    executors.register(None)
+    cwd = str(proj)
+    try:
+        runtime.start(layers.load("askme", cwd), cwd=cwd, scope="s1", caps={})
+        (a,) = _rail(cwd, "s1")["s1"]["answers"]
+        assert a["kind"] == "ask" and isinstance(a["opened_at"], float)
+
+        st = runtime.RunStore(cwd, "s1")
+        state = st.load_state()
+        (rec,) = state["asks"].values()
+        assert a["opened_at"] == pytest.approx(rec["opened_at"])
+        # A state written before the field existed.
+        del rec["opened_at"]
+        st.save_state(state)
+        cflow2_web._RAIL.clear()      # the row is cached per run file
+        (a2,) = _rail(cwd, "s1")["s1"]["answers"]
+        assert "opened_at" not in a2
+    finally:
+        executors.register(None)
+
+
 def test_rail_answers_carry_what_the_terminal_strip_posts(proj):
     """``answers`` (claunch-bpziz): each owed item with the instance and
     options the run page posts, so the terminal strip's press -- the same
@@ -436,6 +495,12 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
     assert set(body["rows"]) == {"s1"}
     assert body["rows"]["s1"]["workflow"] == "pick"
     assert body["rows"]["s1"]["gated"] is True
+    # The daemon's own clock rides the answer, not the rows (claunch-l9znm.1):
+    # a gate's `opened_at` is a daemon stamp, and a page whose clock differs
+    # corrects with this before it counts an age. Rows are cached per run
+    # file; this must not be.
+    assert isinstance(body["now"], (int, float)) and body["now"] > 0
+    assert isinstance(body["rows"]["s1"]["answers"][0]["opened_at"], float)
 
 
 def _live(name, cwd, exited=False):

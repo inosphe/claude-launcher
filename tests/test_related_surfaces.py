@@ -404,8 +404,24 @@ def test_this_repository_lists_the_web_modal_for_a_spawn_contract_change():
     the spawn mode of the new-session modal not sending ``workflow: "-"``)
     is a mirror of the wizard and the CLI. A change to either has to put
     ``app.js`` on the list -- by the guard table, and independently by
-    history."""
-    out = _run("--paths", "src/claude_launcher/wizard.py", "src/claude_launcher/cli_sessions.py", "--json")
+    history.
+
+    The window is this repository's whole history, not the tool's default
+    (``DEFAULT_LIMIT``, 800 commits). The default is a reading budget for
+    the review step; this assertion is not a budget but the evidence
+    criterion of claunch-6ccc, and a fixed window makes it a claim about
+    where the commits happen to sit rather than about whether the files
+    are coupled. ``app.js`` and ``cli_sessions.py`` had met in exactly
+    three counted commits inside 800; when #620 landed six commits,
+    ``331b03ef`` (prompt-packs, 2026-10-18) fell out of the window, the
+    count became two, and this test failed on master with nothing changed
+    in either file. Every commit that adds to the repository pushes the
+    oldest evidence out, so the assertion would fail again for the same
+    non-reason -- while a real break in the coupling (the case this test
+    exists for) still fails it, because the count would go to zero.
+    """
+    out = _run("--paths", "src/claude_launcher/wizard.py", "src/claude_launcher/cli_sessions.py",
+               "--limit", "100000", "--json")
     assert out.returncode == 0, out.stderr
     by = {s["path"]: s for s in json.loads(out.stdout)["surfaces"]}
     app = by["src/claude_launcher/web/static/app.js"]

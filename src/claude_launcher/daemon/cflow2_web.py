@@ -1041,7 +1041,16 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
     payload the run page draws, filtered to what only a person releases (a
     ``user`` choice, an ask that fell to a human, a loop or visit limit, a
     halt, the driver's move request). A halt and an acceptance hold carry no press -- the dashboard has
-    no endpoint for them -- only the text."""
+    no endpoint for them -- only the text.
+
+    ``opened_at`` (claunch-l9znm.1) is the epoch second at which the run
+    started waiting on a person, and it is what the dashboard's notice counts
+    the card's age from: the age is a fact about the request, not about when
+    a browser first saw it. The stamp comes from the run's own record
+    (``runtime.py``'s ``opened_at`` on an ask, a hold or a move request) and
+    is left out for a kind that carries none -- a state written before the
+    stamp existed, or a hold this daemon cannot date -- so the dashboard
+    falls back to its own first sight rather than showing an invented age."""
     from ..cflow2 import runtime
 
     try:
@@ -1070,6 +1079,7 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             **({"effect": effect} if effect else {}),
             "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} {asks}: "
                                    f"{move.get('reason') or ''}"),
+            **_rail_opened(move.get("at")),
         })
     for c in payload.get("choices") or []:
         if c.get("chooser") != ir.CHOOSER_USER:
@@ -1081,6 +1091,7 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             "require_reason": bool(c.get("require_reason")),
             "options": [{"name": o.get("name"), "description": o.get("description") or ""}
                         for o in c.get("options") or []],
+            **_rail_opened(c.get("opened_at")),
         })
     for a in payload.get("asks") or []:
         if a.get("resolution") != runtime.RES_HUMAN:
@@ -1098,25 +1109,44 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             or [{"name": runtime.ASK_APPROVE, "description": "enter the task"},
                 {"name": runtime.ASK_DECLINE, "description": "the task finishes declined"}],
             "recommended": q.get("recommended") if isinstance(q, dict) else None,
+            **_rail_opened(a.get("opened_at")),
         })
     for lim in payload.get("loop_limits") or []:
         out.append({"kind": runtime.HOLD_LOOP, "instance": lim.get("instance"),
                     "label": lim.get("label") or lim.get("node"),
-                    "count": lim.get("iterations"), "max": lim.get("max")})
+                    "count": lim.get("iterations"), "max": lim.get("max"),
+                    **_rail_opened(lim.get("opened_at"))})
     for lim in payload.get("visit_limits") or []:
         out.append({"kind": runtime.HOLD_VISIT, "instance": lim.get("instance"),
                     "label": lim.get("label") or lim.get("node"),
-                    "count": lim.get("visits"), "max": lim.get("max")})
+                    "count": lim.get("visits"), "max": lim.get("max"),
+                    **_rail_opened(lim.get("opened_at"))})
     if state.get("status") == runtime.ST_WAITING:
         for a in state.get("approvals") or []:
             if a.get("kind") == runtime.HOLD_HALT:
                 out.append({"kind": "halt", "label": a.get("monitor"),
                             "prompt": f"halted by monitor {a.get('monitor')} "
-                                      "(claunch cflow2 resume)"})
+                                      "(claunch cflow2 resume)",
+                            **_rail_opened(a.get("opened_at"))})
             elif a.get("kind") == runtime.HOLD_ACCEPTANCE:
                 out.append({"kind": runtime.HOLD_ACCEPTANCE, "label": "acceptance",
-                            "prompt": "the run's acceptance criteria wait on a person"})
+                            "prompt": "the run's acceptance criteria wait on a person",
+                            **_rail_opened(a.get("opened_at"))})
     return out
+
+
+def _rail_opened(value: Any) -> Dict[str, Any]:
+    """``{"opened_at": <epoch>}`` when the run stamped when it opened, else
+    ``{}``.
+
+    The dashboard counts a gate card's age from this
+    (claunch-l9znm.1); a kind the run cannot date leaves the field out and
+    the card falls back to the browser's own first sight. ``opened_at`` is
+    epoch seconds, so the page never parses an ISO string, and
+    ``rail_entry``'s ``now`` lets it correct for a clock that differs from
+    the daemon's."""
+    at = _epoch(value)
+    return {} if at is None else {"opened_at": at}
 
 
 #: ``(cwd, scope) -> (stamp, entry)``. The rail polls every few seconds for

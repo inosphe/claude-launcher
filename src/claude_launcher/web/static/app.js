@@ -7360,6 +7360,20 @@ function applyCflowBadges() {
    one state on the whole rail. */
 let cflow2RailCache = {};
 let cflow2RailSig = null;
+/* This page's clock minus the daemon's, in seconds, from the rail's own
+   `now` (claunch-l9znm.1). A gate's `opened_at` is a daemon stamp; the age
+   the card shows is measured against this page's clock, so the difference is
+   subtracted first. `railSkewOf` keeps the smallest reading seen, so latency
+   does not jitter every age.
+
+   `null` means "no reading yet", never 0: 0 is not a neutral starting value
+   but a reading, and the smallest possible one, so `Math.min` could never
+   replace it. A page running ahead of its daemon reads a positive
+   difference and would keep that 0 forever — every card aged by the whole
+   difference — while a page running behind was corrected. The page reads
+   `null` as no correction until the first answer lands, which is what an
+   older daemon without `now` means anyway. */
+let railClockSkew = null;
 
 // Ownership is independent of whether a simulation is currently running.
 let sessionSimCache = [];
@@ -7721,6 +7735,7 @@ async function refreshCflow2Rail() {
   const rows = (data && data.rows) || {};
   const sig = JSON.stringify(rows);
   cflow2RailCache = rows;
+  railClockSkew = railSkewOf(data && data.now, railClockSkew);
   // every person gate joins the notification channel, every poll
   // (claunch-whm4e.1; urgent asks only, before: claunch-x76l8.1)
   if (typeof runGateFeed === "function") runGateFeed();
@@ -23403,10 +23418,77 @@ function personGateRecords() {
         kind: a.kind, label: a.label || a.instance || a.kind,
         urgent: !!a.urgent, prompt: termCflow2Question(a),
         presses: termCflow2Answers(r, a, session),
+        // held since the run itself started waiting on a person, in the
+        // daemon's epoch seconds (claunch-l9znm.1); absent for a daemon or a
+        // kind that has no stamp, and the card then counts from its arrival
+        opened: railOpenedSecs(a.opened_at),
       });
     }
   }
   return { pending: out, settled };
+}
+
+/* A gate's `opened_at` (epoch seconds, the daemon's clock) as the history
+   row stores it — raw seconds, with no clock correction applied. The
+   correction belongs at read time (`openedOnThisClock`): a stored value that
+   moved with this page's clock would differ on every poll and rewrite the
+   whole history each time. Undefined when the answer carries none
+   (claunch-l9znm.1), and the card then counts from its own arrival, which is
+   what every card did before this. */
+function railOpenedSecs(at) {
+  const secs = Number(at);
+  return Number.isFinite(secs) && secs > 0 ? secs : undefined;
+}
+
+/* This page's clock minus the daemon's, in seconds, from the `now` the rail
+   answer carries. An answer that carries none (an older daemon, an error
+   body) leaves the reading as it was, and a page that has never read one
+   reads the stamp as it is. A gate's `opened_at` is the daemon's clock and
+   the age is measured on this page's, so the difference is subtracted before
+   counting: two machines five minutes apart would otherwise show a card
+   opening in the future, or one that has waited five minutes longer than it
+   has (claunch-l9znm.1).
+
+   The reading is noisy — `now` is stamped before the answer travels, so each
+   poll's difference is the true skew plus that poll's latency. Taking it
+   fresh every poll would move every card's age by that jitter each time, so
+   the smallest reading wins: latency can only ever push a reading up, and
+   the minimum converges on the true difference. `known` is the reading so
+   far — `null` before the first, and a NaN or a missing `now` leaves it as
+   it was, `null` included.
+
+   A minimum only ever falls, so it cannot follow a clock that is stepped —
+   an NTP correction, or the machine waking from sleep — and a step up would
+   leave every card's age off by the step for as long as the page lives. A
+   reading that exceeds the current minimum by more than `RAIL_SKEW_JUMP` is
+   therefore taken as the new value: that gap is a step, and following it is
+   cheaper than being wrong by it. The minimum is also dropped when the page
+   reconnects to its daemon (`noteRailReconnect`), the other moment every
+   reading may have moved. */
+const RAIL_SKEW_JUMP = 30;   // seconds; a gap this large is a clock step
+function railSkewOf(now, known) {
+  const secs = Number(now);
+  // No clock this page can use leaves the reading alone — including `null`,
+  // which must stay `null`: turning it into 0 would hand the minimum a
+  // reading of zero that it could never rise above.
+  if (!Number.isFinite(secs) || secs <= 0) return known;
+  const reading = Date.now() / 1000 - secs;
+  if (!Number.isFinite(known)) return reading;
+  // A reading this far above the minimum is a clock step, not latency. A
+  // response that took that long (a tab throttled in the background) is
+  // followed too, and the next ordinary answer's minimum puts it back: the
+  // cost is one poll's worth of ages being wrong.
+  if (reading - known > RAIL_SKEW_JUMP) return reading;
+  return Math.min(known, reading);
+}
+
+/* Drops the correction so the next answer re-reads it from scratch. Called
+   when the page reconnects to its daemon — the other moment every reading
+   may have moved, and the one place the daemon itself may have changed.
+   `null` reads as "no reading yet", which `railSkewOf` takes the next
+   answer's value for and `openedOnThisClock` treats as no correction. */
+function noteRailReconnect() {
+  railClockSkew = null;
 }
 
 /* The two polls each hand the channel the whole set: one feed, so neither
@@ -58459,8 +58541,27 @@ function noticeAgeLine(at) {
   const line = el("div", "notice-sub notice-when");
   const text = el("span", null, noticeAgeText(at));
   line.appendChild(text);
-  noticeAges.add({ node: text, at });
+  const rec = { node: text, at };
+  noticeAges.add(rec);
+  // The record rides on the line so a card that already drew it can be
+  // re-aged in place when the daemon's `opened` reaches it (noticeAgeSetFor).
+  line.__noticeAge = rec;
   return line;
+}
+
+/* Re-ages a card already on screen from `at`, without waiting for a rebuild
+   (claunch-l9znm.1). A gate's age is the run's own stamp for when it started
+   waiting on a person; a row written before that answer carried the stamp
+   gets it on a later poll, and the card must say the true age then rather
+   than keep counting from the arrival it was drawn with. */
+function noticeAgeSetFor(root, at) {
+  if (!root || !Number.isFinite(at) || typeof root.querySelector !== "function") return;
+  const line = root.querySelector(".notice-when");
+  const rec = line && line.__noticeAge;
+  if (!rec || rec.at === at) return;
+  rec.at = at;
+  const text = noticeAgeText(at);
+  if (rec.node.textContent !== text) rec.node.textContent = text;
 }
 
 function noticeAgesPaint() {
@@ -59174,10 +59275,19 @@ function gateHistoryEntry(type, rid) {
 /* When a gate request reached this browser — its history row's stamp, which
    is the arrival its panel row and its card both show (claunch-egqrq). A
    card drawn while the row does not exist yet (no id on an older daemon)
-   is stamped now, the same way its row would be. */
+   is stamped now, the same way its row would be.
+
+   `opened` wins when the row has it (claunch-l9znm.1): that is when the run
+   started waiting on a person, which is what the age is about. It survives
+   the row being written again, so a card whose row was rebuilt reads the
+   same age it did before instead of going back to 0s. A request the daemon
+   cannot date has no `opened`, and its age is the arrival, as it always
+   was. */
 function gateSeenAt(type, rid) {
   const entry = gateHistoryEntry(type, String(rid));
-  return entry && Number.isFinite(entry.at) ? entry.at : Date.now();
+  if (!entry) return Date.now();
+  if (Number.isFinite(entry.opened)) return openedOnThisClock(entry.opened);
+  return Number.isFinite(entry.at) ? entry.at : Date.now();
 }
 
 /* One history row per request, written the first time a poll sees it. */
@@ -59185,11 +59295,43 @@ function gateHistoryOpen(type, rid, title, sub, extra) {
   if (gateHistoryEntry(type, rid)) return;
   // Read from the start: the bell counts it as waiting while it is pending,
   // and a request just answered should not come back as unread. `extra`
-  // carries the session an urgent ask belongs to.
+  // carries the session an urgent ask belongs to, and `opened` (when the
+  // run started waiting on a person, in the daemon's epoch seconds —
+  // claunch-l9znm.1) for the kinds that can date themselves.
   noticeRecord(Object.assign(
     { title, sub, kind: "warn", source: type, gate: { type, rid }, status: "pending", read: true },
     extra || {}
   ));
+}
+
+/* Writes the daemon's `opened` onto a row that was already recorded, and
+   says whether it changed. A row written before the daemon sent the stamp
+   (or before this page asked for it) gets it on the next poll, so a card
+   that has waited an hour stops claiming 0s once the answer carries the
+   time it opened rather than when this browser first saw it
+   (claunch-l9znm.1). An older daemon never sends one, and nothing moves. */
+function gateHistoryOpened(type, rid, opened) {
+  const entry = gateHistoryEntry(type, String(rid));
+  if (!entry || !Number.isFinite(opened)) return false;
+  if (entry.opened === opened) return false;
+  entry.opened = opened;
+  noticeHistorySave();
+  return true;
+}
+
+/* A row's `opened` is the daemon's stamp as it arrived, and this turns it
+   into a time on this page's clock only when it is read. Storing the
+   corrected value instead would make it differ by a few milliseconds on
+   every poll (the skew is measured against a moving `Date.now()`), so each
+   poll would rewrite the whole history — the very cost this field is meant
+   to sit beside, not add to.
+
+   `railClockSkew` is null between a reconnect and the next rail answer
+   (`noteRailReconnect`); there is no correction to apply yet, so the stamp
+   is read as it is. */
+function openedOnThisClock(secs) {
+  const skew = Number.isFinite(railClockSkew) ? railClockSkew : 0;
+  return (secs + skew) * 1000;
 }
 
 /* A request that left the pending set. `status` is the daemon's word for it
@@ -59951,19 +60093,24 @@ function noticePanelPaint() {
   // Read waiting requests are listed too, apart from the ones not yet seen:
   // their rows keep the buttons and the countdown, and Mark unread puts them
   // back under the count (claunch-qqy2i).
-  // Every gate kind of NOTICE_SOURCES the reader shows, newest first: when
-  // this browser first saw the request, which is its history row's time
-  // (claunch-efpoi).
+  // Every gate kind of NOTICE_SOURCES the reader shows, longest-waiting
+  // first: the request that has stood longest is the one to answer. The
+  // order is the same stamp the row shows as its age, so a row that says
+  // "1h ago" is above one that says "2m ago" — before claunch-l9znm.1 it
+  // was when this browser first saw them, which is the same order only when
+  // the page was open the whole time.
   const waiting = [];
   for (const [type, recs] of Object.entries(gatePending)) {
     if (!noticeSourceShown(type)) continue;
     for (const rec of recs) waiting.push([type, rec]);
   }
-  const seenAt = ([type, rec]) => {
+  const openedAt = ([type, rec]) => {
     const entry = gateHistoryEntry(type, String(rec.id));
-    return entry ? entry.at || 0 : 0;
+    if (!entry) return 0;
+    if (Number.isFinite(entry.opened)) return openedOnThisClock(entry.opened);
+    return entry.at || 0;
   };
-  waiting.sort((a, b) => seenAt(b) - seenAt(a));
+  waiting.sort((a, b) => openedAt(a) - openedAt(b));
   noticePanelHiddenLine(body);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
@@ -61666,7 +61813,22 @@ function applyRunGate(pending, settled) {
   for (const rec of recs) {
     const key = RUN_GATE_PREFIX + rec.id;
     gateHistoryOpen("ask", String(rec.id), `${rec.session} ${runGateTitle(rec)}`,
-                    rec.prompt || "", { session: rec.session });
+                    rec.prompt || "",
+                    rec.opened === undefined
+                      ? { session: rec.session }
+                      : { session: rec.session, opened: rec.opened });
+    // The run's own stamp for when it started waiting lands on the row even
+    // when the row was written before the answer carried it: the age is
+    // about the request, not about this browser (claunch-l9znm.1). A card
+    // already on screen is re-aged here rather than waiting for a rebuild
+    // the state has not asked for. The row keeps the daemon's raw stamp; the
+    // card gets it on this page's clock, which is what the tick subtracts
+    // from.
+    if (rec.opened !== undefined
+        && gateHistoryOpened("ask", rec.id, rec.opened)
+        && notices.get(key)) {
+      noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened));
+    }
     if (gateIsHidden("ask", rec.id)) continue;
     seen.add(key);
     const note = runGateNudgeNotes[rec.session] || "";
@@ -62696,6 +62858,13 @@ async function pollOnce() {
         { source: "daemon", key: NOTICE_LINK }
       );
     }
+    // The daemon may be a different process than the one the rail's clock was
+    // measured against, and the time this took is time either clock could have
+    // been stepped in, so the correction is re-read by `boot()` below rather
+    // than carried across (claunch-l9znm.1). The `typeof` guard is for the
+    // harnesses that slice pollOnce() without the rail helpers; it is not a
+    // runtime branch this page ever takes.
+    if (typeof noteRailReconnect === "function") noteRailReconnect();
     await boot();     // re-read everything this daemon publishes, from scratch
     reconnectNow();   // and give the attached terminal its socket back
     return;

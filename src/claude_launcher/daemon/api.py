@@ -7112,7 +7112,13 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     registered session whose own directory holds a v2 run under the session's own
     name (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
     ``/api/cflow`` or ``/api/cflow2/runs``: the rail asks one question per
-    session, keyed by the session, not by the run slots on disk."""
+    session, keyed by the session, not by the run slots on disk.
+
+    ``now`` is the daemon's own clock (epoch seconds) at this answer
+    (claunch-l9znm.1): a gate's ``opened_at`` is the daemon's stamp, and a
+    page whose clock differs from it would otherwise show a wrong age. The
+    page subtracts the difference before it counts. It sits here rather than
+    in a row because the rows are cached per run file and this must not be."""
     manager: SessionManager = request.app["manager"]
     pairs = []
     for session in manager.list():
@@ -7120,7 +7126,7 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
         if cwd:
             pairs.append((session.sdef.name, cwd))
     rows = await asyncio.to_thread(cflow2_web.rail_entries, pairs)
-    return json_response({"rows": rows})
+    return json_response({"rows": rows, "now": time.time()})
 
 
 async def h_cflow2_definition(request: web.Request) -> web.Response:

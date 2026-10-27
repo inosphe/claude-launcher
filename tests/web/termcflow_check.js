@@ -73,6 +73,9 @@ let transcriptName = null;
 let transcriptMachine = null;
 let cflowCache = [];
 let cflow2RailCache = {};
+// This page's clock minus the daemon's, as refreshCflow2Rail leaves it
+// (claunch-l9znm.1); a gate row's opened is read through it.
+let railClockSkew = 0;
 let sessionsCache = [];
 function refreshCflow2Rail() {}
 let refits = 0;
@@ -97,7 +100,7 @@ new Function(
      "sessionCategory", "gateWakeNote",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
-     "personGateRecords", "runGateFeed"]
+     "personGateRecords", "railOpenedSecs", "runGateFeed"]
     .map(slice).join("\n") + `
 let gateFed = null;
 function runGateSync(pending, settled) { gateFed = { pending, settled }; }
@@ -835,8 +838,11 @@ const RUN = {
     ctx.setRuns([]);
     ctx.setRail({});
   }
+  // The window allows the daemon-clock line between the cache write and the
+  // feed (claunch-l9znm.1): the skew has to be set before personGateRecords
+  // stamps a gate row's opened, so it sits ahead of runGateFeed.
   check("both polls feed the channel",
-        /cflow2RailCache = rows;[\s\S]{0,200}runGateFeed\(\)/.test(src) &&
+        /cflow2RailCache = rows;[\s\S]{0,400}runGateFeed\(\)/.test(src) &&
           /runGateFeed\(\);[^\n]*\n\s*renderTermTimer\(\);/.test(src));
 
   /* ---- the markup, the stylesheet, the call sites ---- */

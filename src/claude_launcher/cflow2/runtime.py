@@ -724,7 +724,8 @@ def _visit_limit(r: Run, iid: str, node: ir.Node) -> None:
     inst["frame"]["visit_limit"] = True
     visits = int(r.state["visits"].get(key) or 0)
     approval = {"kind": HOLD_VISIT, "instance": iid, "node": node.id,
-                "label": shown_label(r.chart, node), "visits": visits, "max": _max_visits(r, key)}
+                "label": shown_label(r.chart, node), "visits": visits,
+                "max": _max_visits(r, key), "opened_at": r.now}
     r.state.setdefault("approvals", []).append(approval)
     r.emit("waiting", node=node.id, instance=iid, kind=HOLD_VISIT, visits=visits,
            max=approval["max"])
@@ -971,6 +972,9 @@ def _loop_limit(r: Run, iid: str) -> None:
         "kind": "loop_limit", "instance": iid, "node": node.id,
         "label": shown_label(r.chart, node), "iterations": _loop_count(frame),
         "max": _loop_cap(r, iid), "mode": node.get("mode"),
+        # when the run started waiting on a person (claunch-l9znm.1): the
+        # notification's age is this stamp, not when a browser first saw it
+        "opened_at": r.now,
     }
     r.state.setdefault("approvals", []).append(approval)
     r.state["status"] = ST_WAITING
@@ -1645,7 +1649,8 @@ def _acceptance_job(cwd: str, scope: str, token: str, now: Optional[float]) -> N
         r.state["approvals"] = [a for a in r.state.get("approvals") or []
                                 if a.get("kind") != HOLD_ACCEPTANCE]
         r.state["approvals"].append({"kind": HOLD_ACCEPTANCE, "instance": None,
-                                     "failed": [x["id"] for x in failed]})
+                                     "failed": [x["id"] for x in failed],
+                                     "opened_at": r.now})
         r.emit("acceptance_failed", failed=[{k: x[k] for k in ("id", "text", "exit")}
                                             for x in failed])
     try:
@@ -4620,6 +4625,25 @@ def pending_move(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _opened_at(r: Run, iid: str, kind: str) -> Dict[str, Any]:
+    """``{"opened_at": <epoch>}`` for the hold ``kind`` on instance ``iid``,
+    or ``{}`` when the run carries no such hold.
+
+    A gate's notification says how long the request has waited
+    (claunch-l9znm.1), and that is the run's own stamp for the moment it
+    started waiting on a person -- not when a dashboard first saw the card.
+    Each hold kind is stamped where it is created (``_loop_limit``,
+    ``_visit_limit``); a state written by an older run has no stamp, and the
+    caller then leaves the field out rather than inventing one."""
+    for a in r.state.get("approvals") or []:
+        if a.get("kind") == kind and a.get("instance") == iid:
+            at = a.get("opened_at")
+            if isinstance(at, (int, float)) and not isinstance(at, bool):
+                return {"opened_at": float(at)}
+            return {}
+    return {}
+
+
 def _require_no_move_request(r: Run) -> None:
     """A pending move request holds the driver: the run does not advance by
     the driver's hand until a person answers it (v1's ``waiting_goto``)."""
@@ -5364,7 +5388,8 @@ def _violate(r: Run, name: str, body: Dict[str, Any], kind: str,
     if action == MON_HALT:
         approvals = r.state.setdefault("approvals", [])
         if not any(a.get("monitor") == name for a in approvals):
-            approvals.append({"kind": "monitor_violation", "monitor": name, "instance": None})
+            approvals.append({"kind": "monitor_violation", "monitor": name, "instance": None,
+                              "opened_at": r.now})
     found.append({"monitor": name, "kind": kind, "action": action, **detail})
 
 
@@ -5641,6 +5666,9 @@ def describe(r: Run) -> Dict[str, Any]:
                 "chooser": node.get("chooser") or ir.CHOOSER_AGENT,
                 "require_reason": bool(node.get("require_reason")),
                 "options": avail, "unavailable": unavail,
+                # the node entered and started waiting on this pick then; the
+                # notification's age is this stamp (claunch-l9znm.1)
+                "opened_at": inst.get("entered_at"),
             })
             held = inst["frame"].get("held")
             if held:
@@ -5674,11 +5702,13 @@ def describe(r: Run) -> Dict[str, Any]:
             key = node_key(node)
             visit_limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                                  "visits": (s.get("visits") or {}).get(key),
-                                 "max": _max_visits(r, key)})
+                                 "max": _max_visits(r, key),
+                                 **_opened_at(r, iid, HOLD_VISIT)})
         elif aw == AW_LIMIT:
             limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                            "iterations": _loop_count(inst["frame"]),
-                           "max": _loop_cap(r, iid)})
+                           "max": _loop_cap(r, iid),
+                           **_opened_at(r, iid, HOLD_LOOP)})
         if node.type == ir.T_GROUP:
             frame = inst["frame"]
             groups.append({
@@ -6460,6 +6490,9 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "resolution": rec.get("resolution"), "urgent": bool(rec.get("urgent")),
         "asked": [e.get("handle") for e in rec.get("asked") or []],
         "deadline": rec.get("deadline"),
+        # when the ask was opened (``_open_ask``): the notification's age is
+        # this stamp, not when a browser first saw the card (claunch-l9znm.1)
+        "opened_at": rec.get("opened_at"),
         "skipped": [s.get("reason") for s in rec.get("skipped") or []],
         "how": _ask_how(iid, rec),
         **(_ask_question(r, rec) if rec.get("brief") is not None else {}),
