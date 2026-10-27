@@ -112,7 +112,7 @@ def _block(text: str) -> str:
 #: beads block drops v1's self cap and settles on "every issue closed, or a
 #: leader HOLD". Apart from DIVERGENCES below, the v2 copy stays the v1
 #: block word for word.
-V1_ONLY = """묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
+V1_ONLY = """self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
 (`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
 대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
 intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전에 범위
@@ -121,7 +121,7 @@ intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전�
 pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
 이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
 `HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가"""
-V2_INSTEAD = """묻는다. self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
+V2_INSTEAD = """self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
 거부권을 가진다(`update <id> --assignee ""` + `UNQUEUED by leader:
 <이유>`); 거부된 이슈는 pool과 같이 상위의 처분을 따른다. 세션이
 만들었거나 배정받은 일감이 전부 closed여야 세션이 끝난다 — 예외는
@@ -875,6 +875,29 @@ def test_beads_common_loaded_value_is_the_v1_block():
     intake_issue = next(n for n in chart.nodes.values() if n.label == "intake-issue")
     assert _words(_block(intake_issue.props["prompt"])) == _as_v2(v1_block)
     assert "${frag:beads-common}" in V2.read_text(encoding="utf-8")
+
+
+def test_pool_answer_assigning_back_is_named_and_announced():
+    # claunch-p641s: a leader answered a pool ask by assigning the issue back
+    # to the asking worker; wrapup only knew "HOLD or another session", the
+    # marker was undefined, and queue-recheck started the round silently.
+    chart = _chart()
+    wrapup = _words(next(n for n in chart.nodes.values()
+                         if n.label == "wrapup").props["prompt"])
+    assert "`HOLD: <이유>` 코멘트, (2) 다른 세션에 배정, (3) 물어 온 이 세션에 배정" in wrapup
+    assert "`ASSIGNED by leader: <이 세션> <이유>`" in wrapup
+    recheck = next(_words(n.props["prompt"]) for n in chart.nodes.values()
+                   if "회차가 마감됐다" in (n.props.get("prompt") or ""))
+    assert "`ASSIGNED by leader:` 코멘트로 들어온 것이 있으면" in recheck
+    assert "`thread_open`" in recheck
+    common = _words(_block(COMMON.read_text(encoding="utf-8")))
+    assert "`ASSIGNED by leader: <그 세션> <이유>`" in common
+    # v1 wrapup lists the same three answers; the shared block promises no
+    # user notice because only v2's queue-recheck sends one.
+    v1_wrapup = _words(yaml.safe_load(V1.read_text(encoding="utf-8"))
+                       ["steps"]["wrapup"]["instructions"])
+    assert "(3) 물어 온 이 세션에 배정" in v1_wrapup
+    assert "사용자에게 알린다" not in common
 
 
 # -- triggers (docs/cflow-v2.md 2.8) -----------------------------------------
