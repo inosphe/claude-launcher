@@ -10903,6 +10903,7 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     # the actual checkout path, just like the CLI launch path does. An empty
     # name means the standard generated name; omitting the key means no
     # worktree.
+    settled_auto = None
     if "worktree" in body:
         choice = body.pop("worktree")
         if choice is True or choice is None:
@@ -10922,6 +10923,10 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
             # spent a number here would leave an empty directory for every
             # rejected form submission -- the litter the counter exists to
             # stop.
+            # ``settled_auto`` carries the counter's answer down to stage(),
+            # which cannot tell a settled candidate from a hand-typed name
+            # once the name is on the definition.
+            settled_auto = not str(body.get("name") or "").strip()
             try:
                 body["name"] = manager.settle_name(str(body.get("name") or ""))
             except ManagerError as exc:
@@ -10985,7 +10990,7 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     except (KeyError, ValueError, TypeError) as exc:
         return 400, {"error": f"bad session definition: {exc}"}
     try:
-        session = manager.stage(sdef)
+        session = manager.stage(sdef, auto=settled_auto)
     except ManagerError as exc:
         return 409 if "already exists" in str(exc) else 400, {"error": str(exc)}
     try:

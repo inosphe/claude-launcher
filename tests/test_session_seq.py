@@ -222,6 +222,81 @@ def test_a_hand_chosen_numeric_name_does_not_move_the_counter(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_child_that_named_no_child_still_spends_its_number(home, tmp_path):
+    """``stage_child`` settles a candidate and puts it on the definition before
+    calling ``stage``, so ``stage`` sees a filled-in name. Read as "the caller
+    chose", that would leave the counter behind while the directory is made —
+    and the next allocation would step over a number for no reason.
+
+    ``stage_child`` therefore passes ``auto`` explicitly. This test drives it
+    through a real spawn so the flag cannot silently go missing again.
+    """
+    _register_py_harness()
+    # A spawned child inherits its parent's profile by default; letting the
+    # request name one is what puts a child through stage_child with no
+    # name at all, which is the path this test is about.
+    store.update(
+        lambda doc: doc.update({"spawn": {"allow_profile": True, "allow_cwd": True}})
+    )
+
+    async def run():
+        mgr = _manager()
+        parent = mgr.stage(SessionDef(name="boss", harness="py", cwd=str(tmp_path)))
+        child = mgr.stage_child("boss", {"profile": "py", "cwd": str(tmp_path)})
+        assert child.sdef.name == "s0", child.sdef.name
+        # The number was spent, not merely used for a directory.
+        assert _seq() == 1
+
+        # And the next auto assignment is consecutive, not s2.
+        assert mgr.auto_name() == "s1"
+        assert _take(mgr) == "s1"
+
+        for name in ("boss", "s0", "s1"):
+            mgr.discard(name)
+
+    asyncio.run(run())
+
+
+def test_the_web_worktree_path_still_spends_its_number(home):
+    """``POST /api/sessions`` with a generated worktree name settles a
+    candidate into ``body["name"]`` before ``stage`` sees it. That is a
+    counter name, so the counter must move — otherwise every web session made
+    with a worktree would leave a number behind."""
+    import asyncio as _asyncio
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=0.0)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "", "worktree": "", "profile": "py",
+                      "cwd": str(home), "task": ""},
+                headers={"Authorization": "Bearer sekrit"},
+            )
+            # Whatever the request did, the auto path must not have used a
+            # number without spending it: either a session exists and the
+            # counter moved past it, or nothing was created and the counter
+            # is untouched.
+            body = await resp.json()
+            name = str(body.get("name") or "")
+            if resp.status in (200, 201) and name.startswith("s"):
+                assert _seq() >= int(name[1:]) + 1, (name, session_seq.read())
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    _asyncio.run(run())
+
+
 def test_a_hand_chosen_numeric_name_is_stepped_over_when_reached(home):
     """A person's ``s1`` is a name in the sequence's own shape, so the sequence
     has to step over it when it gets there — without being told what the

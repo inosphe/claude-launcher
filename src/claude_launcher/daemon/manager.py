@@ -427,6 +427,7 @@ class SessionManager:
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
         delivery_hold: bool = False,
+        auto: Optional[bool] = None,
     ) -> Session:
         """Register a session without starting it.
 
@@ -454,18 +455,26 @@ class SessionManager:
         a person pinned this session shut, and the relaunch is that session
         continuing, so the pin continues with it (see
         :attr:`Session._delivery_hold`).
+
+        ``auto`` says whether ``sdef.name`` is a name the counter handed out
+        or one a person typed, and it exists because the definition cannot
+        answer that: :meth:`stage_child` and the web create route settle a
+        candidate and put it *on the definition* before arriving here, so a
+        filled-in name means "the caller already chose" for a hand-typed
+        ``s9000`` and for the counter's ``s7`` alike. ``None`` — every path
+        that builds a definition itself — means "read it off the name": empty
+        is an auto assignment, filled in is a choice. Only an auto name moves
+        the counter.
         """
         # The name is reserved here, and only here: every check that could
         # refuse this request has already passed, so a number is spent only on
         # a session that is going to exist. ``settle_name`` (which callers that
         # must name a worktree use) computes a candidate and writes nothing --
         # see its docstring for why the two are split.
-        #
-        # ``auto`` records which side of that split this session is on: only a
-        # name the counter produced may move the counter (a hand-typed ``s9000``
-        # is not a number the sequence spent).
         requested = str(sdef.name or "")
-        name = self._reserve(self.settle_name(requested), auto=not requested.strip())
+        if auto is None:
+            auto = not requested.strip()
+        name = self._reserve(self.settle_name(requested), auto=auto)
         sdef = self._resolve_resume(
             SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
@@ -1398,13 +1407,17 @@ class SessionManager:
             exempt_depth=exempt_depth,
         )
         # Settled here rather than left to :meth:`stage`, because the child's
-        # worktree is named after the child (``<parent>-<child>-<stamp>``) and
-        # the checkout is cut before the record exists. Checked here too: a
-        # name already taken refuses before the CHECKOUT is made, which is the
-        # expensive half. An auto-assigned name has already created its session
-        # directory -- that empty directory is what reserves the number, and it
-        # outlives a request refused at this point.
-        name = self.settle_name(str(request.get("name") or ""))
+        # worktree is named after the child (``<parent>-<child>``) and the
+        # checkout is cut before the record exists. Checked here too: a name
+        # already taken refuses before the CHECKOUT is made, which is the
+        # expensive half. Settling writes nothing (see
+        # :meth:`settle_name`), so a request refused below this line costs no
+        # number. An auto-assigned name is only a candidate here: ``stage``
+        # reserves it, which is what moves the counter -- and ``auto`` tells it
+        # whether this candidate came from the counter, because a definition
+        # with the name already filled in cannot say so on its own.
+        requested = str(request.get("name") or "")
+        name = self.settle_name(requested)
         # After the policy and before the record: a checkout is a thing on
         # disk, so it is made only once nothing left can refuse the request.
         child = spawn_mod.make_worktree(child, request, parent=parent, name=name)
@@ -1453,7 +1466,11 @@ class SessionManager:
                         if request.get("fork") else ""
                     ),
                 }
-            )
+            ),
+            # A name the request did not give came from the counter, and this
+            # is the only place that still knows it: by now ``name`` is on the
+            # definition, where nothing distinguishes it from a person's.
+            auto=not requested.strip(),
         )
 
     def spawn_capabilities(self, parent: str) -> dict:
