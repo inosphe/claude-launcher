@@ -856,6 +856,9 @@ def gate(repo, tmp_path, monkeypatch):
         def red(self):
             state["exit"] = 1
 
+        def green(self):
+            state["exit"] = 0
+
     return Gate()
 
 
@@ -1163,6 +1166,100 @@ def test_no_reuse_runs_anyway(repo, gate):
     assert gate() == 0
     assert gate("--no-reuse") == 0
     assert gate.runs() == 2
+
+
+def test_a_second_run_keeps_the_first_receipt_beside_it(repo, gate, capsys):
+    """The key names the tree and the selection, and neither names the run.
+
+    So two runs over one tree write one path, and the second one used to erase
+    the first -- ``started_at``, ``seconds``, ``window`` and ``basetemp``,
+    which are the only account of how that verdict was obtained. A round in
+    this repository reported the window of the run that had been overwritten
+    (``claunch-23r7d.1.1.1``, s3205, 2026-10-27). The red-to-green rerun is
+    the field shape: a red receipt is not reused, so the next run of the same
+    tree lands on the same key.
+
+    Both halves of the requirement are asserted here: the earlier receipt is
+    still on disk, and ``--check`` answers with the newer one rather than
+    abstaining.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    gate.red()
+    assert gate() == 1
+    first = json.loads(
+        changed_tests.receipt_path(
+            repo,
+            changed_tests.worktree_tree(repo),
+            changed_tests.select(repo, changed_tests.changed_paths(repo, "master")),
+            gate.receipts,
+        ).read_text(encoding="utf-8")
+    )
+
+    gate.green()
+    assert gate() == 0
+    assert gate.runs() == 2
+
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    newest = json.loads(key.read_text(encoding="utf-8"))
+    assert newest["exit_code"] == 0, "the key must hold the run that just finished"
+
+    archived = sorted(
+        p for p in key.parent.iterdir() if p != key and p.name.startswith(key.stem + "@")
+    )
+    assert len(archived) == 1, f"the first receipt was not kept: {list(key.parent.iterdir())}"
+    kept = json.loads(archived[0].read_text(encoding="utf-8"))
+    assert kept["started_at"] == first["started_at"]
+    assert kept["exit_code"] == 1, "the earlier run's own verdict must survive"
+    assert kept["basetemp"] == first["basetemp"]
+
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts)["started_at"] == (
+        newest["started_at"]
+    )
+    assert gate("--check") == 0, "the newest receipt is the one --check answers with"
+    assert "kept the earlier receipt" in capsys.readouterr().out
+
+
+def test_the_kept_receipt_is_named_for_the_run_it_records(repo, gate):
+    """The stamp comes from the receipt being moved, not from the clock now.
+
+    A name taken from ``now`` would file the archive under the run that
+    displaced it, which is the same confusion in a different place: the file
+    has to say which run it is when it is read later, out of order, by
+    somebody who was not there.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    gate.red()
+    assert gate() == 1
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    first = json.loads(key.read_text(encoding="utf-8"))
+
+    gate.green()
+    assert gate() == 0
+
+    stamp = changed_tests.datetime.fromisoformat(first["started_at"]).astimezone(
+        changed_tests.timezone.utc
+    ).strftime(changed_tests.RECEIPT_STAMP)
+    assert (key.parent / f"{key.stem}@{stamp}.json").is_file()
+
+
+def test_no_reuse_keeps_the_green_receipt_it_displaces(repo, gate):
+    """The escape hatch is exempt from reuse, not from keeping the record."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    first = json.loads(key.read_text(encoding="utf-8"))
+
+    assert gate("--no-reuse") == 0
+    assert gate.runs() == 2
+    kept = sorted(p for p in key.parent.iterdir() if p.name.startswith(key.stem + "@"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text(encoding="utf-8"))["started_at"] == first["started_at"]
 
 
 def test_an_untracked_file_is_in_the_tree_key(repo):
