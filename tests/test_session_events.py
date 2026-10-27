@@ -131,6 +131,45 @@ def test_index_failure_does_not_change_control_result(tmp_path, monkeypatch, cap
     assert "could not index session event" in caplog.text
 
 
+def test_a_locked_index_database_does_not_change_control_result(
+        tmp_path, monkeypatch, caplog):
+    """A locked or full index database must not fail the control operation.
+
+    ``search_records.remember`` opens SQLite with a 10 s timeout against the
+    daemon directory, so the failure it actually hits in production is
+    ``sqlite3.OperationalError`` ("database is locked" / "database or disk is
+    full") -- not ``OSError``. ``sqlite3.Error`` is not an ``OSError``
+    subclass (its MRO is OperationalError -> DatabaseError -> Error ->
+    Exception), so a guard written for ``OSError`` alone lets it escape
+    :meth:`Events.record` and the caller sees a failed kill/pause/archive that
+    did happen (claunch-mxar3).
+
+    This is the same guarantee as
+    ``test_index_failure_does_not_change_control_result`` for the exception
+    class that actually arrives. Both are kept: narrowing the guard back to
+    ``OSError`` turns this one red while leaving the other green.
+    """
+    import sqlite3
+
+    events = session_events.Events(tmp_path)
+    session = SimpleNamespace(sdef=SimpleNamespace(name="s1"), created_at="first")
+
+    from claude_launcher.daemon import search_records
+
+    def locked(name, batch):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(search_records, "remember", locked)
+    event = events.record(session, "kill", "세션 종료 요청")
+
+    # The control operation returned, its row is on disk, and the failure was
+    # reported rather than swallowed silently.
+    assert events.rows(session) == [event]
+    restored = session_events.Events(tmp_path)
+    assert [row["id"] for row in restored.rows(session)] == [event["id"]]
+    assert "could not index session event" in caplog.text
+
+
 def test_a_reader_does_not_wait_on_the_index_write(tmp_path, monkeypatch):
     """The lock must end before ``search_records.remember`` (claunch-tsmqd).
 

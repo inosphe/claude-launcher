@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -129,9 +130,12 @@ class Events:
         try:
             from . import search_records
             search_records.remember(session.sdef.name, [event])
-        except OSError:
+        except (OSError, sqlite3.Error):
             # The index is a mirror, so losing one write costs only an entry
-            # until the next event for this session re-delivers it -- and it
-            # must not turn a completed control operation into a failure.
+            # until something rewrites it -- and it must not turn a completed
+            # control operation into a failure. ``sqlite3.Error`` is not an
+            # ``OSError`` (its MRO is OperationalError -> DatabaseError ->
+            # Error -> Exception), so a locked or full index database would
+            # escape an ``OSError``-only guard (claunch-mxar3).
             log.exception("could not index session event for %s", session.sdef.name)
         return event
