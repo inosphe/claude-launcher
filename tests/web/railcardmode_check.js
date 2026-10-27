@@ -252,52 +252,12 @@ ok("a compact card keeps the briefing one-line — it is the card's summary",
    !/#session-list li\[data-rail-mode="compact"\][^{]*\.rail-brief[^{]*\{/.test(plain),
    "a rule hides .rail-brief on a compact card");
 
-/* The buttons line on a compact card: the box survives, the buttons in it do
-   not. `.sess-key` is the exception, and it is the reason the rule is written
-   by exclusion — that chip NAMES the key the session runs on and is the only
-   entry to its picker, so it says something rather than offering something.
-   Hiding the box itself would take the chip with it; sessionkey_browser
-   caught exactly that, which is why this check pins the shape of the rule and
-   not just its effect. */
-const compactActions = plain.match(
-  /#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions\s*> :not\(([^)]*)\)\s*\{([^}]*)\}/);
-ok("a compact card hides the buttons inside the buttons line",
-   compactActions && /display:\s*none/.test(compactActions[2]),
-   compactActions ? compactActions[2].trim() : "no rule");
-/* Only the key picker remains on compact cards. Refreshes become available
-   after opening the card, so asynchronous labels cannot squeeze the profile. */
-const spared = compactActions ? compactActions[1] : "";
-for (const keep of ["sess-key"]) {
-  ok(`...and .${keep} inside it is spared by name`,
-     spared.includes(`.${keep}`),
-     `the compact exclusion list is "${spared.trim()}" — it does not name .${keep}`);
-}
-ok("...by exclusion, so the key chip inside it is spared",
-   !/#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions\s*\{[^}]*display:\s*none/.test(plain),
-   "the whole .rail-actions box is hidden on a compact card, which takes .sess-key with it");
-ok("...and an empty buttons line still costs no height",
-   /#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions:not\(:has\([\s\S]{0,200}?\.sess-key[\s\S]{0,200}?\)\)/.test(plain),
-   "no :has(... .sess-key ...) guard on the compact buttons line");
-/* What is left on a compact card is short glyphs, so the box must not take a
-   full-width line of its own: `flex-basis: 100%` (the shared rule) is a 20px
-   row on every card in the rail, which is the budget the buttons were dropped
-   to buy. The values are `flex: 0 1 auto; order: 0` — sized to what it holds
-   and placed before the first full-width line. NOT `flex-basis: 0`: a zero
-   basis leaves the box no width to lay children out in, so the key chip was
-   drawn past the rail's edge and the page behind it took the clicks
-   (sessionkey_browser). So the assertion is "not a full-width basis", plus
-   the order that puts it on the earlier line. */
+/* Compact cards hide every action, including the pool picker. */
 const compactBox = plain.match(
   /#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions\s*\{([^}]*)\}/);
-const boxCSS = compactBox ? compactBox[1] : "";
-ok("...and the box rides an existing line instead of taking its own",
-   !!compactBox && /order:\s*0/.test(boxCSS)
-     && !/flex-basis:\s*100%/.test(boxCSS) && !/flex:\s*[^;]*100%/.test(boxCSS),
-   compactBox ? boxCSS.trim() : "no compact .rail-actions box rule");
-ok("...sized to its glyphs, not collapsed to zero width",
-   /flex:\s*0\s+1\s+auto/.test(boxCSS) || /flex-basis:\s*auto/.test(boxCSS),
-   `the compact box must not have a zero basis — its children overflow it and `
-   + `the row's own controls are drawn outside the rail: "${boxCSS.trim()}"`);
+ok("a compact card hides the whole actions line including its key picker",
+   !!compactBox && /display:\s*none/.test(compactBox[1]),
+   compactBox ? compactBox[1].trim() : "no compact .rail-actions rule");
 /* Written the same shape as the `.rail-quiet` defence below: the chips are
    drawn because NO rule hides them, so a later `display: none` added for the
    compact density fails here rather than quietly taking them off the default
