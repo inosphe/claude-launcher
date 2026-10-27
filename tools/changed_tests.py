@@ -1358,6 +1358,64 @@ def receipt_passes(receipt: dict) -> bool:
     )
 
 
+def find_archived_receipt(
+    path: Path,
+    tree: str,
+    files: List[str],
+    deselect: tuple = (),
+) -> Optional[dict]:
+    """The newest kept receipt beside ``path`` that answers for the same key.
+
+    ``keep_earlier_receipt`` writes ``<stem>@<that run's started_at>.json``
+    beside the key. A run that kept one and then died before the swap -- the
+    move the first version did, or a swap that never happened -- could leave
+    the key path empty with those files still on disk. Every check over that
+    tree then answered ``CANNOT_TELL`` for a verdict that was sitting right
+    there, one directory listing away (``claunch-23r7d.1.1.1.1.2``).
+
+    Kept receipts are not trusted by their name. Each candidate has to carry
+    this tree, this selection and these deselections in its own body, because
+    the name is a stamp and the body is the record -- the same rule the exact
+    path is held to. The newest of those that pass is the answer; nothing
+    passes and this is ``None``, exactly as before.
+
+    Says which file answered, on stdout: a check that passed on an older
+    run's verdict has to be readable as such, or it is indistinguishable from
+    a check of this one.
+    """
+    candidates = []
+    unreadable = []
+    for kept in path.parent.glob(f"{path.stem}@*.json"):
+        try:
+            receipt = json.loads(kept.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            unreadable.append((kept, exc))
+            continue
+        if (
+            receipt.get("tree") != tree
+            or sorted(receipt.get("selection") or []) != sorted(files)
+            or sorted(set(receipt.get("deselected") or [])) != sorted(set(deselect))
+        ):
+            continue                      # kept from a different key, or hand-edited
+        if not receipt_passes(receipt):
+            continue
+        candidates.append((str(receipt.get("started_at") or ""), kept, receipt))
+    if not candidates:
+        for kept, exc in unreadable:
+            print(
+                f"WARNING: {kept} cannot be read as a receipt ({exc}); a kept "
+                f"receipt for this tree and selection is unusable.",
+                file=sys.stderr,
+            )
+        return None
+    started_at, kept, receipt = max(candidates, key=lambda item: item[0])
+    print(
+        f"no receipt at the key path; answering with the kept receipt "
+        f"{kept.name} (run at {started_at})"
+    )
+    return receipt
+
+
 def find_receipt(
     repo: Path,
     tree: str,
@@ -1386,10 +1444,16 @@ def find_receipt(
     treated as absent -- the changed_tests echo of ``sweep``'s rule on the
     same shape, see ``sweep._newest_green``. A silent skip here is a round
     re-measuring what it had already measured.
+
+    The exact path comes first and, on its own, wins. Only when there is no
+    receipt there at all does :func:`find_archived_receipt` get a look: a run
+    that died between keeping the earlier receipt and swapping the new one in
+    could leave the key empty (``claunch-23r7d.1.1.1.1.2``), and the verdict it
+    stranded is still sitting beside it.
     """
     path = receipt_path(repo, tree, files, override, deselect)
     if not path.is_file():
-        return None
+        return find_archived_receipt(path, tree, files, deselect)
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -1418,7 +1482,7 @@ RECEIPT_STAMP = "%Y%m%dT%H%M%SZ"
 
 
 def keep_earlier_receipt(dest: Path) -> Optional[Path]:
-    """Move the receipt already at ``dest`` aside, named for the run it is.
+    """Copy the receipt already at ``dest`` aside, named for the run it is.
 
     The key is the tree and the selection, and neither of them says *which
     run* made the verdict. Two runs over the same tree and the same selection
@@ -1430,16 +1494,26 @@ def keep_earlier_receipt(dest: Path) -> Optional[Path]:
     10:34:57Z was overwritten at 10:36:11Z by the windowed one and the commit
     report quoted the first (``claunch-23r7d.1.1.1``, s3205, 2026-10-27).
 
+    It copies, and does not move. A move takes the earlier receipt off the
+    key path, and the swap that puts the new one there happens after it --
+    which left a window in which a process killed between the two steps
+    (SIGKILL, power loss) stranded the key empty, and every check over that
+    tree answered ``CANNOT_TELL`` until the next run wrote a receipt
+    (``claunch-23r7d.1.1.1.1.2``). With a copy the key path holds a receipt at
+    every instant, and ``os.replace`` swaps the new one in atomically.
+
     The name is ``<key>@<the earlier run's own started_at>.json``: the stamp
-    comes from the receipt being moved, not from the clock now, so the
+    comes from the receipt being kept, not from the clock now, so the
     archived file says which run it records. A ``-2``, ``-3`` ... suffix
     keeps a second archival of the same instant apart.
 
-    The reading side does not move. ``find_receipt`` looks for the key path,
+    The reading side does not move: ``find_receipt`` looks for the key path,
     so ``--check`` keeps answering with the newest run, and the archived
-    files beside it are never candidates -- which is also why this stays
-    inside ``changed/``: ``sweep.find_receipt_by_tree`` globs the parent
-    directory and must not read a three-module receipt as a whole-suite one.
+    files beside it are candidates only when the key is missing -- a state
+    an older run of this tool could leave behind
+    (:func:`find_archived_receipt`). Which is also why this stays inside
+    ``changed/``: ``sweep.find_receipt_by_tree`` globs the parent directory
+    and must not read a three-module receipt as a whole-suite one.
 
     An unreadable receipt is kept by its mtime rather than left to be
     overwritten: the bytes that could not be parsed are still the only record
@@ -1476,7 +1550,8 @@ def keep_earlier_receipt(dest: Path) -> Optional[Path]:
         kept = dest.with_name(f"{dest.stem}@{stamp}-{suffix}.json")
         suffix += 1
     try:
-        dest.replace(kept)
+        # copy2, not replace: the key path keeps its receipt while this runs.
+        shutil.copy2(dest, kept)
     except OSError as exc:
         # Never turn a finished run into a failure over its bookkeeping, but
         # say it: a silent failure here leaves the overwrite this exists to
@@ -1966,13 +2041,8 @@ def run_and_record(
                 tmp.unlink()
             except OSError:
                 pass                      # nothing to clean up, or nothing we can do
-        if kept is not None and not dest.exists():
-            # The swap is what failed, after the archive already moved the
-            # earlier receipt. Put it back: the run did not replace it.
-            try:
-                kept.replace(dest)
-            except OSError:
-                pass
+        # No restore step: keeping the earlier receipt is a copy, so the key
+        # path still holds it. Nothing was displaced to put back.
     if comparison is not None and not comparison["new_failures"]:
         return 0
     return 0 if code == 0 else 1
