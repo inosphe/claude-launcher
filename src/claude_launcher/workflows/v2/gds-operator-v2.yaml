@@ -119,19 +119,27 @@ fragments:
        503이다 — 그때는 이 항목을 건너뛴다).
     3. 코드 실측: `GET /api/scan` → `scan`이 null이면 아직 스캔이 없다(`note`가 그렇게
        말한다). 있으면 `scan.kinds`·`scan.unscheduled`를 읽는다.
-    4. 작업 범위별 실현 상태: `GET /api/frames/summary` → `frames[<frame_id>]`마다
+    4. 작업 범위(프레임) 목록: `GET /api/plane/frames` → `frames[]`(각 `frame_id`·
+       `revision`·`title`·`goal`·`archived_at`·`targets`·`context`·`excluded`·`drifted`).
+       기획에서 만든 프레임 전부다. 기획의 `frames` 단계가 done이 아니면 비어 있거나
+       의미가 없다 — 그때는 건너뛴다.
+    5. 작업 범위별 실현 상태: `GET /api/frames/summary` → `frames[<frame_id>]`마다
        `works`(설계 일감 수)·`issues_origin`·`issues_repo`(보드별 이슈 수)·`run`
-       (`stage`·`status`, 없으면 null). 기획의 `frames` 단계가 done이 아니면 이 호출은
-       비어 있거나 의미가 없다 — 그때는 건너뛴다.
-    5. 활성 범위의 실행: 진행 중이거나 남은 작업이 있는 프레임 하나를 골라
+       (`stage`·`status`, 없으면 null).
+       **이 요약은 실현 이력이 있는 프레임만 담는다** — gds6의 `issue-gen/src/server.ts`
+       가 영향·이슈·실행 기록에서 발견한 `frame_id`만 넣기 때문이다. 그래서 4의 목록에
+       있고 5에 없는 프레임은 「없는 프레임」이 아니라 **아직 실현이 시작되지 않은 새
+       프레임**이다. `frames: {}`를 「할 일 없음」으로 읽지 않는다: 기획의 `frames` 단계가
+       done이고 4의 목록이 비어 있지 않으면, 그 프레임들이 8~11단계의 다음 후보다.
+    6. 활성 범위의 실행: 4·5를 합쳐 고른 프레임 하나로
        `GET /api/delivery?frame_id=<frame_id>` → `run`(활성 실행: `stage`·`status`)과
        `diagnosis`(`scan`·`targets`·`wired`·`works`·`warnings`)를 읽는다. 활성 실행이
        없으면 `diagnosis`가 지금 어디서 시작해야 하는지 말한다.
-    6. 그 프레임의 이슈와 열린 결정: `GET /api/beads?frame_id=<frame_id>`,
+    7. 그 프레임의 이슈와 열린 결정: `GET /api/beads?frame_id=<frame_id>`,
        `GET /api/impl-decisions?frame_id=<frame_id>&status=open`,
        `GET /api/impact/<frame_id>`(규칙-코드 연결 `edges` 가운데 `kind: wire`와 설계
        일감 `works`).
-    7. 사용자 입력·세션: `opv2_poll`(직전 응답의 `cursor`로)과 `opv2_sessions`.
+    8. 사용자 입력·세션: `opv2_poll`(직전 응답의 `cursor`로)과 `opv2_sessions`.
        gds6가 만든 분석 세션(`job-<id>`)은 claunch 세션이므로 여기서 보인다 — 상태와
        마지막 활동을 읽고, 끝났는데 결과가 저장되지 않은 것은 리뷰 대상이다.
   order: |

@@ -66,9 +66,15 @@ def test_the_observe_task_reads_the_ledger_and_nudges_from_it(tmp_path):
     rules = {r["id"] for r in task["rules"]}
 
     # every stage the operator nudges along is read from the server, not guessed
-    for probe in ("/api/plane/progress", "/api/frames/summary", "/api/delivery?frame_id=",
-                  "/api/beads?frame_id=", "/api/scan", "/api/impl-decisions?frame_id="):
+    for probe in ("/api/plane/progress", "/api/plane/frames", "/api/frames/summary",
+                  "/api/delivery?frame_id=", "/api/beads?frame_id=", "/api/scan",
+                  "/api/impl-decisions?frame_id="):
         assert probe in prompt, probe
+    # A planning frame with no realization history is absent from the
+    # summary (issue-gen only lists frames found in works/issues/runs), so
+    # the list is read beside it and an empty summary is not "nothing to do".
+    assert "실현 이력이 있는 프레임만 담는다" in prompt
+    assert "`frames: {}`를 「할 일 없음」으로 읽지 않는다" in prompt
     assert "http://gds:8888" in prompt  # the run's own address, not a constant
     assert {"stage-order", "evidence-before-nudge", "review-before-nudge",
             "one-action-per-post", "qa-when", "no-decisions"} <= rules
@@ -89,6 +95,9 @@ def test_the_pack_ships_with_the_stage_order_and_the_read_only_rule():
     assert "읽기만" in body and "쓰기" in body
     assert "opv2_ask" in body and "qa_ask" in body
     assert "POST·PATCH·PUT·DELETE" in body
+    # the frame rule the review found missing: the summary is a subset
+    assert "/api/plane/frames" in body and "/api/frames/summary" in body
+    assert "`frames: {}`인 채로" in body
 
 
 def test_the_gds_workflow_names_the_pack_and_the_pack_ships():
@@ -99,8 +108,9 @@ def test_the_gds_workflow_names_the_pack_and_the_pack_ships():
 
 # -- the record ---------------------------------------------------------------
 class FakeSession:
-    def __init__(self, name, project="gds"):
-        self.sdef = SimpleNamespace(name=name, project=project, cwd="/repo/gds", task="t", issue=None)
+    def __init__(self, name, project="gds", env=None):
+        self.sdef = SimpleNamespace(name=name, project=project, cwd="/repo/gds", task="t",
+                                    issue=None, env=dict(env or {}))
         self.exited = False
 
     def info(self):
@@ -160,6 +170,38 @@ def test_the_qa_switch_is_read_from_the_record(world):
     assert world.ops.qa_allowed("op-gds") is True
     assert world.ops.qa_allowed("op-watch") is False
     assert world.ops.operator_of_session("op-gds")["id"] == gds["id"]
+
+
+def test_a_qa_toggle_applies_from_the_next_start_not_now(world):
+    """Both directions: the running session keeps what it started with.
+
+    The MCP surface is fixed at process start, so the daemon has to answer
+    from the same value or the three doors disagree (claunch-eyz0s review:
+    ``qa_*`` stayed on a surface whose API and pane had just been turned
+    off, and the reverse left the tools hidden while the pane opened).
+    """
+    on = world.ops.create({"name": "Guide", "projects": ["gds"],
+                           "workflow": "gds-operator-v2", "qa": True})
+    world.ops.bind(on, "op-on")
+    world.manager.sessions["op-on"] = FakeSession("op-on", env={session_env.OPERATOR_QA_ENV: "1"})
+    assert world.ops.qa_allowed("op-on") is True
+
+    asyncio.run(world.ops.update(on["id"], {"qa": False}))
+    assert world.ops.summary(on)["qa"] is False
+    assert world.ops.qa_allowed("op-on") is True, "the running session keeps its surface"
+    world.manager.sessions["op-on"] = FakeSession("op-on")      # restarted, switch now off
+    assert world.ops.qa_allowed("op-on") is False
+
+    off = world.ops.create({"name": "Watch", "projects": ["gds"],
+                            "workflow": "gds-operator-v2", "qa": False})
+    world.ops.bind(off, "op-off")
+    world.manager.sessions["op-off"] = FakeSession("op-off")
+    assert world.ops.qa_allowed("op-off") is False
+    asyncio.run(world.ops.update(off["id"], {"qa": True}))
+    assert world.ops.summary(off)["qa"] is True
+    assert world.ops.qa_allowed("op-off") is False, "...and no tools appear behind its back"
+    world.manager.sessions["op-off"] = FakeSession("op-off", env={session_env.OPERATOR_QA_ENV: "1"})
+    assert world.ops.qa_allowed("op-off") is True
 
 
 def test_update_switches_the_workflow_and_says_it_applies_next_start(world):

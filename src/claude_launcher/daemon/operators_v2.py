@@ -773,15 +773,31 @@ class OperatorsV2:
         return None
 
     def qa_allowed(self, name):
-        """Whether the operator bound to ``name`` keeps session QA on.
+        """Whether the operator bound to ``name`` keeps session QA on — as of
+        the start of the session running there, not the record's today value.
 
-        The MCP server reads the same switch from its environment
-        (``session_env.OPERATOR_QA_ENV``) to keep the tools on its surface;
-        this is the daemon's own answer, which is what ``daemon/qa_api.py``
-        enforces against.
+        The switch is applied *from the next start*, which is what the
+        record's feed says. The MCP surface is decided once, when the process
+        starts (``session_env.OPERATOR_QA_ENV``), so a daemon reading the
+        record's current value would answer differently from the tools: a
+        PATCH to ``qa: false`` on a running operator would keep ``qa_*`` on
+        its surface while this answer turned the API and the rail off, and
+        the reverse PATCH would open them while the tools stayed hidden
+        (claunch-eyz0s, found in review). Reading the session's own env keeps
+        the tools, this answer and the rail on one value.
         """
         rec = self.operator_of_session(name)
-        return bool(rec and rec.get("qa"))
+        if not rec:
+            return False
+        session = self.session(name)
+        env = getattr(getattr(session, "sdef", None), "env", None) or {}
+        if env.get(session_env.OPERATOR_QA_ENV) == "1":
+            return True
+        if session is not None:
+            return False
+        # No session to read (it has not started yet, or the daemon does not
+        # know it): the record's value is what the next start will use.
+        return bool(rec.get("qa"))
 
     # -- the bot's output --------------------------------------------------
     def _idempotent(self, rec, token, payload):
