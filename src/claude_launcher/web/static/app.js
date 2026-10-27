@@ -61119,7 +61119,9 @@ async function refreshMeshJoinGate() {
    session's terminal offers -- the same endpoint and body, so the two
    cannot disagree. A press that needs text (reframe, a refusal's reason
    when required) is not offered here; the card says so and opens the
-   session, where the strip asks for it. A click on the card opens that
+   session, where the strip asks for it. Any other press goes through the
+   strip's dialogs first: a reason prompt, or a confirm for a press that ends
+   or moves the run (Stop, Move, v1 Approve). A click on the card opens that
    session. An urgent ask keeps its own look (`urgent-ask`), and its history
    row gets the run's word for how it ended; any other row reads "no longer
    pending" once its gate is gone. */
@@ -61150,12 +61152,22 @@ function runGatePresses(rec) {
 }
 
 async function runGatePost(rec, press, btn) {
+  // the strip's own order (renderTermCflow): a press with a reason asks for
+  // it, one with an ask confirms first -- a card press is the same act
+  let payload = press.body || {};
+  if (press.reason) {
+    const why = prompt(press.reason, "");
+    if (why === null) return false;
+    payload = { ...payload, reason: why };
+  } else if (press.ask && !confirm(press.ask)) {
+    return false;
+  }
   btn.disabled = true;
   try {
     const resp = await api(press.path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(press.body || {}),
+      body: JSON.stringify(payload),
     });
     if (resp && resp.ok === false) {
       btn.disabled = false;

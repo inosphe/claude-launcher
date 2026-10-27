@@ -222,6 +222,8 @@ function build(opts) {
           '$("refresh-all").addEventListener') +
     "\n})(__doc, __win);";
   const listeners = { document: {}, window: {} };
+  // what window.confirm / window.prompt answer, and what they were asked
+  const dialogs = { confirm: true, prompt: "", asked: [] };
   const target = (on) => ({ addEventListener: (ev, fn) => { on[ev] = fn; } });
   const noop = () => {};
   const api = new Function(
@@ -233,6 +235,7 @@ function build(opts) {
     "refreshProjects", "ensureControlSocket", "refreshCflow2Rail",
     "refreshTermWindow", "refreshTermTimers",
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
+    "confirm", "prompt",
     "__doc", "__win",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, runGateSync," +
@@ -257,12 +260,15 @@ function build(opts) {
     // Node has a real BroadcastChannel; a world joins a tab hub only when
     // the test gives it one, so worlds never hear each other by accident.
     o.hub ? o.hub.Channel : undefined,
+    (q) => { dialogs.asked.push(["confirm", q]); return dialogs.confirm; },
+    (q) => { dialogs.asked.push(["prompt", q]); return dialogs.prompt; },
     target(listeners.document), target(listeners.window),
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
   return {
     api, nodes, clock, gate, apiCalls, apiBodies, storage, loc, layouts, timers, listeners,
+    dialogs,
     strip: () => nodes.notices.children,
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
@@ -1144,6 +1150,46 @@ function gotoRec(rec) {
     check("gates gone from the polls settle their rows as no longer pending",
           w.badge() === "" && w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask")
             .every((e) => e.status === "no longer pending"), w.api.noticeHistory);
+  }
+  {
+    // a card press is the strip's press: its confirm and its reason prompt
+    // come first (claunch-whm4e.1 review: Stop / Move / v1 Approve end or
+    // move the run; Refuse carries the reason typed)
+    const w = build();
+    const stop = { label: "Stop", path: "/api/cflow2/extend", ask: "Stop the run?",
+                   body: { cwd: "/w/s9", scope: "s9", node: "round/loop", stop: true } };
+    const refuse = { label: "Refuse", path: "/api/cflow2/move/resolve",
+                     reason: "Refuse the move? optional",
+                     body: { cwd: "/w/s8", scope: "s8", decision: "deny", reason: "" } };
+    w.api.runGateSync([
+      { id: "v2|r9|round/loop|loop_limit", session: "s9", cwd: "/w/s9", scope: "s9",
+        version: 2, kind: "loop_limit", label: "loop", prompt: "loop max", presses: [stop] },
+      { id: "move|mv-2", session: "s8", cwd: "/w/s8", scope: "s8", version: 2,
+        kind: "move", label: "end", prompt: "move to end", presses: [refuse] },
+    ], []);
+    w.dialogs.confirm = false;
+    w.press(w.nodes.notices, "Stop").click();
+    await new Promise((r) => setImmediate(r));
+    check("a press with an ask confirms first, and a no posts nothing",
+          w.dialogs.asked.some(([k, q]) => k === "confirm" && q === "Stop the run?") &&
+            !w.apiBodies.some(([p]) => p === "/api/cflow2/extend") && w.strip().length === 2,
+          [w.dialogs.asked, w.apiBodies]);
+    w.dialogs.confirm = true;
+    w.press(w.nodes.notices, "Stop").click();
+    await new Promise((r) => setImmediate(r));
+    check("and a yes posts it",
+          w.apiBodies.some(([p, b]) => p === "/api/cflow2/extend" && b.stop === true), w.apiBodies);
+    w.dialogs.prompt = null;
+    w.press(w.nodes.notices, "Refuse").click();
+    await new Promise((r) => setImmediate(r));
+    check("a cancelled reason prompt posts nothing",
+          !w.apiBodies.some(([p]) => p === "/api/cflow2/move/resolve"), w.apiBodies);
+    w.dialogs.prompt = "not now";
+    w.press(w.nodes.notices, "Refuse").click();
+    await new Promise((r) => setImmediate(r));
+    check("Refuse sends the reason typed into the prompt",
+          w.apiBodies.some(([p, b]) => p === "/api/cflow2/move/resolve" &&
+            b.decision === "deny" && b.reason === "not now"), w.apiBodies);
   }
   {
     // an ask whose reframe needs text: the others are offered, reframe is not
