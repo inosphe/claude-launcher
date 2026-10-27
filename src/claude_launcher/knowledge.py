@@ -14,6 +14,12 @@ explicit records (claunch-269q1) from two sources, searched as one index:
   outside git worktrees so a write after a round's tree is clean leaves the
   tree clean.
 
+Database records keep their versions (claunch-qgdfc): every edit that changes
+a field writes the record as it stood to ``revisions`` before the new value
+lands, so no text is lost and ``history`` can show what the record said and
+who changed it. The current row is the newest version; ``revisions`` holds the
+older ones. File records are versioned by git instead.
+
 Search is lexical (casefolded substrings over title, tags, refs and body),
 which is enough for a few hundred records and keeps Korean spellings with
 particles matchable without a tokenizer. Embedding search belongs to the
@@ -83,9 +89,24 @@ def connection(ws):
                     tags TEXT NOT NULL, refs TEXT NOT NULL,
                     source TEXT NOT NULL, author TEXT NOT NULL,
                     status TEXT NOT NULL, supersedes TEXT NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS revisions (
+                    record_id TEXT NOT NULL, version INTEGER NOT NULL,
+                    kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+                    tags TEXT NOT NULL, refs TEXT NOT NULL,
+                    source TEXT NOT NULL, author TEXT NOT NULL,
+                    status TEXT NOT NULL, supersedes TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    archived_at TEXT NOT NULL, archived_by TEXT NOT NULL,
+                    PRIMARY KEY (record_id, version)
                 );
             """)
+            # Databases written before versions (claunch-qgdfc) have no column.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(records)")}
+            if "version" not in columns:
+                db.execute("ALTER TABLE records ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
             with db:
                 yield db
         finally:
@@ -145,6 +166,7 @@ def _row(row):
     out["tags"] = json.loads(out["tags"])
     out["refs"] = json.loads(out["refs"])
     out["origin"] = "db"
+    out.setdefault("version", 1)
     return out
 
 
@@ -160,11 +182,33 @@ def _writable(ident):
         raise KnowledgeError("a file record is edited in git: change the file under .claunch/knowledge/", 409)
 
 
-def _supersede(db, old):
+def _snapshot(db, row, editor):
+    """Keep the record as it stands now as the version the next edit replaces."""
+    db.execute(
+        "INSERT OR REPLACE INTO revisions (record_id, version, kind, title, body, tags, refs, "
+        "source, author, status, supersedes, created_at, updated_at, archived_at, archived_by) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            row["id"], row["version"], row["kind"], row["title"], row["body"],
+            json.dumps(row["tags"], ensure_ascii=False),
+            json.dumps(row["refs"], ensure_ascii=False),
+            row["source"], row["author"], row["status"], row["supersedes"],
+            row["created_at"], row["updated_at"], _now(), editor))
+
+
+def _supersede(db, old, editor=""):
     # Only database records can be marked; a file record names its own status.
-    if old and not old.startswith("md:"):
-        db.execute("UPDATE records SET status='superseded', updated_at=? WHERE id=?",
-                   (_now(), old))
+    # The status change is itself a version, so the history says who replaced it.
+    if not old or old.startswith("md:"):
+        return
+    row = db.execute("SELECT * FROM records WHERE id=?", (old,)).fetchone()
+    if row is None:
+        return
+    current = _row(row)
+    if current["status"] == "superseded":
+        return
+    _snapshot(db, current, editor)
+    db.execute("UPDATE records SET status='superseded', updated_at=?, version=? WHERE id=?",
+               (_now(), current["version"] + 1, old))
 
 
 def create(ws, body, author=""):
@@ -172,38 +216,79 @@ def create(ws, body, author=""):
     author = _text(author or body.get("author", ""), "author", 200)
     ident, at = uuid.uuid4().hex[:12], _now()
     with connection(ws) as db:
-        db.execute("INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             ident, value["kind"], value["title"], value["body"],
             json.dumps(value["tags"], ensure_ascii=False),
             json.dumps(value["refs"], ensure_ascii=False),
-            value["source"], author, value["status"], value["supersedes"], at, at))
-        _supersede(db, value["supersedes"])
+            value["source"], author, value["status"], value["supersedes"], at, at, 1))
+        _supersede(db, value["supersedes"], author or "web")
         return _get(db, ident)
 
 
-def update(ws, ident, body):
+def update(ws, ident, body, author=""):
     _writable(ident)
     if not isinstance(body, dict):
         raise KnowledgeError("body must be an object")
+    editor = _text(author or body.get("author", "") or "web", "author", 200)
     with connection(ws) as db:
+        # Read and write under one write lock: two editors at once must not both
+        # snapshot the same version and lose one of the changes.
+        db.execute("BEGIN IMMEDIATE")
         current = _get(db, ident)
         value = clean({**current, **body})
+        changed = any(value[key] != current[key] for key in
+                      ("kind", "title", "body", "tags", "refs", "source", "status", "supersedes"))
+        if changed:
+            _snapshot(db, current, editor)
         db.execute("UPDATE records SET kind=?, title=?, body=?, tags=?, refs=?, source=?, "
-                   "status=?, supersedes=?, updated_at=? WHERE id=?", (
+                   "status=?, supersedes=?, updated_at=?, version=? WHERE id=?", (
                        value["kind"], value["title"], value["body"],
                        json.dumps(value["tags"], ensure_ascii=False),
                        json.dumps(value["refs"], ensure_ascii=False),
-                       value["source"], value["status"], value["supersedes"], _now(), ident))
+                       value["source"], value["status"], value["supersedes"], _now(),
+                       current["version"] + (1 if changed else 0), ident))
         if value["supersedes"] != current["supersedes"]:
-            _supersede(db, value["supersedes"])
+            _supersede(db, value["supersedes"], editor)
         return _get(db, ident)
+
+
+def history(ws, ident, limit=20):
+    """One record's versions, oldest first; the current row is the last entry.
+
+    At most ``limit`` entries come back: the current row plus the newest
+    ``limit - 1`` older versions. A file record is a single version here —
+    git holds its history.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise KnowledgeError("limit must be an integer 1..100")
+    if ident.startswith("md:"):
+        match = next((row for row in file_records(ws) if row["id"] == ident), None)
+        if match is None:
+            raise KnowledgeError("knowledge record not found", 404)
+        return [{**match, "version": 1, "current": True}]
+    with connection(ws) as db:
+        current = _get(db, ident)
+        old = [] if limit == 1 else [_row(row) for row in db.execute(
+            "SELECT * FROM revisions WHERE record_id=? ORDER BY version DESC LIMIT ?",
+            (ident, limit - 1))]
+    old.reverse()
+    for row in old:
+        row["current"] = False
+    current["current"] = True
+    # The current row was not replaced by anything, but every entry carries the keys.
+    current.setdefault("archived_by", "")
+    current.setdefault("archived_at", "")
+    return old + [current]
 
 
 def delete(ws, ident):
     _writable(ident)
     with connection(ws) as db:
+        db.execute("BEGIN IMMEDIATE")
         _get(db, ident)
         db.execute("DELETE FROM records WHERE id=?", (ident,))
+        db.execute("DELETE FROM revisions WHERE record_id=?", (ident,))
 
 
 def parse_file(path):

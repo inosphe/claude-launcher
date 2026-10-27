@@ -15,7 +15,32 @@
 | `lesson` | 시도했다가 틀린 것, 예상과 달랐던 측정 |
 
 필드: `title`, `body`(markdown), `tags`, `refs`(이슈 id·세션·경로), `source`, `author`,
-`status`(`active`/`superseded`), `supersedes`(대체한 기록 id).
+`status`(`active`/`superseded`), `supersedes`(대체한 기록 id), `version`(세션 기록의
+현재 버전 번호).
+
+본문은 markdown이다. Knowledge 탭은 페이지의 렌더러(`mdInto`, `app.js` — HTML을 파싱하지
+않고 DOM 노드를 만든다)로 제목·목록·표·코드 펜스·링크를 그린다. `knowledge_record`의
+설명과 improv-worker-v2의 `knowledge-record` 노드도 본문을 markdown으로 쓰라고 지시한다.
+
+## 버전 (세션 기록)
+
+세션 기록은 편집해도 이전 내용이 사라지지 않는다. 갱신이 필드 하나라도 바꾸면 그 전
+상태를 `revisions` 테이블에 그 기록의 버전 번호와 함께 남기고 `records` 행을 다음 버전으로
+올린다. 대체(`supersedes`)로 상태가 `superseded`로 바뀌는 것도 그 기록의 버전으로 남는다 —
+누가 언제 대체했는지가 이력에 있다. 필드가 그대로인 갱신(같은 본문을 다시 저장)은 버전을
+만들지 않는다.
+
+- `knowledge.history(ws, id, limit=20)` — 오래된 것부터, 마지막 항목이 현재 버전
+  (`current: true`). 각 항목은 `version`, `title`, `body`, `author`, `updated_at`과,
+  과거 버전이면 그것을 갈아낸 `archived_by`·`archived_at`을 싣는다. `archived_by`는
+  그 버전을 갈아낸 주체이고 `author`(그 버전을 쓴 사람)와 다르다 — Knowledge 탭에서
+  저장하거나 대체하면 `web`, MCP `knowledge_record`로 남기면 그 세션 id다.
+- 대체된 기록을 다시 유효로 돌리는 것은 상태를 `active`로 바꾸는 갱신이다(웹의
+  「되살리기」와 편집기의 상태 선택). 그 변경도 버전으로 남는다. 그 기록을 대체했던 다른
+  기록의 상태는 함께 바뀌지 않는다 — 필요하면 그 기록을 따로 대체 처리한다.
+- 파일 기록(`md:...`)의 이력은 git에 있다(`git log -- .claunch/knowledge/<파일>.md`).
+  API·MCP는 그 기록 하나를 버전 1로 답한다.
+- 기록을 삭제하면 그 기록의 버전도 함께 지운다.
 
 ## 저장 위치 두 곳, 색인 하나
 
@@ -34,12 +59,16 @@ refs(2점)·본문(1점)의 부분 문자열로 맞추고, 맞은 낱말 수, �
 ## 화면·API·MCP
 
 - 대시보드 **Knowledge** 탭(`#/knowledge`, Hive 옆): 검색, 종류·상태 필터, 세션 기록의
-  추가·편집·삭제, Markdown 내보내기.
+  추가·편집·삭제, Markdown 내보내기. 본문은 markdown으로 렌더링하고, 세션 기록 카드의
+  **이력**이 버전 목록(현재 + 과거 버전, 각각의 본문)을 보여 준다. 대체된 기록의
+  **되살리기**는 상태를 `active`로 되돌린다.
 - `GET /api/knowledge?workspace=&q=&kind=&status=&limit=`, `POST /api/knowledge`,
   `PUT|DELETE /api/knowledge/<id>`(파일 기록은 409), `GET /api/knowledge/export`
-  (`text/markdown`).
+  (`text/markdown`), `GET /api/knowledge/<id>/history?limit=&workspace=` → `{versions: [...]}`
+  (오래된 것부터, 마지막이 현재).
 - MCP `knowledge_search {query, kind?, limit?, workspace?}`, `knowledge_record {kind, title,
-  body, tags?, refs?, source?, supersedes?, workspace?}`. `workspace`를 생략하면 세션의
+  body, tags?, refs?, source?, supersedes?, workspace?}`,
+  `knowledge_history {id, limit?, workspace?}`. `workspace`를 생략하면 세션의
   등록 위치에서 찾는다. 기존 stdio MCP 프로세스와 데몬은 새 코드를 다시 읽어야 도구와
   API가 보인다.
 

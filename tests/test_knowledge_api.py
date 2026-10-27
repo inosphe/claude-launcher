@@ -56,7 +56,44 @@ def test_the_daemon_app_registers_the_knowledge_routes(home):
     app = asyncio.run(build())
     routes = {(r.method, r.resource.canonical) for r in app.router.routes() if r.resource is not None}
     assert {("GET", "/api/knowledge"), ("POST", "/api/knowledge"), ("PUT", "/api/knowledge/{id}"),
-            ("DELETE", "/api/knowledge/{id}")} <= routes
+            ("DELETE", "/api/knowledge/{id}"), ("GET", "/api/knowledge/{id}/history")} <= routes
+
+
+def test_history_returns_the_versions_oldest_first(home, tmp_path):
+    ws = workspaces.add(str(tmp_path), "alpha")
+    folder = knowledge.files_dir(ws)
+    folder.mkdir(parents=True)
+    (folder / "v.md").write_text("---\nkind: vision\ntitle: 파일 비전\n---\n방향\n", encoding="utf-8")
+
+    async def scenario():
+        app = web.Application()
+        knowledge_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            created = await client.post("/api/knowledge?workspace=alpha",
+                                        json={"kind": "decision", "title": "결정",
+                                              "body": "v1", "author": "s1"})
+            row = (await created.json())["record"]
+            # The shape the Knowledge tab sends: the record's fields, no author.
+            updated = await client.put("/api/knowledge/" + row["id"] + "?workspace=alpha",
+                                       json={"kind": "decision", "title": "결정", "body": "v2",
+                                             "tags": [], "refs": [], "source": "",
+                                             "status": "active", "supersedes": ""})
+            assert updated.status == 200
+            response = await client.get("/api/knowledge/" + row["id"] + "/history?workspace=alpha")
+            assert response.status == 200
+            versions = (await response.json())["versions"]
+            assert [(v["version"], v["body"], v["current"]) for v in versions] == [
+                (1, "v1", False), (2, "v2", True)]
+            assert versions[0]["author"] == "s1"
+            assert versions[0]["archived_by"] == "web"
+            assert (await client.get("/api/knowledge/nope/history?workspace=alpha")).status == 404
+            assert (await client.get("/api/knowledge/" + row["id"] +
+                                     "/history?workspace=alpha&limit=oops")).status == 400
+            file_history = await client.get("/api/knowledge/md%3Av/history?workspace=alpha")
+            assert file_history.status == 200
+            assert [(v["version"], v["current"]) for v in (await file_history.json())["versions"]] == [
+                (1, True)]
+    asyncio.run(scenario())
 
 
 def test_a_listing_without_status_shows_active_records_only(home, tmp_path):
