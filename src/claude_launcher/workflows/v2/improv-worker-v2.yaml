@@ -3862,6 +3862,17 @@ nodes:
          `$CLAUNCH_SCRATCH/auto-release-<런 id>.md`에 같은 내용을 쓰고 그
          경로를 보고에 적는다.
 
+      ── 기한 초과로 들어왔다면 (claunch-q4cqy.4) ──
+      이 스텝에 end-decision의 5분 무응답으로 들어왔는지는 터미널 사용자가
+      답하지 않았다는 사실과 `claunch cflow2 journal -t <세션>`의 기록으로
+      판정한다. 그렇다면 **여기서 `flow_nudge`를 부르지 않는다** — 기한이
+      지나는 순간 timeout이 열려 있던 ask를 닫으므로(cflow2/runtime.py의
+      `_cancel_children`) 이 런은 사람에게 owed인 것이 없고, nudge는 "the run
+      waits on no person right now"로 거절된다. 그 사실은 바로 뒤
+      release-decision의 nudge 메시지에 담는다 — 그 질문은 사람을 기다리므로
+      카드가 실제로 선다. 여기서는 4번의 `AUTO-RELEASE` 줄에 `기한 초과(5분
+      무응답)`을 함께 적어, 왜 이 단계가 자동으로 돌았는지 보드에 남긴다.
+
       이 단계는 세션을 끝내지 않는다. 정리가 끝나면 release-decision이
       end|hold|new-task를 묻는다.
     done_when: |
@@ -5547,6 +5558,19 @@ procedures:
                     bind: end_decision
                     with:
                       require_reason: true
+                      # 질문이 사람 앞에 서는 순간을 대시보드에 올린다(claunch-q4cqy.4):
+                      # 드라이버가 부르지 않으면 5분 기한이 도는 것도 사용자에게 닿지
+                      # 않아, 답이 없어 auto-release로 넘어간 사실을 나중에야 알게 된다.
+                      nudge: |
+                        이 질문은 사람의 답을 기다리고, 5분 안에 답이 없으면
+                        auto-release로 넘어간다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에
+                        MCP `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두
+                        줄로 무엇을 정해야 하는지와 답하는 명령
+                        (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
+                        답이 오지 않으면 다시 부르지 않는다 — 5분 안 재호출은 같은
+                        카드이고(daemon/flow_nudge.py의 REPEAT_AFTER), 데몬이 owed
+                        목록을 직접 읽어 카드 내용을 채운다(daemon/cflow2_web.py의
+                        rail_entry).
                       topic: |
                         이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
                         5분 안에 답이 없으면 auto-release로 넘어가 정리한 뒤, 이
@@ -5609,6 +5633,19 @@ procedures:
               bind: release_decision
               with:
                 require_reason: true
+                # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
+                # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
+                nudge: |
+                  이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 세션은
+                  살아 있는 채로 선다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
+                  `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
+                  무엇을 정해야 하는지와 답하는 명령
+                  (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
+                  **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
+                  그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
+                  진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
+                  않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
+                  REPEAT_AFTER).
                 topic: |
                   회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
                   이 질문에는 기한이 없다 — 답이 없으면 세션은 살아 있는 채로 선다.

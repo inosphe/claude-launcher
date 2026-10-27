@@ -66,6 +66,12 @@ procedures:
       choices: {type: list, default: null, description: 선택지 이름을 고정할 때 그 목록. 부르는 쪽이 답으로 분기할 때 쓴다}
       from: {type: list, default: null, description: ask.from과 같은 후보 목록. null이면 사람만 답한다}
       require_reason: {type: bool, default: false, description: true면 모든 답에 이유를 요구한다(reframe은 항상 요구)}
+      # 이 질문이 사람을 기다리는 동안 대시보드 알림을 올리라는 지시 문구.
+      # 비우면(기본값) 아무것도 하지 않는다 — 부르는 쪽이 쓸 때만 실린다.
+      # 지시를 여기에 직접 쓰지 않는 이유는 소음이다: ask-user는 coding-plan·
+      # settle-stall·retrospective도 부르고, 그 질문까지 카드가 되면 안 된다
+      # (claunch-q4cqy.4).
+      nudge: {type: str, default: "", description: 질문을 대기시키며 flow_nudge를 부르라는 지시 문구. 빈 값이면 지시 없음}
     returns:
       ok: {decision: str, reason: "str?", by: str, brief: dict}
       reframe: {reason: str, brief: dict}
@@ -113,7 +119,9 @@ procedures:
         effects: [fs.read]
       ask-pose:
         title: 사용자 질문
-        prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
+        prompt: |
+          사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
+          ${params.nudge}
         effects: []
         ask:
           brief: ${prev.brief}
