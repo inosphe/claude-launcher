@@ -87,6 +87,7 @@ from . import (
 )
 from . import paths
 from . import daemon_prompt
+from . import storage as storage_mod
 from . import profile_facts
 from . import sessionstats, statsboard, statscompare, statsworker
 from . import tokenusage
@@ -1246,6 +1247,9 @@ def build_app(
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/stats", h_session_stats)
+    # How much the session's scratch directory holds, walked off the loop and
+    # cached per session (daemon/storage.py). `?refresh=1` measures again now.
+    r.add_get("/api/sessions/{name}/storage", h_session_storage)
     r.add_get("/api/sessions/{name}/token-series", h_session_token_series)
     r.add_get("/api/stats/compare", h_stats_compare)
     r.add_get("/api/stats/overview", h_stats_overview)
@@ -10442,6 +10446,11 @@ RAIL_FIELDS = {
     # card draws a count and the targets in its hover, and the detail panel
     # draws the whole list from its own /meta request.
     "watch",
+    # How much this session's scratch directory holds (daemon/storage.py):
+    # the card's size badge and its hover read the *cached* measurement off
+    # this poll -- the walk itself never runs on the poll path, and the
+    # breakdown behind the badge comes from /api/sessions/{name}/storage.
+    "storage",
 }
 
 
@@ -10647,10 +10656,27 @@ async def _sessions_list(request: web.Request) -> web.Response:
             # subscription belongs to a watcher that is still running.
             if not archived:
                 info["watch"] = _watch_rows(info.get("name") or "")
+            # How much its scratch directory holds, from the measurement
+            # daemon/storage.py keeps. Only the standing numbers ride this
+            # poll: the walk costs hundreds of milliseconds to seconds on the
+            # trees these sessions leave behind, and this resource is polled
+            # once a second. A row with no measurement (or an old one) is
+            # queued for the background walker instead, and only for a session
+            # that is still running -- the rail carries hundreds of exited
+            # rows and none of them is worth a walk.
+            if not archived:
+                stale = storage_mod.attach(info, info.get("name") or "")
+                if stale and rail_view and not s.exited:
+                    need_storage.append(info.get("name") or "")
             out.append(info)
         return out
 
+    # Collected in the worker, walked after it: names whose measurement the
+    # poll queued (daemon/storage.py, one walk at a time).
+    need_storage: list[str] = []
     attached, check_digests = await asyncio.to_thread(collect)
+    if need_storage:
+        storage_mod.STORAGE.prefetch(need_storage)
     for s, info in zip(sessions, attached):
         # Which git branch the session's checkout is on — one fact that tells
         # two sessions in the same worktree apart without opening either. On
@@ -11946,6 +11972,30 @@ def _session(request: web.Request):
 
 async def h_session_get(request: web.Request) -> web.Response:
     return json_response(_session(request).info())
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def h_session_storage(request: web.Request) -> web.Response:
+    """A session's scratch storage: totals and the breakdown per entry.
+
+    The walk is cached per session (``daemon/storage.py``), so this answers
+    from the standing measurement most of the time and says how old it is
+    with ``stale``. ``?refresh=1`` -- what the panel's button sends -- pays
+    for a new walk. A session that is not on this daemon is a 404; a session
+    whose scratch was never written answers zeros, which is an ordinary state
+    and not an error.
+    """
+    name = request.match_info["name"]
+    manager: SessionManager = request.app["manager"]
+    try:
+        manager.get(name)
+    except (ManagerError, KeyError):
+        return json_error(404, f"no session named {name}")
+    refresh = _truthy(request.query.get("refresh"))
+    return json_response(await storage_mod.STORAGE.read(name, refresh=refresh))
 
 
 async def h_score_goal_defaults(request: web.Request) -> web.Response:
