@@ -499,6 +499,19 @@ def test_group_refuses_nodes_with_different_parents_unless_across(ws):
     assert {web["id"], cli["id"]} <= {n["id"] for n in c.tree(ws)["nodes"]}
 
 
+def test_group_across_does_not_report_a_parent_that_still_holds_items(ws):
+    web = node(ws, "web")
+    cli = node(ws, "cli")
+    beads = node(ws, "beads page", parent=web["id"])
+    sims = node(ws, "sims page", parent=cli["id"])
+    # web keeps a session of its own once its only child node moves out.
+    c.assign(ws, [S("a")], web["id"])
+    out = c.group(ws, {"label": "pages", "nodes": [beads["id"], sims["id"]], "across": True},
+                  actor="user")
+    assert not any(n["parent_id"] == web["id"] for n in c.tree(ws)["nodes"])
+    assert out["emptied"] == [{"id": cli["id"], "path": ["cli"]}]
+
+
 def test_group_of_siblings_empties_nothing(ws):
     web = node(ws, "web")
     one = node(ws, "beads page", parent=web["id"])
