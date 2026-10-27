@@ -515,6 +515,7 @@ CHECKS = [
         "testoutputdir_check.js",
         "delegatesetting_check.js",
         "sweepbatchsetting_check.js",
+        "webdebugsetting_check.js",
         "noticehistory_check.js",
         "noticepaint_check.js",
         "termcache_check.js",

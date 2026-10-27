@@ -205,6 +205,8 @@ class _FakeCDP:
 class _FakeBrowser:
     def __init__(self):
         self.cdp = _FakeCDP()
+        self.pages = []
+        self.tls = []
 
     @property
     def live(self):
@@ -213,8 +215,16 @@ class _FakeBrowser:
     async def ensure(self):
         return self.cdp
 
-    async def new_page(self, url="about:blank"):
-        return {"context_id": "ctx-1", "target_id": "tgt-1", "session_id": "sess-1"}
+    async def new_page(self, url="about:blank", *, insecure_tls=False):
+        page = {"context_id": "ctx-1", "target_id": "tgt-1", "session_id": f"sess-{len(self.pages) + 1}"}
+        self.pages.append({**page, "insecure_tls": insecure_tls})
+        self.tls.append((page["session_id"], insecure_tls))
+        return page
+
+    async def set_insecure_tls(self, session_id, value):
+        self.tls.append((session_id, bool(value)))
+        self.cdp.sent.append(("Security.setIgnoreCertificateErrors",
+                              {"ignore": bool(value)}, session_id))
 
     async def close_page(self, page):
         return None
@@ -790,3 +800,264 @@ def test_a_move_names_the_button_that_is_held():
     shape, table = _tab_move_source()
     assert shape == "table", f"the move takes its button from {shape!r}"
     assert "e.button" not in table
+
+
+def test_the_top_bar_switch_is_part_of_the_window_s_dial():
+    """The page half of the per-window certificate answer: the switch is in the
+    top bar, it goes into the socket's query (so a reload keeps it), it is sent
+    as a message while the socket is up, and the daemon's state message is what
+    the page ends up showing."""
+    html = (STATIC / "webdebug.html").read_text(encoding="utf-8")
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    assert 'id="wd-tls"' in html and "인증서 무시" in html
+    assert 'q.set("insecure", "1")' in script
+    assert 'send({ type: "insecure", insecure: insecureTls })' in script
+    assert "msg.insecure_tls" in script
+
+
+def test_an_absent_switch_in_the_query_is_not_off():
+    """A query without the switch means the caller did not choose, so the window
+    takes the configured default; ``insecure=0`` is a choice, and it is off."""
+    assert webdebug._flag(None) is None
+    assert webdebug._flag("") is None
+    assert webdebug._flag("  ") is None
+    assert webdebug._flag("1") is True
+    assert webdebug._flag("true") is True
+    assert webdebug._flag("0") is False
+    assert webdebug._flag("false") is False
+    assert webdebug._flag("off") is False
+
+
+# --------------------------------------------------------------------------- #
+# the three knobs: config keys now, environment variables still winning
+# (claunch-o8pb7.2.1)
+# --------------------------------------------------------------------------- #
+def _no_env(monkeypatch):
+    for name in (webdebug.MAX_WINDOWS_ENV, webdebug.NO_SANDBOX_ENV,
+                 webdebug.INSECURE_TLS_ENV):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_three_keys_are_daemon_settings_with_their_old_defaults(home):
+    """(2) The three keys exist in DAEMON_DEFAULTS, and their built-in defaults
+    are what the module did when the variables were all that existed."""
+    from claude_launcher import store
+
+    for key in ("webdebug_max_windows", "webdebug_no_sandbox", "webdebug_insecure_tls"):
+        assert key in store.DAEMON_DEFAULTS, key
+    assert store.DAEMON_DEFAULTS["webdebug_max_windows"] == 1
+    assert store.DAEMON_DEFAULTS["webdebug_no_sandbox"] is False
+    assert store.DAEMON_DEFAULTS["webdebug_insecure_tls"] is False
+
+
+def test_the_page_is_told_the_certificate_answer_before_it_loads(home, monkeypatch):
+    """The real Browser.new_page path, not the hub's: the answer is sent to the
+    new page's own CDP session, and before anything is loaded there."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug, "AGENT_FILE", Path("/nonexistent/webdebug-agent.js"))
+
+    async def run():
+        browser = webdebug.Browser(lambda event: None)
+        fake = _FakeCDP()
+        browser._cdp = fake
+        page = await browser.new_page(insecure_tls=True)
+        tls = [i for i, (method, _p, _s) in enumerate(fake.sent)
+               if method == "Security.setIgnoreCertificateErrors"]
+        assert tls, "the page's CDP session was never told"
+        assert fake.sent[tls[0]] == ("Security.setIgnoreCertificateErrors",
+                                     {"ignore": True}, page["session_id"])
+        # before the page is given anything to run
+        order = [method for method, _p, _s in fake.sent]
+        assert order.index("Security.setIgnoreCertificateErrors") < order.index(
+            "Emulation.setDeviceMetricsOverride")
+        assert "Page.startScreencast" not in order
+
+        fake.sent.clear()
+        await browser.new_page()
+        assert [entry for entry in fake.sent
+                if entry[0] == "Security.setIgnoreCertificateErrors"] == [
+            ("Security.setIgnoreCertificateErrors", {"ignore": False}, "sess-1")]
+
+    asyncio.run(run())
+
+
+def test_the_saved_keys_are_what_a_window_uses(home, monkeypatch):
+    """(1) A value written as a config key reaches the window-creation path --
+    not just the reader, but the page that is actually created."""
+    from claude_launcher import store
+
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+    store.set_daemon_field("webdebug_max_windows", 3)
+    store.set_daemon_field("webdebug_no_sandbox", True)
+    store.set_daemon_field("webdebug_insecure_tls", True)
+    assert webdebug.max_windows() == 3
+    assert "--no-sandbox" in webdebug.browser_args("/usr/bin/chrome", "/profile")
+    assert webdebug.insecure_tls_default() is True
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _FakeBrowser()
+        try:
+            await hub.attach("w-aaaa", "s1", _Viewer())
+            # the page was created with the configured default
+            assert hub.browser.pages[0]["insecure_tls"] is True
+            # max_windows 3 means two more fit without closing the first
+            await hub.attach("w-bbbb", "s1", _Viewer())
+            await hub.attach("w-cccc", "s1", _Viewer())
+            assert sorted(hub.windows) == ["w-aaaa", "w-bbbb", "w-cccc"]
+            await hub.attach("w-dddd", "s1", _Viewer())
+            assert sorted(hub.windows) == ["w-bbbb", "w-cccc", "w-dddd"]
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_the_environment_variables_still_win(home, monkeypatch):
+    """(3) Regression: an operator who only set the variables sees exactly what
+    the module did before the keys existed."""
+    from claude_launcher import store
+
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+    store.set_daemon_field("webdebug_max_windows", 5)
+    store.set_daemon_field("webdebug_no_sandbox", False)
+    store.set_daemon_field("webdebug_insecure_tls", False)
+
+    monkeypatch.setenv(webdebug.MAX_WINDOWS_ENV, "2")
+    monkeypatch.setenv(webdebug.NO_SANDBOX_ENV, "1")
+    monkeypatch.setenv(webdebug.INSECURE_TLS_ENV, "1")
+    assert webdebug.max_windows() == 2
+    assert webdebug.sandbox_off() is True
+    assert webdebug.insecure_tls_default() is True
+    assert "--no-sandbox" in webdebug.browser_args("/usr/bin/chrome", "/profile")
+    assert "--ignore-certificate-errors" in webdebug.browser_args("/usr/bin/chrome", "/profile")
+
+    # an empty value is how a shell spells "nothing here", not a request for zero
+    monkeypatch.setenv(webdebug.MAX_WINDOWS_ENV, "")
+    assert webdebug.max_windows() == 5
+
+    # the variable off (0) beats a key that is on
+    store.set_daemon_field("webdebug_insecure_tls", True)
+    monkeypatch.setenv(webdebug.INSECURE_TLS_ENV, "0")
+    assert webdebug.insecure_tls_default() is False
+
+
+def test_the_browser_flag_is_the_environment_s_and_the_key_is_per_window(home, monkeypatch):
+    """The browser flag --ignore-certificate-errors covers every window and no
+    window can narrow it, so only the environment sets it. The key is the
+    default for a new window, applied to that window's own page."""
+    from claude_launcher import store
+
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+    store.set_daemon_field("webdebug_insecure_tls", True)
+    assert "--ignore-certificate-errors" not in webdebug.browser_args("/usr/bin/chrome", "/p")
+    monkeypatch.setenv(webdebug.INSECURE_TLS_ENV, "1")
+    assert "--ignore-certificate-errors" in webdebug.browser_args("/usr/bin/chrome", "/p")
+
+
+def test_insecure_tls_is_one_window_s_answer(home, monkeypatch):
+    """(4) Two windows, one on and one off: the flag goes to each window's own
+    CDP session, and neither window's answer changes the other's."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _FakeBrowser()
+        viewers = [_Viewer(), _Viewer()]
+        try:
+            safe = await hub.attach("w-safe", "s1", viewers[0], insecure=False)
+            loose = await hub.attach("w-loose", "s1", viewers[1], insecure=True)
+            assert safe.insecure_tls is False and loose.insecure_tls is True
+            assert [(s, v) for s, v in hub.browser.tls] == [("sess-1", False), ("sess-2", True)]
+            # each window says its own answer, in the state the tab reads
+            assert [m["insecure_tls"] for m in viewers[0].json if m.get("type") == "state"] == [False]
+            assert [m["insecure_tls"] for m in viewers[1].json if m.get("type") == "state"] == [True]
+
+            # a later viewer that states no choice leaves an existing window as
+            # it is: absence is not "off"
+            await hub.attach("w-loose", "s1", _Viewer())
+            assert loose.insecure_tls is True
+
+            # the top-bar switch flips one window, and only that one
+            await webdebug._viewer_message(hub, loose, {"type": "insecure", "insecure": False})
+            assert loose.insecure_tls is False and safe.insecure_tls is False
+            assert hub.browser.tls[-1] == ("sess-2", False)
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_the_setting_route_reads_and_writes_the_three(home, monkeypatch):
+    """(2) The Settings page's route: GET shows the stored values, the effective
+    values and the environment that overrides them; PUT writes and null resets."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        client = TestClient(TestServer(_app(_Manager("s1"))))
+        await client.start_server()
+        try:
+            body = await (await client.get("/api/webdebug-setting")).json()
+            assert body["values"] == {"max_windows": 1, "no_sandbox": False,
+                                      "insecure_tls": False}
+            assert body["defaults"] == {"max_windows": 1, "no_sandbox": False,
+                                        "insecure_tls": False}
+            assert body["env"]["max_windows"] == {"name": webdebug.MAX_WINDOWS_ENV, "set": False}
+
+            r = await client.put("/api/webdebug-setting",
+                                 json={"max_windows": 3, "no_sandbox": True,
+                                       "insecure_tls": True})
+            body = await r.json()
+            assert r.status == 200
+            assert body["values"] == {"max_windows": 3, "no_sandbox": True,
+                                      "insecure_tls": True}
+            assert body["effective"] == body["values"]
+
+            r = await client.put("/api/webdebug-setting", json={"max_windows": None})
+            assert r.status == 200
+            assert (await r.json())["values"]["max_windows"] == 1
+
+            # the value the page stores is the value the daemon reads
+            assert webdebug.max_windows() == 1
+            assert webdebug.insecure_tls_default() is True
+
+            for bad, why in (
+                    ({"max_windows": 0}, "between"),
+                    ({"max_windows": 99}, "between"),
+                    ({"max_windows": 2.5}, "whole"),
+                    ({"max_windows": True}, "whole"),
+                    ({"no_sandbox": "yes"}, "true, false or null"),
+                    ({}, "give")):
+                r = await client.put("/api/webdebug-setting", json=bad)
+                assert r.status == 400, (bad, await r.text())
+                assert why in (await r.json())["error"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_route_reports_an_environment_that_overrides_the_saved_value(home, monkeypatch):
+    """The operator who set the variable sees the page's value ignored; the
+    route says which variable, so the page can say why."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv(webdebug.INSECURE_TLS_ENV, "1")
+
+    async def run():
+        client = TestClient(TestServer(_app(_Manager("s1"))))
+        await client.start_server()
+        try:
+            body = await (await client.get("/api/webdebug-setting")).json()
+            assert body["values"]["insecure_tls"] is False
+            assert body["effective"]["insecure_tls"] is True
+            assert body["env"]["insecure_tls"] == {"name": webdebug.INSECURE_TLS_ENV,
+                                                   "set": True}
+        finally:
+            await client.close()
+
+    asyncio.run(run())

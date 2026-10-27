@@ -42,6 +42,16 @@ Three parts, all in this module:
   explicit act: a picked element or a screenshot goes to the session only when
   the user presses Send (``/api/webdebug/send``), typed into the session as a
   ``[claunch webdebug w-...]`` block.
+
+* **Settings.** The three knobs that shape the browser -- ``max_windows``,
+  ``no_sandbox``, ``insecure_tls`` -- are ``daemon.webdebug_*`` keys, read and
+  written through ``GET/PUT /api/webdebug-setting`` and shown on the Settings
+  page. Each is read when a window is opened, so a change applies to the next
+  window without a daemon restart. The environment variables of the same names
+  still win over them (claunch-o8pb7.2.1). ``insecure_tls`` is a per-window
+  DEFAULT: the window's own page is what ignores certificates, and the page's
+  top bar can override the default for that window alone. The environment
+  variable of that name is wider -- a browser flag covering every window.
 """
 
 from __future__ import annotations
@@ -67,6 +77,7 @@ import aiohttp
 from aiohttp import WSMsgType, web
 
 from . import paths
+from .. import store
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +114,16 @@ MAX_QUALITY = 90
 #: Windows alive at once. One page costs ~1.3 GiB across the browser's whole
 #: process tree (measured 2026-10-27, Chrome for Testing 156, headless, 1280x800,
 #: streaming); opening one more closes the oldest.
-MAX_WINDOWS = max(1, int(os.environ.get("CLAUNCH_WEBDEBUG_MAX_WINDOWS") or 1))
+#:
+#: The value comes from ``daemon.webdebug_max_windows`` or, when it is set,
+#: from the environment variable below -- the three knobs of this module were
+#: environment-only until claunch-o8pb7.2.1, so the variables stay as the
+#: operator's override and the config keys are what the Settings page writes.
+MAX_WINDOWS_ENV = "CLAUNCH_WEBDEBUG_MAX_WINDOWS"
+DEFAULT_MAX_WINDOWS = 1
+#: The Settings page refuses a larger value: eight windows is already some ten
+#: gigabytes of browser (the measured 1.3 GiB per page times eight).
+MAX_WINDOWS_CEILING = 8
 #: The browser is stopped this long after its last window closed.
 IDLE_SECONDS = float(os.environ.get("CLAUNCH_WEBDEBUG_IDLE") or 300)
 #: A viewer tab that goes away keeps its page this long (a reload comes back).
@@ -141,12 +161,80 @@ def _on(value: str) -> bool:
     return os.environ.get(value) not in (None, "", "0", "false", "no")
 
 
+def _env_given(name: str) -> bool:
+    """Whether the operator set this variable at all. An empty or blank value
+    counts as unset: ``CLAUNCH_WEBDEBUG_MAX_WINDOWS=`` is how a shell spells
+    "nothing here", not a request for zero windows."""
+    return bool(str(os.environ.get(name) or "").strip())
+
+
+def _env_on(name: str) -> bool:
+    """An environment switch, read only when it was given."""
+    return _env_given(name) and _on(name)
+
+
+def max_windows() -> int:
+    """Windows alive at once, never below one.
+
+    The environment variable wins over ``daemon.webdebug_max_windows``: it is
+    the operator's override, and it was the only way to set this before the
+    key existed (claunch-o8pb7.2.1). A value that does not read as a number is
+    ignored rather than fatal -- the daemon must still open a window.
+    """
+    if _env_given(MAX_WINDOWS_ENV):
+        try:
+            return max(1, int(str(os.environ[MAX_WINDOWS_ENV]).strip()))
+        except ValueError:
+            pass
+    try:
+        return max(1, int(store.daemon_config().get("webdebug_max_windows")
+                       or DEFAULT_MAX_WINDOWS))
+    except (TypeError, ValueError, store.StoreError):
+        return DEFAULT_MAX_WINDOWS
+
+
 def sandbox_off() -> bool:
-    """Whether to start the browser with ``--no-sandbox``."""
-    if _on(NO_SANDBOX_ENV):
-        return True
+    """Whether to start the browser with ``--no-sandbox``.
+
+    The environment variable wins over ``daemon.webdebug_no_sandbox``. Root
+    cannot use Chrome's sandbox at all, so it is off there whatever the
+    setting says.
+    """
+    if _env_given(NO_SANDBOX_ENV):
+        return _on(NO_SANDBOX_ENV)
+    try:
+        if store.daemon_config().get("webdebug_no_sandbox"):
+            return True
+    except store.StoreError:
+        pass
     getuid = getattr(os, "geteuid", None)
     return bool(getuid and getuid() == 0)
+
+
+def insecure_tls_default() -> bool:
+    """Whether a newly opened window accepts any certificate, when the request
+    did not say.
+
+    ``daemon.webdebug_insecure_tls`` is this default; the environment variable
+    of the same name wins and is wider than a default: it puts
+    ``--ignore-certificate-errors`` on the browser, so every window it opens
+    ignores certificate errors and no window can narrow that.
+    """
+    if _env_given(INSECURE_TLS_ENV):
+        return _on(INSECURE_TLS_ENV)
+    try:
+        return bool(store.daemon_config().get("webdebug_insecure_tls"))
+    except store.StoreError:
+        return False
+
+
+def _flag(raw: Optional[str]) -> Optional[bool]:
+    """A switch that came in the request's query string: absent or blank means
+    "the caller did not choose", which is different from choosing false."""
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    return text not in ("0", "false", "no", "off")
 
 
 def browser_args(binary: str, profile: str) -> List[str]:
@@ -162,7 +250,14 @@ def browser_args(binary: str, profile: str) -> List[str]:
         "--disable-gpu", "--hide-scrollbars", "--mute-audio", "--disable-dev-shm-usage",
         "--disable-extensions", "--disable-sync",
     ]
-    if _on(INSECURE_TLS_ENV):
+    if _env_on(INSECURE_TLS_ENV):
+        # Only the environment puts this on: it is a browser flag, so it
+        # disarms certificate checks for every window this browser opens and
+        # no window can turn it back on. The config key of the same meaning
+        # is deliberately NOT read here -- it is the default for each new
+        # window (insecure_tls_default, Security.setIgnoreCertificateErrors),
+        # so opening one self-signed site does not widen every other page
+        # (claunch-o8pb7.2.1).
         args.append("--ignore-certificate-errors")
     if sandbox_off():
         args.append("--no-sandbox")
@@ -407,7 +502,8 @@ class Browser:
         if profile:
             shutil.rmtree(profile, ignore_errors=True)
 
-    async def new_page(self, url: str = "about:blank") -> Dict[str, str]:
+    async def new_page(self, url: str = "about:blank", *,
+                       insecure_tls: bool = False) -> Dict[str, str]:
         cdp = await self.ensure()
         context = await cdp.send("Target.createBrowserContext", {"disposeOnDetach": False})
         context_id = context["browserContextId"]
@@ -419,6 +515,11 @@ class Browser:
         await cdp.send("Page.enable", session=session_id)
         await cdp.send("Runtime.enable", session=session_id)
         await cdp.send("Log.enable", session=session_id)
+        # Per page, before anything is loaded: this window's certificate
+        # answer and no other's (claunch-o8pb7.2.1). A browser started with the
+        # environment's --ignore-certificate-errors is wider than this, and
+        # the false here does not narrow it back.
+        await self.set_insecure_tls(session_id, insecure_tls)
         await cdp.send("Emulation.setDeviceMetricsOverride", {
             "width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT,
             "deviceScaleFactor": 1, "mobile": False,
@@ -428,6 +529,13 @@ class Browser:
             await cdp.send("Page.addScriptToEvaluateOnNewDocument",
                            {"source": source}, session=session_id)
         return {"context_id": context_id, "target_id": target["targetId"], "session_id": session_id}
+
+    async def set_insecure_tls(self, session_id: str, value: bool) -> None:
+        """Whether this page accepts any certificate. The security agent is
+        per target session, so this reaches one window's page."""
+        cdp = await self.ensure()
+        await cdp.send("Security.setIgnoreCertificateErrors", {"ignore": bool(value)},
+                       session=session_id)
 
     async def close_page(self, page: Dict[str, str]) -> None:
         cdp = self._cdp
@@ -460,6 +568,10 @@ class Window:
     opened_at: float = field(default_factory=time.time)
     focused_at: float = field(default_factory=time.time)
     closing: bool = False
+    #: Whether THIS window's page accepts any certificate. Set when the window is
+    #: created and applied to its own CDP page, so one self-signed site does not
+    #: disarm the check on every other window (claunch-o8pb7.2.1).
+    insecure_tls: bool = False
     #: Resolved by the browser's Page.loadEventFired for this window, so a
     #: navigate waits for the page it asked for and not for the one before it.
     loading: Optional[asyncio.Future] = None
@@ -472,6 +584,7 @@ class Window:
         return {"window": self.id, "session": self.session, "url": self.url, "title": self.title,
                 "screen_shared": True, "frames": self.frames,
                 "viewport": {"width": self.frame_size[0], "height": self.frame_size[1]},
+                "insecure_tls": self.insecure_tls,
                 "opened_at": _iso(self.opened_at), "focused_at": _iso(self.focused_at)}
 
 
@@ -544,21 +657,35 @@ class Hub:
                 "its top bar."))
         return mine[0]
 
-    async def attach(self, window: str, session: str, ws: web.WebSocketResponse) -> Window:
+    async def attach(self, window: str, session: str, ws: web.WebSocketResponse,
+                     insecure: Optional[bool] = None) -> Window:
+        """Attach a viewer to a window, creating the window if this is the first.
+
+        ``insecure`` is the page's top-bar switch: absent (None) means "the
+        caller did not choose", so a new window takes the configured default and
+        an existing one keeps what it had. Given, it sets THIS window's
+        certificate answer and no other window's.
+        """
         async with self._lock:
             win = self.windows.get(window)
             reaper = self._reapers.pop(window, None)
             if reaper is not None:
                 reaper.cancel()
             if win is None:
-                while len(self.windows) >= MAX_WINDOWS:
+                limit = max_windows()
+                while len(self.windows) >= limit:
                     oldest = min(self.windows.values(), key=lambda w: w.opened_at)
                     log.info("webdebug: %d window(s) already open, closing %s", len(self.windows), oldest.id)
                     self.windows.pop(oldest.id, None)
                     await self._close_page(oldest)
-                page = await self.browser.new_page()
-                win = Window(id=window, page=page, session=session)
+                flag = insecure_tls_default() if insecure is None else bool(insecure)
+                page = await self.browser.new_page(insecure_tls=flag)
+                win = Window(id=window, page=page, session=session, insecure_tls=flag)
                 self.windows[window] = win
+            elif insecure is not None and bool(insecure) != win.insecure_tls:
+                win.insecure_tls = bool(insecure)
+                with contextlib.suppress(WebDebugError):
+                    await self.browser.set_insecure_tls(win.cdp_session, win.insecure_tls)
             win.viewers.append(ws)
             if session:
                 win.session = session
@@ -683,6 +810,7 @@ class Hub:
     async def send_state(self, win: Window) -> None:
         payload = {"type": "state", "window": win.id, "session": win.session, "url": win.url,
                    "title": win.title, "frames": win.frames,
+                   "insecure_tls": win.insecure_tls,
                    "viewport": {"width": win.frame_size[0] or VIEWPORT_WIDTH,
                                 "height": win.frame_size[1] or VIEWPORT_HEIGHT}}
         for ws in list(win.viewers):
@@ -954,10 +1082,11 @@ async def h_ws(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": "window must look like w-xxxx"}, status=400)
     session = request.query.get("session", "")
     first_url = request.query.get("url", "")
+    insecure = _flag(request.query.get("insecure"))
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
     try:
-        win = await hub.attach(wid, session, ws)
+        win = await hub.attach(wid, session, ws, insecure=insecure)
     except WebDebugError as exc:
         with contextlib.suppress(Exception):
             await ws.send_json({"type": "error", "message": str(exc)})
@@ -1010,6 +1139,14 @@ async def _viewer_message(hub: Hub, win: Window, msg: dict) -> None:
             await hub.broadcast(win, {"type": "picked", **(value or {})})
         elif kind == "quality":
             await hub.ensure_screencast(win, int(msg.get("quality") or 0))
+        elif kind == "insecure":
+            # This window's top-bar switch. It reaches this window's own page
+            # and no other viewer's (claunch-o8pb7.2.1); the reply is send_state.
+            wanted = bool(msg.get("insecure"))
+            if wanted != win.insecure_tls:
+                win.insecure_tls = wanted
+                await hub.browser.set_insecure_tls(win.cdp_session, wanted)
+            await hub.send_state(win)
         elif kind == "reload":
             await hub.navigate(win, win.url or "about:blank")
         elif kind == "back":
@@ -1145,6 +1282,90 @@ async def h_send(request: web.Request) -> web.Response:
     return web.json_response({"delivered": delivered, "text": text})
 
 
+_SETTING_FIELDS = {
+    "max_windows": "webdebug_max_windows",
+    "no_sandbox": "webdebug_no_sandbox",
+    "insecure_tls": "webdebug_insecure_tls",
+}
+
+
+def setting_state() -> dict:
+    """The three knobs as the Settings page shows them: what is in effect, the
+    built-in default, and -- for each -- the environment variable that would
+    override it, since an operator who set that variable sees the page's value
+    ignored and needs to be told why."""
+    try:
+        cfg = store.daemon_config()
+    except store.StoreError as exc:
+        raise WebDebugError(500, str(exc)) from None
+    env = {"max_windows": MAX_WINDOWS_ENV, "no_sandbox": NO_SANDBOX_ENV,
+           "insecure_tls": INSECURE_TLS_ENV}
+    return {
+        "values": {
+            "max_windows": cfg.get("webdebug_max_windows", DEFAULT_MAX_WINDOWS),
+            "no_sandbox": bool(cfg.get("webdebug_no_sandbox")),
+            "insecure_tls": bool(cfg.get("webdebug_insecure_tls")),
+        },
+        "effective": {"max_windows": max_windows(), "no_sandbox": sandbox_off(),
+                      "insecure_tls": insecure_tls_default()},
+        "defaults": {
+            "max_windows": store.DAEMON_DEFAULTS["webdebug_max_windows"],
+            "no_sandbox": store.DAEMON_DEFAULTS["webdebug_no_sandbox"],
+            "insecure_tls": store.DAEMON_DEFAULTS["webdebug_insecure_tls"],
+        },
+        "env": {field: {"name": name, "set": _env_given(name)} for field, name in env.items()},
+    }
+
+
+async def h_setting_get(_request: web.Request) -> web.Response:
+    """``daemon.webdebug_max_windows`` / ``_no_sandbox`` / ``_insecure_tls``
+    (claunch-o8pb7.2.1). All three are read when a window is opened, so a
+    change applies to the next window without a daemon restart."""
+    try:
+        return web.json_response(setting_state())
+    except WebDebugError as exc:
+        return _err(exc)
+
+
+async def h_setting_set(request: web.Request) -> web.Response:
+    """Set any of the three; ``null`` restores the built-in default. The
+    environment variable of the same meaning still wins over the stored value."""
+    try:
+        body = await _json_body(request)
+    except WebDebugError as exc:
+        return _err(exc)
+    writes = {}
+    for field, key in _SETTING_FIELDS.items():
+        if field not in body:
+            continue
+        value = body[field]
+        if value is not None:
+            if field == "max_windows":
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return web.json_response({"error": "'max_windows' must be a whole number"},
+                                             status=400)
+                if not 1 <= value <= MAX_WINDOWS_CEILING:
+                    return web.json_response(
+                        {"error": f"'max_windows' must be between 1 and {MAX_WINDOWS_CEILING}"},
+                        status=400)
+            elif not isinstance(value, bool):
+                return web.json_response({"error": f"'{field}' must be true, false or null"},
+                                         status=400)
+        writes[key] = value
+    if not writes:
+        return web.json_response({"error": "give 'max_windows', 'no_sandbox' and/or "
+                                           "'insecure_tls'"},
+                                 status=400)
+    try:
+        for key, value in writes.items():
+            store.set_daemon_field(key, value)
+        return web.json_response(setting_state())
+    except WebDebugError as exc:
+        return _err(exc)
+    except store.StoreError as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def _lifecycle(app):
     yield
     await app["webdebug"].stop_all()
@@ -1162,3 +1383,5 @@ def install(app: web.Application, hub: Optional[Hub] = None) -> None:
     r.add_post("/api/webdebug/images", h_image_upload)
     r.add_get("/api/webdebug/images/{name}", h_image)
     r.add_post("/api/webdebug/send", h_send)
+    r.add_get("/api/webdebug-setting", h_setting_get)
+    r.add_put("/api/webdebug-setting", h_setting_set)
