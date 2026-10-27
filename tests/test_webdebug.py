@@ -637,3 +637,92 @@ def test_the_tools_carry_the_session_and_the_op(monkeypatch):
     webdebug_mcp.call_tool("webdebug_navigate", {"url": "http://x/", "window": "w-abcd"})
     _method, _path, body = client.calls[-1]
     assert body["op"] == "navigate" and body["window"] == "w-abcd" and body["timeout"] == 30
+
+
+def _tab_move_button():
+    """Whatever `button` the browser tab names on a mouse move, read from the
+    shipped source, so the browser test below measures what the tab really
+    sends rather than what the test assumes it sends."""
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    start = script.index('screen.addEventListener("mousemove"')
+    end = script.index("screen.addEventListener(", start + 1)
+    move = script[start:end]
+    assert 'type: "mouseMoved"' in move and "buttons: e.buttons" in move
+    if 'button: "none"' in move:
+        return "none"
+    if "buttonName(e.button)" in move:
+        return "left"  # a move's own e.button is 0, which names the left button
+    raise AssertionError("the move does not name its button in a shape this test reads")
+
+
+def test_a_hover_reaches_the_page_as_no_button_held(tmp_path, monkeypatch):
+    """A move names no button: Chrome takes the page's e.buttons from the
+    event's `button` field, so "left" with buttons 0 arrives as buttons 1 and
+    every hover became a drag in a page that tracks one (s490-rev, s648-rev)."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    from urllib.parse import quote
+
+    from aiohttp import WSMsgType
+
+    page = tmp_path / "moves.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>moves</title>"
+        "<script>window.__moves=[];document.addEventListener('mousemove',"
+        "e=>{window.__moves.push({button:e.button,buttons:e.buttons});});</script>",
+        encoding="utf-8")
+
+    async def run():
+        client = TestClient(TestServer(_app(_Manager("s1"))))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                "/api/webdebug/ws?window=w-moves&session=s1&url=" + quote(page.as_uri(), safe=""))
+            for _ in range(200):
+                msg = await ws.receive(timeout=10)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("type") == "state":
+                    break
+            hub = client.server.app["webdebug"]
+            win = hub.window_for("s1", "w-moves")
+            # the state message goes out at attach, before the navigation lands
+            for _ in range(100):
+                if await hub.evaluate(win, "document.title") == "moves":
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError("the page never loaded")
+
+            async def move(button, buttons, want):
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "mouse", "type": "mouseMoved", "x": 10, "y": 10,
+                    "button": button, "buttons": buttons}})
+                for _ in range(50):
+                    seen = json.loads(await hub.evaluate(win, "JSON.stringify(window.__moves)"))
+                    if seen and len(seen) == want:
+                        return seen[-1]
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    f"no move reached the page for button={button!r} buttons={buttons}: {seen} "
+                    f"at {await hub.evaluate(win, 'location.href')}")
+
+            # the shape the tab really sends, with the mask carrying the state
+            assert await move(_tab_move_button(), 0, 1) == {"button": 0, "buttons": 0}
+            assert await move(_tab_move_button(), 1, 2) == {"button": 0, "buttons": 1}
+
+            # naming a button fabricates a press out of an empty mask, which is
+            # how a hover became a drag (s490-rev, s648-rev)
+            assert await move("left", 0, 3) == {"button": 0, "buttons": 1}
+            await ws.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_move_names_no_button():
+    """The tab builds the move itself; it must say "none" and let the mask
+    carry the held button (the browser-level test above measures why)."""
+    assert _tab_move_button() == "none"

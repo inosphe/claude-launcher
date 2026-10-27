@@ -240,8 +240,12 @@ let movePending = null;
 screen.addEventListener("mousemove", (e) => {
   if (picking) return;
   const p = pagePoint(e);
-  // e.buttons carries a drag: a pressed button stays held while the pointer moves.
-  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: buttonName(e.button),
+  // A move names no button of its own. Chrome takes e.buttons on the page from
+  // this field, not from the mask: "left" with buttons 0 arrives as buttons 1,
+  // so reading e.button (always 0 on a move) turned every hover into a drag
+  // (s490-rev, s648-rev). "none" plus the real mask reproduces both states --
+  // hover as buttons 0, a pressed button carried along as buttons 1.
+  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: "none",
     buttons: e.buttons, modifiers: modifiers(e) };
   const now = performance.now();
   if (now - moveAt > 33) {  // ~30 moves/s is enough to feel live
