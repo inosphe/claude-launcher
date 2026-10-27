@@ -100,6 +100,22 @@ const view = OperatorView.create({
 root.addEventListener("click", event => {
   if (event.target.closest?.('a[href^="#/"]')) modal.close();
 });
+// A click on the backdrop closes the dialog (claunch-ho56l). The backdrop has
+// no element of its own: a click there lands on the dialog itself, outside
+// its box. A press that starts inside (selecting text, dragging a handle) and
+// is let go outside also lands on the dialog, so the press must start
+// outside too.
+const outside = event => {
+  const box = modal.getBoundingClientRect();
+  return event.target === modal && (event.clientX < box.left || event.clientX > box.right
+    || event.clientY < box.top || event.clientY > box.bottom);
+};
+let pressedOutside = false;
+modal.addEventListener("pointerdown", event => { pressedOutside = outside(event); });
+modal.addEventListener("click", event => {
+  if (pressedOutside && outside(event)) modal.close();
+  pressedOutside = false;
+});
 
 /* The dock: one control in the corner that Chat (chat.js) joins too. */
 function fabDock() {

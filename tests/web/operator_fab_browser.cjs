@@ -229,6 +229,20 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.evaluate(() => location.hash), "#/s/s900");
     await page.evaluate(() => { location.hash = "#/"; });
 
+    // A click on the backdrop closes the dialog (claunch-ho56l); a click
+    // inside, or a press inside let go on the backdrop, leaves it open.
+    const isOpen = () => page.evaluate(() => document.querySelector(".opfab-modal").open);
+    await page.click(".operator-fab");
+    await page.waitForSelector(".opfab-modal[open]");
+    await page.mouse.click(640, 450);
+    assert.equal(await isOpen(), true, "a click inside keeps it open");
+    await page.mouse.move(640, 450); await page.mouse.down();
+    await page.mouse.move(300, 450); await page.mouse.move(40, 40);
+    await page.mouse.up();
+    assert.equal(await isOpen(), true, "a press inside let go on the backdrop keeps it open");
+    await page.mouse.click(40, 40);
+    await page.waitForFunction(() => !document.querySelector(".opfab-modal").open);
+
     // The size: dragged from an edge it grows on both sides and stays centred,
     // the screen caps it, the next opening and a reload keep it, a double
     // click returns to the default, and a damaged value reads as the default.
