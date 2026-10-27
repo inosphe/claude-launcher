@@ -38680,7 +38680,7 @@ async function refreshWebdebugSetting() {
   } catch (err) {
     webdebugSetting.error = String(err);
   }
-  renderWorkspaces();
+  if (wsOpen) renderWorkspaces();
 }
 
 async function saveWebdebugSetting(field, value) {
@@ -38703,10 +38703,14 @@ async function saveWebdebugSetting(field, value) {
 }
 
 function webdebugEnvNote(field) {
+  // Only for the cases the "In effect now" sentence does not already explain.
+  // Where the environment flips the value, that sentence names the variable;
+  // repeating it here would say the same thing twice.
   const env = webdebugSetting.env[field];
   if (!env || !env.set) return null;
+  if (!!webdebugSetting.effective[field] !== !!webdebugSetting.values[field]) return null;
   return el("p", "wf-note",
-    `${env.name} is set in the daemon's environment and wins over this value; ` +
+    `${env.name} is set in the daemon's environment. It decides this value; ` +
     "the saved value applies once that variable is unset for the daemon.");
 }
 

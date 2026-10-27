@@ -64,8 +64,9 @@ const BASE = {
   },
 };
 
-function build(answers) {
+function build(answers, wsOpen = true) {
   const calls = [];
+  const redraws = [];
   const api = async (url, opts) => {
     calls.push({ url, method: (opts && opts.method) || "GET",
                  body: opts && opts.body ? JSON.parse(opts.body) : null });
@@ -74,11 +75,11 @@ function build(answers) {
   };
   const code = slice("/* The web debug browser", "/* Model tiers (claunch-cvife)");
   const w = new Function(
-    "el", "document", "api", "renderWorkspaces",
+    "el", "document", "api", "renderWorkspaces", "wsOpen",
     code + "\nreturn { webdebugSetting, takeWebdebugSetting, refreshWebdebugSetting,"
          + " saveWebdebugSetting, webdebugSettingCard };")(
-    node, { createElement: (tag) => node(tag) }, api, () => {});
-  return { w, calls };
+    node, { createElement: (tag) => node(tag) }, api, () => redraws.push(1), wsOpen);
+  return { w, calls, redraws };
 }
 
 (async () => {
@@ -89,6 +90,20 @@ function build(answers) {
           card.children.some((c) => c.text === "reading…"));
     check("no control before the first answer",
           !inputById(card, "webdebug-max-windows") && !inputById(card, "webdebug-no_sandbox"));
+  }
+
+  {
+    // The card is on the Settings page, so a redraw while that page is closed
+    // rebuilds a view nobody is looking at. Every sibling refresher guards the
+    // call with wsOpen; this one must too.
+    const closed = build([{ status: 200, body: BASE }], false);
+    await closed.w.refreshWebdebugSetting();
+    check("a refresh does not redraw a closed Settings page",
+          closed.redraws.length === 0, closed.redraws);
+    const open = build([{ status: 200, body: BASE }], true);
+    await open.w.refreshWebdebugSetting();
+    check("a refresh redraws the open Settings page",
+          open.redraws.length === 1, open.redraws);
   }
 
   {
