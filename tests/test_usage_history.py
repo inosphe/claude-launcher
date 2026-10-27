@@ -27,7 +27,12 @@ def _setup(monkeypatch, now):
     monkeypatch.setattr(
         profile_usage,
         "_resolve",
-        lambda selector: (SimpleNamespace(selector=selector, name=selector), "p", f"{selector}/p/r"),
+        lambda selector: (
+            SimpleNamespace(selector=selector, name=selector),
+            "p",
+            f"{selector}/p/r",
+            "r",
+        ),
     )
     monkeypatch.setattr(profile_usage.lineage, "effective_harness", lambda _p: "h")
     calls = []
