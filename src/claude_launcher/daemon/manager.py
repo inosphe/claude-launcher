@@ -42,6 +42,7 @@ from .. import codex_mode
 from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
+from . import session_seq
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import (
@@ -454,8 +455,12 @@ class SessionManager:
         continuing, so the pin continues with it (see
         :attr:`Session._delivery_hold`).
         """
-        name = (sdef.name or "").strip() or self._auto_name()
-        self._check_name(name)
+        # One place decides a name (:meth:`settle_name`), so a caller that has
+        # already named the worktree after the session and one that left the
+        # name empty cannot choose differently. An auto-generated name has
+        # already made its directory and moved the counter -- see
+        # :meth:`_auto_name` for why that order, and why neither is undone.
+        name = self.settle_name(str(sdef.name or ""))
         sdef = self._resolve_resume(
             SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
@@ -1193,7 +1198,14 @@ class SessionManager:
             log.debug("claim give-up notice for %r failed", name, exc_info=True)
 
     def discard(self, name: str) -> None:
-        """Drop a staged session that will never start."""
+        """Drop a staged session that will never start.
+
+        The number it took is *not* handed back: the counter never rewinds (see
+        :mod:`session_seq`), so an attempt that failed mid-way costs one number
+        and nothing else. That is deliberate — the alternative, trying to work
+        out whether a failed attempt may safely give its number back, is where a
+        double allocation would come from.
+        """
         session = self._sessions.get(name)
         if session is not None and getattr(session, "pty", None) is None:
             self._sessions.pop(name, None)
@@ -1456,23 +1468,38 @@ class SessionManager:
         record exists -- the worktree cut for it -- so a name already taken
         is refused before anything is on disk. Empty means the next free
         ``sN`` (:meth:`_auto_name`).
+
+        This is the one place a name is decided: :meth:`stage`,
+        :meth:`stage_child` and the web create route all ask here, so the
+        worktree a session is cut into and the session itself cannot end up
+        with two different names.
         """
         name = (name or "").strip() or self._auto_name()
         self._check_name(name)
         return name
 
     def _auto_name(self) -> str:
-        """The first free ``sN``.
+        """The next ``sN`` from the counter, skipping names already in use.
 
-        Exited records count as taken (they are still respawnable), and so do
-        the session directories left on disk — a recycled name would append to
-        another session's output log and make two histories look like one.
-        ``clear-sessions --logs`` is what frees the numbers again.
+        The counter (:mod:`session_seq`) is a high-water mark rather than a
+        search: it only moves forward, so deleting a session directory does not
+        make a lower number available again. That is the whole point — a
+        recycled name appends to another session's output log, report directory
+        and worktree name, and two histories then look like one.
+
+        A name is skipped when a record holds it (an exited one counts: it is
+        still respawnable) or a directory does — the latter is checked by the
+        allocation itself, which creates the directory as its reservation.
+
+        A name a person chose (``s9000`` typed by hand) does not move the
+        counter: it is simply stepped over here when the sequence reaches it.
+
+        ``clear-sessions --logs`` deletes the directory and leaves the counter
+        where it is. The numbers are not freed.
         """
-        i = 0
-        while f"s{i}" in self._sessions or paths.session_dir(f"s{i}").is_dir():
-            i += 1
-        return f"s{i}"
+        return session_seq.allocate(
+            lambda name: name in self._sessions, records=list(self._sessions)
+        )
 
     def get(self, name: str) -> AnySession:
         self._recover_claims()
@@ -2392,8 +2419,11 @@ class SessionManager:
         Running sessions are untouched. This is the *only* thing that makes a
         session unresumable, which is why the daemon never does it on its own —
         it happens when a human asks (``claunch clear-sessions``, or the web
-        UI's clear button). ``logs`` also deletes their captured output,
-        freeing their auto-generated names for reuse.
+        UI's clear button). ``logs`` also deletes their captured output.
+
+        Neither answer frees a name: session numbers come from a counter that
+        only moves forward (:mod:`session_seq`), so a cleared session's ``sN``
+        is never handed out again.
 
         ``keep`` spares named records. The caller decides what goes in it: the
         manager knows nothing of meshes, and a record a mesh row still names is

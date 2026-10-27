@@ -334,11 +334,14 @@ def child_name(parent: str, child: str, now: Optional[datetime] = None) -> str:
     ``s45-<stamp>`` checkouts, every one of them named after the *parent*
     that dispatched them and none of them saying which worker's it was.
 
-    The stamp stays even though a live session name is already unique here:
-    ``clear-sessions --logs`` frees the numbers again while the checkouts and
-    branches they cut stay on disk, so a recycled ``s45-s110`` would be
-    RESOLVED to the previous child's checkout (see :func:`resolve`) and the
-    new worker would wake up on someone else's branch.
+    The stamp is kept as a second guarantee. Session numbers no longer rewind
+    (``daemon/session_seq.py``: the counter only moves forward, so
+    ``clear-sessions --logs`` deletes a directory without freeing its number),
+    and that alone would make ``<parent>-<child>`` unique. But a session name
+    is also anybody's to type — a person may hand a session a name a previous
+    one had, and a checkout cut under that name would be RESOLVED to the
+    previous one (see :func:`resolve`). The stamp keeps the two apart whatever
+    the naming did.
     """
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
     parts = [_fragment(parent), _fragment(child), stamp]

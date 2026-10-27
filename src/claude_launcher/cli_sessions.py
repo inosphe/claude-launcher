@@ -4084,7 +4084,11 @@ def register(sub) -> None:
     p_clear.add_argument(
         "--logs",
         action="store_true",
-        help="also delete their captured output logs, freeing their names for reuse",
+        help=(
+            "also delete their captured output logs. Names are not freed: the "
+            "session-name counter only moves forward, so a deleted session's "
+            "number is never assigned again"
+        ),
     )
     p_clear.set_defaults(func=_cmd_clear_sessions)
 
