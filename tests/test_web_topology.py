@@ -432,6 +432,7 @@ CHECKS = [
         "railbadge_check.js",
         "sessionprs_check.js",
         "watchrow_check.js",
+        "railstorage_check.js",
         "railcflow2_check.js",
         "sessmesh_check.js",
         "sesshandle_check.js",
