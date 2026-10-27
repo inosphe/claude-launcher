@@ -754,6 +754,12 @@ def group(ws, body, items=(), actor="", reason=""):
     ``items`` (optional) are placed at ``place`` -- the new node when omitted,
     otherwise a node inside the new node's subtree (one of ``nodes`` or below
     one), so a registering session can land in D while D moves under F.
+
+    ``nodes`` must share one parent: F -> (D, E) groups siblings. Nodes from
+    different parents or depths are refused unless ``across`` is true, which
+    pulls them out of their parents to the lowest common one (claunch-jpqat).
+    A former parent left with no child and no item is listed in ``emptied``;
+    it is kept, not deleted.
     """
     if not isinstance(body, dict):
         raise CategoryError("body must be an object")
@@ -777,6 +783,13 @@ def group(ws, body, items=(), actor="", reason=""):
             if clash:
                 raise CategoryError(
                     f"{node['label']} is inside {clash[0]}, which is also selected")
+        if len({n["parent_id"] for n in nodes}) > 1 and body.get("across") is not True:
+            where = "; ".join(f"{n['label']}: {' / '.join(_path(db, n['parent_id'])) or '(top level)'}"
+                              for n in nodes)
+            raise CategoryError(
+                f"group puts sibling categories under one parent, and these have different "
+                f"parents ({where}); pick siblings, or pass across: true to pull them out "
+                f"of their parents")
         if "parent_id" in body:
             parent = _parent_arg(body.get("parent_id"))
             if parent is not None:
@@ -798,13 +811,18 @@ def group(ws, body, items=(), actor="", reason=""):
         target = place or made["id"]
         for kind, ref in items:
             _place(db, kind, ref, target, actor, reason or "group")
+        emptied = [old for old in dict.fromkeys(n["parent_id"] for n in nodes)
+                   if old is not None
+                   and not db.execute("SELECT 1 FROM nodes WHERE parent_id=?", (old,)).fetchone()
+                   and not db.execute("SELECT 1 FROM items WHERE node_id=?", (old,)).fetchone()]
         _event(db, actor, "group", node=made["id"], parent=parent, reason=reason,
                grouped=[{"id": n["id"], "label": n["label"], "from": n["parent_id"]} for n in nodes],
-               items=items, place=target)
+               items=items, place=target, emptied=emptied)
         return {"node": {**made, "path": _path(db, made["id"])},
                 "grouped": [{"id": n["id"], "path": _path(db, n["id"])} for n in nodes],
                 "items": [{"kind": k, "ref": r} for k, r in items],
-                "placed_in": {"id": target, "path": _path(db, target)}}
+                "placed_in": {"id": target, "path": _path(db, target)},
+                "emptied": [{"id": e, "path": _path(db, e)} for e in emptied]}
 
 
 # ---- an agent's proposals ------------------------------------------------------- #

@@ -446,6 +446,17 @@ def test_agent_group_puts_siblings_under_a_new_parent(home, tmp_path, typed):
         bad = await _call(client, "POST", "/api/category/agent-assign", {
             "session": "a", "group": {"label": "x", "nodes": [one["id"]]}}, status=400)
         assert "at least two" in bad["error"]
+        # Nodes with different parents are refused on the agent route too.
+        web = category.create_node(ws, {"label": "web"}, "user")
+        inner = category.create_node(ws, {"label": "charts", "parent_id": web["id"]}, "user")
+        apart = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "group": {"label": "y", "nodes": [inner["id"], two["id"]]}},
+            status=400)
+        assert "different parents" in apart["error"]
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "r",
+            "group": {"label": "y", "nodes": [inner["id"], two["id"]], "across": True}})
+        assert out["emptied"] == ["web"]
 
     _run(scenario, tmp_path)
 

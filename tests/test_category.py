@@ -470,6 +470,43 @@ def test_group_places_items_in_a_grouped_node_and_refuses_bad_shapes(ws):
     assert c.where(ws, "session", "x")["node"]["path"] == ["pages", "beads page", "beads list"]
 
 
+def test_group_refuses_nodes_with_different_parents_unless_across(ws):
+    web = node(ws, "web")
+    cli = node(ws, "cli")
+    beads = node(ws, "beads page", parent=web["id"])
+    sims = node(ws, "sims page", parent=cli["id"])
+    top = node(ws, "chart page")
+    c.assign(ws, [S("a")], beads["id"])
+    before = {n["id"]: n["parent_id"] for n in c.tree(ws)["nodes"]}
+    # Two parents: refused, and the message names where each one sits.
+    with pytest.raises(c.CategoryError) as split:
+        c.group(ws, {"label": "pages", "nodes": [beads["id"], sims["id"]]})
+    assert split.value.status == 400
+    assert "beads page: web" in str(split.value) and "sims page: cli" in str(split.value)
+    assert "across: true" in str(split.value)
+    # Different depths (a top-level node and one under web): refused too.
+    with pytest.raises(c.CategoryError, match=r"chart page: \(top level\)"):
+        c.group(ws, {"label": "pages", "nodes": [top["id"], beads["id"]]})
+    assert {n["id"]: n["parent_id"] for n in c.tree(ws)["nodes"]} == before
+    # across: true keeps the old move -- F at the lowest common parent -- and
+    # names the parent it left with nothing in it; that node is kept.
+    out = c.group(ws, {"label": "pages", "nodes": [beads["id"], sims["id"]], "across": True},
+                  actor="user")
+    assert out["node"]["parent_id"] is None
+    assert c.where(ws, "session", "a")["node"]["path"] == ["pages", "beads page"]
+    assert out["emptied"] == [{"id": web["id"], "path": ["web"]},
+                              {"id": cli["id"], "path": ["cli"]}]
+    assert {web["id"], cli["id"]} <= {n["id"] for n in c.tree(ws)["nodes"]}
+
+
+def test_group_of_siblings_empties_nothing(ws):
+    web = node(ws, "web")
+    one = node(ws, "beads page", parent=web["id"])
+    two = node(ws, "sims page", parent=web["id"])
+    out = c.group(ws, {"label": "pages", "nodes": [one["id"], two["id"]]})
+    assert out["emptied"] == []
+
+
 def test_merge_into_a_node_inside_a_folded_one_is_refused(ws):
     outer = node(ws, "web")
     inner = node(ws, "beads page", parent=outer["id"])
