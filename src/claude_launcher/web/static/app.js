@@ -7711,12 +7711,13 @@ async function refreshCflow2Rail() {
     return;
   }
   const rows = (data && data.rows) || {};
-  // urgent asks join the notification channel (claunch-x76l8.1)
-  if (typeof urgentAskSync === "function") urgentAskSync(rows);
   const sig = JSON.stringify(rows);
+  cflow2RailCache = rows;
+  // every person gate joins the notification channel, every poll
+  // (claunch-whm4e.1; urgent asks only, before: claunch-x76l8.1)
+  if (typeof runGateFeed === "function") runGateFeed();
   if (sig === cflow2RailSig) return;
   cflow2RailSig = sig;
-  cflow2RailCache = rows;
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
   applyCflow2Badges();
   // the answer strip over the attached terminal reads the same rows
@@ -12394,6 +12395,7 @@ async function refreshCflow() {
     if (typeof renderSessionGrid === "function") renderSessionGrid(); // and the grid's gate highlight, read off the same cache
     applyRailQuiet();    // one of its two flags is read off this very cache
   }
+  runGateFeed();       // every gated run's card (claunch-whm4e.1)
   renderTermTimer();   // the attached session's own header chip
   renderTermCflow();   // and the answer strip over its terminal
   if (repaintRail && currentPage === "home") renderHome();
@@ -23322,6 +23324,70 @@ function renderTermCflow() {
   box.appendChild(btns);
   box.classList.remove("hidden");
   refitSoon(60);
+}
+
+/* ---- run gates for the notification channel (claunch-whm4e.1) ----
+   Every run that stands on something only a person releases, one record per
+   thing owed, for the corner card, the bell and the panel's "Waiting on you"
+   (the `ask` notice kind, runGateSync). Read from the rows the strip above
+   reads -- the v1 cflow cache and the v2 rail rows -- for every session
+   rather than the attached one, with the strip's own presses, so a card
+   cannot answer differently from the strip.
+
+   Neither the driver's flow_nudge nor an `urgent: true` on the node is a
+   condition: a landing-review ask that fell to a person after its
+   responder abstained sat with no card at all, its driver's nudge forgotten
+   by a daemon restart. The run files are the source, so the next poll after
+   a restart brings the same cards back. A v1 goto request is left to its
+   own gate kind (`goto`), which already carries its presses. */
+function personGateRecords() {
+  const out = [];
+  const settled = [];
+  const known = new Set(((typeof sessionsCache === "object" && sessionsCache) || [])
+    .map((s) => s && s.name).filter(Boolean));
+  for (const r of (typeof cflowCache === "object" && cflowCache) || []) {
+    if (!r || /[+~]/.test(r.scope || "") || r.status === "idle") continue;
+    if (!sessCflowGated(r) || r.status === "waiting_goto") continue;
+    const session = scopeSession(r.scope, r.session);
+    if (!session || (known.size && !known.has(session))) continue;
+    out.push({
+      id: ["v1", r.cwd, r.scope, r.run, r.step_id, r.visit ?? "", r.status].join("|"),
+      session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 1,
+      kind: r.status, label: sessCflowGateStep(r) || "?",
+      prompt: termCflowQuestion(r), presses: termCflowAnswers(r, session),
+    });
+  }
+  const rail = (typeof cflow2RailCache === "object" && cflow2RailCache) || {};
+  for (const [session, r] of Object.entries(rail)) {
+    if (!r) continue;
+    for (const u of r.urgent_asks || []) {
+      if (!u || !u.id || u.status === "open") continue;
+      settled.push({ id: String(u.id), status: u.status === "answered"
+        ? `answered: ${u.decision || "?"}` + (u.by ? ` by ${u.by}` : "") : u.status });
+    }
+    if (!r.gated) continue;
+    for (const a of r.answers || []) {
+      if (!a || !a.kind) continue;
+      const slot = [r.run, a.instance || "", a.kind].join("|");
+      out.push({
+        id: a.kind === "ask" && a.ask ? String(a.ask)
+          : a.kind === "move" && a.request ? `move|${a.request}` : `v2|${slot}`,
+        session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 2,
+        kind: a.kind, label: a.label || a.instance || a.kind,
+        urgent: !!a.urgent, prompt: termCflow2Question(a),
+        presses: termCflow2Answers(r, a, session),
+      });
+    }
+  }
+  return { pending: out, settled };
+}
+
+/* The two polls each hand the channel the whole set: one feed, so neither
+   settles the other's records as gone. */
+function runGateFeed() {
+  if (typeof runGateSync !== "function") return;
+  const { pending, settled } = personGateRecords();
+  runGateSync(pending, settled);
 }
 
 /* ---- delivery chip (#term-hold) ----
@@ -58480,10 +58546,11 @@ const NOTICE_SOURCES = [
     refresh: () => refreshKillGate(), row: noticeRowKill },
   { id: "meshjoin", label: "mesh join requests from other machines", gate: true,
     refresh: () => refreshMeshJoinGate(), row: noticeRowMeshJoin },
-  { id: "ask", label: "run questions (urgent asks)", gate: true,
-    // Fed by the rail's cflow poll, which hands it the rows.
+  { id: "ask", label: "runs waiting on you (questions, picks, limits, move requests)",
+    gate: true,
+    // Fed by the cflow polls (runGateFeed), which hand it the records.
     polled: false,
-    refresh: () => urgentAskSync(urgentAskRows), row: noticeRowAsk },
+    refresh: () => runGateSync(runGateLast.pending, runGateLast.settled), row: noticeRowAsk },
   { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
   { id: "fault", label: "leader faults (harness stopped)" },
@@ -59394,17 +59461,21 @@ function noticeRowSpawn(row, head, actions, rec) {
 
 function noticeRowAsk(row, head, actions, rec) {
   head.appendChild(gateSessionLink(rec.session));
-  head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
+  head.appendChild(el("span", "notice-title", ` ${runGateTitle(rec)}`));
   row.appendChild(head);
-  const prompt = (rec.answer && rec.answer.prompt) || "";
-  if (prompt) row.appendChild(el("div", "notice-sub gate-reason", prompt));
-  for (const btn of urgentAskButtons(rec, () => urgentAskSync(urgentAskRows))) {
+  if (rec.prompt) row.appendChild(el("div", "notice-sub gate-reason", rec.prompt));
+  const note = runGateNudgeNotes[rec.session];
+  if (note) row.appendChild(el("div", "notice-sub gate-nudge", note));
+  const short = runGateShortfall(rec);
+  if (short) row.appendChild(el("div", "notice-sub", short));
+  for (const btn of runGateButtons(
+    rec, () => runGateSync(runGateLast.pending, runGateLast.settled))) {
     actions.appendChild(btn);
   }
   actions.appendChild(noticePanelButton(
     "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
       "the panel stays open beside it",
-    () => urgentAskOpen(rec)
+    () => runGateOpen(rec)
   ));
 }
 
@@ -61180,49 +61251,72 @@ async function refreshMeshJoinGate() {
 }
 
 /* ------------------------------------------------------------------ */
-/* urgent asks: a cflow v2 ask that wants a person's answer now       */
+/* run gates: a cflow run that waits on a person's answer             */
 /* ------------------------------------------------------------------ */
-/* An ask declared `urgent: true` in its workflow (claunch-x76l8.1; e.g.
-   improv-worker-v2's coding-approval) joins the gates above once it falls to
-   a person (resolution `human`): a card in the corner, a row in the history,
-   a place in the bell's waiting count. Its source is the v2 rail poll
-   (refreshCflow2Rail hands every row here): `urgent_asks` lists the run's
-   urgent asks, open and settled, and `answers` carries the presses.
+/* Every run that stands on something only a person releases joins the
+   gates above (claunch-whm4e.1): a card in the corner, a row in the
+   history, a place in the bell's waiting count and the panel's "Waiting on
+   you". That is a v2 ask that fell to a person, a `chooser: user` choice,
+   the driver's move or report request, a loop or visit limit, a halt or an
+   acceptance hold, and a v1 run's approval, selection or an ask that
+   reached nobody. Until then only an ask declared `urgent: true` got a card
+   (claunch-x76l8.1), and every other gate reached the channel only if its
+   driver called flow_nudge -- whose card a daemon restart forgets.
 
-   The presses are the run page's own: POST /api/cflow2/approve with the
-   instance and the decision. An ask that wants text with the answer -- a
-   brief ask (its `reframe` takes a reason) or one with require_reason --
-   gets no presses here; the card only opens the session, where the strip
-   over its terminal answers it. A click on the card opens that session.
-   An ask without `urgent`, or one still routed to agents, is not shown. */
-const URGENT_ASK_PREFIX = "urgent-ask-";
-/* The rows of the last rail poll, so a card shown again (gateUnhide) is
-   redrawn without waiting for the next poll. */
-let urgentAskRows = {};
+   The records come from personGateRecords (the v1 cflow poll and the v2
+   rail poll, runGateFeed), each with the presses the strip over its
+   session's terminal offers -- the same endpoint and body, so the two
+   cannot disagree. A press that needs text (reframe, a refusal's reason
+   when required) is not offered here; the card says so and opens the
+   session, where the strip asks for it. Any other press goes through the
+   strip's dialogs first: a reason prompt, or a confirm for a press that ends
+   or moves the run (Stop, Move, v1 Approve). A click on the card opens that
+   session. An urgent ask keeps its own look (`urgent-ask`), and its history
+   row gets the run's word for how it ended; any other row reads "no longer
+   pending" once its gate is gone. */
+const RUN_GATE_PREFIX = "run-gate-";
+/* The last records handed in, so a card shown again (gateUnhide) or a
+   kind unhidden is redrawn without waiting for the next poll. */
+let runGateLast = { pending: [], settled: [] };
+/* The message of each session's pending nudge: the driver's own line rides
+   on the run's card instead of a second card (refreshNudgeGate). */
+let runGateNudgeNotes = {};
 
-function urgentAskWords(u) {
-  if (u.status === "answered") {
-    return `answered: ${u.decision || "?"}` + (u.by ? ` by ${u.by}` : "");
+const RUN_GATE_WORDS = {
+  ask: "waits on your answer", choose: "waits on your pick",
+  move: "asks you to move its run", loop_limit: "reached a loop limit",
+  visit_limit: "reached a visit limit", halt: "is halted",
+  acceptance: "waits on its acceptance check",
+  waiting_approval: "waits on your approval", waiting_selection: "waits on your pick",
+  waiting_answer: "waits on your answer",
+};
+
+function runGateTitle(rec) {
+  return `${RUN_GATE_WORDS[rec.kind] || "waits on you"}: ${rec.label}`;
+}
+
+/* The presses a card can make without asking for text. */
+function runGatePresses(rec) {
+  return (rec.presses || []).filter((p) => p && p.path && !p.reasonRequired);
+}
+
+async function runGatePost(rec, press, btn) {
+  // the strip's own order (renderTermCflow): a press with a reason asks for
+  // it, one with an ask confirms first -- a card press is the same act
+  let payload = press.body || {};
+  if (press.reason) {
+    const why = prompt(press.reason, "");
+    if (why === null) return false;
+    payload = { ...payload, reason: why };
+  } else if (press.ask && !confirm(press.ask)) {
+    return false;
   }
-  return u.status || null;
-}
-
-/* The answer an urgent ask can take from a card, or null when it needs text. */
-function urgentAskPresses(a) {
-  if (!a || a.require_reason) return null;
-  const opts = (a.options || []).map((o) => o.name || String(o));
-  if (!opts.length || opts.includes("reframe")) return null;
-  return opts;
-}
-
-async function urgentAskPost(rec, decision, btn) {
   btn.disabled = true;
   try {
-    const resp = await api("/api/cflow2/approve", {
+    const resp = await api(press.path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: rec.cwd, scope: rec.scope, node: rec.instance,
-                             decision, reason: "" }),
+      body: JSON.stringify(payload),
     });
     if (resp && resp.ok === false) {
       btn.disabled = false;
@@ -61233,104 +61327,104 @@ async function urgentAskPost(rec, decision, btn) {
     return false;
   }
   noticeTabsGates();
+  // the polls that feed this kind read the run again, so the card goes
+  // with the gate rather than on the next tick
+  if (typeof refreshCflow2Rail === "function") refreshCflow2Rail();
+  if (rec.version === 1 && typeof refreshCflow === "function") refreshCflow();
   return true;
 }
 
-function urgentAskOpen(rec) {
+function runGateOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
 }
 
 /* The card's way into the session, under the nudge card's rule
    (claunch-yjm0v): the card goes exactly as its Hide press would put it away,
-   and then the session opens. The ask is not answered by this -- it stays
+   and then the session opens. The gate is not answered by this -- it stays
    pending, listed in the panel with Show card and counted by the bell. */
-function urgentAskGo(rec, key) {
+function runGateGo(rec, key) {
   gateHide("ask", String(rec.id));
   dismissNotice(key);
-  urgentAskOpen(rec);
+  runGateOpen(rec);
 }
 
-function urgentAskButtons(rec, after) {
-  const out = [];
-  for (const name of urgentAskPresses(rec.answer) || []) {
-    const btn = el("button", "wf-btn" + (name === "decline" ? " clear" : " approve"), name);
+function runGateButtons(rec, after) {
+  return runGatePresses(rec).map((p) => {
+    const btn = el("button", "wf-btn" + (p.cls ? " " + p.cls : ""), p.label);
     btn.type = "button";
-    btn.title = `answer '${name}' to ${rec.label} in ${rec.session}'s run`;
+    btn.title = (p.title ? p.title + " — " : "") +
+      `answers ${rec.label} in ${rec.session}'s run`;
     btn.addEventListener("click", async (ev) => {
       if (ev && ev.stopPropagation) ev.stopPropagation();
-      if (await urgentAskPost(rec, name, btn)) after();
+      if (await runGatePost(rec, p, btn)) after();
     });
-    out.push(btn);
-  }
-  return out;
+    return btn;
+  });
 }
 
-function urgentAskSync(rows) {
-  urgentAskRows = rows || {};
+/* What a card or panel row says under its title when it cannot answer the
+   gate itself, or "" when it can answer all of it. */
+function runGateShortfall(rec) {
+  const all = rec.presses || [];
+  const here = runGatePresses(rec);
+  if (!all.length) return "this one has no press here — open the session to settle it";
+  if (here.length < all.length) {
+    return "an answer that needs a reason is not offered here — open the session for it";
+  }
+  return "";
+}
+
+function runGateSync(pending, settled) {
+  runGateLast = { pending: pending || [], settled: settled || [] };
   const host = $("notices");
   if (!host) return;
-  const pending = [];
-  const all = [];
-  for (const [session, r] of Object.entries(urgentAskRows)) {
-    if (!r) continue;
-    const answers = new Map((r.answers || [])
-      .filter((a) => a.kind === "ask" && a.ask).map((a) => [a.ask, a]));
-    for (const u of r.urgent_asks || []) {
-      if (!u || !u.id) continue;
-      const rec = {
-        id: u.id, session, cwd: r.cwd, scope: r.scope, workflow: r.workflow,
-        instance: u.instance, label: u.label || u.instance || "?",
-        answer: answers.get(u.id) || null,
-      };
-      if (u.status === "open" && u.resolution === "human") {
-        rec.status = "pending";
-        pending.push(rec);
-      } else if (u.status !== "open") {
-        rec.status = urgentAskWords(u);
-        all.push(rec);
-      }
-    }
-  }
-  gateHistorySync("ask", pending, all.concat(pending));
+  const recs = runGateLast.pending.map((r) => ({ ...r, status: "pending" }));
+  gateHistorySync("ask", recs, runGateLast.settled.concat(recs));
   const seen = new Set();
-  for (const rec of pending) {
-    const key = URGENT_ASK_PREFIX + rec.id;
-    const prompt = (rec.answer && rec.answer.prompt) || "";
-    gateHistoryOpen(
-      "ask", String(rec.id),
-      `${rec.session} waits on your answer: ${rec.label}`,
-      prompt, { session: rec.session }
-    );
+  for (const rec of recs) {
+    const key = RUN_GATE_PREFIX + rec.id;
+    gateHistoryOpen("ask", String(rec.id), `${rec.session} ${runGateTitle(rec)}`,
+                    rec.prompt || "", { session: rec.session });
     if (gateIsHidden("ask", rec.id)) continue;
     seen.add(key);
+    const note = runGateNudgeNotes[rec.session] || "";
     const card = notices.get(key);
-    if (card && card.node.isConnected) continue;
+    if (card && card.node.isConnected) {
+      // the driver's nudge arrives on its own poll: it updates the card
+      const line = card.node.querySelector(".gate-nudge");
+      if (line && line.textContent !== note) {
+        line.textContent = note;
+        line.classList.toggle("hidden", !note);
+      }
+      continue;
+    }
     dismissNotice(key);
-    const node = el("div", "notice warn gate urgent-ask");
+    const node = el("div", "notice warn gate run-gate" + (rec.urgent ? " urgent-ask" : ""));
     const title = el("div", "notice-title");
     title.appendChild(gateSessionLink(rec.session));
-    title.appendChild(el("span", null, ` waits on your answer: ${rec.label}`));
+    title.appendChild(el("span", null, ` ${runGateTitle(rec)}`));
     node.appendChild(title);
-    if (prompt) node.appendChild(el("div", "notice-sub gate-reason", prompt));
-    if (rec.workflow) node.appendChild(el("div", "notice-sub", `workflow ${rec.workflow}`));
-    const actions = el("div", "gate-actions");
-    const presses = urgentAskButtons(rec, () => dismissNotice(key));
-    for (const btn of presses) actions.appendChild(btn);
-    if (!presses.length) {
+    if (rec.prompt) node.appendChild(el("div", "notice-sub gate-reason", rec.prompt));
+    node.appendChild(el("div", "notice-sub gate-nudge" + (note ? "" : " hidden"), note));
+    if (rec.workflow) {
       node.appendChild(el("div", "notice-sub",
-        "this answer needs a reason — open the session to answer it"));
+        `workflow ${rec.workflow}` + (rec.version === 1 ? " (cflow v1)" : "")));
     }
+    const short = runGateShortfall(rec);
+    if (short) node.appendChild(el("div", "notice-sub", short));
+    const actions = el("div", "gate-actions");
+    for (const btn of runGateButtons(rec, () => dismissNotice(key))) actions.appendChild(btn);
     actions.appendChild(gateHideButton("ask", rec.id, key,
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
     node.title = `open ${rec.session}`;
-    node.addEventListener("click", () => urgentAskGo(rec, key));
+    node.addEventListener("click", () => runGateGo(rec, key));
     noticeCardAdd(host, node, gateSeenAt("ask", rec.id));
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
-    if (key.startsWith(URGENT_ASK_PREFIX) && !seen.has(key)) dismissNotice(key);
+    if (key.startsWith(RUN_GATE_PREFIX) && !seen.has(key)) dismissNotice(key);
   }
 }
 
@@ -61459,9 +61553,17 @@ async function refreshNudgeGate() {
   } catch {
     return;
   }
-  const all = (body && body.requests ? body.requests : []).map((r) => (
-    r.status === "pending" ? r : { ...r, status: r.status || "settled" }
-  ));
+  // A run whose gate already has its own card (runGateSync, claunch-whm4e.1)
+  // needs no second one: the nudge's message rides on that card, and the
+  // nudge leaves the waiting count so one gate is not counted twice.
+  const covered = new Set((gatePending.ask || []).map((r) => r.session));
+  runGateNudgeNotes = {};
+  const all = (body && body.requests ? body.requests : []).map((r) => {
+    if (r.status !== "pending") return { ...r, status: r.status || "settled" };
+    if (!covered.has(r.session)) return r;
+    if (r.message) runGateNudgeNotes[r.session] = `${r.session}: ${r.message}`;
+    return { ...r, status: "shown on its run's own card" };
+  });
   const pending = all.filter((r) => r.status === "pending");
   gateHistorySync("nudge", pending, all);
   const seen = new Set();

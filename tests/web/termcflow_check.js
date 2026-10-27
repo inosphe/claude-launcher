@@ -96,10 +96,16 @@ new Function(
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
      "sessionCategory", "gateWakeNote",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
-     "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow"]
+     "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
+     "personGateRecords", "runGateFeed"]
     .map(slice).join("\n") + `
+let gateFed = null;
+function runGateSync(pending, settled) { gateFed = { pending, settled }; }
 Object.assign(exports, {
   renderTermCflow,
+  personGateRecords,
+  runGateFeed,
+  gateFed: () => gateFed,
   refits: () => refits,
   actions: () => actions,
   asked: () => asked,
@@ -760,6 +766,78 @@ const RUN = {
 
   check("the v2 rail poll repaints it",
         /applyCflow2Badges\(\);\s*(\/\/[^\n]*\n\s*)*if \(typeof renderTermCflow === "function"\) renderTermCflow\(\);/.test(src));
+
+  /* ---- every gated run as a notification record (claunch-whm4e.1) ----
+     Not only the attached session, not only an urgent ask, and with the
+     strip's own presses. */
+  {
+    ctx.setName("s16");
+    ctx.setSessions([]);
+    ctx.setRuns([
+      { ...RUN, scope: "s20", sessions: ["s20"], status: "waiting_approval", step_id: "gate" },
+      { ...RUN, scope: "s21", sessions: ["s21"], status: "waiting_goto", step_id: "work",
+        goto_request: { step: "end", from: "work" } },
+      { ...RUN, scope: "s22", sessions: ["s22"], status: "step", step_id: "work" },
+      { ...RUN, scope: "s20+stack", sessions: ["s20"], status: "waiting_approval", step_id: "x" },
+    ]);
+    const R2 = { cwd: "/w", run: "r7", workflow: "improv-worker-v2", status: "waiting" };
+    ctx.setRail({
+      s30: { ...R2, scope: "s30", gated: true, owed: ["ask: landing-review"], urgent_asks: [],
+        answers: [{ kind: "ask", ask: "ask2-01", instance: "round/land/landing-review@81",
+          label: "landing-review", prompt: "land it?", urgent: false,
+          options: [{ name: "request" }, { name: "hold" }] }] },
+      s31: { ...R2, scope: "s31", gated: true, owed: ["choose: end"], urgent_asks: [],
+        answers: [{ kind: "choose", instance: "round/end@3", label: "end-decision",
+          prompt: "end?", options: [{ name: "end" }, { name: "continue" }] },
+          { kind: "loop_limit", instance: "round@1", label: "round", count: 5, max: 5 }] },
+      s32: { ...R2, scope: "s32", gated: false, owed: [], answers: [],
+        urgent_asks: [{ id: "ask2-09", status: "answered", decision: "approve", by: "web" }] },
+    });
+    const { pending, settled } = ctx.personGateRecords();
+    const by = (id) => pending.find((r) => r.id === id);
+    const ask = by("ask2-01");
+    check("gates: a non-urgent v2 ask fallen to a person is a record", !!ask &&
+          ask.session === "s30" && ask.kind === "ask" && ask.urgent === false, pending);
+    check("gates: its presses are the strip's (approve with the instance)",
+          ask && ask.presses.map((p) => p.label).join() === "request,hold" &&
+            ask.presses[0].path === "/api/cflow2/approve" &&
+            ask.presses[0].body.node === "round/land/landing-review@81" &&
+            ask.presses[0].body.decision === "request", ask && ask.presses);
+    const pick = pending.find((r) => r.session === "s31" && r.kind === "choose");
+    check("gates: a user choice is a record posting select",
+          pick && pick.presses[0].path === "/api/cflow2/select" &&
+            pick.presses[0].body.option === "end", pick);
+    const lim = pending.find((r) => r.session === "s31" && r.kind === "loop_limit");
+    check("gates: a loop limit is a record posting extend",
+          lim && lim.presses.some((p) => p.path === "/api/cflow2/extend"), lim);
+    check("gates: two things owed by one run are two records",
+          pick && lim && pick.id !== lim.id, [pick && pick.id, lim && lim.id]);
+    const v1 = pending.find((r) => r.session === "s20");
+    check("gates: a v1 approval is a record posting the v1 approve",
+          v1 && v1.version === 1 && v1.presses[0].path === "/api/cflow/approve", v1);
+    check("gates: a v1 goto is left to the goto gate kind, a running run and a side slot to nobody",
+          !pending.some((r) => r.session === "s21" || r.session === "s22") &&
+            pending.filter((r) => r.session === "s20").length === 1, pending.map((r) => r.id));
+    check("gates: they are every session's, not just the attached one",
+          pending.every((r) => r.session !== "s16") && pending.length === 4,
+          pending.map((r) => r.id));
+    check("gates: an answered urgent ask hands its ending to the history",
+          settled.some((s) => s.id === "ask2-09" && s.status === "answered: approve by web"),
+          settled);
+    ctx.setSessions([{ name: "s30" }]);
+    check("gates: a v1 run of a session the dashboard does not list is left out",
+          !ctx.personGateRecords().pending.some((r) => r.session === "s20"),
+          ctx.personGateRecords().pending.map((r) => r.id));
+    ctx.setSessions([]);
+    ctx.runGateFeed();
+    check("gates: the feed hands the channel the whole set",
+          ctx.gateFed() && ctx.gateFed().pending.length === 4, ctx.gateFed());
+    ctx.setRuns([]);
+    ctx.setRail({});
+  }
+  check("both polls feed the channel",
+        /cflow2RailCache = rows;[\s\S]{0,200}runGateFeed\(\)/.test(src) &&
+          /runGateFeed\(\);[^\n]*\n\s*renderTermTimer\(\);/.test(src));
 
   /* ---- the markup, the stylesheet, the call sites ---- */
   const at = (id) => html.indexOf(`id="${id}"`);
