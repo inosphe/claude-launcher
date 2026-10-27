@@ -205,6 +205,13 @@ beside the gate by hand, because no change touches it, and that run left no
 receipt (``claunch-23r7d.1``). A path that is not a file in this checkout is
 refused before anything runs: a selection quietly smaller than what was asked
 for is the false green this file is about.
+
+What ``--include`` adds is told apart from what the diff found. A module the
+command line names *and* the diff already reached was derived from the change;
+recording it as ``--include`` would tell the next reader there is no change
+behind it (``claunch-23r7d.1.1``). So the receipt's ``included`` is the part
+of the command line the diff did not reach, and the printed line counts that
+part -- the selection itself is the union either way, so the key does not move.
 """
 
 from __future__ import annotations
@@ -2128,12 +2135,19 @@ def main(argv: Optional[list] = None) -> int:
     # command, the receipt's `selection`, its key, and `--check`'s lookup all
     # stand on this one list, so an included module is covered by the run or
     # by the receipt that says a run happened.
-    included, problem = resolve_includes(repo, args.include)
+    named, problem = resolve_includes(repo, args.include)
     if problem is not None:
         print(f"cannot tell: --include {problem}")
         return CANNOT_TELL
-    if included:
-        files = sorted(set(files) | set(included))
+    # Only what the diff did not already reach. A module named on the command
+    # line that the diff selected too is still derived from the change, and
+    # calling it "not derived" is a false statement to the reader who then
+    # looks for a change behind it (claunch-23r7d.1.1). The selection below is
+    # the union either way, so `selection_key` and `--check` do not move.
+    derived = set(files)
+    included = [f for f in named if f not in derived]
+    if named:
+        files = sorted(derived | set(named))
     deselect = list(args.deselect)
     if args.known_failures is not None:
         try:
@@ -2209,7 +2223,8 @@ def main(argv: Optional[list] = None) -> int:
     if included:
         # Said apart from the derivation, because a reader who assumes every
         # module came from the diff will look for the change that put it
-        # there and not find one.
+        # there and not find one. A module the diff did reach is not in this
+        # list even when --include named it: that change does exist.
         print(f"{len(included)} of them named by --include, not derived from the change:")
         for f in included:
             print(f"  {f}")
