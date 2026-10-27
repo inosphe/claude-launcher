@@ -716,6 +716,11 @@ def build_app(
     # off each session's screen by daemon/session_fault.py.
     from . import session_fault_api
     session_fault_api.install(app)
+    # Leader faults (daemon/leader_fault.py, claunch-9djny): a fault on a
+    # session that holds a mesh's leader role, while its state still owes the
+    # project work. The dashboard raises a fatal notification from this.
+    from . import leader_fault
+    leader_fault.install(app)
     from . import spec_api
     spec_api.install(app)
     # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,

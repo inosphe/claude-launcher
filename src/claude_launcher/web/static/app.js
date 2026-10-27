@@ -57601,23 +57601,33 @@ function notify(title, sub, opts) {
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   // A click on the card goes where it points; × only puts it away
   // (claunch-x76l8). The history keeps the row either way.
-  const close = el("button", "notice-close", "×");
-  close.type = "button";
-  close.title = "dismiss (the history keeps it)";
-  close.addEventListener("click", (ev) => {
-    if (ev && ev.stopPropagation) ev.stopPropagation();
-    noticeSyncDismiss(key);
-    dismissNotice(key);
-  });
-  node.appendChild(close);
+  // `dismissable: false` is for the alert that has to stay read (a leader
+  // the harness stopped, claunch-9djny): it has no ×, and a click opens the
+  // session without taking the card down. The poll that raised it is the
+  // only thing that puts it away, when the condition it reports is gone.
+  const dismissable = o.dismissable !== false;
+  if (dismissable) {
+    const close = el("button", "notice-close", "×");
+    close.type = "button";
+    close.title = "dismiss (the history keeps it)";
+    close.addEventListener("click", (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      noticeSyncDismiss(key);
+      dismissNotice(key);
+    });
+    node.appendChild(close);
+  }
   node.appendChild(el("div", "notice-title", title));
   if (sub) node.appendChild(el("div", "notice-sub", sub));
   // A card about one session (a QA request) opens it: the reader's next
   // move is that session's pane, and the click puts the card away as well.
-  node.title = o.session ? `open ${o.session}` : "click to dismiss";
+  node.title = o.session ? `open ${o.session}`
+    : dismissable ? "click to dismiss" : "stays until the alert clears";
   node.addEventListener("click", () => {
-    noticeSyncDismiss(key);
-    dismissNotice(key);
+    if (dismissable) {
+      noticeSyncDismiss(key);
+      dismissNotice(key);
+    }
     noticeMarkRead([rec.id], true);   // a click is a read; × is not
     if (o.open) o.open();
     else if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
@@ -57792,6 +57802,7 @@ const NOTICE_SOURCES = [
     refresh: () => urgentAskSync(urgentAskRows), row: noticeRowAsk },
   { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
+  { id: "fault", label: "leader faults (harness stopped)" },
   { id: "qa", label: "QA questions" },
   { id: "thread", label: "thread replies" },
   { id: "chat", label: "mesh chat messages" },
@@ -60620,6 +60631,78 @@ function urgentAskSync(rows) {
 }
 
 /* ------------------------------------------------------------------ */
+/* leader faults: the harness stopped the session a mesh routes through */
+/* ------------------------------------------------------------------ */
+/* A fault on a leader-role session stops more than that session: landing
+   requests, integration and review all route through it, so the project
+   stands still while the rail shows one small pill on one row
+   (GET /api/leader-faults, daemon/leader_fault.py — claunch-9djny). The
+   daemon decides who counts (leader role on a mesh; category running or
+   hold; an active fault) and this poll only draws it: one fatal card per
+   session, sticky and without ×, because the point is that it cannot be
+   swiped away while the leader is still stopped. The card comes down when
+   the daemon stops listing the row — the fault cleared, or the session was
+   paused, killed or archived and the project is no longer waiting on it.
+   The card is re-raised only when what it says changed (kind, message,
+   until, category), so a two-second poll does not fill the history with
+   copies of one event. */
+const LEADER_FAULT_PREFIX = "leader-fault-";
+const leaderFaultRaised = new Map();   // card key -> the signature raised
+
+function leaderFaultSub(a) {
+  const f = a.fault || {};
+  const lines = [];
+  const message = String(f.message || "").split("\n")[0];
+  if (message) lines.push(message);
+  const facts = [f.label || f.kind || "fault", f.harness].filter(Boolean).join(" / ");
+  if (facts) lines.push(`${facts} — ${a.category || "running"}`);
+  if (f.until) {
+    const at = new Date(f.until);
+    if (!isNaN(at)) lines.push(`until ${at.toLocaleString()}`);
+  }
+  if (f.resolved_by) lines.push(`clears by: ${f.resolved_by}`);
+  return lines.join(" · ");
+}
+
+async function refreshLeaderFaults() {
+  let body;
+  try {
+    const resp = await api("/api/leader-faults");
+    if (!resp.ok) return;
+    body = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = body && Array.isArray(body.alerts) ? body.alerts : [];
+  const live = new Set();
+  for (const a of rows) {
+    const session = String((a && a.session) || "");
+    if (!session) continue;
+    const key = LEADER_FAULT_PREFIX + session;
+    live.add(key);
+    // A hidden kind records and shows nothing (notify's own rule), and
+    // calling it every poll would fill the history with copies. Reading the
+    // setting here keeps the decision in one place: hidden means no card,
+    // and unhiding raises the next alert on the poll after it.
+    if (!noticeSourceShown("fault")) continue;
+    const f = a.fault || {};
+    const sig = [a.category, f.kind, f.message, f.until, f.resolved_by, a.handle]
+      .join("|");
+    if (leaderFaultRaised.get(key) === sig) continue;
+    leaderFaultRaised.set(key, sig);
+    notify(`leader stopped: ${a.handle || session}`, leaderFaultSub(a), {
+      source: "fault", key, kind: "fatal", sticky: true, dismissable: false,
+      session,
+    });
+  }
+  for (const key of [...leaderFaultRaised.keys()]) {
+    if (live.has(key)) continue;
+    leaderFaultRaised.delete(key);
+    dismissNotice(key);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* nudges: a driver asking its person to act on its cflow run          */
 /* ------------------------------------------------------------------ */
 /* An agent whose run stops on something only a person releases -- a
@@ -61532,6 +61615,9 @@ async function pollOnce() {
     refreshTermWindow(),
     refreshTermTimers(),
     refreshTermProcs(),
+    // A stopped leader is the one fault the operator cannot wait to read off
+    // the rail; the daemon decides which rows count (claunch-9djny).
+    refreshLeaderFaults(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
