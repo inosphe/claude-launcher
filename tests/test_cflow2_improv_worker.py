@@ -877,6 +877,23 @@ def test_beads_common_loaded_value_is_the_v1_block():
     assert "${frag:beads-common}" in V2.read_text(encoding="utf-8")
 
 
+def test_pool_answer_assigning_back_is_named_and_announced():
+    # claunch-p641s: a leader answered a pool ask by assigning the issue back
+    # to the asking worker; wrapup only knew "HOLD or another session", the
+    # marker was undefined, and queue-recheck started the round silently.
+    chart = _chart()
+    wrapup = _words(next(n for n in chart.nodes.values()
+                         if n.label == "wrapup").props["prompt"])
+    assert "`HOLD: <이유>` 코멘트, (2) 다른 세션에 배정, (3) 물어 온 이 세션에 배정" in wrapup
+    assert "`ASSIGNED by leader: <이 세션> <이유>`" in wrapup
+    recheck = next(_words(n.props["prompt"]) for n in chart.nodes.values()
+                   if "회차가 마감됐다" in (n.props.get("prompt") or ""))
+    assert "`ASSIGNED by leader:` 코멘트로 들어온 것이 있으면" in recheck
+    assert "`thread_open`" in recheck
+    common = _words(_block(COMMON.read_text(encoding="utf-8")))
+    assert "`ASSIGNED by leader: <그 세션> <이유>`" in common
+
+
 # -- triggers (docs/cflow-v2.md 2.8) -----------------------------------------
 
 
