@@ -198,7 +198,9 @@ screen.addEventListener("load", () => { $("wd-empty").classList.add("hidden"); }
 window.addEventListener("focus", () => send({ type: "hello", session }));
 
 /* ---- mouse, wheel and keys ---- */
-const BUTTONS = { 0: 1, 1: 4, 2: 2 };
+// DOM and CDP use the same button names and the same buttons bitmask.
+const BUTTON_NAMES = ["left", "middle", "right", "back", "forward"];
+const buttonName = (n) => BUTTON_NAMES[n] || "none";
 function pagePoint(e) {
   const r = screen.getBoundingClientRect();
   const w = screen.naturalWidth || r.width;
@@ -215,10 +217,10 @@ screen.addEventListener("mousedown", (e) => {
   if (picking) return;
   const p = pagePoint(e);
   const now = performance.now();
-  const count = (now - lastAt < 400 && Math.abs(e.clientX - lastDown) < 4) ? 2 : 1;
+  const count = (e.button === 0 && now - lastAt < 400 && Math.abs(e.clientX - lastDown) < 4) ? 2 : 1;
   lastAt = now; lastDown = e.clientX;
-  send({ type: "input", event: { kind: "mouse", type: "mousePressed", ...p, button: "left",
-    buttons: BUTTONS[e.button] || 1, clickCount: count, modifiers: modifiers(e) } });
+  send({ type: "input", event: { kind: "mouse", type: "mousePressed", ...p, button: buttonName(e.button),
+    buttons: e.buttons, clickCount: count, modifiers: modifiers(e) } });
   e.preventDefault();
 });
 screen.addEventListener("mouseup", (e) => {
@@ -229,8 +231,8 @@ screen.addEventListener("mouseup", (e) => {
     return;
   }
   const p = pagePoint(e);
-  send({ type: "input", event: { kind: "mouse", type: "mouseReleased", ...p, button: "left",
-    buttons: 0, clickCount: 1, modifiers: modifiers(e) } });
+  send({ type: "input", event: { kind: "mouse", type: "mouseReleased", ...p, button: buttonName(e.button),
+    buttons: e.buttons, clickCount: 1, modifiers: modifiers(e) } });
   e.preventDefault();
 });
 let moveAt = 0;
@@ -238,8 +240,9 @@ let movePending = null;
 screen.addEventListener("mousemove", (e) => {
   if (picking) return;
   const p = pagePoint(e);
-  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: "none", buttons: 0,
-    modifiers: modifiers(e) };
+  // e.buttons carries a drag: a pressed button stays held while the pointer moves.
+  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: buttonName(e.button),
+    buttons: e.buttons, modifiers: modifiers(e) };
   const now = performance.now();
   if (now - moveAt > 33) {  // ~30 moves/s is enough to feel live
     moveAt = now;
@@ -259,12 +262,16 @@ screen.addEventListener("wheel", (e) => {
     deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modifiers(e) } });
   e.preventDefault();
 }, { passive: false });
+// Backspace and Enter only act on the page when Chrome is told what they
+// produce; Delete and Tab already work without text (s1262-rev measured all
+// four), so only these two carry it.
+const EDIT_TEXT = { Backspace: "\b", Enter: "\r" };
 function forwardKey(e, type) {
   if (document.activeElement !== screen) return;
   const printable = e.key.length === 1;
+  const text = type !== "keyDown" ? undefined : (printable ? e.key : EDIT_TEXT[e.key]);
   send({ type: "input", event: { kind: "key", type, key: e.key, code: e.code,
-    keyCode: e.keyCode, text: type === "keyDown" && printable ? e.key : undefined,
-    modifiers: modifiers(e) } });
+    keyCode: e.keyCode, text, modifiers: modifiers(e) } });
   if (e.key === "Escape" && type === "keyDown") { screen.blur(); activity("키보드 전달을 멈췄습니다."); }
   if (printable || e.key === "Backspace" || e.key === "Enter" || e.key === "Tab" || e.key.startsWith("Arrow")) {
     e.preventDefault();

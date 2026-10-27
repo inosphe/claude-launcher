@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+import re
 import stat
 from pathlib import Path
 
@@ -58,6 +59,21 @@ def test_the_agent_is_installed_into_every_document_before_the_page_runs():
     assert "__claunchWebdebug" in agent and "postMessage" not in agent
 
 
+def test_the_browser_tab_sends_the_text_an_editing_key_produces():
+    """Backspace and Enter only act on the page when Chrome is told what they
+    produce; the tab therefore carries text for them too (s1262-rev)."""
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    assert "EDIT_TEXT" in script
+    for key, text in (("Backspace", r'"\b"'), ("Enter", r'"\r"')):
+        assert re.search(rf'{key}:\s*"{re.escape(text.strip(chr(34)))}"', script), key
+
+
+def test_a_drag_and_a_right_click_keep_their_button():
+    script = (STATIC / "webdebug.js").read_text(encoding="utf-8")
+    assert "buttonName(e.button)" in script and "buttons: e.buttons" in script
+    assert 'button: "left"' not in script
+
+
 # --------------------------------------------------------------------------- #
 # the browser
 # --------------------------------------------------------------------------- #
@@ -93,6 +109,31 @@ def test_only_addresses_a_browser_can_open_are_accepted(raw):
     with pytest.raises(webdebug.WebDebugError) as caught:
         webdebug.target_url(raw)
     assert caught.value.status == 400
+
+
+def test_the_refusal_names_what_is_accepted(monkeypatch):
+    monkeypatch.delenv(webdebug.NO_SANDBOX_ENV, raising=False)
+    with pytest.raises(webdebug.WebDebugError) as caught:
+        webdebug.target_url("javascript:alert(1)")
+    assert "javascript" in str(caught.value) and "file" in str(caught.value)
+
+
+def test_the_browser_keeps_chrome_s_sandbox_unless_the_operator_turns_it_off(monkeypatch):
+    """This browser renders whatever page someone names, so its renderer runs
+    sandboxed; the flag is dropped only where the sandbox cannot work."""
+    monkeypatch.delenv(webdebug.NO_SANDBOX_ENV, raising=False)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+    args = webdebug.browser_args("/usr/bin/chrome", "/profile")
+    assert "--no-sandbox" not in args
+    assert args[0] == "/usr/bin/chrome" and args[-1] == "about:blank"
+
+    monkeypatch.setenv(webdebug.NO_SANDBOX_ENV, "1")
+    assert "--no-sandbox" in webdebug.browser_args("/usr/bin/chrome", "/profile")
+
+    # root cannot use Chrome's sandbox at all
+    monkeypatch.delenv(webdebug.NO_SANDBOX_ENV)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 0, raising=False)
+    assert "--no-sandbox" in webdebug.browser_args("/usr/bin/chrome", "/profile")
 
 
 # --------------------------------------------------------------------------- #
@@ -378,6 +419,130 @@ def test_a_real_browser_streams_frames_takes_input_and_screenshots(tmp_path, mon
 
             shot = await hub.command("s1", "screenshot", {}, window=win.id)
             assert Path(shot["value"]["image"]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_scrolled_element_is_captured_where_it_is(tmp_path, monkeypatch):
+    """The clip of an element screenshot is in page coordinates while the
+    agent's rect is viewport-relative; without the offset a scrolled element
+    captured the empty region above it (s1236-rev2, s511-rev)."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    page = tmp_path / "scrolled.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>scrolled</title><style>"
+        "html,body{margin:0;padding:0}body{height:5000px}"
+        ".box{position:absolute;left:0;width:120px;height:120px;background:#ff0000}"
+        "#top{top:0}#deep{top:2000px}</style>"
+        "<div id=top class=box></div><div id=deep class=box></div>", encoding="utf-8")
+
+    async def run():
+        hub = webdebug.Hub()
+        try:
+            win = await hub.attach("w-scrl", "s1", _Viewer())
+            await hub.navigate(win, page.as_uri())
+            near = await hub.command("s1", "screenshot", {"selector": "#top"}, window="w-scrl")
+            far = await hub.command("s1", "screenshot", {"selector": "#deep"}, window="w-scrl")
+            info = await hub.agent(win, "rect", {"selector": "#deep"})
+            # the element is deep in the document but on screen once scrolled
+            assert info["page"]["y"] >= 1500 and info["rect"]["y"] < 800
+            # two identical red squares: the captures must show the same thing
+            assert (Path(far["value"]["image"]).read_bytes()
+                    == Path(near["value"]["image"]).read_bytes())
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_the_agent_installs_itself_into_a_document_that_predates_it(tmp_path, monkeypatch):
+    """The first document (about:blank) exists before the agent is injected;
+    a command there must install it and answer, not return null."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+
+    async def run():
+        hub = webdebug.Hub()
+        try:
+            win = await hub.attach("w-fresh", "s1", _Viewer())
+            value = await hub.agent(win, "where", {})
+            assert isinstance(value, dict) and value.get("url") == "about:blank"
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_the_socket_carries_a_backspace_and_an_enter(tmp_path, monkeypatch):
+    """Keys that edit rather than print only act when Chrome is told what they
+    produce; without that text the page keeps the character and never submits
+    (s1262-rev measured both)."""
+    try:
+        webdebug.find_browser()
+    except webdebug.WebDebugError:
+        pytest.skip("no Chromium on this machine for the web debug page")
+    monkeypatch.setattr(webdebug, "image_folder", lambda: tmp_path)
+    from urllib.parse import quote
+
+    from aiohttp import WSMsgType
+
+    page = tmp_path / "keys.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>keys</title>"
+        "<form id=f><input id=i></form><script>window.__submits=0;"
+        "document.getElementById('f').addEventListener('submit',e=>{e.preventDefault();"
+        "window.__submits++;});</script>", encoding="utf-8")
+
+    async def run():
+        client = TestClient(TestServer(_app(_Manager("s1"))))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                "/api/webdebug/ws?window=w-keys&session=s1&url=" + quote(page.as_uri(), safe=""))
+            for _ in range(200):
+                msg = await ws.receive(timeout=10)
+                if msg.type == WSMsgType.TEXT and json.loads(msg.data).get("type") == "state":
+                    break
+            hub = client.server.app["webdebug"]
+            await hub.command("s1", "click", {"selector": "#i"}, window="w-keys")
+            await ws.send_json({"type": "input", "event": {"kind": "text", "text": "abc"}})
+            for key, code, vk, text in (("Backspace", "Backspace", 8, "\b"),
+                                        ("Enter", "Enter", 13, "\r")):
+                await ws.send_json({"type": "input", "event": {
+                    "kind": "key", "type": "keyDown", "key": key, "code": code,
+                    "keyCode": vk, "text": text}})
+            win = hub.window_for("s1", "w-keys")
+            for _ in range(50):
+                if await hub.evaluate(win, "window.__submits") == 1:
+                    break
+                await asyncio.sleep(0.1)
+            assert await hub.evaluate(win, "document.getElementById('i').value") == "ab"
+            assert await hub.evaluate(win, "window.__submits") == 1
+            await ws.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_bad_value_from_the_viewer_is_an_error_and_not_the_end_of_the_socket():
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _FakeBrowser()
+        try:
+            viewer = _Viewer()
+            win = await hub.attach("w-abcd", "s1", viewer)
+            await webdebug._viewer_message(hub, win, {"type": "quality", "quality": "high"})
+            assert any(m.get("type") == "error" for m in viewer.json)
         finally:
             await hub.stop_all()
 

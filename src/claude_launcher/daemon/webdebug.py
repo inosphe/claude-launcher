@@ -118,6 +118,14 @@ BROWSER_ENV = "CLAUNCH_CHROMIUM"
 #: any certificate; it is off by default because that browser then also trusts
 #: whatever a real site's attacker presents.
 INSECURE_TLS_ENV = "CLAUNCH_WEBDEBUG_INSECURE_TLS"
+#: Chrome's sandbox stays on by default: this browser renders whatever page a
+#: user or agent names, so without it a renderer bug is code execution as the
+#: daemon's user. It is turned off only where it cannot work (running as root)
+#: or when the operator says so -- some containers and older kernels have no
+#: user namespaces, and there Chrome refuses to start.
+NO_SANDBOX_ENV = "CLAUNCH_WEBDEBUG_NO_SANDBOX"
+#: What the page-side agent throws when the document has not got it yet.
+MISSING_AGENT = "the web debug agent is not in this document"
 _LAUNCH_TIMEOUT = 25.0
 
 _KEY_MODIFIERS = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
@@ -127,6 +135,39 @@ class WebDebugError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+def _on(value: str) -> bool:
+    return os.environ.get(value) not in (None, "", "0", "false", "no")
+
+
+def sandbox_off() -> bool:
+    """Whether to start the browser with ``--no-sandbox``."""
+    if _on(NO_SANDBOX_ENV):
+        return True
+    getuid = getattr(os, "geteuid", None)
+    return bool(getuid and getuid() == 0)
+
+
+def browser_args(binary: str, profile: str) -> List[str]:
+    """The browser's command line. Split out so a test can hold the flags
+    without starting anything."""
+    args = [
+        binary,
+        "--headless=new",
+        "--remote-debugging-port=0",
+        f"--user-data-dir={profile}",
+        f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT}",
+        "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
+        "--disable-gpu", "--hide-scrollbars", "--mute-audio", "--disable-dev-shm-usage",
+        "--disable-extensions", "--disable-sync",
+    ]
+    if _on(INSECURE_TLS_ENV):
+        args.append("--ignore-certificate-errors")
+    if sandbox_off():
+        args.append("--no-sandbox")
+    args.append("about:blank")
+    return args
 
 
 def target_url(raw: str) -> str:
@@ -143,7 +184,9 @@ def target_url(raw: str) -> str:
         # (digits, then the path or nothing) means the user typed an address.
         rest = text.split(":", 1)[1]
         if not re.match(r"^\d+(/|$|\?)", rest):
-            raise WebDebugError(400, f"only http and https pages can be opened, not {scheme}:")
+            raise WebDebugError(400, (
+                f"a browser cannot open {scheme}: addresses -- only "
+                + ", ".join(allowed) + " are"))
         text = "http://" + text
     elif not scheme:
         text = "http://" + text
@@ -303,29 +346,21 @@ class Browser:
                     shutil.rmtree(stale, ignore_errors=True)
         self._profile = tempfile.mkdtemp(prefix="browser-", dir=str(root))
         port_file = Path(self._profile) / "DevToolsActivePort"
-        args = [
-            self.path,
-            "--headless=new",
-            "--remote-debugging-port=0",
-            f"--user-data-dir={self._profile}",
-            f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT}",
-            "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
-            "--disable-gpu", "--hide-scrollbars", "--mute-audio", "--disable-dev-shm-usage",
-            "--disable-extensions", "--disable-sync", "--no-sandbox",
-            "about:blank",
-        ]
-        if os.environ.get(INSECURE_TLS_ENV) not in (None, "", "0", "false", "no"):
-            args.insert(-1, "--ignore-certificate-errors")
+        args = browser_args(self.path, self._profile)
         log.info("webdebug: starting browser %s", self.path)
         self._proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         deadline = time.monotonic() + _LAUNCH_TIMEOUT
         port = 0
+        # Chrome's sandbox needs user namespaces; a container without them fails
+        # here. Say so, because the fix is an opt-out the operator chooses.
+        sandbox_hint = "" if sandbox_off() else (
+            f" -- if this machine cannot run Chrome's sandbox, set {NO_SANDBOX_ENV}=1")
         while time.monotonic() < deadline:
             if self._proc.returncode is not None:
                 raise WebDebugError(503, (
                     f"the browser {self.path} exited with {self._proc.returncode} before it "
-                    "opened a DevTools port"))
+                    "opened a DevTools port" + sandbox_hint))
             if port_file.is_file():
                 text = port_file.read_text(errors="replace").split()
                 if text:
@@ -334,7 +369,7 @@ class Browser:
             await asyncio.sleep(0.05)
         if not port:
             raise WebDebugError(503, f"the browser {self.path} did not open a DevTools port "
-                                     f"within {_LAUNCH_TIMEOUT:g}s")
+                                     f"within {_LAUNCH_TIMEOUT:g}s" + sandbox_hint)
         self._session = aiohttp.ClientSession()
         try:
             async with self._session.get(f"http://127.0.0.1:{port}/json/version") as resp:
@@ -674,12 +709,16 @@ class Hub:
         return (result.get("result") or {}).get("value")
 
     async def agent(self, win: Window, op: str, args: dict, *, timeout: float = COMMAND_TIMEOUT) -> object:
-        expr = ("window.__claunchWebdebug && window.__claunchWebdebug.op("
-                + json.dumps(op) + ", " + json.dumps(args or {}) + ")")
+        # A guard that throws, not `window.__claunchWebdebug && ...`: the latter
+        # answers undefined for a document that predates the injection, and the
+        # retry below would never run (s1389-rev, s511-rev, s648-rev).
+        expr = ("(() => { if (!window.__claunchWebdebug) { throw new Error("
+                + json.dumps(MISSING_AGENT) + "); } return window.__claunchWebdebug.op("
+                + json.dumps(op) + ", " + json.dumps(args or {}) + "); })()")
         try:
             return await self.evaluate(win, expr, timeout=timeout, await_promise=True)
         except WebDebugError as exc:
-            if "is not defined" not in str(exc) or "Promise" in str(exc):
+            if MISSING_AGENT not in str(exc):
                 raise
             # The document predates the injection (about:blank, or a page opened
             # before the agent existed): install it once, then retry.
@@ -772,9 +811,16 @@ class Hub:
             info = await self.agent(win, "rect", {"ref": args.get("ref"),
                                                   "selector": args.get("selector")}, timeout=timeout)
             rect = (info or {}).get("rect") or {}
+            # getBoundingClientRect is viewport-relative and the rect op scrolls
+            # the element to the middle of the screen; a CDP clip is in page
+            # coordinates. Without the offset a scrolled element captures the
+            # region above it (s1236-rev2 measured a white PNG for a red div).
+            page = (info or {}).get("page") or {}
             element = (info or {}).get("element")
             if rect.get("width") and rect.get("height"):
-                params["clip"] = {"x": max(0, rect["x"]), "y": max(0, rect["y"]),
+                left = page.get("x", rect["x"])
+                top = page.get("y", rect["y"])
+                params["clip"] = {"x": max(0, left), "y": max(0, top),
                                   "width": rect["width"], "height": rect["height"], "scale": 1}
         shot = await cdp.send("Page.captureScreenshot", params,
                               session=win.cdp_session, timeout=timeout)
@@ -981,6 +1027,10 @@ async def _viewer_message(hub: Hub, win: Window, msg: dict) -> None:
             await hub.broadcast(win, {"type": "screenshot", **value})
     except WebDebugError as exc:
         await hub.broadcast(win, {"type": "error", "message": str(exc)})
+    except (ValueError, TypeError) as exc:
+        # A viewer's own value was unusable (quality "high", x "left"). Answer
+        # it; letting it escape would end that viewer's socket loop.
+        await hub.broadcast(win, {"type": "error", "message": f"{kind}: {exc}"})
 
 
 async def h_command(request: web.Request) -> web.Response:

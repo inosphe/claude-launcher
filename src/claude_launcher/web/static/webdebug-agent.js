@@ -332,11 +332,16 @@
   function rect(args) {
     args = args || {};
     if (!(args.ref || args.selector)) {
-      return { rect: { x: 0, y: 0, width: innerWidth, height: innerHeight } };
+      return { rect: { x: 0, y: 0, width: innerWidth, height: innerHeight },
+        page: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } };
     }
     const el = resolve(args);
     if (args.scroll !== false) el.scrollIntoView({ block: "center" });
-    return { rect: rectOf(el), element: describeShort(el) };
+    const r = rectOf(el);
+    // The daemon needs both places: clicks and presses land in viewport
+    // coordinates, a screenshot clip is taken in page coordinates.
+    return { rect: r, page: { ...r, x: r.x + scrollX, y: r.y + scrollY },
+      element: describeShort(el) };
   }
   function highlight(args) {
     const el = resolve(args);
