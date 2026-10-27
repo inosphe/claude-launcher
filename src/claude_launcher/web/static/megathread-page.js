@@ -191,8 +191,9 @@ globalThis.MegaThreadPage = (() => {
     cflowOf: {},
     project: "",
     mesh: "",
-    // The role filter: "" is every role, "-" the sessions with none.
-    role: "",
+    // The role filter: the roles ticked in its combobox, "-" for the
+    // sessions with none. Empty is every role.
+    role: new Set(),
     // Which of the seven categories the reader keeps. Empty means all of
     // them, so a reader who has not filtered sees the whole fleet.
     statuses: new Set(),
@@ -214,6 +215,9 @@ globalThis.MegaThreadPage = (() => {
   // The create panel's parts while it is open, so a repaint after a tick or
   // a preview reaches the same nodes the reader is using.
   let createParts = null;
+  // The fleet read open() starts after the clusters paint, while it is in
+  // flight. A preview asked for before it answers waits on it.
+  let fleetLoad = null;
 
   function view() {
     return typeof document !== "undefined" && document.getElementById("megathreads-view");
@@ -383,13 +387,18 @@ globalThis.MegaThreadPage = (() => {
      are drawn and capped at the daemon's own ceiling: a preview has to score
      what the reader is looking at, not the whole archive of the machine.
      A failure leaves the panel usable — the ticks can still be made by hand
-     — and 재시도 re-sends the same body. */
+     — and 재시도 re-sends the same body.
+     Asked before the fleet has arrived, it waits for it: the candidates are
+     drawn from that list, and an empty one is a request the daemon refuses
+     ("no sessions to score"). An empty list after the filters is refused
+     here for the same reason, without a call. */
   async function requestDraft() {
     const topic = String(state.topic || "").trim();
     if (!topic || state.draftBusy) return;
     state.draftBusy = true;
     state.draftError = "";
     paintDraft(createParts);
+    if (state.sessions === null && fleetLoad) await fleetLoad;
     const scope = pickerRows(state.sessions || [], {
       query: state.filter,
       picked: state.picked,
@@ -399,7 +408,16 @@ globalThis.MegaThreadPage = (() => {
       statuses: state.statuses,
       sort: state.sort,
       hierarchy: false,
+      // The mesh and role filters read the roster: without it every row
+      // has neither, and either filter would empty the candidate list.
+      meshOf: state.meshOf,
     }).map((row) => row.name).slice(0, 40);
+    if (!scope.length) {
+      state.draftBusy = false;
+      state.draftError = "필터에 남은 세션이 없습니다 — 필터를 넓힌 뒤 다시 요청하세요";
+      paintDraft(createParts);
+      return;
+    }
     try {
       const res = await apiSend("/api/megathreads/draft", { topic, sessions: scope });
       state.draftPreview = res;
@@ -688,6 +706,17 @@ globalThis.MegaThreadPage = (() => {
     return out;
   }
 
+  /* The role filter as a set: the combobox's ticks, or one name (the form a
+     caller with a single role passes). Empty is every role; "-" stands for
+     the sessions with none. */
+  function roleSet(value) {
+    if (value instanceof Set) return value;
+    if (value && typeof value !== "string" && typeof value[Symbol.iterator] === "function") {
+      return new Set([...value].filter(Boolean).map(String));
+    }
+    return new Set(value ? [String(value)] : []);
+  }
+
   /* Which sessions a filter set keeps. Each axis is independent and an empty
      one means "everything"; the status set is the one exception, where an
      empty set is also "everything" because a reader who has ticked nothing
@@ -703,9 +732,10 @@ globalThis.MegaThreadPage = (() => {
       const mesh = entry ? entry.mesh : "";
       if (o.mesh === "-" ? !!mesh : mesh !== o.mesh) return false;
     }
-    if (o.role) {
+    const roles = roleSet(o.role);
+    if (roles.size) {
       const role = roleOf(s, o.meshOf);
-      if (o.role === "-" ? !!role : role !== o.role) return false;
+      if (!roles.has(role || "-")) return false;
     }
     if (o.statuses && o.statuses.size) {
       const wanted = o.statuses instanceof Set ? o.statuses : new Set(o.statuses);
@@ -928,13 +958,11 @@ globalThis.MegaThreadPage = (() => {
     filter.addEventListener("input", () => { state.filter = filter.value; paintRows(parts); });
     controls.appendChild(filter);
 
-    const { projects, meshes, roles } = filterChoices(state.sessions || [], state.meshOf);
+    // Their options come from the fleet, which may still be in flight:
+    // paintFilters fills them now and again when it arrives.
     const projectSelect = document.createElement("select");
     projectSelect.className = "mt-create-project";
     projectSelect.title = "프로젝트로 거르기";
-    projectSelect.appendChild(optionRow("", "모든 프로젝트"));
-    for (const name of projects) projectSelect.appendChild(optionRow(name, name));
-    projectSelect.value = projects.includes(state.project) ? state.project : "";
     projectSelect.addEventListener("change", () => {
       state.project = projectSelect.value;
       paintRows(parts);
@@ -944,28 +972,73 @@ globalThis.MegaThreadPage = (() => {
     const meshSelect = document.createElement("select");
     meshSelect.className = "mt-create-mesh";
     meshSelect.title = "메시로 거르기";
-    meshSelect.appendChild(optionRow("", "모든 메시"));
-    for (const name of meshes) meshSelect.appendChild(optionRow(name, name));
-    meshSelect.appendChild(optionRow("-", "메시 없음"));
-    meshSelect.value = meshes.includes(state.mesh) || state.mesh === "-" ? state.mesh : "";
     meshSelect.addEventListener("change", () => {
       state.mesh = meshSelect.value;
       paintRows(parts);
     });
     controls.appendChild(meshSelect);
 
-    const roleSelect = document.createElement("select");
-    roleSelect.className = "mt-create-role";
-    roleSelect.title = "역할로 거르기";
-    roleSelect.appendChild(optionRow("", "모든 역할"));
-    for (const name of roles) roleSelect.appendChild(optionRow(name, name));
-    roleSelect.appendChild(optionRow("-", "역할 없음"));
-    roleSelect.value = roles.includes(state.role) || state.role === "-" ? state.role : "";
-    roleSelect.addEventListener("change", () => {
-      state.role = roleSelect.value;
+    /* The role filter is a multi-select combobox: a button that says what
+       is ticked, over a list of checkboxes (each role and 역할 없음) with a
+       search box. Nothing ticked is every role. The list stays open while
+       the reader ticks, and each tick repaints the session list only. */
+    const roleCombo = node("div", "mt-create-role");
+    const roleBtn = node("button", "mt-create-role-btn");
+    roleBtn.type = "button";
+    roleBtn.title = "역할로 거르기";
+    roleBtn.setAttribute("aria-haspopup", "listbox");
+    roleBtn.setAttribute("aria-expanded", "false");
+    roleCombo.appendChild(roleBtn);
+    const rolePop = node("div", "mt-create-role-pop");
+    rolePop.hidden = true;
+    const roleSearch = document.createElement("input");
+    roleSearch.type = "search";
+    roleSearch.className = "mt-create-role-search";
+    roleSearch.placeholder = "역할 찾기";
+    roleSearch.setAttribute("role", "combobox");
+    roleSearch.setAttribute("aria-expanded", "true");
+    rolePop.appendChild(roleSearch);
+    const roleList = node("div", "mt-create-role-list");
+    roleList.setAttribute("role", "listbox");
+    roleList.setAttribute("aria-multiselectable", "true");
+    rolePop.appendChild(roleList);
+    const roleClear = node("button", "mt-create-role-clear", "선택 해제");
+    roleClear.type = "button";
+    rolePop.appendChild(roleClear);
+    roleCombo.appendChild(rolePop);
+    const roleOpen = (open) => {
+      rolePop.hidden = !open;
+      roleBtn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) { roleSearch.value = ""; paintRoleList(parts); roleSearch.focus(); }
+    };
+    roleBtn.addEventListener("click", () => roleOpen(rolePop.hidden));
+    roleSearch.addEventListener("input", () => paintRoleList(parts));
+    roleList.addEventListener("change", (event) => {
+      const box = event.target;
+      if (!box || !box.classList || !box.classList.contains("mt-create-role-opt")) return;
+      if (box.checked) state.role.add(box.value);
+      else state.role.delete(box.value);
+      paintRoleButton(parts);
       paintRows(parts);
     });
-    controls.appendChild(roleSelect);
+    roleClear.addEventListener("click", () => {
+      state.role.clear();
+      paintRoleList(parts);
+      paintRoleButton(parts);
+      paintRows(parts);
+    });
+    // Escape closes the list, not the panel; a click outside it closes it.
+    roleCombo.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !rolePop.hidden) {
+        event.stopPropagation();
+        roleOpen(false);
+        roleBtn.focus();
+      }
+    });
+    overlay.addEventListener("mousedown", (event) => {
+      if (!rolePop.hidden && !roleCombo.contains(event.target)) roleOpen(false);
+    });
+    controls.appendChild(roleCombo);
 
     const sort = document.createElement("select");
     sort.className = "mt-create-sort";
@@ -1032,14 +1105,85 @@ globalThis.MegaThreadPage = (() => {
     card.appendChild(foot);
 
     const parts = { list, count, clear, hint, create, draftBtn, retry, draftNote, topic, statusBar,
-      thresholdRow, slider, thresholdValue };
+      thresholdRow, slider, thresholdValue, projectSelect, meshSelect,
+      roleBtn, roleList, roleSearch };
     createParts = parts;
+    paintFilters(parts);
     paintDraft(parts);
     paintRows(parts);
     card.addEventListener("keydown", (event) => {
       if (event.key === "Escape") { state.createOpen = false; render(); }
     });
     return overlay;
+  }
+
+  /* The project / mesh selects' options and the role combobox's list, from
+     the fleet in hand. Only the options are replaced, never the control, so
+     a control the reader is on keeps its focus when the fleet arrives under
+     it. A choice the new list no longer offers falls back to "all". */
+  function paintFilters(parts) {
+    if (!parts || !parts.projectSelect) return;
+    const { projects, meshes, roles } = filterChoices(state.sessions || [], state.meshOf);
+    const fill = (select, all, names, none) => {
+      select.innerHTML = "";
+      select.appendChild(optionRow("", all));
+      for (const name of names) select.appendChild(optionRow(name, name));
+      if (none) select.appendChild(optionRow("-", none));
+    };
+    fill(parts.projectSelect, "모든 프로젝트", projects, "");
+    parts.projectSelect.value = projects.includes(state.project) ? state.project : "";
+    fill(parts.meshSelect, "모든 메시", meshes, "메시 없음");
+    parts.meshSelect.value = meshes.includes(state.mesh) || state.mesh === "-" ? state.mesh : "";
+    // A ticked role the fleet no longer has is dropped, as the selects fall
+    // back to "all" for a choice they no longer offer.
+    for (const role of [...state.role]) {
+      if (role !== "-" && !roles.includes(role)) state.role.delete(role);
+    }
+    parts.roles = roles;
+    paintRoleList(parts);
+    paintRoleButton(parts);
+  }
+
+  /* The combobox's list: each role the fleet has, then 역할 없음, narrowed
+     by its search box, each ticked as the filter holds it. */
+  function paintRoleList(parts) {
+    if (!parts || !parts.roleList) return;
+    const query = String(parts.roleSearch.value || "").trim().toLowerCase();
+    const items = [...(parts.roles || []).map((name) => [name, name]), ["-", "역할 없음"]];
+    parts.roleList.innerHTML = "";
+    for (const [value, label] of items) {
+      if (query && !label.toLowerCase().includes(query)) continue;
+      const item = node("label", "mt-create-role-item");
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", state.role.has(value) ? "true" : "false");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.className = "mt-create-role-opt";
+      box.value = value;
+      box.checked = state.role.has(value);
+      item.appendChild(box);
+      item.appendChild(node("span", null, label));
+      parts.roleList.appendChild(item);
+    }
+    if (!parts.roleList.children.length) {
+      parts.roleList.appendChild(node("p", "wf-note", "맞는 역할이 없습니다"));
+    }
+  }
+
+  function paintRoleButton(parts) {
+    if (!parts || !parts.roleBtn) return;
+    parts.roleBtn.textContent = roleLabel(state.role);
+    parts.roleBtn.classList.toggle("on", state.role.size > 0);
+  }
+
+  /* What the role button says: 전체 when nothing is ticked, else the ticked
+     names in the list's order with 역할 없음 last. */
+  function roleLabel(ticked) {
+    const set = roleSet(ticked);
+    if (!set.size) return "역할: 전체";
+    const names = [...set].filter((r) => r !== "-").sort((a, b) => a.localeCompare(b));
+    if (set.has("-")) names.push("역할 없음");
+    return `역할: ${names.join(", ")}`;
   }
 
   function optionRow(value, label) {
@@ -1115,7 +1259,7 @@ globalThis.MegaThreadPage = (() => {
     }
     if (!rows.length) {
       parts.list.appendChild(node("p", "wf-note",
-        state.filter || state.project || state.mesh || state.role || state.statuses.size
+        state.filter || state.project || state.mesh || state.role.size || state.statuses.size
           ? "거른 결과가 없습니다" : "고를 세션이 없습니다"));
     }
     paintCounters(parts);
@@ -1128,7 +1272,9 @@ globalThis.MegaThreadPage = (() => {
     const preview = state.draftPreview;
     if (state.draftBusy) {
       parts.draftNote.className = "mt-create-draft-note";
-      parts.draftNote.textContent = "Jev가 주제를 읽는 중…";
+      parts.draftNote.textContent = state.sessions === null
+        ? "세션 목록을 읽는 중… 도착하면 Jev에 보냅니다"
+        : "Jev가 주제를 읽는 중…";
     } else if (state.draftError) {
       parts.draftNote.className = "mt-create-draft-note bad";
       parts.draftNote.textContent = `추천 실패 — ${state.draftError}`;
@@ -1423,10 +1569,17 @@ globalThis.MegaThreadPage = (() => {
     await load();
     if (timer) clearInterval(timer);
     timer = setInterval(() => load(true), POLL_MS);
-    loadSessions().then(() => {
+    // A panel the reader is typing in is not rebuilt: its list, counters and
+    // select options are repainted in place.
+    fleetLoad = loadSessions();
+    fleetLoad.then(() => {
+      fleetLoad = null;
       if (!timer) return;  // the reader left the page meanwhile
-      if (typing() && createParts) { paintRows(createParts); paintCounters(createParts); }
-      else if (!typing()) render();
+      if (typing() && createParts) {
+        paintFilters(createParts);
+        paintRows(createParts);
+        paintCounters(createParts);
+      } else if (!typing()) render();
     });
   }
 
@@ -1442,6 +1595,6 @@ globalThis.MegaThreadPage = (() => {
     statusTone, sessionLine, matchesFilter, pickerRows, createHint,
     // the create panel's model (tests/web/megathread_check.js runs these bare)
     sessionCategory, metaLine, roleOf, briefLine, sortRows, hierarchyOrder,
-    filterChoices, CATEGORIES, SORTS,
+    filterChoices, roleSet, roleLabel, CATEGORIES, SORTS,
   };
 })();

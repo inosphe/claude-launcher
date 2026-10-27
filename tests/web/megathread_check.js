@@ -35,7 +35,9 @@ const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
   // the preview's threshold slider (claunch-wlk6g)
   "probLogit", "logitProb", "draftPicks",
   // score colours and the role filter (claunch-kzudj)
-  "scoreBand", "roleOf"];
+  "scoreBand", "roleOf",
+  // the role combobox (multi-select)
+  "roleSet", "roleLabel"];
 const ctx = {};
 vm.createContext(ctx);
 // ringLayout's defaults read the page's own stage constants; take them from
@@ -308,6 +310,17 @@ assert.deepEqual(byRole("reviewer", true), ["r1:0", "r2:0"],
 assert.deepEqual(byRole("-", false), ["x:0"], "'역할 없음' is the sessions with no role");
 assert.deepEqual(plain(ctx.filterChoices(team, teamRoster)).roles, ["reviewer", "worker"],
   "the choices come from every record, not the filtered list");
+// The combobox ticks several roles at once: the filter keeps a row whose
+// role is any of them, "-" among them keeping the rows with none. An empty
+// set is every role, like "".
+assert.deepEqual(byRole(new Set(["worker", "-"]), false), ["w1:0", "w2:0", "x:0"],
+  "a worker or a session with no role");
+assert.deepEqual(byRole(["reviewer", "worker"], true), ["w1:0", "r1:1", "w2:0", "r2:1"],
+  "both roles keep the tree, and the role-less row is dropped");
+assert.deepEqual(byRole(new Set(), true), byRole("", true), "nothing ticked is every role");
+assert.equal(ctx.roleLabel(new Set()), "역할: 전체");
+assert.equal(ctx.roleLabel(new Set(["-", "worker", "reviewer"])), "역할: reviewer, worker, 역할 없음",
+  "the button names the ticks sorted, with 역할 없음 last");
 
 /* ---- score colours (claunch-kzudj) --------------------------------------
    Over the threshold is its own band; under it, p >= 0.5, p >= 0.2 and the
