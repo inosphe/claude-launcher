@@ -162,6 +162,72 @@ def test_held_owner_keeps_ownership(tmp_path):
     run(tmp_path, scenario)
 
 
+def boot_sweep(tmp_path, scenario):
+    """An app that is still restoring its fleet when it starts: the owners
+    named in the scenario are on disk but not yet in the manager."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    # The previous daemon's records: written while their owners were running.
+    before = S.SimStore(tmp_path / "sims", live=lambda n: True)
+    sims = {o: before.create(title=o, root=str(root), owner=o, actor=o)["id"]
+            for o in ("restored", "delayed", "gone")}
+    before.attach_runner(sims["restored"], "restored-run")
+    mgr = FakeManager([])
+    st = S.SimStore(tmp_path / "sims", live=lambda n: sim_api._live(mgr, n))
+    app = web.Application()
+    app["manager"] = mgr
+    app["boot"] = {"phase": "restoring"}
+    sim_api.install(app, st)
+
+    async def go():
+        async with TestClient(TestServer(app)):
+            await scenario(app, mgr, st, sims)
+        return app
+
+    return asyncio.run(go())
+
+
+def owners(st, sims):
+    return {o: st.get(sid)["owner"] for o, sid in sims.items()}
+
+
+def test_startup_sweep_waits_for_the_restore(tmp_path):
+    # claunch-qg3x9: the sweep ran from on_startup, before restore_all, and
+    # released every owner the restore was about to bring back.
+    async def scenario(app, mgr, st, sims):
+        await asyncio.sleep(0.5)
+        assert owners(st, sims) == {"restored": "restored", "delayed": "delayed", "gone": "gone"}
+        assert st.runner_of(sims["restored"]) == "restored-run"
+        restored = FakeSession("restored", "")
+        delayed = FakeSession("delayed", "")
+        delayed.exited, delayed.held_at = True, "2026-10-27T00:00:00+00:00"
+        run = FakeSession("restored-run", "")
+        mgr.sessions.update({"restored": restored, "delayed": delayed, "restored-run": run})
+        app["boot"]["phase"] = "ready"
+        await asyncio.sleep(0.5)
+        assert app["sims_sweep_task"].done()
+        assert owners(st, sims) == {"restored": "restored", "delayed": "delayed", "gone": ""}
+        assert st.runner_of(sims["restored"]) == "restored-run"
+    boot_sweep(tmp_path, scenario)
+
+
+def test_startup_sweep_skips_a_restore_that_never_finishes(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim_api, "SWEEP_BOOT_WAIT_S", 0.3)
+
+    async def scenario(app, mgr, st, sims):
+        await asyncio.sleep(0.8)
+        assert app["sims_sweep_task"].done()
+        assert owners(st, sims) == {"restored": "restored", "delayed": "delayed", "gone": "gone"}
+    boot_sweep(tmp_path, scenario)
+
+
+def test_startup_sweep_is_cancelled_at_shutdown(tmp_path):
+    async def scenario(app, mgr, st, sims):
+        assert not app["sims_sweep_task"].done()
+    app = boot_sweep(tmp_path, scenario)
+    assert app["sims_sweep_task"].cancelled()
+
+
 def test_exit_releases_and_user_transfers(tmp_path):
     async def scenario(req, mgr, s1, s2):
         sid = (await req("POST", "/api/sims", {"title": "door", "session": "s1"}, status=201))["sim"]["id"]
