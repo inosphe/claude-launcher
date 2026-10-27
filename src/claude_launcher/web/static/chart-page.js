@@ -263,9 +263,11 @@ globalThis.ChartPage = (() => {
      end, each placed by the same positionOf the session bars use, so the
      token chart and the rows under it name the same instants. The last
      bucket runs to `until` rather than a whole width past the last zero
-     bucket (the payload pads the window's tail). */
+     bucket (the payload pads the window's tail). The first bucket starts on
+     the series' grid, up to one width before the axis does; its left edge is
+     held at 0 and the part before the axis is dropped from its width. */
   function seriesSpan(point, smodel, model) {
-    const left = positionOf(point.t, model);
+    const left = Math.max(0, positionOf(point.t, model));
     const end = Math.min(point.t + smodel.widthMs, model.t1);
     const right = Math.max(left, positionOf(Math.max(end, point.t + 1000), model));
     return { left, right };
@@ -340,6 +342,9 @@ globalThis.ChartPage = (() => {
     } else if (r.tokens) {
       rows.push(["토큰(창)", `${formatTokens(r.tokens.total)} · 요청 ` +
         `${(Number(r.tokens.requests) || 0).toLocaleString()}`]);
+      const parts = SERIES_PARTS.filter(([key]) => r.tokens[key])
+        .map(([key, label]) => `${label} ${formatTokens(r.tokens[key])}`);
+      if (parts.length) rows.push(["구성", parts.join(" · ")]);
       const act = activityStats(r.span, r.tokens, smodel, model.now);
       if (act && act.covered) {
         rows.push(["활동 구간", `${act.busy}/${act.covered} 버킷 ` +
@@ -365,6 +370,9 @@ globalThis.ChartPage = (() => {
       rows.push(["cflow", `${r.cflow.version} ${r.cflow.label}` +
         (age.elapsed !== null ? ` · ${formatDuration(age.elapsed)} 전` : "") +
         (age.stalled ? " ⚠" : "")]);
+      if (age.stalled) {
+        rows.push(["정지 의심", `${formatDuration(STALL_MS)} 이상 무변화`]);
+      }
     }
     if (s.profile) rows.push(["profile", s.profile]);
     return { title: r.name, role: r.role || "", brief: briefOf(s), rows };

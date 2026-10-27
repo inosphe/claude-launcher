@@ -511,5 +511,34 @@ assert.strictEqual(card.brief, '');
 tr = tipRows(card);
 assert.ok(tr['토큰(창)'].startsWith('계측 없음'));
 assert.ok(!('활동 구간' in tr) && !('마지막 요청' in tr));
+// No part figures (the fixture's `a`): no breakdown line.
+assert.ok(!('구성' in tipRows(C.rowTip(tipRow, tipModel, am, null))));
+
+// The card carries what the removed title tooltips did (claunch-9n7g1): the
+// window's tokens in the Stats page's four parts, zero parts left out, and
+// why a stalled run is marked.
+const partsRow = Object.assign({}, tipRow, { tokens: Object.assign({},
+  am.bySession.get('a'), { input: 1200, output: 300, cache_read: 45000, cache_write: 0 }) });
+tr = tipRows(C.rowTip(partsRow, tipModel, am, null));
+assert.strictEqual(tr['구성'], 'fresh input 1.20k · cache read 45.0k · output 300');
+const stallRow = Object.assign({}, tipRow, { cflow: { version: 'v2',
+  label: 'work', state: 'running', changedAt: now - C.STALL_MS } });
+tr = tipRows(C.rowTip(stallRow, tipModel, am, null));
+assert.ok(tr.cflow.endsWith(' ⚠'), tr.cflow);
+assert.strictEqual(tr['정지 의심'], '30m 이상 무변화');
+tr = tipRows(C.rowTip(Object.assign({}, stallRow, { cflow: Object.assign({},
+  stallRow.cflow, { changedAt: now - C.STALL_MS + 60000 }) }), tipModel, am, null));
+assert.ok(!('정지 의심' in tr) && !tr.cflow.includes('⚠'));
+
+// On the 24h axis the series' first bucket can start up to one width before
+// the axis; its column and its activity marks start at the axis edge, and
+// the part before the axis is cut from the width (claunch-9n7g1).
+const early = C.buildSeriesModel({ bucket_s: 300, start: sec(now - 24 * H - 200000),
+  until: sec(now), points: [{ t: sec(now - 24 * H - 200000), total: 300 }] });
+const dayAxis = { axisStart: now - 24 * H, t1: now, scale: 'linear' };
+const edge = C.seriesSpan(early.points[0], early, dayAxis);
+assert.strictEqual(edge.left, 0);
+assert.ok(Math.abs(edge.right - C.positionOf(now - 24 * H + 100000, dayAxis)) < 1e-9,
+  `the 100s of the bucket inside the axis remain: ${edge.right}`);
 
 console.log('ok');

@@ -459,6 +459,8 @@ function assertTicksApart(ticks, where) {
     assert.ok(card.includes("Chart 세션 행에 유휴 구간 표시"), "the briefing's one line: " + card);
     assert.ok(!card.includes("step-level sentence"), "the one line, not `now`");
     assert.ok(card.includes("활동 구간") && card.includes("2.15k"), card);
+    assert.ok(card.includes("fresh input 100 · cache read 2.00k · output 50"),
+      "the four-part breakdown the title tooltips used to carry: " + card);
     assert.ok(!card.includes("커서 위치"), "no instant over the name column");
     // Over the track, the bucket under the pointer: the busy one at the
     // start of alpha's bar, a quiet one near now. The pointer is placed by
