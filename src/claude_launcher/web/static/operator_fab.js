@@ -2,7 +2,8 @@
    a dialog over any page with the operator v2 tabs and conversation that the
    Observer page draws (observer_operator.js, one OperatorView per host) and
    an input row of its own. Opened on a session's page it selects the operator
-   whose scope holds that session. Alt+O opens and closes it.
+   whose scope holds that session. Alt+O opens and closes it; Escape, the ×
+   button and a click on the backdrop close it.
    The badge counts the asks waiting across every operator: the ones not
    shown yet when there are any (and the segment turns red), else all that
    are unanswered. Creating, scoping, starting and stopping operators stay on
