@@ -3178,12 +3178,14 @@ def _with_verify_note(payload: Dict[str, Any], job: Dict[str, Any]) -> Dict[str,
 
 
 #: Appended wherever the run stops on a person (claunch-g08xz): a person who
-#: is not watching the driver's terminal does not see the brief written there,
-#: and the run waits for as long as nobody looks. flow_nudge raises it on the
-#: dashboard's notification channel (daemon/flow_nudge.py).
-NUDGE_HINT = ("The user may not be watching this terminal: after writing the brief, call "
-              "flow_nudge(message) once to raise it on their dashboard (card, notification "
-              "history, bell), then wait")
+#: is not watching the driver's terminal does not see the brief written there.
+#: The dashboard puts the gate itself on its notification channel, with its
+#: answers, read from the run files (claunch-whm4e.1, app.js runGateSync);
+#: flow_nudge (daemon/flow_nudge.py) adds the driver's one line to that card.
+NUDGE_HINT = ("The user may not be watching this terminal. The dashboard already raises "
+              "this on their notification channel by itself, a card with the answers "
+              "(card, notification history, bell); after writing the brief, call "
+              "flow_nudge(message) once to put its one-line summary on that card, then wait")
 
 
 def select(node: Optional[str], option: str, reason: Optional[str] = None, *,

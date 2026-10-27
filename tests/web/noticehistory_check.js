@@ -181,7 +181,9 @@ function build(opts) {
     apiCalls.push(p);
     if (opts && opts.body) apiBodies.push([p, JSON.parse(opts.body)]);
     const answer = (body) => ({ ok: true, json: async () => JSON.parse(JSON.stringify(body)) });
-    if (p === "/api/cflow2/approve") return answer({ ok: true });
+    if (p === "/api/cflow2/approve" || p === "/api/cflow2/select" ||
+        p === "/api/cflow2/move/resolve" || p === "/api/cflow2/extend" ||
+        p === "/api/cflow/approve") return answer({ ok: true });
     if (p === "/api/daemon/restart-request") return answer({ request: gate.restart });
     if (p === "/api/cflow/goto-requests") return answer({ requests: gate.goto });
     if (p === "/api/reposync/requests") return answer({ requests: gate.reposync });
@@ -233,7 +235,7 @@ function build(opts) {
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
     "__doc", "__win",
     code +
-    "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
+    "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, runGateSync," +
     " refreshNudgeGate, refreshMeshJoinGate, noticeGatePoll," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
@@ -1032,75 +1034,128 @@ function gotoRec(rec) {
             !w.nodes["notice-panel"].classList.contains("hidden"), w.loc.hash);
   }
 
-  /* --- urgent asks (claunch-x76l8.1) ------------------------------------ */
+  /* --- run gates (claunch-whm4e.1; urgent asks only before, claunch-x76l8.1) --
+     The records are personGateRecords' (termcflow_check.js checks that
+     builder against real rail rows): each carries the strip's presses. */
   {
     const w = build();
-    const urgent = (u) => ({ id: "ask2-aa", instance: "i7", label: "coding-approval",
-                             status: "open", resolution: "human", ...(u || {}) });
-    const row = (u, answers, extra) => ({
-      cwd: "/w/s5", scope: "s5", workflow: "improv-worker-v2", urgent_asks: u,
-      answers: answers === undefined ? [{ kind: "ask", ask: "ask2-aa", instance: "i7",
-        urgent: true, label: "coding-approval", prompt: "start coding?",
-        require_reason: false,
-        options: [{ name: "approve" }, { name: "decline" }] }] : answers,
-      ...(extra || {}) });
+    const approve = (node, extra) => ({ label: "approve", cls: "approve",
+      path: "/api/cflow2/approve",
+      body: { cwd: "/w/s5", scope: "s5", node, decision: "approve", reason: "" }, ...(extra || {}) });
+    const decline = (node) => ({ label: "decline", path: "/api/cflow2/approve",
+      body: { cwd: "/w/s5", scope: "s5", node, decision: "decline", reason: "" } });
+    const ask = (r) => ({ id: "ask2-aa", session: "s5", cwd: "/w/s5", scope: "s5",
+      workflow: "improv-worker-v2", version: 2, kind: "ask", label: "landing-review",
+      prompt: "land it?", presses: [approve("i7"), decline("i7")], ...(r || {}) });
 
-    // an ask without urgent never reaches urgent_asks: the rail row has the
-    // human ask in answers only, and nothing changes on the channel
-    w.api.urgentAskSync({ s5: row([], [{ kind: "ask", ask: "ask2-bb", instance: "i8",
-      label: "plain", prompt: "ok?", options: [{ name: "approve" }, { name: "decline" }] }]) });
-    check("an ask without urgent draws no card", w.strip().length === 0 && w.badge() === "" &&
-            w.api.noticeHistory.length === 0, [w.said(), w.api.noticeHistory]);
-
-    // urgent, but still routed to agents: unchanged
-    for (const resolution of ["routing", "asked", "self"]) {
-      w.api.urgentAskSync({ s5: row([urgent({ resolution })], []) });
-      check(`an urgent ask at resolution ${resolution} draws no card`,
-            w.strip().length === 0 && w.badge() === "" && w.api.noticeHistory.length === 0,
-            [w.said(), w.api.noticeHistory]);
-    }
-
-    w.api.urgentAskSync({ s5: row([urgent()]) });
-    check("an urgent ask fallen to a person draws its card",
-          w.strip().length === 1 && /s5/.test(w.said()) && /coding-approval/.test(w.said()) &&
-            /start coding\?/.test(w.said()), w.said());
+    // the case that had no card at all: an ask without urgent, fallen to a person
+    w.api.runGateSync([ask()], []);
+    check("an ask without urgent that fell to a person draws its card",
+          w.strip().length === 1 && /s5/.test(w.said()) && /landing-review/.test(w.said()) &&
+            /land it\?/.test(w.said()) && /waits on your answer/.test(w.said()), w.said());
     check("the bell counts it as waiting", w.badge() === "1" &&
             w.nodes["notice-bell"].classList.contains("waiting"), [w.badge()]);
     const hist = w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask");
     check("one history row, read, pending, naming the session",
           hist.length === 1 && hist[0].read === true && hist[0].status === "pending" &&
             hist[0].session === "s5", hist);
-    w.api.urgentAskSync({ s5: row([urgent()]) });
+    w.api.runGateSync([ask()], []);
     check("the next poll keeps one card and one row",
           w.strip().length === 1 &&
             w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask").length === 1,
           w.said());
+    check("a plain ask's card is not drawn as urgent",
+          !/urgent-ask/.test(w.strip()[0].className), w.strip()[0].className);
 
     w.press(w.nodes.notices, "approve").click();
     await new Promise((r) => setImmediate(r));
     const posted = w.apiBodies.find(([p]) => p === "/api/cflow2/approve");
-    check("approve posts the run page's own approve with the instance",
+    check("approve posts the strip's own body with the instance",
           posted && posted[1].node === "i7" && posted[1].decision === "approve" &&
             posted[1].cwd === "/w/s5" && posted[1].scope === "s5", w.apiBodies);
     check("and the card goes", w.strip().length === 0, w.said());
 
-    w.api.urgentAskSync({ s5: row([urgent({ status: "answered", decision: "approve", by: "web" })], []) });
+    w.api.runGateSync([], [{ id: "ask2-aa", status: "answered: approve by web" }]);
     check("the answered ask leaves the waiting count", w.badge() === "" &&
             !w.nodes["notice-bell"].classList.contains("waiting"), w.badge());
     check("and its history row says how it ended",
           w.api.noticeHistory.some((e) => e.gate && e.gate.type === "ask" &&
             e.status === "answered: approve by web"), w.api.noticeHistory);
+
+    // an urgent ask keeps its look
+    w.api.runGateSync([ask({ id: "ask2-ee", urgent: true })], []);
+    check("an urgent ask's card keeps its urgent look",
+          w.strip().length === 1 && /urgent-ask/.test(w.strip()[0].className),
+          w.strip().map((c) => c.className));
   }
   {
-    // an urgent ask whose answer wants text: no presses, only the way there
+    // the other gates: a user choice, a move request, a loop limit, a v1 approval
     const w = build();
-    w.api.urgentAskSync({ s6: { cwd: "/w/s6", scope: "s6", urgent_asks: [{ id: "ask2-cc",
-      instance: "i1", label: "plan", status: "open", resolution: "human" }],
-      answers: [{ kind: "ask", ask: "ask2-cc", instance: "i1", prompt: "which plan?",
-                  require_reason: false,
-                  options: [{ name: "a" }, { name: "b" }, { name: "reframe" }] }] } });
-    check("a brief ask's card has no decision presses",
-          w.strip().length === 1 && !w.press(w.nodes.notices, "a") &&
+    const recs = [
+      { id: "v2|r1|round/end|choose", session: "s7", cwd: "/w/s7", scope: "s7", version: 2,
+        kind: "choose", label: "end-decision", prompt: "end or continue?",
+        presses: [{ label: "end", path: "/api/cflow2/select",
+                    body: { cwd: "/w/s7", scope: "s7", node: "round/end", option: "end", reason: "" } }] },
+      { id: "move|mv-1", session: "s8", cwd: "/w/s8", scope: "s8", version: 2,
+        kind: "move", label: "rebase", prompt: "s8 asks to move the run to rebase",
+        presses: [{ label: "Move to 'rebase'", cls: "approve", path: "/api/cflow2/move/resolve",
+                    body: { cwd: "/w/s8", scope: "s8", decision: "approve", reason: "" } },
+                  { label: "Refuse", path: "/api/cflow2/move/resolve",
+                    body: { cwd: "/w/s8", scope: "s8", decision: "deny", reason: "" },
+                    reason: "Refuse the move? optional" }] },
+      { id: "v2|r9|round/loop|loop_limit", session: "s9", cwd: "/w/s9", scope: "s9", version: 2,
+        kind: "loop_limit", label: "loop", prompt: "loop reached its max (5/5)",
+        presses: [{ label: "Allow 5 more", cls: "approve", path: "/api/cflow2/extend",
+                    body: { cwd: "/w/s9", scope: "s9", node: "round/loop", by: 5 } }] },
+      { id: "v1|/w/s10|s10|r|gate|1|waiting_approval", session: "s10", cwd: "/w/s10",
+        scope: "s10", version: 1, kind: "waiting_approval", label: "gate", workflow: "improv-worker",
+        prompt: "approve the gate?",
+        presses: [{ label: "Approve", cls: "approve", path: "/api/cflow/approve",
+                    body: { cwd: "/w/s10", scope: "s10" } }] },
+      { id: "v2|r11||halt", session: "s11", cwd: "/w/s11", scope: "s11", version: 2,
+        kind: "halt", label: "monitor-x", prompt: "halted by monitor monitor-x", presses: [] },
+    ];
+    w.api.runGateSync(recs, []);
+    check("every kind of gate draws a card", w.strip().length === 5 && w.badge() === "5",
+          [w.said(), w.badge()]);
+    check("each card says what it waits on",
+          /waits on your pick: end-decision/.test(w.said()) &&
+            /asks you to move its run: rebase/.test(w.said()) &&
+            /reached a loop limit: loop/.test(w.said()) &&
+            /waits on your approval: gate/.test(w.said()) &&
+            /is halted: monitor-x/.test(w.said()) && /cflow v1/.test(w.said()), w.said());
+    check("a gate with no press here says to open the session",
+          /no press here/.test(w.said()), w.said());
+    check("Refuse, whose reason is optional, is offered with an empty one",
+          !!w.press(w.nodes.notices, "Refuse"), w.said());
+    w.press(w.nodes.notices, "end").click();
+    w.press(w.nodes.notices, "Move to 'rebase'").click();
+    w.press(w.nodes.notices, "Approve").click();
+    await new Promise((r) => setImmediate(r));
+    const sent = (p) => w.apiBodies.filter(([q]) => q === p).map(([, b]) => b);
+    check("a user choice posts the strip's select",
+          sent("/api/cflow2/select").some((b) => b.option === "end" && b.node === "round/end"),
+          w.apiBodies);
+    check("a move request posts the strip's move/resolve",
+          sent("/api/cflow2/move/resolve").some((b) => b.decision === "approve"), w.apiBodies);
+    check("a v1 approval posts the v1 approve",
+          sent("/api/cflow/approve").some((b) => b.scope === "s10"), w.apiBodies);
+    w.api.runGateSync([], []);
+    check("gates gone from the polls settle their rows as no longer pending",
+          w.badge() === "" && w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask")
+            .every((e) => e.status === "no longer pending"), w.api.noticeHistory);
+  }
+  {
+    // an ask whose reframe needs text: the others are offered, reframe is not
+    const w = build();
+    const p = (name, extra) => ({ label: name, path: "/api/cflow2/approve",
+      body: { cwd: "/w/s6", scope: "s6", node: "i1", decision: name, reason: "" }, ...(extra || {}) });
+    const rec = { id: "ask2-cc", session: "s6", cwd: "/w/s6", scope: "s6", version: 2,
+      kind: "ask", label: "plan", prompt: "which plan?",
+      presses: [p("a"), p("b"), p("reframe", { reasonRequired: true, reason: "say why" })] };
+    w.api.runGateSync([rec], []);
+    check("a brief ask's card offers the options but not reframe",
+          w.strip().length === 1 && !!w.press(w.nodes.notices, "a") &&
             !w.press(w.nodes.notices, "reframe") && /needs a reason/.test(w.said()), w.said());
     w.api.noticePanelToggle(true);
     check("the panel lists it as waiting with an Open press",
@@ -1110,15 +1165,41 @@ function gotoRec(rec) {
     check("Open goes to the session and leaves the panel open (claunch-0fdx7)",
           w.loc.hash === "#/s/s6" && !w.nodes["notice-panel"].classList.contains("hidden"),
           [w.loc.hash, w.nodes["notice-panel"].className]);
-    w.api.urgentAskSync({ s6: { cwd: "/w/s6", scope: "s6", urgent_asks: [{ id: "ask2-cc",
-      instance: "i1", label: "plan", status: "open", resolution: "human" }], answers: [] } });
+    w.api.runGateSync([rec], []);
     check("opening the panel hid it: off the corner and in the count (claunch-paqfs)",
           w.strip().length === 0 &&
             w.badge() === "1", [w.said(), w.badge()]);
-    w.api.urgentAskSync({});
+    w.api.runGateSync([], []);
     check("a session gone from the rail settles it", w.badge() === "" &&
             w.api.noticeHistory.some((e) => e.gate && e.gate.rid === "ask2-cc" &&
               e.status === "no longer pending"), w.api.noticeHistory);
+  }
+  {
+    // a nudge for a run whose gate has its own card: one card, one count,
+    // and the driver's message on the run's card
+    const w = build();
+    w.api.runGateSync([{ id: "ask2-ff", session: "s3", cwd: "/w/s3", scope: "s3",
+      version: 2, kind: "ask", label: "landing-review", prompt: "land it?",
+      presses: [{ label: "request", path: "/api/cflow2/approve",
+                  body: { cwd: "/w/s3", scope: "s3", node: "i3", decision: "request" } }] }], []);
+    w.gate.nudges = [{ id: "n9", session: "s3", items: ["ask: landing-review"],
+      message: "s15 abstained; request is recommended", status: "pending" }];
+    await w.api.refreshNudgeGate();
+    check("the covered nudge puts up no second card",
+          w.strip().length === 1 && !/needs you/.test(w.said()), w.said());
+    check("and the bell counts the gate once", w.badge() === "1", w.badge());
+    check("and leaves nothing pending of its own",
+          w.api.noticeHistory.every((e) => !e.gate || e.gate.type !== "nudge" ||
+            e.status !== "pending") && w.api.gatePending.nudge.length === 0,
+          w.api.noticeHistory);
+    w.api.runGateSync(w.api.gatePending.ask.map((r) => ({ ...r })), []);
+    check("the driver's message rides on the run's card",
+          /s15 abstained; request is recommended/.test(w.said()), w.said());
+    w.gate.nudges = [{ id: "n10", session: "s4", items: ["choose: end"],
+      message: "pick end", status: "pending" }];
+    await w.api.refreshNudgeGate();
+    check("a nudge for a run with no card of its own still draws its card",
+          /s4\s+needs you/.test(w.said()), w.said());
   }
 
   /* --- Open puts the card away on the way in (claunch-yjm0v) ------------ */
@@ -1155,15 +1236,14 @@ function gotoRec(rec) {
             w.api.gateIsHidden("nudge", "n2"), [w.loc.hash, w.said()]);
   }
   {
-    // and the urgent ask's card, which has no Open button of its own
+    // and the run gate's card, which has no Open button of its own
     const w = build();
-    w.api.urgentAskSync({ s5: { cwd: "/w/s5", scope: "s5", urgent_asks: [{ id: "ask2-dd",
-      instance: "i9", label: "coding-approval", status: "open", resolution: "human" }],
-      answers: [{ kind: "ask", ask: "ask2-dd", instance: "i9", prompt: "start coding?",
-                  require_reason: false,
-                  options: [{ name: "approve" }, { name: "decline" }] }] } });
+    w.api.runGateSync([{ id: "ask2-dd", session: "s5", cwd: "/w/s5", scope: "s5",
+      version: 2, kind: "ask", label: "coding-approval", prompt: "start coding?",
+      urgent: true, presses: [{ label: "approve", path: "/api/cflow2/approve",
+        body: { cwd: "/w/s5", scope: "s5", node: "i9", decision: "approve" } }] }], []);
     w.strip()[0].click();
-    check("a click on the urgent-ask card opens the session and puts the card away",
+    check("a click on the run gate's card opens the session and puts the card away",
           w.loc.hash === "#/s/s5" && w.strip().length === 0 &&
             w.api.gateIsHidden("ask", "ask2-dd"), [w.loc.hash, w.said()]);
     check("...still unanswered: the bell counts it and the panel lists it",
@@ -1748,7 +1828,7 @@ function gotoRec(rec) {
     const want = w.api.NOTICE_SOURCES.filter((s) => s.gate && s.id !== "ask").map((s) => s.id);
     check("the poll refreshes every gate kind but the one another feed keeps",
           JSON.stringify(called) === JSON.stringify(want), [called, want]);
-    check("only the urgent asks are left to their own feed",
+    check("only the run gates are left to their own feed",
           w.api.NOTICE_SOURCES.filter((s) => s.polled === false).map((s) => s.id).join() === "ask");
     const tick = slice("async function pollTick(", "pollTimer = setInterval(pollTick");
     check("pollTick takes its gates from that list", /\.\.\.noticeGatePoll\(\)/.test(tick) &&

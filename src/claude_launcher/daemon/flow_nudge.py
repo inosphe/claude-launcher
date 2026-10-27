@@ -15,6 +15,13 @@ daemon's own approval gates. This module is the daemon's half: it keeps the
 requests and decides, from the run's own files, whether each one is still
 waiting.
 
+The dashboard now raises a card for every such gate by itself, with its
+answers, from the cflow polls (claunch-whm4e.1, app.js ``runGateSync``). A
+nudge for a run that has that card puts up no second one: its message is
+shown on the run's card and it leaves the waiting count. A nudge with no
+such card (a run whose session the dashboard does not list) is drawn as
+before.
+
 Two things keep it from becoming noise:
 
 - A nudge is refused unless the run really waits on a person *now*
