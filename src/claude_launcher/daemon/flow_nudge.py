@@ -98,6 +98,89 @@ def v1_gate_options(entry: dict) -> list:
             for o in raw or [] if isinstance(o, dict) and o.get("name")]
 
 
+#: A v2 limit's presses (``/api/cflow2/extend``), as the run page and the
+#: terminal strip offer them (app.js ``cf2LimitPresses``).
+_V2_LIMIT_PRESSES = {
+    "loop_limit": (("Allow 5 more", {"by": 5}), ("Allow 15 more", {"by": 15}),
+                   ("Stop the loop", {"stop": True})),
+    "visit_limit": (("Allow one more visit", {"by": 1, "visits": True}),
+                    ("Stop here", {"stop": True, "visits": True})),
+}
+
+
+def v2_presses(entry: dict, answer: dict) -> list:
+    """The presses that settle one of a v2 rail row's ``answers``
+    (cflow2_web ``_rail_answers``): ``{label, path, body}`` each, the same
+    endpoint and body the terminal strip posts (app.js ``termCflow2Answers``).
+    ``reason_required`` marks a press that is refused without a reason
+    (``reframe``, or every option of a ``require_reason`` ask or choice);
+    ``reason_optional`` one whose reason the driver reads. A
+    halt and an acceptance hold have none -- the dashboard has no endpoint
+    for them."""
+    slot = {"cwd": entry.get("cwd"), "scope": entry.get("scope")}
+    kind = answer.get("kind")
+    if kind == "move":
+        return [
+            {"label": (f"Report '{answer.get('outcome')}'" if answer.get("report")
+                       else f"Move to '{answer.get('label')}'"),
+             "path": "/api/cflow2/move/resolve",
+             "body": {**slot, "decision": "approve", "reason": ""}},
+            {"label": "Refuse", "path": "/api/cflow2/move/resolve",
+             "body": {**slot, "decision": "deny", "reason": ""}, "reason_optional": True},
+        ]
+    body = {**slot, "node": answer.get("instance")}
+    if kind in ("ask", "choose"):
+        out = []
+        for o in answer.get("options") or []:
+            name = o.get("name") if isinstance(o, dict) else str(o)
+            if not name:
+                continue
+            press = ({"label": name, "path": "/api/cflow2/approve",
+                      "body": {**body, "decision": name, "reason": ""}} if kind == "ask" else
+                     {"label": name, "path": "/api/cflow2/select",
+                      "body": {**body, "option": name, "reason": ""}})
+            if answer.get("require_reason") or (kind == "ask" and name == "reframe"):
+                press["reason_required"] = True
+            if kind == "ask" and answer.get("recommended") == name:
+                press["recommended"] = True
+            out.append(press)
+        return out
+    if kind in _V2_LIMIT_PRESSES:
+        return [{"label": label, "path": "/api/cflow2/extend", "body": {**body, **extra}}
+                for label, extra in _V2_LIMIT_PRESSES[kind]]
+    return []
+
+
+def v2_gates(entry: dict) -> list:
+    """The person gates of one v2 rail row (cflow2_web ``rail_entry``), one
+    per ``answers`` item: ``kind`` (ask, choose, move, loop_limit,
+    visit_limit, halt, acceptance), the question, the options and the
+    presses (:func:`v2_presses`); ``ask_id`` is an ask's id and ``request``
+    a move request's. Empty when the run waits on no person."""
+    if not entry or not entry.get("gated"):
+        return []
+    out = []
+    for a in entry.get("answers") or []:
+        kind = a.get("kind") if isinstance(a, dict) else None
+        if not kind:
+            continue
+        if kind == "loop_limit":
+            prompt = f"loop reached its max ({a.get('count')}/{a.get('max')})"
+        elif kind == "visit_limit":
+            prompt = f"reached the run's visit limit ({a.get('count')}/{a.get('max')})"
+        else:
+            prompt = a.get("prompt") or ""
+        out.append({
+            "kind": kind, "instance": a.get("instance"), "ask_id": a.get("ask"),
+            "request": a.get("request"), "label": a.get("label") or a.get("instance") or kind,
+            "prompt": prompt, "urgent": bool(a.get("urgent")),
+            "options": [{"name": o.get("name"), "description": o.get("description") or ""}
+                        for o in a.get("options") or [] if isinstance(o, dict)],
+            "presses": v2_presses(entry, a),
+        })
+    return out
+
+
 def _owed_v2(cwd: str, scope: str) -> Optional[dict]:
     from ..cflow2 import store as store2
     from . import cflow2_web

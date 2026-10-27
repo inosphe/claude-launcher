@@ -436,3 +436,95 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
     assert set(body["rows"]) == {"s1"}
     assert body["rows"]["s1"]["workflow"] == "pick"
     assert body["rows"]["s1"]["gated"] is True
+
+
+def _live(name, cwd, exited=False):
+    return SimpleNamespace(sdef=SimpleNamespace(name=name, cwd=cwd), exited=exited)
+
+
+def test_operator_gates_carry_a_v2_ask_that_fell_to_a_person(proj):
+    """claunch-whm4e.1.1: the Operator's gate list (``_operator_gates``)
+    reads a v2 run too -- an ask that fell to a person rides it with
+    ``version: 2`` and the strip's presses, and the approve press's body
+    moves the run through the same handler as ``/api/cflow2/approve``."""
+    executors.register(None)
+    cwd = str(proj)
+    try:
+        runtime.start(layers.load("askme", cwd), cwd=cwd, scope="s1", caps={})
+        (g,) = api_mod._operator_gates([_live("s1", cwd), _live("s2", cwd),
+                                        _live("s1", cwd, exited=True)])
+        assert g["session"] == "s1" and g["version"] == 2 and g["kind"] == "ask"
+        assert g["workflow"] == "askme" and g["status"] == "waiting_approval"
+        assert g["prompt"] == "may I a?" and g["title"] == "a" and g["step_id"]
+        assert [p["label"] for p in g["presses"]] == [runtime.ASK_APPROVE, runtime.ASK_DECLINE]
+        press = g["presses"][0]
+        assert press["path"] == "/api/cflow2/approve"
+        assert press["body"] == {"cwd": g["cwd"], "scope": g["scope"], "node": g["step_id"],
+                                 "decision": runtime.ASK_APPROVE, "reason": ""}
+        cflow2_approve.approve(press["body"]["cwd"], press["body"]["scope"], press["body"],
+                               nudge_fn=lambda *x: None)
+        assert api_mod._operator_gates([_live("s1", cwd)]) == []
+    finally:
+        executors.register(None)
+
+
+def test_operator_gates_carry_a_v2_user_choice_and_a_loop_limit(proj):
+    """A ``chooser: user`` choice carries ``/api/cflow2/select`` presses and
+    a loop limit ``/api/cflow2/extend`` ones; each press's body settles its
+    gate."""
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+    (g,) = api_mod._operator_gates([_live("s1", cwd)])
+    assert g["version"] == 2 and g["kind"] == "choose" and g["prompt"] == "which way?"
+    assert [o["name"] for o in g["options"]] == ["left", "right"]
+    left = g["presses"][0]
+    assert left["path"] == "/api/cflow2/select" and left["body"]["option"] == "left"
+    runtime.select(left["body"]["node"], left["body"]["option"], cwd=cwd, scope="s1",
+                   caller=runtime.CALLER_USER)
+    assert api_mod._operator_gates([_live("s1", cwd)]) == []
+
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s1")
+    (g,) = api_mod._operator_gates([_live("s1", cwd)])
+    assert g["kind"] == "loop_limit" and g["prompt"] == "loop reached its max (1/1)"
+    assert [p["label"] for p in g["presses"]] == ["Allow 5 more", "Allow 15 more",
+                                                  "Stop the loop"]
+    assert all(p["path"] == "/api/cflow2/extend" for p in g["presses"])
+    stop = g["presses"][-1]["body"]
+    runtime.extend_loop(stop["node"], 0, stop=stop["stop"], cwd=cwd, scope="s1")
+    assert api_mod._operator_gates([_live("s1", cwd)]) == []
+
+
+def test_v2_presses_for_a_move_request_and_a_halt():
+    """The driver's move request answers through ``/api/cflow2/move/resolve``
+    (approve, or a refusal whose reason the driver reads); a halt has no
+    press -- the dashboard has no endpoint for it -- and still is a gate."""
+    from claude_launcher.daemon import flow_nudge
+
+    row = {"cwd": "/w", "scope": "s1", "gated": True, "answers": [
+        {"kind": "move", "request": "mv-1", "node": "n", "label": "rebase",
+         "prompt": "s1 asks to move the run to rebase"},
+        {"kind": "halt", "label": "mon", "prompt": "halted by monitor mon"},
+    ]}
+    move, halt = flow_nudge.v2_gates(row)
+    assert move["request"] == "mv-1" and move["label"] == "rebase"
+    assert [(p["label"], p["body"]["decision"]) for p in move["presses"]] == [
+        ("Move to 'rebase'", "approve"), ("Refuse", "deny")]
+    assert all(p["path"] == "/api/cflow2/move/resolve" and p["body"]["scope"] == "s1"
+               for p in move["presses"])
+    assert halt["kind"] == "halt" and halt["presses"] == []
+    assert flow_nudge.v2_gates({**row, "gated": False}) == []
+
+
+def test_v2_presses_mark_every_option_of_a_require_reason_ask():
+    from claude_launcher.daemon import flow_nudge
+
+    row = {"cwd": "/w", "scope": "s1", "gated": True}
+    ask = {"kind": "ask", "instance": "i1", "require_reason": True, "recommended": "full",
+           "options": [{"name": "narrow"}, {"name": "full"}]}
+    narrow, full = flow_nudge.v2_presses(row, ask)
+    assert narrow["reason_required"] and full["reason_required"] and full["recommended"]
+    plain = flow_nudge.v2_presses(row, {**ask, "require_reason": False,
+                                        "options": [{"name": "approve"}, {"name": "reframe"}]})
+    assert "reason_required" not in plain[0] and plain[1]["reason_required"]
