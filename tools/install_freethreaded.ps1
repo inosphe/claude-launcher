@@ -29,10 +29,12 @@
 # Environment:
 #   CLAUNCH_FT_ZVEC_REF    zvec git ref to build (default: the commit measured in README)
 #   CLAUNCH_FT_ZVEC_REPO   zvec git URL (default: https://github.com/alibaba/zvec)
-#   CLAUNCH_FT_WHEELS      wheel cache directory (default: %LOCALAPPDATA%\claunch\zvec-wheels)
+#   CLAUNCH_FT_WHEELS      wheel cache directory (default: %LOCALAPPDATA%\claunch\zvec-wheels,
+#                          or <local app data>\claunch\zvec-wheels when that variable is empty)
 #   CLAUNCH_FT_ZVEC_WHEEL  path to an existing cp314t zvec wheel; skips the build
-#   CLAUNCH_FT_ROOT        tool environment and bin (default: %LOCALAPPDATA%\claunch-nogil)
-#   CLAUNCH_FT_SHIM_DIR    where claunch-nogil.cmd is written (default: ~\.local\bin)
+#   CLAUNCH_FT_ROOT        tool environment and bin (default: %LOCALAPPDATA%\claunch-nogil,
+#                          or <local app data>\claunch-nogil when that variable is empty)
+#   CLAUNCH_FT_SHIM_DIR    where claunch-nogil.cmd is written (default: ~/.local/bin)
 #
 # The tool environment lives in its own UV_TOOL_DIR/UV_TOOL_BIN_DIR under
 # CLAUNCH_FT_ROOT, so `uv tool install` cannot replace the `claude-launcher`
@@ -42,7 +44,9 @@
 #
 # Requires "Visual Studio Build Tools" with the C++ workload for the zvec build.
 # Building zvec on Windows from this ref has not been run by the author of this
-# script; the Linux path (install_freethreaded.sh) has.
+# script; the Linux path (install_freethreaded.sh) has. The part above the zvec
+# build -- the p2p decision and its three branches -- does run off Windows under
+# pwsh, which is how it is tested (claunch-fsn9f.1).
 #
 # --reinstall rebuilds the tool environment. --force is only needed when a
 # claunch executable that uv did not create sits in the tool bin directory; the
@@ -61,12 +65,38 @@ if ($NoP2p -and $RequireP2p) {
     exit 2
 }
 
+# Where the per-user defaults live. That is $env:LOCALAPPDATA on Windows; the
+# variable is empty on other hosts, and Join-Path refuses a null base, so the
+# script used to throw while computing its defaults -- before the p2p decision
+# and before saying anything useful, which made the decision branches
+# unrunnable anywhere but Windows (claunch-fsn9f.1). GetFolderPath answers on
+# every host: it reads LOCALAPPDATA on Windows and the XDG directory elsewhere.
+function Get-LocalAppData {
+    if ($env:LOCALAPPDATA) { return $env:LOCALAPPDATA }
+    $folder = [Environment]::GetFolderPath('LocalApplicationData')
+    if ($folder) { return $folder }
+    return (Join-Path (Get-HomeDir) '.local/share')
+}
+
+# $HOME is empty in a spawned shell with no login state, and Join-Path refuses
+# an empty base -- so the shim's default died the same way LOCALAPPDATA did, at
+# line 88, before the decision (found in review). GetFolderPath answers from the
+# passwd entry instead, so this resolves where $HOME does not.
+function Get-HomeDir {
+    if ($HOME) { return $HOME }
+    $profile = [Environment]::GetFolderPath('UserProfile')
+    if ($profile) { return $profile }
+    return [IO.Path]::GetTempPath()
+}
+
+$LocalAppData = Get-LocalAppData
+
 $ZvecRepo = if ($env:CLAUNCH_FT_ZVEC_REPO) { $env:CLAUNCH_FT_ZVEC_REPO } else { 'https://github.com/alibaba/zvec' }
 $ZvecRef = if ($env:CLAUNCH_FT_ZVEC_REF) { $env:CLAUNCH_FT_ZVEC_REF } else { '8d4996924bce78f8b072a353803c305101bcc807' }
-$CacheRoot = if ($env:CLAUNCH_FT_WHEELS) { $env:CLAUNCH_FT_WHEELS } else { Join-Path $env:LOCALAPPDATA 'claunch\zvec-wheels' }
+$CacheRoot = if ($env:CLAUNCH_FT_WHEELS) { $env:CLAUNCH_FT_WHEELS } else { Join-Path (Join-Path $LocalAppData 'claunch') 'zvec-wheels' }
 $PythonSpec = '3.14t'
-$FtRoot = if ($env:CLAUNCH_FT_ROOT) { $env:CLAUNCH_FT_ROOT } else { Join-Path $env:LOCALAPPDATA 'claunch-nogil' }
-$ShimDir = if ($env:CLAUNCH_FT_SHIM_DIR) { $env:CLAUNCH_FT_SHIM_DIR } else { Join-Path $HOME '.local\bin' }
+$FtRoot = if ($env:CLAUNCH_FT_ROOT) { $env:CLAUNCH_FT_ROOT } else { Join-Path $LocalAppData 'claunch-nogil' }
+$ShimDir = if ($env:CLAUNCH_FT_SHIM_DIR) { $env:CLAUNCH_FT_SHIM_DIR } else { Join-Path (Join-Path (Get-HomeDir) '.local') 'bin' }
 $env:UV_TOOL_DIR = Join-Path $FtRoot 'tools'
 $env:UV_TOOL_BIN_DIR = Join-Path $FtRoot 'bin'
 New-Item -ItemType Directory -Force -Path $env:UV_TOOL_DIR, $env:UV_TOOL_BIN_DIR, $ShimDir | Out-Null

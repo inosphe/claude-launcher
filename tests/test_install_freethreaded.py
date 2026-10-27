@@ -9,19 +9,22 @@ or continues -- never a silent downgrade.
 These cases run the real script against a stub ``uv`` that records what the
 script asked for, so the decision is what is measured. A stub ``uv`` makes the
 build a no-op and a stub tool python answers the post-install zvec check. The
-Windows counterpart (``install_freethreaded.ps1``) has no host here to run on;
-only its parse is checked, elsewhere.
+Windows counterpart (``install_freethreaded.ps1``) is run the same way when a
+``pwsh`` is on PATH -- skipped otherwise; see the last two cases and
+claunch-fsn9f.1.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.sh"
+PS1 = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.ps1"
 
 # Logs its argv, answers `tool dir`, and can be told to fail the install the
 # way a real missing header fails it -- after the check said it was there.
@@ -314,3 +317,227 @@ def test_help_lists_both_flags_and_the_non_interactive_default(sandbox):
     assert "--no-p2p" in out
     assert "--require-p2p" in out
     assert "no terminal" in out
+
+
+# --------------------------------------------------------------------------
+# The Windows counterpart, run under pwsh. claunch-fsn9f.1
+# --------------------------------------------------------------------------
+#
+# The ps1 computed its two per-user defaults with `Join-Path $env:LOCALAPPDATA`
+# and Join-Path refuses a null base, so anywhere that variable is unset --
+# every host that is not Windows -- the script threw at line 66 before it
+# reached the p2p decision, and the decision branches could not be run at all.
+# These cases pin that the decision is reachable with LOCALAPPDATA empty, and
+# that a set LOCALAPPDATA still decides where the defaults go.
+#
+# They need a real pwsh; where there is none they are skipped rather than
+# passing on nothing.
+
+PWSH = shutil.which("pwsh")
+
+
+@pytest.fixture
+def ps1_sandbox(tmp_path: Path):
+    """Stub uv, stub tool python, a wheel, and a run() that runs the ps1."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text(STUB_UV, encoding="utf-8")
+    uv.chmod(0o755)
+
+    # The ps1 joins 'claude-launcher\Scripts\python.exe'; on a non-Windows host
+    # pwsh reads the backslash as a separator, so the stub is the nested file.
+    tool_python = tmp_path / "tooldir" / "claude-launcher" / "Scripts" / "python.exe"
+    tool_python.parent.mkdir(parents=True)
+    tool_python.write_text(STUB_TOOL_PYTHON, encoding="utf-8")
+    tool_python.chmod(0o755)
+
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+    wheel = wheel_dir / "zvec-0.8.0-cp314t-cp314t-linux_x86_64.whl"
+    wheel.write_text("", encoding="utf-8")
+
+    log = tmp_path / "uv.log"
+
+    def pkg_config(exit_code: int | None) -> None:
+        path = bin_dir / "pkg-config"
+        if exit_code is None:
+            if path.exists():
+                path.unlink()
+            return
+        path.write_text(STUB_PKG_CONFIG.replace("{exit_code}", str(exit_code)), encoding="utf-8")
+        path.chmod(0o755)
+
+    def run(*args: str, pkg: int | None = 1, local_app_data: str | None = None,
+            home: str | None = "__default__", stdin: str = ""):
+        """Run the ps1. ``local_app_data=None`` unsets the variable -- the defect.
+
+        ``pkg=None`` also strips every inherited directory that holds a
+        pkg-config, for the reason ``_without_pkg_config`` gives.
+
+        ``XDG_DATA_HOME`` is pointed inside ``tmp_path`` and ``HOME`` is too,
+        because the script's own default paths resolve through both: pwsh's
+        ``GetFolderPath('LocalApplicationData')`` prefers ``XDG_DATA_HOME`` over
+        ``HOME``, so a sandbox that set only ``HOME`` still created
+        ``$XDG_DATA_HOME/claunch-nogil/{bin,tools}`` -- outside ``tmp_path``, on
+        a real directory, while the case passed (found in review, claunch-fsn9f.1).
+        That preference only applies when the directory exists: measured,
+        ``GetFolderPath`` returns empty for a ``XDG_DATA_HOME`` that is not
+        there, and the script then falls through to ``$HOME/.local/share``. So
+        the fixture creates the directory, and without the redirect the whole
+        run stays inside ``tmp_path`` and the leak the review found is not
+        reproduced at all.
+        ``home=None`` unsets ``HOME`` instead, for the case that pins the shim's
+        default against it.
+        """
+        pkg_config(pkg)
+        env = dict(os.environ)
+        for name in ("CLAUNCH_FT_ROOT", "CLAUNCH_FT_WHEELS", "CLAUNCH_FT_SHIM_DIR",
+                     "CLAUNCH_FT_ZVEC_WHEEL"):
+            env.pop(name, None)
+        inherited = env.get("PATH", "")
+        if pkg is None:
+            inherited = _without_pkg_config(inherited)
+        env["PATH"] = os.pathsep.join([str(bin_dir), inherited])
+        env["STUB_UV_LOG"] = str(log)
+        env["STUB_TOOL_DIR"] = str(tmp_path / "tooldir")
+        env["CLAUNCH_FT_ZVEC_WHEEL"] = str(wheel)
+        # Created, not just named: GetFolderPath answers with this path only
+        # while the directory exists (measured), and the point is to make the
+        # sandbox the place the script's defaults resolve to.
+        (tmp_path / "xdg-data").mkdir(exist_ok=True)
+        env["XDG_DATA_HOME"] = str(tmp_path / "xdg-data")
+        if home is None:
+            env.pop("HOME", None)
+        elif home == "__default__":
+            env["HOME"] = str(tmp_path / "home")
+        else:
+            env["HOME"] = home
+        if local_app_data is None:
+            env.pop("LOCALAPPDATA", None)
+        else:
+            env["LOCALAPPDATA"] = local_app_data
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-File", str(PS1), *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=str(PS1.parents[1]),
+        )
+
+    def calls() -> list[str]:
+        if not log.exists():
+            return []
+        return log.read_text(encoding="utf-8").splitlines()
+
+    def targets() -> list[str]:
+        out = []
+        for line in calls():
+            parts = line.split()
+            if line.startswith("tool install") and "--editable" in parts:
+                out.append(parts[parts.index("--editable") + 1])
+        return out
+
+    return {"run": run, "calls": calls, "targets": targets, "tmp": tmp_path}
+
+
+needs_pwsh = pytest.mark.skipif(PWSH is None, reason="no pwsh on PATH to run the Windows script")
+
+
+@needs_pwsh
+def test_the_ps1_reaches_the_decision_with_LOCALAPPDATA_unset(ps1_sandbox):
+    """The defect: this used to die at line 66 before deciding anything.
+
+    The interesting part is *which* failure comes back. Exit 1 is right, but
+    it has to be the p2p stop with the guide -- not a null-path throw that
+    never looked at p2p.
+    """
+    proc = ps1_sandbox["run"]("-RequireP2p", pkg=None)
+    out = _out(proc)
+    assert proc.returncode == 1, out
+    assert "Cannot bind argument to parameter 'Path'" not in out, out
+    assert "libsrtp2" in out, out
+    assert "멈춥니다" in out, out
+    # The decision came before any uv call, as in the .sh counterpart.
+    assert ps1_sandbox["calls"]() == [], ps1_sandbox["calls"]()
+
+
+@needs_pwsh
+def test_the_ps1_no_p2p_branch_installs_without_the_extra(ps1_sandbox):
+    proc = ps1_sandbox["run"]("-NoP2p", pkg=None)
+    out = _out(proc)
+    assert proc.returncode == 0, out
+    # -NoP2p already answered the question, so neither is printed.
+    assert "번호를 고르세요" not in out, out
+    assert "고치려면" not in out, out
+    assert ps1_sandbox["targets"]() == ["."], ps1_sandbox["calls"]()
+    assert "빠른 직접 연결 기능: 포함되지 않음" in out, out
+
+
+@needs_pwsh
+def test_the_ps1_stops_without_a_terminal_when_no_flag_is_given(ps1_sandbox):
+    proc = ps1_sandbox["run"](pkg=None, stdin="")
+    out = _out(proc)
+    assert proc.returncode == 1, out
+    assert "물어볼 수 없습니다" in out, out
+    # It names the flag that makes the non-interactive choice explicit.
+    assert "-NoP2p" in out, out
+    assert ps1_sandbox["calls"]() == [], ps1_sandbox["calls"]()
+
+
+@needs_pwsh
+def test_the_ps1_still_uses_LOCALAPPDATA_when_it_is_set(ps1_sandbox):
+    """The fallback must not take over on Windows, where the variable is set."""
+    local = ps1_sandbox["tmp"] / "localappdata"
+    local.mkdir()
+    proc = ps1_sandbox["run"]("-RequireP2p", pkg=None, local_app_data=str(local))
+    assert proc.returncode == 1, _out(proc)
+    # The tool environment defaults under it, and that is created before the
+    # decision, so the directory existing is the default having been used.
+    assert (local / "claunch-nogil" / "tools").is_dir(), list(local.rglob("*"))
+
+
+@needs_pwsh
+def test_the_ps1_reaches_the_decision_with_HOME_unset_too(ps1_sandbox):
+    """The shim's default read $HOME, so it died the same way LOCALAPPDATA did.
+
+    ``$ShimDir`` was ``Join-Path (Join-Path $HOME '.local') 'bin'`` and sat
+    above the decision, so an empty ``$HOME`` stopped the script at that line
+    with 'Cannot bind argument to parameter Path because it is an empty string'
+    -- a spawned shell with no login state reaches it (found in review).
+    """
+    proc = ps1_sandbox["run"]("-RequireP2p", pkg=None, home=None)
+    out = _out(proc)
+    assert proc.returncode == 1, out
+    assert "Cannot bind argument to parameter 'Path'" not in out, out
+    assert "libsrtp2" in out, out
+    assert "멈춥니다" in out, out
+    assert ps1_sandbox["calls"]() == [], ps1_sandbox["calls"]()
+
+
+@needs_pwsh
+def test_the_ps1_defaults_land_under_the_sandbox_data_home(ps1_sandbox, tmp_path):
+    """The script's own defaults must land inside the sandbox, not on the host.
+
+    ``GetFolderPath('LocalApplicationData')`` prefers ``XDG_DATA_HOME`` over
+    ``HOME``, so a sandbox that redirected only ``HOME`` still wrote
+    ``$XDG_DATA_HOME/claunch-nogil/{bin,tools}`` -- outside ``tmp_path``, on a
+    real directory, while every case passed (measured, found in review).
+
+    The assertion is positive and on the sandbox: the fixture points
+    ``XDG_DATA_HOME`` at an existing ``tmp_path/xdg-data``, so the tool
+    environment the script creates has to appear there. Drop the redirect and
+    the run resolves to the host's data home instead, and this fails wherever it
+    runs -- unlike checking the host for a new directory, which could not tell a
+    fresh leak from an install the machine already had (a real one from an
+    earlier day sits at ~/.local/share/claunch-nogil here, which is what the
+    first version of this case tripped over).
+    """
+    proc = ps1_sandbox["run"]("-RequireP2p", pkg=None)
+    assert proc.returncode == 1, _out(proc)
+    assert "멈춥니다" in _out(proc), _out(proc)
+    assert (tmp_path / "xdg-data" / "claunch-nogil" / "tools").is_dir(), \
+        sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "xdg-data").rglob("*"))

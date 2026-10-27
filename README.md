@@ -87,9 +87,13 @@ told which way: `--no-p2p` finishes without it and skips the check,
 script does not restart the daemon: both commands share
 `~/.claude-launcher` and port 8378, so run `claunch-nogil daemon restart` to
 move the daemon to `3.14t` and `claunch daemon restart` to move it back. The
-`.ps1` script has not been run: it was written without access to a Windows
-machine or PowerShell; only its parse and its p2p decision branch have been
-exercised (with `/usr/bin/pwsh` on Linux).
+`.ps1` script has not been run to completion: the Windows install path (the
+MSVC toolchain and the `zvec` build) was written without access to a Windows
+machine. Its p2p decision branches have been exercised on Linux under `pwsh`,
+with `LOCALAPPDATA` unset — the script falls back to
+`[Environment]::GetFolderPath('LocalApplicationData')` for its default paths
+instead of throwing, so those branches are reachable off Windows
+(claunch-fsn9f.1).
 
 `zvec`'s extension does not declare that it runs without the GIL, so importing
 it turns the GIL back on for the whole process unless `PYTHON_GIL=0` is set.
