@@ -164,6 +164,14 @@ def _read_json(path: Path, default):
         return default
 
 
+def _state_key(state: Any) -> str:
+    """A finding's state as a sort key: unhandled rows carry one machine's
+    state name, stuck rows the whole state as a dict (claunch-0lm0o)."""
+    if state is None or isinstance(state, str):
+        return state or ""
+    return json.dumps(state, sort_keys=True, ensure_ascii=False, default=str)
+
+
 def _append(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
@@ -1398,7 +1406,7 @@ class SimStore:
                 rows = [r for r in rows if r.get("status") in want]
             if kind:
                 rows = [r for r in rows if r.get("kind") == kind]
-            rows.sort(key=lambda r: (r.get("machine") or "~", r.get("state") or "", -(r.get("count") or 0), r["key"]))
+            rows.sort(key=lambda r: (r.get("machine") or "~", _state_key(r.get("state")), -(r.get("count") or 0), r["key"]))
             return {"total": len(rows), "findings": rows[:max(1, min(limit, 1000))]}
 
     def gap_batches(self, sim_id: str, limit: int = 8) -> List[dict]:
