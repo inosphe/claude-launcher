@@ -122,6 +122,9 @@ check("a running run is not the reader's move", line(rows.s1).className, "sess-c
 check("a session without an entry grows no line", line(rows.quiet), null);
 check("the v1 badge stays on the row", rows.s1.children.includes(v1), true);
 
+check("run navigation is a native link", line(rows.s1).tag, "a");
+check("run destination is explicit", line(rows.s1).children[3].textContent, "Run ↗");
+check("link href targets this run", line(rows.s1).href, "#/wf/" + encodeURIComponent("s1|F:/repo"));
 const first = line(rows.s1);
 ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
                     owed: ["loop_limit: rounds", "choose: landing"] } });
