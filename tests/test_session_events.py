@@ -106,6 +106,88 @@ def test_history_write_failure_does_not_change_control_result(tmp_path, monkeypa
     assert "could not persist session event" in caplog.text
 
 
+def test_index_failure_does_not_change_control_result(tmp_path, monkeypatch, caplog):
+    """The index mirror failing must not fail the control operation.
+
+    ``search_records.remember`` runs after the row is in the cache and the file,
+    outside the lock, in its own guard (claunch-tsmqd). A caller that treated
+    its failure as the operation's failure would invite a retry of a control
+    action that already happened.
+    """
+    events = session_events.Events(tmp_path)
+    session = SimpleNamespace(sdef=SimpleNamespace(name="s1"), created_at="first")
+
+    from claude_launcher.daemon import search_records
+
+    def fail(*args, **kwargs):
+        raise OSError("index unavailable")
+
+    monkeypatch.setattr(search_records, "remember", fail)
+    event = events.record(session, "kill", "세션 종료 요청")
+
+    assert events.rows(session) == [event]
+    restored = session_events.Events(tmp_path)
+    assert [row["id"] for row in restored.rows(session)] == [event["id"]]
+    assert "could not index session event" in caplog.text
+
+
+def test_a_reader_does_not_wait_on_the_index_write(tmp_path, monkeypatch):
+    """The lock must end before ``search_records.remember`` (claunch-tsmqd).
+
+    ``record`` runs on a worker thread (``pools.background`` reports refused
+    spawns through ``spawn_events``) while the event loop reads the same
+    session through ``rows`` for its observer snapshot. ``remember`` opens
+    SQLite and commits -- median 189 ms on this host against 213 ms for the
+    whole call -- so holding ``_lock`` across it parks the loop behind the
+    worker's disk I/O.
+
+    The index write is held open here, on the writer's thread, at a point the
+    loop can only reach after it. If the lock still spans that call, ``rows``
+    blocks until the stub returns and the reader only runs afterwards; with
+    the lock released first, the reader runs while the stub is still inside.
+    The assertion is the reader's completion, recorded from the stub itself.
+
+    Mutation: moving the ``search_records.remember`` call back inside the
+    ``with self._lock`` block makes this red -- the reader finishes after the
+    stub returns instead of during it.
+    """
+    events = session_events.Events(tmp_path)
+    session = SimpleNamespace(sdef=SimpleNamespace(name="s1"), created_at="first")
+    # Populate the cache first, so ``rows`` from the reader cannot block on a
+    # file read that has nothing to do with the lock.
+    events.record(session, "kill", "첫 이벤트")
+
+    from claude_launcher.daemon import search_records
+
+    reader_done = threading.Event()
+    reader_finished_inside = {}
+
+    def slow_remember(name, batch):
+        # The reader thread starts while this call is in progress.
+        reader_done.wait(timeout=2.0)
+        reader_finished_inside["value"] = reader_done.is_set()
+        return True
+
+    def read():
+        events.rows(session)
+        reader_done.set()
+
+    monkeypatch.setattr(search_records, "remember", slow_remember)
+    reader = threading.Thread(target=read)
+    writer = threading.Thread(target=lambda: events.record(session, "resume", "재개"))
+    writer.start()
+    reader.start()
+    writer.join(timeout=15)
+    reader.join(timeout=15)
+
+    assert not writer.is_alive(), "the writer never returned"
+    assert not reader.is_alive(), "the reader never returned"
+    assert reader_finished_inside.get("value") is True, (
+        "rows() was still blocked while the index write was in progress -- the "
+        "lock spans search_records.remember, so the event loop waits on it")
+
+
+
 def _both_miss_the_cache_together(events, session, action_a, action_b):
     """Drive two ``record`` calls so both must miss the cache before either writes.
 
