@@ -60712,8 +60712,6 @@ function spawnGateClock(rec) {
   return `auto-approves in ${left}${more}`;
 }
 
-/* What the session would be beyond the facts rows: issue, name, the first
-   line of its task. */
 /* The record a spawn row's clock reads. A corner card outlives the poll that
    drew it, and every poll replaces the records; the clock follows the newest
    copy of the same request so the one-second tick and the poll write the same
@@ -60723,6 +60721,8 @@ function spawnGateLive(rec) {
   return live.find((r) => String(r.id) === String(rec.id)) || rec;
 }
 
+/* What the session would be beyond the facts rows: issue, name, the first
+   line of its task. */
 function spawnGateSpecText(spec) {
   if (!spec) return "";
   const task = String(spec.task || "").trim().split("\n")[0];
