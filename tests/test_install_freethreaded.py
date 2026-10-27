@@ -25,6 +25,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.s
 
 # Logs its argv, answers `tool dir`, and can be told to fail the install the
 # way a real missing header fails it -- after the check said it was there.
+# `build` records and succeeds without producing a wheel, which is enough to
+# tell "the decision came first" from "the build came first".
 STUB_UV = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_UV_LOG"
 if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then echo "$STUB_TOOL_DIR"; exit 0; fi
@@ -39,6 +41,17 @@ STUB_TOOL_PYTHON = """#!/usr/bin/env bash
 cat >/dev/null
 echo "python: 3.14.0 (stub) | Py_GIL_DISABLED = 1"
 echo "zvec: 0.8.0 (stub) | GIL enabled with PYTHON_GIL=0: False"
+"""
+
+# Enough of git for the zvec build path to run: the script only ever clones,
+# checks out and updates submodules. Exists so the ordering case below does not
+# depend on the host having git or a C++ compiler.
+STUB_GIT = """#!/usr/bin/env bash
+exit 0
+"""
+
+STUB_CXX = """#!/usr/bin/env bash
+exit 0
 """
 
 # Answers `--exists libsrtp2` with {exit_code}: 0 means the header is present.
@@ -57,6 +70,25 @@ def _overrides_tail(line: str) -> str:
     return line.split(marker, 1)[1] if marker in line else ""
 
 
+def _without_pkg_config(path: str) -> str:
+    """``path`` minus every directory that holds a ``pkg-config``.
+
+    Dropping the entries, rather than only the stub, is what makes "the host
+    has no pkg-config" a real condition: a sandbox that merely skips writing a
+    stub still inherits the host's copy, and a developer who followed the
+    README's `apt install pkg-config` advice would then get different results
+    from CI or from a machine that skipped it (caught in review, claunch-fsn9f).
+    """
+    kept = []
+    for entry in path.split(os.pathsep):
+        if not entry:
+            continue
+        if any(os.access(os.path.join(entry, name), os.X_OK) for name in ("pkg-config", "pkg-config.exe")):
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept)
+
+
 @pytest.fixture
 def sandbox(tmp_path: Path):
     """A stub PATH, a stub tool directory, and a wheel the script accepts."""
@@ -65,6 +97,13 @@ def sandbox(tmp_path: Path):
     uv = bin_dir / "uv"
     uv.write_text(STUB_UV, encoding="utf-8")
     uv.chmod(0o755)
+
+    # The zvec build path shells out to git and looks for a C++ compiler.
+    # Stubbing both keeps the ordering case independent of the host toolchain.
+    for name, body in (("git", STUB_GIT), ("c++", STUB_CXX)):
+        stub = bin_dir / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o755)
 
     tool_python = tmp_path / "tools" / "claude-launcher" / "bin" / "python"
     tool_python.parent.mkdir(parents=True)
@@ -87,20 +126,35 @@ def sandbox(tmp_path: Path):
         path.write_text(STUB_PKG_CONFIG.replace("{exit_code}", str(exit_code)), encoding="utf-8")
         path.chmod(0o755)
 
-    def run(*args: str, stdin: str = "", pkg: int | None = 1, fail_install: bool = False):
-        """Run the script. ``pkg=None`` leaves pkg-config off PATH entirely."""
+    def run(*args: str, stdin: str = "", pkg: int | None = 1, fail_install: bool = False,
+            wheel_path: str | None = "__default__"):
+        """Run the script. ``pkg=None`` leaves pkg-config unreachable.
+
+        ``wheel_path=None`` clears CLAUNCH_FT_ZVEC_WHEEL so the script takes the
+        real build path -- the only configuration in which "the check ran before
+        the build" is observable.
+        """
         pkg_config(pkg)
         env = dict(os.environ)
+        inherited = env.get("PATH", "")
+        if pkg is None:
+            inherited = _without_pkg_config(inherited)
         env.update(
             {
-                "PATH": os.pathsep.join([str(bin_dir), env.get("PATH", "")]),
+                "PATH": os.pathsep.join([str(bin_dir), inherited]),
                 "STUB_UV_LOG": str(log),
                 "STUB_TOOL_DIR": str(tmp_path / "tools"),
-                "CLAUNCH_FT_ZVEC_WHEEL": str(wheel),
                 "CLAUNCH_FT_ROOT": str(tmp_path / "ft-root"),
                 "CLAUNCH_FT_SHIM_DIR": str(tmp_path / "shim"),
+                "CLAUNCH_FT_WHEELS": str(tmp_path / "wheels"),
             }
         )
+        if wheel_path is None:
+            env.pop("CLAUNCH_FT_ZVEC_WHEEL", None)
+        elif wheel_path == "__default__":
+            env["CLAUNCH_FT_ZVEC_WHEEL"] = str(wheel)
+        else:
+            env["CLAUNCH_FT_ZVEC_WHEEL"] = wheel_path
         if fail_install:
             env["STUB_FAIL_INSTALL"] = "1"
         else:
@@ -116,16 +170,17 @@ def sandbox(tmp_path: Path):
             cwd=str(SCRIPT.parents[1]),
         )
 
-    def installs() -> list[str]:
-        """The `tool install` calls the script actually issued, target kept."""
+    def calls() -> list[str]:
+        """Every argv line the stub uv recorded, in order."""
         if not log.exists():
             return []
-        return [
-            line for line in log.read_text(encoding="utf-8").splitlines()
-            if line.startswith("tool install")
-        ]
+        return log.read_text(encoding="utf-8").splitlines()
 
-    return {"run": run, "installs": installs}
+    def installs() -> list[str]:
+        """The `tool install` calls the script actually issued, target kept."""
+        return [line for line in calls() if line.startswith("tool install")]
+
+    return {"run": run, "installs": installs, "calls": calls}
 
 
 def _out(proc: subprocess.CompletedProcess) -> str:
@@ -208,6 +263,35 @@ def test_a_failed_p2p_build_does_not_fall_back_silently(sandbox):
     assert "SIMULATED: the p2p build failed" in out
     # One attempt, and it was the one with the extra -- not a downgrade.
     assert _targets(sandbox) == [".[p2p]"]
+
+
+def test_the_decision_comes_before_the_zvec_build(sandbox):
+    """The goal is the *order*, not just the message.
+
+    Every case above hands in ``CLAUNCH_FT_ZVEC_WHEEL``, so they never enter
+    the build path -- and a script that moved the p2p decision after the build
+    (9 minutes, then ask) passed all of them. This case clears the wheel so the
+    real build path runs, and asserts it was never reached.
+    """
+    proc = sandbox["run"]("--require-p2p", pkg=1, wheel_path=None)
+    out = _out(proc)
+    assert proc.returncode != 0, out
+    # Stopped for the p2p reason, not because a build failed or a tool was
+    # missing.
+    assert "sudo apt install -y libsrtp2-dev pkg-config" in out
+    # The build never started: no `uv build`, and therefore no 9-minute wait
+    # before the question.
+    calls = sandbox["calls"]()
+    assert not [line for line in calls if line.startswith("build")], calls
+    # And nothing was installed either.
+    assert sandbox["installs"]() == []
+
+
+def test_nothing_heavy_happens_before_the_decision(sandbox):
+    """Weaker than the case above but pins more: no uv call at all."""
+    proc = sandbox["run"]("--require-p2p", pkg=None, wheel_path=None)
+    assert proc.returncode != 0, _out(proc)
+    assert sandbox["calls"]() == [], sandbox["calls"]()
 
 
 def test_both_flags_are_refused(sandbox):
