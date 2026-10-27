@@ -719,6 +719,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="min"] .rail-meshes,
 #session-list li[data-rail-mode="min"] .rail-handle,
 #session-list li[data-rail-mode="min"] .rail-watch,
+#session-list li[data-rail-mode="min"] .rail-storage,
 #session-list li[data-rail-mode="min"] .rail-keys,
 #session-list li[data-rail-mode="min"] .rail-compacting {
   display: none;
@@ -1104,6 +1105,34 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 .sess-watch-row:last-of-type { border-bottom: none; }
 .sess-watch-target { font-weight: 600; color: #39c5cf; }
 .sess-watch-kinds, .sess-watch-since { font-size: 11px; color: #9ca3af; }
+/* What the session's scratch directory holds (app.js, sessStoragePanel):
+   totals on one line, then one row per top-level entry, largest first. The
+   table is read-only by design -- cleanup is artifact_cleanup's flow, not a
+   control this panel offers. */
+.sess-storage { margin: 10px 0; }
+.sess-storage h3 { margin: 0 0 6px; font-size: 13px; }
+.sess-storage-head {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  margin-bottom: 6px;
+}
+.sess-storage-total { font-weight: 600; }
+.sess-storage-when { font-size: 11px; color: #9ca3af; }
+.sess-storage-refresh {
+  margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 9px;
+  background: #1b1f27; color: #d1d5db; border: 1px solid #2a2e36; cursor: pointer;
+}
+.sess-storage-refresh:hover { border-color: #3a4048; }
+.sess-storage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sess-storage-table th {
+  text-align: left; font-weight: normal; font-size: 11px; color: #9ca3af;
+  padding: 2px 6px 2px 0; border-bottom: 1px solid #2a2e36;
+}
+.sess-storage-table td { padding: 3px 6px 3px 0; border-bottom: 1px solid #22262d; }
+.sess-storage-table tr:last-child td { border-bottom: none; }
+.sess-storage-path { overflow-wrap: anywhere; }
+.sess-storage-size, .sess-storage-files { white-space: nowrap; text-align: right; }
+.sess-storage-size { color: #d1d5db; }
+.sess-storage-files { color: #9ca3af; }
 /* Role and rooms share the squeeze rather than one of them absorbing all of
    it. Left rigid, the role pill ("specialist" is 55px of a 114px budget)
    pushed the whole shortfall onto the rooms beside it, which then shrank past
@@ -1233,6 +1262,18 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
    none. */
 #session-list .rail-keys {
   flex: none; font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  white-space: nowrap;
+}
+/* How much of the disk this session's scratch holds (app.js,
+   railStorageTag). Neutral grey with no fill: it is a resource figure, not a
+   state of the session, and the rail's colours all already mean something
+   (blue what it is, green what the mesh calls it, amber that its run wants
+   the reader, purple that it is compacting, cyan what it watches). Rigid,
+   because "1.2 GB" clipped to "1.2…" is a wrong number rather than a shorter
+   one. */
+#session-list .rail-storage {
+  flex: none; font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  background: #191d24; color: #9ca3af; border: 1px solid #2a2e36;
   white-space: nowrap;
 }
 #session-list .rail-keys.on-card {

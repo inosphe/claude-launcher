@@ -6457,6 +6457,18 @@ async function refreshSessions(options) {
       watchBox.textContent = watching.text;
       watchBox.title = watching.title;
     }
+    // And how much room it is using on disk. Last of the pills because it is
+    // the one that is not about the session's identity or its work — it is a
+    // resource the reader manages elsewhere, drawn here so a fleet's growth
+    // is visible without opening anything. Guarded like the watch pill above.
+    const storing = typeof railStorageTag === "function" ? railStorageTag(s) : null;
+    let storeBox = null;
+    if (storing) {
+      storeBox = document.createElement("span");
+      storeBox.className = "rail-storage";
+      storeBox.textContent = storing.text;
+      storeBox.title = storing.title;
+    }
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = railMetaText(s);
@@ -6619,7 +6631,8 @@ async function refreshSessions(options) {
     head.append(label, keys, ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
                 ...(meshBox ? [meshBox] : []),
-                ...(watchBox ? [watchBox] : []));
+                ...(watchBox ? [watchBox] : []),
+                ...(storeBox ? [storeBox] : []));
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
     // scanning for "which of these has nobody touched" finds it in one
@@ -7050,6 +7063,45 @@ function watchTargetLabel(row) {
   const target = String((row && row.target) || "");
   const kinds = row && Array.isArray(row.kinds) ? row.kinds : null;
   return kinds && kinds.length ? `${target} (${kinds.join(", ")})` : target;
+}
+
+/* A byte count as the rail and the detail panel print it: 1024-based, whole
+   units, and one decimal only while the number is small enough for the
+   decimal to say something. Empty for zero -- the callers that hide at zero
+   test the string, so "0 B" must not be a string they get. */
+function storageSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let value = n;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text = unit === 0 ? String(Math.round(value))
+    : value.toFixed(value >= 10 ? 0 : 1);
+  return `${text} ${units[unit]}`;
+}
+
+/* How much this session's scratch directory holds, as one pill.
+
+   The number is the daemon's *cached* measurement (`storage` on the session
+   row, daemon/storage.py), carried by the poll the rail already makes; the
+   page never walks a directory. Null at zero, and null while nothing has been
+   measured yet: both are the same thing to a reader ("nothing to see"), and a
+   "0 B" on every quiet row is noise on a 260px rail. */
+function railStorageTag(s) {
+  const st = s && s.storage;
+  const text = storageSize(st && st.bytes);
+  if (!text) return null;
+  const files = Number(st.files) || 0;
+  const when = st.scanned_at ? `measured ${localStamp(st.scanned_at)}`
+    : "not measured yet";
+  return {
+    text,
+    title: `scratch ${text} · ${files} file${files === 1 ? "" : "s"} · ${when}`,
+  };
 }
 
 /* The names a session answers to in its rooms, when they are not the name
@@ -47261,6 +47313,97 @@ function sessWatchPanel(data) {
   return box;
 }
 
+/* How much this session's scratch directory holds, and what holds it.
+
+   The card carries one number; this is where a reader finds out which
+   directory under it is the one that grew. The totals and the per-entry
+   table both come from `/api/sessions/{name}/storage`, which measures in a
+   worker thread and caches per session for a minute (daemon/storage.py). The
+   panel is rebuilt on every poll, so the answer is kept here as well: asking
+   again each redraw would put one request per session per 2s on a resource
+   whose whole point is that measuring is expensive. The refresh button is
+   the only caller that pays for a new walk (`?refresh=1`).
+
+   There is deliberately nothing to click in the table. Cleanup belongs to
+   `artifact_cleanup`, a plan-then-apply flow with its own gates; a size
+   table that also deleted would be a second, unreviewed way in. */
+const sessStorageSeen = new Map();   // session name -> {at, doc, error}
+
+function sessStoragePanel(name) {
+  const box = el("section", "sess-storage");
+  box.appendChild(el("h3", null, "Storage"));
+  const head = el("div", "sess-storage-head");
+  const tableBox = el("div", "sess-storage-entries");
+  box.append(head, tableBox);
+  const load = (refresh) => {
+    api(`/api/sessions/${encodeURIComponent(name)}/storage${refresh ? "?refresh=1" : ""}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((doc) => {
+        sessStorageSeen.set(name, { at: Date.now(), doc, error: null });
+        if (box.isConnected) draw(doc, null);
+      })
+      .catch((err) => {
+        const why = (err && err.message) || String(err);
+        sessStorageSeen.set(name, { at: Date.now(), doc: null, error: why });
+        if (box.isConnected) draw(null, why);
+      });
+  };
+  const draw = (doc, error) => {
+    head.innerHTML = "";
+    tableBox.innerHTML = "";
+    if (error || !doc) {
+      // The rest of the panel is drawn by its own builders; one section that
+      // could not be measured says so here instead of taking them with it.
+      head.appendChild(el("p", "wf-note", `measurement unavailable — ${error || "no answer"}`));
+      const again = el("button", "sess-storage-refresh", "retry");
+      again.type = "button";
+      again.addEventListener("click", () => load(true));
+      head.appendChild(again);
+      return;
+    }
+    const total = storageSize(doc.bytes) || "0 B";
+    head.appendChild(el("div", "sess-storage-total",
+      `${total} · ${Number(doc.files) || 0} files · ${Number(doc.dirs) || 0} directories`));
+    const when = doc.scanned_at ? localStamp(doc.scanned_at) : "not measured yet";
+    head.appendChild(el("div", "sess-storage-when",
+      `${when}${doc.stale ? " · stale, measuring again" : ""}` +
+      `${doc.truncated ? " · partial walk" : ""}`));
+    const again = el("button", "sess-storage-refresh", "refresh");
+    again.type = "button";
+    again.title = "measure this directory again now";
+    again.addEventListener("click", () => load(true));
+    head.appendChild(again);
+    const rows = Array.isArray(doc.entries) ? doc.entries : [];
+    if (!rows.length) {
+      tableBox.appendChild(el("p", "wf-note", "nothing on disk"));
+      return;
+    }
+    const table = el("table", "sess-storage-table");
+    const thead = el("thead");
+    const hrow = el("tr");
+    for (const label of ["path", "size", "files"]) hrow.appendChild(el("th", null, label));
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    for (const row of rows) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "sess-storage-path", String(row.path || "")));
+      tr.appendChild(el("td", "sess-storage-size", storageSize(row.bytes) || "0 B"));
+      tr.appendChild(el("td", "sess-storage-files", String(Number(row.files) || 0)));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    tableBox.appendChild(table);
+  };
+  const seen = sessStorageSeen.get(name);
+  if (seen && Date.now() - seen.at < 60000) draw(seen.doc, seen.error);
+  else {
+    head.appendChild(el("p", "wf-note", "measuring…"));
+    load(false);
+  }
+  return box;
+}
+
 function sessDetailTabs(name) {
   const bar = el("div", "seq-tabs sess-subtabs");
   bar.setAttribute("role", "tablist");
@@ -47947,6 +48090,12 @@ function renderSession(data) {
     if (typeof sessWatchPanel === "function") {
       const watch = sessWatchPanel(data);
       if (watch) view.appendChild(watch);
+    }
+    // What it holds on disk, under the relations and above the static facts:
+    // a reader comes here to find out why a disk filled, and the per-entry
+    // table is the answer (daemon/storage.py).
+    if (typeof sessStoragePanel === "function") {
+      view.appendChild(sessStoragePanel(name));
     }
     const dl = el("dl", "sess-meta");
     metaRow(
