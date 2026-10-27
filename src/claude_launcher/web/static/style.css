@@ -925,15 +925,12 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   background: #1b2a44; box-shadow: inset 0 0 0 1px #1f6feb;
 }
 /* Child cards move as a whole so every line shares the nesting inset.
-   The one-pixel guide stays inside the card for content-visibility clipping.
-   Narrow rails reduce the step to retain space for labels at depth four. */
-#session-list li.child { position: relative; }
+   No guide line runs down the leading edge (claunch-zijwn.1): the depth
+   shade below already marks that edge, and a hard line on top of it read
+   as a border rather than a recess. Narrow rails reduce the step to retain
+   space for labels at depth four. */
 #session-list li.child::before {
   content: "└"; color: #6e7681; font-size: 11px; flex: none; margin-right: -2px;
-}
-#session-list li.child::after {
-  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 1px;
-  background: #30363d; pointer-events: none;
 }
 /* A child card sits deeper in the rail than its parent (claunch-zijwn): an
    inset shade along its top and leading edges, darker and wider at each

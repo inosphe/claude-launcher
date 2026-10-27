@@ -5,8 +5,8 @@
    DECLARES; this holds what the page actually draws — because the two can
    disagree without either being wrong on its own. A rule can hide a line and
    a more specific rule can put it back; a card can be given a class and still
-   lay out at the same height; the child stack's spine is a pseudo-element
-   whose geometry only exists once a browser has computed it.
+   lay out at the same height; a child card's depth is a computed shade
+   that only exists once a browser has resolved the cascade.
 
    What it asserts, against the shipped app.js and style.css and a fixture
    daemon:
@@ -15,8 +15,9 @@
        lines it is supposed to draw and no others;
      * every role family wears a different colour, and a role's alias wears
        the colour of its family;
-     * a child row is a card with a spine at its depth, siblings share the
-       spine's offset, and a shallower child's spine sits further left;
+     * a child row is a card indented to its depth with no guide line down
+       its edge, siblings share the offset, and a shallower child sits
+       further left;
      * picking a session expands its card in place (the card grows, the
        sub-lines appear, the briefing card is drawn) — the fold the rail used
        to have is gone, so this is the only way a card opens. */
@@ -132,7 +133,7 @@ const server = http.createServer((req, res) => {
 
 /* What the page draws for every card: its density, how tall it came out,
    which of its lines are laid out at all, the role pill's computed colour,
-   and the child stack's spine. */
+   and whether a guide line is drawn down its edge. */
 const READ = `(() => {
   const shown = (el) => !!el && getComputedStyle(el).display !== "none";
   return [...document.querySelectorAll("#session-list li[data-name]")].map((li) => {
@@ -301,14 +302,16 @@ const READ = `(() => {
     const deep = by("w1a");            // depth 2, under w1
     const sibling = by("w1b");
     const shallow = by("w1");
-    assert.ok(deep.spine, "a child row draws a spine");
-    assert.equal(sibling.spine, deep.spine,
-      "siblings at one depth share the spine's offset");
+    /* claunch-zijwn.1: the depth shade marks the leading edge, so no guide
+       line is drawn over it at any depth. */
+    for (const r of [shallow, deep, sibling]) {
+      assert.equal(r.spine, "", `${r.name}: a child row draws no guide line (${r.spine})`);
+    }
     assert.ok(shallow.left < deep.left,
-      `a shallower child's spine sits further left (${shallow.spine} vs ${deep.spine})`);
+      `a shallower child sits further left (${shallow.left} vs ${deep.left})`);
     assert.deepEqual([shallow.depth, deep.depth], ["1", "2"],
-      "each child carries its depth for the spine");
-    assert.equal(by("lead").spine, "", "a root row draws no spine");
+      "each child carries its depth for the shade");
+    assert.equal(by("lead").spine, "", "a root row draws no guide line");
     assert.equal(deep.tick, '"└"', "the tick still hangs the child off its parent");
     assert.equal(deep.left, sibling.left, "siblings align their entire cards");
     assert.equal(deep.background, by("lead").background,
