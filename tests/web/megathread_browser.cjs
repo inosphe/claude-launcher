@@ -42,6 +42,12 @@ const CANDIDATES = [
   { session: "s2", thread: "th-b", p_mine: 0.9, p_not_mine: 0.1, logit: 2.2, choice: "mine", confidence: 0.9 },
 ];
 const posted = [];
+let fleetReleased = false;
+const fleetHeld = [];
+function releaseFleet() {
+  fleetReleased = true;
+  for (const go of fleetHeld.splice(0)) go();
+}
 const drafts = [];
 
 const server = http.createServer((req, res) => {
@@ -49,6 +55,15 @@ const server = http.createServer((req, res) => {
   if (url.pathname.startsWith("/api/")) {
     res.setHeader("Content-Type", "application/json");
     if (url.pathname === "/api/batch") { res.statusCode = 404; return res.end("{}"); }
+    // The page's own fleet read is the one with no `state` (every record,
+    // archived included). It is held until the test lets it go, so the
+    // check below can see the clusters drawn before the fleet has arrived
+    // (claunch-wbs0i: on a live daemon that read took 1.5-2.3 s and the
+    // whole page waited for it).
+    if (url.pathname === "/api/sessions" && !url.searchParams.has("state") && !fleetReleased) {
+      fleetHeld.push(() => server.emit("request", req, res));
+      return;
+    }
     if (url.pathname === "/api/sessions") {
       // The fields the rail poll really sends: branch and issue, no `task`,
       // and the two activity stamps the picker sorts by. `role` is left out
@@ -159,6 +174,14 @@ const server = http.createServer((req, res) => {
     // could join are offered.
     const chips = await page.$$eval("#megathreads-view .mt-chip-name", (els) => els.map((e) => e.textContent));
     assert.equal(chips.length, 2);
+    // ...all of it before the fleet read has been answered: the clusters do
+    // not wait on it. Then the fleet arrives and the page draws it in.
+    for (let i = 0; i < 300 && !fleetHeld.length; i++) await new Promise((ok) => setTimeout(ok, 10));
+    assert.ok(fleetHeld.length >= 1, "the page asks for the fleet after drawing the clusters");
+    assert.deepEqual(await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.length), 0);
+    releaseFleet();
+    await page.waitForFunction(() => document.querySelectorAll("#megathreads-view .mt-add-session option").length === 2,
+      null, { timeout: 15000 });
     const joinable = await page.$$eval("#megathreads-view .mt-add-session option", (els) => els.map((e) => e.value));
     assert.deepEqual(joinable.sort(), ["s1", "s2"]);
 
