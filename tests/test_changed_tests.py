@@ -1246,6 +1246,34 @@ def test_the_kept_receipt_is_named_for_the_run_it_records(repo, gate):
     assert (key.parent / f"{key.stem}@{stamp}.json").is_file()
 
 
+def test_keeping_the_earlier_receipt_copies_it_instead_of_moving_it(repo, gate):
+    """The key path has to hold a receipt while the next one is on its way.
+
+    Keeping by moving took the earlier receipt off the key path, and the swap
+    that puts the new one there comes after -- so a process killed between
+    the two (SIGKILL, power loss) left the key empty and every check over
+    that tree answered ``CANNOT_TELL`` until the next run wrote a receipt
+    (``claunch-23r7d.1.1.1.1.2``). A copy leaves the key alone until the
+    atomic rename replaces what is there.
+
+    Asserted on the function rather than through a run, because that is where
+    the difference is: a run that completes swaps the new receipt in either
+    way, and then the two are indistinguishable from outside.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    dest = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    before = json.loads(dest.read_text(encoding="utf-8"))
+
+    kept = changed_tests.keep_earlier_receipt(dest)
+    assert kept is not None and kept.is_file(), "the earlier receipt must be kept"
+    assert dest.is_file(), "and must still be at the key path, where a check looks"
+    assert json.loads(dest.read_text(encoding="utf-8"))["started_at"] == before["started_at"]
+    assert json.loads(kept.read_text(encoding="utf-8"))["started_at"] == before["started_at"]
+
+
 def test_no_reuse_keeps_the_green_receipt_it_displaces(repo, gate):
     """The escape hatch is exempt from reuse, not from keeping the record."""
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
@@ -1353,20 +1381,19 @@ def test_a_half_written_receipt_beside_the_key_is_removed(repo, gate, monkeypatc
     assert "could not write the receipt" in capsys.readouterr().err
 
 
-def test_a_failed_swap_puts_the_archived_receipt_back(repo, gate, monkeypatch, capsys):
-    """The archive has already moved the earlier receipt when the swap fails.
+def test_a_failed_swap_leaves_the_earlier_receipt_where_the_check_looks(repo, gate, monkeypatch, capsys):
+    """The rename over the key fails, and the key never went empty.
 
-    The write succeeded, so the temporary file holds a whole receipt; the
-    rename over the key is what fails. At that moment the earlier receipt is
-    not at the key -- the archive moved it -- so the recovery has to put it
-    back, or the key path ends up empty exactly as in the ordering this fixed
-    (``claunch-23r7d.1.1.1.1``). Removing that branch also left the suite green
-    before this case existed.
+    Keeping the earlier receipt copies it, so at the moment the swap fails
+    the receipt this run did not replace is still at the key path -- and the
+    copy beside it records the same run. A reviewer removed this branch and
+    the suite stayed green (``claunch-23r7d.1.1.1.1.1``); the shape it guards
+    is the one ``claunch-23r7d.1.1.1.1.2`` made reachable, where keeping by
+    moving emptied the key for as long as the swap took to fail.
 
-    Only the rename whose source is a ``.tmp`` fails: the archive's own
-    ``dest.replace(kept)`` and the restore's ``kept.replace(dest)`` move
-    something else, and a test that broke those too would fail at the wrong
-    line.
+    Only the rename whose source is a ``.tmp`` fails: the copy that keeps the
+    earlier receipt moves something else, and a test that broke that too
+    would fail at the wrong line.
     """
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
     assert gate() == 0
@@ -1390,12 +1417,52 @@ def test_a_failed_swap_puts_the_archived_receipt_back(repo, gate, monkeypatch, c
 
     assert key.is_file(), "the run did not replace the receipt, so the earlier one must stand"
     still = json.loads(key.read_text(encoding="utf-8"))
-    assert still["started_at"] == first["started_at"], "the restore must bring back the earlier run"
-    assert _archived(key) == [], "the restore undoes the archive; it must not leave a second copy"
+    assert still["started_at"] == first["started_at"], "the key must still hold the earlier run"
+    kept = _archived(key)
+    assert len(kept) == 1, f"the copy records the same run: {kept}"
+    assert json.loads(kept[0].read_text(encoding="utf-8"))["started_at"] == first["started_at"]
     assert changed_tests.find_receipt(repo, tree, files, gate.receipts)["started_at"] == (
         first["started_at"]
     ), "a check over this tree and selection must still get an answer"
-    assert "could not write the receipt" in capsys.readouterr().err
+    out = capsys.readouterr()
+    assert "could not write the receipt" in out.err
+    assert "kept the earlier receipt" in out.out
+
+
+def test_a_kept_receipt_answers_when_the_key_path_is_gone(repo, gate, capsys):
+    """The state a crash left behind: kept receipts on disk, nothing at the key.
+
+    Keeping the earlier receipt is a copy now, so this tool cannot empty the
+    key path itself. Runs that came before the copy could -- and a key path
+    that is gone is not a tree that was never measured. The verdict is beside
+    it, and ``--check`` answering ``CANNOT_TELL`` there is the same silence
+    the round that introduced the receipt set out to end.
+
+    The name is a stamp, so the file is not trusted by it: the receipt's own
+    ``tree`` and ``selection`` decide, which is what keeps a kept receipt from
+    answering for a selection it did not measure.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    first = json.loads(key.read_text(encoding="utf-8"))
+
+    assert gate("--no-reuse") == 0
+    assert gate.runs() == 2
+    assert len(_archived(key)) == 1
+
+    key.unlink()
+    assert not key.exists()
+
+    found = changed_tests.find_receipt(repo, tree, files, gate.receipts)
+    assert found is not None, "the kept receipt answers for the tree it measured"
+    assert found["started_at"] == first["started_at"]
+    assert "kept receipt" in capsys.readouterr().out
+
+    assert gate("--check") == 0, "the reviewer's door answers instead of abstaining"
+    assert gate.runs() == 2, "and it answers without running the selection again"
 
 
 def test_an_untracked_file_is_in_the_tree_key(repo):
