@@ -203,6 +203,27 @@ const server = http.createServer((req, res) => {
     m = await measure();
     assert.equal(m.bars.some(b => b.sel === "#term-cflow"), false,
       "the cflow line goes back down with no run waiting");
+    // The other direction of the same mechanism (claunch-i5lk4.1). Going
+    // down is proven above; coming back up is not the same witness. The
+    // placement is re-measured because watchNoticeStrip observes every
+    // named row, so a row that goes display: none — a reported size of 0 —
+    // re-places a card that is already on screen. Without that observer the
+    // card keeps the top it was given while the rows were up, and nothing
+    // else in this harness would notice.
+    const backUp = m.notices.top;
+    assert(backUp < under.notices.top,
+      "the strip comes back up when the rows go away "
+      + `(strip ${backUp}, was ${under.notices.top} with the rows up)`);
+    const headerBottom = m.bars.find(b => b.sel === "#term-header").bottom;
+    // Back in the header's neighbourhood, not still hanging where the cflow
+    // line was. A window rather than the exact gap: the register the strip
+    // keeps under the last bar is app.js's to choose, and a test that pins
+    // the number fails on a legitimate change to it.
+    assert(backUp <= headerBottom + 24,
+      "with the rows gone the strip sits back under the header "
+      + `(strip ${backUp}, header bottom ${headerBottom})`);
+    console.log(`rows gone again: strip ${backUp} (was ${under.notices.top}), `
+      + `header ${headerBottom}`);
 
     // --- the tab row wraps under a card that is already up ----------------
     // The bars move after the card is drawn, which is why the placement is
