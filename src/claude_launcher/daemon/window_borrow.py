@@ -129,8 +129,14 @@ _recipes: Dict[tuple, tuple] = {}
 #: pytest options that change which configuration, conftest files or plugins
 #: a run loads. The lender's arguments select tests; they may not reach past
 #: the borrower's checkout or swap its plugins (claunch-onqp6).
-_SCOPE_OPTIONS = ("--config-file", "--rootdir", "--confcutdir")
-_SCOPE_SHORT = ("-p", "-c")
+_SCOPE_OPTIONS = ("--config-file", "--rootdir", "--confcutdir", "--override-ini")
+# The short options a lent run may carry, read the way pytest reads a bundle
+# such as ``-xvs``: a flag takes nothing, a valued option takes the rest of
+# its token or else the next one. Any other letter -- ``-p``, ``-c`` and
+# ``-o`` among them -- is refused rather than guessed at.
+_SHORT_FLAGS = frozenset("xqvsl")
+_SHORT_VALUED = frozenset("kmrnW")
+_SHORT_SCOPE = frozenset("pco")
 
 
 def _escapes(path: str, base: str = "") -> bool:
@@ -143,24 +149,47 @@ def _escapes(path: str, base: str = "") -> bool:
     return joined == ".." or joined.startswith("../")
 
 
+def _short_bundle(raw: str) -> "tuple[Optional[str], bool]":
+    """The letter of ``raw`` (``-xvs``) a borrow refuses, or None, and
+    whether the bundle's last option takes the next token as its value."""
+    for i, letter in enumerate(raw[1:], 1):
+        if letter in _SHORT_VALUED:
+            return None, i == len(raw) - 1
+        if letter not in _SHORT_FLAGS:
+            return letter, False
+    return None, False
+
+
 def vet_borrow(info: dict) -> Optional[str]:
     """Why the borrower must not run ``info``'s pytest, or None.
 
     ``rel_cwd`` must name a directory inside the checkout; every argument's
     path (a positional test id or an ``--opt=value`` value, before ``::``)
-    must stay inside it from there; and the options that move pytest's
-    configuration or plugins (``-p``, ``-c``, ``--config-file``,
-    ``--rootdir``, ``--confcutdir``) are refused outright.
+    must stay inside it from there; the options that move pytest's
+    configuration or plugins (``-p``, ``-c``, ``-o``, ``--config-file``,
+    ``--rootdir``, ``--confcutdir``, ``--override-ini``) are refused
+    outright, and so is any short option outside ``_SHORT_FLAGS`` and
+    ``_SHORT_VALUED``, bundled or not.
     """
     rel = str(info.get("rel_cwd") or "")
     if _escapes(rel):
         return f"rel_cwd {rel!r} is outside the checkout"
     base = posixpath.normpath(rel.replace("\\", "/")) if rel else ""
     base = "" if base == "." else base
+    value_next = False
     for raw in [str(a) for a in info.get("pytest_args") or []]:
+        if value_next:
+            value_next = False
+            continue
+        if len(raw) > 1 and raw.startswith("-") and not raw.startswith("--"):
+            letter, value_next = _short_bundle(raw)
+            if letter in _SHORT_SCOPE:
+                return f"pytest option {raw!r} changes the run's configuration or plugins"
+            if letter is not None:
+                return f"pytest option {raw!r} is not one a borrowed run may carry"
+            continue
         name, eq, value = raw.partition("=")
-        if name in _SCOPE_OPTIONS or any(
-                raw.startswith(short) and not raw.startswith("--") for short in _SCOPE_SHORT):
+        if name in _SCOPE_OPTIONS:
             return f"pytest option {raw!r} changes the run's configuration or plugins"
         target = value if (eq and raw.startswith("-")) else ("" if raw.startswith("-") else raw)
         if _escapes(target.split("::", 1)[0], base):

@@ -303,8 +303,11 @@ def test_recipe_commit_merge_and_refusals(lender_clone):
 @pytest.mark.parametrize("rel_cwd, args", [
     ("", ["tests", "-q"]),
     ("sub/dir", ["../../tests/test_a.py::test_x", "-k", "a or b"]),
-    ("", ["--deselect=tests/test_a.py::test_y", "-o", "junit_family=xunit1"]),
+    ("", ["--deselect=tests/test_a.py::test_y", "-x"]),
     ("", ["-q", "--pdb"]),
+    ("", ["-xq", "-vv", "-rA", "tests"]),
+    ("", ["-k", "not slow", "-n", "4", "-m", "-slow-ish"]),
+    ("", ["-n4", "-Werror", "-xk", "a"]),
 ])
 def test_vet_borrow_accepts_selections_inside_the_checkout(rel_cwd, args):
     assert window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args}) is None
@@ -327,6 +330,16 @@ def test_vet_borrow_accepts_selections_inside_the_checkout(rel_cwd, args):
     ("", ["--config-file=other.ini"], "configuration or plugins"),
     ("", ["--rootdir", "."], "configuration or plugins"),
     ("", ["--confcutdir=."], "configuration or plugins"),
+    ("", ["-xc../out/evil.ini"], "configuration or plugins"),
+    ("", ["-xpevil"], "configuration or plugins"),
+    ("", ["-vxc", "../x.ini"], "configuration or plugins"),
+    ("", ["-o", "pythonpath=.."], "configuration or plugins"),
+    ("", ["-opythonpath=.."], "configuration or plugins"),
+    ("", ["--override-ini=cache_dir=/abs"], "configuration or plugins"),
+    ("", ["--override-ini", "pythonpath=/abs"], "configuration or plugins"),
+    ("", ["-Z"], "may carry"),
+    ("", ["-xZ"], "may carry"),
+    ("", ["-k", "x", "/abs/t.py"], "outside the checkout"),
 ])
 def test_vet_borrow_refuses_paths_out_and_scope_options(rel_cwd, args, said):
     reason = window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args})
