@@ -8989,6 +8989,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    (claunch-g6uma.2): how much of the definition is unfolded */
 .cf2-modes.sub { margin-left: 8px; border-color: #21262d; }
 .cf2-modes.sub .cf2-mode { padding: 2px 9px; font-size: 11px; }
+/* `Simplified` and the levels answer different questions — the run's position
+   against how much loop detail is drawn — so a rule and a caption stand
+   between them (claunch-g6uma.2.1) */
+.cf2-modes-sep {
+  width: 1px; align-self: stretch; background: #30363d;
+}
+.cf2-modes-cap {
+  display: inline-flex; align-items: center; padding: 0 7px 0 5px;
+  font-size: 10px; letter-spacing: .04em; color: #8b949e;
+  border-right: 1px solid #21262d; white-space: nowrap;
+}
 
 /* the graph view: the same chart as a flow — down is sequence, side by side
    is branches, a box is a loop, a call frame is a procedure drawn once */
