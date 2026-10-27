@@ -208,12 +208,43 @@ def test_the_cli_shell_does_not_inherit_the_daemons_interpreter_settings(
 #: A session leader that starts one child in its own process group and one in
 #: a session of its own, then waits to be killed. The two children write a
 #: marker after a delay, so what survives is visible after the leader is gone.
+#:
+#: Each child sets SIGHUP back to SIG_DFL before doing anything, and reports
+#: that it did (its ``.up`` file). An ignored disposition is inherited across
+#: fork+exec, so under a runner that started with SIGHUP ignored (``trap ''
+#: HUP`` in a parent shell, or any parent that masked it) the ordinary child
+#: would survive the leader's death and this test would be measuring the
+#: runner, not the kernel — measured: this test failed every run under
+#: ``trap '' HUP`` and passed every run without it. The leader writes ``ready``
+#: only once both children have reported, so the test never kills it while a
+#: child is still booting — a SIGHUP that arrives before the reset is ignored,
+#: and a child forked after the group's SIGHUP is sent never receives it.
+#:
+#: The 10s deadline has to *fail*, not fall through: writing ``ready`` after it
+#: expires would put back exactly the hole this handshake closes, silently, on
+#: the slow runs where it matters most. A child measured 10.01s to start once
+#: in three under load (s1262-rev, claunch-c1yst), so the window is real. When
+#: it expires the leader exits without ``ready`` and the test fails at its own
+#: message instead — "the leader must start both children before it is killed".
 _LEADER = r"""
-import subprocess, sys, time
-attached, detached = sys.argv[1], sys.argv[2]
-child = "import sys, time; time.sleep(1.2); open(sys.argv[1], 'w').write('x')"
-subprocess.Popen([sys.executable, "-c", child, attached])
-subprocess.Popen([sys.executable, "-c", child, detached], start_new_session=True)
+import os, subprocess, sys, time
+attached, detached, ready = sys.argv[1], sys.argv[2], sys.argv[3]
+child = (
+    "import signal, sys, time\n"
+    "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
+    "open(sys.argv[2], 'w').write('x')\n"
+    "time.sleep(1.2)\n"
+    "open(sys.argv[1], 'w').write('x')\n"
+)
+up = [attached + ".up", detached + ".up"]
+subprocess.Popen([sys.executable, "-c", child, attached, up[0]])
+subprocess.Popen([sys.executable, "-c", child, detached, up[1]], start_new_session=True)
+deadline = time.time() + 10.0
+while time.time() < deadline and not all(os.path.exists(p) for p in up):
+    time.sleep(0.02)
+if not all(os.path.exists(p) for p in up):
+    sys.exit("children did not report their SIGHUP reset within 10s")
+open(ready, "w").write("x")
 time.sleep(30)
 """
 
@@ -227,17 +258,33 @@ def test_a_child_of_the_tab_shell_dies_with_it_unless_detached(home, tmp_path):
     foreground process group, so a child that stayed in that group dies too —
     which is how a restart typed into the tab lost its start half. A child
     started in its own session (what ``_hand_off_restart`` does) lives on.
+
+    Two things this test has to control or it measures the wrong subject, both
+    measured against this machine (claunch-c1yst):
+
+    - the children's SIGHUP disposition, which is inherited across exec (see
+      ``_LEADER``). A runner that ignores SIGHUP makes the ordinary child
+      survive, and the failure says "the child outlived the leader" about a
+      kernel that was never asked;
+    - when the leader is killed. The fixed delay it used to sleep could pass
+      before both children were forked under load, and a child created after
+      the group's SIGHUP is delivered keeps running — the assertion then
+      reads a schedule, not the mechanism.
     """
     from claude_launcher.daemon import pty_backend
 
     attached = tmp_path / "attached"
     detached = tmp_path / "detached"
+    ready = tmp_path / "ready"
     pty = pty_backend.spawn_local(
-        [sys.executable, "-c", _LEADER, str(attached), str(detached)],
+        [sys.executable, "-c", _LEADER, str(attached), str(detached), str(ready)],
         env=dict(os.environ), cwd=str(tmp_path), cols=80, rows=24,
     )
     try:
-        time.sleep(0.6)          # let it start both children
+        deadline = time.monotonic() + 10.0
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "the leader must start both children before it is killed"
         pty.terminate(force=False)   # the session leader dies here
         time.sleep(2.5)          # both children's delays have passed
     finally:
