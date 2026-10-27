@@ -56,7 +56,8 @@ function sliceConstMulti(name) {
 const CONSTS = ["CF2G_NODE_W", "CF2G_NODE_H", "CF2G_GAP", "CF2G_LANE", "CF2G_PAD",
                 "CF2G_HEAD", "CF2G_CHIP", "CF2G_RAIL", "CF2G_EDGE", "CF2G_MARGIN",
                 "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes",
-                "CF2G_HANDLE", "CF2G_PRESET_DEPTH", "cf2GraphPresets", "cf2GraphFolds"];
+                "CF2G_HANDLE", "CF2G_LEVELS", "cf2GraphPresets", "cf2GraphFolds",
+                "cf2GraphLevel"];
 /* the presets are written one per line, so the harness copies them whole */
 const BLOCK_CONSTS = ["CF2G_PRESETS"];
 
@@ -88,14 +89,16 @@ const fns = new Function(
    slice("cflow2GraphHidden"),
    slice("cflow2NodeBits"),
    slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs"),
+   slice("cflow2GraphLevelOf"), slice("cflow2GraphCut"),
    slice("cflow2GraphPreset"), slice("cflow2GraphPresetSet"),
    slice("cflow2GraphPresetPick"), slice("cflow2GraphPresetTabs")].join("\n") +
   "\nreturn { cflow2GraphLayout, cflow2GraphProcs, cflow2GraphOpen, cflow2GraphSvg," +
   " cflow2GraphSig, cflow2GraphSite, cflow2NodeBits, cflow2ChartMode, cflow2ChartModeTabs," +
   " cflow2GraphInto, cflow2GraphPreset, cflow2GraphPresetSet, cflow2GraphPresetPick," +
   " cflow2GraphPresetTabs," +
-  " cflow2GraphHidden," +
-  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD, CF2G_PRESETS, cf2GraphPresets, cf2GraphFolds };"
+  " cflow2GraphHidden, cflow2GraphLevelOf, cflow2GraphCut," +
+  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD, CF2G_PRESETS, CF2G_LEVELS," +
+  " cf2GraphPresets, cf2GraphFolds, cf2GraphLevel };"
 )();
 
 let failures = 0;
@@ -329,12 +332,30 @@ const inside = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y &&
   ok("a person's toggle folds one back", !folded.has("pa"));
 }
 
-/* ---- the presets: how much of the definition is unfolded --------------
+/* ---- the presets: ten steps, spread over the chart's own depth --------
    (claunch-g6uma.2.1, thread th-e39112) The row answers two questions.
-   Simplified is where the run is; the levels are structure, and a level counts
-   block bodies — a loop's, a `call`'s and a branch's alike. `deep()` has one
-   loop whose body holds a seq and a par, so `lv2` opens the loop and `lv3`
-   opens what it holds. */
+   Simplified is where the run is; the block-detail slider is the structure, in
+   ten steps. A step is not a fixed depth: the program measures the chart's own
+   block depth when it draws and spreads the slider over it, so the same step
+   opens more on a deeper chart, and the last step is every block unfolded —
+   the picture the old standalone `All` button drew. */
+{
+  check("the last step is not a depth, it is everything",
+        [fns.cflow2GraphCut(10, 17), fns.cflow2GraphCut(10, 1)], [null, null]);
+  check("a chart with no block body has nothing for a step to hide",
+        fns.cflow2GraphCut(3, 0), null);
+  check("ten steps spread over the chart's own depth",
+        [1, 3, 5, 7, 9].map((l) => fns.cflow2GraphCut(l, 17)), [2, 5, 9, 12, 15]);
+  check("a chart one block deep has one step of room", fns.cflow2GraphCut(4, 1), 1);
+  check("…and a chart two deep has two",
+        [1, 5, 9].map((l) => fns.cflow2GraphCut(l, 2)), [1, 1, 2]);
+  check("the retired `all` reads as the last step",
+        [fns.cflow2GraphLevelOf("all"), fns.cflow2GraphLevelOf("lv7"),
+         fns.cflow2GraphLevelOf("simple"), fns.cflow2GraphLevelOf("lv0"),
+         fns.cflow2GraphLevelOf("lv11")], [10, 7, 0, 0, 0]);
+}
+
+/* one loop whose body holds a seq and a par: one block body deep */
 function deep() {
   return {
     root: "d0",
@@ -351,8 +372,7 @@ function deep() {
     },
   };
 }
-/* two loops, one inside the other: each level on this chart opens exactly one
-   more block, which is what tells the levels apart at all */
+/* two loops, one inside the other: two block bodies deep */
 function nest() {
   return {
     root: "n0",
@@ -372,30 +392,27 @@ function nest() {
 {
   const chart = deep();
   const opened = (preset) => [...fns.cflow2GraphOpen(chart, {}, null, null, preset)].sort();
-  check("the ladder has the presets the page offers", fns.CF2G_PRESETS.length, 5);
+  check("the last step opens every block, whatever the chart",
+        opened("lv10"), ["d0", "d1", "d2", "d3"]);
+  check("…and that is what the retired `all` drew",
+        opened("all").join(), opened("lv10").join());
+  check("a chart one block body deep saturates before the last step",
+        [opened("lv1"), opened("lv9")], [["d0", "d1"], ["d0", "d1"]]);
   check("simplified shows the root's steps and follows the run", opened("simple"), ["d0"]);
-  check("one level opens the root and its own blocks' bodies",
-        opened("lv1"), ["d0", "d1"]);
-  check("two levels opens the blocks the loop body holds",
-        opened("lv2"), ["d0", "d1", "d2", "d3"]);
-  check("three levels opens no more — this chart is that shallow",
-        opened("lv3"), ["d0", "d1", "d2", "d3"]);
-  check("all opens the deepest block too", opened("all"), ["d0", "d1", "d2", "d3"]);
-  check("a preset the page does not offer reads as simplified", opened("lv9"), ["d0"]);
+  check("a step the page does not offer reads as simplified", opened("lv99"), ["d0"]);
 
-  /* the levels are a ladder among themselves. `simple` is deliberately not on
-     it: it answers where the run is, not how deep the picture goes, and the
-     two are not comparable (claunch-g6uma.2.1). */
-  const levels = ["lv1", "lv2", "lv3", "all"];
+  /* the steps are a ladder among themselves. `simple` is deliberately not on
+     it: it answers where the run is, not how deep the picture goes. */
+  const steps = Array.from({ length: fns.CF2G_LEVELS }, (_, i) => "lv" + (i + 1));
   const gaps = [];
-  for (let i = 1; i < levels.length; i++) {
-    const now = new Set(opened(levels[i]));
-    for (const id of opened(levels[i - 1])) if (!now.has(id)) gaps.push([levels[i], id]);
+  for (let i = 1; i < steps.length; i++) {
+    const now = new Set(opened(steps[i]));
+    for (const id of opened(steps[i - 1])) if (!now.has(id)) gaps.push([steps[i], id]);
   }
-  check("each level opens at least the level below it", gaps, []);
+  check("each step opens at least the step below it", gaps, []);
 
-  check("a fold laid on a level closes that block again",
-        [...fns.cflow2GraphOpen(chart, {}, null, { d1: false }, "all")].sort(),
+  check("a fold laid on a step closes that block again",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: false }, "lv10")].sort(),
         ["d0", "d2", "d3"]);
   check("an open laid on simplified opens that block",
         [...fns.cflow2GraphOpen(chart, {}, null, { d1: true }, "simple")].sort(),
@@ -404,9 +421,10 @@ function nest() {
 
 /* ---- the root's own type does not shift the ladder --------------------
    A definition wrapped in a `try` and one sitting in a plain `seq` must give
-   the same `lv1`: the chart's root is the frame of the whole thing, not a body
-   a level opens. A branch body counts a level like a loop's, which is the
-   person's rule read on the other kind of block (thread th-e39112). */
+   the same picture at the same step: the chart's root is the frame of the
+   whole thing, not a body a step opens. A branch body counts a level like a
+   loop's, which is the person's rule read on the other kind of block
+   (thread th-e39112). */
 {
   const chart = {
     root: "w0",
@@ -422,122 +440,75 @@ function nest() {
     },
   };
   const openOf = (preset) => [...fns.cflow2GraphOpen(chart, {}, null, null, preset)].sort();
-  check("a branch at the root does not spend the first level",
+  check("a branch at the root does not spend the first step",
         openOf("lv1"), ["T", "b1", "w0"]);
-  check("the body inside that branch is what the second level opens",
-        openOf("lv2"), ["T", "b1", "b2", "w0"]);
+  check("the body inside that branch is what the last step opens",
+        openOf("lv10"), ["T", "b1", "b2", "w0"]);
   const lv1 = fns.cflow2GraphLayout(chart, {}, {
     open: fns.cflow2GraphOpen(chart, {}, null, null, "lv1") });
-  check("…and the first level draws it as one line", !!boxOf(lv1, "b2"), false);
+  check("…and the first step draws it as one line", !!boxOf(lv1, "b2"), false);
 }
 
-/* ---- the levels are one ladder, and every block body counts a level -----
-   (claunch-g6uma.2.1, thread th-e39112) The person's first report was that the
-   levels read as part of Simplified: they folded the run's path away, so a
-   level and Simplified were two answers to one question. The answer the person
-   then gave is the rule here — a level counts block bodies, and a loop, a
-   `call` and a branch are the same unit. The two questions stay apart: the
-   levels draw the structure, Simplified follows the run, and the levels report
-   a run they leave out instead of bending the structure around it. `nest()` is
-   two nested loops, so each level opens exactly one more block. */
+/* ---- the steps are one ladder over the chart's outline ----------------
+   (claunch-g6uma.2.1, thread th-e39112) The person's first report was that
+   the levels read as part of Simplified: they folded the run's path away, so
+   a level and Simplified were two answers to one question. The answer the
+   person then gave is the rule here — a step counts block bodies, and a loop,
+   a `call` and a branch are the same unit. The two questions stay apart: the
+   slider draws the structure, Simplified follows the run, and the slider
+   reports a run it leaves out instead of bending the structure around it. */
 {
   const chart = nest();
   const openOf = (preset) => fns.cflow2GraphOpen(chart, {}, null, null, preset);
   const layoutOf = (preset) => fns.cflow2GraphLayout(chart, {}, { open: openOf(preset) });
-  const levels = ["lv1", "lv2", "lv3", "all"];
+  /* this chart is two block bodies deep, so its ten steps have three stops */
+  const steps = ["lv1", "lv5", "lv8", "lv10"];
 
-  /* the outline above the fold: the root's own blocks are on the picture at
-     every level, one line each while the level is too shallow for them */
-  check("every level draws the root's own blocks",
-        levels.map((p) => ["p", "L1", "q"].filter((id) => !layoutOf(p).drawn.has(id))),
+  check("every step draws the root's own blocks",
+        steps.map((p) => ["p", "L1", "q"].filter((id) => !layoutOf(p).drawn.has(id))),
         [[], [], [], []]);
-  check("the outer loop is a frame at every level",
-        levels.map((p) => !!boxOf(layoutOf(p), "L1")), [true, true, true, true]);
-  check("the loop inside a body is a frame from two levels on",
-        levels.map((p) => !!boxOf(layoutOf(p), "L2")), [false, true, true, true]);
-
-  /* a level counts block bodies, and a plain `seq` between two of them is not
-     one: `b1` and `L2` both sit one block body inside `L1`, so `lv2` opens
-     them together and `lv3` opens the body below them */
-  check("each level opens one more block, whatever kind it is",
-        levels.map((p) => [...openOf(p)].sort()),
-        [["L1", "n0"], ["L1", "L2", "b1", "n0"], ["L1", "L2", "b1", "b2", "n0"],
+  check("the outer loop is a frame at every step",
+        steps.map((p) => !!boxOf(layoutOf(p), "L1")), [true, true, true, true]);
+  check("the loop inside a body is a frame once the cut reaches it",
+        steps.map((p) => !!boxOf(layoutOf(p), "L2")), [false, false, true, true]);
+  check("each step opens what its cut reaches",
+        steps.map((p) => [...openOf(p)].sort()),
+        [["L1", "n0"], ["L1", "n0"], ["L1", "L2", "b1", "n0"],
          ["L1", "L2", "b1", "b2", "n0"]]);
-  check("on this chart each level folds one block fewer",
-        levels.map((p) => layoutOf(p).folded.length), [1, 1, 0, 0]);
+  check("…so the steps fold one block fewer",
+        steps.map((p) => layoutOf(p).folded.length), [1, 1, 1, 0]);
   check("simplified folds the structure away, which is what it is for",
         layoutOf("simple").folded.slice().sort(), ["L1"]);
   check("the folded blocks are blocks, not leaves or call references",
-        levels.map((p) => layoutOf(p).folded.filter((id) => !chart.nodes[id].children.length)),
+        steps.map((p) => layoutOf(p).folded.filter((id) => !chart.nodes[id].children.length)),
         [[], [], [], []]);
 
-  /* A level draws the structure and does not follow the run: the run's path
-     would otherwise be most of the picture on a deep chart, and the levels
-     would all become Simplified. What a level leaves out is reported under the
-     picture, with a press that goes to Simplified (ask2-1b15e9b5). */
+  /* A step draws the structure and does not follow the run: the run's path
+     would otherwise be most of the picture on a deep chart, and every step
+     would become Simplified. What a step leaves out is reported under the
+     picture, with a press that goes to Simplified. */
   const atS1 = { instances: [{ instance: "i1", node: "s1", await: "task" }] };
   const drawnAt = (preset) => fns.cflow2GraphLayout(chart, atS1,
     { open: fns.cflow2GraphOpen(chart, atS1, null, null, preset) });
   ok("simplified follows the run down to where it waits",
      !!nodeOf(drawnAt("simple"), "s1"));
-  check("the levels reach the run only where their own depth does",
-        levels.map((p) => !!nodeOf(drawnAt(p), "s1")), [false, true, true, true]);
-  check("…and every level that cannot reach it names it",
-        levels.map((p) => fns.cflow2GraphHidden(drawnAt(p), atS1)),
-        [["s1"], [], [], []]);
-  check("a deeper run is on no level until the level that opens its block",
-        ["lv1", "lv2", "lv3", "all"].map((p) => {
+  check("a step reaches the run only where its cut does",
+        steps.map((p) => !!nodeOf(drawnAt(p), "s1")), [false, false, true, true]);
+  check("…and every step that cannot reach it names it",
+        steps.map((p) => fns.cflow2GraphHidden(drawnAt(p), atS1)),
+        [["s1"], ["s1"], [], []]);
+  check("a deeper run arrives only at the last step",
+        ["lv1", "lv5", "lv9", "lv10"].map((p) => {
           const d = { instances: [{ instance: "i1", node: "s2", await: "task" }] };
           const g = fns.cflow2GraphLayout(chart, d,
             { open: fns.cflow2GraphOpen(chart, d, null, null, p) });
           return [!!nodeOf(g, "s2"), fns.cflow2GraphHidden(g, d).length];
         }),
-        [[false, 1], [false, 1], [true, 0], [true, 0]]);
+        [[false, 1], [false, 1], [false, 1], [true, 0]]);
 
-  /* a selection is a person's own focus, so its path is open at every preset —
-     the one lift the levels keep */
+  /* a selection is a person's own focus, so its path is open at every step */
   const sel = fns.cflow2GraphOpen(chart, {}, "s2", null, "lv1");
-  ok("a selected step's path is open at a level too", sel.has("L2") && sel.has("b2"));
-}
-
-/* ---- a run that sits deep, and the level that reports it ----------------
-   (s2273-rev2, claunch-g6uma.2.1) A level draws the structure, so a deep run
-   can be off its picture; the note under the drawing is what keeps that from
-   being silent, and Simplified — one press away — is where the run is drawn.
-   A manual fold is the other way to lose it, and the same note covers both. */
-{
-  const chart = deep();
-  const detail = { instances: [{ instance: "i1", node: "c1", await: "task" }] };
-  const openOf = (preset) => fns.cflow2GraphOpen(chart, detail, null, null, preset);
-  const layoutOf = (preset) => fns.cflow2GraphLayout(chart, detail, { open: openOf(preset) });
-
-  check("simplified opens the whole path down to where the run waits",
-        [...openOf("simple")].sort(), ["d0", "d1", "d2", "d3"]);
-  const sim = layoutOf("simple");
-  ok("…and draws the step that is waiting",
-     !!nodeOf(sim, "c1") && nodeOf(sim, "c1").awaiting === "task");
-  check("a level draws the run only where its own depth reaches",
-        ["lv1", "lv2", "lv3", "all"].map((p) => !!nodeOf(layoutOf(p), "c1")),
-        [false, true, true, true]);
-  check("…and names it everywhere it does not",
-        ["lv1", "lv2", "lv3", "all"].map((p) => fns.cflow2GraphHidden(layoutOf(p), detail)),
-        [["c1"], [], [], []]);
-
-  check("simplified leaves nothing out", fns.cflow2GraphHidden(sim, detail), []);
-  check("so does `all`", fns.cflow2GraphHidden(layoutOf("all"), detail), []);
-  check("a chart with nothing running hides nothing",
-        fns.cflow2GraphHidden(fns.cflow2GraphLayout(chart, {}, { open: new Set(["d0"]) }), {}), []);
-  /* a plain run has no box of its own: its children are placed in its place.
-     Counting boxes would call every `seq` on the run's path hidden. A hand
-     fold takes the run off the picture the same way a level does, and then the
-     note speaks. */
-  const nested = fns.cflow2GraphLayout(deep(), detail, { open: new Set(["d0", "d1"]) });
-  check("the state is what the walk reached, not what has a box",
-        fns.cflow2GraphHidden(nested, detail), ["c1"]);
-  ok("the note under the drawing says it, and the way back is one press",
-     src.includes("cflow2GraphHidden(layoutNow, data)") &&
-     src.includes("1 step of the run is not in this view") &&
-     src.includes('"Show the run"') && css.includes(".cf2g-hidden"));
+  ok("a selected step's path is open at a step too", sel.has("L2") && sel.has("b2"));
 }
 
 /* ---- what unfolding could ever show is the chart's answer --------------
@@ -565,20 +536,19 @@ function nest() {
 
   check("the chart's own reach is every step, folds or no folds",
         [...layoutOf("lv1").everything].sort(), ["c1", "q1", "r", "s1", "w1"]);
-  const ever = ["simple", "lv1", "lv2", "lv3", "all"]
+  const ever = ["simple", "lv1", "lv5", "lv9", "all"]
     .map((p) => [...layoutOf(p).everything].sort().join(","));
   check("and it does not move with the preset", ever.filter((v) => v !== ever[0]), []);
-  /* this chart is two `call` bodies deep and holds no loop at all, which is
-     the person's rule read back: a call body counts a level exactly like a
-     loop, so each level opens one more of them */
-  check("each level opens one more call body",
-        ["lv1", "lv2", "lv3", "all"].map((p) =>
+  /* this chart is one `call` body deep and holds no loop at all, which is the
+     person's rule read back: a call body counts a level exactly like a loop,
+     and the last step opens it */
+  check("the last step opens the call body, the steps below it do not",
+        ["lv1", "lv9", "lv10"].map((p) =>
           [...fns.cflow2GraphOpen(chart, detail, null, null, p)].sort()),
-        [["c1", "r", "s1"], ["c1", "q1", "r", "s1"], ["c1", "q1", "r", "s1"],
-         ["c1", "q1", "r", "s1"]]);
-  check("a level that folds the run's call bodies reports the run",
-        ["lv1", "lv2", "lv3", "all"].map((p) => fns.cflow2GraphHidden(layoutOf(p), detail)),
-        [["w1"], [], [], []]);
+        [["c1", "r", "s1"], ["c1", "r", "s1"], ["c1", "q1", "r", "s1"]]);
+  check("a step that folds the run's call body reports the run",
+        ["lv1", "lv9", "lv10", "all"].map((p) => fns.cflow2GraphHidden(layoutOf(p), detail)),
+        [["w1"], ["w1"], [], []]);
   check("simplified has nothing to report", fns.cflow2GraphHidden(layoutOf("simple"), detail), []);
   check("so does all", fns.cflow2GraphHidden(layoutOf("all"), detail), []);
 
@@ -831,54 +801,72 @@ function nest() {
      src.includes('chartMode === "graph"'));
 }
 
-/* ---- the presets are a sub radio group, and the choice is remembered -- */
+/* ---- the presets are Simplified plus a slider, and the choice is kept -- */
 {
   check("a host nobody has switched starts on the simplified view",
         fns.cflow2GraphPreset("fresh"), "simple");
-  store["claunch.cflow2.graphpreset.odd"] = "lv9";
+  store["claunch.cflow2.graphpreset.odd"] = "graph";   // not a preset at all
   check("a stored value that is no preset falls back to the simplified view",
         fns.cflow2GraphPreset("odd"), "simple");
+  store["claunch.cflow2.graphpreset.old"] = "all";     // the retired button
+  check("the retired `all` comes back as the last step",
+        fns.cflow2GraphPreset("old"), "lv" + fns.CF2G_LEVELS);
 
   let draws = 0;
   const group = fns.cflow2GraphPresetTabs("host-g", "lv2", () => { draws++; });
-  check("it is one sub radio group of the presets",
+  check("it is one sub group of the two answers",
         [group.attrs.role, group.attrs["aria-label"], group.className],
-        ["radiogroup", "Graph detail", "cf2-modes sub"]);
+        ["group", "Graph detail", "cf2-modes sub"]);
   /* Simplified answers a different question from the levels, so the row says
-     so: a rule and a caption stand between it and the ladder (ask2-1b15e9b5). */
-  check("the row is Simplified, a rule, a caption, then the ladder",
+     so: a rule and a caption stand between it and the slider. */
+  check("the row is Simplified, a rule, a caption, a slider and its readout",
         group.children.map((c) => c.attrs.role || c.className), [
-          "radio", "cf2-modes-sep", "cf2-modes-cap",
-          "radio", "radio", "radio", "radio",
+          "cf2-mode", "cf2-modes-sep", "cf2-modes-cap",
+          "cf2-modes-range", "cf2-modes-lv",
         ]);
-  check("the caption names what the ladder counts", group.children[2].textContent, "block detail");
+  check("the caption names what the slider counts", group.children[2].textContent, "block detail");
   check("the rule is decoration, not a control",
         group.children[1].attrs["aria-hidden"], "true");
-  const radios = group.children.filter((c) => c.attrs.role === "radio");
-  check("one button per preset", radios.length, fns.CF2G_PRESETS.length);
-  ok("each button is a radio", radios.every((b) => b.attrs.role === "radio"));
-  check("the preset in hand is the checked one",
-        radios.map((b) => [b.textContent, b.attrs["aria-checked"]]),
-        [["Simplified", "false"], ["1 level", "false"], ["2 levels", "true"],
-         ["3 levels", "false"], ["All", "false"]]);
 
-  radios[3].click();
-  check("pressing a preset switches to it", fns.cflow2GraphPreset("host-g"), "lv3");
-  check("…remembered for this viewer", store["claunch.cflow2.graphpreset.host-g"], "lv3");
+  const button = group.children[0];
+  check("Simplified is a plain button, pressed only when it is the answer in hand",
+        [button.textContent, button.attrs["aria-pressed"]], ["Simplified", "false"]);
+
+  const slider = group.children[3];
+  check("the slider is the whole ladder", [slider.type, slider.min, slider.max, slider.step],
+        ["range", "1", String(fns.CF2G_LEVELS), "1"]);
+  check("it stands on the step in hand", slider.value, "2");
+  check("…and says which step it is", group.children[4].textContent,
+        "2/" + fns.CF2G_LEVELS);
+  ok("and it is labelled for a reader who cannot see the caption",
+     slider.attrs["aria-label"] === "Block detail level");
+
+  /* scrubbing is the whole interaction: each move is that step, and a step
+     starts the chart over from itself (the person's folds are dropped) */
+  fns.cf2GraphFolds["host-g"] = { d1: false };
+  slider.value = "7";
+  for (const fn of slider.listeners.input || []) fn();
+  check("moving the slider picks that step", fns.cflow2GraphPreset("host-g"), "lv7");
+  check("…remembered for this viewer", store["claunch.cflow2.graphpreset.host-g"], "lv7");
+  check("…says which step it landed on", group.children[4].textContent,
+        "7/" + fns.CF2G_LEVELS);
+  check("…drops the person's own folds", fns.cf2GraphFolds["host-g"], {});
   check("…and asks for one redraw", draws, 1);
 
-  /* a preset starts the chart over from itself: the folds a person laid on
-     the last one are not carried onto this one (s2273-rev2) */
-  fns.cf2GraphFolds["host-g"] = { d1: false, d3: true };
-  radios[0].click();
-  check("picking a preset drops the person's own folds",
+  button.click();
+  check("pressing Simplified goes back to the run",
         [fns.cflow2GraphPreset("host-g"), fns.cf2GraphFolds["host-g"]], ["simple", {}]);
   check("…and asks for the redraw that shows it", draws, 2);
 
+  const again = fns.cflow2GraphPresetTabs("host-g", "simple", () => { draws++; });
+  check("the slider keeps the last step it was on while Simplified is in hand",
+        [again.children[3].value, again.children[4].textContent],
+        ["7", "7/" + fns.CF2G_LEVELS]);
+  check("…and Simplified reads as pressed", again.children[0].attrs["aria-pressed"], "true");
+
   fns.cflow2GraphPresetSet("host-g", "all");
-  check("the current-state button can set it without a press",
-        [fns.cflow2GraphPreset("host-g"), store["claunch.cflow2.graphpreset.host-g"]],
-        ["all", "all"]);
+  check("a retired value set without a press still reads as the last step",
+        fns.cflow2GraphPreset("host-g"), "lv" + fns.CF2G_LEVELS);
   fns.cf2GraphFolds["host-g"] = { d2: false };
   fns.cflow2GraphPresetPick("host-g", "simple");
   check("the way back to the run clears them the same way",
@@ -899,13 +887,15 @@ function nest() {
   ok("the CSS sets the sub group apart from the view tabs", css.includes(".cf2-modes.sub"));
   ok("the CSS draws the rule and the caption between the two questions",
      css.includes(".cf2-modes-sep") && css.includes(".cf2-modes-cap"));
+  ok("the CSS gives the slider and its readout a place in the row",
+     css.includes(".cf2-modes-range") && css.includes(".cf2-modes-lv"));
   ok("the CSS gives the fold control a pressable look", css.includes(".cf2g-fold:hover"));
-  ok("a level says how much detail it folded, and opens the next level",
+  ok("a step says how much detail it folded, and opens the next step",
      src.includes("blocks are folded") &&
      src.includes('"Show more detail"') &&
-     src.includes("CF2G_PRESETS[CF2G_PRESETS.findIndex((p) => p[0] === preset) + 1]"));
+     src.includes('levelNow < CF2G_LEVELS ? "lv" + (levelNow + 1)'));
   ok("the legend separates the two questions the row answers",
-     src.includes("Simplified follows the run; a level draws the structure instead"));
+     src.includes("Simplified follows the run; the block detail slider draws the structure"));
 }
 
 /* ---- nothing to draw ------------------------------------------------- */

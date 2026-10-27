@@ -9000,6 +9000,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   font-size: 10px; letter-spacing: .04em; color: #8b949e;
   border-right: 1px solid #21262d; white-space: nowrap;
 }
+/* the levels are one slider of ten steps (thread th-e39112): a scrub reads
+   better than ten buttons, and the program decides what each step opens */
+.cf2-modes-range {
+  width: 96px; height: 16px; margin: 0 6px; align-self: center;
+  accent-color: #58a6ff; cursor: pointer;
+}
+.cf2-modes-range:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+.cf2-modes-lv {
+  display: inline-flex; align-items: center; min-width: 32px;
+  font-size: 10px; color: #8b949e; font-variant-numeric: tabular-nums;
+}
 
 /* the graph view: the same chart as a flow — down is sequence, side by side
    is branches, a box is a loop, a call frame is a procedure drawn once */

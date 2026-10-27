@@ -43207,26 +43207,40 @@ const CF2G_HANDLE = 16;    // a plain run's band, where its fold control sits
 const CF2G_ATOMIC = new Set(["task", "wait", "control"]);
 /* Containers whose children are alternatives or concurrent branches. */
 const CF2G_BRANCHES = new Set(["par", "group", "cond", "choose", "try", "timeout"]);
-/* How much of the definition a preset unfolds, as a sub radio group inside the
-   graph view (claunch-g6uma.2.1). `Simplified` stands on its own: it answers
-   WHERE THE RUN IS and nothing else — the path down to every live instance and
-   to the selection, with every other block folded. The levels answer how much
-   BLOCK DETAIL is drawn, and every kind of block body counts one layer: a
-   loop's, a `call` procedure's, a branch's, the same (the person's rule in
-   thread th-e39112). At `lv1` the top-level blocks are on the picture as one
-   line each; each further level opens the bodies of the blocks the one below
-   it folded, and `all` opens everything. A level that leaves a step of the run
-   out says so under the picture, with a press that goes to Simplified, so
-   neither answer hides anything; what a level does fold is reported there too
+/* How much of the definition the graph draws, as a sub group inside the graph
+   view (claunch-g6uma.2.1, thread th-e39112). `Simplified` stands on its own:
+   it answers WHERE THE RUN IS and nothing else — the path down to every live
+   instance and to the selection, with every other block folded. The levels
+   answer how much BLOCK DETAIL is drawn, on a slider of CF2G_LEVELS steps, and
+   every kind of block body counts one layer: a loop's, a `call` procedure's, a
+   branch's, the same (the person's rule). The steps are not fixed depths —
+   the program reads the chart's own block depth when it draws and spreads it
+   over the slider (`cflow2GraphCut`), so a deep workflow and a shallow one
+   both use the whole slider. The last step opens everything, which is what the
+   row's old standalone `All` button drew. A level that leaves a step of the
+   run out says so under the picture, with a press that goes to Simplified, so
+   neither answer hides anything; what a level folds is reported there too
    (`layout.folded`). */
+const CF2G_LEVELS = 10;
 const CF2G_PRESETS = [
   ["simple", "Simplified", "the run's position — the path down to it, every other block folded"],
-  ["lv1", "1 level", "the top-level blocks, one line each"],
-  ["lv2", "2 levels", "one layer of block bodies open — loops, calls and branches alike"],
-  ["lv3", "3 levels", "two layers of block bodies open"],
-  ["all", "All", "every block unfolded, whole"],
 ];
-const CF2G_PRESET_DEPTH = { lv1: 1, lv2: 2, lv3: 3 };
+/* `lv7` -> 7, the retired `all` -> the last step, anything else -> 0 (Simplified) */
+function cflow2GraphLevelOf(preset) {
+  if (preset === "all") return CF2G_LEVELS;
+  const m = /^lv(\d+)$/.exec(String(preset == null ? "" : preset));
+  if (!m) return 0;
+  const n = Number(m[1]);
+  return n >= 1 && n <= CF2G_LEVELS ? n : 0;
+}
+/* How deep a step opens, decided when the chart is drawn rather than pinned to
+   a number of layers: the chart's own block depth is spread over the slider,
+   and the last step opens everything. A chart with no block body to spread has
+   nothing to hide, so every step of it is the whole picture. */
+function cflow2GraphCut(level, deepest) {
+  if (level >= CF2G_LEVELS || !deepest) return Infinity;
+  return Math.max(1, Math.round((level * deepest) / CF2G_LEVELS));
+}
 
 /* One line, at most `max` characters: an SVG <text> collapses whitespace but
    a newline would still push the rest of a label out of its box. */
@@ -43326,13 +43340,15 @@ function cflow2GraphProcs(chart) {
    path down to every live or awaiting instance and to the selection is open,
    and every other container is folded. The levels answer the other question —
    how much of the structure is drawn — and open the same layers whatever the
-   run is doing: `lvN` opens every container whose body sits fewer than N block
-   bodies deep, and a block body is a loop's, a `call` procedure's or a
-   branch's alike (the person's rule in thread th-e39112). `all` opens every
-   container. A container at the level's depth is still on the picture as one
-   folded line, so the outline above the fold is drawn at every level. The
-   person's own folds (`overrides`: id -> open) are laid on top of that, and
-   picking a preset again starts the chart over from the preset. Pure. */
+   run is doing: a step opens every container whose body sits above its cut,
+   and a block body is a loop's, a `call` procedure's or a branch's alike
+   (the person's rule in thread th-e39112). The cut comes from the chart
+   (`cflow2GraphCut`), and the last step opens every container — the picture
+   the row's old standalone `All` drew. A container below the cut is still on
+   the picture as one folded line, so the outline above the fold is drawn at
+   every step. The person's own folds (`overrides`: id -> open) are laid on
+   top of that, and picking a preset again starts the chart over from the
+   preset. Pure. */
 function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
   const nodes = (chart && chart.nodes) || {};
   const open = new Set();
@@ -43344,21 +43360,21 @@ function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
     }
   }
   const lift = (id) => { for (let p = parent[id]; p; p = parent[p]) open.add(p); };
-  const mode = CF2G_PRESETS.some((p) => p[0] === preset) ? preset : "simple";
+  const level = cflow2GraphLevelOf(preset);
   /* Simplified follows the run, so it opens the path down to every live
      instance. A level answers the other question — how much of the structure
      is drawn — and opens the same layers whatever the run is doing; spending
      its first layers on the run's path (which on a deep chart is most of the
-     picture) collapsed `lv1`, `lv2` and Simplified into one drawing. What a
+     picture) collapsed the low steps and Simplified into one drawing. What a
      level leaves out of the run is reported under the picture with a press
      that goes there (`cflow2GraphHidden`, `Show the run`), so the run is not
      lost silently either way. A selection is a person's own focus and is
      opened at every preset. */
-  if (mode === "simple") {
+  if (!level) {
     for (const i of (detail && detail.instances) || []) if (nodes[i.node]) lift(i.node);
   }
   if (selected && nodes[selected]) lift(selected);
-  if (mode !== "simple") {
+  if (level) {
     /* how many block bodies a step sits inside, counted from the nearest root
        and from every kind of block alike — a loop, a `call` body and a branch
        are each one layer, which is the person's rule: the level treats them
@@ -43389,12 +43405,19 @@ function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
         if (nodes[c]) queue.push([c, d + step]);
       }
     }
-    const limit = CF2G_PRESET_DEPTH[mode];
+    /* the bodies, and how deep the deepest of them sits: the level's cut comes
+       from that, so ten steps cover this chart whether it is three blocks deep
+       or seventeen */
+    const bodies = [];
+    let deepest = 0;
     for (const [id, d] of inside) {
       const n = nodes[id];
       if (!n || CF2G_ATOMIC.has(n.type) || !(n.children || []).length) continue;
-      if (mode === "all" || d < limit) open.add(id);
+      bodies.push([id, d]);
+      if (d > deepest) deepest = d;
     }
+    const cut = cflow2GraphCut(level, deepest);
+    for (const [id, d] of bodies) if (d < cut) open.add(id);
   }
   for (const [id, on] of Object.entries(overrides || {})) {
     if (on) open.add(id); else open.delete(id);
@@ -43839,8 +43862,9 @@ function cflow2GraphLegend() {
     "Down: steps in order · side by side: branches, forked above and joined below · " +
     "boxed: a loop, its retry running back up · call: a procedure, drawn once " +
     "where several steps call it · − folds a block, a box reading +n collapsed opens one · " +
-    "Simplified follows the run; a level draws the structure instead and opens block " +
-    "bodies — a loop's, a call's, a branch's alike — one layer at a time");
+    "Simplified follows the run; the block detail slider draws the structure instead, " +
+    "opening the bodies of loops, calls and branches alike — ten steps spread over this " +
+    "chart's own depth, the last one everything");
 }
 
 /* Which of the run's own steps the drawing left out, leaving out the ones no
@@ -43942,13 +43966,18 @@ function cflow2ChartModeTabs(host, mode, redraw) {
    picture. Kept per host like the chart mode is. */
 const cf2GraphPresets = {};
 const cf2GraphFolds = {};
+/* where the slider stands while Simplified is the preset in hand — moving it
+   leaves Simplified for that step */
+const cf2GraphLevel = {};
 function cflow2GraphPreset(host) {
   let preset = cf2GraphPresets[host];
   if (!preset) {
     try { preset = localStorage.getItem("claunch.cflow2.graphpreset." + host); } catch {}
-    if (!CF2G_PRESETS.some((p) => p[0] === preset)) preset = "simple";
   }
-  return preset;
+  /* one spelling reaches the drawing: `lv7`, with the retired `all` read as
+     the last step and anything else as Simplified */
+  const level = cflow2GraphLevelOf(preset);
+  return level ? "lv" + level : "simple";
 }
 function cflow2GraphPresetSet(host, preset) {
   cf2GraphPresets[host] = preset;
@@ -43958,26 +43987,22 @@ function cflow2GraphPresetSet(host, preset) {
    what they laid on top of the last preset, not on top of this one. */
 function cflow2GraphPresetPick(host, preset) {
   cflow2GraphPresetSet(host, preset);
+  const level = cflow2GraphLevelOf(preset);
+  if (level) cf2GraphLevel[host] = level;
   cf2GraphFolds[host] = {};
 }
 function cflow2GraphPresetTabs(host, preset, redraw) {
   const group = el("div", "cf2-modes sub");
-  group.setAttribute("role", "radiogroup");
+  group.setAttribute("role", "group");
   group.setAttribute("aria-label", "Graph detail");
+  const level = cflow2GraphLevelOf(preset);
+  /* Simplified answers a different question from the levels — where the run
+     is, not how much block detail is drawn — so the row shows that: a rule
+     and a caption stand between it and the slider (claunch-g6uma.2.1). */
   for (const [value, label, hint] of CF2G_PRESETS) {
-    /* Simplified answers a different question from the levels — where the run
-       is, not how much block detail is drawn — so the row shows that: a rule
-       and a caption stand between it and the ladder (claunch-g6uma.2.1). */
-    if (value === "lv1") {
-      const sep = el("span", "cf2-modes-sep");
-      sep.setAttribute("aria-hidden", "true");
-      group.appendChild(sep);
-      group.appendChild(el("span", "cf2-modes-cap", "block detail"));
-    }
     const button = el("button", "cf2-mode", label);
     button.type = "button";
-    button.setAttribute("role", "radio");
-    button.setAttribute("aria-checked", String(preset === value));
+    button.setAttribute("aria-pressed", String(preset === value));
     button.title = hint;
     button.addEventListener("click", () => {
       cflow2GraphPresetPick(host, value);
@@ -43985,6 +44010,29 @@ function cflow2GraphPresetTabs(host, preset, redraw) {
     });
     group.appendChild(button);
   }
+  const sep = el("span", "cf2-modes-sep");
+  sep.setAttribute("aria-hidden", "true");
+  group.appendChild(sep);
+  group.appendChild(el("span", "cf2-modes-cap", "block detail"));
+  const readout = el("span", "cf2-modes-lv",
+    `${level || cf2GraphLevel[host] || CF2G_LEVELS}/${CF2G_LEVELS}`);
+  readout.setAttribute("aria-hidden", "true");
+  const slider = el("input", "cf2-modes-range");
+  slider.type = "range";
+  slider.min = "1";
+  slider.max = String(CF2G_LEVELS);
+  slider.step = "1";
+  slider.value = String(level || cf2GraphLevel[host] || CF2G_LEVELS);
+  slider.setAttribute("aria-label", "Block detail level");
+  slider.title = "how much of the structure is drawn — the last step is every block unfolded";
+  slider.addEventListener("input", () => {
+    const step = Number(slider.value) || 1;
+    readout.textContent = `${step}/${CF2G_LEVELS}`;
+    cflow2GraphPresetPick(host, "lv" + step);
+    redraw();
+  });
+  group.appendChild(slider);
+  group.appendChild(readout);
   return group;
 }
 
@@ -44970,9 +45018,8 @@ function renderCflow2Into(box, data, ui, force = false) {
       const layoutNow = box._cf2GraphLayout;
       const away = cflow2GraphHidden(layoutNow, data);
       const foldedBlocks = (layoutNow.folded || []).length;
-      const nextPreset = CF2G_PRESET_DEPTH[preset]
-        ? (CF2G_PRESETS[CF2G_PRESETS.findIndex((p) => p[0] === preset) + 1] || [])[0]
-        : "";
+      const levelNow = cflow2GraphLevelOf(preset);
+      const nextPreset = levelNow && levelNow < CF2G_LEVELS ? "lv" + (levelNow + 1) : "";
       if (away.length) {
         const note = el("div", "wf-note cf2g-hidden");
         note.appendChild(el("span", null, away.length === 1
