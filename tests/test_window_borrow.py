@@ -352,6 +352,10 @@ def test_vet_borrow_accepts_selections_inside_the_checkout(rel_cwd, args):
     ("", ["-Werror"], "may carry"),
     ("", ["--ignore", "/abs/t.py"], "outside the checkout"),
     ("", ["--deselect", "../t.py::t"], "outside the checkout"),
+    ("", ["@/abs/args.txt"], "from a file"),
+    ("", ["@../args.txt"], "from a file"),
+    ("", ["@args.txt"], "from a file"),
+    ("", ["-k", "@x"], "from a file"),
 ])
 def test_vet_borrow_refuses_paths_out_and_scope_options(rel_cwd, args, said):
     reason = window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args})

@@ -184,7 +184,9 @@ def vet_borrow(info: dict) -> Optional[str]:
     ``--rootdir``, ``--confcutdir``, ``--override-ini``) are refused
     outright, and so is any short option outside ``_SHORT_FLAGS`` and
     ``_SHORT_VALUED``, bundled or not, and any long option outside
-    ``_LONG_FLAGS``, ``_LONG_VALUED`` and ``_LONG_PATHS``.
+    ``_LONG_FLAGS``, ``_LONG_VALUED`` and ``_LONG_PATHS``. An ``@file``
+    token is refused wherever it stands: pytest expands it into arguments
+    this check never sees.
     """
     rel = str(info.get("rel_cwd") or "")
     if _escapes(rel):
@@ -194,6 +196,8 @@ def vet_borrow(info: dict) -> Optional[str]:
     value_next = False
     path_next = False
     for raw in [str(a) for a in info.get("pytest_args") or []]:
+        if raw.startswith("@"):
+            return f"pytest argument {raw!r} reads its arguments from a file"
         if value_next:
             value_next = False
             if path_next and _escapes(raw.split("::", 1)[0], base):
