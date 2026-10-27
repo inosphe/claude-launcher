@@ -526,11 +526,19 @@ async function fadeCost(page, selector, fade) {
     data.sessions[1].state="done";
     data.sessions.push({name:"s3",running:true,status:"busy",meshes:[],events:[],state:"done",
       usage:{prompt_tokens:500,completion_tokens:40,prompt_cache_hit_tokens:120,prompt_cache_miss_tokens:380}});
-    gates=[{run:"r1",scope:"s1",cwd:"/repo",status:"waiting_approval",step_id:"review",gate:"Approve deployment",sessions:["s1"]}];
+    // s1 owes an answer and has been quiet for an hour: with no gate on it,
+    // that is 「장기 대기」.
     await page.evaluate(()=>{location.hash="#/observer";});
     await page.reload();
-    await page.getByRole("button",{name:"Approve gate",exact:true}).waitFor();
+    await page.getByText("Review screenshot and choose",{exact:true}).waitFor();
     assert.equal(await page.locator(".state.waiting").innerText(),"장기 대기");
+    // A run of s1's waiting on approval is in the dashboard's gate poll
+    // (personGateRecords -> gatePending.ask), and a gate outranks the long
+    // wait (claunch-kuopi): the state names what the reader can answer here.
+    gates=[{run:"r1",scope:"s1",cwd:"/repo",status:"waiting_approval",step_id:"review",gate:"Approve deployment",sessions:["s1"]}];
+    await page.reload();
+    await page.getByRole("button",{name:"Approve gate",exact:true}).waitFor();
+    await page.waitForFunction(()=>document.querySelector(".state.waiting")?.textContent==="승인 대기");
     assert.equal(await page.locator(".state.done").innerText(),"완료 후 유휴");
     assert.equal(await page.locator(".state.working").innerText(),"동작 중");
     await page.selectOption("#observer-activity","working");
@@ -554,8 +562,11 @@ async function fadeCost(page, selector, fade) {
     await page.waitForFunction(()=>!document.querySelector(".observer-gate"));
     assert(sent.some(r=>r.url==="/api/cflow/approve"&&r.body.scope==="s1"&&r.body.cwd==="/repo"));
     gates=[{run:"r1",scope:"s1",cwd:"/repo",status:"waiting_selection",step_id:"environment",chooser:"user",prompt:"Choose target",options:[{name:"staging",description:"Test environment"},{name:"production",description:"Live environment"}],sessions:["s1"]}];
-    await page.getByRole("button",{name:"staging",exact:true}).waitFor();
-    await page.getByRole("button",{name:"staging",exact:true}).click();
+    // The dashboard's notice panel lists the same pick as an ask row with
+    // its own staging button; this checks the card's.
+    const pick=page.locator(".observer-gate").getByRole("button",{name:"staging",exact:true});
+    await pick.waitFor();
+    await pick.click();
     await page.waitForTimeout(150);
     assert(sent.some(r=>r.url==="/api/cflow/select"&&r.body.option==="staging"&&r.body.scope==="s1"));
     if(process.env.CLAUNCH_BOARD_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_BOARD_SCREENSHOT,fullPage:true});
@@ -593,7 +604,7 @@ async function fadeCost(page, selector, fade) {
     await page.setViewportSize({width:1280,height:900});
     assert.equal(await page.locator('.observer-grid').isVisible(),true);
     await page.check('#observer-actions-only');
-    await page.getByRole('button',{name:'staging',exact:true}).waitFor();
+    await page.locator('.observer-gate').getByRole('button',{name:'staging',exact:true}).waitFor();
     assert.equal(await page.locator('.observer-card').count(),1,'gate remains reachable after filtering');
     await page.uncheck('#observer-actions-only');
     data.sessions[1].events=Array.from({length:12},(_,i)=>({id:`grid-${i}`,kind:'result',text:`Grid post ${i}`,source:'transcript:2',at:new Date(Date.now()+(i+1)*60000).toISOString()}));
@@ -869,6 +880,12 @@ async function fadeCost(page, selector, fade) {
     // (app.js `gatePending`); the card reads that object instead of asking
     // the gate routes again. Written here and redrawn through a control the
     // page owns, because the fixture serves no gate routes.
+    // s1's cflow pick above is still waiting and is a gate of its own
+    // (gatePending.ask, claunch-whm4e.1): settle it first, so the count below
+    // is the restart request alone.
+    gates = [];
+    await page.evaluate(() => refreshCflow());
+    await page.waitForFunction(() => !(gatePending.ask || []).length);
     await page.evaluate(() => {
       gatePending.restart = [{ id: "rq1", session: "s1", reason: "apply the new code" }];
       document.getElementById("observer-activity").dispatchEvent(new Event("change"));
