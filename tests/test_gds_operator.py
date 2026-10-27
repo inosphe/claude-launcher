@@ -219,6 +219,38 @@ def test_a_standard_operator_keeps_its_spec(world):
 
 
 # -- the surface --------------------------------------------------------------
+def test_the_rail_says_which_sessions_are_operators_and_whether_qa_is_open():
+    """The header's 🗪 threads and ? qa buttons read the rail.
+
+    An operator's session has no session panes, except QA when its record
+    keeps it; the rail carries both answers so the page does not have to
+    guess from the workflow name (``daemon/api.py``
+    ``_operator_rail_fields``).
+    """
+    from claude_launcher.daemon import api as api_mod
+
+    class Store:
+        def __init__(self, bound, qa):
+            self.bound, self.qa = bound, qa
+
+        def operator_of_session(self, name):
+            return {"id": "x"} if name in self.bound else None
+
+        def qa_allowed(self, name):
+            return name in self.qa
+
+    rows = {"op": {"workflow": "gds-operator-v2"}, "op2": {"workflow": "operator-v2"},
+            "plain": {"workflow": "improv-worker-v2"}}
+    api_mod._operator_rail_fields({"operators_v2": Store({"op", "op2"}, {"op"})}, rows)
+    assert rows["op"] == {"workflow": "gds-operator-v2", "operator": True, "operator_qa": True}
+    assert rows["op2"] == {"workflow": "operator-v2", "operator": True, "operator_qa": False}
+    assert rows["plain"] == {"workflow": "improv-worker-v2"}
+
+    # No store (or one that cannot answer) leaves the rows untouched.
+    untouched = {"a": {"workflow": "operator-v2"}}
+    assert api_mod._operator_rail_fields({}, untouched) == {"a": {"workflow": "operator-v2"}}
+
+
 def test_the_mcp_surface_keeps_qa_for_an_operator_that_keeps_it(monkeypatch):
     def offered():
         resp = mcp_server.SERVER.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

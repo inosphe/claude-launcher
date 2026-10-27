@@ -127,6 +127,18 @@ const has = n => n.classList.contains("has-resource");
   // The QA pane does not open by itself there either (the stub would throw).
   vm.runInContext('qaRailCache = {a: {unresolved: 1, agent_seq: 99}}', ctx);
   ctx.maybeOpenQaPane();
+  // A gds6 operator keeps session QA when its record does (the rail's
+  // `operator_qa`): ? qa is a live door there, 🗪 threads still is not.
+  ctx.cflow2RailCache.a = {workflow: "gds-operator-v2", operator: true, operator_qa: true};
+  ctx.syncSessionResourceButtons();
+  assert.ok(!qa.classList.contains("hidden"), "a gds6 operator with QA draws ? qa");
+  assert.ok(threads.classList.contains("hidden"), "...and still no 🗪 threads");
+  assert.ok(has(qa) && !has(threads), "...and lights only the door it keeps");
+  // The same workflow with the switch off draws neither.
+  ctx.cflow2RailCache.a = {workflow: "gds-operator-v2", operator: true, operator_qa: false};
+  ctx.syncSessionResourceButtons();
+  assert.ok(qa.classList.contains("hidden") && threads.classList.contains("hidden"),
+    "QA off: neither door");
   // A session that is not an operator's keeps both doors.
   ctx.currentName = "b"; ctx.syncSessionResourceButtons();
   assert.ok(!qa.classList.contains("hidden") && !threads.classList.contains("hidden"),
