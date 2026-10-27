@@ -1,14 +1,14 @@
-/* The web debug page (claunch-dsb28; daemon/webdebug.py, webdebug-probe.js).
+/* The web debug page (claunch-o8pb7.2; daemon/webdebug.py).
 
-   The page under test is framed through the daemon's proxy, which runs it at
-   an origin of its own and injects the probe. This page talks to the probe
-   with postMessage and to the daemon with one WebSocket, on which the
-   session the user picked in the top bar sends its commands.
+   The page under test runs inside the daemon's own headless browser. This tab
+   does not frame it: it receives that browser's screen as JPEG frames over
+   one WebSocket (binary), draws them in an <img>, and sends the user's mouse,
+   wheel and key events back up the same socket. A screenshot is the daemon's
+   capture, so it works whether or not the user is watching.
 
    Everything the user hands to the session is explicit: picking, a
-   screenshot region, a note -- each ends in a composer, and only its Send
-   button types anything into the session. Screen sharing for the agent's own
-   screenshots is a toggle the user turns on and can turn off at any time. */
+   screenshot, a note -- each ends in a composer, and only its Send button
+   types anything into the session. */
 "use strict";
 (() => {
 const BASE = location.pathname.replace(/[^/]*$/, "");
@@ -16,12 +16,6 @@ const TOKEN_KEY = `claunch_token:${BASE}`;
 const $ = (id) => document.getElementById(id);
 const url = (path) => BASE + String(path).replace(/^\//, "");
 const params = new URLSearchParams(location.search);
-// The daemon's proxy listener speaks plain http, always (daemon/webdebug.py).
-// A dashboard opened over https cannot frame it: the browser blocks the
-// mixed content and the proxy has no certificate to offer. The page says so
-// and gives a new-tab link instead of pointing the frame at a port that is
-// not speaking TLS (claunch-o8pb7).
-const PROXY_SCHEME = "http:";
 
 /* ---- this window's id ---- */
 function newWindowId() {
@@ -30,6 +24,7 @@ function newWindowId() {
 }
 let windowId = /^w-[0-9a-z]{4,16}$/.test(params.get("w") || "") ? params.get("w") : newWindowId();
 let session = params.get("session") || "";
+const target = { url: params.get("url") || "", title: "" };
 function syncQuery() {
   const q = new URLSearchParams(location.search);
   q.set("w", windowId);
@@ -100,178 +95,187 @@ async function loadSessions() {
 $("wd-session").addEventListener("change", (e) => {
   session = e.target.value;
   syncQuery();
-  sendState({ session });
+  send({ type: "session", session });
   activity(session ? `이 창은 이제 ${session} 세션이 봅니다.` : "세션 선택이 해제됐습니다.");
 });
 
 /* ---- the socket to the daemon ---- */
 let ws = null;
 let wsDelay = 1000;
-function sendState(extra) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "state", ...extra }));
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(msg)); return true; }
+  return false;
 }
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${proto}//${location.host}${url("api/webdebug/ws")}?window=${encodeURIComponent(windowId)}`);
+  const q = new URLSearchParams({ window: windowId });
+  if (session) q.set("session", session);
+  if (target.url) q.set("url", target.url);
+  ws = new WebSocket(`${proto}//${location.host}${url("api/webdebug/ws")}?${q}`);
+  ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     wsDelay = 1000;
     $("wd-link").classList.add("up");
     $("wd-link").title = "데몬에 연결됨";
-    ws.send(JSON.stringify({ type: "hello", session, url: target.url, title: target.title, sharing: !!share.stream }));
+    send({ type: "hello", session });
   };
   ws.onclose = (e) => {
     $("wd-link").classList.remove("up");
+    if (e.code === 4001) {
+      // The daemon closed this window because another one opened (one browser
+      // page at a time). Reconnecting would close that one in turn.
+      $("wd-link").title = "이 창은 닫혔습니다";
+      activity("다른 웹 디버그 창이 열려 이 창은 닫혔습니다. 새로고침하면 이 창이 다시 열립니다.", "error");
+      return;
+    }
     $("wd-link").title = "데몬 연결 끊김 (다시 연결 중)";
-    if (e.code === 4000) { windowId = newWindowId(); syncQuery(); }
     setTimeout(connect, wsDelay);
     wsDelay = Math.min(wsDelay * 2, 15000);
   };
   ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) { showFrame(e.data); return; }
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
-    if (msg.type === "command") runCommand(msg);
+    handle(msg);
   };
 }
-window.addEventListener("focus", () => sendState({ focused: true }));
 
-/* ---- the frame and its target ---- */
-const frame = $("wd-frame");
-const target = { url: "", title: "", origin: "", proxyOrigin: "", probe: false, blocked: "" };
-let readyWaiters = [];
-function displayUrl(href) {
-  if (target.proxyOrigin && href.startsWith(target.proxyOrigin)) return target.origin + href.slice(target.proxyOrigin.length);
-  return href;
-}
-function enterLink(res) {
-  return target.proxyOrigin + res.enter + "&parent=" + encodeURIComponent(location.origin);
-}
-/* Is this origin the dashboard's own? The scheme may differ (the daemon is
-   plain http and the address may have been typed https), so the host and
-   port decide. */
-function isDashboard(origin) {
-  try { return new URL(origin).host === location.host; } catch (_) { return false; }
-}
-/* The dashboard is https: the plain-http proxy cannot go in the frame.
-   Replace the empty stage with why, and a link that opens the same proxied
-   page as a top-level tab (a top-level navigation to http is not mixed
-   content -- only framing it is). */
-function showMixedContent(res) {
-  const stage = $("wd-empty");
-  stage.replaceChildren();
-  stage.classList.remove("hidden");
-  const why = document.createElement("p");
-  why.textContent = "대시보드가 https로 열려 있습니다. webdebug 프록시는 평문 http라 브라우저가 프레임을 혼합 콘텐츠로 차단합니다.";
-  const open = document.createElement("p");
-  const a = document.createElement("a");
-  a.href = enterLink(res);
-  a.target = "_blank";
-  a.rel = "noopener";
-  a.textContent = "새 탭에서 이 페이지 열기";
-  open.appendChild(a);
-  const note = document.createElement("p");
-  note.className = "wd-muted";
-  note.textContent = "새 탭으로 연 페이지에서는 이 창의 요소 선택·스크린샷·세션 조작이 동작하지 않습니다. 그것이 필요하면 대시보드를 http로 열거나, 세션에 브라우저 확장 방향을 요청하십시오.";
-  stage.append(why, open, note);
-}
-async function navigate(raw) {
-  const text = String(raw || "").trim();
-  if (!text) return;
-  const res = await postJSON("api/webdebug/proxy", { url: text });
-  target.origin = res.origin;
-  // proxy_origin is the address the daemon was reached on plus the proxy's
-  // port: the browser that made this request can reach it, which the typed
-  // host name may not be (one forwarded port maps the name for the daemon's
-  // port only).
-  target.proxyOrigin = res.proxy_origin || `${PROXY_SCHEME}//${location.hostname}:${res.port}`;
-  target.url = res.origin + res.path;
-  target.probe = false;
-  target.blocked = "";
-  $("wd-url").value = target.url;
+/* ---- the screen ---- */
+const screen = $("wd-screen");
+let frameUrl = null;
+let frames = 0;
+let bytes = 0;
+let statsAt = performance.now();
+function showFrame(buffer) {
+  const blob = new Blob([buffer], { type: "image/jpeg" });
+  const next = URL.createObjectURL(blob);
+  const old = frameUrl;
+  frameUrl = next;
+  screen.src = next;
+  // The previous frame is still being decoded for a moment; revoking its URL
+  // immediately can leave the <img> blank. Give it a second, and keep the
+  // queue bounded (45 fps x ~7 KiB x 2 s).
+  if (old) setTimeout(() => URL.revokeObjectURL(old), 2000);
   $("wd-empty").classList.add("hidden");
-  const notes = [];
-  if (res.switched_from) {
-    notes.push(`${res.switched_from} 은(는) TLS로 응답하지 않아 ${res.origin} 로 열었습니다.`);
+  $("wd-busy").classList.add("hidden");
+  frames += 1;
+  bytes += buffer.byteLength;
+  const now = performance.now();
+  if (now - statsAt > 1000) {
+    const secs = (now - statsAt) / 1000;
+    $("wd-stat").textContent =
+      `${screen.naturalWidth || "?"}×${screen.naturalHeight || "?"} · `
+      + `${(frames / secs).toFixed(0)} fps · ${(bytes / secs / 1024).toFixed(0)} KiB/s`;
+    frames = 0; bytes = 0; statsAt = now;
   }
-  if (isDashboard(res.origin)) {
-    // The proxy strips the daemon's login cookie before it goes upstream,
-    // so the dashboard's shell loads in the frame but its API answers 401.
-    notes.push("이 주소는 대시보드 자신입니다. 프록시는 로그인 쿠키를 넘기지 않으므로 프레임 안의 대시보드 화면은 API를 쓸 수 없습니다 — 대시보드는 그 탭에서 보십시오.");
-  }
-  if (notes.length) activity(notes.join(" "), "error");
-  if (location.protocol === "https:") {
-    target.blocked = "mixed content";
-    frame.removeAttribute("src");
-    showMixedContent(res);
-  } else {
-    frame.src = enterLink(res);
-  }
-  syncQuery();
-  sendState({ url: target.url });
-  try { localStorage.setItem("claunch_webdebug_url:" + (session || ""), target.url); } catch (_) { /* ignore */ }
 }
-function waitReady(ms = 15000) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("the page did not finish loading (or the probe is absent)")), ms);
-    readyWaiters.push(() => { clearTimeout(t); resolve(); });
-  });
-}
-frame.addEventListener("load", () => {
-  // A page that left the proxy (another origin) loads without the probe.
-  setTimeout(() => {
-    if (target.blocked) return;
-    if (!target.probe) activity("이 프레임에는 probe가 없습니다 (프록시 밖 주소로 이동했거나 HTML이 아닌 응답).", "error");
-  }, 2500);
-});
-$("wd-address").addEventListener("submit", (e) => {
-  e.preventDefault();
-  navigate($("wd-url").value).catch((err) => activity(String(err.message || err), "error"));
-});
-$("wd-back").addEventListener("click", () => probe("back").catch(() => {}));
-$("wd-forward").addEventListener("click", () => probe("forward").catch(() => {}));
-$("wd-reload").addEventListener("click", () => {
-  if (target.probe) probe("reload").catch(() => {}); else if (target.url) navigate(target.url).catch(() => {});
-});
-
-/* ---- the probe ---- */
-const probeWaiters = new Map();
-let probeSeq = 0;
-function probe(op, args = {}, ms = 15000) {
-  if (!frame.contentWindow || !target.proxyOrigin) return Promise.reject(new Error("no page is open"));
-  const id = "p" + (++probeSeq);
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => { probeWaiters.delete(id); reject(new Error(`the page did not answer ${op}`)); }, ms);
-    probeWaiters.set(id, { resolve, reject, t });
-    frame.contentWindow.postMessage({ claunch: "wd", type: "cmd", id, op, args }, target.proxyOrigin);
-  });
-}
-window.addEventListener("message", (e) => {
-  if (e.source !== frame.contentWindow || e.origin !== target.proxyOrigin) return;
-  const msg = e.data;
-  if (!msg || msg.claunch !== "wd") return;
-  if (msg.type === "res") {
-    const w = probeWaiters.get(msg.id);
-    if (!w) return;
-    probeWaiters.delete(msg.id);
-    clearTimeout(w.t);
-    if (msg.ok) w.resolve(msg.value); else w.reject(new Error(msg.error));
-  } else if (msg.type === "ready" || msg.type === "nav") {
-    target.probe = true;
-    target.url = displayUrl(msg.url);
+function handle(msg) {
+  const kind = msg.type;
+  if (kind === "state") {
+    target.url = msg.url || target.url;
     target.title = msg.title || "";
-    if (document.activeElement !== $("wd-url")) $("wd-url").value = target.url;
+    if (!$("wd-url").matches(":focus") && target.url) $("wd-url").value = target.url;
+    if (msg.session) { session = msg.session; $("wd-session").value = session; }
+    $("wd-busy").classList.add("hidden");
     syncQuery();
-    sendState({ url: target.url, title: target.title });
-    const waiters = readyWaiters; readyWaiters = [];
-    waiters.forEach((f) => f());
-  } else if (msg.type === "picked") {
+  } else if (kind === "picked") {
     setPicking(false);
-    activity("");
-    openComposer({ kind: "element", element: msg.element, url: displayUrl(msg.url), title: msg.title });
-  } else if (msg.type === "pick-cancel") {
-    setPicking(false);
-  } else if (msg.type === "console" && msg.entry) {
-    activity("페이지 오류: " + msg.entry.text.split("\n")[0], "error");
+    openComposer({ kind: "element", url: msg.url || target.url, title: msg.title || target.title, element: msg.element });
+  } else if (kind === "snapshot") {
+    showPanel("페이지 읽기", snapshotNode(msg.value));
+  } else if (kind === "console") {
+    showPanel("콘솔", consoleNode(msg.value));
+  } else if (kind === "screenshot") {
+    openComposer({ kind: "screenshot", url: msg.url || target.url, title: msg.title || target.title, image: msg.image });
+  } else if (kind === "activity") {
+    activity(msg.text || "", "agent");
+  } else if (kind === "error") {
+    activity(String(msg.message || "오류"), "error");
+    $("wd-busy").classList.add("hidden");
   }
+}
+screen.addEventListener("load", () => { $("wd-empty").classList.add("hidden"); });
+window.addEventListener("focus", () => send({ type: "hello", session }));
+
+/* ---- mouse, wheel and keys ---- */
+const BUTTONS = { 0: 1, 1: 4, 2: 2 };
+function pagePoint(e) {
+  const r = screen.getBoundingClientRect();
+  const w = screen.naturalWidth || r.width;
+  const h = screen.naturalHeight || r.height;
+  return { x: (e.clientX - r.left) * (w / r.width), y: (e.clientY - r.top) * (h / r.height) };
+}
+let lastDown = 0;
+let lastAt = 0;
+function modifiers(e) {
+  return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+}
+screen.addEventListener("mousedown", (e) => {
+  screen.focus();
+  if (picking) return;
+  const p = pagePoint(e);
+  const now = performance.now();
+  const count = (now - lastAt < 400 && Math.abs(e.clientX - lastDown) < 4) ? 2 : 1;
+  lastAt = now; lastDown = e.clientX;
+  send({ type: "input", event: { kind: "mouse", type: "mousePressed", ...p, button: "left",
+    buttons: BUTTONS[e.button] || 1, clickCount: count, modifiers: modifiers(e) } });
+  e.preventDefault();
+});
+screen.addEventListener("mouseup", (e) => {
+  if (picking) {
+    const p = pagePoint(e);
+    if (send({ type: "pick", x: p.x, y: p.y })) activity("요소를 고르는 중…", "agent");
+    e.preventDefault();
+    return;
+  }
+  const p = pagePoint(e);
+  send({ type: "input", event: { kind: "mouse", type: "mouseReleased", ...p, button: "left",
+    buttons: 0, clickCount: 1, modifiers: modifiers(e) } });
+  e.preventDefault();
+});
+let moveAt = 0;
+let movePending = null;
+screen.addEventListener("mousemove", (e) => {
+  if (picking) return;
+  const p = pagePoint(e);
+  const ev = { kind: "mouse", type: "mouseMoved", ...p, button: "none", buttons: 0,
+    modifiers: modifiers(e) };
+  const now = performance.now();
+  if (now - moveAt > 33) {  // ~30 moves/s is enough to feel live
+    moveAt = now;
+    send({ type: "input", event: ev });
+  } else if (!movePending) {
+    movePending = setTimeout(() => {
+      movePending = null;
+      moveAt = performance.now();
+      send({ type: "input", event: ev });
+    }, 34);
+  }
+});
+screen.addEventListener("contextmenu", (e) => e.preventDefault());
+screen.addEventListener("wheel", (e) => {
+  const p = pagePoint(e);
+  send({ type: "input", event: { kind: "mouse", type: "mouseWheel", ...p,
+    deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modifiers(e) } });
+  e.preventDefault();
+}, { passive: false });
+function forwardKey(e, type) {
+  if (document.activeElement !== screen) return;
+  const printable = e.key.length === 1;
+  send({ type: "input", event: { kind: "key", type, key: e.key, code: e.code,
+    keyCode: e.keyCode, text: type === "keyDown" && printable ? e.key : undefined,
+    modifiers: modifiers(e) } });
+  if (e.key === "Escape" && type === "keyDown") { screen.blur(); activity("키보드 전달을 멈췄습니다."); }
+  if (printable || e.key === "Backspace" || e.key === "Enter" || e.key === "Tab" || e.key.startsWith("Arrow")) {
+    e.preventDefault();
+  }
+}
+document.addEventListener("keydown", (e) => forwardKey(e, "keyDown"), true);
+document.addEventListener("keyup", (e) => forwardKey(e, "keyUp"), true);
+document.addEventListener("paste", (e) => {
+  if (document.activeElement !== screen) return;
+  const text = e.clipboardData && e.clipboardData.getData("text");
+  if (text) { send({ type: "input", event: { kind: "text", text } }); e.preventDefault(); }
 });
 
 /* ---- picking ---- */
@@ -279,151 +283,67 @@ let picking = false;
 function setPicking(on) {
   picking = on;
   $("wd-pick").setAttribute("aria-pressed", on ? "true" : "false");
+  screen.classList.toggle("picking", on);
+  if (on) activity("요소를 고르려면 화면에서 클릭하십시오 (Esc 취소).", "agent");
 }
-$("wd-pick").addEventListener("click", async () => {
-  try {
-    if (picking) { await probe("pick-cancel"); setPicking(false); return; }
-    await probe("pick");
-    setPicking(true);
-    activity("페이지에서 요소를 클릭하십시오. Esc는 취소.");
-    frame.focus();
-  } catch (err) { activity(String(err.message || err), "error"); }
+$("wd-pick").addEventListener("click", () => setPicking(!picking));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && picking) { setPicking(false); activity("요소 선택을 취소했습니다."); }
 });
 
-/* ---- screen capture ---- */
-const share = { stream: null, persistent: false };
-async function startStream() {
-  if (share.stream) return share.stream;
-  const stream = await navigator.mediaDevices.getDisplayMedia({
-    video: { displaySurface: "browser" }, audio: false,
-    preferCurrentTab: true, selfBrowserSurface: "include", surfaceSwitching: "exclude",
-  });
-  const track = stream.getVideoTracks()[0];
-  const surface = (track.getSettings && track.getSettings().displaySurface) || "";
-  if (surface && surface !== "browser") {
-    activity("이 탭이 아닌 화면이 공유됐습니다. 좌표가 맞지 않을 수 있으니 이 탭을 고르십시오.", "error");
-  }
-  track.addEventListener("ended", () => stopStream());
-  share.stream = stream;
-  const video = $("wd-video");
-  video.srcObject = stream;
-  await video.play();
-  return stream;
+/* ---- the address bar ---- */
+function go(address) {
+  const value = String(address || "").trim();
+  if (!value) return;
+  target.url = value;
+  $("wd-url").value = value;
+  syncQuery();
+  $("wd-busy").classList.remove("hidden");
+  if (!send({ type: "navigate", url: value })) activity("데몬에 연결되지 않았습니다.", "error");
+  try { localStorage.setItem("claunch_webdebug_url:" + (session || ""), value); } catch (_) { /* ignore */ }
 }
-function stopStream() {
-  if (share.stream) share.stream.getTracks().forEach((t) => t.stop());
-  share.stream = null;
-  share.persistent = false;
-  $("wd-video").srcObject = null;
-  $("wd-share").setAttribute("aria-pressed", "false");
-  sendState({ sharing: false });
-}
-$("wd-share").addEventListener("click", async () => {
-  if (share.persistent) { stopStream(); activity("화면 공유를 껐습니다."); return; }
-  try {
-    await startStream();
-    share.persistent = true;
-    $("wd-share").setAttribute("aria-pressed", "true");
-    sendState({ sharing: true });
-    activity("화면 공유 중: 세션이 이 창의 스크린샷을 찍을 수 있습니다.");
-  } catch (err) { activity("화면 공유를 시작하지 못했습니다: " + (err.message || err), "error"); }
+$("wd-address").addEventListener("submit", (e) => { e.preventDefault(); go($("wd-url").value); });
+$("wd-back").addEventListener("click", () => send({ type: "back" }));
+$("wd-forward").addEventListener("click", () => send({ type: "forward" }));
+$("wd-reload").addEventListener("click", () => {
+  if (target.url) go(target.url); else activity("먼저 주소를 입력하십시오.");
 });
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-async function freshFrame(video) {
-  await nextFrame();
-  if (video.requestVideoFrameCallback) {
-    await new Promise((r) => { const t = setTimeout(r, 400); video.requestVideoFrameCallback(() => { clearTimeout(t); r(); }); });
-  } else {
-    await new Promise((r) => setTimeout(r, 200));
-  }
+$("wd-quality").addEventListener("change", (e) => send({ type: "quality", quality: Number(e.target.value) }));
+
+/* ---- side panel ---- */
+function showPanel(title, node) {
+  $("wd-side-title").textContent = title;
+  $("wd-side-body").replaceChildren(node);
+  $("wd-side").classList.remove("hidden");
 }
-/* Capture `rect` (CSS px of this page's viewport) from the shared tab. */
-async function capture(rect) {
-  const video = $("wd-video");
-  const composer = $("wd-composer");
-  const wasHidden = composer.classList.contains("hidden");
-  composer.classList.add("hidden");
-  try {
-    await freshFrame(video);
-    const sx = video.videoWidth / window.innerWidth;
-    const sy = video.videoHeight / window.innerHeight;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(rect.width * sx));
-    canvas.height = Math.max(1, Math.round(rect.height * sy));
-    canvas.getContext("2d").drawImage(video, rect.x * sx, rect.y * sy, rect.width * sx, rect.height * sy,
-      0, 0, canvas.width, canvas.height);
-    return await new Promise((r) => canvas.toBlob(r, "image/png"));
-  } finally {
-    if (!wasHidden) composer.classList.remove("hidden");
-  }
+$("wd-side-close").addEventListener("click", () => $("wd-side").classList.add("hidden"));
+function snapshotNode(value) {
+  const v = value || {};
+  const wrap = document.createElement("div");
+  const head = document.createElement("p");
+  head.className = "wd-muted";
+  head.textContent = `${v.title || ""} — ${v.url || ""}`;
+  const pre = document.createElement("pre");
+  pre.textContent = v.elements || "(요소 없음)";
+  const text = document.createElement("pre");
+  text.className = "wd-text";
+  text.textContent = v.text || "";
+  wrap.append(head, pre, text);
+  return wrap;
 }
-function frameRect() {
-  const r = frame.getBoundingClientRect();
-  return { x: r.left, y: r.top, width: r.width, height: r.height };
+function consoleNode(value) {
+  const v = value || {};
+  const pre = document.createElement("pre");
+  pre.textContent = (v.entries || []).map((e) => `[${e.level}] ${e.text}`).join("\n") || "(출력 없음)";
+  return pre;
 }
-async function captureElement(args) {
-  const inner = (await probe("rect", args)).rect;
-  const f = frameRect();
-  const x = Math.max(f.x, f.x + inner.x), y = Math.max(f.y, f.y + inner.y);
-  const right = Math.min(f.x + f.width, f.x + inner.x + inner.width);
-  const bottom = Math.min(f.y + f.height, f.y + inner.y + inner.height);
-  if (right <= x || bottom <= y) throw new Error("the element is outside the visible page");
-  return capture({ x, y, width: right - x, height: bottom - y });
-}
-async function upload(blob) {
-  return api("api/webdebug/images", { method: "POST", headers: { "Content-Type": blob.type || "image/png" }, body: blob });
-}
-function selectRegion() {
-  return new Promise((resolve) => {
-    const layer = $("wd-region"), box = $("wd-region-box");
-    layer.classList.remove("hidden");
-    box.style.display = "none";
-    let start = null;
-    const stage = layer.getBoundingClientRect();
-    const done = (value) => {
-      layer.classList.add("hidden");
-      layer.onpointerdown = layer.onpointermove = layer.onpointerup = null;
-      document.removeEventListener("keydown", onKey, true);
-      resolve(value);
-    };
-    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(null); } };
-    document.addEventListener("keydown", onKey, true);
-    layer.onpointerdown = (e) => { start = { x: e.clientX, y: e.clientY }; layer.setPointerCapture(e.pointerId); };
-    layer.onpointermove = (e) => {
-      if (!start) return;
-      const x = Math.min(start.x, e.clientX), y = Math.min(start.y, e.clientY);
-      Object.assign(box.style, { display: "block", left: (x - stage.left) + "px", top: (y - stage.top) + "px",
-        width: Math.abs(e.clientX - start.x) + "px", height: Math.abs(e.clientY - start.y) + "px" });
-    };
-    layer.onpointerup = (e) => {
-      if (!start) return;
-      const w = Math.abs(e.clientX - start.x), h = Math.abs(e.clientY - start.y);
-      if (w < 4 || h < 4) { done(frameRect()); return; }
-      done({ x: Math.min(start.x, e.clientX), y: Math.min(start.y, e.clientY), width: w, height: h });
-    };
-  });
-}
-$("wd-shot").addEventListener("click", async () => {
-  if (!target.proxyOrigin) { activity("먼저 페이지를 여십시오.", "error"); return; }
-  let temporary = false;
-  try {
-    if (!share.stream) { await startStream(); temporary = true; }
-    const region = await selectRegion();
-    if (!region) return;
-    const blob = await capture(region);
-    const f = frameRect();
-    openComposer({ kind: "screenshot", blob, url: target.url, title: target.title,
-      region: { x: Math.round(region.x - f.x), y: Math.round(region.y - f.y),
-        width: Math.round(region.width), height: Math.round(region.height) } });
-  } catch (err) {
-    activity("스크린샷을 찍지 못했습니다: " + (err.message || err), "error");
-  } finally {
-    if (temporary && !share.persistent) stopStream();
-  }
-});
+$("wd-snap").addEventListener("click", () => send({ type: "snapshot" }));
+$("wd-log").addEventListener("click", () => send({ type: "console" }));
+
+/* ---- sends to the session ---- */
+$("wd-shot").addEventListener("click", () => send({ type: "screenshot" }));
 $("wd-note").addEventListener("click", () => openComposer({ kind: "note", url: target.url, title: target.title }));
 
-/* ---- composer: the only way anything reaches the session ---- */
 let draft = null;
 function dl(rows) {
   const d = document.createElement("dl");
@@ -442,24 +362,22 @@ function openComposer(item) {
   $("wd-composer-title").textContent = `${titles[item.kind]} → ${session || "(세션 선택 필요)"}`;
   const rows = [["page", item.url || "(열린 페이지 없음)"]];
   if (item.kind === "element") {
-    const el = item.element;
+    const el = item.element || {};
     rows.push(["element", el.label], ["selector", el.selector], ["text", el.text],
-      ["rect", `${el.rect.x},${el.rect.y} ${el.rect.width}×${el.rect.height}`]);
+      ["rect", el.rect ? `${el.rect.x},${el.rect.y} ${el.rect.width}×${el.rect.height}` : ""]);
     body.appendChild(dl(rows));
     const pre = document.createElement("pre");
-    pre.textContent = el.html;
+    pre.textContent = el.html || "";
     body.appendChild(pre);
   } else {
     body.appendChild(dl(rows));
   }
-  if (item.blob) {
+  if (item.image) {
     const img = document.createElement("img");
-    img.src = URL.createObjectURL(item.blob);
+    img.src = url(`api/webdebug/images/${item.image}`);
     img.alt = "스크린샷 미리보기";
     body.appendChild(img);
   }
-  $("wd-composer-capture-row").classList.toggle("hidden", !(item.kind === "element" && share.stream));
-  $("wd-composer-capture").checked = false;
   $("wd-composer-note").value = "";
   $("wd-composer-status").textContent = session ? "" : "위 막대에서 세션을 먼저 고르십시오.";
   $("wd-composer-send").disabled = false;
@@ -469,7 +387,6 @@ function openComposer(item) {
 function closeComposer() {
   $("wd-composer").classList.add("hidden");
   draft = null;
-  probe("hide").catch(() => {});
 }
 $("wd-composer-close").addEventListener("click", closeComposer);
 $("wd-composer-cancel").addEventListener("click", closeComposer);
@@ -485,15 +402,10 @@ $("wd-composer-send").addEventListener("click", async () => {
   $("wd-composer-status").textContent = "보내는 중…";
   try {
     const note = $("wd-composer-note").value.trim();
-    let blob = draft.blob || null;
-    if (!blob && draft.kind === "element" && $("wd-composer-capture").checked) {
-      blob = await captureElement({ selector: draft.element.selector });
-    }
     if (draft.kind === "note" && !note) throw new Error("메모를 입력하십시오.");
-    const image = blob ? (await upload(blob)).id : undefined;
     const res = await postJSON("api/webdebug/send", {
       session, window: windowId, kind: draft.kind, url: draft.url, title: draft.title, note,
-      element: draft.element, region: draft.region, image,
+      element: draft.element, image: draft.image,
     });
     closeComposer();
     activity(res.delivered ? `${session}에 보냈습니다.` : `${session}에 전달하지 못했습니다 (세션이 종료됐을 수 있음).`,
@@ -504,69 +416,13 @@ $("wd-composer-send").addEventListener("click", async () => {
   }
 });
 
-/* ---- commands from the session's agent ---- */
-const VERB = { snapshot: "페이지 읽기", query: "요소 찾기", click: "클릭", type: "입력", press: "키 입력",
-  scroll: "스크롤", navigate: "이동", eval: "스크립트 실행", console: "콘솔 읽기", screenshot: "스크린샷",
-  highlight: "강조" };
-function describe(op, args) {
-  const what = args.ref || args.selector || args.url || args.key || "";
-  return `에이전트(${session}): ${VERB[op] || op}${what ? " " + String(what).slice(0, 80) : ""}`;
-}
-async function runCommand(msg) {
-  const { id, op } = msg;
-  const args = msg.args || {};
-  activity(describe(op, args), "agent");
-  const reply = (body) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "result", id, ...body })); };
-  try {
-    let value;
-    if (op === "navigate") {
-      const ready = waitReady();
-      try {
-        await navigate(args.url);
-      } catch (err) {
-        ready.catch(() => {});
-        throw err;
-      }
-      if (target.blocked) {
-        ready.catch(() => {});
-        throw new Error("the dashboard is open over https, so the browser blocks the plain-http "
-          + "proxy frame; ask the user to open the dashboard over http (or to open the address in a new tab)");
-      }
-      await ready;
-      value = { url: target.url, title: target.title };
-    } else if (op === "screenshot") {
-      if (!share.stream) {
-        throw new Error("the user has not turned on screen sharing in this window; ask them to press "
-          + "'화면 공유' in its top bar (or to send a screenshot themselves)");
-      }
-      const blob = (args.ref || args.selector) ? await captureElement(args) : await capture(frameRect());
-      const up = await upload(blob);
-      value = { image: up.id, bytes: up.bytes };
-    } else {
-      if (!target.probe) throw new Error("no page with the probe is open in this window");
-      value = await probe(op, args, Math.min(Number(args.timeout_ms) || 15000, 60000));
-    }
-    reply({ ok: true, value });
-  } catch (err) {
-    reply({ ok: false, error: String(err.message || err) });
-    activity(describe(op, args) + " 실패: " + (err.message || err), "error");
-  }
-}
-
 /* ---- start ---- */
 syncQuery();
 loadSessions();
 setInterval(loadSessions, 15000);
 connect();
-if (BASE !== "/") activity("릴레이 경로로 열린 대시보드에서는 프록시 포트에 닿지 못할 수 있습니다.", "error");
-// A link that names the page opens it; otherwise the last address is only
-// put back in the bar, and opening it is the user's press of 이동.
-const first = params.get("url");
-if (first) {
-  $("wd-url").value = first;
-  navigate(first).catch((err) => activity(String(err.message || err), "error"));
-} else {
-  try { $("wd-url").value = localStorage.getItem("claunch_webdebug_url:" + (session || "")) || ""; } catch (_) { /* ignore */ }
-  $("wd-url").focus();
-}
+$("wd-url").value = target.url || (() => {
+  try { return localStorage.getItem("claunch_webdebug_url:" + (session || "")) || ""; } catch (_) { return ""; }
+})();
+if (!target.url) $("wd-url").focus();
 })();

@@ -4,26 +4,35 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claunch web</title>
-<!-- The web debug page (claunch-dsb28; daemon/webdebug.py). One line for
+<!-- The web debug page (claunch-o8pb7.2; daemon/webdebug.py). One line for
      claunch's own controls, one for the address of the page under test, and
-     the rest of the window is that page, framed through the daemon's proxy. -->
+     the rest of the window is the screen of the daemon's own browser: the
+     page under test runs there, and this tab shows its screencast frames and
+     sends the user's mouse and keys back. -->
 <script src="static/theme.js"></script>
 <link rel="stylesheet" href="static/webdebug.css">
 </head>
 <body>
 <header id="wd-bar" role="toolbar" aria-label="claunch web debug">
   <span class="wd-brand" title="claunch web debug page">claunch web</span>
-  <label class="sr-only" for="wd-session">이 페이지를 볼 세션</label>
-  <select id="wd-session" title="이 페이지를 보고 조작할 수 있는 세션 (그 세션의 에이전트만 이 창을 조작한다)">
+  <label class="sr-only" for="wd-session">이 화면을 볼 세션</label>
+  <select id="wd-session" title="이 화면을 보고 조작할 수 있는 세션 (그 세션의 에이전트만 이 창을 조작한다)">
     <option value="">세션 선택</option>
   </select>
   <span id="wd-link" class="wd-dot" title="데몬 연결 상태"></span>
   <span class="wd-sep" aria-hidden="true"></span>
-  <button id="wd-pick" type="button" title="페이지에서 요소 하나를 클릭해 고른다 (Esc 취소)">◎ 요소 선택</button>
-  <button id="wd-shot" type="button" title="영역을 끌어 스크린샷을 찍는다 (클릭만 하면 페이지 전체)">▭ 스크린샷</button>
+  <button id="wd-pick" type="button" aria-pressed="false"
+          title="화면에서 요소 하나를 클릭해 고른다 (Esc 취소)">◎ 요소 선택</button>
+  <button id="wd-shot" type="button" title="지금 화면을 캡처한다">▭ 스크린샷</button>
   <button id="wd-note" type="button" title="이 페이지 주소와 함께 메모를 보낸다">✎ 메모</button>
-  <button id="wd-share" type="button" aria-pressed="false"
-          title="이 탭의 화면 공유를 켠다. 켜 둔 동안에는 세션이 스크린샷을 찍을 수 있다">◉ 화면 공유</button>
+  <button id="wd-snap" type="button" title="페이지의 요소 목록을 읽는다">▤ 페이지 읽기</button>
+  <button id="wd-log" type="button" title="페이지의 콘솔 출력을 읽는다">⌨ 콘솔</button>
+  <label class="sr-only" for="wd-quality">화면 품질</label>
+  <select id="wd-quality" title="화면 전송 품질 (낮출수록 대역폭이 줄어든다)">
+    <option value="30">낮음</option>
+    <option value="60" selected>보통</option>
+    <option value="85">높음</option>
+  </select>
   <span id="wd-activity" class="wd-activity" role="status" aria-live="polite"></span>
   <span id="wd-window" class="wd-chip" title="이 창의 id (세션의 webdebug_* 도구가 window로 쓴다)"></span>
 </header>
@@ -36,18 +45,27 @@
   <button id="wd-go" type="submit">이동</button>
 </form>
 <main id="wd-stage">
-  <iframe id="wd-frame" title="디버깅 대상 페이지"
-          allow="clipboard-read; clipboard-write; fullscreen; geolocation; camera; microphone"></iframe>
-  <div id="wd-empty" class="wd-empty">
-    <p>주소창에 디버깅할 페이지 주소를 넣고 이동을 누르십시오.</p>
-    <p class="wd-muted">페이지는 데몬의 프록시 포트를 거쳐 열립니다. 대상 주소는 데몬이 도는 머신 기준입니다
-      (<code>localhost</code>는 데몬 머신의 localhost).</p>
+  <div id="wd-screen-wrap">
+    <img id="wd-screen" tabindex="0" draggable="false" alt="데몬 브라우저의 화면">
+    <div id="wd-empty" class="wd-empty">
+      <p>주소창에 디버깅할 페이지 주소를 넣고 이동을 누르십시오.</p>
+      <p class="wd-muted">페이지는 데몬이 띄운 브라우저에서 열리고, 이 창은 그 화면을 받아 보여 줍니다.
+        주소는 데몬이 도는 머신 기준입니다 (<code>localhost</code>는 데몬 머신의 localhost).</p>
+    </div>
+    <div id="wd-busy" class="wd-busy hidden" role="status">불러오는 중…</div>
   </div>
-  <div id="wd-region" class="wd-region hidden" aria-label="스크린샷 영역 선택">
-    <div id="wd-region-box"></div>
-    <p class="wd-region-hint">끌어서 영역을 고르십시오. 클릭만 하면 페이지 전체, Esc는 취소.</p>
-  </div>
+  <aside id="wd-side" class="hidden" aria-label="페이지 정보">
+    <div class="wd-side-head">
+      <strong id="wd-side-title">페이지 정보</strong>
+      <button id="wd-side-close" type="button" title="닫기">×</button>
+    </div>
+    <div id="wd-side-body"></div>
+  </aside>
 </main>
+<footer id="wd-status">
+  <span id="wd-stat" class="wd-muted"></span>
+  <span id="wd-hint" class="wd-muted">화면을 클릭하면 그 자리로 마우스가 전달됩니다. 화면을 클릭한 뒤에는 키보드도 전달됩니다 (Esc로 해제).</span>
+</footer>
 <section id="wd-composer" class="wd-composer hidden" aria-label="세션에 보내기">
   <div class="wd-composer-head">
     <strong id="wd-composer-title"></strong>
@@ -57,13 +75,11 @@
   <label class="sr-only" for="wd-composer-note">메모</label>
   <textarea id="wd-composer-note" rows="3" placeholder="세션에 덧붙일 말 (선택)"></textarea>
   <div class="wd-composer-foot">
-    <label id="wd-composer-capture-row" class="hidden"><input id="wd-composer-capture" type="checkbox"> 요소 캡처 함께 보내기</label>
     <span id="wd-composer-status" class="wd-muted" role="status"></span>
     <button id="wd-composer-cancel" type="button">취소</button>
     <button id="wd-composer-send" type="button" class="wd-primary">보내기</button>
   </div>
 </section>
-<video id="wd-video" muted playsinline hidden></video>
 <script src="static/webdebug.js"></script>
 </body>
 </html>

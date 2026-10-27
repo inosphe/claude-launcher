@@ -397,10 +397,11 @@ def _foreign_origin(request: web.Request) -> Optional[str]:
 
     The login cookie is SameSite=Strict, but a cookie's site ignores the port:
     every port of the dashboard's host is the same site, so a page served on
-    one of them -- the web debug proxy frames arbitrary pages there
-    (daemon/webdebug.py) -- gets the cookie attached to a POST or a WebSocket
-    it opens to the daemon. CORS hides the response, not the effect, and a
-    WebSocket is not covered by CORS at all (claunch-dsb28). The browser says
+    one of them gets the cookie attached to a POST or a WebSocket it opens to
+    the daemon. CORS hides the response, not the effect, and a WebSocket is not
+    covered by CORS at all (claunch-dsb28; the web debug page framed arbitrary
+    pages that way until claunch-o8pb7.2 moved them into the daemon's own
+    browser). The browser says
     where a request came from: Sec-Fetch-Site in every current browser,
     Origin where that is missing. Both are computed against the URL the
     browser is on, so a relay in front of the daemon does not change them.
@@ -756,9 +757,9 @@ def build_app(
     # away in one browser goes down in the others on their next poll.
     from . import notice_sync
     notice_sync.install(app)
-    # The web debug page (daemon/webdebug.py, claunch-dsb28): a page under
-    # development framed through a per-origin proxy, driven by the user and
-    # by the session the user picked for it.
+    # The web debug page (daemon/webdebug.py, claunch-o8pb7.2): a page under
+    # development loaded in the daemon's own headless browser, whose screen is
+    # streamed to a window the user drives, and to the session the user picked.
     from . import webdebug
     webdebug.install(app)
     # deep_think (daemon/deep_think.py): a session asks itself a question and

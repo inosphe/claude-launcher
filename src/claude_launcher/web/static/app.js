@@ -18568,10 +18568,11 @@ $("term-observer").addEventListener("click", () => {
   if (currentName) go("#/observer/session/" + encodeURIComponent(currentName));
 });
 
-/* The web debug page (webdebug.html, claunch-dsb28) opens in a window of
+/* The web debug page (webdebug.html, claunch-o8pb7.2) opens in a window of
    its own, already showing this session; the user may switch it to another
-   session in its top bar. A new window per press: several can be up at once,
-   one per session or several for one. */
+   session in its top bar. The page under development runs in the daemon's
+   browser and this window shows its screen, so a second window closes the
+   first (daemon/webdebug.py MAX_WINDOWS). */
 $("term-webdebug").addEventListener("click", () => {
   if (!currentName) return;
   window.open(url("webdebug") + "?session=" + encodeURIComponent(currentName), "_blank");

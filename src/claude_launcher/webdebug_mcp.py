@@ -1,4 +1,4 @@
-"""MCP tools for the web debug page (claunch-dsb28).
+"""MCP tools for the web debug page (claunch-o8pb7.2).
 
 Thin clients of the daemon's ``/api/webdebug`` routes (daemon/webdebug.py).
 The user opens a web debug window (the ``web`` button in a session's
@@ -6,6 +6,11 @@ terminal header), loads the page under development in it and picks which
 session it is for; that session drives the window with these tools. Every
 call carries ``$CLAUNCH_SESSION``, and the daemon refuses a window that is
 showing another session.
+
+The page runs in the daemon's own headless browser and the user watches its
+screen, so a tool acts on a real page with real input behind it -- and a
+screenshot is the browser's own capture, available whether or not anyone is
+watching.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ _TARGET = {
 TOOLS = [
     {"name": "webdebug_windows",
      "description": "The web debug windows the user opened for your session: id, the page's url and "
-                    "title, and whether the user shares the screen (needed for webdebug_screenshot).",
+                    "title, its viewport, and how many screencast frames it has sent.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "webdebug_snapshot",
      "description": "Read the page in a web debug window: url, title, viewport, its visible interactive "
@@ -82,9 +87,9 @@ TOOLS = [
          "max": {"type": "integer", "description": "default 100"},
          "clear": {"type": "boolean"}}}},
     {"name": "webdebug_screenshot",
-     "description": "Screenshot the page (or one element) as the user sees it. Works only while the "
-                    "user shares the screen in that window ('화면 공유' in its top bar); otherwise ask "
-                    "them to. Returns the PNG's path on this machine -- open it to look.",
+     "description": "Screenshot the page (or one element) as the user sees it: the daemon's browser "
+                    "captures it, so it works whether or not anyone is watching. Returns the PNG's "
+                    "path on this machine -- open it to look.",
      "inputSchema": {"type": "object", "properties": {**_WINDOW, **_TARGET}}},
 ]
 
