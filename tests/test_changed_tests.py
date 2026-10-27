@@ -2476,6 +2476,60 @@ def test_an_included_module_is_in_the_receipt_and_its_key(repo, gate, capsys):
     assert "named by --include" in capsys.readouterr().out
 
 
+def test_an_include_the_diff_already_reached_is_not_said_to_be_underived(repo, gate, capsys):
+    """Naming a module the diff already found adds nothing, so the gate must
+    not tell the reader it was not derived from the change -- that reader goes
+    looking for a change behind it and there is none (``claunch-23r7d.1.1``).
+
+    Found by the peer review of ``claunch-23r7d.1``: the wording and the
+    receipt agreed with each other and not with the selection.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    derived = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    assert derived, "this test needs the diff to select something"
+    overlap = derived[0]
+
+    assert gate("--include", overlap) == 0
+    out = capsys.readouterr().out
+    assert "not derived from the change" not in out, out
+    assert "named by --include" not in out, out
+
+    tree = changed_tests.worktree_tree(repo)
+    path = changed_tests.receipt_path(repo, tree, derived, gate.receipts)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    assert receipt["selection"] == derived
+    assert receipt["included"] == [], (
+        "the diff reached this module, so it is not a command-line addition"
+    )
+    # The union is the same list, so the key did not move: a receipt written
+    # before this change answers for the run after it.
+    assert receipt["selection"] == sorted(set(derived) | {overlap})
+
+
+def test_an_include_beside_one_the_diff_reached_names_only_the_new_one(repo, gate, capsys):
+    """Both kinds on one command line: the receipt's ``included`` is the part
+    the diff could not reach, and the printed count says the same. The
+    selection is the union of both, unchanged."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    derived = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    assert derived, "this test needs the diff to select something"
+    overlap = derived[0]
+    fresh = "tests/test_unrelated.py"
+    assert fresh not in derived
+
+    assert gate("--include", overlap, "--include", fresh) == 0
+    out = capsys.readouterr().out
+    assert "1 of them named by --include" in out, out
+    assert fresh in out
+
+    tree = changed_tests.worktree_tree(repo)
+    widened = sorted(set(derived) | {fresh})
+    path = changed_tests.receipt_path(repo, tree, widened, gate.receipts)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    assert receipt["selection"] == widened
+    assert receipt["included"] == [fresh]
+
+
 def test_a_receipt_answers_even_with_a_field_this_build_does_not_know(repo, gate):
     """The receipt is a format more than one build reads, so a field added to
     it must not make a reader blind to the receipt (leader, ``claunch-23r7d.1``).
