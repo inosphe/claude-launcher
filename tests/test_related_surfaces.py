@@ -12,7 +12,9 @@ the issue set: a change to one spawn-contract file lists ``app.js``.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -442,35 +444,113 @@ def test_every_guard_group_member_exists_in_this_checkout():
 # --------------------------------------------------------------------------- #
 
 _SELF = Path(__file__).resolve()
+_HERE = str(ROOT)
+
+_EXPR = "\x00not-a-constant"
 
 
-def _tool_invocations():
-    """Every place this file invokes the tool, as ``(lineno, argv, repo)``.
+def _argv_of(nodes):
+    """The literal arguments a call carries. Anything that is not a string
+    constant becomes ``_EXPR`` -- present in the list so ``in`` tests still
+    see the flag, but carrying no text to match on."""
+    return [
+        n.value
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        else _EXPR
+        for n in nodes
+    ]
 
-    Two shapes: the ``_run(...)`` helper and a bare ``subprocess.run([...])``
-    whose first element is the script. Parsed from the source rather than
-    grepped so a call split across lines is still one call."""
-    import ast
 
-    tree = ast.parse(_SELF.read_text(encoding="utf-8"))
+def _reads_this_checkout(node):
+    """Does this argument name the checkout the test is standing in?
+
+    ``ROOT``, ``str(ROOT)`` and the literal path all resolve to it. A fixture
+    name (``repo``), a ``tmp_path`` or anything else does not: the tool cannot
+    fall back to that path on its own, so its history is a fixed thing the
+    case built rather than a window that slides as this repository grows."""
+    if isinstance(node, ast.Name):
+        return node.id == "ROOT"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value == _HERE
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "str":
+        return bool(node.args) and _reads_this_checkout(node.args[0])
+    return False
+
+
+def _names_the_script(node):
+    """Whether an argv element is the script, however it is spelled.
+
+    The two spellings in this file are ``SCRIPT`` and ``str(SCRIPT)``. Testing
+    the element's own name against ``SCRIPT`` only ever matched the first, so
+    the bare ``subprocess.run`` branch below was dead code -- it matched no
+    call at all, and a bare call reading this repository without ``--limit``
+    passed the guard (found by three reviewers on claunch-o5il6). Walking the
+    element instead catches both, and any future wrapper."""
+    return any(isinstance(n, ast.Name) and n.id == "SCRIPT" for n in ast.walk(node))
+
+
+def _repo_verdict(nodes, in_process=False):
+    """Whether a call reads *this* repository's history.
+
+    Three ways to end up there: no ``--repo`` at all (the tool falls back to
+    ``ROOT``), ``--repo`` handed this checkout's own path, or an in-process
+    ``rs.history(ROOT)``. Only the first is an ``in`` test on the flag list --
+    the other two are why this is a function.
+
+    ``--help``/``-h`` is the one argv that cannot reach ``history()``:
+    ``parse_args`` raises ``SystemExit`` on it before the tool reads anything.
+    The claim is pinned by :func:`test_help_exits_before_the_tool_reads_history`
+    rather than asserted here, so it cannot rot into a silent exemption."""
+    if in_process:
+        return bool(nodes) and _reads_this_checkout(nodes[0])
+    argv = _argv_of(nodes)
+    if "--help" in argv or "-h" in argv:
+        return False
+    if "--repo" not in argv:
+        return True
+    at = argv.index("--repo")
+    if at + 1 >= len(nodes):
+        return True  # --repo with no value: argparse will refuse it, but do not exempt it
+    return _reads_this_checkout(nodes[at + 1])
+
+
+def _tool_invocations(source=None):
+    """Every place a source invokes the tool, as ``(lineno, argv, reads_here)``.
+
+    Three shapes: the ``_run(...)`` helper (its definition prepends
+    ``sys.executable, str(SCRIPT)``, so a call site's own arguments are the
+    tool's argv), a bare ``subprocess.run([...])`` naming the script anywhere
+    in its argument list, and the in-process ``rs.history(<repo>)``. Parsed
+    from source rather than grepped so a call split across lines is still one
+    call."""
+    tree = ast.parse(source if source is not None else _SELF.read_text(encoding="utf-8"))
     out = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        argv = None
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+
         if name == "_run":
-            argv = [a.value for a in node.args if isinstance(a, ast.Constant)]
-        elif name == "run":
-            first = node.args[0] if node.args else None
-            if isinstance(first, ast.List):
-                items = first.elts
-                names = [getattr(i, "id", None) or getattr(i, "attr", None) for i in items]
-                if "SCRIPT" in names:
-                    argv = [a.value for a in items[2:] if isinstance(a, ast.Constant)]
-        if argv is None:
+            out.append((node.lineno, _argv_of(node.args), _repo_verdict(node.args)))
             continue
-        out.append((node.lineno, argv))
+
+        if name == "history" and getattr(getattr(func, "value", None), "id", None) == "rs":
+            out.append((node.lineno, [], _repo_verdict(node.args[:1], in_process=True)))
+            continue
+
+        if name != "run" or not node.args or not isinstance(node.args[0], ast.List):
+            continue
+        items = node.args[0].elts
+        at = next((i for i, el in enumerate(items) if _names_the_script(el)), None)
+        if at is None:
+            continue
+        tail = items[at + 1 :]
+        if any(isinstance(el, ast.Starred) for el in tail):
+            # The helper's own definition forwards ``*args``; its call sites
+            # above are the invocations, and this body has no argv of its own.
+            continue
+        out.append((node.lineno, _argv_of(tail), _repo_verdict(tail)))
     return out
 
 
@@ -490,15 +570,20 @@ def test_every_call_into_this_repository_names_its_window():
     built by the fixture -- and its history cannot slide past anything that
     matters, so it is exempt. ``--paths`` does **not** exempt: it narrows which
     files the question is about, but the history is still *this* repository's
-    log read back ``--limit`` commits. The exemption is therefore exactly the
-    tool's own default: no ``--repo`` means ``ROOT``, and only ``--repo``
-    points the tool somewhere else."""
+    log read back ``--limit`` commits.
+
+    The exemption is the *path*, not the flag: ``--repo str(ROOT)``,
+    ``--repo ROOT`` and the bare literal name this checkout, so they read this
+    repository as surely as no ``--repo`` does, and ``rs.history(ROOT)`` skips
+    the CLI altogether. All three were outside an earlier version of this
+    guard, which matched the flag's presence rather than its value (reviewers
+    s490-rev, s404-rev, s648-rev on claunch-o5il6)."""
     calls = _tool_invocations()
     assert calls, "no invocation of the tool was found -- the parser lost them"
 
     this_repository = []
-    for lineno, argv in calls:
-        if "--repo" in argv:
+    for lineno, argv, reads_here in calls:
+        if not reads_here:
             continue
         this_repository.append(lineno)
         assert "--limit" in argv, (
@@ -522,16 +607,115 @@ def test_a_call_handed_its_own_repository_may_keep_the_default():
     is given nothing. Assert that here, or the guard could be satisfied by
     exempting everything."""
     calls = _tool_invocations()
-    exempt = [n for n, argv in calls if "--repo" in argv]
+    exempt = [n for n, _argv, reads_here in calls if not reads_here]
     assert exempt, "the exemption matches nothing -- the guard above is untested"
 
     # And the tool's own default really is the sliding window this test names,
     # so the guard cannot be satisfied by the tool quietly changing shape.
     assert rs.DEFAULT_LIMIT == 800
-    import inspect
 
     sig = inspect.signature(rs.history)
     assert sig.parameters["limit"].default == rs.DEFAULT_LIMIT
+
+
+def test_help_exits_before_the_tool_reads_history():
+    """``--help`` is the one argv the guard exempts without a ``--limit``.
+
+    The exemption is a claim about ``argparse``: ``parse_args`` raises
+    ``SystemExit`` on ``--help`` before ``main`` reaches ``history()``, so no
+    window is ever read. Assert it against the tool itself, because an
+    exemption that only *looks* true is the same hole this guard exists to
+    close. What proves the point is the absence of the rendered answer: the
+    usage text itself mentions "changed paths" as a flag description, so the
+    marker has to be the summary line the tool prints after reading history."""
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+    )
+    assert out.returncode == 0
+    assert "usage: related_surfaces" in out.stdout
+    # No rendering: the tool's own facts never printed.
+    assert "related surfaces:" not in out.stdout
+    assert out.stdout.lstrip().startswith("usage:")
+
+
+def test_the_parser_sees_both_spellings_of_the_script():
+    """The bare ``subprocess.run`` branch must stay alive.
+
+    An earlier version matched a list element's *name* against ``SCRIPT``, but
+    this file writes ``str(SCRIPT)``, so the branch matched nothing and a bare
+    call reading this repository without ``--limit`` passed the guard
+    (claunch-o5il6, found independently by s1262-rev, s404-rev and s648-rev).
+    Assert the shape directly on a sample rather than trusting the live file to
+    happen to contain one: a guard whose branch is dead looks exactly like a
+    guard that finds nothing wrong."""
+    sample = """
+def _run(*args, cwd=None):
+    return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=str(cwd or ROOT))
+
+def test_a():
+    out = subprocess.run([sys.executable, str(SCRIPT), "--json"], cwd=str(ROOT))
+
+def test_b():
+    out = subprocess.run([sys.executable, SCRIPT, "--limit", "5"], cwd=str(ROOT))
+
+def test_c():
+    out = _run("--repo", str(tmp_path), cwd=tmp_path)
+
+def test_d():
+    rs.history(ROOT)
+
+def test_e():
+    rs.history(repo, max_files=100)
+"""
+    calls = _tool_invocations(sample)
+    by_line = {lineno: (argv, reads_here) for lineno, argv, reads_here in calls}
+
+    # _run's own body forwards *args, so it is not itself an invocation; its
+    # three call-site shapes below are what the guard reads.
+    assert len(calls) == 5, [(n, a, r) for n, a, r in calls]
+
+    bare_str = by_line[6]
+    assert bare_str == (["--json"], True), bare_str
+    bare_name = by_line[9]
+    assert bare_name == (["--limit", "5"], True), bare_name
+    via_run = by_line[12]
+    assert via_run[1] is False, via_run
+    in_process_root = by_line[15]
+    assert in_process_root == ([], True), in_process_root
+    in_process_fixture = by_line[18]
+    assert in_process_fixture == ([], False), in_process_fixture
+
+
+def test_the_parser_treats_this_checkouts_own_path_as_this_repository():
+    """``--repo`` names the path it was handed, so three spellings that all
+    resolve to this checkout are *not* exemptions.
+
+    The s490-rev finding on claunch-o5il6: the guard exempted any call that
+    carried ``--repo``, including one pointed back at this repository."""
+    sample = """
+def test_a():
+    out = _run("--repo", str(ROOT), "--json")
+
+def test_b():
+    out = _run("--repo", ROOT)
+
+def test_c():
+    out = _run("--repo", "@LITERAL@")
+
+def test_d():
+    out = _run("--repo", "@ELSEWHERE@")
+
+def test_e():
+    out = _run("--repo")
+""".replace("@LITERAL@", _HERE).replace("@ELSEWHERE@", _HERE + "-elsewhere")
+    by_line = {n: (a, r) for n, a, r in _tool_invocations(sample)}
+
+    assert by_line[3][1] is True, by_line[3]        # --repo str(ROOT)
+    assert by_line[6][1] is True, by_line[6]        # --repo ROOT
+    assert by_line[9][1] is True, by_line[9]        # the literal path
+    assert by_line[12][1] is False, by_line[12]     # another checkout is exempt
+    assert by_line[15][1] is True, by_line[15]      # --repo with no value is not exempt
 
 
 def test_the_review_step_asks_for_the_sentence_and_names_the_tool():
