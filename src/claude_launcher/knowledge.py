@@ -222,7 +222,7 @@ def create(ws, body, author=""):
             json.dumps(value["tags"], ensure_ascii=False),
             json.dumps(value["refs"], ensure_ascii=False),
             value["source"], author, value["status"], value["supersedes"], at, at, 1))
-        _supersede(db, value["supersedes"], author or "knowledge_record")
+        _supersede(db, value["supersedes"], author or "web")
         return _get(db, ident)
 
 

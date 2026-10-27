@@ -184,6 +184,24 @@ def test_a_store_written_before_versions_gains_the_column(home, tmp_path):
         (1, "본문"), (2, "새 본문")]
 
 
+def test_a_page_save_records_the_editor_not_the_author(home, tmp_path):
+    ws = _ws(tmp_path)
+    row = knowledge.create(ws, {"kind": "decision", "title": "t", "body": "v1"}, author="s1")
+    # The tab sends the record's fields without its author: the author is who
+    # wrote the record, not who changed this version (claunch-qgdfc review).
+    knowledge.update(ws, row["id"], {"kind": "decision", "title": "t", "body": "v2",
+                                     "tags": [], "refs": [], "source": "",
+                                     "status": "active", "supersedes": ""})
+    versions = knowledge.history(ws, row["id"])
+    assert versions[0]["author"] == "s1" and versions[0]["body"] == "v1"
+    assert versions[0]["archived_by"] == "web"
+    # A supersede made on the page carries the same editor label, not a tool name.
+    old = knowledge.create(ws, {"kind": "decision", "title": "old", "body": "b"}, author="s1")
+    knowledge.create(ws, {"kind": "decision", "title": "new", "body": "b",
+                          "supersedes": old["id"]})
+    assert knowledge.history(ws, old["id"])[0]["archived_by"] == "web"
+
+
 def test_delete_drops_the_versions_too(home, tmp_path):
     ws = _ws(tmp_path)
     row = knowledge.create(ws, {"kind": "decision", "title": "t", "body": "v1"}, author="s1")

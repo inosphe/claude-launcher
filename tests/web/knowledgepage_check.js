@@ -78,6 +78,12 @@ async function settle() { for (let i = 0; i < 8; i++) await new Promise(resolve 
   field('body').value = '고친 이유'; field('body').oninput();
   saveForm().onsubmit({preventDefault() {}}); await settle();
   assert(calls.some(c => c.method === 'PUT' && c.url.pathname === '/api/knowledge/r1' && c.body.body === '고친 이유'));
+  // The record's author is not the editor: a save never sends it, and the
+  // read-only fields stay out of the body.
+  const pageSave = calls.find(c => c.method === 'PUT' && c.url.pathname === '/api/knowledge/r1');
+  for (const key of ['author', 'id', 'origin', 'created_at', 'updated_at', 'version'])
+    assert.strictEqual(pageSave.body[key], undefined, key);
+  assert.strictEqual(pageSave.body.status, 'active');
   // Create one with tags and refs split by line.
   buttons('기록 추가')[0].onclick();
   for (const [name, value] of [['title', '새 니즈'], ['body', '배경'], ['tags', 'a\nb'], ['refs', 'claunch-2']]) {

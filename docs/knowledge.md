@@ -32,7 +32,9 @@
 
 - `knowledge.history(ws, id, limit=20)` — 오래된 것부터, 마지막 항목이 현재 버전
   (`current: true`). 각 항목은 `version`, `title`, `body`, `author`, `updated_at`과,
-  과거 버전이면 그것을 갈아낸 `archived_by`·`archived_at`을 싣는다.
+  과거 버전이면 그것을 갈아낸 `archived_by`·`archived_at`을 싣는다. `archived_by`는
+  그 버전을 갈아낸 주체이고 `author`(그 버전을 쓴 사람)와 다르다 — Knowledge 탭에서
+  저장하거나 대체하면 `web`, MCP `knowledge_record`로 남기면 그 세션 id다.
 - 대체된 기록을 다시 유효로 돌리는 것은 상태를 `active`로 바꾸는 갱신이다(웹의
   「되살리기」와 편집기의 상태 선택). 그 변경도 버전으로 남는다. 그 기록을 대체했던 다른
   기록의 상태는 함께 바뀌지 않는다 — 필요하면 그 기록을 따로 대체 처리한다.

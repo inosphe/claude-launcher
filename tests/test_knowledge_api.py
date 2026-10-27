@@ -73,15 +73,19 @@ def test_history_returns_the_versions_oldest_first(home, tmp_path):
                                         json={"kind": "decision", "title": "결정",
                                               "body": "v1", "author": "s1"})
             row = (await created.json())["record"]
+            # The shape the Knowledge tab sends: the record's fields, no author.
             updated = await client.put("/api/knowledge/" + row["id"] + "?workspace=alpha",
-                                       json={"body": "v2", "author": "s2"})
+                                       json={"kind": "decision", "title": "결정", "body": "v2",
+                                             "tags": [], "refs": [], "source": "",
+                                             "status": "active", "supersedes": ""})
             assert updated.status == 200
             response = await client.get("/api/knowledge/" + row["id"] + "/history?workspace=alpha")
             assert response.status == 200
             versions = (await response.json())["versions"]
             assert [(v["version"], v["body"], v["current"]) for v in versions] == [
                 (1, "v1", False), (2, "v2", True)]
-            assert versions[0]["archived_by"] == "s2"
+            assert versions[0]["author"] == "s1"
+            assert versions[0]["archived_by"] == "web"
             assert (await client.get("/api/knowledge/nope/history?workspace=alpha")).status == 404
             assert (await client.get("/api/knowledge/" + row["id"] +
                                      "/history?workspace=alpha&limit=oops")).status == 400

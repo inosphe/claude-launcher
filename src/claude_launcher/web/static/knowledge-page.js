@@ -210,8 +210,15 @@ globalThis.KnowledgePage = (() => {
     const save = node("button", "저장", "wf-btn glossary-primary"); save.disabled = busy;
     form.append(save);
     form.onsubmit = e => {
-      e.preventDefault(); const body = {...draft};
-      act(() => request(url("/api/knowledge" + (body.id ? "/" + body.id : "")), body.id ? "PUT" : "POST", body), () => { draft = null; });
+      e.preventDefault();
+      const body = {...draft};
+      const target = body.id ? url("/api/knowledge/" + body.id) : url("/api/knowledge");
+      // The record's author is who wrote it, not who changed this version: the
+      // API reads `author` as the editor, so a page save never sends it (the
+      // daemon records the edit as "web"). Read-only fields stay out too.
+      for (const key of ["id", "author", "origin", "path", "created_at", "updated_at", "version"])
+        delete body[key];
+      act(() => request(target, draft.id ? "PUT" : "POST", body), () => { draft = null; });
     };
     return form;
   }
