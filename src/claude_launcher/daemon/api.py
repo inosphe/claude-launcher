@@ -11676,13 +11676,19 @@ def _report_spawn_failure(request, target: str, reason: str, *, site: str, **det
     Uses the app's manager reporter, and falls back to the installed one for
     a manager that has none (a stub an older test builds the app with): a
     refusal must not turn into a second failure because its report is
-    missing."""
+    missing. That is also why the call itself is guarded -- this runs on the
+    way out of a refusal whose response is already decided, and a report that
+    raised would answer 500 where the route meant 4xx (claunch-is4o4,
+    s1389-rev)."""
     failures = getattr(request.app["manager"], "spawn_failures", None)
     if failures is None:
         failures = spawn_events.installed()
     if failures is None:
         return
-    failures.report(target, kind="fail", reason=reason, site=site, **details)
+    try:
+        failures.report(target, kind="fail", reason=reason, site=site, **details)
+    except Exception:  # noqa: BLE001 - see the docstring
+        log.exception("could not report the refused spawn for %r (%s)", target, site)
 
 
 async def h_session_reparent(request: web.Request) -> web.Response:

@@ -36,6 +36,17 @@ report that clears the gap says how many were folded into the previous one.
 That is the rule the permanent-refusal case needs: an attempt every five
 minutes for hours is one situation, not a hundred.
 
+**A permanent failure reports again once per gap.** The gap is a window, not
+a mute: when it clears, the pair is re-armed and the report that follows
+carries ``repeats``. So a refusal that never stops -- the sweep retrying
+every :data:`claude_launcher.daemon.delayed_sweep.SPAWN_BACKOFF` seconds,
+say -- is one event, then one more per fifteen minutes, each saying how many
+attempts it folded. This is deliberate (claunch-is4o4, raised by s597-rev and
+s511-rev): the issue asks that a repeat be *one* report, and a situation that
+lasts for hours has to stay visible -- a single line, then silence, reads as
+a failure that was fixed. The count is what keeps that from being noise:
+four rows an hour, not a hundred.
+
 **The reason is normalised** because the same failure is seen twice: the
 route reports what it answered, and a caller that reached it over HTTP
 re-reports the client's rendering of the same sentence (``POST
@@ -45,8 +56,10 @@ the whitespace makes both the same key, so one refusal stays one report.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -82,13 +95,29 @@ MAX_SEEN = 500
 #: error body, so the caller's copy of a route's refusal keys with the route's.
 _CALL_PREFIX = re.compile(r"^(?:GET|POST|PUT|PATCH|DELETE) /\S*: ")
 
+#: What remains of a caller's sentence when the route answered an error with
+#: no ``error`` field (:func:`daemon_client._error_detail`). The route itself
+#: has nothing to say either, so both sides mean "the refusal that said
+#: nothing" and must key as one (claunch-is4o4, s490-rev).
+_NO_DETAIL = re.compile(r"^HTTP \d{3}$")
+
+#: The sentence a failure with no reason at all is reported as.
+NO_REASON = "세션 생성이 사유 없이 실패했다"
+
 
 def normalize(reason: Any) -> str:
     """``reason`` as one comparable sentence: whitespace folded, the HTTP
-    call prefix dropped, empty replaced with what a person can still act on."""
+    call prefix dropped, empty replaced with what a person can still act on.
+
+    A bare status code counts as empty. When a route answers an error with no
+    ``error`` field, the route's own reason is ``""`` while a caller over HTTP
+    reads ``HTTP 500`` from the client; folding both to :data:`NO_REASON`
+    keeps one refusal to one report."""
     text = " ".join(str(reason or "").split())
     text = _CALL_PREFIX.sub("", text)
-    return text[:MAX_REASON] or "세션 생성이 사유 없이 실패했다"
+    if _NO_DETAIL.match(text):
+        text = ""
+    return text[:MAX_REASON] or NO_REASON
 
 
 class Failures:
@@ -111,8 +140,13 @@ class Failures:
         self.session_of = session_of
         self.gap = gap
         self.clock = clock
-        #: (target, reason) -> [reported at, repeats since that report]
+        #: (target, reason) -> [reported at, repeats since that report].
+        #: Guarded by ``_lock``: :func:`report` is reached from the loop
+        #: (the sweep, the API) and from a worker thread (the cflow2 clock
+        #: runs the executor on ``pools.background``), and an unguarded
+        #: check-then-set there can report the same failure twice.
         self.seen: Dict[Tuple[str, str], list] = {}
+        self._lock = threading.Lock()
 
     def report(
         self,
@@ -137,18 +171,20 @@ class Failures:
         """
         reason = normalize(reason)
         key = (str(target or ""), reason)
-        now = self.clock()
-        previous = self.seen.get(key)
-        if previous is not None and now - previous[0] < self.gap:
-            previous[1] += 1
-            return None
-        repeats = previous[1] if previous else 0
-        self.seen[key] = [now, 0]
-        if len(self.seen) > MAX_SEEN:
-            # Oldest report first: a pair not seen for that long would report
-            # again anyway.
-            for stale in sorted(self.seen, key=lambda k: self.seen[k][0])[:len(self.seen) - MAX_SEEN]:
-                del self.seen[stale]
+        with self._lock:
+            now = self.clock()
+            previous = self.seen.get(key)
+            if previous is not None and now - previous[0] < self.gap:
+                previous[1] += 1
+                return None
+            repeats = previous[1] if previous else 0
+            self.seen[key] = [now, 0]
+            if len(self.seen) > MAX_SEEN:
+                # Oldest report first: a pair not seen for that long would
+                # report again anyway.
+                for stale in sorted(self.seen, key=lambda k: self.seen[k][0])[
+                        :len(self.seen) - MAX_SEEN]:
+                    del self.seen[stale]
         session = self._session(target)
         if session is None:
             # Nothing to file it on: the target is gone (an exited owner, a
@@ -157,10 +193,20 @@ class Failures:
             log.warning("spawn %s for %r was not recorded: %s", kind, target, reason)
             return None
         text = self._text(kind, reason, repeats)
-        event = self.events.record(
-            session, kind, text, level=LEVEL, reason=reason, site=site,
-            target=str(target or ""), repeats=repeats, **details
-        )
+        try:
+            event = self.events.record(
+                session, kind, text, level=LEVEL, reason=reason, site=site,
+                target=str(target or ""), repeats=repeats, **details
+            )
+        except Exception:  # noqa: BLE001 - see the docstring
+            # The store is where the durable half lands, and a caller that
+            # reached :func:`report` is already handling a failure: letting a
+            # store error out of here would turn the API's 4xx into a 500,
+            # cut the sweep's pass short and be caught by the cflow2 reroute
+            # as the spawn's error. The notice below still goes out, like the
+            # reverse case in :meth:`_notice`.
+            log.exception("could not record the spawn %s event for %r: %s", kind, target, reason)
+            event = None
         self._notice(notify_on or target, text)
         return event
 
@@ -182,12 +228,31 @@ class Failures:
         """The immediate half: a warn line over that session's terminal.
 
         Never raises: a notice is a courtesy to whoever is looking, and the
-        failure it announces has already been recorded."""
+        failure it announces has already been recorded. Called from the
+        loop (the sweep, the API) and from a worker thread (the cflow2
+        executor runs on ``pools.background``); ``Session.notify`` fans out
+        to asyncio queues, so an off-loop caller hands it to the session's
+        loop rather than touching those queues from here."""
         session = self._session(name)
         if session is None:
             return
-        try:
+
+        def show() -> None:
             session.notify(text[:NOTICE_TEXT], ttl=NOTICE_TTL, level=NOTICE_LEVEL)
+
+        try:
+            loop = getattr(session, "_loop", None)
+            if loop is None or not loop.is_running():
+                show()
+            else:
+                try:
+                    running = asyncio.get_running_loop()
+                except RuntimeError:
+                    running = None
+                if running is loop:
+                    show()
+                else:
+                    loop.call_soon_threadsafe(show)
         except Exception:  # noqa: BLE001 - a notice must never break the manager
             log.debug("spawn notice for %r failed", name, exc_info=True)
 
