@@ -35,6 +35,15 @@ Three parts, all in this module:
   to every port) and the proxy cookies are stripped before a request goes
   upstream.
 
+  The listener speaks plain HTTP, always. Two consequences were reported as
+  one bug (claunch-o8pb7: "페이지가 연결도 안되고"): an ``https://`` address
+  for a server that answers in plaintext failed in the upstream client with
+  ``SSL: WRONG_VERSION_NUMBER`` (now read once at proxy time by
+  :func:`alternate_scheme`, which opens it as ``http://``), and a dashboard
+  opened over https cannot frame an http listener at all -- the browser
+  blocks it as mixed content, so the page says so and offers a new tab
+  instead of pointing the frame at a port that is not speaking TLS.
+
 * **Windows.** Each open web debug page holds one WebSocket
   (``/api/webdebug/ws``) and says which session it is showing. The user
   picks that session in the page's top bar; only that session's agent can
@@ -57,6 +66,7 @@ import json
 import logging
 import re
 import secrets
+import ssl
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -107,6 +117,9 @@ OPS = frozenset({
 
 COMMAND_TIMEOUT = 20.0
 MAX_COMMAND_TIMEOUT = 120.0
+#: How long the scheme probe (alternate_scheme) may take before the address
+#: keeps the scheme it was typed with.
+SCHEME_PROBE_TIMEOUT = 2.5
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 _IMAGE_ID = re.compile(r"^[0-9a-f]{20}\.(png|jpg|webp)$")
@@ -157,6 +170,58 @@ def split_target(raw: str) -> Tuple[str, str]:
     return origin, path
 
 
+def _authority(host: str, port: int) -> str:
+    """``host:port`` with an IPv6 host bracketed, for a URL or a bind."""
+    return (f"[{host}]" if ":" in host else host) + f":{port}"
+
+
+async def _speaks_tls(host: str, port: int, timeout: float = SCHEME_PROBE_TIMEOUT) -> Optional[bool]:
+    """Whether ``host:port`` answers a TLS handshake.
+
+    ``True``: the handshake completed (the certificate is not judged -- the
+    proxy does not verify it either). ``False``: TLS was attempted and the
+    peer answered something else, which is a plain HTTP server sending its
+    error page back (``SSL: WRONG_VERSION_NUMBER``). ``None``: no verdict --
+    the address did not answer at all, which says nothing about the scheme.
+    """
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    writer = None
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=context, server_hostname=host), timeout)
+        return True
+    except ssl.SSLError:  # an OSError subclass: keep this branch first
+        return False
+    except (asyncio.TimeoutError, OSError):
+        return None
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+
+async def alternate_scheme(origin: str) -> Optional[str]:
+    """``origin`` with ``http://`` when its ``https://`` host speaks plaintext.
+
+    Only an https address is read: that is the failure claunch-o8pb7 reported
+    (a dev server at ``http://host:port`` opened as ``https://host:port``),
+    and the probe is cheap and local in the common case -- a TLS handshake
+    that the plaintext server answers with its HTTP error page. An http
+    address is left alone: probing it would send a stray ClientHello to every
+    page opened through the proxy, for a failure (a TLS-only dev server typed
+    without a scheme) that the 502 page names.
+    """
+    parts = urllib.parse.urlsplit(origin)
+    if parts.scheme != "https" or not parts.hostname:
+        return None
+    if await _speaks_tls(parts.hostname, parts.port or 443) is not False:
+        return None
+    return "http://" + origin[len("https://"):]
+
+
 _HEAD = re.compile(rb"<head(\s[^>]*)?>", re.IGNORECASE)
 _HTML = re.compile(rb"<html(\s[^>]*)?>", re.IGNORECASE)
 _DOCTYPE = re.compile(rb"<!doctype[^>]*>", re.IGNORECASE)
@@ -197,6 +262,24 @@ def _page(status: int, text: str) -> web.Response:
     body = ("<!doctype html><meta charset=utf-8><title>claunch webdebug</title>"
             f"<p style='font:14px system-ui;margin:2em'>{text}</p>")
     return web.Response(status=status, text=body, content_type="text/html")
+
+
+def _upstream_failure(origin: str, exc: BaseException) -> str:
+    """What the frame says when the target did not answer.
+
+    The two scheme mismatches get a sentence naming the fix: the OpenSSL text
+    ("WRONG_VERSION_NUMBER") reads as a claunch failure when the address is
+    simply the wrong scheme (claunch-o8pb7).
+    """
+    text = str(exc)
+    low = text.lower()
+    if origin.startswith("https://") and ("wrong_version_number" in low or "wrong version number" in low):
+        return (f"{origin} 은(는) TLS로 응답하지 않습니다. 이 포트는 평문 HTTP일 수 있습니다 — "
+                f"http://{origin[len('https://'):]} 로 여십시오.")
+    if origin.startswith("http://") and isinstance(exc, aiohttp.ServerDisconnectedError):
+        return (f"{origin} 이(가) 연결을 닫았습니다. 이 포트가 TLS를 요구할 수 있습니다 — "
+                f"https://{origin[len('http://'):]} 로 시도해 보십시오.")
+    return f"{origin} did not answer: {text}"
 
 
 # --------------------------------------------------------------------------- #
@@ -349,7 +432,7 @@ class Proxy:
                 await resp.write_eof()
                 return resp
         except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
-            return _page(502, f"{self.origin} did not answer: {exc}")
+            return _page(502, _upstream_failure(self.origin, exc))
 
     async def _websocket(self, request: web.Request) -> web.StreamResponse:
         assert self.http is not None
@@ -609,13 +692,25 @@ async def h_proxy(request: web.Request) -> web.Response:
     try:
         body = await _json_body(request)
         origin, path = split_target(body.get("url"))
+        switched_from = None
+        alternate = await alternate_scheme(origin)
+        if alternate:
+            switched_from, origin = origin, alternate
         proxy = await _hub(request).proxy_for(origin, _bind_of(request))
     except WebDebugError as exc:
         return _err(exc)
     except OSError as exc:
         return web.json_response({"error": f"could not open a proxy port: {exc}"}, status=500)
-    return web.json_response({"origin": origin, "path": path, "port": proxy.port,
-                              "enter": proxy.enter_path(path)})
+    return web.json_response({
+        "origin": origin, "path": path, "port": proxy.port,
+        "enter": proxy.enter_path(path),
+        # The listener speaks plain http and binds the address this request
+        # arrived on, so this is the base the browser that made the request
+        # can reach -- not necessarily the host name it typed (a WSL host
+        # with one forwarded port resolves the name for 8378 only).
+        "proxy_origin": f"http://{_authority(proxy.bind, proxy.port)}",
+        "switched_from": switched_from,
+    })
 
 
 async def h_sessions(request: web.Request) -> web.Response:
