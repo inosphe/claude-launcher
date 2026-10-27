@@ -641,7 +641,11 @@ class Ledger:
         the figure the Stats page's table prints for it without a second read:
         the two are one pass over one set of bins. A wanted session the ledger
         cannot speak for is absent from the map (the page draws ``-`` there,
-        never a zero -- the overview's rule, claunch-ha2s9).
+        never a zero -- the overview's rule, claunch-ha2s9). Each entry also
+        carries ``points``: the buckets in which that session spent anything,
+        as ``[t, total, requests]`` on the same grid, so the row can draw when
+        it was busy and the gaps in a live session's bar read as idle
+        (claunch-58pvy).
 
         Buckets are aligned to multiples of their own width since the epoch,
         so a poll draws the same boundaries as the poll before it, and the
@@ -721,6 +725,18 @@ class Ledger:
                 row[key] += acc[i]
             row["total"] += acc[0] + acc[1] + acc[2] + acc[3]
             row["requests"] += acc[4]
+            # The same bin, kept per bucket for the row's own activity strip:
+            # a live session whose buckets are empty was up and idle.
+            busy = row.setdefault("_buckets", {})
+            cell = busy.setdefault(slot["t"], [0, 0])
+            cell[0] += acc[0] + acc[1] + acc[2] + acc[3]
+            cell[1] += acc[4]
+        # Sparse and time-ordered: only buckets that saw a request or a token,
+        # as [bucket start, total, requests] on the `points` grid.
+        for row in by_session.values():
+            busy = row.pop("_buckets", {})
+            row["points"] = [[t, v[0], v[1]] for t, v in sorted(busy.items())
+                             if v[0] or v[1]]
         totals = {key: sum(p[key] for p in points) for key in
                   ("input", "cache_read", "cache_write", "output",
                    "total", "requests")}
