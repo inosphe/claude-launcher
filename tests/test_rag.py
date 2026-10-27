@@ -1028,6 +1028,17 @@ def test_rerank_budget_is_rerank_top_not_the_page_size(tmp_path, repo):
     The reranker was measured at 18.6 s of a 29.7 s search because a screen
     asking for 30 results sent 30 documents to a reranker configured for 12.
     Results past the budget keep their vector order behind the reranked head.
+
+    The index is settled with ``drain`` before the search, not left to the
+    search's two-second wait. That wait is a wall clock over a sync whose
+    writes run on the module-global background pool (``rag._sync`` calls
+    ``pools.background``); when the sync crosses the budget ``wait_sync``
+    returns silently, the search ranks an empty index, and this test fails on
+    ``len(results) == 3``. It did so in a full parallel sweep while passing
+    every time on its own (claunch-eypmd); why the sync crossed two seconds
+    in that sweep is not established. ``drain`` waits for the sync itself, so
+    the assertions below measure the reranker budget and not how loaded the
+    machine was.
     """
     ep = Endpoint()
     br = FakeBr(_issues())
@@ -1038,6 +1049,8 @@ def test_rerank_budget_is_rerank_top_not_the_page_size(tmp_path, repo):
             cfg = _cfg(server, rerank_top=2)
             svc = rag.RagService(board=_board(br, repo), config=lambda: cfg,
                                  root_dir=tmp_path / "rag")
+            svc.ensure_sync("beads", repo)
+            await svc.drain(30)
             view = await svc.search("beads", "kanban lanes", root=repo, limit=3)
             assert len(view["results"]) == 3
             assert len(ep.rerank_calls[-1]["documents"]) == 2
@@ -1094,6 +1107,17 @@ def test_search_waits_for_a_sync_only_while_the_index_is_empty(tmp_path, repo):
 
     The answer reports its own coverage, so spending the wait budget on every
     search buys nothing once there is something to rank.
+
+    What is measured here is the wait, not what the wait is worth: the budget
+    is a wall clock over a sync whose writes run on the module-global
+    background pool (``rag._sync`` calls ``pools.background``), so the sync
+    can spend the whole two seconds and the search then answers an empty
+    index. That answer is legal -- the view reports its own coverage -- so
+    asserting results straight after the wait measured the machine's state
+    rather than the contract, and it failed that way in a full parallel sweep
+    while passing on its own (claunch-eypmd). The index is therefore settled
+    with ``drain`` before results are read, and the wait itself is asserted on
+    the budgets passed, which is what this test names.
     """
     ep = Endpoint()
     br = FakeBr(_issues())
@@ -1112,8 +1136,13 @@ def test_search_waits_for_a_sync_only_while_the_index_is_empty(tmp_path, repo):
                 await real_wait(prog, budget)
 
             svc.wait_sync = record
-            first = await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
-            assert first["results"] and waits == [2.0]
+            await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
+            # The wait is what this test names: an empty index spends it.
+            assert waits == [2.0]
+            await svc.drain(30)
+            filled = await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
+            assert filled["results"]
+            # A filled index answers from what it holds, so no second wait.
             await svc.search("beads", "kanban", root=repo, limit=1, rerank=False)
             assert waits == [2.0]
         finally:
