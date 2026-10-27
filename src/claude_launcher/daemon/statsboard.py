@@ -725,14 +725,19 @@ class Ledger:
                 row[key] += acc[i]
             row["total"] += acc[0] + acc[1] + acc[2] + acc[3]
             row["requests"] += acc[4]
-            # The same bin, kept per bucket for the row's own activity strip:
-            # a live session whose buckets are empty was up and idle.
+            # The same bin, kept at the ledger's own five-minute grid for the
+            # row's activity strip whatever the window's bucket: a 7-day
+            # window's hour-wide bucket painted a whole hour busy for one
+            # request, and on the page's log axis that hour is most of a
+            # short session's bar (claunch-9n7g1). A live session whose
+            # bins are empty was up and idle.
             busy = row.setdefault("_buckets", {})
-            cell = busy.setdefault(slot["t"], [0, 0])
+            cell = busy.setdefault(at, [0, 0])
             cell[0] += acc[0] + acc[1] + acc[2] + acc[3]
             cell[1] += acc[4]
-        # Sparse and time-ordered: only buckets that saw a request or a token,
-        # as [bucket start, total, requests] on the `points` grid.
+        # Sparse and time-ordered: only bins that saw a request or a token,
+        # as [bin start, total, requests] on the SERIES_BIN_S grid
+        # (`points_bucket_s`), which divides the `points` grid.
         for row in by_session.values():
             busy = row.pop("_buckets", {})
             row["points"] = [[t, v[0], v[1]] for t, v in sorted(busy.items())
@@ -746,6 +751,7 @@ class Ledger:
         return {
             "window": window,
             "bucket_s": width,
+            "points_bucket_s": SERIES_BIN_S,
             "start": start,
             "until": now,
             "points": points,

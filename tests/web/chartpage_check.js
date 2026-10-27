@@ -511,5 +511,56 @@ assert.strictEqual(card.brief, '');
 tr = tipRows(card);
 assert.ok(tr['토큰(창)'].startsWith('계측 없음'));
 assert.ok(!('활동 구간' in tr) && !('마지막 요청' in tr));
+// No part figures (the fixture's `a`): no breakdown line.
+assert.ok(!('구성' in tipRows(C.rowTip(tipRow, tipModel, am, null))));
+
+// The card carries what the removed title tooltips did (claunch-9n7g1): the
+// window's tokens in the Stats page's four parts, zero parts left out, and
+// why a stalled run is marked.
+const partsRow = Object.assign({}, tipRow, { tokens: Object.assign({},
+  am.bySession.get('a'), { input: 1200, output: 300, cache_read: 45000, cache_write: 0 }) });
+tr = tipRows(C.rowTip(partsRow, tipModel, am, null));
+assert.strictEqual(tr['구성'], 'fresh input 1.20k · cache read 45.0k · output 300');
+const stallRow = Object.assign({}, tipRow, { cflow: { version: 'v2',
+  label: 'work', state: 'running', changedAt: now - C.STALL_MS } });
+tr = tipRows(C.rowTip(stallRow, tipModel, am, null));
+assert.ok(tr.cflow.endsWith(' ⚠'), tr.cflow);
+assert.strictEqual(tr['정지 의심'], '30m 이상 무변화');
+tr = tipRows(C.rowTip(Object.assign({}, stallRow, { cflow: Object.assign({},
+  stallRow.cflow, { changedAt: now - C.STALL_MS + 60000 }) }), tipModel, am, null));
+assert.ok(!('정지 의심' in tr) && !tr.cflow.includes('⚠'));
+
+// On the 24h axis the series' first bucket can start up to one width before
+// the axis; its column and its activity marks start at the axis edge, and
+// the part before the axis is cut from the width (claunch-9n7g1).
+const early = C.buildSeriesModel({ bucket_s: 300, start: sec(now - 24 * H - 200000),
+  until: sec(now), points: [{ t: sec(now - 24 * H - 200000), total: 300 }] });
+const dayAxis = { axisStart: now - 24 * H, t1: now, scale: 'linear' };
+const edge = C.seriesSpan(early.points[0], early, dayAxis);
+assert.strictEqual(edge.left, 0);
+assert.ok(Math.abs(edge.right - C.positionOf(now - 24 * H + 100000, dayAxis)) < 1e-9,
+  `the 100s of the bucket inside the axis remain: ${edge.right}`);
+
+// A 7-day window's hour-wide buckets do not coarsen the rows: their
+// activity rides on the ledger's five-minute grid (`points_bucket_s`), so one
+// request is one five-minute column and the rest of the hour stays idle
+// (claunch-9n7g1). A payload without the field keeps the series' width.
+const wk = C.buildSeriesModel({ window: '7d', bucket_s: 3600, points_bucket_s: 300,
+  start: sec(now - 2 * H), until: sec(now), points: [{ t: sec(now - 2 * H), total: 0 }],
+  by_session: { a: { total: 9, requests: 1, points: [[sec(now - H), 9, 1]] } } });
+assert.strictEqual(wk.widthMs, 3600000);
+assert.strictEqual(wk.activityMs, 300000);
+assert.strictEqual(am.activityMs, am.widthMs, 'no field: the series grid');
+act = C.activityStats(liveSpan, wk.bySession.get('a'), wk, now);
+assert.strictEqual(act.covered, 24, 'two hours counted in five-minute buckets');
+assert.strictEqual(act.busy, 1);
+assert.strictEqual(act.last, now - H + M5);
+assert.strictEqual(C.bucketAt(wk.bySession.get('a'), wk, now - H + 6 * 60000).total, 0,
+  'six minutes past the request is idle, not the same hour');
+const col = C.seriesSpan(wk.bySession.get('a').points[0], wk, lin, wk.activityMs);
+assert.ok(Math.abs((col.right - col.left) - (300 / (2 * 3600)) * 100) < 1e-9);
+tr = tipRows(C.rowTip(Object.assign({}, tipRow, { tokens: wk.bySession.get('a') }),
+  tipModel, wk, null));
+assert.ok(tr['활동 구간'].includes('5분 단위'), tr['활동 구간']);
 
 console.log('ok');

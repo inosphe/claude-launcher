@@ -224,9 +224,9 @@ globalThis.ChartPage = (() => {
       parts.requests = Number(value.requests) || 0;
       parts.total = Number(value.total) || (parts.input + parts.cache_read +
         parts.cache_write + parts.output);
-      // The buckets the session spent anything in, on the same grid as the
-      // fleet's points ([t seconds, total, requests]); what is not listed is
-      // a bucket it was measured in and sat idle (claunch-58pvy).
+      // The buckets the session spent anything in ([t seconds, total,
+      // requests]) on the `points_bucket_s` grid; what is not listed is a
+      // bucket it was measured in and sat idle (claunch-58pvy).
       parts.points = (Array.isArray(value.points) ? value.points : [])
         .filter((p) => Array.isArray(p) && Number.isFinite(Number(p[0])))
         .map((p) => ({ t: toMs(p[0]), total: Number(p[1]) || 0,
@@ -240,6 +240,11 @@ globalThis.ChartPage = (() => {
       // `widthMs` is the same span in the axis's own unit, which the times
       // beside it are in.
       points, width, widthMs: width * 1000, peak,
+      // The rows' activity grid: the ledger's five-minute bin whatever the
+      // window's bucket (claunch-9n7g1); an older daemon sent the rows on
+      // the series' own grid and no field for it.
+      activityWidth: Number(payload.points_bucket_s) || width,
+      activityMs: (Number(payload.points_bucket_s) || width) * 1000,
       start: toMs(payload.start) || points[0].t,
       until: toMs(payload.until) ||
         points[points.length - 1].t + width * 1000,
@@ -263,24 +268,27 @@ globalThis.ChartPage = (() => {
      end, each placed by the same positionOf the session bars use, so the
      token chart and the rows under it name the same instants. The last
      bucket runs to `until` rather than a whole width past the last zero
-     bucket (the payload pads the window's tail). */
-  function seriesSpan(point, smodel, model) {
-    const left = positionOf(point.t, model);
-    const end = Math.min(point.t + smodel.widthMs, model.t1);
+     bucket (the payload pads the window's tail). The first bucket starts on
+     the series' grid, up to one width before the axis does; its left edge is
+     held at 0 and the part before the axis is dropped from its width. */
+  function seriesSpan(point, smodel, model, widthMs = smodel.widthMs) {
+    const left = Math.max(0, positionOf(point.t, model));
+    const end = Math.min(point.t + widthMs, model.t1);
     const right = Math.max(left, positionOf(Math.max(end, point.t + 1000), model));
     return { left, right };
   }
 
-  /* How much of a session's life on the series' grid had a request in it
-     (claunch-58pvy). ``covered`` counts the buckets its span touches inside
+  /* How much of a session's life on its activity grid (`activityMs`, the
+     ledger's five-minute bin) had a request in it (claunch-58pvy,
+     claunch-9n7g1). ``covered`` counts the buckets its span touches inside
      the series window, ``busy`` those it spent anything in, ``last`` the end
      of its last busy bucket (ms) and ``idleFor`` how long a live session has
      gone since then (null when it never spent anything in the window).
      null when the row has no figures to say it with: no series read yet, or
      a session the ledger never saw -- unmeasured is not idle. */
   function activityStats(span, tokens, smodel, now) {
-    if (!span || !tokens || !smodel || !(smodel.widthMs > 0)) return null;
-    const w = smodel.widthMs;
+    if (!span || !tokens || !smodel || !(smodel.activityMs > 0)) return null;
+    const w = smodel.activityMs;
     const from = Math.max(span.start, smodel.start);
     const to = Math.min(span.end, smodel.until);
     const points = tokens.points || [];
@@ -308,7 +316,7 @@ globalThis.ChartPage = (() => {
   function bucketAt(tokens, smodel, t) {
     if (!tokens || !smodel || t === null || t === undefined) return null;
     if (t < smodel.start || t >= smodel.until) return null;
-    const w = smodel.widthMs;
+    const w = smodel.activityMs;
     const start = smodel.start + Math.floor((t - smodel.start) / w) * w;
     const hit = (tokens.points || []).find((p) => p.t === start);
     return { t: start, end: Math.min(start + w, smodel.until),
@@ -340,14 +348,17 @@ globalThis.ChartPage = (() => {
     } else if (r.tokens) {
       rows.push(["토큰(창)", `${formatTokens(r.tokens.total)} · 요청 ` +
         `${(Number(r.tokens.requests) || 0).toLocaleString()}`]);
+      const parts = SERIES_PARTS.filter(([key]) => r.tokens[key])
+        .map(([key, label]) => `${label} ${formatTokens(r.tokens[key])}`);
+      if (parts.length) rows.push(["구성", parts.join(" · ")]);
       const act = activityStats(r.span, r.tokens, smodel, model.now);
       if (act && act.covered) {
         rows.push(["활동 구간", `${act.busy}/${act.covered} 버킷 ` +
-          `(${formatPct(act.ratio)}, ${formatBucketWidth(smodel.width)} 단위)`]);
+          `(${formatPct(act.ratio)}, ${formatBucketWidth(smodel.activityWidth)} 단위)`]);
       }
       if (act && act.last !== null) {
         rows.push(["마지막 요청", formatTime(act.last) +
-          (act.idleFor !== null && act.idleFor >= smodel.widthMs
+          (act.idleFor !== null && act.idleFor >= smodel.activityMs
             ? ` · ${formatDuration(act.idleFor)}째 유휴` : "")]);
       } else if (act) {
         rows.push(["마지막 요청", "이 창에서 요청 없음"]);
@@ -365,6 +376,9 @@ globalThis.ChartPage = (() => {
       rows.push(["cflow", `${r.cflow.version} ${r.cflow.label}` +
         (age.elapsed !== null ? ` · ${formatDuration(age.elapsed)} 전` : "") +
         (age.stalled ? " ⚠" : "")]);
+      if (age.stalled) {
+        rows.push(["정지 의심", `${formatDuration(STALL_MS)} 이상 무변화`]);
+      }
     }
     if (s.profile) rows.push(["profile", s.profile]);
     return { title: r.name, role: r.role || "", brief: briefOf(s), rows };
@@ -1190,19 +1204,20 @@ globalThis.ChartPage = (() => {
     bar.style.left = `${geo.left}%`;
     bar.style.width = `${geo.width}%`;
     track.appendChild(bar);
-    /* The buckets the session spent in, drawn over its bar on the series'
-       grid (claunch-58pvy): a column per busy bucket, as tall as its tokens
-       against the row's own busiest bucket. The bar is dimmed under them, so
-       the stretches of a live bar with no column are the idle ones. */
+    /* The buckets the session spent in, drawn over its bar on the ledger's
+       five-minute grid (claunch-58pvy, claunch-9n7g1): a column per busy
+       bucket in the bar's own status colour, as tall as its tokens against
+       the row's own busiest bucket. The bar is dimmed under them, so the
+       stretches of a live bar with no column are the idle ones. */
     if (busy && busy.length) {
       const strip = node("span", "chart-activity");
       const peak = Math.max(1, ...busy.map((p) => p.total));
       for (const p of busy) {
-        const span = seriesSpan(p, smodel, model);
-        const mark = node("span", "chart-activity-mark");
+        const span = seriesSpan(p, smodel, model, smodel.activityMs);
+        const mark = node("span", `chart-activity-mark cat-${r.category}`);
         mark.style.left = `${span.left}%`;
         mark.style.width = `${Math.max(span.right - span.left, 0.15)}%`;
-        mark.style.height = `${Math.round(30 + 70 * Math.sqrt(p.total / peak))}%`;
+        mark.style.height = `${Math.round(40 + 60 * Math.sqrt(p.total / peak))}%`;
         strip.appendChild(mark);
       }
       track.appendChild(strip);
@@ -1396,7 +1411,7 @@ globalThis.ChartPage = (() => {
     const act = activityStats(r.span, tokens, currentSeries(), model.now);
     if (act && act.covered) {
       item("활동 구간", `${act.busy}/${act.covered} 버킷 (${formatPct(act.ratio)})` +
-        (act.idleFor !== null && act.idleFor >= currentSeries().widthMs
+        (act.idleFor !== null && act.idleFor >= currentSeries().activityMs
           ? ` · ${formatDuration(act.idleFor)}째 유휴` : ""));
     }
     item("briefing", briefOf(s));

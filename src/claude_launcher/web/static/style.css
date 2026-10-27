@@ -8340,17 +8340,19 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-bar { position: absolute; top: 2px; height: 10px; border-radius: 3px; background: #6e7681; }
 .chart-bar.clipped { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .chart-bar.alive { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.cat-running.chart-bar, .cat-running.chart-dot { background: #3fb950; }
-.cat-hold.chart-bar, .cat-hold.chart-dot { background: #79c0ff; }
-.cat-paused.chart-bar, .cat-paused.chart-dot { background: #d29922; }
-.cat-killed.chart-bar, .cat-killed.chart-dot { background: #f85149; }
-.cat-archived.chart-bar, .cat-archived.chart-dot { background: #6e7681; }
+.cat-running.chart-bar, .cat-running.chart-dot, .cat-running.chart-activity-mark { background: #3fb950; }
+.cat-hold.chart-bar, .cat-hold.chart-dot, .cat-hold.chart-activity-mark { background: #79c0ff; }
+.cat-paused.chart-bar, .cat-paused.chart-dot, .cat-paused.chart-activity-mark { background: #d29922; }
+.cat-killed.chart-bar, .cat-killed.chart-dot, .cat-killed.chart-activity-mark { background: #f85149; }
+.cat-archived.chart-bar, .cat-archived.chart-dot, .cat-archived.chart-activity-mark { background: #6e7681; }
 /* A measured session's bar is dimmed so the buckets it spent in, drawn over
-   it, stand out; a stretch of bar with no column over it was idle
-   (claunch-58pvy). */
-.chart-bar.metered { opacity: 0.38; }
-.chart-activity { position: absolute; inset: 0; pointer-events: none; }
-.chart-activity-mark { position: absolute; bottom: 1px; min-width: 1px; background: #e6edf3; border-radius: 1px 1px 0 0; opacity: 0.9; }
+   it in the same status colour at full strength, stand out; a stretch of
+   bar with no column over it was idle (claunch-58pvy). The columns sit in
+   the bar's own 10px band, bottom-aligned, so the bar's colour reads the
+   same busy or idle (claunch-9n7g1). */
+.chart-bar.metered { opacity: 0.3; }
+.chart-activity { position: absolute; left: 0; right: 0; top: 2px; height: 10px; pointer-events: none; }
+.chart-activity-mark { position: absolute; bottom: 0; min-width: 1px; border-radius: 1px 1px 0 0; }
 /* The row's hover card (chart-page.js showTip). */
 .chart-tip { position: fixed; z-index: 1000; display: none; max-width: 380px; padding: 8px 10px; background: #1c2128; color: #c9d1d9; border: 1px solid #444c56; border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); font-size: 12px; pointer-events: none; }
 .chart-tip.shown { display: block; }
