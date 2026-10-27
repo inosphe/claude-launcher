@@ -36,10 +36,29 @@ function sliceConst(name) {
   const end = src.indexOf("\n", start);
   return src.slice(start, end).replace(/;$/, "") + ";";
 }
+/* The same, for a declaration that runs over several lines — an array or an
+   object reads better one entry per line, and the harness still copies the
+   shipped value instead of a copy of it. */
+function sliceConstMulti(name) {
+  const start = src.indexOf(`const ${name} =`);
+  if (start < 0) throw new Error(`cannot locate const ${name} in app.js`);
+  let depth = 0;
+  for (let j = src.indexOf("=", start); j < src.length; j++) {
+    if (src[j] === "[" || src[j] === "{") depth++;
+    else if (src[j] === "]" || src[j] === "}") {
+      depth--;
+      if (!depth) return src.slice(start, src.indexOf(";", j) + 1);
+    }
+  }
+  throw new Error(`unbalanced const ${name}`);
+}
 
 const CONSTS = ["CF2G_NODE_W", "CF2G_NODE_H", "CF2G_GAP", "CF2G_LANE", "CF2G_PAD",
                 "CF2G_HEAD", "CF2G_CHIP", "CF2G_RAIL", "CF2G_EDGE", "CF2G_MARGIN",
-                "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes"];
+                "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes",
+                "CF2G_HANDLE", "CF2G_PRESET_DEPTH", "cf2GraphPresets", "cf2GraphFolds"];
+/* the presets are written one per line, so the harness copies them whole */
+const BLOCK_CONSTS = ["CF2G_PRESETS"];
 
 /* ---- stub DOM, just enough for the mode tabs -------------------------- */
 function stubNode(tag) {
@@ -62,13 +81,21 @@ globalThis.localStorage = {
 
 const fns = new Function(
   CONSTS.map(sliceConst).join("\n") + "\n" +
+  BLOCK_CONSTS.map(sliceConstMulti).join("\n") + "\n" +
   [slice("cflow2GraphClip"), slice("cflow2GraphLoopText"), slice("cflow2GraphChip"),
    slice("cflow2GraphSig"), slice("cflow2GraphSite"), slice("cflow2GraphProcs"), slice("cflow2GraphOpen"),
-   slice("cflow2GraphLayout"), slice("cflow2GraphSvg"), slice("cflow2NodeBits"),
-   slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs")].join("\n") +
+   slice("cflow2GraphLayout"), slice("cflow2GraphSvg"), slice("cflow2GraphInto"),
+   slice("cflow2GraphHidden"),
+   slice("cflow2NodeBits"),
+   slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs"),
+   slice("cflow2GraphPreset"), slice("cflow2GraphPresetSet"),
+   slice("cflow2GraphPresetPick"), slice("cflow2GraphPresetTabs")].join("\n") +
   "\nreturn { cflow2GraphLayout, cflow2GraphProcs, cflow2GraphOpen, cflow2GraphSvg," +
   " cflow2GraphSig, cflow2GraphSite, cflow2NodeBits, cflow2ChartMode, cflow2ChartModeTabs," +
-  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD };"
+  " cflow2GraphInto, cflow2GraphPreset, cflow2GraphPresetSet, cflow2GraphPresetPick," +
+  " cflow2GraphPresetTabs," +
+  " cflow2GraphHidden," +
+  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD, CF2G_PRESETS, cf2GraphPresets, cf2GraphFolds };"
 )();
 
 let failures = 0;
@@ -302,6 +329,266 @@ const inside = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y &&
   ok("a person's toggle folds one back", !folded.has("pa"));
 }
 
+/* ---- the presets: how much of the definition is unfolded --------------
+   (claunch-g6uma.2) A level counts from the block's root, so the same button
+   gives the same picture whatever the run is doing; the Simplified preset is
+   the run's position, which is the state the panel opens in. */
+function deep() {
+  return {
+    root: "d0",
+    nodes: {
+      d0: { id: "d0", type: "seq", children: ["a", "d1"], roles: ["", ""] },
+      a: { id: "a", type: "task", label: "a", children: [], roles: [] },
+      d1: { id: "d1", type: "loop", mode: "while", guard: "more", children: ["d2"],
+            roles: ["do"] },
+      d2: { id: "d2", type: "seq", children: ["b", "d3"], roles: ["", ""] },
+      b: { id: "b", type: "task", label: "b", children: [], roles: [] },
+      d3: { id: "d3", type: "par", settle: "all", children: ["c1", "c2"], roles: ["", ""] },
+      c1: { id: "c1", type: "task", label: "c1", children: [], roles: [] },
+      c2: { id: "c2", type: "task", label: "c2", children: [], roles: [] },
+    },
+  };
+}
+{
+  const chart = deep();
+  const opened = (preset) => [...fns.cflow2GraphOpen(chart, {}, null, null, preset)].sort();
+  check("the ladder has the presets the page offers", fns.CF2G_PRESETS.length, 5);
+  check("simplified shows the root's steps and follows the run", opened("simple"), ["d0"]);
+  check("one level is the root alone", opened("lv1"), ["d0"]);
+  check("two levels open one block below it", opened("lv2"), ["d0", "d1"]);
+  check("three levels open two blocks below it", opened("lv3"), ["d0", "d1", "d2"]);
+  check("all opens the deepest block too", opened("all"), ["d0", "d1", "d2", "d3"]);
+  check("a preset the page does not offer reads as simplified", opened("lv9"), ["d0"]);
+
+  /* the levels are a ladder among themselves. `simple` is deliberately not on
+     it: it answers where the run is, not how deep the picture goes, and the
+     two are not comparable (s2273-rev2, claunch-g6uma.2). */
+  const levels = ["lv1", "lv2", "lv3", "all"];
+  const gaps = [];
+  for (let i = 1; i < levels.length; i++) {
+    const now = new Set(opened(levels[i]));
+    for (const id of opened(levels[i - 1])) if (!now.has(id)) gaps.push([levels[i], id]);
+  }
+  check("each level opens at least the level below it", gaps, []);
+
+  check("a fold laid on a level closes that block again",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: false }, "all")].sort(),
+        ["d0", "d2", "d3"]);
+  check("an open laid on simplified opens that block",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: true }, "simple")].sort(),
+        ["d0", "d1"]);
+}
+
+/* ---- a run that sits deep, and the level that folds it away ------------
+   (s2273-rev2, claunch-g6uma.2) A level counts depth; Simplified follows the
+   run. With the run three blocks deep those are different pictures, and the
+   level hides it — so the panel has to say what it hid. */
+{
+  const chart = deep();
+  const detail = { instances: [{ instance: "i1", node: "c1", await: "task" }] };
+  const openOf = (preset) => fns.cflow2GraphOpen(chart, detail, null, null, preset);
+  const layoutOf = (preset) => fns.cflow2GraphLayout(chart, detail, { open: openOf(preset) });
+
+  check("simplified opens the whole path down to where the run waits",
+        [...openOf("simple")].sort(), ["d0", "d1", "d2", "d3"]);
+  const sim = layoutOf("simple");
+  ok("…and draws the step that is waiting",
+     !!nodeOf(sim, "c1") && nodeOf(sim, "c1").awaiting === "task");
+  check("no level follows the run",
+        ["lv1", "lv2", "lv3"].map((p) => !!nodeOf(layoutOf(p), "c1")), [false, false, false]);
+  check("the deepest level shown is the deepest block opened",
+        [...openOf("lv3")].sort(), ["d0", "d1", "d2"]);
+
+  const lv2 = layoutOf("lv2");
+  check("a level names the steps it left out", fns.cflow2GraphHidden(lv2, detail), ["c1"]);
+  check("simplified leaves nothing out", fns.cflow2GraphHidden(sim, detail), []);
+  check("so does `all`", fns.cflow2GraphHidden(layoutOf("all"), detail), []);
+  check("a chart with nothing running hides nothing",
+        fns.cflow2GraphHidden(fns.cflow2GraphLayout(chart, {}, { open: new Set(["d0"]) }), {}), []);
+  /* a plain run has no box of its own: its children are placed in its place.
+     Counting boxes would call every `seq` on the run's path hidden. */
+  const nested = fns.cflow2GraphLayout(deep(), detail, { open: new Set(["d0", "d1"]) });
+  check("the state is what the walk reached, not what has a box",
+        fns.cflow2GraphHidden(nested, detail), ["c1"]);
+  ok("the note under the drawing says it, and the way back is one press",
+     src.includes("cflow2GraphHidden(box._cf2GraphLayout, data)") &&
+     src.includes("1 step of the run is not in this view") &&
+     src.includes('"Show the run"') && css.includes(".cf2g-hidden"));
+}
+
+/* ---- what unfolding could ever show is the chart's answer --------------
+   (s2273-rev2, claunch-g6uma.2) `everything` exists so a step that no fold
+   could reveal is not reported as hidden. Settling ownership against the
+   picture on screen breaks that: when the site that owns a shared body is
+   itself inside a folded block, no open set reaches the body, and the note
+   falls silent exactly at the levels that hid the run — speaking only at the
+   level deep enough to draw the owner. It is settled against everyOpen in
+   its own map now, so it is a function of the chart alone. */
+{
+  const chart = {
+    root: "r",
+    nodes: {
+      r: { id: "r", type: "seq", children: ["c1"], roles: [""] },
+      c1: { id: "c1", type: "seq", children: ["s1"], roles: [""] },
+      s1: { id: "s1", type: "scope", proc: "p", children: ["q1"], roles: [""] },
+      q1: { id: "q1", type: "scope", proc: "q", children: ["w1"], roles: [""] },
+      w1: { id: "w1", type: "task", label: "w1", children: [], roles: [] },
+    },
+  };
+  const detail = { instances: [{ instance: "i1", node: "w1", await: "task" }] };
+  const layoutOf = (preset) => fns.cflow2GraphLayout(chart, detail, {
+    open: fns.cflow2GraphOpen(chart, detail, null, null, preset) });
+
+  check("the chart's own reach is every step, folds or no folds",
+        [...layoutOf("lv1").everything].sort(), ["c1", "q1", "r", "s1", "w1"]);
+  const ever = ["simple", "lv1", "lv2", "lv3", "all"]
+    .map((p) => [...layoutOf(p).everything].sort().join(","));
+  check("and it does not move with the preset", ever.filter((v) => v !== ever[0]), []);
+  check("every level that folded the run away says so",
+        ["lv1", "lv2", "lv3"].map((p) => fns.cflow2GraphHidden(layoutOf(p), detail)),
+        [["w1"], ["w1"], ["w1"]]);
+  check("simplified has nothing to report", fns.cflow2GraphHidden(layoutOf("simple"), detail), []);
+  check("so does all", fns.cflow2GraphHidden(layoutOf("all"), detail), []);
+
+  /* the other half of the rule: a step under a site that is not its body's
+     owner is never drawn by any open set, so it must stay silent rather than
+     be counted as folded away. */
+  const sharedChart = fixture();
+  const sDetail = { instances: [{ instance: "i1", node: "bb", await: "task" }] };
+  const sLayout = (preset) => fns.cflow2GraphLayout(sharedChart, sDetail, {
+    open: fns.cflow2GraphOpen(sharedChart, sDetail, null, null, preset) });
+  ok("the non-owning site really owns nothing",
+     !nodeOf(sLayout("all"), "bb") && !!nodeOf(sLayout("all"), "ba"));
+  check("a step under the non-owning site is not reported at any preset",
+        ["simple", "lv1", "lv2", "lv3", "all"]
+          .map((p) => fns.cflow2GraphHidden(sLayout(p), sDetail)),
+        [[], [], [], [], []]);
+}
+
+/* ---- a group's caption shares its row with the fold control -----------
+   (s2273-rev2) A one-branch group is exactly one box wide and the longest
+   captions — `try`, `timeout` — are wider than that, so the caption used to
+   run under the control. */
+{
+  const layoutFor = (node) => fns.cflow2GraphLayout({
+    root: "r",
+    nodes: {
+      r: { id: "r", type: "seq", children: ["g"], roles: [""] },
+      g: node,
+      t: { id: "t", type: "task", label: "t", children: [], roles: [] },
+      u: { id: "u", type: "task", label: "u", children: [], roles: [] },
+    },
+  }, {}, { open: new Set(["r", "g"]) });
+  /* 10.5px monospace is about 6.3px a character: the caption ends left of the
+     control, which starts 20px short of the frame's right edge */
+  const clears = (layout) => {
+    const chip = layout.chips[0], fold = layout.folds.find((f) => f.id === "g");
+    return chip.x + 2 + chip.text.length * 6.3 <= fold.x;
+  };
+  const narrow = [
+    ["timeout", { id: "g", type: "timeout", seconds: 30, children: ["t"], roles: ["body"] }],
+    ["try", { id: "g", type: "try", children: ["t"], roles: ["body"] }],
+    ["group", { id: "g", type: "group", name: "rounds", settle: "all", children: ["t"], roles: ["b"] }],
+  ];
+  check("every one-branch caption stays left of the fold control",
+        narrow.filter(([, node]) => !clears(layoutFor(node))).map(([k]) => k), []);
+  ok("a cut caption says so", layoutFor(narrow[1][1]).chips[0].text.endsWith("…"));
+  check("a wide group keeps its caption whole",
+        layoutFor({ id: "g", type: "par", settle: "all", children: ["t", "u"], roles: ["", ""] })
+          .chips[0].text, "∥ par · settle all");
+}
+
+
+{
+  const chart = fixture();
+  const svg = {};
+  const dangling = [];
+  for (const preset of ["simple", "lv1", "lv2", "lv3", "all"]) {
+    const g = fns.cflow2GraphLayout(chart, {},
+      { open: fns.cflow2GraphOpen(chart, {}, null, null, preset) });
+    svg[preset] = fns.cflow2GraphSvg(g);
+    const onScreen = new Set(g.nodes.concat(g.boxes).map((b) => b.id));
+    for (const n of g.nodes) if (n.ref && !onScreen.has(n.ref)) dangling.push([preset, n.id]);
+  }
+  check("no preset leaves a call pointing at a body that is not drawn", dangling, []);
+  ok("a preset that draws more says so in the markup",
+     svg.simple.length < svg.lv2.length, `${svg.simple.length} vs ${svg.lv2.length}`);
+
+  const lv1 = fns.cflow2GraphLayout(chart, {},
+    { open: fns.cflow2GraphOpen(chart, {}, null, null, "lv1") });
+  const lv2 = fns.cflow2GraphLayout(chart, {},
+    { open: fns.cflow2GraphOpen(chart, {}, null, null, "lv2") });
+  check("one level draws the root's blocks as boxes",
+        [!!boxOf(lv1, "lp"), nodeOf(lv1, "lp").toggle, !!boxOf(lv1, "pa")],
+        [false, true, false]);
+  check("two levels draws them as frames around their bodies",
+        [boxOf(lv2, "lp").kind, boxOf(lv2, "pa").kind, !!nodeOf(lv2, "lb"),
+         !!nodeOf(lv2, "a1")], ["loop", "group", true, true]);
+}
+
+/* ---- a block folds and opens again on the block itself ---------------- */
+{
+  const chart = deep();
+  const all = fns.cflow2GraphOpen(chart, {}, null, null, "all");
+  const wide = fns.cflow2GraphLayout(chart, {}, { open: all });
+  check("every open block carries a fold control",
+        wide.folds.map((f) => f.id).sort(), ["d0", "d1", "d2", "d3"]);
+  const wideSvg = fns.cflow2GraphSvg(wide);
+  ok("the loop's control is drawn on the loop",
+     wideSvg.includes('data-node="d1" data-collapse="1"'));
+  ok("a plain run has one too, in its own band",
+     wideSvg.includes('data-node="d0" data-collapse="1"'));
+
+  const folded = fns.cflow2GraphOpen(chart, {}, null, { d1: false }, "all");
+  const g = fns.cflow2GraphLayout(chart, {}, { open: folded });
+  check("folding a block leaves no frame", !!boxOf(g, "d1"), false);
+  check("…one box in its place that says what it hides",
+        nodeOf(g, "d1").sub, "while ≤ ? · more · +1 collapsed");
+  ok("…and that box offers to open it", nodeOf(g, "d1").toggle === true);
+  check("nothing inside a folded block is drawn", nodeOf(g, "d2"), undefined);
+  check("the folded block has no fold control left",
+        g.folds.map((f) => f.id), ["d0"]);
+  ok("the box that opens it is the pressable one",
+     fns.cflow2GraphSvg(g).includes('data-node="d1" data-toggle="1"'));
+  check("opening it again comes back to the same picture",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: true }, "all")].sort(),
+        [...all].sort());
+
+  /* a shared body has one owner: the other sites are calls that point at it,
+     so none of them is a block a reader can fold */
+  const sharedChart = fixture();
+  const sharedG = fns.cflow2GraphLayout(sharedChart, {}, { open: ALL() });
+  check("only the site that drew a shared body has a fold control",
+        sharedG.folds.filter((f) => f.kind === "call").map((f) => f.id), ["ca"]);
+}
+
+/* ---- a press on the drawing goes where it was aimed ------------------ */
+{
+  const chart = fixture();
+  const calls = [];
+  const host = stubNode("div");
+  const into = fns.cflow2GraphInto(host, chart, { instances: [] }, {
+    preset: "lv2", open: {},
+    onSelect: (id, collapsed) => calls.push(["select", id, collapsed]),
+    onToggle: (id, open) => calls.push(["toggle", id, open]),
+  });
+  ok("the drawing is put in the host", host.children[0] === into.wrap);
+  ok("the fold control is in the markup it drew",
+     into.wrap.innerHTML.includes('data-node="lp" data-collapse="1"'));
+  const press = (ds) =>
+    into.wrap.listeners.click[0]({ target: { closest: () => ({ dataset: ds }) } });
+  press({ node: "lp", collapse: "1" });
+  press({ node: "lp", toggle: "1" });
+  press({ node: "t1" });
+  check("a fold control folds its block and selects nothing",
+        calls[0], ["toggle", "lp", false]);
+  check("a folded block's box asks to open it", calls[1], ["select", "lp", true]);
+  check("any other box is a selection", calls[2], ["select", "t1", false]);
+  const quiet = fns.cflow2GraphInto(stubNode("div"), chart, {}, { preset: "lv2" });
+  quiet.wrap.listeners.click[0]({ target: { closest: () => ({ dataset: { node: "lp", collapse: "1" } }) } });
+  ok("a press with nobody listening is harmless", true);
+}
+
 /* ---- the markup carries the whole picture ---------------------------- */
 {
   const chart = fixture();
@@ -401,6 +688,64 @@ const inside = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y &&
      src.includes("sec.appendChild(cflow2ChartModeTabs(host, chartMode, redraw));"));
   ok("the graph and the callstack are the branches the mode picks between",
      src.includes('chartMode === "graph"'));
+}
+
+/* ---- the presets are a sub radio group, and the choice is remembered -- */
+{
+  check("a host nobody has switched starts on the simplified view",
+        fns.cflow2GraphPreset("fresh"), "simple");
+  store["claunch.cflow2.graphpreset.odd"] = "lv9";
+  check("a stored value that is no preset falls back to the simplified view",
+        fns.cflow2GraphPreset("odd"), "simple");
+
+  let draws = 0;
+  const group = fns.cflow2GraphPresetTabs("host-g", "lv2", () => { draws++; });
+  check("it is one sub radio group of the presets",
+        [group.attrs.role, group.attrs["aria-label"], group.className],
+        ["radiogroup", "Graph detail", "cf2-modes sub"]);
+  check("one button per preset", group.children.length, fns.CF2G_PRESETS.length);
+  ok("each button is a radio", group.children.every((b) => b.attrs.role === "radio"));
+  check("the preset in hand is the checked one",
+        group.children.map((b) => [b.textContent, b.attrs["aria-checked"]]),
+        [["Simplified", "false"], ["1 level", "false"], ["2 levels", "true"],
+         ["3 levels", "false"], ["All", "false"]]);
+
+  group.children[3].click();
+  check("pressing a preset switches to it", fns.cflow2GraphPreset("host-g"), "lv3");
+  check("…remembered for this viewer", store["claunch.cflow2.graphpreset.host-g"], "lv3");
+  check("…and asks for one redraw", draws, 1);
+
+  /* a preset starts the chart over from itself: the folds a person laid on
+     the last one are not carried onto this one (s2273-rev2) */
+  fns.cf2GraphFolds["host-g"] = { d1: false, d3: true };
+  group.children[0].click();
+  check("picking a preset drops the person's own folds",
+        [fns.cflow2GraphPreset("host-g"), fns.cf2GraphFolds["host-g"]], ["simple", {}]);
+  check("…and asks for the redraw that shows it", draws, 2);
+
+  fns.cflow2GraphPresetSet("host-g", "all");
+  check("the current-state button can set it without a press",
+        [fns.cflow2GraphPreset("host-g"), store["claunch.cflow2.graphpreset.host-g"]],
+        ["all", "all"]);
+  fns.cf2GraphFolds["host-g"] = { d2: false };
+  fns.cflow2GraphPresetPick("host-g", "simple");
+  check("the way back to the run clears them the same way",
+        [fns.cflow2GraphPreset("host-g"), fns.cf2GraphFolds["host-g"]], ["simple", {}]);
+
+  ok("the chart section draws the sub group from the stored preset, in graph mode only",
+     src.includes("if (chartMode === \"graph\") {") &&
+     src.includes("sec.appendChild(cflow2GraphPresetTabs(host, cflow2GraphPreset(host), redraw));"));
+  ok("the graph keeps its own folds, apart from the callstack's",
+     src.includes("cf2GraphFolds[host], preset)") &&
+     src.includes("cf2GraphFolds[host] || {}"));
+  ok("a redraw is skipped unless the preset or the folds changed",
+     src.includes("sel, preset, [...opened].sort()"));
+  ok("Expand all and Collapse stay with the callstack, which has no presets",
+     src.includes('if (chartMode !== "graph") tools.append(expand, fold);'));
+  ok("the current-state button reaches the run's position by picking Simplified",
+     src.includes('cflow2GraphPresetPick(host, "simple")'));
+  ok("the CSS sets the sub group apart from the view tabs", css.includes(".cf2-modes.sub"));
+  ok("the CSS gives the fold control a pressable look", css.includes(".cf2g-fold:hover"));
 }
 
 /* ---- nothing to draw ------------------------------------------------- */
