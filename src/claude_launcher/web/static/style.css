@@ -805,8 +805,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 }
 /* The chips keep the label shape of the base rule (border, tint) on a card:
    bare coloured text read as part of the briefing line above it
-   (claunch-9txuo). Only the box is tightened to the card's density. */
-#session-list li.sess-card .rail-status-checks { gap: 2px 4px; padding-top: 1px; }
+   (claunch-9txuo). Only the box is tightened to the card's density; the
+   chips stay joined as one group (claunch-yhk8r). */
+#session-list li.sess-card .rail-status-checks { gap: 2px 0; padding-top: 1px; }
 #session-list li.sess-card .rail-status-check {
   padding: 0 5px; font-size: 10px; line-height: 15px; font-variant-numeric: tabular-nums;
 }
@@ -1541,7 +1542,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 }
 #session-list .rail-note-status.warn { color: #ff7b72; }
 #session-list .rail-status-checks {
-  flex-basis: 100%; order: 2; display: flex; flex-wrap: wrap; gap: 3px 5px;
+  flex-basis: 100%; order: 2; display: flex; flex-wrap: wrap; gap: 3px 0;
   padding: 2px 0 0 16px;
 }
 /* What waits on the reader in the talk panes (claunch-wp90t): one pill per
@@ -1572,6 +1573,15 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 .rail-status-check.check-yes { color: #3fb950; border-color: #1f6f3f; background: #10251a; }
 .rail-status-check.check-no { color: #ff7b72; border-color: #8b3030; background: #2d1719; }
 .rail-status-check.check-unknown { color: #d29922; border-color: #6b4f14; background: #2b230f; }
+/* One row's chips read as one grouped label (claunch-yhk8r): no gap, the
+   neighbours share a border (each chip's left edge is the divider, in its
+   own tint), and only the group's two ends are rounded. The same on a
+   local row and on a remote card (.shadow-checks). */
+:is(.rail-status-checks, .shadow-checks) > .rail-status-check { border-radius: 0; }
+:is(.rail-status-checks, .shadow-checks) > .rail-status-check + .rail-status-check { margin-left: -1px; }
+:is(.rail-status-checks, .shadow-checks) > .rail-status-check:first-child { border-radius: 8px 0 0 8px; }
+:is(.rail-status-checks, .shadow-checks) > .rail-status-check:last-child { border-radius: 0 8px 8px 0; }
+:is(.rail-status-checks, .shadow-checks) > .rail-status-check:only-child { border-radius: 8px; }
 .sess-status-check-rowref {
   flex: none; order: 0; background: none; border: none; color: #8b949e;
   font-size: 10px; line-height: 1; padding: 2px 4px; cursor: pointer;
@@ -1866,16 +1876,21 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 /* the work count at the head of the line (claunch-9f8ag): what is left,
    split by status in the pills' own tints, then what is done. Each count is
    a label (border and tint, claunch-9txuo) so it reads apart from the issue
-   pills beside it and from the rail's plain text. */
+   pills beside it and from the rail's plain text, and the counts are joined
+   into one grouped label (claunch-yhk8r): shared borders, rounded ends. */
 #session-list .rail-beads-count {
-  display: inline-flex; gap: 4px; align-items: center; font-size: 10px;
-  color: #8b949e; white-space: nowrap; margin-right: 2px; cursor: default;
+  display: inline-flex; gap: 0; align-items: center; font-size: 10px;
+  color: #8b949e; white-space: nowrap; margin-right: 4px; cursor: default;
 }
 #session-list :is(.rail-beads-left, .rail-beads-n) {
-  padding: 0 5px; border-radius: 8px; line-height: 15px;
+  padding: 0 5px; border-radius: 0; line-height: 15px;
   border: 1px solid #30363d; background: #191d24;
   font-variant-numeric: tabular-nums;
 }
+#session-list .rail-beads-count > * + * { margin-left: -1px; }
+#session-list .rail-beads-count > :first-child { border-radius: 8px 0 0 8px; }
+#session-list .rail-beads-count > :last-child { border-radius: 0 8px 8px 0; }
+#session-list .rail-beads-count > :only-child { border-radius: 8px; }
 #session-list .rail-beads-left { color: #e6edf3; font-weight: 600; }
 #session-list .rail-beads-left.none { color: #3fb950; border-color: #1f6f3f; background: #10251a; }
 #session-list .rail-beads-n.waiting { color: #79c0ff; border-color: #1f4a7a; background: #111d2e; }
@@ -8704,7 +8719,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .shadow-note { color: #d8dbe0; }
 /* The status-check chips (.rail-status-check) on a remote card: one wrapping
    line, the way a local row lays them out. */
-.shadow-checks { display: flex; flex-wrap: wrap; gap: 3px 5px; white-space: normal; }
+.shadow-checks { display: flex; flex-wrap: wrap; gap: 3px 0; white-space: normal; }
 .shadow-cflow { color: #8b93a1; }
 .shadow-cflow.gated { color: #d29922; }
 .shadow-error { color: #f85149; }
