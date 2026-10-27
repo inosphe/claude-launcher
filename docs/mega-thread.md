@@ -241,6 +241,9 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 
 페이지가 열려 있는 동안 5초마다 목록·멤버·로그를 다시 읽는다. 라우터가 다른 페이지로 옮길 때
 `MegaThreadPage.stop()`이 폴링을 멈춘다.
+읽은 값이 직전과 같으면 다시 그리지 않는다. 값이 바뀌어 다시 그릴 때는 목록·로그 열의 스크롤 위치를
+유지하고, 열린 생성 패널은 다시 만들지 않는다(claunch-wlk6g.1: 예전에는 매 폴링마다 페이지와 패널을
+새로 만들어 패널 목록의 스크롤이 5초마다 맨 위로 돌아갔다).
 
 ### 생성 패널 (claunch-vz96l)
 
@@ -282,7 +285,8 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 2. **정렬·필터**: 정렬은 활동/생성 × 최신/오래된 네 가지(`SORTS`), `부모-자식 위계` 체크박스는
    `parent`로 트리를 만들고 들여쓴다(부모가 목록에 없으면 루트). 필터는 프로젝트·메시·역할·수명주기
    (`running · hold · paused · killed · delayed · failed · archived`, `session.py::session_category`와 같은
-   규칙)와 부분 일치 검색이다. 역할 필터(claunch-kzudj)는 다중 선택 콤보박스다. 버튼(`역할: 전체` 또는
+   규칙)와 부분 일치 검색이다. 수명주기 필터는 `running`(실행 중)만 고른 상태로 시작하고, `전체`가 모든
+   수명주기다(claunch-wlk6g.1). 역할 필터(claunch-kzudj)는 다중 선택 콤보박스다. 버튼(`역할: 전체` 또는
    고른 역할 이름)을 누르면 역할마다 체크박스와 `역할 없음`, 찾기 입력칸이 열린다. 여러 역할을 고르면 그중
    하나에 해당하는 세션을 남기고, 아무것도 고르지 않으면 모든 역할이다. 값은 행의 meta 줄과 같다
    (`roleOf`: 레코드의 `role`, 없으면 메시 로스터의 role). `역할 없음`은 role이 없는 세션이다. Escape나
@@ -293,6 +297,8 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
    필터가 남긴 세션이 0개면 요청을 보내지 않고 패널에 그 사실을 적는다.
 3. **목록**: 행마다 이름, role(메시 로스터), 메시 이름, cflow2 런(workflow · status · 현재 노드), 프로젝트,
    이슈·브랜치·note, 한 줄 브리핑. 값이 없는 줄은 그리지 않는다.
+   행은 세션 이름으로 유지된다. 그린 값이 같은 행은 노드를 그대로 쓰고, 체크는 그 행의 상자만 바꾸며,
+   바뀐 행만 새로 만든다. 그래서 체크와 패널 밖의 다시 그리기가 목록의 스크롤 위치를 바꾸지 않는다.
 
 세션 목록은 `/api/sessions?view=rail`(레코드) + `/api/mesh?view=rail`(role·메시) + `/api/cflow2/rail`
 (cflow2 런)을 세션 이름으로 조인해 만든다. 레일 자체의 `role`은 살아 있는 행에서 비어 있어
