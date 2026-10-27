@@ -652,7 +652,7 @@ class BorrowRunner:
         await asyncio.to_thread(self._checkout, repo, checkout, made)
         # vet_borrow judged rel_cwd and the path arguments as text; a
         # committed symlink can still lead out, and that shows only on disk.
-        _lent_cwd(checkout, run["info"])
+        await asyncio.to_thread(_lent_cwd, checkout, run["info"])
         self._set(run, status="setup")
         command = self.setup_command(checkout)
         if command is None:
@@ -671,7 +671,7 @@ class BorrowRunner:
         info = run["info"]
         # Again, before the window is asked: setup ran code in the checkout
         # and could have moved a link.
-        cwd = _lent_cwd(checkout, info)
+        cwd = await asyncio.to_thread(_lent_cwd, checkout, info)
 
         self._set(run, status="waiting-window")
         args = [str(a) for a in info.get("pytest_args") or []]
@@ -841,7 +841,8 @@ def _arg_paths(args: list) -> "list[tuple[str, str]]":
 def _lent_cwd(checkout: Path, info: dict) -> Path:
     """The lent ``rel_cwd`` under ``checkout``, refused if it or one of the
     pytest path arguments read from it resolves outside the checkout
-    (through a symlink in the checkout)."""
+    (through a symlink in the checkout), or if any symlink in the checkout
+    leads outside it."""
     top = checkout.resolve()
     cwd = checkout / (info.get("rel_cwd") or "")
     try:
@@ -853,7 +854,33 @@ def _lent_cwd(checkout: Path, info: dict) -> Path:
             (cwd / path).resolve().relative_to(top)
         except ValueError:
             raise RuntimeError(f"pytest argument {raw!r} resolves outside the checkout")
+    # A directory argument, or none, is walked by pytest, and pytest follows
+    # a symlinked directory it meets on the way (claunch-vur61.1).
+    link = _escaping_link(top)
+    if link is not None:
+        raise RuntimeError(f"symlink {link!r} in the checkout resolves outside it")
     return cwd
+
+
+def _escaping_link(top: Path) -> Optional[str]:
+    """The first symlink under ``top`` (relative, posix) whose target is
+    outside ``top``, or None. Skips ``.git`` and virtualenvs (a directory
+    holding ``pyvenv.cfg``, as ``uv sync`` makes): pytest does not collect
+    in a virtualenv without ``--collect-in-virtualenv``, and its ``python``
+    links to an interpreter outside the checkout."""
+    for root, dirs, files in os.walk(top, followlinks=False):
+        here = Path(root)
+        dirs[:] = [d for d in dirs if d != ".git" and (
+            (here / d).is_symlink() or not (here / d / "pyvenv.cfg").exists())]
+        for name in [*dirs, *files]:
+            path = here / name
+            if not path.is_symlink():
+                continue
+            try:
+                path.resolve().relative_to(top)
+            except ValueError:
+                return path.relative_to(top).as_posix()
+    return None
 
 
 async def _run_proc(argv, *, cwd, env, state: dict, timeout: Optional[float] = None):
