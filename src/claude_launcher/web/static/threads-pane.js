@@ -656,7 +656,7 @@ globalThis.ThreadsPane = (() => {
   }
 
   function create(title, text) {
-    return once("", () => act(async () => {
+    const run = once("", () => act(async () => {
       const forking = forkOn && !composeQa && !!(forkCap && forkCap.ok);
       const body = {to: name, title};
       if (text) body.text = text;
@@ -679,6 +679,12 @@ globalThis.ThreadsPane = (() => {
       focusCompose = true;
       notice = deliveryNotice(res);
     }));
+    // A refused post leaves the form up (composing is cleared only on
+    // success) and the button off, and the render() that would put it back
+    // is the one typingIn() skips while the title holds the focus -- which
+    // it does from the form's first moment. Repaint the button in place.
+    if (run && run.then) run.then(syncForkRow, syncForkRow);
+    return run;
   }
 
   function setStatus(tid, verb) {
@@ -1037,6 +1043,25 @@ globalThis.ThreadsPane = (() => {
     }
   }
 
+  /* The form's two flags, in one place (claunch-x5n0r.1): renderList paints
+     the button when the form is built, syncForkRow repaints it in place while
+     a field holds the focus. Two copies of this expression drift apart with
+     nothing to say so, and a label written without the disabled state leaves
+     the button off. */
+  function startButton() {
+    const busy = inflight.has("");
+    return {label: busy ? "여는 중…" : (forkOn ? "포크하고 시작" : "시작"), disabled: busy};
+  }
+
+  /* The one place that writes the start button's state, whichever copy of the
+     button is in hand (renderList's own, or the live one syncForkRow finds). */
+  function paintStart(go) {
+    if (!go) return;
+    const start = startButton();
+    go.textContent = start.label;
+    go.disabled = start.disabled;
+  }
+
   /* Repaint the fork row and the button it renames in place (claunch-x5n0r).
      render() leaves the whole side alone while a field in it has the focus
      (typingIn, so a poll cannot eat what is being typed), and the answer
@@ -1047,8 +1072,7 @@ globalThis.ThreadsPane = (() => {
     if (!host) return;
     const row = host.querySelector(".th-newform .th-fork");
     if (row) fillForkRow(row);
-    const go = host.querySelector(".th-newform .th-send");
-    if (go) go.textContent = inflight.has("") ? "여는 중…" : (forkOn ? "포크하고 시작" : "시작");
+    paintStart(host.querySelector(".th-newform .th-send"));
   }
 
   function renderList(side, threads, read) {
@@ -1081,13 +1105,13 @@ globalThis.ThreadsPane = (() => {
         drop.addEventListener("click", () => { composeQa = null; render(); });
         about.append(drop);
       }
-      const go = node("button", "term-btn th-send", inflight.has("") ? "여는 중…" : (forkOn ? "포크하고 시작" : "시작"));
+      const go = node("button", "term-btn th-send");
       go.type = "button";
-      go.disabled = inflight.has("");
+      paintStart(go);
       const submit = () => {
         if (inflight.has("")) return;
-        go.disabled = true;
         create(title.value.trim(), first.value.trim());
+        paintStart(go);   // off and 여는 중… while the post is out
       };
       go.addEventListener("click", submit);
       title.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); first.focus(); } });
