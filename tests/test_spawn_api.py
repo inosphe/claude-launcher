@@ -1303,7 +1303,8 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
             # that forgot it would forget the work it was doing
             mesh = mm.get(mm.list()[0].name)
             assert "w1" in mesh.members
-            assert mm.mesh_info(mesh)["members"][-1]["reachability"] == "exited"
+            last = mm.mesh_info(mesh, state="all")["members"][-1]
+            assert last["reachability"] == "exited"
 
             # and the slot came back on THAT call, not on a second one. The
             # first cut of this counted exited children against the cap, so

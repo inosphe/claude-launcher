@@ -190,6 +190,14 @@ MEMBER_STATES = (
 #: in a way a message ends (held, or delayed in the restore queue).
 CURRENT_CATEGORIES = ("running", "remote", "hold", "delayed")
 
+#: The roster ``state`` a caller gets when it names none (claunch-cj2th).
+#: Ended members are kept for good, and ``member_links`` is every *pair* of
+#: the members sent: on the claunch mesh (1559 members, 1350 of them killed or
+#: archived) ``all`` was 1,214,461 pairs and 67MB per ``GET /api/mesh``, past
+#: the 5s budget of cflow's responder lookup. A caller that needs ended members
+#: asks for them (``?state=all``, or one of the ended words).
+DEFAULT_MEMBER_STATE = "current"
+
 
 def member_state_words(state: str) -> Tuple[str, ...]:
     """The words of a roster ``state``: one word, or several joined by commas.
@@ -9139,7 +9147,8 @@ class MeshManager:
         }
 
     def mesh_info(
-        self, mesh: Mesh, *, session: str = "", state: str = "all"
+        self, mesh: Mesh, *, session: str = "",
+        state: str = DEFAULT_MEMBER_STATE,
     ) -> dict:
         """One mesh in full. ``state`` selects which members get a record.
 
@@ -9153,9 +9162,9 @@ class MeshManager:
 
         So the filter is applied here rather than in the reader. The counts
         are taken over every member either way -- a filter bar that cannot
-        say what it is hiding is worse than no filter -- and ``state="all"``
-        is the default, so a caller that says nothing gets what it always
-        got.
+        say what it is hiding is worse than no filter. The default is
+        :data:`DEFAULT_MEMBER_STATE` (``current``); ``state="all"`` is the
+        whole roster and must be asked for.
         """
         members = []
         lineage = self._local_lineage(mesh)
@@ -9164,6 +9173,7 @@ class MeshManager:
             "delayed": 0, "failed": 0, "killed": 0, "paused": 0, "archived": 0,
             "missing": 0,
         }
+        chosen: Dict[str, str] = {}
         for handle in sorted(mesh.members):
             m = mesh.members[handle]
             category = self._member_category(mesh, m)
@@ -9172,8 +9182,34 @@ class MeshManager:
                 counts[category] += 1
             if category in CURRENT_CATEGORIES:
                 counts["current"] += 1
-            if not member_in_state(category, state):
-                continue
+            if member_in_state(category, state):
+                chosen[handle] = category
+
+        def raw_parent(handle: str) -> Optional[str]:
+            m = mesh.members.get(handle)
+            if m is None:
+                return None
+            if self._is_local(mesh, m):
+                return lineage.get(handle)
+            return mesh.remote_lineage.get(handle)
+
+        def sent_parent(handle: str) -> Optional[str]:
+            # The nearest ancestor this answer carries. A filtered-out member
+            # in the middle of a chain (an ended mid lead) is stepped over,
+            # so lead -> mid(killed) -> kid reads kid.parent == lead under
+            # the current default: a parent the reader cannot see would cut
+            # the lineage cflow's responders walk (claunch-cj2th review).
+            seen = {handle}
+            parent = raw_parent(handle)
+            while parent and parent in mesh.members and parent not in seen:
+                if parent in chosen:
+                    return parent
+                seen.add(parent)
+                parent = raw_parent(parent)
+            return None
+
+        for handle, category in chosen.items():
+            m = mesh.members[handle]
             local = self._is_local(mesh, m)
             # Unanswered mail alongside undelivered: 'pending' is the daemon's
             # debt to the member, 'owed' the member's debt to the mesh. Remote
@@ -9191,8 +9227,9 @@ class MeshManager:
             # daemon last told us. A parent that has since left reads as no
             # parent at all — the same rule the session tree uses for a
             # dangling one, so a departure cannot leave an edge pointing at
-            # nobody.
-            parent = lineage.get(handle) if local else mesh.remote_lineage.get(handle)
+            # nobody. One this answer leaves out is folded to the nearest
+            # ancestor it does carry (`sent_parent`).
+            parent = sent_parent(handle)
             members.append(
                 {
                     **m.to_dict(),
@@ -9210,7 +9247,7 @@ class MeshManager:
                     # — see `_member_category`). `reachability` stays exactly
                     # as it was: the CLI prints it and the spawn tests read it.
                     "category": category,
-                    "parent": parent if parent in mesh.members else None,
+                    "parent": parent,
                     # The member's user said no to a cflow run for it
                     # (claunch-val3l.2): the leader reads this to stop asking
                     # it for what only a run produces. Ours only -- another

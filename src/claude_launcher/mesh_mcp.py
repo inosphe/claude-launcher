@@ -140,11 +140,24 @@ TOOLS = [
         "description": (
             "List a mesh's members: handle, role, machine/session, "
             "reachability, pending message count — plus linked peer daemons "
-            "and the relay connection state."
+            "and the relay connection state. Current members only unless "
+            "'state' asks for others."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"mesh": {"type": "string", "description": "mesh name"}},
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "state": {
+                    "type": "string",
+                    "description": (
+                        "which members to list (default 'current': running, "
+                        "remote, held, delayed). 'all' adds the ended ones; "
+                        "or one of running, remote, hold, delayed, failed, "
+                        "killed, paused, archived, missing, comma-joined for "
+                        "several"
+                    ),
+                },
+            },
             "required": ["mesh"],
         },
     },
@@ -1422,7 +1435,9 @@ def call_tool(name: str, args: dict) -> dict:
         result["relay"] = _relay_summary(relay)
         return result
     if name == "members":
-        info = _client().get(f"/api/mesh/{mesh}")
+        state = str(args.get("state") or "").strip()
+        query = f"?state={quote(state)}" if state else ""
+        info = _client().get(f"/api/mesh/{mesh}{query}")
         # Who *you* can actually message, resolved here rather than left for
         # the agent to derive from the edge list — an agent that has to
         # compute its own reachability will sooner or later address a peer it

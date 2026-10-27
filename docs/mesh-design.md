@@ -166,10 +166,16 @@ load).
 
 All under the existing auth (Bearer token / web cookie):
 
-- `GET  /api/mesh` — meshes + member counts (+ relay status)
+- `GET  /api/mesh[?state=S]` — meshes + member counts (+ relay status);
+  `state` filters each mesh's roster as below
 - `POST /api/mesh` `{name}` — create
-- `GET  /api/mesh/{mesh}[?session=S]` — members, per-member
-  `local`/pending/reachability; `you` is the handle `S` wears here (or null)
+- `GET  /api/mesh/{mesh}[?session=S][&state=S]` — members, per-member
+  `local`/pending/reachability; `you` is the handle `S` wears here (or null).
+  `state` picks which members get a record and which pairs `member_links`
+  lists: `current` (running, remote, held, delayed) when absent, `all` for
+  every member, or lifecycle words comma-joined; `member_counts` is over
+  every member either way (claunch-cj2th: the old `all` default was 67MB
+  on a 1559-member mesh)
 - `DELETE /api/mesh/{mesh}`
 - `POST /api/mesh/{mesh}/members` `{session, handle?, role?}` — join
 - `DELETE /api/mesh/{mesh}/members/{handle}` — leave
@@ -929,7 +935,7 @@ claunch mesh ls
 claunch mesh join <mesh> [--as HANDLE] [--role ROLE] [--session NAME]
 claunch mesh leave <mesh> [--session NAME | --as HANDLE]
 claunch mesh send <mesh> <to|*> <text...>       # sender = $CLAUNCH_SESSION
-claunch mesh members <mesh>
+claunch mesh members <mesh> [--state STATE]      # default: current members
 claunch mesh history <mesh> [-n N]
 claunch mesh roles <mesh> [--yaml | --file ROLES.YAML | --reset]
 claunch mesh stance <mesh> [--as HANDLE]

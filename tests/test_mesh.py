@@ -2043,7 +2043,8 @@ def test_member_rows_carry_the_lifecycle_partition(home, tmp_path):
         def categories() -> dict:
             mesh = mm.get("m")
             return {
-                r["handle"]: r["category"] for r in mm.mesh_info(mesh)["members"]
+                r["handle"]: r["category"]
+                for r in mm.mesh_info(mesh, state="all")["members"]
             }
 
         assert categories() == {
@@ -2064,7 +2065,10 @@ def test_member_rows_carry_the_lifecycle_partition(home, tmp_path):
             "alice": "running", "bob": "killed",
             "carol": "paused", "dave": "archived",
         }
-        rows = {r["handle"]: r for r in mm.mesh_info(mm.get("m"))["members"]}
+        rows = {
+            r["handle"]: r
+            for r in mm.mesh_info(mm.get("m"), state="all")["members"]
+        }
         assert rows["bob"]["reachability"] == "exited"  # the old word, unchanged
         assert rows["dave"]["reachability"] == "exited"
 
@@ -2089,8 +2093,8 @@ def test_the_roster_is_filtered_before_it_is_built(home, tmp_path):
     member and 11ms and 4.7KB with the eight running ones.
 
     The counts stay whole, because a filter bar that cannot say what it is
-    hiding is worse than no filter; and the default is still every member, so
-    a caller that says nothing gets what it always got.
+    hiding is worse than no filter. The default is the current members
+    (claunch-cj2th); every member is ``state="all"`` and must be asked for.
     """
     _register_py_harness()
     mgr = _manager()
@@ -2106,8 +2110,10 @@ def test_the_roster_is_filtered_before_it_is_built(home, tmp_path):
         await _wait_exited(mgr.get("gone"))
         mesh = mm.get("m")
 
-        everyone = mm.mesh_info(mesh)
+        everyone = mm.mesh_info(mesh, state="all")
         assert [r["handle"] for r in everyone["members"]] == ["alice", "bob"]
+        # Saying nothing is the current members.
+        assert mm.mesh_info(mesh) == mm.mesh_info(mesh, state="current")
 
         current = mm.mesh_info(mesh, state="current")
         assert [r["handle"] for r in current["members"]] == ["alice"]
