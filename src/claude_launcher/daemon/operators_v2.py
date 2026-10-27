@@ -649,33 +649,40 @@ class OperatorsV2:
         rows.sort(key=lambda r: (r["name"].casefold(), r["id"]))
         return {"operators": rows, "unseen": sum(r["unseen"] for r in rows)}
 
-    async def view(self, op_id, thread=None):
+    async def view(self, op_id, thread=None, *, panel=True):
         """The operator for its view: its threads, and the entries of
-        ``thread`` (default: the most recently active one)."""
+        ``thread`` (default: the most recently active one). ``panel`` adds
+        the watched sessions' rows and their gates; ``panel=False`` leaves
+        them out (no ``sessions``/``gates`` keys). The board, gate and
+        Observer reads behind the panel took 3.7-25s on a loaded daemon
+        while the threads and feed took under 1ms, and the dashboard's
+        conversation views draw none of the panel (claunch-fokj3)."""
         rec = self.get(op_id)
         tid = self.thread_of(rec, thread, create=False)
+        feed = self.feed(rec, tid) if tid else []
+        out = {**self.summary(rec), "threads": self.thread_rows(rec), "thread": tid,
+               "feed": feed[-VIEW_ENTRIES:], "omitted": max(0, len(feed) - VIEW_ENTRIES)}
+        if not panel:
+            return out
         shown = self.watched(rec)
         running = [s for s in shown if session_category(s) == CATEGORY_RUNNING]
         work, _ = await self.work_read(shown)
         gates, _ = await self.gates_read(running)
         snapshot = {row["name"]: row for row in self.snapshot_of(shown)}
-        panel = []
+        rows = []
         for session in shown:
             category = session_category(session)
             row = snapshot.get(session.sdef.name, {})
             questions = 0 if category == CATEGORY_PAUSED else sum(
                 1 for e in row.get("events", []) if e.get("question") and not e.get("answer"))
-            panel.append({"name": session.sdef.name, "project": project_of(session),
-                          "running": not session.exited, "category": category,
-                          "status": row.get("status") or session.info().get("status"),
-                          "state": row.get("state"), "summary": row.get("summary"),
-                          "last_activity_at": row.get("last_activity_at"), "questions": questions,
-                          **progress_of(work.get(session.sdef.name))})
-        panel.sort(key=lambda r: (r["category"] == CATEGORY_PAUSED, -r["questions"], r["name"]))
-        feed = self.feed(rec, tid) if tid else []
-        return {**self.summary(rec), "threads": self.thread_rows(rec), "thread": tid,
-                "feed": feed[-VIEW_ENTRIES:], "omitted": max(0, len(feed) - VIEW_ENTRIES),
-                "sessions": panel, "gates": list(gates or [])}
+            rows.append({"name": session.sdef.name, "project": project_of(session),
+                         "running": not session.exited, "category": category,
+                         "status": row.get("status") or session.info().get("status"),
+                         "state": row.get("state"), "summary": row.get("summary"),
+                         "last_activity_at": row.get("last_activity_at"), "questions": questions,
+                         **progress_of(work.get(session.sdef.name))})
+        rows.sort(key=lambda r: (r["category"] == CATEGORY_PAUSED, -r["questions"], r["name"]))
+        return {**out, "sessions": rows, "gates": list(gates or [])}
 
     def mark_seen(self, op_id):
         rec = self.get(op_id)
@@ -1465,7 +1472,8 @@ def install(app, *, create=None, gates=None, work=None):
 
     @guarded
     async def view(request):
-        return await ops.view(request.match_info["id"], request.query.get("thread") or None)
+        return await ops.view(request.match_info["id"], request.query.get("thread") or None,
+                              panel=request.query.get("panel") not in ("0", "false", "no"))
 
     @guarded
     async def update(request):

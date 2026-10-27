@@ -229,6 +229,34 @@ def test_posts_asks_and_dispatches_go_to_their_thread(world):
     assert [e["text"] for e in ops.history("opa", {"thread": a, "kind": "post"})["entries"]] == ["기본", "배포 중"]
 
 
+
+def test_the_view_without_its_panel_reads_no_session(world):
+    """``panel=False`` is the conversation alone: the threads and the feed,
+    and none of the board, gate and Observer reads behind the session panel
+    -- those took 3.7-25s on a loaded daemon (claunch-fokj3)."""
+    ops, aid = world.ops, world.alpha["id"]
+    tid = run(ops.open_user_thread(aid, {"title": "주제", "text": "질문"}))["thread"]["id"]
+    calls = []
+
+    async def work(sessions):
+        calls.append("work")
+        return {}
+
+    def gates(sessions):
+        calls.append("gates")
+        return []
+
+    snapshot = world.ops.observer.snapshot
+    world.ops.observer.snapshot = lambda **kw: calls.append("observer") or snapshot(**kw)
+    ops.work, ops.gates = work, gates
+    lite = run(ops.view(aid, tid, panel=False))
+    assert calls == []
+    assert lite["thread"] == tid and [e["text"] for e in lite["feed"]] == ["질문"]
+    assert "sessions" not in lite and "gates" not in lite
+    full = run(ops.view(aid, tid))
+    assert sorted(calls) == ["gates", "observer", "work"]
+    assert {k: full[k] for k in lite} == lite and "sessions" in full and "gates" in full
+
 def test_the_user_message_carries_images_to_the_inbox(world):
     ops, aid = world.ops, world.alpha["id"]
     image = opening_images.stage([PNG], "image/png")
@@ -368,6 +396,8 @@ def test_routes_open_threads_post_to_one_and_view_it(world):
             view = await (await client.get(base + f"?thread={tid}")).json()
             assert view["thread"] == tid and [e["text"] for e in view["feed"]] == ["질문", "둘째"]
             assert {t["title"] for t in view["threads"]} >= {"새 주제"}
+            lite = await (await client.get(base + f"?thread={tid}&panel=0")).json()
+            assert lite["feed"] == view["feed"] and "sessions" not in lite and "sessions" in view
             assert (await client.get(base + "?thread=th-zzzzzz")).status == 404
             closed = await (await client.post(base + f"/threads/{tid}/close", json={})).json()
             assert {t["id"]: t["status"] for t in closed["threads"]}[tid] == "closed"

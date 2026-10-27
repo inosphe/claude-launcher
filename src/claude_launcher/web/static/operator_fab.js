@@ -156,24 +156,39 @@ function sessionOnScreen() {
   try { return decodeURIComponent(match[1]); } catch { return ""; }
 }
 let mounted = false, timer = null;
+const mountView = () => { if (!mounted) { view.mount(root); mounted = true; } };
+const toEnd = () => { const area = root.querySelector(".op-area"); if (area) area.scrollTop = area.scrollHeight; };
+/* The dialog opens on what the closed-dialog poll last read (tick, below),
+   so it shows at once; the read for the session on screen follows. */
 async function openModal() {
-  if (!mounted) { view.mount(root); mounted = true; }
+  mountView();
   if (!modal.open) modal.showModal();
-  await view.focusSession(sessionOnScreen());
-  setBadge(view.summary());
-  const area = root.querySelector(".op-area");
-  if (area) area.scrollTop = area.scrollHeight;
+  toEnd();
   view.focusInput();
   clearInterval(timer);
   timer = setInterval(tick, POLL_OPEN);
+  await view.focusSession(sessionOnScreen());
+  setBadge(view.summary());
+  toEnd();
 }
-modal.addEventListener("close", () => { clearInterval(timer); timer = setInterval(tick, POLL_BADGE); refreshBadge(); });
-/* Open, the view reads the selected operator and its feed (and marks shown
-   asks seen); closed, only the list is read, for the badge. */
+modal.addEventListener("close", () => { clearInterval(timer); timer = setInterval(tick, POLL_BADGE); });
+/* Open or closed, the view reads the list and the selected operator's
+   conversation (claunch-fokj3): the read is the conversation alone
+   (panel=0, under 1ms of the daemon's time), and keeping it current while
+   closed is what lets the dialog open with its content instead of an empty
+   frame. Before the first open the view is not mounted: the read is kept
+   and drawn when the dialog mounts it, and the page holds no second copy
+   of the conversation the Observer page draws. Only an open dialog marks
+   the shown asks seen (opts.active). On the Observer page, which hides
+   this segment, only the list is read, for the badge -- and so it is
+   everywhere once a read came back with the session panel: that daemon
+   predates panel=0 and each read costs it seconds, so the dialog reads
+   only when opened until the daemon is restarted. */
 async function tick() {
   if (document.visibilityState !== "visible") return;
-  if (modal.open) { await view.refresh(); setBadge(view.summary()); }
-  else refreshBadge();
+  if (!modal.open && (document.body.classList.contains("observer-active") || !view.lightReads())) return refreshBadge();
+  await view.refresh();
+  setBadge(view.summary());
 }
 async function refreshBadge() {
   try {
@@ -187,7 +202,7 @@ async function refreshBadge() {
 }
 // app.js (api, the login) runs after this file; DOMContentLoaded comes after
 // every script has run.
-const start = () => { if (!timer) { refreshBadge(); timer = setInterval(tick, POLL_BADGE); } };
+const start = () => { if (!timer) { tick(); timer = setInterval(tick, POLL_BADGE); } };
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, {once: true});
 else setTimeout(start, 0);
 
