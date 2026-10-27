@@ -110,6 +110,19 @@ THREAD_MESSAGES = 12
 #: nothing to a model that has never read the board.
 DRAFT_ISSUES = 4
 ISSUE_TITLE_CHARS = 200
+#: The first non-closed issues among those also carry their description
+#: (claunch-gqt6w). A title says what an issue is called; the description
+#: says what the session is doing about it, and a topic is usually phrased
+#: in that vocabulary. Measured by scoring the same documents with and
+#: without it, against a base-to-base noise of 0.61 at most: on 6-10
+#: sessions per topic the answer session's logit rose 1.26 and 1.30 on two
+#: of three topics; on the full 40-candidate preview it rose 1.49, 0.46 and
+#: 0.13 (only the first clears the noise), its rank went 9->4, 7->4, 24->21,
+#: and it stayed below ln 9 on all three. Sessions over ln 9 went from 5 to
+#: 2. Closed issues are finished work the title already names, so they
+#: carry no body.
+DRAFT_ISSUE_BODIES = 2
+ISSUE_BODY_CHARS = 600
 #: The cached briefing fields each prompt reads, in order. The preview also
 #: reads ``progress``: it is the sentence that says what the session has
 #: already done, which is how a topic about finished work tells two sessions
@@ -272,7 +285,9 @@ def draft_facts(name: str, sdef, *, workspace: str = "",
 
     ``issues`` are the board rows that belong to the session
     (``beads.match`` order: the linked issue first, then the active ones);
-    only their id, status and title travel. ``workspace`` is the registered
+    their id, status and title travel, and the first
+    :data:`DRAFT_ISSUE_BODIES` non-closed ones with a description also carry
+    it, clipped to :data:`ISSUE_BODY_CHARS`. ``workspace`` is the registered
     workspace the session's directory belongs to -- a worktree path names
     its checkout, not the project, and two sessions in the same project can
     stand in directories that share nothing but that name.
@@ -287,16 +302,23 @@ def draft_facts(name: str, sdef, *, workspace: str = "",
     if parent:
         facts["parent"] = str(parent)
     rows = []
+    bodies = 0
     for row in issues:
         if not isinstance(row, dict) or not row.get("id"):
             continue
-        rows.append({
+        status = str(row.get("status") or "")
+        entry = {
             key: value for key, value in (
                 ("id", str(row.get("id"))),
-                ("status", str(row.get("status") or "")),
+                ("status", status),
                 ("title", clip(row.get("title") or "", ISSUE_TITLE_CHARS)),
             ) if value
-        })
+        }
+        body = str(row.get("description") or "").strip()
+        if body and status != "closed" and bodies < DRAFT_ISSUE_BODIES:
+            entry["description"] = clip(body, ISSUE_BODY_CHARS)
+            bodies += 1
+        rows.append(entry)
         if len(rows) >= DRAFT_ISSUES:
             break
     if rows:
