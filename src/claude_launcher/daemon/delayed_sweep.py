@@ -114,9 +114,14 @@ class Clock:
         #: for again every SPAWN_BACKOFF: each attempt costs a session number
         #: and a log line, and on 2026-10-27 it cost 34 of each per minute
         #: (claunch-k3acp).
+        #: Keyed by ``(job id, generation)``, not by the job id alone: a person
+        #: who fixes the cause the refusal named asks again with
+        #: ``retry-watcher``, which bumps the generation, so the job gets a
+        #: watcher without a daemon restart (claunch-k3acp review of
+        #: 4f3f8b85).
         self.spawn_permanent: dict = {}
         #: Jobs whose owner has been told, and with which reason — one report
-        #: per job, whatever it says the second time.
+        #: per job and generation, whatever it says the second time.
         self.spawn_reported: dict = {}
         #: How often each reason has been seen, so repeats are counted
         #: instead of logged.
@@ -289,20 +294,21 @@ class Clock:
         for job in queue.unattended():
             if live >= CHILDREN_MAX:
                 break
-            if job["id"] in self.spawn_permanent:
+            if (job["id"], job["generation"]) in self.spawn_permanent:
                 continue
             origin = json.loads(job["origin"])
             if (origin.get("instance") != paths.instance()
                     or origin.get("base") != str(paths.base_home().resolve())):
                 continue
-            if time.monotonic() - self.spawn_tried.get(job["id"], -SPAWN_BACKOFF) < SPAWN_BACKOFF:
+            if time.monotonic() - self.spawn_tried.get((job["id"], job["generation"]),
+                                                       -SPAWN_BACKOFF) < SPAWN_BACKOFF:
                 continue
             try:
                 if self.manager.get(job["owner"]).exited:
                     continue
             except KeyError:
                 continue
-            self.spawn_tried[job["id"]] = time.monotonic()
+            self.spawn_tried[(job["id"], job["generation"])] = time.monotonic()
             try:
                 name = await asyncio.to_thread(spawn, job["owner"], self.watch_body(job))
             except Exception as exc:  # noqa: BLE001 - refused or unreachable alike
@@ -319,7 +325,7 @@ class Clock:
         that changes."""
         reason = _one_line(str(exc) or exc.__class__.__name__)
         if getattr(exc, "permanent", False):
-            self.spawn_permanent[job["id"]] = reason
+            self.spawn_permanent[(job["id"], job["generation"])] = reason
             self.spawn_failures[reason] = self.spawn_failures.get(reason, 0) + 1
             log.warning("sweep watcher for %s will not be created: %s",
                         job["id"], reason)
@@ -337,12 +343,15 @@ class Clock:
     async def _report_spawn_failure(self, job, reason: str) -> None:
         """Tell the job's owner once, with the refusal and what it costs them.
 
-        One report per job: the reason is kept, so a job the daemon refuses
-        for a second reason still reports that second one, while a repeat of
-        the first is not sent again."""
-        if self.spawn_reported.get(job["id"]) == reason:
+        One report per job generation: the reason is kept, so a job the daemon
+        refuses for a second reason still reports that second one, while a
+        repeat of the first is not sent again. A generation bump
+        (``retry-watcher``) is a new attempt by a person, and its report is
+        new too."""
+        key = (job["id"], job["generation"])
+        if self.spawn_reported.get(key) == reason:
             return
-        self.spawn_reported[job["id"]] = reason
+        self.spawn_reported[key] = reason
         try:
             session = self.manager.get(job["owner"])
             if session.exited:
@@ -356,9 +365,11 @@ class Clock:
                       "protocol: the daemon refused this spawn with an answer a retry "
                       "cannot change, so it will not try again. The sweep itself still "
                       "runs; only the watching session is missing. Fix the cause named "
-                      "above and requeue the job with 'tools/delayed_sweep.py requeue "
-                      f"--job {job['id']}', or cancel it with 'cancel --job "
-                      f"{job['id']} --reason ...'.\n---")
+                      "above, then ask for the watcher again with "
+                      f"'tools/delayed_sweep.py retry-watcher --job {job['id']}' — the "
+                      "job keeps its status, its verdict and its covered merges, and the "
+                      f"daemon gives it a watcher on the next tick. To drop the job "
+                      f"instead: 'cancel --job {job['id']} --reason ...'.\n---")
             with delivery_wake("notice"):
                 await session.deliver(notice)
         except KeyError:

@@ -498,7 +498,7 @@ def test_a_queue_file_without_the_remeasure_columns_is_upgraded(tmp_path):
     q = mod.Queue(path)
     with q.connect() as conn:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
-    assert {"remeasures", "history"} <= columns
+    assert {"remeasures", "history", "generation"} <= columns
 
 
 def paused_on(q, repo, name="bad"):
@@ -1248,6 +1248,69 @@ def test_a_permanent_refusal_is_reported_once_and_never_retried(repo, tmp_path, 
     assert "2 meshes" in delivered[0]
     assert q.get(jobs[-1]["id"])["child"] == ""
     assert q.get(jobs[-1]["id"])["status"] == "running", "the sweep must not be held back"
+
+
+def test_a_requeued_job_gets_a_watcher_without_a_daemon_restart(repo, tmp_path, monkeypatch):
+    """The report's recovery advice has to work (review of 4f3f8b85).
+
+    The refusal is remembered per generation, and ``retry-watcher`` bumps the
+    generation. Without that, the job's watcher could only come back after a
+    daemon restart: ``retry-watcher`` would move a counter nothing read, and
+    the same id would be skipped for the life of the daemon."""
+    from claude_launcher.daemon.cflow2_exec import SpawnRefused
+
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = jobs[-1]["id"]
+    calls = []
+    refuse = {"on": True}
+
+    def spawn(parent, body):
+        calls.append(parent)
+        if refuse["on"]:
+            raise SpawnRefused("session 'leader' is in 2 meshes (claunch, leader)",
+                               permanent=True)
+        return "w1"
+
+    delivered = []
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.tick())
+    assert len(calls) == 1 and len(delivered) == 1
+    asyncio.run(clock.tick())
+    assert len(calls) == 1, "a final refusal was asked again"
+
+    # The owner fixes the cause and asks for the watcher again.
+    refuse["on"] = False
+    assert q.retry_watcher(tip) == 1
+    clock.spawn_tried.clear()
+    asyncio.run(clock.tick())
+    assert len(calls) == 2, "the job still had no watcher after the cause was fixed"
+    assert q.get(tip)["child"] == "w1"
+
+
+def test_a_job_with_a_verdict_is_not_given_a_retry_watcher(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    q.finish(job["id"], "passed", "receipt")
+    with pytest.raises(ValueError, match="verdict"):
+        q.retry_watcher(job["id"])
+
+
+def test_retry_watcher_from_the_command_line(repo, tmp_path):
+    db = tmp_path / "jobs.sqlite3"
+    q = mod.Queue(db)
+    job, _ = enqueue(q, repo, "a")
+    tool = TOOL.with_name("delayed_sweep.py")
+    out = subprocess.run([sys.executable, str(tool), "--database", str(db),
+                          "retry-watcher", "--job", job["id"]],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["generation"] == 1
+    assert q.get(job["id"])["status"] == job["status"], "the job itself must not move"
 
 
 def test_a_transient_refusal_is_still_retried_and_not_reported(repo, tmp_path, monkeypatch):

@@ -76,6 +76,7 @@ class Queue:
                     receipt TEXT, detail TEXT NOT NULL DEFAULT '',
                     notified INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
                     remeasures INTEGER NOT NULL DEFAULT 0, history TEXT NOT NULL DEFAULT '[]',
+                    generation INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(common, sha)
                 );
                 CREATE TABLE IF NOT EXISTS pauses (
@@ -94,6 +95,12 @@ class Queue:
                 db.execute("ALTER TABLE jobs ADD COLUMN remeasures INTEGER NOT NULL DEFAULT 0")
             if "history" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN history TEXT NOT NULL DEFAULT '[]'")
+            # ``generation`` counts the watcher retries an operator asked for:
+            # the daemon's Clock remembers a final refusal per generation, so
+            # fixing the cause and bumping this gives the job a watcher again
+            # without a restart (claunch-k3acp, review of 4f3f8b85).
+            if "generation" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
             # Batching: ``covered_by`` names the tip job whose sweep answers for this
             # merge; ``formed`` marks a job that left the batching pool (a batch tip,
             # or a job swept alone); ``child`` is the session watching the tip;
@@ -416,6 +423,26 @@ class Queue:
                 raise ValueError(f"only a stuck or cancelled job is requeued, not {row['status']}")
             db.execute("UPDATE jobs SET status='queued',failures=0,available=0,notified=0,detail='' "
                        "WHERE id=?", (job,))
+
+    def retry_watcher(self, job):
+        """Let a permanently refused watcher be spawned again, verdict untouched.
+
+        A refusal the daemon answered finally is remembered by the sweep for
+        the life of the daemon, so fixing the cause was not enough: the job
+        kept its missing watcher until a restart (claunch-k3acp review). This
+        bumps ``generation``, which is what the daemon keys that memory on, and
+        changes nothing else — the sweep itself was never held back by the
+        refusal, so its status, verdict, attempts and covered merges stay as
+        they are."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                raise ValueError("unknown verification job")
+            if row["status"] in ("passed", "failed", "cancelled"):
+                raise ValueError(f"job already has a verdict: {row['status']}")
+            db.execute("UPDATE jobs SET generation=generation+1 WHERE id=?", (job,))
+            return db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()["generation"]
 
     def remeasure(self, repo, job, reason):
         """Leader action: measure the active pause job's SHA again, at most REMEASURE_LIMIT times.
