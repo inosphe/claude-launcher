@@ -7609,8 +7609,10 @@ function markQaSeen(name) {
    opens only for questions still waiting: its closed history is no news. */
 function maybeOpenQaPane() {
   const name = currentPage === "terminal" ? currentName : null;
-  // An operator session has no session QA pane to open (isOperatorSession).
-  if (isOperatorSession(name)) { markQaSeen(name); return; }
+  // An operator session has no session QA pane to open (isOperatorSession),
+  // unless its record keeps session QA (operatorQa) — a gds6 operator asks
+  // there, so a new question opens the pane like any other session's.
+  if (isOperatorSession(name) && !operatorQa(name)) { markQaSeen(name); return; }
   const row = name && qaRailCache[name];
   if (!row || !row.agent_seq) return;
   const seen = loadQaSeen()[name];
@@ -25969,9 +25971,12 @@ function syncSplitPane() {
   const remembered = name ? sessLayoutFor(name) : null;
   // An operator session has neither a threads nor a session QA pane (see
   // isOperatorSession); a layout remembered from before it became one is
-  // not honoured, so the terminal takes the column back.
+  // not honoured, so the terminal takes the column back. A gds6 operator
+  // whose record keeps session QA (operatorQa) keeps a qa-only pane —
+  // anything that would show threads still goes.
   const talkAway = !!remembered && isOperatorSession(name)
-    && (talkShows(remembered.pane, "threads") || talkShows(remembered.pane, "qa"));
+    && (talkShows(remembered.pane, "threads")
+        || (talkShows(remembered.pane, "qa") && !operatorQa(name)));
   const lay = talkAway ? null : remembered;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
   $("term-split").classList.toggle("hidden", !up);

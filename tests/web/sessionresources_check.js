@@ -134,11 +134,29 @@ const has = n => n.classList.contains("has-resource");
   assert.ok(!qa.classList.contains("hidden"), "a gds6 operator with QA draws ? qa");
   assert.ok(threads.classList.contains("hidden"), "...and still no 🗪 threads");
   assert.ok(has(qa) && !has(threads), "...and lights only the door it keeps");
-  // The same workflow with the switch off draws neither.
+  // A new question opens the pane it keeps. sessLayoutFor/talkShows live
+  // outside this slice, so they are stubbed; setSessLayout is the stub that
+  // throws, replaced here to record instead (a QA-off operator must not call it).
+  const opened = [];
+  ctx.sessLayoutFor = () => ({});
+  ctx.talkShows = () => false;
+  ctx.setSessLayout = (name, lay) => opened.push([name, lay]);
+  vm.runInContext('qaRailCache = {a: {unresolved: 1, agent_seq: 100}}', ctx);
+  ctx.maybeOpenQaPane();
+  // The layout is built inside the vm realm, so compare its fields, not its
+  // prototype.
+  assert.equal(opened.length, 1, "QA on: a new question opens the pane");
+  assert.equal(opened[0][0], "a");
+  assert.deepEqual({...opened[0][1]}, {split: true, pane: "qa"});
+  // The same workflow with the switch off draws neither — and opens nothing.
   ctx.cflow2RailCache.a = {workflow: "gds-operator-v2", operator: true, operator_qa: false};
   ctx.syncSessionResourceButtons();
   assert.ok(qa.classList.contains("hidden") && threads.classList.contains("hidden"),
     "QA off: neither door");
+  opened.length = 0;
+  vm.runInContext('qaRailCache = {a: {unresolved: 1, agent_seq: 101}}', ctx);
+  ctx.maybeOpenQaPane();
+  assert.deepEqual(opened, [], "QA off: no pane opens either");
   // A session that is not an operator's keeps both doors.
   ctx.currentName = "b"; ctx.syncSessionResourceButtons();
   assert.ok(!qa.classList.contains("hidden") && !threads.classList.contains("hidden"),
