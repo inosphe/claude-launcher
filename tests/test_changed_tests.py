@@ -1465,6 +1465,120 @@ def test_a_kept_receipt_answers_when_the_key_path_is_gone(repo, gate, capsys):
     assert gate.runs() == 2, "and it answers without running the selection again"
 
 
+def _kept_beside(key: Path, name: str, body: dict) -> Path:
+    """Write ``body`` beside ``key`` as a kept receipt, under ``name``."""
+    kept = key.parent / f"{key.stem}@{name}.json"
+    kept.write_text(json.dumps(body), encoding="utf-8")
+    return kept
+
+
+def test_a_kept_receipt_for_another_selection_does_not_answer(repo, gate, capsys):
+    """The name is a stamp; the body decides, and a foreign body is no answer.
+
+    ``find_archived_receipt`` trusts nothing about the file name, and the
+    only thing tying a kept receipt to this check is what it says about
+    itself. A reviewer deleted that body check and the suite stayed green at
+    146 passed (``claunch-23r7d.1.1.1.1.2.1``): a green receipt for the same
+    tree and a *different* selection would then answer -- the false green
+    ``selection_key`` exists to make impossible, a three-module verdict
+    standing in for sixteen.
+
+    Two halves, because they fail differently. Beside a legitimately kept
+    receipt the foreign one must not win, even though it is newer; alone on
+    disk it must yield no answer at all, and say nothing on stdout. A
+    rejection is silence here by design: the only receipt the check can
+    speak through is one it accepted.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    body = json.loads(key.read_text(encoding="utf-8"))
+
+    kept = changed_tests.keep_earlier_receipt(key)
+    assert kept is not None
+    foreign = _kept_beside(
+        key,
+        "20991231T235959Z",
+        dict(
+            body,
+            selection=sorted(files) + ["tests/test_unrelated.py"],
+            started_at="2099-12-31T23:59:59+00:00",
+        ),
+    )
+    key.unlink()
+
+    found = changed_tests.find_receipt(repo, tree, files, gate.receipts)
+    assert found is not None, "the receipt kept for this selection still answers"
+    assert found["started_at"] == body["started_at"], (
+        "the newer kept receipt measures modules this check did not select"
+    )
+    out = capsys.readouterr().out
+    assert kept.name in out, "it has to say which file answered"
+    assert foreign.name not in out, "a receipt for another selection must not answer"
+
+    kept.unlink()
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts) is None, (
+        "with only a receipt for another selection kept, this tree is unswept"
+    )
+    out = capsys.readouterr().out
+    assert "kept receipt" not in out
+    assert foreign.is_file(), "rejected, and left on disk as the record of its run"
+
+
+def test_a_kept_receipt_that_failed_does_not_answer(repo, gate, capsys):
+    """A kept receipt that failed is not a verdict this check can use.
+
+    ``receipt_passes`` is the same judge the exact path is held to. Remove
+    that one condition and a red archived run answers as though it had
+    passed (``claunch-23r7d.1.1.1.1.2.1``) -- the false green in its
+    plainest form, since the receipt itself records that the selection
+    failed.
+
+    Built the same two ways as the selection case: beside a green kept
+    receipt a newer red one must lose, and alone on disk it is no answer.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    body = json.loads(key.read_text(encoding="utf-8"))
+
+    kept = changed_tests.keep_earlier_receipt(key)
+    assert kept is not None
+    red = _kept_beside(
+        key,
+        "20991231T235959Z",
+        dict(
+            body,
+            exit_code=1,
+            counts={"passed": 0, "failed": 1},
+            new_failures=["tests/test_mesh.py::test_mesh"],
+            preexisting=[],
+            started_at="2099-12-31T23:59:59+00:00",
+        ),
+    )
+    key.unlink()
+
+    found = changed_tests.find_receipt(repo, tree, files, gate.receipts)
+    assert found is not None, "the green kept receipt still answers"
+    assert found["started_at"] == body["started_at"], (
+        "the newer kept receipt records a failure for this very selection"
+    )
+    out = capsys.readouterr().out
+    assert kept.name in out
+    assert red.name not in out, "a red receipt must not read as green"
+
+    kept.unlink()
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts) is None, (
+        "with only a red receipt kept, this tree has no passing verdict"
+    )
+    assert "kept receipt" not in capsys.readouterr().out
+    assert red.is_file(), "rejected, and left on disk as the record of its run"
+
+
 def test_an_untracked_file_is_in_the_tree_key(repo):
     """``changed_paths`` counts untracked files, so the key must too.
 
