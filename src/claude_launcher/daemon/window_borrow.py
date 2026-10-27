@@ -650,6 +650,9 @@ class BorrowRunner:
         workdir.mkdir(parents=True, exist_ok=True)
         self._set(run, status="checkout")
         await asyncio.to_thread(self._checkout, repo, checkout, made)
+        # vet_borrow judged rel_cwd as text; a committed symlink can still
+        # lead out, and that shows only on disk.
+        _lent_cwd(checkout, run["info"])
         self._set(run, status="setup")
         command = self.setup_command(checkout)
         if command is None:
@@ -691,11 +694,8 @@ class BorrowRunner:
         basetemp = pytest_basetemp.ensure(pytest_basetemp.root()) / f"borrow-{run['id']}w"
         argv = [str(python), "-m", "pytest", *args, f"--basetemp={basetemp}",
                 f"--junit-xml={junit}", "-o", "junit_family=xunit1"]
-        cwd = checkout / (info.get("rel_cwd") or "")
-        try:
-            cwd.resolve().relative_to(checkout.resolve())
-        except ValueError:
-            raise RuntimeError(f"rel_cwd {info.get('rel_cwd')!r} resolves outside the checkout")
+        # Again: setup ran code in the checkout and could have moved a link.
+        cwd = _lent_cwd(checkout, info)
         clock = time.monotonic()
         code, output = await _run_proc(
             argv, cwd=cwd, state=state, env=suite_env(
@@ -808,6 +808,17 @@ def _kill(proc) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
+
+
+def _lent_cwd(checkout: Path, info: dict) -> Path:
+    """The lent ``rel_cwd`` under ``checkout``, refused if it resolves
+    outside it (through a symlink in the checkout)."""
+    cwd = checkout / (info.get("rel_cwd") or "")
+    try:
+        cwd.resolve().relative_to(checkout.resolve())
+    except ValueError:
+        raise RuntimeError(f"rel_cwd {info.get('rel_cwd')!r} resolves outside the checkout")
+    return cwd
 
 
 async def _run_proc(argv, *, cwd, env, state: dict, timeout: Optional[float] = None):

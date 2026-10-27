@@ -607,6 +607,106 @@ def test_borrower_refuses_a_lent_cwd_outside_its_checkout(lender_clone, tmp_path
     asyncio.run(run())
 
 
+def test_borrower_refuses_a_lent_cwd_that_a_symlink_leads_outside(
+        lender_clone, tmp_path, monkeypatch):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    try:
+        (clone / "tests" / "link_out").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    _git(clone, "add", "tests/link_out")
+    _git(clone, "commit", "-q", "-m", "link_out")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Runner(own, transport, lambda: "borrower",
+                         root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            # Inside the checkout as text, so vet_borrow lets it through.
+            waiter, gid = await _queued(lender, info=_info(
+                clone, rel_cwd="tests/link_out", pytest_args=["-q"]))
+            run_doc = await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert "'tests/link_out' resolves outside the checkout" in done["error"]
+            assert "window_grant" not in done  # refused before setup and the window
+            assert "resolves outside the checkout" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
+            assert own.status()["holders"] == []
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_borrower_checks_the_cwd_again_after_setup(lender_clone, tmp_path, monkeypatch):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    (clone / "tests" / "late").mkdir()
+    _commit(clone, "tests/late/test_late.py", "def test_late():\n    assert True\n")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    class _Relinking(_Runner):
+        # A setup that swaps the lent cwd for a link out of the checkout.
+        setup_command = staticmethod(lambda checkout: [sys.executable, "-c", (
+            "import os, shutil; shutil.rmtree('tests/late'); "
+            f"os.symlink({str(outside)!r}, 'tests/late', target_is_directory=True)")])
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Relinking(own, transport, lambda: "borrower",
+                            root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(
+                clone, rel_cwd="tests/late", pytest_args=["-q"]))
+            await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert "'tests/late' resolves outside the checkout" in done["error"]
+            assert "resolves outside the checkout" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: own.status()["holders"] == [], 30)
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_borrower_fails_when_the_rebuilt_tree_is_not_the_lenders(
         lender_clone, tmp_path, monkeypatch):
     clone, bare, url = lender_clone
