@@ -12,9 +12,18 @@ and the one past :data:`KEEP` is deleted. Reads span every generation, oldest
 first, so a chart does not lose its past at a rotation.
 
 A line is the reading's payload (the same dict ``/api/usage`` answers) plus
-``at``, the epoch seconds of the read. The last line of a key is also what a
-restarted daemon serves until that key's next read (:func:`last`), so the
-refresh clock does not ask every account again the moment the daemon is back.
+``at``, the epoch seconds of the read. A payload may also carry a field that
+:func:`append` writes through untouched and the daemon reads but never
+serves: :mod:`profile_usage` samples the digest of the launcher token a
+reading describes (``profile_usage.CREDENTIAL_FIELD``), so a daemon that
+restarts inside a key's period can tell whether the newest sample is still
+about the key the profile holds (claunch-vz8nj). Such a field belongs to the
+writer: :func:`read` and :func:`last` hand it back unchanged, and the writer
+strips it from what it serves.
+
+The last line of a key is also what a restarted daemon serves until that
+key's next read (:func:`last`), so the refresh clock does not ask every
+account again the moment the daemon is back.
 """
 
 from __future__ import annotations
@@ -72,7 +81,10 @@ def _rotate(key: str) -> None:
 
 def append(key: str, payload: dict, at: float) -> None:
     """Write one sample of ``key``, rotating its file first when it has
-    reached :data:`MAX_BYTES`. Raises :class:`OSError` when the disk does."""
+    reached :data:`MAX_BYTES`. ``payload`` is one reading's answer dict and
+    every field in it is written as it comes, so a caller may add a field of
+    its own for the daemon to read back later (see the module docstring).
+    Raises :class:`OSError` when the disk does."""
     line = json.dumps({**payload, "at": at}, ensure_ascii=False, separators=(",", ":"))
     target = path_for(key)
     with _guard:

@@ -184,6 +184,24 @@ def test_a_line_cut_short_is_skipped():
     assert usage_history.stats(key, period=900)["samples"] == 1
 
 
+def test_a_field_the_writer_adds_rides_through_unchanged():
+    """A payload may carry a field of the writer's own (claunch-23r7d).
+
+    `profile_usage` samples the digest of the launcher token a reading
+    describes, so a daemon that restarts inside a key's period can tell
+    whether the newest sample is still about the key the profile holds. The
+    store has to hand that field back as it came — the module docstring says
+    so, and a reader that dropped it would silently seed the cache with the
+    departed key's numbers (claunch-vz8nj).
+    """
+    key = "work/default/anthropic"
+    usage_history.append(key, {"windows": [], "credential": "abc123def456"}, 1.0)
+
+    assert usage_history.last(key) == {
+        "windows": [], "credential": "abc123def456", "at": 1.0}
+    assert usage_history.read(key) == [usage_history.last(key)]
+
+
 def test_a_full_file_rotates_and_reads_span_every_generation(monkeypatch):
     key = "fw/fireworks/fireworks-billing"
     monkeypatch.setattr(usage_history, "MAX_BYTES", 1)  # every append rotates
