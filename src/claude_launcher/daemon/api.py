@@ -5635,13 +5635,35 @@ def _operator_gates(sessions) -> list:
     rail binds a run to a session. Each carries the ``cwd`` and ``scope`` the
     dashboard's own presses post (``/api/cflow/approve``, ``select``,
     ``goto/resolve``), so the Operator panel settles it the same way.
+
+    A session that drives a v2 run gets that run's person gates instead
+    (claunch-whm4e.1.1): the rail row's ``answers`` (cflow2_web
+    ``rail_entries``, the same read the dashboard's cards stand on), each
+    with ``version: 2`` and its ``presses`` -- ``/api/cflow2/approve``,
+    ``select``, ``extend`` or ``move/resolve`` with the strip's body. A slot
+    that holds a v2 run is not read as v1: the v1 engine refuses it.
     """
     gates = []
-    for session in sessions:
-        cwd = _session_cwd(session)
-        if session.exited or not cwd:
-            continue
+    live = [(s, _session_cwd(s)) for s in sessions]
+    live = [(s, cwd) for s, cwd in live if not s.exited and cwd]
+    try:
+        rail = cflow2_web.rail_entries([(s.sdef.name, cwd) for s, cwd in live])
+    except Exception:  # noqa: BLE001 - the v1 gates still go out
+        log.debug("operator gates: v2 rail read failed", exc_info=True)
+        rail = {}
+    for session, cwd in live:
         name = session.sdef.name
+        row = rail.get(name)
+        if row is not None and row.get("status") != "error":
+            for g in flow_nudge.v2_gates(row):
+                gates.append({"session": name, "cwd": row.get("cwd") or cwd,
+                              "scope": row.get("scope") or name, "version": 2,
+                              "status": row.get("status"), "run": row.get("run"),
+                              "workflow": row.get("workflow"), "step_id": g["instance"],
+                              "title": g["label"], "reason": row.get("reason"),
+                              "goto_request": None, **g,
+                              "prompt": _clip(g["prompt"], 1200)})
+            continue
         try:
             entry = _slim_cflow_payload(cflow_engine.status(cwd, scope=name))
         except (CflowError, WorkflowError, StateError, OSError):
@@ -5651,7 +5673,7 @@ def _operator_gates(sessions) -> list:
             continue
         ask = entry.get("ask") or {}
         goto = entry.get("goto_request") or {}
-        gates.append({"session": name, "cwd": cwd, "scope": name, "kind": kind,
+        gates.append({"session": name, "cwd": cwd, "scope": name, "kind": kind, "version": 1,
                       "status": entry.get("status"), "run": entry.get("run"),
                       "workflow": entry.get("workflow"), "step_id": entry.get("step_id"),
                       "title": entry.get("title"), "reason": entry.get("reason"),
