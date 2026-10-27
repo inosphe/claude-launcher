@@ -114,9 +114,13 @@ ISSUE_TITLE_CHARS = 200
 #: (claunch-gqt6w). A title says what an issue is called; the description
 #: says what the session is doing about it, and a topic is usually phrased
 #: in that vocabulary. Measured by scoring the same documents with and
-#: without it: the answer session's logit rose 1.26 and 1.30 on two of three
-#: topics, against a base-to-base noise of 0.61 at most. Closed issues are
-#: finished work the title already names, so they carry no body.
+#: without it, against a base-to-base noise of 0.61 at most: on 6-10
+#: sessions per topic the answer session's logit rose 1.26 and 1.30 on two
+#: of three topics; on the full 40-candidate preview it rose 1.49, 0.46 and
+#: 0.13 (only the first clears the noise), its rank went 9->4, 7->4, 24->21,
+#: and it stayed below ln 9 on all three. Sessions over ln 9 went from 5 to
+#: 2. Closed issues are finished work the title already names, so they
+#: carry no body.
 DRAFT_ISSUE_BODIES = 2
 ISSUE_BODY_CHARS = 600
 #: The cached briefing fields each prompt reads, in order. The preview also
