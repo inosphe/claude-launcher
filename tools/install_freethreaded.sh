@@ -34,6 +34,10 @@
 #   CLAUNCH_FT_ROOT        tool environment and bin (default: ~/.local/share/claunch-nogil)
 #   CLAUNCH_FT_SHIM_DIR    where `claunch-nogil` is written (default: ~/.local/bin)
 #
+# `~` above is `$HOME`, or -- when `HOME` is unset or empty -- your passwd
+# entry's home directory, so the script still reaches the p2p question instead
+# of dying on the first line that reads `$HOME`.
+#
 # The tool environment lives in its own UV_TOOL_DIR/UV_TOOL_BIN_DIR under
 # CLAUNCH_FT_ROOT, so `uv tool install` cannot replace the `claude-launcher`
 # tool of the regular `claunch`. `claunch-nogil` sets PYTHON_GIL=0 and runs the
@@ -48,12 +52,26 @@
 
 set -euo pipefail
 
+# The three defaults below are the first thing to read the environment, and
+# `set -u` above turns an empty `$HOME` into a fatal error on the line it is
+# read -- before the p2p decision asks anything (found in review, mirrored from
+# install_freethreaded.ps1). A spawned shell with no login state reaches that.
+# The passwd entry answers where `$HOME` does not; a temp directory is the last
+# resort, so the decision still runs and still asks.
+home_dir="${HOME:-}"
+if [ -z "$home_dir" ] && command -v getent >/dev/null 2>&1; then
+    home_dir="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+fi
+if [ -z "$home_dir" ]; then
+    home_dir="${TMPDIR:-/tmp}"
+fi
+
 ZVEC_REPO="${CLAUNCH_FT_ZVEC_REPO:-https://github.com/alibaba/zvec}"
 ZVEC_REF="${CLAUNCH_FT_ZVEC_REF:-8d4996924bce78f8b072a353803c305101bcc807}"
-CACHE_ROOT="${CLAUNCH_FT_WHEELS:-${XDG_CACHE_HOME:-$HOME/.cache}/claunch/zvec-wheels}"
+CACHE_ROOT="${CLAUNCH_FT_WHEELS:-${XDG_CACHE_HOME:-$home_dir/.cache}/claunch/zvec-wheels}"
 PYTHON_SPEC="3.14t"
-FT_ROOT="${CLAUNCH_FT_ROOT:-$HOME/.local/share/claunch-nogil}"
-SHIM_DIR="${CLAUNCH_FT_SHIM_DIR:-$HOME/.local/bin}"
+FT_ROOT="${CLAUNCH_FT_ROOT:-$home_dir/.local/share/claunch-nogil}"
+SHIM_DIR="${CLAUNCH_FT_SHIM_DIR:-$home_dir/.local/bin}"
 export UV_TOOL_DIR="$FT_ROOT/tools" UV_TOOL_BIN_DIR="$FT_ROOT/bin"
 
 rebuild=0
