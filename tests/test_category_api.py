@@ -429,6 +429,27 @@ def test_agent_fold_absorbs_flat_nodes_into_one(home, tmp_path, typed):
     _run(scenario, tmp_path)
 
 
+def test_agent_group_puts_siblings_under_a_new_parent(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        one = category.create_node(ws, {"label": "beads page"}, "user")
+        two = category.create_node(ws, {"label": "sims page"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "old"}], two["id"], "user")
+        out = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "reason": "two pages",
+            "group": {"label": "pages", "nodes": [one["id"], two["id"]], "place": one["id"]}})
+        assert out["grouped_under"] == "pages"
+        assert out["path"] == ["pages", "beads page"]
+        assert sorted(out["grouped"]) == ["pages / beads page", "pages / sims page"]
+        assert category.where(ws, "session", "a")["node"]["id"] == one["id"]
+        assert category.where(ws, "session", "old")["node"]["path"] == ["pages", "sims page"]
+        bad = await _call(client, "POST", "/api/category/agent-assign", {
+            "session": "a", "group": {"label": "x", "nodes": [one["id"]]}}, status=400)
+        assert "at least two" in bad["error"]
+
+    _run(scenario, tmp_path)
+
+
 def test_agent_refuses_a_fold_with_nothing_to_absorb_and_a_partial_split(home, tmp_path, typed):
     async def scenario(mgr, client):
         ws = category.workspace("alpha")

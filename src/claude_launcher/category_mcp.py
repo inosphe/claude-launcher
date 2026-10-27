@@ -49,6 +49,12 @@ TOOLS = [
      "items?: [ref...]}]}, reason} makes several children of one parent and puts the items "
      "across them; at most one part may name no items, and that part takes whatever the "
      "others left. "
+     "GROUP at registration: {group: {label, nodes: [id...], place?, parent_id?, aliases?, "
+     "description?}, reason} puts two or more existing categories under one new parent "
+     "(F -> (D, E)) and keeps them whole -- their items and children move with them -- then "
+     "places the items at 'place' (one of those nodes or a node inside one; omitted: the new "
+     "parent). Use it when sibling categories share a subject, so the level does not keep "
+     "widening; fold is the call that dissolves them instead. "
      "Without 'items' it places the session this job is about (and its issue). A request "
      "started from the session pane's 'Assign to tree' follows that pane's '제안으로 등록' "
      "checkbox instead of this argument.",
@@ -82,6 +88,17 @@ TOOLS = [
                                      "description": "refs (session name or issue id) from this call's items; omit to take the rest"}},
                            "required": ["label"]}}},
                   "required": ["parts"]},
+         "group": {"type": "object", "description":
+                   "put existing categories under one new parent at registration, keeping them",
+                   "properties": {
+                       "parent_id": {"type": "string", "description": "existing node id; omit to use the lowest common parent of the grouped nodes"},
+                       "label": {"type": "string"},
+                       "aliases": {"type": "array", "items": {"type": "string"}},
+                       "description": {"type": "string"},
+                       "nodes": {"type": "array", "items": {"type": "string"},
+                                 "description": "ids of two or more existing categories to put under the new one"},
+                       "place": {"type": "string", "description": "node id for this call's items: one of nodes or inside one; omit for the new parent"}},
+                   "required": ["label", "nodes"]},
          "proposal": {"type": "boolean", "description":
                       "file a new category for a person to review instead of creating it now "
                       "(default false: create now)"},
@@ -106,7 +123,8 @@ def call_tool(name, args):
     if name == "category_assign":
         if not session:
             raise CategoryMcpError("category_assign needs a claunch session (CLAUNCH_SESSION)")
-        body = {k: args[k] for k in ("node_id", "new", "fold", "split", "proposal", "reason", "items")
+        body = {k: args[k] for k in ("node_id", "new", "fold", "split", "group", "proposal", "reason",
+                                 "items")
                 if args.get(k)}
         return client.post("/api/category/agent-assign", {**body, "session": session})
     selection = {"workspace": args["workspace"]} if args.get("workspace") else {"cwd": os.getcwd()}

@@ -299,6 +299,20 @@ def _split(ws, split: dict, items: list, actor: str, reason: str) -> dict:
             "paths": [" / ".join(c["node"]["path"]) for c in made["children"]]}
 
 
+def _group(ws, group: dict, items: list, actor: str, reason: str) -> dict:
+    """Registration-time grouping: put the existing nodes ``group.nodes`` under
+    one new parent (labelled by ``group``) and place ``items`` at
+    ``group.place`` -- one of those nodes or below one -- or at the new parent
+    when it is omitted. The nodes keep their items and children
+    (:func:`category.group`); ``fold`` is the call that dissolves them."""
+    body = {k: group[k] for k in ("label", "aliases", "description", "parent_id", "nodes", "place")
+            if k in group}
+    made = category.group(ws, body, items, actor, reason)
+    return {"grouped_under": made["node"]["label"], "node_id": made["node"]["id"],
+            "path": made["placed_in"]["path"],
+            "grouped": [" / ".join(g["path"]) for g in made["grouped"]]}
+
+
 def agent_assign(manager, caller: str, body: dict) -> dict:
     """The ``category_assign`` MCP call. ``caller`` is the calling session: a
     category fork assigns its origin's items, anyone else its own."""
@@ -328,6 +342,8 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
             result = _fold(ws, body["fold"], items, actor, reason)
         elif isinstance(body.get("split"), dict):
             result = _split(ws, body["split"], items, actor, reason)
+        elif isinstance(body.get("group"), dict):
+            result = _group(ws, body["group"], items, actor, reason)
         elif isinstance(body.get("new"), dict):
             new = dict(body["new"])
             # The job -- opened by "Assign to tree" -- records what the person
@@ -353,7 +369,8 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
                           "path": node["path"]}
         else:
             raise AssignError(400, "give node_id (an existing category), new {label, ...}, "
-                                    "fold {label, nodes, ...} or split {parts, ...}")
+                                    "fold {label, nodes, ...}, split {parts, ...} "
+                                    "or group {label, nodes, place?, ...}")
     except category.CategoryError as exc:
         err = AssignError(exc.status, str(exc))
         err.extra = exc.extra  # type: ignore[attr-defined]

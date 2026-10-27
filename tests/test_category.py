@@ -425,6 +425,51 @@ def test_merge_takes_an_explicit_parent_for_registration(ws):
     assert place(ws, S("p"))["id"] == out["node"]["id"]
 
 
+def test_group_puts_sibling_nodes_under_a_new_parent_and_keeps_them(ws):
+    web = node(ws, "web")
+    beads = node(ws, "beads page", parent=web["id"])
+    sims = node(ws, "sims page", parent=web["id"])
+    deep = node(ws, "sim charts", parent=sims["id"])
+    c.assign(ws, [S("a")], beads["id"])
+    c.assign(ws, [S("b")], deep["id"])
+    out = c.group(ws, {"label": "pages", "nodes": [beads["id"], sims["id"]]},
+                  [S("new")], "user", "two pages")
+    pages = out["node"]
+    # The new parent sits where the nodes met; the nodes, their items and
+    # their children are unchanged under it.
+    assert pages["parent_id"] == web["id"] and out["node"]["path"] == ["web", "pages"]
+    assert place(ws, S("a"))["id"] == beads["id"]
+    assert c.where(ws, "session", "b")["node"]["path"] == ["web", "pages", "sims page", "sim charts"]
+    assert {g["id"] for g in out["grouped"]} == {beads["id"], sims["id"]}
+    # Without `place` the call's items land in the new parent.
+    assert place(ws, S("new"))["id"] == pages["id"]
+    assert c.events(ws)[0]["op"] == "group"
+
+
+def test_group_places_items_in_a_grouped_node_and_refuses_bad_shapes(ws):
+    a = node(ws, "beads page")
+    b = node(ws, "sims page")
+    inner = node(ws, "beads list", parent=a["id"])
+    other = node(ws, "cflow")
+    with pytest.raises(c.CategoryError, match="at least two"):
+        c.group(ws, {"label": "pages", "nodes": [a["id"]]})
+    with pytest.raises(c.CategoryError, match="which is also selected"):
+        c.group(ws, {"label": "pages", "nodes": [a["id"], inner["id"]]})
+    with pytest.raises(c.CategoryError, match="place must be"):
+        c.group(ws, {"label": "pages", "nodes": [a["id"], b["id"]], "place": other["id"]}, [S("x")])
+    with pytest.raises(c.CategoryError, match="would sit inside it"):
+        c.group(ws, {"label": "pages", "nodes": [a["id"], b["id"]], "parent_id": inner["id"]})
+    with pytest.raises(c.CategoryError) as taken:
+        c.group(ws, {"label": "cflow", "nodes": [a["id"], b["id"]]})
+    assert taken.value.status == 409
+    # A refusal leaves the tree as it was.
+    assert {n["label"] for n in c.tree(ws)["nodes"]} == {"beads page", "sims page", "beads list", "cflow"}
+    out = c.group(ws, {"label": "pages", "nodes": [a["id"], b["id"]], "place": inner["id"]},
+                  [S("x")], "user")
+    assert out["node"]["parent_id"] is None
+    assert c.where(ws, "session", "x")["node"]["path"] == ["pages", "beads page", "beads list"]
+
+
 def test_merge_into_a_node_inside_a_folded_one_is_refused(ws):
     outer = node(ws, "web")
     inner = node(ws, "beads page", parent=outer["id"])

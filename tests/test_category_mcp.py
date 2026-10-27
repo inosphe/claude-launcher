@@ -85,11 +85,15 @@ def test_fold_and_split_reach_the_agent_route(client, monkeypatch):
     category_mcp.call_tool("category_assign", {
         "split": {"parts": [{"label": "a"}, {"label": "b"}]}, "reason": "two"})
     assert client.calls[-1][2]["split"]["parts"] == [{"label": "a"}, {"label": "b"}]
+    category_mcp.call_tool("category_assign", {
+        "group": {"label": "pages", "nodes": ["n1", "n2"], "place": "n1"}, "reason": "siblings"})
+    assert client.calls[-1][2]["group"] == {"label": "pages", "nodes": ["n1", "n2"], "place": "n1"}
 
 
 def test_the_tools_name_fold_and_split(client, monkeypatch):
     assign = next(t for t in category_mcp.TOOLS if t["name"] == "category_assign")
     props = assign["inputSchema"]["properties"]
-    assert {"fold", "split"} <= set(props)
+    assert {"fold", "split", "group"} <= set(props)
+    assert props["group"]["required"] == ["label", "nodes"]
     assert assign["inputSchema"]["properties"]["fold"]["required"] == ["label", "nodes"]
     assert assign["inputSchema"]["properties"]["split"]["required"] == ["parts"]

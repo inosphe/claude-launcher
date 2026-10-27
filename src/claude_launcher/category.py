@@ -741,6 +741,72 @@ def merge(ws, body, actor=""):
                 "folded": [n["id"] for n in nodes]}
 
 
+def group(ws, body, items=(), actor="", reason=""):
+    """Put existing sibling-level nodes under one new parent: ``F -> (D, E)``.
+
+    Where :func:`merge` dissolves the selected nodes into the new one, this
+    keeps them: ``nodes`` (two or more, none inside another) become children
+    of a new node labelled by ``body``, which sits at ``parent_id`` when given
+    and otherwise at the nodes' lowest common parent. Their items and
+    subtrees move with them, so nothing is re-placed. It is how a tree whose
+    top level keeps widening gains a level (claunch-xvb5o).
+
+    ``items`` (optional) are placed at ``place`` -- the new node when omitted,
+    otherwise a node inside the new node's subtree (one of ``nodes`` or below
+    one), so a registering session can land in D while D moves under F.
+    """
+    if not isinstance(body, dict):
+        raise CategoryError("body must be an object")
+    items = _items(items or [])
+    grouped = body.get("nodes") or []
+    if not isinstance(grouped, list) or len(grouped) > 100:
+        raise CategoryError("nodes must be an array of at most 100 ids")
+    grouped = list(dict.fromkeys(_text(n, "node id", 64, True) for n in grouped))
+    if len(grouped) < 2:
+        raise CategoryError("group needs at least two existing categories to put under one parent")
+    label, aliases, description = _new_node_body(body)
+    reason = _text(reason, "reason", 2000)
+    place = body.get("place")
+    place = None if place in (None, "") else _text(place, "place", 64, True)
+    with connection(ws) as db:
+        db.execute("BEGIN IMMEDIATE")
+        nodes = [_get_node(db, n) for n in grouped]
+        for node in nodes:
+            above = _ancestors(db, node["parent_id"])
+            clash = [o["label"] for o in nodes if o["id"] in above]
+            if clash:
+                raise CategoryError(
+                    f"{node['label']} is inside {clash[0]}, which is also selected")
+        if "parent_id" in body:
+            parent = _parent_arg(body.get("parent_id"))
+            if parent is not None:
+                _get_node(db, parent)
+                for node in nodes:
+                    if node["id"] in _ancestors(db, parent):
+                        raise CategoryError(
+                            f"cannot group {node['label']}: the new category would sit inside it")
+        else:
+            parent = _lca(db, [n["parent_id"] for n in nodes])
+        if place is not None:
+            _get_node(db, place)
+            if not set(grouped) & set(_ancestors(db, place)):
+                raise CategoryError("place must be one of the grouped categories or inside one")
+        made = _insert_node(db, parent, label, aliases, description, actor)
+        for node in nodes:
+            db.execute("UPDATE nodes SET parent_id=?, updated_at=? WHERE id=?",
+                       (made["id"], _now(), node["id"]))
+        target = place or made["id"]
+        for kind, ref in items:
+            _place(db, kind, ref, target, actor, reason or "group")
+        _event(db, actor, "group", node=made["id"], parent=parent, reason=reason,
+               grouped=[{"id": n["id"], "label": n["label"], "from": n["parent_id"]} for n in nodes],
+               items=items, place=target)
+        return {"node": {**made, "path": _path(db, made["id"])},
+                "grouped": [{"id": n["id"], "path": _path(db, n["id"])} for n in nodes],
+                "items": [{"kind": k, "ref": r} for k, r in items],
+                "placed_in": {"id": target, "path": _path(db, target)}}
+
+
 # ---- an agent's proposals ------------------------------------------------------- #
 
 def similar(ws, label, limit=5):
