@@ -109,6 +109,9 @@ function row(name, mode = "expanded") {
   const li = mkel("li");
   li.dataset.name = name;
   li.dataset.railMode = mode;
+  const actions = mkel("div");
+  actions.className = "rail-actions";
+  li.appendChild(actions);
   list.appendChild(li);
   return li;
 }
@@ -210,10 +213,10 @@ const kv = (li) => kvOf(card(li));
   check("opening uncached expanded rows makes no request", calls, []);
   check("the empty card explains the explicit action", note(rows.s1).textContent,
         "No summary yet");
-  check("the empty card has an enabled refresh", card(rows.s1).querySelector(".sess-brief-refresh").disabled, false);
+  check("the empty card has an enabled refresh", rows.s1.querySelector(".sess-brief-refresh").disabled, false);
   ctx.apply();
   check("repainting empty rows still makes no request", calls, []);
-  click(card(rows.s1).querySelector(".sess-brief-refresh"));
+  click(rows.s1.querySelector(".sess-brief-refresh"));
   check("an explicit request starts summarising", note(rows.s1).textContent, "summarising…");
   check("the explicit action uses refresh=1", calls, ["/api/sessions/s1/briefing?refresh=1"]);
   await flush();
@@ -282,13 +285,13 @@ const kv = (li) => kvOf(card(li));
                 state: "blocked", progress: "waiting on review" },
     raw: null,
   } };
-  click(card(rows.s1).querySelector(".sess-brief-refresh"));
+  click(rows.s1.querySelector(".sess-brief-refresh"));
   check("the refresh asks again, uncached",
         calls.at(-1), "/api/sessions/s1/briefing?refresh=1");
   check("the stale text stays readable under the refresh",
         [card(rows.s1).className, one(rows.s1).textContent],
         ["sess-brief refreshing", "착지를 관리한다"]);
-  const spin = card(rows.s1).querySelector(".sess-brief-refresh");
+  const spin = rows.s1.querySelector(".sess-brief-refresh");
   check("the button spins and refuses a second click while out",
         [spin.className, spin.disabled],
         ["sess-brief-refresh spinning", true]);
@@ -318,7 +321,7 @@ const kv = (li) => kvOf(card(li));
   } };
   const s2row = row("s2b");
   ctx.apply();
-  click(card(s2row).querySelector(".sess-brief-refresh"));
+  click(s2row.querySelector(".sess-brief-refresh"));
   await flush();
   const raw = card(s2row).querySelector(".sess-brief-raw");
   check("unshaped prose is shown as it came",
@@ -329,7 +332,7 @@ const kv = (li) => kvOf(card(li));
   const s3 = row("s3");
   answer = { status: 400, body: { error: "llm not configured" } };
   ctx.apply();
-  click(card(s3).querySelector(".sess-brief-refresh"));
+  click(s3.querySelector(".sess-brief-refresh"));
   await flush();
   check("no LLM points at the config to write",
         note(s3).title,
@@ -339,7 +342,7 @@ const kv = (li) => kvOf(card(li));
   const s4 = row("s4");
   answer = { status: 404, body: { error: "no record" } };
   ctx.apply();
-  click(card(s4).querySelector(".sess-brief-refresh"));
+  click(s4.querySelector(".sess-brief-refresh"));
   await flush();
   check("a session with no record says that, not an error",
         note(s4).textContent, "no session record to summarise");
@@ -347,13 +350,13 @@ const kv = (li) => kvOf(card(li));
   const s5 = row("s5");
   answer = { status: 500, body: { error: "summariser fell over" } };
   ctx.apply();
-  click(card(s5).querySelector(".sess-brief-refresh"));
+  click(s5.querySelector(".sess-brief-refresh"));
   await flush();
   check("a real failure is reported in the daemon's words",
         [note(s5).textContent, note(s5).className],
         ["summariser fell over", "sess-brief-note error"]);
   check("a failed card still offers the ⟳",
-        card(s5).querySelector(".sess-brief-refresh").disabled, false);
+        s5.querySelector(".sess-brief-refresh").disabled, false);
 
   /* A state outside the agreed five stays neutral. */
   const s6 = row("s6");
@@ -365,7 +368,7 @@ const kv = (li) => kvOf(card(li));
     raw: null,
   } };
   ctx.apply();
-  click(card(s6).querySelector(".sess-brief-refresh"));
+  click(s6.querySelector(".sess-brief-refresh"));
   await flush();
   check("an unrecognised state stays neutral",
         card(s6).querySelector(".sess-brief-state").className,

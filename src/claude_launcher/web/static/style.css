@@ -805,7 +805,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   padding: 0; gap: 3px; font-variant-numeric: tabular-nums;
 }
 #session-list li[data-rail-mode="expanded"] .rail-actions {
-  order: 5; gap: 8px; padding: 0 0 0 var(--rail-inset);
+  order: 5; gap: 4px; flex-wrap: wrap; padding: 0 0 0 var(--rail-inset);
   background: transparent; border: 0;
 }
 #session-list li.sess-card .rail-actions > button {
@@ -835,13 +835,14 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li.sess-card :is(.rail-ctx-tokens, .rail-life) {
   flex-wrap: wrap; white-space: normal; overflow: visible;
 }
-/* One refresh for each function; status and controls share one baseline. */
+/* Expanded cards put their refresh controls in the actions row. */
 #session-list li[data-rail-mode="expanded"]:has(.sess-brief)
   :is(.sess-brief-rowref, .sess-status-check-rowref) { display: none; }
 #session-list li.sess-card .sess-brief {
   order: 6; margin: 0 0 0 var(--rail-inset); padding: 0;
   background: transparent; border: 0; border-radius: 0;
 }
+#session-list li.sess-card .sess-brief:empty { display: none; }
 #session-list li.sess-card .sess-brief-head {
   flex-wrap: nowrap; gap: 4px; min-height: 24px; font-size: 10px;
 }
@@ -858,7 +859,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 }
 #session-list li.sess-card .sess-brief-refresh {
   min-width: 24px; min-height: 24px; border: 0;
-  border-radius: 0; background: transparent;
+  border-radius: 0; background: transparent; margin-left: 0;
 }
 #session-list li.sess-card .sess-brief-refresh.spinning { animation: none; }
 /* A stand-in row for the rows the rail does not draw (app.js, claunch-thuwx):
@@ -1285,6 +1286,21 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   min-width: 0; white-space: normal; overflow-wrap: anywhere;
 }
 #session-list .sess-cflow2.gated { color: #d29922; font-weight: 600; }
+#session-list :is(a.sess-cflow, a.sess-cflow2) {
+  text-decoration: none; cursor: pointer;
+}
+#session-list .sess-cflow-link {
+  flex: none; margin-left: auto; font-size: 10px; color: #58a6ff;
+}
+#session-list :is(a.sess-cflow, a.sess-cflow2):is(:hover, :focus-visible) {
+  background: color-mix(in srgb, #58a6ff 12%, transparent);
+}
+#session-list :is(a.sess-cflow, a.sess-cflow2):is(:hover, :focus-visible) .sess-cflow-link {
+  text-decoration: underline;
+}
+#session-list :is(a.sess-cflow, a.sess-cflow2):focus-visible {
+  outline: 1px solid #58a6ff; outline-offset: 2px;
+}
 #session-list .sess-sims {
   flex-basis: 100%; min-width: 0; order: 3; padding-left: 16px;
   display: flex; flex-direction: column; gap: 3px; font-size: 11px;

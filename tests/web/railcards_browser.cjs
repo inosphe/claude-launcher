@@ -447,14 +447,18 @@ const READ = `(() => {
     assert.equal(await lead.locator(".sess-brief-note").count(), 0,
       "an existing row summary suppresses the empty summary notice");
     assert.equal(briefingRequests.length, 1, "opening a second uncached card adds no request");
-    const footerAligned = async () => lead.evaluate(li => {
-      const note = li.querySelector(".sess-brief-note").getBoundingClientRect();
+    await page.evaluate(() => { document.getElementById("sidebar").style.width = "660px"; });
+    const actionsAligned = async () => lead.evaluate(li => {
+      const actions = li.querySelector(".rail-actions");
       const buttons = [...li.querySelectorAll(".sess-brief-refresh, .sess-brief-check-refresh")];
-      return buttons.every(e => {
+      const details = actions.querySelector(".rail-details-toggle").getBoundingClientRect();
+      return buttons.length === 2 && buttons.every(e => {
         const b = e.getBoundingClientRect();
-        return Math.abs((b.top + b.bottom - note.top - note.bottom) / 2) < 2;
+        return e.parentElement === actions && Math.abs(b.top - details.top) < 2;
       });
     });
+    assert.ok(await actionsAligned(), "refreshes share the actions line with Details closed");
+    assert.equal(await lead.locator(".sess-brief-head").count(), 0, "no empty footer line");
     assert.equal(await lead.locator(".sess-brief-check-refresh").isVisible(), true,
       "summary presence preserves both refresh controls");
     if (process.env.RAIL_SCREENSHOT_DIR) await lead.screenshot({
@@ -463,7 +467,7 @@ const READ = `(() => {
     briefingDelay = 1500;
     await lead.locator(".sess-brief-refresh").click();
     await lead.locator(".sess-brief-note").filter({hasText: "summarising"}).waitFor();
-    assert.ok(await footerAligned(), "loading summary keeps the same line");
+    assert.ok(await actionsAligned(), "loading keeps controls in the actions line");
     if (process.env.RAIL_SCREENSHOT_DIR) await lead.screenshot({
       path: path.join(process.env.RAIL_SCREENSHOT_DIR, "summary-loading.png"),
     });
@@ -517,6 +521,7 @@ const READ = `(() => {
     assert.equal(await details.getAttribute("aria-expanded"), "false", "a control keeps its own keys");
     await page.keyboard.press("Enter");
     assert.equal(await details.getAttribute("aria-expanded"), "true");
+    assert.ok(await actionsAligned(), "refreshes stay in the actions line with Details open");
     assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), true);
     assert.equal(await lead.locator(".rail-commits").isVisible(), true);
     assert.equal(await lead.locator(".rail-tps-line").isVisible(), true, "TPS remains available in Details");
@@ -551,15 +556,15 @@ const READ = `(() => {
           });
       });
       const footer = await lead.evaluate(li => {
-        const head = li.querySelector(".sess-brief-head"), box = head.getBoundingClientRect();
+        const head = li.querySelector(".rail-actions"), box = head.getBoundingClientRect();
         return {overflow: head.scrollWidth > head.clientWidth + 1,
-          buttonsInside: [...head.querySelectorAll("button")].every(e => {
+          buttonsInside: [...head.querySelectorAll(".sess-brief-refresh, .sess-brief-check-refresh, .rail-details-toggle")].every(e => {
             const r = e.getBoundingClientRect();
             return r.width > 0 && r.left >= box.left && r.right <= box.right + 1;
           })};
       });
       assert.deepEqual(footer, {overflow:false, buttonsInside:true},
-        `${theme} ${width}px summary controls fit with TPS data present`);
+        `${theme} ${width}px action controls fit with TPS data present`);
       await lead.locator(".sess-brief-refresh").click();
       await page.waitForFunction(() => !document.querySelector(
         '#session-list li[data-name="lead"] .sess-brief-refresh').disabled);
@@ -692,6 +697,17 @@ const READ = `(() => {
     assert.equal(rows.find((r) => r.name === "rev-b").mode, "min",
       "and its unpinned neighbour stays a one-line card");
 
+    const runLink = page.locator('#session-list li[data-name="lead"] a.sess-cflow2');
+    await runLink.scrollIntoViewIfNeeded();
+    assert.match(await runLink.innerText(), /Run ↗/);
+    assert.equal(await runLink.getAttribute("href"), "#/wf/" + encodeURIComponent("lead@main|/repo"));
+    await runLink.focus();
+    assert.equal(await runLink.evaluate(e => getComputedStyle(e).outlineStyle), "solid");
+    if (process.env.RAIL_SCREENSHOT_DIR) await runLink.screenshot({
+      path: path.join(process.env.RAIL_SCREENSHOT_DIR, "run-link-focus.png"),
+    });
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => location.hash === "#/wf/" + encodeURIComponent("lead@main|/repo"));
     assert.deepEqual(errors, []);
     console.log("railcards_browser: ok");
   } finally {

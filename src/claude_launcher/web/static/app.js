@@ -7237,7 +7237,7 @@ function applyCflowBadges() {
     const old = li.querySelector(".sess-cflow");
     const r = sessCflowRun(li.dataset.name);
     if (!r) { if (old) old.remove(); continue; }
-    const line = old || document.createElement("span");
+    const line = old || document.createElement("a");
     if (!old) {
       // The badge walks to the run page; the row it sits on attaches. One
       // listener for the element's lifetime — it reads the run key from the
@@ -7252,6 +7252,7 @@ function applyCflowBadges() {
     // dataset writes are not covered by quietdom.js, so this one compares.
     const wf = `${r.scope || "default"}|${r.cwd}`;
     if (line.dataset.wf !== wf) line.dataset.wf = wf;
+    line.href = "#/wf/" + encodeURIComponent(wf);
     const gated = sessCflowGated(r);
     line.className = `sess-cflow${gated ? " gated" : ""}`;
     const [markCls, markGlyph] = wfMark(r.status, r);
@@ -7274,13 +7275,16 @@ function applyCflowBadges() {
       : (r.title || r.step_id || "");
     // Redrawn only when it reads differently: every poll repaints every badge
     // (claunch-v87).
+    const linkLabel = document.createElement("span");
+    linkLabel.className = "sess-cflow-link";
+    linkLabel.textContent = "Run ↗";
     const holder = document.createElement("span");
     if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
-      holder.append(mark, txt);
+      holder.append(mark, txt, linkLabel);
       if (line.innerHTML === holder.innerHTML) continue;
     }
     line.textContent = "";
-    line.append(mark, txt);
+    line.append(mark, txt, linkLabel);
   }
 }
 
@@ -7694,7 +7698,7 @@ function applyCflow2Badges() {
     const old = li.querySelector(".sess-cflow2");
     const r = (cflow2RailCache || {})[li.dataset.name];
     if (!r) { if (old) old.remove(); continue; }
-    const line = old || document.createElement("span");
+    const line = old || document.createElement("a");
     if (!old) {
       // Walks to the run page, which draws the v2 view for the slot; the
       // key is read from the dataset each poll rewrites.
@@ -7706,6 +7710,7 @@ function applyCflow2Badges() {
     }
     const wf = `${r.scope}|${r.cwd}`;
     if (line.dataset.wf !== wf) line.dataset.wf = wf;
+    line.href = "#/wf/" + encodeURIComponent(wf);
     line.className = `sess-cflow2${r.gated ? " gated" : ""}`;
     const state = cflow2RailMarkState(r);
     const mark = document.createElement("span");
@@ -7718,13 +7723,16 @@ function applyCflow2Badges() {
     txt.className = "sess-cflow2-text";
     txt.textContent = `${r.workflow || "cflow2"} · ${cflow2RailLabel(r)}`;
     line.title = (r.gated ? r.owed : r.current || []).join("\n");
+    const linkLabel = document.createElement("span");
+    linkLabel.className = "sess-cflow-link";
+    linkLabel.textContent = "Run ↗";
     const holder = document.createElement("span");
     if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
-      holder.append(mark, tag, txt);
+      holder.append(mark, tag, txt, linkLabel);
       if (line.innerHTML === holder.innerHTML) continue;
     }
     line.textContent = "";
-    line.append(mark, tag, txt);
+    line.append(mark, tag, txt, linkLabel);
   }
 }
 
@@ -11316,6 +11324,7 @@ function renderBriefingCard(name, entry, opts) {
   if (loading && data) card.className += " refreshing";
 
   const head = el("div", "sess-brief-head");
+  const controls = (opts && opts.actions) || head;
   if (brief && brief.state) {
     head.appendChild(el(
       "span", `sess-brief-state st-${briefingStateClass(brief.state)}`, brief.state
@@ -11344,7 +11353,7 @@ function renderBriefingCard(name, entry, opts) {
     e.stopPropagation();
     fetchBriefing(name, true);
   });
-  head.appendChild(refresh);
+  controls.appendChild(refresh);
   if (sessionStatusChecks(name).length) {
     const checksRefresh = el("button", "sess-brief-check-refresh");
     checksRefresh.type = "button";
@@ -11354,7 +11363,7 @@ function renderBriefingCard(name, entry, opts) {
       e.stopPropagation();
       requestStatusChecksRefresh(name, checksRefresh);
     });
-    head.appendChild(checksRefresh);
+    controls.appendChild(checksRefresh);
   }
   card.appendChild(head);
 
@@ -11418,8 +11427,7 @@ function renderBriefingCard(name, entry, opts) {
   // appear.
   if (!summaryOnly) appendStatusChecks(card, name);
   if (summaryOnly) {
-    // Empty/loading/error states belong beside the controls. Prose keeps
-    // its own full-width row, just as it does in the detail panel.
+    // Empty/loading/error states share the summary's metadata line.
     const note = card.querySelector(".sess-brief-note");
     if (note) {
       note.title = note.textContent;
@@ -11430,6 +11438,7 @@ function renderBriefingCard(name, entry, opts) {
       head.insertBefore(note, head.firstChild);
     }
   }
+  if (!head.children.length) head.remove();
   return card;
 }
 
@@ -11455,6 +11464,11 @@ function applyBriefingCards() {
     // any more: only this function appends `.sess-brief` to a rail row.
     const old = li.querySelector(".sess-brief");
     if (old) old.remove();
+    const actions = li.querySelector(".rail-actions");
+    if (actions) {
+      actions.querySelector(".sess-brief-refresh")?.remove();
+      actions.querySelector(".sess-brief-check-refresh")?.remove();
+    }
     syncRowRefresh(li, name);
     // A refresh that just landed paints its one-line onto the row now, so
     // the ⟳ stopping and the text changing are one event — otherwise the
@@ -11470,7 +11484,7 @@ function applyBriefingCards() {
     if (li.dataset.railMode !== "expanded") continue;
     // Rendering never starts a summary job. Only explicit controls request one.
     li.appendChild(renderBriefingCard(name, briefingCache.get(name), {
-      rail: true, rowSummary: oline ? oline.textContent : "",
+      rail: true, rowSummary: oline ? oline.textContent : "", actions,
     }));
   }
   // And the current session's top-bar button + pane, now the rail exists.
