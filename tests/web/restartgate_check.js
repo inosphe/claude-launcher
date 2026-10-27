@@ -118,6 +118,10 @@ function build(opts) {
   class FakeDate {
     constructor(ms) { this.ms = ms === undefined ? clock.at : ms; }
     toLocaleTimeString() { return `T${this.ms}`; }
+    // A card's footer names when its event arrived (claunch-egqrq), so the
+    // stub answers the formatting a real Date does.
+    toDateString() { return `D${this.ms}`; }
+    toLocaleString() { return `D${this.ms} T${this.ms}`; }
     // Gate deadlines arrive as ISO strings; Date.parse is real node, so a
     // fixed string is a fixed number, and the countdown then compares it
     // against FakeDate.now (the harness clock).

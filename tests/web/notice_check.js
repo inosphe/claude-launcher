@@ -94,6 +94,12 @@ function build(opts) {
   class FakeDate {
     constructor(ms) { this.ms = ms === undefined ? clock.at : ms; }
     toLocaleTimeString() { return `T${this.ms}`; }
+    // A card's footer names when its event arrived (claunch-egqrq), so the
+    // stub answers the formatting a real Date does; two different instants
+    // are two different days here, which keeps the "today" branch honest.
+    toLocaleString() { return `D${this.ms} T${this.ms}`; }
+    toDateString() { return `D${this.ms}`; }
+    getTime() { return typeof this.ms === "number" ? this.ms : Date.parse(this.ms); }
     // isNaN() is how app.js tells an unparseable started_at apart; a real
     // Date would answer from its own clock, the stub answers from what it
     // was handed (a string it cannot parse is still "a time it was given").

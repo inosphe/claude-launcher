@@ -240,6 +240,7 @@ function build(opts) {
     " killReapedNotify," +
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
+    " noticeAgesPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -1760,6 +1761,72 @@ function gotoRec(rec) {
                          handle: "bob", requested_at: new Date(BASE).toISOString() }];
     await w.api.refreshMeshJoinGate();
     check("a hidden mesh join kind draws no card", w.strip().length === 0, w.said());
+  }
+  /* --- when it arrived, and how long ago that was (claunch-egqrq) -------
+     The corner card and the panel's rows both end with the pair: the clock
+     reading of the moment the notice reached this browser and the age of
+     it. A sticky card can sit for an hour, so the age is redrawn by the
+     page's own one-second tick (noticeAgesPaint) instead of at repaint
+     time; the clock reading beside it keeps the same value throughout. */
+  {
+    const w = build();
+    w.api.notify("daemon restarted", "a different daemon answered",
+                 { source: "daemon", sticky: true });
+    const card = w.strip()[0];
+    const foot = card && card.children[card.children.length - 1];
+    const stamp = new Date(BASE).toLocaleTimeString();
+    check("a card ends with the arrival and its age",
+          !!foot && foot.classList.contains("notice-when") &&
+          foot.text().trim() === `${stamp} · 0s ago`, foot && foot.text());
+    check("the pair sits below what the card is about",
+          !!foot && card.children.indexOf(foot) === card.children.length - 1 &&
+          card.children.some((c) => c.textContent === "daemon restarted"),
+          card && card.children.map((c) => c.className));
+    w.clock.at = BASE + 95000;
+    w.api.noticeAgesPaint();
+    check("the age moves with the clock, without a repaint",
+          foot.text().trim() === `${stamp} · 1m ago`, foot.text());
+    w.clock.at = BASE + 3 * 3600 * 1000 + 5 * 60 * 1000;
+    w.api.noticeAgesPaint();
+    check("an hours-old card says hours and minutes",
+          foot.text().trim() === `${stamp} · 3h05m ago`, foot.text());
+    // A clock set backwards (another tab, a corrected machine time) must not
+    // put a negative age on a card.
+    w.clock.at = BASE - 60000;
+    w.api.noticeAgesPaint();
+    check("a card older than the clock says 0s rather than a negative age",
+          foot.text().trim() === `${stamp} · 0s ago`, foot.text());
+  }
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    const card = w.strip()[0];
+    const foot = card && card.children[card.children.length - 1];
+    check("a gate card carries the pair too, below its buttons",
+          !!foot && foot.classList.contains("notice-when") &&
+          /· 0s ago$/.test(foot.text().trim()), foot && foot.text());
+    w.api.noticePanelToggle(true);
+    const waiting = w.panelRows().find((r) => r.classList.contains("pending"));
+    const rowFoot = waiting && waiting.querySelector(".notice-when");
+    check("a waiting request's panel row ends with the pair",
+          !!rowFoot && /· 0s ago$/.test(rowFoot.text().trim()),
+          rowFoot && rowFoot.text());
+    w.api.notify("plain result", "copied", { source: "page" });
+    w.api.noticePanelPaint();
+    const hist = w.panelRows().find((r) => !r.classList.contains("pending"));
+    const histFoot = hist && hist.querySelector(".notice-when");
+    check("a history row carries the pair as well",
+          !!histFoot && /· 0s ago$/.test(histFoot.text().trim()),
+          histFoot && histFoot.text());
+    w.gate.goto = [];
+    await w.api.refreshGotoGate();
+    w.api.noticePanelPaint();
+    const whens = w.panelRows()
+      .map((r) => r.querySelector(".notice-when"))
+      .filter(Boolean).map((n) => n.text().trim());
+    check("a settled row keeps its age and names when it ended",
+          whens.some((t) => /· ended /.test(t)), whens);
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }

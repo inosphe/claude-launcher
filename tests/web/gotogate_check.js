@@ -86,6 +86,11 @@ function build() {
     constructor(ms) { this.ms = ms === undefined ? clock.at : ms; }
     getTime() { return typeof this.ms === "number" ? this.ms : Date.parse(this.ms); }
     valueOf() { return typeof this.ms === "number" ? this.ms : 1; }
+    // A card's footer names when its event arrived (claunch-egqrq), so the
+    // stub answers the formatting a real Date does.
+    toDateString() { return `D${this.ms}`; }
+    toLocaleTimeString() { return `T${this.ms}`; }
+    toLocaleString() { return `D${this.ms} T${this.ms}`; }
   }
   FakeDate.now = () => clock.at;
 
