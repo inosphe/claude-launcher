@@ -43868,10 +43868,11 @@ function cflow2GraphLegend() {
 }
 
 /* Which of the run's own steps the drawing left out, leaving out the ones no
-   unfolding would show. Every preset opens the run's path (cflow2GraphOpen), so
-   this is a safety net rather than the common case: it speaks when a step the
-   run is standing on is not drawn anyway — its body is drawn at another site a
-   shared procedure owns — rather than leaving a run panel that shows no run.
+   unfolding would show. `Simplified` opens the run's path (cflow2GraphOpen); a
+   block-detail step draws the structure instead, so this is what says which
+   steps of the run that leaves out — and it stays quiet for a step no
+   unfolding would show — its body is drawn at another site a shared procedure
+   owns — rather than leaving a run panel that shows no run.
 
    "On screen" is the layout's own walk (`layout.drawn`), not the boxes: a
    plain run emits no box of its own — its children are placed in its place —
@@ -44024,12 +44025,28 @@ function cflow2GraphPresetTabs(host, preset, redraw) {
   slider.step = "1";
   slider.value = String(level || cf2GraphLevel[host] || CF2G_LEVELS);
   slider.setAttribute("aria-label", "Block detail level");
+  slider.setAttribute("data-host", host);
   slider.title = "how much of the structure is drawn — the last step is every block unfolded";
+  /* The number follows the hand, the picture follows the release: a redraw
+     rebuilds this row (renderCflow2Into empties the box), so doing it on every
+     `input` would pull the slider out from under the pointer mid-drag and the
+     drag would stop after one step. `change` fires once the step is settled —
+     on release, or on each arrow key — and that is when the graph is redrawn
+     (ask2-73f9e612: nothing was redrawn at all, because the redraw was also
+     dropped while the slider held the focus). */
   slider.addEventListener("input", () => {
+    readout.textContent = `${Number(slider.value) || 1}/${CF2G_LEVELS}`;
+  });
+  slider.addEventListener("change", () => {
     const step = Number(slider.value) || 1;
     readout.textContent = `${step}/${CF2G_LEVELS}`;
     cflow2GraphPresetPick(host, "lv" + step);
     redraw();
+    /* the redraw replaced this slider, so a keyboard reader keeps its place */
+    if (typeof document.querySelector === "function") {
+      const again = document.querySelector(`.cf2-modes-range[data-host="${host}"]`);
+      if (again && again.focus) again.focus();
+    }
   });
   group.appendChild(slider);
   group.appendChild(readout);
@@ -44524,13 +44541,21 @@ function cflow2Throughput(data, state) {
   draw(); return section;
 }
 
+/* Whether a redraw may replace the box. A hand in a field on this view (a
+   reason being typed, an outcome being picked) makes a poll wait for it; a
+   forced redraw is the person's own press, so it goes through — a slider holds
+   the focus while it is dragged, and dropping those redraws left the picture
+   frozen on the step before (ask2-73f9e612). Pure. */
+function cflow2RedrawAllowed(force, handInBox) {
+  return !!force || !handInBox;
+}
+
 function renderCflow2Into(box, data, ui, force = false) {
   ui = ui || {};
-  // A hand is in a box on this view (a reason being typed, an outcome being
-  // picked): leave it; the next poll redraws once focus moves on.
   const act = document.activeElement;
-  if (act && act !== document.body && box.contains(act) &&
-      act.matches("input, textarea, select")) return;
+  const hand = !!act && act !== document.body && box.contains(act) &&
+    act.matches("input, textarea, select");
+  if (!cflow2RedrawAllowed(force, hand)) return;
   const signature = JSON.stringify(data);
   if (!force && box._cf2Signature === signature && box.querySelector(".cf2")) return;
   const identity = JSON.stringify([data.cwd, data.scope, (data.run || {}).run]);

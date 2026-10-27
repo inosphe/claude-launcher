@@ -90,13 +90,14 @@ const fns = new Function(
    slice("cflow2NodeBits"),
    slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs"),
    slice("cflow2GraphLevelOf"), slice("cflow2GraphCut"),
+   slice("cflow2RedrawAllowed"),
    slice("cflow2GraphPreset"), slice("cflow2GraphPresetSet"),
    slice("cflow2GraphPresetPick"), slice("cflow2GraphPresetTabs")].join("\n") +
   "\nreturn { cflow2GraphLayout, cflow2GraphProcs, cflow2GraphOpen, cflow2GraphSvg," +
   " cflow2GraphSig, cflow2GraphSite, cflow2NodeBits, cflow2ChartMode, cflow2ChartModeTabs," +
   " cflow2GraphInto, cflow2GraphPreset, cflow2GraphPresetSet, cflow2GraphPresetPick," +
   " cflow2GraphPresetTabs," +
-  " cflow2GraphHidden, cflow2GraphLevelOf, cflow2GraphCut," +
+  " cflow2GraphHidden, cflow2GraphLevelOf, cflow2GraphCut, cflow2RedrawAllowed," +
   " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD, CF2G_PRESETS, CF2G_LEVELS," +
   " cf2GraphPresets, cf2GraphFolds, cf2GraphLevel };"
 )();
@@ -841,17 +842,32 @@ function nest() {
   ok("and it is labelled for a reader who cannot see the caption",
      slider.attrs["aria-label"] === "Block detail level");
 
-  /* scrubbing is the whole interaction: each move is that step, and a step
-     starts the chart over from itself (the person's folds are dropped) */
+  /* scrubbing is the whole interaction. The number follows the hand; the
+     picture follows the release, because a redraw rebuilds this row and would
+     pull the slider out from under the drag (ask2-73f9e612) */
   fns.cf2GraphFolds["host-g"] = { d1: false };
   slider.value = "7";
   for (const fn of slider.listeners.input || []) fn();
-  check("moving the slider picks that step", fns.cflow2GraphPreset("host-g"), "lv7");
+  check("the number follows the hand", group.children[4].textContent,
+        "7/" + fns.CF2G_LEVELS);
+  check("…and the row is not rebuilt mid-drag", draws, 0);
+  for (const fn of slider.listeners.change || []) fn();
+  check("releasing the slider picks that step", fns.cflow2GraphPreset("host-g"), "lv7");
   check("…remembered for this viewer", store["claunch.cflow2.graphpreset.host-g"], "lv7");
   check("…says which step it landed on", group.children[4].textContent,
         "7/" + fns.CF2G_LEVELS);
   check("…drops the person's own folds", fns.cf2GraphFolds["host-g"], {});
   check("…and asks for one redraw", draws, 1);
+
+  /* the redraw is forced, and a slider holds the focus while it is dragged:
+     the guard must let the person's own press through and still leave a poll
+     alone while a field is being typed in */
+  check("a forced redraw goes through even with a hand in the box",
+        [fns.cflow2RedrawAllowed(true, true), fns.cflow2RedrawAllowed(true, false)],
+        [true, true]);
+  check("a poll waits for the hand",
+        [fns.cflow2RedrawAllowed(false, true), fns.cflow2RedrawAllowed(false, false)],
+        [false, true]);
 
   button.click();
   check("pressing Simplified goes back to the run",
