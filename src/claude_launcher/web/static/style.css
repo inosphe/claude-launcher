@@ -10110,6 +10110,10 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-create-draft-note { margin: 0; font-size: 11px; color: #8b949e; min-height: 14px; }
 .mt-create-draft-note.ok { color: #3fb950; }
 .mt-create-draft-note.bad { color: #f85149; }
+.mt-create-threshold { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b949e; }
+.mt-create-threshold[hidden] { display: none; }
+.mt-create-threshold-input { flex: 1 1 auto; min-width: 0; max-width: 320px; accent-color: #3fb950; }
+.mt-create-threshold-value { white-space: nowrap; color: #d8dbe0; font-variant-numeric: tabular-nums; }
 .mt-create-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .mt-create-controls select { background: #161b22; color: #d8dbe0; border: 1px solid #30363d;
   border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }

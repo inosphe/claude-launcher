@@ -31,7 +31,9 @@ const NAMES = ["ringLayout", "edgeWidth", "nodeTone", "routeBody", "optionRows",
   "pct", "logitText", "esc", "ring",
   // the create panel's model (claunch-vz96l)
   "sessionCategory", "metaLine", "briefLine", "sortRows", "hierarchyOrder",
-  "keepsRow", "filterChoices"];
+  "keepsRow", "filterChoices",
+  // the preview's threshold slider (claunch-wlk6g)
+  "probLogit", "logitProb", "draftPicks"];
 const ctx = {};
 vm.createContext(ctx);
 // ringLayout's defaults read the page's own stage constants; take them from
@@ -303,6 +305,36 @@ assert.ok(app.includes('case "megathreads"'), "the router opens it");
 assert.ok(app.includes("globalThis.MegaThreadPage?.stop()"), "leaving the page stops its poll");
 assert.ok(/if \(parts\[0\] === "megathreads"\)/.test(app), "the address names the page");
 
+/* ---- the preview's threshold (claunch-wlk6g) ---------------------------- */
+// The slider speaks p(mine) and the daemon scores in log-odds; 90% is ln 9,
+// the daemon's default bar, so the slider opens where the daemon judged.
+assert.ok(Math.abs(ctx.probLogit(0.9) - Math.log(9)) < 1e-9);
+assert.ok(Math.abs(ctx.logitProb(Math.log(9)) - 0.9) < 1e-9);
+assert.ok(Number.isFinite(ctx.probLogit(1)) && Number.isFinite(ctx.probLogit(0)), "certainty is clamped");
+{
+  const preview = { threshold: Math.log(9), members: [
+    { session: "a", logit: 2.6 }, { session: "b", logit: 1.5 }, { session: "c", logit: -0.4 },
+    { session: "d", logit: null, error: "jev: HTTP 500" },
+  ] };
+  assert.deepEqual(plain(ctx.draftPicks(preview, Math.log(9))), ["a"]);
+  // Lowering the bar widens the pick from the same scores, and the
+  // comparison is inclusive like the daemon's judge.
+  assert.deepEqual(plain(ctx.draftPicks(preview, 1.5)), ["a", "b"]);
+  assert.deepEqual(plain(ctx.draftPicks(preview, -5)), ["a", "b", "c"], "a failed call is never picked");
+  assert.deepEqual(plain(ctx.draftPicks(null, 0)), []);
+}
+// The slider never asks the daemon: its handler re-ticks and repaints, and
+// requestDraft (the one function that posts a preview) is not reachable
+// from it.
+{
+  const panel = slice("createPanel");
+  const handler = panel.slice(panel.indexOf('slider.addEventListener("input"'));
+  const body = handler.slice(0, handler.indexOf("});") + 3);
+  assert.ok(body.includes("applyDraftThreshold"), body);
+  assert.ok(!body.includes("requestDraft") && !body.includes("apiSend"), body);
+  assert.ok(!slice("applyDraftThreshold").includes("apiSend"));
+}
+
 const styles = fs.readFileSync(path.join(WEB, "style.css"), "utf8");
 assert.ok(styles.includes("#megathreads-view"), "the page has styles");
 assert.ok(/--rail-nav-rows:\s*\d+/.test(styles), "the rail's hover cap is a named count");
@@ -313,7 +345,9 @@ for (const cls of [".mt-new-filter", ".mt-new-count", ".mt-new-session-row.on", 
   // controls that are new with it
   ".mt-create-overlay", ".mt-create-card", ".mt-create-list", ".mt-create-controls",
   ".mt-create-status.on", ".mt-create-draft", ".mt-create-retry", ".mt-new-flag",
-  ".mt-new-meta", ".mt-new-brief"]) {
+  ".mt-new-meta", ".mt-new-brief",
+  // the preview's threshold slider (claunch-wlk6g)
+  ".mt-create-threshold", ".mt-create-threshold-input", ".mt-create-threshold-value"]) {
   assert.ok(styles.includes(cls), `the picker draws ${cls}`);
 }
 

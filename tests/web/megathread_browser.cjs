@@ -11,6 +11,9 @@
         with both offers and their scores;
      5. ticking both sends the message plus exactly those thread ids;
      6. the delivery result is shown, not swallowed.
+   And the create panel's Jev preview: the threshold slider re-ticks the
+   sessions over the scores already received, with no second request
+   (claunch-wlk6g).
 
    No live daemon is involved: /api/megathreads* answers from the fixture. */
 const assert = require("node:assert/strict");
@@ -86,7 +89,7 @@ const server = http.createServer((req, res) => {
           threshold: 2.197, model: "jev-latest", tokens: 420, scored: 2,
           members: [
             { session: "s2", thread: "", p_mine: 0.93, logit: 2.6, recommended: true },
-            { session: "s1", thread: "", p_mine: 0.12, logit: -1.9, recommended: false },
+            { session: "s1", thread: "", p_mine: 0.7, logit: 0.85, recommended: false },
           ],
           recommended: ["s2"], budget_used_tokens: 420, budget_remaining_tokens: 1999580,
         }));
@@ -258,6 +261,31 @@ const server = http.createServer((req, res) => {
       "a weak flag never claims a recommendation");
     assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("1명을 추천"),
       "the panel says what the preview found");
+
+    // The threshold slider (claunch-wlk6g): it opens at the daemon's bar
+    // (ln 9 = 90%) and moving it re-ticks from the scores in hand. The
+    // preview request count is the Jev call count: it must not move.
+    assert.equal(await page.isVisible(`${picker} .mt-create-threshold`), true,
+      "the slider appears with the scores");
+    assert.equal(await page.inputValue(`${picker} .mt-create-threshold-input`), "90");
+    assert.ok((await page.textContent(`${picker} .mt-create-threshold-value`)).includes("1명"));
+    const slide = (percent) => page.$eval(`${picker} .mt-create-threshold-input`, (el, value) => {
+      el.value = String(value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, percent);
+    const ticked = () => page.$$eval(`${picker} .mt-new-session:checked`, (els) => els.map((e) => e.value).sort());
+    await slide(60);
+    assert.deepEqual(await ticked(), ["s1", "s2"], "a lower bar ticks s1 (p 70%) as well");
+    assert.equal(await page.textContent(`${picker} .mt-new-count`), "2개 선택");
+    assert.equal((await page.$$eval(`${picker} .mt-new-flag:not(.weak)`, (els) => els.length)), 2,
+      "both rows now carry the recommendation flag");
+    assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("2명을 추천"));
+    await slide(95);
+    assert.deepEqual(await ticked(), [], "a bar over every score ticks nobody");
+    assert.ok((await page.textContent(`${picker} .mt-create-draft-note`)).includes("넘은 세션이 없습니다"));
+    await slide(90);
+    assert.deepEqual(await ticked(), ["s2"]);
+    assert.equal(drafts.length, 1, "moving the threshold asked Jev nothing");
 
     await page.check(`${picker} .mt-new-session[value="s1"]`);
     assert.equal(await page.textContent(`${picker} .mt-new-count`), "2개 선택");

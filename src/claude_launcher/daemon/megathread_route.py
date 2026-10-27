@@ -34,7 +34,8 @@ import asyncio
 import json
 import logging
 import math
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import briefing, cflow2_web, jev
 
@@ -64,6 +65,15 @@ CRITERIA = {
 #: instead of a message. The option ids stay ``mine``/``not_mine`` so one
 #: scorer (``scores``) and one judge (``judge``) read both answers; only the
 #: sentence the model is asked changes.
+#:
+#: The criteria count work the session has already done (claunch-wlk6g). A
+#: mega thread gathers the places a subject lives, and a session waiting on
+#: review or wrapping up is one of them; the first wording sent "already
+#: finished here" to ``not_mine``, and on four topics over forty live sessions
+#: the sessions that matched scored a logit of 1.5-2.4, under the ln 9
+#: threshold, so on the widest topic the preview recommended one or two of
+#: fifteen. With this wording eight or nine of the fifteen cleared it and no
+#: other session did (measurement on the issue).
 DRAFT_INSTRUCTIONS = (
     "The user is creating a mega thread: one input box that will reach several "
     "AI sessions, each with its own conversation thread. The user typed the "
@@ -71,14 +81,19 @@ DRAFT_INSTRUCTIONS = (
 )
 DRAFT_CRITERIA = {
     MINE: (
-        "The topic is this session's subject or would be answered by the work "
-        "this session is doing now (its task, issue, branch, briefing)."
+        "The topic is this session's subject, or the work this session is "
+        "doing or has done (its task, issues, branch, briefing) is about it."
     ),
     NOT_MINE: (
-        "The topic is another session's work, already finished here, or too "
-        "general to say this session is one of its places."
+        "The topic is about other work than this session's, or too general "
+        "to say this session is one of its places."
     ),
 }
+#: The key the state document gives the text being judged. A routing judges
+#: a message; the preview judges a topic, and its instructions say "the topic
+#: below", so the document names it that way.
+MESSAGE_KEY = "message"
+TOPIC_KEY = "topic"
 
 #: What one member's prompt may carry. The Jev default is 32k tokens for the
 #: state plus the question and 64k for the whole request; these caps keep a
@@ -87,6 +102,21 @@ SESSION_CHARS = 2000
 BRIEFING_CHARS = 2000
 MESSAGE_CHARS = 1000
 THREAD_MESSAGES = 12
+#: What the create form's preview adds to a session's record (claunch-wlk6g).
+#: A topic is scored before any thread exists, so the thread tail that tells a
+#: routing what a session is about is usually empty there, and the record has
+#: to say it instead: which workspace the session works in, which branch it
+#: stands on, and the titles of the issues it holds -- an issue id alone says
+#: nothing to a model that has never read the board.
+DRAFT_ISSUES = 4
+ISSUE_TITLE_CHARS = 200
+#: The cached briefing fields each prompt reads, in order. The preview also
+#: reads ``progress``: it is the sentence that says what the session has
+#: already done, which is how a topic about finished work tells two sessions
+#: on the same subject apart. Routing keeps the shorter set it was measured
+#: with (claunch-v5nhp).
+BRIEFING_KEYS = ("one-line-job-description", "goal", "now", "state")
+DRAFT_BRIEFING_KEYS = ("one-line-job-description", "goal", "now", "progress", "state")
 #: How many members the "nobody cleared the threshold" answer offers.
 TOP_N = 5
 #: Characters per token, deliberately pessimistic: Korean text runs near one
@@ -167,7 +197,7 @@ def session_state(manager, name: str) -> Dict[str, Any]:
     return {key: value for key, value in state.items() if value not in ("", None)}
 
 
-def briefing_text(name: str, sdef) -> str:
+def briefing_text(name: str, sdef, keys: Sequence[str] = BRIEFING_KEYS) -> str:
     """What the session is doing, from the cache the dashboard filled.
 
     No composition here: ``briefing.compose`` would call an LLM per member per
@@ -182,7 +212,7 @@ def briefing_text(name: str, sdef) -> str:
     if isinstance(brief, dict):
         parts = [
             str(brief.get(key) or "").strip()
-            for key in ("one-line-job-description", "goal", "now", "state")
+            for key in keys
         ]
         text = " / ".join(p for p in parts if p)
         if text:
@@ -197,6 +227,81 @@ def briefing_text(name: str, sdef) -> str:
         return clip("\n".join(briefing.tail_events(path, max_events=6)), BRIEFING_CHARS)
     except Exception:  # noqa: BLE001
         return ""
+
+
+def git_branch(cwd: str) -> str:
+    """The branch checked out in ``cwd``, read from git's own files.
+
+    No ``git`` process: a preview scores up to forty sessions and a fork per
+    session is the slow part of that. A linked worktree's ``.git`` is a file
+    naming its gitdir, which holds that worktree's ``HEAD``. A detached head,
+    a directory outside any checkout or an unreadable file is no branch.
+    """
+    if not cwd:
+        return ""
+    try:
+        here = Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        return ""
+    for top in (here, *here.parents):
+        dotgit = top / ".git"
+        try:
+            if dotgit.is_file():
+                line = dotgit.read_text(encoding="utf-8").strip()
+                if not line.startswith("gitdir:"):
+                    return ""
+                gitdir = Path(line[len("gitdir:"):].strip())
+                if not gitdir.is_absolute():
+                    gitdir = top / gitdir
+            elif dotgit.is_dir():
+                gitdir = dotgit
+            else:
+                continue
+            head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return ""
+        prefix = "ref: refs/heads/"
+        return head[len(prefix):] if head.startswith(prefix) else ""
+    return ""
+
+
+def draft_facts(name: str, sdef, *, workspace: str = "",
+                issues: Sequence[dict] = ()) -> Dict[str, Any]:
+    """What the preview adds to one session's record, beside
+    :func:`session_state`.
+
+    ``issues`` are the board rows that belong to the session
+    (``beads.match`` order: the linked issue first, then the active ones);
+    only their id, status and title travel. ``workspace`` is the registered
+    workspace the session's directory belongs to -- a worktree path names
+    its checkout, not the project, and two sessions in the same project can
+    stand in directories that share nothing but that name.
+    """
+    facts: Dict[str, Any] = {}
+    if workspace:
+        facts["workspace"] = workspace
+    branch = git_branch(getattr(sdef, "cwd", "") or "")
+    if branch:
+        facts["branch"] = branch
+    parent = getattr(sdef, "parent", "") or ""
+    if parent:
+        facts["parent"] = str(parent)
+    rows = []
+    for row in issues:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        rows.append({
+            key: value for key, value in (
+                ("id", str(row.get("id"))),
+                ("status", str(row.get("status") or "")),
+                ("title", clip(row.get("title") or "", ISSUE_TITLE_CHARS)),
+            ) if value
+        })
+        if len(rows) >= DRAFT_ISSUES:
+            break
+    if rows:
+        facts["issues"] = rows
+    return facts
 
 
 def thread_state(threads, tid: str) -> Dict[str, Any]:
@@ -234,18 +339,27 @@ def draft_questions() -> Dict[str, dict]:
 
 
 def build_state(manager, threads, member: Dict[str, Any], text: str, *,
-                max_chars: int = 12000) -> Dict[str, Any]:
+                max_chars: int = 12000, facts: Optional[Dict[str, Any]] = None,
+                briefing_keys: Sequence[str] = BRIEFING_KEYS,
+                text_key: str = MESSAGE_KEY) -> Dict[str, Any]:
     """One member's state document: the message being routed, who the session
-    is, what it is doing, and what this thread has been about."""
+    is, what it is doing, and what this thread has been about.
+
+    ``facts`` are fields added to the session's record (the preview's
+    :func:`draft_facts`); the record's own fields win a name they share.
+    """
     name = member["session"]
     try:
         sdef = manager.get(name).sdef
     except Exception:  # noqa: BLE001
         sdef = None
+    record = session_state(manager, name)
+    if facts:
+        record = {**facts, **record}
     state = {
-        "message": clip(text, MESSAGE_CHARS),
-        "session": session_state(manager, name),
-        "briefing": briefing_text(name, sdef) if sdef is not None else "",
+        text_key: clip(text, MESSAGE_CHARS),
+        "session": record,
+        "briefing": briefing_text(name, sdef, briefing_keys) if sdef is not None else "",
         "thread": thread_state(threads, member["thread"]),
     }
     # One cap over the whole document: the sections are individually bounded,
@@ -408,6 +522,9 @@ async def evaluate(
     manager, threads, members: List[Dict[str, Any]], text: str, *,
     cfg: Dict[str, Any], ask: Optional[Any] = None,
     qs_factory: Optional[Any] = None,
+    facts: Optional[Dict[str, Dict[str, Any]]] = None,
+    briefing_keys: Sequence[str] = BRIEFING_KEYS,
+    text_key: str = MESSAGE_KEY,
 ) -> Dict[str, Any]:
     """Ask Jev about every member concurrently and judge the answers.
 
@@ -416,7 +533,9 @@ async def evaluate(
     ``qs_factory`` is the question set to ask (``questions`` here,
     ``draft_questions`` for the create form's preview): the machinery below
     -- one document per member, one call, one judgment -- is the same for a
-    message and for a topic.
+    message and for a topic. ``facts`` (session name -> fields),
+    ``briefing_keys`` and ``text_key`` are the preview's record; a routing
+    passes none of them.
     """
     pol = policy(cfg)
     call = ask or default_ask
@@ -434,7 +553,9 @@ async def evaluate(
         """
         qs = build_questions()
         try:
-            state = build_state(manager, threads, member, text, max_chars=pol["max_chars"])
+            state = build_state(manager, threads, member, text, max_chars=pol["max_chars"],
+                                facts=(facts or {}).get(member.get("session") or ""),
+                                briefing_keys=briefing_keys, text_key=text_key)
             estimate = estimate_tokens(state, qs)
         except Exception as exc:  # noqa: BLE001 -- no state, no call, no spend
             log.info("megathread: member %s has no state: %s", member.get("thread"), exc)
@@ -498,6 +619,7 @@ def draft_members(threads, sessions: List[str]) -> List[Dict[str, Any]]:
 async def draft(
     manager, threads, sessions: List[str], topic: str, *,
     cfg: Dict[str, Any], ask: Optional[Any] = None,
+    facts: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Which of ``sessions`` the topic belongs to.
 
@@ -506,10 +628,16 @@ async def draft(
     ``recommended``. The caller shows the list, the user edits it, and only
     then is a cluster created -- so nothing here writes a thread, a member or
     a delivery.
+
+    ``facts`` is :func:`draft_facts` per session, gathered by the caller
+    (it reads the board, which this module does not hold). Every member's
+    ``logit`` comes back, recommended or not: the form moves its threshold
+    over these scores without asking again (claunch-wlk6g).
     """
     members = draft_members(threads, sessions)
     judgment = await evaluate(
         manager, threads, members, topic, cfg=cfg, ask=ask, qs_factory=draft_questions,
+        facts=facts, briefing_keys=DRAFT_BRIEFING_KEYS, text_key=TOPIC_KEY,
     )
     threshold = float(judgment.get("threshold") or 0.0)
     rows = []

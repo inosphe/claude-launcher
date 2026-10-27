@@ -27,6 +27,9 @@ T20 a message whose mention names only a guest is delivered to that guest,
    and the ledger follows it (claunch-p9wes.1.1)
 T21 an exited guest beside a live owner does not make the row queued
    (claunch-p9wes.1.1): the owner was typed, so ``delivered`` holds
+T24 the topic preview gives Jev each session's board issues (titles, not
+   ids) from one cached listing per board, and a board that cannot be read
+   leaves the preview standing (claunch-wlk6g)
 """
 
 import asyncio
@@ -112,10 +115,12 @@ def jev_answer(p_mine: float, tokens: int = 100):
     }
 
 
-def run(tmp_path, scenario, names=("s1", "s2"), cfg=None):
+def run(tmp_path, scenario, names=("s1", "s2"), cfg=None, board=None):
     manager = FakeManager([FakeSession(n) for n in names])
     app = web.Application()
     app["manager"] = manager
+    if board is not None:
+        app["beads"] = board
     threads = threads_api.install(app, T.ThreadStore(tmp_path / "threads.sqlite3"))
     megas = megathread_api.install(app, M.MegaThreadStore(tmp_path / "megathread.sqlite3"))
 
@@ -773,3 +778,62 @@ def test_t25_a_preview_does_not_close_a_routing(tmp_path, monkeypatch):
 
     run(tmp_path, scenario, cfg={**CFG, "megathread_max_chars": 300,
                                  "megathread_jev_budget_tokens": 1000})
+
+
+class FakeBoard:
+    """The parts of ``daemon/beads.Board`` the preview reads."""
+
+    def __init__(self, rows, fail=False):
+        self.rows, self.fail, self.reads = rows, fail, 0
+
+    def available(self):
+        return True
+
+    async def root_for(self, cwd):
+        return "/board"
+
+    def has_board(self, root):
+        return root == "/board"
+
+    async def issues_or_stale(self, root):
+        self.reads += 1
+        if self.fail:
+            raise RuntimeError("br is locked")
+        return self.rows
+
+
+def test_t24_the_preview_reads_each_sessions_issue_titles_from_the_board(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+        seen[state["session"]["name"]] = state
+        return jev_answer(0.9)
+
+    monkeypatch.setattr(jev, "system_one", fake_system_one)
+    board = FakeBoard([
+        {"id": "x-1", "status": "in_progress", "assignee": "s1", "title": "로그 형식을 정한다"},
+        {"id": "x-2", "status": "closed", "created_by": "s2", "title": "배포 스크립트"},
+        {"id": "x-3", "status": "open", "assignee": "s9", "title": "남의 일"},
+    ])
+
+    async def scenario(req, manager, threads, megas):
+        await req("POST", "/api/megathreads/draft", {"topic": "로그"})
+        assert seen["s1"]["topic"] == "로그"
+        assert seen["s1"]["session"]["issues"] == [
+            {"id": "x-1", "status": "in_progress", "title": "로그 형식을 정한다"}]
+        assert seen["s2"]["session"]["issues"] == [
+            {"id": "x-2", "status": "closed", "title": "배포 스크립트"}]
+        # One listing for the board, however many sessions file on it.
+        assert board.reads == 1
+
+    run(tmp_path, scenario, board=board)
+
+    seen.clear()
+    broken = FakeBoard([], fail=True)
+
+    async def still(req, manager, threads, megas):
+        res = await req("POST", "/api/megathreads/draft", {"topic": "로그"})
+        assert res["scored"] == 2 and not any(m.get("error") for m in res["members"])
+        assert "issues" not in seen["s1"]["session"]
+
+    run(tmp_path / "broken", still, board=broken)
