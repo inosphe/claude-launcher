@@ -591,6 +591,14 @@ const READ = `(() => {
       "poll updates preserve the reveal");
     sessions[0].profile = "nc";
     await page.evaluate(() => refreshSessions());
+    // The rebuilt row is `content-visibility: auto`: until the browser's next
+    // rendering update decides it is on screen it measures as its placeholder
+    // (81 px here, then 290 px), so its height is read once it has been laid
+    // out, the same wait the width/theme loop below makes (claunch-qnq1c.3).
+    await page.waitForFunction((closed) => {
+      const li = document.querySelector('#session-list li[data-name="lead"]');
+      return li && li.getBoundingClientRect().height > closed;
+    }, closedHeight, { timeout: 5000 }).catch(() => {});
     assert.ok(await lead.evaluate(e => e.getBoundingClientRect().height) > closedHeight,
       "diagnostics are omitted from the default card height");
 
