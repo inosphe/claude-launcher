@@ -837,7 +837,7 @@ const RUN = {
   }
   check("both polls feed the channel",
         /cflow2RailCache = rows;[\s\S]{0,200}runGateFeed\(\)/.test(src) &&
-          /renderTermCflow\(\);[^\n]*\n\s*runGateFeed\(\);/.test(src));
+          /runGateFeed\(\);[^\n]*\n\s*renderTermTimer\(\);/.test(src));
 
   /* ---- the markup, the stylesheet, the call sites ---- */
   const at = (id) => html.indexOf(`id="${id}"`);

@@ -12343,9 +12343,9 @@ async function refreshCflow() {
     if (typeof renderSessionGrid === "function") renderSessionGrid(); // and the grid's gate highlight, read off the same cache
     applyRailQuiet();    // one of its two flags is read off this very cache
   }
+  runGateFeed();       // every gated run's card (claunch-whm4e.1)
   renderTermTimer();   // the attached session's own header chip
   renderTermCflow();   // and the answer strip over its terminal
-  runGateFeed();       // and every gated run's card (claunch-whm4e.1)
   if (repaintRail && currentPage === "home") renderHome();
   // Everything above is what feeds the rail and the header: badges on rows,
   // the attached session's countdown, the home card's count. What follows
