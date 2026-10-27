@@ -43187,11 +43187,19 @@ const CF2G_RAIL = 14;      // a branch group's fork and join rails
 const CF2G_EDGE = 8;       // the room each rail asks for
 const CF2G_MARGIN = 14;    // around the whole drawing
 const CF2G_GUTTER = 6;     // where a shared-body reference runs
+const CF2G_HANDLE = 16;    // a plain run's band, where its fold control sits
 /* The engine completes these from their children; every other type is drawn
    as one box. A box that still has children (`on` outcomes) stacks them. */
 const CF2G_ATOMIC = new Set(["task", "wait", "control"]);
 /* Containers whose children are alternatives or concurrent branches. */
 const CF2G_BRANCHES = new Set(["par", "group", "cond", "choose", "try", "timeout"]);
+/* How much of the definition a preset unfolds, as a sub radio group inside the
+   graph view (claunch-g6uma.2). The ladder runs from the state the panel opens
+   in to everything: `simple` follows the run, `lvN` unfolds every block less
+   than N deep from its root, `all` unfolds every block. Each step opens at
+   least what the step before it does. */
+const CF2G_PRESETS = [["simple", "Simplified", "every block folded but the path to the run's position"], ["lv1", "1 level", "the root's own steps, with the blocks below them folded"], ["lv2", "2 levels", "blocks open two levels deep"], ["lv3", "3 levels", "blocks open three levels deep"], ["all", "All", "every block unfolded"]];
+const CF2G_PRESET_DEPTH = { lv1: 1, lv2: 2, lv3: 3 };
 
 /* One line, at most `max` characters: an SVG <text> collapses whitespace but
    a newline would still push the rest of a label out of its box. */
@@ -43287,10 +43295,14 @@ function cflow2GraphProcs(chart) {
   return { first, sites, order, groups, key };
 }
 
-/* Which containers the graph draws open: the root, every ancestor of the
-   run's position (a live or awaiting instance) and of the selection, then
-   the person's own toggles — the rule cflow2TreeOpen applies. */
-function cflow2GraphOpen(chart, detail, selected, overrides) {
+/* Which containers the graph draws open. The preset settles the base set:
+   `simple` (what the panel opens in) is the run's position — the root, every
+   ancestor of a live or awaiting instance and of the selection, the rule
+   cflow2TreeOpen applies; `lvN` opens every block less than N deep from its
+   root; `all` opens every block. The person's own folds (`overrides`:
+   id -> open) are laid on top of that, and picking a preset again starts the
+   chart over from the preset. Pure. */
+function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
   const nodes = (chart && chart.nodes) || {};
   const open = new Set();
   if (chart && chart.root && nodes[chart.root]) open.add(chart.root);
@@ -43300,9 +43312,35 @@ function cflow2GraphOpen(chart, detail, selected, overrides) {
       if (nodes[c] && parent[c] === undefined) parent[c] = id;
     }
   }
-  const lift = (id) => { for (let p = parent[id]; p; p = parent[p]) open.add(p); };
-  for (const i of (detail && detail.instances) || []) if (nodes[i.node]) lift(i.node);
-  if (selected && nodes[selected]) lift(selected);
+  const mode = CF2G_PRESETS.some((p) => p[0] === preset) ? preset : "simple";
+  const limit = CF2G_PRESET_DEPTH[mode];
+  if (limit || mode === "all") {
+    /* how deep a block sits, counted from the nearest root: a body reachable
+       by two paths opens at the shallower one, so a level never hides a block
+       that another path would have shown */
+    const depth = new Map();
+    const roots = [];
+    if (chart && chart.root && nodes[chart.root]) roots.push(chart.root);
+    else for (const id of Object.keys(nodes)) if (parent[id] === undefined) roots.push(id);
+    const queue = roots.map((id) => [id, 0]);
+    while (queue.length) {
+      const [id, d] = queue.shift();
+      if (depth.has(id) && depth.get(id) <= d) continue;
+      depth.set(id, d);
+      for (const c of (nodes[id] && nodes[id].children) || []) {
+        if (nodes[c]) queue.push([c, d + 1]);
+      }
+    }
+    for (const [id, d] of depth) {
+      const n = nodes[id];
+      if (!n || CF2G_ATOMIC.has(n.type) || !(n.children || []).length) continue;
+      if (mode === "all" || d < limit) open.add(id);
+    }
+  } else {
+    const lift = (id) => { for (let p = parent[id]; p; p = parent[p]) open.add(p); };
+    for (const i of (detail && detail.instances) || []) if (nodes[i.node]) lift(i.node);
+    if (selected && nodes[selected]) lift(selected);
+  }
   for (const [id, on] of Object.entries(overrides || {})) {
     if (on) open.add(id); else open.delete(id);
   }
@@ -43409,13 +43447,13 @@ function cflow2GraphLayout(chart, detail, opts) {
             h: Math.max(...boxes.map((b) => b.h)) + CF2G_CHIP + 2 * CF2G_EDGE + 2 * CF2G_RAIL };
     } else {
       const boxes = k.map(measure);
-      s = { w: Math.max(...boxes.map((b) => b.w)), h: stackH(boxes) };
+      s = { w: Math.max(...boxes.map((b) => b.w)), h: stackH(boxes) + CF2G_HANDLE };
     }
     size.set(id, s);
     return s;
   };
 
-  const out = { w: 0, h: 0, nodes: [], edges: [], boxes: [], chips: [] };
+  const out = { w: 0, h: 0, nodes: [], edges: [], boxes: [], chips: [], folds: [] };
   const geo = new Map();
   const roleOf = (id, child) => {
     const n = at(id);
@@ -43488,11 +43526,17 @@ function cflow2GraphLayout(chart, detail, opts) {
       const sites = groupOf(id);
       out.boxes.push({
         id, kind: n.type === "loop" ? "loop" : "call", x, y, w: s.w, h: s.h,
-        text: n.type === "loop" ? cflow2GraphLoopText(n)
+        /* a loop's guard can be prose: it is cut to the room left beside the
+           fold control rather than running under it */
+        text: n.type === "loop"
+          ? cflow2GraphClip(cflow2GraphLoopText(n),
+                            Math.max(12, Math.floor((s.w - 46) / 6.3)))
           : `call ${n.proc || "?"}${sites.length > 1 ? ` · shared ×${sites.length}` : ""}`,
         sub: n.type === "scope" ? cflow2GraphSite(id) : "",
         shared: sites.length > 1,
       });
+      out.folds.push({ id, kind: n.type === "loop" ? "loop" : "call",
+                       x: x + s.w - 20, y: y + 5 });
       const inner = x + CF2G_PAD, iw = s.w - 2 * CF2G_PAD;
       let cy = y + CF2G_HEAD, prev = null, first = null;
       for (const c of k) {
@@ -43529,6 +43573,7 @@ function cflow2GraphLayout(chart, detail, opts) {
       const ax = x + s.w / 2;
       out.chips.push({ id, x, y, w: s.w, type: n.type, text: cflow2GraphChip(n) });
       out.boxes.push({ id, kind: "group", x, y, w: s.w, h: s.h, text: "" });
+      out.folds.push({ id, kind: "group", x: x + s.w - 20, y: y + 2 });
       let lx = x;
       k.forEach((c, i) => {
         const cs = boxes[i];
@@ -43547,8 +43592,11 @@ function cflow2GraphLayout(chart, detail, opts) {
       return;
     }
 
-    /* everything else runs in order, top to bottom */
-    let cy = y, prev = null;
+    /* everything else runs in order, top to bottom, under a band of its own:
+       a plain run has no frame to title, so the band is the room its fold
+       control needs and the only mark that the block starts here */
+    out.folds.push({ id, kind: n.type || "seq", x: x + s.w - 20, y: y + 1 });
+    let cy = y + CF2G_HANDLE, prev = null;
     for (const c of k) {
       const cs = measure(c);
       const cx = x + (s.w - cs.w) / 2;
@@ -43635,6 +43683,19 @@ function cflow2GraphSvg(g) {
              `y="${num(e.ly)}">${escXml(e.label)}</text>`);
     }
   }
+  /* Every block drawn open carries the way back: a `−` in its title band (a
+     frame's) or in its own band (a plain run's). Drawn after the edges so no
+     line crosses it, and pressable on its own — the frame is a picture, not a
+     target. A folded block is a plain box instead, and that box opens it
+     (`data-toggle`). */
+  for (const f of g.folds) {
+    p.push(`<g class="cf2g-fold ${escXml(f.kind || "seq")}" data-node="${escXml(f.id)}" ` +
+           `data-collapse="1" tabindex="0" role="button" aria-label="fold ${escXml(f.id)}">`);
+    p.push("<title>fold this block</title>");
+    p.push(`<rect x="${num(f.x)}" y="${num(f.y)}" width="15" height="13" rx="3"/>`);
+    p.push(`<text x="${num(f.x + 7.5)}" y="${num(f.y + 10)}" text-anchor="middle">−</text>`);
+    p.push("</g>");
+  }
   for (const n of g.nodes) {
     const cls = ["cf2g-node", `t-${n.type}`, n.kind,
                  n.live ? "live" : "", n.awaiting ? "awaiting" : "",
@@ -43670,20 +43731,26 @@ function cflow2GraphLegend() {
   return el("p", "wf-note cf2g-legend",
     "Down: steps in order · side by side: branches, forked above and joined below · " +
     "boxed: a loop, its retry running back up · call: a procedure, drawn once " +
-    "where several steps call it");
+    "where several steps call it · − folds a block, a box reading +n collapsed opens one");
 }
 
-/* `opts`: selected, open (overrides), onSelect(id, collapsed). */
+/* `opts`: selected, open (the person's own folds), preset, onSelect(id,
+   collapsed), onToggle(id, open). */
 function cflow2GraphInto(host, chart, detail, opts) {
   opts = opts || {};
-  const open = cflow2GraphOpen(chart, detail, opts.selected, opts.open);
+  const open = cflow2GraphOpen(chart, detail, opts.selected, opts.open, opts.preset);
   const layout = cflow2GraphLayout(chart, detail, { open });
   const wrap = el("div", "cf2g-wrap");
   wrap.tabIndex = 0;
   wrap.innerHTML = cflow2GraphSvg(layout);
   const pick = (target) => {
     const node = target && target.closest ? target.closest("[data-node]") : null;
-    if (!node || !opts.onSelect) return;
+    if (!node || !node.dataset) return;
+    if (node.dataset.collapse) {
+      if (opts.onToggle) opts.onToggle(node.dataset.node, false);
+      return;
+    }
+    if (!opts.onSelect) return;
     opts.onSelect(node.dataset.node, !!node.dataset.toggle);
   };
   wrap.addEventListener("click", (e) => pick(e.target));
@@ -43725,6 +43792,43 @@ function cflow2ChartModeTabs(host, mode, redraw) {
     button.addEventListener("click", () => {
       cf2ChartModes[host] = value;
       try { localStorage.setItem("claunch.cflow2.chartmode." + host, value); } catch {}
+      redraw();
+    });
+    group.appendChild(button);
+  }
+  return group;
+}
+
+/* How much of the graph is unfolded, per host, and the sub radio group that
+   picks it. A preset is the base the person's own folds sit on: choosing one
+   starts the chart over from it, so the same button always gives the same
+   picture. Kept per host like the chart mode is. */
+const cf2GraphPresets = {};
+const cf2GraphFolds = {};
+function cflow2GraphPreset(host) {
+  let preset = cf2GraphPresets[host];
+  if (!preset) {
+    try { preset = localStorage.getItem("claunch.cflow2.graphpreset." + host); } catch {}
+    if (!CF2G_PRESETS.some((p) => p[0] === preset)) preset = "simple";
+  }
+  return preset;
+}
+function cflow2GraphPresetSet(host, preset) {
+  cf2GraphPresets[host] = preset;
+  try { localStorage.setItem("claunch.cflow2.graphpreset." + host, preset); } catch {}
+}
+function cflow2GraphPresetTabs(host, preset, redraw) {
+  const group = el("div", "cf2-modes sub");
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", "Graph detail");
+  for (const [value, label, hint] of CF2G_PRESETS) {
+    const button = el("button", "cf2-mode", label);
+    button.type = "button";
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", String(preset === value));
+    button.title = hint;
+    button.addEventListener("click", () => {
+      cflow2GraphPresetSet(host, value);
       redraw();
     });
     group.appendChild(button);
@@ -44629,6 +44733,15 @@ function renderCflow2Into(box, data, ui, force = false) {
     const redraw = () => renderCflow2Into(box, box._cf2Data, ui, true);
     const chartMode = cflow2ChartMode(host);
     sec.appendChild(cflow2ChartModeTabs(host, chartMode, redraw));
+    /* the graph's own sub radio group: how much of the definition is unfolded.
+       In graph mode the presets are what Expand all and Collapse were, so
+       those two buttons stay with the callstack, which has no presets. */
+    if (chartMode === "graph") {
+      sec.appendChild(cflow2GraphPresetTabs(host, cflow2GraphPreset(host), () => {
+        cf2GraphFolds[host] = {};   // a preset is a starting point, not a step
+        redraw();
+      }));
+    }
     const tools = el("div", "cf2-chart-tools");
     const marked = Object.values(nodes).filter((n) => n.force_target).length;
     tools.appendChild(el("span", "wf-note", marked
@@ -44642,10 +44755,17 @@ function renderCflow2Into(box, data, ui, force = false) {
       const active = rows.filter((r) => r.awaiting);
       const target = active[0] || rows.filter((r) => r.active).at(-1);
       if (!target) return;
-      const parents = Object.fromEntries(rows.map((r) => [r.id, r.parent]));
-      const opened = { ...(cf2Open[host] || {}) };
-      for (let p = parents[target.id]; p; p = parents[p]) opened[p] = true;
-      cf2Open[host] = opened;
+      /* in the graph the run's position is what the Simplified preset is, so
+         reaching it is picking that preset rather than opening boxes by hand */
+      if (chartMode === "graph") {
+        cflow2GraphPresetSet(host, "simple");
+        cf2GraphFolds[host] = {};
+      } else {
+        const parents = Object.fromEntries(rows.map((r) => [r.id, r.parent]));
+        const opened = { ...(cf2Open[host] || {}) };
+        for (let p = parents[target.id]; p; p = parents[p]) opened[p] = true;
+        cf2Open[host] = opened;
+      }
       redraw();
       const scope = chartMode === "graph" ? ".cf2g-wrap [data-node]" : ".cf2-tree [data-node]";
       const row = Array.from(box.querySelectorAll(scope))
@@ -44660,24 +44780,31 @@ function renderCflow2Into(box, data, ui, force = false) {
     const fold = el("button", "wf-btn sm clear", "Collapse");
     fold.title = "back to the run's position only";
     fold.addEventListener("click", () => { cf2Open[host] = {}; redraw(); });
-    tools.append(current, expand, fold);
+    tools.appendChild(current);
+    if (chartMode !== "graph") tools.append(expand, fold);
     sec.appendChild(tools);
     let sel = cf2Selected[host] || null;
     if (sel && !nodes[sel]) sel = cf2Selected[host] = null;
     if (chartMode === "graph") {
       sec.appendChild(cflow2GraphLegend());
-      const opened = cflow2GraphOpen(data.chart, data, sel, cf2Open[host]);
+      const preset = cflow2GraphPreset(host);
+      const opened = cflow2GraphOpen(data.chart, data, sel, cf2GraphFolds[host], preset);
       const graphSignature = JSON.stringify([identity, data.chart, data.visits,
-        (data.instances || []).map((i) => [i.node, i.await]), sel, [...opened].sort()]);
+        (data.instances || []).map((i) => [i.node, i.await]), sel, preset, [...opened].sort()]);
       if (box._cf2GraphSignature === graphSignature && box._cf2Graph) {
         sec.appendChild(box._cf2Graph);
       } else {
         box._cf2Graph = cflow2GraphInto(sec, data.chart, data, {
           selected: sel,
-          open: cf2Open[host] || {},
+          open: cf2GraphFolds[host] || {},
+          preset,
           onSelect: (id, collapsed) => {
-            if (collapsed) cf2Open[host] = { ...(cf2Open[host] || {}), [id]: true };
+            if (collapsed) cf2GraphFolds[host] = { ...(cf2GraphFolds[host] || {}), [id]: true };
             cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
+            redraw();
+          },
+          onToggle: (id, on) => {
+            cf2GraphFolds[host] = { ...(cf2GraphFolds[host] || {}), [id]: on };
             redraw();
           },
         }).wrap;

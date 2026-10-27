@@ -8930,6 +8930,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-mode:hover { color: #e6edf3; background: rgba(110, 118, 129, .14); }
 .cf2-mode[aria-checked="true"] { color: #e6edf3; background: rgba(56, 139, 253, .24); }
 .cf2-mode:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+/* the graph's own presets ride beside the view tabs, one step smaller
+   (claunch-g6uma.2): how much of the definition is unfolded */
+.cf2-modes.sub { margin-left: 8px; border-color: #21262d; }
+.cf2-modes.sub .cf2-mode { padding: 2px 9px; font-size: 11px; }
 
 /* the graph view: the same chart as a flow — down is sequence, side by side
    is branches, a box is a loop, a call frame is a procedure drawn once */
@@ -8960,6 +8964,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2g-edge.ref { stroke: #7ee787; stroke-dasharray: 4 4; }
 .cf2g-head { fill: #6e7681; }
 .cf2g-elabel { fill: #8fa1b3; font-size: 9.5px; }
+/* the `−` in a block's title band: the way back from an open block */
+.cf2g-fold { cursor: pointer; }
+.cf2g-fold rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.2; }
+.cf2g-fold text { fill: #8b949e; font-size: 11px; font-weight: 700; }
+.cf2g-fold:hover rect { fill: #21262d; stroke: #8fa1b3; }
+.cf2g-fold:hover text { fill: #e6edf3; }
+.cf2g-fold:focus-visible rect { stroke: #58a6ff; stroke-width: 2; }
+.cf2g-fold:focus-visible text { fill: #e6edf3; }
 .cf2g-node { cursor: pointer; }
 .cf2g-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.4; }
 .cf2g-node:hover rect { stroke: #8fa1b3; }

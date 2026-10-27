@@ -39,7 +39,9 @@ function sliceConst(name) {
 
 const CONSTS = ["CF2G_NODE_W", "CF2G_NODE_H", "CF2G_GAP", "CF2G_LANE", "CF2G_PAD",
                 "CF2G_HEAD", "CF2G_CHIP", "CF2G_RAIL", "CF2G_EDGE", "CF2G_MARGIN",
-                "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes"];
+                "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes",
+                "CF2G_HANDLE",
+                "CF2G_PRESETS", "CF2G_PRESET_DEPTH", "cf2GraphPresets", "cf2GraphFolds"];
 
 /* ---- stub DOM, just enough for the mode tabs -------------------------- */
 function stubNode(tag) {
@@ -64,11 +66,15 @@ const fns = new Function(
   CONSTS.map(sliceConst).join("\n") + "\n" +
   [slice("cflow2GraphClip"), slice("cflow2GraphLoopText"), slice("cflow2GraphChip"),
    slice("cflow2GraphSig"), slice("cflow2GraphSite"), slice("cflow2GraphProcs"), slice("cflow2GraphOpen"),
-   slice("cflow2GraphLayout"), slice("cflow2GraphSvg"), slice("cflow2NodeBits"),
-   slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs")].join("\n") +
+   slice("cflow2GraphLayout"), slice("cflow2GraphSvg"), slice("cflow2GraphInto"),
+   slice("cflow2NodeBits"),
+   slice("escXml"), slice("el"), slice("cflow2ChartMode"), slice("cflow2ChartModeTabs"),
+   slice("cflow2GraphPreset"), slice("cflow2GraphPresetSet"),
+   slice("cflow2GraphPresetTabs")].join("\n") +
   "\nreturn { cflow2GraphLayout, cflow2GraphProcs, cflow2GraphOpen, cflow2GraphSvg," +
   " cflow2GraphSig, cflow2GraphSite, cflow2NodeBits, cflow2ChartMode, cflow2ChartModeTabs," +
-  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD };"
+  " cflow2GraphInto, cflow2GraphPreset, cflow2GraphPresetSet, cflow2GraphPresetTabs," +
+  " CF2G_ATOMIC, CF2G_BRANCHES, CF2G_PAD, CF2G_PRESETS, cf2GraphPresets, cf2GraphFolds };"
 )();
 
 let failures = 0;
@@ -302,6 +308,144 @@ const inside = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y &&
   ok("a person's toggle folds one back", !folded.has("pa"));
 }
 
+/* ---- the presets: how much of the definition is unfolded --------------
+   (claunch-g6uma.2) A level counts from the block's root, so the same button
+   gives the same picture whatever the run is doing; the Simplified preset is
+   the run's position, which is the state the panel opens in. */
+function deep() {
+  return {
+    root: "d0",
+    nodes: {
+      d0: { id: "d0", type: "seq", children: ["a", "d1"], roles: ["", ""] },
+      a: { id: "a", type: "task", label: "a", children: [], roles: [] },
+      d1: { id: "d1", type: "loop", mode: "while", guard: "more", children: ["d2"],
+            roles: ["do"] },
+      d2: { id: "d2", type: "seq", children: ["b", "d3"], roles: ["", ""] },
+      b: { id: "b", type: "task", label: "b", children: [], roles: [] },
+      d3: { id: "d3", type: "par", settle: "all", children: ["c1", "c2"], roles: ["", ""] },
+      c1: { id: "c1", type: "task", label: "c1", children: [], roles: [] },
+      c2: { id: "c2", type: "task", label: "c2", children: [], roles: [] },
+    },
+  };
+}
+{
+  const chart = deep();
+  const opened = (preset) => [...fns.cflow2GraphOpen(chart, {}, null, null, preset)].sort();
+  check("the ladder has the presets the page offers", fns.CF2G_PRESETS.length, 5);
+  check("simplified shows the root's steps and follows the run", opened("simple"), ["d0"]);
+  check("one level is the root alone", opened("lv1"), ["d0"]);
+  check("two levels open one block below it", opened("lv2"), ["d0", "d1"]);
+  check("three levels open two blocks below it", opened("lv3"), ["d0", "d1", "d2"]);
+  check("all opens the deepest block too", opened("all"), ["d0", "d1", "d2", "d3"]);
+  check("a preset the page does not offer reads as simplified", opened("lv9"), ["d0"]);
+
+  const ladder = ["simple", "lv1", "lv2", "lv3", "all"];
+  const shrank = [];
+  for (let i = 1; i < ladder.length; i++) {
+    const now = new Set(opened(ladder[i]));
+    for (const id of opened(ladder[i - 1])) if (!now.has(id)) shrank.push([ladder[i], id]);
+  }
+  check("no step opens less than the step before it", shrank, []);
+
+  check("a fold laid on a level closes that block again",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: false }, "all")].sort(),
+        ["d0", "d2", "d3"]);
+  check("an open laid on simplified opens that block",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: true }, "simple")].sort(),
+        ["d0", "d1"]);
+}
+
+/* ---- every preset draws a picture that holds together ---------------- */
+{
+  const chart = fixture();
+  const svg = {};
+  const dangling = [];
+  for (const preset of ["simple", "lv1", "lv2", "lv3", "all"]) {
+    const g = fns.cflow2GraphLayout(chart, {},
+      { open: fns.cflow2GraphOpen(chart, {}, null, null, preset) });
+    svg[preset] = fns.cflow2GraphSvg(g);
+    const onScreen = new Set(g.nodes.concat(g.boxes).map((b) => b.id));
+    for (const n of g.nodes) if (n.ref && !onScreen.has(n.ref)) dangling.push([preset, n.id]);
+  }
+  check("no preset leaves a call pointing at a body that is not drawn", dangling, []);
+  ok("a preset that draws more says so in the markup",
+     svg.simple.length < svg.lv2.length, `${svg.simple.length} vs ${svg.lv2.length}`);
+
+  const lv1 = fns.cflow2GraphLayout(chart, {},
+    { open: fns.cflow2GraphOpen(chart, {}, null, null, "lv1") });
+  const lv2 = fns.cflow2GraphLayout(chart, {},
+    { open: fns.cflow2GraphOpen(chart, {}, null, null, "lv2") });
+  check("one level draws the root's blocks as boxes",
+        [!!boxOf(lv1, "lp"), nodeOf(lv1, "lp").toggle, !!boxOf(lv1, "pa")],
+        [false, true, false]);
+  check("two levels draws them as frames around their bodies",
+        [boxOf(lv2, "lp").kind, boxOf(lv2, "pa").kind, !!nodeOf(lv2, "lb"),
+         !!nodeOf(lv2, "a1")], ["loop", "group", true, true]);
+}
+
+/* ---- a block folds and opens again on the block itself ---------------- */
+{
+  const chart = deep();
+  const all = fns.cflow2GraphOpen(chart, {}, null, null, "all");
+  const wide = fns.cflow2GraphLayout(chart, {}, { open: all });
+  check("every open block carries a fold control",
+        wide.folds.map((f) => f.id).sort(), ["d0", "d1", "d2", "d3"]);
+  const wideSvg = fns.cflow2GraphSvg(wide);
+  ok("the loop's control is drawn on the loop",
+     wideSvg.includes('data-node="d1" data-collapse="1"'));
+  ok("a plain run has one too, in its own band",
+     wideSvg.includes('data-node="d0" data-collapse="1"'));
+
+  const folded = fns.cflow2GraphOpen(chart, {}, null, { d1: false }, "all");
+  const g = fns.cflow2GraphLayout(chart, {}, { open: folded });
+  check("folding a block leaves no frame", !!boxOf(g, "d1"), false);
+  check("…one box in its place that says what it hides",
+        nodeOf(g, "d1").sub, "while ≤ ? · more · +1 collapsed");
+  ok("…and that box offers to open it", nodeOf(g, "d1").toggle === true);
+  check("nothing inside a folded block is drawn", nodeOf(g, "d2"), undefined);
+  check("the folded block has no fold control left",
+        g.folds.map((f) => f.id), ["d0"]);
+  ok("the box that opens it is the pressable one",
+     fns.cflow2GraphSvg(g).includes('data-node="d1" data-toggle="1"'));
+  check("opening it again comes back to the same picture",
+        [...fns.cflow2GraphOpen(chart, {}, null, { d1: true }, "all")].sort(),
+        [...all].sort());
+
+  /* a shared body has one owner: the other sites are calls that point at it,
+     so none of them is a block a reader can fold */
+  const sharedChart = fixture();
+  const sharedG = fns.cflow2GraphLayout(sharedChart, {}, { open: ALL() });
+  check("only the site that drew a shared body has a fold control",
+        sharedG.folds.filter((f) => f.kind === "call").map((f) => f.id), ["ca"]);
+}
+
+/* ---- a press on the drawing goes where it was aimed ------------------ */
+{
+  const chart = fixture();
+  const calls = [];
+  const host = stubNode("div");
+  const into = fns.cflow2GraphInto(host, chart, { instances: [] }, {
+    preset: "lv2", open: {},
+    onSelect: (id, collapsed) => calls.push(["select", id, collapsed]),
+    onToggle: (id, open) => calls.push(["toggle", id, open]),
+  });
+  ok("the drawing is put in the host", host.children[0] === into.wrap);
+  ok("the fold control is in the markup it drew",
+     into.wrap.innerHTML.includes('data-node="lp" data-collapse="1"'));
+  const press = (ds) =>
+    into.wrap.listeners.click[0]({ target: { closest: () => ({ dataset: ds }) } });
+  press({ node: "lp", collapse: "1" });
+  press({ node: "lp", toggle: "1" });
+  press({ node: "t1" });
+  check("a fold control folds its block and selects nothing",
+        calls[0], ["toggle", "lp", false]);
+  check("a folded block's box asks to open it", calls[1], ["select", "lp", true]);
+  check("any other box is a selection", calls[2], ["select", "t1", false]);
+  const quiet = fns.cflow2GraphInto(stubNode("div"), chart, {}, { preset: "lv2" });
+  quiet.wrap.listeners.click[0]({ target: { closest: () => ({ dataset: { node: "lp", collapse: "1" } }) } });
+  ok("a press with nobody listening is harmless", true);
+}
+
 /* ---- the markup carries the whole picture ---------------------------- */
 {
   const chart = fixture();
@@ -401,6 +545,54 @@ const inside = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y &&
      src.includes("sec.appendChild(cflow2ChartModeTabs(host, chartMode, redraw));"));
   ok("the graph and the callstack are the branches the mode picks between",
      src.includes('chartMode === "graph"'));
+}
+
+/* ---- the presets are a sub radio group, and the choice is remembered -- */
+{
+  check("a host nobody has switched starts on the simplified view",
+        fns.cflow2GraphPreset("fresh"), "simple");
+  store["claunch.cflow2.graphpreset.odd"] = "lv9";
+  check("a stored value that is no preset falls back to the simplified view",
+        fns.cflow2GraphPreset("odd"), "simple");
+
+  let draws = 0;
+  const group = fns.cflow2GraphPresetTabs("host-g", "lv2", () => { draws++; });
+  check("it is one sub radio group of the presets",
+        [group.attrs.role, group.attrs["aria-label"], group.className],
+        ["radiogroup", "Graph detail", "cf2-modes sub"]);
+  check("one button per preset", group.children.length, fns.CF2G_PRESETS.length);
+  ok("each button is a radio", group.children.every((b) => b.attrs.role === "radio"));
+  check("the preset in hand is the checked one",
+        group.children.map((b) => [b.textContent, b.attrs["aria-checked"]]),
+        [["Simplified", "false"], ["1 level", "false"], ["2 levels", "true"],
+         ["3 levels", "false"], ["All", "false"]]);
+
+  group.children[3].click();
+  check("pressing a preset switches to it", fns.cflow2GraphPreset("host-g"), "lv3");
+  check("…remembered for this viewer", store["claunch.cflow2.graphpreset.host-g"], "lv3");
+  check("…and asks for one redraw", draws, 1);
+
+  fns.cflow2GraphPresetSet("host-g", "all");
+  check("the current-state button can set it without a press",
+        [fns.cflow2GraphPreset("host-g"), store["claunch.cflow2.graphpreset.host-g"]],
+        ["all", "all"]);
+
+  ok("the chart section draws the sub group from the stored preset, in graph mode only",
+     src.includes("if (chartMode === \"graph\") {") &&
+     src.includes("sec.appendChild(cflow2GraphPresetTabs(host, cflow2GraphPreset(host), () => {"));
+  ok("picking a preset throws the manual folds away and starts over",
+     src.includes("cf2GraphFolds[host] = {};   // a preset is a starting point, not a step"));
+  ok("the graph keeps its own folds, apart from the callstack's",
+     src.includes("cf2GraphFolds[host], preset)") &&
+     src.includes("cf2GraphFolds[host] || {}"));
+  ok("a redraw is skipped unless the preset or the folds changed",
+     src.includes("sel, preset, [...opened].sort()"));
+  ok("Expand all and Collapse stay with the callstack, which has no presets",
+     src.includes('if (chartMode !== "graph") tools.append(expand, fold);'));
+  ok("the current-state button reaches the run's position by picking Simplified",
+     src.includes('cflow2GraphPresetSet(host, "simple");'));
+  ok("the CSS sets the sub group apart from the view tabs", css.includes(".cf2-modes.sub"));
+  ok("the CSS gives the fold control a pressable look", css.includes(".cf2g-fold:hover"));
 }
 
 /* ---- nothing to draw ------------------------------------------------- */
