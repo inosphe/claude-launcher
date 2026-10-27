@@ -338,13 +338,20 @@ class Clock:
         minute, one session number burned each time). The event folds repeats
         of one (owner, reason) into one report, so it is not one row per
         attempt."""
-        reason = _one_line(str(exc) or exc.__class__.__name__)
+        raw = str(exc) or exc.__class__.__name__
+        reason = _one_line(raw)
         if getattr(exc, "permanent", False):
             self.spawn_permanent[(job["id"], job["generation"])] = reason
             self.spawn_failures[reason] = self.spawn_failures.get(reason, 0) + 1
             log.warning("sweep watcher for %s will not be created: %s",
                         job["id"], reason)
-            await self._report_spawn_failure(job, reason)
+            # ``raw``, not ``reason``: the event's fold key is
+            # ``normalize(reason)``, and the route that already reported this
+            # same refusal keys on the untruncated sentence. ``_one_line``
+            # cuts at 300 chars *before* the HTTP call prefix is stripped, so
+            # handing it over would key the long case differently on each
+            # side and write two rows (s5808-rev, claunch-is4o4).
+            await self._report_spawn_failure(job, raw)
             return
         count = self.spawn_failures[reason] = self.spawn_failures.get(reason, 0) + 1
         if count == 1:
@@ -379,6 +386,9 @@ class Clock:
         if self.spawn_reported.get(key) == reason:
             return
         self.spawn_reported[key] = reason
+        # ``reason`` may be the untruncated sentence (see the caller): it is
+        # what the event keys on, while the typed block shows one short line.
+        line = _one_line(reason)
         spawn_events.report(
             job["owner"], kind="fail", reason=reason,
             site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
@@ -405,7 +415,7 @@ class Clock:
                       f"owner: {job['owner']}\n"
                       f"repo: {job['repo']}\n"
                       f"sha: {job['sha']}\n"
-                      f"reason: {reason}\n"
+                      f"reason: {line}\n"
                       "protocol: the daemon refused this spawn with an answer a retry "
                       "cannot change, so it will not try again. The sweep itself still "
                       "runs; only the watching session is missing. Fix the cause named "

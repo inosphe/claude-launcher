@@ -613,3 +613,42 @@ def test_a_refusal_seen_by_the_route_and_the_sweep_is_one_event(tmp_path, monkey
         f"it one row, got {[e['details']['site'] for e in recorded]}")
     assert recorded[0]["details"]["site"] == "api.spawn", (
         "the route reported first; the sweep's copy folds into it")
+
+
+def test_a_long_reason_still_folds_the_route_and_the_sweep_into_one_row(tmp_path, monkeypatch):
+    """Truncation must not split the fold key (s5808-rev, claunch-is4o4).
+
+    ``_one_line`` cuts at 300 characters *before* ``normalize`` strips the
+    ``POST <path>: `` prefix, so a refusal longer than the limit keys 300
+    characters on the route side and 264 on the sweep side -- two rows for one
+    refusal. The sweep therefore reports the untruncated sentence and lets
+    ``normalize`` truncate once, on the same text the route saw."""
+    from claude_launcher.daemon import paths as daemon_paths
+    from test_delayed_sweep import Clock, git as run_git, live_manager, merges, queue
+
+    monkeypatch.setenv(daemon_paths.INSTANCE_BASE_ENV, str(tmp_path / ".home"))
+    monkeypatch.setenv(daemon_paths.INSTANCE_ENV, "")
+    repo = _sweep_repo(tmp_path, run_git)
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+
+    long_reason = "session 'leader' already exists: " + ("x" * 600)
+    _, rows = reporting(tmp_path, "leader")
+
+    # The route reports what the body said, untruncated.
+    spawn_events.report("leader", reason=long_reason, site="api.spawn")
+
+    def refuse(parent, body):
+        raise cflow2_exec.SpawnRefused(long_reason, permanent=True)
+
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(live_manager(), q, batch=True, spawn=refuse, policy=(5, 3600))
+    asyncio.run(clock.tick())
+
+    recorded = rows("leader")
+    assert len(recorded) == 1, (
+        "a long reason keys the same on both sides; truncation happens once, "
+        f"inside normalize, got {[e['details']['site'] for e in recorded]}")
