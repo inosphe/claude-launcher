@@ -58,7 +58,9 @@ def test_async_verification_gates_and_merge_interval_are_declared():
     # (claunch-1o6az): 5 waiting requests or 300 s after the first
     from claude_launcher import delayed_sweep, store
     assert opts["integrate"]["batch"] == {"collection": "landing", "status": "requested",
-                                          "size": delayed_sweep.BATCH_SIZE}
+                                          "size": delayed_sweep.BATCH_SIZE, "expire": 1800}
+    # a request nobody took for six windows is stale and no candidate (claunch-1o6az.1)
+    assert opts["integrate"]["batch"]["expire"] > 3 * opts["integrate"]["interval"]
     assert opts["integrate"]["interval"] == delayed_sweep.BATCH_SETTLE
     assert store.DAEMON_DEFAULTS["delayed_sweep_batch_size"] == delayed_sweep.BATCH_SIZE
     assert store.DAEMON_DEFAULTS["delayed_sweep_batch_settle"] == delayed_sweep.BATCH_SETTLE

@@ -1472,9 +1472,10 @@ def _b_choose(ctx, sc, node, value, m, line):
 def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
     """``batch: {collection, status, size}`` of a paced choose option: the window
     opens when ``size`` records of ``collection`` hold ``status``, or ``interval``
-    seconds after the oldest of them arrived, whichever comes first."""
+    seconds after the oldest of them arrived, whichever comes first. ``expire``
+    (optional, seconds) leaves out a record that has held ``status`` longer."""
     raw = _need_map(ctx, sc.file, raw, what, line)
-    _check_keys(ctx, sc.file, raw, ("collection", "status", "size"), what)
+    _check_keys(ctx, sc.file, raw, ("collection", "status", "size", "expire"), what)
     out: Dict[str, Any] = {}
     for key in ("collection", "status"):
         val = raw.get(key)
@@ -1485,6 +1486,11 @@ def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
     if size < 1 or size != int(size):
         raise ctx.err(sc.file, line, f"{what}: size must be a whole number of at least 1")
     out["size"] = int(size)
+    if raw.get("expire") is not None:
+        expire = _number(ctx, sc.file, raw.get("expire"), f"{what} expire", line)
+        if expire <= 0:
+            raise ctx.err(sc.file, line, f"{what}: expire must be a positive number of seconds")
+        out["expire"] = expire
     return out
 
 

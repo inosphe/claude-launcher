@@ -3289,11 +3289,23 @@ def _window_opens(r: Run, node: ir.Node, opt: Dict[str, Any]) -> Optional[float]
 def _batch_view(r: Run, opt: Dict[str, Any]) -> Dict[str, Any]:
     """What a batched option's window counts now: the records of its collection
     in the declared status (``count``), the arrival of the oldest (``first_at``,
-    None when none wait) and the ``size`` that opens the window at once."""
+    None when none wait) and the ``size`` that opens the window at once.
+
+    A record's arrival is when it entered that status (``since``; ``at`` for a
+    record written before ``since`` existed), so one that comes back to the
+    status later (deferred, then requested again) is timed from its return. With
+    ``expire`` a record that has held the status longer than that is left out:
+    its window opened long ago, so it is no candidate for this one."""
     batch = opt["batch"]
     cs = (r.state.get("collections") or {}).get(batch["collection"])
-    waiting = col_mod.items(cs, batch["status"])
-    firsts = [float(x["at"]) for x in waiting if x.get("at") is not None]
+    waiting = []
+    for x in col_mod.items(cs, batch["status"]):
+        t = x.get("since", x.get("at"))
+        x["_t"] = None if t is None else float(t)
+        if batch.get("expire") and x["_t"] is not None and r.now - x["_t"] > batch["expire"]:
+            continue
+        waiting.append(x)
+    firsts = [x["_t"] for x in waiting if x["_t"] is not None]
     return {"count": len(waiting), "size": batch["size"],
             "first_at": min(firsts) if firsts else None}
 
@@ -6985,7 +6997,7 @@ def _init_collections(r: "Run", previous: Optional[Dict[str, Any]]) -> None:
     old_cols = (previous or {}).get("collections") or {}
     for name, spec in specs.items():
         if previous is not None and spec["lifecycle"].get("inherit"):
-            cols[name], summary = col_mod.inherit_report(old_cols.get(name), spec)
+            cols[name], summary = col_mod.inherit_report(old_cols.get(name), spec, r.now)
             if not summary.get("inherited"):
                 cols[name] = _new_col(r, spec)
             else:
@@ -7350,7 +7362,7 @@ def _reset_at(r: "Run", node: Optional[ir.Node]) -> None:
         hit = next((p for p in names if p in points), None)
         if hit is None:
             continue
-        summary = dict(col_mod.reset(_col_state(r, name), spec))
+        summary = dict(col_mod.reset(_col_state(r, name), spec, r.now))
         summary.pop("event", None)
         r.emit("collection_reset", at=hit, **summary)
 

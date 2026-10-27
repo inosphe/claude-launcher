@@ -647,15 +647,18 @@ v1 `checklist:`의 대응:
   `selected`에 `override: true`가 붙는다. 사람의 선택도 기록을 갱신한다.
 - 고를 수 있는 옵션 목록의 항목에 `interval`과, 창이 닫혀 있으면
   `window_opens_at`이 실린다.
-- `batch: {collection, status, size}`(claunch-1o6az): `interval`을 가진 옵션에 붙이면
+- `batch: {collection, status, size[, expire]}`(claunch-1o6az): `interval`을 가진 옵션에 붙이면
   창의 기준이 「마지막 선택」에서 「모이는 배치」로 바뀐다. `collection`에서 `status`인
-  항목이 `size`건이면 창이 바로 열리고, 그보다 적으면 그중 가장 이른 항목의 `at`(밀려
-  들어온 시각) + `interval`에 열린다. 항목이 0건이면 기다릴 것이 없으므로 닫히지 않는다.
+  항목이 `size`건이면 창이 바로 열리고, 그보다 적으면 그중 가장 이른 항목이 그 `status`가 된
+  시각(`since`; 큐 항목은 push와 `status` 변경 때 엔진이 적고, 옛 항목은 `at`) + `interval`에
+  열린다. 그래서 deferred였다가 requested로 돌아온 항목은 돌아온 시각부터 잰다.
+  `expire`(초, 선택)를 주면 그 `status`에 그보다 오래 머문 항목은 세지 않는다(창은 이미
+  오래전에 열렸으니 이번 배치의 후보가 아니다, claunch-1o6az.1). 항목이 0건이면 기다릴 것이 없으므로 닫히지 않는다.
   보류 중에 항목이 `size`건에 닿으면 `opens_at`을 기다리지 않고 다음 시간 틱에 확정된다
   (`opens_at`은 틱마다 컬렉션에서 다시 계산한다). `batch`가 없는 옵션은 위 규칙 그대로다.
   옵션 항목에 `batch: {count, size, first_at, opens_at, opens_epoch}`가 실리고, 세션
   상단 타이머 줄(`#term-timers`)이 `batch n/size`로 보여 준다. improv-leader-v2의
-  `integrate`가 쓴다(`size: 5`, `interval: 300`) — 후속 스윕 배치(`delayed_sweep_batch_*`,
+  `integrate`가 쓴다(`size: 5`, `interval: 300`, `expire: 1800`) — 후속 스윕 배치(`delayed_sweep_batch_*`,
   기본 5건·300초)와 같은 규칙이다. 두 값은 워크플로 정본과 데몬 설정 기본값에 각각
   적혀 있고 `tests/test_cflow2_improv_leader.py`가 둘이 같은지 잰다.
 
