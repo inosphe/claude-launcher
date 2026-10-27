@@ -75,7 +75,18 @@ function Get-LocalAppData {
     if ($env:LOCALAPPDATA) { return $env:LOCALAPPDATA }
     $folder = [Environment]::GetFolderPath('LocalApplicationData')
     if ($folder) { return $folder }
-    return (Join-Path (Join-Path $HOME '.local') 'share')
+    return (Join-Path (Get-HomeDir) '.local/share')
+}
+
+# $HOME is empty in a spawned shell with no login state, and Join-Path refuses
+# an empty base -- so the shim's default died the same way LOCALAPPDATA did, at
+# line 88, before the decision (found in review). GetFolderPath answers from the
+# passwd entry instead, so this resolves where $HOME does not.
+function Get-HomeDir {
+    if ($HOME) { return $HOME }
+    $profile = [Environment]::GetFolderPath('UserProfile')
+    if ($profile) { return $profile }
+    return [IO.Path]::GetTempPath()
 }
 
 $LocalAppData = Get-LocalAppData
@@ -85,7 +96,7 @@ $ZvecRef = if ($env:CLAUNCH_FT_ZVEC_REF) { $env:CLAUNCH_FT_ZVEC_REF } else { '8d
 $CacheRoot = if ($env:CLAUNCH_FT_WHEELS) { $env:CLAUNCH_FT_WHEELS } else { Join-Path (Join-Path $LocalAppData 'claunch') 'zvec-wheels' }
 $PythonSpec = '3.14t'
 $FtRoot = if ($env:CLAUNCH_FT_ROOT) { $env:CLAUNCH_FT_ROOT } else { Join-Path $LocalAppData 'claunch-nogil' }
-$ShimDir = if ($env:CLAUNCH_FT_SHIM_DIR) { $env:CLAUNCH_FT_SHIM_DIR } else { Join-Path (Join-Path $HOME '.local') 'bin' }
+$ShimDir = if ($env:CLAUNCH_FT_SHIM_DIR) { $env:CLAUNCH_FT_SHIM_DIR } else { Join-Path (Join-Path (Get-HomeDir) '.local') 'bin' }
 $env:UV_TOOL_DIR = Join-Path $FtRoot 'tools'
 $env:UV_TOOL_BIN_DIR = Join-Path $FtRoot 'bin'
 New-Item -ItemType Directory -Force -Path $env:UV_TOOL_DIR, $env:UV_TOOL_BIN_DIR, $ShimDir | Out-Null

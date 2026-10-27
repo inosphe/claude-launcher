@@ -369,11 +369,26 @@ def ps1_sandbox(tmp_path: Path):
         path.chmod(0o755)
 
     def run(*args: str, pkg: int | None = 1, local_app_data: str | None = None,
-            stdin: str = ""):
+            home: str | None = "__default__", stdin: str = ""):
         """Run the ps1. ``local_app_data=None`` unsets the variable -- the defect.
 
         ``pkg=None`` also strips every inherited directory that holds a
         pkg-config, for the reason ``_without_pkg_config`` gives.
+
+        ``XDG_DATA_HOME`` is pointed inside ``tmp_path`` and ``HOME`` is too,
+        because the script's own default paths resolve through both: pwsh's
+        ``GetFolderPath('LocalApplicationData')`` prefers ``XDG_DATA_HOME`` over
+        ``HOME``, so a sandbox that set only ``HOME`` still created
+        ``$XDG_DATA_HOME/claunch-nogil/{bin,tools}`` -- outside ``tmp_path``, on
+        a real directory, while the case passed (found in review, claunch-fsn9f.1).
+        That preference only applies when the directory exists: measured,
+        ``GetFolderPath`` returns empty for a ``XDG_DATA_HOME`` that is not
+        there, and the script then falls through to ``$HOME/.local/share``. So
+        the fixture creates the directory, and without the redirect the whole
+        run stays inside ``tmp_path`` and the leak the review found is not
+        reproduced at all.
+        ``home=None`` unsets ``HOME`` instead, for the case that pins the shim's
+        default against it.
         """
         pkg_config(pkg)
         env = dict(os.environ)
@@ -387,7 +402,17 @@ def ps1_sandbox(tmp_path: Path):
         env["STUB_UV_LOG"] = str(log)
         env["STUB_TOOL_DIR"] = str(tmp_path / "tooldir")
         env["CLAUNCH_FT_ZVEC_WHEEL"] = str(wheel)
-        env["HOME"] = str(tmp_path / "home")
+        # Created, not just named: GetFolderPath answers with this path only
+        # while the directory exists (measured), and the point is to make the
+        # sandbox the place the script's defaults resolve to.
+        (tmp_path / "xdg-data").mkdir(exist_ok=True)
+        env["XDG_DATA_HOME"] = str(tmp_path / "xdg-data")
+        if home is None:
+            env.pop("HOME", None)
+        elif home == "__default__":
+            env["HOME"] = str(tmp_path / "home")
+        else:
+            env["HOME"] = home
         if local_app_data is None:
             env.pop("LOCALAPPDATA", None)
         else:
@@ -473,3 +498,46 @@ def test_the_ps1_still_uses_LOCALAPPDATA_when_it_is_set(ps1_sandbox):
     # The tool environment defaults under it, and that is created before the
     # decision, so the directory existing is the default having been used.
     assert (local / "claunch-nogil" / "tools").is_dir(), list(local.rglob("*"))
+
+
+@needs_pwsh
+def test_the_ps1_reaches_the_decision_with_HOME_unset_too(ps1_sandbox):
+    """The shim's default read $HOME, so it died the same way LOCALAPPDATA did.
+
+    ``$ShimDir`` was ``Join-Path (Join-Path $HOME '.local') 'bin'`` and sat
+    above the decision, so an empty ``$HOME`` stopped the script at that line
+    with 'Cannot bind argument to parameter Path because it is an empty string'
+    -- a spawned shell with no login state reaches it (found in review).
+    """
+    proc = ps1_sandbox["run"]("-RequireP2p", pkg=None, home=None)
+    out = _out(proc)
+    assert proc.returncode == 1, out
+    assert "Cannot bind argument to parameter 'Path'" not in out, out
+    assert "libsrtp2" in out, out
+    assert "멈춥니다" in out, out
+    assert ps1_sandbox["calls"]() == [], ps1_sandbox["calls"]()
+
+
+@needs_pwsh
+def test_the_ps1_defaults_land_under_the_sandbox_data_home(ps1_sandbox, tmp_path):
+    """The script's own defaults must land inside the sandbox, not on the host.
+
+    ``GetFolderPath('LocalApplicationData')`` prefers ``XDG_DATA_HOME`` over
+    ``HOME``, so a sandbox that redirected only ``HOME`` still wrote
+    ``$XDG_DATA_HOME/claunch-nogil/{bin,tools}`` -- outside ``tmp_path``, on a
+    real directory, while every case passed (measured, found in review).
+
+    The assertion is positive and on the sandbox: the fixture points
+    ``XDG_DATA_HOME`` at an existing ``tmp_path/xdg-data``, so the tool
+    environment the script creates has to appear there. Drop the redirect and
+    the run resolves to the host's data home instead, and this fails wherever it
+    runs -- unlike checking the host for a new directory, which could not tell a
+    fresh leak from an install the machine already had (a real one from an
+    earlier day sits at ~/.local/share/claunch-nogil here, which is what the
+    first version of this case tripped over).
+    """
+    proc = ps1_sandbox["run"]("-RequireP2p", pkg=None)
+    assert proc.returncode == 1, _out(proc)
+    assert "멈춥니다" in _out(proc), _out(proc)
+    assert (tmp_path / "xdg-data" / "claunch-nogil" / "tools").is_dir(), \
+        sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "xdg-data").rglob("*"))
