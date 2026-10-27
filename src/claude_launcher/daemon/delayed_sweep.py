@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..delayed_sweep import BATCH_SETTLE, BATCH_SIZE, NOTIFIED, Queue
 from .. import config, store, test_window
-from . import instance_manifest, paths, pools
+from . import instance_manifest, paths, pools, spawn_events
 from .session import delivery_wake
 
 log = logging.getLogger("claunch.daemon.delayed_sweep")
@@ -313,6 +313,22 @@ class Clock:
                 name = await asyncio.to_thread(spawn, job["owner"], self.watch_body(job))
             except Exception as exc:  # noqa: BLE001 - refused or unreachable alike
                 await self._spawn_failed(job, exc)
+                # ``_spawn_failed`` decides what the *sweep* does about this
+                # attempt -- log once per reason, and stop retrying a refusal
+                # a retry cannot change -- and tells the owner in a typed
+                # block when it is permanent (claunch-k3acp). This is the
+                # other half: the same failure as a warning-grade event in
+                # the session history, for the retry loop that never becomes
+                # permanent and so would otherwise be visible only in the log
+                # (claunch-is4o4: 34 failures a minute, one session number
+                # burned each time). Repeats of one (owner, reason) fold into
+                # a single report, so the two do not multiply.
+                spawn_events.report(
+                    job["owner"], kind="fail", reason=str(exc),
+                    site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
+                    generation=job.get("generation"),
+                    permanent=bool(getattr(exc, "permanent", False)),
+                )
                 continue
             queue.attach_child(job["id"], name)
             live += 1
