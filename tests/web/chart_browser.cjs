@@ -434,6 +434,8 @@ function assertTicksApart(ticks, where) {
       return {
         alpha: marks("alpha"), gamma: marks("gamma"),
         alphaBar: row("alpha").querySelector(".chart-bar").getBoundingClientRect(),
+        colours: ["chart-bar", "chart-activity-mark"].map((c) =>
+          getComputedStyle(row("alpha").querySelector("." + c)).backgroundColor),
         alphaMetered: row("alpha").querySelector(".chart-bar").classList.contains("metered"),
         gammaMetered: row("gamma").querySelector(".chart-bar").classList.contains("metered"),
         titles: Array.from(row("alpha").querySelectorAll("[title]"), (e) => e.className),
@@ -443,6 +445,12 @@ function assertTicksApart(ticks, where) {
     assert.ok(strips.alpha[0].height > 3 && strips.alpha[0].width >= 1, "the column is visible");
     assert.ok(Math.abs(strips.alpha[0].left - strips.alphaBar.left) < 8,
       `the busy bucket sits where alpha's bar starts: ${JSON.stringify(strips)}`);
+    // The column is the bar's own status colour, inside the bar's band: the
+    // light theme turned a fixed light colour into near-black blocks
+    // (claunch-9n7g1).
+    assert.equal(strips.colours[1], strips.colours[0], "the column has the bar's colour");
+    assert.ok(strips.alpha[0].top >= strips.alphaBar.top - 0.5 &&
+      strips.alpha[0].bottom <= strips.alphaBar.bottom + 0.5, "the column sits in the bar's band");
     assert.ok(strips.alphaMetered && !strips.gammaMetered,
       "only a measured bar is dimmed under its columns");
     assert.deepEqual(strips.gamma, [], "an unmeasured row draws no activity");

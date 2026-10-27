@@ -541,4 +541,26 @@ assert.strictEqual(edge.left, 0);
 assert.ok(Math.abs(edge.right - C.positionOf(now - 24 * H + 100000, dayAxis)) < 1e-9,
   `the 100s of the bucket inside the axis remain: ${edge.right}`);
 
+// A 7-day window's hour-wide buckets do not coarsen the rows: their
+// activity rides on the ledger's five-minute grid (`points_bucket_s`), so one
+// request is one five-minute column and the rest of the hour stays idle
+// (claunch-9n7g1). A payload without the field keeps the series' width.
+const wk = C.buildSeriesModel({ window: '7d', bucket_s: 3600, points_bucket_s: 300,
+  start: sec(now - 2 * H), until: sec(now), points: [{ t: sec(now - 2 * H), total: 0 }],
+  by_session: { a: { total: 9, requests: 1, points: [[sec(now - H), 9, 1]] } } });
+assert.strictEqual(wk.widthMs, 3600000);
+assert.strictEqual(wk.activityMs, 300000);
+assert.strictEqual(am.activityMs, am.widthMs, 'no field: the series grid');
+act = C.activityStats(liveSpan, wk.bySession.get('a'), wk, now);
+assert.strictEqual(act.covered, 24, 'two hours counted in five-minute buckets');
+assert.strictEqual(act.busy, 1);
+assert.strictEqual(act.last, now - H + M5);
+assert.strictEqual(C.bucketAt(wk.bySession.get('a'), wk, now - H + 6 * 60000).total, 0,
+  'six minutes past the request is idle, not the same hour');
+const col = C.seriesSpan(wk.bySession.get('a').points[0], wk, lin, wk.activityMs);
+assert.ok(Math.abs((col.right - col.left) - (300 / (2 * 3600)) * 100) < 1e-9);
+tr = tipRows(C.rowTip(Object.assign({}, tipRow, { tokens: wk.bySession.get('a') }),
+  tipModel, wk, null));
+assert.ok(tr['활동 구간'].includes('5분 단위'), tr['활동 구간']);
+
 console.log('ok');

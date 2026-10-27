@@ -1126,10 +1126,10 @@ def test_the_series_carries_each_session_s_totals(tmp_path, ledger):
 
 
 def test_the_series_carries_each_session_s_busy_buckets(tmp_path, ledger):
-    """A row draws when its session was spending, on the series' own grid, so
-    a live bar with no bucket under it reads as idle (claunch-58pvy). Only
-    buckets with something in them are listed, in time order, and they sum
-    to the row's figure."""
+    """A row draws when its session was spending, on the ledger's
+    five-minute grid, so a live bar with no bucket under it reads as idle
+    (claunch-58pvy). Only buckets with something in them are listed, in time
+    order, and they sum to the row's figure."""
     write_ledger(tmp_path / "metering", [
         record("s1", hour=9, minute=0, fresh=10, cached=0, output=5),
         record("s1", hour=9, minute=2, fresh=20, cached=0, output=7),
@@ -1142,7 +1142,8 @@ def test_the_series_carries_each_session_s_busy_buckets(tmp_path, ledger):
     grid = {p["t"] for p in out["points"]}
     s1 = out["by_session"]["s1"]["points"]
     assert [t for t, _, _ in s1] == sorted(t for t, _, _ in s1)
-    assert all(t in grid for t, _, _ in s1), "the row's buckets are the series'"
+    assert out["points_bucket_s"] == 300
+    assert all(t in grid for t, _, _ in s1), "on a 24h window the grids are one"
     assert all(total or requests for _, total, requests in s1)
     # 09:00 and 09:02 share a five-minute bucket; 11:30 is its own, and the
     # two hours between them are absent -- the idle stretch.
@@ -1152,6 +1153,11 @@ def test_the_series_carries_each_session_s_busy_buckets(tmp_path, ledger):
     assert sum(v[1] for v in s1) == out["by_session"]["s1"]["total"]
     assert sum(v[2] for v in s1) == out["by_session"]["s1"]["requests"]
     assert [(v[1], v[2]) for v in out["by_session"]["s2"]["points"]] == [(3, 1)]
+    # A wider window coarsens the fleet's buckets but not the row's: one
+    # request no longer paints a whole hour busy (claunch-9n7g1).
+    week = ledger.series("7d", sessions=[meta("s1")], now=NOW)
+    assert week["bucket_s"] > 300 and week["points_bucket_s"] == 300
+    assert week["by_session"]["s1"]["points"] == s1
     # A measured session with nothing in the window lists no bucket.
     write_ledger(tmp_path / "metering",
                  [record("old", day=20, hour=9, fresh=1)], name="older.jsonl")
