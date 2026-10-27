@@ -195,8 +195,9 @@ globalThis.MegaThreadPage = (() => {
     // sessions with none. Empty is every role.
     role: new Set(),
     // Which of the seven categories the reader keeps. Empty means all of
-    // them, so a reader who has not filtered sees the whole fleet.
-    statuses: new Set(),
+    // them (전체). The panel opens on the running sessions: those are the
+    // ones a new cluster can route to (claunch-wlk6g.1).
+    statuses: new Set(["running"]),
     sort: "activity-desc",
     hierarchy: true,
     topic: "",
@@ -215,6 +216,10 @@ globalThis.MegaThreadPage = (() => {
   // The create panel's parts while it is open, so a repaint after a tick or
   // a preview reaches the same nodes the reader is using.
   let createParts = null;
+  // The open panel's own node. render() keeps it in place instead of
+  // building a new one, so the poll's repaint does not throw away the
+  // list's scroll position (claunch-wlk6g.1).
+  let createOverlay = null;
   // The fleet read open() starts after the clusters paint, while it is in
   // flight. A preview asked for before it answers waits on it.
   let fleetLoad = null;
@@ -256,7 +261,14 @@ globalThis.MegaThreadPage = (() => {
     return !!(active && active.closest && active.closest(".mt-page"));
   }
 
+  /* What the page draws from the poll's answers. A quiet poll that brings
+     back the same values does not repaint at all. */
+  function drawnKey() {
+    return JSON.stringify([state.clusters, state.mega, state.routes, state.error]);
+  }
+
   async function load(quiet = false) {
+    const before = drawnKey();
     try {
       const listing = await apiGet("/api/megathreads");
       state.clusters = listing.megathreads || [];
@@ -267,6 +279,7 @@ globalThis.MegaThreadPage = (() => {
     } catch (err) {
       state.error = String(err.message || err);
     }
+    if (quiet && drawnKey() === before) return;
     if (!quiet || !typing()) render();
   }
 
@@ -1193,14 +1206,54 @@ globalThis.MegaThreadPage = (() => {
     return option;
   }
 
-  /* Ticking a row repaints the row's own state and the counters, not the
-     whole list: a full repaint would take focus off the checkbox the reader
-     just used. */
+  /* One picker row, built once for the values in `key` and reused until
+     they change. Ticking it repaints the row's own state and the counters,
+     not the list: a repaint would take focus off the checkbox the reader
+     just used. The box writes the tick to state, so a repaint reads it back
+     from there. */
+  function sessionRow(parts, row, flag, key) {
+    const label = node("label", `mt-new-session-row mt-cat-${row.category}`);
+    if (row.depth) label.style.paddingLeft = `${6 + row.depth * 14}px`;
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "mt-new-session";
+    box.value = row.name;
+    box.addEventListener("change", () => {
+      if (box.checked) state.picked.add(row.name);
+      else state.picked.delete(row.name);
+      label.classList.toggle("on", box.checked);
+      paintCounters(parts);
+    });
+    label.appendChild(box);
+
+    const body = node("span", "mt-new-body");
+    const line1 = node("span", "mt-new-top");
+    line1.appendChild(node("span", "mt-new-name", row.name));
+    if (flag) {
+      const mark = node("span", `mt-new-flag band-${flag.band}${flag.weak ? " weak" : ""}`, flag.text);
+      mark.title = flag.title;
+      line1.appendChild(mark);
+    }
+    if (row.tone) line1.appendChild(node("span", `mt-new-dot ${row.tone}`));
+    line1.appendChild(node("span", "mt-new-cat", row.categoryLabel));
+    body.appendChild(line1);
+    if (row.meta) body.appendChild(node("span", "mt-new-meta", row.meta));
+    if (row.line) body.appendChild(node("span", "mt-new-line", row.line));
+    if (row.brief) body.appendChild(node("span", "mt-new-brief", row.brief));
+    label.appendChild(body);
+    return { label, box, key };
+  }
+
+  /* The rows are keyed by session: a row whose drawn values are the same as
+     last time keeps its node, a tick only flips its box, and the rest are
+     built or dropped. Clearing the list on every paint sent its scroll back
+     to the top and rebuilt rows nothing had changed (claunch-wlk6g.1). */
   function paintRows(parts) {
     if (!parts || !parts.list) return;
-    parts.list.innerHTML = "";
+    if (!parts.rows) parts.rows = new Map();
     if (state.sessions === null) {
-      parts.list.appendChild(node("p", "wf-note mt-new-loading", "세션 목록을 읽는 중…"));
+      parts.rows.clear();
+      parts.list.replaceChildren(node("p", "wf-note mt-new-loading", "세션 목록을 읽는 중…"));
       return;
     }
     const rows = pickerRows(state.sessions || [], {
@@ -1220,48 +1273,43 @@ globalThis.MegaThreadPage = (() => {
     for (const row of scoring || []) scoreOf[row.session] = row;
     const threshold = draftThreshold();
     const recommended = new Set(draftPicks(state.draftPreview, threshold));
+    const wanted = [];
+    const seen = new Set();
     for (const row of rows) {
-      const label = node("label", `mt-new-session-row mt-cat-${row.category}${row.checked ? " on" : ""}`);
-      if (row.depth) label.style.paddingLeft = `${6 + row.depth * 14}px`;
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.className = "mt-new-session";
-      box.value = row.name;
-      box.checked = row.checked;
-      box.addEventListener("change", () => {
-        if (box.checked) state.picked.add(row.name);
-        else state.picked.delete(row.name);
-        label.classList.toggle("on", box.checked);
-        paintCounters(parts);
-      });
-      label.appendChild(box);
-
-      const body = node("span", "mt-new-body");
-      const line1 = node("span", "mt-new-top");
-      line1.appendChild(node("span", "mt-new-name", row.name));
       const score = scoreOf[row.name];
       const band = score ? scoreBand(score.logit, threshold) : "";
-      if (band) {
-        const flag = node("span", `mt-new-flag band-${band}${recommended.has(row.name) ? "" : " weak"}`,
-          recommended.has(row.name) ? `추천 ${pct(score.p_mine)}` : pct(score.p_mine));
-        flag.title = `p(mine) ${pct(score.p_mine)} · 임계값 p ${pct(logitProb(threshold))} ` +
-          (band === "hit" ? "이상" : "미만");
-        line1.appendChild(flag);
+      const flag = band ? {
+        band,
+        weak: !recommended.has(row.name),
+        text: recommended.has(row.name) ? `추천 ${pct(score.p_mine)}` : pct(score.p_mine),
+        title: `p(mine) ${pct(score.p_mine)} · 임계값 p ${pct(logitProb(threshold))} ` +
+          (band === "hit" ? "이상" : "미만"),
+      } : null;
+      const key = JSON.stringify([row.category, row.depth, row.tone, row.categoryLabel,
+        row.meta, row.line, row.brief, flag]);
+      let entry = parts.rows.get(row.name);
+      if (!entry || entry.key !== key) {
+        entry = sessionRow(parts, row, flag, key);
+        parts.rows.set(row.name, entry);
       }
-      if (row.tone) line1.appendChild(node("span", `mt-new-dot ${row.tone}`));
-      line1.appendChild(node("span", "mt-new-cat", row.categoryLabel));
-      body.appendChild(line1);
-      if (row.meta) body.appendChild(node("span", "mt-new-meta", row.meta));
-      if (row.line) body.appendChild(node("span", "mt-new-line", row.line));
-      if (row.brief) body.appendChild(node("span", "mt-new-brief", row.brief));
-      label.appendChild(body);
-      parts.list.appendChild(label);
+      if (entry.box.checked !== row.checked) entry.box.checked = row.checked;
+      entry.label.classList.toggle("on", row.checked);
+      seen.add(row.name);
+      wanted.push(entry.label);
     }
+    for (const name of [...parts.rows.keys()]) if (!seen.has(name)) parts.rows.delete(name);
     if (!rows.length) {
-      parts.list.appendChild(node("p", "wf-note",
+      wanted.push(node("p", "wf-note",
         state.filter || state.project || state.mesh || state.role.size || state.statuses.size
           ? "거른 결과가 없습니다" : "고를 세션이 없습니다"));
     }
+    // Move only what is out of place; what is left after the last wanted
+    // node is a row the filters dropped or a node a changed row replaced.
+    const children = parts.list.children;
+    wanted.forEach((el, i) => {
+      if (children[i] !== el) parts.list.insertBefore(el, children[i] || null);
+    });
+    while (children.length > wanted.length) parts.list.removeChild(children[children.length - 1]);
     paintCounters(parts);
   }
 
@@ -1503,10 +1551,22 @@ globalThis.MegaThreadPage = (() => {
     location.hash = `#/s/${encodeURIComponent(member.session)}`;
   }
 
+  /* The page's scrolling columns, by class: a repaint builds new ones, and
+     these carry the old offsets over to them. */
+  const SCROLLERS = [".mt-list", ".mt-log"];
+
   function render() {
     const root = view();
     if (!root) return;
-    root.innerHTML = "";
+    const scrolled = {};
+    for (const sel of SCROLLERS) {
+      const el = root.querySelector(`.mt-page ${sel}`);
+      if (el) scrolled[sel] = el.scrollTop;
+    }
+    // The open panel is a sibling of the page, not a child, so clearing the
+    // page leaves it attached: the same nodes, focus and list offset.
+    const keep = state.createOpen && createOverlay && createOverlay.parentNode === root ? createOverlay : null;
+    for (const child of [...root.childNodes]) if (child !== keep) root.removeChild(child);
     const page = node("div", "mt-page");
     if (state.error) page.appendChild(node("p", "error", state.error));
     const inner = node("div", "mt-inner");
@@ -1514,9 +1574,18 @@ globalThis.MegaThreadPage = (() => {
     stage(inner);
     logPanel(inner);
     page.appendChild(inner);
-    if (state.createOpen) page.appendChild(createPanel());
-    else createParts = null;
-    root.appendChild(page);
+    root.insertBefore(page, keep);
+    if (!state.createOpen) {
+      createOverlay = null;
+      createParts = null;
+    } else if (!keep) {
+      createOverlay = createPanel();
+      root.appendChild(createOverlay);
+    }
+    for (const [sel, top] of Object.entries(scrolled)) {
+      const el = page.querySelector(sel);
+      if (el) el.scrollTop = top;
+    }
   }
 
   /* The fleet the picker draws, from three answers the dashboard already
@@ -1575,11 +1644,12 @@ globalThis.MegaThreadPage = (() => {
     fleetLoad.then(() => {
       fleetLoad = null;
       if (!timer) return;  // the reader left the page meanwhile
-      if (typing() && createParts) {
+      if (createParts) {
         paintFilters(createParts);
         paintRows(createParts);
         paintCounters(createParts);
-      } else if (!typing()) render();
+      }
+      if (!typing()) render();
     });
   }
 

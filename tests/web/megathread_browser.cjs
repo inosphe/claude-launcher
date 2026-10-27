@@ -211,7 +211,11 @@ const server = http.createServer((req, res) => {
     releaseFleet();
     for (let i = 0; i < 300 && !drafts.length; i++) await new Promise((ok) => setTimeout(ok, 10));
     assert.equal(drafts.length, 1, "the waiting preview is sent once the fleet is in");
-    assert.deepEqual(drafts[0].sessions.sort(), ["s1", "s2"], "with the fleet as its candidates");
+    // The panel opens on 실행 중 (claunch-wlk6g.1): s2 is paused, so the
+    // candidates are the running s1 only.
+    assert.deepEqual(await page.$$eval(`${early} .mt-create-status.on`, (els) => els.map((e) => e.dataset.category)),
+      ["running"], "the panel opens with only 실행 중 ticked");
+    assert.deepEqual(drafts[0].sessions.sort(), ["s1"], "with the running sessions as its candidates");
     await page.waitForFunction((sel) => {
       const btn = document.querySelector(`${sel} .mt-create-draft`);
       return btn && btn.textContent === "Jev로 멤버 추천";
@@ -240,6 +244,8 @@ const server = http.createServer((req, res) => {
     const picker = "#megathreads-view .mt-create-card";
     const pickerNames = () => page.$$eval(`${picker} .mt-new-session-row .mt-new-name`,
       (els) => els.map((e) => e.textContent));
+    assert.deepEqual(await pickerNames(), ["s1"], "the running filter hides the paused s2");
+    await page.click(`${picker} .mt-create-status-all`);
     // Newest activity first: s2 (01-03) before s1 (01-02).
     assert.deepEqual(await pickerNames(), ["s2", "s1"], "the default order is the newest activity");
     // The second line comes from fields the daemon really sends (branch,
@@ -279,6 +285,29 @@ const server = http.createServer((req, res) => {
       assert.ok(row.content <= row.height, `a row is as tall as what it holds: ${JSON.stringify(geometry)}`);
     }
     assert.ok(geometry[0].bottom <= geometry[1].top, `the rows do not overlap: ${JSON.stringify(geometry)}`);
+
+    // A repaint keeps the panel, its rows and the list's offset
+    // (claunch-wlk6g.1). The poll's repaint used to clear the page and build
+    // a new panel, so the list went back to the top every five seconds.
+    // render() is what the poll calls; one real poll follows it.
+    const scrollTo = list.content - list.height;
+    await page.$eval(`${picker} .mt-create-list`, (el, top) => { el.scrollTop = top; }, scrollTo);
+    await page.$$eval(`${picker} .mt-new-session-row`, (rows) => rows.forEach((row, i) => { row.dataset.mark = String(i); }));
+    const kept = () => page.evaluate((sel) => ({
+      top: document.querySelector(`${sel} .mt-create-list`).scrollTop,
+      marks: [...document.querySelectorAll(`${sel} .mt-new-session-row`)].map((row) => row.dataset.mark || ""),
+      cards: document.querySelectorAll(sel).length,
+    }), picker);
+    await page.evaluate(() => globalThis.MegaThreadPage.render());
+    assert.deepEqual(await kept(), { top: scrollTo, marks: ["0", "1"], cards: 1 },
+      "render() keeps the panel, the row nodes and the list offset");
+    await new Promise((ok) => setTimeout(ok, 5600));
+    assert.deepEqual(await kept(), { top: scrollTo, marks: ["0", "1"], cards: 1 },
+      "a poll keeps them too");
+    // A tick flips that row's box in place: the node stays.
+    await page.click(`${picker} .mt-new-session-row:nth-child(2) .mt-new-session`);
+    assert.deepEqual((await kept()).marks, ["0", "1"], "ticking a row does not rebuild the list");
+    await page.click(`${picker} .mt-new-session-row:nth-child(2) .mt-new-session`);
     await page.$eval(picker, (card) => { card.style.height = ""; });
 
     // The lifecycle filter: s2 is paused, so only it survives.
