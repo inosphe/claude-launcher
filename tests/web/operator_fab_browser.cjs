@@ -23,6 +23,9 @@ const { chromium } = require(process.env.CLAUNCH_PLAYWRIGHT || "playwright");
 const { safeListen } = require("./safe_listen.cjs");
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 const sent = [], reads = [];
+// A daemon started before panel=0 existed answers every read with the whole
+// view, its session panel included (claunch-fokj3).
+let legacyView = false;
 const at = n => new Date(Date.UTC(2026, 9, 17, 9, 0, n)).toISOString();
 const sessions = [
   { name: "s1", status: "idle", running: true, project: "alpha" },
@@ -60,7 +63,9 @@ function operatorsApi(req, res, body) {
         pending: own.filter(e => e.kind === "ask" && !e.answer).length, last: own.at(-1) };
     }).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     const thread = new URL(req.url, "http://x").searchParams.get("thread") || threads[0]?.id || null;
-    return json({ ...summary(o), threads, thread, feed: o.feed.filter(e => e.thread === thread), sessions: [], gates: [] });
+    const view = { ...summary(o), threads, thread, feed: o.feed.filter(e => e.thread === thread) };
+    const light = new URL(req.url, "http://x").searchParams.get("panel") === "0" && !legacyView;
+    return json(light ? view : { ...view, sessions: [], gates: [] });
   }
   if (rest === "seen") { o.seen = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id); return json(summary(o)); }
   if (rest === "message") {
@@ -356,6 +361,21 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT });
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector(".opfab-modal").open);
+
+    // Against a daemon that ignores panel=0, the closed dialog stops reading
+    // conversations after the first answer that carried the panel: each such
+    // read costs that daemon seconds. The badge still reads the list.
+    legacyView = true;
+    await page.reload();
+    await page.waitForSelector("#fab-dock .operator-fab");
+    const convReads = () => reads.filter(u => /^\/api\/operators\/op[AB](\?|$)/.test(u)).length;
+    const listReads = () => reads.filter(u => u === "/api/operators").length;
+    for (let i = 0; i < 50 && convReads() === 0; i++) await page.waitForTimeout(50);
+    const afterProbe = convReads(), listBefore = listReads();
+    await page.waitForTimeout(1500);
+    assert.equal(convReads() - afterProbe, 0, "no conversation read while closed once the panel came back");
+    assert(listReads() > listBefore, "the badge keeps reading the list");
+    legacyView = false;
 
     // The Observer page has the operators on it; the segment steps aside.
     await page.setViewportSize({ width: 1280, height: 900 });

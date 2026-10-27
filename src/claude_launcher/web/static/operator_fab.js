@@ -180,10 +180,13 @@ modal.addEventListener("close", () => { clearInterval(timer); timer = setInterva
    and drawn when the dialog mounts it, and the page holds no second copy
    of the conversation the Observer page draws. Only an open dialog marks
    the shown asks seen (opts.active). On the Observer page, which hides
-   this segment, only the list is read, for the badge. */
+   this segment, only the list is read, for the badge -- and so it is
+   everywhere once a read came back with the session panel: that daemon
+   predates panel=0 and each read costs it seconds, so the dialog reads
+   only when opened until the daemon is restarted. */
 async function tick() {
   if (document.visibilityState !== "visible") return;
-  if (!modal.open && document.body.classList.contains("observer-active")) return refreshBadge();
+  if (!modal.open && (document.body.classList.contains("observer-active") || !view.lightReads())) return refreshBadge();
   await view.refresh();
   setBadge(view.summary());
 }

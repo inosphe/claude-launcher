@@ -64,6 +64,11 @@ let pressing = false;
 /* A poll's redraw that waited (a press, a field being typed in, text
    selected in the view), and what the last drawn poll read. */
 let heldRender = false, drawnRead = "";
+/* Whether the last conversation read came back with the session panel: a
+   daemon started before panel=0 existed ignores it and answers with the
+   whole view, seconds of its time (claunch-fokj3). The closed operator
+   dialog reads in the background only while this is false (lightReads). */
+let panelRead = false;
 /* Whether this view already listens for the release on the window (see
    mount). Per view: the page's dock and the floating dialog are two
    instances of this module, each with its own `pressing`. */
@@ -164,6 +169,7 @@ function refresh() {
         // A thread that went away (its operator deleted it) gives way to
         // the most recently active one.
         detail = await read(tid).catch(err => { if(!tid) throw err; threadOf.delete(id); return read(""); });
+        panelRead = "sessions" in detail;
         if(detail.thread && !threadOf.has(id)) threadOf.set(id, detail.thread);
         if(detail.unseen > 0 && !document.hidden && opts.active?.()) {
           const seen = await call(opPath(selected, "/seen"), "POST", {});
@@ -831,8 +837,9 @@ async function focusSession(name) {
 }
 /* What waits across every operator, for a badge: unanswered asks, and of
    those the ones not shown yet. */
+const lightReads = () => !panelRead;
 const summary = () => list.reduce((sum, o) => ({pending: sum.pending + (o.pending || 0), unseen: sum.unseen + (o.unseen || 0)}), {pending: 0, unseen: 0});
 const focusInput = () => input?.text.focus();
-return {mount, refresh, targets, isTarget, defaultTarget, send, askAbout, focusSession, summary, focusInput,
+return {mount, refresh, targets, isTarget, defaultTarget, send, askAbout, focusSession, summary, lightReads, focusInput,
         selected: () => selected, _covers: covers};
 }
