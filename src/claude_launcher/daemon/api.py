@@ -11120,6 +11120,7 @@ async def _onboard_and_launch(
                 parent=parent,
                 mesh_mgr=_mesh_mgr(request),
                 project=session.sdef.project or "",
+                child=name,
             )
             onboard.inherit_workflow(
                 body,

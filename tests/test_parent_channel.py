@@ -157,3 +157,103 @@ def test_failed_channel_join_cleans_up_pair(home, tmp_path, monkeypatch):
         assert not mm.meshes_for_session("parent")
 
     asyncio.run(run())
+
+
+# --- the parent's main mesh (claunch-k3acp) ---------------------------------------
+
+def _increasing_clock(monkeypatch):
+    """Give every join its own, later ``joined_at``.
+
+    The real clock has seconds resolution, so two joins in one test land on
+    the same stamp and the answer would fall to the name tie-break. Advancing
+    the clock keeps the test about the rule and not about its tie-break.
+    """
+    import itertools
+    from datetime import datetime, timedelta, timezone
+    from claude_launcher.daemon import mesh as mesh_mod
+
+    ticks = itertools.count()
+    start = datetime(2026, 10, 27, 10, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        mesh_mod, "utcnow",
+        lambda: (start + timedelta(seconds=next(ticks))).isoformat())
+
+
+def test_a_parent_in_two_meshes_hands_the_child_the_one_it_joined_first(home, tmp_path, monkeypatch):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mgr.stage(SessionDef(name="parent", harness="py", cwd=str(tmp_path)))
+        mm.create("own")
+        mm.create("team")
+        _increasing_clock(monkeypatch)
+        await mm.join("team", "parent", handle="parent")
+        await mm.join("own", "parent", handle="parent")
+
+        body = {"role": "worker"}
+        await onboard.inherit_mesh(body, parent="parent", mesh_mgr=mm, child="kid")
+        assert body["mesh"] == "team", (
+            "the first mesh the session joined is its main mesh")
+        # The role the caller asked for is kept: the child joins a real
+        # team, so it has a place in one.
+        assert body["role"] == "worker"
+
+    asyncio.run(run())
+
+
+def test_a_parent_in_two_meshes_does_not_refuse_the_spawn(home, tmp_path, monkeypatch):
+    """The regression: a second mesh of its own (a reviewer's) made every
+    spawn from that session a 400, and the cflow2 delegation above it fell
+    back to a sub-agent (claunch-ull6m, claunch-k3acp)."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        client = await _serve(mgr, mm)
+
+        async def launch(session, **kw):
+            return session
+
+        monkeypatch.setattr(mgr, "launch_async", launch)
+        try:
+            mgr.stage(SessionDef(name="parent", harness="py", cwd=str(tmp_path)))
+            mm.create("own")
+            mm.create("team")
+            _increasing_clock(monkeypatch)
+            await mm.join("team", "parent", handle="parent")
+            await mm.join("own", "parent", handle="parent")
+            response = await client.post(
+                "/api/sessions/parent/children", headers=BEARER,
+                json={"name": "kid", "workflow": "-", "beads": False, "task": "go"},
+            )
+            result = await response.json()
+            assert response.status == 201, result
+            joined = [m["mesh"] for m in mm.meshes_for_session("kid")
+                      if not m.get("parent_channel")]
+            assert joined == ["team"], f"the child joined {joined}"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_parent_in_no_mesh_opens_one_and_the_child_takes_the_free_role(home, tmp_path):
+    """The fallback branch: no team to place the child in, so the role the
+    caller asked for is not kept (claunch-k3acp, user decision)."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mgr.stage(SessionDef(name="solo", harness="py", cwd=str(tmp_path)))
+        body = {"role": "worker"}
+        await onboard.inherit_mesh(body, parent="solo", mesh_mgr=mm, child="kid")
+        opened = [m.name for m in mm.list()]
+        assert opened == [body["mesh"]], "one mesh is opened for the parent"
+        assert body["role"] == onboard.FREE_ROLE
+        assert mm.meshes_for_session("solo"), "the parent was joined into it"
+
+    asyncio.run(run())

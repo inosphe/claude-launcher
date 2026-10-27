@@ -64,6 +64,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 from ..cflow import engine as cflow_engine
@@ -85,6 +86,14 @@ NO_MESH = "-"
 #: parent's workflow would have paired it with one. Omission means *inherit*
 #: here too, so refusing needs a word of its own.
 NO_WORKFLOW = "-"
+
+#: The role a child joins under when the spawn had to open a mesh for its
+#: parent (:func:`_open_mesh_for`). A mesh opened on the spot has no team for
+#: the child to be placed in, and the role the caller asked for describes a
+#: place in a team that does not exist yet — the packaged vocabulary's
+#: ``free-role`` is the one that means "nobody gave you a place here; do the
+#: job you were given" (``mesh_roles.DEFAULT_YAML`` spells it as ``default``).
+FREE_ROLE = "free-role"
 
 
 class OnboardError(Exception):
@@ -169,7 +178,7 @@ class Plan:
 
 
 async def inherit_mesh(
-    body: dict, *, parent: str, mesh_mgr, project: str = ""
+    body: dict, *, parent: str, mesh_mgr, project: str = "", child: str = ""
 ) -> None:
     """Settle which mesh a child joins when its parent named none.
 
@@ -185,19 +194,31 @@ async def inherit_mesh(
     the session came up, did its work, and had nowhere to put it.
 
     * **One mesh** — the answer, and the case nearly every fleet is in.
+    * **Several** — the parent's **main mesh**: the one it joined first
+      (``joined_at``, then the name, so the answer does not depend on a
+      tie). A session collects a second mesh the moment it opens one for its
+      own children (a reviewer's mesh of its own), so "several" is the normal
+      state of a session that has spawned before, not a mistake in the
+      request. Refusing here made every spawn from such a session fail, and
+      the cflow2 delegation above it fall back to a sub-agent; the first mesh
+      is the team the session was created into, and it is recorded, so it is
+      a fact to read rather than a guess to make. A session that means its
+      *other* mesh names it on the request.
     * **None** — one is opened for the pair and the parent joined into it
       (:func:`_open_mesh_for`). A parent nobody put in a mesh is not a parent
       that wants an unreachable child; it is one that never needed a mesh
       until now. The mesh is named after the parent, so its whole subtree
       lands in the same one: the next spawn finds it in exactly one mesh and
-      takes this branch no further.
-    * **Several** — refused, naming them. Guessing here is the one mistake
-      that cannot be walked back, because the wrong guess does not fail, it
-      broadcasts: the child arrives in a room of strangers and reports its
-      work to them.
+      takes this branch no further. The child joins it as
+      :data:`FREE_ROLE`: there is no team here to hold a place in, and the
+      role the caller asked for would claim one.
 
     :data:`NO_MESH` opts out of a team mesh. The parent channel is still set
     up by :func:`arrange`.
+
+    ``child`` is the new session's name, when the caller already knows it —
+    it is the one this decision is about, and a caller that reports the
+    fallback above needs to name it.
     """
     named = str(body.get("mesh") or "").strip()
     if named == NO_MESH:
@@ -205,20 +226,36 @@ async def inherit_mesh(
         return
     if named:
         return
-    mine = [m["mesh"] for m in mesh_mgr.meshes_for_session(parent)
+    mine = [m for m in mesh_mgr.meshes_for_session(parent)
             if not m.get("parent_channel")]
-    if len(mine) > 1:
-        raise OnboardError(
-            f"session {parent!r} is in {len(mine)} meshes "
-            f"({', '.join(sorted(mine))}) — name the one this child belongs "
-            f"in, or pass mesh: {NO_MESH!r} for only a parent channel. "
-            "A child is put in its parent's mesh by default, and with several "
-            "there is no default to take"
-        )
-    body["mesh"] = (
-        mine[0] if mine
-        else await _open_mesh_for(parent, mesh_mgr, project=project)
-    )
+    if not mine:
+        body["mesh"] = await _open_mesh_for(parent, mesh_mgr, project=project)
+        body["role"] = FREE_ROLE
+        return
+    body["mesh"] = min(mine, key=_main_mesh_key)["mesh"]
+
+
+def _main_mesh_key(entry: dict):
+    """Sort key for "the mesh this session works in".
+
+    Its first join, then its name. ``joined_at`` is written once, at the
+    member's creation, and a session cannot join the same mesh twice
+    (``MeshManager._join_local`` refuses both a taken handle and a second
+    join of one session) — so the value is stable for as long as the
+    membership is, and moves only if the session leaves and comes back.
+    Seconds resolution means two joins can tie; the name then decides, so
+    the answer never depends on the order a list happened to arrive in.
+
+    The instants are compared as instants: a stamp written with another
+    offset would sort wrongly as a string. A stamp that cannot be read is
+    placed last rather than allowed to win.
+    """
+    stamp = str(entry.get("joined_at") or "")
+    try:
+        instant = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        instant = float("inf")
+    return (instant, str(entry.get("mesh") or ""))
 
 
 def inherit_workflow(body: dict, *, parent: str, parent_cwd: str, cwd: str) -> None:

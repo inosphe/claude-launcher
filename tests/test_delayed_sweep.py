@@ -1169,6 +1169,17 @@ def live_manager():
     return SimpleNamespace(get=lambda name: SimpleNamespace(exited=False))
 
 
+def reporting_manager(delivered):
+    """A manager whose owner session can be delivered to, and records it."""
+    class _Session:
+        exited = False
+
+        async def deliver(self, text, **kw):
+            delivered.append(text)
+            return True
+    return SimpleNamespace(get=lambda name: _Session())
+
+
 def test_the_clock_gives_each_batch_tip_one_watching_child_and_still_sweeps(repo, tmp_path, monkeypatch):
     q = queue(tmp_path)
     jobs = merges(q, repo, list("abcde"))
@@ -1183,8 +1194,88 @@ def test_the_clock_gives_each_batch_tip_one_watching_child_and_still_sweeps(repo
     parent, body = calls[0]
     assert parent == "leader" and body["workflow"] == "sweep-job-v2" and body["workflow_version"] == 2
     assert body["cflow_inputs"]["job"] == jobs[-1]["id"] and body["beads"] is False
+    # The watcher is a one-shot job, and its run says so; the daemon composes
+    # this body itself, so the name has to ride here too (claunch-k3acp).
+    assert body["role"] == daemon_sweep.WATCH_ROLE == "oneshot"
     assert q.get(jobs[-1]["id"])["child"] == "w1"
     assert q.get(jobs[-1]["id"])["status"] == "running"
+
+
+def test_the_watch_body_and_its_workflow_name_one_role(repo, tmp_path):
+    """``watch_body`` carries ``default_role`` by hand; this keeps it honest."""
+    from claude_launcher.cflow2 import layers
+    from claude_launcher.daemon import mesh_roles
+
+    declared = (layers.load("sweep-job-v2", None).meta or {}).get("default_role")
+    assert declared == daemon_sweep.WATCH_ROLE, (
+        "sweep-job-v2 and daemon.delayed_sweep.WATCH_ROLE disagree")
+    assert mesh_roles.resolve().get(declared) is not None, (
+        f"{declared!r} is not in the packaged vocabulary — the join would refuse it")
+
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = q.claim(batch=(5, 3600))
+    body = Clock(live_manager(), q).watch_body(q.get(tip["id"]))
+    assert body["role"] == declared
+    assert body["workflow"] == "sweep-job-v2"
+
+
+def test_a_permanent_refusal_is_reported_once_and_never_retried(repo, tmp_path, monkeypatch):
+    """A 4xx about the request itself is final: one attempt, one report
+    (claunch-k3acp — 34 refusals a minute, each with a traceback)."""
+    from claude_launcher.daemon.cflow2_exec import SpawnRefused
+
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    calls = []
+
+    def spawn(parent, body):
+        calls.append((parent, body))
+        raise SpawnRefused("POST /api/sessions/leader/children: session 'leader' is in "
+                           "2 meshes (claunch, leader)", permanent=True)
+
+    delivered = []
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawn, policy=(5, 3600))
+    for _ in range(3):
+        asyncio.run(clock.tick())
+
+    assert len(calls) == 1, "a refusal a retry cannot change was asked again"
+    assert len(delivered) == 1, "the owner was not told exactly once"
+    assert jobs[-1]["id"] in delivered[0]
+    assert "2 meshes" in delivered[0]
+    assert q.get(jobs[-1]["id"])["child"] == ""
+    assert q.get(jobs[-1]["id"])["status"] == "running", "the sweep must not be held back"
+
+
+def test_a_transient_refusal_is_still_retried_and_not_reported(repo, tmp_path, monkeypatch):
+    """No answer, a timeout or a 5xx can change on the next tick."""
+    from claude_launcher.daemon.cflow2_exec import SpawnRefused
+
+    q = queue(tmp_path)
+    merges(q, repo, list("abcde"))
+    calls = []
+
+    def spawn(parent, body):
+        calls.append((parent, body))
+        raise SpawnRefused("cannot reach daemon at http://127.0.0.1:9: timed out")
+
+    delivered = []
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.tick())
+    # Backed off within SPAWN_BACKOFF, as before: one attempt so far.
+    assert len(calls) == 1
+    assert delivered == []
+    # Once the backoff has passed the same job is asked again.
+    clock.spawn_tried.clear()
+    asyncio.run(clock.tick())
+    assert len(calls) == 2
+    assert delivered == []
 
 
 def test_a_failed_spawn_is_retried_later_and_does_not_stop_the_sweep(repo, tmp_path, monkeypatch):

@@ -66,7 +66,23 @@ def kill_tree(pid: int) -> None:
 
 
 class SpawnRefused(Exception):
-    """The daemon would not create the child (policy, a bad request)."""
+    """The daemon would not create the child (policy, a bad request).
+
+    ``permanent`` says whether the same request could answer differently on a
+    later attempt. A 4xx about the request itself cannot: retrying it spends a
+    session number and a log line per tick for an answer that is already
+    final (``daemon_client.permanent``). Everything else — no answer, a
+    timeout, a 5xx, a 408/429 — stays retryable.
+    """
+
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+def _refused(exc, daemon_client) -> SpawnRefused:
+    """The :class:`SpawnRefused` for a failed HTTP spawn call."""
+    return SpawnRefused(str(exc), permanent=daemon_client.permanent(exc))
 
 
 def default_spawn(parent: str, body: Dict[str, Any]) -> str:
@@ -84,7 +100,7 @@ def default_spawn(parent: str, body: Dict[str, Any]) -> str:
     try:
         doc = client.post(f"/api/sessions/{parent}/children", body, timeout=120.0)
     except daemon_client.DaemonClientError as exc:
-        raise SpawnRefused(str(exc)) from exc
+        raise _refused(exc, daemon_client) from exc
     name = ((doc or {}).get("session") or {}).get("name")
     if not name:
         raise SpawnRefused(f"spawn answered without a session name: {doc!r}")
@@ -103,7 +119,7 @@ def default_quick_fork(parent: str, body: Dict[str, Any]) -> str:
     try:
         doc = client.post(f"/api/sessions/{parent}/quick-fork", body, timeout=120.0)
     except daemon_client.DaemonClientError as exc:
-        raise SpawnRefused(str(exc)) from exc
+        raise _refused(exc, daemon_client) from exc
     name = ((doc or {}).get("session") or {}).get("name")
     if not name:
         raise SpawnRefused(f"quick-fork answered without a session name: {doc!r}")

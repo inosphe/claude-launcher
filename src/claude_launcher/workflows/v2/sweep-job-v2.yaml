@@ -17,6 +17,14 @@ description: >-
 #
 # 이 런은 recur도 escalate도 선언하지 않는다: done에 닿으면 데몬이 세션을 종료한다
 # (kill-on-end, oneshot-job-v2와 같다).
+#
+# 이 런을 도는 세션의 메시 역할. 위임 자식과 같은 이유로 필요하다(claunch-k3acp):
+# 핸들이 `sN`이라 역할이 추론되지 않고, 워크플로가 역할을 선언하지 않으면 어휘의
+# 기본값(free-role)으로 떨어진다. 감시 세션도 하나의 job을 받아 끝나는 세션이므로
+# `oneshot`이다. 데몬이 스폰 본문을 직접 만들기 때문에(daemon/delayed_sweep.Clock
+# .watch_body) 그 값도 거기서 함께 실린다 — 두 곳이 같은 이름을 쓰는지는 테스트가
+# 지킨다.
+default_role: oneshot
 
 inputs:
   job:

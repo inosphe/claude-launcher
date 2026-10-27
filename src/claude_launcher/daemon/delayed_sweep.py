@@ -43,6 +43,20 @@ CHILDREN_MAX = 3
 SPAWN_BACKOFF = 300.0
 #: Seconds between nudges the watching session's workflow sends (its wait timeout).
 WATCH_WORKFLOW = "sweep-job-v2"
+#: The role that run declares for itself (``default_role`` in
+#: workflows/v2/sweep-job-v2.yaml). Unlike a cflow2 delegation, the daemon
+#: composes this spawn body itself, so it carries the name here; a test keeps
+#: the two spellings equal.
+WATCH_ROLE = "oneshot"
+
+
+def _one_line(text: str, limit: int = 300) -> str:
+    """A log line and a refusal body from a message that may run to a traceback.
+
+    Collapsing whitespace keeps one failure to one line, which is what the
+    log and the notice to the owner are for."""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 def suspect_lines(queue, job):
@@ -94,6 +108,19 @@ class Clock:
         #: (size, settle) fixed by the caller; None reads the daemon settings each tick.
         self.policy = policy
         self.spawn_tried = {}
+        #: Jobs whose watcher the daemon refused in a way a retry cannot
+        #: change, and the refusal it gave. A refused spawn never holds the
+        #: sweep back, but an answer that is already final must not be asked
+        #: for again every SPAWN_BACKOFF: each attempt costs a session number
+        #: and a log line, and on 2026-10-27 it cost 34 of each per minute
+        #: (claunch-k3acp).
+        self.spawn_permanent: dict = {}
+        #: Jobs whose owner has been told, and with which reason — one report
+        #: per job, whatever it says the second time.
+        self.spawn_reported: dict = {}
+        #: How often each reason has been seen, so repeats are counted
+        #: instead of logged.
+        self.spawn_failures: dict = {}
 
     def start(self):
         self.task = asyncio.create_task(self.run())
@@ -216,6 +243,14 @@ class Clock:
                 "시작한다.\n"
                 f"큐 도구: {job['python']} {tool} --database {queue.database}")
         return {"task": task, "workflow": WATCH_WORKFLOW, "workflow_version": 2,
+                # The role the run declares (``default_role`` in
+                # workflows/v2/sweep-job-v2.yaml). The daemon builds this body
+                # itself, so the declaration is not read off the chart the way
+                # ``cflow2_exec.session_body`` reads a delegation's — the two
+                # are kept in step by a test, and the watcher joins its
+                # parent's main mesh as ``oneshot`` rather than falling to the
+                # handle's default.
+                "role": WATCH_ROLE,
                 "cflow_inputs": {"job": job["id"], "python": job["python"], "tool": str(tool),
                                  "database": str(queue.database)},
                 "beads": False}
@@ -224,7 +259,14 @@ class Clock:
         """Form batches, then give each unwatched batch tip a child session.
 
         A tip is swept whether or not it has a watcher; a spawn that fails is
-        tried again after SPAWN_BACKOFF and never holds the sweep back."""
+        tried again after SPAWN_BACKOFF and never holds the sweep back.
+
+        A failure the daemon answered finally (a 4xx about the request) is not
+        tried again: the job is marked in ``spawn_permanent`` and its owner is
+        told once. Every attempt costs a session number and a log line, and
+        on 2026-10-27 an unretryable refusal was asked 34 times a minute
+        (claunch-k3acp). Anything else — no answer, a timeout, a 5xx — keeps
+        its retry."""
         await pools.background(queue.dispatch, *policy)
         jobs = queue.status()["jobs"]
         live = 0
@@ -247,6 +289,8 @@ class Clock:
         for job in queue.unattended():
             if live >= CHILDREN_MAX:
                 break
+            if job["id"] in self.spawn_permanent:
+                continue
             origin = json.loads(job["origin"])
             if (origin.get("instance") != paths.instance()
                     or origin.get("base") != str(paths.base_home().resolve())):
@@ -261,11 +305,67 @@ class Clock:
             self.spawn_tried[job["id"]] = time.monotonic()
             try:
                 name = await asyncio.to_thread(spawn, job["owner"], self.watch_body(job))
-            except Exception:
-                log.exception("sweep watcher for %s was not created", job["id"])
+            except Exception as exc:  # noqa: BLE001 - refused or unreachable alike
+                await self._spawn_failed(job, exc)
                 continue
             queue.attach_child(job["id"], name)
             live += 1
+
+    async def _spawn_failed(self, job, exc) -> None:
+        """Record one failed watcher spawn; report it if it is final.
+
+        The log carries one line per reason, not one per attempt: a transient
+        failure repeats every SPAWN_BACKOFF and the count is the only thing
+        that changes."""
+        reason = _one_line(str(exc) or exc.__class__.__name__)
+        if getattr(exc, "permanent", False):
+            self.spawn_permanent[job["id"]] = reason
+            self.spawn_failures[reason] = self.spawn_failures.get(reason, 0) + 1
+            log.warning("sweep watcher for %s will not be created: %s",
+                        job["id"], reason)
+            await self._report_spawn_failure(job, reason)
+            return
+        count = self.spawn_failures[reason] = self.spawn_failures.get(reason, 0) + 1
+        if count == 1:
+            log.warning("sweep watcher for %s could not be created: %s "
+                        "(retrying every %ds; later repeats are counted, not logged)",
+                        job["id"], reason, int(SPAWN_BACKOFF))
+        else:
+            log.debug("sweep watcher for %s still failing (%d times): %s",
+                      job["id"], count, reason)
+
+    async def _report_spawn_failure(self, job, reason: str) -> None:
+        """Tell the job's owner once, with the refusal and what it costs them.
+
+        One report per job: the reason is kept, so a job the daemon refuses
+        for a second reason still reports that second one, while a repeat of
+        the first is not sent again."""
+        if self.spawn_reported.get(job["id"]) == reason:
+            return
+        self.spawn_reported[job["id"]] = reason
+        try:
+            session = self.manager.get(job["owner"])
+            if session.exited:
+                return
+            notice = ("---\n# claunch delayed-sweep: watcher not created -- machine-generated\n"
+                      f"job: {job['id']}\n"
+                      f"owner: {job['owner']}\n"
+                      f"repo: {job['repo']}\n"
+                      f"sha: {job['sha']}\n"
+                      f"reason: {reason}\n"
+                      "protocol: the daemon refused this spawn with an answer a retry "
+                      "cannot change, so it will not try again. The sweep itself still "
+                      "runs; only the watching session is missing. Fix the cause named "
+                      "above and requeue the job with 'tools/delayed_sweep.py requeue "
+                      f"--job {job['id']}', or cancel it with 'cancel --job "
+                      f"{job['id']} --reason ...'.\n---")
+            with delivery_wake("notice"):
+                await session.deliver(notice)
+        except KeyError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - the report must not fail the tick
+            log.warning("sweep watcher refusal for %s was not delivered: %s",
+                        job["id"], _one_line(str(exc) or exc.__class__.__name__))
 
     async def run(self):
         while True:
