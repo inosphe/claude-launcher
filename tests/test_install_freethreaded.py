@@ -57,6 +57,14 @@ STUB_CXX = """#!/usr/bin/env bash
 exit 0
 """
 
+# Answers `getent passwd <uid>` with the sandbox home, so the script's
+# $HOME-unset fallback can be exercised without resolving to the developer's
+# real home -- which is how this defect was first reached by hand, and running
+# the install there for real is how it did damage (claunch-a0ero).
+STUB_GETENT = """#!/usr/bin/env bash
+printf '%s:x:1000:1000::%s:/bin/bash\\n' "sandbox" "$STUB_HOME_ANSWER"
+"""
+
 # Answers `--exists libsrtp2` with {exit_code}: 0 means the header is present.
 STUB_PKG_CONFIG = """#!/usr/bin/env bash
 [ "$1" = "--exists" ] && [ "$2" = "libsrtp2" ] && exit {exit_code}
@@ -103,7 +111,9 @@ def sandbox(tmp_path: Path):
 
     # The zvec build path shells out to git and looks for a C++ compiler.
     # Stubbing both keeps the ordering case independent of the host toolchain.
-    for name, body in (("git", STUB_GIT), ("c++", STUB_CXX)):
+    # `getent` is stubbed so the $HOME fallback answers with a sandbox path
+    # instead of the developer's real home (claunch-a0ero).
+    for name, body in (("git", STUB_GIT), ("c++", STUB_CXX), ("getent", STUB_GETENT)):
         stub = bin_dir / name
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o755)
@@ -130,12 +140,23 @@ def sandbox(tmp_path: Path):
         path.chmod(0o755)
 
     def run(*args: str, stdin: str = "", pkg: int | None = 1, fail_install: bool = False,
-            wheel_path: str | None = "__default__"):
+            wheel_path: str | None = "__default__", home: str | None = "__default__",
+            no_overrides: bool = False):
         """Run the script. ``pkg=None`` leaves pkg-config unreachable.
 
         ``wheel_path=None`` clears CLAUNCH_FT_ZVEC_WHEEL so the script takes the
         real build path -- the only configuration in which "the check ran before
         the build" is observable.
+
+        ``home`` sets HOME; ``home=None`` removes it entirely, which is the
+        condition claunch-a0ero is about.
+
+        ``no_overrides`` clears CLAUNCH_FT_ROOT, CLAUNCH_FT_SHIM_DIR and
+        CLAUNCH_FT_WHEELS. Those three bypass the defaults that read HOME, so
+        with them set this defect cannot happen at all -- the cases that
+        measure it have to run without them. The values still land inside
+        tmp_path: the defaults are computed from whichever HOME the run gets,
+        and the script answers from the sandbox's own home directory.
         """
         pkg_config(pkg)
         env = dict(os.environ)
@@ -147,11 +168,24 @@ def sandbox(tmp_path: Path):
                 "PATH": os.pathsep.join([str(bin_dir), inherited]),
                 "STUB_UV_LOG": str(log),
                 "STUB_TOOL_DIR": str(tmp_path / "tools"),
-                "CLAUNCH_FT_ROOT": str(tmp_path / "ft-root"),
-                "CLAUNCH_FT_SHIM_DIR": str(tmp_path / "shim"),
-                "CLAUNCH_FT_WHEELS": str(tmp_path / "wheels"),
+                "STUB_HOME_ANSWER": str(tmp_path / "fallback-home"),
             }
         )
+        if no_overrides:
+            for name in ("CLAUNCH_FT_ROOT", "CLAUNCH_FT_SHIM_DIR", "CLAUNCH_FT_WHEELS"):
+                env.pop(name, None)
+        else:
+            env.update(
+                {
+                    "CLAUNCH_FT_ROOT": str(tmp_path / "ft-root"),
+                    "CLAUNCH_FT_SHIM_DIR": str(tmp_path / "shim"),
+                    "CLAUNCH_FT_WHEELS": str(tmp_path / "wheels"),
+                }
+            )
+        if home is None:
+            env.pop("HOME", None)
+        elif home != "__default__":
+            env["HOME"] = home
         if wheel_path is None:
             env.pop("CLAUNCH_FT_ZVEC_WHEEL", None)
         elif wheel_path == "__default__":
@@ -266,6 +300,57 @@ def test_a_failed_p2p_build_does_not_fall_back_silently(sandbox):
     assert "SIMULATED: the p2p build failed" in out
     # One attempt, and it was the one with the extra -- not a downgrade.
     assert _targets(sandbox) == [".[p2p]"]
+
+
+def test_the_decision_is_reached_with_HOME_unset(sandbox):
+    """claunch-a0ero: `set -u` made an empty HOME fatal on the first default.
+
+    Three branches, all with HOME gone and no CLAUNCH_FT_* overrides -- the
+    overrides bypass the defaults, so with them set this cannot fail.
+    """
+    stop = sandbox["run"]("--require-p2p", pkg=1, home=None, no_overrides=True)
+    out = _out(stop)
+    assert stop.returncode == 1, out
+    assert "HOME: unbound variable" not in out, out
+    assert "멈춥니다 — --require-p2p" in out, out
+    assert sandbox["installs"]() == []
+
+    # HOME is gone and there is no terminal: it stops, rather than quietly
+    # installing without the feature or dying on the way there.
+    blind = sandbox["run"](pkg=1, home=None, no_overrides=True, stdin="")
+    out = _out(blind)
+    assert blind.returncode == 1, out
+    assert "HOME: unbound variable" not in out, out
+    assert "물어볼 수 없습니다" in out, out
+    assert sandbox["installs"]() == []
+
+
+def test_the_defaults_land_under_the_fallback_home_when_HOME_is_unset(sandbox, tmp_path):
+    """The fallback has to be the passwd entry, not an empty string.
+
+    An empty HOME let `$HOME/.local/bin` collapse to `/.local/bin`, which is
+    not a path anyone can write; the point of the fallback is that the install
+    still lands somewhere real.
+    """
+    proc = sandbox["run"]("--no-p2p", pkg=1, home=None, no_overrides=True)
+    out = _out(proc)
+    assert proc.returncode == 0, out
+    assert "HOME: unbound variable" not in out, out
+    assert _targets(sandbox) == ["."]
+    assert (tmp_path / "fallback-home" / ".local" / "share" / "claunch-nogil").is_dir(), \
+        sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_dir())[:20]
+    assert (tmp_path / "fallback-home" / ".local" / "bin" / "claunch-nogil").is_file(), \
+        sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))[:20]
+
+
+def test_no_p2p_still_wins_when_HOME_is_unset(sandbox):
+    """The flag answers the question, so no terminal is needed to install."""
+    proc = sandbox["run"]("--no-p2p", pkg=1, home=None, no_overrides=True)
+    out = _out(proc)
+    assert proc.returncode == 0, out
+    assert "번호를 고르세요" not in out
+    assert "빠른 직접 연결 기능: 포함되지 않음" in out
+    assert _targets(sandbox) == ["."]
 
 
 def test_the_decision_comes_before_the_zvec_build(sandbox):
