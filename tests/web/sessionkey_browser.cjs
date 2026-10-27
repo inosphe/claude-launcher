@@ -114,7 +114,11 @@ const server = http.createServer((req, res) => {
     const label = async (name) => (await chip(name).locator(".sess-key-label").textContent()).trim();
 
     // 1. Only the pooled profile gets a chip.
-    await chip("s1").waitFor();
+    await chip("s1").waitFor({ state: "attached" });
+    assert.equal(await chip("s1").isVisible(), false,
+                 "the compact card hides its pool picker");
+    await row("s1").locator(".rail-name").click();
+    await chip("s1").waitFor({ state: "visible" });
     assert.equal(await chip("s2").count(), 0,
                  "a single-token profile offered no choice, so it has no chip");
 

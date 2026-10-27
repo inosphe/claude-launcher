@@ -98,6 +98,9 @@ const server = http.createServer((req, res) => {
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "card" };
     else if (url.pathname === "/api/cflow2/rail") data = { rows: workflowRows };
     else if (url.pathname === "/api/sessions") data = { sessions, llm_configured: true };
+    else if (url.pathname === "/api/profiles/nc/keys") data = {
+      pooled: true, keys: [{ id: "fixture-key", label: "rotation pool", current: true }],
+    };
     else if (url.pathname.endsWith("/status-checks/refresh")) data = { delivered: true };
     else if (url.pathname.endsWith("/briefing")) {
       const name = decodeURIComponent(url.pathname.split("/")[3] || "");
@@ -153,9 +156,7 @@ const READ = `(() => {
         ctx: shown(li.querySelector(".rail-ctx-line")),
         seen: shown(li.querySelector(".rail-seen")),
         actions: shown(li.querySelector(".rail-actions")),
-        /* The five action buttons, separately from the box: a compact card
-           keeps the box (it holds the key chip and the two refreshes, which
-           are not actions on the session) but none of these. */
+        /* Measure session action buttons separately from their container. */
         actionButtons: [...li.querySelectorAll(
           ".sess-plus, .sess-pin, .sess-observe, .sess-note-edit, .sess-info")]
           .filter((b) => b.getBoundingClientRect().width > 0).length,
@@ -243,6 +244,10 @@ const READ = `(() => {
       "a compact card draws the briefing one-line and the chips");
     assert.equal(by("lead").lines.actionButtons, 0,
       "a compact card draws no session action buttons");
+    const compactKey = page.locator('#session-list li[data-name="w1"] .sess-key');
+    await compactKey.waitFor({ state: "attached" });
+    assert.equal(await compactKey.isVisible(), false,
+      "a compact card hides its rotation pool picker");
     assert.equal(by("lead").lines.rowRefreshes, 0,
       "a compact card has no briefing/check refresh buttons");
     assert.equal(by("w1b").lines.rowRefreshes, 0,
@@ -407,6 +412,8 @@ const READ = `(() => {
       return li && li.dataset.railMode === "expanded";
     });
     const worker = page.locator('#session-list li[data-name="w1"]');
+    assert.equal(await worker.locator(".sess-key").isVisible(), true,
+      "opening the card reveals its rotation pool picker");
     await worker.locator(".sess-brief-refresh").waitFor();
     assert.deepEqual(briefingRequests, [], "opening a never-summarised card makes no briefing request");
     assert.equal(await worker.locator(".sess-brief-note").count(), 0, "row summary is already present");
@@ -697,6 +704,9 @@ const READ = `(() => {
     assert.equal(rows.find((r) => r.name === "rev-b").mode, "min",
       "and its unpinned neighbour stays a one-line card");
 
+    /* The pool response redraws rows after reload; focus the final row. */
+    await page.locator('#session-list li[data-name="lead"] .sess-key')
+      .waitFor({ state: "attached" });
     const runLink = page.locator('#session-list li[data-name="lead"] a.sess-cflow2');
     await runLink.scrollIntoViewIfNeeded();
     assert.match(await runLink.innerText(), /Run ↗/);

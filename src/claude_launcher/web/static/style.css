@@ -669,9 +669,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
              The default.
    expanded  every line the row has, plus the briefing card.
 
-   `.rail-actions` belongs to expanded cards. A compact card retains only
-   the API-key picker when present; refreshing its briefing or checks is an
-   explicit action available after opening the card. Keeping asynchronous
+   `.rail-actions` belongs to expanded cards. The API-key picker and
+   briefing/check refresh controls are available after opening the card.
+   Keeping asynchronous
    refresh labels off the identity line also keeps the profile position stable.
 
    `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
@@ -743,17 +743,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .sess-brief {
   display: none;
 }
-/* Keep the key picker reachable in compact cards. Refresh controls are
-   deliberately expanded-only, including their pending and completed labels. */
-#session-list li[data-rail-mode="compact"] .rail-actions > :not(.sess-key) {
-  display: none;
-}
+/* All controls, including the key picker, belong to expanded cards. */
 #session-list li[data-rail-mode="compact"] .rail-actions {
-  flex: 0 1 auto; order: 0;
-  padding-left: 0; margin-left: 2px; gap: 3px;
-  min-width: 0; max-width: 100%; overflow: hidden;
-}
-#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(.sess-key)) {
   display: none;
 }
 /* Workflow state remains visible at every card density. */
