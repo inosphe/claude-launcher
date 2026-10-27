@@ -43211,18 +43211,20 @@ const CF2G_BRANCHES = new Set(["par", "group", "cond", "choose", "try", "timeout
    graph view (claunch-g6uma.2.1). `Simplified` stands on its own: it answers
    WHERE THE RUN IS and nothing else — the path down to every live instance and
    to the selection, with every other block folded. The levels answer how much
-   LOOP DETAIL is drawn: every block outside a loop, and every loop itself, is
-   drawn open at all of them, and the level counts only how many loop bodies
-   deep the detail goes; `all` opens those too. The run's own path is drawn at
-   every preset, so a level never hides where the run is; what a level does
-   fold is reported under the picture (`layout.folded`), so neither
-   simplification is silent. */
+   BLOCK DETAIL is drawn, and every kind of block body counts one layer: a
+   loop's, a `call` procedure's, a branch's, the same (the person's rule in
+   thread th-e39112). At `lv1` the top-level blocks are on the picture as one
+   line each; each further level opens the bodies of the blocks the one below
+   it folded, and `all` opens everything. A level that leaves a step of the run
+   out says so under the picture, with a press that goes to Simplified, so
+   neither answer hides anything; what a level does fold is reported there too
+   (`layout.folded`). */
 const CF2G_PRESETS = [
   ["simple", "Simplified", "the run's position — the path down to it, every other block folded"],
-  ["lv1", "1 level", "the whole skeleton and the run, each loop's body folded to one line"],
-  ["lv2", "2 levels", "the whole skeleton and the run, and a loop's own steps"],
-  ["lv3", "3 levels", "the whole skeleton and the run, and the blocks inside a loop body"],
-  ["all", "All", "every block unfolded, every loop body shown whole"],
+  ["lv1", "1 level", "the top-level blocks, one line each"],
+  ["lv2", "2 levels", "one layer of block bodies open — loops, calls and branches alike"],
+  ["lv3", "3 levels", "two layers of block bodies open"],
+  ["all", "All", "every block unfolded, whole"],
 ];
 const CF2G_PRESET_DEPTH = { lv1: 1, lv2: 2, lv3: 3 };
 
@@ -43320,20 +43322,17 @@ function cflow2GraphProcs(chart) {
   return { first, sites, order, groups, key };
 }
 
-/* Which containers the graph draws open. Two rules hold at every preset, not
-   just at `simple`:
-   · the run is drawn — the ancestors of every live or awaiting instance and of
-     the selection are open (the rule cflow2TreeOpen applies), so no preset can
-     hand back a run panel with no run in it;
-   · the skeleton is drawn — outside a loop the structure does not depend on
-     the preset at all.
-   What the presets do differ in is loop detail and nothing else: `simple`
-   folds every container that is not on the run's path, while `lvN` and `all`
-   open every container no loop body encloses and count how far inside loops
-   they go (a container N loop bodies deep is folded at every level at or below
-   N); `all` opens those too. The person's own folds (`overrides`: id ->
-   open) are laid on top of that, and picking a preset again starts the chart
-   over from the preset. Pure. */
+/* Which containers the graph draws open. `Simplified` follows the run: the
+   path down to every live or awaiting instance and to the selection is open,
+   and every other container is folded. The levels answer the other question —
+   how much of the structure is drawn — and open the same layers whatever the
+   run is doing: `lvN` opens every container whose body sits fewer than N block
+   bodies deep, and a block body is a loop's, a `call` procedure's or a
+   branch's alike (the person's rule in thread th-e39112). `all` opens every
+   container. A container at the level's depth is still on the picture as one
+   folded line, so the outline above the fold is drawn at every level. The
+   person's own folds (`overrides`: id -> open) are laid on top of that, and
+   picking a preset again starts the chart over from the preset. Pure. */
 function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
   const nodes = (chart && chart.nodes) || {};
   const open = new Set();
@@ -43345,15 +43344,32 @@ function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
     }
   }
   const lift = (id) => { for (let p = parent[id]; p; p = parent[p]) open.add(p); };
-  for (const i of (detail && detail.instances) || []) if (nodes[i.node]) lift(i.node);
-  if (selected && nodes[selected]) lift(selected);
   const mode = CF2G_PRESETS.some((p) => p[0] === preset) ? preset : "simple";
+  /* Simplified follows the run, so it opens the path down to every live
+     instance. A level answers the other question — how much of the structure
+     is drawn — and opens the same layers whatever the run is doing; spending
+     its first layers on the run's path (which on a deep chart is most of the
+     picture) collapsed `lv1`, `lv2` and Simplified into one drawing. What a
+     level leaves out of the run is reported under the picture with a press
+     that goes there (`cflow2GraphHidden`, `Show the run`), so the run is not
+     lost silently either way. A selection is a person's own focus and is
+     opened at every preset. */
+  if (mode === "simple") {
+    for (const i of (detail && detail.instances) || []) if (nodes[i.node]) lift(i.node);
+  }
+  if (selected && nodes[selected]) lift(selected);
   if (mode !== "simple") {
-    /* how many loop bodies lie between a block and the outside, counted from
-       the nearest root: a block reachable by two paths sits at the shallower
-       one, so a level never folds a block that another path would have shown.
-       Loop containers themselves are outside their own body, so the loop is
-       drawn at every level and only what it holds answers the level. */
+    /* how many block bodies a step sits inside, counted from the nearest root
+       and from every kind of block alike — a loop, a `call` body and a branch
+       are each one layer, which is the person's rule: the level treats them
+       the same (thread th-e39112). A plain `seq` is a run, not a block, and
+       draws no frame of its own, so it does not spend a level. A step
+       reachable by two paths sits at the shallower one, so a level never folds
+       a block that another path would have shown. A block at the level's depth
+       is drawn as one folded line, so the shape above the fold is on the
+       picture at every level. */
+    const counts = (n) => !!n && (n.type === "loop" || n.type === "scope" ||
+      CF2G_BRANCHES.has(n.type));
     const inside = new Map();
     const roots = [];
     if (chart && chart.root && nodes[chart.root]) roots.push(chart.root);
@@ -43363,8 +43379,13 @@ function cflow2GraphOpen(chart, detail, selected, overrides, preset) {
       const [id, d] = queue.shift();
       if (inside.has(id) && inside.get(id) <= d) continue;
       inside.set(id, d);
-      const step = nodes[id] && nodes[id].type === "loop" ? 1 : 0;
-      for (const c of (nodes[id] && nodes[id].children) || []) {
+      const n = nodes[id];
+      /* the chart's own root is the frame of the whole thing, not a body a
+         level opens: it always counts none, so `lv1` means the same amount of
+         picture whether the definition is wrapped in a `try` or sits in a
+         plain `seq` */
+      const step = id !== chart.root && counts(n) && (n.children || []).length ? 1 : 0;
+      for (const c of (n && n.children) || []) {
         if (nodes[c]) queue.push([c, d + step]);
       }
     }
@@ -43723,10 +43744,10 @@ function cflow2GraphLayout(chart, detail, opts) {
   out.drawn = drawn;
   out.everything = everything;
   /* Which blocks this open set left folded — a container the walk reached and
-     drew as one line (`+n collapsed`). A level folds only what a loop body
-     holds, so the count is how much loop detail the level simplified, and the
-     caller says it under the picture. A site that does not own its shared body
-     draws none of it, so it is not a folded block. */
+     drew as one line (`+n collapsed`). A level folds block bodies of every
+     kind the same way, so the count is how much detail the level simplified,
+     and the caller says it under the picture. A site that does not own its
+     shared body draws none of it, so it is not a folded block. */
   out.folded = [];
   for (const id of drawn) {
     if (shared(id) || !bodyKids(id).length || shown(id)) continue;
@@ -43818,8 +43839,8 @@ function cflow2GraphLegend() {
     "Down: steps in order · side by side: branches, forked above and joined below · " +
     "boxed: a loop, its retry running back up · call: a procedure, drawn once " +
     "where several steps call it · − folds a block, a box reading +n collapsed opens one · " +
-    "Simplified is the run's position; a level keeps the whole skeleton, the run, and " +
-    "folds only what is inside a loop");
+    "Simplified follows the run; a level draws the structure instead and opens block " +
+    "bodies — a loop's, a call's, a branch's alike — one layer at a time");
 }
 
 /* Which of the run's own steps the drawing left out, leaving out the ones no
@@ -43945,13 +43966,13 @@ function cflow2GraphPresetTabs(host, preset, redraw) {
   group.setAttribute("aria-label", "Graph detail");
   for (const [value, label, hint] of CF2G_PRESETS) {
     /* Simplified answers a different question from the levels — where the run
-       is, not how much loop detail is drawn — so the row shows that: a rule
+       is, not how much block detail is drawn — so the row shows that: a rule
        and a caption stand between it and the ladder (claunch-g6uma.2.1). */
     if (value === "lv1") {
       const sep = el("span", "cf2-modes-sep");
       sep.setAttribute("aria-hidden", "true");
       group.appendChild(sep);
-      group.appendChild(el("span", "cf2-modes-cap", "loop detail"));
+      group.appendChild(el("span", "cf2-modes-cap", "block detail"));
     }
     const button = el("button", "cf2-mode", label);
     button.type = "button";
@@ -44942,11 +44963,10 @@ function renderCflow2Into(box, data, ui, force = false) {
         box._cf2GraphLayout = drawn.layout;
         box._cf2GraphSignature = graphSignature;
       }
-      /* A level keeps the whole skeleton and folds only what a loop body holds,
-         so two different things can be off the picture: a step of the run (the
-         level draws structure and does not follow the run; Simplified does),
-         and the loop detail the level folded away. Say which of the two it is,
-         and make each one press. */
+      /* A level draws the structure and does not follow the run, so two
+         different things can be off the picture: a step of the run it folded
+         away with the block that holds it, and the block detail itself. Say
+         each one, and make it a press. */
       const layoutNow = box._cf2GraphLayout;
       const away = cflow2GraphHidden(layoutNow, data);
       const foldedBlocks = (layoutNow.folded || []).length;
@@ -44965,14 +44985,14 @@ function renderCflow2Into(box, data, ui, force = false) {
         note.appendChild(show);
         sec.appendChild(note);
       }
-      /* both can be true at once — a run inside a loop at a level that folds
-         that loop is not the same fact as the loop detail the level folded —
+      /* both can be true at once — a run inside a block at a level that folds
+         that block is not the same fact as the block detail the level folded —
          so the two notes stand on their own rather than one hiding the other */
       if (nextPreset && foldedBlocks) {
         const note = el("div", "wf-note cf2g-hidden");
         note.appendChild(el("span", null, foldedBlocks === 1
-          ? "1 block of loop detail is folded"
-          : `${foldedBlocks} blocks of loop detail are folded`));
+          ? "1 block is folded"
+          : `${foldedBlocks} blocks are folded`));
         const more = el("button", "wf-btn sm", "Show more detail");
         more.type = "button";
         more.title = "open what the next level opens";

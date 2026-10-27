@@ -8990,7 +8990,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-modes.sub { margin-left: 8px; border-color: #21262d; }
 .cf2-modes.sub .cf2-mode { padding: 2px 9px; font-size: 11px; }
 /* `Simplified` and the levels answer different questions — the run's position
-   against how much loop detail is drawn — so a rule and a caption stand
+   against how much block detail is drawn — so a rule and a caption stand
    between them (claunch-g6uma.2.1) */
 .cf2-modes-sep {
   width: 1px; align-self: stretch; background: #30363d;
@@ -9005,7 +9005,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    is branches, a box is a loop, a call frame is a procedure drawn once */
 .cf2g-legend { margin: 0 0 6px; }
 /* under the graph, when the picture left something out — a step of the run a
-   level folded, or the loop detail a level simplified (claunch-g6uma.2.1) */
+   level folded, or the block detail a level simplified (claunch-g6uma.2.1) */
 .cf2g-hidden {
   display: flex; align-items: center; gap: 8px; margin: 6px 0 0;
   padding: 4px 8px; border: 1px solid #30363d; border-radius: 6px;
