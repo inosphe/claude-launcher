@@ -1937,18 +1937,42 @@ def run_and_record(
     except LookupError:
         receipt["commit"] = None          # an address for the reader, not the key
     dest = receipt_path(repo, tree, files, override, deselect)
+    tmp = None
+    kept = None
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # Before the write, so a second run over this tree and selection
-        # leaves the first one's account beside it instead of erasing it.
+        # Into a temporary file first: the key path must not go empty while a
+        # replacement is being written. Archiving the earlier receipt before
+        # the write left a window in which the only receipt at the key was
+        # gone and ``--check`` answered ``CANNOT_TELL`` -- for as long as it
+        # took ``write_text`` to fail (``claunch-23r7d.1.1.1.1``). A run whose
+        # bookkeeping failed now leaves the earlier verdict exactly where a
+        # check looks for it.
+        tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        # A second run over this tree and selection leaves the first one's
+        # account beside it instead of erasing it.
         kept = keep_earlier_receipt(dest)
         if kept is not None:
             print(f"kept the earlier receipt: {kept}")
-        dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        os.replace(tmp, dest)
+        tmp = None
         print(f"receipt: {dest}")
     except OSError as exc:
         # Never turn a finished run into a failure over its bookkeeping.
         print(f"WARNING: could not write the receipt: {exc}", file=sys.stderr)
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass                      # nothing to clean up, or nothing we can do
+        if kept is not None and not dest.exists():
+            # The swap is what failed, after the archive already moved the
+            # earlier receipt. Put it back: the run did not replace it.
+            try:
+                kept.replace(dest)
+            except OSError:
+                pass
     if comparison is not None and not comparison["new_failures"]:
         return 0
     return 0 if code == 0 else 1
