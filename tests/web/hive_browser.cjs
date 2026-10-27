@@ -35,7 +35,13 @@
         session tab's order, a session with no briefing says so, leaving
         the chip closes it, focusing a chip opens it, the chip carries no
         native title under it, and search finds a chip by its briefing;
-    13. no page errors. */
+    13. opening task and cflow (claunch-z6cfr): the overlay carries the
+        worker's opening task (read from /api/sessions/<name>, its first
+        lines and how many more) and the leader's cflow run (workflow,
+        status, round, current nodes, what it waits on); the detail pane a
+        click opens draws the whole task, the briefing and the cflow rows
+        with a link to the run page, and a session with no run says so;
+    14. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -56,6 +62,12 @@ const SESSIONS = [
   { name: "parked", status: "exited", held_at: ago(3), created_at: ago(9), project: "gds", cwd: "/w/gds" },
   { name: "dead", status: "exited", exited_at: ago(2), created_at: ago(9), project: "gds", cwd: "/w/gds" },
 ];
+const WK_TASK = Array.from({ length: 12 }, (_, i) => `task line ${i + 1}`).join("\n");
+const CFLOW2 = {
+  lead: { cwd: "/w/claunch", scope: "lead", workflow: "improv-leader-v2", status: "running", round: 3,
+          current: ["integrate"], owed: ["select: land"], gated: true },
+};
+const taskAsked = [];
 const MESH = {
   meshes: [{
     name: "claunch", members: [
@@ -109,6 +121,15 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ sessions: url.searchParams.get("state") === "archived" ? [] : SESSIONS }));
     }
     if (url.pathname === "/api/mesh") return res.end(JSON.stringify(MESH));
+    if (url.pathname === "/api/cflow2/rail") return res.end(JSON.stringify({ rows: CFLOW2 }));
+    const one = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+    if (one) {
+      const name = decodeURIComponent(one[1]);
+      const s = SESSIONS.find((x) => x.name === name);
+      taskAsked.push(name);
+      if (!s) { res.statusCode = 404; return res.end(JSON.stringify({ error: "no such session" })); }
+      return res.end(JSON.stringify({ ...s, task: name === "wk" ? WK_TASK : "" }));
+    }
     if (url.pathname === "/api/beads/queues") return res.end(JSON.stringify(QUEUES));
     if (url.pathname === "/api/category") {
       categoryAsked.push(url.searchParams.get("workspace"));
@@ -323,7 +344,7 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     assert.deepEqual(await page.$$eval(`${brief} .hive-brief-row`, (rs) => rs.map((r) => r.textContent)),
       ["wiring the relation chips", "goalshow session-issue ties", "nowwriting the browser step",
        "progressmodel done, view half"]);
-    assert.equal(await page.textContent(`${brief} .hive-brief-head`), "briefing · fresh");
+    assert.equal(await page.textContent(`${brief} .hive-brief-head.h-briefing`), "briefing · fresh");
     assert.match(await page.textContent(`${brief} .hive-brief-name`), /^wk — idle/);
     const inPort = await page.$eval(brief, (b) => {
       const p = b.parentElement.getBoundingClientRect(), r = b.getBoundingClientRect();
@@ -332,7 +353,7 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     assert.ok(inPort, "the overlay stays inside the canvas");
     await page.hover('#hive-view .hive-chip[data-kind="session"][data-id="lead"]');
     await page.waitForSelector(`${brief}:not(.hidden)[data-session="lead"]`);
-    assert.equal(await page.textContent(`${brief} .hive-brief-head`), "briefing 없음");
+    assert.equal(await page.textContent(`${brief} .hive-brief-head.h-briefing`), "briefing 없음");
     await page.hover("#hive-view .hive-status");
     await page.waitForSelector(brief, { state: "hidden" });
     await page.focus(wkChip);
@@ -343,7 +364,48 @@ const chipNames = (page) => page.$$eval("#hive-view .hive-chip[data-kind=session
     await page.waitForSelector('#hive-view .hive-chip.hit[data-id="wk"]');
     await page.fill("#hive-view .hive-search", "");
 
-    // 13.
+    // 13. Opening task and cflow, in the overlay and the detail pane.
+    await page.hover(wkChip);
+    await page.waitForSelector(`${brief}:not(.hidden)[data-session="wk"] .hive-task-text`);
+    assert.equal(await page.textContent(`${brief} .hive-task-text`),
+      WK_TASK.split("\n").slice(0, 8).join("\n"), "the overlay shows the task's first lines");
+    assert.match(await page.textContent(brief), /… 4줄 더/);
+    const wkReads = () => taskAsked.filter((n) => n === "wk").length;
+    const readsBefore = wkReads();
+    assert.equal(await page.textContent(`${brief} .hive-brief-head.h-cflow`), "cflow 런 없음");
+    const heads = await page.$$eval(`${brief} .hive-brief-head`, (hs) => hs.map((h) => h.className.split(" ").pop()));
+    assert.deepEqual(heads, ["h-task", "h-briefing", "h-cflow"]);
+    const leadChip = '#hive-view .hive-chip[data-kind="session"][data-id="lead"]';
+    await page.hover(leadChip);
+    await page.waitForSelector(`${brief}:not(.hidden)[data-session="lead"] .hive-cflow-rows`);
+    assert.match(await page.textContent(`${brief} .hive-brief-head.h-cflow`), /^cflow · improv-leader-v2/);
+    assert.deepEqual(await page.$$eval(`${brief} .hive-cflow-rows .hive-brief-row`, (rs) => rs.map((r) => r.textContent)),
+      ["workflowimprov-leader-v2", "statusrunning · 사람 대기", "round3", "현재integrate", "대기select: land"]);
+    await page.waitForFunction((b) => /기록된 opening task가 없다/.test(document.querySelector(b).textContent), brief);
+    assert.doesNotMatch(await page.textContent(`${brief} .hive-brief-meta`), /cflow:/, "the cflow line is its own section");
+    await page.hover("#hive-view .hive-status");
+    await page.waitForSelector(brief, { state: "hidden" });
+    // The detail pane: the whole task, the briefing, the cflow rows.
+    await page.click(wkChip);
+    await page.waitForSelector("#hive-view .hive-detail:not(.hidden) .s-task .hive-task-text.full");
+    assert.equal(await page.textContent("#hive-view .hive-detail .hive-task-text.full"), WK_TASK);
+    assert.equal(wkReads(), readsBefore, "the task read for the overlay is kept for the pane");
+    assert.deepEqual(await page.$$eval("#hive-view .hive-detail .s-briefing .hive-brief-row", (rs) => rs.map((r) => r.textContent)),
+      ["wiring the relation chips", "goalshow session-issue ties", "nowwriting the browser step",
+       "progressmodel done, view half"]);
+    assert.equal(await page.textContent("#hive-view .hive-detail .s-cflow .hive-detail-head"), "cflow 런 없음");
+    await page.click(leadChip);
+    await page.waitForFunction(() => document.querySelector("#hive-view .hive-detail h3")?.textContent === "lead");
+    assert.deepEqual(await page.$$eval("#hive-view .hive-detail .s-cflow .hive-brief-row", (rs) => rs.map((r) => r.textContent)),
+      ["workflowimprov-leader-v2", "statusrunning · 사람 대기", "round3", "현재integrate", "대기select: land"]);
+    assert.deepEqual(await page.$$eval("#hive-view .hive-detail a.hive-btn", (as) => as.map((a) => a.getAttribute("href"))),
+      ["#/s/lead", "#/wf/" + encodeURIComponent("lead|/w/claunch")]);
+    await page.waitForSelector("#hive-view .hive-detail .s-task .hive-muted");
+    assert.equal(await page.textContent("#hive-view .hive-detail .s-task .hive-muted"), "기록된 opening task가 없다.");
+    await page.click(leadChip);
+    await page.waitForSelector("#hive-view .hive-detail.hidden", { state: "attached" });
+
+    // 14.
     assert.deepEqual(errors, []);
     console.log("hive browser ok");
   } finally {

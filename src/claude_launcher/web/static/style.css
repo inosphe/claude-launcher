@@ -10619,3 +10619,12 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-brief-row { display: contents; }
 .hive-brief-row.b-one_line .hive-brief-text { grid-column: 1 / -1; color: #e6edf3; }
 .hive-brief-label { color: #8b949e; }
+/* The opening task and cflow sections of the overlay and the detail pane
+   (claunch-z6cfr). */
+.hive-task-text {
+  margin: 4px 0 0; font: inherit; color: #d8dbe0; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.hive-task-text.full { max-height: 260px; overflow: auto; background: #0d1117; border: 1px solid #262c36; border-radius: 6px; padding: 6px 8px; }
+.hive-cflow-rows .hive-brief-text { white-space: pre-line; }
+.hive-detail-sec { margin: 0 0 12px; }
+.hive-detail-head { padding-top: 8px; border-top: 1px solid #262c36; color: #58a6ff; font-size: 11px; margin-bottom: 4px; }
