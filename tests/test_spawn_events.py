@@ -652,3 +652,63 @@ def test_a_long_reason_still_folds_the_route_and_the_sweep_into_one_row(tmp_path
     assert len(recorded) == 1, (
         "a long reason keys the same on both sides; truncation happens once, "
         f"inside normalize, got {[e['details']['site'] for e in recorded]}")
+
+
+def test_a_report_that_raises_does_not_turn_the_refusal_into_500(
+        home, tmp_path, monkeypatch, caplog):
+    """``_report_spawn_failure``'s own guard, which nothing pinned (claunch-3t1wd).
+
+    The report runs *after* the route has decided its answer (``api.py``
+    ``_spawn_child_reported``): the 4xx is already computed, and only then is
+    the refusal recorded. A report that raised there would replace a 409 the
+    client can act on -- "a session by that name exists" -- with a 500 that
+    says nothing and reads as the daemon's fault.
+
+    The store's own guard is a different one and already tested:
+    ``test_a_store_that_cannot_write_does_not_become_a_second_failure`` covers
+    ``Failures.report``'s internals (``events.record``, ``_notice``). This
+    measures the caller's ``except`` around ``failures.report`` itself, so the
+    stub raises from ``report`` rather than from anything it calls -- the one
+    way to reach that ``except``.
+
+    Mutation: deleting the ``try``/``except`` at ``api.py``
+    ``_spawn_child_reported``'s callee (``_report_spawn_failure``) makes this
+    red with a 500, because aiohttp turns the escaped exception into one.
+    """
+    _register_py_harness()
+
+    def refuse(*args, **kwargs):
+        raise OSError("the board went away")
+
+    async def run():
+        mgr = _manager()
+        # The route reaches the manager's reporter; give it one that raises.
+        monkeypatch.setattr(mgr, "spawn_failures",
+                            SimpleNamespace(report=refuse), raising=False)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        parent = mgr.stage(SessionDef(name="parent", harness="py", cwd=str(tmp_path)))
+        try:
+            resp = await client.post(
+                "/api/sessions/parent/children", headers=BEARER,
+                json={"name": "parent", "task": "child work", "beads": False})
+            status = resp.status
+            # aiohttp answers an escaped exception with text/plain, so reading
+            # the body first would fail on the JSON decode instead of on the
+            # status that says what went wrong.
+            error = (await resp.json()).get("error") if status == 409 else await resp.text()
+        finally:
+            await client.close()
+        return mgr, parent, status, error
+
+    mgr, parent, status, error = asyncio.run(run())
+
+    assert status == 409, (
+        "the route's own answer must survive its report failing, "
+        f"got {status}")
+    assert "already exists" in error
+    assert "could not report the refused spawn" in caplog.text, (
+        "the failure was reported to the log rather than swallowed silently")
+    # And the route reported what it answered, from its own site.
+    assert [e for e in mgr.events.rows(parent) if e["kind"] == "fail"] == [], (
+        "the stub replaced the reporter, so this route added no row of its own")
