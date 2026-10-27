@@ -784,7 +784,8 @@ class Hub:
         folder = image_folder()
         folder.mkdir(parents=True, exist_ok=True)
         name = secrets.token_hex(10) + ".png"
-        (folder / name).write_bytes(data)
+        with open(folder / name, "wb") as fh:
+            fh.write(data)
         out = {"image": name, "bytes": len(data), "url": win.url, "title": win.title}
         if element:
             out["element"] = element
