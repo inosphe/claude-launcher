@@ -22,6 +22,9 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
 
+// 4:32 out. The card text is read seconds after the rows are built (browser
+// launch, route setup, refresh), so the countdown asserts accept 4:00-4:39
+// rather than the one 10-second band the clock starts in (claunch-zjq1j).
 const soon = () => new Date(Date.now() + 272000).toISOString();
 const SPEC = { profile: 'p', project: 'alpha', cwd: '/repo/alpha', task: 'Fix the login bug\nwith details',
   workflow: 'improv-worker-v2', worktree: '', issue: 'alpha-7' };
@@ -114,7 +117,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.deepEqual(await factRows(spawnCard), [['project', 'alpha'], ['profile', 'p'],
       ['workspace', '/repo/alpha'], ['worktree', 'new (generated name)'],
       ['role', '—'], ['workflow', 'improv-worker-v2']]);
-    assert.match(spawnText, /no answer in 4:3\d: no top-level session — created as op1's child instead/);
+    assert.match(spawnText, /no answer in 4:[0-3]\d: no top-level session — created as op1's child instead/);
     const buttons = async card => (await card.locator('.gate-actions button').allInnerTexts()).map(t => t.trim());
     assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
 
@@ -122,7 +125,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.match(resumeText, /old1/);
     assert.match(resumeText, /otherwise a new session: issue alpha-7/);
     assert.equal((await factRows(resumeCard))[0][1], 'alpha', 'the fallback spec fills the rows');
-    assert.match(resumeText, /not resumed — a new session is asked for instead — in 4:3\d \(extended 1×\)/);
+    assert.match(resumeText, /not resumed — a new session is asked for instead — in 4:[0-3]\d \(extended 1×\)/);
     assert.deepEqual(await buttons(resumeCard), ['Resume', 'New session', 'Reject', '+5 min', 'Hide']);
     const childText = await childCard.innerText();
     assert.match(childText, /child session requested under w1/);
@@ -130,7 +133,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.deepEqual(await factRows(childCard), [['project', 'alpha'], ['profile', 'p (inherited from w1)'],
       ['workspace', 'alpha (inherited from w1)'], ['worktree', 'kid-wt'],
       ['role', 'worker'], ['workflow', 'improv-worker-v2']]);
-    assert.match(childText, /auto-approves in 4:3\d — created as asked/);
+    assert.match(childText, /auto-approves in 4:[0-3]\d — created as asked/);
     assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
     assert.equal(await page.evaluate(() => gatePending.spawn.length), 4, 'the bell counts all four');
     // A request taken over by hand stays on the card with its clock paused
