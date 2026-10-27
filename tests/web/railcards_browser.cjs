@@ -402,6 +402,34 @@ const READ = `(() => {
     assert.equal(both.ring, rootMark.bg.ring,
       `...and the flash ring (${both.ring} vs ${rootMark.bg.ring})`);
 
+    /* ---- the row the reader is on is findable ------------------------- */
+    /* What marks the session whose terminal is on screen. The request that
+       produced this ("highlight that card more clearly") was about a mark
+       the reader had to hunt for: a 2px edge in a muted blue on the card's
+       transparent face, the same weight as the hover tint beside it. So what
+       is measured is the DIFFERENCE between the row's two faces, not one
+       colour: a face that paints nothing, or paints the hover tint, fails.
+       The class is toggled by hand because the fixture boots with no session
+       attached and therefore no active row to read. */
+    const activeFace = async (name, on) => page.evaluate(([n, want]) => {
+      const li = document.querySelector(`#session-list li[data-name="${n}"]`);
+      li.classList.toggle("active", want);
+      li.classList.remove("goto-flash");
+      const cs = getComputedStyle(li);
+      const label = li.querySelector(".rail-name");
+      return { bg: cs.backgroundColor, ring: cs.boxShadow,
+               name: label ? getComputedStyle(label).color : "" };
+    }, [name, on]);
+    const resting = await activeFace("w1", false);
+    const here = await activeFace("w1", true);
+    assert.notEqual(here.bg, resting.bg,
+      `the active row paints a face of its own (${here.bg} vs ${resting.bg})`);
+    assert.ok(/inset/.test(here.ring) && /rgb\(88, 166, 255\)/.test(here.ring),
+      `...carrying the accent bar and the rim (${here.ring})`);
+    assert.notEqual(here.name, resting.name,
+      `...and a name at a brighter contrast (${here.name} vs ${resting.name})`);
+    await activeFace("w1", false);
+
     /* ---- picking a card expands it ----------------------------------- */
     /* The reader's only way to open a card now: this is what the removed
        fold left behind, so it has to work in the shipped page. */

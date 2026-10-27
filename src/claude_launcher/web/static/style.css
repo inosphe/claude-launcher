@@ -759,9 +759,32 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li.sess-card[data-rail-mode="min"] {
   padding-top: 7px; padding-bottom: 7px;
 }
+/* Where the reader is: the row of the session whose terminal is on screen.
+ * `currentName` in app.js puts `.active` on exactly that row, and the three
+ * navigation paths move it when the reader switches sessions.
+ *
+ * The claim used to be a 2px edge in a muted blue on the card's transparent
+ * face. That is the weight of the hover tint and one hue away from it, so on
+ * a rail of hundreds of rows the mark read as "this row is special somehow"
+ * rather than "this is the session you are looking at". It is now three
+ * marks that all survive a glance down the column: a tinted surface the
+ * plain rows do not have, a 3px bar on the leading edge, and a hairline rim
+ * that closes the card. The name is lifted to the app's brightest text as
+ * well, because a filled row whose label still reads at its neighbours'
+ * contrast has to be READ instead of found.
+ *
+ * `.goto-flash` is excluded here and still paints over this face: it says
+ * "this is the row you just asked for", which outranks "this is where you
+ * are" for the moment it lasts. That is decided by declaration order among
+ * the rules further down (`li.goto-flash`, `li.child.goto-flash.*`) — the
+ * child case, where the flashed row is also the active one, is measured in
+ * railcards_browser.cjs. */
 #session-list .sess-card.active:not(.goto-flash) {
-  background: transparent; box-shadow: inset 2px 0 0 #426286;
+  background: #1d3550;
+  box-shadow: inset 3px 0 0 #58a6ff,
+              inset 0 0 0 1px rgba(88, 166, 255, 0.28);
 }
+#session-list .sess-card.active:not(.goto-flash) .rail-name { color: #f0f6fc; }
 #session-list li.sess-card .rail-name {
   font-weight: 600; letter-spacing: .01em; flex: 1 1 auto; min-width: 8ch;
 }
