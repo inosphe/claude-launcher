@@ -516,6 +516,7 @@ CHECKS = [
         "delegatesetting_check.js",
         "sweepbatchsetting_check.js",
         "noticehistory_check.js",
+        "noticepaint_check.js",
         "termcache_check.js",
         "gpurender_check.js",
         "theme_check.js",
