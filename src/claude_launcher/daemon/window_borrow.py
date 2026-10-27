@@ -42,13 +42,14 @@ import json
 import logging
 import os
 import platform
+import posixpath
 import secrets
 import shutil
 import signal
 import subprocess
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Dict, List, Optional
 
 from .. import atomic, pytest_basetemp, reposync, store, test_window, workspaces
@@ -125,6 +126,47 @@ def _remote_ref_of(repo: str, sha: str, keyed: Dict[str, str]) -> Optional[dict]
 
 _recipes: Dict[tuple, tuple] = {}
 
+#: pytest options that change which configuration, conftest files or plugins
+#: a run loads. The lender's arguments select tests; they may not reach past
+#: the borrower's checkout or swap its plugins (claunch-onqp6).
+_SCOPE_OPTIONS = ("--config-file", "--rootdir", "--confcutdir")
+_SCOPE_SHORT = ("-p", "-c")
+
+
+def _escapes(path: str, base: str = "") -> bool:
+    """``path`` is absolute (on either OS) or leaves the checkout when read
+    from ``base``, both relative to the checkout's top."""
+    path = path.replace("\\", "/")
+    if PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive:
+        return True
+    joined = posixpath.normpath(posixpath.join(base, path)) if path else base
+    return joined == ".." or joined.startswith("../")
+
+
+def vet_borrow(info: dict) -> Optional[str]:
+    """Why the borrower must not run ``info``'s pytest, or None.
+
+    ``rel_cwd`` must name a directory inside the checkout; every argument's
+    path (a positional test id or an ``--opt=value`` value, before ``::``)
+    must stay inside it from there; and the options that move pytest's
+    configuration or plugins (``-p``, ``-c``, ``--config-file``,
+    ``--rootdir``, ``--confcutdir``) are refused outright.
+    """
+    rel = str(info.get("rel_cwd") or "")
+    if _escapes(rel):
+        return f"rel_cwd {rel!r} is outside the checkout"
+    base = posixpath.normpath(rel.replace("\\", "/")) if rel else ""
+    base = "" if base == "." else base
+    for raw in [str(a) for a in info.get("pytest_args") or []]:
+        name, eq, value = raw.partition("=")
+        if name in _SCOPE_OPTIONS or any(
+                raw.startswith(short) and not raw.startswith("--") for short in _SCOPE_SHORT):
+            return f"pytest option {raw!r} changes the run's configuration or plugins"
+        target = value if (eq and raw.startswith("-")) else ("" if raw.startswith("-") else raw)
+        if _escapes(target.split("::", 1)[0], base):
+            return f"pytest argument {raw!r} names a path outside the checkout"
+    return None
+
 
 def recipe(info: dict) -> dict:
     """How another machine rebuilds the waiter's tree, or why it cannot.
@@ -142,6 +184,9 @@ def recipe(info: dict) -> dict:
         return {"ok": False, "reason": "the waiter sent no commit to reproduce"}
     if info.get("pytest_args") is None:
         return {"ok": False, "reason": "the run's arguments name paths outside its repository"}
+    refused = vet_borrow(info)
+    if refused:
+        return {"ok": False, "reason": refused}
     memo_key = (top, head, tree)
     hit = _recipes.get(memo_key)
     if hit and time.monotonic() - hit[0] < RECIPE_TTL:
@@ -430,6 +475,11 @@ class BorrowRunner:
         }
         self._runs.append(run)
         self._save()
+        refused = vet_borrow(run["info"])
+        if refused:
+            await self._give_back(run, f"the borrower refused: {refused}")
+            self._set(run, status="failed", error=refused, finished_at=_utcnow())
+            return self._view(run)
         if repo is None:
             await self._give_back(run, "no workspace here shares this repository's remote")
             self._set(run, status="failed", error="no matching local clone",
@@ -579,6 +629,10 @@ class BorrowRunner:
         argv = [str(python), "-m", "pytest", *args, f"--basetemp={basetemp}",
                 f"--junit-xml={junit}", "-o", "junit_family=xunit1"]
         cwd = checkout / (info.get("rel_cwd") or "")
+        try:
+            cwd.resolve().relative_to(checkout.resolve())
+        except ValueError:
+            raise RuntimeError(f"rel_cwd {info.get('rel_cwd')!r} resolves outside the checkout")
         clock = time.monotonic()
         code, output = await _run_proc(
             argv, cwd=cwd, state=state, env=suite_env(
