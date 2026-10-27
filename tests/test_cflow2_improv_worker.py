@@ -87,7 +87,7 @@ V1_TO_V2 = {
     "settle-check": ["settle-check", "settle-poll"],
     "settle-wait": ["settle-wait"],
     "settle-stall": ["settle-stall"],
-    "end-gate": ["end-decision", "end-notice"],
+    "end-gate": ["end-decision"],
     "end-hold": ["end-hold"],
 }
 
@@ -1597,7 +1597,10 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
         dict(BRIEF["options"][1], name="new-task"),
         dict(BRIEF["options"][1], name="self-improve"),
         dict(BRIEF["options"][1], name="auto-release")])
-    for scope, answer, then in (("m", "end", "end-notice"), ("n", "new-task", "end-new-task")):
+    # claunch-q4cqy.6: end at the first gate runs the cleanup and finishes the
+    # run -- the notice already went out ahead of the gate, and
+    # release-decision is not asked.
+    for scope, answer, then in (("m", "end", "auto-release"), ("n", "new-task", "end-new-task")):
         kw = {"cwd": str(tmp_path), "scope": scope, "now": 1.0}
         st = runtime.start(chart, caps={}, **kw)
         iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
@@ -1625,7 +1628,8 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
 
 #: The nodes the end-watch loop runs, stubbed: every one prints its own name.
 #: The self-improve nodes are the library's own (self-improve-common).
-END_NODES = ("end-notice", "end-hold", "end-new-task", "auto-release")
+#: end-notice is not here: it runs before the gate, in settle (claunch-q4cqy.6).
+END_NODES = ("end-hold", "end-new-task", "auto-release")
 #: A value each self-improve node accepts.
 SI_VALUES = {"self-improve-review": {"where": "c", "general": 1, "cflow": 1},
              "self-improve-discuss": {"items": [], "agreed": 0},
@@ -1707,7 +1711,8 @@ def _end_flow(tmp_path):
 
 
 def _end_labels(st):
-    return [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]]
+    # a finished run carries no 'tasks' key at all
+    return [t["label"].rsplit("/", 1)[-1] for t in st.get("tasks", [])]
 
 
 def _pose(st, brief, **kw):
@@ -1746,7 +1751,68 @@ def test_the_end_question_times_out_into_auto_release_then_the_release_gate(
     runtime.approve(None, decision="end", reason="r",
                     cwd=kw["cwd"], scope=kw["scope"], now=4010.0)
     st = runtime.status(cwd=kw["cwd"], scope=kw["scope"], now=4011.0)
-    assert _end_labels(st) == ["end-notice"]
+    # claunch-q4cqy.6: the cleanup already ran and the notice already went out
+    # before the gate, so end here runs no node -- the run just finishes.
+    assert _end_labels(st) == [] and st["status"] == "done", _end_labels(st)
+
+
+def test_end_at_the_first_gate_cleans_up_then_finishes_the_run(
+        tmp_path, monkeypatch):
+    """claunch-q4cqy.6: end chosen at end-decision has not passed auto-release
+    yet, so it runs the cleanup and then the run finishes -- release-decision
+    is not asked again."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _end_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, _brief("end", "hold", "new-task", "self-improve", "auto-release"), **kw)
+    assert st["status"] == "waiting_approval"
+    runtime.approve(None, decision="end", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["auto-release"], _end_labels(st)
+    iid = st["tasks"][0]["instance"]
+    st = runtime.report(iid, "ok", {}, **kw)
+    assert st["status"] == "done"
+    assert _end_labels(st) == []
+    # no release-decision behind the cleanup: the person already answered end
+    state = runtime.RunStore(kw["cwd"], kw["scope"]).load_state()
+    assert [a for a in state["asks"].values() if a["status"] == "open"] == []
+
+
+def test_the_notice_runs_before_the_end_gate():
+    """claunch-q4cqy.6: the notice is written on the turn the round just
+    ended, while the context cache is still warm -- a session standing at the
+    gate has an invalidated cache, so the one-line notice must not cost a
+    prefill of that context. In settle the notice therefore sits after the
+    retrospective and before end-watch, not inside the loop."""
+    chart = _chart()
+    settle = chart.nodes["settle.body"]
+    children = settle.props["children"]
+
+    def try_task(node_id):
+        """The label of the single task a try{seq:[...]} wrapper runs."""
+        node = chart.nodes[node_id]
+        if node.type != "try":
+            return None
+        seq = chart.nodes[node.props["child"]]
+        return chart.nodes[seq.props["children"][0]].label
+
+    # after the retrospective's try, before the gate loop
+    assert try_task(children[1]) == "retrospective"
+    assert try_task(children[2]) == "end-notice"
+    gate = next(c for c in children if chart.nodes[c].label == "end-watch")
+    assert children.index(children[2]) < children.index(gate)
+    # the notice is not a member of either gate's cases any more, and each
+    # gate's end does its own part: the first cleans up, the second is a bare
+    # break (the cleanup already ran before it).
+    first_end = chart.nodes["settle/end-decision.cases.case.end"]
+    assert [chart.nodes[c].label for c in first_end.props["children"]][0] == "auto-release"
+    second_end = chart.nodes["settle/release-decision.cases.case.end"]
+    assert len(second_end.props["children"]) == 1
+    assert chart.nodes[second_end.props["children"][0]].props["op"] == "break"
+    for case in (first_end, second_end):
+        assert "settle/end-notice" not in str(chart.nodes[case.id].props)
 
 
 def test_ending_the_session_at_an_end_gate_finishes_the_run(tmp_path, monkeypatch):
