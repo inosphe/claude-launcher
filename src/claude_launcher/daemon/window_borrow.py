@@ -42,13 +42,14 @@ import json
 import logging
 import os
 import platform
+import posixpath
 import secrets
 import shutil
 import signal
 import subprocess
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Dict, List, Optional
 
 from .. import atomic, pytest_basetemp, reposync, store, test_window, workspaces
@@ -125,6 +126,110 @@ def _remote_ref_of(repo: str, sha: str, keyed: Dict[str, str]) -> Optional[dict]
 
 _recipes: Dict[tuple, tuple] = {}
 
+#: pytest options that change which configuration, conftest files or plugins
+#: a run loads. The lender's arguments select tests; they may not reach past
+#: the borrower's checkout or swap its plugins (claunch-onqp6).
+_SCOPE_OPTIONS = ("--config-file", "--rootdir", "--confcutdir", "--override-ini")
+# The long options a lent run may carry, by what follows them: nothing, a
+# value that is not a path, or a path the checkout check applies to. A value
+# comes after ``=`` or as the next token. Any other long option -- a
+# plugin's ``--tx``/``--px``, ``--pdbcls``, ``--pythonwarnings`` -- is
+# refused rather than guessed at.
+_LONG_FLAGS = frozenset((
+    "--lf", "--last-failed", "--ff", "--failed-first", "--nf", "--new-first",
+    "--sw", "--stepwise", "--sw-skip", "--strict-markers", "--no-header",
+    "--no-summary", "--quiet", "--verbose", "--exitfirst", "--showlocals",
+    "--runxfail", "--disable-warnings"))
+_LONG_VALUED = frozenset((
+    "--tb", "--maxfail", "--durations", "--durations-min", "--capture",
+    "--numprocesses", "--maxprocesses", "--dist", "--color", "--verbosity"))
+_LONG_PATHS = frozenset(("--deselect", "--ignore", "--ignore-glob"))
+# The short options a lent run may carry, read the way pytest reads a bundle
+# such as ``-xvs``: a flag takes nothing, a valued option takes the rest of
+# its token or else the next one. Any other letter -- ``-p``, ``-c`` and
+# ``-o`` among them -- is refused rather than guessed at.
+_SHORT_FLAGS = frozenset("xqvsl")
+_SHORT_VALUED = frozenset("kmrn")
+_SHORT_SCOPE = frozenset("pco")
+
+
+def _escapes(path: str, base: str = "") -> bool:
+    """``path`` is absolute (on either OS) or leaves the checkout when read
+    from ``base``, both relative to the checkout's top."""
+    path = path.replace("\\", "/")
+    if PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive:
+        return True
+    joined = posixpath.normpath(posixpath.join(base, path)) if path else base
+    return joined == ".." or joined.startswith("../")
+
+
+def _short_bundle(raw: str) -> "tuple[Optional[str], bool]":
+    """The letter of ``raw`` (``-xvs``) a borrow refuses, or None, and
+    whether the bundle's last option takes the next token as its value."""
+    for i, letter in enumerate(raw[1:], 1):
+        if letter in _SHORT_VALUED:
+            return None, i == len(raw) - 1
+        if letter not in _SHORT_FLAGS:
+            return letter, False
+    return None, False
+
+
+def vet_borrow(info: dict) -> Optional[str]:
+    """Why the borrower must not run ``info``'s pytest, or None.
+
+    ``rel_cwd`` must name a directory inside the checkout; every argument's
+    path (a positional test id or an ``--opt=value`` value, before ``::``)
+    must stay inside it from there; the options that move pytest's
+    configuration or plugins (``-p``, ``-c``, ``-o``, ``--config-file``,
+    ``--rootdir``, ``--confcutdir``, ``--override-ini``) are refused
+    outright, and so is any short option outside ``_SHORT_FLAGS`` and
+    ``_SHORT_VALUED``, bundled or not, and any long option outside
+    ``_LONG_FLAGS``, ``_LONG_VALUED`` and ``_LONG_PATHS``. An ``@file``
+    token is refused wherever it stands: pytest expands it into arguments
+    this check never sees.
+    """
+    rel = str(info.get("rel_cwd") or "")
+    if _escapes(rel):
+        return f"rel_cwd {rel!r} is outside the checkout"
+    base = posixpath.normpath(rel.replace("\\", "/")) if rel else ""
+    base = "" if base == "." else base
+    value_next = False
+    path_next = False
+    for raw in [str(a) for a in info.get("pytest_args") or []]:
+        if raw.startswith("@"):
+            return f"pytest argument {raw!r} reads its arguments from a file"
+        if value_next:
+            value_next = False
+            if path_next and _escapes(raw.split("::", 1)[0], base):
+                return f"pytest argument {raw!r} names a path outside the checkout"
+            path_next = False
+            continue
+        if len(raw) > 1 and raw.startswith("-") and not raw.startswith("--"):
+            letter, value_next = _short_bundle(raw)
+            if letter in _SHORT_SCOPE:
+                return f"pytest option {raw!r} changes the run's configuration or plugins"
+            if letter is not None:
+                return f"pytest option {raw!r} is not one a borrowed run may carry"
+            continue
+        name, eq, value = raw.partition("=")
+        if name in _SCOPE_OPTIONS:
+            return f"pytest option {raw!r} changes the run's configuration or plugins"
+        if raw.startswith("--"):
+            if name in _LONG_FLAGS and not eq:
+                continue
+            if name in _LONG_VALUED or name in _LONG_PATHS:
+                if not eq:
+                    value_next, path_next = True, name in _LONG_PATHS
+                    continue
+                if name in _LONG_VALUED:
+                    continue
+            else:
+                return f"pytest option {raw!r} is not one a borrowed run may carry"
+        target = value if (eq and raw.startswith("-")) else ("" if raw.startswith("-") else raw)
+        if _escapes(target.split("::", 1)[0], base):
+            return f"pytest argument {raw!r} names a path outside the checkout"
+    return None
+
 
 def recipe(info: dict) -> dict:
     """How another machine rebuilds the waiter's tree, or why it cannot.
@@ -142,6 +247,9 @@ def recipe(info: dict) -> dict:
         return {"ok": False, "reason": "the waiter sent no commit to reproduce"}
     if info.get("pytest_args") is None:
         return {"ok": False, "reason": "the run's arguments name paths outside its repository"}
+    refused = vet_borrow(info)
+    if refused:
+        return {"ok": False, "reason": refused}
     memo_key = (top, head, tree)
     hit = _recipes.get(memo_key)
     if hit and time.monotonic() - hit[0] < RECIPE_TTL:
@@ -430,6 +538,11 @@ class BorrowRunner:
         }
         self._runs.append(run)
         self._save()
+        refused = vet_borrow(run["info"])
+        if refused:
+            await self._give_back(run, f"the borrower refused: {refused}")
+            self._set(run, status="failed", error=refused, finished_at=_utcnow())
+            return self._view(run)
         if repo is None:
             await self._give_back(run, "no workspace here shares this repository's remote")
             self._set(run, status="failed", error="no matching local clone",
@@ -579,6 +692,10 @@ class BorrowRunner:
         argv = [str(python), "-m", "pytest", *args, f"--basetemp={basetemp}",
                 f"--junit-xml={junit}", "-o", "junit_family=xunit1"]
         cwd = checkout / (info.get("rel_cwd") or "")
+        try:
+            cwd.resolve().relative_to(checkout.resolve())
+        except ValueError:
+            raise RuntimeError(f"rel_cwd {info.get('rel_cwd')!r} resolves outside the checkout")
         clock = time.monotonic()
         code, output = await _run_proc(
             argv, cwd=cwd, state=state, env=suite_env(

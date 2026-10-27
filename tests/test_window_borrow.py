@@ -299,6 +299,77 @@ def test_recipe_commit_merge_and_refusals(lender_clone):
     assert base
 
 
+
+@pytest.mark.parametrize("rel_cwd, args", [
+    ("", ["tests", "-q"]),
+    ("sub/dir", ["../../tests/test_a.py::test_x", "-k", "a or b"]),
+    ("", ["--deselect=tests/test_a.py::test_y", "-x"]),
+    ("", ["-q", "--tb", "short"]),
+    ("", ["--tb=line", "--maxfail=2", "--lf"]),
+    ("", ["--deselect", "tests/test_a.py::t", "-n", "4", "--dist", "load"]),
+    ("", ["-xq", "-vv", "-rA", "tests"]),
+    ("", ["-k", "not slow", "-n", "4", "-m", "-slow-ish"]),
+    ("", ["-n4", "-xk", "a"]),
+])
+def test_vet_borrow_accepts_selections_inside_the_checkout(rel_cwd, args):
+    assert window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args}) is None
+
+
+@pytest.mark.parametrize("rel_cwd, args, said", [
+    ("/etc", ["tests"], "rel_cwd"),
+    ("C:/work", ["tests"], "rel_cwd"),
+    ("..", ["tests"], "rel_cwd"),
+    ("sub/../..", ["tests"], "rel_cwd"),
+    ("sub\\..\\..", ["tests"], "rel_cwd"),
+    ("", ["/abs/tests/test_a.py"], "outside the checkout"),
+    ("", ["../elsewhere/test_a.py::t"], "outside the checkout"),
+    ("sub", ["../../x.py"], "outside the checkout"),
+    ("", ["--deselect=/abs/t.py::t"], "outside the checkout"),
+    ("", ["D:\\x\\test_a.py"], "outside the checkout"),
+    ("", ["-p", "evil_plugin"], "configuration or plugins"),
+    ("", ["-pno:cacheprovider"], "configuration or plugins"),
+    ("", ["-c", "other.ini"], "configuration or plugins"),
+    ("", ["--config-file=other.ini"], "configuration or plugins"),
+    ("", ["--rootdir", "."], "configuration or plugins"),
+    ("", ["--confcutdir=."], "configuration or plugins"),
+    ("", ["-xc../out/evil.ini"], "configuration or plugins"),
+    ("", ["-xpevil"], "configuration or plugins"),
+    ("", ["-vxc", "../x.ini"], "configuration or plugins"),
+    ("", ["-o", "pythonpath=.."], "configuration or plugins"),
+    ("", ["-opythonpath=.."], "configuration or plugins"),
+    ("", ["--override-ini=cache_dir=/abs"], "configuration or plugins"),
+    ("", ["--override-ini", "pythonpath=/abs"], "configuration or plugins"),
+    ("", ["-Z"], "may carry"),
+    ("", ["-xZ"], "may carry"),
+    ("", ["-k", "x", "/abs/t.py"], "outside the checkout"),
+    ("", ["--tx=popen//python=../x", "--dist=load"], "may carry"),
+    ("", ["--tx", "popen//python=/abs/x"], "may carry"),
+    ("", ["--px=popen"], "may carry"),
+    ("", ["--pdbcls=m:C"], "may carry"),
+    ("", ["-q", "--pdb"], "may carry"),
+    ("", ["--rsyncdir=.."], "may carry"),
+    ("", ["--lf=x"], "may carry"),
+    ("", ["-Werror"], "may carry"),
+    ("", ["--ignore", "/abs/t.py"], "outside the checkout"),
+    ("", ["--deselect", "../t.py::t"], "outside the checkout"),
+    ("", ["@/abs/args.txt"], "from a file"),
+    ("", ["@../args.txt"], "from a file"),
+    ("", ["@args.txt"], "from a file"),
+    ("", ["-k", "@x"], "from a file"),
+])
+def test_vet_borrow_refuses_paths_out_and_scope_options(rel_cwd, args, said):
+    reason = window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args})
+    assert reason and said in reason, reason
+
+
+def test_recipe_refuses_what_the_borrower_would_refuse(lender_clone):
+    clone, _bare, _url = lender_clone
+    window_borrow._recipes.clear()
+    made = window_borrow.recipe(_info(clone, rel_cwd="../outside"))
+    assert not made["ok"] and "rel_cwd" in made["reason"]
+    made = window_borrow.recipe(_info(clone, pytest_args=["-p", "x", "tests"]))
+    assert not made["ok"] and "plugins" in made["reason"]
+
 # ---- the whole borrow, lender app + borrower runner ----------------------------- #
 
 class _Runner(window_borrow.BorrowRunner):
@@ -484,6 +555,96 @@ def test_borrower_restart_gives_its_open_borrows_back(lender_clone, tmp_path):
 
     asyncio.run(run())
 
+
+
+def _tampering(transport, change):
+    """A lender whose borrow answer is rewritten by ``change`` -- one that
+    does not check what it lends, or a recipe the borrower cannot meet."""
+    async def wrapped(machine, path, body):
+        answer = await transport(machine, path, body)
+        if path == "/peer/window/borrow" and answer.get("ok"):
+            change(answer)
+        return answer
+    return wrapped
+
+
+def _given_back(lender, gid) -> str:
+    entry = lender.status()["queue"][0]
+    assert entry["grant_id"] == gid and "borrow" not in entry
+    return entry["borrows"][-1]["end"]
+
+
+def test_borrower_refuses_a_lent_cwd_outside_its_checkout(lender_clone, tmp_path):
+    clone, bare, url = lender_clone
+    window_borrow._recipes.clear()
+    _borrower_clone(tmp_path, bare, url)
+
+    def outside(answer):
+        answer["entry"]["borrow_info"]["rel_cwd"] = "../../etc"
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Runner(_make(tmp_path, "borrower.json"), _tampering(transport, outside),
+                         lambda: "borrower", root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(clone))
+            # Given back before the waiter's long-poll sees the borrow: the
+            # request simply keeps waiting here.
+            run_doc = await runner.start("lender", gid)
+            assert run_doc["status"] == "failed" and "rel_cwd" in run_doc["error"]
+            assert "window_grant" not in runner.runs()[0]  # pytest never started
+            assert _given_back(lender, gid).startswith("released: the borrower refused")
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and again["borrowed"] is None
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_borrower_fails_when_the_rebuilt_tree_is_not_the_lenders(
+        lender_clone, tmp_path, monkeypatch):
+    clone, bare, url = lender_clone
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    def other_tree(answer):
+        answer["recipe"] = {**answer["recipe"], "tree": "0" * 40}
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Runner(own, _tampering(transport, other_tree), lambda: "borrower",
+                         root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(clone))
+            run_doc = await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert "is not the lender's 000000000000" in done["error"]
+            assert "window_grant" not in done  # no test ran on the wrong tree
+            # No result reached the lender: the request waits there again.
+            assert "the rebuilt tree" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
+            assert own.status()["holders"] == []
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
 
 def test_borrow_route_refuses_a_session(tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
