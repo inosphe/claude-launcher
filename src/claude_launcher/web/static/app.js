@@ -1490,11 +1490,19 @@ async function batchFlush() {
   batchPending = null;
   if (!pending || !pending.size) return;
   const paths = [...pending.keys()];
+  // A fetch Response reads once, so each waiter past the first gets a clone,
+  // taken before any of them can read: handed the same one, the second
+  // caller's json() threw and the rail's poll returned having drawn nothing
+  // (claunch-qnq1c.3). batchResponse's objects read again and have no clone.
   const settle = (path, response, error) => {
-    for (const waiter of pending.get(path) || []) {
+    const waiting = pending.get(path) || [];
+    const copies = waiting.map((_, i) => (
+      i && response && typeof response.clone === "function"
+        ? response.clone() : response));
+    waiting.forEach((waiter, i) => {
       if (error) waiter.reject(error);
-      else waiter.resolve(response);
-    }
+      else waiter.resolve(copies[i]);
+    });
   };
   // A good answer goes to each waiter as its own response (batchResponses).
   const settleAnswer = (path, payload, text) => {

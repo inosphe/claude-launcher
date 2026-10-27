@@ -100,6 +100,24 @@ function jsonResponse(payload, ok = true, status = 200) {
   return { ok, status, json: async () => payload, text: async () => JSON.stringify(payload) };
 }
 
+/* A fetch Response as the browser hands it over: its body is a stream and
+   reads once. A second read throws, which is what a waiter handed somebody
+   else's response runs into; clone() is the only way to read it twice. */
+function streamResponse(payload, ok = true, status = 200) {
+  let read = false;
+  const take = async () => {
+    if (read) throw new TypeError("body stream already read");
+    read = true;
+    return payload;
+  };
+  return {
+    ok, status,
+    json: take,
+    text: async () => JSON.stringify(await take()),
+    clone: () => streamResponse(payload, ok, status),
+  };
+}
+
 function batchOf(call) {
   return JSON.parse(call.opts.body).paths;
 }
@@ -261,6 +279,39 @@ async function anOlderDaemonStillServesThePage() {
   assert.ok(tried.includes("/api/sessions") && tried.includes("/api/cflow"), tried.join(","));
 }
 
+/* ---- 5b. two callers of one path each read their own answer ------------ */
+/* The fallbacks send one GET per path and used to hand that one Response to
+   every caller waiting on the path. Its body reads once, so the second
+   caller's json() threw; the rail's poll swallows that and returns, and an
+   explicit refresh that shared a batch with the timer's poll drew nothing
+   (claunch-qnq1c.3). Both fallbacks: the old daemon, and a set past
+   BATCH_MAX. */
+async function twoCallersOfOnePathEachReadTheirOwnAnswer() {
+  const old = build(async (u) => {
+    if (u === "/api/batch") return streamResponse({ error: "not found" }, false, 404);
+    return streamResponse({ path: u });
+  });
+  const [a, b] = await Promise.all([
+    old.api("/api/sessions"), old.api("/api/sessions"),
+  ]);
+  assert.deepStrictEqual(await a.json(), { path: "/api/sessions" });
+  assert.deepStrictEqual(await b.json(), { path: "/api/sessions" },
+    "the second caller of the same path reads an answer of its own");
+  assert.strictEqual(
+    old.calls.filter((c) => c.url === "/api/sessions").length, 1,
+    "the two callers still share one request");
+
+  const wide = build(async (u) => streamResponse({ path: u }));
+  const many = [];
+  for (let i = 0; i < 25; i++) many.push(wide.api(`/api/thing/${i}`));
+  many.push(wide.api("/api/thing/0"));
+  const answers = await Promise.all(many);
+  assert.ok(!wide.calls.some((c) => c.url === "/api/batch"), "past BATCH_MAX, no batch");
+  assert.deepStrictEqual(await answers[0].json(), { path: "/api/thing/0" });
+  assert.deepStrictEqual(await answers[25].json(), { path: "/api/thing/0" },
+    "past BATCH_MAX the duplicate caller also reads its own answer");
+}
+
 /* ---- 6. the page keeps room for the terminal --------------------------- */
 /* Batching reduces how often the ceiling is approached; the budget is what
    makes the headroom a guarantee. A request past it waits in the page rather
@@ -304,5 +355,6 @@ async function requestsPastTheBudgetWaitInThePage() {
   await aFailedReadIsAloneInFailing();
   await aRefusedReadKeepsItsRouteStatus();
   await anOlderDaemonStillServesThePage();
+  await twoCallersOfOnePathEachReadTheirOwnAnswer();
   console.log("batchpoll_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });
