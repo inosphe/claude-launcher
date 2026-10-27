@@ -694,6 +694,132 @@ def test_borrower_checks_the_cwd_again_after_setup(lender_clone, tmp_path, monke
             await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
             done = runner.runs()[0]
             assert "'tests/late' resolves outside the checkout" in done["error"]
+            assert "window_grant" not in done  # checked again before the window
+            assert "resolves outside the checkout" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: own.status()["holders"] == [], 30)
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_arg_paths_reads_positional_ids_and_path_option_values():
+    args = ["-q", "-n", "4", "tests/a.py::test_x", "--ignore", "tests/b",
+            "--deselect=tests/c.py::test_y", "--tb", "short", "-k", "slow",
+            "--ignore-glob=tests/d*", "-x"]
+    assert window_borrow._arg_paths(args) == [
+        ("tests/a.py::test_x", "tests/a.py"), ("tests/b", "tests/b"),
+        ("--deselect=tests/c.py::test_y", "tests/c.py"),
+        ("--ignore-glob=tests/d*", "tests/d*")]
+
+
+@pytest.mark.parametrize("pytest_args, raw", [
+    (["-q", "tests/link_out/test_out.py"], "tests/link_out/test_out.py"),
+    (["-q", "--ignore", "tests/link_out"], "tests/link_out"),
+])
+def test_borrower_refuses_a_path_argument_that_a_symlink_leads_outside(
+        lender_clone, tmp_path, monkeypatch, pytest_args, raw):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    try:
+        (clone / "tests" / "link_out").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    _git(clone, "add", "tests/link_out")
+    _git(clone, "commit", "-q", "-m", "link_out")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+    marker = tmp_path / "setup-ran"
+
+    class _Recording(_Runner):
+        setup_command = staticmethod(lambda checkout: [
+            sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"])
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Recording(own, transport, lambda: "borrower",
+                            root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            # Inside the checkout as text, so vet_borrow lets it through.
+            waiter, gid = await _queued(lender, info=_info(
+                clone, pytest_args=pytest_args))
+            run_doc = await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert f"pytest argument {raw!r} resolves outside the checkout" in done["error"]
+            assert "window_grant" not in done
+            assert not marker.exists()  # refused right after the checkout
+            assert "resolves outside the checkout" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
+            assert own.status()["holders"] == []
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_borrower_checks_the_path_arguments_again_after_setup(
+        lender_clone, tmp_path, monkeypatch):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    (clone / "tests" / "late").mkdir()
+    _commit(clone, "tests/late/test_out.py", "def test_out():\n    assert True\n")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    class _Relinking(_Runner):
+        # A setup that swaps the named test directory for a link out of the checkout.
+        setup_command = staticmethod(lambda checkout: [sys.executable, "-c", (
+            "import os, shutil; shutil.rmtree('tests/late'); "
+            f"os.symlink({str(outside)!r}, 'tests/late', target_is_directory=True)")])
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Relinking(own, transport, lambda: "borrower",
+                            root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(
+                clone, pytest_args=["-q", "tests/late/test_out.py"]))
+            await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert ("pytest argument 'tests/late/test_out.py' resolves outside the checkout"
+                    in done["error"])
+            assert "window_grant" not in done
             assert "resolves outside the checkout" in _given_back(lender, gid)
             again = await lender.await_entry(gid, wait=0.05)
             assert again["pending"] and not again.get("remote")

@@ -650,8 +650,8 @@ class BorrowRunner:
         workdir.mkdir(parents=True, exist_ok=True)
         self._set(run, status="checkout")
         await asyncio.to_thread(self._checkout, repo, checkout, made)
-        # vet_borrow judged rel_cwd as text; a committed symlink can still
-        # lead out, and that shows only on disk.
+        # vet_borrow judged rel_cwd and the path arguments as text; a
+        # committed symlink can still lead out, and that shows only on disk.
         _lent_cwd(checkout, run["info"])
         self._set(run, status="setup")
         command = self.setup_command(checkout)
@@ -668,9 +668,12 @@ class BorrowRunner:
         python = self.python_of(checkout)
         if not python.exists():
             raise RuntimeError("the test environment has no Python interpreter")
+        info = run["info"]
+        # Again, before the window is asked: setup ran code in the checkout
+        # and could have moved a link.
+        cwd = _lent_cwd(checkout, info)
 
         self._set(run, status="waiting-window")
-        info = run["info"]
         args = [str(a) for a in info.get("pytest_args") or []]
         requested = test_window.requested_width_of(args)
         while True:
@@ -694,8 +697,6 @@ class BorrowRunner:
         basetemp = pytest_basetemp.ensure(pytest_basetemp.root()) / f"borrow-{run['id']}w"
         argv = [str(python), "-m", "pytest", *args, f"--basetemp={basetemp}",
                 f"--junit-xml={junit}", "-o", "junit_family=xunit1"]
-        # Again: setup ran code in the checkout and could have moved a link.
-        cwd = _lent_cwd(checkout, info)
         clock = time.monotonic()
         code, output = await _run_proc(
             argv, cwd=cwd, state=state, env=suite_env(
@@ -810,14 +811,48 @@ def _kill(proc) -> None:
             proc.kill()
 
 
+def _arg_paths(args: list) -> "list[tuple[str, str]]":
+    """Each path argument of an already vetted ``args`` as ``(raw, path)``:
+    a positional test id or a ``_LONG_PATHS`` value (``--opt=v`` or the
+    next token), cut before ``::``."""
+    found = []
+    value_next = path_next = False
+    for raw in [str(a) for a in args]:
+        if value_next:
+            if path_next:
+                found.append((raw, raw.split("::", 1)[0]))
+            value_next = path_next = False
+            continue
+        if len(raw) > 1 and raw.startswith("-") and not raw.startswith("--"):
+            value_next = _short_bundle(raw)[1]
+            continue
+        name, eq, value = raw.partition("=")
+        if raw.startswith("--"):
+            if name in _LONG_PATHS and eq:
+                found.append((raw, value.split("::", 1)[0]))
+            elif (name in _LONG_VALUED or name in _LONG_PATHS) and not eq:
+                value_next, path_next = True, name in _LONG_PATHS
+            continue
+        if raw and raw != "-":
+            found.append((raw, raw.split("::", 1)[0]))
+    return found
+
+
 def _lent_cwd(checkout: Path, info: dict) -> Path:
-    """The lent ``rel_cwd`` under ``checkout``, refused if it resolves
-    outside it (through a symlink in the checkout)."""
+    """The lent ``rel_cwd`` under ``checkout``, refused if it or one of the
+    pytest path arguments read from it resolves outside the checkout
+    (through a symlink in the checkout)."""
+    top = checkout.resolve()
     cwd = checkout / (info.get("rel_cwd") or "")
     try:
-        cwd.resolve().relative_to(checkout.resolve())
+        cwd.resolve().relative_to(top)
     except ValueError:
         raise RuntimeError(f"rel_cwd {info.get('rel_cwd')!r} resolves outside the checkout")
+    for raw, path in _arg_paths(info.get("pytest_args") or []):
+        try:
+            (cwd / path).resolve().relative_to(top)
+        except ValueError:
+            raise RuntimeError(f"pytest argument {raw!r} resolves outside the checkout")
     return cwd
 
 
