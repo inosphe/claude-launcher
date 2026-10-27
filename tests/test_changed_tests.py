@@ -1307,6 +1307,97 @@ def test_a_failed_receipt_write_leaves_the_earlier_receipt_in_place(repo, gate, 
     )
 
 
+def _archived(key: Path) -> list:
+    """The receipts kept beside ``key``, named ``<stem>@<stamp>.json``."""
+    return sorted(p for p in key.parent.iterdir() if p.name.startswith(key.stem + "@"))
+
+
+def test_a_half_written_receipt_beside_the_key_is_removed(repo, gate, monkeypatch, capsys):
+    """A write that dies mid-way leaves a file behind, and the recovery deletes it.
+
+    The case above raises before ``write_text`` opens anything, so "no ``.tmp``
+    is left" holds there whether the cleanup runs or not -- a reviewer removed
+    that branch and the test stayed green (``claunch-23r7d.1.1.1.1.1``).
+    ``write_text`` opens the file before it writes the bytes, so a disk that
+    fills up leaves a truncated one, and the run's own leftovers directory is
+    the last place to leave a file nobody can tell from a receipt at a glance.
+
+    What this pins is the deletion, not the exit status: the run still passes,
+    and the earlier receipt is still where ``--check`` looks for it.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    first = json.loads(key.read_text(encoding="utf-8"))
+
+    real = Path.write_text
+
+    def half_written(self, data, *args, **kwargs):
+        if self.name.endswith(".tmp"):
+            real(self, data[: len(data) // 2], *args, **kwargs)
+            raise OSError(28, "No space left on device")
+        return real(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", half_written)
+
+    assert gate("--no-reuse") == 0, "bookkeeping failure is not a run failure"
+    assert gate.runs() == 2
+
+    leftovers = sorted(key.parent.glob("*.tmp"))
+    assert not leftovers, f"the half-written file must not be left behind: {leftovers}"
+    assert _archived(key) == [], "the write failed before anything was archived"
+    still = json.loads(key.read_text(encoding="utf-8"))
+    assert still["started_at"] == first["started_at"], "the key must still hold the earlier run"
+    assert "could not write the receipt" in capsys.readouterr().err
+
+
+def test_a_failed_swap_puts_the_archived_receipt_back(repo, gate, monkeypatch, capsys):
+    """The archive has already moved the earlier receipt when the swap fails.
+
+    The write succeeded, so the temporary file holds a whole receipt; the
+    rename over the key is what fails. At that moment the earlier receipt is
+    not at the key -- the archive moved it -- so the recovery has to put it
+    back, or the key path ends up empty exactly as in the ordering this fixed
+    (``claunch-23r7d.1.1.1.1``). Removing that branch also left the suite green
+    before this case existed.
+
+    Only the rename whose source is a ``.tmp`` fails: the archive's own
+    ``dest.replace(kept)`` and the restore's ``kept.replace(dest)`` move
+    something else, and a test that broke those too would fail at the wrong
+    line.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    first = json.loads(key.read_text(encoding="utf-8"))
+    assert _archived(key) == []
+
+    real = os.replace
+
+    def failing_swap(src, dst, *args, **kwargs):
+        if str(src).endswith(".tmp"):
+            raise OSError(28, "No space left on device")
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", failing_swap)
+
+    assert gate("--no-reuse") == 0, "bookkeeping failure is not a run failure"
+    assert gate.runs() == 2
+
+    assert key.is_file(), "the run did not replace the receipt, so the earlier one must stand"
+    still = json.loads(key.read_text(encoding="utf-8"))
+    assert still["started_at"] == first["started_at"], "the restore must bring back the earlier run"
+    assert _archived(key) == [], "the restore undoes the archive; it must not leave a second copy"
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts)["started_at"] == (
+        first["started_at"]
+    ), "a check over this tree and selection must still get an answer"
+    assert "could not write the receipt" in capsys.readouterr().err
+
+
 def test_an_untracked_file_is_in_the_tree_key(repo):
     """``changed_paths`` counts untracked files, so the key must too.
 
