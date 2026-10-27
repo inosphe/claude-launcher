@@ -1414,6 +1414,81 @@ def find_receipt(
     return receipt if receipt_passes(receipt) else None
 
 
+RECEIPT_STAMP = "%Y%m%dT%H%M%SZ"
+
+
+def keep_earlier_receipt(dest: Path) -> Optional[Path]:
+    """Move the receipt already at ``dest`` aside, named for the run it is.
+
+    The key is the tree and the selection, and neither of them says *which
+    run* made the verdict. Two runs over the same tree and the same selection
+    therefore write the same path, and until this the second one erased the
+    first -- ``started_at``, ``seconds``, ``window`` and ``basetemp``, which
+    are the only account of how that verdict was obtained. The run that gets
+    overwritten is not hypothetical: a round in this repository reported a
+    window it had not used, because a run on the fallback slot lock at
+    10:34:57Z was overwritten at 10:36:11Z by the windowed one and the commit
+    report quoted the first (``claunch-23r7d.1.1.1``, s3205, 2026-10-27).
+
+    The name is ``<key>@<the earlier run's own started_at>.json``: the stamp
+    comes from the receipt being moved, not from the clock now, so the
+    archived file says which run it records. A ``-2``, ``-3`` ... suffix
+    keeps a second archival of the same instant apart.
+
+    The reading side does not move. ``find_receipt`` looks for the key path,
+    so ``--check`` keeps answering with the newest run, and the archived
+    files beside it are never candidates -- which is also why this stays
+    inside ``changed/``: ``sweep.find_receipt_by_tree`` globs the parent
+    directory and must not read a three-module receipt as a whole-suite one.
+
+    An unreadable receipt is kept by its mtime rather than left to be
+    overwritten: the bytes that could not be parsed are still the only record
+    of a run.
+    """
+    if not dest.is_file():
+        return None
+    receipt = None
+    try:
+        receipt = json.loads(dest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        receipt = None                    # unreadable, and still worth keeping
+    stamp = None
+    started = receipt.get("started_at") if isinstance(receipt, dict) else None
+    if isinstance(started, str):
+        try:
+            stamp = (
+                datetime.fromisoformat(started)
+                .astimezone(timezone.utc)
+                .strftime(RECEIPT_STAMP)
+            )
+        except ValueError:
+            stamp = None
+    if stamp is None:
+        try:
+            stamp = datetime.fromtimestamp(
+                dest.stat().st_mtime, timezone.utc
+            ).strftime(RECEIPT_STAMP)
+        except (OSError, OverflowError):
+            stamp = "unknown"
+    kept = dest.with_name(f"{dest.stem}@{stamp}.json")
+    suffix = 2
+    while kept.exists():
+        kept = dest.with_name(f"{dest.stem}@{stamp}-{suffix}.json")
+        suffix += 1
+    try:
+        dest.replace(kept)
+    except OSError as exc:
+        # Never turn a finished run into a failure over its bookkeeping, but
+        # say it: a silent failure here leaves the overwrite this exists to
+        # prevent.
+        print(
+            f"WARNING: could not keep the earlier receipt {dest}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    return kept
+
+
 def describe(receipt: dict) -> str:
     """What was stood on, named -- never inferred.
 
@@ -1864,6 +1939,11 @@ def run_and_record(
     dest = receipt_path(repo, tree, files, override, deselect)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # Before the write, so a second run over this tree and selection
+        # leaves the first one's account beside it instead of erasing it.
+        kept = keep_earlier_receipt(dest)
+        if kept is not None:
+            print(f"kept the earlier receipt: {kept}")
         dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
         print(f"receipt: {dest}")
     except OSError as exc:
@@ -2029,7 +2109,12 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument(
         "--no-reuse",
         action="store_true",
-        help="run even if a green receipt already answers for this tree",
+        help=(
+            "run even if a green receipt already answers for this tree; the "
+            "earlier receipt is kept beside the new one as "
+            "<key>@<its started_at>.json and --check keeps answering with "
+            "the newest"
+        ),
     )
     ap.add_argument(
         "--receipts",
@@ -2288,6 +2373,22 @@ def main(argv: Optional[list] = None) -> int:
             f"the key)"
         )
         return 0
+
+    # A second run over a tree and a selection that already have a receipt is
+    # deliberate: either the earlier one is red (a red verdict is not reused,
+    # see ``find_receipt``) or ``--no-reuse`` asked for the run anyway. Said
+    # out loud before the window is taken, because the cost of not knowing is
+    # a report quoting the run that got overwritten -- which is the whole
+    # subject of ``keep_earlier_receipt``.
+    if tree is not None:
+        earlier = receipt_path(repo, tree, files, args.receipts, deselect)
+        if earlier.is_file():
+            print(
+                f"NOTE: tree {tree[:12]} with this {len(files)}-module "
+                f"selection has already been measured; this run adds a second "
+                f"receipt and the first stays beside it:\n  {earlier}",
+                file=sys.stderr,
+            )
 
     # Reclaim before the run, not after: the directory this run is about to
     # create is the newest and so is never a candidate, and a run that dies
