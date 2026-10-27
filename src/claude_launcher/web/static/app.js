@@ -58463,11 +58463,20 @@ const NOTICE_HISTORY_MAX = 100;
 /* Over NOTICE_HISTORY_MAX the oldest unmarked rows go, never the newest
    row (rows[0]). Marked rows are never trimmed (claunch-knuet.1): when every
    row but the newest is marked the history stays over the cap, at most one
-   row more than the marked count. */
+   row more than the marked count.
+
+   Nor is the row of a request still waiting (claunch-qnq1c). Every poll
+   writes a row for each pending request it does not find, so a trimmed
+   pending row came straight back and pushed the next one out: with 133 asks
+   waiting against the cap of 100, every feed re-recorded 33+ rows, each a
+   whole-history localStorage write, a panel repaint and a card whose age
+   restarted at 0s. The daemon's pending set bounds these rows; once settled
+   they are trimmed like any other. */
 function noticeTrim(rows) {
   let i = rows.length - 1;
   while (rows.length > NOTICE_HISTORY_MAX && i > 0) {
-    if (!rows[i].marked) rows.splice(i, 1);
+    const e = rows[i];
+    if (!e.marked && !(e.gate && e.status === "pending")) rows.splice(i, 1);
     i -= 1;
   }
 }

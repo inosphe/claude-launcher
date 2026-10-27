@@ -1962,6 +1962,43 @@ function gotoRec(rec) {
     check("a settled row keeps its age and names when it ended",
           whens.some((t) => /· ended /.test(t)), whens);
   }
+
+  /* --- more waiting requests than the cap (claunch-qnq1c) ----------------
+     133 asks pending against a 100-row history: the cap took the oldest
+     pending rows out, the next feed found them missing and wrote them again,
+     and those pushed the next ones out. Every feed re-recorded 33+ rows, each
+     a whole-history localStorage write and a fresh `at` (so its card's age
+     restarted at 0s) -- 53 writes of 65 kB a second on the live dashboard. */
+  {
+    const w = build();
+    const asks = Array.from({ length: 133 }, (_, i) => ({
+      id: `ask2-${i}`, session: `s${i}`, cwd: `/w/s${i}`, scope: `s${i}`,
+      workflow: "improv-worker-v2", version: 2, kind: "ask", label: "landing-review",
+      prompt: "land it?", presses: [] }));
+    w.api.runGateSync(asks, []);
+    const pendingRows = () => w.api.noticeHistory.filter((e) => e.gate && e.status === "pending");
+    check("every waiting request keeps its row past the cap",
+          pendingRows().length === 133, pendingRows().length);
+    const stamps = new Map(w.api.noticeHistory.map((e) => [e.id, e.at]));
+    let writes = 0;
+    const setItem = w.storage.setItem;
+    w.storage.setItem = (k, v) => { if (k === "claunch.noticeHistory") writes += 1; setItem(k, v); };
+    w.api.runGateSync(asks.map((r) => ({ ...r })), []);
+    w.api.runGateSync(asks.map((r) => ({ ...r })), []);
+    check("a feed that brings nothing new writes no history",
+          writes === 0, writes);
+    check("and leaves every row as it was",
+          w.api.noticeHistory.length === 133 &&
+            w.api.noticeHistory.every((e) => stamps.get(e.id) === e.at),
+          w.api.noticeHistory.length);
+    // Once they settle they are ordinary rows again, and the next row trims
+    // the history back to the cap.
+    w.api.runGateSync([], []);
+    w.api.notify("after", "", { key: "after" });
+    check("settled rows give way to the cap again",
+          w.api.noticeHistory.length === 100 && w.api.noticeHistory[0].title === "after",
+          w.api.noticeHistory.length);
+  }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
   else console.log("noticehistory_check: ok");
