@@ -42,10 +42,41 @@ BATCH_SIZE = 5
 BATCH_SETTLE = 300.0
 #: Results the originating session is told about.
 NOTIFIED = ("passed", "failed", "stuck")
+#: Statuses a job can be in while it still waits for a verdict *and* a watching
+#: session can be given to it. ``unattended`` selects on this set and
+#: ``retry_watcher`` refuses everything outside it, so one tuple answers both
+#: questions. They used to be written apart -- a blacklist of past-the-verdict
+#: statuses on one side, a literal status list in a SELECT on the other -- and a
+#: ``stuck`` job fell between them: ``retry-watcher`` reported the generation it
+#: had bumped and no watcher could ever read it (claunch-k3acp.1).
+WATCHABLE = ("queued", "retry", "running")
 
 
 def retry_delay(failures):
     return min(RETRY_BASE_DELAY * 2 ** max(0, failures - 1), RETRY_MAX_DELAY)
+
+
+def no_watcher_message(row):
+    """Why ``retry-watcher`` cannot help this job, and what can.
+
+    The caller is a person who read a notice and typed the command it named, so
+    the message says which state the job is in and the one command that changes
+    it, rather than telling them to try again. A stuck or cancelled job gets
+    ``requeue``; a status that already answers for the merge gets nothing to
+    run, and says so."""
+    job, status = row["id"], row["status"]
+    if status in ("stuck", "cancelled"):
+        return (f"job is {status}, so no watcher can be given to it until it runs again: "
+                f"run 'requeue --job {job}' first, then 'retry-watcher --job {job}'")
+    if status in ("passed", "failed"):
+        return f"job already has a verdict: {status}"
+    if status == "covered":
+        return (f"job is covered: the batch tip {row['covered_by']} answers for its merge, "
+                f"so ask for that tip's watcher ('retry-watcher --job {row['covered_by']}')")
+    if status == "pending":
+        return ("job is pending: its verification checkpoint was never prepared, so no watcher "
+                "is possible; enqueue the same merge again to repair it")
+    return f"job is {status}, which no watcher is given to"
 
 
 def git(repo, *args):
@@ -250,9 +281,10 @@ class Queue:
     def unattended(self):
         """Batch tips that still wait for a verdict and have no watching session."""
         with self.connect() as db:
+            marks = ",".join("?" * len(WATCHABLE))
             return [dict(r) for r in db.execute(
                 "SELECT * FROM jobs WHERE formed=1 AND priority<0 AND child='' AND covered_by IS NULL "
-                "AND status IN ('queued','retry','running') ORDER BY created,rowid")]
+                f"AND status IN ({marks}) ORDER BY created,rowid", WATCHABLE)]
 
     def attach_child(self, ident, child):
         with self.connect() as db:
@@ -433,14 +465,19 @@ class Queue:
         bumps ``generation``, which is what the daemon keys that memory on, and
         changes nothing else — the sweep itself was never held back by the
         refusal, so its status, verdict, attempts and covered merges stay as
-        they are."""
+        they are.
+
+        A job outside ``WATCHABLE`` is refused instead of bumped, because
+        ``unattended`` reads that same tuple: a status it does not select would
+        take the bump and never read it, and the caller would be told a watcher
+        was asked for when nothing could appear (claunch-k3acp.1)."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
             if row is None:
                 raise ValueError("unknown verification job")
-            if row["status"] in ("passed", "failed", "cancelled"):
-                raise ValueError(f"job already has a verdict: {row['status']}")
+            if row["status"] not in WATCHABLE:
+                raise ValueError(no_watcher_message(row))
             db.execute("UPDATE jobs SET generation=generation+1 WHERE id=?", (job,))
             return db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()["generation"]
 

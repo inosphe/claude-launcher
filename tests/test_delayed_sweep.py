@@ -1300,6 +1300,67 @@ def test_a_job_with_a_verdict_is_not_given_a_retry_watcher(repo, tmp_path):
         q.retry_watcher(job["id"])
 
 
+def test_a_stuck_job_is_not_given_a_retry_watcher_but_is_told_to_requeue(repo, tmp_path):
+    """claunch-k3acp.1: the command reported a generation nothing could read.
+
+    ``retry_watcher`` refused only the past-the-verdict statuses, while
+    ``unattended`` selected a literal list that excluded ``stuck``. A stuck job
+    therefore took the bump and was told it had asked for a watcher, and
+    ``Clock.attend`` never spawned one -- the recovery advice handed to the
+    owner did nothing on exactly the status whose notice recommends it.
+    """
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET failures=? WHERE id=?", (mod.RETRY_LIMIT - 1, job["id"]))
+    q.finish(job["id"], "retry", detail="uv sync failed")
+    assert q.get(job["id"])["status"] == "stuck"
+
+    with pytest.raises(ValueError) as raised:
+        q.retry_watcher(job["id"])
+    message = str(raised.value)
+    assert "stuck" in message
+    assert f"requeue --job {job['id']}" in message, "the refusal must name the command that works"
+    assert q.get(job["id"])["generation"] == 0, "a refused request must not move the generation"
+
+    # The route it names does work, and after it the watcher request is legal.
+    q.requeue(job["id"])
+    assert q.retry_watcher(job["id"]) == 1
+
+
+def test_every_status_retry_watcher_accepts_is_one_unattended_would_watch(repo, tmp_path):
+    """The refusal list and the selection are one tuple (claunch-k3acp.1).
+
+    They were written apart -- a blacklist against a literal SELECT -- and the
+    gap between them was the defect. This measures both against the same
+    statuses so a status added to one side and not the other turns red instead
+    of silently accepting a request nothing reads.
+    """
+    statuses = ("pending", "queued", "retry", "running", "covered",
+                "passed", "failed", "stuck", "cancelled")
+    q = queue(tmp_path)
+    accepted, watched = [], []
+    for index, status in enumerate(statuses):
+        job, _ = enqueue(q, repo, f"m{index}")
+        with q.connect() as db:
+            db.execute("UPDATE jobs SET status=?, formed=1, child='', covered_by=? WHERE id=?",
+                       (status, "the-tip" if status == "covered" else None, job["id"]))
+        try:
+            q.retry_watcher(job["id"])
+            accepted.append(status)
+        except ValueError:
+            pass
+        if any(j["id"] == job["id"] for j in q.unattended()):
+            watched.append(job["id"])
+            # unattended is the watcher question, so what it picks must be bumpable
+            assert status in accepted, f"unattended watches {status}, but retry_watcher refuses it"
+        with q.connect() as db:
+            db.execute("UPDATE jobs SET child='taken' WHERE id=?", (job["id"],))
+
+    assert accepted == list(mod.WATCHABLE)
+    assert len(watched) == len(mod.WATCHABLE)
+
+
 def test_retry_watcher_from_the_command_line(repo, tmp_path):
     db = tmp_path / "jobs.sqlite3"
     q = mod.Queue(db)
@@ -1309,8 +1370,28 @@ def test_retry_watcher_from_the_command_line(repo, tmp_path):
                           "retry-watcher", "--job", job["id"]],
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout)["generation"] == 1
+    answer = json.loads(out.stdout)
+    assert answer["generation"] == 1
+    assert answer["status"] == "queued", "the answer names the status that makes the bump readable"
     assert q.get(job["id"])["status"] == job["status"], "the job itself must not move"
+
+
+def test_the_command_line_fails_on_a_stuck_job_and_names_requeue(repo, tmp_path):
+    """A person running the notice's advice must not get exit 0 on a no-op."""
+    db = tmp_path / "jobs.sqlite3"
+    q = mod.Queue(db)
+    job, _ = enqueue(q, repo, "a")
+    with q.connect() as conn:
+        conn.execute("UPDATE jobs SET failures=? WHERE id=?", (mod.RETRY_LIMIT - 1, job["id"]))
+    q.finish(job["id"], "retry", detail="uv sync failed")
+    tool = TOOL.with_name("delayed_sweep.py")
+    out = subprocess.run([sys.executable, str(tool), "--database", str(db),
+                          "retry-watcher", "--job", job["id"]],
+                         capture_output=True, text=True)
+    assert out.returncode == 2, "a refused request must not read as success"
+    assert out.stdout == ""
+    assert "stuck" in out.stderr and f"requeue --job {job['id']}" in out.stderr
+    assert q.get(job["id"])["generation"] == 0
 
 
 def test_a_transient_refusal_is_still_retried_and_not_reported(repo, tmp_path, monkeypatch):
