@@ -67,6 +67,20 @@ globalThis.MegaThreadPage = (() => {
     return 1 / (1 + Math.exp(-Number(logit)));
   }
 
+  /* Which colour a preview score is drawn in (claunch-kzudj): over the
+     threshold the reader is judging by, or under it in one of three bands of
+     p(mine) — at least even, at least one in five, below that. The bar is a
+     logit like the scores, so moving the slider recolours the pills with no
+     request. A member Jev did not score has no band. */
+  function scoreBand(logit, threshold) {
+    if (logit === null || logit === undefined || Number.isNaN(Number(logit))) return "";
+    const value = Number(logit);
+    if (value >= Number(threshold)) return "hit";
+    const p = logitProb(value);
+    if (p >= 0.5) return "warm";
+    return p >= 0.2 ? "mild" : "cold";
+  }
+
   /* The sessions a preview recommends at `threshold`: every scored member
      whose logit clears it. The daemon returns every member's logit, so a
      new threshold is answered here, without another Jev call. A member whose
@@ -177,6 +191,8 @@ globalThis.MegaThreadPage = (() => {
     cflowOf: {},
     project: "",
     mesh: "",
+    // The role filter: "" is every role, "-" the sessions with none.
+    role: "",
     // Which of the seven categories the reader keeps. Empty means all of
     // them, so a reader who has not filtered sees the whole fleet.
     statuses: new Set(),
@@ -379,6 +395,7 @@ globalThis.MegaThreadPage = (() => {
       picked: state.picked,
       project: state.project,
       mesh: state.mesh,
+      role: state.role,
       statuses: state.statuses,
       sort: state.sort,
       hierarchy: false,
@@ -571,11 +588,20 @@ globalThis.MegaThreadPage = (() => {
         (run.gated ? " · ⚑" : "")
       : "";
     return [
-      s.role || (mesh && mesh.role) || "",
+      roleOf(s, meshOf),
       s.project || "",
       mesh ? mesh.mesh : "",
       cflow,
     ].map((bit) => String(bit || "").trim()).filter(Boolean).join(" · ");
+  }
+
+  /* The role a row shows and the role filter matches: the record's own,
+     else the mesh roster's — one reading, so the filter keeps exactly the
+     rows whose meta line names that role. */
+  function roleOf(session, meshOf) {
+    const s = session || {};
+    const mesh = (meshOf || {})[String(s.name || "")] || null;
+    return String(s.role || (mesh && mesh.role) || "").trim();
   }
 
   /* The briefing digest the daemon cached for the session: one line, already
@@ -677,6 +703,10 @@ globalThis.MegaThreadPage = (() => {
       const mesh = entry ? entry.mesh : "";
       if (o.mesh === "-" ? !!mesh : mesh !== o.mesh) return false;
     }
+    if (o.role) {
+      const role = roleOf(s, o.meshOf);
+      if (o.role === "-" ? !!role : role !== o.role) return false;
+    }
     if (o.statuses && o.statuses.size) {
       const wanted = o.statuses instanceof Set ? o.statuses : new Set(o.statuses);
       if (!wanted.has(sessionCategory(s))) return false;
@@ -722,9 +752,15 @@ globalThis.MegaThreadPage = (() => {
       const name = String((entry && entry.mesh) || "");
       if (name && !meshes.includes(name)) meshes.push(name);
     }
+    const roles = [];
+    for (const s of sessions || []) {
+      const role = roleOf(s, meshOf);
+      if (role && !roles.includes(role)) roles.push(role);
+    }
     projects.sort((a, b) => a.localeCompare(b));
     meshes.sort((a, b) => a.localeCompare(b));
-    return { projects, meshes };
+    roles.sort((a, b) => a.localeCompare(b));
+    return { projects, meshes, roles };
   }
 
   /* What the line above the button says: why it is off, or what the click
@@ -892,7 +928,7 @@ globalThis.MegaThreadPage = (() => {
     filter.addEventListener("input", () => { state.filter = filter.value; paintRows(parts); });
     controls.appendChild(filter);
 
-    const { projects, meshes } = filterChoices(state.sessions || [], state.meshOf);
+    const { projects, meshes, roles } = filterChoices(state.sessions || [], state.meshOf);
     const projectSelect = document.createElement("select");
     projectSelect.className = "mt-create-project";
     projectSelect.title = "프로젝트로 거르기";
@@ -917,6 +953,19 @@ globalThis.MegaThreadPage = (() => {
       paintRows(parts);
     });
     controls.appendChild(meshSelect);
+
+    const roleSelect = document.createElement("select");
+    roleSelect.className = "mt-create-role";
+    roleSelect.title = "역할로 거르기";
+    roleSelect.appendChild(optionRow("", "모든 역할"));
+    for (const name of roles) roleSelect.appendChild(optionRow(name, name));
+    roleSelect.appendChild(optionRow("-", "역할 없음"));
+    roleSelect.value = roles.includes(state.role) || state.role === "-" ? state.role : "";
+    roleSelect.addEventListener("change", () => {
+      state.role = roleSelect.value;
+      paintRows(parts);
+    });
+    controls.appendChild(roleSelect);
 
     const sort = document.createElement("select");
     sort.className = "mt-create-sort";
@@ -1015,6 +1064,7 @@ globalThis.MegaThreadPage = (() => {
       picked: state.picked,
       project: state.project,
       mesh: state.mesh,
+      role: state.role,
       statuses: state.statuses,
       sort: state.sort,
       hierarchy: state.hierarchy,
@@ -1024,7 +1074,8 @@ globalThis.MegaThreadPage = (() => {
     const scoring = state.draftPreview && (state.draftPreview.members || []);
     const scoreOf = {};
     for (const row of scoring || []) scoreOf[row.session] = row;
-    const recommended = new Set(draftPicks(state.draftPreview, draftThreshold()));
+    const threshold = draftThreshold();
+    const recommended = new Set(draftPicks(state.draftPreview, threshold));
     for (const row of rows) {
       const label = node("label", `mt-new-session-row mt-cat-${row.category}${row.checked ? " on" : ""}`);
       if (row.depth) label.style.paddingLeft = `${6 + row.depth * 14}px`;
@@ -1045,10 +1096,13 @@ globalThis.MegaThreadPage = (() => {
       const line1 = node("span", "mt-new-top");
       line1.appendChild(node("span", "mt-new-name", row.name));
       const score = scoreOf[row.name];
-      if (score && recommended.has(row.name)) {
-        line1.appendChild(node("span", "mt-new-flag", `추천 ${pct(score.p_mine)}`));
-      } else if (score && score.logit !== null && score.logit !== undefined) {
-        line1.appendChild(node("span", "mt-new-flag weak", pct(score.p_mine)));
+      const band = score ? scoreBand(score.logit, threshold) : "";
+      if (band) {
+        const flag = node("span", `mt-new-flag band-${band}${recommended.has(row.name) ? "" : " weak"}`,
+          recommended.has(row.name) ? `추천 ${pct(score.p_mine)}` : pct(score.p_mine));
+        flag.title = `p(mine) ${pct(score.p_mine)} · 임계값 p ${pct(logitProb(threshold))} ` +
+          (band === "hit" ? "이상" : "미만");
+        line1.appendChild(flag);
       }
       if (row.tone) line1.appendChild(node("span", `mt-new-dot ${row.tone}`));
       line1.appendChild(node("span", "mt-new-cat", row.categoryLabel));
@@ -1061,7 +1115,7 @@ globalThis.MegaThreadPage = (() => {
     }
     if (!rows.length) {
       parts.list.appendChild(node("p", "wf-note",
-        state.filter || state.project || state.mesh || state.statuses.size
+        state.filter || state.project || state.mesh || state.role || state.statuses.size
           ? "거른 결과가 없습니다" : "고를 세션이 없습니다"));
     }
     paintCounters(parts);
@@ -1384,10 +1438,10 @@ globalThis.MegaThreadPage = (() => {
   return {
     open, stop, render, ring,
     ringLayout, edgeWidth, nodeTone, routeBody, optionRows, verdictLine,
-    deliveryLine, statusLabel, pct, logitText, esc, probLogit, logitProb, draftPicks,
+    deliveryLine, statusLabel, pct, logitText, esc, probLogit, logitProb, draftPicks, scoreBand,
     statusTone, sessionLine, matchesFilter, pickerRows, createHint,
     // the create panel's model (tests/web/megathread_check.js runs these bare)
-    sessionCategory, metaLine, briefLine, sortRows, hierarchyOrder,
+    sessionCategory, metaLine, roleOf, briefLine, sortRows, hierarchyOrder,
     filterChoices, CATEGORIES, SORTS,
   };
 })();

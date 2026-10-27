@@ -10092,6 +10092,15 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-new-cat { font-size: 10px; color: #8b949e; border: 1px solid #30363d; border-radius: 9px; padding: 0 5px; white-space: nowrap; }
 .mt-new-flag { font-size: 10px; color: #3fb950; border: 1px solid #1f6f3f; border-radius: 9px; padding: 0 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .mt-new-flag.weak { color: #8b949e; border-color: #30363d; }
+/* Score bands (claunch-kzudj, scoreBand): over the threshold, then p >= 0.5,
+   p >= 0.2 and below. Written after .weak so a band wins over it; the light
+   theme derives its colours from these (theme.js), and the text tones are
+   light enough here that their inversion keeps 4.5:1 on the light page
+   (tests/web/megathread_check.js measures both). */
+.mt-new-flag.band-hit { color: #85e89d; border-color: #2ea043; background: #0f2d1a; font-weight: 600; }
+.mt-new-flag.band-warm { color: #ffa657; border-color: #bd561d; background: #2b1a0e; }
+.mt-new-flag.band-mild { color: #79c0ff; border-color: #1f4f8f; }
+.mt-new-flag.band-cold { color: #8b949e; border-color: #30363d; }
 .mt-new-line { flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-new-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #30363d; }
 .mt-new-dot.live { background: #3fb950; }

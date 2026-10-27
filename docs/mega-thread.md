@@ -180,7 +180,7 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
   예산 경계와 동시 라우팅 직렬화, `closed` 409, 닫기·다시 열기와 잘못된 status 400, NaN 거절,
   설정 조회·수정, 원장 실패가 전달을 500으로 바꾸지 않음.
 - `tests/web/megathread_check.js` — 링 배치·선 굵기·판정별 행과 문구·전송 본문·SVG 노드 수, 생성 패널의
-  모델(수명주기 7구간, 정렬 4종, 부모-자식 위계, 프로젝트·메시·상태 필터, 행의 role/cflow/브리핑 조인),
+  모델(수명주기 7구간, 정렬 4종, 부모-자식 위계, 프로젝트·메시·역할·상태 필터, 행의 role/cflow/브리핑 조인, 점수 구간과 두 테마의 대비),
   그리고 페이지가 주소·레일·`VIEWS`·라우터에 배선됐는지.
 - 회귀: `tests/test_threads_store.py`, `tests/test_threads_api.py`, `tests/test_threads_mcp.py`,
   `tests/test_qa_nudge.py`, `tests/test_web_topology.py`.
@@ -266,10 +266,18 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
      나타나고, 움직이면 받은 점수로 체크를 다시 계산한다 — 요청도 Jev 호출도 없다. 채점된 세션은
      임계값을 넘을 때만 체크되고(손으로 고친 체크도 슬라이더를 다시 움직이면 덮인다), 채점되지 않은
      세션의 체크는 그대로다. 정한 임계값은 다음 미리보기에도 유지된다.
+   - **점수 색** (claunch-kzudj): 행의 점수 알약은 `scoreBand`가 정한 네 구간의 색으로 그린다 —
+     `hit`(지금 임계값 이상, `추천` 표시와 같은 집합, 초록 채움), `warm`(임계값 미만이고 p ≥ 0.5, 주황),
+     `mild`(p ≥ 0.2, 파랑), `cold`(그 아래, 회색). 슬라이더를 움직이면 색도 요청 없이 바뀐다. 라이트
+     테마는 theme.js가 이 색들에서 파생하며, `megathread_check.js`가 두 테마에서 각 구간 글자의 명도
+     대비가 4.5:1 이상인지 잰다.
 2. **정렬·필터**: 정렬은 활동/생성 × 최신/오래된 네 가지(`SORTS`), `부모-자식 위계` 체크박스는
-   `parent`로 트리를 만들고 들여쓴다(부모가 목록에 없으면 루트). 필터는 프로젝트·메시·수명주기
+   `parent`로 트리를 만들고 들여쓴다(부모가 목록에 없으면 루트). 필터는 프로젝트·메시·역할·수명주기
    (`running · hold · paused · killed · delayed · failed · archived`, `session.py::session_category`와 같은
-   규칙)와 부분 일치 검색이다.
+   규칙)와 부분 일치 검색이다. 역할 콤보박스(claunch-kzudj)는 행의 meta 줄과 같은 값(`roleOf`: 레코드의
+   `role`, 없으면 메시 로스터의 role)으로 거르고, `역할 없음`은 role이 없는 세션이다. 선택지는 거르기 전
+   전체 레코드에서 만든다. 모든 필터는 가진 레코드로 목록만 다시 그리며 데몬에 다시 묻지 않는다.
+   Jev 미리보기도 이 필터들이 남긴 세션만 채점한다.
 3. **목록**: 행마다 이름, role(메시 로스터), 메시 이름, cflow2 런(workflow · status · 현재 노드), 프로젝트,
    이슈·브랜치·note, 한 줄 브리핑. 값이 없는 줄은 그리지 않는다.
 
