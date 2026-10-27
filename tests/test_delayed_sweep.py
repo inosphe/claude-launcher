@@ -1291,6 +1291,75 @@ def test_a_requeued_job_gets_a_watcher_without_a_daemon_restart(repo, tmp_path, 
     assert q.get(tip)["child"] == "w1"
 
 
+def test_the_requeue_then_retry_watcher_route_the_refusal_names_works(repo, tmp_path, monkeypatch):
+    """The refusal tells an owner to run two commands; both are needed.
+
+    ``requeue`` alone does not do it. The daemon remembers a final refusal per
+    ``(job, generation)`` and ``requeue`` leaves the generation alone, so on a
+    job that was refused before it went stuck the watcher still does not
+    appear — measured here as ``child`` staying empty after the requeue tick.
+    The pair is what works, which is why the message names both rather than
+    just "requeue".
+    """
+    from claude_launcher.daemon.cflow2_exec import SpawnRefused
+
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = jobs[-1]["id"]
+    calls, refuse = [], {"on": True}
+    delivered = []
+
+    def spawn(parent, body):
+        calls.append(parent)
+        if refuse["on"]:
+            raise SpawnRefused("session 'leader' is in 2 meshes (claunch, leader)", permanent=True)
+        return "w"
+
+    class Owner:
+        exited = False
+
+        async def deliver(self, text, **kw):
+            delivered.append(text)
+            return True
+
+    def manager(name):
+        # The owner is there; the watcher a dead sweep-job run left behind is not.
+        if name == "leader":
+            return Owner()
+        return SimpleNamespace(exited=True)
+
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(SimpleNamespace(get=manager), q, batch=True, spawn=spawn, policy=(5, 3600))
+
+    # A final refusal is recorded while the tip is still watchable.
+    asyncio.run(clock.tick())
+    assert len(calls) == 1 and clock.spawn_permanent, "the refusal was not remembered"
+
+    # The runner then exhausts its retries: the tip parks as stuck with its watcher gone.
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET status='stuck', child='w1', failures=? WHERE id=?",
+                   (mod.RETRY_LIMIT - 1, tip))
+    q.finish(tip, "retry", detail="uv sync failed")
+    assert q.get(tip)["status"] == "stuck"
+
+    # First command: requeue. Alone it is not enough — the memory is per generation.
+    refuse["on"] = False
+    q.requeue(tip)
+    clock.spawn_tried.clear()
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 1, "requeue alone revived the refused spawn; the message could say one command"
+    assert q.get(tip)["child"] == ""
+
+    # Second command: the one the refusal names.
+    assert q.retry_watcher(tip) == 1
+    clock.spawn_tried.clear()
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 2, "the pair the refusal prints did not produce a watcher"
+    assert q.get(tip)["child"] == "w"
+
+
 def test_a_job_with_a_verdict_is_not_given_a_retry_watcher(repo, tmp_path):
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")
@@ -1321,6 +1390,10 @@ def test_a_stuck_job_is_not_given_a_retry_watcher_but_is_told_to_requeue(repo, t
     message = str(raised.value)
     assert "stuck" in message
     assert f"requeue --job {job['id']}" in message, "the refusal must name the command that works"
+    assert f"retry-watcher --job {job['id']}" in message, (
+        "requeue alone is not enough when the job was already refused at this generation; "
+        "the message must name both, and "
+        "test_the_requeue_then_retry_watcher_route_the_refusal_names_works measures why")
     assert q.get(job["id"])["generation"] == 0, "a refused request must not move the generation"
 
     # The route it names does work, and after it the watcher request is legal.
