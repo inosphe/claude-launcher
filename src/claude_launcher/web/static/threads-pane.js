@@ -442,6 +442,9 @@ globalThis.ThreadsPane = (() => {
     if (!host || name !== asked || turn !== forkTurn) return;
     forkCap = cap;
     if (!cap.ok && forkOn) forkOn = false;
+    // The form is what is on screen while this answer lands, and its title
+    // holds the focus -- so the row is repainted here, not left to render().
+    syncForkRow();
     render();
   }
 
@@ -999,17 +1002,53 @@ globalThis.ThreadsPane = (() => {
     const row = node("label", "th-fork");
     const box = node("input", "th-fork-box");
     box.type = "checkbox";
+    box.addEventListener("change", () => {
+      forkOn = box.checked;
+      syncForkRow();
+      render();
+    });
+    row.append(box, node("span", "th-fork-label", "포크 모드 — 대화 사본을 만들어 그 세션이 이 쓰레드를 맡습니다"));
+    fillForkRow(row);
+    return row;
+  }
+
+  /* The row's state from forkCap/forkOn, written onto a row already in the
+     document: the first draw and a repaint read the same facts here, so the
+     two cannot drift. Only attributes and text are touched -- the box is an
+     INPUT somebody may be sitting on. */
+  function fillForkRow(row) {
     const qaBound = !!composeQa;
+    const can = !qaBound && !!(forkCap && forkCap.ok);
+    const box = row.querySelector(".th-fork-box");
+    if (box) {
+      box.disabled = !can;
+      box.checked = can && forkOn;
+    }
     const why = qaBound ? "QA 질문에 연결된 쓰레드는 포크할 수 없습니다."
                         : (forkCap && !forkCap.ok ? forkCap.why : "");
-    const can = !qaBound && !!(forkCap && forkCap.ok);
-    box.checked = can && forkOn;
-    box.disabled = !can;
-    box.addEventListener("change", () => { forkOn = box.checked; render(); });
-    row.append(box, node("span", "th-fork-label", "포크 모드 — 대화 사본을 만들어 그 세션이 이 쓰레드를 맡습니다"));
-    const hint = why || (forkCap ? "" : "확인 중…");
-    if (hint) row.append(node("span", "th-fork-why", hint));
-    return row;
+    const text = why || (forkCap ? "" : "확인 중…");
+    const hint = row.querySelector(".th-fork-why");
+    if (!text) {
+      if (hint) row.removeChild(hint);
+    } else if (hint) {
+      hint.textContent = text;
+    } else {
+      row.append(node("span", "th-fork-why", text));
+    }
+  }
+
+  /* Repaint the fork row and the button it renames in place (claunch-x5n0r).
+     render() leaves the whole side alone while a field in it has the focus
+     (typingIn, so a poll cannot eat what is being typed), and the answer
+     lands exactly then: the title takes the focus as the form opens. Without
+     this the row said 확인 중… until the focus left the form, which is the
+     next poll at the earliest (POLL_MS). Nothing here moves focus or caret. */
+  function syncForkRow() {
+    if (!host) return;
+    const row = host.querySelector(".th-newform .th-fork");
+    if (row) fillForkRow(row);
+    const go = host.querySelector(".th-newform .th-send");
+    if (go) go.textContent = inflight.has("") ? "여는 중…" : (forkOn ? "포크하고 시작" : "시작");
   }
 
   function renderList(side, threads, read) {

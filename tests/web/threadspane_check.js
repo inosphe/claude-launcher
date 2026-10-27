@@ -602,7 +602,30 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.match(host.querySelector(".th-newform").text(), /대화가 없어 복사할 수 없습니다/,
                "the reason is on the form");
   assert.equal(host.querySelector(".th-newform .th-send").textContent, "시작", "the plain label stays");
+  // claunch-x5n0r: the answer arrives while the focus is still in the form.
+  // The title takes the focus as the form opens (renderList's
+  // `setTimeout(() => title.focus())`) and render() leaves the whole side
+  // alone under a focused field (typingIn), so the fork row repaints itself
+  // in place -- without that it said 확인 중… until the focus left the form,
+  // which is the next poll at the earliest (POLL_MS = 3s).
   forkCapDoc = {session: "s1", ok: true, why: ""};
+  document.activeElement = null;
+  host.querySelector(".th-new").fire("click");   // close the form left open
+  await settle();
+  host.querySelector(".th-new").fire("click");   // a fresh form, its answer due
+  host.querySelector(".th-newform .th-title-input").focus();
+  await settle();
+  assert.equal(host.querySelector(".th-newform .th-fork-box").disabled, false,
+               "the box opens while the title still holds the focus");
+  assert.ok(!host.querySelector(".th-newform .th-fork").text().includes("확인 중"),
+            "and the 확인 중… hint clears without redrawing the side");
+  fbox = host.querySelector(".th-newform .th-fork-box");
+  fbox.checked = true;
+  fbox.focus();                 // a click leaves the focus on the box
+  fbox.fire("change");
+  assert.equal(host.querySelector(".th-newform .th-send").textContent, "포크하고 시작",
+               "ticking renames the button in place too");
+  document.activeElement = null;
   host.querySelector(".th-new").fire("click");   // close the form
   await settle();
 
