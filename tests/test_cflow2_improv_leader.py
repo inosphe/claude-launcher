@@ -54,6 +54,14 @@ def test_async_verification_gates_and_merge_interval_are_declared():
     assert chart.meta["inputs"]["restart_live"]["default"] is True
     opts = {o["name"]: o for o in chart.node("standby").get("options")}
     assert opts["integrate"]["interval"] == 300
+    # the integration window and the post-merge sweep batch are one rule
+    # (claunch-1o6az): 5 waiting requests or 300 s after the first
+    from claude_launcher import delayed_sweep, store
+    assert opts["integrate"]["batch"] == {"collection": "landing", "status": "requested",
+                                          "size": delayed_sweep.BATCH_SIZE}
+    assert opts["integrate"]["interval"] == delayed_sweep.BATCH_SETTLE
+    assert store.DAEMON_DEFAULTS["delayed_sweep_batch_size"] == delayed_sweep.BATCH_SIZE
+    assert store.DAEMON_DEFAULTS["delayed_sweep_batch_settle"] == delayed_sweep.BATCH_SETTLE
     assert "handle-regression" in opts
     for label, action in (("checkpoint-check", "check-enqueued"),):
         run = by_label[label].get("verify")["run"]
@@ -146,9 +154,16 @@ def test_disabled_restart_finishes_without_waiting_for_sweep_or_deployment(tmp_p
     assert runtime.start_next_round(ld.cwd, "lead", ld.now)["round"] == 2
     ld.status()
     ld.report("intake")
+    # one request waits: the window opens 300 s after it arrived (claunch-1o6az)
+    ld.now = T0 + 100
+    runtime.collection_op("push", "landing", cwd=ld.cwd, scope="lead", principal="driver",
+                          session="lead", now=ld.now,
+                          item={"issue": "x-1", "branch": "origin/s1-x", "tip": "a" * 40,
+                                "requested_by": "s1"})
     ld.select("integrate")
     assert ld.st["held"]["option"] == "integrate"
-    ld.now = T0 + 300
+    assert ld.st["held"]["opens_at"] == T0 + 400
+    ld.now = T0 + 400
     ld.tick()
     assert ld.tasks() == ["integrate-preflight"]
 

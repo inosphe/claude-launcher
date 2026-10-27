@@ -1190,6 +1190,11 @@ def run_timers(payload: dict, scope: str) -> List[dict]:
       (await-landing's ``nudge``).
     - ``window`` -- an option whose window is still closed with no pick
       queued behind it.
+    - ``batch`` -- the same for an option that declares ``batch``
+      (improv-leader-v2's ``integrate``): ``n/size`` waiting candidates, due
+      ``interval`` seconds after the oldest arrived (claunch-1o6az). It
+      stands in for the ``window`` / ``hold`` chip of that option; a window
+      the full batch has already opened shows nothing.
     - ``wait`` -- a ``wait`` node with ``seconds``.
     - ``pause`` -- a loop's ``every`` pause until ``resume_at``.
     - ``ask`` -- an ask whose responders have until ``deadline``.
@@ -1201,7 +1206,22 @@ def run_timers(payload: dict, scope: str) -> List[dict]:
         label = c.get("label") or c.get("node") or "choice"
         held = c.get("held") or {}
         for o in c.get("options") or []:
-            if not o.get("window_opens_at") or o.get("name") == held.get("option"):
+            b = o.get("batch")
+            if b and b.get("opens_epoch") is not None and b.get("opens_at") and b.get("count"):
+                span = _num_or_none(b.get("interval"))
+                first = _epoch(b.get("first_at"))
+                is_held = o.get("name") == held.get("option")
+                out.append(st.timer(
+                    "cflow2", "batch", f"{scope}:{c.get('instance')}:{o.get('name')}:batch",
+                    f"{o.get('name')} batch {b['count']}/{b['size']}", b["opens_epoch"],
+                    since=first if first is not None else (
+                        b["opens_epoch"] - span if span else None),
+                    state=st.STATE_HELD if is_held else st.STATE_CLOSED, scope=scope,
+                    detail=f"{b['count']} of {b['size']} {b.get('status')} requests in "
+                           f"{b.get('collection')}; option {o.get('name')!r} opens when "
+                           f"{b['size']} are waiting or {int(span or 0)}s after the first"
+                           + ("; the held pick is applied then" if is_held else "")))
+            if b or not o.get("window_opens_at") or o.get("name") == held.get("option"):
                 continue
             opens = _epoch(o["window_opens_at"])
             interval = _num_or_none(o.get("interval"))
@@ -1212,7 +1232,8 @@ def run_timers(payload: dict, scope: str) -> List[dict]:
                 state=st.STATE_CLOSED, scope=scope,
                 detail=f"option {o.get('name')!r} of {label} opens again "
                        f"(interval {o.get('interval')}s)"))
-        if held:
+        if held and not any(o.get("batch") for o in c.get("options") or []
+                            if o.get("name") == held.get("option")):
             opt = held.get("option")
             interval = next((o.get("interval") for o in c.get("options") or []
                              if o.get("name") == opt), None)

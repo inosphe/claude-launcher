@@ -152,7 +152,7 @@ nodes:
         보존하고 전체 검증 큐에 넣는다. 기본 priority=-1, 수정 머지 검증은
         priority=0이다.
       - 배치 스윕: 큐는 같은 저장소의 대기 중 머지를 5건(또는 가장 오래된 머지가
-        10분 대기)씩 묶는다. 누적 체크포인트라 가장 새 머지(배치 tip)의 스냅샷 하나를
+        5분 대기)씩 묶는다 — 통합 창과 같은 규칙이다. 누적 체크포인트라 가장 새 머지(배치 tip)의 스냅샷 하나를
         스윕하면 앞선 머지 전부가 덮인다(`covered`). 데몬이 tip마다 감시
         자식 세션(sweep-job-v2)을 스폰하고, 스윕은 격리된 detached 워크트리에서 낮은
         우선순위로 돈다. 감시 자식은 창 대기 동안 주기 알림을 받아 idle hold로 내려가지
@@ -682,9 +682,10 @@ body:
               관제 대기. 워커의 요청을 처리하고 증거를 수합한다. 착지 큐
               (collections.landing)에 requested 항목이 있고 그 증거(브랜치, tip,
               표적 테스트 수치)가 찼으면 지체 없이 integrate를 고른다 — 사람의
-              지시를 기다리지 않는다. 직전 통합에서 300초가 안 됐으면 엔진이
-              선택을 보류하고(waiting_window) 창이 열리면 데몬이 확정해 이
-              터미널을 깨운다 — 턴을 끝내고 기다린다. 그사이 후보가 늘면 같은
+              지시를 기다리지 않는다. 대기 요청이 5건 미만이고 가장 오래된
+              요청이 들어온 지 300초가 안 됐으면 엔진이 선택을 보류하고
+              (waiting_window) 창이 열리면(5건 도달 또는 첫 건 후 300초) 데몬이
+              확정해 이 터미널을 깨운다 — 턴을 끝내고 기다린다. 그사이 후보가 늘면 같은
               옵션을 다시 골라 reason을 갱신한다. 교대 종료 지시가 오면 wind-down.
               활성 회귀 실패의 수정 자식이 아직 없으면 handle-regression을 고른다.
               restart_live=true이고 이미 머지된 코드가 아직 라이브에 반영되지
@@ -695,8 +696,9 @@ body:
               ${frag:remote-mesh}
             options:
               integrate:
-                description: 증거가 찬 착지 요청이 있다 — 통합 심사로(직전 통합에서 300초가 지나야 열린다)
+                description: 증거가 찬 착지 요청이 있다 — 통합 심사로(대기 요청 5건이 차거나 가장 오래된 요청에서 300초가 지나면 열린다)
                 interval: 300
+                batch: {collection: landing, status: requested, size: 5}
                 then:
                   seq:
                     - {seq: [integrate-preflight], bind: reviewed}

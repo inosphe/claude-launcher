@@ -1021,6 +1021,26 @@ def test_a_batch_takes_at_most_its_size_and_the_rest_form_the_next(repo, tmp_pat
     assert q.get(jobs[5]["id"])["formed"] == 0
 
 
+def test_the_default_batch_is_five_merges_or_300_seconds_after_the_first(repo, tmp_path, monkeypatch):
+    # claunch-1o6az: the same rule as the leader's integration window. One batch is one
+    # sweep job (its tip); the merges it covers never run on their own.
+    assert (mod.BATCH_SIZE, mod.BATCH_SETTLE) == (5, 300.0)
+    now = [1000.0]
+    monkeypatch.setattr(mod.time, "time", lambda: now[0])
+    q = queue(tmp_path)
+    jobs = merges(q, repo, ["a", "b", "c"])
+    policy = (mod.BATCH_SIZE, mod.BATCH_SETTLE)
+    now[0] = 1000.0 + 299
+    assert q.claim(batch=policy) is None          # three merges, 299 s after the first
+    now[0] = 1000.0 + 300
+    job = q.claim(batch=policy)
+    assert job["id"] == jobs[-1]["id"]            # 300 s opens the batch
+    assert [j["id"] for j in q.members(job["id"])] == [j["id"] for j in jobs[:-1]]
+    assert [q.get(j["id"])["status"] for j in jobs[:-1]] == ["covered", "covered"]
+    q.finish(job["id"], "passed", "r")
+    assert q.claim(batch=policy) is None          # nothing else queued: one job ran
+
+
 def test_a_clock_stepping_back_does_not_reorder_the_pool(repo, tmp_path, monkeypatch):
     # The wall clock can step back (VM time sync) while merges are enqueued; the
     # batch must still end on the fifth enqueued merge, not on a later one stamped early.
@@ -1197,7 +1217,7 @@ def test_an_exited_watcher_is_replaced(repo, tmp_path, monkeypatch):
 
 
 def test_batching_follows_the_daemon_settings(monkeypatch):
-    assert daemon_sweep.batch_policy({}) == (5, 600.0)
+    assert daemon_sweep.batch_policy({}) == (5, 300.0)
     assert daemon_sweep.batch_policy({"delayed_sweep_batch_size": 0}) is None
     assert daemon_sweep.batch_policy({"delayed_sweep_batch_size": 3,
                                       "delayed_sweep_batch_settle": 60}) == (3, 60.0)

@@ -44,8 +44,8 @@ def test_get_answers_the_effective_values_and_defaults(home):
         resp = await client.get("/api/sweep-batch-setting", headers=BEARER)
         assert resp.status == 200
         data = await resp.json()
-        assert data["size"] == 5 and data["settle"] == 600.0
-        assert data["defaults"] == {"size": 5, "settle": 600.0}
+        assert data["size"] == 5 and data["settle"] == 300.0
+        assert data["defaults"] == {"size": 5, "settle": 300.0}
 
     _with_client(body)
 
@@ -66,7 +66,7 @@ def test_put_saves_a_field_and_null_restores_the_default(home):
         resp = await client.put(
             "/api/sweep-batch-setting", json={"size": None, "settle": None}, headers=BEARER)
         data = await resp.json()
-        assert data["size"] == 5 and data["settle"] == 600.0
+        assert data["size"] == 5 and data["settle"] == 300.0
         assert "daemon" not in store.load()
 
     _with_client(body)

@@ -22899,6 +22899,7 @@ let termTimersTick = null;   // the 1s repaint while the strip is up
 const TERM_TIMER_GLYPH = {
   hold: "⏸",     // a pick queued behind a closed window
   window: "◔",   // an option that opens again at `due`
+  batch: "▤",    // n/size candidates gathering; opens at size or `due` (claunch-1o6az)
   wait: "⧗",
   pause: "↻",
   ask: "?",
@@ -38586,7 +38587,7 @@ function delegateSettingCard() {
    saved value applies within seconds, without a daemon restart. The Reset
    button sends null, which restores the built-in default. */
 let sweepBatchSetting = {
-  size: 5, settle: 600, defaults: { size: 5, settle: 600 },
+  size: 5, settle: 300, defaults: { size: 5, settle: 300 },
   loaded: false, error: "", busy: false,
 };
 

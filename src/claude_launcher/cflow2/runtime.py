@@ -3275,10 +3275,50 @@ def _window_opens(r: Run, node: ir.Node, opt: Dict[str, Any]) -> Optional[float]
     interval = opt.get("interval")
     if not interval:
         return None
+    if opt.get("batch"):
+        view = _batch_view(r, opt)
+        if view["count"] <= 0 or view["count"] >= view["size"]:
+            return None
+        return float(view["first_at"]) + float(interval)
     last = (r.state.get("windows") or {}).get(_window_key(node, opt["name"]))
     if last is None:
         return None
     return float(last) + float(interval)
+
+
+def _batch_view(r: Run, opt: Dict[str, Any]) -> Dict[str, Any]:
+    """What a batched option's window counts now: the records of its collection
+    in the declared status (``count``), the arrival of the oldest (``first_at``,
+    None when none wait) and the ``size`` that opens the window at once."""
+    batch = opt["batch"]
+    cs = (r.state.get("collections") or {}).get(batch["collection"])
+    waiting = col_mod.items(cs, batch["status"])
+    firsts = [float(x["at"]) for x in waiting if x.get("at") is not None]
+    return {"count": len(waiting), "size": batch["size"],
+            "first_at": min(firsts) if firsts else None}
+
+
+def _held_opens(r: Run, node: ir.Node, held: Dict[str, Any]) -> float:
+    """When a held choice's window opens: the time stored at hold for a plain
+    interval, recomputed from the collection for a batched option (a candidate
+    arriving after the hold can fill the batch and open the window early)."""
+    opt = next((o for o in node.get("options") or [] if o["name"] == held.get("option")), None)
+    if opt is not None and opt.get("batch"):
+        opens = _window_opens(r, node, opt)
+        return 0.0 if opens is None else opens
+    return float(held.get("opens_at") or 0)
+
+
+def _batch_status(r: Run, opt: Dict[str, Any], opens: Optional[float]) -> Dict[str, Any]:
+    """The batch a paced option gathers, for the status payload: ``count`` of
+    ``size``, the oldest arrival and when the window opens (null: open now or
+    nothing waits)."""
+    view = _batch_view(r, opt)
+    return {"collection": opt["batch"]["collection"], "status": opt["batch"]["status"],
+            "count": view["count"], "size": view["size"], "interval": opt["interval"],
+            "first_at": None if view["first_at"] is None else _iso(view["first_at"]),
+            "opens_at": None if opens is None or r.now >= opens else _iso(opens),
+            "opens_epoch": None if opens is None else opens}
 
 
 def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Optional[str],
@@ -3321,7 +3361,7 @@ def _release_hold(r: Run, iid: str, node: ir.Node) -> bool:
     available. True when something changed."""
     frame = r.inst[iid]["frame"]
     held = frame.get("held") or {}
-    if r.now < float(held.get("opens_at") or 0):
+    if r.now < _held_opens(r, node, held):
         return False
     frame.pop("held", None)
     opt = next((o for o in node.get("options") or [] if o["name"] == held.get("option")), None)
@@ -5014,7 +5054,7 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                 fired = True
                 break
             if inst.get("await") == AW_CHOOSE and frame.get("held") \
-                    and r.now >= float(frame["held"].get("opens_at") or 0):
+                    and r.now >= _held_opens(r, node, frame["held"]):
                 if _release_hold(r, iid, node):
                     fired = True
                     break
@@ -5580,6 +5620,8 @@ def describe(r: Run) -> Dict[str, Any]:
                     opens = _window_opens(r, node, opt)
                     if opens is not None and r.now < opens:
                         entry["window_opens_at"] = _iso(opens)
+                    if opt.get("batch"):
+                        entry["batch"] = _batch_status(r, opt, opens)
                 (avail if ok else unavail).append(entry if ok else {**entry, "when": opt.get("guard")})
             choices.append({
                 "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
@@ -5590,10 +5632,11 @@ def describe(r: Run) -> Dict[str, Any]:
             })
             held = inst["frame"].get("held")
             if held:
-                choices[-1]["held"] = {**held, "opens_at": _iso(held.get("opens_at"))}
+                held_opens = _held_opens(r, node, held)
+                choices[-1]["held"] = {**held, "opens_at": _iso(held_opens)}
                 windows.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                                 "option": held.get("option"),
-                                "opens_at": _iso(held.get("opens_at"))})
+                                "opens_at": _iso(held_opens)})
         elif aw == AW_WAIT:
             waits.append({
                 "instance": iid, "node": node.id, "kind": "wait",

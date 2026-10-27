@@ -307,6 +307,113 @@ def test_hold_dropped_when_the_guard_turns_false(tmp_path):
     assert "guard is false" in _events(tmp_path, "hold_cancelled")[-1]["why"]
 
 
+# -- choose option batch (claunch-1o6az) ----------------------------------------------
+
+BATCHED = """
+    collections:
+      jobs:
+        kind: queue
+        key: id
+        item: {id: str}
+        status: {initial: requested, values: [requested, done]}
+    nodes:
+      merge: {prompt: M}
+    body:
+      loop:
+        max: 10
+        while: "true"
+        do:
+          choose:
+            options:
+              integrate: {then: merge, interval: 300,
+                          batch: {collection: jobs, status: requested, size: 3}}
+              wait: {then: {continue: null}}
+"""
+
+
+def _push(cwd, key, now):
+    runtime.collection_op("push", "jobs", cwd=str(cwd), scope="own", principal="driver",
+                          item={"id": key}, now=now)
+
+
+def test_batch_compiles_and_needs_an_interval():
+    chart = _compile(BATCHED)
+    choose = next(n for n in chart.nodes.values() if n.get("options"))
+    opts = {o["name"]: o for o in choose.get("options")}
+    assert opts["integrate"]["batch"] == {"collection": "jobs", "status": "requested", "size": 3}
+    assert "needs an interval" in _err("""
+        body:
+          choose:
+            options:
+              go: {then: end, batch: {collection: jobs, status: requested, size: 3}}
+    """)
+    assert "size must be" in _err("""
+        body:
+          choose:
+            options:
+              go: {then: end, interval: 5, batch: {collection: jobs, status: requested, size: 0}}
+    """)
+
+
+def test_a_full_batch_opens_the_window_at_once(tmp_path):
+    _start(tmp_path, BATCHED)
+    runtime.select(None, "integrate", "first", **_kw(tmp_path))
+    st = runtime.status(**_kw(tmp_path, T0 + 1))
+    runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path, T0 + 1))
+    for i, key in enumerate("abc"):
+        _push(tmp_path, key, T0 + 2 + i)
+    st = runtime.select(None, "integrate", "three wait", **_kw(tmp_path, T0 + 10))
+    assert "held" not in st and [t["label"] for t in st["tasks"]] == ["merge"]
+
+
+def test_a_partial_batch_opens_300_seconds_after_the_first_arrival(tmp_path):
+    _start(tmp_path, BATCHED)
+    _push(tmp_path, "a", T0 + 100)
+    _push(tmp_path, "b", T0 + 150)
+    # the last take is long past: the first arrival is the reference
+    st = runtime.select(None, "integrate", "two wait", **_kw(tmp_path, T0 + 200))
+    assert st["held"]["opens_at"] == T0 + 400
+    assert st["waiting_window"][0]["opens_at"] == runtime._iso(T0 + 400)
+    st = runtime.wait_tick(T0 + 399, cwd=str(tmp_path), scope="own")
+    assert st["tasks"] == [] and st["ticked"] == 0
+    st = runtime.wait_tick(T0 + 400, cwd=str(tmp_path), scope="own")
+    assert [t["label"] for t in st["tasks"]] == ["merge"] and st["ticked"] == 1
+
+
+def test_the_third_candidate_releases_a_hold_before_the_deadline(tmp_path):
+    _start(tmp_path, BATCHED)
+    _push(tmp_path, "a", T0 + 100)
+    st = runtime.select(None, "integrate", "one waits", **_kw(tmp_path, T0 + 110))
+    assert st["held"]["opens_at"] == T0 + 400
+    st = runtime.wait_tick(T0 + 200, cwd=str(tmp_path), scope="own")
+    assert st["tasks"] == []
+    _push(tmp_path, "b", T0 + 210)
+    _push(tmp_path, "c", T0 + 220)
+    st = runtime.wait_tick(T0 + 230, cwd=str(tmp_path), scope="own")
+    assert [t["label"] for t in st["tasks"]] == ["merge"]
+    assert _events(tmp_path, "selected")[-1]["by"] == "window"
+
+
+def test_batch_status_reports_count_and_deadline(tmp_path):
+    _start(tmp_path, BATCHED)
+    _push(tmp_path, "a", T0 + 100)
+    _push(tmp_path, "b", T0 + 150)
+    _st, choice = _choice(tmp_path, T0 + 160)
+    batch = [o for o in choice["options"] if o["name"] == "integrate"][0]["batch"]
+    assert batch["count"] == 2 and batch["size"] == 3
+    assert batch["first_at"] == runtime._iso(T0 + 100)
+    assert batch["opens_at"] == runtime._iso(T0 + 400) and batch["opens_epoch"] == T0 + 400
+
+
+def test_no_candidate_means_nothing_to_wait_for(tmp_path):
+    _start(tmp_path, BATCHED)
+    runtime.select(None, "integrate", "first", **_kw(tmp_path))
+    st = runtime.status(**_kw(tmp_path, T0 + 1))
+    runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path, T0 + 1))
+    st = runtime.select(None, "integrate", "again", **_kw(tmp_path, T0 + 2))
+    assert "held" not in st and [t["label"] for t in st["tasks"]] == ["merge"]
+
+
 # -- recur -----------------------------------------------------------------------------
 
 
