@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import time
@@ -694,7 +695,285 @@ def test_borrower_checks_the_cwd_again_after_setup(lender_clone, tmp_path, monke
             await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
             done = runner.runs()[0]
             assert "'tests/late' resolves outside the checkout" in done["error"]
+            assert "window_grant" not in done  # checked again before the window
             assert "resolves outside the checkout" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: own.status()["holders"] == [], 30)
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_arg_paths_reads_positional_ids_and_path_option_values():
+    args = ["-q", "-n", "4", "tests/a.py::test_x", "--ignore", "tests/b",
+            "--deselect=tests/c.py::test_y", "--tb", "short", "-k", "slow",
+            "--ignore-glob=tests/d*", "-x"]
+    assert window_borrow._arg_paths(args) == [
+        ("tests/a.py::test_x", "tests/a.py"), ("tests/b", "tests/b"),
+        ("--deselect=tests/c.py::test_y", "tests/c.py"),
+        ("--ignore-glob=tests/d*", "tests/d*")]
+
+
+def test_link_scan_finds_a_link_out_but_not_one_inside_or_in_a_venv(tmp_path):
+    top, outside = tmp_path / "co", tmp_path / "outside"
+    (top / "tests" / "real").mkdir(parents=True)
+    outside.mkdir()
+    venv = top / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    (top / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    try:
+        (venv / "python").symlink_to(outside / "python3")
+        (top / "tests" / "link_in").symlink_to(top / "tests" / "real",
+                                               target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    top = top.resolve()
+    assert window_borrow._link_scan(top) == (None, [top / ".venv"])
+    (top / "tests" / "real" / "conftest.py").symlink_to(outside / "conftest.py")
+    assert window_borrow._link_scan(top)[0] == "tests/real/conftest.py"
+
+
+@pytest.mark.parametrize("rel_cwd, pytest_args, error", [
+    ("", ["-q", "tests/fake"], "pytest argument 'tests/fake' is inside the virtualenv 'tests/fake'"),
+    ("", ["-q", "tests/fake/test_x.py::t"],
+     "pytest argument 'tests/fake/test_x.py::t' is inside the virtualenv 'tests/fake'"),
+    ("tests/fake", ["-q"], "rel_cwd 'tests/fake' is inside the virtualenv 'tests/fake'"),
+    ("tests", ["-q", "fake"], "pytest argument 'fake' is inside the virtualenv 'tests/fake'"),
+    # pytest skips a virtualenv it walks into, so a parent is fine.
+    ("", ["-q", "tests"], None),
+    ("tests", ["-q"], None),
+])
+def test_lent_cwd_refuses_pointing_pytest_into_a_skipped_venv(tmp_path, rel_cwd, pytest_args, error):
+    # A committed pyvenv.cfg makes the scan skip the directory, and pytest
+    # collects a virtualenv it is pointed at, links and all (claunch-vur61.1).
+    top, outside = tmp_path / "co", tmp_path / "outside"
+    (top / "tests" / "fake").mkdir(parents=True)
+    outside.mkdir()
+    (top / "tests" / "fake" / "pyvenv.cfg").write_text("", encoding="utf-8")
+    try:
+        (top / "tests" / "fake" / "link_out").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    info = {"rel_cwd": rel_cwd, "pytest_args": pytest_args}
+    if error is None:
+        assert window_borrow._lent_cwd(top, info) == top / rel_cwd
+    else:
+        with pytest.raises(RuntimeError, match=re.escape(error)):
+            window_borrow._lent_cwd(top, info)
+
+
+@pytest.mark.parametrize("pytest_args, error", [
+    (["-q", "tests/link_out/test_out.py"],
+     "pytest argument 'tests/link_out/test_out.py' resolves outside the checkout"),
+    (["-q", "--ignore", "tests/link_out"],
+     "pytest argument 'tests/link_out' resolves outside the checkout"),
+    # pytest walks a directory argument, or the cwd, into the link.
+    (["-q", "tests"], "symlink 'tests/link_out' in the checkout resolves outside it"),
+    (["-q"], "symlink 'tests/link_out' in the checkout resolves outside it"),
+])
+def test_borrower_refuses_a_path_argument_that_a_symlink_leads_outside(
+        lender_clone, tmp_path, monkeypatch, pytest_args, error):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    try:
+        (clone / "tests" / "link_out").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    _git(clone, "add", "tests/link_out")
+    _git(clone, "commit", "-q", "-m", "link_out")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+    marker = tmp_path / "setup-ran"
+
+    class _Recording(_Runner):
+        setup_command = staticmethod(lambda checkout: [
+            sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"])
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Recording(own, transport, lambda: "borrower",
+                            root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            # Inside the checkout as text, so vet_borrow lets it through.
+            waiter, gid = await _queued(lender, info=_info(
+                clone, pytest_args=pytest_args))
+            run_doc = await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert error in done["error"]
+            assert "window_grant" not in done
+            assert not marker.exists()  # refused right after the checkout
+            assert "resolves outside" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
+            assert own.status()["holders"] == []
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_borrower_refuses_an_argument_into_a_committed_venv(lender_clone, tmp_path, monkeypatch):
+    # The reviewer's form: a committed pyvenv.cfg makes the link scan skip
+    # tests/fake, and `pytest tests/fake` collects through its link out.
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    (clone / "tests" / "fake").mkdir()
+    try:
+        (clone / "tests" / "fake" / "link_out").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    _commit(clone, "tests/fake/pyvenv.cfg", "")
+    _git(clone, "add", "tests/fake/link_out")
+    _git(clone, "commit", "-q", "-m", "fake venv")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Runner(own, transport, lambda: "borrower",
+                         root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(
+                clone, pytest_args=["-q", "tests/fake"]))
+            await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert ("pytest argument 'tests/fake' is inside the virtualenv 'tests/fake'"
+                    in done["error"])
+            assert "window_grant" not in done
+            assert "inside the virtualenv" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: own.status()["holders"] == [], 30)
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_borrower_checks_the_path_arguments_again_after_setup(
+        lender_clone, tmp_path, monkeypatch):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    (clone / "tests" / "late").mkdir()
+    _commit(clone, "tests/late/test_out.py", "def test_out():\n    assert True\n")
+    _git(clone, "push", "-q", "origin", "HEAD:master")
+    _git(clone, "fetch", "-q", "origin")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    class _Relinking(_Runner):
+        # A setup that swaps the named test directory for a link out of the checkout.
+        setup_command = staticmethod(lambda checkout: [sys.executable, "-c", (
+            "import os, shutil; shutil.rmtree('tests/late'); "
+            f"os.symlink({str(outside)!r}, 'tests/late', target_is_directory=True)")])
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Relinking(own, transport, lambda: "borrower",
+                            root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(
+                clone, pytest_args=["-q", "tests/late/test_out.py"]))
+            await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert ("pytest argument 'tests/late/test_out.py' resolves outside the checkout"
+                    in done["error"])
+            assert "window_grant" not in done
+            assert "resolves outside the checkout" in _given_back(lender, gid)
+            again = await lender.await_entry(gid, wait=0.05)
+            assert again["pending"] and not again.get("remote")
+            await _until(lambda: own.status()["holders"] == [], 30)
+            waiter.cancel()
+        finally:
+            await runner.close()
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_borrower_refuses_a_link_out_that_setup_makes(lender_clone, tmp_path, monkeypatch):
+    clone, bare, url = lender_clone
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_out.py").write_text("def test_out():\n    assert True\n",
+                                         encoding="utf-8")
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    window_borrow._recipes.clear()
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 0.1)
+    _borrower_clone(tmp_path, bare, url)
+
+    class _Linking(_Runner):
+        # A setup that adds a link out under the directory pytest will walk.
+        setup_command = staticmethod(lambda checkout: [sys.executable, "-c", (
+            f"import os; os.symlink({str(outside)!r}, 'tests/made_out', "
+            "target_is_directory=True)")])
+
+    async def run():
+        lender = _make(tmp_path, "lender.json")
+        own = _make(tmp_path, "borrower.json")
+        client, manager, transport = await _lender_app(lender)
+        runner = _Linking(own, transport, lambda: "borrower",
+                          root=tmp_path / "borrows" / "window-borrow")
+        try:
+            await lender.acquire("sweep", session=None, pid=os.getpid())
+            waiter, gid = await _queued(lender, info=_info(clone, pytest_args=["-q", "tests"]))
+            await runner.start("lender", gid)
+            await _until(lambda: runner.runs()[0]["status"] == "failed", 30)
+            done = runner.runs()[0]
+            assert "symlink 'tests/made_out' in the checkout resolves outside it" in done["error"]
+            assert "window_grant" not in done  # checked again before the window
+            assert "resolves outside" in _given_back(lender, gid)
             again = await lender.await_entry(gid, wait=0.05)
             assert again["pending"] and not again.get("remote")
             await _until(lambda: own.status()["holders"] == [], 30)
