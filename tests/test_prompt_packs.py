@@ -68,6 +68,17 @@ def test_the_non_pytest_pack_is_opt_in_and_only_pointed_at(home):
         assert "claunch window run" not in text
 
 
+def test_the_code_engineering_pack_ships_opt_in(home):
+    # claunch-kv9ac: guidance on branching over early abstraction and on
+    # locality, offered at creation and ticked by no one by default.
+    pack = prompt_packs.shipped("code-engineering")
+    assert "if`/`switch" in pack.body and "locality" in pack.body
+    assert not prompt_packs.is_on_demand("code-engineering")
+    assert "code-engineering" not in prompt_packs.default_packs()
+    assert all("code-engineering" not in packs
+               for packs in prompt_packs.DEFAULT_ROLE_PACKS.values())
+
+
 def test_install_status_edit_and_remove(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
