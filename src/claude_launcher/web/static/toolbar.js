@@ -252,9 +252,12 @@
   // one text change this row gets once a second — the reminder chip's
   // countdown — so without this the measuring pass below ran at 1 Hz for as
   // long as a session was on screen (claunch-hwbuc). The app writes the
-  // countdown with `textContent` (paintTermTimer), which a MutationObserver
-  // reports as a childList swap rather than a characterData edit, so the
-  // comparison is made against the text each item had at the last fit.
+  // countdown with `textContent` (paintTermTimer). quietdom.js turns that
+  // write into a change of the one text node's data, so a MutationObserver
+  // sees a characterData record (claunch-qnq1c); without quietdom it is a
+  // childList swap. A record of either kind does not carry the old text the
+  // item was fitted at, so the comparison is made against the text each item
+  // had at the last fit.
   //
   // It is a claim about the tabular run only, so it is checked twice: every
   // character that moved must be a digit on both sides, and the element the
