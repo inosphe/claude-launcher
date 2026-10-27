@@ -383,11 +383,18 @@ class Clock:
             job["owner"], kind="fail", reason=reason,
             site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
             generation=job.get("generation"), permanent=True,
-            # The block below already puts this in front of the person, and
-            # this guard -- not the event's 900-second fold -- is what says
-            # "once": a retry-watcher bump is a person asking again and must
-            # bring both back together.
-            notice=False, fold=False,
+            # The block below already puts this in front of the person, so the
+            # transient line is suppressed. The fold is left ON: the sweep's
+            # default spawn is ``cflow2_exec.default_spawn``, which POSTs to
+            # this daemon's own children route -- so the route has already
+            # reported this same refusal once (``api.spawn``), and folding is
+            # what keeps the two call sites to one row. Turning it off here
+            # would also clear the pair from ``seen`` and make this report
+            # write a second row beside the route's (s5808-rev, claunch-is4o4).
+            # "Once per generation" is this guard's job, not the fold's: a
+            # ``retry-watcher`` bump opens the guard and the report goes out
+            # again, folding into the still-fresh route row inside the window.
+            notice=False,
         )
         try:
             session = self.manager.get(job["owner"])

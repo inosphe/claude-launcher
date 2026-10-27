@@ -511,9 +511,14 @@ def test_a_permanent_refusal_is_one_event_per_generation(tmp_path, monkeypatch):
 
     ``Clock._report_spawn_failure`` tells the owner once per
     ``(job id, generation)``; the event is emitted from inside that guard so
-    the two cannot drift. A ``retry-watcher`` bump is a person asking again,
-    so both come back together -- and a repeat inside one generation adds
-    neither (s5803 on claunch-is4o4)."""
+    the two cannot drift: a repeat inside one generation adds neither.
+
+    A ``retry-watcher`` bump opens that guard and the report goes out again,
+    but the row still folds -- a generation bump inside the window is the
+    same situation, and the issue asks for one row per refusal, not one per
+    attempt. The fold is the only thing keeping the route's row and the
+    sweep's row to one, so it cannot be opted out of (s5808-rev measured what
+    an opt-out costs); the count surfaces when the window turns over."""
     from claude_launcher.daemon import cflow2_exec
     from claude_launcher.daemon import paths as daemon_paths
     from test_delayed_sweep import Clock, git as run_git, live_manager, merges, queue, spawner
@@ -548,10 +553,10 @@ def test_a_permanent_refusal_is_one_event_per_generation(tmp_path, monkeypatch):
     asyncio.run(clock.tick())
     assert len(rows("leader")) == 1
 
-    # ``retry-watcher`` is a person asking again: it bumps the generation that
-    # both the typed block and this event are keyed on, so both come back.
-    # Computing that condition twice (once here, once in the block's guard)
-    # would let the two drift the first time somebody retries.
+    # ``retry-watcher`` is a person asking again: it bumps the generation, so
+    # the guard opens and the block is typed again. The event folds into the
+    # row above -- inside the window one refusal is still one situation, and
+    # a second row here would be the duplicate the issue is about.
     q.retry_watcher(jobs[-1]["id"])
     async def launch_again(*args, **kwargs):
         return SimpleNamespace(pid=os.getpid(), returncode=None)
@@ -559,4 +564,52 @@ def test_a_permanent_refusal_is_one_event_per_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch_again)
     clock.spawn_tried.clear()
     asyncio.run(clock.tick())
-    assert len(rows("leader")) == 2, "a new generation is a new report"
+    assert len(rows("leader")) == 1, "the bump folds; the row count does not double"
+
+
+def test_a_refusal_seen_by_the_route_and_the_sweep_is_one_event(tmp_path, monkeypatch):
+    """One permanent refusal, reached twice, is one row (s5808-rev, claunch-is4o4).
+
+    The sweep's default spawn is ``cflow2_exec.default_spawn``, which POSTs to
+    this daemon's own ``/api/sessions/{parent}/children``. A refusal therefore
+    passes the route's reporter first (``api.spawn``) and ``Clock._report_spawn_failure``
+    second (``delayed_sweep.attend``). Those are two call sites for one
+    failure, and what keeps it one row is the 900-second fold -- so the
+    permanent path must not turn the fold off. Turning it off also clears the
+    key from ``seen``, which makes the outer report believe it is the first
+    and write a second row next to the route's.
+
+    The other permanent-refusal test injects ``spawn=`` and so never crosses
+    the route; this one is the shape that actually happens in the daemon."""
+    from claude_launcher.daemon import paths as daemon_paths
+    from test_delayed_sweep import Clock, git as run_git, live_manager, merges, queue
+
+    monkeypatch.setenv(daemon_paths.INSTANCE_BASE_ENV, str(tmp_path / ".home"))
+    monkeypatch.setenv(daemon_paths.INSTANCE_ENV, "")
+    repo = _sweep_repo(tmp_path, run_git)
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+
+    reason = "session 'leader' already exists"
+    _, rows = reporting(tmp_path, "leader")
+
+    # 1. The route reports the refusal, as ``default_spawn`` would see it.
+    spawn_events.report("leader", reason=reason, site="api.spawn")
+
+    # 2. The sweep reports the same refusal for the same job.
+    def refuse(parent, body):
+        raise cflow2_exec.SpawnRefused(reason, permanent=True)
+
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(live_manager(), q, batch=True, spawn=refuse, policy=(5, 3600))
+    asyncio.run(clock.tick())
+
+    recorded = rows("leader")
+    assert len(recorded) == 1, (
+        "one refusal reached the route and the sweep; the fold is what makes "
+        f"it one row, got {[e['details']['site'] for e in recorded]}")
+    assert recorded[0]["details"]["site"] == "api.spawn", (
+        "the route reported first; the sweep's copy folds into it")
