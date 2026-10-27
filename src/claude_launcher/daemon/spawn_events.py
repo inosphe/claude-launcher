@@ -157,6 +157,7 @@ class Failures:
         site: str = "",
         notify_on: str = "",
         notice: bool = True,
+        fold: bool = True,
         **details,
     ) -> Optional[dict]:
         """Record one event for ``target``, or fold it into the last report.
@@ -174,25 +175,38 @@ class Failures:
         (claunch-k3acp), while the event here is still worth keeping -- that
         block is typed text, and the history outlives it.
 
+        ``fold=False`` records unconditionally, for a caller that already
+        decided what "one report" means. ``Clock._report_spawn_failure`` runs
+        once per ``(job id, generation)`` and a ``retry-watcher`` bump is a
+        person asking again, so its event must come back with that bump --
+        the 900-second fold would swallow it and leave the history saying
+        the job was reported once when the person had asked twice
+        (claunch-is4o4, claunch-k3acp).
+
         Returns the recorded event, or ``None`` when this failure was folded
         into an earlier report.
         """
         reason = normalize(reason)
         key = (str(target or ""), reason)
-        with self._lock:
-            now = self.clock()
-            previous = self.seen.get(key)
-            if previous is not None and now - previous[0] < self.gap:
-                previous[1] += 1
-                return None
-            repeats = previous[1] if previous else 0
-            self.seen[key] = [now, 0]
-            if len(self.seen) > MAX_SEEN:
-                # Oldest report first: a pair not seen for that long would
-                # report again anyway.
-                for stale in sorted(self.seen, key=lambda k: self.seen[k][0])[
-                        :len(self.seen) - MAX_SEEN]:
-                    del self.seen[stale]
+        repeats = 0
+        if fold:
+            with self._lock:
+                now = self.clock()
+                previous = self.seen.get(key)
+                if previous is not None and now - previous[0] < self.gap:
+                    previous[1] += 1
+                    return None
+                repeats = previous[1] if previous else 0
+                self.seen[key] = [now, 0]
+                if len(self.seen) > MAX_SEEN:
+                    # Oldest report first: a pair not seen for that long would
+                    # report again anyway.
+                    for stale in sorted(self.seen, key=lambda k: self.seen[k][0])[
+                            :len(self.seen) - MAX_SEEN]:
+                        del self.seen[stale]
+        elif reason:  # keep the fold honest for this pair once it grows to it
+            with self._lock:
+                self.seen.pop(key, None)
         session = self._session(target)
         if session is None:
             # Nothing to file it on: the target is gone (an exited owner, a
@@ -293,6 +307,7 @@ def report(
     site: str = "",
     notify_on: str = "",
     notice: bool = True,
+    fold: bool = True,
     **details,
 ) -> Optional[dict]:
     """Record one event through the installed reporter.
@@ -314,7 +329,7 @@ def report(
     try:
         return failures.report(
             target, kind=kind, reason=reason, site=site, notify_on=notify_on,
-            notice=notice, **details
+            notice=notice, fold=fold, **details
         )
     except Exception:  # noqa: BLE001 - see the docstring
         log.exception("spawn event for %r could not be recorded", target)

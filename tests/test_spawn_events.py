@@ -491,3 +491,72 @@ def test_a_failure_already_told_another_way_keeps_the_event_but_not_the_line(tmp
 
     failures.report("owner", reason="a different refusal", site="delayed_sweep.attend")
     assert len(seen) == 1, "every other failure still shows its line"
+
+
+def _sweep_repo(tmp_path, run_git):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (("init", "-q"), ("config", "user.email", "test@example.com"),
+                 ("config", "user.name", "test")):
+        run_git(repo, *args)
+    (repo / "base").write_text("base")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-qm", "base")
+    run_git(repo, "branch", "-M", "master")
+    return repo
+
+
+def test_a_permanent_refusal_is_one_event_per_generation(tmp_path, monkeypatch):
+    """The typed block and the durable event ride ONE condition.
+
+    ``Clock._report_spawn_failure`` tells the owner once per
+    ``(job id, generation)``; the event is emitted from inside that guard so
+    the two cannot drift. A ``retry-watcher`` bump is a person asking again,
+    so both come back together -- and a repeat inside one generation adds
+    neither (s5803 on claunch-is4o4)."""
+    from claude_launcher.daemon import cflow2_exec
+    from claude_launcher.daemon import paths as daemon_paths
+    from test_delayed_sweep import Clock, git as run_git, live_manager, merges, queue, spawner
+
+    monkeypatch.setenv(daemon_paths.INSTANCE_BASE_ENV, str(tmp_path / ".home"))
+    monkeypatch.setenv(daemon_paths.INSTANCE_ENV, "")
+    repo = _sweep_repo(tmp_path, run_git)
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+
+    def refuse(parent, body):
+        raise cflow2_exec.SpawnRefused("spawn policy: max_children reached",
+                                       permanent=True)
+
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    _, rows = reporting(tmp_path, "leader")
+    clock = Clock(live_manager(), q, batch=True, spawn=refuse, policy=(5, 3600))
+    asyncio.run(clock.tick())
+
+    recorded = rows("leader")
+    assert len(recorded) == 1
+    assert recorded[0]["details"]["permanent"] is True
+    assert recorded[0]["details"]["site"] == "delayed_sweep.attend"
+    assert recorded[0]["details"]["job"] == jobs[-1]["id"]
+    assert "max_children" in recorded[0]["details"]["reason"]
+
+    # A second pass makes no second attempt (the job is marked permanent), so
+    # neither the block nor the event repeats.
+    asyncio.run(clock.tick())
+    assert len(rows("leader")) == 1
+
+    # ``retry-watcher`` is a person asking again: it bumps the generation that
+    # both the typed block and this event are keyed on, so both come back.
+    # Computing that condition twice (once here, once in the block's guard)
+    # would let the two drift the first time somebody retries.
+    q.retry_watcher(jobs[-1]["id"])
+    async def launch_again(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch_again)
+    clock.spawn_tried.clear()
+    asyncio.run(clock.tick())
+    assert len(rows("leader")) == 2, "a new generation is a new report"

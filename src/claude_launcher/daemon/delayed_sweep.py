@@ -312,25 +312,15 @@ class Clock:
             try:
                 name = await asyncio.to_thread(spawn, job["owner"], self.watch_body(job))
             except Exception as exc:  # noqa: BLE001 - refused or unreachable alike
-                permanent = bool(getattr(exc, "permanent", False))
                 await self._spawn_failed(job, exc)
-                # ``_spawn_failed`` decides what the *sweep* does about this
-                # attempt -- log once per reason, and stop retrying a refusal
-                # a retry cannot change -- and types a block into the owner's
-                # terminal when the refusal is permanent (claunch-k3acp). This
-                # is the durable half of the same fact: one warning-grade
-                # event in the session history, which outlives that block.
-                # The transient line is skipped when the block already went
-                # out, so one refusal does not arrive on screen twice; for a
-                # retry that keeps failing but never becomes permanent (the
-                # claunch-is4o4 case: 34 failures a minute) there is no block,
-                # so the line is what the person sees.
-                spawn_events.report(
-                    job["owner"], kind="fail", reason=str(exc),
-                    site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
-                    generation=job.get("generation"), permanent=permanent,
-                    notice=not permanent,
-                )
+                # ``_spawn_failed`` owns everything this failure decides --
+                # the log, the retry, and (for a permanent refusal) the typed
+                # block plus the durable warning event, which it emits from
+                # inside :meth:`_report_spawn_failure` so both ride the same
+                # ``(job id, generation)`` condition (claunch-is4o4,
+                # claunch-k3acp). Nothing is reported here: a second gate at
+                # this call site would drift from that one the first time a
+                # person bumps the generation with ``retry-watcher``.
                 continue
             queue.attach_child(job["id"], name)
             live += 1
@@ -340,7 +330,14 @@ class Clock:
 
         The log carries one line per reason, not one per attempt: a transient
         failure repeats every SPAWN_BACKOFF and the count is the only thing
-        that changes."""
+        that changes.
+
+        A *transient* failure still reaches the person as a warning event in
+        the session history (claunch-is4o4) -- that retry loop never becomes
+        final, so nothing else would tell them it is happening (34 failures a
+        minute, one session number burned each time). The event folds repeats
+        of one (owner, reason) into one report, so it is not one row per
+        attempt."""
         reason = _one_line(str(exc) or exc.__class__.__name__)
         if getattr(exc, "permanent", False):
             self.spawn_permanent[(job["id"], job["generation"])] = reason
@@ -357,6 +354,11 @@ class Clock:
         else:
             log.debug("sweep watcher for %s still failing (%d times): %s",
                       job["id"], count, reason)
+        spawn_events.report(
+            job["owner"], kind="fail", reason=reason,
+            site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
+            generation=job.get("generation"), permanent=False,
+        )
 
     async def _report_spawn_failure(self, job, reason: str) -> None:
         """Tell the job's owner once, with the refusal and what it costs them.
@@ -365,11 +367,28 @@ class Clock:
         refuses for a second reason still reports that second one, while a
         repeat of the first is not sent again. A generation bump
         (``retry-watcher``) is a new attempt by a person, and its report is
-        new too."""
+        new too.
+
+        The durable event is emitted here, inside the same guard, rather than
+        at the call site: the block below is typed text that scrolls away, and
+        the event is what a person can still find afterwards. Keeping both on
+        one ``(job id, generation)`` condition means a ``retry-watcher`` bump
+        cannot deliver a block with no matching row, or the reverse
+        (claunch-is4o4, claunch-k3acp)."""
         key = (job["id"], job["generation"])
         if self.spawn_reported.get(key) == reason:
             return
         self.spawn_reported[key] = reason
+        spawn_events.report(
+            job["owner"], kind="fail", reason=reason,
+            site="delayed_sweep.attend", job=job["id"], sha=job.get("sha", ""),
+            generation=job.get("generation"), permanent=True,
+            # The block below already puts this in front of the person, and
+            # this guard -- not the event's 900-second fold -- is what says
+            # "once": a retry-watcher bump is a person asking again and must
+            # bring both back together.
+            notice=False, fold=False,
+        )
         try:
             session = self.manager.get(job["owner"])
             if session.exited:
