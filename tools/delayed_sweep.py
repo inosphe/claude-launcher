@@ -279,7 +279,11 @@ def main(argv=None):
             result = queue.get(args.job)
         elif args.action == "retry-watcher":
             queue.retry_watcher(args.job)
-            result = {"job": args.job, "generation": queue.get(args.job)["generation"]}
+            row = queue.get(args.job)
+            # The status is what makes the answer checkable: a bump is only
+            # worth anything on a status the daemon gives a watcher to, and
+            # ``retry_watcher`` refuses the rest (claunch-k3acp.1).
+            result = {"job": args.job, "generation": row["generation"], "status": row["status"]}
         elif args.action == "unbatch":
             result = queue.unbatch(args.job)
         elif args.action == "job-state":

@@ -1291,6 +1291,75 @@ def test_a_requeued_job_gets_a_watcher_without_a_daemon_restart(repo, tmp_path, 
     assert q.get(tip)["child"] == "w1"
 
 
+def test_the_requeue_then_retry_watcher_route_the_refusal_names_works(repo, tmp_path, monkeypatch):
+    """The refusal tells an owner to run two commands; both are needed.
+
+    ``requeue`` alone does not do it. The daemon remembers a final refusal per
+    ``(job, generation)`` and ``requeue`` leaves the generation alone, so on a
+    job that was refused before it went stuck the watcher still does not
+    appear — measured here as ``child`` staying empty after the requeue tick.
+    The pair is what works, which is why the message names both rather than
+    just "requeue".
+    """
+    from claude_launcher.daemon.cflow2_exec import SpawnRefused
+
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = jobs[-1]["id"]
+    calls, refuse = [], {"on": True}
+    delivered = []
+
+    def spawn(parent, body):
+        calls.append(parent)
+        if refuse["on"]:
+            raise SpawnRefused("session 'leader' is in 2 meshes (claunch, leader)", permanent=True)
+        return "w"
+
+    class Owner:
+        exited = False
+
+        async def deliver(self, text, **kw):
+            delivered.append(text)
+            return True
+
+    def manager(name):
+        # The owner is there; the watcher a dead sweep-job run left behind is not.
+        if name == "leader":
+            return Owner()
+        return SimpleNamespace(exited=True)
+
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(SimpleNamespace(get=manager), q, batch=True, spawn=spawn, policy=(5, 3600))
+
+    # A final refusal is recorded while the tip is still watchable.
+    asyncio.run(clock.tick())
+    assert len(calls) == 1 and clock.spawn_permanent, "the refusal was not remembered"
+
+    # The runner then exhausts its retries: the tip parks as stuck with its watcher gone.
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET status='stuck', child='w1', failures=? WHERE id=?",
+                   (mod.RETRY_LIMIT - 1, tip))
+    q.finish(tip, "retry", detail="uv sync failed")
+    assert q.get(tip)["status"] == "stuck"
+
+    # First command: requeue. Alone it is not enough — the memory is per generation.
+    refuse["on"] = False
+    q.requeue(tip)
+    clock.spawn_tried.clear()
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 1, "requeue alone revived the refused spawn; the message could say one command"
+    assert q.get(tip)["child"] == ""
+
+    # Second command: the one the refusal names.
+    assert q.retry_watcher(tip) == 1
+    clock.spawn_tried.clear()
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 2, "the pair the refusal prints did not produce a watcher"
+    assert q.get(tip)["child"] == "w"
+
+
 def test_a_job_with_a_verdict_is_not_given_a_retry_watcher(repo, tmp_path):
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")
@@ -1298,6 +1367,71 @@ def test_a_job_with_a_verdict_is_not_given_a_retry_watcher(repo, tmp_path):
     q.finish(job["id"], "passed", "receipt")
     with pytest.raises(ValueError, match="verdict"):
         q.retry_watcher(job["id"])
+
+
+def test_a_stuck_job_is_not_given_a_retry_watcher_but_is_told_to_requeue(repo, tmp_path):
+    """claunch-k3acp.1: the command reported a generation nothing could read.
+
+    ``retry_watcher`` refused only the past-the-verdict statuses, while
+    ``unattended`` selected a literal list that excluded ``stuck``. A stuck job
+    therefore took the bump and was told it had asked for a watcher, and
+    ``Clock.attend`` never spawned one -- the recovery advice handed to the
+    owner did nothing on exactly the status whose notice recommends it.
+    """
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET failures=? WHERE id=?", (mod.RETRY_LIMIT - 1, job["id"]))
+    q.finish(job["id"], "retry", detail="uv sync failed")
+    assert q.get(job["id"])["status"] == "stuck"
+
+    with pytest.raises(ValueError) as raised:
+        q.retry_watcher(job["id"])
+    message = str(raised.value)
+    assert "stuck" in message
+    assert f"requeue --job {job['id']}" in message, "the refusal must name the command that works"
+    assert f"retry-watcher --job {job['id']}" in message, (
+        "requeue alone is not enough when the job was already refused at this generation; "
+        "the message must name both, and "
+        "test_the_requeue_then_retry_watcher_route_the_refusal_names_works measures why")
+    assert q.get(job["id"])["generation"] == 0, "a refused request must not move the generation"
+
+    # The route it names does work, and after it the watcher request is legal.
+    q.requeue(job["id"])
+    assert q.retry_watcher(job["id"]) == 1
+
+
+def test_every_status_retry_watcher_accepts_is_one_unattended_would_watch(repo, tmp_path):
+    """The refusal list and the selection are one tuple (claunch-k3acp.1).
+
+    They were written apart -- a blacklist against a literal SELECT -- and the
+    gap between them was the defect. This measures both against the same
+    statuses so a status added to one side and not the other turns red instead
+    of silently accepting a request nothing reads.
+    """
+    statuses = ("pending", "queued", "retry", "running", "covered",
+                "passed", "failed", "stuck", "cancelled")
+    q = queue(tmp_path)
+    accepted, watched = [], []
+    for index, status in enumerate(statuses):
+        job, _ = enqueue(q, repo, f"m{index}")
+        with q.connect() as db:
+            db.execute("UPDATE jobs SET status=?, formed=1, child='', covered_by=? WHERE id=?",
+                       (status, "the-tip" if status == "covered" else None, job["id"]))
+        try:
+            q.retry_watcher(job["id"])
+            accepted.append(status)
+        except ValueError:
+            pass
+        if any(j["id"] == job["id"] for j in q.unattended()):
+            watched.append(job["id"])
+            # unattended is the watcher question, so what it picks must be bumpable
+            assert status in accepted, f"unattended watches {status}, but retry_watcher refuses it"
+        with q.connect() as db:
+            db.execute("UPDATE jobs SET child='taken' WHERE id=?", (job["id"],))
+
+    assert accepted == list(mod.WATCHABLE)
+    assert len(watched) == len(mod.WATCHABLE)
 
 
 def test_retry_watcher_from_the_command_line(repo, tmp_path):
@@ -1309,8 +1443,28 @@ def test_retry_watcher_from_the_command_line(repo, tmp_path):
                           "retry-watcher", "--job", job["id"]],
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout)["generation"] == 1
+    answer = json.loads(out.stdout)
+    assert answer["generation"] == 1
+    assert answer["status"] == "queued", "the answer names the status that makes the bump readable"
     assert q.get(job["id"])["status"] == job["status"], "the job itself must not move"
+
+
+def test_the_command_line_fails_on_a_stuck_job_and_names_requeue(repo, tmp_path):
+    """A person running the notice's advice must not get exit 0 on a no-op."""
+    db = tmp_path / "jobs.sqlite3"
+    q = mod.Queue(db)
+    job, _ = enqueue(q, repo, "a")
+    with q.connect() as conn:
+        conn.execute("UPDATE jobs SET failures=? WHERE id=?", (mod.RETRY_LIMIT - 1, job["id"]))
+    q.finish(job["id"], "retry", detail="uv sync failed")
+    tool = TOOL.with_name("delayed_sweep.py")
+    out = subprocess.run([sys.executable, str(tool), "--database", str(db),
+                          "retry-watcher", "--job", job["id"]],
+                         capture_output=True, text=True)
+    assert out.returncode == 2, "a refused request must not read as success"
+    assert out.stdout == ""
+    assert "stuck" in out.stderr and f"requeue --job {job['id']}" in out.stderr
+    assert q.get(job["id"])["generation"] == 0
 
 
 def test_a_transient_refusal_is_still_retried_and_not_reported(repo, tmp_path, monkeypatch):
