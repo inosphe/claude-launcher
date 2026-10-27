@@ -1,5 +1,6 @@
 """Mechanical events survive restarts and share the observer timeline."""
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -105,6 +106,94 @@ def test_history_write_failure_does_not_change_control_result(tmp_path, monkeypa
     assert "could not persist session event" in caplog.text
 
 
+def _both_miss_the_cache_together(events, session, action_a, action_b):
+    """Drive two ``record`` calls so both must miss the cache before either writes.
+
+    The collision is the **cache miss**, so merely starting two threads does not
+    reach it reliably: whichever finishes first populates the cache, and the
+    second is then a plain ``list.append``, which the GIL already makes safe.
+    The miss is held open at the one place both writers must pass before either
+    can install a list -- the file read inside :meth:`Events.rows`.
+
+    ``_path`` is that read's first step, and each ``record`` calls it twice
+    (once through ``rows`` to read, once to name the file it writes). So the
+    gate is per thread and only on its **first** call. Both threads wait there
+    until both have arrived.
+
+    With the lock this rendezvous is unreachable: the first writer holds
+    ``_lock`` across the read *and* the write, so the second never reaches the
+    read until the first is done. Its wait then times out and the barrier
+    breaks, which is the pass case -- both rows end up in the file, because the
+    two records were serialized. Without the lock both threads arrive, each
+    reads the file, each gets its own list, and the second write drops the
+    first writer's row -- which is the red case this test exists to show.
+    """
+    original = session_events.Events._path
+    arrived = threading.Barrier(2, timeout=1.0)
+    seen = {}
+    failures = []
+
+    def first_call_only(self, key):
+        ident = threading.get_ident()
+        seen[ident] = seen.get(ident, 0) + 1
+        if seen[ident] == 1:
+            try:
+                arrived.wait()
+            except threading.BrokenBarrierError:
+                pass          # serialized by the lock -- see the docstring
+        return original(self, key)
+
+    def write(action):
+        try:
+            events.record(session, action, action)
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the caller
+            failures.append(exc)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(session_events.Events, "_path", first_call_only)
+        threads = [threading.Thread(target=write, args=(action,))
+                   for action in (action_a, action_b)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads), "a writer never returned"
+    return failures
+
+
+def test_two_threads_recording_the_first_event_of_one_session_keep_both(
+        tmp_path, monkeypatch):
+    """The daemon records the same session from the loop and a worker thread.
+
+    ``cflow2_exec.spawn_session``/``_spawn_fork`` report through
+    ``spawn_events`` on ``pools.background``, and the loop records control
+    events through ``manager``. For a session's **first** event both threads
+    miss the cache, each reads the file into its own list, and whichever writes
+    second writes a list the other's row is not in -- so one event survives.
+    Once both share the cached list ``list.append`` is atomic under the GIL;
+    the miss is the whole hazard (claunch-tn2wo).
+
+    The lock must cover the miss, which is what this measures: replacing
+    ``Events._lock`` with a no-op makes it read ``['fail']`` instead of
+    ``['fail', 'kill']``, every run. Holding the lock across the write too
+    guards a second hazard (the dump walking a list another thread appends to),
+    and that half is not measured here -- guarding only the lookup still passes,
+    so this test claims the miss and nothing more.
+    """
+    monkeypatch.setattr(session_events, "LIMIT", 200)
+    session = SimpleNamespace(sdef=SimpleNamespace(name="s1"), created_at="first")
+    events = session_events.Events(tmp_path)
+
+    failures = _both_miss_the_cache_together(events, session, "kill", "fail")
+    assert failures == [], f"record() raised: {failures}"
+
+    # Both writers' rows are in the file, not just the one that wrote last.
+    restored = session_events.Events(tmp_path)
+    kinds = sorted(row["kind"] for row in restored.rows(session))
+    assert kinds == ["fail", "kill"], (
+        "one event was lost: the two writers both missed the cache and the "
+        f"second write replaced the first writer's list, got {kinds}")
 def test_kill_records_request_then_exit_and_noop_is_silent(home, monkeypatch):
     mgr = SessionManager(idle_threshold=1, scrollback=100, restore_default=True)
     session = SimpleNamespace(sdef=SessionDef(name="s1"), created_at="first",
