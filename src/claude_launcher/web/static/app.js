@@ -18574,7 +18574,7 @@ $("term-observer").addEventListener("click", () => {
    its own, already showing this session; the user may switch it to another
    session in its top bar. The page under development runs in the daemon's
    browser and this window shows its screen, so a second window closes the
-   first (daemon/webdebug.py MAX_WINDOWS). */
+   first (daemon/webdebug.py max_windows, daemon.webdebug_max_windows). */
 $("term-webdebug").addEventListener("click", () => {
   if (!currentName) return;
   window.open(url("webdebug") + "?session=" + encodeURIComponent(currentName), "_blank");
