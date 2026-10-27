@@ -203,6 +203,7 @@ const READ = `(() => {
       flash: li.classList.contains("goto-flash"),
       spine: spine.content === "none" || !spine.width ? "" : spine.width + "@" + spine.left,
       background: getComputedStyle(li).backgroundColor,
+      shade: getComputedStyle(li).boxShadow,
       tick: getComputedStyle(li, "::before").content,
       toggle: !!li.querySelector(".sess-brief-toggle"),
     };
@@ -312,6 +313,24 @@ const READ = `(() => {
     assert.equal(deep.left, sibling.left, "siblings align their entire cards");
     assert.equal(deep.background, by("lead").background,
       "ordinary parent and child cards share the rail background");
+
+    /* ---- a deeper child sits deeper in the rail (claunch-zijwn) ------- */
+    /* The child card carries an inset shade on its top and leading edges,
+       and the shade grows with the depth, so a stack reads as stepping into
+       the screen. Measured as the alpha of the shade's first layer: a root
+       row paints none, a depth-1 child some, a depth-2 child more. */
+    const shadeAlpha = (r) => {
+      if (!/inset/.test(r.shade)) return 0;
+      const m = /rgba\(0, 0, 0, ([\d.]+)\)/.exec(r.shade);
+      return m ? Number(m[1]) : 0;
+    };
+    assert.equal(shadeAlpha(by("lead")), 0,
+      `a root row draws no recess (${by("lead").shade})`);
+    assert.ok(shadeAlpha(shallow) > 0,
+      `a depth-1 child draws an inset shade (${shallow.shade})`);
+    assert.ok(shadeAlpha(deep) > shadeAlpha(shallow),
+      `a depth-2 child's shade is darker than depth 1's (${deep.shade} vs ${shallow.shade})`);
+    assert.equal(sibling.shade, deep.shade, "siblings at one depth share the shade");
 
     /* ---- the line that says why a session is silent ------------------- */
     /* w1a is a compact child card with an active harness fault. The compact
