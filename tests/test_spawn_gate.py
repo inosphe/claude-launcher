@@ -759,6 +759,64 @@ def test_card_facts_keep_what_the_spec_names(home, tmp_path):
     assert named == {"value": "hq", "inherited": False}
 
 
+def test_card_facts_show_the_workflow_a_child_inherits(home):
+    # A child spec naming no workflow is given its asker's pair at create
+    # time (onboard.inherit_workflow): the row says so instead of "none"
+    # (claunch-1pfnx).
+    asker = {"profile": "work", "cwd": "/w/op"}
+    facts = spawn_gate.card_facts({"role": "worker"}, asker,
+                                  paired_workflow="improv-worker-v2")
+    assert facts["workflow"] == {"value": "improv-worker-v2", "inherited": True}
+    # the spec's own answer wins, and "-" declines the pair
+    named = spawn_gate.card_facts({"workflow": "other"}, asker,
+                                  paired_workflow="improv-worker-v2")
+    assert named["workflow"] == {"value": "other", "inherited": False}
+    declined = spawn_gate.card_facts({"workflow": "-"}, asker,
+                                     paired_workflow="improv-worker-v2")
+    assert declined["workflow"] == {"value": "", "inherited": False}
+    # no pair: still none
+    assert spawn_gate.card_facts({}, asker)["workflow"] == {"value": "", "inherited": False}
+
+
+def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon import onboard
+
+    asked = []
+
+    def paired(*, parent, parent_cwd, cwd):
+        asked.append((parent, parent_cwd, cwd))
+        return "improv-worker-v2"
+
+    monkeypatch.setattr(onboard, "paired_child_workflow", paired)
+
+    async def run():
+        mgr = _manager(_FakeSession("op"))
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        gate = app["spawn_gate"]
+        gate.on_settle = None
+        client = await _client(app)
+        try:
+            kid = gate.submit_spawn(session="op", spec={"role": "worker", "task": "t"},
+                                    reason="r", scope="child")["id"]
+            named = gate.submit_spawn(session="op", spec={"role": "worker", "task": "t",
+                                                          "workflow": "-"},
+                                      reason="r", scope="child")["id"]
+            rows = (await (await client.get("/api/spawn-requests", headers=AUTH)).json())["requests"]
+            by_id = {r["id"]: r for r in rows}
+            got = await (await client.get(f"/api/spawn-requests/{kid}", headers=AUTH)).json()
+            return by_id, got, kid, named
+        finally:
+            await client.close()
+
+    by_id, got, kid, named = asyncio.run(run())
+    want = {"value": "improv-worker-v2", "inherited": True}
+    assert by_id[kid]["facts"]["workflow"] == want
+    assert got["request"]["facts"]["workflow"] == want
+    # a declined pair is not looked up and reads as none
+    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False}
+    assert set(asked) == {("op", "/w/op", "/w/op")}
+
+
 def test_card_facts_without_an_asker_show_the_spec_alone(home):
     facts = spawn_gate.card_facts({"cwd": "/not/registered"}, None)
     assert facts["project"] == {"value": "default", "inherited": False}

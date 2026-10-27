@@ -233,7 +233,7 @@ def _worktree_row(spec: dict, *, top_level: bool, asked: Optional[dict]) -> dict
 
 def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
                top_level: bool = False, asked: Optional[dict] = None,
-               project_home: bool = True) -> Dict[str, dict]:
+               project_home: bool = True, paired_workflow: str = "") -> Dict[str, dict]:
     """What the session a request would create runs as, one row per
     :data:`CARD_FIELDS` -- ``{"value": str, "inherited": bool}``.
 
@@ -253,7 +253,13 @@ def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
     but empty means a new worktree with the generated name. ``asked`` is
     what the agent itself sent when ``spec`` is the daemon's completion of
     it (a root request's ``child_spec``): a row it did not name is
-    inherited even though ``spec`` spells the value out."""
+    inherited even though ``spec`` spells the value out.
+
+    ``paired_workflow`` is the run the asker's own run pairs a child with
+    (:func:`claude_launcher.daemon.onboard.paired_child_workflow`): a child
+    spec that names no workflow gets it at create time
+    (``onboard.inherit_workflow``), so the row shows it as inherited rather
+    than as none (claunch-1pfnx). ``-`` declines the pair and reads as none."""
     spec = spec or {}
     asker = asker or {}
 
@@ -293,7 +299,10 @@ def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
     facts["worktree"] = _worktree_row(spec, top_level=top_level, asked=asked)
     facts["role"] = row(str(spec.get("role") or "").strip())
     flow = str(spec.get("workflow") or "").strip()
-    facts["workflow"] = row("" if flow == "-" else flow)
+    if flow:
+        facts["workflow"] = row("" if flow == "-" else flow)
+    else:
+        facts["workflow"] = row(paired_workflow.strip(), True)
     return facts
 
 

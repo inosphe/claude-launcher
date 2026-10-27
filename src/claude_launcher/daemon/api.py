@@ -9480,26 +9480,43 @@ def _with_card_facts(manager: SessionManager, record: dict) -> dict:
         asker = manager.get(str(record.get("session") or "")).sdef.to_dict()
     except Exception:  # the asker is gone: show the spec alone
         asker = None
+    # A child that names no workflow is given the pair its asker's run
+    # declares (onboard.inherit_workflow); the card reads the same answer
+    # so it does not say "none" for a session that starts with a run
+    # (claunch-1pfnx).
+    paired = ""
+    if child and asker and not str((spec or {}).get("workflow") or "").strip():
+        parent_cwd = str(asker.get("cwd") or "")
+        try:
+            paired = onboard.paired_child_workflow(
+                parent=str(record.get("session") or ""), parent_cwd=parent_cwd,
+                cwd=str((spec or {}).get("cwd") or "") or parent_cwd)
+        except Exception:  # noqa: BLE001 - the card must not fail on a broken run
+            paired = ""
     facts = spawn_gate.card_facts(
         spec, asker, top_level=not child,
         # a root spec is _root_spec's completion; the agent's own words are
         # its child_spec, and what they leave out was copied from the asker
         asked=record.get("child_spec") if record.get("scope") == spawn_gate.ROOT else None,
-        project_home=spawn_mod.SpawnPolicy.load().allow_workspace if child else True)
+        project_home=spawn_mod.SpawnPolicy.load().allow_workspace if child else True,
+        paired_workflow=paired)
     return {**record, "facts": facts}
 
 
 async def h_spawn_requests_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
-    return json_response({"requests": [_with_card_facts(manager, rec)
-                                       for rec in request.app["spawn_gate"].list()]})
+    records = request.app["spawn_gate"].list()
+    # off the loop: the pair is read from run files and the v2 layers
+    return json_response({"requests": await asyncio.to_thread(
+        lambda: [_with_card_facts(manager, rec) for rec in records])})
 
 
 async def h_spawn_request_get(request: web.Request) -> web.Response:
     record = request.app["spawn_gate"].get(request.match_info["rid"])
     if record is None:
         return json_error(404, "no spawn request with that id")
-    return json_response({"request": _with_card_facts(request.app["manager"], record)})
+    return json_response({"request": await asyncio.to_thread(
+        _with_card_facts, request.app["manager"], record)})
 
 
 async def h_spawn_request_settle(request: web.Request) -> web.Response:
