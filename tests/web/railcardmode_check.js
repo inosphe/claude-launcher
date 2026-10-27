@@ -280,10 +280,50 @@ ok("a card keeps the label border and tint on status checks and bead counts",
    cardLabelRules.map(([s, , b]) => `${s.trim()} { ${b.trim()} }`).join("\n") || "no card rule");
 const beadLabel = plain.match(
   /#session-list :is\(\.rail-beads-left, \.rail-beads-n\)\s*\{([^}]*)\}/);
-ok("each bead count is drawn as a label (border, radius, tint)",
-   !!beadLabel && /border:\s*1px solid/.test(beadLabel[1])
-     && /border-radius:/.test(beadLabel[1]) && /background:/.test(beadLabel[1]),
+ok("each bead count is drawn as a label (border, tint)",
+   !!beadLabel && /border:\s*1px solid/.test(beadLabel[1]) && /background:/.test(beadLabel[1]),
    beadLabel ? beadLabel[1].trim() : "no bead count label rule");
+
+/* Each set is one grouped label (claunch-yhk8r): the segments touch (no
+   column gap), share a border (each segment after the first pulls back 1px)
+   and only the group's ends are rounded. A gap or a per-segment radius
+   coming back splits the group into separate pills again. */
+const ruleBody = (re) => {
+  const m = plain.match(re);
+  return m ? m[1] : null;
+};
+const groups = [
+  ["status checks on a row", /#session-list \.rail-status-checks\s*\{([^}]*)\}/,
+   /:is\(\.rail-status-checks, \.shadow-checks\) > \.rail-status-check/],
+  ["status checks on a card", /#session-list li\.sess-card \.rail-status-checks\s*\{([^}]*)\}/, null],
+  ["status checks on a remote card", /\.shadow-checks\s*\{([^}]*)\}/, null],
+  ["bead counts", /#session-list \.rail-beads-count\s*\{([^}]*)\}/,
+   /#session-list \.rail-beads-count > /],
+];
+for (const [name, boxRe, segPrefix] of groups) {
+  const box = ruleBody(boxRe);
+  ok(`${name}: the segments touch (no column gap)`,
+     box !== null && /gap:\s*(0|\S+\s+0)\s*(;|$)/.test(box),
+     box === null ? "no rule" : box.trim());
+  if (!segPrefix) continue;
+  const p = segPrefix.source;
+  const seg = (tail) => ruleBody(new RegExp(p + tail + "\\s*\\{([^}]*)\\}"));
+  const next = seg(String.raw`\*?\s*\+\s*(?:\.rail-status-check|\*)`);
+  ok(`${name}: neighbours share a border (margin-left: -1px)`,
+     next !== null && /margin-left:\s*-1px/.test(next), next === null ? "no rule" : next.trim());
+  const first = seg(":first-child"), last = seg(":last-child");
+  ok(`${name}: only the group's ends are rounded`,
+     first !== null && /border-radius:\s*8px 0 0 8px/.test(first)
+       && last !== null && /border-radius:\s*0 8px 8px 0/.test(last),
+     `first: ${first && first.trim()} / last: ${last && last.trim()}`);
+}
+const segRadius = ruleBody(/:is\(\.rail-status-checks, \.shadow-checks\) > \.rail-status-check\s*\{([^}]*)\}/);
+ok("a status check inside the group has square inner corners",
+   segRadius !== null && /border-radius:\s*0\s*(;|$)/.test(segRadius),
+   segRadius === null ? "no rule" : segRadius.trim());
+ok("a bead count inside the group has square inner corners",
+   !!beadLabel && /border-radius:\s*0\s*(;|$)/.test(beadLabel[1]),
+   beadLabel ? beadLabel[1].trim() : "no rule");
 
 /* A run that wants the reader's keyboard survives every density: hiding it
    on the short cards is how a gated session goes unnoticed. */
