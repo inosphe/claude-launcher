@@ -304,10 +304,12 @@ def test_recipe_commit_merge_and_refusals(lender_clone):
     ("", ["tests", "-q"]),
     ("sub/dir", ["../../tests/test_a.py::test_x", "-k", "a or b"]),
     ("", ["--deselect=tests/test_a.py::test_y", "-x"]),
-    ("", ["-q", "--pdb"]),
+    ("", ["-q", "--tb", "short"]),
+    ("", ["--tb=line", "--maxfail=2", "--lf"]),
+    ("", ["--deselect", "tests/test_a.py::t", "-n", "4", "--dist", "load"]),
     ("", ["-xq", "-vv", "-rA", "tests"]),
     ("", ["-k", "not slow", "-n", "4", "-m", "-slow-ish"]),
-    ("", ["-n4", "-Werror", "-xk", "a"]),
+    ("", ["-n4", "-xk", "a"]),
 ])
 def test_vet_borrow_accepts_selections_inside_the_checkout(rel_cwd, args):
     assert window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args}) is None
@@ -340,6 +342,16 @@ def test_vet_borrow_accepts_selections_inside_the_checkout(rel_cwd, args):
     ("", ["-Z"], "may carry"),
     ("", ["-xZ"], "may carry"),
     ("", ["-k", "x", "/abs/t.py"], "outside the checkout"),
+    ("", ["--tx=popen//python=../x", "--dist=load"], "may carry"),
+    ("", ["--tx", "popen//python=/abs/x"], "may carry"),
+    ("", ["--px=popen"], "may carry"),
+    ("", ["--pdbcls=m:C"], "may carry"),
+    ("", ["-q", "--pdb"], "may carry"),
+    ("", ["--rsyncdir=.."], "may carry"),
+    ("", ["--lf=x"], "may carry"),
+    ("", ["-Werror"], "may carry"),
+    ("", ["--ignore", "/abs/t.py"], "outside the checkout"),
+    ("", ["--deselect", "../t.py::t"], "outside the checkout"),
 ])
 def test_vet_borrow_refuses_paths_out_and_scope_options(rel_cwd, args, said):
     reason = window_borrow.vet_borrow({"rel_cwd": rel_cwd, "pytest_args": args})

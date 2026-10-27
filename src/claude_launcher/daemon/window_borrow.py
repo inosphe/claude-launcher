@@ -130,12 +130,26 @@ _recipes: Dict[tuple, tuple] = {}
 #: a run loads. The lender's arguments select tests; they may not reach past
 #: the borrower's checkout or swap its plugins (claunch-onqp6).
 _SCOPE_OPTIONS = ("--config-file", "--rootdir", "--confcutdir", "--override-ini")
+# The long options a lent run may carry, by what follows them: nothing, a
+# value that is not a path, or a path the checkout check applies to. A value
+# comes after ``=`` or as the next token. Any other long option -- a
+# plugin's ``--tx``/``--px``, ``--pdbcls``, ``--pythonwarnings`` -- is
+# refused rather than guessed at.
+_LONG_FLAGS = frozenset((
+    "--lf", "--last-failed", "--ff", "--failed-first", "--nf", "--new-first",
+    "--sw", "--stepwise", "--sw-skip", "--strict-markers", "--no-header",
+    "--no-summary", "--quiet", "--verbose", "--exitfirst", "--showlocals",
+    "--runxfail", "--disable-warnings"))
+_LONG_VALUED = frozenset((
+    "--tb", "--maxfail", "--durations", "--durations-min", "--capture",
+    "--numprocesses", "--maxprocesses", "--dist", "--color", "--verbosity"))
+_LONG_PATHS = frozenset(("--deselect", "--ignore", "--ignore-glob"))
 # The short options a lent run may carry, read the way pytest reads a bundle
 # such as ``-xvs``: a flag takes nothing, a valued option takes the rest of
 # its token or else the next one. Any other letter -- ``-p``, ``-c`` and
 # ``-o`` among them -- is refused rather than guessed at.
 _SHORT_FLAGS = frozenset("xqvsl")
-_SHORT_VALUED = frozenset("kmrnW")
+_SHORT_VALUED = frozenset("kmrn")
 _SHORT_SCOPE = frozenset("pco")
 
 
@@ -169,7 +183,8 @@ def vet_borrow(info: dict) -> Optional[str]:
     configuration or plugins (``-p``, ``-c``, ``-o``, ``--config-file``,
     ``--rootdir``, ``--confcutdir``, ``--override-ini``) are refused
     outright, and so is any short option outside ``_SHORT_FLAGS`` and
-    ``_SHORT_VALUED``, bundled or not.
+    ``_SHORT_VALUED``, bundled or not, and any long option outside
+    ``_LONG_FLAGS``, ``_LONG_VALUED`` and ``_LONG_PATHS``.
     """
     rel = str(info.get("rel_cwd") or "")
     if _escapes(rel):
@@ -177,9 +192,13 @@ def vet_borrow(info: dict) -> Optional[str]:
     base = posixpath.normpath(rel.replace("\\", "/")) if rel else ""
     base = "" if base == "." else base
     value_next = False
+    path_next = False
     for raw in [str(a) for a in info.get("pytest_args") or []]:
         if value_next:
             value_next = False
+            if path_next and _escapes(raw.split("::", 1)[0], base):
+                return f"pytest argument {raw!r} names a path outside the checkout"
+            path_next = False
             continue
         if len(raw) > 1 and raw.startswith("-") and not raw.startswith("--"):
             letter, value_next = _short_bundle(raw)
@@ -191,6 +210,17 @@ def vet_borrow(info: dict) -> Optional[str]:
         name, eq, value = raw.partition("=")
         if name in _SCOPE_OPTIONS:
             return f"pytest option {raw!r} changes the run's configuration or plugins"
+        if raw.startswith("--"):
+            if name in _LONG_FLAGS and not eq:
+                continue
+            if name in _LONG_VALUED or name in _LONG_PATHS:
+                if not eq:
+                    value_next, path_next = True, name in _LONG_PATHS
+                    continue
+                if name in _LONG_VALUED:
+                    continue
+            else:
+                return f"pytest option {raw!r} is not one a borrowed run may carry"
         target = value if (eq and raw.startswith("-")) else ("" if raw.startswith("-") else raw)
         if _escapes(target.split("::", 1)[0], base):
             return f"pytest argument {raw!r} names a path outside the checkout"
