@@ -22975,21 +22975,38 @@ function renderTermTimers(v) {
     if (changed) refitSoon(60);
     return;
   }
-  box.innerHTML = "";
-  box.appendChild(el("span", "tt-head", "timers"));
-  for (const r of rows) {
-    const chip = el("button",
-      `tt-chip tt-${r.kind || "other"} tt-state-${r.state}${r.overdue ? " tt-due" : ""}`);
-    chip.type = "button";
+  // The 1s tick moves the clocks, not the set: with the same chips up they
+  // are written in place (claunch-qnq1c). Rebuilding them every second was
+  // four new nodes a chip a second for anything watching the page to scan.
+  const chips = changed ? null : box.querySelectorAll(".tt-chip");
+  if (!chips || chips.length !== rows.length) {
+    box.innerHTML = "";
+    box.appendChild(el("span", "tt-head", "timers"));
+    for (const r of rows) {
+      const chip = el("button", "tt-chip");
+      chip.type = "button";
+      chip.appendChild(el("span", "tt-glyph"));
+      chip.appendChild(el("span", "tt-label"));
+      chip.appendChild(el("span", "tt-clock"));
+      chip.addEventListener("click", () => {
+        if (chip.dataset.link) location.hash = chip.dataset.link;
+      });
+      box.appendChild(chip);
+    }
+  }
+  box.querySelectorAll(".tt-chip").forEach((chip, i) => {
+    const r = rows[i];
+    chip.className =
+      `tt-chip tt-${r.kind || "other"} tt-state-${r.state}${r.overdue ? " tt-due" : ""}`;
     chip.title = r.title + (r.link ? "\nclick: open the run page" : "");
     if (r.pct !== null) chip.style.setProperty("--tt-pct", `${Math.round(r.pct * 100)}%`);
-    chip.appendChild(el("span", "tt-glyph", r.glyph));
-    chip.appendChild(el("span", "tt-label", r.label));
-    chip.appendChild(el("span", "tt-clock", r.clock));
-    if (r.link) chip.addEventListener("click", () => { location.hash = r.link; });
-    else chip.disabled = true;
-    box.appendChild(chip);
-  }
+    else chip.style.removeProperty("--tt-pct");
+    chip.querySelector(".tt-glyph").textContent = r.glyph;
+    chip.querySelector(".tt-label").textContent = r.label;
+    chip.querySelector(".tt-clock").textContent = r.clock;
+    if (chip.dataset.link !== r.link) chip.dataset.link = r.link;   // dataset is not quietdom's
+    chip.disabled = !r.link;
+  });
   box.classList.remove("hidden");
   if (!termTimersTick) {
     termTimersTick = setInterval(() => renderTermTimers(termTimersView), 1000);
@@ -58463,11 +58480,20 @@ const NOTICE_HISTORY_MAX = 100;
 /* Over NOTICE_HISTORY_MAX the oldest unmarked rows go, never the newest
    row (rows[0]). Marked rows are never trimmed (claunch-knuet.1): when every
    row but the newest is marked the history stays over the cap, at most one
-   row more than the marked count. */
+   row more than the marked count.
+
+   Nor is the row of a request still waiting (claunch-qnq1c). Every poll
+   writes a row for each pending request it does not find, so a trimmed
+   pending row came straight back and pushed the next one out: with 133 asks
+   waiting against the cap of 100, every feed re-recorded 33+ rows, each a
+   whole-history localStorage write, a panel repaint and a card whose age
+   restarted at 0s. The daemon's pending set bounds these rows; once settled
+   they are trimmed like any other. */
 function noticeTrim(rows) {
   let i = rows.length - 1;
   while (rows.length > NOTICE_HISTORY_MAX && i > 0) {
-    if (!rows[i].marked) rows.splice(i, 1);
+    const e = rows[i];
+    if (!e.marked && !(e.gate && e.status === "pending")) rows.splice(i, 1);
     i -= 1;
   }
 }

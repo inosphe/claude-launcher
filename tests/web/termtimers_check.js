@@ -39,8 +39,14 @@ function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
     dataset: {}, title: "", type: "", disabled: false, props: {},
-    style: { setProperty(k, v) { n.props[k] = v; } },
+    style: { setProperty(k, v) { n.props[k] = v; }, removeProperty(k) { delete n.props[k]; } },
     appendChild(c) { this.kids.push(c); return c; },
+    get className() { return [...n.classes].join(" "); },
+    set className(v) { n.classes = new Set(String(v).split(/\s+/).filter(Boolean)); },
+    get textContent() { return n.text; },
+    set textContent(v) { n.text = String(v); },
+    querySelectorAll(sel) { return walk(n).filter((k) => k.classes.has(sel.slice(1))); },
+    querySelector(sel) { return n.querySelectorAll(sel)[0] || null; },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
     fire(k, ev) { return Promise.all((this.handlers[k] || []).map((fn) => fn(ev))); },
     set innerHTML(v) { if (v === "") this.kids = []; },
@@ -147,6 +153,13 @@ check("a chip opens its run page", ctx.hash() === "#/wf/s16%7CF%3A%5Crepo", ctx.
 
 ctx.renderTermTimers(VIEW([HOLD({ due: T + 300 })]));
 check("a same-set repaint does not refit", ctx.refits() === before + 1);
+// The 1s tick writes the chips it has (claunch-qnq1c): the same nodes, the
+// clock moved, no new node for a page-watching extension to scan.
+const kept = byClass(strip, "tt-chip")[0];
+check("a same-set repaint keeps the chip node", kept === chip);
+check("and moves its clock in place", byClass(kept, "tt-clock")[0].text === "5m00s",
+      byClass(kept, "tt-clock")[0].text);
+check("and keeps its link", (kept.fire("click"), ctx.hash() === "#/wf/s16%7CF%3A%5Crepo"), ctx.hash());
 
 /* ---- several, from more than one kind and source ---- */
 ctx.renderTermTimers(VIEW([
