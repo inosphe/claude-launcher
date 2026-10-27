@@ -55,6 +55,31 @@ globalThis.MegaThreadPage = (() => {
     return (value >= 0 ? "+" : "") + value.toFixed(2);
   }
 
+  /* The preview's threshold slider speaks p(mine), the number each row
+     shows; the daemon's scores are log-odds. These two convert between
+     them (claunch-wlk6g). */
+  function probLogit(p) {
+    const value = Math.min(1 - 1e-6, Math.max(1e-6, Number(p)));
+    return Math.log(value) - Math.log(1 - value);
+  }
+
+  function logitProb(logit) {
+    return 1 / (1 + Math.exp(-Number(logit)));
+  }
+
+  /* The sessions a preview recommends at `threshold`: every scored member
+     whose logit clears it. The daemon returns every member's logit, so a
+     new threshold is answered here, without another Jev call. A member whose
+     call failed has no logit and is never recommended. */
+  function draftPicks(preview, threshold) {
+    const out = [];
+    for (const row of (preview && preview.members) || []) {
+      if (row.error || row.logit === null || row.logit === undefined) continue;
+      if (Number(row.logit) >= Number(threshold)) out.push(row.session);
+    }
+    return out;
+  }
+
   /* What the composer sends: the plain message, or the message plus the
      threads the user ticked after an ambiguous answer. */
   function routeBody(text, picks) {
@@ -163,6 +188,10 @@ globalThis.MegaThreadPage = (() => {
     draftPreview: null,
     draftError: "",
     draftBusy: false,
+    // The threshold the reader set on the preview's slider, as a logit; null
+    // until they move it, which means the daemon's own threshold. Kept
+    // across previews so a second topic is judged by the same bar.
+    draftThreshold: null,
   };
   let timer = null;
   let wantId = "";
@@ -322,6 +351,7 @@ globalThis.MegaThreadPage = (() => {
       state.picked.clear();
       state.draftPreview = null;
       state.draftError = "";
+      state.draftThreshold = null;
       state.createOpen = false;
       state.notice = `mega thread를 만들었습니다: ${res.mega.title}`;
       await load();
@@ -359,7 +389,7 @@ globalThis.MegaThreadPage = (() => {
       // The preview replaces the ticks: it is the answer to "what belongs
       // here", and the reader edits it from that starting point.
       state.picked.clear();
-      for (const name of res.recommended || []) state.picked.add(name);
+      applyDraftThreshold(draftThreshold());
     } catch (err) {
       state.draftError = String((err && err.message) || err);
     }
@@ -746,6 +776,29 @@ globalThis.MegaThreadPage = (() => {
      proposes members for a typed topic. The selection still lives in
      `state.picked`, so filtering, sorting and the poll repaint cannot drop
      a tick. */
+  /* The threshold the preview is judged by now: the reader's, or the one the
+     daemon answered with. */
+  function draftThreshold() {
+    if (state.draftThreshold !== null && state.draftThreshold !== undefined) return state.draftThreshold;
+    const preview = state.draftPreview;
+    const value = Number(preview && preview.threshold);
+    return Number.isFinite(value) ? value : Math.log(9);
+  }
+
+  /* Move the bar and re-tick: every scored session is ticked exactly when it
+     clears it. Sessions the preview did not score keep whatever the reader
+     gave them. A hand edit to a scored row lasts until the bar moves again —
+     the slider is the reader saying "this many", and leaving old ticks above
+     or below it would make the count disagree with the bar. */
+  function applyDraftThreshold(logit) {
+    if (state.draftPreview) state.draftThreshold = logit;
+    const keep = new Set(draftPicks(state.draftPreview, logit));
+    for (const row of (state.draftPreview && state.draftPreview.members) || []) {
+      if (keep.has(row.session)) state.picked.add(row.session);
+      else state.picked.delete(row.session);
+    }
+  }
+
   function createPanel() {
     const overlay = node("div", "mt-create-overlay");
     const card = node("div", "mt-create-card");
@@ -802,6 +855,29 @@ globalThis.MegaThreadPage = (() => {
 
     const draftNote = node("p", "mt-create-draft-note");
     top.appendChild(draftNote);
+
+    /* The threshold over the scores already in hand (claunch-wlk6g). It
+       appears with the first preview and re-ticks on every step, with no
+       request: the daemon sent every member's logit, so the reader can look
+       for the bar that keeps the right sessions instead of retyping the
+       topic and paying for the same scores again. */
+    const thresholdRow = node("label", "mt-create-threshold");
+    thresholdRow.hidden = true;
+    thresholdRow.appendChild(node("span", "mt-create-threshold-name", "추천 임계값"));
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.className = "mt-create-threshold-input";
+    slider.min = "50";
+    slider.max = "99";
+    slider.step = "1";
+    slider.addEventListener("input", () => {
+      applyDraftThreshold(probLogit(Number(slider.value) / 100));
+      paintRows(parts);
+    });
+    thresholdRow.appendChild(slider);
+    const thresholdValue = node("span", "mt-create-threshold-value");
+    thresholdRow.appendChild(thresholdValue);
+    top.appendChild(thresholdRow);
     card.appendChild(top);
 
     /* The controls: what the reader narrows by, and how the list is ordered.
@@ -906,7 +982,8 @@ globalThis.MegaThreadPage = (() => {
     foot.appendChild(create);
     card.appendChild(foot);
 
-    const parts = { list, count, clear, hint, create, draftBtn, retry, draftNote, topic, statusBar };
+    const parts = { list, count, clear, hint, create, draftBtn, retry, draftNote, topic, statusBar,
+      thresholdRow, slider, thresholdValue };
     createParts = parts;
     paintDraft(parts);
     paintRows(parts);
@@ -943,6 +1020,7 @@ globalThis.MegaThreadPage = (() => {
     const scoring = state.draftPreview && (state.draftPreview.members || []);
     const scoreOf = {};
     for (const row of scoring || []) scoreOf[row.session] = row;
+    const recommended = new Set(draftPicks(state.draftPreview, draftThreshold()));
     for (const row of rows) {
       const label = node("label", `mt-new-session-row mt-cat-${row.category}${row.checked ? " on" : ""}`);
       if (row.depth) label.style.paddingLeft = `${6 + row.depth * 14}px`;
@@ -963,7 +1041,7 @@ globalThis.MegaThreadPage = (() => {
       const line1 = node("span", "mt-new-top");
       line1.appendChild(node("span", "mt-new-name", row.name));
       const score = scoreOf[row.name];
-      if (score && score.recommended) {
+      if (score && recommended.has(row.name)) {
         line1.appendChild(node("span", "mt-new-flag", `추천 ${pct(score.p_mine)}`));
       } else if (score && score.logit !== null && score.logit !== undefined) {
         line1.appendChild(node("span", "mt-new-flag weak", pct(score.p_mine)));
@@ -997,17 +1075,31 @@ globalThis.MegaThreadPage = (() => {
       parts.draftNote.className = "mt-create-draft-note bad";
       parts.draftNote.textContent = `추천 실패 — ${state.draftError}`;
     } else if (preview) {
-      const n = (preview.recommended || []).length;
+      const threshold = draftThreshold();
+      const n = draftPicks(preview, threshold).length;
       parts.draftNote.className = "mt-create-draft-note ok";
       parts.draftNote.textContent = n
-        ? `${n}명을 추천했습니다 (임계값 logit ${logitText(preview.threshold)}) — 체크를 직접 고친 뒤 만드세요`
-        : `임계값(logit ${logitText(preview.threshold)})을 넘은 세션이 없습니다 — 점수는 참고로 두고 직접 고르세요`;
+        ? `${n}명을 추천했습니다 (임계값 logit ${logitText(threshold)}) — 체크를 직접 고친 뒤 만드세요`
+        : `임계값(logit ${logitText(threshold)})을 넘은 세션이 없습니다 — 임계값을 낮추거나 직접 고르세요`;
       if (preview.budget_remaining_tokens !== null && preview.budget_remaining_tokens !== undefined) {
         parts.draftNote.textContent += ` · 예산 남음 ${Number(preview.budget_remaining_tokens).toLocaleString()} tokens`;
       }
     } else {
       parts.draftNote.className = "mt-create-draft-note";
       parts.draftNote.textContent = "";
+    }
+    if (parts.thresholdRow) {
+      const scored = !!(preview && (preview.members || []).some((m) => m.logit !== null && m.logit !== undefined));
+      parts.thresholdRow.hidden = !scored;
+      if (scored) {
+        const threshold = draftThreshold();
+        const percent = Math.min(99, Math.max(50, Math.round(logitProb(threshold) * 100)));
+        // Never write the value while the reader drags: the browser already
+        // holds it, and a rounded write-back would make the thumb jump.
+        if (document.activeElement !== parts.slider) parts.slider.value = String(percent);
+        parts.thresholdValue.textContent =
+          `p ≥ ${percent}% (logit ${logitText(threshold)}) · ${draftPicks(preview, threshold).length}명`;
+      }
     }
     if (parts.retry) parts.retry.hidden = !state.draftError;
     if (parts.draftBtn) {
@@ -1276,7 +1368,7 @@ globalThis.MegaThreadPage = (() => {
   return {
     open, stop, render, ring,
     ringLayout, edgeWidth, nodeTone, routeBody, optionRows, verdictLine,
-    deliveryLine, statusLabel, pct, logitText, esc,
+    deliveryLine, statusLabel, pct, logitText, esc, probLogit, logitProb, draftPicks,
     statusTone, sessionLine, matchesFilter, pickerRows, createHint,
     // the create panel's model (tests/web/megathread_check.js runs these bare)
     sessionCategory, metaLine, briefLine, sortRows, hierarchyOrder,

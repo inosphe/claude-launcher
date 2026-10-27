@@ -38,7 +38,7 @@ from aiohttp import web
 from .. import store as store_mod
 from ..megathread import store as mega_store
 from ..threads import store as thread_store
-from . import jev, megathread_route as route_mod, paths
+from . import beads as beads_mod, jev, megathread_route as route_mod, paths
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +363,46 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
         rows.sort(key=lambda r: r["at"], reverse=True)
         return [r["name"] for r in rows[:DRAFT_MAX_CANDIDATES]]
 
+    async def draft_facts(sessions: list) -> dict:
+        """:func:`route_mod.draft_facts` for each candidate (claunch-wlk6g).
+
+        The board listing is the cached one the rail reads
+        (``issues_or_stale``), one per board, so a preview over forty
+        sessions forks ``br`` at most once per board and usually not at all.
+        A board that cannot be read leaves the issues out and keeps the rest:
+        the preview scored without these facts before, and it still can.
+        """
+        board = app.get("beads")
+        listings: dict = {}
+        out: dict = {}
+        for name in sessions:
+            try:
+                sdef = manager.get(name).sdef
+            except Exception:  # noqa: BLE001 -- checked by the caller; gone since
+                continue
+            cwd = getattr(sdef, "cwd", "") or ""
+            issues: list = []
+            if board is not None and cwd:
+                try:
+                    if board.available():
+                        root = await board.root_for(cwd)
+                        if board.has_board(root):
+                            key = str(root)
+                            if key not in listings:
+                                listings[key] = await board.issues_or_stale(root)
+                            issues = beads_mod.match(listings[key], name,
+                                                     issue=getattr(sdef, "issue", None),
+                                                     task=getattr(sdef, "task", None))
+                except Exception as exc:  # noqa: BLE001 -- no board, no titles
+                    log.debug("megathread: no board facts for %s: %s", name, exc)
+            try:
+                out[name] = await asyncio.to_thread(
+                    route_mod.draft_facts, name, sdef,
+                    workspace=beads_mod.workspace_for(cwd), issues=issues)
+            except Exception as exc:  # noqa: BLE001 -- the record still stands
+                log.debug("megathread: no facts for %s: %s", name, exc)
+        return out
+
     async def h_draft(request: web.Request) -> web.Response:
         """Score a topic against sessions; write nothing but the ledger row.
 
@@ -412,7 +452,8 @@ def install(app, store: Optional[mega_store.MegaThreadStore] = None):
                     {"error": str(exc), "used_tokens": used, "limit_tokens": limit,
                      "estimated_tokens": estimate}, status=429)
 
-        result = await route_mod.draft(manager, threads, sessions, topic, cfg=cfg)
+        facts = await draft_facts(sessions)
+        result = await route_mod.draft(manager, threads, sessions, topic, cfg=cfg, facts=facts)
         ledger_error = None
         try:
             await asyncio.to_thread(

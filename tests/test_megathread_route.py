@@ -16,6 +16,14 @@ T6 policy reads the odds-ratio threshold and the budget, and falls back on a
 T7 a member whose thread is gone is that member's error, not the routing's
 T8 a preview failure names the session that failed even when neither session
    has a thread (every unthreaded member shares thread "")
+T9 the preview's record (claunch-wlk6g): the branch is read from git's own
+   files in a plain checkout and in a linked worktree; draft_facts carries
+   workspace, branch, parent and at most DRAFT_ISSUES issue titles
+T10 the preview asks about a topic: the document names it "topic", carries
+   the facts and the briefing's progress, and the criteria no longer send
+   finished work to not_mine; a routing's document is unchanged
+T11 every scored member's logit comes back, so the form can move its
+   threshold without asking again, and one preview is one call per member
 """
 
 import asyncio
@@ -254,3 +262,107 @@ def test_t6_policy_reads_the_threshold_and_budget():
                        "megathread_max_chars": float("nan")})
     assert broken["threshold"] == pytest.approx(math.log(9.0))
     assert broken["budget_tokens"] == 10_000_000 and broken["max_chars"] == 12000
+
+
+def test_t9_draft_facts_and_the_branch_from_git_files(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    assert P.git_branch(str(repo / "src")) == "master", "a subdirectory finds its checkout"
+    # A linked worktree: `.git` is a file naming the gitdir that holds HEAD.
+    gitdir = repo / ".git" / "worktrees" / "wt"
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/s1-topic\n", encoding="utf-8")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    assert P.git_branch(str(wt)) == "s1-topic"
+    (gitdir / "HEAD").write_text("0123456789abcdef0123456789abcdef01234567\n", encoding="utf-8")
+    assert P.git_branch(str(wt)) == "", "a detached head is no branch"
+    assert P.git_branch(str(tmp_path / "nowhere")) == ""
+    assert P.git_branch("") == ""
+
+    sdef = SimpleNamespace(name="s1", cwd=str(repo), parent="s0")
+    issues = [{"id": f"x-{i}", "status": "open", "title": f"title {i}", "description": "long"}
+              for i in range(P.DRAFT_ISSUES + 2)]
+    facts = P.draft_facts("s1", sdef, workspace="claunch", issues=issues)
+    assert facts["workspace"] == "claunch" and facts["branch"] == "master"
+    assert facts["parent"] == "s0"
+    assert [i["id"] for i in facts["issues"]] == [f"x-{i}" for i in range(P.DRAFT_ISSUES)]
+    # Only id, status and title travel -- a description would be the whole
+    # board in every prompt.
+    assert facts["issues"][0] == {"id": "x-0", "status": "open", "title": "title 0"}
+    # Nothing known is nothing sent.
+    assert P.draft_facts("s1", SimpleNamespace(name="s1", cwd="")) == {}
+
+
+def test_t10_the_preview_document_names_a_topic_and_carries_the_facts(tmp_path, monkeypatch):
+    from claude_launcher.daemon import briefing
+
+    monkeypatch.setattr(briefing, "cached_result", lambda name: {"briefing": {
+        "one-line-job-description": "로그 형식 정리", "goal": "g", "now": "n",
+        "progress": "PR #1 merged", "state": "waiting"}})
+    seen = []
+
+    async def ask(cfg, state, questions, model):
+        seen.append((state, questions))
+        return {"model": model, "usage": {"input_tokens": 3},
+                "answers": {P.QUESTION_ID: {"type": "choice", "choice": "mine", "confidence": 0.9,
+                                            "probabilities": {"mine": 0.9, "not_mine": 0.1}}}}
+
+    class NoThreads:
+        def list(self, name, closed=False):
+            return {"threads": []}
+
+    manager = FakeManager([FakeSession("s1", task="t")])
+    facts = {"s1": {"workspace": "claunch", "issues": [{"id": "x-1", "title": "로그 형식"}],
+                    "name": "not this"}}
+    asyncio.run(P.draft(manager, NoThreads(), ["s1"], "로그", cfg={}, ask=ask, facts=facts))
+    state, qs = seen[0]
+    assert state["topic"] == "로그" and "message" not in state
+    assert state["session"]["workspace"] == "claunch"
+    assert state["session"]["issues"] == [{"id": "x-1", "title": "로그 형식"}]
+    assert state["session"]["name"] == "s1", "the record's own field wins over a fact"
+    assert "PR #1 merged" in state["briefing"], "the preview reads progress"
+    criteria = qs[P.QUESTION_ID]["criteria"]
+    assert "has done" in criteria[P.MINE]
+    assert "finished" not in criteria[P.NOT_MINE]
+
+    # A routing keeps the document it was measured with.
+    seen.clear()
+    asyncio.run(P.evaluate(manager, StoreStub(), [{"session": "s1", "thread": "th-a"}],
+                           "a message", cfg={}, ask=ask))
+    state, qs = seen[0]
+    assert state["message"] == "a message" and "topic" not in state
+    assert "workspace" not in state["session"] and "issues" not in state["session"]
+    assert "PR #1 merged" not in state["briefing"]
+    assert qs[P.QUESTION_ID]["instructions"] == P.INSTRUCTIONS
+
+
+def test_t11_every_logit_comes_back_from_one_call_per_member():
+    calls = []
+    scores = {"s1": 0.95, "s2": 0.8, "s3": 0.3}
+
+    async def ask(cfg, state, questions, model):
+        name = state["session"]["name"]
+        calls.append(name)
+        p = scores[name]
+        return {"model": model, "usage": {"input_tokens": 1},
+                "answers": {P.QUESTION_ID: {"type": "choice", "choice": "mine", "confidence": p,
+                                            "probabilities": {"mine": p, "not_mine": 1 - p}}}}
+
+    class NoThreads:
+        def list(self, name, closed=False):
+            return {"threads": []}
+
+    out = asyncio.run(P.draft(FakeManager([FakeSession(n) for n in scores]), NoThreads(),
+                              list(scores), "주제", cfg={}, ask=ask))
+    assert sorted(calls) == ["s1", "s2", "s3"], "one call per member, no more"
+    rows = {r["session"]: r for r in out["members"]}
+    # Not only the recommended one: a member under the bar keeps its score,
+    # which is what the form's slider moves over.
+    for name, p in scores.items():
+        assert rows[name]["logit"] == pytest.approx(math.log(p / (1 - p)))
+    assert out["recommended"] == ["s1"]
+    assert out["threshold"] == pytest.approx(math.log(9))
