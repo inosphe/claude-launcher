@@ -57803,12 +57803,28 @@ let noticeSeq = 0;
    row the reader keeps reaching for, while it says something that can
    wait.
 
+   The header is only the first of the rows the session screen stacks under
+   it (index.html, #main is a flex column). The queued-deliveries banner, the
+   measurement-window row, the session's timer line (#term-timers) and the
+   cflow answer line (#term-cflow) each sit on the header's bottom edge and
+   carry buttons a person presses; a card pinned just under the header lands
+   on them instead (claunch-i5lk4). Every one of them is hidden until it has
+   something to say, so they are named here and left to the box filter below
+   — a row that is down has no box, and the next visible row is then against
+   the one above it.
+
    Measured rather than typed, because none of that is fixed: the tabs row
-   wraps, the header comes and goes with the page, and the phone's bar
-   depends on the breakpoint. A bar counts only when it is stacked against
-   the top edge — one further down is page content (or a modal's head), and
-   the strip never grows to reach it. */
-const NOTICE_BARS = "#mobile-top, #session-tabs, #term-header, .wf-head, .page-head";
+   wraps, each row comes and goes with what it has to report, and the phone's
+   bar depends on the breakpoint. A bar counts only when it is stacked
+   against the top edge — one further down is page content (#term-brief-pane
+   opens below the cflow line and is as tall as the briefing, so it is not
+   named here; the card never grows to reach it), and a modal's head is not
+   part of this stack either. */
+const NOTICE_BARS = [
+  "#mobile-top", "#session-tabs", "#term-header",
+  "#term-queued", "#term-window", "#term-timers", "#term-procs", "#term-cflow",
+  ".wf-head", ".page-head",
+].join(", ");
 const NOTICE_TOP = 12;         // no bar at all: the corner it always had
 const NOTICE_TOP_GAP = 8;      // the strip's distance below the last bar
 

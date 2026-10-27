@@ -13,8 +13,9 @@
    than read off the stylesheet: a card never starts above the bottom of any
    bar that is stacked against the top of the page. It is checked on a
    session page (tabs + header), with the tab row wrapping under a card
-   that is already up (the ResizeObserver path), and on a phone (the mobile
-   bar, the header down). */
+   that is already up (the ResizeObserver path), with the rows under the
+   header — the timer line and the cflow answer line — filled in
+   (claunch-i5lk4), and on a phone (the mobile bar, the header down). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -29,6 +30,12 @@ const sessions = Array.from({ length: 8 }, (_, i) => ({
   paused_at: i === 7 ? null : "2026-10-18T00:00:00Z", cwd: "/repo", harness: "codex",
 }));
 
+// The two rows the session screen stacks under its header, for the scenario
+// that needs them (claunch-i5lk4): the session's timer line and the cflow
+// answer line. Both are polled, so they are served from here rather than
+// injected into the page — an injected strip would be wiped by the next poll.
+const fixture = { timers: [], rail: {} };
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.startsWith("/api/")) {
@@ -38,6 +45,10 @@ const server = http.createServer((req, res) => {
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "test" };
     else if (url.pathname === "/api/sessions") data = { sessions, llm_configured: false };
     else if (url.pathname.endsWith("/capture")) data = { lines: ["Session snapshot"] };
+    else if (/^\/api\/sessions\/[^/]+\/timers$/.test(url.pathname))
+      data = { session: decodeURIComponent(url.pathname.split("/")[3]),
+               timers: fixture.timers };
+    else if (url.pathname === "/api/cflow2/rail") data = { rows: fixture.rail };
     else if (/^\/api\/(profiles|workspaces|mesh|cflow|harnesses|roles)$/.test(url.pathname)) data = [];
     res.end(JSON.stringify(data));
     return;
@@ -65,7 +76,9 @@ const server = http.createServer((req, res) => {
 
     // Bars that own the top of the page, and the strip under them. A bar
     // counts only while it has a box: #term-header is up on a session page
-    // and down everywhere else, and the phone's bar is the other way round.
+    // and down everywhere else, the phone's bar is the other way round, and
+    // the rows under the header (queued, window, timers, procs, cflow) are
+    // each hidden until they have something to report.
     const measure = () => page.evaluate(() => {
       const box = (sel) => {
         const el = document.querySelector(sel);
@@ -74,7 +87,8 @@ const server = http.createServer((req, res) => {
         return { top: r.top, bottom: r.bottom, height: r.height,
                  up: el.getClientRects().length > 0 && getComputedStyle(el).display !== "none" };
       };
-      const bars = ["#session-tabs", "#term-header", "#mobile-top"]
+      const bars = ["#session-tabs", "#term-header", "#mobile-top",
+        "#term-queued", "#term-window", "#term-timers", "#term-procs", "#term-cflow"]
         .map(sel => ({ sel, ...box(sel) }))
         .filter(b => b.up && b.height > 0);
       const notices = box("#notices");
@@ -147,6 +161,48 @@ const server = http.createServer((req, res) => {
     // The picture the complaint was made with: a card, the header under it.
     if (process.env.CLAUNCH_NOTICE_SCREENSHOT)
       await page.screenshot({ path: process.env.CLAUNCH_NOTICE_SCREENSHOT });
+
+    // --- the rows the header stacks under itself --------------------------
+    // The queued banner, the window row, the timer line and the cflow answer
+    // line all sit on the header's bottom edge and carry presses of their
+    // own, so a card placed just under the header lands on them
+    // (claunch-i5lk4). The timer line and the cflow answer line are the two
+    // the person reads there; the other rows use the same slot.
+    const nowS = Math.round(Date.now() / 1000);
+    fixture.timers = [{ id: "t1", source: "cflow2", kind: "wait", label: "await landing",
+      state: "waiting", due: nowS + 600, since: nowS, scope: "s1@main" }];
+    fixture.rail = { s1: {
+      cwd: "/repo", scope: "default", run: "r-fixture", workflow: "improv-worker-v2",
+      status: "waiting", current: ["round/item/work"], owed: ["ask: work"],
+      gated: true, urgent_asks: [], inputs: {},
+      answers: [{ kind: "ask", instance: "round/item/work", label: "work",
+        prompt: "may the run land this branch?",
+        options: [{ name: "approve" }, { name: "decline" }] }],
+    } };
+    await page.evaluate(() => Promise.all([refreshTermTimers(), refreshCflow2Rail()]));
+    await settle();
+    m = await measure();
+    for (const sel of ["#term-timers", "#term-cflow"])
+      assert(m.bars.some(b => b.sel === sel), `${sel} is up under the header`);
+    await showCard("rows");
+    const under = await assertClear("rows under the header");
+    const lowest = under.bars.reduce((a, b) => (b.bottom > a.bottom ? b : a));
+    assert.equal(lowest.sel, "#term-cflow", "the cflow answer line is the lowest row");
+    assert(under.notices.top >= lowest.bottom,
+      "the strip clears the cflow answer line, not just the header "
+      + `(strip ${under.notices.top}, cflow bottom ${lowest.bottom})`);
+    console.log(`rows under the header: strip ${under.notices.top}, `
+      + `header ${under.bars.find(b => b.sel === "#term-header").bottom}, `
+      + `timers ${under.bars.find(b => b.sel === "#term-timers").bottom}, `
+      + `cflow ${lowest.bottom}`);
+    // Back to an empty stack for the scenarios that follow: the rows are
+    // polled, so they have to be cleared at the source.
+    fixture.timers = []; fixture.rail = {};
+    await page.evaluate(() => Promise.all([refreshTermTimers(), refreshCflow2Rail()]));
+    await settle();
+    m = await measure();
+    assert.equal(m.bars.some(b => b.sel === "#term-cflow"), false,
+      "the cflow line goes back down with no run waiting");
 
     // --- the tab row wraps under a card that is already up ----------------
     // The bars move after the card is drawn, which is why the placement is
