@@ -90,15 +90,19 @@ ok("the mark does not change the row's box",
 /* ---- the cascade -------------------------------------------------------
    Specificity as (ids, classes, elements); `:not(x)` contributes its
    argument's, and the pseudo-classes this rail uses (:hover) count as
-   classes. Enough for the flat selectors below — anything with a comma or a
-   combinator this function cannot read would be visible here as a wrong
-   number rather than silently passing. */
+   classes — as do attribute selectors, which is one of the tints below
+   (`[data-rail-mode="min"]`) and would otherwise be counted as an element
+   and quietly read as a weaker rule than it is. Enough for the flat
+   selectors below — anything with a comma or a combinator this function
+   cannot read would be visible here as a wrong number rather than silently
+   passing. */
 function specificity(sel) {
-  let s = sel.trim().replace(/:not\(([^)]*)\)/g, (_, inner) => " " + inner + " ");
+  const s = sel.trim().replace(/:not\(([^)]*)\)/g, (_, inner) => " " + inner + " ");
   const ids = (s.match(/#[\w-]+/g) || []).length;
-  const classes = (s.match(/\.[\w-]+|:[\w-]+/g) || []).length;
+  const attributes = (s.match(/\[[^\]]*\]/g) || []).length;
+  const classes = (s.match(/\.[\w-]+|:[\w-]+/g) || []).length + attributes;
   const elements = (s.split(/[\s>+~]+/).filter(Boolean)
-    .map((part) => part.replace(/[#.:][\w-]+/g, ""))
+    .map((part) => part.replace(/\[[^\]]*\]/g, "").replace(/[#.:][\w-]+/g, ""))
     .filter(Boolean)).length;
   return [ids, classes, elements];
 }
