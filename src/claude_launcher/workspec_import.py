@@ -169,7 +169,10 @@ class DaemonBackend(Backend):
     def get_mesh(self, mesh):
         from .daemon_client import DaemonClientError
         try:
-            return self.client.get(f"/api/mesh/{mesh}")
+            # Every member, ended ones too: a handle an archived member still
+            # holds is taken, and the import must see it (claunch-cj2th made
+            # the route's default the current members).
+            return self.client.get(f"/api/mesh/{mesh}?state=all")
         except DaemonClientError as exc:
             if "no mesh named" in str(exc):
                 return None

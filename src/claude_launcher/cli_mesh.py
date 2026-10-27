@@ -100,6 +100,19 @@ def _cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _member_total(info: dict) -> int:
+    """Every member of a mesh, ended ones included.
+
+    ``members`` holds only the current ones since claunch-cj2th; the count
+    over the whole roster is ``member_counts.all``. A daemon that predates
+    the counts sends every member in ``members``.
+    """
+    counts = info.get("member_counts")
+    if isinstance(counts, dict) and isinstance(counts.get("all"), int):
+        return counts["all"]
+    return len(info.get("members") or [])
+
+
 def _cmd_ls(_args: argparse.Namespace) -> int:
     client, why = daemon_client.connect_with_diagnosis()
     if client is None:
@@ -136,7 +149,7 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
         # one-project view reads exactly as the list always did.
         proj = "" if project_filter else f"{m.get('project') or 'default':<10} "
         print(
-            f"{m['name']:<16} {proj}{len(m['members'])} member(s), "
+            f"{m['name']:<16} {proj}{_member_total(m)} member(s), "
             f"{m['messages']} message(s)"
             + tag
         )
@@ -891,7 +904,8 @@ def _cmd_subroles(args: argparse.Namespace) -> int:
             body,
         )
     else:
-        info = client.get(f"/api/mesh/{args.mesh}")
+        # Any member, ended ones too: their roles are still on record.
+        info = client.get(f"/api/mesh/{args.mesh}?state=all")
         member = next(
             (m for m in info.get("members", []) if m.get("handle") == handle),
             None,
@@ -924,12 +938,20 @@ def _cmd_subroles(args: argparse.Namespace) -> int:
 
 def _cmd_members(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
-    info = client.get(f"/api/mesh/{args.mesh}")
+    state = str(getattr(args, "state", None) or "").strip()
+    query = f"?state={quote(state)}" if state else ""
+    info = client.get(f"/api/mesh/{args.mesh}{query}")
     primary = info.get("primary")
     if primary:
         print(f"(mirror of primary daemon {primary!r})")
     members = info.get("members", [])
-    if not members:
+    total = _member_total(info)
+    if not members and total:
+        print(
+            f"mesh {args.mesh!r} has no {state or 'current'} members "
+            f"({total} in all; --state all lists them)"
+        )
+    elif not members:
         print(f"mesh {args.mesh!r} has no members yet")
     for m in members:
         # the roster is absolute: '' = the primary daemon's own member
@@ -1754,6 +1776,13 @@ def register(sub) -> None:
 
     p = msub.add_parser("members", help="list a mesh's members and reachability")
     p.add_argument("mesh")
+    p.add_argument(
+        "--state", metavar="STATE",
+        help="which members to list (default: current -- running, remote, "
+             "held, delayed); 'all' adds the ended ones, or name one of "
+             "running/remote/hold/delayed/failed/killed/paused/archived/"
+             "missing, comma-joined for several",
+    )
     p.set_defaults(func=_cmd_members)
 
     p = msub.add_parser(

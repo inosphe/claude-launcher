@@ -8015,6 +8015,11 @@ async def h_mesh_list(request: web.Request) -> web.Response:
     rail_view = request.query.get("view") == "rail"
     # ``?project=`` narrows to one project's meshes; absent = every mesh.
     project_filter = str(request.query.get("project") or "").strip()
+    # ``?state=`` is the roster filter of every mesh in the full answer, as on
+    # /api/mesh/<name>; absent = the current members (claunch-cj2th).
+    state = str(request.query.get("state") or mesh_mod.DEFAULT_MEMBER_STATE)
+    if not rail_view and not mesh_mod.valid_member_state(state):
+        return json_error(400, f"invalid member state: {state!r}")
     return json_response(
         {
             # The rail view is what the sidebar polls: names, local members
@@ -8023,7 +8028,7 @@ async def h_mesh_list(request: web.Request) -> web.Response:
             # daemon, and only the mesh page and the flow view draw it -- they
             # fetch /api/mesh/<name>, which still carries it.
             "meshes": [
-                mm.mesh_rail_info(m) if rail_view else mm.mesh_info(m)
+                mm.mesh_rail_info(m) if rail_view else mm.mesh_info(m, state=state)
                 for m in mm.list()
                 if projects.matches(m.project, project_filter)
             ],
@@ -8072,8 +8077,8 @@ async def h_mesh_get(request: web.Request) -> web.Response:
     session = str(request.query.get("session") or "")
     # `?state=` is the roster filter, applied before the expensive half of
     # the answer is built rather than after it reaches the page. Absent means
-    # every member, which is what this route has always sent.
-    state = str(request.query.get("state") or "all")
+    # the current members (claunch-cj2th); `?state=all` is the whole roster.
+    state = str(request.query.get("state") or mesh_mod.DEFAULT_MEMBER_STATE)
     if not mesh_mod.valid_member_state(state):
         return json_error(400, f"invalid member state: {state!r}")
     return json_response(

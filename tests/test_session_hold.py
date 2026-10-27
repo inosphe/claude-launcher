@@ -331,7 +331,7 @@ def test_a_held_recipient_is_not_reported_dead_to_senders(home, tmp_path):
         assert "bob" not in (sent.get("notice") or "")
         assert mm.stranded_recipients(mesh, ["bob"]) == []
 
-        rows = {r["handle"]: r for r in mm.mesh_info(mesh)["members"]}
+        rows = {r["handle"]: r for r in mm.mesh_info(mesh, state="all")["members"]}
         assert rows["bob"]["reachability"] == "held"
         assert rows["dan"]["reachability"] == "exited"
         assert responders.Responder("bob", "bob", "worker",

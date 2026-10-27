@@ -190,6 +190,14 @@ MEMBER_STATES = (
 #: in a way a message ends (held, or delayed in the restore queue).
 CURRENT_CATEGORIES = ("running", "remote", "hold", "delayed")
 
+#: The roster ``state`` a caller gets when it names none (claunch-cj2th).
+#: Ended members are kept for good, and ``member_links`` is every *pair* of
+#: the members sent: on the claunch mesh (1559 members, 1350 of them killed or
+#: archived) ``all`` was 1,214,461 pairs and 67MB per ``GET /api/mesh``, past
+#: the 5s budget of cflow's responder lookup. A caller that needs ended members
+#: asks for them (``?state=all``, or one of the ended words).
+DEFAULT_MEMBER_STATE = "current"
+
 
 def member_state_words(state: str) -> Tuple[str, ...]:
     """The words of a roster ``state``: one word, or several joined by commas.
@@ -9139,7 +9147,8 @@ class MeshManager:
         }
 
     def mesh_info(
-        self, mesh: Mesh, *, session: str = "", state: str = "all"
+        self, mesh: Mesh, *, session: str = "",
+        state: str = DEFAULT_MEMBER_STATE,
     ) -> dict:
         """One mesh in full. ``state`` selects which members get a record.
 
@@ -9153,9 +9162,9 @@ class MeshManager:
 
         So the filter is applied here rather than in the reader. The counts
         are taken over every member either way -- a filter bar that cannot
-        say what it is hiding is worse than no filter -- and ``state="all"``
-        is the default, so a caller that says nothing gets what it always
-        got.
+        say what it is hiding is worse than no filter. The default is
+        :data:`DEFAULT_MEMBER_STATE` (``current``); ``state="all"`` is the
+        whole roster and must be asked for.
         """
         members = []
         lineage = self._local_lineage(mesh)
