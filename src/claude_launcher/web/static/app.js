@@ -43407,36 +43407,53 @@ function cflow2GraphLayout(chart, detail, opts) {
     for (const id of roots) visit(id);
     return seen;
   };
-  const owners = new Map();
-  let drawn = drawnSet(owners);
-  for (let pass = 0; pass < 4; pass++) {
-    let changed = false;
-    for (const [key, ids] of procs.groups) {
-      if (owners.has(key)) continue;
-      const here = ids.filter((i) => drawn.has(i));
-      if (!here.length) continue;
-      owners.set(key, here.find((i) => open.has(i) && bodyKids(i).length) || here[0]);
-      changed = true;
+  /* One settling, for one open set: ownership and the walk that rewriting it
+     changes. Passing a different set asks a different question, so this is a
+     function, and every caller below names the set it means. */
+  const settle = (set) => {
+    const own = new Map();
+    let seen = drawnSet(own, set);
+    for (let pass = 0; pass < 4; pass++) {
+      let changed = false;
+      for (const [key, ids] of procs.groups) {
+        if (own.has(key)) continue;
+        const here = ids.filter((i) => seen.has(i));
+        if (!here.length) continue;
+        own.set(key, here.find((i) => set.has(i) && bodyKids(i).length) || here[0]);
+        changed = true;
+      }
+      seen = drawnSet(own, set);
+      if (!changed) break;
     }
-    drawn = drawnSet(owners);
-    if (!changed) break;
-  }
-  /* an owner the walk never reached owns nothing after all: its sites read as
-     plain calls rather than pointing at an invisible body */
-  for (const [key, id] of [...owners]) if (!drawn.has(id)) owners.delete(key);
+    /* an owner the walk never reached owns nothing after all: its sites read
+       as plain calls rather than pointing at an invisible body */
+    for (const [key, id] of [...own]) if (!seen.has(id)) own.delete(key);
+    return { owners: own, drawn: seen };
+  };
+  const settled = settle(open);
+  const owners = settled.owners;
+  const drawn = settled.drawn;
 
   /* Which steps the drawing could ever reach, so that "not drawn" can be told
      apart from "not drawn because it is folded". A step inside a shared body
      the run happens to be in is never drawn — the body is drawn once, at the
      site that owns it — and that is not something unfolding would fix. One
      more traversal with every container open answers it; no measuring, no
-     placing. */
+     placing.
+
+     The set is settled against ITSELF, not against the picture on screen
+     (s2273-rev2, claunch-g6uma.2). An owner picked from what the picture
+     draws is a site the picture draws, so when that site sits inside a
+     folded block the body is never drawn even with every container open —
+     and the answer then moves with the preset it exists to be independent
+     of: the note stayed silent at lv1 and lv2 and spoke at lv3 for the same
+     run. Settled against everyOpen it is a function of the chart alone. */
   const everyOpen = new Set();
   for (const id of Object.keys(nodes)) {
     const n = nodes[id];
     if (n && !CF2G_ATOMIC.has(n.type) && (n.children || []).length) everyOpen.add(id);
   }
-  const everything = drawnSet(owners, everyOpen);
+  const everything = settle(everyOpen).drawn;
 
   /* A site that is not its body's owner draws no children: the body is the
      shared node, reached by a reference edge. */

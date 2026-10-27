@@ -416,6 +416,55 @@ function deep() {
      src.includes('"Show the run"') && css.includes(".cf2g-hidden"));
 }
 
+/* ---- what unfolding could ever show is the chart's answer --------------
+   (s2273-rev2, claunch-g6uma.2) `everything` exists so a step that no fold
+   could reveal is not reported as hidden. Settling ownership against the
+   picture on screen breaks that: when the site that owns a shared body is
+   itself inside a folded block, no open set reaches the body, and the note
+   falls silent exactly at the levels that hid the run — speaking only at the
+   level deep enough to draw the owner. It is settled against everyOpen in
+   its own map now, so it is a function of the chart alone. */
+{
+  const chart = {
+    root: "r",
+    nodes: {
+      r: { id: "r", type: "seq", children: ["c1"], roles: [""] },
+      c1: { id: "c1", type: "seq", children: ["s1"], roles: [""] },
+      s1: { id: "s1", type: "scope", proc: "p", children: ["q1"], roles: [""] },
+      q1: { id: "q1", type: "scope", proc: "q", children: ["w1"], roles: [""] },
+      w1: { id: "w1", type: "task", label: "w1", children: [], roles: [] },
+    },
+  };
+  const detail = { instances: [{ instance: "i1", node: "w1", await: "task" }] };
+  const layoutOf = (preset) => fns.cflow2GraphLayout(chart, detail, {
+    open: fns.cflow2GraphOpen(chart, detail, null, null, preset) });
+
+  check("the chart's own reach is every step, folds or no folds",
+        [...layoutOf("lv1").everything].sort(), ["c1", "q1", "r", "s1", "w1"]);
+  const ever = ["simple", "lv1", "lv2", "lv3", "all"]
+    .map((p) => [...layoutOf(p).everything].sort().join(","));
+  check("and it does not move with the preset", ever.filter((v) => v !== ever[0]), []);
+  check("every level that folded the run away says so",
+        ["lv1", "lv2", "lv3"].map((p) => fns.cflow2GraphHidden(layoutOf(p), detail)),
+        [["w1"], ["w1"], ["w1"]]);
+  check("simplified has nothing to report", fns.cflow2GraphHidden(layoutOf("simple"), detail), []);
+  check("so does all", fns.cflow2GraphHidden(layoutOf("all"), detail), []);
+
+  /* the other half of the rule: a step under a site that is not its body's
+     owner is never drawn by any open set, so it must stay silent rather than
+     be counted as folded away. */
+  const sharedChart = fixture();
+  const sDetail = { instances: [{ instance: "i1", node: "bb", await: "task" }] };
+  const sLayout = (preset) => fns.cflow2GraphLayout(sharedChart, sDetail, {
+    open: fns.cflow2GraphOpen(sharedChart, sDetail, null, null, preset) });
+  ok("the non-owning site really owns nothing",
+     !nodeOf(sLayout("all"), "bb") && !!nodeOf(sLayout("all"), "ba"));
+  check("a step under the non-owning site is not reported at any preset",
+        ["simple", "lv1", "lv2", "lv3", "all"]
+          .map((p) => fns.cflow2GraphHidden(sLayout(p), sDetail)),
+        [[], [], [], [], []]);
+}
+
 /* ---- a group's caption shares its row with the fold control -----------
    (s2273-rev2) A one-branch group is exactly one box wide and the longest
    captions — `try`, `timeout` — are wider than that, so the caption used to
