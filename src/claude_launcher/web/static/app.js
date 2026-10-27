@@ -7358,11 +7358,13 @@ let cflow2RailSig = null;
    subtracted first. `railSkewOf` keeps the smallest reading seen, so latency
    does not jitter every age.
 
-   `null` means "no reading yet", never 0: a 0 here would enter `Math.min` as
-   a reading of zero, and a page whose clock runs up to 30 s ahead of the
-   daemon's would keep it forever — every card aged by the full difference.
-   The page reads it as no correction until the first answer lands, which is
-   what an older daemon without `now` means anyway. */
+   `null` means "no reading yet", never 0: 0 is not a neutral starting value
+   but a reading, and the smallest possible one, so `Math.min` could never
+   replace it. A page running ahead of its daemon reads a positive
+   difference and would keep that 0 forever — every card aged by the whole
+   difference — while a page running behind was corrected. The page reads
+   `null` as no correction until the first answer lands, which is what an
+   older daemon without `now` means anyway. */
 let railClockSkew = null;
 
 // Ownership is independent of whether a simulation is currently running.
