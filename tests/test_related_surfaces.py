@@ -476,22 +476,67 @@ def _path_text(node):
     """The path an argument names, as text; ``None`` when it names none.
 
     ``ROOT`` becomes this checkout's absolute path, and the wrappers this file
-    puts around it (``str(ROOT)``, ``Path(ROOT)``) are unwrapped. A string
-    constant keeps whatever it spells -- ``"."`` is relative, so reading it
-    needs the call's ``cwd`` (see :func:`_resolves_here`). Anything else
-    returns ``None``: a fixture name such as ``repo`` or ``tmp_path`` has no
-    location the source states."""
+    puts around it (``str(ROOT)``, ``Path(ROOT)``) are unwrapped. Two idioms
+    that also land here are recognised: a string constant keeps whatever it
+    spells -- ``"."`` is relative, so reading it needs the call's ``cwd`` (see
+    :func:`_resolves_here`) -- and ``Path(__file__).resolve().parents[N]``,
+    which is how this file already writes ``_SELF`` and how a sibling module
+    would reach the checkout from a test directory (s597-rev, claunch-o5il6).
+    Anything else returns ``None``: a fixture name such as ``repo`` or
+    ``tmp_path`` has no location the source states."""
     if isinstance(node, ast.Name):
         return _HERE if node.id == "ROOT" else None
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
-    if (
-        isinstance(node, ast.Call)
-        and getattr(node.func, "id", None) in ("str", "Path")
-        and node.args
-    ):
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) in ("str", "Path") and node.args:
         return _path_text(node.args[0])
+    return _this_files_ancestor(node)
+
+
+def _literal_index(node):
+    """The non-negative integer a subscript carries, or ``None``.
+
+    ``parents[-1]`` and a computed index are left alone: guessing which
+    directory they name would be a claim the source does not make."""
+    sl = getattr(node, "slice", node)
+    if isinstance(sl, ast.Index):  # Python < 3.9
+        sl = sl.value
+    if isinstance(sl, ast.Constant) and isinstance(sl.value, int) and sl.value >= 0:
+        return sl.value
     return None
+
+
+def _this_files_ancestor(node):
+    """``Path(__file__).resolve().parents[N]`` as a path, or ``None``.
+
+    ``__file__`` is this module, so ``parents[0]`` is this file's directory and
+    each hop after that is one level up. That idiom is how this file already
+    writes ``_SELF``, and how a sibling test would walk to the checkout from a
+    test directory -- s597-rev found it unrecognised (claunch-o5il6).
+
+    Only this exact chain is read. Some *other* object's ``parents[N]`` says
+    nothing about this checkout, so treating it as one would be a false
+    positive in the over-blocking direction."""
+    if not isinstance(node, ast.Subscript) or getattr(node.value, "attr", None) != "parents":
+        return None
+    hop = _literal_index(node)
+    if hop is None:
+        return None
+    chain = node.value.value
+    if isinstance(chain, ast.Call) and getattr(chain.func, "attr", None) == "resolve":
+        chain = chain.func.value
+    if not (
+        isinstance(chain, ast.Call)
+        and getattr(chain.func, "id", None) == "Path"
+        and chain.args
+        and isinstance(chain.args[0], ast.Name)
+        and chain.args[0].id == "__file__"
+    ):
+        return None
+    base = _SELF.parent
+    for _ in range(hop):
+        base = base.parent
+    return str(base)
 
 
 def _resolves_here(text, base):
@@ -938,9 +983,16 @@ def test_surfaces_reads_this_repositorys_history_unless_it_is_handed_one():
     sliding window this guard exists for -- so a bare ``rs.surfaces(ROOT, [...])``
     is exactly the call that must fail. ``commits=`` is what names a window
     instead, and the expression handed to it is an invocation in its own right,
-    so ``commits=rs.history(ROOT, limit=50)`` is collected twice and passes
-    both times. s490-rev found this on claunch-o5il6 and asked for either a
-    guard or an explicit statement that the shape is out of scope."""
+    so ``commits=rs.history(ROOT, limit=50)`` is collected twice: once as the
+    history call that names the window, once as the surfaces call handed it.
+    s490-rev found this on claunch-o5il6 and asked for either a guard or an
+    explicit statement that the shape is out of scope.
+
+    Both of those calls are asserted below, on separate lines. An earlier
+    version wrote the ``commits`` argument inline, putting the outer and inner
+    calls on one line, and the ``by_line`` lookup then kept only the inner one
+    -- so the outer verdict was never checked while this docstring said it was
+    (s1262-rev, claunch-o5il6)."""
     sample = """
 def test_a():
     rs.surfaces(ROOT, ["a.py"])
@@ -949,13 +1001,25 @@ def test_b():
     rs.surfaces(ROOT, ["a.py"], commits=None)
 
 def test_c():
-    rs.surfaces(ROOT, ["a.py"], commits=rs.history(ROOT, limit=50))
+    window = rs.history(ROOT, limit=50)
+    rs.surfaces(ROOT, ["a.py"], commits=window)
 
 def test_d():
     rs.surfaces(repo, ["a.py"])
 """
     calls = _tool_invocations(sample)
     by_line = {n: (a, r) for n, a, r in calls}
+
+    # One call per line, deliberately: this test used to put the outer
+    # ``rs.surfaces`` and the ``commits=rs.history(...)`` it hands in on the
+    # same line, and ``by_line`` kept only the second. The verdict for the
+    # outer call was then never asserted -- ``_surfaces_window`` could be made
+    # to return ``[]`` and this test still passed, while its docstring claimed
+    # both were checked (s1262-rev, claunch-o5il6). A dict keyed by line is
+    # only as good as the one-call-per-line assumption behind it.
+    assert len(calls) == len(by_line), (
+        f"two invocations share a line and one would go unchecked: {calls}"
+    )
 
     bare = by_line[3]
     assert bare[1] is True and not _names_a_window(bare[0]), bare
@@ -964,14 +1028,80 @@ def test_d():
     explicit_none = by_line[6]
     assert explicit_none[1] is True and not _names_a_window(explicit_none[0]), explicit_none
 
-    windowed = by_line[9]
+    # The windowed case is now two lines, and both are asserted: the history
+    # call that names the window, and the surfaces call handed that window.
+    inner = by_line[9]
+    assert inner[1] is True and _names_a_window(inner[0]), inner
+    windowed = by_line[10]
     assert windowed[1] is True and _names_a_window(windowed[0]), windowed
-    # The window handed in is its own invocation, and it carries its own window.
-    inner = [c for c in calls if c[0] == 9]
-    assert len(inner) == 2, inner
 
-    elsewhere = by_line[12]
+    elsewhere = by_line[13]
     assert elsewhere[1] is False, elsewhere
+
+
+def test_a_path_walked_from_this_file_names_this_checkout():
+    """``Path(__file__).resolve().parents[1]`` from this file *is* this checkout.
+
+    This module already writes ``_SELF = Path(__file__).resolve()``, so the
+    idiom is right here to be copied -- and a sibling test walking up from
+    ``tests/`` reaches the same directory. Not recognising it made the guard
+    miss a call that reads this repository (s597-rev, claunch-o5il6).
+
+    The flip side is asserted too, because recognising *any* ``parents[N]``
+    would be the over-blocking direction: some other object's ancestry says
+    nothing about this checkout, and a negative or computed index is not a
+    claim the source makes."""
+    here = _path_text(ast.parse("Path(__file__).resolve().parents[1]").body[0].value)
+    assert here == _HERE, here
+
+    # Without .resolve() the chain is the same directory: Path(__file__) needs
+    # no resolution to have a parent.
+    no_resolve = _path_text(ast.parse("Path(__file__).parents[1]").body[0].value)
+    assert no_resolve == _HERE, no_resolve
+
+    # parents[0] is this file's own directory -- still inside the checkout.
+    own_dir = _path_text(ast.parse("Path(__file__).resolve().parents[0]").body[0].value)
+    assert own_dir == str(_SELF.parent), own_dir
+    assert _resolves_here(own_dir, _HERE) is True
+
+    for unknown in (
+        "Path(other).resolve().parents[1]",     # not this file
+        "Path(__file__).resolve().parents[-1]",  # negative: which dir is a guess
+        "Path(__file__).resolve().parents[n]",   # computed: same
+        "Path(__file__).resolve().parents[1].parent",  # a further wrapper
+    ):
+        assert _path_text(ast.parse(unknown).body[0].value) is None, unknown
+
+    sample = """
+def test_a():
+    _run("--repo", str(Path(__file__).resolve().parents[1]))
+
+def test_b():
+    rs.history(Path(__file__).resolve().parents[1])
+"""
+    calls = _tool_invocations(sample)
+    assert [r for _n, _a, r in calls] == [True, True], calls
+
+
+def test_the_surfaces_sample_does_not_put_two_calls_on_one_line():
+    """A ``by_line`` dict silently drops one of two calls sharing a line.
+
+    The previous version of the surfaces test handed ``commits=rs.history(...)``
+    inline, so the outer ``rs.surfaces`` and the inner ``rs.history`` both sat
+    on one line and only the inner survived into ``by_line``. ``_surfaces_window``
+    could then be reduced to ``return []`` with the test still green, while the
+    docstring said both were checked (s1262-rev, claunch-o5il6). This is that
+    guard: if a future edit inlines the sample again, this fails first and says
+    so, rather than leaving one assertion quietly vacuous."""
+    sample = """
+def test_c():
+    window = rs.history(ROOT, limit=50)
+    rs.surfaces(ROOT, ["a.py"], commits=window)
+"""
+    calls = _tool_invocations(sample)
+    lines = [n for n, _a, _r in calls]
+    assert len(calls) == len(set(lines)), f"two calls on one line: {calls}"
+    assert len(calls) == 2, calls
 
 
 def test_the_review_step_asks_for_the_sentence_and_names_the_tool():
