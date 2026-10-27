@@ -58276,7 +58276,7 @@ function noticeAgesPaint() {
    to change, so the page's one-second tick carries these the same way it
    carries the arrival ages above: one text write per row, no nodes. A row
    left behind by a rebuild reads isConnected false and leaves the tick. */
-const noticeClocks = new Set();    // {node, prefix, deadline}
+const noticeClocks = new Set();    // {node, prefix, deadline} or {node, render}
 function noticeClockLine(prefix, deadlineIso) {
   const line = el("div", "notice-sub gate-clock");
   line.textContent = `${prefix}${gateCountdown(deadlineIso)}`;
@@ -58284,10 +58284,27 @@ function noticeClockLine(prefix, deadlineIso) {
   return line;
 }
 
+/* A clock whose words are more than a prefix and a countdown: the spawn
+   request row says different things around it (`spawnGateClock`). It keeps a
+   reader instead, so the tick still owns the text. The reader closes over the
+   record the row was drawn from; a record that changes in a way that changes
+   its wording (a new deadline, a manual hold) changes gatePending and the
+   panel rebuilds its rows anyway. */
+function noticeClockReader(render) {
+  const line = el("div", "notice-sub gate-clock");
+  line.textContent = render();
+  noticeClocks.add({ node: line, render });
+  return line;
+}
+
+function noticeClockText(rec) {
+  return rec.render ? rec.render() : `${rec.prefix}${gateCountdown(rec.deadline)}`;
+}
+
 function noticeClocksPaint() {
   for (const rec of [...noticeClocks]) {
     if (rec.node.isConnected === false) { noticeClocks.delete(rec); continue; }
-    const text = `${rec.prefix}${gateCountdown(rec.deadline)}`;
+    const text = noticeClockText(rec);
     if (rec.node.textContent !== text) rec.node.textContent = text;
   }
 }
@@ -59164,10 +59181,13 @@ function noticePanelToggle(force) {
   const strip = $("notices");
   if (strip) strip.classList.toggle("panel-open", open);
   if (open) gateShownInPanel.clear();
-  noticeHideAll(open);
   // Nothing rebuilds the body while the panel is hidden, so what it holds on
-  // the way back may be from before the close: opening always draws.
+  // the way back may be from before the close: opening always draws. The
+  // signature is cleared before the batch below, so that batch's flush is the
+  // open's one draw — clearing it after made an open with waiting requests
+  // rebuild twice (claunch-n39r2).
   noticePanelPainted = null;
+  noticeHideAll(open);
   if (open) noticePanelPaint();
   noticeBellPaint();
   // The panel is a column of the layout (claunch-w8q00): opening or closing
@@ -60694,6 +60714,15 @@ function spawnGateClock(rec) {
 
 /* What the session would be beyond the facts rows: issue, name, the first
    line of its task. */
+/* The record a spawn row's clock reads. A corner card outlives the poll that
+   drew it, and every poll replaces the records; the clock follows the newest
+   copy of the same request so the one-second tick and the poll write the same
+   words (an extended deadline moves for both). */
+function spawnGateLive(rec) {
+  const live = (gatePending && gatePending.spawn) || [];
+  return live.find((r) => String(r.id) === String(rec.id)) || rec;
+}
+
 function spawnGateSpecText(spec) {
   if (!spec) return "";
   const task = String(spec.task || "").trim().split("\n")[0];
@@ -60779,7 +60808,10 @@ function spawnGateBody(node, rec, head) {
     }
     node.appendChild(spawnGateFacts(rec, spec));
   }
-  node.appendChild(el("div", "notice-sub gate-clock", spawnGateClock(rec)));
+  // On the one-second tick, not only on the next rebuild: the panel no longer
+  // rebuilds for a poll that changed nothing, and this row's clock used to
+  // move as a side effect of that rebuild (claunch-n39r2, found in review).
+  node.appendChild(noticeClockReader(() => spawnGateClock(spawnGateLive(rec))));
 }
 
 async function spawnGatePost(rec, verb, btn, body) {

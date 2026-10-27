@@ -15,9 +15,12 @@
    - a batch of writes (what the panel's open/close pass does for every
      waiting request) flushes exactly one rebuild, and it shows the last
      state;
+   - opening the panel with waiting requests rebuilds once, not once per
+     request hidden (that pass goes through gateHide, which paints);
    - the countdown in a row moves on the page's one-second tick
      (noticeClocksPaint) with no rebuild at all — the rebuild is no longer
-     what keeps the clock right;
+     what keeps the clock right — and that holds for the spawn request row
+     too, whose clock says different words around the countdown;
    - opening the panel always draws, even when the state matches what the
      body already held from the previous open.
 
@@ -148,9 +151,11 @@ function build() {
   }
 
   const gate = { restart: null };
+  const spawn = { requests: [] };
   const api = async (p) => {
     const answer = (body) => ({ ok: true, json: async () => JSON.parse(JSON.stringify(body)) });
     if (p === "/api/daemon/restart-request") return answer({ request: gate.restart });
+    if (p === "/api/spawn-requests") return answer({ requests: spawn.requests });
     return answer({});
   };
   const storage = memoryStorage();
@@ -177,8 +182,8 @@ function build() {
     "confirm", "prompt", "document", "window",
     code +
     "\nreturn {noticePanelToggle, runGateSync, noticePanelBatch, noticePanelPaint," +
-    " noticeClocksPaint, noticeHistory, gatePending, noticeBellPaint," +
-    " refreshRestartGate};"
+    " noticeClocksPaint, noticeClocks, noticeHistory, gatePending, noticeBellPaint," +
+    " refreshRestartGate, refreshSpawnGate};"
   )(
     (id) => nodes[id] || null,
     (tag, cls, text) => node(cls, text),
@@ -198,7 +203,9 @@ function build() {
     nodes,
     clock,
     gate,
+    spawn,
     seen,
+    cards: () => nodes["notices"].text(),
     panel: () => nodes["notice-panel-body"].text(),
     rebuilds: () => seen.rebuilds,
     reset: () => { seen.rebuilds = 0; seen.created = 0; },
@@ -301,6 +308,74 @@ function asks(n) {
   check("the one-second tick moves the countdown", /auto-approves in 3:59/.test(w.panel()),
         w.panel());
   check("and rebuilds nothing", w.rebuilds() === 0, w.rebuilds());
+}
+
+/* --- the spawn row's clock is on the tick too -------------------------- */
+/* Its words are not "prefix + countdown" (spawnGateClock says different
+   things around it), and it used to be written only when the row was built:
+   with the panel no longer rebuilding on every poll, it froze at whatever it
+   said when the panel opened (found in review of claunch-n39r2). */
+function spawnRec(deadline) {
+  return {
+    id: 7, session: "s9", reason: "take the ledger rewrite",
+    requested_at: new Date(BASE).toISOString(),
+    deadline: new Date(deadline).toISOString(),
+    status: "pending", kind: "spawn", scope: "child", extensions: 0,
+    basis: { operator_name: "operator" },
+    spec: { name: "ledger", task: "rewrite the ledger" },
+  };
+}
+
+{
+  const w = build();
+  w.api.noticePanelToggle(true);
+  w.spawn.requests = [spawnRec(BASE + 300000)];
+  await w.api.refreshSpawnGate();
+  check("the spawn row carries its countdown",
+        /auto-approves in 5:00 — created as asked/.test(w.panel()), w.panel());
+  w.clock.at += 61000;
+  w.reset();
+  w.api.noticeClocksPaint();
+  check("the tick moves the spawn row's countdown",
+        /auto-approves in 3:59 — created as asked/.test(w.panel()), w.panel());
+  check("and rebuilds nothing for it", w.rebuilds() === 0, w.rebuilds());
+}
+
+/* --- a card's clock follows the newest copy of its request -------------- */
+/* The card is not rebuilt by a poll, so the tick and the poll write the same
+   text only if the tick reads the record the poll put in, not the one the
+   card was built from (+5 min moves the deadline). */
+{
+  const w = build();
+  w.nodes["notice-panel"].className = "hidden";
+  w.spawn.requests = [spawnRec(BASE + 300000)];
+  await w.api.refreshSpawnGate();
+  check("the card carries its countdown", /auto-approves in 5:00/.test(w.cards()),
+        w.cards());
+  w.spawn.requests = [spawnRec(BASE + 600000)];    // +5 min pressed elsewhere
+  await w.api.refreshSpawnGate();
+  check("the poll writes the extended countdown", /auto-approves in 10:00/.test(w.cards()),
+        w.cards());
+  w.reset();
+  w.api.noticeClocksPaint();
+  check("and the tick keeps it rather than the old deadline",
+        /auto-approves in 10:00/.test(w.cards()), w.cards());
+}
+
+/* --- opening puts the waiting cards away in one rebuild ----------------- */
+/* The open/close pass hides one request per call through gateHide, which
+   paints; without the batch that is one rebuild per waiting request. */
+{
+  const w = build();
+  w.nodes["notice-panel"].className = "hidden";
+  w.api.runGateSync(asks(12), []);
+  w.reset();
+  w.api.noticePanelToggle(true);
+  check("opening with 12 waiting requests rebuilds once", w.rebuilds() === 1,
+        w.rebuilds());
+  check("and every one of them is listed",
+        (w.panel().match(/landing-review/g) || []).length >= 12,
+        w.panel().slice(0, 200));
 }
 
 /* --- opening always draws ---------------------------------------------- */
