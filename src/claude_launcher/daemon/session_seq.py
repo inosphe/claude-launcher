@@ -177,8 +177,13 @@ def commit(number: int) -> int:
         # with message delivery; renaming the write keeps the contract strict
         # instead of adding this module to its allowlist (as
         # ``sim/runtime.py`` and ``daemon/api.py`` already do).
+        #
+        # ``newline="\\n"`` keeps the file byte-identical on every platform.
+        # The module docstring promises something a person can correct by hand
+        # and diff, and a Windows ``\\r\\n`` would show as a whole-file diff
+        # against a line someone fixed there.
         tmp.write_text(json.dumps({NEXT: nxt}, ensure_ascii=False) + "\n",
-                       encoding="utf-8")
+                       encoding="utf-8", newline="\n")
         atomic.replace(tmp, path)
     return nxt
 
