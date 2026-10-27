@@ -68,10 +68,10 @@ def _seq() -> int:
 def _take(mgr: SessionManager) -> str:
     """The next name, reserved -- what ``stage`` does, without a session.
 
-    ``_auto_name`` only proposes (see ``settle_name``), so a test that wants a
+    ``auto_name`` only proposes (see ``settle_name``), so a test that wants a
     number *spent* has to reserve it the way the manager does.
     """
-    return mgr._reserve(mgr._auto_name())
+    return mgr._reserve(mgr.auto_name(), auto=True)
 
 
 def test_the_first_allocation_starts_at_zero_on_a_fresh_home(home):
@@ -193,6 +193,33 @@ def test_a_hand_chosen_name_does_not_consume_a_number(home):
 
     # And the sequence carries on from where it was, not from s9000.
     assert mgr.settle_name("") == "s1"
+
+
+def test_a_hand_chosen_numeric_name_does_not_move_the_counter(home, tmp_path):
+    """The shape of a name says nothing about where it came from.
+
+    ``s9000`` typed by a person is in the sequence's own format but is not a
+    number the sequence spent, so creating a session with it must leave the
+    counter where it was. Moving it to 9001 is the issue's own symptom — the
+    auto numbers running ahead of the fleet — reached from the other side.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        assert _take(mgr) == "s0"
+
+        hand = mgr.stage(SessionDef(name="s9000", harness="py", cwd=str(tmp_path)))
+        assert hand.sdef.name == "s9000"
+        assert _seq() == 1, "a hand-given s9000 spent the sequence's numbers"
+
+        # The auto sequence carries on from 1, and steps over the hand name if
+        # it ever reaches it.
+        assert _take(mgr) == "s1"
+        for name in ("s0", "s1", "s9000"):
+            mgr.discard(name)
+
+    asyncio.run(run())
 
 
 def test_a_hand_chosen_numeric_name_is_stepped_over_when_reached(home):
@@ -421,4 +448,4 @@ def test_clear_sessions_does_not_free_a_number(home):
     assert removed == ["s0"]
     assert not paths.session_dir("s0").is_dir()
 
-    assert mgr._auto_name() == "s1"
+    assert mgr.auto_name() == "s1"

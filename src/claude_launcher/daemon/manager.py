@@ -460,7 +460,12 @@ class SessionManager:
         # a session that is going to exist. ``settle_name`` (which callers that
         # must name a worktree use) computes a candidate and writes nothing --
         # see its docstring for why the two are split.
-        name = self._reserve(self.settle_name(str(sdef.name or "")))
+        #
+        # ``auto`` records which side of that split this session is on: only a
+        # name the counter produced may move the counter (a hand-typed ``s9000``
+        # is not a number the sequence spent).
+        requested = str(sdef.name or "")
+        name = self._reserve(self.settle_name(requested), auto=not requested.strip())
         sdef = self._resolve_resume(
             SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
@@ -1469,7 +1474,7 @@ class SessionManager:
         For a caller that must name something after the session before its
         record exists -- the worktree cut for it -- so a name already taken is
         refused there rather than later. Empty means the next number the
-        counter would hand out (:meth:`_auto_name`).
+        counter would hand out (:meth:`auto_name`).
 
         **Nothing is written here, and no number is spent.** A caller reaches
         this while its request can still be refused (``POST /api/sessions``
@@ -1484,11 +1489,11 @@ class SessionManager:
         misnamed directory, not a lost identity, and it is much cheaper than
         wrecking the naming invariant for every refused request.
         """
-        name = (name or "").strip() or self._auto_name()
+        name = (name or "").strip() or self.auto_name()
         self._check_name(name)
         return name
 
-    def _auto_name(self) -> str:
+    def auto_name(self) -> str:
         """The next ``sN`` the counter would hand out -- without taking it.
 
         The counter (:mod:`session_seq`) is a high-water mark rather than a
@@ -1497,9 +1502,6 @@ class SessionManager:
         recycled name appends to another session's output log, report directory
         and worktree name, and two histories then look like one.
 
-        A name a person chose (``s9000`` typed by hand) does not move the
-        counter: it is simply stepped over here when the sequence reaches it.
-
         ``clear-sessions --logs`` deletes the directory and leaves the counter
         where it is. The numbers are not freed.
         """
@@ -1507,24 +1509,28 @@ class SessionManager:
             lambda name: name in self._sessions, records=list(self._sessions)
         )
 
-    def _reserve(self, name: str) -> str:
+    def _reserve(self, name: str, *, auto: bool) -> str:
         """Make ``name`` real: its directory exists and no other session holds it.
 
         The one place a name becomes a session's. Called from :meth:`stage`,
         which is reached only once every check that could refuse the request
         has passed (see :meth:`settle_name` for the ordering that has to hold).
 
-        An auto-assigned candidate that the filesystem or another record took
-        since it was computed is replaced by the next one. A name a person gave
-        is not in the sequence, so it spends no number and is only checked --
-        and, as before this counter existed, a directory left behind by a
-        cleared session does not stop a person from reusing their own name.
+        ``auto`` says whether the counter produced this name, and it decides
+        everything: only a name the counter produced may move the counter. A
+        person's ``s9000`` is a name in the sequence's *shape*, not a number the
+        sequence spent, and treating it as one would jump the counter to 9001 —
+        which is the symptom this issue exists to remove, arrived at from the
+        other side. So a hand-given name is only checked, and (as before the
+        counter existed) a directory left behind by a cleared session does not
+        stop a person from reusing their own name.
+
+        An ``auto`` candidate that the filesystem or another record took since
+        it was computed is replaced by the next one.
         """
         if name in self._sessions:
             raise ManagerError(f"session {name!r} already exists")
-        if not session_seq.NUMBER_RE.match(name):
-            # A person's name: no counter involvement at all (the issue's
-            # "a hand-given name does not consume a number").
+        if not auto:
             return name
         if session_seq.claim(name, lambda n: n in self._sessions):
             return name
@@ -1571,7 +1577,7 @@ class SessionManager:
 
         The one ordering every listing surface takes: ``claunch ls``, the web
         dashboard, the agent-facing tree. Names cannot carry it — they are
-        auto-generated with a counter (:meth:`_auto_name`), so a string sort
+        auto-generated with a counter (:meth:`auto_name`), so a string sort
         files ``s100`` between ``s10`` and ``s11`` and a fleet past nine reads
         as no order at all.
 
