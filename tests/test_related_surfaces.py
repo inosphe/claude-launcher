@@ -448,6 +448,8 @@ _HERE = str(ROOT)
 
 _EXPR = "\x00not-a-constant"
 
+_LIMIT = "--limit"
+
 
 def _argv_of(nodes):
     """The literal arguments a call carries. Anything that is not a string
@@ -461,20 +463,81 @@ def _argv_of(nodes):
     ]
 
 
-def _reads_this_checkout(node):
-    """Does this argument name the checkout the test is standing in?
+def _names_a_window(argv):
+    """Whether an argv carries ``--limit``, in either spelling argparse takes.
 
-    ``ROOT``, ``str(ROOT)`` and the literal path all resolve to it. A fixture
-    name (``repo``), a ``tmp_path`` or anything else does not: the tool cannot
-    fall back to that path on its own, so its history is a fixed thing the
-    case built rather than a window that slides as this repository grows."""
+    ``--limit=100000`` is one token and reads the same window as
+    ``--limit 100000``; matching only the bare flag would have read the first
+    as no window at all."""
+    return any(a == _LIMIT or a.startswith(_LIMIT + "=") for a in argv)
+
+
+def _path_text(node):
+    """The path an argument names, as text; ``None`` when it names none.
+
+    ``ROOT`` becomes this checkout's absolute path, and the wrappers this file
+    puts around it (``str(ROOT)``, ``Path(ROOT)``) are unwrapped. A string
+    constant keeps whatever it spells -- ``"."`` is relative, so reading it
+    needs the call's ``cwd`` (see :func:`_resolves_here`). Anything else
+    returns ``None``: a fixture name such as ``repo`` or ``tmp_path`` has no
+    location the source states."""
     if isinstance(node, ast.Name):
-        return node.id == "ROOT"
+        return _HERE if node.id == "ROOT" else None
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value == _HERE
-    if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "str":
-        return bool(node.args) and _reads_this_checkout(node.args[0])
-    return False
+        return node.value
+    if (
+        isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) in ("str", "Path")
+        and node.args
+    ):
+        return _path_text(node.args[0])
+    return None
+
+
+def _resolves_here(text, base):
+    """Whether path ``text`` lies inside the checkout this file lives in.
+
+    A subdirectory counts: ``git -C <subdir>`` reads the repository that
+    contains it, so ``--repo src`` still walks this repository's log.
+
+    ``base`` is what a relative path is relative to. ``None`` means the base
+    could not be read from the source -- and then this answers ``False``
+    rather than guessing, because a relative path with no readable base is the
+    file's fixture convention (``cwd=repo``) and not a claim about this
+    checkout. An *absent* base never reaches here: :func:`_cwd_of` fills it."""
+    if text is None:
+        return False
+    path = Path(text)
+    if not path.is_absolute():
+        if base is None:
+            return False
+        path = Path(base) / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    here = Path(_HERE)
+    return resolved == here or here in resolved.parents
+
+
+def _within_this_checkout(node, base):
+    """Does this argument name a directory inside the checkout under test?"""
+    return _resolves_here(_path_text(node), base)
+
+
+def _cwd_of(call):
+    """The directory a ``subprocess`` call runs in.
+
+    No ``cwd`` keyword means this checkout: ``_run`` defaults it to ``ROOT``,
+    and a bare ``subprocess.run`` inherits the pytest process's directory.
+    That default is what makes ``_run("--repo", ".")`` read this repository
+    while looking like a relative path -- a hole s490-rev found. A ``cwd`` the
+    source cannot place (``cwd=repo``) comes back as ``None``, which leaves a
+    relative path exempt rather than misread."""
+    for kw in call.keywords:
+        if kw.arg == "cwd":
+            return _path_text(kw.value)
+    return _HERE
 
 
 def _names_the_script(node):
@@ -489,40 +552,84 @@ def _names_the_script(node):
     return any(isinstance(n, ast.Name) and n.id == "SCRIPT" for n in ast.walk(node))
 
 
-def _repo_verdict(nodes, in_process=False):
+def _repo_verdict(nodes, base=None, in_process=False):
     """Whether a call reads *this* repository's history.
 
-    Three ways to end up there: no ``--repo`` at all (the tool falls back to
-    ``ROOT``), ``--repo`` handed this checkout's own path, or an in-process
-    ``rs.history(ROOT)``. Only the first is an ``in`` test on the flag list --
-    the other two are why this is a function.
+    Three ways to end up there: no ``--repo`` at all (the tool's default is
+    ``"."``, resolved against the directory the call runs in), ``--repo``
+    handed a path inside this checkout, or an in-process ``rs.history(<repo>)``
+    / ``rs.surfaces(<repo>, ...)``. Only the first is an ``in`` test on the
+    flag list -- the other two are why this is a function.
+
+    ``base`` is the directory a relative path resolves against: the call's
+    ``cwd`` for a subprocess, ``None`` for an in-process call. See
+    :func:`_resolves_here` for what an unreadable base means.
 
     ``--help``/``-h`` is the one argv that cannot reach ``history()``:
     ``parse_args`` raises ``SystemExit`` on it before the tool reads anything.
     The claim is pinned by :func:`test_help_exits_before_the_tool_reads_history`
     rather than asserted here, so it cannot rot into a silent exemption."""
     if in_process:
-        return bool(nodes) and _reads_this_checkout(nodes[0])
+        return bool(nodes) and _within_this_checkout(nodes[0], base)
     argv = _argv_of(nodes)
     if "--help" in argv or "-h" in argv:
         return False
     if "--repo" not in argv:
-        return True
+        # The tool's own default: --repo "." against this call's directory.
+        return _resolves_here(".", base)
     at = argv.index("--repo")
     if at + 1 >= len(nodes):
         return True  # --repo with no value: argparse will refuse it, but do not exempt it
-    return _reads_this_checkout(nodes[at + 1])
+    return _within_this_checkout(nodes[at + 1], base)
+
+
+def _history_window(call):
+    """The window an in-process ``rs.history(...)`` call names, as argv.
+
+    ``limit`` reaches the function two ways -- the second positional argument
+    and the ``limit`` keyword -- and both are a window. Reading only argv
+    spellings made a correctly windowed call look like a bare one, so it failed
+    the guard for the right reason in the wrong direction (s490-rev, s648-rev
+    and s404-rev all reported this on claunch-o5il6)."""
+    if len(call.args) > 1:
+        return [_LIMIT]
+    if any(kw.arg == "limit" for kw in call.keywords):
+        return [_LIMIT]
+    return []
+
+
+def _surfaces_window(call):
+    """The window an in-process ``rs.surfaces(...)`` call names, as argv.
+
+    ``surfaces`` takes no ``limit``: when ``commits`` is given it reads the
+    history it was handed, and when it is not it calls ``history(repo)`` at
+    ``DEFAULT_LIMIT`` -- the sliding window itself. So the window is *present*
+    exactly when ``commits`` is passed with a value. The expression handed to
+    ``commits`` is an invocation in its own right and is collected separately,
+    so ``commits=rs.history(repo, limit=50)`` is checked twice and passes both
+    times."""
+    for kw in call.keywords:
+        if kw.arg != "commits":
+            continue
+        if isinstance(kw.value, ast.Constant) and kw.value.value is None:
+            return []  # commits=None is the tool's own default path
+        return [_LIMIT]
+    return []
 
 
 def _tool_invocations(source=None):
     """Every place a source invokes the tool, as ``(lineno, argv, reads_here)``.
 
-    Three shapes: the ``_run(...)`` helper (its definition prepends
+    Four shapes: the ``_run(...)`` helper (its definition prepends
     ``sys.executable, str(SCRIPT)``, so a call site's own arguments are the
     tool's argv), a bare ``subprocess.run([...])`` naming the script anywhere
-    in its argument list, and the in-process ``rs.history(<repo>)``. Parsed
-    from source rather than grepped so a call split across lines is still one
-    call."""
+    in its argument list, and the in-process ``rs.history(<repo>)`` and
+    ``rs.surfaces(<repo>, ...)``. Parsed from source rather than grepped so a
+    call split across lines is still one call.
+
+    ``argv`` is what the caller wrote, plus a synthesised ``--limit`` where the
+    in-process functions take their window another way. It is not a faithful
+    argv: it is the shape the guard's ``"--limit" in argv`` test reads."""
     tree = ast.parse(source if source is not None else _SELF.read_text(encoding="utf-8"))
     out = []
     for node in ast.walk(tree):
@@ -532,12 +639,22 @@ def _tool_invocations(source=None):
         name = getattr(func, "id", None) or getattr(func, "attr", None)
 
         if name == "_run":
-            out.append((node.lineno, _argv_of(node.args), _repo_verdict(node.args)))
+            out.append(
+                (node.lineno, _argv_of(node.args), _repo_verdict(node.args, _cwd_of(node)))
+            )
             continue
 
-        if name == "history" and getattr(getattr(func, "value", None), "id", None) == "rs":
-            out.append((node.lineno, [], _repo_verdict(node.args[:1], in_process=True)))
-            continue
+        if getattr(getattr(func, "value", None), "id", None) == "rs":
+            if name == "history":
+                out.append(
+                    (node.lineno, _history_window(node), _repo_verdict(node.args[:1], in_process=True))
+                )
+                continue
+            if name == "surfaces":
+                out.append(
+                    (node.lineno, _surfaces_window(node), _repo_verdict(node.args[:1], in_process=True))
+                )
+                continue
 
         if name != "run" or not node.args or not isinstance(node.args[0], ast.List):
             continue
@@ -550,7 +667,8 @@ def _tool_invocations(source=None):
             # The helper's own definition forwards ``*args``; its call sites
             # above are the invocations, and this body has no argv of its own.
             continue
-        out.append((node.lineno, _argv_of(tail), _repo_verdict(tail)))
+        base = _cwd_of(node)
+        out.append((node.lineno, _argv_of(tail), _repo_verdict(tail, base)))
     return out
 
 
@@ -586,7 +704,7 @@ def test_every_call_into_this_repository_names_its_window():
         if not reads_here:
             continue
         this_repository.append(lineno)
-        assert "--limit" in argv, (
+        assert _names_a_window(argv), (
             f"line {lineno}: this call reads this repository's history without "
             f"--limit, so it rides the sliding DEFAULT_LIMIT ({rs.DEFAULT_LIMIT}). "
             f"Pass a window that fits the assertion, as "
@@ -716,6 +834,144 @@ def test_e():
     assert by_line[9][1] is True, by_line[9]        # the literal path
     assert by_line[12][1] is False, by_line[12]     # another checkout is exempt
     assert by_line[15][1] is True, by_line[15]      # --repo with no value is not exempt
+
+
+def test_a_relative_repo_is_read_against_the_directory_the_call_runs_in():
+    """``--repo "."`` is this repository or a temporary one depending on ``cwd``.
+
+    The tool defaults ``--repo`` to ``"."`` and resolves it against the working
+    directory, and ``_run`` defaults ``cwd`` to ``ROOT``. So ``_run("--repo",
+    ".")`` reads *this* repository while looking like a relative path the guard
+    would exempt -- a hole s490-rev found on claunch-o5il6, and the mirror of
+    its opposite: ``_run(cwd=tmp_path)`` with no ``--repo`` reads the temporary
+    repository, so flagging it as this checkout's would be over-blocking. Both
+    directions are asserted here because only the pair pins the ``cwd`` axis."""
+    sample = """
+def _run(*args, cwd=None):
+    return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=str(cwd or ROOT))
+
+def test_a():
+    _run("--repo", ".")
+
+def test_b():
+    _run("--repo", ".", cwd=tmp_path)
+
+def test_c():
+    _run(cwd=tmp_path)
+
+def test_d():
+    _run("--repo", "src")
+
+def test_e():
+    _run("--limit", "100000")
+"""
+    by_line = {n: (a, r) for n, a, r in _tool_invocations(sample)}
+
+    dotted = by_line[6]
+    assert dotted[1] is True, dotted     # _run defaults cwd to ROOT, so "." is here
+    assert dotted[0] == ["--repo", "."], dotted
+
+    elsewhere = by_line[9]
+    assert elsewhere[1] is False, elsewhere      # "." against a temporary cwd
+
+    no_repo = by_line[12]
+    assert no_repo[1] is False, no_repo          # no --repo, but cwd is elsewhere
+
+    subdirectory = by_line[15]
+    assert subdirectory[1] is True, subdirectory  # git -C src reads the repo above it
+
+    windowed = by_line[18]
+    assert windowed[1] is True and _names_a_window(windowed[0]), windowed
+
+
+def test_a_window_counts_however_the_flag_is_spelled():
+    """``--limit=100000`` is one token and names the same window.
+
+    Matching only the bare flag would read it as no window and fail a call that
+    did everything right."""
+    assert _names_a_window(["--limit", "100000"])
+    assert _names_a_window(["--limit=100000"])
+    assert not _names_a_window(["--json"])
+    assert not _names_a_window(["--limits", "5"])
+    assert not _names_a_window([])
+
+
+def test_an_in_process_call_may_name_its_window_as_an_argument():
+    """``rs.history`` takes ``limit`` as a positional or keyword argument.
+
+    Both are a window, but neither appears in the ``argv`` the guard reads, so
+    a call that named its window correctly was rejected as if it had named none
+    -- the over-blocking direction. s490-rev, s648-rev and s404-rev all reported
+    it on claunch-o5il6, and it is the one case where this guard was wrong
+    about a *correct* call."""
+    sample = """
+def test_a():
+    rs.history(ROOT, limit=50)
+
+def test_b():
+    rs.history(ROOT, 50)
+
+def test_c():
+    rs.history(ROOT)
+
+def test_d():
+    rs.history(ROOT, max_files=100)
+"""
+    by_line = {n: (a, r) for n, a, r in _tool_invocations(sample)}
+
+    keyword = by_line[3]
+    assert keyword[1] is True and _names_a_window(keyword[0]), keyword
+    positional = by_line[6]
+    assert positional[1] is True and _names_a_window(positional[0]), positional
+    bare = by_line[9]
+    assert bare[1] is True and not _names_a_window(bare[0]), bare
+    # max_files is not limit: narrowing which commits count is not naming a
+    # window to read, so this stays a call that rides DEFAULT_LIMIT.
+    other_keyword = by_line[12]
+    assert other_keyword[1] is True and not _names_a_window(other_keyword[0]), other_keyword
+
+
+def test_surfaces_reads_this_repositorys_history_unless_it_is_handed_one():
+    """``rs.surfaces`` is a second way into ``history`` and was not collected.
+
+    With no ``commits`` it calls ``history(repo)`` at ``DEFAULT_LIMIT`` -- the
+    sliding window this guard exists for -- so a bare ``rs.surfaces(ROOT, [...])``
+    is exactly the call that must fail. ``commits=`` is what names a window
+    instead, and the expression handed to it is an invocation in its own right,
+    so ``commits=rs.history(ROOT, limit=50)`` is collected twice and passes
+    both times. s490-rev found this on claunch-o5il6 and asked for either a
+    guard or an explicit statement that the shape is out of scope."""
+    sample = """
+def test_a():
+    rs.surfaces(ROOT, ["a.py"])
+
+def test_b():
+    rs.surfaces(ROOT, ["a.py"], commits=None)
+
+def test_c():
+    rs.surfaces(ROOT, ["a.py"], commits=rs.history(ROOT, limit=50))
+
+def test_d():
+    rs.surfaces(repo, ["a.py"])
+"""
+    calls = _tool_invocations(sample)
+    by_line = {n: (a, r) for n, a, r in calls}
+
+    bare = by_line[3]
+    assert bare[1] is True and not _names_a_window(bare[0]), bare
+
+    # commits=None is the tool's own default path: it falls through to history().
+    explicit_none = by_line[6]
+    assert explicit_none[1] is True and not _names_a_window(explicit_none[0]), explicit_none
+
+    windowed = by_line[9]
+    assert windowed[1] is True and _names_a_window(windowed[0]), windowed
+    # The window handed in is its own invocation, and it carries its own window.
+    inner = [c for c in calls if c[0] == 9]
+    assert len(inner) == 2, inner
+
+    elsewhere = by_line[12]
+    assert elsewhere[1] is False, elsewhere
 
 
 def test_the_review_step_asks_for_the_sentence_and_names_the_tool():
