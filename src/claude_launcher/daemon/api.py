@@ -11120,6 +11120,7 @@ async def _onboard_and_launch(
                 parent=parent,
                 mesh_mgr=_mesh_mgr(request),
                 project=session.sdef.project or "",
+                child=name,
             )
             onboard.inherit_workflow(
                 body,
@@ -13459,8 +13460,8 @@ async def stage_quick_fork(
         # The origin's mesh, read here rather than by inherit_mesh downstream
         # when it can be named outright: inherit_mesh reads the PARENT's, and
         # a sibling's parent is not the origin. With none or several the child
-        # keeps the downstream reading (it opens one, or refuses naming them);
-        # a sibling has no such parent to fall back on.
+        # keeps the downstream reading (it opens one, or takes the one the
+        # parent joined first); a sibling has no such parent to fall back on.
         if len(origin_meshes) == 1:
             mesh = origin_meshes[0]["mesh"]
         elif sibling:

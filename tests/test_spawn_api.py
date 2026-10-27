@@ -311,9 +311,34 @@ def test_a_parent_in_no_mesh_gets_one_opened_for_the_pair(home, tmp_path):
     asyncio.run(run())
 
 
-def test_a_parent_in_several_meshes_must_say_which(home, tmp_path):
-    """Guessing is the one mistake that cannot be walked back: a wrong guess
-    does not fail, it broadcasts."""
+def _increasing_joined_at(monkeypatch):
+    """Stamp each join a second later than the one before it.
+
+    ``joined_at`` has seconds resolution, so two joins in one test would tie
+    and the answer would fall to the mesh-name tie-break instead of the rule
+    under test."""
+    import itertools
+    from datetime import datetime, timedelta, timezone
+    from claude_launcher.daemon import mesh as mesh_mod
+
+    ticks = itertools.count()
+    start = datetime(2026, 10, 27, 10, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        mesh_mod, "utcnow",
+        lambda: (start + timedelta(seconds=next(ticks))).isoformat())
+
+
+def test_a_parent_in_several_meshes_gives_the_child_its_main_mesh(home, tmp_path, monkeypatch):
+    """The first mesh the parent joined is its main one, and the child takes
+    it (claunch-k3acp). This used to be a 400: refusing made every spawn from
+    a session that had opened a second mesh of its own fail, and the cflow2
+    delegation above it fall back to a sub-agent (claunch-ull6m). The rule is
+    read off ``joined_at`` — recorded at the member's creation, so it is a
+    fact to read rather than a guess to make.
+
+    The real clock has seconds resolution, so the two joins below are stamped
+    apart on purpose: otherwise the name decides, and this test would be
+    about the tie-break."""
     _register_py_harness()
 
     async def run():
@@ -324,20 +349,20 @@ def test_a_parent_in_several_meshes_must_say_which(home, tmp_path):
             mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
             for name in ("alpha", "beta"):
                 mm.create(name)
-                await mm.join(name, "lead", handle="lead")
+            _increasing_joined_at(monkeypatch)
+            await mm.join("alpha", "lead", handle="lead")
+            await mm.join("beta", "lead", handle="lead")
 
             resp = await client.post(
                 "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
             )
-            assert resp.status == 400
-            error = (await resp.json())["error"]
-            assert "alpha, beta" in error
-            assert mgr.children("lead") == []  # nothing half-made
+            assert resp.status == 201, await resp.json()
+            assert (await resp.json())["mesh"]["mesh"] == "alpha"
 
-            # naming one settles it
+            # naming one still settles it outright
             resp = await client.post(
                 "/api/sessions/lead/children",
-                json={"name": "w1", "mesh": "beta"},
+                json={"name": "w2", "mesh": "beta"},
                 headers=BEARER,
             )
             assert resp.status == 201

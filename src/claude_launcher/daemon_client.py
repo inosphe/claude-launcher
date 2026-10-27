@@ -63,7 +63,36 @@ OBSERVATION_BUDGET = 2 * (HEALTH_TIMEOUT + PROBE_GAP)
 
 
 class DaemonClientError(Exception):
-    """Raised for daemon-unreachable and API-error conditions."""
+    """Raised for daemon-unreachable and API-error conditions.
+
+    ``status`` is the HTTP status when the daemon answered with one, and
+    ``None`` when the request never got an answer. Callers that decide
+    whether to try again read it through :func:`permanent`: a refusal the
+    daemon made about the request itself does not change on a retry, while
+    an unreachable daemon, a timeout or a 5xx can.
+    """
+
+    def __init__(self, message: str = "", *, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+#: Statuses that mean "ask again later" even though they are 4xx: the daemon
+#: answered, but about its own present state rather than about the request.
+RETRYABLE_4XX = frozenset({408, 429})
+
+
+def permanent(exc: BaseException) -> bool:
+    """Whether retrying ``exc`` unchanged cannot give a different answer.
+
+    True only for a 4xx that names a problem with the request (a bad field, a
+    refused policy, a taken name). Everything else — no answer, a timeout, a
+    5xx, the two 4xx statuses above — is transient by this answer, because the
+    cost of one extra try is far below the cost of giving up on a child the
+    daemon would have created on the next tick.
+    """
+    status = getattr(exc, "status", None)
+    return isinstance(status, int) and 400 <= status < 500 and status not in RETRYABLE_4XX
 
 
 class DaemonSpooled(DaemonClientError):
@@ -131,7 +160,8 @@ class DaemonClient:
                 payload = resp.read()
         except urllib.error.HTTPError as exc:
             detail = _error_detail(exc)
-            raise DaemonClientError(f"{method} {path}: {detail}") from exc
+            raise DaemonClientError(f"{method} {path}: {detail}",
+                                    status=exc.code) from exc
         except (urllib.error.URLError, OSError) as exc:
             reason = f"cannot reach daemon at {self.base_url}: {exc}"
             if request_id and _in_session():

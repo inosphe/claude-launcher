@@ -227,6 +227,9 @@ def main(argv=None):
     p.add_argument("--reason", required=True)
     p = sub.add_parser("requeue", help="give a stuck or cancelled job fresh attempts")
     p.add_argument("--job", required=True)
+    p = sub.add_parser("retry-watcher",
+                       help="ask again for the watching session a final refusal denied")
+    p.add_argument("--job", required=True)
     p = sub.add_parser("remeasure", help="measure the active pause job's SHA again (leader action, once)")
     p.add_argument("--repo", type=Path, required=True)
     p.add_argument("--job", required=True)
@@ -274,6 +277,9 @@ def main(argv=None):
         elif args.action == "requeue":
             queue.requeue(args.job)
             result = queue.get(args.job)
+        elif args.action == "retry-watcher":
+            queue.retry_watcher(args.job)
+            result = {"job": args.job, "generation": queue.get(args.job)["generation"]}
         elif args.action == "unbatch":
             result = queue.unbatch(args.job)
         elif args.action == "job-state":
