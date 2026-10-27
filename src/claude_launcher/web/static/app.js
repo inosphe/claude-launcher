@@ -58270,6 +58270,28 @@ function noticeAgesPaint() {
   }
 }
 
+/* The countdown of a waiting request in the panel (claunch-n39r2). It used
+   to move only as a side effect of the panel being rebuilt, which is part of
+   why the panel was rebuilt on every poll. A rebuild now waits for the state
+   to change, so the page's one-second tick carries these the same way it
+   carries the arrival ages above: one text write per row, no nodes. A row
+   left behind by a rebuild reads isConnected false and leaves the tick. */
+const noticeClocks = new Set();    // {node, prefix, deadline}
+function noticeClockLine(prefix, deadlineIso) {
+  const line = el("div", "notice-sub gate-clock");
+  line.textContent = `${prefix}${gateCountdown(deadlineIso)}`;
+  noticeClocks.add({ node: line, prefix, deadline: deadlineIso });
+  return line;
+}
+
+function noticeClocksPaint() {
+  for (const rec of [...noticeClocks]) {
+    if (rec.node.isConnected === false) { noticeClocks.delete(rec); continue; }
+    const text = `${rec.prefix}${gateCountdown(rec.deadline)}`;
+    if (rec.node.textContent !== text) rec.node.textContent = text;
+  }
+}
+
 function notify(title, sub, opts) {
   const o = opts || {};
   const host = $("notices");
@@ -59143,6 +59165,9 @@ function noticePanelToggle(force) {
   if (strip) strip.classList.toggle("panel-open", open);
   if (open) gateShownInPanel.clear();
   noticeHideAll(open);
+  // Nothing rebuilds the body while the panel is hidden, so what it holds on
+  // the way back may be from before the close: opening always draws.
+  noticePanelPainted = null;
   if (open) noticePanelPaint();
   noticeBellPaint();
   // The panel is a column of the layout (claunch-w8q00): opening or closing
@@ -59164,6 +59189,12 @@ const gateShownInPanel = new Set();
    while the panel was open are hidden as well, since their cards were drawn
    into the hidden strip; a card put back with "Show card" stays. */
 function noticeHideAll(opening) {
+  // One batch: this hides a request per call and each call used to paint the
+  // panel (claunch-n39r2).
+  return noticePanelBatch(() => hideAllCards(opening));
+}
+
+function hideAllCards(opening) {
   for (const type of Object.keys(gatePending)) {
     let hid = false;
     for (const rec of gatePending[type]) {
@@ -59252,10 +59283,7 @@ function noticeRowRestart(row, head, actions, rec) {
     row.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason.trim()}`));
   }
   row.appendChild(el("div", "notice-sub gate-mode", restartModeText(rec)));
-  row.appendChild(el(
-    "div", "notice-sub gate-clock",
-    `auto-approves in ${gateCountdown(rec.deadline)}`
-  ));
+  row.appendChild(noticeClockLine("auto-approves in ", rec.deadline));
   // A stale refusal (claunch-xnnct.3) replaces Approve with its two answers.
   const stale = restartGateStale && restartGateStale.rid === rid
     ? restartGateStale
@@ -59322,10 +59350,7 @@ function noticeRowGoto(row, head, actions, rec) {
     "div", "notice-sub",
     `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
   ));
-  row.appendChild(el(
-    "div", "notice-sub gate-clock",
-    `auto-approves in ${gateCountdown(rec.deadline)}`
-  ));
+  row.appendChild(noticeClockLine("auto-approves in ", rec.deadline));
   actions.appendChild(noticePanelButton(
     "Approve", "approve", `move this run to '${rec.step}' now`,
     async (btn) => {
@@ -59456,10 +59481,7 @@ function noticeRowReposync(row, head, actions, rec) {
     (rec.session ? `${rec.session} asks: ` : "") +
       (plan.summary || plan.action || "?")
   ));
-  row.appendChild(el(
-    "div", "notice-sub gate-clock",
-    `expires (as a refusal) in ${gateCountdown(rec.deadline)}`
-  ));
+  row.appendChild(noticeClockLine("expires (as a refusal) in ", rec.deadline));
   actions.appendChild(noticePanelButton(
     "Approve", "approve", "the asking session pushes exactly this plan",
     async (btn) => {
@@ -59631,13 +59653,68 @@ function noticeSourcesApplied(only) {
   noticePanelPaint();
 }
 
-/* Rebuilt from the state above on every gate poll while the panel is open,
-   so the countdowns move and a request settled elsewhere drops out of the
-   waiting list on its own. */
+/* One rebuild per change of state, not one per write to it (claunch-n39r2).
+
+   The panel used to be rebuilt on every call of noticePanelPaint, and the
+   gate feed called it once per request whose history row it opened: a poll
+   that saw N new requests rebuilt the whole panel N times, and the two feeds
+   of one poll (refreshCflow and refreshCflow2Rail) rebuilt it twice more, on
+   an answer that had not moved. On the trace behind the issue
+   (Trace-20261027T230354, 486 s, ~1,100 sessions) that path was 34.7% of the
+   sampled main thread and both multi-second stalls — 7,804 ms and 3,958 ms —
+   were one of those loops.
+
+   `noticePanelBatch` collapses the writes inside one feed into a single
+   rebuild, flushed when the outermost batch ends so a caller still sees the
+   panel painted when it returns; `noticePanelState` is what the rebuild
+   reads, so a poll whose answer is already on screen rebuilds nothing. */
+let noticePanelBatchDepth = 0;
+let noticePanelPaintWanted = false;
+
+function noticePanelBatch(fn) {
+  noticePanelBatchDepth += 1;
+  try {
+    return fn();
+  } finally {
+    noticePanelBatchDepth -= 1;
+    if (!noticePanelBatchDepth && noticePanelPaintWanted) {
+      noticePanelPaintWanted = false;
+      noticePanelPaint();
+    }
+  }
+}
+
+/* What the open panel draws, as one string: the waiting requests of every
+   gate kind, the history rows, and the sets and flags that change how a row
+   is drawn. Everything noticePanelPaint reads is here except the clock —
+   ages and countdowns move with the second, not with the state, and
+   noticeAgesPaint/noticeClocksPaint carry them (see above). */
+let noticePanelPainted = null;     // the signature the open panel was built for
+
+function noticePanelState() {
+  return JSON.stringify([
+    gatePending,
+    noticeHistory,
+    [...gateHiddenIds],
+    [...gateReadIds],
+    [...noticeSourcesHidden],
+    noticeFilter,
+    runGateNudgeNotes,
+    restartGateStale,
+  ]);
+}
+
+/* Rebuilt from the state above whenever that state changes while the panel
+   is open, so a request settled elsewhere drops out of the waiting list on
+   its own. */
 function noticePanelPaint() {
+  if (noticePanelBatchDepth) { noticePanelPaintWanted = true; return; }
   if (!noticePanelOpen()) return;
   const body = $("notice-panel-body");
   if (!body) return;
+  const state = noticePanelState();
+  if (state === noticePanelPainted) return;
+  noticePanelPainted = state;
   body.innerHTML = "";
   // Read waiting requests are listed too, apart from the ones not yet seen:
   // their rows keep the buttons and the countdown, and Mark unread puts them
@@ -61327,7 +61404,15 @@ function runGateShortfall(rec) {
   return "";
 }
 
+/* One feed is one batch: it opens a history row per request it has not seen,
+   and each open used to paint the whole panel, so a poll that saw N new
+   requests rebuilt it N times (claunch-n39r2). applyRunGate is the work; the
+   batch around it is what makes the panel be built once. */
 function runGateSync(pending, settled) {
+  return noticePanelBatch(() => applyRunGate(pending, settled));
+}
+
+function applyRunGate(pending, settled) {
   runGateLast = { pending: pending || [], settled: settled || [] };
   const host = $("notices");
   if (!host) return;
@@ -62419,10 +62504,11 @@ document.addEventListener("visibilitychange", () => {
 setInterval(noticeSyncTick, NOTICE_SYNC_MS);
 noticeSyncTick();
 // The age on every card and panel row counts up between repaints
-// (claunch-egqrq). It fetches nothing — it is a second's worth of
-// subtraction over the few nodes currently on screen — and the cards that
-// need it are exactly the sticky ones that can sit for an hour.
-setInterval(noticeAgesPaint, 1000);
+// (claunch-egqrq), and so do the panel's countdowns (claunch-n39r2). They
+// fetch nothing — a second's worth of subtraction over the few nodes
+// currently on screen — and the rows that need it are exactly the sticky
+// ones that can sit for an hour.
+setInterval(() => { noticeAgesPaint(); noticeClocksPaint(); }, 1000);
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and

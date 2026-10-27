@@ -246,6 +246,7 @@ function build(opts) {
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " noticeAgesPaint," +
+    " noticeClocksPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -689,7 +690,14 @@ function gotoRec(rec) {
 
     w.clock.at += 61000;
     await w.api.refreshRestartGate();
-    check("the panel's countdown moves with the poll", /auto-approves in 3:59/.test(w.panel()),
+    // The panel is no longer rebuilt for the clock alone (claunch-n39r2):
+    // the same answer leaves the body where it is, and the one-second tick
+    // carries the countdown.
+    check("a poll that returned the same answer leaves the panel alone",
+          /auto-approves in 5:00/.test(w.panel()), w.panel());
+    w.api.noticeClocksPaint();
+    check("the panel's countdown moves on the one-second tick",
+          /auto-approves in 3:59/.test(w.panel()),
           w.panel());
 
     w.press(w.nodes["notice-panel-body"], "Show card").click();
