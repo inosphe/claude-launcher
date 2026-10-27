@@ -7356,7 +7356,8 @@ let cflow2RailSig = null;
    `now` (claunch-l9znm.1). A gate's `opened_at` is a daemon stamp; the age
    the card shows is measured against this page's clock, so the difference is
    subtracted first. Zero while the daemon does not send it, which is what
-   an older daemon means: trust the stamp as it is. */
+   an older daemon means: trust the stamp as it is. `railSkewOf` keeps the
+   smallest reading seen, so latency does not jitter every age. */
 let railClockSkew = 0;
 
 // Ownership is independent of whether a simulation is currently running.
@@ -7719,7 +7720,7 @@ async function refreshCflow2Rail() {
   const rows = (data && data.rows) || {};
   const sig = JSON.stringify(rows);
   cflow2RailCache = rows;
-  railClockSkew = railSkewOf(data && data.now);
+  railClockSkew = railSkewOf(data && data.now, railClockSkew);
   // every person gate joins the notification channel, every poll
   // (claunch-whm4e.1; urgent asks only, before: claunch-x76l8.1)
   if (typeof runGateFeed === "function") runGateFeed();
@@ -23430,10 +23431,21 @@ function railOpenedSecs(at) {
    measured on this page's, so the difference is subtracted before counting:
    two machines five minutes apart would otherwise show a card opening in the
    future, or one that has waited five minutes longer than it has
-   (claunch-l9znm.1). */
-function railSkewOf(now) {
+   (claunch-l9znm.1).
+
+   The reading is noisy — `now` is stamped before the answer travels, so each
+   poll's difference is the true skew plus that poll's latency. Taking it
+   fresh every poll would move every card's age by that jitter each time, so
+   the smallest reading wins: latency can only ever push a reading up, and
+   the minimum converges on the true difference. `known` is the reading so
+   far (null before the first), and a NaN or a missing `now` leaves it as it
+   was. */
+function railSkewOf(now, known) {
   const secs = Number(now);
-  return Number.isFinite(secs) && secs > 0 ? Date.now() / 1000 - secs : 0;
+  if (!Number.isFinite(secs) || secs <= 0) return known || 0;
+  const reading = Date.now() / 1000 - secs;
+  if (!Number.isFinite(known)) return reading;
+  return Math.min(known, reading);
 }
 
 /* The two polls each hand the channel the whole set: one feed, so neither

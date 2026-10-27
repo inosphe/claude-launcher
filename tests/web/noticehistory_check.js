@@ -215,7 +215,11 @@ function build(opts) {
   // clocks agree — and a test that cares sets it.
   const skew = { value: Number(o.railSkew) || 0 };
   const code = "\nlet railClockSkew = " + skew.value + ";\n" +
-    slice("/* notices — the page's own voice",
+    // railOpenedSecs / railSkewOf feed the rows' `opened` (claunch-l9znm.1);
+    // they sit with the rail cache, outside the notices slice below.
+    "\n" + slice("/* A gate's `opened_at` (epoch seconds, the daemon's clock) as the history",
+                  "/* The two polls each hand the channel the whole set") +
+    "\n" + slice("/* notices — the page's own voice",
           "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);") +
     // commitRef / commitText (claunch-tb145): the gate's tips line uses them.
     "\n" + slice("/* A commit hash drawn as a link", "function wsWorktreeList(") +
@@ -252,6 +256,7 @@ function build(opts) {
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
+    " railSkewOf," +
     " noticeClocksPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -2073,6 +2078,69 @@ function gotoRec(rec) {
     check("a settled row keeps the stamp it opened with",
           !!settledRow && settledRow.opened === hourAgoSecs && settledRow.status !== "pending",
           settledRow && { opened: settledRow.opened, status: settledRow.status });
+  }
+
+  /* --- the waiting list re-orders when a stamp arrives late ------------
+     (claunch-l9znm.1)
+
+     A row written before the answer carried `opened` sits in the panel by
+     its arrival. When a later poll brings the stamp, the row's place in
+     "Waiting on you" moves to where it now belongs — the list is ordered by
+     the same stamp it shows, so a card that has waited an hour must not stay
+     below one that arrived a minute ago just because this browser saw it
+     first. That move is the intent, and this pins it so it is not later read
+     as a glitch. */
+  {
+    const w = build();
+    w.api.noticePanelToggle(true);
+    const rec = (id, opened) => ({
+      id: `ask-${id}`, session: `s-${id}`, cwd: `/w/${id}`, scope: `s-${id}`,
+      workflow: "improv-worker-v2", version: 2, kind: "ask", label: "landing-review",
+      prompt: "land it?", presses: [], opened });
+    // "new" arrives and is seen first; "old" has actually waited longer but
+    // its answer carries no stamp yet.
+    w.api.runGateSync([rec("new", undefined)], []);
+    w.clock.at += 1000;
+    w.api.runGateSync([rec("new", undefined), rec("old", undefined)], []);
+    const order = () => w.panelRows().filter((r) => r.classList.contains("pending"))
+      .map((r) => (r.text().match(/s-(new|old)/) || [])[1]);
+    check("without stamps the list is ordered by arrival, newest first",
+          order().join(",") === "new,old", order());
+
+    w.clock.at += 1000;
+    w.api.runGateSync([rec("new", (BASE - 7200e3) / 1000), rec("old", (BASE - 60e3) / 1000)], []);
+    check("a stamp that arrives late moves its row to where it now belongs",
+          order().join(",") === "new,old", order());
+  }
+  /* --- the clock correction does not jitter every age ---------------
+     (claunch-l9znm.1)
+
+     A gate's `opened_at` is the daemon's clock and the age is measured on
+     this page's, so the difference is subtracted. Each answer's `now` is
+     stamped before it travels, so a fresh reading is the true difference
+     plus that poll's latency — and latency only ever pushes a reading up.
+     Taking the smallest converges on the true difference; taking each one
+     fresh would move every card's age by the jitter, poll after poll. */
+  {
+    const w = build();
+    // BASE is this page's clock in ms; railSkewOf speaks epoch seconds.
+    const now = () => w.clock.at / 1000;
+    // The daemon stamped `now` before the answer travelled, so the reading is
+    // the true difference plus that poll's latency: latency only adds.
+    const a = w.api.railSkewOf(now() - 5.0, null);    // page 5 s ahead of the daemon
+    check("the first reading is taken as it is", Math.abs(a - 5) < 1e-6, a);
+    // An answer that sat 300 ms longer in flight reads 300 ms higher; the
+    // smaller of the two is kept.
+    const b = w.api.railSkewOf(now() - 5.3, a);
+    check("a slower answer does not move the correction", b === a, b);
+    // A faster answer reads lower, and that is the true difference.
+    const c = w.api.railSkewOf(now() - 5.0 + 0.2, a);
+    check("a faster answer tightens it", Math.abs(c - 4.8) < 1e-6, c);
+    // No `now` at all leaves it where it was.
+    check("an answer without a clock leaves it as it was",
+          w.api.railSkewOf(undefined, c) === c, w.api.railSkewOf(undefined, c));
+    check("and so does one with no clock this page can use",
+          w.api.railSkewOf(0, c) === c, w.api.railSkewOf(0, c));
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
