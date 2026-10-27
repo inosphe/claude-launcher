@@ -209,12 +209,16 @@ function build(opts) {
   const storage = o.storage === undefined ? memoryStorage() : o.storage;
   const loc = { hash: "" };
   const layouts = {};   // session -> split layout, as setSessLayout left it
-  // This page's clock minus the daemon's, as refreshCflow2Rail leaves it
-  // (claunch-l9znm.1). The rail poll is outside the slice below, so the
-  // notices code gets it as a stand-in; the ordinary value is 0 — the two
-  // clocks agree — and a test that cares sets it.
-  const skew = { value: Number(o.railSkew) || 0 };
-  const code = "\nlet railClockSkew = " + skew.value + ";\n" +
+  // This page's clock minus the daemon's (claunch-l9znm.1) is declared with
+  // the rail cache, outside the notices slice below, so its **own**
+  // declaration is sliced in here: its initial value is part of what is
+  // being checked — `0` is a reading the minimum can never rise above, so a
+  // page whose clock runs ahead of its daemon's would keep it and age every
+  // card by the whole difference, while `null` means "no reading yet".
+  const skew = { value: o.railSkew };
+  const code = "\n" +
+    slice("/* This page's clock minus the daemon's, in seconds",
+          "// Ownership is independent of whether") +
     // railOpenedSecs / railSkewOf feed the rows' `opened` (claunch-l9znm.1);
     // they sit with the rail cache, outside the notices slice below.
     "\n" + slice("/* A gate's `opened_at` (epoch seconds, the daemon's clock) as the history",
@@ -2185,6 +2189,33 @@ function gotoRec(rec) {
     const d = answer(30, w.api.railSkew);
     check("the first answer after it is taken as it is",
           Math.abs(d - 30) < 1e-6, d);
+  }
+  /* --- a page that has not read the clock yet does not start at zero -----
+     (claunch-l9znm.1, review round 3)
+
+     `0` is not a neutral starting value: it is a reading, and it is the
+     smallest one possible. A page whose clock runs ahead of its daemon's
+     reads a positive difference, so a 0 minimum can never be replaced and
+     every card is aged by the whole difference. The initial value has to be
+     "no reading yet" (`null`), which `railSkewOf` takes the first answer's
+     value for and `openedOnThisClock` reads as no correction. */
+  {
+    const w = build();
+    const now = () => w.clock.at / 1000;
+    check("a page that has not polled yet has no correction",
+          w.api.railSkew === null, w.api.railSkew);
+    check("and it reads a stamp raw until one arrives",
+          Math.abs(w.api.openedOnThisClock(1000) - 1000e3) < 1e-6,
+          w.api.openedOnThisClock(1000));
+    // The page is 5 s ahead of the daemon: the reading is +5, not 0.
+    const a = w.api.railSkewOf(now() - 5.0, w.api.railSkew);
+    check("the first answer is taken as it is, in either direction",
+          Math.abs(a - 5) < 1e-6, a);
+    // An answer with no `now` (an older daemon, an error body) must not put
+    // a 0 back where `null` was.
+    check("an answer with no clock leaves `no reading yet` as it is",
+          w.api.railSkewOf(undefined, null) === null,
+          w.api.railSkewOf(undefined, null));
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }

@@ -7355,10 +7355,15 @@ let cflow2RailSig = null;
 /* This page's clock minus the daemon's, in seconds, from the rail's own
    `now` (claunch-l9znm.1). A gate's `opened_at` is a daemon stamp; the age
    the card shows is measured against this page's clock, so the difference is
-   subtracted first. Zero while the daemon does not send it, which is what
-   an older daemon means: trust the stamp as it is. `railSkewOf` keeps the
-   smallest reading seen, so latency does not jitter every age. */
-let railClockSkew = 0;
+   subtracted first. `railSkewOf` keeps the smallest reading seen, so latency
+   does not jitter every age.
+
+   `null` means "no reading yet", never 0: a 0 here would enter `Math.min` as
+   a reading of zero, and a page whose clock runs up to 30 s ahead of the
+   daemon's would keep it forever — every card aged by the full difference.
+   The page reads it as no correction until the first answer lands, which is
+   what an older daemon without `now` means anyway. */
+let railClockSkew = null;
 
 // Ownership is independent of whether a simulation is currently running.
 let sessionSimCache = [];
@@ -23445,17 +23450,23 @@ function railOpenedSecs(at) {
    an NTP correction, or the machine waking from sleep — and a step up would
    leave every card's age off by the step for as long as the page lives. A
    reading that exceeds the current minimum by more than `RAIL_SKEW_JUMP` is
-   therefore taken as the new value: latency never reaches that far, so the
-   gap is a step, and following it is cheaper than being wrong by it. The
-   minimum is also dropped when the page reconnects to its daemon
-   (`noteRailReconnect`), the other moment every reading may have moved. */
+   therefore taken as the new value: that gap is a step, and following it is
+   cheaper than being wrong by it. The minimum is also dropped when the page
+   reconnects to its daemon (`noteRailReconnect`), the other moment every
+   reading may have moved. */
 const RAIL_SKEW_JUMP = 30;   // seconds; a gap this large is a clock step
 function railSkewOf(now, known) {
   const secs = Number(now);
-  if (!Number.isFinite(secs) || secs <= 0) return known || 0;
+  // No clock this page can use leaves the reading alone — including `null`,
+  // which must stay `null`: turning it into 0 would hand the minimum a
+  // reading of zero that it could never rise above.
+  if (!Number.isFinite(secs) || secs <= 0) return known;
   const reading = Date.now() / 1000 - secs;
   if (!Number.isFinite(known)) return reading;
-  // A reading this far above the minimum is a clock step, not latency.
+  // A reading this far above the minimum is a clock step, not latency. A
+  // response that took that long (a tab throttled in the background) is
+  // followed too, and the next ordinary answer's minimum puts it back: the
+  // cost is one poll's worth of ages being wrong.
   if (reading - known > RAIL_SKEW_JUMP) return reading;
   return Math.min(known, reading);
 }
@@ -62839,7 +62850,9 @@ async function pollOnce() {
     // The daemon may be a different process than the one the rail's clock was
     // measured against, and the time this took is time either clock could have
     // been stepped in, so the correction is re-read by `boot()` below rather
-    // than carried across (claunch-l9znm.1).
+    // than carried across (claunch-l9znm.1). The `typeof` guard is for the
+    // harnesses that slice pollOnce() without the rail helpers; it is not a
+    // runtime branch this page ever takes.
     if (typeof noteRailReconnect === "function") noteRailReconnect();
     await boot();     // re-read everything this daemon publishes, from scratch
     reconnectNow();   // and give the attached terminal its socket back
