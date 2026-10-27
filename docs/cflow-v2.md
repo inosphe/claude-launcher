@@ -341,6 +341,16 @@ ask:
   `urgent_asks`(열림·응답됨, 결정)와 `answers[]`의 `urgent`·`ask`이며,
   `flow_status`의 `asks` 항목도 `urgent`를 싣는다. 끄면 지금까지와 같다.
   예: `improv-worker-v2`의 coding-approval.
+- 게이트가 열린 시각(claunch-l9znm.1): `/api/cflow2/rail`의 `answers[]` 항목마다
+  `opened_at`(epoch 초)이 실린다 — 런이 그 요청으로 사람을 기다리기 시작한 시각이다.
+  ask는 `asks` 기록의 `opened`(열 때 `utcnow()`)에서, `choose`는 인스턴스의
+  `entered_at`에서, move는 요청의 `at`에서, 루프·방문 한도와 halt·acceptance는
+  그 hold를 만드는 자리에서 온다. 대시보드 알림 카드의 `*s ago`가 이 값으로 계산된다
+  — 「이 브라우저가 처음 본 시각」이 아니라 「요청이 기다린 시간」이다. 시각 출처가
+  없는 종류는 필드를 비우고, 화면은 그때 지금까지대로 도착 시각을 쓴다. 응답의
+  `now`(데몬의 epoch 초)는 두 시계의 차이를 보정하는 값이다 — `opened_at`은 데몬
+  시계이고 나이는 페이지 시계로 재므로, 페이지가 차이를 빼고 센다. `flow_status`의
+  `asks`·`choices`·`loop_limits`·`visit_limits` 항목도 같은 `opened_at`을 싣는다.
 - 런의 메시(`state.mesh`, claunch-5itbf): 질문은 이 메시의 명단으로 라우팅된다.
   시작할 때 고정한다 — 데몬이 만드는 세션의 런은 그 세션이 가입한 메시, MCP
   `flow_start`(`mesh` 인자)와 CLI `start`(`--mesh`)는 인자가 없으면 드라이버가

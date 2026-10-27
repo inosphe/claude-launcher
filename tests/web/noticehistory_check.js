@@ -209,8 +209,14 @@ function build(opts) {
   const storage = o.storage === undefined ? memoryStorage() : o.storage;
   const loc = { hash: "" };
   const layouts = {};   // session -> split layout, as setSessLayout left it
-  const code = slice("/* notices — the page's own voice",
-                     "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);") +
+  // This page's clock minus the daemon's, as refreshCflow2Rail leaves it
+  // (claunch-l9znm.1). The rail poll is outside the slice below, so the
+  // notices code gets it as a stand-in; the ordinary value is 0 — the two
+  // clocks agree — and a test that cares sets it.
+  const skew = { value: Number(o.railSkew) || 0 };
+  const code = "\nlet railClockSkew = " + skew.value + ";\n" +
+    slice("/* notices — the page's own voice",
+          "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);") +
     // commitRef / commitText (claunch-tb145): the gate's tips line uses them.
     "\n" + slice("/* A commit hash drawn as a link", "function wsWorktreeList(") +
     // The page-wide Escape and `storage` listeners of the panel
@@ -245,7 +251,7 @@ function build(opts) {
     " killReapedNotify," +
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
-    " noticeAgesPaint," +
+    " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
     " noticeClocksPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -1669,8 +1675,11 @@ function gotoRec(rec) {
     w.api.gateHistoryOpen("spawn", "s-new", "spawn new", "", {});
     w.api.noticePanelPaint();
     const rows = w.panelRows().filter((r) => r.classList.contains("pending"));
-    check("the waiting list has the newest request first, whatever its kind",
-          rows.length === 2 && /kill/i.test(rows[1].text()) && !/kill/i.test(rows[0].text()),
+    // Longest-waiting first (claunch-l9znm.1): the list is ordered by the
+    // same stamp the row shows as its age, so the request that has stood
+    // longest is the one to answer and reads its own age truthfully.
+    check("the waiting list has the longest-waiting request first, whatever its kind",
+          rows.length === 2 && /kill/i.test(rows[0].text()) && !/kill/i.test(rows[1].text()),
           rows.map((r) => r.text()));
   }
 
@@ -1998,6 +2007,72 @@ function gotoRec(rec) {
     check("settled rows give way to the cap again",
           w.api.noticeHistory.length === 100 && w.api.noticeHistory[0].title === "after",
           w.api.noticeHistory.length);
+  }
+
+  /* --- a gate's age is when it opened, not when we first saw it --------
+     (claunch-l9znm.1)
+
+     The rail now carries `opened_at` (epoch seconds, the daemon's clock) for
+     a run that started waiting on a person. The card's age counts from it,
+     so a request that has stood an hour says so the first time this browser
+     opens, and a row written again reads the same age rather than restarting
+     at 0s. A kind the daemon cannot date carries none, and its age stays the
+     arrival — what every card did before this. */
+  {
+    const w = build();
+    // The rail answer's `opened_at` is epoch seconds; the row keeps that
+    // number as it came, so a poll that brings the same answer writes nothing.
+    const openRec = (atMs, id) => ({
+      id: `ask-${id}`, session: `s-${id}`, cwd: `/w/${id}`, scope: `s-${id}`,
+      workflow: "improv-worker-v2", version: 2, kind: "ask", label: "landing-review",
+      prompt: "land it?", presses: [], opened: atMs === undefined ? undefined : atMs / 1000 });
+
+    // One hour old, seen for the first time on this page.
+    const hourAgo = BASE - 3600e3;
+    const hourAgoSecs = hourAgo / 1000;
+    w.api.runGateSync([openRec(hourAgo, "old")], []);
+    const card = () => w.strip().find((c) => /landing-review/.test(c.text()));
+    let when = card() && card().querySelector(".notice-when");
+    check("a request that opened an hour ago says an hour, the first time we see it",
+          !!when && /1h00m ago/.test(when.text()), when && when.text());
+    const row = w.api.noticeHistory.find((e) => e.gate && e.gate.rid === "ask-old");
+    check("the row keeps both stamps: when it arrived, and when it opened",
+          !!row && row.at === BASE && row.opened === hourAgoSecs,
+          row && { at: row.at, opened: row.opened });
+
+    // A daemon that answers without the stamp leaves the age as the arrival.
+    w.api.runGateSync([openRec(undefined, "plain")], []);
+    const plain = w.strip().find((c) => /s-plain/.test(c.text()));
+    const plainWhen = plain && plain.querySelector(".notice-when");
+    check("a request the run cannot date still counts from its arrival",
+          !!plainWhen && /· 0s ago/.test(plainWhen.text()), plainWhen && plainWhen.text());
+
+    // The row written before the stamp arrived takes it on a later poll, and
+    // the card already on screen is re-aged without being rebuilt.
+    w.clock.at += 5000;
+    w.api.runGateSync([openRec(hourAgo, "plain")], []);
+    const plainRow = w.api.noticeHistory.find((e) => e.gate && e.gate.rid === "ask-plain");
+    check("a row written before the stamp takes it on a later poll",
+          plainRow && plainRow.opened === hourAgoSecs, plainRow && plainRow.opened);
+    const reaged = plain && plain.querySelector(".notice-when");
+    check("and the card already on screen is re-aged in place, not rebuilt",
+          !!reaged && /1h00m ago/.test(reaged.text()), reaged && reaged.text());
+    check("the same card node is still the one on screen",
+          w.strip().includes(plain));
+
+    // A row rewritten from the same answer does not restart the age.
+    w.clock.at += 3000;
+    w.api.runGateSync([openRec(hourAgo, "old")], []);
+    const again = card() && card().querySelector(".notice-when");
+    check("a feed that writes the row again does not reset its age",
+          !!again && /1h00m ago/.test(again.text()), again && again.text());
+
+    // Older browsers' rows (no `opened`) still read their arrival.
+    w.api.gateHistorySettle("ask", "ask-old", "answered");
+    const settledRow = w.api.noticeHistory.find((e) => e.gate && e.gate.rid === "ask-old");
+    check("a settled row keeps the stamp it opened with",
+          !!settledRow && settledRow.opened === hourAgoSecs && settledRow.status !== "pending",
+          settledRow && { opened: settledRow.opened, status: settledRow.status });
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
