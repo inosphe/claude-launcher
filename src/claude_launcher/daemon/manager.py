@@ -1395,8 +1395,10 @@ class SessionManager:
         # Settled here rather than left to :meth:`stage`, because the child's
         # worktree is named after the child (``<parent>-<child>-<stamp>``) and
         # the checkout is cut before the record exists. Checked here too: a
-        # name already taken must refuse BEFORE a directory is on disk, which
-        # is the same rule the worktree's own placement below keeps.
+        # name already taken refuses before the CHECKOUT is made, which is the
+        # expensive half. An auto-assigned name has already created its session
+        # directory -- that empty directory is what reserves the number, and it
+        # outlives a request refused at this point.
         name = self.settle_name(str(request.get("name") or ""))
         # After the policy and before the record: a checkout is a thing on
         # disk, so it is made only once nothing left can refuse the request.
@@ -1465,9 +1467,17 @@ class SessionManager:
         """The name a session about to be created will have, checked now.
 
         For a caller that must name something after the session before its
-        record exists -- the worktree cut for it -- so a name already taken
-        is refused before anything is on disk. Empty means the next free
-        ``sN`` (:meth:`_auto_name`).
+        record exists -- the worktree cut for it -- so a name already taken is
+        refused there rather than later, with the session already half made.
+        Empty means the next number from the counter (:meth:`_auto_name`).
+
+        A named session is only *checked*, and nothing is on disk. An
+        auto-assigned one is *reserved*: :meth:`_auto_name` creates its
+        directory, which is how the counter avoids handing one number to two
+        creators, and moves the counter so the number is never issued again.
+        A caller that settles a name and then refuses the request leaves that
+        empty directory behind — accepted, because unwinding it is how a name
+        would come to be handed out twice.
 
         This is the one place a name is decided: :meth:`stage`,
         :meth:`stage_child` and the web create route all ask here, so the
