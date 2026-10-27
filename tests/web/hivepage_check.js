@@ -112,7 +112,7 @@ const queues = {
   }],
 };
 const model = plain(P.buildModel(fleet, queues, {
-  now, endedMs: 6 * H, meshesOf: (n) => MESH[n] || [], cflowOf: (n) => n === 'lead' ? { state: 'yours', label: 'v2 · ⚑ select' } : null,
+  now, endedMs: 6 * H, meshesOf: (n) => MESH[n] || [], cflowOf: (n) => n === 'lead' ? { state: 'yours', label: 'v2 · ⚑ select', rows: [['status', 'running']], href: '#/wf/x' } : null,
 }));
 
 // Projects: the busiest first; every drawn session counted once.
@@ -127,6 +127,8 @@ assert.deepStrictEqual(claunch.meshes.map((m) => m.name), ['claunch', '']);
 const lead = claunch.meshes[0].roots[0];
 assert.strictEqual(lead.name, 'lead');
 assert.strictEqual(lead.cflow.state, 'yours');
+assert.deepStrictEqual(lead.cflow.rows, [['status', 'running']]);
+assert.strictEqual(lead.cflow.href, '#/wf/x');
 // w1 is drawn; w2 stays as a faded chip because w2-kid is alive.
 assert.deepStrictEqual(lead.children.map((n) => n.name), ['w1', 'w2']);
 const w2 = lead.children[1];
@@ -301,5 +303,29 @@ const briefed = plain(P.buildModel([{ name: 'b1', status: 'idle', created_at: ne
 const bnodes = briefed.projects[0].meshes[0].roots;
 assert.deepStrictEqual(bnodes.find((n) => n.name === 'b1').briefing, { state: 'stale', rows: [{ key: 'one_line', label: '', text: 'on it' }] });
 assert.strictEqual(bnodes.find((n) => n.name === 'b2').briefing, null);
+
+// A cflow run as the overlay and the detail pane list it (claunch-z6cfr):
+// a v2 rail row's workflow, status (gated says a person is owed), round,
+// current nodes and what it waits on, empty rows left out, and its run page.
+assert.deepStrictEqual(plain(P.cflowFacts({ workflow: 'improv-worker-v2', status: 'running', gated: true, round: 2,
+                                            current: ['work', 'found'], owed: ['select: end', 'ask: review'],
+                                            scope: 's1', cwd: '/w/c' }, null)),
+  { rows: [['workflow', 'improv-worker-v2'], ['status', 'running · 사람 대기'], ['round', '2'],
+           ['현재', 'work, found'], ['대기', 'select: end\nask: review']],
+    href: '#/wf/' + encodeURIComponent('s1|/w/c') });
+assert.deepStrictEqual(plain(P.cflowFacts({ status: 'done', current: [], owed: [] }, null)),
+  { rows: [['workflow', 'cflow2'], ['status', 'done']], href: '' });
+assert.deepStrictEqual(plain(P.cflowFacts(null, { workflow: 'improv', status: 'step', step_id: 'work', cwd: '/w/c' })),
+  { rows: [['workflow', 'improv'], ['status', 'step'], ['step', 'work']],
+    href: '#/wf/' + encodeURIComponent('default|/w/c') });
+assert.strictEqual(P.cflowFacts(null, null), null);
+
+// The overlay's head of an opening task: its first lines, how many more.
+assert.deepStrictEqual(plain(P.taskPreview('a\nb\n')), { text: 'a\nb', clipped: false, more: 0 });
+const ten = Array.from({ length: 10 }, (_, i) => `line ${i}`).join('\n');
+assert.deepStrictEqual(plain(P.taskPreview(ten, 8)), { text: ten.split('\n').slice(0, 8).join('\n'), clipped: true, more: 2 });
+const long = P.taskPreview('word '.repeat(200), 8, 50);
+assert.ok(long.clipped && long.text.endsWith('…') && long.text.length <= 51, long.text);
+assert.deepStrictEqual(plain(P.taskPreview('')), { text: '', clipped: false, more: 0 });
 
 console.log('hivepage ok');

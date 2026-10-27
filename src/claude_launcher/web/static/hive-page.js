@@ -44,6 +44,10 @@
    and progress (claunch-yzgqb.2.1). That is the digest the /api/sessions
    poll already carries (daemon/briefing.digest), so a hover composes
    nothing and calls no LLM; a session with no cached briefing says so.
+   The overlay and the detail pane a click opens also carry the session's
+   opening task, read from /api/sessions/<name> on the first hover or pick
+   because the rail poll leaves it out, and its cflow run's workflow,
+   status, round, current nodes and what it waits on (claunch-z6cfr).
 
    The model (buildModel and the helpers before it) takes plain data so
    tests/web/hivepage_check.js runs it without a page. The canvas is rebuilt
@@ -209,6 +213,43 @@ globalThis.HivePage = (() => {
     }
     if (!rows.length) return null;
     return { state: String(b.state || "").trim(), rows };
+  }
+
+  /* A cflow run as the overlay and the detail pane list it (claunch-z6cfr):
+     [label, value] rows with the empty ones left out, and the run page's
+     address. `v2` is a /api/cflow2/rail row, `v1` a /api/cflow run. */
+  function cflowFacts(v2, v1) {
+    const rows = [];
+    const add = (k, v) => { const t = String(v ?? "").trim(); if (t) rows.push([k, t]); };
+    if (v2) {
+      add("workflow", v2.workflow || "cflow2");
+      add("status", v2.status + (v2.gated ? " · 사람 대기" : ""));
+      add("round", v2.round);
+      add("현재", (v2.current || []).join(", "));
+      add("대기", (v2.owed || []).join("\n"));
+      if (v2.status === "error") add("error", v2.error);
+      const href = v2.scope && v2.cwd ? "#/wf/" + encodeURIComponent(`${v2.scope}|${v2.cwd}`) : "";
+      return { rows, href };
+    }
+    if (v1) {
+      add("workflow", v1.workflow || "cflow");
+      add("status", v1.status);
+      add("step", v1.title || v1.step_id);
+      const href = v1.cwd ? "#/wf/" + encodeURIComponent(`${v1.scope || "default"}|${v1.cwd}`) : "";
+      return { rows, href };
+    }
+    return null;
+  }
+
+  /* The head of an opening task for the overlay: at most `lines` lines and
+     `chars` characters, and how many lines were left out. */
+  function taskPreview(text, lines = 8, chars = 480) {
+    const all = String(text || "").replace(/\s+$/, "").split("\n");
+    let head = all.slice(0, lines).join("\n");
+    let clipped = all.length > lines;
+    if (head.length > chars) { head = head.slice(0, chars).replace(/\s+\S*$/, "") + "…"; clipped = true; }
+    const shown = head.split("\n").length;
+    return { text: head, clipped, more: clipped ? Math.max(0, all.length - shown) : 0 };
   }
 
   /* The ties between session `name`, started on issue `link`, and the
@@ -516,7 +557,7 @@ globalThis.HivePage = (() => {
         meshes: memberships.map((m) => m.mesh), issue: s.issue || "",
         fault: s.fault && s.fault.active ? String(s.fault.label || s.fault.kind || "fault") : "",
         compacting: !!s.compacting,
-        cflow: cflow ? { state: cflow.state, label: cflow.label } : null,
+        cflow: cflow ? { state: cflow.state, label: cflow.label, rows: cflow.rows || [], href: cflow.href || "" } : null,
         created: lane ? lane.created : 0, categories: catsOf("session", name),
         briefing: briefingOf(s), issues, refs, rels, children: [], decks: [],
       });
@@ -714,12 +755,12 @@ globalThis.HivePage = (() => {
     const v2 = typeof cflow2RailCache !== "undefined" ? (cflow2RailCache || {})[name] : null;
     if (v2 && typeof cflow2RailMarkState === "function") {
       return { state: cflow2RailMarkState(v2),
-               label: `${v2.workflow || "cflow2"} · ${cflow2RailLabel(v2)}` };
+               label: `${v2.workflow || "cflow2"} · ${cflow2RailLabel(v2)}`, ...cflowFacts(v2, null) };
     }
     const v1 = typeof sessCflowRun === "function" ? sessCflowRun(name) : null;
     if (v1 && typeof wfMarkState === "function") {
       return { state: wfMarkState(v1.status, v1),
-               label: `${v1.workflow || "cflow"} · ${sessCflowLabel(v1)}` };
+               label: `${v1.workflow || "cflow"} · ${sessCflowLabel(v1)}`, ...cflowFacts(null, v1) };
     }
     return null;
   }
@@ -1094,14 +1135,28 @@ globalThis.HivePage = (() => {
       for (const k of RELS) {
         row(REL_LABEL[k], (it.rels[k] || []).map((t) => (t.missing ? `${t.id} (활성 목록에 없음)` : t.id)).join("\n"));
       }
-      row("cflow", it.cflow ? it.cflow.label : "");
       row("카테고리", it.categories.join("\n"));
       row("fault", it.fault);
       side.appendChild(dl);
+      // What the session is for and where it stands, in the overlay's
+      // sections, with the opening task whole (claunch-z6cfr).
+      wantTask(it.name);
+      for (const [cls, el] of [["task", taskSection(it.name, "hive-detail", true)],
+                               ["briefing", briefingSection(it, "hive-detail")],
+                               ["cflow", cflowSection(it, "hive-detail")]]) {
+        const sec = node("section", `hive-detail-sec s-${cls}`);
+        sec.appendChild(el);
+        side.appendChild(sec);
+      }
       const actions = node("div", "hive-detail-actions");
       const open = node("a", "hive-btn", "세션 열기 →");
       open.href = "#/s/" + encodeURIComponent(it.name);
       actions.appendChild(open);
+      if (it.cflow && it.cflow.href) {
+        const run = node("a", "hive-btn", "런 페이지 →");
+        run.href = it.cflow.href;
+        actions.appendChild(run);
+      }
       if ((it.state === "killed" || it.state === "failed") && typeof archiveSession === "function") {
         const arch = node("button", "hive-btn", "보관(archive)");
         arch.type = "button";
@@ -1337,13 +1392,66 @@ globalThis.HivePage = (() => {
     return hit;
   }
 
-  function briefEl(n) {
+  /* A session's opening task (claunch-z6cfr). The rail poll leaves it out
+     (daemon/api.py RAIL_FIELDS), so it is read from /api/sessions/<name>
+     when a chip is hovered or picked, and kept for TASK_KEEP_MS: the task is
+     fixed at creation, so a re-read only covers a record that changed. */
+  const TASK_KEEP_MS = 120000;
+  const taskCache = new Map();  // name -> {task, error, at, busy}
+
+  function taskOf(name) {
+    const live = liveSessions().find((s) => s.name === name);
+    if (live && typeof live.task === "string") return { task: live.task, at: Date.now() };
+    return taskCache.get(name) || null;
+  }
+
+  async function wantTask(name) {
+    if (!name || typeof api !== "function") return;
+    const live = liveSessions().find((s) => s.name === name);
+    if (live && typeof live.task === "string") return;
+    const kept = taskCache.get(name);
+    if (kept && (kept.busy || Date.now() - kept.at < TASK_KEEP_MS)) return;
+    taskCache.set(name, { ...(kept || {}), busy: true, at: kept ? kept.at : 0 });
+    let entry;
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}`);
+      const doc = await resp.json().catch(() => ({}));
+      entry = resp.ok ? { task: String(doc.task || ""), at: Date.now() }
+                      : { error: doc.error || `HTTP ${resp.status}`, at: Date.now() };
+    } catch (err) {
+      entry = { error: String(err && err.message || err), at: Date.now() };
+    }
+    taskCache.set(name, entry);
+    if (briefFor === name) placeBrief();
+    if (picked && picked.kind === "session" && picked.id === name && lastModel) renderDetail(lastModel);
+  }
+
+  /* The opening task as a section: the head, then the text (clipped to its
+     first lines in the overlay, whole and scrolled in the detail pane). */
+  function taskSection(name, cls, full) {
     const box = document.createDocumentFragment();
-    const lines = sessionTitle(n).split("\n");
-    box.appendChild(node("b", "hive-brief-name", lines[0]));
-    if (lines.length > 1) box.appendChild(node("div", "hive-brief-meta", lines.slice(1).join(" · ")));
+    box.appendChild(node("div", `${cls}-head h-task`, "opening task"));
+    const t = taskOf(name);
+    if (!t || (t.busy && t.task === undefined && !t.error)) {
+      box.appendChild(node("div", "hive-muted", "불러오는 중…"));
+    } else if (t.error) {
+      box.appendChild(node("div", "hive-muted", `읽지 못했다: ${t.error}`));
+    } else if (!t.task.trim()) {
+      box.appendChild(node("div", "hive-muted", "기록된 opening task가 없다."));
+    } else if (full) {
+      box.appendChild(node("pre", "hive-task-text full", t.task));
+    } else {
+      const p = taskPreview(t.task);
+      box.appendChild(node("pre", "hive-task-text", p.text));
+      if (p.clipped) box.appendChild(node("div", "hive-muted", p.more ? `… ${p.more}줄 더 — 칩을 눌러 전체 보기` : "… 칩을 눌러 전체 보기"));
+    }
+    return box;
+  }
+
+  function briefingSection(n, cls) {
+    const box = document.createDocumentFragment();
     const b = n.briefing;
-    box.appendChild(node("div", "hive-brief-head", b ? `briefing${b.state ? ` · ${b.state}` : ""}` : "briefing 없음"));
+    box.appendChild(node("div", `${cls}-head h-briefing`, b ? `briefing${b.state ? ` · ${b.state}` : ""}` : "briefing 없음"));
     if (!b) {
       box.appendChild(node("div", "hive-muted", "이 세션의 briefing이 아직 만들어지지 않았다."));
       return box;
@@ -1356,6 +1464,34 @@ globalThis.HivePage = (() => {
       list.appendChild(row);
     }
     box.appendChild(list);
+    return box;
+  }
+
+  function cflowSection(n, cls) {
+    const box = document.createDocumentFragment();
+    const f = n.cflow;
+    box.appendChild(node("div", `${cls}-head h-cflow`, f ? `cflow · ${f.label}` : "cflow 런 없음"));
+    if (!f || !f.rows.length) return box;
+    const list = node("div", "hive-brief-rows hive-cflow-rows");
+    for (const [k, v] of f.rows) {
+      const row = node("div", "hive-brief-row");
+      row.appendChild(node("span", "hive-brief-label", k));
+      row.appendChild(node("span", "hive-brief-text", v));
+      list.appendChild(row);
+    }
+    box.appendChild(list);
+    return box;
+  }
+
+  function briefEl(n) {
+    const box = document.createDocumentFragment();
+    // The cflow line has its own section below.
+    const lines = sessionTitle(n).split("\n").filter((l) => !l.startsWith("cflow: "));
+    box.appendChild(node("b", "hive-brief-name", lines[0]));
+    if (lines.length > 1) box.appendChild(node("div", "hive-brief-meta", lines.slice(1).join(" · ")));
+    box.appendChild(taskSection(n.name, "hive-brief", false));
+    box.appendChild(briefingSection(n, "hive-brief"));
+    box.appendChild(cflowSection(n, "hive-brief"));
     return box;
   }
 
@@ -1391,6 +1527,7 @@ globalThis.HivePage = (() => {
   function showBrief(name, delay) {
     if (briefTimer) { clearTimeout(briefTimer); briefTimer = null; }
     briefFor = name;
+    wantTask(name);
     if (!delay) { placeBrief(); return; }
     briefTimer = setTimeout(() => { briefTimer = null; placeBrief(); }, delay);
   }
@@ -1656,6 +1793,6 @@ globalThis.HivePage = (() => {
 
   return { open, stop, render, fit, category, stateOf, keep, isMinor, roleOf,
            issueParentId, nestIssues, readQueues, readCategories, boardWorkspaces, buildModel, tally,
-           relationKinds, issueRows, RELS, briefingOf,
+           relationKinds, issueRows, RELS, briefingOf, cflowFacts, taskPreview,
            arrangeSiblings, ENDED_WINDOWS, STATES, get model() { return lastModel; } };
 })();
