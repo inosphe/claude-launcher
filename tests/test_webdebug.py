@@ -3,7 +3,9 @@ per-origin proxy that injects the probe, the window registry the session's
 commands go through, the user's explicit send, and the MCP tools."""
 
 import asyncio
+import contextlib
 import json
+import ssl
 
 import aiohttp
 import pytest
@@ -175,6 +177,93 @@ def test_the_scheme_probe_reads_a_plaintext_peer():
     asyncio.run(run())
 
 
+# A self-signed pair for the TLS-speaking peer below. The probe does not judge
+# certificates (verify_mode=CERT_NONE), so the pair only has to complete a
+# handshake; it is embedded here so the test needs no openssl and no fixture.
+_TLS_KEY = """\
+-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCIAIZq3KCXfEQd
+DPC8x39ikNC2pokosO8MT83kvy7tlODytamEYJ+ou21TMUmetONQrXfl1MyiRSyK
+9nu62eaAJ3xcvj5o8vcRiB/OgDa93v7UxQT6azyCfSuo0jCgAw5++sX/SMc5wEms
+o2kPaRdmu4gxUy0zdQpGWjUYxBR5q/+TTx8RIBGGEdLKD2cQC9/5laIn7taucKJY
+TTW7PJNsIo7T5omvJbvCJrGeYqVy4sO3X33RUR0HvuFghrCpYbxJNu4A5A+U7Vx7
+y84xXU1iSHtevFMUJRVaK76SHuNrn9jAKzwHh9STJEcfUQriMH/6pCMeXwtf5dZE
+KiXyVAdPAgMBAAECggEAKMQjho+okY/dqOmSlbuk+uoWrdFAhtJ2bTXUrS8DhZKd
+VRNQA06lPQIldIzvGOP2yV2d9WXyiud6QRM+JlWfiqWLWQ9rjLDbj0VC53a2MfbQ
+Yv3FjryrMCAOALY0fho8c6J+zBVIJo71Zoq6+LQTICexXLumbmi0Uj9C8DACRS/x
+9OXmMPz8amIzhz0EAJpB31bGZQQBybRgV39g10gb7ApQw7eRtY7dGU3TRpjK6EYB
+fPZKKDYjXLxvoqI5yhSl1Nt7mC6tlatzNgcV2ei0+2JHqVHGzVgoKbSLoDB7EOFR
+HJSNGWNppxuyxqIulb5MAUpK7g99mzvFBh+hoBsY6QKBgQC9qt0e2bD//c+Q/OVS
+Nu5qY+r0ird3rTEC0N3bbgYAAzH5MDl1XTSLZHvAPcc2yek6pZOcGVfTDMETW7F7
+MkSeecXA49lwurQa38VXBpYo10py4nUWwxpsBdgefHFhT+MMIq6bKnb/Y74DueOQ
+5fK0OidW8j27MJWui8tHAD6vRwKBgQC3kPCTcw7Ma7EjS47Cv0vH1SKoTMlLoW5n
++GWYGiE73jIDLSYk7WBEwG9906z1sxT4WoW5bmtcR0tWkepIMbvvJNqW+vXP4SLw
+7/pLp4/EJztSAjfepmzrfil6CScpaQruOaE5swnfkjNlUdrLytpf0p+ngNY5BlEz
+auA9PU47uQKBgDhH1luML1iXARu933J4+GA7jAHKk8yAaPWz8tFlIYSpbg/KfpJT
++P6P76TI8C9S1NFhRp7gak4nD7fl0pGDBhecfNDTC7fGvyDmW9GKE87Eq8PRbPs3
+I8UAKvRI6v/8S5xTQkqq3CrGdyD17RAXG+DdDMVhFm5QaWok80n7SZ6LAoGAeeuC
+Xeylf5BnbpHYl/CGXItrIW0epWTq95M7pvJz8Fd70DBEjXI75m4JnwDgd7Ah1XIK
+L0bvd7LCjxULDjg6InPP20eDzDY0BuLc0zLPgfCsraNbiD3xSdfZpHw/znk+EUul
+kbUgcaWhDUJ4l7J7p/k0oQQpRGa1t/jcRtBZDcECgYA0m1OEncyblZfWB9zPoCOX
+oPSkuIW1m/AImTHWlG0Bp3gHA2VOWGaGp1AX2LEo+3U8w0//hAZWUG141FgIqrko
+3yMQpGjIr/mYDRwDVw1NiXVLxf7fk2v3FuQNUKGRSEGYmEQbP4P9QlAgfVj6QnfR
+rQ8qZ+cxqNrn1a4f7WlfcQ==
+-----END PRIVATE KEY-----
+"""
+
+_TLS_CERT = """\
+-----BEGIN CERTIFICATE-----
+MIIDCzCCAfOgAwIBAgIUcMzgmtK4tGYcEWJllDHGnGJ6PywwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MTAyNzA1MTU0M1oYDzIxMjYx
+MDAzMDUxNTQzWjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCIAIZq3KCXfEQdDPC8x39ikNC2pokosO8MT83kvy7t
+lODytamEYJ+ou21TMUmetONQrXfl1MyiRSyK9nu62eaAJ3xcvj5o8vcRiB/OgDa9
+3v7UxQT6azyCfSuo0jCgAw5++sX/SMc5wEmso2kPaRdmu4gxUy0zdQpGWjUYxBR5
+q/+TTx8RIBGGEdLKD2cQC9/5laIn7taucKJYTTW7PJNsIo7T5omvJbvCJrGeYqVy
+4sO3X33RUR0HvuFghrCpYbxJNu4A5A+U7Vx7y84xXU1iSHtevFMUJRVaK76SHuNr
+n9jAKzwHh9STJEcfUQriMH/6pCMeXwtf5dZEKiXyVAdPAgMBAAGjUzBRMB0GA1Ud
+DgQWBBRPrr7w91uwqquTkqGkXCqHPS5dqjAfBgNVHSMEGDAWgBRPrr7w91uwqquT
+kqGkXCqHPS5dqjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBI
+EreOMaKCGM+I1qa4JjkAyi9YiTagOG5Kj6SWszmcgufaFZeOpNP1e/8L7zw8gwtB
+4V4zNYfixvCFgz97kBqpu9PHw7PVjKon1FG8qDla+7NS3YDKNaQ2QCZTSPzFEU4J
+p5dFsy8csENmzA6Mq6RYxxG5yXWSSou7iAFo3rv9gGdzsgmkm6Q2YOKrGnihtU0h
+jJgt9c3FhcBVJhy4DoUD5fEdzqhAOPpb0KcK6lmVffMdO18N+aPzxkniVZldVOUW
+Qx8xXZcjRBjCs7jUh8g5dV1iYqW5tzRLQn+OWcHhxVftzbJZoHoryCYukzIxdsdK
+uQaxGWJGVfbKAGJppxse
+-----END CERTIFICATE-----
+"""
+
+
+def test_a_tls_server_keeps_the_https_it_was_typed_with(tmp_path):
+    """The probe answer is three-way: a peer that completes the handshake
+    speaks TLS, so its https address is left alone. Reading a successful
+    handshake as "no verdict" rewrites a working https address to http."""
+    key, cert = tmp_path / "tls-key.pem", tmp_path / "tls-cert.pem"
+    key.write_text(_TLS_KEY, encoding="ascii")
+    cert.write_text(_TLS_CERT, encoding="ascii")
+
+    async def run():
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+
+        async def greet(reader, writer):
+            with contextlib.suppress(Exception):
+                writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(greet, "127.0.0.1", 0, ssl=context)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            assert await webdebug._speaks_tls("127.0.0.1", port) is True
+            assert await webdebug.alternate_scheme(f"https://127.0.0.1:{port}") is None
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+
+
 def test_an_unreachable_address_keeps_the_scheme_it_was_typed_with():
     async def run():
         # Nothing listens: no answer is not a verdict about TLS.
@@ -205,7 +294,18 @@ def test_an_https_address_for_a_plaintext_server_is_opened_as_http():
     asyncio.run(run())
 
 
-def test_a_plain_http_address_is_not_probed_or_rewritten():
+def test_a_plain_http_address_is_not_probed_or_rewritten(monkeypatch):
+    """An http address is never handed to the TLS probe: the proxy would send a
+    stray ClientHello to every page opened through it. The scheme check is the
+    only thing that keeps the probe to https addresses."""
+    probed = []
+
+    async def spy(host, port, timeout=webdebug.SCHEME_PROBE_TIMEOUT):
+        probed.append((host, port))
+        return False
+
+    monkeypatch.setattr(webdebug, "_speaks_tls", spy)
+
     async def run():
         client = TestClient(TestServer(_app(_Manager())))
         await client.start_server()
@@ -216,8 +316,10 @@ def test_a_plain_http_address_is_not_probed_or_rewritten():
             assert body["switched_from"] is None
         finally:
             await client.close()
+        assert await webdebug.alternate_scheme("http://127.0.0.1:5173") is None
 
     asyncio.run(run())
+    assert probed == []
 
 
 def test_the_scheme_mismatch_page_names_the_fix():
