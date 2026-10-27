@@ -263,6 +263,9 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 세션 목록은 `/api/sessions?view=rail`(레코드) + `/api/mesh?view=rail`(role·메시) + `/api/cflow2/rail`
 (cflow2 런)을 세션 이름으로 조인해 만든다. 레일 자체의 `role`은 살아 있는 행에서 비어 있어
 (claunch-cn8v6 실측 0/26) 로스터가 유일한 출처다. 두 조인은 실패해도 목록을 막지 않는다.
+이 세 읽기는 페이지를 연 뒤 클러스터(`/api/megathreads`)를 먼저 그리고 나서 나간다. state 없는
+`/api/sessions?view=rail`은 보관 기록까지 전부라 cold 응답이 1.5-2.3초였고(기록 2303개, claunch-wbs0i),
+도착 전의 피커는 「세션 목록을 읽는 중…」을 보여 준다.
 
 ### 좌하단 nav
 
