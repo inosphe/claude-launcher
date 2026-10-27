@@ -30,15 +30,17 @@ let tree = {
     {kind: 'session', ref: 's10', node_id: 'n2'},
     {kind: 'session', ref: 's11', node_id: 'n2'},
     {kind: 'issue', ref: 'i-1', node_id: 'n3'},
+    {kind: 'issue', ref: 'i-2', node_id: 'n1'},
   ],
   unassigned: [{kind: 'session', ref: 's9'}],
   proposals: [{id: 'p1', parent_id: 'n1', label: 'panes', aliases: ['split'], description: '', reason: 'new UI',
                items: [{kind: 'session', ref: 's1', waiting_in: 'n1'}], proposed_by: 's1-cat1', created_at: '2026-10-18T00:00:00'}],
-  details: {'session:s1': {status: 'idle', life: 'running', note: 'tab work'},
+  details: {'session:s1': {status: 'idle', life: 'running', note: 'tab work', issue: 'i-2'},
             'session:s2': {status: 'busy', life: 'running', note: ''},
             'session:s10': {status: 'exited', life: 'killed', note: ''},
             'session:s11': {status: 'exited', life: 'archived', note: ''},
-            'issue:i-1': {title: 'An issue', status: 'open'}},
+            'issue:i-1': {title: 'An issue', status: 'open'},
+            'issue:i-2': {title: 's1 work', status: 'in_progress', assignee: 's1'}},
 };
 let sessionView = {workspace: 'alpha', session: 's1', mode: 'fork', job: null,
   places: [{kind: 'session', ref: 's1', node: {path: ['web']}, proposals: []}]};
@@ -109,7 +111,26 @@ const last = () => calls[calls.length - 1];
   assert.strictEqual(ctx.categoryLca(byId, ['n2', 'n3']), null);
   assert.strictEqual(ctx.categoryLca(byId, ['n2', 'n2']), 'n2');
 
+  // A session's issues go under it: its own issue first, else the assignee;
+  // an issue whose session is not in the same list stays a row of the node.
+  const S = (ref) => ({kind: 'session', ref}), I = (ref) => ({kind: 'issue', ref});
+  const nest = (items, details) => JSON.parse(JSON.stringify(ctx.categoryNest(items, details)))
+    .map(r => [r.item.ref, r.under.map(u => u.ref)]);
+  assert.deepStrictEqual(nest([I('a'), S('x'), I('b'), I('c'), S('y'), I('d')], {
+    'session:x': {issue: 'a'}, 'issue:a': {assignee: 'y'},   // own issue wins over assignee
+    'issue:b': {assignee: 'y'}, 'issue:c': {assignee: 'gone'}, 'issue:d': {}}),
+    [['x', ['a']], ['c', []], ['y', ['b']], ['d', []]]);
+  assert.deepStrictEqual(nest([I('a')], {'issue:a': {assignee: 'x'}}), [['a', []]]);
+
   await ctx.CategoryPage.open('alpha'); await settle();
+  const group = all().find(n => n.className === 'category-session-group');
+  assert(group, 'a session with an issue renders as a group');
+  assert.strictEqual(group.children[0].tag, 'div');
+  assert(all(group.children[0]).some(n => n.tag === 'a' && n.textContent === 's1'));
+  const sub = group.children[1];
+  assert.strictEqual(sub.className, 'category-children category-session-children');
+  assert(all(sub).some(n => n.tag === 'a' && n.textContent === 'i-2'));
+  assert(!all(sub).some(n => n.tag === 'a' && n.textContent === 's1'));
   assert(calls.some(c => c.url.pathname === '/api/category' && c.url.searchParams.get('workspace') === 'alpha'));
   // Labels are text, never markup.
   assert(all().some(n => n.textContent === '<img src=x onerror=bad()>'));

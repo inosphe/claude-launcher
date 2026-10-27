@@ -10031,7 +10031,16 @@ body.split-max #term-wf { flex: 1 1 0; }
   font: inherit; padding: 6px 8px; color: inherit; background: #0d1117;
   border: 1px solid var(--cat-border); border-radius: 6px; }
 .category-roots, .category-children { list-style: none; margin: 0; padding: 0; }
-.category-children { padding-left: 22px; border-left: 1px solid #262d36; margin-left: 11px; }
+/* Depth reads from the guide line (claunch-xvb5o): a wider step, a 2px rule
+   and a colour per level, cycling every four; a session's issues hang on a
+   dashed rule so they read as the session's, not the node's. */
+.category-children { padding-left: 32px; border-left: 2px solid #3d4652; margin-left: 11px; }
+.category-children .category-children { border-left-color: #2f5a8a; }
+.category-children .category-children .category-children { border-left-color: #2d6b4f; }
+.category-children .category-children .category-children .category-children { border-left-color: #7a5a24; }
+.category-children .category-children .category-children .category-children .category-children { border-left-color: #3d4652; }
+.category-children > .category-node + .category-node { margin-top: 2px; }
+.category-session-children { padding-left: 24px; margin-left: 5px; border-left-style: dashed !important; border-left-color: #4a5260 !important; }
 .category-node-head { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
 .category-node-head:hover .category-node-tools { visibility: visible; }
 .category-node-tools { visibility: hidden; display: inline-flex; gap: 3px; margin-left: 6px; }

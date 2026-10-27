@@ -44,6 +44,28 @@ function categoryLca(byId, anchors) {
   return chains[0].find(n => common.has(n)) ?? null;
 }
 
+/* The items of one node in display order, each issue that belongs to a
+   session of the same node moved under that session: the session's own
+   issue (`details.issue`) first, else the issue's assignee. An issue whose
+   session is elsewhere, hidden or absent stays a row of the node. Returns
+   [{item, under: [issue items]}]. */
+function categoryNest(items, details = {}) {
+  const sessions = new Map(items.filter(i => i.kind === "session").map(i => [i.ref, {item: i, under: []}]));
+  const owner = new Map();
+  for (const [ref] of sessions) {
+    const issue = (details["session:" + ref] || {}).issue;
+    if (issue && !owner.has(issue)) owner.set(issue, ref);
+  }
+  const rows = [];
+  for (const item of items) {
+    if (item.kind === "session") { rows.push(sessions.get(item.ref)); continue; }
+    const ref = owner.get(item.ref) ?? (details["issue:" + item.ref] || {}).assignee;
+    if (item.kind === "issue" && ref && sessions.has(ref)) sessions.get(ref).under.push(item);
+    else rows.push({item, under: []});
+  }
+  return rows;
+}
+
 function makeCategoryView({root, workspace: fixed = ""}) {
   const node = categoryNode;
   let workspace = fixed, workspaces = [], data = null, events = [];
@@ -248,9 +270,9 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return (life === "killed" && !showKilled) || (life === "archived" && !showArchived);
   }
 
-  function itemRow(item) {
+  function itemRow(item, tag = "li") {
     const key = categoryKey(item);
-    const row = node("li", null, "category-item");
+    const row = node(tag, null, "category-item");
     const box = node("input"); box.type = "checkbox"; box.checked = picked.has(key);
     box.setAttribute("aria-label", `${item.kind} ${item.ref} 선택`);
     box.onchange = () => { box.checked ? picked.add(key) : picked.delete(key); render(); };
@@ -309,7 +331,16 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     if (form?.kind === "reparent" && form.id === n.id) li.append(reparentForm(n));
     if (open) {
       const ul = node("ul", null, "category-children");
-      for (const item of items) ul.append(itemRow(item));
+      for (const {item, under} of categoryNest(items, data?.details)) {
+        if (!under.length) { ul.append(itemRow(item)); continue; }
+        // A session with its issues: the session's row, then its issues one
+        // level deeper.
+        const group = node("li", null, "category-session-group");
+        const sub = node("ul", null, "category-children category-session-children");
+        for (const issue of under) sub.append(itemRow(issue));
+        group.append(itemRow(item, "div"), sub);
+        ul.append(group);
+      }
       for (const child of kids) ul.append(nodeBlock(child, children, itemsByNode));
       if (ul.childElementCount) li.append(ul);
     }
