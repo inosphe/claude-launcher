@@ -660,6 +660,7 @@ CHECKS = [
         "megathread_check.js",
         "talkpane_check.js",
         "splitframe_check.js",
+        "sessioncli_check.js",
         "specpage_check.js",
         "specpage_tools_check.js",
         "shadowcard_check.js",

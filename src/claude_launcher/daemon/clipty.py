@@ -1,11 +1,17 @@
-"""One raw, unmanaged shell PTY — the dashboard's CLI tab.
+"""The daemon's raw, unmanaged shell PTYs.
 
-A session is a managed agent: named, arranged, restored. This is the opposite
-end of the same pipe: a plain interactive shell on the daemon machine, with
-no record, no harness and no lifecycle beyond the daemon's own. One per
-daemon (the SPA's tab is one terminal), spawned lazily on the first viewer,
-then left running — the shell's state (directory, history, exports) is meant
-to outlive whichever browser tab is looking at it.
+A session is a managed agent: named, arranged, restored. These are the
+opposite end of the same pipe, and there are two kinds of them:
+
+* :class:`ShellPty` — the dashboard's CLI tab. One per daemon, for the user
+  alone: a plain interactive shell with no record, no harness and no
+  lifecycle beyond the daemon's own. Spawned lazily on the first viewer, then
+  left running — its state (directory, history, exports) is meant to outlive
+  whichever browser tab is looking at it.
+* :class:`SessionShell` — one per agent session, shown in that session's
+  ``cli`` split pane. Same PTY, plus the proposal queue: the session's agent
+  may read its output and propose input, and only the user accepts. A
+  session's shell dies with the session (``daemon/session_shells.py``).
 
 Concurrency model is borrowed from :class:`~claude_launcher.daemon.session
 .Session`'s: all mutable state lives on the event loop; a dedicated daemon
@@ -60,7 +66,8 @@ CLI_TAB_ENV = "CLAUNCH_CLI_TAB"
 #: A proposed line's own limits: long enough for a compound command or a
 #: short script, short enough that the pane stays readable. The per-session
 #: cap keeps one agent from filling the user's strip; the total cap bounds
-#: the memory the daemon spends on proposals nobody has decided.
+#: the memory the daemon spends on proposals nobody has decided. Per-shell,
+#: since every session has one.
 SUGGESTION_MAX_TEXT = 4096
 SUGGESTION_MAX_WHY = 1000
 SUGGESTION_PENDING_PER_SESSION = 10
@@ -99,16 +106,18 @@ def _config_argv(shell: object) -> Optional[List[str]]:
 
 
 class ShellPty:
-    """Owns one persistent shell child; created once by the daemon's app.
+    """Owns one persistent shell child; the CLI tab's shell.
 
-    Spawned lazily: the first WebSocket viewer calls :meth:`start_once`,
-    which starts the child and leaves it running until the shell exits on its
-    own or the daemon shuts down. ``start_once`` only ever starts a child
-    that never was started — a shell stopped mid-daemon (the user typed
-    ``exit``) stays stopped until a viewer's ``restart`` control revives it.
-    An asymmetry that is the point: after a daemon restart there is no old
-    shell to miss and the tab comes up fresh; while the daemon lives, an
-    exited shell is a deliberate stop, and only a person may undo it.
+    The user's own terminal and nothing else: no proposal queue, no agent
+    routes (those are :class:`SessionShell`). Spawned lazily: the first
+    WebSocket viewer calls :meth:`start_once`, which starts the child and
+    leaves it running until the shell exits on its own or the daemon shuts
+    down. ``start_once`` only ever starts a child that never was started — a
+    shell stopped mid-daemon (the user typed ``exit``) stays stopped until a
+    viewer's ``restart`` control revives it. An asymmetry that is the point:
+    after a daemon restart there is no old shell to miss and the tab comes up
+    fresh; while the daemon lives, an exited shell is a deliberate stop, and
+    only a person may undo it.
     """
 
     def __init__(
@@ -119,6 +128,7 @@ class ShellPty:
         cols: int = 100,
         rows: int = 30,
         config: Optional[dict] = None,
+        cli_tab: bool = True,
     ) -> None:
         cfg = config if config is not None else store.daemon_config()
         self._argv = (
@@ -127,6 +137,11 @@ class ShellPty:
             else (_config_argv(cfg.get("shell")) or default_shell_argv())
         )
         self._cwd = cwd if cwd is not None else (cfg.get("shell_cwd") or None)
+        #: Whether this child carries the CLI tab marker (see CLI_TAB_ENV).
+        #: The tab's shell does; a session's shell does not — the marker is
+        #: read by ``claunch daemon restart`` and only that tab's shell was
+        #: ever intended to hand the restart off.
+        self._cli_tab = cli_tab
         self._cols, self._rows = cols, rows
         #: Whether a child was ever spawned for this daemon incarnation.
         self._ever_started = False
@@ -141,9 +156,6 @@ class ShellPty:
         #: only its tail, so this is the cursor a reader resumes from: the
         #: buffer covers ``[_total - _buffered, _total)``.
         self._total = 0
-        #: Input proposed by agent sessions, by suggestion id. A proposal is
-        #: text and a reason; only the user's accept writes it to the PTY.
-        self._suggestions: Dict[str, dict] = {}
         self._subscribers = set()
         self._loop = asyncio.get_running_loop()
         #: One writer into the PTY at a time; see :meth:`write_bytes`.
@@ -206,9 +218,10 @@ class ShellPty:
         if sys.platform != "win32":   # cmd.exe has no termios to service
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
-        # This shell dies with the daemon; anything it must outlive has to
-        # know it was started here (see CLI_TAB_ENV).
-        env[CLI_TAB_ENV] = "1"
+        # The CLI tab's shell dies with the daemon; anything it must outlive
+        # has to know it was started there (see CLI_TAB_ENV).
+        if self._cli_tab:
+            env[CLI_TAB_ENV] = "1"
         try:
             # In this process even with the PTY host on (claunch-xnnct.1):
             # the shell has no record for a successor to adopt it by, so it
@@ -354,8 +367,72 @@ class ShellPty:
             "exit_code": self.exit_code,
         }
 
+    def resize(self, cols: int, rows: int) -> None:
+        """The viewer's grid. Remembered for the next child, applied and
+        announced to every attached viewer when one is alive."""
+        if cols == self._cols and rows == self._rows:
+            return
+        self._cols, self._rows = cols, rows
+        if not self.exited and self._pty is not None:
+            try:
+                self._pty.resize(cols, rows)
+            except Exception:  # noqa: BLE001 — racing child exit
+                pass
+        self._broadcast(("resize", (cols, rows)))
+
     # ------------------------------------------------------------------ #
-    # input proposals (agents propose, the user decides)
+    # subscribers (WebSocket viewers)
+    # ------------------------------------------------------------------ #
+    def attach(self) -> Tuple[asyncio.Queue, bytes]:
+        """Subscribe a viewer and hand it the output ring in one step.
+
+        Both halves run synchronously on the loop, so the snapshot covers
+        exactly the bytes published before this viewer subscribed and the
+        queue carries everything after — no gap and no duplicate.
+        """
+        q: asyncio.Queue = asyncio.Queue(maxsize=1024)
+        self._subscribers.add(q)
+        return q, b"".join(self._buffer)
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self._subscribers.discard(q)
+
+    def _broadcast(self, item: Tuple[str, object]) -> None:
+        dead = []
+        for q in self._subscribers:
+            try:
+                q.put_nowait(item)
+            except asyncio.QueueFull:
+                dead.append(q)  # slow consumer: drop it, it can reattach
+        for q in dead:
+            self._subscribers.discard(q)
+
+
+class SessionShell(ShellPty):
+    """One agent session's own shell — the session's ``cli`` split pane.
+
+    The same PTY the CLI tab has, with one thing added: the agent driving
+    that session may **read** its output and **propose** input, and only the
+    user accepts. There is no path from a proposal to the child except
+    :meth:`accept`, which the user's side (the pane's run button, or
+    ``claunch shell accept``) calls — the MCP tools have no accept tool and
+    the route refuses a session-shaped accept (``daemon/shell_api.py``).
+
+    Every shell here belongs to exactly one session and dies with it
+    (``daemon/session_shells.py``), which is what makes the boundary
+    legible: a proposal can only be made to the shell of the session that
+    made it, so there is nothing to authorize across sessions.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        kwargs.setdefault("cli_tab", False)
+        super().__init__(**kwargs)
+        #: Input proposed by this session's agent, by suggestion id. A
+        #: proposal is text and a reason; only the user's accept writes it.
+        self._suggestions: Dict[str, dict] = {}
+
+    # ------------------------------------------------------------------ #
+    # input proposals (the agent proposes, the user decides)
     # ------------------------------------------------------------------ #
     def suggestions(self, state: Optional[str] = None) -> List[dict]:
         """The proposal queue, oldest first; ``state`` filters it."""
@@ -365,11 +442,10 @@ class ShellPty:
         return rows
 
     def suggest(self, session: str, text: str, why: str = "") -> dict:
-        """Queue text an agent session proposes the user run.
+        """Queue text this session's agent proposes the user run.
 
-        Nothing here reaches the child: a proposal is a row the CLI tab
-        shows beside its accept control. The only path from a proposal to
-        the PTY is :meth:`accept`, which the user's side calls.
+        Nothing here reaches the child: a proposal is a row the session's
+        ``cli`` pane shows beside its accept control.
         """
         session = (session or "").strip()
         if not session:
@@ -437,7 +513,7 @@ class ShellPty:
         if row["state"] != "pending":
             raise ValueError(f"suggestion {sid} was already {row['state']}")
         if self.exited or self._pty is None:
-            raise RuntimeError("the shell is not running; restart it in the CLI tab first")
+            raise RuntimeError("the shell is not running; restart it in the session's CLI pane first")
         row = self.decide(sid, "accepted", by)
         await self.write_bytes(row["text"].encode("utf-8") + b"\r", "suggestion")
         return row
@@ -453,43 +529,3 @@ class ShellPty:
         decided.sort(key=lambda r: r["created_at"])
         for row in decided[: len(decided) - SUGGESTION_KEEP_DECIDED]:
             self._suggestions.pop(row["id"], None)
-
-    def resize(self, cols: int, rows: int) -> None:
-        """The viewer's grid. Remembered for the next child, applied and
-        announced to every attached viewer when one is alive."""
-        if cols == self._cols and rows == self._rows:
-            return
-        self._cols, self._rows = cols, rows
-        if not self.exited and self._pty is not None:
-            try:
-                self._pty.resize(cols, rows)
-            except Exception:  # noqa: BLE001 — racing child exit
-                pass
-        self._broadcast(("resize", (cols, rows)))
-
-    # ------------------------------------------------------------------ #
-    # subscribers (WebSocket viewers)
-    # ------------------------------------------------------------------ #
-    def attach(self) -> Tuple[asyncio.Queue, bytes]:
-        """Subscribe a viewer and hand it the output ring in one step.
-
-        Both halves run synchronously on the loop, so the snapshot covers
-        exactly the bytes published before this viewer subscribed and the
-        queue carries everything after — no gap and no duplicate.
-        """
-        q: asyncio.Queue = asyncio.Queue(maxsize=1024)
-        self._subscribers.add(q)
-        return q, b"".join(self._buffer)
-
-    def unsubscribe(self, q: asyncio.Queue) -> None:
-        self._subscribers.discard(q)
-
-    def _broadcast(self, item: Tuple[str, object]) -> None:
-        dead = []
-        for q in self._subscribers:
-            try:
-                q.put_nowait(item)
-            except asyncio.QueueFull:
-                dead.append(q)  # slow consumer: drop it, it can reattach
-        for q in dead:
-            self._subscribers.discard(q)
