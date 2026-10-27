@@ -1262,6 +1262,51 @@ def test_no_reuse_keeps_the_green_receipt_it_displaces(repo, gate):
     assert json.loads(kept[0].read_text(encoding="utf-8"))["started_at"] == first["started_at"]
 
 
+def test_a_failed_receipt_write_leaves_the_earlier_receipt_in_place(repo, gate, monkeypatch, capsys):
+    """Archiving before the write emptied the key when the write then failed.
+
+    ``--check`` reads the key path and nothing else, so a run whose
+    bookkeeping died after the archive answered ``CANNOT_TELL`` for that tree
+    and selection -- where before the archive existed it answered with the
+    earlier run. The account of a run is not worth a gate that cannot speak,
+    so the receipt is written beside and swapped in: a failed write must leave
+    the earlier receipt exactly where the check looks, and must not leave a
+    partial file behind either.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    key = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    first = json.loads(key.read_text(encoding="utf-8"))
+
+    real = Path.write_text
+
+    def full_disk(self, *args, **kwargs):
+        if self.name.endswith(".tmp"):
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+
+    assert gate("--no-reuse") == 0, "bookkeeping failure is not a run failure"
+    assert gate.runs() == 2
+
+    assert key.is_file(), "the earlier receipt must not leave the key path"
+    still = json.loads(key.read_text(encoding="utf-8"))
+    assert still["started_at"] == first["started_at"], "the key must still hold the earlier run"
+    assert still["exit_code"] == 0
+    assert not sorted(p for p in key.parent.iterdir() if p.name.startswith(key.stem + "@")), (
+        "a write that failed displaced nothing"
+    )
+    assert not list(key.parent.glob("*.tmp")), "the half-written file must not be left behind"
+
+    assert "could not write the receipt" in capsys.readouterr().err
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts)["started_at"] == (
+        first["started_at"]
+    )
+
+
 def test_an_untracked_file_is_in_the_tree_key(repo):
     """``changed_paths`` counts untracked files, so the key must too.
 
