@@ -43198,7 +43198,13 @@ const CF2G_BRANCHES = new Set(["par", "group", "cond", "choose", "try", "timeout
    in to everything: `simple` follows the run, `lvN` unfolds every block less
    than N deep from its root, `all` unfolds every block. Each step opens at
    least what the step before it does. */
-const CF2G_PRESETS = [["simple", "Simplified", "every block folded but the path to the run's position"], ["lv1", "1 level", "the root's own steps, with the blocks below them folded"], ["lv2", "2 levels", "blocks open two levels deep"], ["lv3", "3 levels", "blocks open three levels deep"], ["all", "All", "every block unfolded"]];
+const CF2G_PRESETS = [
+  ["simple", "Simplified", "every block folded but the path to the run's position"],
+  ["lv1", "1 level", "the root's own steps, with the blocks below them folded"],
+  ["lv2", "2 levels", "blocks open two levels deep"],
+  ["lv3", "3 levels", "blocks open three levels deep"],
+  ["all", "All", "every block unfolded"],
+];
 const CF2G_PRESET_DEPTH = { lv1: 1, lv2: 2, lv3: 3 };
 
 /* One line, at most `max` characters: an SVG <text> collapses whitespace but

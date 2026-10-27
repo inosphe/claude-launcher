@@ -36,12 +36,29 @@ function sliceConst(name) {
   const end = src.indexOf("\n", start);
   return src.slice(start, end).replace(/;$/, "") + ";";
 }
+/* The same, for a declaration that runs over several lines — an array or an
+   object reads better one entry per line, and the harness still copies the
+   shipped value instead of a copy of it. */
+function sliceConstMulti(name) {
+  const start = src.indexOf(`const ${name} =`);
+  if (start < 0) throw new Error(`cannot locate const ${name} in app.js`);
+  let depth = 0;
+  for (let j = src.indexOf("=", start); j < src.length; j++) {
+    if (src[j] === "[" || src[j] === "{") depth++;
+    else if (src[j] === "]" || src[j] === "}") {
+      depth--;
+      if (!depth) return src.slice(start, src.indexOf(";", j) + 1);
+    }
+  }
+  throw new Error(`unbalanced const ${name}`);
+}
 
 const CONSTS = ["CF2G_NODE_W", "CF2G_NODE_H", "CF2G_GAP", "CF2G_LANE", "CF2G_PAD",
                 "CF2G_HEAD", "CF2G_CHIP", "CF2G_RAIL", "CF2G_EDGE", "CF2G_MARGIN",
                 "CF2G_GUTTER", "CF2G_ATOMIC", "CF2G_BRANCHES", "cf2ChartModes",
-                "CF2G_HANDLE",
-                "CF2G_PRESETS", "CF2G_PRESET_DEPTH", "cf2GraphPresets", "cf2GraphFolds"];
+                "CF2G_HANDLE", "CF2G_PRESET_DEPTH", "cf2GraphPresets", "cf2GraphFolds"];
+/* the presets are written one per line, so the harness copies them whole */
+const BLOCK_CONSTS = ["CF2G_PRESETS"];
 
 /* ---- stub DOM, just enough for the mode tabs -------------------------- */
 function stubNode(tag) {
@@ -64,6 +81,7 @@ globalThis.localStorage = {
 
 const fns = new Function(
   CONSTS.map(sliceConst).join("\n") + "\n" +
+  BLOCK_CONSTS.map(sliceConstMulti).join("\n") + "\n" +
   [slice("cflow2GraphClip"), slice("cflow2GraphLoopText"), slice("cflow2GraphChip"),
    slice("cflow2GraphSig"), slice("cflow2GraphSite"), slice("cflow2GraphProcs"), slice("cflow2GraphOpen"),
    slice("cflow2GraphLayout"), slice("cflow2GraphSvg"), slice("cflow2GraphInto"),
