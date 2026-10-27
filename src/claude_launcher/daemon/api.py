@@ -71,7 +71,7 @@ from . import pools
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
-from . import shared_reads, wallclock
+from . import shared_reads, spawn_events, wallclock
 from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
@@ -9503,7 +9503,7 @@ async def _spawn_gate_create(app, spec: dict, asker: str, record: dict) -> Tuple
                         reason=f"setup:{record.get('setup') or spawn_gate.SETUP_APPROVED}")
     request = _GateRequest(app, asker, actor)
     if record.get("created_as") == spawn_gate.CHILD:
-        return await _spawn_child(request, asker, dict(spec), created_by=actor)
+        return await _spawn_child_reported(request, asker, dict(spec), created_by=actor)
     return await _create_session(request, dict(spec))
 
 
@@ -11542,7 +11542,7 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     # the user chose to keep off the card.
     if actor.get("kind") == actors.AGENT and (root or not spawn_gate_exempt(body)):
         return await _file_spawn_request(request, parent, body, root=root, reason=reason)
-    status, payload = await _spawn_child(request, parent, body, created_by=actor)
+    status, payload = await _spawn_child_reported(request, parent, body, created_by=actor)
     return json_response(payload, status=status)
 
 
@@ -11648,6 +11648,47 @@ async def _spawn_child(request, parent: str, body: dict, *,
     if warnings:
         body_out["warnings"] = warnings
     return 201, body_out
+
+
+async def _spawn_child_reported(request, parent: str, body: dict, *,
+                                created_by: Optional[dict]) -> Tuple[int, dict]:
+    """:func:`_spawn_child`, with a refused creation recorded for the user.
+
+    A spawn that answers 4xx/5xx has no session to look at afterwards: the
+    refusal goes back to whichever client asked, and if that client is a run
+    engine or the delayed sweep, the person hears nothing (claunch-ull6m,
+    claunch-k3acp). Every refusal that comes back through here is one warning
+    event on the parent -- the session the person was watching when the work
+    was started -- and one warn notice over its terminal (claunch-is4o4).
+    """
+    status, payload = await _spawn_child(request, parent, body, created_by=created_by)
+    if status >= 400:
+        _report_spawn_failure(
+            request, parent, payload.get("error") or "", site="api.spawn",
+            status=status, task=_first_line(body.get("task")),
+        )
+    return status, payload
+
+
+def _report_spawn_failure(request, target: str, reason: str, *, site: str, **details) -> None:
+    """One warning event for a creation this route refused.
+
+    Uses the app's manager reporter, and falls back to the installed one for
+    a manager that has none (a stub an older test builds the app with): a
+    refusal must not turn into a second failure because its report is
+    missing. That is also why the call itself is guarded -- this runs on the
+    way out of a refusal whose response is already decided, and a report that
+    raised would answer 500 where the route meant 4xx (claunch-is4o4,
+    s1389-rev)."""
+    failures = getattr(request.app["manager"], "spawn_failures", None)
+    if failures is None:
+        failures = spawn_events.installed()
+    if failures is None:
+        return
+    try:
+        failures.report(target, kind="fail", reason=reason, site=site, **details)
+    except Exception:  # noqa: BLE001 - see the docstring
+        log.exception("could not report the refused spawn for %r (%s)", target, site)
 
 
 async def h_session_reparent(request: web.Request) -> web.Response:
@@ -13318,6 +13359,11 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
             request, request.match_info["name"], await _json_body(request)
         )
     except QuickForkError as exc:
+        # A fork the engine asked for (a cflow ``fork`` delegation) fails the
+        # same way a spawn does, and is as invisible to the person: one
+        # warning event on the origin (claunch-is4o4).
+        _report_spawn_failure(request, request.match_info["name"], str(exc),
+                              site="api.quick_fork", status=exc.status)
         return json_error(exc.status, str(exc))
     return json_response(out, status=201)
 

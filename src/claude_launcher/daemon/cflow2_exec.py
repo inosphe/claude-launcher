@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..cflow2 import executors, ir, runtime
 from ..cflow2.store import RunStore, unqualified
-from . import actors
+from . import actors, spawn_events
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -352,6 +352,15 @@ def spawn_session(cwd: str, scope: str, did: str, *,
         refused = isinstance(exc, SpawnRefused) and "not reachable" in str(exc)
         if lost is not None and not refused:
             lost(marker)
+        # The run reroutes quietly -- to a sub-agent when the chart allows
+        # it -- so the person would otherwise never learn that the delegation
+        # it asked for did not become a session (claunch-ull6m). One warning
+        # event on the parent; a refusal the API already reported folds into
+        # that report (same target, same sentence, claunch-is4o4).
+        spawn_events.report(
+            parent, kind="fail", reason=str(exc), site="cflow2.spawn",
+            delegation=did, scope=scope, executor=ir.EXEC_SESSION,
+        )
         nxt = runtime.delegate_reroute(did, f"session.spawn refused: {exc}", cwd=cwd, scope=scope)
         return {"delegation": did, "result": "rerouted", "executor": nxt, "error": str(exc)}
     _record_child(cwd, scope, did, child, runner, marker)
@@ -382,6 +391,12 @@ def _spawn_fork(st: RunStore, r: Any, did: str, brief: Dict[str, Any], marker: s
         refused = isinstance(exc, SpawnRefused) and "not reachable" in str(exc)
         if lost is not None and not refused:
             lost(marker)
+        # A fork refusal is the same invisible fallback as a spawn refusal
+        # (claunch-is4o4); see :func:`spawn_session`.
+        spawn_events.report(
+            parent, kind="fail", reason=str(exc), site="cflow2.fork",
+            delegation=did, scope=scope, executor=ir.EXEC_FORK,
+        )
         nxt = runtime.delegate_reroute(did, f"quick-fork refused: {exc}", cwd=cwd, scope=scope)
         return {"delegation": did, "result": "rerouted", "executor": nxt, "error": str(exc)}
     _record_child(cwd, scope, did, child, runner, marker, executor=ir.EXEC_FORK)

@@ -71,7 +71,7 @@ from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
 from ..cflow.model import WorkflowError
 from . import cflow2_web
-from . import harness as harness_mod, mcp_ready, mesh_roles
+from . import harness as harness_mod, mcp_ready, mesh_roles, spawn_events
 from .harness import CLAUDE_HARNESS
 from .mesh import LEADER_IMPLIES, LEADER_ROLE, MeshError
 from .session import delivery_wake
@@ -211,7 +211,12 @@ async def inherit_mesh(
       lands in the same one: the next spawn finds it in exactly one mesh and
       takes this branch no further. The child joins it as
       :data:`FREE_ROLE`: there is no team here to hold a place in, and the
-      role the caller asked for would claim one.
+      role the caller asked for would claim one. This is a fallback — the
+      fleet is being reshaped by a spawn — so it is also the one branch here
+      that tells the user: one warning event on the parent and a warn notice
+      over its terminal, naming the mesh that was opened and the child that
+      landed in it (claunch-is4o4). ``child`` is that child's name, when the
+      caller already has it.
 
     :data:`NO_MESH` opts out of a team mesh. The parent channel is still set
     up by :func:`arrange`.
@@ -229,7 +234,7 @@ async def inherit_mesh(
     mine = [m for m in mesh_mgr.meshes_for_session(parent)
             if not m.get("parent_channel")]
     if not mine:
-        body["mesh"] = await _open_mesh_for(parent, mesh_mgr, project=project)
+        body["mesh"] = await _open_mesh_for(parent, mesh_mgr, project=project, child=child)
         body["role"] = FREE_ROLE
         return
     body["mesh"] = min(mine, key=_main_mesh_key)["mesh"]
@@ -377,7 +382,8 @@ def _paired_v1(*, parent: str, parent_cwd: str, cwd: str) -> Optional[str]:
         return ""
 
 
-async def _open_mesh_for(parent: str, mesh_mgr, *, project: str = "") -> str:
+async def _open_mesh_for(parent: str, mesh_mgr, *, project: str = "",
+                         child: str = "") -> str:
     """Create a mesh for a parent that is in none, and put the parent in it.
 
     Named after the parent because the name has to mean something to a human
@@ -410,6 +416,18 @@ async def _open_mesh_for(parent: str, mesh_mgr, *, project: str = "") -> str:
     # first message has been told by the wrong party.
     await mesh_mgr.join(name, parent, handle=parent)
     log.info("opened mesh %r for %r and its children", name, parent)
+    # The fallback is announced (claunch-is4o4): the parent's topology just
+    # changed because of a spawn, and the child it asked for joins a mesh
+    # that did not exist a moment ago. The parent is the session a person is
+    # looking at (the child has no viewer yet -- it is not launched), so the
+    # event is filed there and the notice goes there.
+    spawn_events.report(
+        parent, kind="fallback",
+        reason=(f"부모 {parent}가 어떤 메시에도 속해 있지 않아 {name} 메시를 새로 열었고, "
+                f"자식 {child or '(이름 미정)'}이 그 메시로 들어간다"),
+        site="onboard.inherit_mesh", mesh=name, parent=parent,
+        **({"child": child} if child else {}),
+    )
     return name
 
 

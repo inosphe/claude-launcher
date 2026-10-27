@@ -41,7 +41,7 @@ from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
 from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
-from . import line_sync, paths, pty_backend, search_records, session_events, session_input
+from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import (
@@ -239,6 +239,13 @@ class SessionManager:
         self.render_budget = RenderBudget(background_render_budget)
         self._sessions: Dict[str, AnySession] = {}
         self.events = session_events.Events(paths.daemon_dir())
+        #: Failed and downgraded session creations, as warning events on the
+        #: session a person would look at (claunch-is4o4). Installed here so
+        #: the modules that meet a failure without a manager handle
+        #: (``onboard.inherit_mesh``, ``cflow2_exec``, ``delayed_sweep``) can
+        #: report through ``spawn_events.report``.
+        self.spawn_failures = spawn_events.Failures(self.events, self._spawn_target)
+        spawn_events.install(self.spawn_failures)
         #: What each session last published about its own progress (see
         #: :mod:`progress`): fed by the OSC hook set in :meth:`stage` and by
         #: ``POST /api/sessions/{name}/progress``, read by the list routes.
@@ -1473,6 +1480,17 @@ class SessionManager:
             return self._sessions[name]
         except KeyError:
             raise ManagerError(f"no session named {name!r}") from None
+
+    def _spawn_target(self, name: str) -> Optional[AnySession]:
+        """The session a spawn event is filed on, or ``None``.
+
+        :meth:`get`'s question asked the way :mod:`spawn_events` asks it: a
+        report about a failure names its target, which may since have exited
+        and been dropped, and a missing one leaves nothing to file on."""
+        try:
+            return self.get(name)
+        except ManagerError:
+            return None
 
     def _fresh_created_at(self) -> str:
         """The creation stamp for a session made now, never older than the
