@@ -23439,13 +23439,34 @@ function railOpenedSecs(at) {
    the smallest reading wins: latency can only ever push a reading up, and
    the minimum converges on the true difference. `known` is the reading so
    far (null before the first), and a NaN or a missing `now` leaves it as it
-   was. */
+   was.
+
+   A minimum only ever falls, so it cannot follow a clock that is stepped —
+   an NTP correction, or the machine waking from sleep — and a step up would
+   leave every card's age off by the step for as long as the page lives. A
+   reading that exceeds the current minimum by more than `RAIL_SKEW_JUMP` is
+   therefore taken as the new value: latency never reaches that far, so the
+   gap is a step, and following it is cheaper than being wrong by it. The
+   minimum is also dropped when the page reconnects to its daemon
+   (`noteRailReconnect`), the other moment every reading may have moved. */
+const RAIL_SKEW_JUMP = 30;   // seconds; a gap this large is a clock step
 function railSkewOf(now, known) {
   const secs = Number(now);
   if (!Number.isFinite(secs) || secs <= 0) return known || 0;
   const reading = Date.now() / 1000 - secs;
   if (!Number.isFinite(known)) return reading;
+  // A reading this far above the minimum is a clock step, not latency.
+  if (reading - known > RAIL_SKEW_JUMP) return reading;
   return Math.min(known, reading);
+}
+
+/* Drops the correction so the next answer re-reads it from scratch. Called
+   when the page reconnects to its daemon — the other moment every reading
+   may have moved, and the one place the daemon itself may have changed.
+   `null` reads as "no reading yet", which `railSkewOf` takes the next
+   answer's value for and `openedOnThisClock` treats as no correction. */
+function noteRailReconnect() {
+  railClockSkew = null;
 }
 
 /* The two polls each hand the channel the whole set: one feed, so neither
@@ -59103,9 +59124,14 @@ function gateHistoryOpened(type, rid, opened) {
    corrected value instead would make it differ by a few milliseconds on
    every poll (the skew is measured against a moving `Date.now()`), so each
    poll would rewrite the whole history — the very cost this field is meant
-   to sit beside, not add to. */
+   to sit beside, not add to.
+
+   `railClockSkew` is null between a reconnect and the next rail answer
+   (`noteRailReconnect`); there is no correction to apply yet, so the stamp
+   is read as it is. */
 function openedOnThisClock(secs) {
-  return (secs + railClockSkew) * 1000;
+  const skew = Number.isFinite(railClockSkew) ? railClockSkew : 0;
+  return (secs + skew) * 1000;
 }
 
 /* A request that left the pending set. `status` is the daemon's word for it
@@ -62632,6 +62658,11 @@ async function pollOnce() {
         { source: "daemon", key: NOTICE_LINK }
       );
     }
+    // The daemon may be a different process than the one the rail's clock was
+    // measured against, and the time this took is time either clock could have
+    // been stepped in, so the correction is re-read by `boot()` below rather
+    // than carried across (claunch-l9znm.1).
+    if (typeof noteRailReconnect === "function") noteRailReconnect();
     await boot();     // re-read everything this daemon publishes, from scratch
     reconnectNow();   // and give the attached terminal its socket back
     return;

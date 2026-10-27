@@ -256,7 +256,8 @@ function build(opts) {
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
-    " railSkewOf," +
+    " railSkewOf, noteRailReconnect, openedOnThisClock," +
+    " get railSkew() { return railClockSkew; }," +
     " noticeClocksPaint," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -2141,6 +2142,49 @@ function gotoRec(rec) {
           w.api.railSkewOf(undefined, c) === c, w.api.railSkewOf(undefined, c));
     check("and so does one with no clock this page can use",
           w.api.railSkewOf(0, c) === c, w.api.railSkewOf(0, c));
+  }
+  /* --- a clock that is stepped is followed, not waited out -----------
+     (claunch-l9znm.1)
+
+     A minimum only ever falls, so it cannot follow a clock that moves the
+     other way — an NTP correction, or the machine waking from sleep — and
+     every card's age would stay off by the step for the life of the page.
+     A reading that exceeds the minimum by more than RAIL_SKEW_JUMP (30 s)
+     is a step and is taken as the new value; latency never reaches that
+     far. Reconnecting to the daemon drops the reading outright, since that
+     is the other moment both clocks may have moved. */
+  {
+    const w = build();
+    // A reading of `r` seconds: the daemon stamped its `now` this far from
+    // this page's clock. (base - r, because the reading is page minus daemon.)
+    const now = () => w.clock.at / 1000;
+    const answer = (r, known) => w.api.railSkewOf(now() - r, known);
+    // The page and the daemon agree to within a second, as they usually do.
+    const a = answer(1, null);
+    check("the correction starts where the first answer puts it",
+          Math.abs(a - 1) < 1e-6, a);
+    // Then the daemon's clock is stepped back a minute: every reading now
+    // sits 60 s higher than the minimum, which no latency produces.
+    const b = answer(61, a);
+    check("a step this large is followed rather than held",
+          Math.abs(b - 61) < 1e-6, b);
+    // Below the threshold it is still latency, and the minimum still wins.
+    check("a gap under the threshold is still treated as latency",
+          answer(61.3, b) === b, answer(61.3, b));
+    check("and a faster answer still tightens it",
+          Math.abs(answer(60.9, b) - 60.9) < 1e-6, answer(60.9, b));
+
+    // Reconnecting drops it: the next answer is authoritative, whichever
+    // direction it moves, and until it lands there is no correction at all.
+    w.api.noteRailReconnect();
+    check("reconnecting drops the correction", w.api.railSkew === null,
+          w.api.railSkew);
+    check("and until the next answer a stamp is read raw",
+          Math.abs(w.api.openedOnThisClock(1000) - 1000e3) < 1e-6,
+          w.api.openedOnThisClock(1000));
+    const d = answer(30, w.api.railSkew);
+    check("the first answer after it is taken as it is",
+          Math.abs(d - 30) < 1e-6, d);
   }
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
