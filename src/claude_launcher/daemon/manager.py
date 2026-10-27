@@ -455,12 +455,12 @@ class SessionManager:
         continuing, so the pin continues with it (see
         :attr:`Session._delivery_hold`).
         """
-        # One place decides a name (:meth:`settle_name`), so a caller that has
-        # already named the worktree after the session and one that left the
-        # name empty cannot choose differently. An auto-generated name has
-        # already made its directory and moved the counter -- see
-        # :meth:`_auto_name` for why that order, and why neither is undone.
-        name = self.settle_name(str(sdef.name or ""))
+        # The name is reserved here, and only here: every check that could
+        # refuse this request has already passed, so a number is spent only on
+        # a session that is going to exist. ``settle_name`` (which callers that
+        # must name a worktree use) computes a candidate and writes nothing --
+        # see its docstring for why the two are split.
+        name = self._reserve(self.settle_name(str(sdef.name or "")))
         sdef = self._resolve_resume(
             SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
@@ -1468,28 +1468,28 @@ class SessionManager:
 
         For a caller that must name something after the session before its
         record exists -- the worktree cut for it -- so a name already taken is
-        refused there rather than later, with the session already half made.
-        Empty means the next number from the counter (:meth:`_auto_name`).
+        refused there rather than later. Empty means the next number the
+        counter would hand out (:meth:`_auto_name`).
 
-        A named session is only *checked*, and nothing is on disk. An
-        auto-assigned one is *reserved*: :meth:`_auto_name` creates its
-        directory, which is how the counter avoids handing one number to two
-        creators, and moves the counter so the number is never issued again.
-        A caller that settles a name and then refuses the request leaves that
-        empty directory behind — accepted, because unwinding it is how a name
-        would come to be handed out twice.
-
-        This is the one place a name is decided: :meth:`stage`,
-        :meth:`stage_child` and the web create route all ask here, so the
-        worktree a session is cut into and the session itself cannot end up
-        with two different names.
+        **Nothing is written here, and no number is spent.** A caller reaches
+        this while its request can still be refused (``POST /api/sessions``
+        checks the worktree, the harness, the profile and the kind after the
+        name is settled), and a name that spent a number on a refused request
+        would leave behind exactly the empty directories this counter exists to
+        stop accumulating. So an auto-assigned name is a *candidate*:
+        :meth:`stage` reserves it, and if another creator took it in between,
+        :meth:`_reserve` picks the next one. The cost of that is the worktree a
+        caller named after the candidate — a request that loses that race gets
+        a session named ``s7`` cut into a checkout named ``s6``. That is a
+        misnamed directory, not a lost identity, and it is much cheaper than
+        wrecking the naming invariant for every refused request.
         """
         name = (name or "").strip() or self._auto_name()
         self._check_name(name)
         return name
 
     def _auto_name(self) -> str:
-        """The next ``sN`` from the counter, skipping names already in use.
+        """The next ``sN`` the counter would hand out -- without taking it.
 
         The counter (:mod:`session_seq`) is a high-water mark rather than a
         search: it only moves forward, so deleting a session directory does not
@@ -1497,18 +1497,43 @@ class SessionManager:
         recycled name appends to another session's output log, report directory
         and worktree name, and two histories then look like one.
 
-        A name is skipped when a record holds it (an exited one counts: it is
-        still respawnable) or a directory does — the latter is checked by the
-        allocation itself, which creates the directory as its reservation.
-
         A name a person chose (``s9000`` typed by hand) does not move the
         counter: it is simply stepped over here when the sequence reaches it.
 
         ``clear-sessions --logs`` deletes the directory and leaves the counter
         where it is. The numbers are not freed.
         """
-        return session_seq.allocate(
+        return session_seq.next_name(
             lambda name: name in self._sessions, records=list(self._sessions)
+        )
+
+    def _reserve(self, name: str) -> str:
+        """Make ``name`` real: its directory exists and no other session holds it.
+
+        The one place a name becomes a session's. Called from :meth:`stage`,
+        which is reached only once every check that could refuse the request
+        has passed (see :meth:`settle_name` for the ordering that has to hold).
+
+        An auto-assigned candidate that the filesystem or another record took
+        since it was computed is replaced by the next one. A name a person gave
+        is not in the sequence, so it spends no number and is only checked --
+        and, as before this counter existed, a directory left behind by a
+        cleared session does not stop a person from reusing their own name.
+        """
+        if name in self._sessions:
+            raise ManagerError(f"session {name!r} already exists")
+        if not session_seq.NUMBER_RE.match(name):
+            # A person's name: no counter involvement at all (the issue's
+            # "a hand-given name does not consume a number").
+            return name
+        if session_seq.claim(name, lambda n: n in self._sessions):
+            return name
+        # The candidate was taken between settling and reserving it -- by
+        # another process's request, or by a record this check does not see.
+        # Ask the counter again rather than failing a request that is otherwise
+        # ready to run.
+        return session_seq.allocate(
+            lambda n: n in self._sessions, records=list(self._sessions)
         )
 
     def get(self, name: str) -> AnySession:

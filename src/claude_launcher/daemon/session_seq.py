@@ -16,13 +16,17 @@ directory therefore frees no number.
 
 Two rules the callers keep, because each is about ordering or intent this
 module cannot see (:meth:`SessionManager.settle_name`,
-:meth:`SessionManager.discard`):
+:meth:`SessionManager._reserve`):
 
-* **The directory is created before the counter moves.** The directory is the
-  reservation: ``mkdir`` refusing a name that is already there is what stops
-  two creators that read the same counter from taking one number. Writing the
-  counter first would instead spend a number on every attempt that then failed,
-  which is the behaviour being replaced.
+* **A name is only proposed until the request cannot be refused.** Computing
+  the next name touches nothing (:func:`next_name`); reserving it
+  (:func:`claim`) makes the directory and moves the counter. The two are split
+  because a caller must name a *worktree* before the rest of its request is
+  validated, and a name spent on a request that validation then refuses leaves
+  an empty directory — the exact litter this module exists to stop. The price
+  of the split is that a candidate can lose a race and the worktree ends up
+  named for a number the session did not get; that is a misnamed directory, not
+  a broken naming invariant.
 * **A name a person chose does not move the counter**, whether or not it looks
   like a number — ``s1305-rev``, ``job-7`` and a hand-typed ``s9000`` alike. The
   scan steps over a name that is taken, so a person's ``s9000`` costs the
@@ -161,7 +165,8 @@ def commit(number: int) -> int:
     session directory exists (see the module docstring): a failure to write
     spends nothing, because the next recovery reads the directory.
     """
-    current, _ = read(lambda: 0)
+    current, source = read(lambda: 0)
+    log_source(source, number)
     nxt = max(current, number + 1)
     path = file()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,47 +178,73 @@ def commit(number: int) -> int:
     return nxt
 
 
-def allocate(taken: Callable[[str], bool] = lambda name: False,
-             records: Iterable[str] = ()) -> str:
-    """Hand out the next ``sN`` and reserve it, in that order; answer its name.
+def next_name(
+    taken: Callable[[str], bool] = lambda name: False,
+    records: Iterable[str] = (),
+) -> str:
+    """The name the next allocation would take, **without taking it**.
 
-    The whole read-decide-write is one critical section, because two creators
-    reading the counter together and both writing ``N + 1`` would hand out the
-    same number twice. Two things hold that:
+    No directory is made and the counter does not move. Callers use this where
+    they must name something after the session before knowing the request will
+    be accepted — the worktree cut for it is the reason this exists — so that a
+    request that is then refused costs nothing.
 
-    * :data:`_lock`, for the threads of this process — the manager runs
-      creation on whatever thread called it.
-    * ``mkdir(exist_ok=False)``, for other processes. The directory is the
-      reservation, and the kernel refuses it to the loser. A process that finds
-      the name already there steps to the next number and tries again.
-
-    The directory is made **before** the counter moves, which is the order the
-    issue asked for and the one that spends least on a failure: a crash between
-    the two leaves a directory holding the name — which the next allocation
-    steps over — rather than a counter that skipped a number for a session that
-    never existed.
-
-    ``taken`` covers what the filesystem cannot: this process's records, whose
-    directory may be absent (a record restored from the durable store is a
-    name in use even if nobody has made its directory yet). ``records`` is the
-    same registry as names, for the recovery in :func:`read`.
+    What it returns is a *candidate*: another creator can take it before the
+    caller reserves it. :func:`claim` is what refuses such a name, so a caller
+    must treat this as a proposal and not as a reservation.
     """
-    with _lock:
-        number, source = read(lambda: recover(records))
-        log_source(source, number)
-        while True:
-            name = f"s{number}"
-            if taken(name):
-                number += 1
-                continue
-            try:
-                paths.session_dir(name).mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
-                number += 1
-                continue
-            break
-        commit(number)
-        return name
+    number, _ = read(lambda: recover(records))
+    # No warning here: this is a peek, and a caller that is refused spends
+    # nothing. :func:`commit` reports recovery, because that is where a number
+    # is actually handed out of a rebuilt value.
+    while taken(f"s{number}") or paths.session_dir(f"s{number}").is_dir():
+        number += 1
+    return f"s{number}"
+
+
+def claim(
+    name: str,
+    taken: Callable[[str], bool] = lambda name: False,
+) -> bool:
+    """Reserve ``name``: make its directory and move the counter past it.
+
+    ``False`` means the name is not available — either this process's registry
+    holds it (``taken``) or its directory already exists, which is how a name
+    taken a moment ago by a request in another process shows up. A caller then
+    asks :func:`next_name` again.
+
+    The directory is created **before** the counter moves: the directory is the
+    reservation (``mkdir`` refusing is what refuses the loser of a race), and a
+    crash between the two leaves a directory holding the name — which the next
+    scan steps over — rather than a counter that skipped a number for a session
+    that never existed.
+    """
+    match = NUMBER_RE.match(name or "")
+    if not match or taken(name):
+        return False
+    try:
+        with _lock:
+            paths.session_dir(name).mkdir(parents=True, exist_ok=False)
+            commit(int(match.group(1)))
+    except FileExistsError:
+        return False
+    return True
+
+
+def allocate(
+    taken: Callable[[str], bool] = lambda name: False,
+    records: Iterable[str] = (),
+) -> str:
+    """Hand out the next ``sN`` and reserve it; answer its name.
+
+    :func:`next_name` plus :func:`claim`, retried when the candidate turns out
+    to be taken. Callers that can still refuse the request afterwards should
+    not use this — see :func:`next_name` for why.
+    """
+    while True:
+        name = next_name(taken, records)
+        if claim(name, taken):
+            return name
 
 
 def log_source(source: str, number: int) -> None:

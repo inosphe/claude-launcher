@@ -10914,6 +10914,14 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
             # own environment, which is nobody's. A taken name is refused
             # here, with the status stage() below would give it, before a
             # checkout is cut.
+            #
+            # This only *computes* a name: the session-name counter is not
+            # touched until stage() reserves it, because this request can
+            # still be refused by the harness, profile and kind checks a few
+            # lines down (and by the worktree resolve just below). A name that
+            # spent a number here would leave an empty directory for every
+            # rejected form submission -- the litter the counter exists to
+            # stop.
             try:
                 body["name"] = manager.settle_name(str(body.get("name") or ""))
             except ManagerError as exc:
