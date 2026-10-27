@@ -23433,20 +23433,21 @@ function railOpenedSecs(at) {
 }
 
 /* This page's clock minus the daemon's, in seconds, from the `now` the rail
-   answer carries — 0 when it carries none (an older daemon), which reads the
-   stamp as it is. A gate's `opened_at` is the daemon's clock and the age is
-   measured on this page's, so the difference is subtracted before counting:
-   two machines five minutes apart would otherwise show a card opening in the
-   future, or one that has waited five minutes longer than it has
-   (claunch-l9znm.1).
+   answer carries. An answer that carries none (an older daemon, an error
+   body) leaves the reading as it was, and a page that has never read one
+   reads the stamp as it is. A gate's `opened_at` is the daemon's clock and
+   the age is measured on this page's, so the difference is subtracted before
+   counting: two machines five minutes apart would otherwise show a card
+   opening in the future, or one that has waited five minutes longer than it
+   has (claunch-l9znm.1).
 
    The reading is noisy — `now` is stamped before the answer travels, so each
    poll's difference is the true skew plus that poll's latency. Taking it
    fresh every poll would move every card's age by that jitter each time, so
    the smallest reading wins: latency can only ever push a reading up, and
    the minimum converges on the true difference. `known` is the reading so
-   far (null before the first), and a NaN or a missing `now` leaves it as it
-   was.
+   far — `null` before the first, and a NaN or a missing `now` leaves it as
+   it was, `null` included.
 
    A minimum only ever falls, so it cannot follow a clock that is stepped —
    an NTP correction, or the machine waking from sleep — and a step up would
