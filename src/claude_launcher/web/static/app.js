@@ -57563,6 +57563,65 @@ const NOTICE_BOOT = "daemon-boot";  // "this is a different daemon"
 const notices = new Map();       // key -> {node, timer}
 let noticeSeq = 0;
 
+/* Where the strip may start (claunch-lolft). The corner it used to pin
+   itself to is the corner the page's own bars reach: #session-tabs wraps
+   across the full width, #term-header carries its controls to the right
+   edge (#term-details floats in the last lane, style.css), a phone's
+   #mobile-top is the whole bar, and every other page opens with the same
+   kind of head (.wf-head, .page-head). A card drawn over them hides the
+   row the reader keeps reaching for, while it says something that can
+   wait.
+
+   Measured rather than typed, because none of that is fixed: the tabs row
+   wraps, the header comes and goes with the page, and the phone's bar
+   depends on the breakpoint. A bar counts only when it is stacked against
+   the top edge — one further down is page content (or a modal's head), and
+   the strip never grows to reach it. */
+const NOTICE_BARS = "#mobile-top, #session-tabs, #term-header, .wf-head, .page-head";
+const NOTICE_TOP = 12;         // no bar at all: the corner it always had
+const NOTICE_TOP_GAP = 8;      // the strip's distance below the last bar
+
+function noticeStripTop() {
+  if (typeof document === "undefined" || !document.querySelectorAll) return NOTICE_TOP;
+  const bars = [];
+  document.querySelectorAll(NOTICE_BARS).forEach((bar) => {
+    // A bar on another page (.hidden, display: none) has no box to read.
+    if (!bar.getClientRects().length) return;
+    const box = bar.getBoundingClientRect();
+    if (box.height > 0) bars.push(box);
+  });
+  bars.sort((a, b) => a.top - b.top);
+  let bottom = 0;
+  for (const box of bars) {
+    // 2px of slack: the bars stack border to border, and a rounded
+    // measurement would read that border as a gap.
+    if (box.top > bottom + 2) break;
+    bottom = Math.max(bottom, box.bottom);
+  }
+  return bottom > 0 ? bottom + NOTICE_TOP_GAP : NOTICE_TOP;
+}
+
+function placeNoticeStrip() {
+  const host = $("notices");
+  // The node harnesses hand in a stub element for #notices (notice_check
+  // and the gate checks slice this block); there is nothing to place there.
+  if (!host || !host.style || typeof host.style.setProperty !== "function") return;
+  host.style.setProperty("--notices-top", `${Math.round(noticeStripTop())}px`);
+}
+
+/* The bars move without telling anyone — the tabs row wraps as sessions
+   are opened, the header leaves with the page, the phone's status line
+   comes and goes with the breakpoint — so a card already on screen is
+   re-placed when they do. One observer over every candidate: a hidden bar
+   reports a size of 0, so it comes *and* goes through here. */
+function watchNoticeStrip() {
+  if (typeof document === "undefined" || typeof ResizeObserver !== "function") return;
+  const watch = new ResizeObserver(() => placeNoticeStrip());
+  document.querySelectorAll(NOTICE_BARS).forEach((bar) => watch.observe(bar));
+  window.addEventListener("resize", placeNoticeStrip);
+  placeNoticeStrip();
+}
+
 /* Local wall-clock, which is what "when did it happen" means to the person
    reading it: the daemon's own uptime is a duration, and a duration read off
    a card that has been sitting there for ten minutes is a lie. */
@@ -57598,6 +57657,9 @@ function notify(title, sub, opts) {
   if (noticePanelOpen()) return null;
   // A hidden kind is recorded and puts up no card.
   if (!noticeSourceShown(source)) return null;
+  // Where the card lands is measured every time one is about to appear
+  // (claunch-lolft): the page it is drawn on is the one the bars belong to.
+  placeNoticeStrip();
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   // A click on the card goes where it points; × only puts it away
   // (claunch-x76l8). The history keeps the row either way.
@@ -61598,6 +61660,10 @@ globalThis.GlossaryComposer?.mount({field: $("term-input-field"),
   session: () => currentName, resize: autogrowTermInput});
 
 boot();
+// Placed here rather than inside boot(): the card that matters most — the
+// daemon is unreachable — is drawn exactly when boot() returned early, and
+// by then the strip still has to sit under the page's bars (claunch-lolft).
+watchNoticeStrip();
 
 // Explicit per-repository policy and provisioning decisions. This service is
 // separate from the one-shot A/B execution choices above.

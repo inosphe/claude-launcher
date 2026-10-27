@@ -7253,9 +7253,18 @@ body.embed #main { width: 100%; }
 /* hidden behind that prompt would explain nothing. The strip itself   */
 /* never eats clicks (pointer-events: none); each card takes its own   */
 /* back, so an empty strip cannot swallow a corner of the page.        */
+/*                                                                    */
+/* The top edge is measured, not typed (claunch-lolft): the corner is  */
+/* also where the page's own bars end — the session tabs wrap across   */
+/* the full width, the session header carries its controls to the     */
+/* right edge (ⓘ details floats in the last lane), and every other     */
+/* page opens with the same kind of head. 12px put the first card over */
+/* the controls a person keeps reaching for. app.js's placeNoticeStrip */
+/* writes --notices-top from those bars; the fallback is the old      */
+/* corner, for a page that has no bar at all.                          */
 /* ------------------------------------------------------------------ */
 #notices {
-  position: fixed; top: 12px; right: 14px; z-index: 30;
+  position: fixed; top: var(--notices-top, 12px); right: 14px; z-index: 30;
   display: flex; flex-direction: column; gap: 8px;
   width: min(340px, calc(100vw - 28px));
   pointer-events: none;
@@ -7442,9 +7451,11 @@ body.embed #main { width: 100%; }
 }
 .notice-chip.live { border-color: #d29922; color: #d29922; }
 /* A phone has no corner to spare: the strip spans the width under the
-   mobile bar instead of floating over the session it is reporting on. */
+   mobile bar instead of floating over the session it is reporting on —
+   and "under" is measured (--notices-top, claunch-lolft), because the
+   status line's own buttons are in that bar. */
 @media (max-width: 700px) {
-  #notices { top: 8px; right: 8px; left: 8px; width: auto; }
+  #notices { top: var(--notices-top, 8px); right: 8px; left: 8px; width: auto; }
 }
 @media (max-width: 820px) {
   #notice-panel {
