@@ -112,7 +112,7 @@ def _block(text: str) -> str:
 #: beads block drops v1's self cap and settles on "every issue closed, or a
 #: leader HOLD". Apart from DIVERGENCES below, the v2 copy stays the v1
 #: block word for word.
-V1_ONLY = """묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
+V1_ONLY = """self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
 (`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
 대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
 intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전에 범위
@@ -121,7 +121,7 @@ intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전�
 pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
 이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
 `HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가"""
-V2_INSTEAD = """묻는다. self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
+V2_INSTEAD = """self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
 거부권을 가진다(`update <id> --assignee ""` + `UNQUEUED by leader:
 <이유>`); 거부된 이슈는 pool과 같이 상위의 처분을 따른다. 세션이
 만들었거나 배정받은 일감이 전부 closed여야 세션이 끝난다 — 예외는

@@ -178,7 +178,11 @@ fragments:
       안에서 다음 회차로 돈다; (3) **pool** — assignee 없이 남기는 것은 이
       세션이 착수할 수 없는 것(다른 저장소 영역, blocked, 범위·우선순위를
       사용자나 리더가 정해야 하는 것)뿐이고, 그 처분은 상위에게 ask로
-      묻는다. self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
+      묻는다. 상위의 답은 셋 중 하나다: `HOLD: <이유>` 코멘트, 다른
+      세션에 배정, 물어 온 세션에 배정(`update <id> --assignee <그 세션>`
+      + `ASSIGNED by leader: <그 세션> <이유>` — pool을 self로 되돌린
+      것이고, 그 세션의 queue-recheck가 다음 회차로 읽고 사용자에게
+      알린다). self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
       거부권을 가진다(`update <id> --assignee ""` + `UNQUEUED by leader:
       <이유>`); 거부된 이슈는 pool과 같이 상위의 처분을 따른다. 세션이
       만들었거나 배정받은 일감이 전부 closed여야 세션이 끝난다 — 예외는
