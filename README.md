@@ -75,13 +75,21 @@ writes a `claunch-nogil` wrapper that sets `PYTHON_GIL=0`. The tool environment
 lives under `~/.local/share/claunch-nogil` (`%LOCALAPPDATA%\claunch-nogil` on
 Windows), so the regular `claunch` tool is not replaced. `pyproject.toml` is not
 changed: its `zvec>=0.7,<0.8` cap conflicts with the `0.8.x` source build, which
-the override replaces. `aiortc` has no `cp314t` wheels and needs `libsrtp2-dev`
-to build, so the `p2p` extra falls back to being left out (`--no-p2p` skips the
-attempt). The script does not restart the daemon: both commands share
+the override replaces. `aiortc` has no `cp314t` wheels, so the optional `p2p`
+extra needs the `libsrtp2` headers and compiles them from source: on Linux
+`libsrtp2-dev` and `pkg-config`, on Windows `vcpkg install
+libsrtp2:x64-windows`. The script checks for them before the `zvec` build and,
+when they are missing, prints the install commands and asks whether to finish
+without that feature or stop. A non-interactive run stops (exit code 1) unless
+told which way: `--no-p2p` finishes without it and skips the check,
+`--require-p2p` always stops when it cannot be built (Windows: `-NoP2p`,
+`-RequireP2p`). The closing summary states whether the feature is in. The
+script does not restart the daemon: both commands share
 `~/.claude-launcher` and port 8378, so run `claunch-nogil daemon restart` to
 move the daemon to `3.14t` and `claunch daemon restart` to move it back. The
 `.ps1` script has not been run: it was written without access to a Windows
-machine or PowerShell.
+machine or PowerShell; only its parse and its p2p decision branch have been
+exercised (with `/usr/bin/pwsh` on Linux).
 
 `zvec`'s extension does not declare that it runs without the GIL, so importing
 it turns the GIL back on for the whole process unless `PYTHON_GIL=0` is set.
