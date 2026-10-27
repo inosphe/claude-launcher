@@ -181,8 +181,7 @@ fragments:
       묻는다. 상위의 답은 셋 중 하나다: `HOLD: <이유>` 코멘트, 다른
       세션에 배정, 물어 온 세션에 배정(`update <id> --assignee <그 세션>`
       + `ASSIGNED by leader: <그 세션> <이유>` — pool을 self로 되돌린
-      것이고, 그 세션의 queue-recheck가 다음 회차로 읽고 사용자에게
-      알린다). self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
+      것이고, 그 세션의 queue-recheck가 다음 회차로 읽는다). self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
       거부권을 가진다(`update <id> --assignee ""` + `UNQUEUED by leader:
       <이유>`); 거부된 이슈는 pool과 같이 상위의 처분을 따른다. 세션이
       만들었거나 배정받은 일감이 전부 closed여야 세션이 끝난다 — 예외는

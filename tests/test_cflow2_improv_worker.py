@@ -892,6 +892,12 @@ def test_pool_answer_assigning_back_is_named_and_announced():
     assert "`thread_open`" in recheck
     common = _words(_block(COMMON.read_text(encoding="utf-8")))
     assert "`ASSIGNED by leader: <그 세션> <이유>`" in common
+    # v1 wrapup lists the same three answers; the shared block promises no
+    # user notice because only v2's queue-recheck sends one.
+    v1_wrapup = _words(yaml.safe_load(V1.read_text(encoding="utf-8"))
+                       ["steps"]["wrapup"]["instructions"])
+    assert "(3) 물어 온 이 세션에 배정" in v1_wrapup
+    assert "사용자에게 알린다" not in common
 
 
 # -- triggers (docs/cflow-v2.md 2.8) -----------------------------------------

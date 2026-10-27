@@ -5446,7 +5446,10 @@ procedures:
                         있었으면 queue-recheck가 next-round를 냈어야 했다
                         (claunch-034c4) — unsettled를 고르기 전에 queue-recheck의 done
                         규칙을 적용한다(풀에 되돌리고 `UNQUEUED:` 코멘트, 상위에게 pool
-                        ask 한 통 — 상위는 HOLD를 남기거나 다른 세션에 배정한다).
+                        ask 한 통 — 상위는 HOLD를 남기거나 다른 세션에 배정한다; 이
+                        세션이 착수할 수 없다고 판정해 되돌린 일감이므로 이 세션에
+                        다시 배정하는 답(`ASSIGNED by leader:`)은 이 자리의 답이
+                        아니다 — 받으면 같은 판정이 되풀이된다).
                       위 두 ask를 보내지 않으면 settle-wait는 재요청을 하지 않으므로
                       아무도 처분을 요청받지 못한 채 settle-stall까지 간다. 한 일을
                       reason에 적는다.
