@@ -437,6 +437,103 @@ def test_every_guard_group_member_exists_in_this_checkout():
             assert (ROOT / rel).is_file(), f"{name}: {rel} is not a file"
 
 
+# --------------------------------------------------------------------------- #
+# the window a call reads: this repository's history is not a reading budget
+# --------------------------------------------------------------------------- #
+
+_SELF = Path(__file__).resolve()
+
+
+def _tool_invocations():
+    """Every place this file invokes the tool, as ``(lineno, argv, repo)``.
+
+    Two shapes: the ``_run(...)`` helper and a bare ``subprocess.run([...])``
+    whose first element is the script. Parsed from the source rather than
+    grepped so a call split across lines is still one call."""
+    import ast
+
+    tree = ast.parse(_SELF.read_text(encoding="utf-8"))
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        argv = None
+        if name == "_run":
+            argv = [a.value for a in node.args if isinstance(a, ast.Constant)]
+        elif name == "run":
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.List):
+                items = first.elts
+                names = [getattr(i, "id", None) or getattr(i, "attr", None) for i in items]
+                if "SCRIPT" in names:
+                    argv = [a.value for a in items[2:] if isinstance(a, ast.Constant)]
+        if argv is None:
+            continue
+        out.append((node.lineno, argv))
+    return out
+
+
+def test_every_call_into_this_repository_names_its_window():
+    """A call that reads *this* repository's history must say how far back.
+
+    ``DEFAULT_LIMIT`` (800) is the review step's reading budget: a fixed count
+    of commits back from HEAD. For the review step that is the right shape --
+    it bounds what a reader pays. For an assertion about this repository it is
+    not: the window slides with every landing, so the test measures where the
+    commits happen to sit rather than whether the files are coupled.
+    ``app.js`` and ``cli_sessions.py`` had met in exactly three counted commits
+    inside 800; #620 landed six commits, ``331b03ef`` fell from 797 to 803, and
+    the count dropped to two with neither file changed (claunch-o5il6).
+
+    A call with ``--repo`` reads a repository it was handed -- a temporary one
+    built by the fixture -- and its history cannot slide past anything that
+    matters, so it is exempt. ``--paths`` does **not** exempt: it narrows which
+    files the question is about, but the history is still *this* repository's
+    log read back ``--limit`` commits. The exemption is therefore exactly the
+    tool's own default: no ``--repo`` means ``ROOT``, and only ``--repo``
+    points the tool somewhere else."""
+    calls = _tool_invocations()
+    assert calls, "no invocation of the tool was found -- the parser lost them"
+
+    this_repository = []
+    for lineno, argv in calls:
+        if "--repo" in argv:
+            continue
+        this_repository.append(lineno)
+        assert "--limit" in argv, (
+            f"line {lineno}: this call reads this repository's history without "
+            f"--limit, so it rides the sliding DEFAULT_LIMIT ({rs.DEFAULT_LIMIT}). "
+            f"Pass a window that fits the assertion, as "
+            f"test_this_repository_lists_the_web_modal_for_a_spawn_contract_change does."
+        )
+
+    # The guard is only worth its weight if something actually reads this
+    # repository through it; an empty list would make every line above vacuous.
+    assert this_repository, (
+        "no call reads this repository any more -- if that is intended, delete "
+        "this guard rather than leaving it passing on nothing"
+    )
+
+
+def test_a_call_handed_its_own_repository_may_keep_the_default():
+    """The exemption is a real distinction, not a hole: the temporary-repository
+    calls above are exempt because the tool falls back to ``ROOT`` only when it
+    is given nothing. Assert that here, or the guard could be satisfied by
+    exempting everything."""
+    calls = _tool_invocations()
+    exempt = [n for n, argv in calls if "--repo" in argv]
+    assert exempt, "the exemption matches nothing -- the guard above is untested"
+
+    # And the tool's own default really is the sliding window this test names,
+    # so the guard cannot be satisfied by the tool quietly changing shape.
+    assert rs.DEFAULT_LIMIT == 800
+    import inspect
+
+    sig = inspect.signature(rs.history)
+    assert sig.parameters["limit"].default == rs.DEFAULT_LIMIT
+
+
 def test_the_review_step_asks_for_the_sentence_and_names_the_tool():
     sys.path.insert(0, str(ROOT / "src"))
     from claude_launcher.cflow import model
