@@ -25,7 +25,7 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
     monkeypatch.setattr(profile_usage, "_entries", {})
     monkeypatch.setattr(profile_usage, "_locks", {})
     monkeypatch.setattr(
-        profile_usage, "_resolve", lambda _: (selected, "openai", "work/openai")
+        profile_usage, "_resolve", lambda _: (selected, "openai", "work/openai", "codex-app-server")
     )
     monkeypatch.setattr(profile_usage.lineage, "effective_harness", lambda _p: "codex")
     monkeypatch.setattr(usage, "fetch", lambda value: report)

@@ -13,12 +13,22 @@ from claude_launcher import (
 )
 
 
-def _fake_resolution(monkeypatch):
-    """Resolve every selector to itself: one cache key per selector string."""
+def _fake_resolution(monkeypatch, reader="h"):
+    """Resolve every selector to itself: one cache key per selector string.
+
+    ``reader`` is what :func:`profile_usage._resolve` would have returned for
+    it; the default names no keyed reader, so these tests see no credential
+    guard (claunch-vz8nj).
+    """
     monkeypatch.setattr(
         profile_usage,
         "_resolve",
-        lambda selector: (SimpleNamespace(selector=selector, name=selector), "p", selector),
+        lambda selector: (
+            SimpleNamespace(selector=selector, name=selector),
+            "p",
+            selector,
+            reader,
+        ),
     )
     monkeypatch.setattr(profile_usage.lineage, "effective_harness", lambda _p: "h")
 
@@ -235,7 +245,9 @@ def _keyed_pool(home, monkeypatch, *tokens, reader="anthropic"):
     monkeypatch.setattr(profile_usage, "_entries", {})
     monkeypatch.setattr(profile_usage, "_locks", {})
     monkeypatch.setattr(
-        profile_usage, "_resolve", lambda selector: (work, "anthropic", "work/anthropic")
+        profile_usage,
+        "_resolve",
+        lambda selector: (work, "anthropic", "work/anthropic", reader),
     )
     monkeypatch.setattr(profile_usage.usage, "reader", lambda _profile: reader)
     return work, keys
@@ -354,10 +366,92 @@ def test_key_usage_without_a_pool_reads_nothing(home, monkeypatch):
     monkeypatch.setattr(profile_usage, "_entries", {})
     monkeypatch.setattr(profile_usage, "_locks", {})
     monkeypatch.setattr(
-        profile_usage, "_resolve", lambda selector: (work, "anthropic", "work/anthropic")
+        profile_usage,
+        "_resolve",
+        lambda selector: (work, "anthropic", "work/anthropic", "anthropic"),
     )
     monkeypatch.setattr(profile_usage.usage, "reader", lambda _profile: "anthropic")
 
     doc = profile_usage.key_usage("work")
 
     assert doc == {"owner": None, "keys": {}, "unmeasurable": None}
+
+
+# --- the profile's own reading is about one key, not the profile -----------
+#
+# claunch-vz8nj. A launch writes the pool's next key into `.launcher-token`,
+# and `usage.fetch` reads that file, so the profile's account changes without
+# the cache key changing. The entry remembers which credential it describes
+# and stops answering when the profile holds another; otherwise the create
+# form showed the previous key's numbers for a whole period, and the key row
+# it copies them into agreed with it.
+
+
+def _reading_that_follows_the_token(monkeypatch, work, reads):
+    """A provider read whose numbers say which token was in the file."""
+
+    def fetch(_selected):
+        reads.append(credentials.stored_token(work))
+        return _report(10.0 if "AAAA" in reads[-1] else 90.0)
+
+    monkeypatch.setattr(profile_usage.usage, "fetch", fetch)
+
+
+def test_the_profile_reading_follows_the_key_a_launch_rotated_to(home, monkeypatch):
+    work, _keys = _keyed_pool(home, monkeypatch, "sk-AAAA1111", "sk-BBBB2222")
+    reads = []
+    _reading_that_follows_the_token(monkeypatch, work, reads)
+
+    profile_keys.select_for_launch(work)
+    first, first_cached, _ = profile_usage.fetch("work")
+
+    profile_keys.select_for_launch(work)
+    second, second_cached, _ = profile_usage.fetch("work")
+
+    assert reads == ["sk-AAAA1111", "sk-BBBB2222"]
+    assert (first_cached, second_cached) == (False, False)
+    assert first["windows"][0]["utilization"] == 10.0
+    assert second["windows"][0]["utilization"] == 90.0
+
+
+def test_a_restart_is_not_seeded_with_the_previous_key_s_reading(home, monkeypatch):
+    work, _keys = _keyed_pool(home, monkeypatch, "sk-AAAA1111", "sk-BBBB2222")
+    reads = []
+    _reading_that_follows_the_token(monkeypatch, work, reads)
+
+    profile_keys.select_for_launch(work)
+    profile_usage.fetch("work")
+
+    # A rotation, then a daemon that starts with no in-memory entry and seeds
+    # itself from the newest history sample.
+    profile_keys.select_for_launch(work)
+    monkeypatch.setattr(profile_usage, "_entries", {})
+    doc, cached, _ = profile_usage.fetch("work")
+
+    assert reads == ["sk-AAAA1111", "sk-BBBB2222"]
+    assert cached is False
+    assert doc["windows"][0]["utilization"] == 90.0
+    # The stamp that makes the guard work stays inside the daemon.
+    assert profile_usage.CREDENTIAL_FIELD not in doc
+
+
+def test_a_login_scoped_reading_keeps_its_period_across_a_token_change(
+    home, monkeypatch
+):
+    work, _keys = _keyed_pool(
+        home, monkeypatch, "sk-AAAA1111", "sk-BBBB2222", reader="codex-app-server"
+    )
+    reads = []
+    _reading_that_follows_the_token(monkeypatch, work, reads)
+
+    profile_keys.select_for_launch(work)
+    profile_usage.fetch("work")
+
+    profile_keys.select_for_launch(work)
+    _doc, cached, _ = profile_usage.fetch("work")
+
+    # codex reports its login, not a key: rotating the pool cannot change
+    # what the reading would say, so it is not asked again.
+    assert reads == ["sk-AAAA1111"]
+    assert cached is True
+

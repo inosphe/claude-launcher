@@ -12,6 +12,13 @@ the reader (:func:`usage.reader`): a harness that keeps its own login
 (``work:codex``) reads another account than the profile's provider does,
 and ``providers.resolve_name`` does not look at the harness.
 
+One account per pair was true until a profile could hold a key pool: a launch
+then writes the pool's next key into ``.launcher-token``, and the profile's
+own reading follows that file. So an entry also remembers which credential its
+answer describes and stops answering when the profile holds another
+(:func:`_credential`); the pair in the key still names the profile's account
+slot, which is what the clock and the history chart follow.
+
 Every key refreshes on one period (:data:`PERIOD_SECONDS`, fifteen minutes):
 an automatic read inside it is answered from the cache, and the daemon's
 refresh clock (``daemon/usage_clock.py``) reads each key again once its own
@@ -46,6 +53,10 @@ log = logging.getLogger(__name__)
 #: Seconds between two provider reads of one key, automatic or periodic.
 PERIOD_SECONDS = 15 * 60
 AUTO_COOLDOWN_SECONDS = PERIOD_SECONDS
+#: Field a history sample carries so a restarted daemon can tell whether its
+#: newest sample describes the credential the profile holds now. It never
+#: leaves the daemon: :func:`_entry` strips it from the payload it serves.
+CREDENTIAL_FIELD = "credential"
 
 
 @dataclass
@@ -53,6 +64,9 @@ class _Entry:
     requested_at: float
     payload: Optional[dict] = None
     error: Optional[str] = None
+    #: Digest of the launcher token this answer describes, when the reading
+    #: is about one (:func:`_credential`).
+    credential: Optional[str] = None
 
 
 _guard = threading.Lock()
@@ -70,17 +84,50 @@ _ERRORS = (
 
 
 def _resolve(selector: str):
-    """The profile usage reads for ``selector``, its provider, and its cache key.
+    """The profile usage reads for ``selector``, its provider, its cache key
+    and the reader's name.
 
     Raises :class:`usage.UsageError` when no reader applies.
     """
     selected = usage.resolve_target(profile_mod.require_selector(selector))
     provider = providers.resolve_name(selected)
-    return selected, provider, _key(selected, provider, usage.reader(selected))
+    reader = usage.reader(selected)
+    return selected, provider, _key(selected, provider, reader), reader
 
 
 def _key(selected, provider: str, reader: str) -> str:
     return f"{selected.name}/{provider}/{reader}"
+
+
+def _credential(selected, reader: str) -> Optional[str]:
+    """Digest of the launcher token this reading authenticates with.
+
+    The cache entry remembers which credential its answer describes, because
+    the profile's account is no longer fixed: ``profile_keys.select_for_launch``
+    writes the pool's next key into ``.launcher-token`` on every launch, and
+    :func:`usage.fetch` reads that file. Without this, a rotated pool would be
+    answered with the previous key's numbers for a whole
+    :data:`PERIOD_SECONDS` -- the create form's chart and the key row it is
+    copied into then agree with each other on values neither key reports
+    (claunch-vz8nj).
+
+    The digest is the same truncated sha256 :func:`_key_reading` puts in its
+    cache keys, so it survives in a history sample without being a secret of
+    its own. It is ``None`` where there is nothing to guard: the login-scoped
+    readers (:data:`usage.LOGIN_SCOPED_READERS`) do not authenticate with a
+    key at all, and a profile with no launcher token has only the one account
+    its harness manages.
+    """
+    if reader not in usage.KEYED_READERS:
+        return None
+    try:
+        token = lineage.stored_auth_token(selected)
+    except (OSError, *_ERRORS):
+        return None
+    token = str(token or "").strip()
+    if not token:
+        return None
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 def _entry(key: str) -> Optional[_Entry]:
@@ -93,22 +140,41 @@ def _entry(key: str) -> Optional[_Entry]:
         except OSError:
             sample = None
         if sample is not None:
-            payload = {k: v for k, v in sample.items() if k != "at"}
-            entry = _entries[key] = _Entry(requested_at=sample["at"], payload=payload)
+            payload = {
+                k: v for k, v in sample.items() if k not in ("at", CREDENTIAL_FIELD)
+            }
+            entry = _entries[key] = _Entry(
+                requested_at=sample["at"],
+                payload=payload,
+                credential=sample.get(CREDENTIAL_FIELD),
+            )
     return entry
 
 
-def _reusable(entry: Optional[_Entry], now: float, manual: bool) -> bool:
+def _reusable(
+    entry: Optional[_Entry],
+    now: float,
+    manual: bool,
+    credential: Optional[str] = None,
+) -> bool:
     """Whether ``entry`` answers a read without reaching the account.
 
     One place for the period rule, because two readers ask it now: the
     profile's own reading (:func:`fetch`) and each pool key's
     (:func:`key_usage`). A manual read always reaches the provider.
+
+    ``credential`` is the account the caller is about to ask about, for the
+    profile's own reading (see :func:`_credential`). An entry stamped with a
+    different one answers a different key, so the period does not apply to it:
+    a rotation makes the entry stale the moment it happens, not when the
+    period runs out.
     """
-    return bool(
-        entry is not None
-        and not manual
-        and now - entry.requested_at < AUTO_COOLDOWN_SECONDS
+    if manual or entry is None or now - entry.requested_at >= AUTO_COOLDOWN_SECONDS:
+        return False
+    return not (
+        credential is not None
+        and entry.credential is not None
+        and credential != entry.credential
     )
 
 
@@ -174,19 +240,22 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
 
     The selector is resolved to its (profile, provider) pair first, and the
     cache and lock are kept per pair. Manual reads always reach the provider.
-    Automatic reads return the last result during the key's period.
+    Automatic reads return the last result during the key's period -- unless
+    the credential the profile holds has changed since that result was read
+    (:func:`_credential`), which a pool's rotation does on every launch.
     Per-pair locks collapse simultaneous page-entry requests into one
     provider call.
     """
     try:
-        selected, provider, key = _resolve(selector)
+        selected, provider, key, reader = _resolve(selector)
     except _ERRORS as exc:
         raise usage.UsageError(str(exc)) from exc
+    credential = _credential(selected, reader)
     now = time.time()
     with _guard:
         lock = _locks.setdefault(key, threading.Lock())
         entry = _entry(key)
-        if _reusable(entry, now, manual):
+        if _reusable(entry, now, manual, credential):
             if entry.error:
                 raise usage.UsageError(entry.error)
             if entry.payload is not None:
@@ -196,12 +265,12 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
         now = time.time()
         with _guard:
             entry = _entries.get(key)
-            if _reusable(entry, now, manual):
+            if _reusable(entry, now, manual, credential):
                 if entry.error:
                     raise usage.UsageError(entry.error)
                 if entry.payload is not None:
                     return dict(entry.payload), True, entry.requested_at
-            entry = _Entry(requested_at=now)
+            entry = _Entry(requested_at=now, credential=credential)
             _entries[key] = entry
 
         try:
@@ -234,8 +303,14 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
             entry.payload = payload
             entry.requested_at = time.time()
             updated_at = entry.requested_at
+        # The sample carries the credential too: a daemon that restarts inside
+        # the period seeds its entry from here, and must not inherit a reading
+        # of the key the pool held before the last rotation.
+        sample = dict(payload)
+        if credential is not None:
+            sample[CREDENTIAL_FIELD] = credential
         try:
-            usage_history.append(key, payload, updated_at)
+            usage_history.append(key, sample, updated_at)
         except OSError as exc:
             log.warning("usage history: cannot write %s: %s", key, exc)
         return payload, False, updated_at
@@ -266,7 +341,7 @@ def key_usage(
     the profile's account, and a pool key is not one of its rows.
     """
     try:
-        selected, _provider, base = _resolve(selector)
+        selected, _provider, base, _reader = _resolve(selector)
     except _ERRORS as exc:
         raise usage.UsageError(str(exc)) from exc
     source = profile_keys.owner(selected)
