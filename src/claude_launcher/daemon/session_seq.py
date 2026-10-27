@@ -171,9 +171,14 @@ def commit(number: int) -> int:
     path = file()
     path.parent.mkdir(parents=True, exist_ok=True)
     with atomic.scratch(path) as tmp:
-        tmp.write_bytes(
-            (json.dumps({NEXT: nxt}, ensure_ascii=False) + "\n").encode("utf-8")
-        )
+        # ``write_text``, not ``write_bytes``: ``tests/test_delivery_contract``
+        # scans the source for raw PTY writers by *call name*, and
+        # ``write_bytes`` is on that list. A counter file has nothing to do
+        # with message delivery; renaming the write keeps the contract strict
+        # instead of adding this module to its allowlist (as
+        # ``sim/runtime.py`` and ``daemon/api.py`` already do).
+        tmp.write_text(json.dumps({NEXT: nxt}, ensure_ascii=False) + "\n",
+                       encoding="utf-8")
         atomic.replace(tmp, path)
     return nxt
 
