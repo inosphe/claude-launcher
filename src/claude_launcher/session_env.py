@@ -40,6 +40,13 @@ from typing import Dict, List, Mapping, MutableMapping, Optional
 #: (``qa_*``) — its questions are ``opv2_ask`` in the Operator view.
 OPERATOR_ENV = "CLAUNCH_OPERATOR_V2"
 
+#: ``1`` when that operator allows session QA (its record's ``qa``), carried
+#: beside :data:`OPERATOR_ENV` for the same reason: the MCP server keeps the
+#: ``qa_*`` tools on its surface without asking the daemon. The daemon still
+#: decides (``daemon/qa_api.py`` reads the record), so this only stops the
+#: surface from hiding a door the record leaves open.
+OPERATOR_QA_ENV = "CLAUNCH_OPERATOR_QA"
+
 #: claunch's own per-session variables. Each is set by the daemon for one
 #: session (or by a tool for one session's run) and names that session, its
 #: files or its grants.
@@ -57,6 +64,7 @@ CLAUNCH_SESSION_ENV = (
     "CLAUNCH_WINDOW_REPORT",
     "CLAUNCH_SIM_ID",  # a simulation's run session (daemon.sim_api)
     OPERATOR_ENV,  # an operator v2's bound session (daemon.operators_v2)
+    OPERATOR_QA_ENV,  # ...and that operator's session-QA switch (operators_v2 qa)
 )
 
 #: What a harness exports into its own tool shell about the conversation that

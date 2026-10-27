@@ -43,17 +43,30 @@ def _operator_session() -> bool:
     return bool(os.environ.get(session_env.OPERATOR_ENV))
 
 
+def _operator_qa() -> bool:
+    """Whether that operator keeps session QA on its surface.
+
+    A gds6 operator talks to its user in two places: the Operator view for the
+    next action, and the QA pane for a question the user works through over
+    several passes (an operator record with ``qa``). The record is the
+    authority (``daemon/qa_api.py`` reads it); this variable only carries its
+    answer to the surface, which was built before this process could ask.
+    """
+    return bool(os.environ.get(session_env.OPERATOR_QA_ENV))
+
+
 def _hidden_tools() -> tuple:
     """The tool families this process does not offer its session.
 
-    An operator v2's session has no session QA: the user it talks to is in
-    the Operator view, where its questions are ``opv2_ask``. Hiding the tools
-    here keeps that agent from filing a question into a pane nobody opens for
-    it; the daemon refuses the same writes as well (``daemon/qa_api.py``),
-    which is the enforcement — this is only the surface. Every other session
-    offers everything.
+    An operator v2's session has no session QA by default: the user it talks
+    to is in the Operator view, where its questions are ``opv2_ask``. Hiding
+    the tools here keeps that agent from filing a question into a pane nobody
+    opens for it; the daemon refuses the same writes as well
+    (``daemon/qa_api.py``), which is the enforcement -- this is only the
+    surface. An operator whose record keeps QA (``_operator_qa``) is offered
+    both. Every other session offers everything.
     """
-    return qa_mcp.TOOL_NAMES if _operator_session() else ()
+    return qa_mcp.TOOL_NAMES if _operator_session() and not _operator_qa() else ()
 
 
 SERVERS = (
@@ -86,7 +99,7 @@ def _instructions() -> str:
     change while it runs.
     """
     parts = [s.instructions for s in SERVERS if s.instructions]
-    if _operator_session():
+    if qa_mcp.INSTRUCTIONS in parts and _hidden_tools():
         parts = [p for p in parts if p != qa_mcp.INSTRUCTIONS]
     return "\n\n".join(parts)
 

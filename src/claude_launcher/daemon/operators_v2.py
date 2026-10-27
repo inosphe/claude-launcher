@@ -81,6 +81,22 @@ LIVE = (CATEGORY_RUNNING, CATEGORY_PAUSED, CATEGORY_HOLD, CATEGORY_DELAYED, CATE
 #: The cflow v2 workflow an operator v2 session runs
 #: (``workflows/v2/operator-v2.yaml``); its start input ``operator`` is the id.
 WORKFLOW = "operator-v2"
+#: The other workflow an operator's record may name: one that guides a project
+#: built with gds6 through its planning and realization planes. It runs the
+#: same ``opv2_*`` surface (the binding is what grants those tools) and adds
+#: ``gds6_url`` as a second start input.
+GDS_WORKFLOW = "gds-operator-v2"
+#: The workflows an operator record may name. A record from before the field
+#: says nothing and runs :data:`WORKFLOW`.
+OPERATOR_WORKFLOWS = (WORKFLOW, GDS_WORKFLOW)
+#: The packs a workflow puts into its session's opening, beside the ones the
+#: creation path ticks. The operator's guidance lives in the workflow's own
+#: tasks; a pack carries the part that must survive a compaction and reach
+#: ``rebrief`` (the stage order, what counts as evidence, how to nudge).
+WORKFLOW_PACKS = {GDS_WORKFLOW: ("gds6-operator",)}
+#: Where the gds6 server answers when an operator record names no address.
+#: gds6's own default (``server/src/main.ts``): one process, both planes.
+DEFAULT_GDS6_URL = "http://localhost:8888"
 #: The workflow a session the operator asks for runs (claunch-iw5i8.15).
 SPAWN_WORKFLOW = "improv-worker-v2"
 #: Seconds a poll waits for the board or the run states before answering
@@ -296,6 +312,14 @@ class OperatorsV2:
         data.setdefault("all", False)
         data.setdefault("watch", True)
         data.setdefault("session", None)
+        #: The cflow v2 workflow its session runs (OPERATOR_WORKFLOWS).
+        data.setdefault("workflow", WORKFLOW)
+        #: Whether its session keeps session QA (``qa_*``) beside the Operator
+        #: view. Off by default: an operator's questions go to opv2_ask unless
+        #: its record says otherwise.
+        data.setdefault("qa", False)
+        #: The gds6 server a gds6 operator reads (GDS_WORKFLOW only).
+        data.setdefault("gds6_url", None)
         #: The seq of the last user message the operator has read
         #: (opv2_inbox); an ask's answer carries its own ``answer_read``.
         data.setdefault("read_seq", 0)
@@ -485,6 +509,24 @@ class OperatorsV2:
             raise ValueError(f"{key} must be a string of at most 200 characters")
         return value.strip() or None
 
+    @staticmethod
+    def _workflow(value):
+        """A record's workflow, checked against the ones a bound session can
+        run. An unknown name is a 400 rather than a run that refuses every
+        ``opv2_*`` call halfway through the user's day."""
+        name = str(value or "").strip() or WORKFLOW
+        if name not in OPERATOR_WORKFLOWS:
+            raise ValueError(f"workflow must be one of {', '.join(OPERATOR_WORKFLOWS)}")
+        return name
+
+    @staticmethod
+    def _flag(value, key, default):
+        if value is None:
+            return default
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be true or false")
+        return value
+
     def create(self, body):
         if not isinstance(body, dict):
             raise ValueError("object required")
@@ -497,6 +539,9 @@ class OperatorsV2:
             "id": uuid.uuid4().hex[:12], "name": name, "all": every, "projects": scope,
             "profile": self._optional(body, "profile"), "model": self._optional(body, "model"),
             "effort": self._optional(body, "effort"), "watch": watch, "created_at": now(),
+            "workflow": self._workflow(body.get("workflow")),
+            "qa": self._flag(body.get("qa"), "qa", False),
+            "gds6_url": self._optional(body, "gds6_url"),
         })
         self.records()[rec["id"]] = rec
         self.save(rec)
@@ -517,6 +562,18 @@ class OperatorsV2:
         for key in ("profile", "model", "effort"):
             if key in body:
                 rec[key] = self._optional(body, key, rec)
+        if "gds6_url" in body:
+            rec["gds6_url"] = self._optional(body, "gds6_url", rec)
+        if "workflow" in body:
+            workflow = self._workflow(body.get("workflow"))
+            if workflow != rec.get("workflow"):
+                rec["workflow"] = workflow
+                changed.append(f"워크플로: {workflow} (다음 시작부터)")
+        if "qa" in body:
+            qa = self._flag(body.get("qa"), "qa", rec.get("qa", False))
+            if qa != rec.get("qa"):
+                rec["qa"] = qa
+                changed.append("세션 QA: " + ("켜짐" if qa else "꺼짐") + " (다음 시작부터)")
         result = {}
         if "watch" in body:
             if not isinstance(body["watch"], bool):
@@ -642,6 +699,8 @@ class OperatorsV2:
         return {"id": rec["id"], "name": rec["name"], "all": rec["all"], "projects": rec["projects"],
                 "profile": rec.get("profile"), "model": rec.get("model"), "effort": rec.get("effort"),
                 "watch": rec["watch"], "created_at": rec.get("created_at"), "operator": operator,
+                "workflow": rec.get("workflow") or WORKFLOW, "qa": bool(rec.get("qa")),
+                "gds6_url": rec.get("gds6_url"),
                 "pending": len(asks), "unseen": sum(1 for a in asks if a not in seen)}
 
     def listing(self):
@@ -712,6 +771,17 @@ class OperatorsV2:
             if rec.get("session") == name:
                 return rec
         return None
+
+    def qa_allowed(self, name):
+        """Whether the operator bound to ``name`` keeps session QA on.
+
+        The MCP server reads the same switch from its environment
+        (``session_env.OPERATOR_QA_ENV``) to keep the tools on its surface;
+        this is the daemon's own answer, which is what ``daemon/qa_api.py``
+        enforces against.
+        """
+        rec = self.operator_of_session(name)
+        return bool(rec and rec.get("qa"))
 
     # -- the bot's output --------------------------------------------------
     def _idempotent(self, rec, token, payload):
@@ -1498,26 +1568,40 @@ def install(app, *, create=None, gates=None, work=None):
         if not profile:
             return fail("profile is required")
         scope = "전체 프로젝트" if rec["all"] else ", ".join(rec["projects"])
+        workflow = rec.get("workflow") if rec.get("workflow") in OPERATOR_WORKFLOWS else WORKFLOW
+        task = (f"너는 Operator v2 '{rec['name']}'(id {rec['id']})이다. 담당 범위: {scope}. "
+                "사용자와의 대화는 터미널이 아니라 opv2_* 도구로 한다. opv2_poll로 범위 안 "
+                "세션을 관찰하고, 사용자 입력은 opv2_inbox로 읽고, opv2_post/opv2_ask로 답한다. "
+                "작업 내용 질문에는 opv2_sessions, opv2_session, opv2_issue, opv2_commits, "
+                "opv2_transcript_search, opv2_history로 근거를 찾아 답하고, 착지 여부는 "
+                "opv2_landing의 landed로 판단한다. 다른 세션에 대한 "
+                "지시는 사용자의 메시지나 승인된 ask를 근거로 opv2_dispatch로만 전달한다. "
+                "맡길 일은 그 일을 하던 실행 중 세션에 먼저 전달하고, 그 세션이 종료됐으면 "
+                "opv2_resume, 없을 때만 opv2_spawn으로 세션을 요청한다.")
+        if workflow == GDS_WORKFLOW:
+            task += (f" 이 operator는 gds6 프로젝트 실행을 안내한다. gds6 서버는 "
+                     f"{rec.get('gds6_url') or DEFAULT_GDS6_URL} 이다. 단계 순서와 근거를 읽는 "
+                     "방법은 오프닝의 gds6-operator 묶음과 이 런의 작업이 정한다.")
         spec = {"profile": profile, "project": projects.DEFAULT if rec["all"] else rec["projects"][0],
                 "context": json.dumps({"operator_v2": rec["id"]}), "beads": False,
                 # The session carries which operator it serves, so the MCP
                 # server it spawns keeps its surface (no session QA,
                 # mcp_server._hidden_tools) without asking the daemon at a
-                # moment the binding may not be written yet.
-                "env": {session_env.OPERATOR_ENV: rec["id"]},
+                # moment the binding may not be written yet. An operator whose
+                # record keeps QA carries that answer beside it.
+                "env": {session_env.OPERATOR_ENV: rec["id"],
+                        **({session_env.OPERATOR_QA_ENV: "1"} if rec.get("qa") else {})},
                 "name": str(body.get("name") or "").strip(),
-                "task": (f"너는 Operator v2 '{rec['name']}'(id {rec['id']})이다. 담당 범위: {scope}. "
-                         "사용자와의 대화는 터미널이 아니라 opv2_* 도구로 한다. opv2_poll로 범위 안 "
-                         "세션을 관찰하고, 사용자 입력은 opv2_inbox로 읽고, opv2_post/opv2_ask로 답한다. "
-                         "작업 내용 질문에는 opv2_sessions, opv2_session, opv2_issue, opv2_commits, "
-                         "opv2_transcript_search, opv2_history로 근거를 찾아 답하고, 착지 여부는 "
-                         "opv2_landing의 landed로 판단한다. 다른 세션에 대한 "
-                         "지시는 사용자의 메시지나 승인된 ask를 근거로 opv2_dispatch로만 전달한다. "
-                         "맡길 일은 그 일을 하던 실행 중 세션에 먼저 전달하고, 그 세션이 종료됐으면 "
-                         "opv2_resume, 없을 때만 opv2_spawn으로 세션을 요청한다.")}
+                "task": task}
         if WORKFLOW:
-            spec["workflow"] = WORKFLOW
-            spec["cflow_inputs"] = {"operator": rec["id"]}
+            spec["workflow"] = workflow
+            inputs = {"operator": rec["id"]}
+            if workflow == GDS_WORKFLOW:
+                inputs["gds6_url"] = rec.get("gds6_url") or DEFAULT_GDS6_URL
+            spec["cflow_inputs"] = inputs
+        packs = WORKFLOW_PACKS.get(workflow)
+        if packs:
+            spec["prompt_packs"] = list(packs)
         for key in ("model", "effort"):
             value = str(body.get(key) or rec.get(key) or "").strip()
             if value:

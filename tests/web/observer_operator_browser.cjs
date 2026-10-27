@@ -62,6 +62,7 @@ function summary(o) {
   const open = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id);
   return { id: o.id, name: o.name, all: o.all, projects: o.projects, profile: o.profile, model: o.model,
     effort: o.effort, watch: o.watch, created_at: o.created_at,
+    workflow: o.workflow || "operator-v2", qa: !!o.qa, gds6_url: o.gds6_url || null,
     operator: o.session ? { name: o.session, running: true, status: o.status || "idle" } : null,
     pending: open.length, unseen: open.filter(id => !o.seen.includes(id)).length };
 }
@@ -78,7 +79,8 @@ function operatorsApi(req, res, body) {
     if (!data.all && !(data.projects || []).length) return json({ error: "projects required" }, 400);
     const id = `op${++serial}`;
     ops[id] = { id, name: data.name, all: !!data.all, projects: data.all ? [] : data.projects, profile: data.profile || null,
-      model: null, effort: null, watch: data.watch !== false, created_at: at(30), session: null, feed: [], seen: [] };
+      model: null, effort: null, watch: data.watch !== false, created_at: at(30), session: null, feed: [], seen: [],
+      workflow: data.workflow || "operator-v2", qa: !!data.qa, gds6_url: data.gds6_url || null };
     return json(summary(ops[id]), 201);
   }
   const o = ops[parts[0]];
@@ -92,7 +94,7 @@ function operatorsApi(req, res, body) {
     return json({ ...summary(o), threads, thread, feed: o.feed.filter(e => e.thread === thread).slice(-200), sessions: [], gates: [] });
   }
   if (!rest && req.method === "PATCH") {
-    for (const key of ["name", "all", "projects", "profile", "watch"]) if (key in data) o[key] = data[key];
+    for (const key of ["name", "all", "projects", "profile", "watch", "workflow", "qa", "gds6_url"]) if (key in data) o[key] = data[key];
     if (o.all) o.projects = [];
     return json(summary(o));
   }
@@ -479,7 +481,8 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-projects input[value=alpha]").isDisabled(), true);
     await page.click("#observer-operators .op-form button[type=submit]");
     await tab("all-ops").waitFor();
-    assert.deepEqual(lastSent("POST", "/api/operators").body, { name: "all-ops", all: true, projects: [], profile: null, watch: true });
+    assert.deepEqual(lastSent("POST", "/api/operators").body, { name: "all-ops", all: true, projects: [], profile: null, watch: true,
+      workflow: "operator-v2", qa: false, gds6_url: null });
     await page.waitForFunction(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("all-ops"));
     assert.match(await page.locator("#observer-operators .op-scope").innerText(), /범위: 전체 프로젝트/);
     // An all-projects operator covers s2 as well.
@@ -494,7 +497,8 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.selectOption("#observer-op-profile", "p1:claude");
     await page.click("#observer-operators .op-form button[type=submit]");
     await tab("two").waitFor();
-    assert.deepEqual(lastSent("POST", "/api/operators").body, { name: "two", all: false, projects: ["alpha", "beta"], profile: "p1:claude", watch: true });
+    assert.deepEqual(lastSent("POST", "/api/operators").body, { name: "two", all: false, projects: ["alpha", "beta"], profile: "p1:claude", watch: true,
+      workflow: "operator-v2", qa: false, gds6_url: null });
     await page.click("text=+ 새 operator");
     await page.waitForSelector("#observer-operators .op-projects input[value=beta]");
     // A name but no scope is refused before anything is sent.
@@ -518,10 +522,27 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.check("#observer-operators .op-projects input[value=beta]");
     await page.click("#observer-operators .op-form button[type=submit]");
     await page.waitForFunction(() => /범위: alpha, beta/.test(document.querySelector("#observer-operators .op-scope")?.textContent || ""));
-    assert.deepEqual(lastSent("PATCH", "/api/operators/op1").body, { name: "ops-a", all: false, projects: ["alpha", "beta"], profile: null, watch: true });
+    assert.deepEqual(lastSent("PATCH", "/api/operators/op1").body, { name: "ops-a", all: false, projects: ["alpha", "beta"], profile: null, watch: true,
+      workflow: "operator-v2", qa: false, gds6_url: null });
     await page.uncheck("#observer-op-watch");
     await page.waitForFunction(() => document.getElementById("observer-op-watch")?.checked === false && !document.getElementById("observer-op-watch").disabled);
     assert.deepEqual(lastSent("PATCH", "/api/operators/op1").body, { watch: false });
+
+    // The gds6 workflow: its address field appears, session QA is switched on
+    // with it (a gds6 operator asks some questions in the QA pane), the tab
+    // says which kind it is, and the record is sent with all three.
+    await page.click("#observer-operators .op-actions button:has-text('설정')");
+    await page.waitForSelector("#observer-op-workflow");
+    assert.equal(await page.locator("#observer-operators .op-gds6").isVisible(), false);
+    assert.equal(await page.isChecked("#observer-op-qa"), false);
+    await page.selectOption("#observer-op-workflow", "gds-operator-v2");
+    assert.equal(await page.locator("#observer-operators .op-gds6").isVisible(), true);
+    assert.equal(await page.isChecked("#observer-op-qa"), true);
+    await page.fill("#observer-op-gds6-url", "http://gds:8888");
+    await page.click("#observer-operators .op-form button[type=submit]");
+    await page.waitForFunction(() => document.querySelector("#observer-operators .op-tab[aria-selected='true'] .op-chip")?.textContent === "gds6");
+    assert.deepEqual(lastSent("PATCH", "/api/operators/op1").body, { name: "ops-a", all: false, projects: ["alpha", "beta"], profile: null, watch: false,
+      workflow: "gds-operator-v2", qa: true, gds6_url: "http://gds:8888" });
 
     // Start needs a profile: without one the form opens and says so.
     const starts = sent.filter(r => r.url.endsWith("/start")).length;
