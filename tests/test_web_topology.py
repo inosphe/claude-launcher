@@ -441,6 +441,7 @@ CHECKS = [
         "railwindow_check.js",
         "railwindow_regress_check.js",
         "railcardmode_check.js",
+        "railactive_check.js",
         "detailsplit_check.js",
         "bulk_check.js",
         "cleanup_check.js",
