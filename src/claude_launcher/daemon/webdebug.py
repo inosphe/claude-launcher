@@ -705,43 +705,62 @@ class Hub:
                 # display would disagree with the page in both directions:
                 # a refused "on" reads as checks-off, a refused "off" reads
                 # as checks-on while the page keeps ignoring certificates.
-                try:
-                    await self.browser.set_insecure_tls(win.cdp_session, bool(insecure))
-                except WebDebugError as exc:
-                    refused = True
-                    log.warning("webdebug: this browser would not take the "
-                                "certificate answer for %s (%s); the window keeps %s",
-                                window, exc, win.insecure_tls)
-                else:
+                verdict, why = await self._apply_insecure(win, bool(insecure))
+                if verdict == "applied":
                     win.insecure_tls = bool(insecure)
+                else:
+                    refused = verdict
+                    log.warning("webdebug: the certificate answer for %s was %s (%s); "
+                                "the window keeps %s", window, verdict, why, win.insecure_tls)
             win.viewers.append(ws)
             if session:
                 win.session = session
             if self._idle is not None:
                 self._idle.cancel()
                 self._idle = None
-        await self.ensure_screencast(win)
-        if win.last_frame:
+        try:
+            await self.ensure_screencast(win)
+            if win.last_frame:
+                with contextlib.suppress(Exception):
+                    await ws.send_bytes(win.last_frame)
+            await self.send_state(win)
+            if refused:
+                # The window says what it is, so the state above is honest; the
+                # viewer that asked for the other answer is told it did not take.
+                # This viewer is already in win.viewers, so a write that fails
+                # here escapes attach before h_ws reaches the try/finally that
+                # detaches it: a closing peer raises ClientConnectionResetError,
+                # which is not a WebDebugError, so the dead viewer would stay
+                # registered and the window would never be reaped
+                # (claunch-9a3k4). The state above has already carried the
+                # truth; this note is the extra, so it may be dropped -- like
+                # every other send in this class.
+                with contextlib.suppress(Exception):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": (
+                            ("the browser did not answer in time, so this change is "
+                             "unconfirmed; the window still reports "
+                             f"{'ignoring' if win.insecure_tls else 'checking'} certificates")
+                            if refused == "unknown" else
+                            ("this browser would not change the certificate answer; "
+                             "the window is still "
+                             f"{'ignoring' if win.insecure_tls else 'checking'} certificates")),
+                    })
+        except BaseException:
+            # Everything above runs after win.viewers.append(ws) and outside the
+            # lock, so anything that escapes here leaves this viewer registered
+            # with nobody owning it. h_ws's WebDebugError branch answers the page
+            # and closes, but it does not detach; detach() only starts a reaper
+            # when the LAST viewer leaves; so one such viewer keeps the window
+            # and its page alive until stop_all. Browser startup is the common
+            # way in: ensure_screencast() opens with browser.ensure(), which
+            # raises WebDebugError(503) when the browser cannot start
+            # (claunch-9a3k4.1). Unregister before the exception travels -- the
+            # caller still reports the failure to the page.
             with contextlib.suppress(Exception):
-                await ws.send_bytes(win.last_frame)
-        await self.send_state(win)
-        if refused:
-            # The window says what it is, so the state above is honest; the
-            # viewer that asked for the other answer is told it did not take.
-            # This viewer is already in win.viewers, so a write that fails here
-            # escapes attach before h_ws reaches the try/finally that detaches
-            # it: a closing peer raises ClientConnectionResetError, which is not
-            # a WebDebugError, so the dead viewer would stay registered and the
-            # window would never be reaped (claunch-9a3k4). The state above has
-            # already carried the truth; this note is the extra, so it may be
-            # dropped -- like every other send in this class.
-            with contextlib.suppress(Exception):
-                await ws.send_json({
-                    "type": "error",
-                    "message": ("this browser would not change the certificate answer; "
-                                "the window is still "
-                                f"{'ignoring' if win.insecure_tls else 'checking'} certificates"),
-                })
+                await self.detach(win, ws)
+            raise
         return win
 
     async def detach(self, win: Window, ws: web.WebSocketResponse) -> None:
@@ -766,6 +785,41 @@ class Hub:
                 self._schedule_idle()
 
         self._reapers[win.id] = asyncio.create_task(reap())
+
+    async def _apply_insecure(self, win: Window, wanted: bool) -> tuple[str, str]:
+        """Send this window's certificate answer and say what came back.
+
+        The three answers the caller must not conflate (claunch-9a3k4.2):
+
+        ``("applied", "")``
+            the page took it — the caller may record it.
+        ``("refused", why)``
+            the browser answered and said no (502): the answer was not taken,
+            and the caller must keep the value it had.
+        ``("unknown", why)``
+            the browser did not answer in time (504) or the connection went
+            away (503). That is not a refusal: the page may apply the change
+            late. Folding it into "refused" would leave the window claiming
+            the old value while the page entered the new one — the same
+            divergence claunch-9a3k4 removed, reached by another path.
+
+        A timeout is retried once. ``setIgnoreCertificateErrors`` is
+        idempotent, and most 504s are one slow reply rather than a page that
+        will never answer, so the retry turns "unknown" into a definite
+        answer in the common case. Only a second timeout, or a connection
+        that went away, stays unknown.
+        """
+        last = ""
+        for attempt in range(2):
+            try:
+                await self.browser.set_insecure_tls(win.cdp_session, wanted)
+            except WebDebugError as exc:
+                last = str(exc)
+                if exc.status != 504 or attempt:
+                    return ("unknown" if exc.status in (503, 504) else "refused"), last
+            else:
+                return "applied", ""
+        return "unknown", last
 
     async def ensure_screencast(self, win: Window, quality: int = 0) -> None:
         cdp = await self.browser.ensure()
@@ -1193,17 +1247,26 @@ async def _viewer_message(hub: Hub, win: Window, msg: dict) -> None:
             # claiming one the page never entered.
             wanted = bool(msg.get("insecure"))
             if wanted != win.insecure_tls:
-                try:
-                    await hub.browser.set_insecure_tls(win.cdp_session, wanted)
-                except WebDebugError:
+                verdict, why = await hub._apply_insecure(win, wanted)
+                if verdict == "applied":
+                    win.insecure_tls = wanted
+                else:
                     # The switch in the page is optimistic: it flips as soon as
                     # it is pressed and re-reads the truth from a state reply.
-                    # Send that state before re-raising, so a refusal snaps the
-                    # switch back instead of leaving it showing a state the
-                    # page is not in (claunch-9a3k4).
+                    # Send that state before reporting, so the switch snaps back
+                    # instead of showing a state the page is not in
+                    # (claunch-9a3k4).
                     await hub.send_state(win)
-                    raise
-                win.insecure_tls = wanted
+                    raise WebDebugError(
+                        409 if verdict == "refused" else 504,
+                        ("this browser would not change the certificate answer; "
+                         "the window is still "
+                         f"{'ignoring' if win.insecure_tls else 'checking'} certificates")
+                        if verdict == "refused" else
+                        ("the browser did not answer in time, so this change is "
+                         "unconfirmed; the window still reports "
+                         f"{'ignoring' if win.insecure_tls else 'checking'} certificates"
+                         f" ({why})"))
             await hub.send_state(win)
         elif kind == "reload":
             await hub.navigate(win, win.url or "about:blank")
