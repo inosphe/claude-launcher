@@ -42,6 +42,7 @@ from .. import codex_mode
 from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
+from . import session_seq
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import (
@@ -426,6 +427,7 @@ class SessionManager:
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
         delivery_hold: bool = False,
+        auto: Optional[bool] = None,
     ) -> Session:
         """Register a session without starting it.
 
@@ -453,9 +455,26 @@ class SessionManager:
         a person pinned this session shut, and the relaunch is that session
         continuing, so the pin continues with it (see
         :attr:`Session._delivery_hold`).
+
+        ``auto`` says whether ``sdef.name`` is a name the counter handed out
+        or one a person typed, and it exists because the definition cannot
+        answer that: :meth:`stage_child` and the web create route settle a
+        candidate and put it *on the definition* before arriving here, so a
+        filled-in name means "the caller already chose" for a hand-typed
+        ``s9000`` and for the counter's ``s7`` alike. ``None`` — every path
+        that builds a definition itself — means "read it off the name": empty
+        is an auto assignment, filled in is a choice. Only an auto name moves
+        the counter.
         """
-        name = (sdef.name or "").strip() or self._auto_name()
-        self._check_name(name)
+        # The name is reserved here, and only here: every check that could
+        # refuse this request has already passed, so a number is spent only on
+        # a session that is going to exist. ``settle_name`` (which callers that
+        # must name a worktree use) computes a candidate and writes nothing --
+        # see its docstring for why the two are split.
+        requested = str(sdef.name or "")
+        if auto is None:
+            auto = not requested.strip()
+        name = self._reserve(self.settle_name(requested), auto=auto)
         sdef = self._resolve_resume(
             SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
@@ -1193,7 +1212,14 @@ class SessionManager:
             log.debug("claim give-up notice for %r failed", name, exc_info=True)
 
     def discard(self, name: str) -> None:
-        """Drop a staged session that will never start."""
+        """Drop a staged session that will never start.
+
+        The number it took is *not* handed back: the counter never rewinds (see
+        :mod:`session_seq`), so an attempt that failed mid-way costs one number
+        and nothing else. That is deliberate — the alternative, trying to work
+        out whether a failed attempt may safely give its number back, is where a
+        double allocation would come from.
+        """
         session = self._sessions.get(name)
         if session is not None and getattr(session, "pty", None) is None:
             self._sessions.pop(name, None)
@@ -1381,11 +1407,17 @@ class SessionManager:
             exempt_depth=exempt_depth,
         )
         # Settled here rather than left to :meth:`stage`, because the child's
-        # worktree is named after the child (``<parent>-<child>-<stamp>``) and
-        # the checkout is cut before the record exists. Checked here too: a
-        # name already taken must refuse BEFORE a directory is on disk, which
-        # is the same rule the worktree's own placement below keeps.
-        name = self.settle_name(str(request.get("name") or ""))
+        # worktree is named after the child (``<parent>-<child>``) and the
+        # checkout is cut before the record exists. Checked here too: a name
+        # already taken refuses before the CHECKOUT is made, which is the
+        # expensive half. Settling writes nothing (see
+        # :meth:`settle_name`), so a request refused below this line costs no
+        # number. An auto-assigned name is only a candidate here: ``stage``
+        # reserves it, which is what moves the counter -- and ``auto`` tells it
+        # whether this candidate came from the counter, because a definition
+        # with the name already filled in cannot say so on its own.
+        requested = str(request.get("name") or "")
+        name = self.settle_name(requested)
         # After the policy and before the record: a checkout is a thing on
         # disk, so it is made only once nothing left can refuse the request.
         child = spawn_mod.make_worktree(child, request, parent=parent, name=name)
@@ -1434,7 +1466,11 @@ class SessionManager:
                         if request.get("fork") else ""
                     ),
                 }
-            )
+            ),
+            # A name the request did not give came from the counter, and this
+            # is the only place that still knows it: by now ``name`` is on the
+            # definition, where nothing distinguishes it from a person's.
+            auto=not requested.strip(),
         )
 
     def spawn_capabilities(self, parent: str) -> dict:
@@ -1453,26 +1489,75 @@ class SessionManager:
         """The name a session about to be created will have, checked now.
 
         For a caller that must name something after the session before its
-        record exists -- the worktree cut for it -- so a name already taken
-        is refused before anything is on disk. Empty means the next free
-        ``sN`` (:meth:`_auto_name`).
+        record exists -- the worktree cut for it -- so a name already taken is
+        refused there rather than later. Empty means the next number the
+        counter would hand out (:meth:`auto_name`).
+
+        **Nothing is written here, and no number is spent.** A caller reaches
+        this while its request can still be refused (``POST /api/sessions``
+        checks the worktree, the harness, the profile and the kind after the
+        name is settled), and a name that spent a number on a refused request
+        would leave behind exactly the empty directories this counter exists to
+        stop accumulating. So an auto-assigned name is a *candidate*:
+        :meth:`stage` reserves it, and if another creator took it in between,
+        :meth:`_reserve` picks the next one. The cost of that is the worktree a
+        caller named after the candidate — a request that loses that race gets
+        a session named ``s7`` cut into a checkout named ``s6``. That is a
+        misnamed directory, not a lost identity, and it is much cheaper than
+        wrecking the naming invariant for every refused request.
         """
-        name = (name or "").strip() or self._auto_name()
+        name = (name or "").strip() or self.auto_name()
         self._check_name(name)
         return name
 
-    def _auto_name(self) -> str:
-        """The first free ``sN``.
+    def auto_name(self) -> str:
+        """The next ``sN`` the counter would hand out -- without taking it.
 
-        Exited records count as taken (they are still respawnable), and so do
-        the session directories left on disk — a recycled name would append to
-        another session's output log and make two histories look like one.
-        ``clear-sessions --logs`` is what frees the numbers again.
+        The counter (:mod:`session_seq`) is a high-water mark rather than a
+        search: it only moves forward, so deleting a session directory does not
+        make a lower number available again. That is the whole point — a
+        recycled name appends to another session's output log, report directory
+        and worktree name, and two histories then look like one.
+
+        ``clear-sessions --logs`` deletes the directory and leaves the counter
+        where it is. The numbers are not freed.
         """
-        i = 0
-        while f"s{i}" in self._sessions or paths.session_dir(f"s{i}").is_dir():
-            i += 1
-        return f"s{i}"
+        return session_seq.next_name(
+            lambda name: name in self._sessions, records=list(self._sessions)
+        )
+
+    def _reserve(self, name: str, *, auto: bool) -> str:
+        """Make ``name`` real: its directory exists and no other session holds it.
+
+        The one place a name becomes a session's. Called from :meth:`stage`,
+        which is reached only once every check that could refuse the request
+        has passed (see :meth:`settle_name` for the ordering that has to hold).
+
+        ``auto`` says whether the counter produced this name, and it decides
+        everything: only a name the counter produced may move the counter. A
+        person's ``s9000`` is a name in the sequence's *shape*, not a number the
+        sequence spent, and treating it as one would jump the counter to 9001 —
+        which is the symptom this issue exists to remove, arrived at from the
+        other side. So a hand-given name is only checked, and (as before the
+        counter existed) a directory left behind by a cleared session does not
+        stop a person from reusing their own name.
+
+        An ``auto`` candidate that the filesystem or another record took since
+        it was computed is replaced by the next one.
+        """
+        if name in self._sessions:
+            raise ManagerError(f"session {name!r} already exists")
+        if not auto:
+            return name
+        if session_seq.claim(name, lambda n: n in self._sessions):
+            return name
+        # The candidate was taken between settling and reserving it -- by
+        # another process's request, or by a record this check does not see.
+        # Ask the counter again rather than failing a request that is otherwise
+        # ready to run.
+        return session_seq.allocate(
+            lambda n: n in self._sessions, records=list(self._sessions)
+        )
 
     def get(self, name: str) -> AnySession:
         self._recover_claims()
@@ -1509,7 +1594,7 @@ class SessionManager:
 
         The one ordering every listing surface takes: ``claunch ls``, the web
         dashboard, the agent-facing tree. Names cannot carry it — they are
-        auto-generated with a counter (:meth:`_auto_name`), so a string sort
+        auto-generated with a counter (:meth:`auto_name`), so a string sort
         files ``s100`` between ``s10`` and ``s11`` and a fleet past nine reads
         as no order at all.
 
@@ -2392,8 +2477,11 @@ class SessionManager:
         Running sessions are untouched. This is the *only* thing that makes a
         session unresumable, which is why the daemon never does it on its own —
         it happens when a human asks (``claunch clear-sessions``, or the web
-        UI's clear button). ``logs`` also deletes their captured output,
-        freeing their auto-generated names for reuse.
+        UI's clear button). ``logs`` also deletes their captured output.
+
+        Neither answer frees a name: session numbers come from a counter that
+        only moves forward (:mod:`session_seq`), so a cleared session's ``sN``
+        is never handed out again.
 
         ``keep`` spares named records. The caller decides what goes in it: the
         manager knows nothing of meshes, and a record a mesh row still names is
