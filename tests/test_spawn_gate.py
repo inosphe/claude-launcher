@@ -795,7 +795,8 @@ def test_card_facts_keep_what_the_spec_names(home, tmp_path):
     # a declined workflow and a missing role read as none — and the card says
     # WHICH none, so a dash is not read as "the daemon lost it" (claunch-8fvr5)
     assert facts["workflow"] == {"value": "", "inherited": False, "note": "no run"}
-    assert facts["role"] == {"value": "", "inherited": False, "note": "from the handle"}
+    assert facts["role"] == {"value": "", "inherited": False,
+                             "note": "from the handle, else free-role"}
     named = spawn_gate.card_facts({"workspace": "hq"}, asker)["workspace"]
     assert named == {"value": "hq", "inherited": False}
 

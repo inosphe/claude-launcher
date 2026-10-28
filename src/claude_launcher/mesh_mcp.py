@@ -431,9 +431,10 @@ TOOLS = [
                         "with nothing or you are driving no run. Name one to "
                         "override that pairing; '-' gives the child no run "
                         "where the pair would have given it one — which is "
-                        "what a 'reviewer' child usually needs, since most "
-                        "runs filter_roles their own pairing down to workers "
-                        "and would refuse to start on a reviewer. A cflow v2 workflow "
+                        "what a 'reviewer' child usually needs: a run's "
+                        "filter_roles admits only the roles it names "
+                        "(improv-worker-v2 takes [worker]), so a pairing that "
+                        "does not list the reviewer refuses to start on it. A cflow v2 workflow "
                         "is named the same way (or as v2:<name> when a v1 one "
                         "shares the name, or a .cflow2/generated/*.yaml path)"
                     ),
