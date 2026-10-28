@@ -631,7 +631,9 @@ def test_the_leaders_run_in_another_repository_is_not_taken(proj, feature, monke
     )
     performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert not performed
-    assert "no run in this repository" in detail
+    # claunch-u7nu3: the skip names the repository the leader does take.
+    assert "leader 'lead' takes landings for another repository" in detail
+    assert landing.common_dir(other) in detail
     assert _queue(engine.status(cwd=other, scope="lead")) == {}
     # ... and beside one in this repository, that one is the only candidate.
     engine.start("lead", cwd=lcwd, scope="lead")
@@ -681,6 +683,38 @@ def test_a_parent_with_a_queue_but_no_merger_role_is_passed_over(proj, feature, 
     assert "fell back to 'lead'" in detail
     assert "x-1" in _queue(engine.status(cwd=lcwd, scope="lead"))
     assert _queue(engine.status(cwd=mid, scope="mid")) == {}
+
+
+def test_a_leader_of_another_repository_is_skipped_by_name_and_the_same_repo_leader_taken(
+    monkeypatch,
+):
+    """claunch-u7nu3: a gds6 worker's independent route went to the claunch
+    leader. The other-repository leader is a skip that names its repository,
+    and a leader of the worker's own repository beside it takes the request."""
+    sessions = {
+        "w1": _Session("w1", "/w", parent="p"),
+        "p": _Session("p", "/p"),
+        "other": _Session("other", "/o"),
+        "lead": _Session("lead", "/l"),
+    }
+    queues = {"other": [landing_route.Holder("/o", None, True)],
+              "lead": [landing_route.Holder("/l", None, True)]}
+    repos = {"/w": "/repo/a", "/l": "/repo/a", "/o": "/repo/b"}
+
+    def holders(name, repo):
+        return [h for h in queues.get(name, []) if repo is None or repos[h.cwd] == repo]
+
+    mesh = _Mesh({"w1": ["worker"], "p": ["worker"], "other": ["leader"], "lead": ["leader"]})
+    router = landing_route.Router(_Manager(sessions.values()), mesh, holders)
+    monkeypatch.setattr(landing_route.cflow_landing, "common_dir", lambda c: repos[c])
+    found = router.independent("/w", "w1")
+    assert found.owner == "lead", found.why
+    queues["lead"] = []
+    found = router.independent("/w", "w1")
+    assert found.holder is None
+    assert ("leader 'other' takes landings for another repository (/repo/b), "
+            "not the worker's (/repo/a)") in found.why
+    assert "leader 'lead' has no run in this repository" in found.why
 
 
 def test_a_main_run_is_picked_before_an_earlier_side_run():

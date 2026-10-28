@@ -2562,12 +2562,17 @@ nodes:
     # 사람 앞에 서고, 그 ask에는 기한이 없어 런이 무기한 대기한다. root는 메시에
     # 부모가 없는 세션 — 운영자가 직접 띄운 세션 — 만 받으므로 후보가 넓어지지
     # 않고, 순서는 그대로 사슬 → 형제 → 루트다(가까운 쪽이 먼저 답한다).
+    # 세 그룹 모두 connect: true다(claunch-u7nu3). 응답자 후보는 이 런과 wire된
+    # 멤버뿐인데, 기본 auto_link는 child↔parent·root↔root·reviewer↔worker만
+    # 잇는다 — 다른 워커 아래 선 independent 자식은 루트 리더와 이어져 있지
+    # 않아 리더가 메시에 있어도 ask가 곧바로 사람 앞에 섰다. connect는 그
+    # 역할을 이미 가진 로컬 멤버와의 간선 하나만 만든다(cflow/responders.wire).
     ask:
       prompt: *landing_review_ask
       from:
-        - {role: leader, scope: ancestor}
-        - {role: leader, scope: sibling}
-        - {role: leader, scope: root}
+        - {role: leader, scope: ancestor, connect: true}
+        - {role: leader, scope: sibling, connect: true}
+        - {role: leader, scope: root, connect: true}
       otherwise: human
       timeout: 1800
       options: *landing_review_options
