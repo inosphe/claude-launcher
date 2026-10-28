@@ -776,6 +776,23 @@ class SessionManager:
                                **_known(ended_by=getattr(session, "ended_by", None)))
             self.persist()
             return
+        if self._ended_with_host(session):
+            # The PTY host went away under the session (claunch-hor3b.1):
+            # the program did not end, its terminal did. Treated as a
+            # restart without the host treats it -- the record stays one the
+            # next boot restores (persist), the exit hooks do not run (the
+            # board keeps its in_progress issue), and the host watch
+            # relaunches it as soon as a new host is up
+            # (relaunch_host_ended).
+            log.warning(
+                "session %r ended with the PTY host (code %s); kept to be relaunched",
+                session.sdef.name, session.exit_code,
+            )
+            self.events.record(session, "exit", "PTY host 종료로 세션 프로세스 종료",
+                               exit_code=session.exit_code,
+                               **_known(ended_by=getattr(session, "ended_by", None)))
+            self.persist()
+            return
         if getattr(session, "held_at", None):
             # A hold ends the program, not the session (Session.held_at): the
             # board keeps its in_progress issue, side runs keep running, and
@@ -838,11 +855,26 @@ class SessionManager:
             return
         if id(session) in self._restarting:
             return
+        if self._ended_with_host(session):
+            session.ended_by = actors.make(actors.DAEMON, reason="pty-host-ended")
+            return
         if getattr(session, "kill_requested", False):
             return
         if getattr(session, "paused_at", None) or getattr(session, "held_at", None):
             return
         session.ended_by = actors.make(actors.SELF)
+
+    def _ended_with_host(self, session: Session) -> bool:
+        """Whether an exit is the PTY host's going rather than the
+        program's (claunch-hor3b.1): the handle said so, and nothing --
+        kill, pause, hold or relaunch -- asked for the ending."""
+        if not getattr(session, "ended_by_host", False):
+            return False
+        if getattr(session, "kill_requested", False):
+            return False
+        if getattr(session, "paused_at", None) or getattr(session, "held_at", None):
+            return False
+        return id(session) not in self._restarting
 
     def _failed_on_its_own(self, session: Session) -> bool:
         """Whether an exit is a failure: a nonzero code, and no kill, pause,
@@ -2543,6 +2575,50 @@ class SessionManager:
             raise
         return self._respawned(session, relaunched)
 
+    def host_ended(self) -> List[str]:
+        """The records waiting for :meth:`relaunch_host_ended`, in creation
+        order (a parent before the sessions it spawned, as at boot)."""
+        return [
+            s.sdef.name for s in self._sessions.values()
+            if s.exited and not s.archived_at and self._ended_with_host(s)
+        ]
+
+    def bound_to_host(self, client) -> List[str]:
+        """Live sessions whose terminal is still a handle of ``client`` --
+        the host connection whose loss is being handled. Their exits are on
+        the way; :meth:`relaunch_host_ended` waits for them first."""
+        return [
+            s.sdef.name for s in self._sessions.values()
+            if not s.exited and getattr(getattr(s, "pty", None), "_client", None) is client
+        ]
+
+    async def relaunch_host_ended(self) -> List[str]:
+        """Relaunch every session the PTY host took down with it
+        (claunch-hor3b.1), the way the next boot's :meth:`restore_all` would:
+        :meth:`respawn_async` with ``restoring=True``, so the claude harness
+        resumes its conversation. Spaced by ``restore_stagger`` as at boot.
+        A record that does not come back is logged and stays one the next
+        boot restores. Returns the names relaunched."""
+        relaunched: List[str] = []
+        for i, name in enumerate(self.host_ended()):
+            if self.shutting_down:
+                break
+            if i and self.restore_stagger > 0:
+                await asyncio.sleep(self.restore_stagger)
+            try:
+                session = await self.respawn_async(name)
+            except Exception:
+                log.exception("could not relaunch %r after the PTY host ended", name)
+                continue
+            # Unattended, as restore_all's relaunch is: nobody asked for it.
+            session.resumed_by_human = False
+            self.events.record(session, "restore", "PTY host 종료 뒤 세션 복원")
+            relaunched.append(name)
+        if relaunched:
+            log.warning("relaunched %d session(s) the PTY host ended: %s",
+                        len(relaunched), ", ".join(relaunched))
+        return relaunched
+
     def _respawn_take(self, name: str) -> AnySession:
         session = self.get(name)
         if not session.exited:
@@ -3284,6 +3360,13 @@ class SessionManager:
                         and not session.archived_at)
                     or (
                         getattr(session, "ended_by_os", False)
+                        and not session.archived_at
+                    )
+                    # Likewise an exit the PTY host's going caused
+                    # (claunch-hor3b.1): until the host watch relaunches
+                    # it, the next boot is what brings it back.
+                    or (
+                        self._ended_with_host(session)
                         and not session.archived_at
                     ),
                     # Whether an agent was mid-turn here. persist() runs

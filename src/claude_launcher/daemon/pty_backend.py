@@ -98,6 +98,12 @@ def stranded_host() -> Optional[int]:
     return _stranded
 
 
+def installed_host():
+    """The installed PTY host client, open or not (None when the daemon
+    spawns its sessions itself)."""
+    return _host
+
+
 def current_host():
     """The installed PTY host client while its connection is open, else None."""
     host = _host

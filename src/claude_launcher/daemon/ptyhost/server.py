@@ -191,6 +191,9 @@ class Host:
         self._conn: Optional[socket.socket] = None
         self._send_lock = threading.Lock()
         self._stop = threading.Event()
+        #: Why the serve loop ended, said in the log and to the client before
+        #: the sessions are ended (claunch-hor3b.1).
+        self._stop_reason = ""
         self._token = b""
         self._sock_path = socket_path(self.dir)
         # What this host runs, read once at start (claunch-xnnct.3): the files
@@ -200,7 +203,9 @@ class Host:
         self.code = code_id(self.code_files)
         self.started_at = time.time()
 
-    def stop(self) -> None:
+    def stop(self, reason: str = "stop requested") -> None:
+        if not self._stop.is_set():
+            self._stop_reason = reason
         self._stop.set()
 
     # -- outgoing --------------------------------------------------------
@@ -262,6 +267,7 @@ class Host:
                 self._poll_liveness()
                 if not self.dir.is_dir():
                     log.info("directory %s is gone; exiting", self.dir)
+                    self._stop_reason = "directory gone"
                     break
                 with self._sessions_lock:
                     busy = bool(self.sessions) or self._conn is not None
@@ -269,9 +275,11 @@ class Host:
                     idle_since = time.monotonic()
                 elif time.monotonic() - idle_since >= self.idle_exit:
                     log.info("no sessions and no client for %.0fs; exiting", self.idle_exit)
+                    self._stop_reason = "idle"
                     break
         finally:
             listener.close()
+            self._announce_stop()
             self._end_all(force=True)
             for path in (self._sock_path, pid_path(self.dir), token_path(self.dir)):
                 try:
@@ -279,6 +287,17 @@ class Host:
                 except OSError:
                     pass
         return 0
+
+    def _announce_stop(self) -> None:
+        """Say why the host is going, before its sessions are ended
+        (claunch-hor3b.1): in the log, which until then kept no line for a
+        SIGTERM, and to the client, so the daemon can tell the exits that
+        follow from the program's own and relaunch them."""
+        reason = self._stop_reason or "stop requested"
+        with self._sessions_lock:
+            live = sum(1 for s in self.sessions.values() if not s.exited.is_set())
+        log.warning("stopping (%s); ending %d live session(s)", reason, live)
+        self.emit({"op": "stopping", "reason": reason})
 
     def _poll_liveness(self) -> None:
         now = time.monotonic()
@@ -449,7 +468,7 @@ class Host:
         elif op == "shutdown":
             # End every session and exit (the serve loop's finally does both).
             self._reply(conn, header.get("id"), pid=os.getpid())
-            self.stop()
+            self.stop("shutdown requested by the client")
         else:
             if "id" in header:
                 self._reply(conn, header["id"], ok=False, error=f"unknown op {op!r}")
@@ -529,5 +548,5 @@ def main(argv=None) -> int:
     host = Host(directory, idle_exit=args.idle_exit)
     # SIGTERM ends the sessions and exits through the same path as idle:
     # the children are this process's, and they must not outlive it.
-    signal.signal(signal.SIGTERM, lambda *_: host.stop())
+    signal.signal(signal.SIGTERM, lambda *_: host.stop("SIGTERM"))
     return host.serve()

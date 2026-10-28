@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the PTY host is
 import claude_launcher  # noqa: E402
 from claude_launcher import lineage, profile, store  # noqa: E402
 from claude_launcher.daemon import pty_backend, paths  # noqa: E402
+from claude_launcher.daemon import host_watch  # noqa: E402
 from claude_launcher.daemon import __main__ as daemon_main  # noqa: E402
 from claude_launcher.daemon.harness import SessionDef  # noqa: E402
 from claude_launcher.daemon.manager import SessionManager  # noqa: E402
@@ -494,6 +495,99 @@ def test_a_host_that_cannot_be_ended_keeps_its_sessions_unrelaunched(
         token_path(paths.ptyhost_dir()).write_text(real, encoding="ascii")
         _reconnect(monkeypatch).shutdown_host()
         assert _wait(lambda: not _pid_alive(pid))
+
+    asyncio.run(run())
+
+
+async def _until_true(pred, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        await asyncio.sleep(0.05)
+    return pred()
+
+
+def test_a_host_sigterm_relaunches_its_sessions_like_a_restart(host, tmp_path, monkeypatch):
+    """The host goes away under a running daemon (claunch-hor3b.1): its
+    sessions are not filed as failed, and the watch brings them back in a
+    new host as a restart without the host would."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="h1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid, host_pid = s.pid, host.host_pid
+        watcher = asyncio.create_task(host_watch.watch(
+            mgr, lambda: hc.ensure_host(paths.ptyhost_dir(), idle_exit=2.0),
+            interval=0.05))
+        try:
+            os.kill(host_pid, signal.SIGTERM)
+            assert await _until_true(lambda: mgr.get("h1") is not s and not mgr.get("h1").exited)
+            s2 = mgr.get("h1")
+            assert s.exited and s.ended_by_host
+            assert getattr(s, "failed_at", None) is None
+            assert s.ended_by == {"kind": "daemon", "reason": "pty-host-ended"}
+            assert "fail" not in [e.get("kind") for e in mgr.events.rows(s)]
+            new = pty_backend.installed_host()
+            assert new is not None and new.host_pid != host_pid
+            assert s2.pid != pid
+            await _wait_screen(s2, "READY")
+            assert "restore" in [e.get("kind") for e in mgr.events.rows(s2)]
+            log_text = (paths.ptyhost_dir() / "ptyhost.log").read_text(encoding="utf-8")
+            assert "stopping (SIGTERM); ending 1 live session(s)" in log_text
+        finally:
+            watcher.cancel()
+            await mgr.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
+def test_a_session_the_lost_host_took_is_restored_at_the_next_boot(host, tmp_path, monkeypatch):
+    """No watch relaunched it (the daemon went down first): the record still
+    reads running, so the next boot's restore_all brings it back -- a lost
+    connection (SIGKILL: no word from the host) counts like a stop."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="h2", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid, host_pid = s.pid, host.host_pid
+        os.kill(host_pid, signal.SIGKILL)
+        assert await _until_true(lambda: s.exited)
+        assert s.ended_by_host and getattr(s, "failed_at", None) is None
+        assert mgr.host_ended() == ["h2"]
+        assert _wait(lambda: not _pid_alive(pid))
+
+        c2 = hc.ensure_host(paths.ptyhost_dir(), idle_exit=2.0)
+        monkeypatch.setattr(pty_backend, "_host", c2)
+        mgr2 = _manager()
+        assert mgr2.restore_all() == []
+        s2 = mgr2.get("h2")
+        assert not s2.exited and s2.pid != pid
+        await _wait_screen(s2, "READY")
+        await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
+def test_a_kill_is_not_undone_by_the_host_going(host, tmp_path, monkeypatch):
+    """An ending somebody asked for stays theirs even when the host goes
+    down in the same moment."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="h3", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        s.kill_requested = True
+        os.kill(host.host_pid, signal.SIGTERM)
+        assert await _until_true(lambda: s.exited)
+        assert s.ended_by_host and mgr.host_ended() == []
+        assert await mgr.relaunch_host_ended() == []
+        assert mgr.get("h3") is s
 
     asyncio.run(run())
 

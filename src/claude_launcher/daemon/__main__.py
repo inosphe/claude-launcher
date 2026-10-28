@@ -20,6 +20,7 @@ from aiohttp import web
 
 from .. import config, daemon_client, providers, routing, session_env, store
 from . import basetemp_reaper
+from . import host_watch
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, pools, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
@@ -350,6 +351,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             "failed to restore %d session(s): %s",
             len(failed), ", ".join(failed),
         )
+    # A host that goes away from here on takes its sessions with it while
+    # this daemon stays up; the watch relaunches them as a restart without
+    # the host would (claunch-hor3b.1).
+    host_watch_task = (
+        asyncio.create_task(host_watch.watch(manager, lambda: _connect_pty_host(cfg)))
+        if pty_host is not None else None
+    )
     restored = [s.sdef.name for s in manager.list() if not s.exited]
     retired = [s.sdef.name for s in manager.list()
                if s.exited and s.sdef.name not in manager.restore_queue]
@@ -594,6 +602,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # is a daemon stop/restart (reattach later) before shutdown_all makes
         # their sessions look like programs that exited on their own.
         teardown = _Teardown()
+        if host_watch_task is not None:
+            await teardown.step("host_watch", _stop_clock(host_watch_task))
         await teardown.step("notify_shutdown", notify_shutdown(app))
         await teardown.step("relay_settings", relay_settings.close())
         if p2p_hub is not None:
@@ -636,6 +646,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # The restart mode (claunch-xnnct.1): "keep" leaves the sessions
         # running in the PTY host for the successor to adopt.
         mode = app.get("restart_mode") or "stop"
+        # The watch may have replaced the host this boot connected to.
+        if pty_host is not None:
+            from . import pty_backend
+
+            pty_host = pty_backend.installed_host()
         if pty_host is None or pty_host.closed.is_set():
             mode = "stop" if mode == "keep" else mode
         log.info("teardown mode: %s", mode)
