@@ -748,10 +748,13 @@ def _cwd_of(call, default=_HERE):
 _INTERPRETER_PREFIX = "python"
 
 #: Runners that take a command and run *it*, so the program is further right.
-#: ``uv run ...`` and ``env VAR=x ...`` are the two that actually appear in
-#: these test modules; both are skipped along with the options and assignments
-#: that belong to them.
-_LAUNCHERS = ("uv", "env", "exec", "command", "nohup", "time")
+#: Only argv[0] is consulted: when it is one of these, the tool anywhere after
+#: it counts. The list does not have to be complete for correctness the way an
+#: option list would -- a launcher that is missing here falls to the
+#: fail-closed branch below, which collects nothing rather than the wrong
+#: thing, and the reviewers' finding was the opposite direction.
+_LAUNCHERS = ("uv", "uvx", "env", "exec", "command", "nohup", "time",
+              "poetry", "pipx", "pdm", "rye", "hatch", "conda", "mise")
 
 
 def _bare_name(node):
@@ -779,16 +782,6 @@ def _runs_the_next_argv(node):
     )
 
 
-#: Interpreter options that take a *separate* value, so the element after them
-#: belongs to the option and not to the program: ``-X utf8``, ``-W default``.
-_OPTION_WITH_VALUE = ("-X", "-W", "-Q", "-o")
-
-#: Subcommands of a launcher that name what it will run: ``uv run ...``,
-#: ``uv run --no-sync ...``. Not options, so the option loop above steps over
-#: them only by name.
-_LAUNCHER_SUBCOMMANDS = ("run", "exec", "tool")
-
-
 def _exec_position(items, from_this_file, names):
     """The index at which an argv element runs as the tool, or ``None``.
 
@@ -814,42 +807,46 @@ def _exec_position(items, from_this_file, names):
     That direction is the worse one. A guard that sees too much fails on a
     correct call and gets switched off; a guard that stops seeing a call it
     used to see returns green and says nothing, which is what this guard
-    exists to prevent. So the fix errs toward reading the program position
-    generously -- any leading interpreter or launcher, then their options and
-    values -- while the *data* position stays strict: once a non-launcher
-    program is named, a path in a later position is that program's argument."""
-    at = 0
-    leading = True
-    while at < len(items):
-        element = items[at]
-        if _names_the_script(element, from_this_file=from_this_file, names=names):
-            return at
-        if not leading:
-            return None
-        if _runs_the_next_argv(element):
-            at += 1
-            # The launcher's own options, subcommands and the values they
-            # take, come next: ``uv run --no-sync``, ``env FOO=1``.
-            while at < len(items):
-                head = items[at]
-                if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
-                    break
-                text = head.value
-                if "=" in text and not text.startswith("-"):
-                    at += 1
-                    continue
-                if text in _LAUNCHER_SUBCOMMANDS:
-                    at += 1
-                    continue
-                if not text.startswith("-"):
-                    break
-                at += 1
-                if text in _OPTION_WITH_VALUE and at < len(items):
-                    at += 1
-            continue
-        leading = False
+    exists to prevent.
+
+    Two rounds of review then showed that tracking *which* options take values
+    cannot be kept up: ``uv run --directory X``, ``--project X``, ``--with X``,
+    ``--python X``, ``-p X`` each stopped the walk on their value, and every
+    launcher not in a fixed list (``poetry``, ``pipx``, ``pdm``) was invisible
+    (s404-rev, s511-rev, s1262-rev measured eight shapes, all caught on master
+    and missed here). The rule is therefore structural rather than a list --
+    s511-rev's formulation:
+
+    * argv[0] is a program that *runs another program* (an interpreter or a
+      launcher): the tool anywhere after it is an invocation. This is master's
+      behaviour and it is the fail-closed direction, which is the right one
+      for an argv that cannot be fully parsed.
+    * argv[0] is any other program (``git``, ``uv run pytest``, ``python -c``):
+      a path later in the argv is data that program operates on. That is the
+      over-blocking s597-rev found, and it stays closed.
+
+    So the discriminator is argv[0] alone, and no option needs to be known.
+
+    One limit comes with it, and it is master's too: when argv[0] is a launcher
+    that runs a *non-interpreter* subcommand, the tool is collected even if
+    that subcommand only reads it as data -- ``uv run ruff check <tool>``. There
+    is no way to tell ``ruff check <path>`` from ``uv run python <path>`` by
+    position alone, because both are "a launcher, then a program, then the
+    tool". It is recorded rather than fixed: master b16cf017 collects it
+    identically (measured), no module in this repository writes that shape, and
+    closing it would mean parsing each launcher's subcommands -- the list that
+    already failed twice."""
+    if not items:
         return None
-    return None
+    if _names_the_script(items[0], from_this_file=from_this_file, names=names):
+        return 0
+    if not _runs_the_next_argv(items[0]):
+        return None
+    return next(
+        (at for at in range(1, len(items))
+         if _names_the_script(items[at], from_this_file=from_this_file, names=names)),
+        None,
+    )
 
 def _names_the_script(node, from_this_file=True, names=None):
     """Whether an argv element is the tool, however it is spelled.
@@ -1740,6 +1737,23 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
         '["uv", "run", "--no-sync", "python", "tools/related_surfaces.py", "--json"]',
         '["env", "python3", "tools/related_surfaces.py", "--json"]',
         '["env", "FOO=1", "python", "tools/related_surfaces.py", "--json"]',
+        # ... and launcher options that take a value. Tracking *which* options
+        # those are is what failed twice: ``--directory`` (this repository's
+        # own re-measure command), ``--project``, ``--with``, ``--python`` and
+        # ``-p`` each stopped the walk on their value (s404-rev, s511-rev,
+        # s1262-rev measured eight shapes, all caught on master and missed
+        # here). These rows pin the structural rule that replaced the list.
+        '["uv", "run", "--no-sync", "--directory", str(ROOT), "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "--directory", ".", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "-p", "3.14", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "--with", "pytest", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--with", "pandas", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--python", "3.12", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--project", ".", "python", "tools/related_surfaces.py", "--json"]',
+        # ... and a launcher this file's list does not name. The rule is
+        # argv[0]-based, so a launcher missing from ``_LAUNCHERS`` still falls
+        # to the fail-closed branch rather than to a wrong answer.
+        '["poetry", "run", "python", "tools/related_surfaces.py", "--json"]',
     ):
         sample = f'x = subprocess.run({argv}, cwd=str(ROOT))\n'
         found = _tool_invocations(sample)
