@@ -44572,26 +44572,72 @@ function cflow2Callstack(data, post, live) {
   return sec;
 }
 
+/* Where an element of the run view sits, as a name that survives the poll's
+   rebuild (claunch-qb42y). A `data-cf2-key` names itself; anything else is
+   named by its path from the box, one step per ancestor: tag, first class,
+   the title its first child carries (a summary or a section heading, digits
+   dropped so "inputs (18)" stays "inputs ()" as values arrive), and its place
+   among the siblings that share all three. So a section that appears above
+   it, a report added in front of it, or a count moving in its title leaves
+   the name alone. One walk names every element below the box, calling
+   visit(node, name) on each: the journal grid alone is hundreds of siblings,
+   so the places are counted on the way down rather than per node. */
+function cf2StateWalk(box, visit) {
+  const base = (n) => {
+    const head = n.firstElementChild;
+    const title = head && /^(SUMMARY|H[2-5])$/.test(head.tagName)
+      ? head.textContent.replace(/\d+/g, "").replace(/\s+/g, " ").trim().slice(0, 120) : "";
+    return `${n.tagName}.${(n.classList && n.classList[0]) || ""}[${title}]`;
+  };
+  const walk = (parent, prefix) => {
+    const seen = new Map();
+    for (const n of parent.children) {
+      const own = n.dataset && n.dataset.cf2Key;
+      let name;
+      if (own) name = "k:" + own;
+      else {
+        const b = base(n), i = seen.get(b) || 0;
+        seen.set(b, i + 1);
+        name = (prefix ? prefix + ">" : "") + `${b}:${i}`;
+      }
+      visit(n, name);
+      walk(n, name);
+    }
+  };
+  walk(box, "");
+}
+
+/* What a poll's rebuild of the run view would cost the reader, taken before
+   the wipe and handed back after it: whether each details is open or shut,
+   and where every scrolled box inside the view and every scroller around it
+   stands. Only what was on screen before is put back -- a details that is
+   new this poll keeps the default its renderer gave it. */
 function captureCflow2View(box) {
   const scrolls = [];
   for (let node = box; node; node = node.parentElement) {
     scrolls.push([node, node.scrollTop, node.scrollLeft]);
   }
-  const inner = [".cf2-tree", ".cf2g-wrap", ".cf2-pane-body", ".cf2-col-main", ".cf2-col-chart"]
-    .map((selector) => {
-      const node = box.querySelector(selector);
-      return node ? [selector, node.scrollTop, node.scrollLeft] : null;
-    }).filter(Boolean);
-  const opened = Array.from(box.querySelectorAll("details[data-cf2-key], details.cf2-journal"))
-    .filter((n) => n.open).map((n) => n.dataset.cf2Key || "journal");
+  // the fixed panes are kept even at 0: the graph is a reused node, and its
+  // place must follow the reader back to the top as well
+  const fixed = new Set(box.querySelectorAll(
+    ".cf2-tree, .cf2g-wrap, .cf2-pane-body, .cf2-col-main, .cf2-col-chart"));
+  const opened = new Map(), inner = new Map();
+  cf2StateWalk(box, (node, name) => {
+    if (node.tagName === "DETAILS") opened.set(name, node.open);
+    if (node.scrollTop || node.scrollLeft || fixed.has(node)) {
+      inner.set(name, [node.scrollTop, node.scrollLeft]);
+    }
+  });
   return () => {
-    for (const node of box.querySelectorAll("details[data-cf2-key], details.cf2-journal")) {
-      node.open = opened.includes(node.dataset.cf2Key || "journal");
-    }
-    for (const [selector, top, left] of inner) {
-      const node = box.querySelector(selector);
-      if (node) { node.scrollTop = top; node.scrollLeft = left; }
-    }
+    // the folds first: a scroll position only holds once the content it
+    // measures is back at its height
+    const later = [];
+    cf2StateWalk(box, (node, name) => {
+      if (node.tagName === "DETAILS" && opened.has(name)) node.open = opened.get(name);
+      const at = inner.get(name);
+      if (at) later.push([node, at]);
+    });
+    for (const [node, [top, left]] of later) { node.scrollTop = top; node.scrollLeft = left; }
     for (const [node, top, left] of scrolls) { node.scrollTop = top; node.scrollLeft = left; }
   };
 }
@@ -44955,9 +45001,15 @@ function cflow2RedrawAllowed(force, handInBox) {
 function renderCflow2Into(box, data, ui, force = false) {
   ui = ui || {};
   const act = document.activeElement;
-  const hand = !!act && act !== document.body && box.contains(act) &&
+  const field = !!act && act !== document.body && box.contains(act) &&
     act.matches("input, textarea, select");
-  if (!cflow2RedrawAllowed(force, hand)) return;
+  // Text being selected on the view is a hand on it too: the rebuild would
+  // drop the selection under the pointer (claunch-qb42y). The poll keeps its
+  // signature unset, so the next one after the selection ends draws.
+  const pick = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  const selecting = !!pick && !pick.isCollapsed &&
+    (box.contains(pick.anchorNode) || box.contains(pick.focusNode));
+  if (!cflow2RedrawAllowed(force, field || selecting)) return;
   const signature = JSON.stringify(data);
   if (!force && box._cf2Signature === signature && box.querySelector(".cf2")) return;
   const identity = JSON.stringify([data.cwd, data.scope, (data.run || {}).run]);

@@ -693,6 +693,7 @@ BROWSER_CHECKS = [
     "cflow2layout_browser.cjs",
     "cflow2inputs_browser.cjs",
     "cflow2history_browser.cjs",
+    "cflow2gentle_browser.cjs",
     "cflow2throughput_browser.cjs",
     "glossary_browser.cjs",
     "flows_browser.cjs",
