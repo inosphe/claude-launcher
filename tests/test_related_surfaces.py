@@ -639,8 +639,27 @@ def _run_cwd_default():
     ``_run`` writes ``cwd=str(cwd or ROOT)``. Three shapes are read: that
     ``or`` default, a plain ``ROOT``/``_HERE`` name, and the ``str(...)``
     wrapper around either. Anything else answers ``None`` -- an unreadable
-    default leaves relative paths exempt rather than guessed at."""
-    for node in ast.walk(ast.parse(_SELF.read_text(encoding="utf-8"))):
+    default leaves relative paths exempt rather than guessed at.
+
+    This reads *this* module's ``_run``. A sibling's is a different function
+    with its own default (:func:`_sibling_run_default`), because applying this
+    answer to every module that happens to define a ``_run`` turned unrelated
+    ``git`` wrappers into violations (s597-rev, s404-rev, s1262-rev)."""
+    return _run_default_in(_SELF.read_text(encoding="utf-8"))
+
+
+#: What :func:`_sibling_run_default` answers when the source has no ``_run``
+#: that invokes the tool. Distinct from ``None``: ``None`` means ``_run``
+#: exists and its default could not be read, which still calls for a verdict.
+_NO_RUN = object()
+
+
+def _run_default_in(text):
+    """``_run``'s default ``cwd``, read from a source, or ``None``.
+
+    Same three shapes as :func:`_run_cwd_default`; separated so a sibling's
+    ``_run`` can be read through the same rules."""
+    for node in ast.walk(ast.parse(text)):
         if not isinstance(node, ast.FunctionDef) or node.name != "_run":
             continue
         for kw in ast.walk(node):
@@ -658,26 +677,72 @@ def _run_cwd_default():
     return None
 
 
-def _cwd_of(call, default=None):
+def _sibling_run_default(tree):
+    """What a *sibling* module's ``_run`` means for the tool, or :data:`_NO_RUN`.
+
+    A module other than this one may define its own ``_run`` -- twenty-plus
+    test modules do -- and most are ``git`` wrappers. Reading those through
+    this file's ``_run`` turned ``_run("status")`` into "reads this
+    repository's history without --limit" in a module that only mentioned the
+    tool in a docstring (s597-rev, s404-rev, s1262-rev on claunch-o5il6.1).
+
+    So a sibling's ``_run`` counts only when its own definition puts the tool
+    in the argv it builds: the body must name ``related_surfaces.py``, or carry
+    a name bound to the tool's path. Then its default ``cwd`` is read the same
+    way this file's is. When there is no such definition the branch says
+    nothing -- an unrecognised helper is not evidence of reading this
+    repository.
+
+    ``ast.walk`` is used for the body rather than a substring test on
+    ``ast.dump``: ``"SCRIPT"`` is a common word in these modules (``PYTEST``,
+    ``SCRIPT_DIR``, a ``SCRIPT`` for some other tool), and matching it would
+    reintroduce the over-blocking this function exists to remove."""
+    names = _tool_names_in(tree)
+    for fn in (
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_run"
+    ):
+        body = list(ast.walk(fn))
+        names_the_tool = any(
+            isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and Path(n.value).name == _TOOL_FILE
+            for n in body
+        ) or any(isinstance(n, ast.Name) and n.id in names for n in body)
+        if not names_the_tool:
+            continue
+        return _run_default_in(ast.unparse(fn))
+    return _NO_RUN
+
+
+def _cwd_of(call, default=_HERE):
     """The directory a ``subprocess`` call runs in when it names no ``cwd``.
 
-    ``default`` is what the call inherits. For the ``_run`` helper that is
-    whatever ``_run`` itself defaults to (:func:`_run_cwd_default`); for a bare
-    ``subprocess.run`` it is the pytest process's directory, which this file
-    cannot place, so ``None``. Keeping the two apart is the point: they are
-    different directories, and collapsing them into one literal was how the
-    guard's answer for ``_run("--repo", ".")`` came to depend on a fact stated
-    somewhere else with nothing pinning it (claunch-o5il6.1).
+    ``default`` is what the call inherits when it writes no ``cwd`` of its own.
+    A call with no ``cwd`` inherits the directory of the process that runs it,
+    and every caller of this guard is pytest started from the checkout:
+    ``changed_tests.py`` runs ``uv run pytest`` with the checkout as cwd, so a
+    bare ``subprocess.run([...])`` in a test module resolves ``"."`` against
+    the checkout. ``_HERE`` is that directory, so it is the default here.
 
-    A ``cwd`` the source cannot place (``cwd=repo``) comes back as ``None``,
-    which leaves a relative path exempt rather than misread."""
+    An earlier version of this function defaulted to ``None``, reasoning that a
+    bare call "cannot be placed". That was wrong in the unsafe direction: it
+    exempted every ``cwd``-less call with no ``--repo``, and those read this
+    repository's sliding window exactly as before (s490-rev, s511-rev,
+    s1262-rev on claunch-o5il6.1 -- all three reproduced it). A ``cwd`` the
+    source writes but this file cannot place (``cwd=repo``) still comes back as
+    ``None``, and that is the only case left exempt.
+
+    ``_run``'s own default is a different question with its own answer
+    (:func:`_run_cwd_default`) and is passed in explicitly by the caller that
+    knows it is looking at ``_run``."""
     for kw in call.keywords:
         if kw.arg == "cwd":
             return _path_text(kw.value)
     return default
 
 
-def _names_the_script(node, from_this_file=True):
+def _names_the_script(node, from_this_file=True, names=None):
     """Whether an argv element is the tool, however it is spelled.
 
     The two spellings in this file are ``SCRIPT`` and ``str(SCRIPT)``. Testing
@@ -689,17 +754,57 @@ def _names_the_script(node, from_this_file=True):
 
     ``SCRIPT`` is *this* module's name for the tool, so a call from another
     test file cannot write it. There the tool is named by its file, so any
-    string spelling ``related_surfaces.py`` counts (claunch-o5il6.3)."""
+    string spelling ``related_surfaces.py`` counts (claunch-o5il6.3).
+
+    ``names`` carries module-level names bound to the tool's path --
+    ``TOOL = ROOT / "tools" / "related_surfaces.py"`` then
+    ``subprocess.run([sys.executable, str(TOOL)])``. Not resolving those left
+    a sibling's call invisible, which is the under-blocking direction this
+    guard exists against (s404-rev on claunch-o5il6.1)."""
     if any(isinstance(n, ast.Name) and n.id == "SCRIPT" for n in ast.walk(node)):
         return True
     if from_this_file:
         return False
+    if names and any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node)):
+        return True
     return any(
         isinstance(n, ast.Constant)
         and isinstance(n.value, str)
         and Path(n.value).name == _TOOL_FILE
         for n in ast.walk(node)
     )
+
+
+def _tool_names_in(tree):
+    """Module-level names bound to a path naming the tool.
+
+    ``TOOL = ROOT / "tools" / "related_surfaces.py"`` and its ``str(...)`` /
+    ``Path(...)`` spellings, plus a plain string. Only module-level
+    assignments: a local binding inside a function is a different scope and
+    resolving it here would be a guess about which one a call site sees."""
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if isinstance(value, ast.Call) and getattr(value.func, "id", None) in ("str", "Path") and value.args:
+            value = value.args[0]
+        names_the_tool = (
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+            and Path(value.value).name == _TOOL_FILE
+        ) or any(
+            isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and n.value == _TOOL_FILE
+            for n in ast.walk(value)
+        )
+        if not names_the_tool:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
 
 
 def _repo_verdict(nodes, base=None, in_process=False):
@@ -794,10 +899,33 @@ def _tool_invocations(source=None):
         name = getattr(func, "id", None) or getattr(func, "attr", None)
 
         if name == "_run":
-            out.append(
-                (node.lineno, _argv_of(node.args),
-                 _repo_verdict(node.args, _cwd_of(node, _run_cwd_default())))
-            )
+            # ``_run`` is *this* file's helper: its definition prepends
+            # ``sys.executable, str(SCRIPT)``, which is why a call site's own
+            # arguments are the tool's argv. A sibling module's ``_run`` is a
+            # different function with its own default directory -- usually a
+            # ``git`` wrapper -- and reading it through this file's definition
+            # made ``_run("status")`` in a module that merely *mentions* the
+            # tool in prose fail the guard (s597-rev, s404-rev, s1262-rev on
+            # claunch-o5il6.1). Twenty-plus test modules define a ``_run``;
+            # only this one's is the tool.
+            #
+            # A sibling's ``_run`` can still invoke the tool: when its own
+            # definition is found in the source and that body names the tool,
+            # its call sites are collected with the sibling's default. When no
+            # definition is found, or the body does not name the tool, the
+            # branch says nothing -- an unrecognised helper is not evidence.
+            if own:
+                out.append(
+                    (node.lineno, _argv_of(node.args),
+                     _repo_verdict(node.args, _cwd_of(node, _run_cwd_default())))
+                )
+            else:
+                sibling_default = _sibling_run_default(tree)
+                if sibling_default is not _NO_RUN:
+                    out.append(
+                        (node.lineno, _argv_of(node.args),
+                         _repo_verdict(node.args, _cwd_of(node, sibling_default)))
+                    )
             continue
 
         if getattr(getattr(func, "value", None), "id", None) == "rs":
@@ -816,7 +944,8 @@ def _tool_invocations(source=None):
             continue
         items = node.args[0].elts
         at = next(
-            (i for i, el in enumerate(items) if _names_the_script(el, from_this_file=own)),
+            (i for i, el in enumerate(items)
+             if _names_the_script(el, from_this_file=own, names=_tool_names_in(tree))),
             None,
         )
         if at is None:
@@ -973,12 +1102,31 @@ def test_the_guards_default_cwd_is_read_from_run_and_not_restated():
     call = ast.parse('_run("--repo", ".")').body[0].value
     assert _cwd_of(call, _run_cwd_default()) == _HERE
 
-    # ...and a bare ``subprocess.run`` inherits the pytest process's directory,
-    # which this file cannot place. Treating the two as one value is exactly
-    # what the hole was, so they must answer differently.
+    # ...and a bare ``subprocess.run`` inherits the *pytest process's*
+    # directory, which is this checkout: ``changed_tests.py`` starts pytest
+    # with the checkout as cwd. So it resolves "." here too and is NOT
+    # exempt. This assertion is inverted from the version that first shipped
+    # this test: that one asserted ``None`` (and so exemption), reasoning a
+    # bare call "cannot be placed". Three reviewers reproduced the hole it
+    # opened -- every cwd-less bare call stopped being checked (s490-rev,
+    # s511-rev, s1262-rev). The distinction this test was built to protect is
+    # *not* "_run reads here, a bare call does not"; it is "``_run``'s default
+    # is read from ``_run``, not restated". The bare call is checked above.
     bare = ast.parse('subprocess.run([sys.executable, str(SCRIPT)])').body[0].value
-    assert _cwd_of(bare) is None
-    assert _resolves_here(".", _cwd_of(bare)) is False
+    assert _cwd_of(bare) == _HERE
+    assert _resolves_here(".", _cwd_of(bare)) is True
+
+    # The value ``_run`` contributes is still *derived*: move the default in a
+    # sample source and the answer moves with it. Without this half the
+    # assertion above passes on a hardcoded ``_HERE``.
+    moved = '''
+import subprocess
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+def _run(*args, cwd=None):
+    return subprocess.run(["git", *args], cwd=str(cwd or Path("/elsewhere")))
+'''
+    assert _run_default_in(moved) is None, "a moved default must not still answer _HERE"
 
 
 def test_help_exits_before_the_tool_reads_history():
@@ -1014,7 +1162,7 @@ def test_the_parser_sees_both_spellings_of_the_script():
     guard that finds nothing wrong."""
     sample = """
 def _run(*args, cwd=None):
-    return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=str(cwd or ROOT))
+    return subprocess.run([sys.executable, "tools/related_surfaces.py", *args], cwd=str(cwd or ROOT))
 
 def test_a():
     out = subprocess.run([sys.executable, str(SCRIPT), "--json"], cwd=str(ROOT))
@@ -1057,6 +1205,9 @@ def test_the_parser_treats_this_checkouts_own_path_as_this_repository():
     The s490-rev finding on claunch-o5il6: the guard exempted any call that
     carried ``--repo``, including one pointed back at this repository."""
     sample = """
+def _run(*args):
+    return subprocess.run([sys.executable, "tools/related_surfaces.py", *args], cwd=str(ROOT or ROOT))
+
 def test_a():
     out = _run("--repo", str(ROOT), "--json")
 
@@ -1074,11 +1225,15 @@ def test_e():
 """.replace("@LITERAL@", _HERE).replace("@ELSEWHERE@", _HERE + "-elsewhere")
     by_line = {n: (a, r) for n, a, r in _tool_invocations(sample)}
 
-    assert by_line[3][1] is True, by_line[3]        # --repo str(ROOT)
-    assert by_line[6][1] is True, by_line[6]        # --repo ROOT
-    assert by_line[9][1] is True, by_line[9]        # the literal path
-    assert by_line[12][1] is False, by_line[12]     # another checkout is exempt
-    assert by_line[15][1] is True, by_line[15]      # --repo with no value is not exempt
+    # The sample carries its own ``_run`` definition: a source handed to
+    # ``_tool_invocations`` is read as a sibling module, and a sibling's
+    # ``_run`` counts only when its body builds the tool's argv
+    # (test_a_siblings_own_run_helper_is_not_this_files_run_helper).
+    assert by_line[6][1] is True, by_line[6]        # --repo str(ROOT)
+    assert by_line[9][1] is True, by_line[9]        # --repo ROOT
+    assert by_line[12][1] is True, by_line[12]      # the literal path
+    assert by_line[15][1] is False, by_line[15]     # another checkout is exempt
+    assert by_line[18][1] is True, by_line[18]      # --repo with no value is not exempt
 
 
 def test_a_relative_repo_is_read_against_the_directory_the_call_runs_in():
@@ -1093,7 +1248,7 @@ def test_a_relative_repo_is_read_against_the_directory_the_call_runs_in():
     directions are asserted here because only the pair pins the ``cwd`` axis."""
     sample = """
 def _run(*args, cwd=None):
-    return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=str(cwd or ROOT))
+    return subprocess.run([sys.executable, "tools/related_surfaces.py", *args], cwd=str(cwd or ROOT))
 
 def test_a():
     _run("--repo", ".")
@@ -1273,6 +1428,9 @@ def test_a_path_walked_from_this_file_names_this_checkout():
         assert _path_text(ast.parse(unknown).body[0].value) is None, unknown
 
     sample = """
+def _run(*args):
+    return subprocess.run([sys.executable, "tools/related_surfaces.py", *args], cwd=str(ROOT or ROOT))
+
 def test_a():
     _run("--repo", str(Path(__file__).resolve().parents[1]))
 
@@ -1417,6 +1575,83 @@ def test_every_test_module_that_names_the_tool_is_parsed():
     )
     every_test = sorted((ROOT / "tests").rglob("*.py"))
     assert len(sources) < len(every_test), (len(sources), len(every_test))
+
+
+def test_a_siblings_own_run_helper_is_not_this_files_run_helper():
+    """A sibling's ``_run`` is a different function, not the tool.
+
+    Widening the guard to every module that names the tool also applied *this*
+    file's ``_run`` definition to theirs: any call named ``_run`` had its
+    arguments read as the tool's argv with this file's default directory. So a
+    module that mentioned the tool in a docstring and defined its own
+    ``git`` wrapper failed the guard on ``_run("status")`` -- a false red in a
+    module that never invokes the tool (s597-rev, s404-rev, s1262-rev; all
+    three reproduced it, and over twenty test modules define a ``_run``).
+
+    A guard that cries wolf gets switched off, so the false red is the same
+    class of defect as the missed call. This asserts the two directions: the
+    unrelated helper is silent, and a helper whose body really does build the
+    tool's argv is still collected."""
+    unrelated = """
+import subprocess
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+
+def _run(*args):
+    return subprocess.run(["git", *args], cwd=ROOT)
+
+def test_x():
+    _run("status")
+"""
+    assert _tool_invocations(unrelated) == [], _tool_invocations(unrelated)
+
+    real = """
+import subprocess
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+
+def _run(*args):
+    return subprocess.run(
+        [sys.executable, "tools/related_surfaces.py", *args], cwd=str(ROOT or ROOT)
+    )
+
+def test_y():
+    _run("--json")
+"""
+    found = _tool_invocations(real)
+    assert len(found) == 1, found
+    _lineno, argv, reads_here = found[0]
+    assert argv == ["--json"], argv
+    assert reads_here is True, reads_here
+
+
+def test_a_module_constant_bound_to_the_tool_is_recognised():
+    """``TOOL = ROOT / "tools" / "related_surfaces.py"`` names the tool too.
+
+    A sibling that lifts the path into a module constant and calls
+    ``subprocess.run([sys.executable, str(TOOL)])`` was invisible: the argv
+    element is a ``Name``, and the file-name check only read string constants
+    (s404-rev on claunch-o5il6.1). Not collected is the under-blocking
+    direction, so it is the defect this guard exists against, not a limit to
+    document."""
+    sample = """
+import subprocess, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+TOOL = ROOT / "tools" / "related_surfaces.py"
+
+def test_z():
+    subprocess.run([sys.executable, str(TOOL)], cwd=str(ROOT))
+"""
+    found = _tool_invocations(sample)
+    assert len(found) == 1, found
+    _lineno, argv, reads_here = found[0]
+    assert argv == [], argv
+    assert reads_here is True, reads_here
+
+    # An unrelated constant must not be mistaken for the tool.
+    other = sample.replace("related_surfaces.py", "some_other_tool.py")
+    assert _tool_invocations(other) == [], _tool_invocations(other)
 
     # And what it finds in another module is actually checked: a sibling that
     # reads this repository with no window must fail, one that names its
