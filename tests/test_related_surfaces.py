@@ -810,7 +810,7 @@ def _tool_names_in(tree):
         ) or any(
             isinstance(n, ast.Constant)
             and isinstance(n.value, str)
-            and n.value == _TOOL_FILE
+            and Path(n.value).name == _TOOL_FILE
             for n in ast.walk(value)
         )
         if not names_the_tool:
@@ -1694,9 +1694,27 @@ def test_z():
     assert argv == [], argv
     assert reads_here is True, reads_here
 
+    # The same path written as one string rather than split across ``/``
+    # operators. ``ROOT / "tools/related_surfaces.py"`` binds a constant to a
+    # path that *is* the tool, and reading only the ``BinOp`` form for the bare
+    # file name left this spelling's ``TOOL`` unbound -- the call was invisible
+    # again, through a different door (s511-rev on claunch-o5il6.1.1, measured;
+    # s404-rev and s490-rev measured the split form and read it as closed,
+    # which it was).
+    one_string = sample.replace('ROOT / "tools" / "related_surfaces.py"', 'ROOT / "tools/related_surfaces.py"')
+    assert one_string != sample
+    found = _tool_invocations(one_string)
+    assert len(found) == 1, found
+    _lineno, argv, reads_here = found[0]
+    assert argv == [], argv
+    assert reads_here is True, reads_here
+
     # An unrelated constant must not be mistaken for the tool.
     other = sample.replace("related_surfaces.py", "some_other_tool.py")
     assert _tool_invocations(other) == [], _tool_invocations(other)
+
+    other_one_string = one_string.replace("related_surfaces.py", "some_other_tool.py")
+    assert _tool_invocations(other_one_string) == [], _tool_invocations(other_one_string)
 
 
 def test_a_siblings_own_script_name_is_not_this_files():
