@@ -16,6 +16,7 @@ import ast
 import importlib.util
 import inspect
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -742,6 +743,232 @@ def _cwd_of(call, default=_HERE):
     return default
 
 
+#: What a Python interpreter's file name looks like, for an argv written as
+#: ``["/usr/bin/python3.11", "tools/related_surfaces.py", ...]``.
+#:
+#: This was a bare ``"python"`` prefix, which read *any* element starting with
+#: those six letters as an interpreter -- so ``git log -- python <tool>``,
+#: ``git grep python_x <tool>`` and ``pytest -k python <tool>`` were all
+#: collected, a direction master ``b16cf017`` did not have (s404-rev,
+#: s597-rev). ``python_x`` is data, not an interpreter.
+#:
+#: The alternatives are the names a Windows argv actually uses: ``py`` and
+#: ``py.exe`` are the launcher, ``pythonw``/``pythonw.exe`` the windowless
+#: interpreter, and all of them carry a version suffix. Leaving the ``w`` out
+#: missed ``pythonw``, which master collects (s597-rev blocked on it, s648-rev
+#: recorded it, both measured).
+_INTERPRETER_NAME = re.compile(r"^(py|pythonw?)(\d+(\.\d+)*)?(\.exe)?$")
+
+#: Runners that take a command and run *it*, so the program is further right.
+#: This is a **widening, not the discriminator**: a python interpreter anywhere
+#: before the tool already decides the question (:func:`_exec_position`), so a
+#: launcher missing from here costs nothing when the tool is reached through an
+#: interpreter. The list only decides the remaining case -- a tool named after a
+#: launcher that is *not* followed by an interpreter -- where it can still be
+#: incomplete without turning a call into silence.
+#:
+#: That claim was **false until this round's test rows existed**, and s1389-rev
+#: is the reviewer who measured it: ``pipenv``, ``tox`` and ``sudo`` are listed
+#: here *and* preceded by an interpreter in every row that named them, so
+#: deleting the interpreter walk left the suite green. A list entry that also
+#: appears behind an interpreter proves neither mechanism. The row that pins the
+#: walk is ``["future-launcher", "python", <tool>]`` -- a launcher in no list at
+#: all -- and the comments on the rows say which row pins which.
+_LAUNCHERS = ("uv", "uvx", "env", "exec", "command", "nohup", "time",
+              "poetry", "pipx", "pdm", "rye", "hatch", "conda", "mise", "npx",
+              "sudo", "tox", "pipenv")
+
+
+def _bare_name(node):
+    """The file name an argv element spells, or ``None`` when it cannot be read.
+
+    Only string literals, ``sys.executable`` and ``str``/``Path`` of them can be
+    resolved before running anything. A ``Name`` here is either the tool
+    constant this guard is looking for or a variable holding an interpreter;
+    :func:`_exec_position` treats "cannot be read" as its own case rather than
+    as "not a program", because guessing the second way is what let
+    ``PY = sys.executable`` calls go silent (s511-rev, s597-rev).
+
+    ``shutil.which("python3")`` is deliberately *not* read here. It was, and a
+    mutation showed the branch was unreachable-as-a-decision: whichever way an
+    unreadable argv[0] is spelled, the fail-closed rule collects the same calls,
+    so deleting the branch left every row green. A branch no test can tell apart
+    is the kind of dead code this issue has spent four rounds on, so it is gone
+    rather than pinned by a row that would only be pinning nothing."""
+    if isinstance(node, ast.Attribute):
+        if node.attr == "executable" and getattr(node.value, "id", None) == "sys":
+            return "python"
+        return None
+    if isinstance(node, ast.Call):
+        if getattr(node.func, "id", None) in ("str", "Path") and node.args:
+            return _bare_name(node.args[0])
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value).name.lower()
+    return None
+
+
+def _is_interpreter(name):
+    """Whether a bare file name is a Python interpreter.
+
+    One regex carries every alternative, so there is no second list to keep in
+    step -- an earlier version matched ``py`` with a separate ``==`` and the
+    two drifted apart the moment one side gained a name (``pythonw``).
+    ``python_x`` and ``python3.py`` are file names, not interpreters; reading
+    them as interpreters collected ``git grep python_x <tool>`` (s404-rev)."""
+    return bool(_INTERPRETER_NAME.match(name))
+
+
+def _runs_the_next_argv(node):
+    """Whether an argv element starts a program whose own name comes later."""
+    name = _bare_name(node)
+    return name is not None and (name in _LAUNCHERS or _is_interpreter(name))
+
+
+def _exec_position(items, from_this_file, names):
+    """The index at which an argv element runs as the tool, or ``None``.
+
+    An argv runs the program its first element names -- after skipping what
+    belongs to *that* program: interpreter flags (``-S``, ``-E``, ``-u``,
+    ``-X utf8``), launcher subcommands and options (``uv run --no-sync``), and
+    ``env``-style ``VAR=value`` assignments. So the program is the first
+    element that is neither a launcher nor one of its options.
+
+    Matching the tool's path *anywhere* in the list made a call that merely
+    names it look like an invocation: ``git log --oneline -- tools/related_surfaces.py``
+    failed this guard, as did the same path reached through a constant or
+    unpacked from a list (s597-rev on claunch-o5il6.1). Widening to sibling
+    modules (claunch-o5il6.3) is what made that reachable.
+
+    Reading exactly position 0 or 1 was too narrow, and four reviewers found
+    it within the hour. ``[sys.executable, "-S", "-E", str(SCRIPT), "--help"]``
+    -- this module's own line 408 -- stopped being collected, and so did
+    ``[sys.executable, "-X", "utf8", ...]`` and ``["uv", "run", ...]``
+    (s490-rev, s404-rev, s597-rev, s511-rev, s1262-rev). They measured the
+    same collection count against master's guard and this one: 11 -> 10.
+
+    That direction is the worse one. A guard that sees too much fails on a
+    correct call and gets switched off; a guard that stops seeing a call it
+    used to see returns green and says nothing, which is what this guard
+    exists to prevent.
+
+    Two rounds of review then showed that tracking *which* options take values
+    cannot be kept up: ``uv run --directory X``, ``--project X``, ``--with X``,
+    ``--python X``, ``-p X`` each stopped the walk on their value, and every
+    launcher not in a fixed list (``poetry``, ``pipx``, ``pdm``) was invisible
+    (s404-rev, s511-rev, s1262-rev measured eight shapes, all caught on master
+    and missed here). The rule is therefore structural rather than a list --
+    s511-rev's formulation:
+
+    * argv[0] is a program that *runs another program* (an interpreter or a
+      launcher): the tool anywhere after it is an invocation. This is master's
+      behaviour and it is the fail-closed direction, which is the right one
+      for an argv that cannot be fully parsed.
+    * argv[0] is any other program (``git``): a path later in the argv is data
+      that program operates on. That is the over-blocking s597-rev found, and
+      it stays closed.
+
+    **A list cannot carry this on its own, and two rounds proved it.** The rule
+    above named the launchers it knew, so every launcher outside ``_LAUNCHERS``
+    fell to "not a runner" and its call went silent -- ``pipenv run python``,
+    ``tox exec -- python``, ``sudo python``, ``npx run`` were all collected on
+    master and missed here (s648-rev, claunch-o5il6.1.1.1, measured on both
+    trees). That is the direction this docstring argues against two paragraphs
+    up, produced by the very mechanism it warns about.
+
+    So the discriminator is no longer argv[0] and no longer a name list: **a
+    python interpreter before the tool settles it.** Python is the only program
+    in this repository's argvs that takes a script path *and runs it*, and it is
+    recognisable without knowing what launched it -- ``/usr/bin/python3.11``, a
+    ``python`` on any shell's PATH, ``sys.executable``. Whatever sits to its
+    left (``sudo``, ``env``, ``pipenv run``, a name nobody has invented yet) is
+    then irrelevant. ``_LAUNCHERS`` keeps only the residual case -- a tool named
+    directly after a launcher with no interpreter, as ``uv run --no-sync <tool>``
+    -- where being incomplete still costs a launcher nobody wrote.
+
+    ``git log -- <tool>`` stays exempt because no python element precedes the
+    tool there, which is what #643 asked for.
+
+    One limit comes with it, and it is master's too: when argv[0] is a launcher
+    that runs a *non-interpreter* subcommand, the tool is collected even if
+    that subcommand only reads it as data -- ``uv run ruff check <tool>``,
+    ``python -c "... <tool>"``, ``uv run pytest <tool>``. There is no way to
+    tell ``ruff check <path>`` from ``uv run python <path>`` by position alone,
+    because both are "a launcher or interpreter, then a program, then the
+    tool". It is recorded rather than fixed: master b16cf017 collects all three
+    identically (measured), and closing it would mean parsing each program's
+    subcommands -- the list that already failed twice.
+
+    **The limits this round added**, each with the tree it departs from:
+
+    * ``git log -- python <tool>`` is collected. A whole element named
+      ``python`` *is* an interpreter name by every reading available here, and
+      master collects it too. Keeping it costs a false failure only when a
+      repository path list contains the bare word ``python``.
+    * ``git log -- src/python_x.py <tool>`` is **not** collected, and master
+      does collect it. This guard is deliberately narrower on that one shape:
+      ``python_x`` is a file name, and the version-suffix regex is what stops
+      ``git grep python_x <tool>`` from being read as an interpreter call. A
+      prefix test gets one of the two shapes wrong whichever way it is written;
+      the regex is the choice to be wrong toward silence only for names that
+      are plainly not interpreters.
+    * An unreadable argv[0] is treated as fail-closed rather than as data, so
+      a call built from a variable is collected even if that variable reaches no
+      interpreter. That is master's behaviour and the reason ``PY =
+      sys.executable`` no longer goes silent; the cost is a false failure if
+      someone writes ``MODE = "log"`` and ``[MODE, "-n", <tool>]``.
+    * ``py -3`` is read as the Windows launcher, as are ``py.exe``, ``pythonw``
+      and ``pythonw.exe``. One regex (``_INTERPRETER_NAME``) carries that whole
+      family, so there is no second name list to fall out of step with the
+      first. Master names none of them; this guard collects shapes master
+      misses, which is the direction that matters for a guard run under Git
+      Bash on Windows (s597-rev blocked on ``pythonw``, s648-rev found it
+      independently).
+    * ``bundle exec <tool>`` is **not** collected. ``bundle`` is a Ruby
+      launcher that hands a script path to another program with no Python
+      interpreter in the argv, so it lands in the residual ``_LAUNCHERS``
+      case, which lists ``npx`` only. Adding ``bundle`` would be a list entry
+      with no row behind it -- the defect this issue has already spent four
+      rounds on -- so it is recorded as a limit instead (s597-rev's judgment,
+      taken as the leader's instruction)."""
+    if not items:
+        return None
+    indexes = range(len(items))
+    if _names_the_script(items[0], from_this_file=from_this_file, names=names):
+        return 0
+    # When argv[0] cannot be read at all -- ``PY = sys.executable`` then
+    # ``[PY, <tool>, ...]`` -- this guard is not in a position to call the path
+    # after it data, so it collects, which is what master does. Reading
+    # "unknown" as "not a runner" made four shapes (``PY``, ``PY -S``,
+    # ``str(PY)``, ``shutil.which("python3")``) go silent where master caught
+    # them (s511-rev, s597-rev, s490-rev, s404-rev). The alternative s511-rev
+    # named is the same rule: an argv[0] that is neither a literal nor
+    # ``sys.executable`` fails closed.
+    if _bare_name(items[0]) is None:
+        return next(
+            (pos for pos in range(1, len(items))
+             if _names_the_script(items[pos], from_this_file=from_this_file, names=names)),
+            None,
+        )
+    # The structural rule: a python interpreter ahead of the tool runs it,
+    # whatever launched that interpreter. This is what keeps the rule working
+    # for launchers neither this file nor its reviewers have heard of.
+    for at in indexes:
+        name = _bare_name(items[at])
+        if name is not None and _is_interpreter(name):
+            return next(
+                (pos for pos in range(at + 1, len(items))
+                 if _names_the_script(items[pos], from_this_file=from_this_file, names=names)),
+                None,
+            )
+    if not _runs_the_next_argv(items[0]):
+        return None
+    return next(
+        (at for at in range(1, len(items))
+         if _names_the_script(items[at], from_this_file=from_this_file, names=names)),
+        None,
+    )
+
 def _names_the_script(node, from_this_file=True, names=None):
     """Whether an argv element is the tool, however it is spelled.
 
@@ -810,7 +1037,7 @@ def _tool_names_in(tree):
         ) or any(
             isinstance(n, ast.Constant)
             and isinstance(n.value, str)
-            and n.value == _TOOL_FILE
+            and Path(n.value).name == _TOOL_FILE
             for n in ast.walk(value)
         )
         if not names_the_tool:
@@ -957,17 +1184,19 @@ def _tool_invocations(source=None):
         if name not in _SHELL_ENTRIES or not node.args or not isinstance(node.args[0], ast.List):
             continue
         items = node.args[0].elts
-        at = next(
-            (i for i, el in enumerate(items)
-             if _names_the_script(el, from_this_file=own, names=_tool_names_in(tree))),
-            None,
-        )
+        at = _exec_position(items, from_this_file=own, names=_tool_names_in(tree))
         if at is None:
             continue
         tail = items[at + 1 :]
         if any(isinstance(el, ast.Starred) for el in tail):
             # The helper's own definition forwards ``*args``; its call sites
             # above are the invocations, and this body has no argv of its own.
+            continue
+        if any(isinstance(el, ast.Starred) for el in items[at:]):
+            # A call site that unpacks the tail (``[python, tool, *ARGS]``)
+            # has no fixed argv to read a ``--limit`` out of; its own callers
+            # are not in this source, so there is nothing to judge. Collected
+            # it would be a violation on an argv this guard cannot see.
             continue
         base = _cwd_of(node)
         out.append((node.lineno, _argv_of(tail), _repo_verdict(tail, base)))
@@ -1547,6 +1776,186 @@ def test_d():
     assert 15 not in by_line, by_line
 
 
+def test_a_path_the_command_operates_on_is_not_a_call_to_the_tool():
+    """Naming the tool's path as *data* for another program is not invoking it.
+
+    The guard collected a ``subprocess`` call when the tool's path appeared
+    anywhere in its argv. So a sibling test doing its own repository work --
+    ``git log --oneline -- tools/related_surfaces.py`` -- failed this guard,
+    even though ``git`` is the program being run and the path is an argument
+    to it. Three shapes, all reproduced on claunch-o5il6.1 (s597-rev). The
+    widening to sibling modules is what made them reachable at all, and (c)
+    was a regression from the basename comparison in ``aa4d0291``, which bound
+    a *list* constant as if it were the path.
+
+    The guard now reads only the two positions that put a program in an argv:
+    the first element, or the second when the first is an interpreter. Both
+    directions are pinned -- a real call in either position is still
+    collected, because exempting one would be the under-blocking failure this
+    guard exists against."""
+    literal = 'x = subprocess.run(["git", "log", "--oneline", "--", "tools/related_surfaces.py"], cwd=str(ROOT))\n'
+    assert _tool_invocations(literal) == [], _tool_invocations(literal)
+
+    through_name = (
+        'TARGET = "tools/related_surfaces.py"\n'
+        'x = subprocess.run(["git", "log", "--oneline", "--", TARGET], cwd=str(ROOT))\n'
+    )
+    assert _tool_invocations(through_name) == [], _tool_invocations(through_name)
+
+    through_list = (
+        'CHANGED = ["tools/related_surfaces.py", "README.md"]\n'
+        'x = subprocess.run(["git", "diff", "--stat", "--", *CHANGED], cwd=str(ROOT))\n'
+    )
+    assert _tool_invocations(through_list) == [], _tool_invocations(through_list)
+
+    # The same path reached as data must not exempt a real call in the same
+    # source: both are present here, and only the real one is counted.
+    both = through_list + 'y = subprocess.run(["tools/related_surfaces.py", "--json"], cwd=str(ROOT))\n'
+    found = _tool_invocations(both)
+    assert len(found) == 1, found
+    assert found[0][1] == ["--json"], found
+
+
+def test_the_tool_is_collected_in_every_position_that_runs_it():
+    """Every argv shape that runs the tool, however much precedes it.
+
+    A module with the tool already executable writes ``[<tool>, ...]``; the far
+    more common shape is ``[sys.executable, <tool>, ...]``. The interpreter is
+    recognised as ``sys.executable``, ``str(...)`` of it, or a literal whose
+    file name starts with ``python`` -- versioned paths like
+    ``/usr/bin/python3.11`` are how a real argv is often written.
+
+    **The rows below the plain forms are regressions that shipped.** A first
+    version of this rule read only position 0 or 1, which silently dropped
+    every call written with an interpreter option or a launcher in front:
+    ``[sys.executable, "-S", "-E", <tool>, ...]`` is this module's own line
+    408, and ``["uv", "run", "--no-sync", <tool>]`` is the command this
+    repository documents in its own prose. Five reviewers measured the same
+    thing from both sides -- s490-rev, s404-rev, s597-rev, s511-rev and
+    s1262-rev -- and s597-rev counted it as master collecting 11 calls where
+    the branch collected 10.
+
+    That direction is the harmful one, so this test is deliberately concrete
+    about the shapes rather than asserting a count: a count changes when an
+    unrelated call is added, and says nothing about which shape was lost.
+
+    The rows below the launcher options are the ones that proved the *name
+    list itself* was the defect: ``pipenv``, ``tox`` and ``sudo`` were in no
+    list, so their calls went silent while master collected them (s648-rev,
+    claunch-o5il6.1.1.1). They are fixed by the python interpreter ahead of the
+    tool, so `sudo -E pipenv run python3.11` collects on the same rule without
+    any of those names being added anywhere."""
+    for argv in (
+        # The program is the first element.
+        '["tools/related_surfaces.py", "--json"]',
+        # The program follows an interpreter.
+        '[sys.executable, "tools/related_surfaces.py", "--json"]',
+        '[str(sys.executable), "tools/related_surfaces.py", "--json"]',
+        '["python3", "tools/related_surfaces.py", "--json"]',
+        '["/usr/bin/python3.11", "tools/related_surfaces.py", "--json"]',
+        # ... and interpreter options, including ones that take a value.
+        '[sys.executable, "-S", "-E", "tools/related_surfaces.py", "--help"]',
+        '[sys.executable, "-u", "tools/related_surfaces.py", "--json"]',
+        '[sys.executable, "-X", "utf8", "tools/related_surfaces.py", "--json"]',
+        '[sys.executable, "-W", "default", "tools/related_surfaces.py", "--json"]',
+        # ... and a launcher: ``uv run`` is this repository's documented
+        # spelling, and it puts both a subcommand and options in front.
+        '["uv", "run", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "python", "tools/related_surfaces.py", "--json"]',
+        '["env", "python3", "tools/related_surfaces.py", "--json"]',
+        '["env", "FOO=1", "python", "tools/related_surfaces.py", "--json"]',
+        # ... and launcher options that take a value. Tracking *which* options
+        # those are is what failed twice: ``--directory`` (this repository's
+        # own re-measure command), ``--project``, ``--with``, ``--python`` and
+        # ``-p`` each stopped the walk on their value (s404-rev, s511-rev,
+        # s1262-rev measured eight shapes, all caught on master and missed
+        # here). These rows pin the structural rule that replaced the list.
+        '["uv", "run", "--no-sync", "--directory", str(ROOT), "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "--directory", ".", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "-p", "3.14", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "--with", "pytest", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--with", "pandas", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--python", "3.12", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--project", ".", "python", "tools/related_surfaces.py", "--json"]',
+        # ... and a launcher this file's list does not name. The rule is
+        # argv[0]-based, so a launcher missing from ``_LAUNCHERS`` still falls
+        # to the fail-closed branch rather than to a wrong answer.
+        '["poetry", "run", "python", "tools/related_surfaces.py", "--json"]',
+        # ... and launchers *nobody listed at all*, which is the direction that
+        # mattered: the name list made every one of these silent, and master
+        # collected all of them (s648-rev, claunch-o5il6.1.1.1; measured on both
+        # trees).
+        #
+        # **These four rows do not pin the interpreter rule**, and saying so
+        # here matters more than the rows do. ``pipenv``, ``tox`` and ``sudo``
+        # are all in ``_LAUNCHERS``, so ``_runs_the_next_argv`` collects them
+        # with the interpreter walk deleted -- measured by s1262-rev, s648-rev,
+        # s1389-rev and s597-rev, and again here. They pin the *list* entries,
+        # which is worth pinning, but the row below them is what pins the walk.
+        '["pipenv", "run", "python", "tools/related_surfaces.py", "--json"]',
+        '["tox", "exec", "--", "python", "tools/related_surfaces.py"]',
+        '["sudo", "python", "tools/related_surfaces.py"]',
+        '["sudo", "-E", "pipenv", "run", "python3.11", "tools/related_surfaces.py"]',
+        # The launcher has a name nobody has written down anywhere -- not in
+        # this file, not in ``_LAUNCHERS``, not in any list a future maintainer
+        # might extend. Only the interpreter ahead of the tool collects it.
+        # **This is the row that fails when the interpreter walk is removed**,
+        # which is what the four above were wrongly believed to do (s1262-rev
+        # proposed this shape; s1389-rev measured the deletion staying green).
+        '["future-launcher", "python", "tools/related_surfaces.py"]',
+        # An interpreter held in a variable is an interpreter. Reading ``None``
+        # out of ``_bare_name`` as "not a runner" made all four of these go
+        # silent where master collects them (s511-rev, s597-rev, s490-rev,
+        # s404-rev -- the last two withdrew a pass over it).
+        'PY = sys.executable\nx = subprocess.run([PY, "tools/related_surfaces.py", "--json"], cwd=str(ROOT))\n',
+        'PY = sys.executable\nx = subprocess.run([PY, "-S", "tools/related_surfaces.py"], cwd=str(ROOT))\n',
+        'PY = sys.executable\nx = subprocess.run([str(PY), "tools/related_surfaces.py"], cwd=str(ROOT))\n',
+        'PYBIN = shutil.which("python3")\nx = subprocess.run([PYBIN, "tools/related_surfaces.py"], cwd=str(ROOT))\n',
+        # The same lookup written inline reaches the fail-closed branch, which
+        # is where it is collected -- `_bare_name` deliberately does not read
+        # ``shutil.which`` itself, so this row is a trip-wire on that branch
+        # rather than a pin on the deleted special case.
+        '[shutil.which("python3"), "tools/related_surfaces.py", "--json"]',
+        # ... and the Windows launcher and windowless interpreter, which this
+        # repository meets under Git Bash there (s597-rev blocked on the gap,
+        # s648-rev found the same shape independently; master b16cf017 collects
+        # all three).
+        '["py", "-3", "tools/related_surfaces.py"]',
+        '["py.exe", "-3", "tools/related_surfaces.py"]',
+        '["pythonw", "tools/related_surfaces.py"]',
+        '["pythonw.exe", "tools/related_surfaces.py"]',
+        # One residual shape has no interpreter to lean on: a launcher that
+        # hands a script path straight to some other program. master collected
+        # it, so leaving it silent is the regression s648-rev named; ``_LAUNCHERS``
+        # still covers this case, and this row is what pins the entry.
+        '["npx", "run", "tools/related_surfaces.py"]',
+    ):
+        sample = argv if argv.lstrip().startswith(("PY ", "PYBIN ")) else f'x = subprocess.run({argv}, cwd=str(ROOT))\n'
+        found = _tool_invocations(sample)
+        assert len(found) == 1, (argv, found)
+        assert found[0][1] in ([], ["--json"], ["--help"]), (argv, found)
+
+    # A launcher running something that is not the tool stays invisible: the
+    # generous reading above must not turn ``uv run pytest`` into a call.
+    assert _tool_invocations('x = subprocess.run(["uv", "run", "pytest", "tests/test_x.py"], cwd=str(ROOT))\n') == []
+
+    # ``python`` as a whole element IS an interpreter name, so master collects
+    # ``git log -- python <tool>`` and so does this guard. That over-collection
+    # is master's, recorded in the limits paragraph -- not narrowed here, since
+    # telling it from data means reading git's argument grammar. The row pins
+    # that the shape keeps behaving as master does.
+    bracket = 'x = subprocess.run(["git", "log", "--", "python", "tools/related_surfaces.py"], cwd=str(ROOT))\n'
+    assert _tool_invocations(bracket) != [], "master collects this; see the limits paragraph"
+
+    # ``python_x`` is a file name, not an interpreter, and the regex says so.
+    # Master reads it as an interpreter and collects the path behind it -- so
+    # here this guard is *narrower* than master, deliberately, and the assertion
+    # records which direction it departs in rather than hiding it.
+    not_an_interpreter = 'x = subprocess.run(["git", "log", "--", "src/python_x.py", "tools/related_surfaces.py"], cwd=str(ROOT))\n'
+    assert _tool_invocations(not_an_interpreter) == [], _tool_invocations(not_an_interpreter)
+
+
 def test_the_tool_is_recognised_by_its_file_name_in_another_module():
     """A sibling test cannot say ``SCRIPT`` -- that name is this module's.
 
@@ -1694,9 +2103,27 @@ def test_z():
     assert argv == [], argv
     assert reads_here is True, reads_here
 
+    # The same path written as one string rather than split across ``/``
+    # operators. ``ROOT / "tools/related_surfaces.py"`` binds a constant to a
+    # path that *is* the tool, and reading only the ``BinOp`` form for the bare
+    # file name left this spelling's ``TOOL`` unbound -- the call was invisible
+    # again, through a different door (s511-rev on claunch-o5il6.1.1, measured;
+    # s404-rev and s490-rev measured the split form and read it as closed,
+    # which it was).
+    one_string = sample.replace('ROOT / "tools" / "related_surfaces.py"', 'ROOT / "tools/related_surfaces.py"')
+    assert one_string != sample
+    found = _tool_invocations(one_string)
+    assert len(found) == 1, found
+    _lineno, argv, reads_here = found[0]
+    assert argv == [], argv
+    assert reads_here is True, reads_here
+
     # An unrelated constant must not be mistaken for the tool.
     other = sample.replace("related_surfaces.py", "some_other_tool.py")
     assert _tool_invocations(other) == [], _tool_invocations(other)
+
+    other_one_string = one_string.replace("related_surfaces.py", "some_other_tool.py")
+    assert _tool_invocations(other_one_string) == [], _tool_invocations(other_one_string)
 
 
 def test_a_siblings_own_script_name_is_not_this_files():
