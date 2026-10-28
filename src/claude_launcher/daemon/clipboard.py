@@ -495,7 +495,10 @@ async def lifecycle(app):
 async def get_history(request):
     history = request.app["clipboard"]
     await history.sample()
-    return web.json_response({"items": history.items, "error": history.error},
+    # ``now`` is this machine's clock, against which a host-copy watch ages
+    # ``copied_at`` (claunch-tn5ba).
+    return web.json_response({"items": history.items, "error": history.error,
+                              "now": datetime.now(timezone.utc).isoformat()},
                              headers={"Cache-Control": "no-store"})
 
 

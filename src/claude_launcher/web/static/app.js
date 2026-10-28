@@ -20738,15 +20738,26 @@ function installOsc52(t) {
    After a key that can copy in such a session — Enter (`/copy`, a choice in
    its copy picker) or Ctrl+O — on the session terminal or the session line,
    the page watches that history for HOST_COPY_WATCH_MS and puts the first
-   host entry newer than the one it saw at the key onto this computer's
-   clipboard. Entries the page posted itself (`source: browser`, an OSC 52
-   copy) are on it already. The window is a key the person pressed plus a few
-   seconds, the span in which browsers still allow the execCommand fallback;
-   whatever reaches the daemon's clipboard inside it is relayed, including a
-   copy someone at that machine makes. */
+   host entry newer than the baseline onto this computer's clipboard.
+   Entries the page posted itself (`source: browser`, an OSC 52 copy) are on
+   it already. The window is a key the person pressed plus a few seconds, the
+   span in which browsers still allow the execCommand fallback; whatever
+   reaches the daemon's clipboard inside it is relayed, including a copy
+   someone at that machine makes.
+   The baseline is taken at the key, from hostCopySeen (the newest id any
+   earlier watch read), because no read made after the key can be one: the
+   daemon samples the host every second on its own, so a copy can be in the
+   history before the first response comes back. The page's first watch has
+   no such id and takes every entry. Either way older host entries get
+   through, so an entry also has to be at most HOST_COPY_RECENT_MS older than
+   the daemon's `now` in the same response: what someone copied at that
+   machine minutes ago does not land on this computer's clipboard on the
+   next Enter. */
 const HOST_COPY_WATCH_MS = 4000;
 const HOST_COPY_POLL_MS = 400;
+const HOST_COPY_RECENT_MS = HOST_COPY_WATCH_MS + 1000;
 let hostCopyWatch = null;   // {session, until, baseline}
+let hostCopySeen = null;    // newest history id a watch has read
 
 function sessionCopiesToHost(name) {
   const rec = (sessionsCache || []).find((s) => s.name === name);
@@ -20766,10 +20777,18 @@ async function hostCopyItems() {
     const response = await api("/api/clipboard");
     if (!response.ok) return null;
     const doc = await response.json();
-    return Array.isArray(doc.items) ? doc.items : null;
+    if (!Array.isArray(doc.items)) return null;
+    const max = doc.items.reduce((m, item) => Math.max(m, Number(item.id) || 0), 0);
+    hostCopySeen = Math.max(hostCopySeen ?? 0, max);
+    return { items: doc.items, now: Date.parse(doc.now) };
   } catch {
     return null;
   }
+}
+
+function isRecentHostCopy(item, now) {
+  const at = Date.parse(item.copied_at);
+  return !Number.isFinite(now) || !Number.isFinite(at) || now - at <= HOST_COPY_RECENT_MS;
 }
 
 async function watchHostCopy() {
@@ -20780,17 +20799,16 @@ async function watchHostCopy() {
     hostCopyWatch.until = until;
     return;
   }
-  const watch = { session: name, until, baseline: null };
+  const watch = { session: name, until, baseline: hostCopySeen ?? 0 };
   hostCopyWatch = watch;
   try {
     while (hostCopyWatch === watch && Date.now() <= watch.until) {
-      const items = await hostCopyItems();
+      const read = await hostCopyItems();
       if (hostCopyWatch !== watch || currentName !== name) return;
-      if (items && watch.baseline === null) {
-        watch.baseline = items.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0);
-      } else if (items) {
-        const fresh = items.find((item) => item.source === "host" &&
-          Number(item.id) > watch.baseline && typeof item.text === "string");
+      if (read) {
+        const fresh = read.items.find((item) => item.source === "host" &&
+          Number(item.id) > watch.baseline && typeof item.text === "string" &&
+          isRecentHostCopy(item, read.now));
         if (fresh) {
           const ok = await copyToBrowserClipboard(fresh.text, document.body);
           if (!ok) {

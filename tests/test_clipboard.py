@@ -2,6 +2,7 @@
 import asyncio
 import sys
 import time
+from datetime import datetime, timezone
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -103,6 +104,25 @@ def test_a_browser_copy_joins_the_history_without_touching_the_host(home):
             too_long = {"text": "x" * (clipboard.MAX_TEXT + 1)}
             assert (await client.post("/api/clipboard", json=too_long, headers=headers)).status == 413
             assert len((await (await client.get("/api/clipboard", headers=headers)).json())["items"]) == 2
+        await mgr.shutdown_all()
+    asyncio.run(run())
+
+
+def test_the_history_carries_the_daemon_clock(home):
+    # A host-copy watch (claunch-tn5ba) ages ``copied_at`` against ``now``,
+    # the daemon's clock in the same response, so the browser's clock and its
+    # skew play no part.
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "secret", started_at=time.monotonic())
+        app["clipboard"].reader = lambda: "copied"
+        before = datetime.now(timezone.utc)  # the app's own sampler starts with the server
+        async with TestClient(TestServer(app)) as client:
+            headers = {"Authorization": "Bearer secret"}
+            doc = await (await client.get("/api/clipboard", headers=headers)).json()
+            now = datetime.fromisoformat(doc["now"])
+            copied_at = datetime.fromisoformat(doc["items"][0]["copied_at"])
+            assert before <= copied_at <= now <= datetime.now(timezone.utc)
         await mgr.shutdown_all()
     asyncio.run(run())
 

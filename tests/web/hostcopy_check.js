@@ -3,9 +3,11 @@
 // clipboard history instead (claunch-tn5ba). Slices the real block out of
 // app.js and drives it against stub terminals and a stub /api/clipboard:
 // the keys that start a watch (Enter, Ctrl+O; not Shift+Enter or typing),
-// the harness gate, the baseline taken at the key, host-only entries, the
-// watch window, the parked-terminal and session-switch guards, and the notice
-// when the browser refuses the write.
+// the harness gate, the baseline held from before the key (a copy the
+// daemon recorded before the first response is still relayed), the age
+// guard on entries an old baseline lets through, host-only entries, the
+// watch window, the parked-terminal and session-switch guards, and the
+// notice when the browser refuses the write.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -32,7 +34,7 @@ let feed = [];          // successive /api/clipboard item lists; the last repeat
 let now = 1_000_000;
 const ctx = vm.createContext({
   TextDecoder, Uint8Array,
-  Date: { now: () => now },
+  Date: { now: () => now, parse: (text) => Number(text) },
   setTimeout: (fn, ms) => { now += ms; setImmediate(fn); },
   navigator: { clipboard: { writeText: async (text) => { written.push(text); } } },
   notify: (title, sub, opts) => { notices.push([title, opts && opts.key]); },
@@ -41,7 +43,8 @@ const ctx = vm.createContext({
     assert.ok(!opts, 'the watch only reads the history');
     gets++;
     const items = feed.length > 1 ? feed.shift() : feed[0];
-    return { ok: true, json: async () => ({ items }) };
+    // The stub's times are Date.now() numbers, so Date.parse is Number.
+    return { ok: true, json: async () => ({ items, now: String(now) }) };
   },
   document: { body: {}, activeElement: null },
   $: (id) => (id === 'term-input' ? sessionLine : null),
@@ -55,8 +58,8 @@ vm.runInContext(source.slice(source.indexOf('async function copyToBrowserClipboa
 const settle = async () => {
   for (let i = 0; i < 40; i++) await new Promise((r) => setImmediate(r));
 };
-const host = (id, text) => ({ id: String(id), text, source: 'host' });
-const browser = (id, text) => ({ id: String(id), text, source: 'browser' });
+const host = (id, text, at = now) => ({ id: String(id), text, source: 'host', copied_at: String(at) });
+const browser = (id, text) => ({ id: String(id), text, source: 'browser', copied_at: String(now) });
 const enter = { key: 'Enter' };
 
 (async () => {
@@ -65,19 +68,31 @@ const enter = { key: 'Enter' };
   ctx.installHostCopyRelay(term);
   const watchMs = vm.runInContext('HOST_COPY_WATCH_MS', ctx);
 
-  // Enter in a Codex session: the first read is the baseline, the host entry
-  // that appears after it goes onto this computer's clipboard, once.
-  feed = [[host(5, 'older')], [host(5, 'older')], [host(6, 'copied'), host(5, 'older')]];
+  // The page's first watch has no id from before the key, so it takes any
+  // recent host entry -- here one the daemon recorded before the first
+  // response -- and skips one copied long before; it is relayed once.
+  const recent = vm.runInContext('HOST_COPY_RECENT_MS', ctx);
+  feed = [[host(6, 'copied'), host(5, 'older', now - recent - 1000)]];
   term.element.fire('keydown', enter);
   await settle();
-  assert.deepEqual(written, ['copied']);
+  assert.deepEqual(written, ['copied'], 'a first watch relays a copy already in its first response');
   assert.equal(vm.runInContext('hostCopyWatch', ctx), null, 'the watch ends at the first relayed copy');
+  assert.equal(vm.runInContext('hostCopySeen', ctx), 6, 'the newest id read is kept for the next key');
+  written.length = 0;
+
+  // The daemon recorded the copy before the watch's first response (its own
+  // once-a-second sample): the baseline is the id held from before the key,
+  // so the very first read relays it.
+  feed = [[host(7, 'raced'), host(6, 'copied')]];
+  term.element.fire('keydown', enter);
+  await settle();
+  assert.deepEqual(written, ['raced'], 'a copy already in the first response is relayed');
   written.length = 0;
 
   // An entry the page posted itself (an OSC 52 copy) is on the browser
   // already; the host entry after it is the one relayed.
-  feed = [[host(6, 'copied')], [browser(7, 'osc52'), host(6, 'copied')],
-    [host(8, 'next'), browser(7, 'osc52'), host(6, 'copied')]];
+  feed = [[browser(8, 'osc52'), host(7, 'raced')],
+    [host(9, 'next'), browser(8, 'osc52'), host(7, 'raced')]];
   term.element.fire('keydown', { key: 'o', ctrlKey: true });
   await settle();
   assert.deepEqual(written, ['next'], 'Ctrl+O starts a watch; browser entries are skipped');
@@ -92,7 +107,7 @@ const enter = { key: 'Enter' };
   assert.equal(gets, 0, 'no history read without a copy key');
 
   // Nothing new inside the window: nothing written, and the polling stops.
-  feed = [[host(8, 'next')]];
+  feed = [[host(9, 'next')]];
   term.element.fire('keydown', enter);
   await settle();
   assert.deepEqual(written, []);
@@ -100,10 +115,20 @@ const enter = { key: 'Enter' };
   assert.ok(gets <= watchMs / vm.runInContext('HOST_COPY_POLL_MS', ctx) + 2, `bounded reads (${gets})`);
 
   // The session line's Enter counts for the session on screen.
-  feed = [[host(8, 'next')], [host(9, 'from the line'), host(8, 'next')]];
+  feed = [[host(9, 'next')], [host(10, 'from the line'), host(9, 'next')]];
   sessionLine.fire('keydown', enter);
   await settle();
   assert.deepEqual(written, ['from the line']);
+  written.length = 0;
+
+  // An entry newer than the held id but copied long before this response
+  // (someone at the daemon's machine, between two Enters) is not relayed;
+  // a recent one after it still is.
+  feed = [[host(11, 'stale', now - recent - 1000), host(10, 'from the line')],
+    [host(12, 'fresh'), host(11, 'stale', now - recent - 1000)]];
+  term.element.fire('keydown', enter);
+  await settle();
+  assert.deepEqual(written, ['fresh'], 'an old entry an old baseline lets through is skipped');
   written.length = 0;
 
   // A harness that copies through OSC 52 (Claude Code) is not watched.
@@ -129,7 +154,7 @@ const enter = { key: 'Enter' };
   assert.equal(gets, 0, 'a parked terminal does not start a watch');
 
   // Switching sessions mid-watch drops it.
-  feed = [[host(9, 'x')], [host(10, 'for cx'), host(9, 'x')]];
+  feed = [[host(12, 'x')], [host(13, 'for cx'), host(12, 'x')]];
   term.element.fire('keydown', enter);
   ctx.currentName = 'cl';
   await settle();
@@ -141,7 +166,7 @@ const enter = { key: 'Enter' };
   ctx.document.createElement = () => ({ style: {}, setAttribute() {}, select() {}, setSelectionRange() {}, remove() {} });
   ctx.document.body.appendChild = () => {};
   ctx.document.execCommand = () => false;
-  feed = [[host(10, 'for cx')], [host(11, 'refused'), host(10, 'for cx')]];
+  feed = [[host(12, 'x')], [host(14, 'refused'), host(12, 'x')]];
   term.element.fire('keydown', enter);
   await settle();
   assert.deepEqual(notices.at(-1), ["Copy did not reach this computer's clipboard", 'osc52']);
@@ -149,5 +174,5 @@ const enter = { key: 'Enter' };
   // The session terminal is wired; the CLI tab is not (it runs no harness).
   assert.match(source, /installOsc52\(term\);\s*\n\s*if \(typeof installHostCopyRelay === "function"\) installHostCopyRelay\(term\);/);
   assert.doesNotMatch(source, /installHostCopyRelay\(cliTerm\)/);
-  console.log('hostcopy: copy keys, harness gate, baseline, host-only entries, window, parked/switch guards, refusal notice passed');
+  console.log('hostcopy: copy keys, harness gate, held baseline, raced copy, age guard, host-only entries, window, parked/switch guards, refusal notice passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });
