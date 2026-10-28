@@ -99,7 +99,12 @@ _CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 #: one mesh had spent 424 of them on 106 watches by the time it was measured.
 RESPONSE_NUDGE_AFTER = 600.0
 
-REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping", "decide"})
+#: ``nudge`` belongs here by the rule the workflows that send it state: a
+#: chaser is a signal about a request that is already on the record, not a
+#: second request. Counted reply-expected it opened a fresh debt on the
+#: recipient for every re-ping of one landing request, and improv-worker's
+#: landing-nudge step tells a worker to send exactly this type (claunch-5sqtt).
+REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping", "decide", "nudge"})
 
 #: The known message INTENTS. Other types are still accepted (and count as
 #: reply-expected) but draw an advisory — see :func:`type_notice`.
@@ -141,8 +146,13 @@ def type_notice(message_type) -> Optional[str]:
     """
     if str(message_type or "say").strip().lower() in INTENT_TYPES:
         return None
+    # Read the roster off INTENT_TYPES rather than typing it again: the old
+    # hand-written list had already lost 'ping', and it would have lost
+    # 'nudge' too (claunch-5sqtt) — an advisory that names the wrong set
+    # sends the reader to a type that is not the one they wanted.
+    known = "/".join(sorted(INTENT_TYPES))
     return (
-        f"type {message_type!r} is not a known intent (ask/say/fyi/ack/decide) "
+        f"type {message_type!r} is not a known intent ({known}) "
         "— it counts as reply-expected. 'type' is the message INTENT, not your "
         "role or a label; use 'fyi'/'ack' for no-reply status so peers "
         "don't reply-all."
