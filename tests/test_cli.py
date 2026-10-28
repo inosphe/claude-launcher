@@ -33,6 +33,20 @@ def test_public_cli_has_one_secret_writer():
     assert "set-key" not in help_text
 
 
+def test_spawn_help_says_which_board_a_moved_child_reads():
+    """`spawn -w`/`-P` is the second copy of the spawn contract, and it
+    drifted from the MCP schema once already (claunch-8fvr5): a workspace
+    moves the board an `--issue` is looked up on, and the project label does
+    not follow the directory."""
+    p = cli.build_parser()
+    spawn = next(a for a in p._subparsers._group_actions[0].choices["spawn"]
+                 ._actions if a.dest == "workspace")
+    assert "board" in spawn.help and "looked up THERE" in spawn.help
+    project = next(a for a in p._subparsers._group_actions[0].choices["spawn"]
+                   ._actions if a.dest == "project")
+    assert "does not follow the directory" in project.help
+
+
 def test_install_scopes_are_mutually_exclusive(home, capsys, tmp_path, monkeypatch):
     import pytest
 
