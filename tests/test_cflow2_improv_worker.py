@@ -1306,13 +1306,16 @@ def _peer_review_ask(tmp_path, issue, items=None):
     branch-setup, with data.claim set to ``issue``; returns the rendered
     question.
 
-    ``items`` stands for the batch this round carried: the items loop reports
+    ``items`` stands for the batch this round carried: ``items-pass`` reports
     the issues ``item-intake`` added beyond the claim issue as
-    ``[{issue, n}, ...]`` and ``[]`` for a single-item round, under the result
-    key of the loop node. A stub node with that id reports the value, so the
-    rendered reference reads exactly what the real loop would have written.
-    Left at None no such node runs, which is what a round looks like whose
-    items loop never started.
+    ``[{issue, n}, ...]`` and ``[]`` for a single-item round. A stub node with
+    that id reports the value, so the rendered reference reads exactly what the
+    real cond would have written. Left at None no such node runs, which is what
+    a round looks like whose items pass never ran.
+
+    The id is ``items-pass``, not ``items``: the loop under ``items`` runs only
+    in rounds where the items pass runs, so its slot keeps a prior round's list
+    into a ``stack-only`` round (claunch-0adj8). The cond completes every round.
     """
     import json
 
@@ -1327,8 +1330,8 @@ def _peer_review_ask(tmp_path, issue, items=None):
     if items is not None:
         # No ``returns``: an undeclared schema accepts any value, which is how
         # a loop's list of item records can be reported here.
-        nodes["items"] = {"prompt": "items"}
-        body = ["branch-setup", "items", "peer-review", "after"]
+        nodes["items-pass"] = {"prompt": "items-pass"}
+        body = ["branch-setup", "items-pass", "peer-review", "after"]
     flow = {"cflow": 2, "name": "peer-review-ask",
             "data": {"claim": {"issue": issue, "how": "claimed" if issue else "no-issue-wait"}},
             "nodes": nodes, "body": body}
@@ -1405,12 +1408,110 @@ def test_peer_review_question_calls_a_single_item_round_single(tmp_path, monkeyp
 
 
 def test_peer_review_question_says_how_to_read_an_unrendered_item_list(tmp_path, monkeypatch):
-    """When the items loop never ran the reference stays as written — the
+    """When the items pass never ran the reference stays as written — the
     reader is told what that means rather than being left with `${...}`."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     prompt = _peer_review_ask(tmp_path, "claunch-zzz")
-    assert "${result['items'].value}" in prompt
+    assert "${result['items-pass'].value}" in prompt
     assert "위 줄이 `${...}` 그대로 보이면" in prompt
+
+
+# -- claunch-0adj8: the slot the ask reads belongs to this round ------------
+
+
+def _items_pass_chart(doc):
+    """The real ``items-pass`` node from the canon, with its surroundings
+    stubbed, called twice: ``full`` (a batch of one) then ``stack-only``."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, runtime
+
+    ip = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"][0]
+    assert ip["id"] == "items-pass"
+
+    def task_of(name, src):
+        keeps = ("title", "returns", "effects")
+        return {**{k: v for k, v in src.items() if k in keeps}, "prompt": name}
+
+    flow = {
+        "cflow": 2, "name": "items-pass-rounds",
+        "nodes": {"item-intake": task_of("item-intake", doc["nodes"]["item-intake"]),
+                  "peer-review": task_of("peer-review", doc["nodes"]["peer-review"])},
+        "procedures": {
+            "item": {"params": {"verify": {"type": "str", "default": ""}},
+                     "returns": {"ok": {}}, "body": [{"return": "ok", "value": {}}]},
+            "worker-round": {"params": {"mode": {"type": "str", "default": "full"},
+                                        "verify": {"type": "str", "default": ""}},
+                             "body": [ip, "peer-review"]},
+        },
+        "body": [{"id": "round-one", "call": "worker-round", "with": {"mode": "full"}},
+                 {"id": "round-two", "call": "worker-round", "with": {"mode": "stack-only"}}],
+    }
+    return frontend.compile_text(json.dumps(flow, ensure_ascii=False)), runtime
+
+
+def test_the_item_list_the_ask_reads_does_not_survive_into_a_stack_only_round(
+        tmp_path, monkeypatch):
+    """claunch-0adj8. ``result`` is one run-wide table keyed by node label
+    (``runtime.node_key``) and a round boundary does not clear it, so a slot
+    written only in the rounds where the items loop ran keeps its old value.
+    Measured with this exact chart: ``result['items']`` still held round one's
+    ``BATCH-1`` while round two was open, and the ask printed it under 「이
+    브랜치에 함께 실린 이슈」. ``items-pass`` completes every round, so its slot
+    is the one that says what this round carried."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _items_pass_chart(doc)
+    kw = {"cwd": str(tmp_path), "scope": "ip"}
+    t = [1.0]
+
+    def nxt():
+        t[0] += 1
+        return t[0]
+
+    st = runtime.start(chart, caps={}, **kw, now=nxt())
+    assert [c["label"].split("/")[-1] for c in st["choices"]] == ["queue-next"]
+    [ch] = st["choices"]
+    st = runtime.select(ch["instance"], "next", reason="a second issue is queued",
+                        **kw, now=nxt())
+    st = runtime.report(st["tasks"][0]["instance"], "ok",
+                        {"issue": "BATCH-1", "n": 1}, **kw, now=nxt())
+    [ch] = st["choices"]
+    st = runtime.select(ch["instance"], "drained", reason="queue empty", **kw, now=nxt())
+
+    assert [x["label"].split("/")[-1] for x in st["tasks"]] == ["peer-review"]
+    round_one = st["result"]["items-pass"]["value"]
+    assert round_one == [{"issue": "BATCH-1", "n": 1}]
+
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {"decision": "pass"},
+                        **kw, now=nxt())
+    assert [x["label"].split("/")[-1] for x in st["tasks"]] == ["peer-review"]
+
+    # The defect: the loop's own slot is not round-local.
+    assert st["result"]["items"]["value"] == [{"issue": "BATCH-1", "n": 1}]
+    # The reference the ask reads is.
+    assert st["result"]["items-pass"]["value"] == []
+
+
+def test_items_pass_completes_in_a_stack_only_round_with_an_empty_list():
+    """The reason ``items-pass`` can carry the reference: its ``else`` arm is a
+    real node that reports ``[]``, so the cond finishes in every round instead
+    of skipping and leaving the slot untouched."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    ip = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"][0]
+    assert ip["id"] == "items-pass"
+    arms = ip["cond"]
+    assert "if" in arms[0] and "then" in arms[0]
+    assert list(arms[1]) == ["else"]
+    empty = arms[1]["else"]
+    assert "foreach" in empty, empty
+    assert empty["foreach"]["in"] == "[]"
+    assert empty["foreach"]["do"] == []
+
 
 
 # -- claunch-0b8dx: no round cap, end on every issue closed ------------------
