@@ -3653,14 +3653,17 @@ def register(sub) -> None:
         "--workspace", "-w", metavar="NAME",
         help="run the child in a registered workspace instead of the "
              "parent's directory ('claunch workspace ls' lists them; "
-             "spawn.allow_workspace turns this off)",
+             "spawn.allow_workspace turns this off). The child's board is "
+             "the one in that directory, so --issue is looked up THERE",
     )
     p_spawn.add_argument(
         "--project", "-P", metavar="NAME",
         help="file the child under this project instead of the parent's "
              "('claunch project ls' lists them); without --workspace/"
              "--worktree the child starts in that project's default "
-             "workspace when it has one",
+             "workspace when it has one. The label does not follow the "
+             "directory: name this too when --workspace belongs to another "
+             "project",
     )
     p_spawn.add_argument(
         "args", nargs=argparse.REMAINDER,
