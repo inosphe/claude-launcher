@@ -814,6 +814,52 @@ def test_the_v1_landing_gate_separates_a_rereview_from_an_unresolved_marker(laye
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_pins_the_narrowed_tip_reading(layer):
+    """The port carried the narrowed tip reading into v1, but nothing pinned it
+    there: replacing the paragraph with the old 「줄 어디에서 찾든 tip」 survived
+    every test (s511-rev·s1262-rev·s490-rev, each with its own mutation). The
+    rule is what keeps an upper session's quoted hash from being read as a
+    reviewer's tip, so v1 needs the same three assertions v2 has — body
+    exclusion, its escalate consequence, and the two-slot disagreement."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # 좁힌 판독 — 두 자리만 tip이다
+    assert "**tip의 자리는 둘 중 하나다 — 그 둘만 tip이다.**" in text
+    assert "그 줄의 마지막 토큰" in text
+    # 본문 안의 해시는 tip이 아니다 → tip 없는 마커 → escalate
+    assert "**줄 본문 안의 다른 `@ <hex>`는 tip이 아니다**" in text
+    assert "그 줄은 tip 없는 마커이므로 escalate다" in text
+    # 두 자리가 다른 해시를 가리키면 판독 불가
+    assert "서로 다른 해시를 가리키면 판독 불가라 escalate다" in text
+    # 옛 판독으로 되돌리면 이 문장이 항변한다
+    assert "줄 어디에서 찾든" not in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_reads_an_uppers_pr_review_line_as_a_brake(layer):
+    """The tip-position rule alone does not separate the upper's brake from a
+    reviewer's verdict on this board. The measured line is
+    ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1) — the
+    hash is right after the marker idiom, so position rule (i) accepts it and
+    the leader's rejection is classified as 「재심 대기」(s597-rev·s1304,
+    claunch-eyz0s.2.2). The rule that separates them is about who wrote the
+    line, so it must sit in the canon *ahead of* the position rules, and the
+    measured form must be quoted there (port of the same v2 fix)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in text
+    assert "`PR-REVIEW #<번호>`로 시작하면" in text
+    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
+    assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
 def test_the_v1_reviewer_writes_the_tip_it_judged(layer):
     """The gate reads ``@ <tip>`` to tell a reviewer's verdict from the upper
     session's decline, so the reviewer has to write it -- in both places that

@@ -254,6 +254,27 @@ def test_the_gate_does_not_read_a_hash_quoted_inside_the_line():
     assert "**서로 다른 해시**를 가리키면 그 줄은 판독 불가다" in prompt
 
 
+def test_an_uppers_pr_review_line_is_a_brake_whatever_its_hash_position():
+    """실측 문면이 (i) 자리에 해시를 두고 있어 자리 규칙만으로는 갈리지 않는다.
+
+    리더가 쓴 ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1
+    320행)는 해시가 마커 낱말 바로 뒤, 곧 판독 규칙 (i)에 그대로 걸린다 —
+    상위의 거절이 「재심 대기」로 통과한다(s597-rev·s1304 재심 지적,
+    claunch-eyz0s.2.2). 상위 판정 줄을 가르는 근거는 해시의 자리가 아니라 그
+    줄을 쓴 주체이므로, 정본은 자리 규칙보다 앞서는 규칙을 들고 있어야 한다."""
+    prompt = _words(_land_prompt())
+    # 규칙 자체 — 상위 판정 줄은 tip 유무와 무관하게 제동이다
+    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in prompt
+    assert "`PR-REVIEW #<번호>`로 시작하면" in prompt
+    assert "**어떤" in prompt and "`@ <hex>`가 있든**" in prompt
+    # 그 규칙이 자리 규칙보다 앞선다는 것 — 없으면 다음 편집자가 둘을 같은
+    # 층으로 읽고 자리 규칙 쪽을 먼저 적용한다
+    assert "자리 규칙보다 이 규칙이 앞선다" in prompt
+    # 실측 문면이 그대로 정본에 있어야 다음 사람이 같은 형태를 다시 만나도
+    # 무엇이 문제였는지 보드로 돌아가지 않고 읽는다
+    assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in prompt
+
+
 def test_the_leader_canon_names_the_declines_marker_form():
     """워커의 판독이 tip으로 두 출처를 가르는 이상, 상위가 남기는 거절의
     꼴도 리더 쪽 정본에 있어야 한다. 없으면 리더는 tip을 붙일 수도, 붙이지
@@ -266,6 +287,10 @@ def test_the_leader_canon_names_the_declines_marker_form():
     # 거절 사유에 해시를 인용해야 할 때의 꼴도 정해져 있어야 한다 —
     # 그러지 않으면 리더가 다시 본문 안에 @ <hex>를 쓴다
     assert "`tip: <hash>`" in text
+    # PR 절차 3번에도 같은 지시가 있어야 한다 — 실측 29건을 낳은 자리가
+    # 그 절차이고, 큐 거절 자리에만 지시가 있으면 리더는 그 줄에 해시를 쓴다
+    assert "**이 코멘트에도 판정 낱말 뒤에 `@ <hash>`를 붙이지 않는다**" in text
+    assert "PR-REVIEW #<번호> <판정>: <근거>" in text
 
 
 def test_the_order_claim_is_scoped_to_an_answered_review():

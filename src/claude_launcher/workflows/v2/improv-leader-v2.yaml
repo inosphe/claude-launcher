@@ -99,7 +99,12 @@ fragments:
        "REQUEST CHANGES: <사유>")로 남긴다. 어느 쪽이든 판정의 정본은 보드다 —
        그 이슈에 `claunch beads comments add <이슈> "PR-REVIEW #<번호> <판정>: <근거>"`
        를 남기고 보고에 매체(review 또는 comment)를 적는다. 판정 자체(머지 여부)는
-       매체와 무관하다.
+       매체와 무관하다. **이 코멘트에도 판정 낱말 뒤에 `@ <hash>`를 붙이지 않는다** —
+       해시를 인용해야 하면 다음 줄에 `tip: <hash>`로 적는다. 이유: 워커의 착지
+       확인 4는 `@ <hex>`의 자리로 리뷰 판정과 상위 제동을 가르는데, 이 줄에 해시를
+       붙이면 상위의 제동이 「재심 대기」로 분류된다(실측: `PR-REVIEW #530 CHANGES
+       REQUESTED @ e6daa14b:` — claunch-75kfl.1, claunch-eyz0s.2.2 재심). 큐 거절
+       자리(아래 절차)의 같은 지시와 이 자리의 지시가 둘 다 있어야 한다.
     4. 먼저 `tools/delayed_sweep.py admit --repo <대상 저장소> --issue <이슈>`가
        통과하는지 다시 확인한다. 거절되면 deferred로 두고 머지하지 않는다.
        `gh pr merge <pr_number> --merge --match-head-commit <tip>`. 다른 tip이면
