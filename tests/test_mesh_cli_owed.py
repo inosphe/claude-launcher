@@ -103,6 +103,40 @@ def test_the_partition_words_are_the_same_on_both_sides():
     assert cli_mesh.MEMBER_STATES == mesh_mod.MEMBER_STATES
 
 
+def _send_type_help() -> str:
+    """The `--type` help as a reader of `claunch mesh send --help` gets it."""
+    import argparse
+
+    from claude_launcher import cli
+
+    def subparsers(parser):
+        return [
+            a for a in parser._actions
+            if isinstance(a, argparse._SubParsersAction)
+        ][0].choices
+
+    return [
+        a for a in subparsers(subparsers(cli.build_parser())["mesh"])["send"]._actions
+        if a.dest == "type"
+    ][0].help
+
+
+def test_the_type_help_names_the_no_reply_intents_it_mirrors():
+    """(claunch-5sqtt.1) The sentence `--type` prints is a second copy of the
+    reply/no-reply contract, and it had already drifted: it named fyi and ack
+    only, while the daemon counts five types as owing no reply. Rendered from
+    REPLY_OPTIONAL_INTENTS it cannot drift from itself; this pins that tuple
+    to the set the daemon actually reads, which is the other half."""
+    assert sorted(cli_mesh.REPLY_OPTIONAL_INTENTS) == sorted(
+        mesh_mod.REPLY_OPTIONAL_TYPES
+    )
+    help_text = _send_type_help()
+    for intent in mesh_mod.REPLY_OPTIONAL_TYPES:
+        assert intent in help_text, intent
+    # The reply side is named too, or a reader has no contrast to read.
+    assert "say (default) and ask invite a reply" in help_text
+
+
 def test_a_named_member_is_read_whatever_state_it_is_in(home, tmp_path):
     """The narrowing that ``--handle`` sends is by name, and it overrides
     the state filter: a member asked for by name and left out would read as
