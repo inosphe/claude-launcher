@@ -748,13 +748,15 @@ def _cwd_of(call, default=_HERE):
 _INTERPRETER_PREFIX = "python"
 
 #: Runners that take a command and run *it*, so the program is further right.
-#: Only argv[0] is consulted: when it is one of these, the tool anywhere after
-#: it counts. The list does not have to be complete for correctness the way an
-#: option list would -- a launcher that is missing here falls to the
-#: fail-closed branch below, which collects nothing rather than the wrong
-#: thing, and the reviewers' finding was the opposite direction.
+#: This is a **widening, not the discriminator**: a python interpreter anywhere
+#: before the tool already decides the question (:func:`_exec_position`), so a
+#: launcher missing from here costs nothing when the tool is reached through an
+#: interpreter. The list only decides the remaining case -- a tool named after a
+#: launcher that is *not* followed by an interpreter -- where it can still be
+#: incomplete without turning a call into silence.
 _LAUNCHERS = ("uv", "uvx", "env", "exec", "command", "nohup", "time",
-              "poetry", "pipx", "pdm", "rye", "hatch", "conda", "mise")
+              "poetry", "pipx", "pdm", "rye", "hatch", "conda", "mise", "npx",
+              "sudo", "tox", "pipenv")
 
 
 def _bare_name(node):
@@ -821,25 +823,56 @@ def _exec_position(items, from_this_file, names):
       launcher): the tool anywhere after it is an invocation. This is master's
       behaviour and it is the fail-closed direction, which is the right one
       for an argv that cannot be fully parsed.
-    * argv[0] is any other program (``git``, ``uv run pytest``, ``python -c``):
-      a path later in the argv is data that program operates on. That is the
-      over-blocking s597-rev found, and it stays closed.
+    * argv[0] is any other program (``git``): a path later in the argv is data
+      that program operates on. That is the over-blocking s597-rev found, and
+      it stays closed.
 
-    So the discriminator is argv[0] alone, and no option needs to be known.
+    **A list cannot carry this on its own, and two rounds proved it.** The rule
+    above named the launchers it knew, so every launcher outside ``_LAUNCHERS``
+    fell to "not a runner" and its call went silent -- ``pipenv run python``,
+    ``tox exec -- python``, ``sudo python``, ``npx run`` were all collected on
+    master and missed here (s648-rev, claunch-o5il6.1.1.1, measured on both
+    trees). That is the direction this docstring argues against two paragraphs
+    up, produced by the very mechanism it warns about.
+
+    So the discriminator is no longer argv[0] and no longer a name list: **a
+    python interpreter before the tool settles it.** Python is the only program
+    in this repository's argvs that takes a script path *and runs it*, and it is
+    recognisable without knowing what launched it -- ``/usr/bin/python3.11``, a
+    ``python`` on any shell's PATH, ``sys.executable``. Whatever sits to its
+    left (``sudo``, ``env``, ``pipenv run``, a name nobody has invented yet) is
+    then irrelevant. ``_LAUNCHERS`` keeps only the residual case -- a tool named
+    directly after a launcher with no interpreter, as ``uv run --no-sync <tool>``
+    -- where being incomplete still costs a launcher nobody wrote.
+
+    ``git log -- <tool>`` stays exempt because no python element precedes the
+    tool there, which is what #643 asked for.
 
     One limit comes with it, and it is master's too: when argv[0] is a launcher
     that runs a *non-interpreter* subcommand, the tool is collected even if
-    that subcommand only reads it as data -- ``uv run ruff check <tool>``. There
-    is no way to tell ``ruff check <path>`` from ``uv run python <path>`` by
-    position alone, because both are "a launcher, then a program, then the
-    tool". It is recorded rather than fixed: master b16cf017 collects it
-    identically (measured), no module in this repository writes that shape, and
-    closing it would mean parsing each launcher's subcommands -- the list that
-    already failed twice."""
+    that subcommand only reads it as data -- ``uv run ruff check <tool>``,
+    ``python -c "... <tool>"``, ``uv run pytest <tool>``. There is no way to
+    tell ``ruff check <path>`` from ``uv run python <path>`` by position alone,
+    because both are "a launcher or interpreter, then a program, then the
+    tool". It is recorded rather than fixed: master b16cf017 collects all three
+    identically (measured), and closing it would mean parsing each program's
+    subcommands -- the list that already failed twice."""
     if not items:
         return None
+    indexes = range(len(items))
     if _names_the_script(items[0], from_this_file=from_this_file, names=names):
         return 0
+    # The structural rule: a python interpreter ahead of the tool runs it,
+    # whatever launched that interpreter. This is what keeps the rule working
+    # for launchers neither this file nor its reviewers have heard of.
+    for at in indexes:
+        name = _bare_name(items[at])
+        if name is not None and name.startswith(_INTERPRETER_PREFIX):
+            return next(
+                (pos for pos in range(at + 1, len(items))
+                 if _names_the_script(items[pos], from_this_file=from_this_file, names=names)),
+                None,
+            )
     if not _runs_the_next_argv(items[0]):
         return None
     return next(
@@ -1716,7 +1749,14 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
 
     That direction is the harmful one, so this test is deliberately concrete
     about the shapes rather than asserting a count: a count changes when an
-    unrelated call is added, and says nothing about which shape was lost."""
+    unrelated call is added, and says nothing about which shape was lost.
+
+    The rows below the launcher options are the ones that proved the *name
+    list itself* was the defect: ``pipenv``, ``tox`` and ``sudo`` were in no
+    list, so their calls went silent while master collected them (s648-rev,
+    claunch-o5il6.1.1.1). They are fixed by the python interpreter ahead of the
+    tool, so `sudo -E pipenv run python3.11` collects on the same rule without
+    any of those names being added anywhere."""
     for argv in (
         # The program is the first element.
         '["tools/related_surfaces.py", "--json"]',
@@ -1754,6 +1794,21 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
         # argv[0]-based, so a launcher missing from ``_LAUNCHERS`` still falls
         # to the fail-closed branch rather than to a wrong answer.
         '["poetry", "run", "python", "tools/related_surfaces.py", "--json"]',
+        # ... and launchers *nobody listed at all*, which is the direction that
+        # mattered: the name list made every one of these silent, and master
+        # collected all of them (s648-rev, claunch-o5il6.1.1.1; measured on both
+        # trees). They are caught because a python interpreter precedes the
+        # tool, not because their launcher is known -- that is the whole point
+        # of the rule, and a new launcher needs no edit here.
+        '["pipenv", "run", "python", "tools/related_surfaces.py", "--json"]',
+        '["tox", "exec", "--", "python", "tools/related_surfaces.py"]',
+        '["sudo", "python", "tools/related_surfaces.py"]',
+        '["sudo", "-E", "pipenv", "run", "python3.11", "tools/related_surfaces.py"]',
+        # One residual shape has no interpreter to lean on: a launcher that
+        # hands a script path straight to some other program. master collected
+        # it, so leaving it silent is the regression s648-rev named; ``_LAUNCHERS``
+        # still covers this case, and this row is what pins the entry.
+        '["npx", "run", "tools/related_surfaces.py"]',
     ):
         sample = f'x = subprocess.run({argv}, cwd=str(ROOT))\n'
         found = _tool_invocations(sample)
