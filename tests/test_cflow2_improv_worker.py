@@ -2911,6 +2911,41 @@ def test_intake_no_longer_promises_a_fresh_branch_per_round():
     assert "쓸 수 없을 때만 이 요지로 새로 판다" in intake
 
 
+def test_intake_leaves_code_reading_and_measuring_to_later_steps():
+    """deepseek-v4.1-flash sessions spent 30-90 tool calls in ``intake``
+    reading code, tests and data to fill scope and evidence, against 4-21
+    for Claude on the same prompt (claunch-igkbo). The prompt now says what
+    intake reads, asks for feature/kind level, and gives a question task
+    its goal form. Nothing reads intake's evidence; its scope is read by
+    ``prior-context`` (as a search query) and by ``sim-check``, which runs
+    before ``coding-plan`` and used to pick its sources "from the scope" --
+    so sim-check now finds the paths itself when the scope names none, and
+    the ``scope`` input's help (shown in the web form and CLI) no longer
+    promises that intake fills in paths. Review of 422aa158 caught both."""
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "intake")
+    intake = _words(node.get("prompt"))
+    done = _words(node.get("done_when"))
+    sim_check = next(n for n in chart.nodes.values() if n.label == "sim-check")
+    sim = _words(sim_check.get("prompt"))
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    scope_help = _words(doc["inputs"]["scope"]["help"])
+    assert "intake는 범위를 기능 수준으로 적고, 바꿀 파일은 coding-plan이 고른다" in scope_help
+    assert "intake가 목표에서 정한다" not in scope_help
+    assert "없으면(intake는 범위를 기능 수준으로 적는다) 목표와 지금 코드에서 이 단계가 찾는다" in sim
+    assert "(범위에서 고른다)" not in sim
+    assert "스택 기준의 git 참조 확인 — 기준 tip 비교와 rebase — 은 예외다" in intake
+    assert "이 단계가 읽는 것은 오프닝·이슈 본문·보드(이슈와 코멘트)까지다" in intake
+    assert "바꿀 파일을 고르는 일은 coding-plan이 하고" in intake
+    assert "질문에 답하는 일은 work가 한다" in intake
+    assert "「질문 <요지>에 근거와 함께 답한다」" in intake
+    assert "기능·동작 수준으로 적는다" in intake
+    assert "종류만 적는다" in intake
+    assert "work·wrapup이 잰 뒤 채운다" in intake
+    assert "시작 입력 범위(고쳐도 되는 경로)" in intake
+    assert "기능·종류 수준이면 충분하다" in done
+
+
 def test_no_step_still_promises_a_brand_new_branch_for_every_round():
     """The reuse decision has to reach the places that cite it, not just the
     step that makes it. Leftovers survived the first pass and reviewers
