@@ -1844,6 +1844,16 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
           hint.textContent = opt.hint;
           text.appendChild(hint);
         }
+        // A second line the caller may still be reading when the modal opens
+        // (the key picker's usage): the node is handed back on the option so
+        // the answer can be written in place once it arrives.
+        if (opt.detail !== undefined) {
+          const detail = document.createElement("small");
+          detail.classList.add("modal-choice-detail");
+          detail.textContent = opt.detail;
+          text.appendChild(detail);
+          opt.detailEl = detail;
+        }
         label.append(radio, text);
         group.appendChild(label);
       }
@@ -49796,11 +49806,63 @@ function decorateKeyRow(li, s) {
   if (existing && hit && (!hit.data || !hit.data.pooled)) existing.remove();
 }
 
+/* The usage selector for a session's pool: the profile asked with the
+   session's harness, the way the terminal overlay asks it
+   (termUsageSelectors), so a pool on an opencode or codex profile is read by
+   that harness's reader. */
+function keyPickerSelector(profile, session) {
+  const harness = session && session.harness;
+  if (!profile || String(profile).includes(":") || !harness) return profile;
+  return `${profile}:${harness}`;
+}
+
+/* What each key of the pool reports (claunch-z881u): /api/usage/keys, the
+   create form's read (claunch-yx2bd), with refresh=auto so it answers from
+   the daemon's cache and reads only the accounts whose period ran out.
+   Resolves to the document, or to {error} — never rejects, because the
+   picker must still switch keys when usage cannot be read. */
+function keyPickerUsage(selector) {
+  if (!selector) return Promise.resolve({ error: "no profile" });
+  return api(`/api/usage/keys?profile=${encodeURIComponent(selector)}&refresh=auto`,
+    { noBatch: true })
+    .then(async (resp) => {
+      const doc = await resp.json().catch(() => null);
+      if (!resp.ok) return { error: (doc && doc.error) || `HTTP ${resp.status}` };
+      return doc || { error: "empty answer" };
+    })
+    .catch((e) => ({ error: `could not reach the daemon (${(e && e.message) || e})` }));
+}
+
+/* The usage line of each key option, written into the nodes the modal handed
+   back (showModal's `detail`). A key the answer does not name says so
+   instead of keeping "reading…" forever. */
+function keyPickerFillUsage(options, doc) {
+  const rows = new Map(((doc && doc.keys) || []).map((k) => [k.id, k.usage]));
+  for (const opt of options) {
+    if (!opt.detailEl || !opt.value || !opt.value.key_id) continue;
+    const reading = rows.get(opt.value.key_id);
+    let text;
+    if (!doc || doc.error) text = `unavailable: ${(doc && doc.error) || "no answer"}`;
+    else if (reading) text = newUsageKeySummary(reading, doc.unmeasurable);
+    else if (doc.unmeasurable) text = `cannot be read: ${doc.unmeasurable}`;
+    else text = "not reported for this key";
+    opt.detailEl.textContent = `usage: ${text}`;
+    const level = reading && !reading.error ? newUsageLevel(newUsagePeak(reading.windows)) : "";
+    opt.detailEl.className = `modal-choice-detail ${level}`.trim();
+  }
+}
+
 /* The floating modal. `showModal` is the page's one dialog (Escape, backdrop
    and Cancel all answer null), and its radio group is exactly a key list —
    so the picker is that dialog with the pool as its choices, instead of a
    second modal implementation with its own dismissal bugs. */
 async function openKeyPicker(name, profile) {
+  const session = (typeof sessionsCache !== "undefined" && sessionsCache || [])
+    .find((x) => x.name === name);
+  // Asked beside the pool rather than after it: the usage answer is the
+  // slower of the two (an account read per key whose cached reading ran
+  // out), and the modal opens on the pool alone and fills usage in.
+  const usage = keyPickerUsage(keyPickerSelector(profile, session));
   const pool = await fetchKeyPool(profile, { fresh: true });
   if (!pool) {
     modalInfo(`Could not read the key pool`,
@@ -49816,8 +49878,6 @@ async function openKeyPicker(name, profile) {
       + "the profile has a pool.");
     return;
   }
-  const session = (typeof sessionsCache !== "undefined" && sessionsCache || [])
-    .find((x) => x.name === name);
   const pinnedTo = session && session.key_id;
   const options = pool.keys.map((k) => ({
     label: k.label || k.masked,
@@ -49826,6 +49886,7 @@ async function openKeyPicker(name, profile) {
       k.id === pinnedTo ? "pinned to this session" : "",
       k.use_count ? `used ${k.use_count}×` : "never used",
     ].filter(Boolean).join(" · "),
+    detail: "usage: reading…",
     value: { key_id: k.id },
   }));
   if (pinnedTo) {
@@ -49835,7 +49896,7 @@ async function openKeyPicker(name, profile) {
       value: { key_id: null },
     });
   }
-  const picked = await showModal({
+  const asked = showModal({
     title: `Key for ${name}`,
     body: `The pool of ${pool.owner || profile} (strategy: ${pool.strategy || "rotation"}).\n`
       + "Switching restarts this session: the same name, the same conversation, "
@@ -49847,6 +49908,8 @@ async function openKeyPicker(name, profile) {
       { label: "Restart on this key", value: { go: true } },
     ],
   });
+  usage.then((doc) => keyPickerFillUsage(options, doc));
+  const picked = await asked;
   if (!picked || !picked.go) return;
   let resp;
   let doc = {};
