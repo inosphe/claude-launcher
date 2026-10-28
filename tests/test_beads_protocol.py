@@ -906,11 +906,21 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     assert "그 답이 **이 줄**을 낳았다" in text
     assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in text
     assert "저널은 **런 전체**를 읽는다" in text
-    # the pairing value is the ask_routed..ask_answered window — ask_answered
-    # carries no tip (s404-rev, s490-rev, s511-rev, s1236-rev2, s648-rev)
+    # the pairing value is the ask_opened..ask_answered window — ask_answered
+    # carries no tip (s404-rev, s490-rev, s511-rev, s1236-rev2, s648-rev).
+    # The v1 names must be the ones the v1 engine emits: `ask_opened`, not
+    # `ask_routed`; `step`/`visit`, not `instance`; `by_session` is always
+    # there (s648-rev, confirmed in cflow/engine.py by s1389-rev).
     assert "`ask_answered`에는" in text
-    assert "`ask_routed`와" in text
-    assert "`ask_answered`의 시각이 그 ask의 `ask_routed` 시각과" in text
+    assert "`ask_opened`와 `ask_answered`의 시각" in text
+    assert "`ask_answered`의 `at`이 그 ask의 `ask_opened` `at`과" in text
+    assert "`step`이 `peer-review`이며" in text
+    assert "`by_session`에 그대로 있다" in text
+    # the names the v1 engine does not emit appear only to be ruled out —
+    # the prose names them precisely so the next reader does not copy them
+    # back in (s648-rev: v1 emits ask_opened and has no ask_routed at all)
+    assert "v1에는 `ask_routed` 이벤트가 없고" in text
+    assert "`instance`도 `channel`도 없다" in text
     assert "응답자는 보드에 **먼저 쓰고 답한다**" in text
     assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in text
     # the line count is never pinned in the prose — the journal grows
