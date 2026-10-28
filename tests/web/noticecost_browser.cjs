@@ -70,12 +70,13 @@ const N = 133;
 //
 // This is the page's own timer, and the window has to span more than one
 // tick of it or "nothing was written" proves nothing: an empty window writes
-// nothing. `DASHBOARD_POLL_MS` is 5000 (app.js), so 4x that admits three
-// ticks. The harness does not trust that arithmetic — it counts the fixture's
-// rail requests and asserts the window held at least two of them, so a
-// changed interval fails here instead of passing quietly.
+// nothing. The page polls every `DASHBOARD_POLL_MS` (5000 in app.js today),
+// and this window is four of those. The arithmetic above is not what holds
+// the assertion up — the harness counts the fixture's rail requests and
+// asserts the window held at least two of them, so a changed interval fails
+// here instead of passing quietly.
 const WINDOW_MS = 20000;
-// Two ticks of the page's 5s dashboard poll, with slack.
+// The fewest polls a window can hold and still describe a working feed.
 const MIN_WINDOW_POLLS = 2;
 
 // Every /api/cflow2/rail answer the fixture serves, so the window can be
