@@ -64,6 +64,11 @@ let pressing = false;
 /* A poll's redraw that waited (a press, a field being typed in, text
    selected in the view), and what the last drawn poll read. */
 let heldRender = false, drawnRead = "";
+/* The form's lists arrived during a press. Unlike a poll's redraw they are
+   drawn on the release even with a form field focused: the press that held
+   them is usually the one that put the caret there, and render() keeps the
+   caret (claunch-iu6z2.1.1). */
+let listsHeld = false;
 /* Whether the last conversation read came back with the session panel: a
    daemon started before panel=0 existed ignores it and answers with the
    whole view, seconds of its time (claunch-fokj3). The closed operator
@@ -227,9 +232,9 @@ async function openForm(op, message = "") {
   if(!profiles.length) profiles = (f.profiles || []).map(x => typeof x === "string" ? {value: x, label: x} : {value: x.name, label: x.name}).filter(x => x.value);
   // The two lists can come back after the form is already on screen and
   // the reader is pressing 저장 in it -- on a loaded machine, between the
-  // pointer's down and up. That redraw waits for the release like a poll's
-  // does, or the button goes and the save never happens (claunch-iu6z2.1.1).
-  if(pressing) heldRender = true;
+  // pointer's down and up. That redraw waits for the release, or the button
+  // goes and the save never happens (claunch-iu6z2.1.1).
+  if(pressing) listsHeld = true;
   else render();
 }
 function formBox() {
@@ -668,7 +673,11 @@ function releaseRender() {
   pressing = false;
   // After the click, not before it: the browser dispatches it right after
   // the pointerup, and the press has to reach the node it was aimed at.
-  setTimeout(() => { if(!pressing) flushHeld(); }, 0);
+  setTimeout(() => {
+    if(pressing) return;
+    if(listsHeld) { listsHeld = false; heldRender = false; render(); }
+    else flushHeld();
+  }, 0);
 }
 /* -- what observer.js uses --------------------------------------------- */
 const TARGET = "operator:";

@@ -733,6 +733,39 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
         "the press lands although a poll ran between its down and its up");
     }
 
+    // The lists held by that press are drawn on its release even when the
+    // press put the caret in a form field. A poll's redraw waits for the
+    // field to lose focus; the lists did too, and a form opened fresh sat on
+    // "불러오는 중…" for as long as the reader stayed in the name field
+    // (claunch-iu6z2.1.1, s404-rev). The redraw is visible as the profile
+    // select being replaced, and the caret stays in the name field.
+    {
+      let releaseLists; const listsHeld = new Promise(r => { releaseLists = r; });
+      await page.route("**/api/profiles", async route => { await listsHeld; await route.continue(); });
+      await page.click("#observer-operators .op-actions button:has-text('설정')");
+      await page.waitForSelector("#observer-operators .op-form");
+      const nameBox = await page.evaluate(() => {
+        window.__profileSelect = document.getElementById("observer-op-profile");
+        const r = document.getElementById("observer-op-name").getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(nameBox.x, nameBox.y);
+      await page.mouse.down();
+      releaseLists();
+      await page.waitForResponse(r => r.url().endsWith("/api/profiles"));
+      await page.evaluate(() => new Promise(r => setTimeout(r, 200)));
+      await page.unroute("**/api/profiles");
+      await page.mouse.up();
+      await page.waitForFunction(() => document.getElementById("observer-op-profile") !== window.__profileSelect,
+        null, { timeout: 2000 }).catch(error => {
+        throw new Error(`${error.message}\nthe form's lists stayed held while the name field had focus`);
+      });
+      assert.equal(await page.evaluate(() => document.activeElement?.id), "observer-op-name",
+        "the caret stays in the name field across the lists' redraw");
+      await page.click("#observer-operators .op-form button:has-text('취소')");
+      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"));
+    }
+
     // A press that ends PAST the view's edge still releases it. The flag that
     // holds a redraw back while a pointer is down is set on a down inside the
     // view; if its only release listener sat on the view's own root, a
