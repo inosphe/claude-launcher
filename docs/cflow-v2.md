@@ -2994,6 +2994,49 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   값이다. 마지막 컷 tip을 그대로 쓰면 스택을 한 번 옮긴 뒤 그 컷 tip이 스택 브랜치의
   조상이 아니어서 옮긴 커밋을 다시 적용한다(claunch-yq80p.9 리뷰 B1·B2).
 
+### 라우팅 명부: 착지와 질문이 읽는 명부 (claunch-eyz0s.1)
+
+한 세션의 두 라우팅은 **같은 메시 명부를 읽지 않는다.** 이 차이는 실측에서 두 번
+사람에게 결정이 내려온 원인이고, 한쪽만 고치면 나머지 절반이 그대로 남는다.
+
+| 라우팅 | 읽는 명부 | 정해지는 자리 |
+|---|---|---|
+| 착지 요청 (`daemon/landing_route.py` `Router.merger_role`·`Router.leader`) | 세션이 속한 **모든** 메시 | 세션의 메시 가입 |
+| 질문 라우팅 (`cflow2/asks.py` `plan_route`, `asks.home_mesh`) | 런에 지정된 **한** 메시 | `state.mesh` — 시작 때 고정, `claunch cflow2 mesh <이름>` |
+
+- 착지 쪽은 `mesh.meshes_for_session(scope)`가 내놓는 메시를 전부 훑는다. 그래서
+  세션이 리더가 있는 메시에 하나라도 가입해 있으면 그 리더가 후보가 된다.
+- 질문 쪽은 `state.mesh` 하나의 명부만 읽는다(2.2 「런의 메시」). 그 값이 비어 있고
+  세션이 팀 메시 여럿에 속해 있으면 `Pool.ambiguous`가 서고, 그룹은 소비되지 않은
+  채 ask가 `unroutable`로 간다 — 「아무도 그 역할을 갖지 않는다」와 다른 답이다.
+- 그래서 「메시에 가입하면 착지가 풀린다」와 「가입하면 질문이 unrouted가 된다」가
+  동시에 참일 수 있다. 착지 요청이 리더에게 닿지 않아 사람에게 내려온 회차에서
+  메시를 하나 더 가입시키면 질문 라우팅이 깨지고, `claunch cflow2 mesh`로 런의
+  메시를 지목하면 질문 쪽이 다시 선다.
+- **`claunch cflow2 mesh`는 착지 후보를 바꾸지 않는다.** 그 명령은 `state.mesh`와
+  아직 라우팅 중인 ask의 메시만 쓰고(`runtime.set_mesh`), 착지 라우팅은
+  `meshes_for_session(scope)`만 읽는다. 즉 런의 메시를 지목해도 착지 후보는 세션의
+  메시 가입 그대로다 — 두 쪽은 서로 다른 손잡이로 움직인다.
+
+**같은 핸들, 다른 데몬**은 양쪽에서 같은 규칙으로 걸러진다. 세션 이름은 머신마다
+유일하므로 명부의 이름 일치만으로는 신원이 서지 않는다. 두 자리의 함수는 서로
+다르고, 역할도 다르다:
+- **착지 쪽**은 `MeshManager.is_local_member(mesh, member)`가 후보를 거른다
+  (`landing_route.py` `Router.merger_role`·`Router.leader`).
+- **질문 쪽**은 `cflow/responders.Responder.answerable`(119행)이 후보를 거른다 —
+  `self.local`이 거짓이면 후보가 아니다. 그 값은 `_pool_from`의
+  `local=bool(m.get("local"))`(477행)에서 온다.
+  `_handle_in`(513행)은 **다른 일**을 한다: 묻는 세션 자신의 핸들을 찾아 `me`를
+  정하는 함수이고, 응답자 후보를 거르지 않는다. 후보 거르기를 고치러 갈 자리는
+  `answerable`이다.
+
+미러된 명부에 같은 이름의 다른 머신 세션이 있어도 두 라우팅 모두 그 줄을 후보에서
+뺀다. 이 규칙들은 테스트로 고정돼 있다(`tests/test_routing_rosters.py`).
+
+착지 라우팅이 후보를 세울 때 런의 메시와 세션의 메시가 다르면, 그 사실은 착지
+결정의 근거를 읽는 사람에게 필요하다 — 다만 이번 회차는 그 값을 라우팅 블록에
+새로 싣지 않는다.
+
 ### stacked PR (stack-v2, claunch-yq80p.2)
 
 자식을 둔 워커(메인 런 + side 런 `stack`, 2.9)에서는 자식의 PR이 master가 아니라
