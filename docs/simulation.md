@@ -160,6 +160,42 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
   - 세션이 살아 있고 `done`이 없으면 마지막 노드 뒤에 점선 「진행 중」 노드가 진행 API의 단계와 문구를 보여 준다.
   - 2초마다 뒤쪽 사건만 받아 이미 그린 SVG에 새 노드와 선을 덧붙이고, 상태가 바뀐 노드의 글자와 class만 고친다. SVG를
     다시 만들지 않으므로 스크롤 위치와 마우스 올림이 유지된다. 세션이 종료되면 폴링을 멈춘다.
+  - 요약줄의 `토큰` 값은 이 실행이 물음마다 남긴 `usage.totalTokens`의 합이다(`web/static/durable-flow.js`의
+    `summary()`, 사건마다 더하는 자리는 `model()`). `ask` 사건 하나가 한 번 더해지므로 실행 중에는 계속 커진다.
+    `usage` 없이 기록된 `ask`(실패한 물음)도 질문 수에는 들어가고 토큰만 0을 더한다. 이어받은 실행(`ancestors`)의
+    토큰은 이 값에 들어가지 않는다 — 그것들은 현재 실행의 왼쪽에 흐리게 그려지고 요약줄에는 `이전 run N`으로 개수만
+    붙는다. 이어받은 실행까지 합친 지출은 각 실행 디렉터리의 로그를 따로 합해 구한다.
+  - 총합의 원자료는 실행 디렉터리의 `<디렉터리 이름>.events.jsonl`이고, 그 디렉터리는 세션 정의의 `SIM_RUN_DIR`
+    또는 `GET /api/sessions/<세션>/durable` 응답의 `run_dir`이다. `ask` 사건마다 `usage`가 있고 그 값들은
+    서로 다른 양이다 — `input`(프롬프트 가운데 캐시로 읽지 않은 몫), `cacheRead`, `output`, `cacheWrite` 넷이고,
+    `totalTokens`는 그 넷의 합이다. 합은 pi-ai가 계산하며 두 어댑터가 같은 식을 쓴다
+    (`anthropic-messages.js`: `input + output + cacheRead + cacheWrite`, `openai-completions.js`: 같은 식).
+    이 객체를 만드는 `conversationCost()`(gds6 `plane/rules-v2/pi/extension.mjs`, claunch `sim/pi/runner.mjs`의 같은
+    이름 함수)는 `input`·`cacheRead`·`output`·`totalTokens`만 옮기고 `cacheWrite`는 옮기지 않는다. 그래서 이벤트
+    로그에 `cacheWrite` 필드는 없고, 그 양은 `totalTokens − (input + cacheRead + output)`로 유도해 읽는다 — 실측
+    (2026-10-28, 세션 `relations2-20261028-032408`)에서 ask 534건 전부 이 값이 0이었다. 이 함수는 그 대화의 모든
+    세대를 누적하므로 한 `ask` 사건의 `totalTokens`는 여러 세대의 합이다(같은 실측에서는 534건 전부 1세대).
+    파일을 직접 합산한 값은 차트가 보는 값과 같으므로, 차트를 열지 않고 확인할 때는 이 파일을 읽는다.
+  - 같은 지출을 요청 단위로 보는 경로가 둘 더 있다: `claunch tps --session <세션>`과 대시보드 Stats 페이지
+    (`GET /api/stats/overview`)이다. 둘 다 라우팅 shim이 남기는 metering 원장(`metering.py`)을 읽으므로 시뮬레이션
+    물음과 함께 **실행 세션 자신의 대화 요청도** 들어 있다. 실행의 지출만 보려면 원장 합에서 대화 요청을 빼야
+    하고, 그 요청은 출력 토큰 수가 `ask` 사건과 짝이 맞지 않는 행이다. 실측(2026-10-28, 세션
+    `relations2-20261028-032408`): 같은 시점 원장 536요청 가운데 2건이 대화였고, 그 둘을 빼면 6,189,937이
+    이벤트 로그 합과 같았다. 원장에서 그 값을 만들 때는 `input_tokens + output_tokens`로 더한다. 이 경로에서 그 합이
+    `totalTokens`와 같은 것은 `cacheWrite`가 0이어서가 아니라 어댑터의 항등식이기 때문이다: `/chat/completions`는
+    `input = prompt − cacheRead − cacheWrite`로 쪼갠 뒤 `totalTokens = input + output + cacheRead + cacheWrite`를
+    내므로 `totalTokens`는 곧 `prompt + output`이고, 원장의 `input_tokens`는 그 `prompt` 원값이다
+    (`metering._usage_fields`가 `prompt_tokens`를 `input_tokens`로 읽는다). `cache_read`를 더하면 그 몫이 두 번
+    세어진다(`metering.prompt_tokens`가 이 규칙을 적고 있다). 같은 실측에서 `cacheRead`가 0이 아닌 ask가 23건(합
+    30,720)이었는데도 등식은 534건 전부 성립했다 — cacheWrite 0으로는 이 등식이 설명되지 않는다.
+    `/v1/messages` 경로는 다르다: 거기서 `input_tokens`는 캐시로 읽지 않은 몫이고 `cache_read`·`cache_write`가 따로
+    기록되므로 `input_tokens + output_tokens`는 `totalTokens`보다 작고, 두 캐시 항을 더해야 같아진다. 같은 실행의
+    원장은 536건 전부 `/chat/completions`였고 `/v1/messages`는 0건이었다.
+  - 세션 레코드의 `token_usage`(`GET /api/sessions/<세션>/stats`, 대시보드의 `Σ` 줄)는 주 대화 하나의 지출만
+    담는다(`daemon/sessionstats.py`·`daemon/tokenusage.py`가 `ctxsize.transcript_of`가 찾은 전사 파일을 읽는다).
+    시뮬레이션 물음은 각각 별도의 durable 대화이고, 전사 파일은 실행 세션의 주 대화만 가리킨다. 그래서 이 값은
+    그 실행을 지휘한 대화의 지출이고, 위 세션의 실측은 `Σ 73,417`(2요청) 대 이벤트 로그 `6,189,937`이었다 — 두
+    값은 같은 순간에 읽었다. 시뮬레이션 총량은 차트 요약줄·이벤트 로그·metering 원장 셋 가운데 하나로 읽는다.
 - 조건이 맞지 않으면 시작은 오류다(claunch-efnbt.8). 데몬은 `sims.start`도 라운드도 실행하지 않고, 소유 세션(또는
   사용자) 권한을 확인한 뒤 상태를 `fault`로, `state_reason`을 이유로 두고 기록에 `fault`를 남긴다. 응답은 409이고
   바디의 `fault`가 원인 코드, `error`가 이유와 고칠 방법이다.
