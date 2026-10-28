@@ -751,7 +751,13 @@ def _cwd_of(call, default=_HERE):
 #: ``git grep python_x <tool>`` and ``pytest -k python <tool>`` were all
 #: collected, a direction master ``b16cf017`` did not have (s404-rev,
 #: s597-rev). ``python_x`` is data, not an interpreter.
-_INTERPRETER_NAME = re.compile(r"^python(\d+(\.\d+)*)?(\.exe)?$")
+#:
+#: The alternatives are the names a Windows argv actually uses: ``py`` and
+#: ``py.exe`` are the launcher, ``pythonw``/``pythonw.exe`` the windowless
+#: interpreter, and all of them carry a version suffix. Leaving the ``w`` out
+#: missed ``pythonw``, which master collects (s597-rev blocked on it, s648-rev
+#: recorded it, both measured).
+_INTERPRETER_NAME = re.compile(r"^(py|pythonw?)(\d+(\.\d+)*)?(\.exe)?$")
 
 #: Runners that take a command and run *it*, so the program is further right.
 #: This is a **widening, not the discriminator**: a python interpreter anywhere
@@ -805,12 +811,12 @@ def _bare_name(node):
 def _is_interpreter(name):
     """Whether a bare file name is a Python interpreter.
 
-    ``py`` is the Windows launcher and this repository runs under Git Bash
-    there, so it counts; it was missed when only a ``python`` prefix was
-    recognised (s597-rev). The ``python_x``/``python3.py`` family is *not* an
-    interpreter, and reading it as one collected ``git grep python_x <tool>``
-    (s404-rev)."""
-    return name == "py" or bool(_INTERPRETER_NAME.match(name))
+    One regex carries every alternative, so there is no second list to keep in
+    step -- an earlier version matched ``py`` with a separate ``==`` and the
+    two drifted apart the moment one side gained a name (``pythonw``).
+    ``python_x`` and ``python3.py`` are file names, not interpreters; reading
+    them as interpreters collected ``git grep python_x <tool>`` (s404-rev)."""
+    return bool(_INTERPRETER_NAME.match(name))
 
 
 def _runs_the_next_argv(node):
@@ -911,9 +917,20 @@ def _exec_position(items, from_this_file, names):
       interpreter. That is master's behaviour and the reason ``PY =
       sys.executable`` no longer goes silent; the cost is a false failure if
       someone writes ``MODE = "log"`` and ``[MODE, "-n", <tool>]``.
-    * ``py -3`` is read as the Windows launcher. Master does not name it; this
-      guard collects one shape master misses, which is the direction that
-      matters for a guard run under Git Bash on Windows (s597-rev)."""
+    * ``py -3`` is read as the Windows launcher, as are ``py.exe``, ``pythonw``
+      and ``pythonw.exe``. One regex (``_INTERPRETER_NAME``) carries that whole
+      family, so there is no second name list to fall out of step with the
+      first. Master names none of them; this guard collects shapes master
+      misses, which is the direction that matters for a guard run under Git
+      Bash on Windows (s597-rev blocked on ``pythonw``, s648-rev found it
+      independently).
+    * ``bundle exec <tool>`` is **not** collected. ``bundle`` is a Ruby
+      launcher that hands a script path to another program with no Python
+      interpreter in the argv, so it lands in the residual ``_LAUNCHERS``
+      case, which lists ``npx`` only. Adding ``bundle`` would be a list entry
+      with no row behind it -- the defect this issue has already spent four
+      rounds on -- so it is recorded as a limit instead (s597-rev's judgment,
+      taken as the leader's instruction)."""
     if not items:
         return None
     indexes = range(len(items))
@@ -1895,14 +1912,19 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
         'PY = sys.executable\nx = subprocess.run([PY, "-S", "tools/related_surfaces.py"], cwd=str(ROOT))\n',
         'PY = sys.executable\nx = subprocess.run([str(PY), "tools/related_surfaces.py"], cwd=str(ROOT))\n',
         'PYBIN = shutil.which("python3")\nx = subprocess.run([PYBIN, "tools/related_surfaces.py"], cwd=str(ROOT))\n',
-        # The same lookup written inline is read by name rather than by the
-        # fail-closed branch -- and that branch is otherwise dead code, which a
-        # mutation showed: deleting it left the suite green until this row
-        # existed. A branch nothing pins is the defect this whole issue is about.
+        # The same lookup written inline reaches the fail-closed branch, which
+        # is where it is collected -- `_bare_name` deliberately does not read
+        # ``shutil.which`` itself, so this row is a trip-wire on that branch
+        # rather than a pin on the deleted special case.
         '[shutil.which("python3"), "tools/related_surfaces.py", "--json"]',
-        # ... and the Windows launcher, which this repository meets under Git
-        # Bash (s597-rev).
+        # ... and the Windows launcher and windowless interpreter, which this
+        # repository meets under Git Bash there (s597-rev blocked on the gap,
+        # s648-rev found the same shape independently; master b16cf017 collects
+        # all three).
         '["py", "-3", "tools/related_surfaces.py"]',
+        '["py.exe", "-3", "tools/related_surfaces.py"]',
+        '["pythonw", "tools/related_surfaces.py"]',
+        '["pythonw.exe", "tools/related_surfaces.py"]',
         # One residual shape has no interpreter to lean on: a launcher that
         # hands a script path straight to some other program. master collected
         # it, so leaving it silent is the regression s648-rev named; ``_LAUNCHERS``
