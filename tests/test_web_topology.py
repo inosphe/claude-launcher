@@ -842,3 +842,49 @@ def test_browser_harnesses_strip_the_real_boot_call():
                 f"{harness.name} strips boot() with a pattern other than "
                 f"{BOOT_STRIP}: {line.strip()}"
             )
+
+
+def test_the_prose_that_opens_the_gate_selects_what_it_says():
+    """CLAUDE.md says how to open the gate above (claunch-odk2w).
+
+    ``tools/changed_tests.py`` selects no test for a markdown file, so nothing
+    else notices the document drifting from the code it describes. Two ways it
+    can drift, and both leave the printed command green:
+
+    * ``-k browser_harness`` is a substring match, so it reaches
+      ``test_browser_harnesses_strip_the_real_boot_call`` whether or not the
+      parametrized ``test_browser_harness`` still exists. Rename that one and
+      the selection collects 1 node instead of 58, runs no harness, and
+      reports pass.
+    * the section states how many harnesses there are. Add one and the number
+      it prints is wrong while every harness still passes.
+
+    So the assertions are about the selection, not only about the prose.
+    """
+    doc = (WEB.parents[1] / "CLAUDE.md").read_text(encoding="utf-8")
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert "tests/test_web_topology.py" in doc, (
+        "CLAUDE.md no longer names this module in the section that opens the "
+        "browser-harness gate"
+    )
+    assert "-k browser_harness" in doc
+    assert "NODE_PATH" in doc
+    lines = source.splitlines()
+    selecting = [line[len("def "):].split("(")[0] for line in lines
+                 if line.startswith("def ") and "browser_harness" in line]
+    assert "test_browser_harness" in selecting, (
+        f"'-k browser_harness' would collect only {selecting} from this module "
+        f"({len(BROWSER_CHECKS)} harnesses would go uncollected), so the "
+        "document's command would report green having run none of them"
+    )
+    # the count the keyword collects comes from BROWSER_CHECKS: one node per
+    # entry, plus the boot-strip check the substring also matches
+    at = lines.index("def test_browser_harness(script):")
+    assert "parametrize(" in lines[at - 1] and "BROWSER_CHECKS" in lines[at - 1], (
+        f"test_browser_harness is no longer parametrized over BROWSER_CHECKS: "
+        f"{lines[at - 1].strip()}"
+    )
+    assert len(BROWSER_CHECKS) > 1, f"only {len(BROWSER_CHECKS)} browser harness(es)"
+    assert f"{len(BROWSER_CHECKS)}개" in doc, (
+        f"CLAUDE.md states a harness count that is not {len(BROWSER_CHECKS)}"
+    )
