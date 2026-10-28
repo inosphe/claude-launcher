@@ -171,7 +171,8 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
     `totalTokens`는 그 넷의 합이다. 합은 pi-ai가 계산하며 두 어댑터가 같은 식을 쓴다
     (`anthropic-messages.js`: `input + output + cacheRead + cacheWrite`, `openai-completions.js`: 같은 식).
     이 객체를 만드는 `conversationCost()`(gds6 `plane/rules-v2/pi/extension.mjs`, claunch `sim/pi/runner.mjs`의 같은
-    이름 함수)는 `input`·`cacheRead`·`output`·`totalTokens`만 옮기고 `cacheWrite`는 옮기지 않는다. 그래서 이벤트
+    이름 함수)는 `cacheWrite`를 옮기지 않는다 — 두 함수 모두 `input`·`cacheRead`·`output`·`totalTokens`·
+    `generations`를 옮기고, gds6 쪽은 `reasoning`을, claunch 쪽은 `peak`를 더 옮긴다. 그래서 이벤트
     로그에 `cacheWrite` 필드는 없고, 그 양은 `totalTokens − (input + cacheRead + output)`로 유도해 읽는다 — 실측
     (2026-10-28, 세션 `relations2-20261028-032408`)에서 ask 534건 전부 이 값이 0이었다. 이 함수는 그 대화의 모든
     세대를 누적하므로 한 `ask` 사건의 `totalTokens`는 여러 세대의 합이다(같은 실측에서는 534건 전부 1세대).
@@ -183,11 +184,15 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
     `relations2-20261028-032408`): 같은 시점 원장 536요청 가운데 2건이 대화였고, 그 둘을 빼면 6,189,937이
     이벤트 로그 합과 같았다. 원장에서 그 값을 만들 때는 `input_tokens + output_tokens`로 더한다. 이 경로에서 그 합이
     `totalTokens`와 같은 것은 `cacheWrite`가 0이어서가 아니라 어댑터의 항등식이기 때문이다: `/chat/completions`는
-    `input = prompt − cacheRead − cacheWrite`로 쪼갠 뒤 `totalTokens = input + output + cacheRead + cacheWrite`를
+    `input = Math.max(0, prompt − cacheRead − cacheWrite)`로 쪼갠 뒤
+    `totalTokens = input + output + cacheRead + cacheWrite`를
     내므로 `totalTokens`는 곧 `prompt + output`이고, 원장의 `input_tokens`는 그 `prompt` 원값이다
     (`metering._usage_fields`가 `prompt_tokens`를 `input_tokens`로 읽는다). `cache_read`를 더하면 그 몫이 두 번
-    세어진다(`metering.prompt_tokens`가 이 규칙을 적고 있다). 같은 실측에서 `cacheRead`가 0이 아닌 ask가 23건(합
-    30,720)이었는데도 등식은 534건 전부 성립했다 — cacheWrite 0으로는 이 등식이 설명되지 않는다.
+    세어진다(`metering.prompt_tokens`가 이 규칙을 적고 있다). 그 `Math.max(0, …)` 클램프는 `prompt < cacheRead +
+    cacheWrite`일 때 `input`을 0으로 눌러 등식을 그 차이만큼 어긋나게 하므로, 이 항등식은 `prompt ≥ cacheRead +
+    cacheWrite`일 때 성립한다(`pi-ai@1.1.0` `dist/api/openai-completions.js`). 같은 실측에서 `cacheRead`가 0이 아닌
+    ask가 23건(합 30,720)이었는데도 등식은 534건 전부 성립했다 — cacheWrite 0으로는 이 등식이 설명되지 않고,
+    클램프도 걸리지 않았다(534건 가운데 `input`이 0인 ask가 0건이므로 위 조건이 항등적으로 참이다).
     `/v1/messages` 경로는 다르다: 거기서 `input_tokens`는 캐시로 읽지 않은 몫이고 `cache_read`·`cache_write`가 따로
     기록되므로 `input_tokens + output_tokens`는 `totalTokens`보다 작고, 두 캐시 항을 더해야 같아진다. 같은 실행의
     원장은 536건 전부 `/chat/completions`였고 `/v1/messages`는 0건이었다.
