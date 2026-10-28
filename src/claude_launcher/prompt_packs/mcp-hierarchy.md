@@ -38,7 +38,8 @@ disagree, the doc wins and this pack should be corrected.
   coordinator or want the move proposed rather than executed. (Phase 2 —
   see availability below.)
 - `give(session, parent)` — moves your own descendant under another
-  session. Same effects and refusals as `adopt`. (Phase 2.)
+  session. Same side effects as `adopt`; its refusals follow `reparent`,
+  not `adopt` (the doc's §3 table). (Phase 2.)
 
 ### The approval gate (decision D1)
 
@@ -73,7 +74,8 @@ coordinates are stale until handled:
    inputs conditionally, journaled as `rehome`), the plan carries it.
 3. Register an adopted session's issue on the new coordinator's `jobs`
    collection (`flow_fork`) — without it the coordinator's accounting
-   never sees that issue.
+   never sees that issue. (Phase 2 — the `jobs` collection arrives with
+   the coordinator role split, `claunch-fnnrk.1`.)
 4. Announce the move: the moved session, the new parent, and the old
    parent get one batch send; leave the move (who, from, to, why) as a
    comment on the board's parent issue.
@@ -82,11 +84,28 @@ The operating procedure in the doc's §6 is the checklist for a cleanup
 round: read `orphans`, write the one-line move record, call `adopt`, run
 the plan, announce, and leave the cleaned-up state on the board.
 
+### Unsettled decisions (see the doc's §7)
+
+Decisions D2, D4, D5 and D6 are not settled — the phase split below and
+the `relation-conflict` rule are the design's proposal, not decided
+fact. What changes in this pack when each settles:
+
+- **D2** (live source-parent consent alongside the card): the approval
+  gate section gains the second consent step.
+- **D4** (coordinator role name and the pm/coordinator alias split): the
+  "Who may call" wording above is rewritten with the settled name.
+- **D5** (whether a coordinator may own a stack): the
+  `relation-conflict` refusal either becomes a hard rule or is replaced
+  by the stack-aware path.
+- **D6** (phase-1 scope): the "Availability (phases)" section below is
+  re-cut along whatever phase boundary is decided.
+
 ### Availability (phases)
 
-Phase 1 ships `orphans` and the orphan path of `adopt` only — no
-`relation` rewrite, refused as `relation-conflict` where the stack cannot
-be settled. `adopt_request` and `give` are phase 2 (live-tree adoption).
+As currently planned (decision D6 is still open — see above), phase 1
+ships `orphans` and the orphan path of `adopt` only — no `relation`
+rewrite, refused as `relation-conflict` where the stack cannot be
+settled. `adopt_request` and `give` are phase 2 (live-tree adoption).
 The stack-owning worker move with the `stack-v2` `rehome` procedure is
 phase 3. Until a phase's issue (`claunch-fnnrk.2`, `.5`, `.3`, `.4`) is
 assigned and landed, the corresponding calls above describe the contract,
