@@ -29,7 +29,7 @@ import contextlib
 import logging
 import time
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from .manager import RESTORE_QUEUE, ManagerError
 
@@ -127,6 +127,13 @@ class RestoreQueue:
         #: Names this queue started (the rest were woken by use first, or
         #: had gone) — the tests' handle on the outcome.
         self.started: List[str] = []
+        #: Names :meth:`_run` has gone past, by any way. A name past is not
+        #: waiting here even if it is delayed again later -- a host relaunch
+        #: files it delayed for its own queue to start, and this one never
+        #: comes back to it (claunch-hor3b.2).
+        self._passed: Set[str] = set()
+        #: True once :meth:`_run` has walked its whole list.
+        self.finished = False
         #: Monotonic time of :meth:`start` and of the queue's last relaunch:
         #: what :meth:`status` paces its estimate by. The configured interval
         #: is a floor, not the pace -- a relaunch itself takes seconds, and on
@@ -152,9 +159,13 @@ class RestoreQueue:
 
     # ---- progress, for the dashboard (claunch-v4uyt) ----------------------- #
 
-    def waiting(self) -> List[str]:
-        """The ranked names still delayed, next first."""
-        return [n for n in self.order if _delayed(self.manager, n)]
+    def waiting(self, without: Iterable[str] = ()) -> List[str]:
+        """The ranked names still delayed that this queue will still start,
+        next first; ``without`` are names another queue counts."""
+        without = set(without)
+        return [n for n in self.order
+                if n not in self._passed and n not in without
+                and _delayed(self.manager, n)]
 
     def pace(self, now: Optional[float] = None) -> float:
         """Seconds per relaunch as measured so far; the interval until the
@@ -164,23 +175,28 @@ class RestoreQueue:
             return self.interval
         return max(self.interval, (self._last_start - self._began) / len(self.started))
 
-    def status(self, now: Optional[float] = None) -> Optional[dict]:
+    def status(self, now: Optional[float] = None,
+               without: Iterable[str] = ()) -> Optional[dict]:
         """The queue as a whole: ``None`` once nothing is left in it.
 
         ``total`` is the boot's count, ``done`` how many have left the queue
         by any way (started by it, woken by use, killed), ``remaining`` the
         rest, ``next`` the one it starts next, ``eta_seconds`` an estimate of
-        when the last one starts at the pace measured so far."""
-        if not self.order:
+        when the last one starts at the pace measured so far. Names in
+        ``without`` are another queue's to count and drop out of all of
+        these (:class:`Queues`)."""
+        without = set(without)
+        order = [n for n in self.order if n not in without]
+        if not order:
             return None
         now = time.monotonic() if now is None else now
-        waiting = self.waiting()
+        waiting = self.waiting(without)
         if not waiting:
             return None
         pace = self.pace(now)
         return {
-            "total": len(self.order),
-            "done": len(self.order) - len(waiting),
+            "total": len(order),
+            "done": len(order) - len(waiting),
             "started_by_queue": len(self.started),
             "remaining": len(waiting),
             "next": waiting[0],
@@ -189,18 +205,21 @@ class RestoreQueue:
             "eta_seconds": round(self._eta(len(waiting) - 1, pace, now)),
         }
 
-    def positions(self, now: Optional[float] = None) -> Dict[str, dict]:
+    def positions(self, now: Optional[float] = None,
+                  without: Iterable[str] = ()) -> Dict[str, dict]:
         """Every still-delayed name's place: ``rank`` in the boot's order out
         of ``total``, how many still wait ``ahead`` of it, and an estimate of
-        when it starts (``eta_seconds``)."""
+        when it starts (``eta_seconds``); ``without`` as in :meth:`status`."""
         now = time.monotonic() if now is None else now
-        waiting = self.waiting()
+        without = set(without)
+        order = [n for n in self.order if n not in without]
+        waiting = self.waiting(without)
         pace = self.pace(now)
-        rank_of = {n: i + 1 for i, n in enumerate(self.order)}
+        rank_of = {n: i + 1 for i, n in enumerate(order)}
         return {
             name: {
                 "rank": rank_of[name],
-                "total": len(self.order),
+                "total": len(order),
                 "ahead": ahead,
                 "eta_seconds": round(self._eta(ahead, pace, now)),
             }
@@ -221,22 +240,87 @@ class RestoreQueue:
     async def _run(self) -> None:
         first = True
         for name in self.order:
-            if not _delayed(self.manager, name):
-                continue  # woken by use, killed or removed: not ours any more
-            if not first and self.interval:
-                await asyncio.sleep(self.interval)
-                if not _delayed(self.manager, name):
-                    continue
-            first = False
             try:
-                await self.manager.wake_async(name, by=RESTORE_QUEUE)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 -- one must not stop the rest
-                log.exception("restore queue: relaunch of %r failed", name)
-                with contextlib.suppress(ManagerError):
-                    self.manager.fail_delayed(name, reason=str(exc))
-                continue
-            self.started.append(name)
-            self._last_start = time.monotonic()
+                if not _delayed(self.manager, name):
+                    continue  # woken by use, killed or removed: not ours any more
+                if not first and self.interval:
+                    await asyncio.sleep(self.interval)
+                    if not _delayed(self.manager, name):
+                        continue
+                first = False
+                try:
+                    await self.manager.wake_async(name, by=RESTORE_QUEUE)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 -- one must not stop the rest
+                    log.exception("restore queue: relaunch of %r failed", name)
+                    with contextlib.suppress(ManagerError):
+                        self.manager.fail_delayed(name, reason=str(exc))
+                    continue
+                self.started.append(name)
+                self._last_start = time.monotonic()
+            finally:
+                self._passed.add(name)
+        self.finished = True
         log.info("restore queue: done (%d started by the queue)", len(self.started))
+
+
+class Queues:
+    """Several :class:`RestoreQueue` runs read as one, for the dashboard.
+
+    A host relaunch starts a queue of its own (claunch-hor3b.1) while the
+    boot's may still be walking its list; putting the new one in the boot
+    queue's place hid the boot's progress until the relaunch's was done
+    (claunch-hor3b.2). This answers :meth:`RestoreQueue.status` and
+    :meth:`RestoreQueue.positions` over every queue that still has names
+    waiting, so neither is lost.
+
+    A name can sit in two queues' lists: started by the boot's queue, or
+    woken by use before the boot's queue reached it, then filed delayed again
+    by a host loss. Each name is counted in one queue only (s511-rev,
+    s648-rev): the first that still has it waiting, else the first whose
+    list has it. The others leave it out of their totals and places."""
+
+    def __init__(self, *queues: RestoreQueue) -> None:
+        self.queues: List[RestoreQueue] = list(queues)
+
+    def add(self, queue: RestoreQueue) -> None:
+        """Join ``queue``; queues that have walked their whole list leave,
+        so a long-lived daemon's host relaunches do not pile up here."""
+        self.queues = [q for q in self.queues if not getattr(q, "finished", False)]
+        self.queues.append(queue)
+
+    def status(self, now: Optional[float] = None) -> Optional[dict]:
+        """The live queues summed; ``next``, ``interval`` and
+        ``pace_seconds`` are the first live queue's, ``eta_seconds`` the
+        latest of theirs. ``None`` once none has anything left."""
+        live = [s for s in (q.status(now, without=others)
+                            for q, others in self._others()) if s is not None]
+        if not live:
+            return None
+        if len(live) == 1:
+            return live[0]
+        out = dict(live[0])
+        for key in ("total", "done", "started_by_queue", "remaining"):
+            out[key] = sum(s[key] for s in live)
+        out["eta_seconds"] = max(s["eta_seconds"] for s in live)
+        return out
+
+    def positions(self, now: Optional[float] = None) -> Dict[str, dict]:
+        """Each still-delayed name's place in the queue that holds it."""
+        out: Dict[str, dict] = {}
+        for queue, others in self._others():
+            out.update(queue.positions(now, without=others))
+        return out
+
+    def _others(self) -> List[tuple]:
+        """``(queue, names another queue counts)`` for each queue."""
+        owner: Dict[str, int] = {}
+        for i, queue in enumerate(self.queues):
+            for name in queue.waiting():
+                owner.setdefault(name, i)
+        for i, queue in enumerate(self.queues):
+            for name in queue.order:
+                owner.setdefault(name, i)
+        return [(queue, {n for n, o in owner.items() if o != i})
+                for i, queue in enumerate(self.queues)]

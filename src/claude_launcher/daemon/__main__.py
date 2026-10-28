@@ -552,8 +552,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
 
     queue = restore_queue.RestoreQueue(manager, roles_of=_roles_of)
     queue.start()
-    # The dashboard reads its progress off the session list (claunch-v4uyt).
-    app["restore_queue"] = queue
+    # The dashboard reads its progress off the session list (claunch-v4uyt);
+    # a host relaunch's queue joins it there (claunch-hor3b.2).
+    app["restore_queue"] = restore_queue.Queues(queue)
     # A host that goes away from here on takes its sessions with it while
     # this daemon stays up; the watch relaunches them as a restart without
     # the host would (claunch-hor3b.1), and each pass gets the restore queue
@@ -567,7 +568,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             )
             again.start()
             host_followups.append(again)
-            app["restore_queue"] = again
+            app["restore_queue"].add(again)
         nudge = resume.ResumeNudge(
             manager,
             result.busy,

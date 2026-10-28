@@ -725,6 +725,114 @@ def test_the_watch_stops_relaunching_a_host_that_keeps_going(monkeypatch):
     asyncio.run(run())
 
 
+def test_a_record_that_will_not_parse_back_is_kept_and_filed_failed(
+        host, tmp_path, monkeypatch):
+    """The relaunch takes the record off the list before handing it to
+    _restore_entry; a definition that does not parse back left nothing in
+    its place, and the next persist dropped it from disk (claunch-hor3b.2).
+    The record stays, filed failed."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="h7", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        os.kill(host.host_pid, signal.SIGTERM)
+        assert await _until_true(lambda: s.exited)
+
+        def refuse(cls, data):
+            raise ValueError("unreadable definition")
+
+        monkeypatch.setattr(SessionDef, "from_dict", classmethod(refuse))
+        out = await mgr.relaunch_host_ended()
+        assert out.failed == ["h7"] and out.relaunched == [] and out.idle == {}
+        assert mgr.get("h7") is s and getattr(s, "failed_at", None)
+        assert "PTY host 종료 뒤 세션 복원 실패" in [e.get("text") for e in mgr.events.rows(s)]
+
+    asyncio.run(run())
+
+
+class _WatchClient:
+    def __init__(self, closed):
+        import threading
+        self.closed = threading.Event()
+        if closed:
+            self.closed.set()
+
+
+def test_the_watch_waits_for_an_outliving_program_before_relaunching(monkeypatch):
+    """Settle waits while a lost host's program still runs (review of
+    claunch-hor3b.1): relaunching before it ends would judge a session the
+    hangup is about to end as one that outlived the host."""
+    installed = {"c": _WatchClient(True)}
+    monkeypatch.setattr(pty_backend, "installed_host", lambda: installed["c"])
+    monkeypatch.setattr(pty_backend, "use_host", lambda c: installed.update(c=c))
+    seen = []
+
+    class _Mgr:
+        shutting_down = False
+        lingering = 3
+
+        def bound_to_host(self, client):
+            return []
+
+        def outlived_host(self):
+            self.lingering -= 1
+            return ["x"] if self.lingering >= 0 else []
+
+        async def relaunch_host_ended(self):
+            seen.append(self.lingering)
+            return HostRelaunch()
+
+    mgr = _Mgr()
+
+    async def run():
+        task = asyncio.create_task(host_watch.watch(
+            mgr, lambda: _WatchClient(False), interval=0.01, settle=30.0))
+        assert await _until_true(lambda: seen, timeout=5.0)
+        task.cancel()
+        assert seen == [-1]
+
+    asyncio.run(run())
+
+
+def test_losses_older_than_the_window_do_not_count_toward_the_cap(monkeypatch):
+    """The cap counts losses inside loss_window only: hosts lost further
+    apart than that are each relaunched (review of claunch-hor3b.1)."""
+    installed = {"c": _WatchClient(True)}
+    monkeypatch.setattr(pty_backend, "installed_host", lambda: installed["c"])
+    monkeypatch.setattr(pty_backend, "use_host", lambda c: installed.update(c=c))
+    fresh = [_WatchClient(True), _WatchClient(True), _WatchClient(False)]
+
+    class _Mgr:
+        shutting_down = False
+        relaunches = 0
+
+        def bound_to_host(self, client):
+            return []
+
+        def outlived_host(self):
+            return []
+
+        async def relaunch_host_ended(self):
+            self.relaunches += 1
+            await asyncio.sleep(0.02)  # each loss lands outside the last one's window
+            return HostRelaunch()
+
+    mgr = _Mgr()
+
+    async def run():
+        task = asyncio.create_task(host_watch.watch(
+            mgr, lambda: fresh.pop(0), interval=0.01, settle=0.0,
+            max_losses=1, loss_window=0.01))
+        assert await _until_true(lambda: not fresh, timeout=5.0)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        assert mgr.relaunches == 3
+
+    asyncio.run(run())
+
+
 def test_stop_refusing_host_signals_only_a_host(tmp_path):
     """The pid file is all it has to go on; a reused pid must not be shot."""
     from claude_launcher.daemon.ptyhost import pid_path

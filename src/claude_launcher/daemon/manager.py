@@ -2672,6 +2672,13 @@ class SessionManager:
             del self._sessions[name]
             failed: List[str] = []
             self._restore_entry(entry, {}, None, None, failed, why="PTY host 종료")
+            if name not in self._sessions:
+                # _restore_entry left nothing in its place (the record would
+                # not parse back into a definition): the one taken off goes
+                # back, or the record would be gone from the list and, at
+                # the next persist, from disk (claunch-hor3b.2).
+                self._sessions[name] = session
+                failed.append(name)
             if failed:
                 self._host_relaunch_failed(name)
                 out.failed.append(name)
