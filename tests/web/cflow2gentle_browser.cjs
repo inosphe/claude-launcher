@@ -105,6 +105,22 @@ const server = http.createServer((req, res) => {
     assert.equal(await pre().evaluate(e => e.scrollTop), preTop, 'an inner scroll position stays');
     assert.equal(await pageScroll(), pageTop, 'the page scroll stays');
 
+    // one node reporting the same text again: each report keeps its own fold
+    // as the next one arrives in front (the reviewers' repro on f2b06627)
+    detail.journal.push(report('round/item/work', '2026-10-28T05:40:00+00:00', 'same text', {n: 1}));
+    detail.journal.push(report('round/item/work', '2026-10-28T05:41:00+00:00', 'same text', {n: 2}));
+    await page.evaluate(() => refreshWf());
+    const works = reportNamed('work');
+    assert.equal(await works.count(), 2);
+    await works.nth(0).locator('summary.cf2-report-head').click();   // shut the newest (05:41)
+    await works.nth(1).locator('summary.cf2-report-head').click();   // open the older (05:40)
+    assert.deepEqual(await works.evaluateAll(ds => ds.map(d => d.open)), [false, true]);
+    detail.journal.push(report('round/item/work', '2026-10-28T05:42:00+00:00', 'same text', {n: 3}));
+    await page.evaluate(() => refreshWf());
+    assert.equal(await works.count(), 3);
+    assert.deepEqual(await works.evaluateAll(ds => ds.map(d => d.open)), [true, false, true],
+      'a repeated report: the new one opens, the shut one stays shut, the opened one stays open');
+
     // a selection on the view holds the poll back until it ends
     const root0 = await view.locator('.cf2').elementHandle();
     await page.evaluate(() => {
@@ -126,6 +142,6 @@ const server = http.createServer((req, res) => {
     assert(!(await isOpen(inputs)), 'a new run resets the folds');
     assert.equal(posts, 0);
     assert.deepEqual(errors, []);
-    console.log('cflow2gentle_browser: folds, scroll, selection hold and run reset passed');
+    console.log('cflow2gentle_browser: folds, repeated reports, scroll, selection hold and run reset passed');
   } finally {await browser.close(); await new Promise(resolve => server.close(resolve));}
 })().catch(e => {console.error(e); process.exit(1);});

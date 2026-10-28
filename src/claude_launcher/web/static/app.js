@@ -43123,13 +43123,23 @@ function cflow2ForceOutcomes(task) {
 /* The agent's reports in the journal tail, newest first: which task, the
    outcome, who reported (by: user for a forced one), when, and the prose
    summary it gave (markdown). Pure. */
+/* Each report carries a key from its journal entry, node and stamp, so the
+   page can keep a report's fold on that report while newer ones arrive in
+   front of it (claunch-qb42y). Repeats of one node and stamp are counted
+   from the oldest, which a newer entry does not renumber. */
 function cflow2Reports(journal) {
-  return (journal || []).filter((e) => e && e.event === "reported").reverse().map((e) => ({
-    node: e.node || "", label: String(e.node || "").split("/").pop(),
-    outcome: e.outcome || "ok", by: e.by || "",
-    ts: localStamp(e.ts),
-    text: typeof e.text === "string" ? e.text : "", value: e.value,
-  }));
+  const seen = new Map();
+  return (journal || []).filter((e) => e && e.event === "reported").map((e) => {
+    const base = `report:${e.node || ""}@${e.ts || ""}`, n = seen.get(base) || 0;
+    seen.set(base, n + 1);
+    return {
+      node: e.node || "", label: String(e.node || "").split("/").pop(),
+      outcome: e.outcome || "ok", by: e.by || "",
+      ts: localStamp(e.ts),
+      text: typeof e.text === "string" ? e.text : "", value: e.value,
+      key: n ? `${base}#${n}` : base,
+    };
+  }).reverse();
 }
 
 const CFLOW2_STATUS_CLS = {
@@ -44578,8 +44588,9 @@ function cflow2Callstack(data, post, live) {
    the title its first child carries (a summary or a section heading, digits
    dropped so "inputs (18)" stays "inputs ()" as values arrive), and its place
    among the siblings that share all three. So a section that appears above
-   it, a report added in front of it, or a count moving in its title leaves
-   the name alone. One walk names every element below the box, calling
+   it or a count moving in its title leaves the name alone. A sibling with the
+   same title added in front of it moves the place: a list that grows at the
+   top with repeating titles (the reports) gives its items a key. One walk names every element below the box, calling
    visit(node, name) on each: the journal grid alone is hundreds of siblings,
    so the places are counted on the way down rather than per node. */
 function cf2StateWalk(box, visit) {
@@ -45383,6 +45394,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     reports.forEach((r, i) => {
       const d = document.createElement("details");
       d.className = "cf2-report";
+      d.dataset.cf2Key = r.key;
       if (i === 0) d.open = true;
       const s = el("summary", "cf2-report-head");
       s.appendChild(el("span", "cf2-head", r.label));
