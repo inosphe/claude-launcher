@@ -744,7 +744,10 @@ def test_worker_round_is_callable_from_an_including_definition():
 def test_land_returns_landed_held_rework():
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     land = doc["procedures"]["land"]
-    assert set(land["returns"]) == {"landed", "held", "rework"}
+    # blocked is the fourth (claunch-improver-integration-request-blocked-o6paj):
+    # "the landing request was not raised because it is blocked" had no
+    # declared outcome, so it could only be reported as the engine's fail.
+    assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
     assert set(land["params"]) == {"mode", "allow"}
 
 
@@ -2968,7 +2971,8 @@ def test_chart_prose_reaches_a_procedure_description():
     fails if the collection reads only the definition's own file.
     """
     chart = _chart()
-    anchor = "결과는 landed(머지 해시), held(동결로 마감), rework(작업으로 되돌아감) 셋 중 하나다"
+    anchor = ("결과는 landed(머지 해시), held(동결로 마감), rework(작업으로 "
+              "되돌아감), blocked(차단으로 요청을 세우지 않음) 넷 중 하나다")
     included = "회차 도중 발견한 범위 밖 결함 하나를 이슈로 남긴다"
 
     # not reachable from nodes: this is the gap the collection had to close,
@@ -3289,3 +3293,163 @@ def test_the_work_prompt_holds_the_parallel_fork_rules():
     for anchor in ("group: slices", "조각을 하나라도 세웠으면 이 작업에서 커밋하지 않는다",
                    "auto-compact까지 100k 토큰 미만"):
         assert _words(anchor) in prose, anchor
+
+
+# --------------------------------------------------------------------------- #
+# A blocked landing request is a declared outcome, not fail
+# (claunch-improver-integration-request-blocked-o6paj)
+# --------------------------------------------------------------------------- #
+def test_a_blocked_landing_request_is_a_declared_outcome():
+    """The request node can say "I raised no request" without ``fail``.
+
+    ``integration-request`` declared only ``ok``. ``validate_result`` always
+    accepts ``fail`` (the engine's own failure result), so a session told to
+    stand down had no other outcome to report. Nothing between that node and
+    the round loop caught ``fail``, so ``rounds.do``'s next statement --
+    ``recheck`` (queue-recheck) -- was skipped whole: run
+    20261027-164135-3ad031, journal 02:33:08, five ``fail`` lines down to
+    ``rounds@2 -> finally: settle``.
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    req = doc["nodes"]["integration-request"]
+    assert set(req["returns"]) == {"ok", "blocked"}
+    assert req["returns"]["blocked"] == {"reason": "str"}
+
+
+def test_land_declares_and_routes_blocked_out_of_the_batch():
+    """A declaration alone is dead: an uncaught ``blocked`` leaves the
+    ``batch`` try as a non-ok result, and ``_loop_body_done`` completes it
+    upward (``if outcome != OUTCOME_OK: _complete(...)``) -- the same escape
+    as ``fail``."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    land = doc["procedures"]["land"]
+    assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
+    assert land["returns"]["blocked"] == {"reason": "str"}
+
+    batch = _find_id(doc["procedures"]["worker-round"]["body"], "batch")
+    # ``do: {try: [...], catch: {...}}`` -- a bare-key mapping, not a list
+    [try_node] = [batch["loop"]["do"]] if isinstance(batch["loop"]["do"], dict) \
+        else [c for c in batch["loop"]["do"] if isinstance(c, dict) and "try" in c]
+    catch = try_node["catch"]
+    assert set(catch) == {"rework", "landed", "held", "blocked"}
+    # a blocked round is over: continuing would re-run the work that was just
+    # refused a request, so it leaves the batch loop like held does.
+    assert catch["blocked"] == {"break": "batch"}
+    assert catch["rework"] == {"continue": "batch"}
+
+
+def test_a_blocked_request_does_not_push_a_landing_row():
+    """``_queue_triggers`` runs on every outcome (runtime._complete's
+    ``-> triggers (at leave)``), so a ``when`` reading only ``relation``
+    queues the push for a blocked round too -- "I raised no request" would
+    raise one, re-adding a refused tip to an issue already in_review. The
+    ``frozen`` push beside them always had this guard."""
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "integration-request")
+    land_pushes = [t for t in node.get("triggers") or []
+                   if t.get("do") == "push" and (t.get("push") or {}).get("to")
+                   in ("parent:landing", "leader:landing")]
+    assert len(land_pushes) == 2
+    for t in land_pushes:
+        assert "$outcome == 'ok'" in t["when"], t["when"]
+    # the pair still splits on relation -- the guard is added, not swapped in
+    assert {t["when"].replace(" and $outcome == 'ok'", "") for t in land_pushes} == {
+        "$data.inputs.relation != 'independent'",
+        "$data.inputs.relation == 'independent'",
+    }
+    for d in node.get("do") or []:
+        if (d.get("item") or {}).get("name") == "'frozen'":
+            assert "$outcome == 'ok'" in d["when"]
+
+
+def test_the_request_prompt_states_what_a_blocked_round_does_not_do():
+    """A declared outcome the prompt never mentions stays unused: the session
+    holding the node reads its prompt, and the three "do not"s are the whole
+    difference between a blocked round and a request.
+
+    Asserted against ``prompt`` alone, not the chart's whole prose: every one
+    of these also appears in ``done_when``, so a union-wide guard stays green
+    when the prompt loses the sentence -- it measures the field it is not
+    supposed to be protecting (the vacuous-assertion class this issue family
+    has paid for four times).
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    prompt = _words(doc["nodes"]["integration-request"]["prompt"])
+    for anchor in ("in_review로 전이하지 않는다",
+                   "`LANDING REQUEST` 코멘트를 남기지 않는다",
+                   "BLOCKED: 착지 요청 없음"):
+        assert _words(anchor) in prompt, anchor
+    # ...and the outcome is named, or the three "do not"s hang off no label
+    assert "`blocked`" in prompt
+
+
+def test_a_blocked_request_reaches_queue_recheck(tmp_path, monkeypatch):
+    """The wiring, driven: a ``blocked`` request keeps the round loop going.
+
+    Fails on the pre-fix definition. ``land``'s ``submit`` loop leaves
+    ``integration-request`` with ``blocked``; ``_loop_body_done`` completes
+    that upward, and the ``batch`` try's catch turns it into ``break``, so
+    ``worker-round`` ends ``ok`` and ``rounds.do`` reaches its next statement
+    ``recheck``. Before the fix the node could only report ``fail``, which no
+    layer caught: ``round`` and ``rounds`` failed and the run fell to
+    ``finally: settle`` with ``queue-recheck`` never entered (run
+    20261027-164135-3ad031, journal 02:33:08).
+
+    What is real: the packaged ``rounds`` loop and the ``round`` → ``recheck``
+    sequencing, ``worker-round``'s ``batch`` try **and its catch**, ``land``'s
+    ``submit`` loop, and ``integration-request``'s declared returns (the
+    engine validates the reported ``blocked`` against them). What is trimmed:
+    ``submit``'s other steps (align, review, PR publish) and the work inside
+    the batch -- those need git and a board, and none of them is the path
+    under test.
+    """
+    import json
+
+    from claude_launcher.cflow2 import frontend, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc.pop("spec", None)
+
+    # land: keep the submit loop (and the packaged integration-request call
+    # out of it), drop the stack cut, the upstream ask and the align/review/
+    # publish steps around it.
+    submit = [c for c in doc["procedures"]["land"]["body"]
+              if isinstance(c, dict) and c.get("id") == "submit"][0]
+    # a bare string is a node reference (the form the packaged definition uses)
+    submit["loop"]["do"] = ["integration-request"]
+    doc["procedures"]["land"]["body"] = [submit]
+
+    # worker-round: keep the batch loop's try/catch, drop the work before land
+    batch = _find_id(doc["procedures"]["worker-round"]["body"], "batch")
+    batch["loop"]["do"]["try"] = [
+        {"id": "land", "call": "land", "with": {"mode": "full",
+                                                "allow": ["request", "escalate"]}}
+    ]
+    doc["procedures"]["worker-round"]["body"] = [batch]
+
+    # the daemon performs triggers; the run under test has none
+    doc["nodes"]["integration-request"].pop("triggers", None)
+
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    kw = {"cwd": str(tmp_path), "scope": "blocked", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+
+    [first] = st["tasks"]
+    assert first["label"] == "integration-request", first["label"]
+    st = runtime.report(first["instance"], "blocked",
+                        {"reason": "reviewer brake is open"}, **kw)
+
+    # queue-recheck's body is a choose, so reaching it shows up as an open
+    # choice, not a task -- and the journal names the node either way.
+    entered = [e for e in runtime.journal(cwd=kw["cwd"], scope=kw["scope"])
+               if e.get("event") == "entered"
+               and str(e.get("node", "")).startswith("recheck")]
+    assert entered, [e.get("event") for e in
+                     runtime.journal(cwd=kw["cwd"], scope=kw["scope"])[-12:]]
+    assert st["status"] == "running"
+    # ...and the round itself finished ok rather than failing the loop
+    round_left = [e for e in runtime.journal(cwd=kw["cwd"], scope=kw["scope"])
+                  if e.get("event") == "left" and e.get("node") == "round"]
+    assert round_left and round_left[-1]["outcome"] == "ok", round_left
