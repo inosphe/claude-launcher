@@ -211,6 +211,41 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_the_boot_adopts_with_the_screen_built_off_the_loop(host, tmp_path, monkeypatch):
+    """The boot's restore (restore_all_async) builds the adopted screen on a
+    worker thread (claunch-opirg); what the session shows and accepts after
+    it is the same as the inline restore above."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        await s.send_keys(["before", "Enter"])
+        await _wait_screen(s, "echo:before")
+        pid = s.pid
+        await asyncio.sleep(1.0)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        assert await mgr2.restore_all_async() == []
+        s2 = mgr2.get("t1")
+        assert mgr2.adopted == ["t1"]
+        assert s2.pid == pid and not s2.exited
+        assert s2.screen.bracketed_paste is True  # the saved modes, applied
+        await _wait_screen(s2, "echo:before")
+        log_bytes = paths.session_log("t1").read_bytes()
+        assert log_bytes.count(b"READY") == 1
+        await s2.send_keys(["after", "Enter"])
+        await _wait_screen(s2, "echo:after")
+        await mgr2.shutdown_all(mode="stop")
+        assert _wait(lambda: not _pid_alive(pid))
+
+    asyncio.run(run())
+
+
 def test_a_busy_adopted_session_joins_the_nudge_audience(host, tmp_path, monkeypatch):
     """``was_busy`` decides which resume-nudge list an adopted session
     lands on (claunch-slia4): a busy one joins ``resumed_busy`` the way a

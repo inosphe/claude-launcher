@@ -821,7 +821,10 @@ class Session:
             name=self.sdef.name,
         ))
 
-    def adopt(self, handle, replay: bytes, reply: dict, saved: dict) -> None:
+    def adopt(
+        self, handle, replay: bytes, reply: dict, saved: dict,
+        screen: Optional[ScreenState] = None,
+    ) -> None:
         """Take over a session the PTY host kept across a daemon restart
         (claunch-xnnct.1) instead of starting a program.
 
@@ -837,29 +840,59 @@ class Session:
         alone and the log is left as it is, so it can miss what the program
         wrote between the crash and now.
 
+        ``screen`` is that rebuilt screen when the caller already made it
+        with :meth:`adopted_screen` -- the boot does, on a worker thread
+        (claunch-opirg) -- and is built here otherwise. It must be built
+        before the replay is appended below: the tail it reads ends where
+        the replay begins.
+
         The replay is not fed to the activity or compaction scanners: it is
         old output, and the clocks those drive must not read it as new.
         """
+        if screen is None:
+            screen = self.adopted_screen(
+                replay, saved, self.screen.cols, self.screen.rows,
+                self.screen.history_limit,
+            )
         self.argv = list(saved.get("argv") or [])
         self._started_mono = time.monotonic()
         gap = int(reply.get("gap") or 0)
         if saved.get("seq") is not None:
-            tail = self._replay_tail()
-            if tail:
-                self.screen.feed(tail)
-            self.screen.apply_modes(saved.get("modes") or {})
             if gap:
                 self._append_log(lost_output_note(gap))
             if replay:
                 self._append_log(replay)
-        if replay:
-            self.screen.feed(replay)
+        self.screen.adopt(screen)
         # The program is running and has drawn; it is not STARTING, and it
         # took input before the restart.
         self._saw_output = True
         self._input_ready = True
         self._last_output_mono = time.monotonic()
         self._attach(handle)
+
+    def adopted_screen(
+        self, replay: bytes, saved: dict, cols: int, rows: int, limit: int
+    ) -> ScreenState:
+        """The screen :meth:`adopt` takes over, built apart from the
+        session's own.
+
+        Safe on a worker thread: it reads the log and fills a screen of its
+        own, and touches nothing the loop holds (``cols``/``rows``/``limit``
+        are read off the session's screen by the caller, on the loop). The
+        pyte work is the boot's largest part -- 0.3s a session, 59.1s of a
+        112.1s restore of 162 sessions on 2026-10-28 (claunch-opirg) -- and
+        off the loop the loop serves everything else meanwhile.
+        """
+        screen = ScreenState(cols, rows, history=self._scrollback)
+        screen.set_history_limit(limit)
+        if saved.get("seq") is not None:
+            tail = self._replay_tail()
+            if tail:
+                screen.feed(tail)
+            screen.apply_modes(saved.get("modes") or {})
+        if replay:
+            screen.feed(replay)
+        return screen
 
     async def detach(self, timeout: float = 5.0) -> Optional[dict]:
         """Let go of a session that runs in the PTY host, leaving it running

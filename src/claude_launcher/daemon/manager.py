@@ -202,6 +202,44 @@ class HostRelaunch:
     blank: List[str] = field(default_factory=list)
 
 
+class _Adoption:
+    """An adoption halfway through a restore (claunch-opirg).
+
+    :meth:`SessionManager._adopt_begin` stages the session and re-attaches
+    it to the PTY host; :meth:`build` rebuilds its screen from the log tail
+    and the host's replay; :meth:`SessionManager._adopt_finish` hands that
+    screen over and starts the session. ``build`` is the pyte work -- 0.3s
+    a session -- and touches nothing the event loop holds, so the boot runs
+    it on a worker thread; the synchronous restore runs it inline.
+    """
+
+    def __init__(self, host, sdef, entry, row, session, handle, replay, reply, rec):
+        self.host, self.sdef, self.entry, self.row = host, sdef, entry, row
+        self.session, self.handle = session, handle
+        self.replay, self.reply, self.rec = replay, reply, rec
+        # Read here, on the loop: the build must not touch session.screen.
+        screen = session.screen
+        self._size = (screen.cols, screen.rows, screen.history_limit)
+        self.screen = None
+        #: Raised by the build, kept for :meth:`_adopt_finish` to raise on
+        #: the loop -- an exception out of a worker thread would end the
+        #: boot's whole restore instead of this one adoption.
+        self.error: Optional[BaseException] = None
+        self.seconds = 0.0
+
+    def build(self) -> None:
+        t0 = _perf_counter()
+        try:
+            cols, rows, limit = self._size
+            self.screen = self.session.adopted_screen(
+                self.replay, self.rec, cols, rows, limit
+            )
+        except Exception as exc:
+            self.error = exc
+        finally:
+            self.seconds = _perf_counter() - t0
+
+
 class SessionManager:
     #: Filesystem discovery for a rollout that Codex has not written yet is
     #: retried from ordinary manager reads.  One dashboard request can perform
@@ -289,6 +327,7 @@ class SessionManager:
         #: Seconds the current :meth:`restore_all` spent per launch step.
         self._restore_clock = {
             "prepare": 0.0, "spawn": 0.0, "attach": 0.0, "adopt": 0.0,
+            "yield": 0.0,
         }
         #: Names whose relaunch failed in the current :meth:`restore_all`.
         #: The pass is a generator now, so the return value cannot carry
@@ -3582,8 +3621,9 @@ class SessionManager:
         and no opening task, which a restore does not replay — so "carry on"
         is not what they need and not what they are sent.
         """
-        for _ in self._restore_steps():
-            pass
+        for work in self._restore_steps():
+            if work is not None:
+                work.build()
         return self._restore_failed
 
     async def restore_all_async(self, progress=None) -> List[str]:
@@ -3603,8 +3643,17 @@ class SessionManager:
         tries to bring back; the rest are kept as exited records, which is
         cheap and happens in the same pass.
         """
-        for _ in self._restore_steps(progress=progress):
-            await asyncio.sleep(0)
+        steps = self._restore_steps(progress=progress)
+        for work in steps:
+            if work is not None:
+                # An adoption's screen, built on a worker thread while the
+                # loop serves everything else (claunch-opirg); the step
+                # resumes on the loop and hands it over.
+                await asyncio.to_thread(work.build)
+            else:
+                t0 = _perf_counter()
+                await asyncio.sleep(0)
+                self._restore_clock["yield"] += _perf_counter() - t0
         return self._restore_failed
 
     def _restore_steps(self, progress=None):
@@ -3648,6 +3697,7 @@ class SessionManager:
         self._loading = True
         self._restore_clock = {
             "prepare": 0.0, "spawn": 0.0, "attach": 0.0, "adopt": 0.0,
+            "yield": 0.0,
         }
         started = _perf_counter()
         try:
@@ -3663,7 +3713,12 @@ class SessionManager:
                 progress(0, relaunching)
             done = 0
             for entry in entries:
-                self._restore_entry(entry, kept, host, stranded, failed)
+                work = self._restore_entry(entry, kept, host, stranded, failed)
+                if work is not None:
+                    # The caller builds the adopted screen -- inline, or on a
+                    # worker thread for the boot -- and resumes us to finish.
+                    yield work
+                    self._finish_adoption(work, entry, stranded, failed)
                 # `done` counts the same population `total` does. The
                 # registry holds far more records than this boot brings
                 # back -- exited ones kept for respawn -- and counting every
@@ -3676,7 +3731,7 @@ class SessionManager:
                     done += 1
                     if progress is not None:
                         progress(done, relaunching)
-                yield
+                yield None
             for row in kept.values():
                 # Running in the host with no record here that owns it: a
                 # session this registry ended or forgot, or one whose record
@@ -3698,34 +3753,45 @@ class SessionManager:
             # restart is read off the log instead of re-measured by hand:
             # "prepare" is building the command and replaying the previous
             # run's scrollback, "spawn" is the process and pseudo console.
+            # "yield" is the loop's own turns between records: the boot
+            # hands it back after each one, and what the API, the sessions
+            # already back and the rest of the boot do in those turns is
+            # wall time of this restore too -- the 51.9s of 112.1s that
+            # used to be filed as "other" (claunch-opirg).
             clock = self._restore_clock
             now = _perf_counter()
             log.info(
                 "restore took %.1fs for %d session(s): prepare/replay %.1fs, "
-                "spawn %.1fs, attach %.1fs, adopt/replay %.1fs, persist %.1fs, "
-                "other %.1fs",
+                "spawn %.1fs, attach %.1fs, adopt/replay %.1fs, "
+                "loop turns %.1fs, persist %.1fs, other %.1fs",
                 now - started,
                 relaunching,
                 clock["prepare"],
                 clock["spawn"],
                 clock["attach"],
                 clock["adopt"],
+                clock["yield"],
                 now - persist_started,
                 (persist_started - started)
                 - clock["prepare"] - clock["spawn"]
-                - clock["attach"] - clock["adopt"],
+                - clock["attach"] - clock["adopt"] - clock["yield"],
             )
 
     def _restore_entry(
         self, entry: dict, kept: Dict[str, dict], host, stranded, failed: List[str],
         *, why: str = "데몬 재시작",
-    ) -> None:
+    ) -> Optional["_Adoption"]:
         """One registry record, as :meth:`_restore_steps` walks them.
 
         Split out so the generator can yield between records: this is where
         a boot's seconds go (an adopt replays up to ``REPLAY_TAIL_BYTES`` of
         pyte work per session), and holding the event loop for all of it is
         what kept the port from answering during a restart.
+
+        An adoption is returned half done: its screen is still to be built
+        (:meth:`_Adoption.build`, which the boot runs on a worker thread),
+        and :meth:`_finish_adoption` takes it from there. Everything else is
+        handled here and returns None.
         """
         try:
             sdef = SessionDef.from_dict(entry.get("def") or {})
@@ -3739,15 +3805,40 @@ class SessionManager:
             # over as it is, before the restore queue and the
             # relaunch below, which are for programs that ended.
             try:
-                self._adopt(host, sdef, entry, row)
-                return
+                return self._adopt_begin(host, sdef, entry, row)
             except Exception:
-                log.exception(
-                    "failed to adopt session %r from the PTY host; "
-                    "ending it there and restoring it", sdef.name,
-                )
-                self._sessions.pop(sdef.name, None)
-                self._end_kept(host, row)
+                self._adopt_failed(host, sdef, row)
+        self._relaunch_entry(sdef, entry, stranded, failed, why=why)
+        return None
+
+    def _finish_adoption(
+        self, work: "_Adoption", entry: dict, stranded, failed: List[str]
+    ) -> None:
+        """The second half of an adoption :meth:`_restore_entry` began, once
+        its screen is built. A failure here falls back the way one in the
+        first half does: the host session is ended and the record restored
+        like a program that ended."""
+        try:
+            self._adopt_finish(work)
+        except Exception:
+            self._adopt_failed(work.host, work.sdef, work.row)
+            self._relaunch_entry(work.sdef, entry, stranded, failed)
+
+    def _adopt_failed(self, host, sdef: SessionDef, row: dict) -> None:
+        log.exception(
+            "failed to adopt session %r from the PTY host; "
+            "ending it there and restoring it", sdef.name,
+        )
+        self._sessions.pop(sdef.name, None)
+        self._end_kept(host, row)
+
+    def _relaunch_entry(
+        self, sdef: SessionDef, entry: dict, stranded, failed: List[str],
+        *, why: str = "데몬 재시작",
+    ) -> None:
+        """The rest of :meth:`_restore_entry`: a record no PTY host session
+        carries over -- relaunched, deferred to the restore queue, or kept
+        as an exited record."""
         if stranded is not None and entry.get("pty") and entry.get("was_running"):
             # Still running in a PTY host this daemon could neither
             # use nor end (claunch-xnnct.1): a relaunch would run
@@ -3839,15 +3930,19 @@ class SessionManager:
             return None
         return kept.pop(str(rec.get("sid")))
 
-    def _adopt(self, host, sdef: SessionDef, entry: dict, row: dict) -> None:
+    def _adopt_begin(
+        self, host, sdef: SessionDef, entry: dict, row: dict
+    ) -> Optional["_Adoption"]:
         """Take over a session the PTY host kept across the restart.
 
-        Running: a :class:`Session` is staged on it and re-attached
-        (:meth:`Session.adopt`) -- same process, no relaunch, no resume.
+        Running: a :class:`Session` is staged on it and re-attached to the
+        host, and the adoption is returned for its screen to be built and
+        :meth:`_adopt_finish` to hand it over (:meth:`Session.adopt`) --
+        same process, no relaunch, no resume.
         Exited while no daemon was attached: the output it made since is
         logged, and it is filed as an ending the way :meth:`_retire` files
         one that happened across a restart (its board sweep is claimed at
-        boot), with the host's code and time.
+        boot), with the host's code and time. Nothing is left to do: None.
         """
         rec = entry["pty"]
         sid = str(rec["sid"])
@@ -3880,7 +3975,7 @@ class SessionManager:
                 log.debug("ack_exit for %s failed", sid, exc_info=True)
             self.events.record(dead, "exit", "데몬이 없는 동안 세션 프로세스 종료",
                                exit_code=code, ended_by=dead.ended_by)
-            return
+            return None
         session = self.stage(
             sdef,
             restoring=True,
@@ -3899,16 +3994,27 @@ class SessionManager:
         handle, replay, reply = host.attach(sid, name=sdef.name, from_seq=from_seq)
         if clock is not None:
             clock["attach"] += _perf_counter() - t0
+        return _Adoption(host, sdef, entry, row, session, handle, replay, reply, rec)
+
+    def _adopt_finish(self, work: "_Adoption") -> None:
+        """Hand an adopted session its built screen and start it."""
+        session, handle = work.session, work.handle
+        clock = self._restore_clock if self._loading else None
+        if clock is not None:
+            clock["adopt"] += work.seconds
         t1 = _perf_counter()
         try:
-            session.adopt(handle, replay, reply, rec)
+            if work.error is not None:
+                raise work.error
+            session.adopt(handle, work.replay, work.reply, work.rec, screen=work.screen)
         except Exception:
             handle.detach()
             raise
         finally:
             if clock is not None:
                 clock["adopt"] += _perf_counter() - t1
-        self.adopted.append(sdef.name)
+        reply, entry = work.reply, work.entry
+        self.adopted.append(session.sdef.name)
         # The nudge audience a relaunch fills (manager.persist writes
         # ``was_busy`` per record; the relaunch path reads it the same
         # way). An idle adopted session whose run is waiting on it — a
@@ -3916,11 +4022,11 @@ class SessionManager:
         # forever: the cflow2 clock only wakes a driver when a wait
         # actually fires, and a choose has none (claunch-slia4).
         if entry.get("was_busy"):
-            self.resumed_busy.append(sdef.name)
+            self.resumed_busy.append(session.sdef.name)
         else:
-            self.resumed_idle[sdef.name] = entry.get("last_output_at")
+            self.resumed_idle[session.sdef.name] = entry.get("last_output_at")
         self.events.record(session, "adopt", "데몬 재시작 후 PTY 호스트의 세션 인수",
-                           pid=session.pid, replayed=len(replay),
+                           pid=session.pid, replayed=len(work.replay),
                            gap=int(reply.get("gap") or 0))
         self.flush_queued_input(session)
         self._run_launch_hooks(session)
