@@ -51660,6 +51660,10 @@ async function restoreNewFormDraft() {
   if (newFormDraftRestored) return;
   newFormDraftRestored = true;
   const f = $("new-session");
+  // Before anything is written onto the form: this is what the page ships,
+  // and a form opened for a spawn REQUEST is the one opening that starts
+  // here rather than on the browser's last answers (claunch-130zs).
+  captureNewFormPristine();
   const d = readNewFormDraft();
   if (!f || !d || sessionFormView().mode !== "new") return;
   const fire = (target, type = "change") =>
@@ -52764,7 +52768,8 @@ async function openSessionModal(opts = {}) {
   // starts on the form's own default instead of on the browser's last
   // answer. The draft is not consulted, and what the boot restore put on the
   // rows is taken back off first.
-  applySessionModalRecall(f);
+  if (opts.spawnRequest) restoreNewFormPristine();
+  else applySessionModalRecall(f);
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   refreshScoreGoalDefault(f);
   // The worktree list is not waited for. /api/git runs four git processes
@@ -61706,9 +61711,10 @@ async function spawnGateManual(rec) {
 
 /* The request's spec as a form seed: EVERY answer the spec carries, not the
    handful the first version spelled out (claunch-8x6v2). A row this leaves
-   empty is one the request did not answer, and openSessionModal fills those
-   from what the browser remembers — the request's own values would then be
-   missing exactly where the person was looking. */
+   empty is one the request did not answer, and a form opened for a request
+   starts those rows on the form's own defaults rather than on the browser's
+   last answers (claunch-130zs) — the request is the whole subject of that
+   opening, so nothing about it should read as a leftover. */
 function spawnRequestSeed(spec, rec) {
   const seed = {};
   const put = (key, value) => {

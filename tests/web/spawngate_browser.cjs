@@ -182,14 +182,19 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     // in for the boot that this harness cuts: it is what the page ships,
     // before the draft goes on top.
     await page.evaluate(() => {
+      captureNewFormPristine();
       const f = $('new-session');
       f.project.appendChild(new Option('alpha', 'alpha'));
       f.profile.appendChild(new Option('p', 'p'));
       f.project.appendChild(new Option('beta', 'beta'));
       f.profile.appendChild(new Option('draft-p', 'draft-p'));
+      ensureOption(f.mesh, 'draft-mesh');
+      ensureOption(f.role, 'draft-role');
       f.task.value = "the browser's last task";
       f.project.value = 'beta';
       f.profile.value = 'draft-p';
+      f.mesh.value = 'draft-mesh';
+      f.role.value = 'draft-role';
     });
     await spawnCard.getByRole('button', { name: 'Manual' }).click();
     await page.waitForFunction(() => typeof sessionModal === 'object' && sessionModal
@@ -201,11 +206,13 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       parent: ($('new-session').parent || {}).value || '',
       project: $('new-session').project.value,
       profile: $('new-session').profile.value,
+      mesh: $('new-session').mesh.value,
+      role: $('new-session').role.value,
       worktree: $('new-session').worktree_mode.value,
       overlay: !$('modal-overlay').classList.contains('hidden'),
     }));
     assert.deepEqual(form, { tab: 'new', task: SPEC.task, parent: '', project: 'alpha',
-      profile: 'p', worktree: 'new', overlay: true });
+      profile: 'p', mesh: '', role: '', worktree: 'new', overlay: true });
     await spawnCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-manual.png') });
