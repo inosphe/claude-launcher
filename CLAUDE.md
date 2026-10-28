@@ -181,14 +181,25 @@
   playwright가 있으면 그 경로를 그대로 `NODE_PATH`로 주면 된다(이 머신에는 1.64.1이
   있다). 다만 그 디렉터리 이름은 npx 재계산으로 바뀌므로, 반복해서 쓰는 쪽은 위의
   전역 설치 경로다.
+- `CLAUNCH_PLAYWRIGHT`(하네스 여럿이 `require(process.env.CLAUNCH_PLAYWRIGHT ||
+  'playwright')`로 playwright를 찾고, `docs/search-anything.md`가 안내하는 변수)만으로는
+  게이트가 열리지 않는다. `test_browser_harness`의 검사는 `require.resolve('playwright')`
+  하나이고 이 변수를 보지 않으므로, 그 경로만 주면 하네스 자신은 playwright를 찾지만
+  테스트는 그대로 skip된다(실측: 같은 경로를 이 변수로만 주면 게이트 검사는
+  `Cannot find module 'playwright'`로 exit 1, 하네스의 `require`는 exit 0). 게이트를
+  열려면 위의 `NODE_PATH`를 세운다.
 - 이 목적을 위해 저장소에 `package.json`·lockfile을 들이지 않는다. `npm install`은
   브라우저 바이너리를 받지 않으므로 재현성이 늘지 않고, 파이썬 스위트가 node 툴체인에
   의존하게 된다.
 - 켠 상태에서 빨간 하네스는 실제 회귀다. skip은 그 실패를 게이트에 보이지 않게 한다
   (claunch-1bhp2.1: 부트 호출을 스트립하는 정규식이 깨져 네 하네스가 빨갰고, 하네스가
-  skip되는 동안 아무 게이트도 그것을 보고하지 않았다). 이 절을 쓴 시점의 실측
-  (2026-10-28, `8c13c594`): **57 passed / 1 failed** — 실패는
-  `spawngate_browser.cjs`이고 그 이슈는 `claunch-odk2w.1`이다.
+  skip되는 동안 아무 게이트도 그것을 보고하지 않았다).
+- 선별 `-k browser_harness`가 모으는 것은 **58건**이다 — 하네스 57건과
+  `test_browser_harnesses_strip_the_real_boot_call` 1건이다(그 키워드는 이름의 부분
+  문자열로 걸리므로 두 테스트를 함께 고른다). 이 절을 쓴 시점의 실측(2026-10-28,
+  `8c13c594`): **57 passed / 1 failed** — 실패 1건은 하네스
+  `spawngate_browser.cjs`(`claunch-odk2w.1`)이고, 나머지 하네스 56건과 부트 스트립
+  검사가 통과했다. 그러므로 이 수치는 「하네스 57건 중 1건 실패」가 아니다.
 
 
 --- 
