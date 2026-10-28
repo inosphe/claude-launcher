@@ -156,6 +156,15 @@ const server = http.createServer((req, res) => {
     await tip.waitFor({ state: "visible" });
     const rows = await tip.locator(".sysperf-tip-row span").allTextContents();
     assert.deepEqual(rows, ["Read", "Write"]);
+    // The hairline sits under the cursor at both ends of the plot, also when
+    // max-height caps the svg and centres the drawing (claunch-cd6s9.1).
+    const hair = page.locator("#sysperf-view .sysperf-card").nth(2).locator("line.sysperf-hair");
+    for (const px of [box.x + 1, box.x + box.width - 2]) {
+      await page.mouse.move(px, box.y + box.height / 2);
+      const line = await hair.boundingBox();
+      assert.ok(Math.abs(line.x + line.width / 2 - px) < 3,
+        `hairline at ${line.x + line.width / 2}, cursor at ${px}`);
+    }
     if (process.env.SYSPERF_SHOT) await page.screenshot({ path: process.env.SYSPERF_SHOT, fullPage: true });
 
     // 5. leave

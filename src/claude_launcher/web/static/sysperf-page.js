@@ -40,6 +40,13 @@
   // not scaled the way bytes are.
   const fmtCount = (n) => (typeof n === "number" && Number.isFinite(n) ? n.toLocaleString() : "—");
   const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  // The viewBox x under a client x. The chart keeps its aspect ratio
+  // (xMidYMid meet): once max-height caps it the drawing is centred in a
+  // wider box, so a plain width ratio misses the cursor (claunch-cd6s9.1).
+  const viewX = (clientX, box, W, H) => {
+    const scale = Math.min(box.width / W, box.height / H);
+    return (clientX - box.left - (box.width - W * scale) / 2) / scale;
+  };
   const ioTotal = (s) => (typeof s.disk_read_bps === "number" ? s.disk_read_bps + (s.disk_write_bps || 0) : null);
 
   // Bytes and inodes are two ways one drive can be full: WSL ran out of
@@ -253,7 +260,7 @@
     hit.addEventListener("pointerleave", hide);
     hit.addEventListener("pointermove", (event) => {
       const box = root.getBoundingClientRect();
-      const px = ((event.clientX - box.left) / box.width) * W;
+      const px = viewX(event.clientX, box, W, H);
       const ts = t0 + ((px - L) / (W - L - R)) * span;
       let best = points[0];
       for (const p of points) if (Math.abs(p.ts - ts) < Math.abs(best.ts - ts)) best = p;
