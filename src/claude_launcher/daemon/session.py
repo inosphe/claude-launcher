@@ -469,6 +469,21 @@ async def _deliver_after_hold(session, text, **kwargs) -> bool:
     return await current.deliver(text, **kwargs)
 
 
+
+def _signallable(session) -> bool:
+    """Whether an ending asked of ``session`` now reaches a program: one is
+    attached, or the boot is adopting one (:attr:`Session.adopting`)."""
+    return session.pty is not None or getattr(session, "adopting", None) is not None
+
+
+def _terminate(session, force: bool) -> None:
+    """Signal ``session``'s program, or owe the signal to
+    :meth:`Session.adopt` while there is no PTY to signal yet."""
+    if session.pty is not None:
+        session.pty.terminate(force=force)
+    else:
+        session._ending_owed = bool(session._ending_owed) or force
+
 class Session:
     """Owns one PTY child; created and torn down by the SessionManager.
 
@@ -2329,25 +2344,12 @@ class Session:
             self.ended_by = dict(by)
 
     def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
-        if self.exited or not self._signallable():
+        if self.exited or not _signallable(self):
             return
         if by:
             self.note_ender(by)
         self.kill_requested = True
-        self._terminate(force)
-
-    def _signallable(self) -> bool:
-        """Whether an ending asked for now reaches a program: one is
-        attached, or the boot is adopting one (:attr:`adopting`)."""
-        return self.pty is not None or self.adopting is not None
-
-    def _terminate(self, force: bool) -> None:
-        """Signal the program, or owe the signal to :meth:`adopt` while
-        there is no PTY to signal yet."""
-        if self.pty is not None:
-            self.pty.terminate(force=force)
-        else:
-            self._ending_owed = bool(self._ending_owed) or force
+        _terminate(self, force)
 
     def pause(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         """Kill, and mark the record as paused rather than killed.
@@ -2359,7 +2361,7 @@ class Session:
         running with the marker set, which the rail draws as "pausing" — the
         same window a plain kill has, made visible.
         """
-        if self.exited or not self._signallable():
+        if self.exited or not _signallable(self):
             return
         self.paused_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2370,7 +2372,7 @@ class Session:
         Marker before signal, for the reason :meth:`pause` gives: the exit
         funnel reads it to decide that nothing has ended.
         """
-        if self.exited or not self._signallable():
+        if self.exited or not _signallable(self):
             return
         self.held_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2386,12 +2388,12 @@ class Session:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        if self.exited or not self._signallable():
+        if self.exited or not _signallable(self):
             return
         # An asked-for ending like kill(): redefine, migrate, archive and
         # clear --running end sessions through here, not through kill().
         self.kill_requested = True
-        self._terminate(False)
+        _terminate(self, False)
         if self.pty is None:
             return
         deadline = time.monotonic() + grace
