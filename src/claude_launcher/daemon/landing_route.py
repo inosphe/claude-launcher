@@ -20,7 +20,9 @@ merge is a skip.
 A session *can merge* when it is live, holds the ``merger`` role in a mesh
 the worker is in (a ``leader`` is taken as holding it; roles are mesh
 membership, so that is where they are read -- claunch-lhgfx), and drives, in a
-checkout of the worker's own repository, a run that holds a landing queue.
+checkout of the worker's own repository, a run that holds a landing queue. One
+whose queues are all in other repositories is skipped with those repositories
+named (claunch-u7nu3).
 With no mesh manager at all (a daemon or test without one) the role is not
 checked. When it drives
 several, one is picked without asking: a main run first, whatever its order,
@@ -97,6 +99,9 @@ class Router:
         self.manager = manager
         self.mesh = mesh
         self.holders = holders
+        #: Parents stated by the caller for a session the manager cannot yet
+        #: answer for (a child being onboarded, claunch-u7nu3).
+        self.parents: Dict[str, str] = {}
 
     def _session(self, name: str) -> Any:
         try:
@@ -107,6 +112,8 @@ class Router:
     def parent_of(self, name: Optional[str]) -> Optional[str]:
         if not name:
             return None
+        if name in self.parents:
+            return self.parents[name] or None
         session = self._session(name)
         return getattr(getattr(session, "sdef", None), "parent", None) or None
 
@@ -162,8 +169,28 @@ class Router:
             return None, f"has runs that could not be read ({exc})"
         holder = pick(found)
         if holder is None:
-            return None, "has no run in this repository that declares a landing queue"
+            return None, self._elsewhere(name, repo) or (
+                "has no run in this repository that declares a landing queue")
         return holder, ""
+
+    def _elsewhere(self, name: str, repo: Optional[str]) -> str:
+        """Why ``name`` is the landing queue of another repository, or empty.
+
+        A leader that integrates one repository is no target for a worker of
+        another (claunch-u7nu3: a gds6 worker routed to the claunch leader);
+        naming the repositories it does hold tells the reader that apart from
+        a leader that has no queue at all."""
+        if repo is None:
+            return ""
+        try:
+            found = self.holders(name, None)
+        except Exception:  # noqa: BLE001 - the plain reason stands
+            return ""
+        others = sorted({cflow_landing.common_dir(h.cwd) or h.cwd for h in found} - {repo})
+        if not others:
+            return ""
+        return (f"takes landings for another repository ({', '.join(others)}), "
+                f"not the worker's ({repo})")
 
     def stacked(self, cwd: str, scope: str) -> Target:
         """The nearest direct ancestor that can merge, else the mesh leader."""
@@ -183,8 +210,12 @@ class Router:
         return Target(why="; ".join(passed + [f"mesh leader fallback: {why}"]),
                       passed=tuple(passed))
 
-    def independent(self, cwd: str, scope: str) -> Target:
-        """The mesh leader only (a sibling or a direct ancestor)."""
+    def independent(self, cwd: str, scope: str, parent: Optional[str] = None) -> Target:
+        """The mesh leader only (a sibling or a direct ancestor). ``parent``
+        states ``scope``'s parent when the session record may not carry it
+        yet (the spawn that wires a child to its leader)."""
+        if parent is not None:
+            self.parents[scope] = parent
         repo = cflow_landing.common_dir(cwd)
         owner, holder, why = self.leader(scope, self.ancestors(scope), repo, tried=set())
         if holder is None:

@@ -1234,6 +1234,9 @@ nodes:
     또는 데몬이 아는 직계 조상의 형제(같은 부모. 둘 다 부모가 없으면 형제로 본다)인
     세션만 대상이다. 부모가 병합할 수 없는 free-role 루트면 그 옆 루트 leader(워커의
     삼촌)가 받는다(claunch-g0ttr). 사촌·형제의 자식·자식 관계인 leader는 대상이 아니다. 병합 가능한 leader가 정확히 하나가 아니면 `trigger_skipped`다.
+    착지 큐가 전부 다른 저장소에 있는 leader는 그 저장소를 사유에 적고 지나간다
+    (`takes landings for another repository (<저장소>), not the worker's (<저장소>)`,
+    claunch-u7nu3) — 같은 저장소의 leader가 옆에 있으면 그쪽이 받는다.
   - 대상이 없으면 `trigger_skipped`(지나간 세션과 사유)를 남기고 데몬 로그에 경고를
     쓴다. 대체 대상으로 넣었으면 `trigger_done`의 사유가 지나간 세션과 대상
     (`fell back to '<세션>' at <cwd>`)을 적는다.
@@ -2962,10 +2965,15 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   관계와 근거는 자식 이슈의 `RELATION: <관계> — <근거>` 코멘트로 남긴다.
 - 착지 요청: `integration-request`의 leave push trigger 둘이 `when`으로 갈린다(2.8).
   independent 자식은 리더에게 nudge하고 부모 워커에게는 fyi만 보낸다.
+- 리더 연결: 기본 `auto_link`는 자식을 부모에게만 잇는다. 그래서 independent 자식은
+  spawn의 join에서 위 mesh leader 규칙이 고른 leader(자식 저장소의 착지 큐를 가진
+  leader)에게 한 번 더 연결된다(claunch-u7nu3). 그런 leader가 없으면 아무에게도
+  잇지 않고 spawn 응답의 `mesh.landing_leader`에 사유를 남긴다.
 - 착지 여부 질문: 워커의 기계 확인이 깨져 `landing`이 escalate하면, 묻는 상대는 착지
   요청을 받을 세션이다(claunch-yq80p.12). stacked는 `landing-review`(응답자: 조상 워커,
-  조상 리더, 형제 리더 순), independent는 `landing-review-leader`(조상 리더, 형제 리더
-  순)다. 두 노드는 질문 문구·선택지·작업 프롬프트를 YAML 앵커로 공유하고 `from`만
+  조상 리더, 형제 리더 순), independent는 `landing-review-leader`(조상 리더, 형제 리더,
+  루트 리더 순, 세 그룹 모두 `connect: true` — wire되지 않은 리더는 질문이 열릴 때
+  연결된다, claunch-u7nu3)다. 두 노드는 질문 문구·선택지·작업 프롬프트를 YAML 앵커로 공유하고 `from`만
   다르다. 30분 안에 답이 없으면 둘 다 사람 앞에 선다.
 - stack 런(stack-v2)은 stacked 자식만 다룬다. 표에 올리기 전에 자식 런의 입력
   (`claunch cflow2 status -t <자식> --json`의 `inputs.relation`)을 읽는다. independent

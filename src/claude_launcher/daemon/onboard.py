@@ -78,6 +78,10 @@ from .session import delivery_wake
 
 log = logging.getLogger(__name__)
 
+#: The ``relation`` start input of a v2 worker whose landing request goes to
+#: the mesh leader (``leader:landing``) rather than its parent.
+INDEPENDENT = "independent"
+
 #: Decline the inherited team mesh while keeping the parent channel.
 #: Omission means inherit, so opting out requires an explicit token.
 NO_MESH = "-"
@@ -175,6 +179,13 @@ class Plan:
     @property
     def wanted(self) -> bool:
         return bool(self.mesh or self.workflow or self.task or self.parent)
+
+    @property
+    def independent(self) -> bool:
+        """A v2 run whose start input ``relation`` is ``independent``: its
+        landing goes to the mesh leader's queue, not its parent's."""
+        return (self.workflow_version == 2
+                and str((self.cflow_inputs or {}).get("relation") or "") == INDEPENDENT)
 
 
 async def inherit_mesh(
@@ -775,7 +786,50 @@ def compose_cflow_declined_note(*, workflow: str = "") -> str:
     )
 
 
-async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, str]:
+def _landing_target(manager, mesh_mgr, cwd: str, name: str, parent: str):
+    """(leader session, why) for an independent child's landing request.
+    Blocking (git reads); call it in a thread."""
+    from ..cflow import landing as cflow_landing
+    from . import cflow2_triggers as v2
+    from .landing_route import Router
+
+    if cflow_landing.common_dir(cwd) is None:
+        # The route would then take a queue in any repository; wiring a
+        # leader of another one is what this edge must never do.
+        return None, f"no git readable in {cwd}, so its repository's leader cannot be told"
+    router = Router(manager, mesh_mgr, v2.landing_holders(manager, v2.session_cwds(manager)))
+    found = router.independent(cwd, name, parent=parent)
+    return found.owner, found.why
+
+
+async def _landing_leader(plan: Plan, name: str, handle: str, *, cwd: str,
+                          mesh_mgr, manager) -> dict:
+    """Connect an independent child to its landing leader. Never raises: the
+    report says who was connected, or why nobody was."""
+    try:
+        owner, why = await asyncio.to_thread(
+            _landing_target, manager, mesh_mgr, cwd, name, plan.parent)
+    except Exception as exc:  # noqa: BLE001 - the spawn goes on without it
+        return {"connected": False, "why": f"the landing leader could not be read ({exc})"}
+    if not owner:
+        return {"connected": False, "why": why}
+    mesh = mesh_mgr.get(plan.mesh)
+    lead = mesh_mgr.member_for_session(mesh, owner)
+    if lead is None:
+        return {"connected": False, "session": owner,
+                "why": f"{owner!r} has no member in mesh {plan.mesh!r}"}
+    out = {"connected": True, "session": owner, "handle": lead.handle}
+    if lead.handle == handle or mesh.connected(handle, lead.handle):
+        return out
+    try:
+        await mesh_mgr.set_member_link(plan.mesh, handle, lead.handle, enabled=True)
+    except MeshError as exc:
+        return {**out, "connected": False, "why": str(exc)}
+    return out
+
+
+async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr,
+                  manager=None) -> Tuple[dict, str]:
     """Do every leg of a validated plan, for a session that does not exist yet.
 
     Returns ``(report, block)``: one report entry per leg attempted, so a
@@ -786,13 +840,15 @@ async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, s
     directly.
 
     The caller owns the session that follows. If it fails to start, undo this
-    with :func:`unwind`.
+    with :func:`unwind`. ``manager`` lets the join find an independent
+    child's landing leader (:func:`_landing_leader`); without one that edge
+    is not made.
     """
     result: dict = {}
     sections: list = []
 
     if plan.mesh:
-        joined = await _join(plan, name, mesh_mgr=mesh_mgr)
+        joined = await _join(plan, name, mesh_mgr=mesh_mgr, cwd=cwd, manager=manager)
         result["mesh"] = joined
         if joined.get("briefing"):
             sections.append(joined.pop("briefing"))
@@ -931,7 +987,7 @@ async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
             log.warning("could not undo cflow run for %r: %s", name, exc)
 
 
-async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
+async def _join(plan: Plan, name: str, *, mesh_mgr, cwd: str = "", manager=None) -> dict:
     """Enrol the session and return the briefing text for the opening block.
 
     Who the new member may talk to is **the join's** decision, not this
@@ -947,6 +1003,14 @@ async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
     does. They are opened after the join rather than passed into it because
     they are the caller's decision about this one child, not a property of the
     mesh's shape.
+
+    An independent child (:attr:`Plan.independent`) is also connected to the
+    leader its landing request will go to (claunch-u7nu3): its landing-nudge
+    and settle asks message that leader, and no ``auto_link`` rule joins a
+    child to anybody but its parent. The leader is the one
+    :meth:`.landing_route.Router.independent` names -- a live leader beside
+    or above the child that drives a landing queue in the child's own
+    repository -- so a leader of another repository is never wired.
     """
     try:
         # The briefing is held back so it can go out inside the opening block
@@ -979,6 +1043,9 @@ async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
             )
         except MeshError as exc:
             out.setdefault("connect_errors", {})[peer] = str(exc)
+    if plan.independent and manager is not None:
+        out["landing_leader"] = await _landing_leader(
+            plan, name, member.handle, cwd=cwd, mesh_mgr=mesh_mgr, manager=manager)
     out["connected_to"] = mesh.neighbours(member.handle)
 
     try:
