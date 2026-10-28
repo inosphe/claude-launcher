@@ -368,6 +368,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -859,6 +860,13 @@ def test_the_prose_that_opens_the_gate_selects_what_it_says():
     * the section states how many harnesses there are. Add one and the number
       it prints is wrong while every harness still passes.
 
+    A third way has no source-level tell at all (claunch-qx1rp): the list the
+    parametrize receives can be cut down — ``BROWSER_CHECKS[:3]`` reads as
+    ``BROWSER_CHECKS`` to the checks below, leaves ``len(BROWSER_CHECKS)`` at
+    its full value and leaves the document's count correct, while the printed
+    command collects four nodes instead of fifty-eight. So the last assertion
+    runs that command against this module and counts what it collects.
+
     So the assertions are about the selection, not only about the prose.
     """
     doc = (WEB.parents[1] / "CLAUDE.md").read_text(encoding="utf-8")
@@ -887,4 +895,37 @@ def test_the_prose_that_opens_the_gate_selects_what_it_says():
     assert len(BROWSER_CHECKS) > 1, f"only {len(BROWSER_CHECKS)} browser harness(es)"
     assert f"{len(BROWSER_CHECKS)}개" in doc, (
         f"CLAUDE.md states a harness count that is not {len(BROWSER_CHECKS)}"
+    )
+    # The source checks above cannot see a cut-down list, and the document's
+    # count cannot either. So run the documented selection and count its
+    # nodes. `--collect-only` executes no test body, so this cannot recurse
+    # into itself; the child inherits this run's window grant rather than
+    # acquiring a second one (tests/conftest.py's `inherited_grant`).
+    here = Path(__file__).resolve()
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(here), "--collect-only", "-q",
+         "-k", "browser_harness", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
+        cwd=str(here.parents[1]),
+    )
+    assert proc.returncode == 0, (
+        "the document's `-k browser_harness` selection does not run cleanly "
+        f"against this module:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+    )
+    nodes = proc.stdout.splitlines()
+    harness_nodes = sum(1 for line in nodes if "::test_browser_harness[" in line)
+    assert harness_nodes == len(BROWSER_CHECKS), (
+        f"`-k browser_harness` collects {harness_nodes} harness node(s) from "
+        f"this module, not one per BROWSER_CHECKS entry "
+        f"({len(BROWSER_CHECKS)}): a sliced, filtered or renamed parametrize "
+        "list leaves the source checks above and the document's count green "
+        "while the printed command runs fewer harnesses than it claims"
+    )
+    boot_nodes = sum(
+        1 for line in nodes
+        if line.endswith("::test_browser_harnesses_strip_the_real_boot_call")
+    )
+    assert boot_nodes == 1, (
+        f"`-k browser_harness` collects {boot_nodes} copies of the boot-strip "
+        "check; the document counts it once"
     )
