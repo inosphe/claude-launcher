@@ -773,7 +773,7 @@ check("the reminder group draws a frame of its own",
 check("...and leaves the row when neither control is up",
       /\.term-reminder:not\(:has\(> \.term-btn:not\(\.hidden\)\)\) \{\s*display:\s*none/.test(rules), true);
 check("...and drops its label when the group turns into a glyph",
-      /#term-header \.term-reminder\.toolbar-icon \.term-reminder-label \{\s*display:\s*none/.test(rules), true);
+      /#term-header \.term-reminder\[data-toolbar-glyph\] \.term-reminder-label \{\s*display:\s*none/.test(rules), true);
 // One border around the pair (claunch-0jjv3.2): the controls inside lose
 // their own outlines, and the due/held/stopped dress moves to the frame.
 check("...and the controls inside it draw no border of their own",

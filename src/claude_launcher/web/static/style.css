@@ -2953,11 +2953,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* A click copies the name (app.js copyTermTitle). */
 #term-title:hover { text-decoration: underline dotted; }
 #term-title:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
-#term-header .toolbar-icon[data-toolbar-icon], #term-header .toolbar-icon [data-toolbar-icon] {
+#term-header [data-toolbar-glyph][data-toolbar-icon], #term-header [data-toolbar-glyph] [data-toolbar-icon] {
   font-size: 0; min-width: 28px; width: 28px; max-width: 28px;
   padding: 2px 0; text-align: center; overflow: hidden;
 }
-#term-header .toolbar-icon[data-toolbar-icon]::before, #term-header .toolbar-icon [data-toolbar-icon]::before {
+#term-header [data-toolbar-glyph][data-toolbar-icon]::before, #term-header [data-toolbar-glyph] [data-toolbar-icon]::before {
   content: attr(data-toolbar-icon); font-size: 13px; line-height: 1.6;
 }
 #term-header .toolbar-overflow { display: none !important; }
@@ -3175,8 +3175,8 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .term-reminder:has(> .due:not(.hidden)) { border-color: #4d3800; }
 .term-reminder:has(> .held:not(.hidden)) { border-color: #3c2e5c; }
 .term-reminder:has(> .timer-chip.stopped:not(.hidden)) { border-color: #8b2e2e; }
-#term-header .term-reminder.toolbar-icon { padding-left: 2px; gap: 2px; }
-#term-header .term-reminder.toolbar-icon .term-reminder-label { display: none; }
+#term-header .term-reminder[data-toolbar-glyph] { padding-left: 2px; gap: 2px; }
+#term-header .term-reminder[data-toolbar-glyph] .term-reminder-label { display: none; }
 /* The briefing card's strip, between the header and the terminal: padding
    and a rule like the queued strip's, in the panel's own grey so a summary
    reads as something to read, not as a wait the reader caused. The card

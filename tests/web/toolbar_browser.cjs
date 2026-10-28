@@ -113,7 +113,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       await settle();
       return page.evaluate(() => window.fits);
     };
-    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll(".toolbar-icon").length), 0);
+    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll("[data-toolbar-glyph]").length), 0);
     assert.equal(await refits("Ⅱ role reminder in 7:12"), 0, "a same-width countdown text does not re-fit the row");
     assert.equal(await refits("Ⅱ role reminder in 7:12 and a good deal longer than it was"), 1,
       "a countdown text that widens the chip re-fits the row");
@@ -222,7 +222,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       document.getElementById("term-link").classList.add("hidden");
     });
     await check(1920);
-    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll(".toolbar-icon").length), 0);
+    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll("[data-toolbar-glyph]").length), 0);
     // The lifecycle group on the row is one Tab stop walked by the arrow keys
     // (claunch-468ec). Kill is checked but disabled here (and resume is
     // disabled), so the stop is the first segment that can be pressed, and

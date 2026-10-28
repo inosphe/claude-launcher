@@ -174,7 +174,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     const fitting = await page.evaluate(() => {
       const h = document.getElementById("term-header");
       return { squeezed: parseFloat(getComputedStyle(h).columnGap) < 10,
-               icons: h.querySelectorAll(".toolbar-icon").length,
+               icons: h.querySelectorAll("[data-toolbar-glyph]").length,
                overflow: h.querySelectorAll(".toolbar-overflow").length };
     });
     assert.deepEqual(fitting, { squeezed: false, icons: 0, overflow: 0 },

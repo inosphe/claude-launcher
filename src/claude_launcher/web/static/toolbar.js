@@ -7,7 +7,9 @@
  *      side padding (9px -> 4px) shrink by exactly the missing width, so a
  *      pixel less column is a pixel less row;
  *   2. iconify — one control at a time, in MINIMIZE_ORDER, trades its label
- *      for its glyph (CSS, `.toolbar-icon`);
+ *      for its glyph (CSS, `[data-toolbar-glyph]` — an attribute, because
+ *      app.js rewrites whole class lists of the status, tps, hold and link
+ *      chips on every poll, and a class put there would be gone each time);
  *   3. overflow — only once every control is a glyph and the row still does
  *      not fit, controls leave for the `⋯` menu one at a time, in the same
  *      order.
@@ -234,8 +236,10 @@
     tabular = new WeakMap();
     observer.disconnect();
     sizes.disconnect();
-    header.querySelectorAll(".toolbar-overflow, .toolbar-icon")
-      .forEach(el => el.classList.remove("toolbar-overflow", "toolbar-icon"));
+    header.querySelectorAll(".toolbar-overflow, [data-toolbar-glyph]").forEach((el) => {
+      el.classList.remove("toolbar-overflow");
+      el.removeAttribute("data-toolbar-glyph");
+    });
     more.classList.add("hidden");
     overflow = [];
     iconified = 0;
@@ -283,8 +287,8 @@
         let done = false;
         for (const el of glyphOrder) {
           const before = el.getBoundingClientRect().width;
-          el.classList.add("toolbar-icon");
-          if (el.getBoundingClientRect().width >= before - 0.5) { el.classList.remove("toolbar-icon"); continue; }
+          el.setAttribute("data-toolbar-glyph", "");
+          if (el.getBoundingClientRect().width >= before - 0.5) { el.removeAttribute("data-toolbar-glyph"); continue; }
           iconified++;
           if (fits()) { done = true; break; }
         }

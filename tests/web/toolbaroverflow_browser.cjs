@@ -80,7 +80,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
         const row = {};
         for (const el of [...items, details]) {
           const state = el.classList.contains("toolbar-overflow") ? "menu"
-            : el.classList.contains("toolbar-icon") ? "icon" : "label";
+            : el.hasAttribute("data-toolbar-glyph") ? "icon" : "label";
           row[key(el)] = { state, width: state === "menu" ? 0 : el.getBoundingClientRect().width };
         }
         out.push({
@@ -151,7 +151,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       await page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, w);
       const seq = await page.evaluate(() => new Promise(done => {
         const h = document.getElementById("term-header");
-        const sig = () => `${h.style.getPropertyValue("--tb-gap")}|${h.querySelectorAll(".toolbar-icon").length}|`
+        const sig = () => `${h.style.getPropertyValue("--tb-gap")}|${h.querySelectorAll("[data-toolbar-glyph]").length}|`
           + h.querySelectorAll(".toolbar-overflow").length;
         const out = []; let n = 60;
         const step = () => { out.push(sig()); (--n ? requestAnimationFrame(step) : done(out.slice(5))); };
@@ -159,6 +159,24 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       }));
       assert.equal(new Set(seq).size, 1, `the row holds still at ${w}px: ${[...new Set(seq)].join(" / ")}`);
     }
+
+    // app.js rewrites the whole class list of the status, tps, hold and link
+    // chips on every poll. The glyph state is an attribute so that write
+    // cannot take it off: the chip is still a glyph after the write.
+    const glyphHold = rows.find(r => r.row["term-hold"] && r.row["term-hold"].state === "icon").at;
+    await page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, glyphHold);
+    const kept = await page.evaluate(() => new Promise(done => {
+      const hold = document.getElementById("term-hold");
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const before = hold.hasAttribute("data-toolbar-glyph");
+        hold.className = "term-btn hold-chip";
+        const right = hold.hasAttribute("data-toolbar-glyph");
+        requestAnimationFrame(() => requestAnimationFrame(() =>
+          done({ before, right, after: hold.hasAttribute("data-toolbar-glyph") })));
+      }));
+    }));
+    assert.deepEqual(kept, { before: true, right: true, after: true },
+      `a whole-class write keeps the hold chip a glyph at ${glyphHold}px`);
 
     // A lit control in the menu lights `⋯`; on the row it does not.
     const lit = async (w, id, cls) => {
