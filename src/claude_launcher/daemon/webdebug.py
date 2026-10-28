@@ -720,28 +720,44 @@ class Hub:
             if self._idle is not None:
                 self._idle.cancel()
                 self._idle = None
-        await self.ensure_screencast(win)
-        if win.last_frame:
+        try:
+            await self.ensure_screencast(win)
+            if win.last_frame:
+                with contextlib.suppress(Exception):
+                    await ws.send_bytes(win.last_frame)
+            await self.send_state(win)
+            if refused:
+                # The window says what it is, so the state above is honest; the
+                # viewer that asked for the other answer is told it did not take.
+                # This viewer is already in win.viewers, so a write that fails
+                # here escapes attach before h_ws reaches the try/finally that
+                # detaches it: a closing peer raises ClientConnectionResetError,
+                # which is not a WebDebugError, so the dead viewer would stay
+                # registered and the window would never be reaped
+                # (claunch-9a3k4). The state above has already carried the
+                # truth; this note is the extra, so it may be dropped -- like
+                # every other send in this class.
+                with contextlib.suppress(Exception):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": ("this browser would not change the certificate answer; "
+                                    "the window is still "
+                                    f"{'ignoring' if win.insecure_tls else 'checking'} certificates"),
+                    })
+        except BaseException:
+            # Everything above runs after win.viewers.append(ws) and outside the
+            # lock, so anything that escapes here leaves this viewer registered
+            # with nobody owning it. h_ws's WebDebugError branch answers the page
+            # and closes, but it does not detach; detach() only starts a reaper
+            # when the LAST viewer leaves; so one such viewer keeps the window
+            # and its page alive until stop_all. Browser startup is the common
+            # way in: ensure_screencast() opens with browser.ensure(), which
+            # raises WebDebugError(503) when the browser cannot start
+            # (claunch-9a3k4.1). Unregister before the exception travels -- the
+            # caller still reports the failure to the page.
             with contextlib.suppress(Exception):
-                await ws.send_bytes(win.last_frame)
-        await self.send_state(win)
-        if refused:
-            # The window says what it is, so the state above is honest; the
-            # viewer that asked for the other answer is told it did not take.
-            # This viewer is already in win.viewers, so a write that fails here
-            # escapes attach before h_ws reaches the try/finally that detaches
-            # it: a closing peer raises ClientConnectionResetError, which is not
-            # a WebDebugError, so the dead viewer would stay registered and the
-            # window would never be reaped (claunch-9a3k4). The state above has
-            # already carried the truth; this note is the extra, so it may be
-            # dropped -- like every other send in this class.
-            with contextlib.suppress(Exception):
-                await ws.send_json({
-                    "type": "error",
-                    "message": ("this browser would not change the certificate answer; "
-                                "the window is still "
-                                f"{'ignoring' if win.insecure_tls else 'checking'} certificates"),
-                })
+                await self.detach(win, ws)
+            raise
         return win
 
     async def detach(self, win: Window, ws: web.WebSocketResponse) -> None:

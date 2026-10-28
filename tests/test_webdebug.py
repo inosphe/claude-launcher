@@ -1195,6 +1195,76 @@ def test_a_dead_viewer_does_not_keep_the_window_from_being_reaped(home, monkeypa
     asyncio.run(run())
 
 
+def _unstartable_browser():
+    """A fake browser that cannot start at all: Browser.ensure() raises the
+    503 that a browser failing to open DevTools raises. new_page is never
+    reached, so attach fails after the viewer is registered."""
+
+    class _Unstartable(_FakeBrowser):
+        async def ensure(self):
+            raise webdebug.WebDebugError(503, "browser did not start")
+
+    return _Unstartable()
+
+
+def test_a_failed_screencast_does_not_leave_the_viewer_registered(home, monkeypatch):
+    """(claunch-9a3k4.1) attach() appends the viewer, then calls
+    ensure_screencast() outside the lock. That call opens with
+    browser.ensure(), which raises WebDebugError(503) when the browser cannot
+    start, and h_ws's WebDebugError branch answers the page and closes without
+    detaching. So the viewer the failed attach registered has nobody to remove
+    it: attach must unregister it before the exception travels."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _unstartable_browser()
+        viewer = _Viewer()
+        try:
+            raised = None
+            try:
+                await hub.attach("w1", "s1", viewer)
+            except webdebug.WebDebugError as exc:
+                raised = exc
+            assert raised is not None, "a browser that cannot start must fail the attach"
+            assert raised.status == 503
+            win = hub.windows["w1"]
+            assert viewer not in win.viewers, (
+                "the viewer of a failed attach stayed registered: nothing "
+                "removes it, because h_ws's except branch does not detach")
+            assert not win.viewers
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_window_whose_screencast_failed_is_still_reaped(home, monkeypatch):
+    """(claunch-9a3k4.1) The leak's consequence, measured end to end. detach()
+    starts a reaper only when the LAST viewer leaves. A viewer left behind by a
+    failed attach keeps detach() returning early forever, so the window and its
+    page live until stop_all. With the failed viewer unregistered, the reaper
+    for that window stands."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _unstartable_browser()
+        try:
+            with pytest.raises(webdebug.WebDebugError):
+                await hub.attach("w1", "s1", _Viewer())
+            win = hub.windows["w1"]
+            assert win.id in hub._reapers, (
+                "no reaper was started: the viewer left behind by the failed "
+                "attach keeps detach() returning early forever")
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
 def test_the_setting_route_reads_and_writes_the_three(home, monkeypatch):
     """(2) The Settings page's route: GET shows the stored values, the effective
     values and the environment that overrides them; PUT writes and null resets."""
