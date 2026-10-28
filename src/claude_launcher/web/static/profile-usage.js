@@ -594,7 +594,7 @@
     open, stop,
     _test: {
       readUsage, readFacts, resetText, shownWindows, countdownText, sizeText, chartSeries,
-      dollarSeries, chartPlan, niceMax, viewX, windowLine, tick, state,
+      dollarSeries, chartPlan, niceMax, viewX, chart, windowLine, tick, state,
     },
   };
 })();

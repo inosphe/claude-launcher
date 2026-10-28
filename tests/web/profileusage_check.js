@@ -161,6 +161,42 @@ const body = {
   assert.ok(Math.abs(T.viewX(10 + pad + 640 * scale, wide, 640, 180) - 640) < 1e-9);
   assert.ok(Math.abs(T.viewX(10 + pad + 36 * scale, wide, 640, 180) - 36) < 1e-9);
 
+  // The chart's own hover path puts the crosshair on the sample under the
+  // cursor in a box wider than the drawing: the right end of the plot is
+  // the last sample, a quarter in is the sample nearest that time. The
+  // width-ratio mapping this replaced picked an earlier sample at the right
+  // end and missed the quarter point (claunch-4mi9b).
+  const made = [];
+  const element = (tag) => {
+    const el = {
+      tag, attrs: {}, children: [], listeners: {}, style: {}, textContent: '',
+      classList: { add() {}, remove() {} },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      append(...kids) { this.children.push(...kids); },
+      addEventListener(type, fn) { this.listeners[type] = fn; },
+    };
+    made.push(el);
+    return el;
+  };
+  ctx.document = { getElementById: () => null, createElement: element,
+    createElementNS: (ns, tag) => element(tag), createTextNode: (text) => ({ text }) };
+  const hourly = Array.from({ length: 9 }, (_, i) => fw(i * 3600, 200 + i, 300 - i));
+  T.state.period = 900;
+  T.chart(hourly);
+  const plot = made.find((el) => el.tag === 'svg');
+  const cross = made.find((el) => el.attrs.class === 'pu-cross');
+  const hit = made.find((el) => el.tag === 'rect');
+  // The same 1000x220 box as above: the drawing is scaled and centred.
+  plot.getBoundingClientRect = () => wide;
+  const L = 36, R = 34, W = 640;
+  const hover = (vx) => {
+    hit.listeners.mousemove({ clientX: wide.left + pad + vx * scale });
+    return Number(cross.attrs.x1);
+  };
+  assert.ok(Math.abs(hover(W - R - 0.5) - (W - R)) < 1e-6, 'right end: last sample');
+  const quarter = L + (W - L - R) / 4;
+  assert.ok(Math.abs(hover(quarter) - quarter) < 1e-6, 'a quarter in: the sample at 2h');
+
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],
     ['512 B', '2.0 KB', '3.0 MB']);
