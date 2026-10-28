@@ -217,12 +217,17 @@ const server = http.createServer((req, res) => {
     assert.equal(actions[2].body.instance, 'frame@1');
     assert.equal(actions[2].body.outcome, 'ok');
     assert.equal(actions[2].body.reason, 'step out from debugger bar');
+    await bar.locator('.cf2-debug-at').selectOption('other@1');
+    detail.instances = detail.instances.map(i => i.instance === 'other@1' ? {...i, instance: 'other@2'} : i);
+    await page.evaluate(() => refreshWf());
+    assert.equal(await bar.locator('.cf2-debug-at').inputValue(), '', 'a pick whose position is gone is dropped');
+    assert.equal(await barOut.getByRole('button').getAttribute('title'), 'choose a position first', 'stale pick asks for a new one');
     await view.locator('.cf2-row[data-node="task"]').first().dispatchEvent('click');
     await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="task"].selected'));
     assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'node pane has no step out block');
     detail.chart.nodes.frame.type = 'loop';
     detail.chart.nodes.inner = {id: 'inner', type: 'seq', label: 'Inner', children: ['task'], roles: ['']};
-    detail.instances = detail.instances.filter(i => i.instance !== 'other@1').map(i =>
+    detail.instances = detail.instances.filter(i => i.instance !== 'other@2').map(i =>
       i.instance === 'task@1' ? {...i, parent: 'inner@1'} : i);
     detail.instances.push({node: 'inner', instance: 'inner@1', parent: 'frame@1', frame: {idx: 0}, can_step_out: true, returns: {ok: {}}});
     await page.evaluate(() => refreshWf());
@@ -238,6 +243,20 @@ const server = http.createServer((req, res) => {
     assert.equal(actions[3].path, '/api/cflow2/step-out');
     assert.equal(actions[3].body.instance, 'frame@1');
     assert.equal(actions[3].body.reason, 'break loop from debugger bar');
+    detail.chart.nodes.frame.mode = 'while';
+    Object.assign(detail.chart.nodes.inner, {type: 'loop', mode: 'foreach'});
+    await page.evaluate(() => refreshWf());
+    assert.equal(await barLoop.getAttribute('data-instance'), 'inner@1', 'break loop takes the innermost of two loops');
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
+      barLoop.getByRole('button', {name: 'Break loop', exact: true}).dispatchEvent('click'),
+    ]);
+    assert.equal(actions.length, 5);
+    assert.equal(actions[4].body.instance, 'inner@1');
+    detail.chart.nodes.inner.mode = 'retry';
+    await page.evaluate(() => refreshWf());
+    assert.equal(await barOut.getAttribute('data-instance'), 'inner@1', 'step out still releases the retry');
+    assert.equal(await barLoop.getAttribute('data-instance'), 'frame@1', 'break loop skips a retry for the loop around it');
     detail.run.status = 'done';
     await page.evaluate(() => refreshWf());
     await view.locator('.cf2-pane').filter({hasText: 'the run is finished'}).waitFor();

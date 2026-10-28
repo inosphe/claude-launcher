@@ -44503,7 +44503,9 @@ let cf2DebugAt = {};
 
 /* What the debugger bar can release from one position (a leaf of the
    callstack, i.e. where the run stands): the innermost enclosing frame that
-   can step out, and the innermost enclosing loop. Pure. */
+   can step out, and the innermost enclosing loop. A retry block compiles to a
+   loop too (mode "retry"); it is a wrapper that re-runs one step, so Break
+   loop skips it for the while/until/foreach around it. Pure. */
 function cf2DebugTargets(rows, leaf) {
   const byId = new Map(rows.map((row) => [row.instance, row]));
   let out = null, loop = null;
@@ -44512,7 +44514,7 @@ function cf2DebugTargets(rows, leaf) {
     seen.add(row.instance);
     if (!row.can_step_out) continue;
     if (!out) out = row;
-    if (!loop && row.definition.type === "loop") loop = row;
+    if (!loop && row.definition.type === "loop" && row.definition.mode !== "retry") loop = row;
   }
   return { out, loop };
 }
