@@ -494,6 +494,7 @@ CHECKS = [
         "commandcopy_check.js",
         "termtitlecopy_check.js",
         "osc52_check.js",
+        "hostcopy_check.js",
         "termselect_check.js",
         "promptpresets_check.js",
         "prompter_check.js",

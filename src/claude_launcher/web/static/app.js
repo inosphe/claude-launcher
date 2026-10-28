@@ -20731,6 +20731,122 @@ function installOsc52(t) {
   });
 }
 
+/* A harness declared `copy_transport: host` (Codex 0.160.1) copies onto the
+   clipboard of the machine it runs on and writes OSC 52 only over SSH or
+   tmux, so the handler above never sees its copy: the daemon's history gains
+   the text and the computer the browser runs on gets nothing (claunch-tn5ba).
+   After a key that can copy in such a session — Enter (`/copy`, a choice in
+   its copy picker) or Ctrl+O — on the session terminal or the session line,
+   the page watches that history for HOST_COPY_WATCH_MS and puts the first
+   host entry newer than the baseline onto this computer's clipboard.
+   Entries the page posted itself (`source: browser`, an OSC 52 copy) are on
+   it already. The window is a key the person pressed plus a few seconds, the
+   span in which browsers still allow the execCommand fallback; whatever
+   reaches the daemon's clipboard inside it is relayed, including a copy
+   someone at that machine makes.
+   The baseline is taken at the key, from hostCopySeen (the newest id any
+   earlier watch read), because no read made after the key can be one: the
+   daemon samples the host every second on its own, so a copy can be in the
+   history before the first response comes back. The page's first watch has
+   no such id and takes every entry. Either way older host entries get
+   through, so an entry also has to be at most HOST_COPY_RECENT_MS older than
+   the daemon's `now` in the same response: what someone copied at that
+   machine minutes ago does not land on this computer's clipboard on the
+   next Enter. The daemon numbers its history from one again when it
+   restarts, and the page reconnects without reloading, so the held id is
+   kept with the history's `epoch` and counts only against entries of that
+   epoch; a read from a new epoch is a first watch again. */
+const HOST_COPY_WATCH_MS = 4000;
+const HOST_COPY_POLL_MS = 400;
+const HOST_COPY_RECENT_MS = HOST_COPY_WATCH_MS + 1000;
+let hostCopyWatch = null;   // {session, until, baseline}
+let hostCopySeen = null;    // {epoch, id}: newest history id a watch has read
+
+function sessionCopiesToHost(name) {
+  const rec = (sessionsCache || []).find((s) => s.name === name);
+  const harness = (rec && rec.harness) || "claude";
+  const detail = (typeof harnessDetails === "object" && harnessDetails)
+    ? harnessDetails[harness] : null;
+  return !!detail && detail.copy_transport === "host";
+}
+
+function isHostCopyKey(ev) {
+  if (ev.key === "Enter") return !ev.isComposing && !ev.shiftKey;
+  return ev.ctrlKey && !ev.altKey && !ev.metaKey && (ev.key === "o" || ev.key === "O");
+}
+
+async function hostCopyItems() {
+  try {
+    const response = await api("/api/clipboard");
+    if (!response.ok) return null;
+    const doc = await response.json();
+    if (!Array.isArray(doc.items)) return null;
+    const max = doc.items.reduce((m, item) => Math.max(m, Number(item.id) || 0), 0);
+    const held = hostCopySeen && hostCopySeen.epoch === doc.epoch ? hostCopySeen.id : 0;
+    hostCopySeen = { epoch: doc.epoch, id: Math.max(held, max) };
+    return { items: doc.items, now: Date.parse(doc.now), epoch: doc.epoch };
+  } catch {
+    return null;
+  }
+}
+
+function isRecentHostCopy(item, now) {
+  const at = Date.parse(item.copied_at);
+  return !Number.isFinite(now) || !Number.isFinite(at) || now - at <= HOST_COPY_RECENT_MS;
+}
+
+async function watchHostCopy() {
+  const name = currentName;
+  if (!name || !sessionCopiesToHost(name)) return;
+  const until = Date.now() + HOST_COPY_WATCH_MS;
+  if (hostCopyWatch && hostCopyWatch.session === name) {
+    hostCopyWatch.until = until;
+    return;
+  }
+  const watch = { session: name, until, baseline: hostCopySeen };
+  hostCopyWatch = watch;
+  try {
+    while (hostCopyWatch === watch && Date.now() <= watch.until) {
+      const read = await hostCopyItems();
+      if (hostCopyWatch !== watch || currentName !== name) return;
+      if (read) {
+        const baseline = watch.baseline && watch.baseline.epoch === read.epoch
+          ? watch.baseline.id : 0;
+        const fresh = read.items.find((item) => item.source === "host" &&
+          Number(item.id) > baseline && typeof item.text === "string" &&
+          isRecentHostCopy(item, read.now));
+        if (fresh) {
+          const ok = await copyToBrowserClipboard(fresh.text, document.body);
+          if (!ok) {
+            notify(
+              "Copy did not reach this computer's clipboard",
+              "The browser refused it — the Clipboard menu's Copy can still take it.",
+              { source: "page", key: "osc52" },
+            );
+          }
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, HOST_COPY_POLL_MS));
+    }
+  } finally {
+    if (hostCopyWatch === watch) hostCopyWatch = null;
+  }
+}
+
+/* The keys on the session terminal start a watch. Only the terminal on
+   screen counts, as for the session line: the watch is for `currentName`. */
+function installHostCopyRelay(t) {
+  t.element?.addEventListener("keydown", (ev) => {
+    if (t === term && isHostCopyKey(ev)) watchHostCopy();
+  }, true);
+}
+if (osc52SessionLine) {
+  osc52SessionLine.addEventListener("keydown", (ev) => {
+    if (isHostCopyKey(ev)) watchHostCopy();
+  }, true);
+}
+
 /* Read a logical line from the rendered PTY buffer, not a transport chunk:
    ANSI escapes are already decoded and soft wraps belong to one command.
    Keep the ! prefix so the copied recommendation can be pasted as shown.
@@ -24809,6 +24925,7 @@ function freshAttach(name) {
   // Guarded like onTermKeyEvent below, for the harnesses that boot this
   // function without the clipboard block.
   if (typeof installOsc52 === "function") installOsc52(term);
+  if (typeof installHostCopyRelay === "function") installHostCopyRelay(term);
   if (typeof installTerminalCommandCopy === "function") installTerminalCommandCopy(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {

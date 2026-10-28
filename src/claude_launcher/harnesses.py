@@ -264,6 +264,13 @@ class Harness:
     #: submits (claunch-1lfrh); text submitted earlier goes out alone and the
     #: image is left in the composer behind it. Empty: no such wait.
     image_paste_marker: str = ""
+    #: Where this harness's own copy command (``/copy``, a copy hotkey) puts
+    #: text. ``terminal``: it writes OSC 52 to the terminal, which the web
+    #: terminal hands to the clipboard of the computer the browser runs on.
+    #: ``host``: it writes only the clipboard of the machine it runs on (the
+    #: daemon's), so the web page relays what the daemon's clipboard history
+    #: gains right after an Enter or Ctrl+O in that session (claunch-tn5ba).
+    copy_transport: str = "terminal"
     #: cflow v2 capability defaults this harness's CLI provides
     #: (docs/cflow-v2.md 6.3): ``{id: {"enabled": bool, "args": [...]}}``
     #: (``args`` only when declared). Ids are not checked here; the cflow2
@@ -405,6 +412,7 @@ class Harness:
             "image_paste_transport": self.image_paste_transport,
             "image_paste_path_format": self.image_paste_path_format,
             "image_paste_marker": self.image_paste_marker,
+            "copy_transport": self.copy_transport,
             "capabilities": {
                 key: {
                     k: (list(v) if isinstance(v, list) else v)
@@ -624,6 +632,10 @@ def _parse_entry(name: str, body) -> Harness:
             str(body.get("image_paste_path_format") or "uri").strip(),
             {"uri", "native"},
         ),
+        "copy_transport": (
+            str(body.get("copy_transport") or "terminal").strip(),
+            {"terminal", "host"},
+        ),
     }
     for field_name, (value, allowed) in strategies.items():
         if value not in allowed:
@@ -723,6 +735,7 @@ def _parse_entry(name: str, body) -> Harness:
         image_paste_transport=strategies["image_paste_transport"][0],
         image_paste_path_format=strategies["image_paste_path_format"][0],
         image_paste_marker=image_paste_marker,
+        copy_transport=strategies["copy_transport"][0],
         image_paste_keys=_as_list(
             body.get("image_paste_keys"),
             f"harness {name!r} image_paste_keys",
