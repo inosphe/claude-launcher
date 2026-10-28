@@ -747,42 +747,109 @@ def _cwd_of(call, default=_HERE):
 #: suffix is part of the name, so this is a prefix rather than a fixed list.
 _INTERPRETER_PREFIX = "python"
 
+#: Runners that take a command and run *it*, so the program is further right.
+#: ``uv run ...`` and ``env VAR=x ...`` are the two that actually appear in
+#: these test modules; both are skipped along with the options and assignments
+#: that belong to them.
+_LAUNCHERS = ("uv", "env", "exec", "command", "nohup", "time")
+
+
+def _bare_name(node):
+    """The file name an argv element spells, or ``None`` when it is not a literal.
+
+    Only string literals and ``sys.executable`` can be read before running
+    anything; a ``Name`` here is the tool constant this guard is looking for,
+    and a call is a wrapper the walkers below do not see through."""
+    if isinstance(node, ast.Attribute):
+        if node.attr == "executable" and getattr(node.value, "id", None) == "sys":
+            return "python"
+        return None
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) in ("str", "Path") and node.args:
+        return _bare_name(node.args[0])
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value).name.lower()
+    return None
+
 
 def _runs_the_next_argv(node):
-    """Whether an argv element is an interpreter that runs the next one."""
-    if isinstance(node, ast.Attribute):
-        return node.attr == "executable" and getattr(node.value, "id", None) == "sys"
-    if isinstance(node, ast.Call) and getattr(node.func, "id", None) in ("str", "Path") and node.args:
-        return _runs_the_next_argv(node.args[0])
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return Path(node.value).name.lower().startswith(_INTERPRETER_PREFIX)
-    return False
+    """Whether an argv element starts a program whose own name comes later."""
+    name = _bare_name(node)
+    return name is not None and (
+        name.startswith(_INTERPRETER_PREFIX) or name in _LAUNCHERS
+    )
+
+
+#: Interpreter options that take a *separate* value, so the element after them
+#: belongs to the option and not to the program: ``-X utf8``, ``-W default``.
+_OPTION_WITH_VALUE = ("-X", "-W", "-Q", "-o")
+
+#: Subcommands of a launcher that name what it will run: ``uv run ...``,
+#: ``uv run --no-sync ...``. Not options, so the option loop above steps over
+#: them only by name.
+_LAUNCHER_SUBCOMMANDS = ("run", "exec", "tool")
 
 
 def _exec_position(items, from_this_file, names):
     """The index at which an argv element runs as the tool, or ``None``.
 
-    Only two places put a program in an argv as the thing being run: the first
-    element (``[str(SCRIPT), "--json"]``), and the second when the first is a
-    Python interpreter (``[sys.executable, str(SCRIPT), ...]``).
+    An argv runs the program its first element names -- after skipping what
+    belongs to *that* program: interpreter flags (``-S``, ``-E``, ``-u``,
+    ``-X utf8``), launcher subcommands and options (``uv run --no-sync``), and
+    ``env``-style ``VAR=value`` assignments. So the program is the first
+    element that is neither a launcher nor one of its options.
 
     Matching the tool's path *anywhere* in the list made a call that merely
-    names it look like an invocation. ``git log --oneline -- tools/related_surfaces.py``
-    in another test module failed this guard, and so did the same path reached
-    through a module constant or unpacked from a list -- the path there is data
-    the command operates on, and ``git`` is the program being run (s597-rev on
-    claunch-o5il6.1, three shapes reproduced). The widening to sibling modules
-    (claunch-o5il6.3) is what made this reachable; the position rule is what
-    keeps it from turning every mention into a violation."""
-    for at in (0, 1):
-        if at == 1 and not (items and _runs_the_next_argv(items[0])):
-            return None
-        if at >= len(items):
-            return None
-        if _names_the_script(items[at], from_this_file=from_this_file, names=names):
-            return at
-    return None
+    names it look like an invocation: ``git log --oneline -- tools/related_surfaces.py``
+    failed this guard, as did the same path reached through a constant or
+    unpacked from a list (s597-rev on claunch-o5il6.1). Widening to sibling
+    modules (claunch-o5il6.3) is what made that reachable.
 
+    Reading exactly position 0 or 1 was too narrow, and four reviewers found
+    it within the hour. ``[sys.executable, "-S", "-E", str(SCRIPT), "--help"]``
+    -- this module's own line 408 -- stopped being collected, and so did
+    ``[sys.executable, "-X", "utf8", ...]`` and ``["uv", "run", ...]``
+    (s490-rev, s404-rev, s597-rev, s511-rev, s1262-rev). They measured the
+    same collection count against master's guard and this one: 11 -> 10.
+
+    That direction is the worse one. A guard that sees too much fails on a
+    correct call and gets switched off; a guard that stops seeing a call it
+    used to see returns green and says nothing, which is what this guard
+    exists to prevent. So the fix errs toward reading the program position
+    generously -- any leading interpreter or launcher, then their options and
+    values -- while the *data* position stays strict: once a non-launcher
+    program is named, a path in a later position is that program's argument."""
+    at = 0
+    leading = True
+    while at < len(items):
+        element = items[at]
+        if _names_the_script(element, from_this_file=from_this_file, names=names):
+            return at
+        if not leading:
+            return None
+        if _runs_the_next_argv(element):
+            at += 1
+            # The launcher's own options, subcommands and the values they
+            # take, come next: ``uv run --no-sync``, ``env FOO=1``.
+            while at < len(items):
+                head = items[at]
+                if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
+                    break
+                text = head.value
+                if "=" in text and not text.startswith("-"):
+                    at += 1
+                    continue
+                if text in _LAUNCHER_SUBCOMMANDS:
+                    at += 1
+                    continue
+                if not text.startswith("-"):
+                    break
+                at += 1
+                if text in _OPTION_WITH_VALUE and at < len(items):
+                    at += 1
+            continue
+        leading = False
+        return None
+    return None
 
 def _names_the_script(node, from_this_file=True, names=None):
     """Whether an argv element is the tool, however it is spelled.
@@ -1632,28 +1699,56 @@ def test_a_path_the_command_operates_on_is_not_a_call_to_the_tool():
 
 
 def test_the_tool_is_collected_in_every_position_that_runs_it():
-    """``[tool, ...]`` and ``[interpreter, tool, ...]`` are the two run forms.
+    """Every argv shape that runs the tool, however much precedes it.
 
-    Both are real: a module with the tool already executable writes the first,
-    and the far more common shape is ``[sys.executable, <tool>, ...]``. The
-    interpreter is recognised as ``sys.executable``, ``str(...)`` of it, or a
-    literal whose file name starts with ``python`` -- versioned paths like
+    A module with the tool already executable writes ``[<tool>, ...]``; the far
+    more common shape is ``[sys.executable, <tool>, ...]``. The interpreter is
+    recognised as ``sys.executable``, ``str(...)`` of it, or a literal whose
+    file name starts with ``python`` -- versioned paths like
     ``/usr/bin/python3.11`` are how a real argv is often written.
 
-    A bare tool call was missed outright before the naming fix on
-    claunch-o5il6; a versioned interpreter path was missed by the first draft
-    of this rule, which compared against a fixed list of names."""
+    **The rows below the plain forms are regressions that shipped.** A first
+    version of this rule read only position 0 or 1, which silently dropped
+    every call written with an interpreter option or a launcher in front:
+    ``[sys.executable, "-S", "-E", <tool>, ...]`` is this module's own line
+    408, and ``["uv", "run", "--no-sync", <tool>]`` is the command this
+    repository documents in its own prose. Five reviewers measured the same
+    thing from both sides -- s490-rev, s404-rev, s597-rev, s511-rev and
+    s1262-rev -- and s597-rev counted it as master collecting 11 calls where
+    the branch collected 10.
+
+    That direction is the harmful one, so this test is deliberately concrete
+    about the shapes rather than asserting a count: a count changes when an
+    unrelated call is added, and says nothing about which shape was lost."""
     for argv in (
+        # The program is the first element.
         '["tools/related_surfaces.py", "--json"]',
+        # The program follows an interpreter.
         '[sys.executable, "tools/related_surfaces.py", "--json"]',
         '[str(sys.executable), "tools/related_surfaces.py", "--json"]',
         '["python3", "tools/related_surfaces.py", "--json"]',
         '["/usr/bin/python3.11", "tools/related_surfaces.py", "--json"]',
+        # ... and interpreter options, including ones that take a value.
+        '[sys.executable, "-S", "-E", "tools/related_surfaces.py", "--help"]',
+        '[sys.executable, "-u", "tools/related_surfaces.py", "--json"]',
+        '[sys.executable, "-X", "utf8", "tools/related_surfaces.py", "--json"]',
+        '[sys.executable, "-W", "default", "tools/related_surfaces.py", "--json"]',
+        # ... and a launcher: ``uv run`` is this repository's documented
+        # spelling, and it puts both a subcommand and options in front.
+        '["uv", "run", "python", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "tools/related_surfaces.py", "--json"]',
+        '["uv", "run", "--no-sync", "python", "tools/related_surfaces.py", "--json"]',
+        '["env", "python3", "tools/related_surfaces.py", "--json"]',
+        '["env", "FOO=1", "python", "tools/related_surfaces.py", "--json"]',
     ):
         sample = f'x = subprocess.run({argv}, cwd=str(ROOT))\n'
         found = _tool_invocations(sample)
         assert len(found) == 1, (argv, found)
-        assert found[0][1] == ["--json"], (argv, found)
+        assert found[0][1] in ([], ["--json"], ["--help"]), (argv, found)
+
+    # A launcher running something that is not the tool stays invisible: the
+    # generous reading above must not turn ``uv run pytest`` into a call.
+    assert _tool_invocations('x = subprocess.run(["uv", "run", "pytest", "tests/test_x.py"], cwd=str(ROOT))\n') == []
 
 
 def test_the_tool_is_recognised_by_its_file_name_in_another_module():
