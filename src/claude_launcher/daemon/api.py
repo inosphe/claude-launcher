@@ -11519,7 +11519,8 @@ async def _onboard_and_launch(
     if plan.wanted:
         try:
             arranged, opening = await onboard.arrange(
-                plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
+                plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request),
+                manager=manager,
             )
         except Exception:
             manager.discard(name)

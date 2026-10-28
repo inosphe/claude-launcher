@@ -1270,10 +1270,38 @@ def test_landing_leaders_third_group_is_the_mesh_root():
         ("leader", "sibling"),
         ("leader", "root"),
     ]
+    # claunch-u7nu3: every group may make the edge to the leader it names.
+    assert all(c.get("connect") is True for c in ask["from"])
     assert ask["otherwise"] == "human"
     assert all(c["scope"] != "descendant" for c in ask["from"]), (
         "a run must not stand up a session to answer its own landing question"
     )
+
+
+def test_landing_leader_ask_wires_an_unwired_root_leader(monkeypatch):
+    """claunch-u7nu3: an independent child under another worker is wired to
+    its parent only, so the root leader is outside its reachable set. The
+    root group's ``connect: true`` makes that one edge and asks the leader
+    instead of falling to a person."""
+    from claude_launcher.cflow import responders
+    from claude_launcher.cflow2 import asks, runtime
+
+    chart = runtime.load_definition("improv-worker-v2")
+    node = next(n for n in chart.nodes.values() if n.label == "landing-review-leader")
+    spec = runtime._ask_spec(node)
+    wired = []
+    monkeypatch.setattr(responders, "wire",
+                        lambda mesh, me, other: wired.append((mesh, me, other)))
+    lead = responders.Responder(session="s29", handle="s29", role="leader",
+                                reachability="idle")
+    parent = responders.Responder(session="p", handle="p", role="worker",
+                                  reachability="idle")
+    pool = responders.Pool(mesh="claunch", me="w", members={"s29": lead, "p": parent},
+                           reachable={"p"}, ancestors=["p"], roots={"s29", "p"})
+    plan = asks.plan_route({"id": "a1", "from": spec["from"]}, pool)
+    assert [m["handle"] for m in plan["asked"]] == ["s29"], plan
+    assert plan["group"] == 2 and plan["wired"] == ["s29"]
+    assert wired == [("claunch", "w", "s29")]
 
 
 def test_landing_review_question_reads_for_a_person_too():

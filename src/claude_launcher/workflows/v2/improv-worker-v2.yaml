@@ -2562,12 +2562,17 @@ nodes:
     # 사람 앞에 서고, 그 ask에는 기한이 없어 런이 무기한 대기한다. root는 메시에
     # 부모가 없는 세션 — 운영자가 직접 띄운 세션 — 만 받으므로 후보가 넓어지지
     # 않고, 순서는 그대로 사슬 → 형제 → 루트다(가까운 쪽이 먼저 답한다).
+    # 세 그룹 모두 connect: true다(claunch-u7nu3). 응답자 후보는 이 런과 wire된
+    # 멤버뿐인데, 기본 auto_link는 child↔parent·root↔root·reviewer↔worker만
+    # 잇는다 — 다른 워커 아래 선 independent 자식은 루트 리더와 이어져 있지
+    # 않아 리더가 메시에 있어도 ask가 곧바로 사람 앞에 섰다. connect는 그
+    # 역할을 이미 가진 로컬 멤버와의 간선 하나만 만든다(cflow/responders.wire).
     ask:
       prompt: *landing_review_ask
       from:
-        - {role: leader, scope: ancestor}
-        - {role: leader, scope: sibling}
-        - {role: leader, scope: root}
+        - {role: leader, scope: ancestor, connect: true}
+        - {role: leader, scope: sibling, connect: true}
+        - {role: leader, scope: root, connect: true}
       otherwise: human
       timeout: 1800
       options: *landing_review_options
@@ -3857,9 +3862,18 @@ nodes:
         (`LANDING REQUEST`, `REVIEWED`, `SWEEP REQUESTED`, `merged` 등).
         배치 회차면 실린 이슈마다 읽는다.
       · 커밋 — `claunch commits`(아래 「증거」 절).
-      기록에 없는 것을 기억이나 추측으로 채우지 않는다. 기록끼리 어긋나면
-      (저널의 수치와 코멘트의 수치가 다르다 등) 고르지 말고 그 사실을
-      보고서에 적는다.
+      기록에 없으면 없다고 적는다 — 기억이나 추측으로 채우지 않고, 지금
+      다시 재서 채우지도 않는다. 기록끼리 어긋나면(저널의 수치와 코멘트의
+      수치가 다르다 등) 고르지 말고 두 값과 각 출처 경로를 보고서에 적는다.
+      영수증은 각각 한 번만 열어 조건 한 줄을 확인한다.
+
+      ── 이 노드가 하지 않는 일: 검증 (claunch-igkbo.2) ──
+      산출물과 검증은 다른 일이다. 검증은 이 회차의 앞 노드(targeted-test·
+      review·스윕)가 이미 했고, 이 노드는 그 기록된 값을 인용한다. 이 노드는
+      테스트·스윕·하네스를 다시 돌리지 않고 어긋난 값의 원인을 조사하지
+      않는다. 「산출물 자체」로 명령의 출력을 실을 때도 이미 기록된 출력만
+      싣는다 — 다시 만들지 말고 커밋이나 기록에서 잘라 싣는다. 실을 산출물이
+      없는 회차(코드뿐인 회차)는 그 절을 비워 둔다.
 
       ── 자식 세션에서 돌 때: 런의 주인을 명시한다 (claunch-xjbrh) ──
       이 노드의 첫 실행기는 session이다 — 데몬이 자식 세션을 띄워 이 브리프를

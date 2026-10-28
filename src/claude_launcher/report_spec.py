@@ -66,10 +66,21 @@ overwrites (never two half-reports). To file a page written elsewhere,
 - **이 회차가 만든 것 자체** — if the round produced something people or
   agents will actually read or see, put it on the page verbatim —
   **산출물 자체를 페이지에 싣는다**: new prose,
-  a config default, an API response shape, a screen, a command's output. The
-  changed-files list and rationale explain it; they do not replace it. If the
-  round's product is code only, this section may be empty — the diff carries
-  it. Never invent a product to fill the section.
+  a config default, an API response shape, a screen, 이미 기록된 출력
+  (output a command already printed into the journal, an issue comment, a
+  sweep receipt or a file). The changed-files list and rationale explain it;
+  they do not replace it. 다시 만들지 말고 커밋이나 기록에서 잘라 싣는다 —
+  quote the bytes that already exist; do not re-run a command, a harness or a
+  test to produce them. If the round's product is code only, this section may
+  be empty — the diff carries it. Never invent a product to fill the section.
+- **산출물과 검증은 다른 절이다** — the product is what the round made; whether
+  it works is verification, and verification was done by the earlier steps of
+  the round (targeted-test, review, the sweep). Writing this page does not
+  verify anything again. 이 보고서는 테스트·스윕을 다시 돌리지 않고 어긋난
+  값의 원인을 조사하지 않는다. When two records disagree (847 in one, 849 in
+  another), write both values with both source paths; open each receipt at
+  most once, to read the one line that states its condition. 기록에 없으면
+  없다고 적는다 — a missing value is reported as missing, never measured now.
 - 회차의 목표와 범위(제외한 것 포함), 이슈 id
 - 무엇을 왜 그렇게 했는가 — changed files and the reasons for those choices
 - 증거: 커밋 해시, 테스트 수치(표적 실행이면 무엇을 골랐는지), 빨갛다가
