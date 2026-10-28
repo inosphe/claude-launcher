@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import List
 
 from .. import atomic
 from . import paths
+
+log = logging.getLogger(__name__)
 
 
 class StatusCheckError(Exception):
@@ -131,6 +135,35 @@ def session_entries(session: str, *, enabled_only: bool = False) -> List[dict]:
     ]
 
 
+def _index_answers(session: str, presets: dict, incoming: dict, at: str) -> None:
+    """Mirror one report's answers into the search index, never raising.
+
+    The index is a derived store, and this runs *after* ``_write`` has put the
+    user's answers on disk. So whatever arrives here, the answer the agent
+    reported is already saved: raising would turn "I recorded your answer"
+    into a 500 that the user reads as "not recorded", which is the same cost
+    ``Reports.answer`` paid before claunch-remember-callers-guard.
+
+    ``search_records.database()`` opens SQLite, creates the table and commits,
+    so the failure that arrives is a ``sqlite3.Error`` (a locked database, a
+    full disk) -- not an ``OSError``, which is what the file write would raise.
+    ``sqlite3.Error`` is not an ``OSError`` subclass (MRO: OperationalError ->
+    DatabaseError -> Error -> Exception), so a plain ``except OSError`` lets it
+    through. The guard is this wide on purpose and matches
+    ``session_events.record`` (claunch-mxar3) and the observer's callers
+    (claunch-remember-callers-guard).
+    """
+    from . import search_records
+
+    try:
+        search_records.capture(session, "checks", [
+            {**presets[key], "answer": answer, "reported_at": at}
+            for key, answer in incoming.items()
+        ], at)
+    except (OSError, sqlite3.Error):
+        log.exception("could not index the status-check answers for %s", session)
+
+
 def report(session: str, answers: list) -> List[dict]:
     """Record one agent's current Y/N answers for enabled presets."""
     data = _read()
@@ -153,12 +186,8 @@ def report(session: str, answers: list) -> List[dict]:
     for preset_id, answer in incoming.items():
         reports[preset_id] = {"answer": answer, "reported_at": at, "source": "agent"}
     _write(data)
-    from . import search_records
     presets = {p["id"]: p for p in data["presets"]}
-    search_records.capture(session, "checks", [
-        {**presets[key], "answer": answer, "reported_at": at}
-        for key, answer in incoming.items()
-    ], at)
+    _index_answers(session, presets, incoming, at)
     return session_entries(session, enabled_only=True)
 
 

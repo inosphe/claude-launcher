@@ -163,3 +163,69 @@ def test_status_checks_mcp_reads_and_reports_only_its_session(monkeypatch):
         ("get", "/api/sessions/s1/status-checks", None),
         ("post", "/api/sessions/s1/status-checks/reports", {"answers": [{"id": "c1", "answer": "yes"}]}),
     ]
+
+
+def test_a_locked_index_does_not_turn_a_saved_answer_into_a_500(home, tmp_path, monkeypatch):
+    """A locked index DB is a derived-store failure, not a report failure.
+
+    ``status_checks.report`` writes the answers to disk with ``_write`` and
+    *then* mirrors them into ``search_records``. That mirror opens SQLite, so
+    the failure that arrives is ``sqlite3.OperationalError`` -- not an
+    ``OSError`` -- and with no guard it escapes ``POST
+    /api/sessions/{name}/status-checks/reports`` as a 500. The user's cost is
+    the opposite of the truth: the answer WAS saved and the card says the
+    report failed, so the user reports it again.
+
+    What is asserted is the route's answer and the file behind it, not the
+    index: the report must come back 200 with the answer on it, and
+    ``status_checks.session_entries`` -- which reads the JSON file, the
+    canonical store -- must carry it.
+
+    Mutation: dropping the guard in ``_index_answers`` makes this red on the
+    status code. The ``acid`` answer is what drives the route through
+    ``capture`` at all; without an answer there is nothing to index and the
+    guard would be untested.
+    """
+    import sqlite3
+
+    from claude_launcher.daemon import search_records
+
+    _register_py_harness()
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            created = await client.post(
+                "/api/status-checks",
+                json={"name": "Tests", "question": "Tests passed?"},
+                headers=BEARER,
+            )
+            assert created.status == 201
+            check = (await created.json())["check"]
+
+            # Installed after the preset exists: the preset route does not
+            # touch the index, so the only caller under test is `report`.
+            monkeypatch.setattr(search_records, "capture", locked)
+
+            report = await client.post(
+                "/api/sessions/s1/status-checks/reports",
+                json={"answers": [{"id": check["id"], "answer": "yes"}]},
+                headers=BEARER,
+            )
+            status = report.status
+            body = await report.json() if status == 200 else {}
+            saved = status_checks.session_entries("s1", enabled_only=True)
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+        return status, body, saved
+
+    status, body, saved = asyncio.run(run())
+    assert status == 200
+    assert body["checks"][0]["report"]["answer"] == "yes"
+    assert saved[0]["report"]["answer"] == "yes"

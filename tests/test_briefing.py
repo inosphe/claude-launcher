@@ -2667,3 +2667,96 @@ def test_briefing_llm_test_endpoint_tests_the_chosen_presets_stored_key(home):
 
     asyncio.run(run())
     assert seen["auth"] == "Bearer big-key"
+
+
+def test_a_locked_index_does_not_turn_a_composed_briefing_into_a_500(
+    home, tmp_path, monkeypatch
+):
+    """A locked index DB is a derived-store failure, not a compose failure.
+
+    ``compose`` caches the briefing and calls ``_persist_cache`` before it
+    mirrors the result into ``search_records``. That mirror opens SQLite, so
+    the failure that arrives is ``sqlite3.OperationalError`` -- not an
+    ``OSError``, and not a ``BriefingError`` -- and with no guard it left
+    ``GET /api/sessions/{name}/briefing`` as an uncaught exception: the route
+    catches only ``BriefingError`` (for the 502 a refused model call gets) and
+    ``error_middleware`` re-raises what it does not name, so aiohttp answered
+    500 with nothing about the index in it. The daemon's
+    ``briefing`` trigger did the same thing through
+    ``cflow_clock.recompose_briefing`` and reported "could not be composed"
+    for a briefing that had in fact been composed and cached.
+
+    The route is what is asserted on, plus the durable file the briefing was
+    already on: a 200 with the composed payload, ``cached: False`` because
+    this compose really did run, and the briefing present in the cached read
+    after the in-memory cache is dropped.
+
+    Mutation: dropping the guard in ``_index_briefing`` makes this red on the
+    status code.
+    """
+    import sqlite3
+
+    from aiohttp import web as aioweb
+
+    from claude_launcher.daemon import search_records
+
+    _register_py_harness()
+    answer = {
+        "goal": "목표", "now": "작업 중", "state": "working", "progress": "70%",
+        "one-line-job-description": "색인 가드",
+    }
+
+    async def handler(request):
+        return aioweb.json_response(
+            _llm_answer(json.dumps(answer, ensure_ascii=False))
+        )
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    async def run():
+        llm = await _start_llm(handler)
+        _set_llm(str(llm.make_url("/v1/chat/completions")))
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            cwd = str(tmp_path / "work")
+            (tmp_path / "work").mkdir()
+            mgr.create(SessionDef(name="s1", harness="py", cwd=cwd))
+            # Stated, not raced: the child's first output moves `status`, and
+            # this test is about the index guard, not the cache key.
+            monkeypatch.setattr(
+                briefing, "gather_live",
+                lambda session: {"status": "idle", "running": True,
+                                 "last_input_at": None, "last_output_at": None},
+            )
+            monkeypatch.setattr(search_records, "capture", locked)
+
+            composing = await client.get(
+                "/api/sessions/s1/briefing?refresh=1", headers=BEARER
+            )
+            status = composing.status
+            body = await composing.json() if status == 200 else {}
+
+            # The briefing is already on disk; a locked index must not take
+            # that away from the reads that do not go through the index.
+            briefing._cache.clear()
+            briefing._loaded_cache_path = None
+            reread = await client.get(
+                "/api/sessions/s1/briefing?cached=1", headers=BEARER
+            )
+            saved_status = reread.status
+            saved = await reread.json() if saved_status == 200 else {}
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+            await llm.close()
+        return status, body, saved_status, saved
+
+    status, body, saved_status, saved = asyncio.run(run())
+    assert status == 200
+    assert body["cached"] is False
+    assert body["briefing"] == answer
+    assert saved_status == 200
+    assert saved["cached"] is True
+    assert saved["briefing"] == answer
