@@ -43358,25 +43358,6 @@ function cf2NodePaneBody(body, data, n, doc, live, post, host, onSelect) {
   }
   body.appendChild(move);
 
-  // releasing a frame from here (claunch-t2kvy): the same press as the
-  // callstack details, for this node and the frames around it
-  const outs = live ? cf2StepOutRows(data, n.id) : [];
-  if (outs.length) {
-    const nodes = (data.chart || {}).nodes || {};
-    const block = el("div", "cf2-pane-block cf2-pane-stepout");
-    block.appendChild(el("h5", null, "Step out"));
-    block.appendChild(el("p", "wf-note", "Cancels the frame's remaining work and returns the " +
-      "chosen outcome to its parent. Existing data and external changes remain."));
-    for (const row of outs) {
-      const line = el("div", "cf2-press");
-      line.dataset.instance = row.instance;
-      const label = el("span", "mono", `${(nodes[row.node] || {}).label || row.node} (${row.instance})`);
-      line.append(label, ...cf2StepOutPress(data, row, post, "step out from node pane"));
-      block.appendChild(line);
-    }
-    body.appendChild(block);
-  }
-
   // where it stands now
   const inst = (doc && doc.instances) || (data.instances || []).filter((i) => i.node === n.id);
   const facts = el("div", "cf2-facts");
@@ -44481,19 +44462,19 @@ function cflow2StackRows(data) {
 
 /* The outcome select and the Step out button for one releasable frame
    (row: an instance of data.instances with can_step_out). The callstack
-   details and the node pane both use it, so the confirmation and the
-   request body stay the same in both places. */
-function cf2StepOutPress(data, row, post, reason) {
+   details and the debugger bar both use it, so the confirmation and the
+   request body stay the same in both places; `text` names the button. */
+function cf2StepOutPress(data, row, post, reason, text = "Step out") {
   const n = ((data.chart || {}).nodes || {})[row.node] || {};
   const outcomes = cflow2ForceOutcomes(row);
   const pick = el("select", "cf2-select");
-  pick.setAttribute("aria-label", `Step out outcome for ${row.instance}`);
+  pick.setAttribute("aria-label", `${text} outcome for ${row.instance}`);
   for (const o of outcomes) {
     const opt = el("option", null, o.name);
     opt.value = o.name;
     pick.appendChild(opt);
   }
-  const release = el("button", "wf-btn sm force", "Step out");
+  const release = el("button", "wf-btn sm force", text);
   release.title = "release this frame and continue its parent with the selected outcome";
   release.addEventListener("click", async () => {
     const o = outcomes.find((v) => v.name === pick.value);
@@ -44516,24 +44497,77 @@ function cf2StepOutPress(data, row, post, reason) {
   return [pick, release];
 }
 
-/* The frames the node pane offers to step out of: each live instance of the
-   node and the instances enclosing it, outermost first, keeping only those
-   that can be released. A task cannot step out itself, so for a task this is
-   the frames around it (claunch-t2kvy). */
-function cf2StepOutRows(data, nodeId) {
-  const instances = data.instances || [];
-  const byId = new Map(instances.map((i) => [i.instance, i]));
-  const rows = [], seen = new Set();
-  for (const leaf of instances.filter((i) => i.node === nodeId)) {
-    const path = [];
-    for (let i = leaf; i && !path.includes(i); i = byId.get(i.parent)) path.unshift(i);
-    for (const i of path) {
-      if (!i.can_step_out || seen.has(i.instance)) continue;
-      seen.add(i.instance);
-      rows.push(i);
-    }
+/* The position the debugger bar acts on, per run, so a poll's rebuild keeps
+   the reader's pick among parallel branches (claunch-yuohe). */
+let cf2DebugAt = {};
+
+/* What the debugger bar can release from one position (a leaf of the
+   callstack, i.e. where the run stands): the innermost enclosing frame that
+   can step out, and the innermost enclosing loop. Pure. */
+function cf2DebugTargets(rows, leaf) {
+  const byId = new Map(rows.map((row) => [row.instance, row]));
+  let out = null, loop = null;
+  const seen = new Set();
+  for (let row = byId.get(leaf); row && !seen.has(row.instance); row = byId.get(row.parent)) {
+    seen.add(row.instance);
+    if (!row.can_step_out) continue;
+    if (!out) out = row;
+    if (!loop && row.definition.type === "loop") loop = row;
   }
-  return rows;
+  return { out, loop };
+}
+
+/* The debugger bar above the callstack (claunch-yuohe): Step out releases the
+   innermost frame around where the run stands, Break loop the innermost loop,
+   each with the outcome it returns to its parent. It works from the run's
+   position, whatever node is selected; with several positions (par, fork) the
+   reader picks one first. */
+function cflow2DebugBar(data, rows, post) {
+  const bar = el("div", "cf2-debugbar");
+  const parents = new Set(rows.map((row) => row.parent));
+  const leaves = rows.filter((row) => !parents.has(row.instance));
+  const run = data.run.run;
+  if (!leaves.some((row) => row.instance === cf2DebugAt[run])) delete cf2DebugAt[run];
+  const at = leaves.length === 1 ? leaves[0].instance : cf2DebugAt[run];
+  const name = (row) => row.definition.label || row.node;
+  if (leaves.length > 1) {
+    const pick = el("select", "cf2-select cf2-debug-at");
+    pick.setAttribute("aria-label", "Position to step from");
+    const none = el("option", null, "choose a position");
+    none.value = "";
+    pick.appendChild(none);
+    for (const row of leaves) {
+      const opt = el("option", null, `${name(row)} (${row.instance})`);
+      opt.value = row.instance;
+      pick.appendChild(opt);
+    }
+    pick.value = at || "";
+    pick.addEventListener("change", () => {
+      if (pick.value) cf2DebugAt[run] = pick.value;
+      else delete cf2DebugAt[run];
+      bar.replaceWith(cflow2DebugBar(data, rows, post));
+    });
+    bar.appendChild(pick);
+  }
+  const { out, loop } = at ? cf2DebugTargets(rows, at) : {};
+  const press = (target, text, reason, why) => {
+    const group = el("span", "cf2-debug-press");
+    group.dataset.action = text;
+    if (target) {
+      group.dataset.instance = target.instance;
+      group.append(el("span", "cf2-debug-target mono", name(target)),
+        ...cf2StepOutPress(data, target, post, reason, text));
+    } else {
+      const off = el("button", "wf-btn sm force", text);
+      off.disabled = true;
+      off.title = at ? why : "choose a position first";
+      group.appendChild(off);
+    }
+    bar.appendChild(group);
+  };
+  press(out, "Step out", "step out from debugger bar", "no releasable frame encloses this position");
+  press(loop, "Break loop", "break loop from debugger bar", "no loop encloses this position");
+  return bar;
 }
 
 function cflow2Callstack(data, post, live) {
@@ -44544,6 +44578,7 @@ function cflow2Callstack(data, post, live) {
     sec.appendChild(el("p", "wf-note", "No live frames."));
     return sec;
   }
+  if (live) sec.appendChild(cflow2DebugBar(data, rows, post));
   const detail = document.createElement("details");
   detail.className = "cf2-stack-detail";
   detail.dataset.cf2Key = "callstack";

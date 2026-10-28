@@ -70,13 +70,20 @@ const server = http.createServer((req, res) => {
     assert.equal(await view.locator('.cf2-stack-path').count(), 1, 'serial path occupies one line');
     assert.equal(await view.locator('.cf2-stack-path').textContent(), 'root › Frame › Implement');
     assert(!(await stackDetail.evaluate(e => e.open)), 'callstack details default closed');
-    assert.equal(await view.getByRole('button', {name: 'Step out', exact: true}).count(), 0);
+    assert.equal(await stackDetail.getByRole('button', {name: 'Step out', exact: true}).count(), 0);
+    const bar = view.locator('.cf2-callstack > .cf2-debugbar');
+    const barOut = bar.locator('.cf2-debug-press[data-action="Step out"]');
+    const barLoop = bar.locator('.cf2-debug-press[data-action="Break loop"]');
+    assert(await bar.isVisible(), 'debugger bar shows while callstack details are closed');
+    assert.equal(await barOut.getAttribute('data-instance'), 'frame@1', 'step out targets innermost releasable frame');
+    assert(await barLoop.getByRole('button').isDisabled(), 'no loop encloses the position');
+    assert.equal(await bar.locator('.cf2-debug-at').count(), 0, 'one position needs no pick');
     assert.equal(await view.locator('.cf2-stack-path').evaluate(e => e.getBoundingClientRect().height), 24);
     await overview.focus();
     await page.keyboard.press('Enter');
     assert(await stackDetail.evaluate(e => e.open), 'keyboard expands full callstack');
     assert.equal(await view.locator('.cf2-stack-frame').count(), 3, 'all live frames shown');
-    assert.equal(await view.getByRole('button', {name: 'Step out', exact: true}).count(), 1,
+    assert.equal(await stackDetail.getByRole('button', {name: 'Step out', exact: true}).count(), 1,
       'root and tasks cannot be released');
     const heights = await view.locator('.cf2-stack-frame').evaluateAll(nodes =>
       nodes.map(n => n.getBoundingClientRect().height));
@@ -154,7 +161,7 @@ const server = http.createServer((req, res) => {
     const dismiss = dialog => dialog.dismiss();
     page.on('dialog', dismiss);
     await view.getByRole('button', {name: 'Rollback', exact: true}).click();
-    await view.getByRole('button', {name: 'Step out', exact: true}).click();
+    await stackDetail.getByRole('button', {name: 'Step out', exact: true}).click();
     assert.equal(posts, 0, 'cancelled rollback and step out send no mutations');
     page.off('dialog', dismiss);
     page.on('dialog', dialog => dialog.accept());
@@ -164,7 +171,7 @@ const server = http.createServer((req, res) => {
     ]);
     await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
-      view.getByRole('button', {name: 'Step out', exact: true}).click(),
+      stackDetail.getByRole('button', {name: 'Step out', exact: true}).click(),
     ]);
     assert.equal(actions.length, 2);
     assert.equal(actions[0].path, '/api/cflow2/move');
@@ -195,34 +202,48 @@ const server = http.createServer((req, res) => {
     await page.keyboard.press('Enter');
     assert.equal(await view.locator('.cf2-stack-frame:visible').count(), 4, 'parallel details include all frames');
     assert.equal(posts, 2, 'callstack disclosures do not mutate run');
-    await view.locator('.cf2-row[data-node="task"]').first().click();
-    const paneOut = view.locator('.cf2-pane .cf2-pane-stepout');
-    await paneOut.waitFor();
-    assert.deepEqual(await paneOut.locator('.cf2-press').evaluateAll(ns => ns.map(n => n.dataset.instance)),
-      ['frame@1'], 'task pane offers its enclosing releasable frames only');
+    assert(await barOut.getByRole('button').isDisabled(), 'parallel positions need a pick first');
+    assert(await barLoop.getByRole('button').isDisabled());
+    await bar.locator('.cf2-debug-at').selectOption('task@1');
+    assert.equal(await barOut.getAttribute('data-instance'), 'frame@1', 'picked position resolves its frame');
+    await page.evaluate(() => refreshWf());
+    assert.equal(await bar.locator('.cf2-debug-at').inputValue(), 'task@1', 'pick survives poll');
     await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
-      paneOut.getByRole('button', {name: 'Step out', exact: true}).click(),
+      barOut.getByRole('button', {name: 'Step out', exact: true}).click(),
     ]);
     assert.equal(actions.length, 3);
     assert.equal(actions[2].path, '/api/cflow2/step-out');
     assert.equal(actions[2].body.instance, 'frame@1');
     assert.equal(actions[2].body.outcome, 'ok');
-    assert.equal(actions[2].body.reason, 'step out from node pane');
-    // the mobile pane covers the chart, so the row gets the click directly
-    await view.locator('.cf2-row[data-node="root"]').first().dispatchEvent('click');
-    await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="root"].selected'));
-    assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'root pane has no step out');
-    await view.locator('.cf2-row[data-node="frame"]').first().dispatchEvent('click');
-    await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="frame"].selected'));
-    assert.deepEqual(await paneOut.locator('.cf2-press').evaluateAll(ns => ns.map(n => n.dataset.instance)),
-      ['frame@1'], 'frame pane offers its own live instance');
+    assert.equal(actions[2].body.reason, 'step out from debugger bar');
+    await view.locator('.cf2-row[data-node="task"]').first().dispatchEvent('click');
+    await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="task"].selected'));
+    assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'node pane has no step out block');
+    detail.chart.nodes.frame.type = 'loop';
+    detail.chart.nodes.inner = {id: 'inner', type: 'seq', label: 'Inner', children: ['task'], roles: ['']};
+    detail.instances = detail.instances.filter(i => i.instance !== 'other@1').map(i =>
+      i.instance === 'task@1' ? {...i, parent: 'inner@1'} : i);
+    detail.instances.push({node: 'inner', instance: 'inner@1', parent: 'frame@1', frame: {idx: 0}, can_step_out: true, returns: {ok: {}}});
+    await page.evaluate(() => refreshWf());
+    await bar.locator('.cf2-debug-at').waitFor({state: 'detached'});
+    assert.equal(await barOut.getAttribute('data-instance'), 'inner@1', 'step out takes the innermost frame');
+    assert.equal(await barLoop.getAttribute('data-instance'), 'frame@1', 'break loop skips the seq for the loop around it');
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
+      // the mobile pane is open over the bar, so the button gets the click directly
+      barLoop.getByRole('button', {name: 'Break loop', exact: true}).dispatchEvent('click'),
+    ]);
+    assert.equal(actions.length, 4);
+    assert.equal(actions[3].path, '/api/cflow2/step-out');
+    assert.equal(actions[3].body.instance, 'frame@1');
+    assert.equal(actions[3].body.reason, 'break loop from debugger bar');
     detail.run.status = 'done';
     await page.evaluate(() => refreshWf());
     await view.locator('.cf2-pane').filter({hasText: 'the run is finished'}).waitFor();
-    assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'finished run offers no step out');
+    assert.equal(await bar.count(), 0, 'finished run offers no debugger bar');
     detail.run.status = 'running';
     assert.deepEqual(errors, []);
-    console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout, node pane stepout passed`);
+    console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout, debugger bar step out/break loop passed`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(e => { console.error(e); process.exit(1); });

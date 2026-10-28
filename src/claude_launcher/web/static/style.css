@@ -8945,6 +8945,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-move-frame.unwound .cf2-stack-label { color: #8b949e; text-decoration: line-through; }
 .cf2-move-frame.entered .cf2-move-mark, .cf2-move-frame.entered .cf2-stack-status { color: #3fb950; }
 .cf2-stack-actions .cf2-select { min-width: 0; max-width: 120px; }
+.cf2-debugbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 4px 0 6px; font-size: 12px; }
+.cf2-debug-press { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.cf2-debug-target { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+.cf2-debugbar .cf2-select { min-width: 0; max-width: 160px; }
 .cf2-layout { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cf2-layout .wf-note { margin: 0 4px 0 0; }
 .cf2-layout [aria-pressed="true"] { background: #172947; color: #a5d6ff; outline: 1px solid #388bfd; }
