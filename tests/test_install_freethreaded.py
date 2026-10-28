@@ -30,9 +30,31 @@ PS1 = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.ps1"
 # way a real missing header fails it -- after the check said it was there.
 # `build` records and succeeds without producing a wheel, which is enough to
 # tell "the decision came first" from "the build came first".
+# `tool run` stands in for the pylibsrtp build: `pip wheel --wheel-dir D` leaves
+# an abi3 wheel in D and `wheel tags --remove F` renames F to the cp314t tag, so
+# the script's own lookups see what the real tools leave behind. `tool install`
+# copies its --overrides file next to the log, because the script deletes it on
+# exit.
 STUB_UV = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_UV_LOG"
 if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then echo "$STUB_TOOL_DIR"; exit 0; fi
+if [ "$1" = "tool" ] && [ "$2" = "run" ]; then
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --wheel-dir) : > "${args[$((i + 1))]}/pylibsrtp-1.0.0-cp310-abi3-linux_x86_64.whl" ;;
+      --remove) f="${args[$((i + 1))]}"; [ -f "$f" ] && mv "$f" "${f/cp310-abi3/cp314-cp314t}" ;;
+    esac
+  done
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "--overrides" ] && cat "$a" >> "$STUB_UV_LOG.overrides"
+    prev="$a"
+  done
+fi
 if [ "$1" = "tool" ] && [ "$2" = "install" ] && [ -n "${STUB_FAIL_INSTALL:-}" ]; then
   echo "SIMULATED: the p2p build failed" >&2
   exit 1
@@ -65,9 +87,11 @@ STUB_GETENT = """#!/usr/bin/env bash
 printf '%s:x:1000:1000::%s:/bin/bash\\n' "sandbox" "$STUB_HOME_ANSWER"
 """
 
-# Answers `--exists libsrtp2` with {exit_code}: 0 means the header is present.
+# Answers `--exists libsrtp2` with {exit_code} and `--exists libcrypto` with
+# {crypto_code}: 0 means the development files are present.
 STUB_PKG_CONFIG = """#!/usr/bin/env bash
 [ "$1" = "--exists" ] && [ "$2" = "libsrtp2" ] && exit {exit_code}
+[ "$1" = "--exists" ] && [ "$2" = "libcrypto" ] && exit {crypto_code}
 exit 1
 """
 
@@ -81,22 +105,43 @@ def _overrides_tail(line: str) -> str:
     return line.split(marker, 1)[1] if marker in line else ""
 
 
-def _without_pkg_config(path: str) -> str:
-    """``path`` minus every directory that holds a ``pkg-config``.
+def _without_pkg_config(path: str, shadow_root: Path) -> str:
+    """``path`` with every ``pkg-config`` on it hidden.
 
-    Dropping the entries, rather than only the stub, is what makes "the host
-    has no pkg-config" a real condition: a sandbox that merely skips writing a
-    stub still inherits the host's copy, and a developer who followed the
-    README's `apt install pkg-config` advice would then get different results
-    from CI or from a machine that skipped it (caught in review, claunch-fsn9f).
+    Hiding the host's copy, rather than only skipping the stub, is what makes
+    "the host has no pkg-config" a real condition: a sandbox that merely skips
+    writing a stub still inherits the host's copy, and a developer who followed
+    the README's `apt install pkg-config` advice would then get different
+    results from CI or from a machine that skipped it (caught in review,
+    claunch-fsn9f).
+
+    A directory that holds one is replaced by a directory under
+    ``shadow_root`` that links everything else in it. Dropping the directory
+    outright also dropped ``/usr/bin`` -- where Ubuntu puts pkg-config next to
+    bash and coreutils -- and the run then failed with FileNotFoundError
+    before the script started.
     """
+    names = ("pkg-config", "pkg-config.exe")
     kept = []
-    for entry in path.split(os.pathsep):
+    for index, entry in enumerate(path.split(os.pathsep)):
         if not entry:
             continue
-        if any(os.access(os.path.join(entry, name), os.X_OK) for name in ("pkg-config", "pkg-config.exe")):
+        if not any(os.access(os.path.join(entry, name), os.X_OK) for name in names):
+            kept.append(entry)
             continue
-        kept.append(entry)
+        shadow = shadow_root / f"path-{index}"
+        shadow.mkdir(parents=True, exist_ok=True)
+        try:
+            children = os.listdir(entry)
+        except OSError:
+            continue
+        for child in children:
+            if child in names:
+                continue
+            link = shadow / child
+            if not os.path.lexists(link):
+                os.symlink(os.path.join(entry, child), link)
+        kept.append(str(shadow))
     return os.pathsep.join(kept)
 
 
@@ -130,19 +175,24 @@ def sandbox(tmp_path: Path):
 
     log = tmp_path / "uv.log"
 
-    def pkg_config(exit_code: int | None) -> None:
+    def pkg_config(exit_code: int | None, crypto_code: int | None = None) -> None:
         path = bin_dir / "pkg-config"
         if exit_code is None:
             if path.exists():
                 path.unlink()
             return
-        path.write_text(STUB_PKG_CONFIG.replace("{exit_code}", str(exit_code)), encoding="utf-8")
+        crypto = exit_code if crypto_code is None else crypto_code
+        body = STUB_PKG_CONFIG.replace("{exit_code}", str(exit_code)).replace("{crypto_code}", str(crypto))
+        path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
 
-    def run(*args: str, stdin: str = "", pkg: int | None = 1, fail_install: bool = False,
-            wheel_path: str | None = "__default__", home: str | None = "__default__",
-            no_overrides: bool = False):
+    def run(*args: str, stdin: str = "", pkg: int | None = 1, crypto: int | None = None,
+            fail_install: bool = False, wheel_path: str | None = "__default__",
+            home: str | None = "__default__", no_overrides: bool = False):
         """Run the script. ``pkg=None`` leaves pkg-config unreachable.
+
+        ``crypto`` answers ``pkg-config --exists libcrypto``; ``None`` answers
+        it the same as libsrtp2.
 
         ``wheel_path=None`` clears CLAUNCH_FT_ZVEC_WHEEL so the script takes the
         real build path -- the only configuration in which "the check ran before
@@ -158,11 +208,11 @@ def sandbox(tmp_path: Path):
         tmp_path: the defaults are computed from whichever HOME the run gets,
         and the script answers from the sandbox's own home directory.
         """
-        pkg_config(pkg)
+        pkg_config(pkg, crypto)
         env = dict(os.environ)
         inherited = env.get("PATH", "")
         if pkg is None:
-            inherited = _without_pkg_config(inherited)
+            inherited = _without_pkg_config(inherited, tmp_path / "path-shadow")
         env.update(
             {
                 "PATH": os.pathsep.join([str(bin_dir), inherited]),
@@ -217,7 +267,15 @@ def sandbox(tmp_path: Path):
         """The `tool install` calls the script actually issued, target kept."""
         return [line for line in calls() if line.startswith("tool install")]
 
-    return {"run": run, "installs": installs, "calls": calls}
+    def overrides() -> list[str]:
+        """The --overrides lines every `tool install` was handed, in order."""
+        path = Path(str(log) + ".overrides")
+        if not path.exists():
+            return []
+        return path.read_text(encoding="utf-8").splitlines()
+
+    return {"run": run, "installs": installs, "calls": calls, "overrides": overrides,
+            "wheels": tmp_path / "wheels"}
 
 
 def _out(proc: subprocess.CompletedProcess) -> str:
@@ -261,7 +319,7 @@ def test_require_p2p_stops_when_libsrtp2_is_missing(sandbox):
     proc = sandbox["run"]("--require-p2p", pkg=1)
     out = _out(proc)
     assert proc.returncode != 0
-    assert "sudo apt install -y libsrtp2-dev pkg-config" in out
+    assert "sudo apt install -y libsrtp2-dev libssl-dev pkg-config" in out
     assert "tools/install_freethreaded.sh --rebuild" in out
     assert sandbox["installs"]() == []
 
@@ -366,7 +424,7 @@ def test_the_decision_comes_before_the_zvec_build(sandbox):
     assert proc.returncode != 0, out
     # Stopped for the p2p reason, not because a build failed or a tool was
     # missing.
-    assert "sudo apt install -y libsrtp2-dev pkg-config" in out
+    assert "sudo apt install -y libsrtp2-dev libssl-dev pkg-config" in out
     # The build never started: no `uv build`, and therefore no 9-minute wait
     # before the question.
     calls = sandbox["calls"]()
@@ -402,6 +460,56 @@ def test_help_lists_both_flags_and_the_non_interactive_default(sandbox):
     assert "--no-p2p" in out
     assert "--require-p2p" in out
     assert "no terminal" in out
+
+
+def test_require_p2p_stops_when_the_openssl_dev_files_are_missing(sandbox):
+    """libsrtp2 alone passed the old check; pylibsrtp then failed to link
+    with `cannot find -lcrypto` on a machine without libssl-dev."""
+    proc = sandbox["run"]("--require-p2p", pkg=0, crypto=1)
+    out = _out(proc)
+    assert proc.returncode != 0, out
+    assert "libssl-dev" in out.splitlines()[0], out
+    assert "sudo apt install -y libsrtp2-dev libssl-dev pkg-config" in out
+    assert sandbox["installs"]() == []
+
+
+def test_p2p_builds_pylibsrtp_retags_it_and_overrides_it(sandbox):
+    """pylibsrtp's setup.py tags every wheel cp310-abi3, which 3.14t refuses.
+
+    The script builds it from the sdist, retags it cp314-cp314t, and points
+    the install at that file through --overrides.
+    """
+    proc = sandbox["run"]("--require-p2p", pkg=0)
+    out = _out(proc)
+    assert proc.returncode == 0, out
+    runs = [line for line in sandbox["calls"]() if line.startswith("tool run")]
+    assert any("pip wheel" in line and "--no-binary pylibsrtp" in line and "pylibsrtp==1.0.0" in line
+               for line in runs), runs
+    assert any("wheel tags --python-tag cp314 --abi-tag cp314t --remove" in line for line in runs), runs
+    srtp = [line for line in sandbox["overrides"]() if line.startswith("pylibsrtp @ ")]
+    assert len(srtp) == 1, sandbox["overrides"]()
+    assert srtp[0].endswith("/pylibsrtp-1.0.0/pylibsrtp-1.0.0-cp314-cp314t-linux_x86_64.whl"), srtp
+    # The build ran before the install that uses it.
+    calls = sandbox["calls"]()
+    first_install = next(i for i, line in enumerate(calls) if line.startswith("tool install"))
+    assert all(calls.index(line) < first_install for line in runs), calls
+
+
+def test_a_cached_pylibsrtp_wheel_is_reused(sandbox):
+    cached = sandbox["wheels"] / "pylibsrtp-1.0.0" / "pylibsrtp-1.0.0-cp314-cp314t-linux_x86_64.whl"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("", encoding="utf-8")
+    proc = sandbox["run"]("--require-p2p", pkg=0)
+    assert proc.returncode == 0, _out(proc)
+    assert not [line for line in sandbox["calls"]() if line.startswith("tool run")], sandbox["calls"]()
+    assert f"pylibsrtp @ file://{cached}" in sandbox["overrides"](), sandbox["overrides"]()
+
+
+def test_no_p2p_does_not_build_or_override_pylibsrtp(sandbox):
+    proc = sandbox["run"]("--no-p2p", pkg=None)
+    assert proc.returncode == 0, _out(proc)
+    assert not [line for line in sandbox["calls"]() if line.startswith("tool run")], sandbox["calls"]()
+    assert not [line for line in sandbox["overrides"]() if line.startswith("pylibsrtp")], sandbox["overrides"]()
 
 
 # --------------------------------------------------------------------------
@@ -450,7 +558,8 @@ def ps1_sandbox(tmp_path: Path):
             if path.exists():
                 path.unlink()
             return
-        path.write_text(STUB_PKG_CONFIG.replace("{exit_code}", str(exit_code)), encoding="utf-8")
+        body = STUB_PKG_CONFIG.replace("{exit_code}", str(exit_code)).replace("{crypto_code}", str(exit_code))
+        path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
 
     def run(*args: str, pkg: int | None = 1, local_app_data: str | None = None,
@@ -482,7 +591,7 @@ def ps1_sandbox(tmp_path: Path):
             env.pop(name, None)
         inherited = env.get("PATH", "")
         if pkg is None:
-            inherited = _without_pkg_config(inherited)
+            inherited = _without_pkg_config(inherited, tmp_path / "path-shadow")
         env["PATH"] = os.pathsep.join([str(bin_dir), inherited])
         env["STUB_UV_LOG"] = str(log)
         env["STUB_TOOL_DIR"] = str(tmp_path / "tooldir")

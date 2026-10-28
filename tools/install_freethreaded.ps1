@@ -14,8 +14,8 @@
 #
 # One feature is optional: the fast direct link between the browser page and
 # the daemon. Without it the page still works and falls back to the relay
-# server, which is slower. Building that link needs a system library that is
-# often missing, so the script checks for it first and tells you what to
+# server, which is slower. Building that link needs two system libraries (libsrtp2
+# and OpenSSL) that are often missing, so the script checks for them first and tells you what to
 # install, instead of finding out after the 9-minute build and quietly
 # installing without it. The technical name for the feature is "p2p" (the
 # `p2p` extra of this package, an extra set of dependencies).
@@ -32,6 +32,7 @@
 #   CLAUNCH_FT_WHEELS      wheel cache directory (default: %LOCALAPPDATA%\claunch\zvec-wheels,
 #                          or <local app data>\claunch\zvec-wheels when that variable is empty)
 #   CLAUNCH_FT_ZVEC_WHEEL  path to an existing cp314t zvec wheel; skips the build
+#   CLAUNCH_FT_SRTP_VERSION  pylibsrtp version rebuilt and retagged for p2p (default: 1.0.0)
 #   CLAUNCH_FT_ROOT        tool environment and bin (default: %LOCALAPPDATA%\claunch-nogil,
 #                          or <local app data>\claunch-nogil when that variable is empty)
 #   CLAUNCH_FT_SHIM_DIR    where claunch-nogil.cmd is written (default: ~/.local/bin)
@@ -95,6 +96,7 @@ $ZvecRepo = if ($env:CLAUNCH_FT_ZVEC_REPO) { $env:CLAUNCH_FT_ZVEC_REPO } else { 
 $ZvecRef = if ($env:CLAUNCH_FT_ZVEC_REF) { $env:CLAUNCH_FT_ZVEC_REF } else { '8d4996924bce78f8b072a353803c305101bcc807' }
 $CacheRoot = if ($env:CLAUNCH_FT_WHEELS) { $env:CLAUNCH_FT_WHEELS } else { Join-Path (Join-Path $LocalAppData 'claunch') 'zvec-wheels' }
 $PythonSpec = '3.14t'
+$SrtpVersion = if ($env:CLAUNCH_FT_SRTP_VERSION) { $env:CLAUNCH_FT_SRTP_VERSION } else { '1.0.0' }
 $FtRoot = if ($env:CLAUNCH_FT_ROOT) { $env:CLAUNCH_FT_ROOT } else { Join-Path $LocalAppData 'claunch-nogil' }
 $ShimDir = if ($env:CLAUNCH_FT_SHIM_DIR) { $env:CLAUNCH_FT_SHIM_DIR } else { Join-Path (Join-Path (Get-HomeDir) '.local') 'bin' }
 $env:UV_TOOL_DIR = Join-Path $FtRoot 'tools'
@@ -147,6 +149,31 @@ function Get-P2pMissing {
     if (-not ($srtp2 -or $hasPkgSrtp2)) {
         return '이 컴퓨터에 libsrtp2(빠른 통신 기능이 쓰는 암호화 라이브러리)가 없어서, 브라우저와 데몬을 직접 연결하는 기능을 켤 수 없습니다.'
     }
+    # pylibsrtp links libcrypto (OpenSSL) as well, so a machine with libsrtp2
+    # and no OpenSSL import library passed the check above and then failed at
+    # the link step. Look for libcrypto.lib on LIB, in a vcpkg tree, or ask
+    # pkg-config.
+    $libcrypto = $null
+    foreach ($dir in ("$env:LIB" -split [IO.Path]::PathSeparator)) {
+        if (-not $dir) { continue }
+        $candidate = Join-Path $dir 'libcrypto.lib'
+        if (Test-Path -LiteralPath $candidate) { $libcrypto = $candidate; break }
+    }
+    if (-not $libcrypto -and $env:SystemDrive) {
+        $vcpkgRoot = Join-Path $env:SystemDrive 'vcpkg'
+        if (Test-Path -LiteralPath $vcpkgRoot) {
+            $libcrypto = Get-ChildItem -Path $vcpkgRoot -Filter 'libcrypto.lib' -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        }
+    }
+    $hasPkgCrypto = $false
+    if (Get-Command 'pkg-config' -ErrorAction SilentlyContinue) {
+        & pkg-config --exists libcrypto 2>$null
+        $hasPkgCrypto = ($LASTEXITCODE -eq 0)
+    }
+    if (-not ($libcrypto -or $hasPkgCrypto)) {
+        return '이 컴퓨터에 OpenSSL 개발 파일(libcrypto.lib)이 없어서, 브라우저와 데몬을 직접 연결하는 기능을 켤 수 없습니다.'
+    }
     return ''
 }
 
@@ -166,7 +193,7 @@ $p2pReason
 고치려면 아래 네 줄을 그대로 실행한 뒤 이 스크립트를 다시 실행하세요
 (이미 vcpkg가 있으면 첫 줄은 건너뜁니다. <vcpkg root>는 vcpkg를 설치한 폴더입니다):
     winget install --id Microsoft.vcpkg
-    vcpkg install libsrtp2:x64-windows
+    vcpkg install libsrtp2:x64-windows openssl:x64-windows
     `$env:LIB += ";<vcpkg root>\installed\x64-windows\lib"; `$env:INCLUDE += ";<vcpkg root>\installed\x64-windows\include"
     pwsh -File tools\install_freethreaded.ps1 -Rebuild
 
@@ -235,7 +262,36 @@ $Overrides = Join-Path ([IO.Path]::GetTempPath()) ("claunch-ft-overrides-" + [Gu
 try {
     $uri = ([Uri]$Wheel).AbsoluteUri
     # ASCII without a byte-order mark: uv reads the file as plain requirements.
-    [IO.File]::WriteAllText($Overrides, "zvec @ $uri`n", (New-Object Text.UTF8Encoding($false)))
+    $overrideLines = "zvec @ $uri`n"
+
+    # p2p pulls pylibsrtp through aiortc. Its setup.py stamps every CPython
+    # wheel `cp310-abi3`, and 3.14t refuses abi3 wheels, so uv builds it and
+    # then rejects the result; the published win_amd64 wheel is abi3 as well
+    # and is built against the limited API, which 3.14t does not have. cffi
+    # compiles the extension without the limited API on 3.14t; only the tag is
+    # wrong. Build it once from the sdist, retag it cp314-cp314t, cache it, and
+    # override pylibsrtp to that wheel. Measured on Linux (install_freethreaded.sh);
+    # this Windows path has not been run.
+    if ($P2pInstalled) {
+        $SrtpDir = Join-Path $CacheRoot "pylibsrtp-$SrtpVersion"
+        if ($Rebuild -and (Test-Path $SrtpDir)) { Remove-Item -Recurse -Force $SrtpDir }
+        $srtpFound = Get-ChildItem -Path $SrtpDir -Filter 'pylibsrtp-*-cp314t-*.whl' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $srtpFound) {
+            New-Item -ItemType Directory -Force -Path $SrtpDir | Out-Null
+            Write-Host "building pylibsrtp $SrtpVersion for $PythonSpec"
+            Invoke-Native 'uv' @('tool', 'run', '--python', $PythonSpec, 'pip', 'wheel', '--quiet', '--no-deps',
+                '--no-binary', 'pylibsrtp', '--wheel-dir', $SrtpDir, "pylibsrtp==$SrtpVersion")
+            $abi3 = Get-ChildItem -Path $SrtpDir -Filter "pylibsrtp-$SrtpVersion-*abi3*.whl" | Select-Object -First 1
+            if (-not $abi3) { throw "pylibsrtp build left no abi3 wheel in $SrtpDir" }
+            Invoke-Native 'uv' @('tool', 'run', '--python', $PythonSpec, 'wheel', 'tags', '--python-tag', 'cp314',
+                '--abi-tag', 'cp314t', '--remove', $abi3.FullName)
+            $srtpFound = Get-ChildItem -Path $SrtpDir -Filter 'pylibsrtp-*-cp314t-*.whl' | Select-Object -First 1
+            if (-not $srtpFound) { throw "pylibsrtp wheel not found in $SrtpDir after the build" }
+        }
+        Write-Host "pylibsrtp wheel: $($srtpFound.FullName)"
+        $overrideLines += "pylibsrtp @ $(([Uri]$srtpFound.FullName).AbsoluteUri)`n"
+    }
+    [IO.File]::WriteAllText($Overrides, $overrideLines, (New-Object Text.UTF8Encoding($false)))
 
     function Install-Tool([string]$Target) {
         Invoke-Native 'uv' @('tool', 'install', '--python', $PythonSpec, '--editable', $Target, '--reinstall', '--overrides', $Overrides)
@@ -270,7 +326,7 @@ $P2pLine = if ($P2pInstalled) {
     '빠른 직접 연결 기능: 포함됨 (브라우저와 데몬이 중계 서버를 거치지 않고 연결될 수 있습니다)'
 } else {
     '빠른 직접 연결 기능: 포함되지 않음. 이 설치는 중계 서버를 거치는 느린 경로로 동작합니다.' + [Environment]::NewLine +
-    '  이 기능을 추가하려면: vcpkg install libsrtp2:x64-windows 로 라이브러리를 갖춘 뒤 pwsh -File tools\install_freethreaded.ps1 -Rebuild'
+    '  이 기능을 추가하려면: vcpkg install libsrtp2:x64-windows openssl:x64-windows 로 라이브러리를 갖춘 뒤 pwsh -File tools\install_freethreaded.ps1 -Rebuild'
 }
 
 Write-Host @"
