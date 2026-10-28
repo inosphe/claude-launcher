@@ -789,9 +789,14 @@ def compose_cflow_declined_note(*, workflow: str = "") -> str:
 def _landing_target(manager, mesh_mgr, cwd: str, name: str, parent: str):
     """(leader session, why) for an independent child's landing request.
     Blocking (git reads); call it in a thread."""
+    from ..cflow import landing as cflow_landing
     from . import cflow2_triggers as v2
     from .landing_route import Router
 
+    if cflow_landing.common_dir(cwd) is None:
+        # The route would then take a queue in any repository; wiring a
+        # leader of another one is what this edge must never do.
+        return None, f"no git readable in {cwd}, so its repository's leader cannot be told"
     router = Router(manager, mesh_mgr, v2.landing_holders(manager, v2.session_cwds(manager)))
     found = router.independent(cwd, name, parent=parent)
     return found.owner, found.why

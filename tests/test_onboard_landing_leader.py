@@ -163,3 +163,8 @@ def test_the_join_leaves_a_stacked_child_to_its_parent(monkeypatch):
     out = asyncio.run(onboard._join(_plan("stacked"), "w", mesh_mgr=mm, cwd="/w",
                                     manager=object()))
     assert "landing_leader" not in out and mm.links == []
+
+
+def test_a_checkout_with_no_git_wires_nobody(tmp_path):
+    owner, why = onboard._landing_target(object(), object(), str(tmp_path), "w", "p")
+    assert owner is None and "no git readable" in why
