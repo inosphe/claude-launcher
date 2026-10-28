@@ -648,6 +648,22 @@ class Cflow2Clock:
             return True
         return bool(getattr(session, "held_at", None) or getattr(session, "paused_at", None))
 
+    def trigger_cwds(self) -> List[str]:
+        """The directories a trigger's push is performed against: the last
+        scan's, or a fresh walk when no scan has run yet.
+
+        One expression, in one place, because two callers now need the same
+        answer and must not be able to drift: :meth:`run_triggers` routes a
+        landing request with it, and the landing-target probe
+        (``api.h_cflow2_landing_target``) asks *before* the request whether
+        there is anybody to route it to. A probe measuring a different set
+        could say "there is a target" where the push then found none --
+        precisely the disagreement asking first exists to prevent. The
+        residual race (the set changing between the probe and the push) is
+        the one the ``NOT queued`` path already handles at ``landing-nudge``.
+        """
+        return list(self._cwds) or self.cwds()
+
     def cwds(self) -> List[str]:
         out: Set[str] = set()
         for session in self._live_sessions():
@@ -986,7 +1002,7 @@ class Cflow2Clock:
         with self._lock:
             todo, self.claimed = self.claimed, []
         done: List[Tuple[str, str, str, bool, str]] = []
-        cwds = list(self._cwds) or await asyncio.to_thread(self.cwds)
+        cwds = await asyncio.to_thread(self.trigger_cwds)
         for cwd, scope, trig, driver in todo:
             if self.stop.is_set():
                 # Not performed: the record stays claimed by this boot and

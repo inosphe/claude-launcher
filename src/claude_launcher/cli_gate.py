@@ -34,6 +34,10 @@ from typing import List, Optional
 #: also the file name under a checkout's ``tools/``.
 GATES = {
     "landed-check": "landed_check",
+    # Is there a session that would take this worker's landing request?
+    # Asked before the request is filed, so a round with nobody to route to
+    # goes to a person instead of spending its wait (claunch-od1mx.1).
+    "landing-target": "landing_target",
 }
 
 

@@ -83,6 +83,14 @@ class Target:
     why: str = ""
     #: Each session passed over on the way, and why (for the trigger detail).
     passed: Tuple[str, ...] = ()
+    #: ``why`` is "this could not be read", not "there is nobody": the walk
+    #: stopped on a fact it could not establish (a mesh membership, a run
+    #: slot). A push reads it as one more skip reason, but a caller that
+    #: *asks before* pushing -- the landing-target probe -- must not read it
+    #: as the answer "no target", because acting on that would ask a person
+    #: to re-route a request nobody had shown to be unroutable. Defaulted, so
+    #: every existing caller keeps its meaning.
+    undecidable: bool = False
 
     def note(self) -> str:
         """``"<passed>; fell back to 'X' at <cwd>: "`` when the request did
@@ -119,19 +127,33 @@ class Router:
             name = self.parent_of(name)
         return out
 
-    def merger_role(self, scope: str, name: str) -> str:
+    def merger_role(self, scope: str, name: str,
+                    blind: Optional[List[str]] = None) -> str:
         """Why ``name`` holds no ``merger`` role where ``scope`` (the worker)
-        can see it, or empty when it does. A ``leader`` counts as one."""
+        can see it, or empty when it does. A ``leader`` counts as one.
+
+        ``blind`` collects the reasons this could not be *read* rather than
+        found absent; the caller turns a non-empty list into
+        :attr:`Target.undecidable`. Collected through an argument rather
+        than matched out of the returned sentence, so rewording a reason
+        cannot silently reclassify a blind walk as a definite "nobody".
+        """
         if self.mesh is None:
             return ""
         try:
             meshes = sorted({m["mesh"] for m in self.mesh.meshes_for_session(scope)})
         except Exception:
+            if blind is not None:
+                blind.append(f"the worker's mesh membership could not be read ({scope!r})")
             return "holds a role that could not be read (the worker's mesh membership)"
         for mname in meshes:
             try:
                 mesh = self.mesh.get(mname)
             except Exception:
+                # A mesh this daemon cannot read may be where the role lives,
+                # so a walk that only failed here has not answered "nobody".
+                if blind is not None:
+                    blind.append(f"mesh {mname!r} could not be read for {name!r}")
                 continue
             for m in mesh.members.values():
                 # A handle on a mirrored mesh can carry the same session name
@@ -144,21 +166,25 @@ class Router:
         where = ", ".join(repr(n) for n in meshes) or "no mesh"
         return f"holds no {MERGER!r} role in the worker's mesh ({where})"
 
-    def merger(self, name: str, repo: Optional[str], scope: str = "") -> Tuple[Optional[Holder], str]:
+    def merger(self, name: str, repo: Optional[str], scope: str = "",
+               blind: Optional[List[str]] = None) -> Tuple[Optional[Holder], str]:
         """(holder, why): the run of ``name`` the request goes on, or why
         ``name`` cannot merge. ``scope`` is the worker whose meshes the
-        ``merger`` role is read in."""
+        ``merger`` role is read in, and ``blind`` collects what could not be
+        read (see :meth:`merger_role`)."""
         session = self._session(name)
         if session is None:
             return None, "is not a session of this daemon"
         if getattr(session, "exited", False):
             return None, "has exited"
-        why = self.merger_role(scope, name)
+        why = self.merger_role(scope, name, blind)
         if why:
             return None, why
         try:
             found = self.holders(name, repo)
         except Exception as exc:  # noqa: BLE001 - an unreadable slot is no holder
+            if blind is not None:
+                blind.append(f"the run slots of {name!r} could not be read ({exc})")
             return None, f"has runs that could not be read ({exc})"
         holder = pick(found)
         if holder is None:
@@ -169,41 +195,48 @@ class Router:
         """The nearest direct ancestor that can merge, else the mesh leader."""
         repo = cflow_landing.common_dir(cwd)
         passed: List[str] = []
+        blind: List[str] = []
         chain = self.ancestors(scope)
         if not chain:
             passed.append("this session has no parent session")
         for depth, name in enumerate(chain):
-            holder, why = self.merger(name, repo, scope)
+            holder, why = self.merger(name, repo, scope, blind)
             if holder is not None:
                 return Target(name, holder, passed=tuple(passed))
             passed.append(f"{'parent' if depth == 0 else 'ancestor'} {name!r} {why}")
-        owner, holder, why = self.leader(scope, chain, repo, tried=set(chain))
+        owner, holder, why = self.leader(scope, chain, repo, tried=set(chain), blind=blind)
         if holder is not None:
             return Target(owner, holder, passed=tuple(passed))
         return Target(why="; ".join(passed + [f"mesh leader fallback: {why}"]),
-                      passed=tuple(passed))
+                      passed=tuple(passed), undecidable=bool(blind))
 
     def independent(self, cwd: str, scope: str) -> Target:
         """The mesh leader only (a sibling or a direct ancestor)."""
         repo = cflow_landing.common_dir(cwd)
-        owner, holder, why = self.leader(scope, self.ancestors(scope), repo, tried=set())
+        blind: List[str] = []
+        owner, holder, why = self.leader(scope, self.ancestors(scope), repo, tried=set(),
+                                         blind=blind)
         if holder is None:
-            return Target(why=f"mesh leader: {why}")
+            return Target(why=f"mesh leader: {why}", undecidable=bool(blind))
         return Target(owner, holder)
 
     def leader(self, scope: str, chain: Sequence[str], repo: Optional[str], *,
-               tried: set) -> Tuple[Optional[str], Optional[Holder], str]:
+               tried: set, blind: Optional[List[str]] = None,
+               ) -> Tuple[Optional[str], Optional[Holder], str]:
         """(leader, holder, why) of the one mesh leader that takes the request.
 
         Only a direct ancestor of ``scope`` (``chain``) or a sibling of
         ``scope`` or of one of those ancestors (a known session); one
-        already asked (``tried``) is not asked again.
+        already asked (``tried``) is not asked again. ``blind`` collects what
+        could not be read, as in :meth:`merger_role`.
         """
         if self.mesh is None:
             return None, None, "no mesh to look for a leader in"
         try:
             names = sorted({m["mesh"] for m in self.mesh.meshes_for_session(scope)})
         except Exception:
+            if blind is not None:
+                blind.append(f"the worker's mesh membership could not be read ({scope!r})")
             return None, None, "the worker's mesh membership could not be read"
         if not names:
             return None, None, "this session is in no mesh"
@@ -212,6 +245,8 @@ class Router:
             try:
                 mesh = self.mesh.get(mname)
             except Exception:
+                if blind is not None:
+                    blind.append(f"mesh {mname!r} could not be read for its leaders")
                 continue
             for _, m in sorted(mesh.members.items()):
                 if LEADER in m.roles and m.session != scope:
@@ -246,7 +281,7 @@ class Router:
                     "or of one of its ancestors"
                 )
                 continue
-            holder, why = self.merger(lead, repo, scope)
+            holder, why = self.merger(lead, repo, scope, blind)
             if holder is None:
                 refused.append(f"leader {lead!r} {why}")
                 continue

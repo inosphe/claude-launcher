@@ -4087,6 +4087,42 @@ nodes:
       ok: {issue: str}
     effects: [board.write, mesh.send]
 
+  landing-target-evidence:
+    title: 착지 대상 없음의 근거 (라우팅 판정 원문)
+    prompt: |
+      이 런의 착지 요청을 받을 세션이 없다는 판정이 났다(landing의 여섯째
+      확인, 종료 코드 1). 이제 그 판정의 근거를 모은다 — 요약하지 말고
+      명령의 출력을 옮긴다:
+      1. `claunch gate landing-target --json` — 데몬의 Router가 낸 답이다.
+         `why`가 탈락 사유 전체이고, `passed`는 지나온 세션과 그 이유,
+         `refused`는 거절된 후보, `undecidable`은 판정 불가 여부다.
+      2. `claunch mesh members <이 런의 메시>` — 지금 명부다. 각 구성원의
+         역할이 보이고, 누가 `merger`나 `leader`를 갖는지 여기서 읽힌다.
+      3. `claunch cflow2 status --json`의 `data.inputs.relation` — 이 런이
+         어느 방향으로 요청했는지(stacked는 부모·조상·리더, independent는 리더).
+         이 런의 값은 ${params.relation}이다 — 1의 판정이 그 방향으로 잰 것인지
+         맞춰 본다(다르면 그것 자체가 보고할 사실이다).
+      그리고 이 회차의 이슈에 한 줄 남긴다:
+          NO LANDING TARGET: <1의 why>
+      마커에 BLOCKED·HOLD·CHANGES REQUESTED를 넣지 않는다 — landing의 넷째
+      확인이 그 세 문자열을 제동 마커로 grep하므로, 넣으면 다음 회차가 이
+      코멘트를 「상위가 멈추라고 했다」로 읽는다.
+      **보드를 건드리지 않는다**: 이슈를 in_review로 전이하지 않고
+      `LANDING REQUEST` 코멘트도 남기지 않는다(요청을 세우지 않는 회차다).
+      보고 형식: {why: <1의 why 그대로>, members: <2의 요약>, relation: <3>}.
+    done_when: |
+      `claunch gate landing-target --json`의 출력(특히 `why`의 문장)이 보고에
+      그대로 옮겨져 있고, 메시 명부에서 누가 무슨 역할인지가 그 출력과 함께
+      있다. 이슈에 `NO LANDING TARGET: <why>` 코멘트가 있고 그 마커에
+      BLOCKED·HOLD·CHANGES REQUESTED가 없다. 보드는 in_review로 전이되지
+      않았고 `LANDING REQUEST` 코멘트도 없다.
+    # 회고·정산과 같은 이유로 위임하지 않는다: 이 판정은 이 세션이 조금 전에
+    # 잰 것이고, 새 컨텍스트의 서브에이전트는 그 런을 모른다.
+    executor: [inline]
+    returns:
+      ok: {why: str, members: str, relation: "str?"}
+    effects: [fs.read, board.write]
+
 procedures:
   fork-slice:
     description: >-
@@ -4724,6 +4760,57 @@ procedures:
               timeout: {call: landed-unclear, with: {why: timeout}}
           record: landed
 
+  landing-target-gate:
+    description: >-
+      착지 요청을 받을 세션이 아무도 없을 때(claunch-od1mx.1) 그 사실을 사람에게
+      올리고 이 런의 착지 경로를 사람이 정하게 한다. 근거는 추측이 아니라
+      라우팅 판정 그 자체다 — 데몬의 Router가 낸 탈락 사유를 그대로 싣는다.
+      보드를 건드리지 않는다: in_review 전이도, LANDING REQUEST 코멘트도 없다.
+      결과는 land의 셋 중 하나로 낸다: rework(메시를 고쳐 다시 올린다),
+      blocked(사람이 직접 머지한다), held(동결하고 마감한다).
+    params:
+      relation: {type: str, default: "", description: "이 런의 시작 입력 relation — 프로브가 어느 방향으로 재는지"}
+    body:
+      # 근거를 먼저 만든다. 질문을 여는 노드가 스스로 잰 값을 넘기는 것이
+      # ask-common의 규약이고(ask-frame → ask-pose), 물어보는 사이에 명부가
+      # 바뀌었을 수 있으므로 잰 시각을 함께 남긴다.
+      - landing-target-evidence
+      - id: landing-target-choice
+        call: ask-user
+        bind: landing_target
+        with:
+          # 근거 칸은 Router의 문장 그대로다 — 사용자가 「누가 왜 통과됐는지」를
+          # 한 화면에서 보게 하는 것이 이 질문의 목적이다.
+          context: "$result['landing-target-evidence'].value.why"
+          require_reason: true
+          topic: |
+            이 런의 착지 요청을 받을 세션이 아무도 없다는 것이 기계 판정으로
+            확인됐다(근거 칸의 사유가 데몬 라우팅 판정의 원문이다). 이 요청을
+            어떻게 할지 정한다. 워커는 이 선택을 스스로 하지 않는다 — 어느
+            쪽이든 머지 실행이나 메시 구성 변경이 사람의 몫이기 때문이다.
+            선택지 셋:
+            · rebase-and-repost — 메시를 고쳐(그 저장소의 착지 큐를 가진 세션을
+              메시에 넣거나, 워커를 그런 세션이 있는 메시에 조인시킨다) 이
+              브랜치를 다시 올린다. 워커는 배치 루프를 되감아 착지 절차를 처음부터
+              다시 하고, 여섯째 확인이 **새 명부로** 다시 선다. 대상이 생겼으면
+              평소의 착지 경로로 간다.
+            · merge-by-person — 대상이 없는 상태 그대로 두고 사람이 직접 머지한다
+              (착지 경로를 사람이 정한다). 워커는 요청을 세우지 않고 회차를
+              차단 상태로 마감한다. 머지 결과는 다음 회차나 사람이 확인한다.
+            · freeze-and-close — 브랜치를 동결하고 이 착지를 접는다. 워커는
+              추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
+            셋 다 이 워커가 master를 머지하지 않는다는 규칙을 그대로 둔다.
+        cases:
+          rebase-and-repost:
+            return: rework
+            value: {reason: "착지 대상을 만들지 못했다 — 사람이 메시 구성을 고쳐 다시 올린다", rework: true}
+          merge-by-person:
+            return: blocked
+            value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다"}
+          freeze-and-close:
+            return: held
+            value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false}
+
   cut-unreachable:
     description: >-
       스택 컷 대기(cut-wait)가 기계로 끝나지 못했다: stack side 런이 없거나
@@ -4799,7 +4886,7 @@ procedures:
       되돌아감), blocked(차단으로 요청을 세우지 않음) 넷 중 하나다.
     params:
       mode: {type: str, default: full, description: "full | stack-only(위임 전용 회차: 스택 컷을 반드시 받는다)"}
-      allow: {type: list, default: [request, escalate], description: landing에서 고를 수 있는 갈래}
+      allow: {type: list, default: [request, escalate, no-target], description: "landing에서 고를 수 있는 갈래. no-target은 여섯째 확인(착지 요청을 받을 세션이 있는가)이 거짓일 때의 갈래다 — 기본값에 있어야 실제로 열린다"}
     returns:
       landed: {merge: str, tip: "str?"}
       held: {reason: "str?", rework: "bool?"}
@@ -4898,6 +4985,31 @@ procedures:
             5. 상위가 걸어 둔 동결·정지 지시가 없다(메시로 온 freeze/hold 공지,
                리더가 승인한 예외 코멘트 포함)
 
+            ── 여섯째: 이 요청을 받을 세션이 있는가 ──
+            다섯은 「깨끗한가」를 묻는다. 여섯째는 다른 것을 묻는다 — 이
+            저장소에서 착지 요청을 받아 줄 세션이 실제로 있는가. 판정은
+            다섯과 같은 방식, 명령의 출력이다:
+                claunch gate landing-target --json
+            이 게이트는 데몬의 라우팅 판정(Router.stacked/independent)을 그대로
+            돌린다 — 실제 푸시가 쓰는 그 코드다. relation은 런이 정한다
+            (지금 ${data.inputs.relation}). 종료 코드 셋:
+                0 대상 있음 — JSON의 owner/holder가 그 세션이다. 여섯째 참.
+                1 대상 없음 — 아무도 이 저장소의 착지 큐를 갖지 않는다. 여섯째 거짓.
+                2 판정 불가 — 데몬 미응답, 런을 읽지 못함, 명부를 읽지 못함.
+                  여섯째 참도 거짓도 아니다.
+            **1이면 request가 아니라 no-target이다.** escalate도 아니다 —
+            escalate는 landing-review로 가서 *상위 세션*에게 묻는데, 대상이
+            없는 편성에서 상위는 바로 그 병합할 수 없는 세션이다. 그 질문은
+            후보 그룹을 차례로 비우고 사람 앞에 서며, 그동안 런은 상한까지
+            돈다(실측: 25회·약 4시간, claunch-od1mx). 없는 대상을 상위에
+            물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 곧바로
+            사람이다.
+            **2면 escalate다.** 모르는 것을 request로 밀지 않는다 — 그 규칙은
+            여섯째에도 그대로다. 다만 2를 1로 읽지도 않는다: 판정 불가는
+            「아무도 없다」가 아니고, 사람에게 올릴 근거가 서지 않았다는 뜻이다.
+            여섯째가 참이어도 다섯이 하나라도 거짓이면 이 문은 여전히 escalate다 —
+            여섯째는 다섯을 대신하지 않고 그 뒤에 붙는 확인이다.
+
             확인이 깨졌거나 — 미리 병합이 충돌한다, 통합 대상이 무엇인지 모르겠다,
             마커가 있는데 해소됐는지 판단이 안 선다 — 내가 정할 수 없는 사정이면
             escalate다. 모르는 것을 request로 밀지 않는다.
@@ -4919,6 +5031,21 @@ procedures:
               description: 확인 다섯이 전부 참 — 통합 대상 위로 정렬해 최신화한 뒤 증거 묶음을 만들어 상위에 요청한다(머지 실행은 상위 세션)
               when: "'request' in $params.allow"
               then: []
+            no-target:
+              # 여섯째 확인의 갈래(claunch-od1mx.1): 이 저장소의 착지 요청을
+              # 받을 세션이 아무도 없다. escalate와 갈라 두는 이유는 그 질문의
+              # *받는 쪽*이 다르기 때문이다 — escalate는 상위 세션에게 묻고,
+              # 대상이 없는 편성에서 상위는 바로 그 병합할 수 없는 세션이다.
+              # 후보 그룹을 차례로 비우고 사람까지 오는 그 왕복이 실측된
+              # 4시간이다(런 20261027-192120-21d28c, claunch-od1mx).
+              # 이 갈래는 integration-request를 지나지 않으므로 보드를 건드리지
+              # 않는다: in_review 전이도 LANDING REQUEST 코멘트도 없다.
+              description: 착지 요청을 받을 세션이 없다(게이트 1) — 요청을 세우지 않고 이 런의 착지 경로를 사람이 정한다
+              when: "'no-target' in $params.allow"
+              then:
+                id: landing-target
+                call: landing-target-gate
+                with: {relation: "$data.inputs.relation"}
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"
@@ -5312,7 +5439,7 @@ procedures:
       stack-round): 목표 수립과 일감 루프 없이 스택 컷만 착지시킨다.
     params:
       mode: {type: str, default: full, description: "full | stack-only"}
-      allow: {type: list, default: [request, escalate]}
+      allow: {type: list, default: [request, escalate, no-target]}
       verify: {type: str, default: ""}
     returns:
       ok: {release: "bool?"}
