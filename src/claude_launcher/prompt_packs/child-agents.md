@@ -51,9 +51,12 @@ description: 실제 일감을 맡길 에이전트는 claunch MCP spawn으로 만
      물려받고, 이름을 적으면 거절된다. 다른 profile이 필요하면 사용자에게
      `~/.claude-launcher/.claunch.yaml`의 그 키를 열도록 요청한다.
 
-   `role`을 비우면 `free-role`이 된다. 메시가 하나도 없어서 자식을 위해 새로
-   열리는 경우에도 그 mesh 요청과 무관하게 `free-role`로 들어간다(그때는 팀이
-   없어 자리를 받을 곳이 없고, 그 사실이 나에게 경고로 온다).
+   `role`을 비우면 handle의 **첫 단어**로 역할이 추론된다(`worker_2`→worker,
+   `qa-1`→reviewer, `moderator`→leader). 어느 역할도 가리키지 않는 handle만
+   `free-role`로 떨어지고, handle을 세션 이름(`s1234`) 그대로 두면 그 경우다.
+   메시가 하나도 없어서 자식을 위해 새로 열리는 경우에도 그 mesh 요청과
+   무관하게 `free-role`로 들어간다(그때는 팀이 없어 자리를 받을 곳이 없고,
+   그 사실이 나에게 경고로 온다).
 3. 소통은 claunch MCP `send` 도구로 한다. 여러 자식에게 서로 다른 지시를 줄 때는
    `sections`로 한 번에 보낸다. 지시는 `say`/`ask`로 보내고, 상태 알림만
    `fyi`/`ack`로 보낸다.

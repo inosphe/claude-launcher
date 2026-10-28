@@ -392,8 +392,12 @@ TOOLS = [
                     "description": (
                         "the child's mesh role, which sets its stance — see "
                         "'claunch mesh roles MESH' for this mesh's vocabulary. "
-                        "Omitted, it joins as 'free-role': a member with none "
-                        "of a role's powers, answering to you"
+                        "Omitted, it is INFERRED from the child's handle's "
+                        "leading word ('worker_2' -> worker, 'qa-1' -> "
+                        "reviewer, 'moderator' -> leader), and only a handle "
+                        "that names no role falls back to 'free-role' — which "
+                        "is what a handle left at the session name ('s1234') "
+                        "does. Name it when you mean it"
                     ),
                 },
                 "subroles": {

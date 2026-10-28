@@ -51,7 +51,7 @@ const childRec = () => ({ id: 'ccc333', kind: 'spawn', scope: 'child', session: 
 // dash a person reads as "the daemon lost it" (claunch-8fvr5).
 const HELD_FACTS = { project: { value: 'alpha', inherited: true }, profile: { value: 'p', inherited: true },
   workspace: { value: 'alpha', inherited: true }, worktree: { value: 'new (generated name)', inherited: false },
-  role: { value: '', inherited: false, note: 'free-role' },
+  role: { value: '', inherited: false, note: 'from the handle' },
   workflow: { value: '', inherited: false, note: 'no run' } };
 const heldRec = () => ({ id: 'ddd444', kind: 'spawn', scope: 'root', session: 'op2', status: 'pending',
   hold: 'manual', held_by: 'web', held_at: new Date().toISOString(), setup: 'custom',
@@ -150,7 +150,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.deepEqual(await buttons(heldCard), ['Approve', 'Open form', 'Reject', '+5 min', 'Hide']);
     // An empty row says which empty it is (claunch-8fvr5)
     const heldRows = Object.fromEntries(await factRows(heldCard));
-    assert.equal(heldRows.role, '— (free-role)');
+    assert.equal(heldRows.role, '— (from the handle)');
     assert.equal(heldRows.workflow, '— (no run)');
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-cards.png') });

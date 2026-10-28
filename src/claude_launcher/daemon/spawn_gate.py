@@ -181,9 +181,11 @@ CARD_FIELDS = ("project", "profile", "workspace", "worktree", "role", "workflow"
 
 #: What an EMPTY row means, for the rows where empty is a real answer. The
 #: card renders these beside the dash; a person reading "role —" cannot tell
-#: "nobody chose one" from "the daemon lost it" (claunch-8fvr5).
+#: "nobody chose one" from "the daemon lost it" (claunch-8fvr5). A role is
+#: not "free-role when empty" — it is inferred from the handle's leading word
+#: and only an unnameable handle falls back (mesh_roles.MeshRoles.infer).
 _EMPTY_MEANS = {
-    "role": "free-role",
+    "role": "from the handle",
     "workflow": "no run",
 }
 

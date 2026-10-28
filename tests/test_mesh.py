@@ -2256,7 +2256,8 @@ def test_the_spawn_schema_says_what_a_moved_child_changes():
     # the reviewer exception lives on the field a reviewer child sets
     assert "reviewer" in flat(props["workflow"]["description"])
     assert "filter_roles" in flat(props["workflow"]["description"])
-    # and the default role is named, since "empty" reads as "unknown"
+    # an omitted role is inferred from the handle, not "always free-role"
+    assert "inferred from the child" in flat(props["role"]["description"])
     assert "free-role" in flat(props["role"]["description"])
 
 
@@ -2272,7 +2273,7 @@ def test_the_child_agents_pack_names_the_four_spawn_exceptions():
     wrong in practice (claunch-8fvr5)."""
     text = _pack_text("child-agents")
     for needle in ("workspace", "project", "filter_roles", "spawn.allow_profile",
-                   "free-role"):
+                   "free-role", "handle"):
         assert needle in text, needle
     assert "`workflow: '-'`" in text
 
