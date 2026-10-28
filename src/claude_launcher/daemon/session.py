@@ -2416,6 +2416,11 @@ class Session:
         # clear --running end sessions through here, not through kill().
         self.kill_requested = True
         _terminate(self, False)
+        # Mid-adoption the terminate is owed until the attach: wait for it,
+        # so the caller (archive, redefine) gets the session ended, not
+        # "still running".
+        if self.pty is None:
+            await self._until_adopted()
         if self.pty is None:
             return
         deadline = time.monotonic() + grace

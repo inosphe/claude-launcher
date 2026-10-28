@@ -42,6 +42,7 @@ from claude_launcher.daemon.session import DeadSession  # noqa: E402
 #: daemon is attached), after ``quit-later`` exits with 3 -- each once a
 #: file named ``go`` appears in its cwd, which the test makes after the
 #: daemon let go. A fixed delay raced a slow shutdown on a loaded machine.
+#: ``size`` prints the size the program's terminal has.
 CHILD = (
     "import os, sys, threading, time\n"
     "sys.stdout.write('\\x1b[?2004hREADY\\n'); sys.stdout.flush()\n"
@@ -58,6 +59,8 @@ CHILD = (
     "        threading.Thread(target=later, args=(line[6:],)).start()\n"
     "    elif line == 'quit-later':\n"
     "        threading.Thread(target=later, args=('bye', 3)).start()\n"
+    "    elif line == 'size':\n"
+    "        print('size:%dx%d' % tuple(os.get_terminal_size(0)), flush=True)\n"
     "    else:\n"
     "        print('echo:' + line, flush=True)\n"
 )
@@ -336,6 +339,74 @@ def test_input_and_a_resize_while_the_screen_is_built_reach_the_program(
         await _wait_screen(staged, "echo:during")
         assert (staged.screen.cols, staged.screen.rows) == (100, 30)
         assert (staged.sdef.cols, staged.sdef.rows) == (100, 30)
+        await staged.send_keys(["size", "Enter"])
+        await _wait_screen(staged, "size:100x30")
+        await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
+def test_an_archive_asked_while_the_screen_is_built_files_the_ended_session(
+    host, tmp_path, monkeypatch
+):
+    """stop_and_archive between the stage and the attach waits for the
+    attach, ends the program and files the record -- the archive is not
+    refused as "still running" while the program ends anyway."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        asked = {}
+        await _restore_with_slow_build(
+            mgr2, monkeypatch,
+            lambda _s: asked.update(task=asyncio.ensure_future(mgr2.stop_and_archive("t1"))),
+        )
+        archived = await asked["task"]
+        assert archived.exited and archived.sdef.name == "t1"
+        assert archived.archived_at
+        assert _wait(lambda: not _pid_alive(pid))
+        await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
+def test_a_kill_while_the_screen_is_built_survives_a_failed_adoption(
+    host, tmp_path, monkeypatch
+):
+    """When the adoption of a session killed during its build fails, the
+    record is retired as ended, not relaunched: a relaunch would undo the
+    kill."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+
+        def fail(self, work):
+            raise RuntimeError("adoption failed")
+
+        monkeypatch.setattr(SessionManager, "_adopt_finish", fail)
+        await _restore_with_slow_build(mgr2, monkeypatch, lambda _s: mgr2.kill("t1"))
+        after = mgr2.get("t1")
+        assert isinstance(after, DeadSession) and after.exited
+        assert _wait(lambda: not _pid_alive(pid))
         await mgr2.shutdown_all(mode="stop")
 
     asyncio.run(run())
