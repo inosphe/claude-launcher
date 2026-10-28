@@ -2089,6 +2089,34 @@ function gotoRec(rec) {
           [mine.since, theirs.since, mine.due, theirs.due]);
   }
 
+  /* --- a tab that cannot read the presser's record files the same wait -- */
+  /* (claunch-gnlui.1) When the receiving tab finds no saved record for the
+     key — its storage is not the presser's, or the read came back empty —
+     it files the reminder itself from the message. The wait it files is the
+     one the reader picked, carried as `after`; without it the tab would fall
+     back to the first choice and bring a 6h card back at 1h. */
+  {
+    const hub = tabHub();
+    const t1 = build({ hub, storage: memoryStorage() });
+    const t2 = build({ hub, storage: memoryStorage() });
+    t1.gate.goto = [gotoRec()];
+    await t1.api.refreshGotoGate();
+    t2.gate.goto = [gotoRec()];
+    await t2.api.refreshGotoGate();
+    t1.press(t1.nodes.notices, "6h").click();
+    await hub.flush();
+    const sent = hub.sent.find((m) => m.t === "gate-remind");
+    check("the press tells the other tabs which wait it picked",
+          !!sent && sent.after === 6 * 3600e3, sent);
+    const theirs = t2.api.gateRemindOf("goto", "g1");
+    check("a tab without the presser's record files the picked wait",
+          !!theirs && theirs.after === 6 * 3600e3 &&
+            theirs.due === theirs.since + 6 * 3600e3 &&
+            t2.api.gateRemindLabel("goto", "g1") === "6h",
+          theirs);
+    check("and takes the card down there too", t2.strip().length === 0, t2.said());
+  }
+
   /* --- both surfaces put the newer notice above the older --------------- */
   {
     // The corner strip and the panel's History are the same feed drawn
