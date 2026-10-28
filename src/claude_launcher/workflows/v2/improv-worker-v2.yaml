@@ -173,7 +173,7 @@ inputs:
   scope:
     type: list
     label: 범위(경로·glob)
-    help: 이 회차가 고쳐도 되는 경로. 비우면 intake가 목표에서 정한다. 범위 밖은 scope-discipline 규칙대로 이슈로 남긴다
+    help: 이 회차가 고쳐도 되는 경로. 비우면 경로 제한이 없다 — intake는 범위를 기능 수준으로 적고, 바꿀 파일은 coding-plan이 고른다. 범위 밖은 scope-discipline 규칙대로 이슈로 남긴다
   invariants:
     type: invariants
     label: 불변식
@@ -600,7 +600,8 @@ nodes:
       아직 없으면 여기서 대기한다(회차는 목표가 생길 때 시작된다). 범위가
       주어졌으면 그 밖의 경로는 이 회차의 범위 밖이다(scope-discipline). 사용자
       불변식·완료 기준이 선언됐으면 아래 규칙 절에 실려 있다.
-      이 단계가 읽는 것은 오프닝·이슈 본문·보드(이슈와 코멘트)까지다. 코드와
+      이 단계가 읽는 것은 오프닝·이슈 본문·보드(이슈와 코멘트)까지다(아래 스택
+      기준의 git 참조 확인 — 기준 tip 비교와 rebase — 은 예외다). 코드와
       테스트를 읽어 바꿀 파일을 고르는 일은 coding-plan이 하고, 데이터 조회·
       측정·원인 조사로 질문에 답하는 일은 work가 한다 — 여기서 미리 하면 그
       결과를 받는 단계가 없고 같은 탐색을 coding-plan에서 다시 한다. 태스크가
@@ -1275,8 +1276,10 @@ nodes:
       1. `flow_call`로 sim-run을 부른다(procedure `sim-run`). with:
          - question: 위 목표를 확인 질문 한 문장으로 쓴 것
          - purpose: spec
-         - sources: 목표가 닿는 기존 코드·문서 경로(범위에서 고른다). 이슈 규칙은
-           파일이 아니므로 모델에서 `issue:<이슈 id>` 참조로 인용한다
+         - sources: 목표가 닿는 기존 코드·문서 경로. 범위에 경로가 있으면 그 안에서
+           고르고, 없으면(intake는 범위를 기능 수준으로 적는다) 목표와 지금 코드에서
+           이 단계가 찾는다. 이슈 규칙은 파일이 아니므로 모델에서 `issue:<이슈 id>`
+           참조로 인용한다
          실행 세션·판정 프로필과 모델은 넘기지 않는다 — Settings의 Simulation
          models 기본값이 들어간다. callee 런은 `flow_status`의 `calls[].scope`를
          scope로 주고 flow_* 도구로 진행한다.
