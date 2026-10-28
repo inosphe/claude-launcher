@@ -738,6 +738,11 @@ class SpawnGate:
             return dict(row)      # already taken over: no second note, same spec
         self._clear(rid)
         row["hold"] = HOLD_MANUAL
+        # Two facts, not one: the hold is the PAUSE, and this is that the form
+        # is out there. `+5 min` ends the pause and is not the form's answer,
+        # so the open form has to stay linkable afterwards
+        # (claunch-uzo40.1).
+        row["opened"] = _stamp()
         row["held_at"] = _stamp()
         row["held_by"] = decided_by
         row["setup"] = SETUP_CUSTOM
@@ -769,16 +774,25 @@ class SpawnGate:
 
         This is what ends a hold: the request settles ``approved`` with
         ``setup: custom`` and the asker learns the session's name. A request
-        the person never took over cannot be linked."""
+        the person never took over cannot be linked.
+
+        A form the person opened stays linkable after ``+5 min`` put the
+        clock back on (:meth:`extend`): that button restarts the countdown,
+        it does not answer the form. Without this the two paths raced — the
+        extend cleared the hold, the link was refused 409, and the deadline
+        went on to create a SECOND session beside the one the form made
+        (claunch-uzo40.1)."""
         self.reconcile()
         row = self._pending(rid, SPAWN)
-        if row.get("hold") != HOLD_MANUAL:
+        if row.get("hold") != HOLD_MANUAL and not row.get("opened"):
             raise GateRefused(409, "no manual spawn request with that id")
         if row.get("created"):
             raise GateRefused(409, f"request {rid} is already linked to {row['created']}")
         created = str(created or "").strip()
         if not created:
             raise GateRefused(400, "session (the created session) is required")
+        # An extended request has a live timer; the answer is here now.
+        self._clear(rid)
         row["created"] = created
         row["created_at"] = _stamp()
         row["setup"] = SETUP_CUSTOM
@@ -790,7 +804,9 @@ class SpawnGate:
 
         On a request the person took over by hand this is also the way back
         to the clock: the hold is cleared and the countdown starts again,
-        five minutes out (claunch-uzo40)."""
+        five minutes out (claunch-uzo40). What it does NOT clear is the fact
+        that the form is open — the request stays linkable until it really
+        settles (claunch-uzo40.1)."""
         row = self._pending(rid)
         now = _now()
         row.pop("hold", None)
