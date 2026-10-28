@@ -842,3 +842,22 @@ def test_browser_harnesses_strip_the_real_boot_call():
                 f"{harness.name} strips boot() with a pattern other than "
                 f"{BOOT_STRIP}: {line.strip()}"
             )
+
+
+def test_the_prose_that_opens_the_gate_names_a_selection_that_exists():
+    """CLAUDE.md says how to open the gate above (claunch-odk2w).
+
+    ``tools/changed_tests.py`` selects no test for a markdown file, so nothing
+    else notices the document pointing at a selection that no longer exists:
+    rename this module or ``test_browser_harness`` and the command the
+    document prints still runs -- it selects only
+    ``test_browser_harnesses_strip_the_real_boot_call``, and reports green
+    having run none of the harnesses the section is about.
+    """
+    doc = (WEB.parents[1] / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "tests/test_web_topology.py" in doc, (
+        "CLAUDE.md no longer names this module in the section that opens the "
+        "browser-harness gate"
+    )
+    assert "-k browser_harness" in doc
+    assert "NODE_PATH" in doc

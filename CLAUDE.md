@@ -160,6 +160,36 @@
     그 자리였다. pytest 안의 같은 격리는 `tests/conftest.py`의 autouse `home`
     픽스처가 맡는다.
 
+## 브라우저 하네스는 기본으로 skip된다 — 켜는 방법은 `NODE_PATH`
+
+- `tests/web/*_browser.cjs` 57개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는
+  `test_browser_harness`가 `node -e "require.resolve('playwright')"`로 게이트를 열 때만
+  실행된다. 이 저장소에는 `package.json`도 `node_modules`도 없으므로 기본 실행에서 그
+  57건은 전부 `pytest.skip`이고, 그 실행의 초록에는 57건의 결과가 들어 있지 않다.
+- 켜는 방법은 환경변수 하나다. playwright가 설치된 `node_modules`를 `NODE_PATH`에 두고
+  같은 선별을 돌린다. `_run_node`는 `subprocess.run(argv, **kwargs)`로 호출되어
+  `env=`를 넘기지 않으므로, 셸의 값이 게이트 검사와 하네스 양쪽에 그대로 상속된다.
+
+  ```
+  npm i -g playwright
+  NODE_PATH=$(npm root -g) uv run --no-sync pytest tests/test_web_topology.py -k browser_harness
+  ```
+
+  Chromium은 `~/.cache/ms-playwright`에 있는 것을 쓰고, 없으면
+  `npx playwright install chromium`이 받는다.
+- 설치 없이도 열린다. npx가 이미 받아 둔 캐시(`~/.npm/_npx/<해시>/node_modules`)에
+  playwright가 있으면 그 경로를 그대로 `NODE_PATH`로 주면 된다(이 머신에는 1.64.1이
+  있다). 다만 그 디렉터리 이름은 npx 재계산으로 바뀌므로, 반복해서 쓰는 쪽은 위의
+  전역 설치 경로다.
+- 이 목적을 위해 저장소에 `package.json`·lockfile을 들이지 않는다. `npm install`은
+  브라우저 바이너리를 받지 않으므로 재현성이 늘지 않고, 파이썬 스위트가 node 툴체인에
+  의존하게 된다.
+- 켠 상태에서 빨간 하네스는 실제 회귀다. skip은 그 실패를 게이트에 보이지 않게 한다
+  (claunch-1bhp2.1: 부트 호출을 스트립하는 정규식이 깨져 네 하네스가 빨갰고, 하네스가
+  skip되는 동안 아무 게이트도 그것을 보고하지 않았다). 이 절을 쓴 시점의 실측
+  (2026-10-28, `8c13c594`): **57 passed / 1 failed** — 실패는
+  `spawngate_browser.cjs`이고 그 이슈는 `claunch-odk2w.1`이다.
+
 
 --- 
 Claude Code가 인간처럼 말하도록 만드는 인스트럭션
