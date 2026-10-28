@@ -254,24 +254,42 @@ def test_the_gate_does_not_read_a_hash_quoted_inside_the_line():
     assert "**서로 다른 해시**를 가리키면 그 줄은 판독 불가다" in prompt
 
 
-def test_an_uppers_pr_review_line_is_a_brake_whatever_its_hash_position():
-    """실측 문면이 (i) 자리에 해시를 두고 있어 자리 규칙만으로는 갈리지 않는다.
-
-    리더가 쓴 ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1
-    320행)는 해시가 마커 낱말 바로 뒤, 곧 판독 규칙 (i)에 그대로 걸린다 —
-    상위의 거절이 「재심 대기」로 통과한다(s597-rev·s1304 재심 지적,
-    claunch-eyz0s.2.2). 상위 판정 줄을 가르는 근거는 해시의 자리가 아니라 그
-    줄을 쓴 주체이므로, 정본은 자리 규칙보다 앞서는 규칙을 들고 있어야 한다."""
+def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
+    """The gate used to separate the upper's brake from a reviewer's verdict by
+    the line's *prefix* (``PR-REVIEW #<번호>``). Three measured lines written by
+    the same upper (s29) carry no prefix and were therefore read as reviewer
+    verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7, the (i)
+    position), ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z, (i) with
+    the author named inline) and a trailing ``@ b606bc15`` (claunch-75kfl, the
+    (ii) position). The canon already said the ground is *who wrote the line*;
+    the discrimination has to actually be the author head ``[sNNN] at <시각>``
+    that ``claunch beads comments`` prints, with the prefix kept only as the
+    fallback when the author cannot be read (claunch-eyz0s.2.1.1)."""
     prompt = _words(_land_prompt())
-    # 규칙 자체 — 상위 판정 줄은 tip 유무와 무관하게 제동이다
-    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in prompt
-    assert "`PR-REVIEW #<번호>`로 시작하면" in prompt
-    assert "**어떤" in prompt and "`@ <hex>`가 있든**" in prompt
-    # 그 규칙이 자리 규칙보다 앞선다는 것 — 없으면 다음 편집자가 둘을 같은
-    # 층으로 읽고 자리 규칙 쪽을 먼저 적용한다
-    assert "자리 규칙보다 이 규칙이 앞선다" in prompt
-    # 실측 문면이 그대로 정본에 있어야 다음 사람이 같은 형태를 다시 만나도
-    # 무엇이 문제였는지 보드로 돌아가지 않고 읽는다
+    # the discrimination, stated ahead of the position rules
+    assert "**판정 주체를 먼저 본다 — 그 줄을 쓴 세션이 상위인가 리뷰어인가.**" in prompt
+    # where the subject is read from
+    assert "`[sNNN] at <시각>` 꼴의 머리" in prompt
+    # the three subjects it splits into
+    assert "`claunch cflow2 responders landing-review --json`" in prompt
+    assert "메시 명부에서 role이 `reviewer`인 세션" in prompt
+    assert "`$CLAUNCH_SESSION`. 자기 코멘트는 판정이 아니다" in prompt
+    # the prefix survives only as the fallback
+    assert "**줄 머리 접두로 되돌아간다**" in prompt
+    assert "`PR-REVIEW #<번호>`로 시작하면 상위의 제동이고" in prompt
+    assert "접두는 주체를 못 읽었을 때의 대체일 뿐이다" in prompt
+    # bidirectional: the subject wins over the prefix both ways. Drop either
+    # sentence and a prefix-only reader comes back.
+    assert "주체가 리뷰어라고 말하는 줄은 접두가 붙어 있어도" in prompt
+    assert "주체가 상위라고 말하는 줄은 접두가 없어도 제동이다" in prompt
+    # the three measured lines, their measured author, and the (i)/(ii)
+    # positions they occupy
+    assert "claunch-o8pb7" in prompt and "claunch-u9m6z" in prompt and "claunch-75kfl" in prompt
+    assert "셋 다 상위(s29)가 쓴 줄이다" in prompt
+    # the ordering claim survives the rewrite — without it the next editor
+    # reads the two layers as peers and applies the position rules first
+    assert "이 규칙이 자리 규칙보다 앞선다" in prompt
+    # the form that *was* caught by the prefix still sits in the canon
     assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in prompt
 
 

@@ -839,24 +839,44 @@ def test_the_v1_gate_pins_the_narrowed_tip_reading(layer):
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
-def test_the_v1_gate_reads_an_uppers_pr_review_line_as_a_brake(layer):
-    """The tip-position rule alone does not separate the upper's brake from a
-    reviewer's verdict on this board. The measured line is
-    ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1) — the
-    hash is right after the marker idiom, so position rule (i) accepts it and
-    the leader's rejection is classified as 「재심 대기」(s597-rev·s1304,
-    claunch-eyz0s.2.2). The rule that separates them is about who wrote the
-    line, so it must sit in the canon *ahead of* the position rules, and the
-    measured form must be quoted there (port of the same v2 fix)."""
+def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
+    """The gate used to separate the upper's brake from a reviewer's verdict by
+    the line's *prefix* (``PR-REVIEW #<번호>``). Three measured lines written by
+    the same upper (s29) carry no prefix and were therefore read as reviewer
+    verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7),
+    ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z) and a trailing
+    ``@ b606bc15`` (claunch-75kfl). The canon already said the ground is *who
+    wrote the line*; the discrimination has to actually be the author head
+    ``[sNNN] at <시각>`` that ``claunch beads comments`` prints, with the
+    prefix kept only as the fallback when the author cannot be read
+    (claunch-eyz0s.2.1.1)."""
     path = (
         _bundled("improv-worker") if layer == "bundled"
         else PROJECT_OVERRIDES / "improv-worker.yaml"
     )
     text = " ".join(model.load(path).steps["landing"].select.prompt.split())
-    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in text
-    assert "`PR-REVIEW #<번호>`로 시작하면" in text
-    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
+    # the discrimination, stated first
+    assert "**판정 주체를 먼저 본다 — 그 줄을 쓴 세션이 상위인가 리뷰어인가.**" in text
+    # where the subject is read from
+    assert "`[sNNN] at <시각>` 꼴의 머리" in text
+    # the three subjects it splits into
+    assert "`claunch cflow responders landing-review --json`" in text
+    assert "메시 명부에서 role이 `reviewer`인 세션" in text
+    assert "`$CLAUNCH_SESSION`. 자기 코멘트는 판정이 아니다" in text
+    # the prefix survives only as the fallback
+    assert "**줄 머리 접두로 되돌아간다**" in text
+    assert "`PR-REVIEW #<번호>`로 시작하면 상위의 제동이고" in text
+    assert "접두는 주체를 못 읽었을 때의 대체일 뿐이다" in text
+    # bidirectional: subject beats prefix in both directions
+    assert "주체가 리뷰어라고 말하는 줄은 접두가 붙어 있어도" in text
+    assert "주체가 상위라고 말하는 줄은 접두가 없어도 제동이다" in text
+    # the three measured lines and their measured author
+    assert "claunch-o8pb7" in text and "claunch-u9m6z" in text and "claunch-75kfl" in text
+    assert "셋 다 상위(s29)가 쓴 줄이다" in text
+    # the prefix case that *was* caught still sits there as the fallback example
     assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in text
+    # the ordering claim survives the rewrite
+    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
