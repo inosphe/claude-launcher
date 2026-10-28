@@ -742,6 +742,48 @@ def _cwd_of(call, default=_HERE):
     return default
 
 
+#: How a Python interpreter's file name starts, for an argv written as
+#: ``["/usr/bin/python3.11", "tools/related_surfaces.py", ...]``. A version
+#: suffix is part of the name, so this is a prefix rather than a fixed list.
+_INTERPRETER_PREFIX = "python"
+
+
+def _runs_the_next_argv(node):
+    """Whether an argv element is an interpreter that runs the next one."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "executable" and getattr(node.value, "id", None) == "sys"
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) in ("str", "Path") and node.args:
+        return _runs_the_next_argv(node.args[0])
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value).name.lower().startswith(_INTERPRETER_PREFIX)
+    return False
+
+
+def _exec_position(items, from_this_file, names):
+    """The index at which an argv element runs as the tool, or ``None``.
+
+    Only two places put a program in an argv as the thing being run: the first
+    element (``[str(SCRIPT), "--json"]``), and the second when the first is a
+    Python interpreter (``[sys.executable, str(SCRIPT), ...]``).
+
+    Matching the tool's path *anywhere* in the list made a call that merely
+    names it look like an invocation. ``git log --oneline -- tools/related_surfaces.py``
+    in another test module failed this guard, and so did the same path reached
+    through a module constant or unpacked from a list -- the path there is data
+    the command operates on, and ``git`` is the program being run (s597-rev on
+    claunch-o5il6.1, three shapes reproduced). The widening to sibling modules
+    (claunch-o5il6.3) is what made this reachable; the position rule is what
+    keeps it from turning every mention into a violation."""
+    for at in (0, 1):
+        if at == 1 and not (items and _runs_the_next_argv(items[0])):
+            return None
+        if at >= len(items):
+            return None
+        if _names_the_script(items[at], from_this_file=from_this_file, names=names):
+            return at
+    return None
+
+
 def _names_the_script(node, from_this_file=True, names=None):
     """Whether an argv element is the tool, however it is spelled.
 
@@ -957,17 +999,19 @@ def _tool_invocations(source=None):
         if name not in _SHELL_ENTRIES or not node.args or not isinstance(node.args[0], ast.List):
             continue
         items = node.args[0].elts
-        at = next(
-            (i for i, el in enumerate(items)
-             if _names_the_script(el, from_this_file=own, names=_tool_names_in(tree))),
-            None,
-        )
+        at = _exec_position(items, from_this_file=own, names=_tool_names_in(tree))
         if at is None:
             continue
         tail = items[at + 1 :]
         if any(isinstance(el, ast.Starred) for el in tail):
             # The helper's own definition forwards ``*args``; its call sites
             # above are the invocations, and this body has no argv of its own.
+            continue
+        if any(isinstance(el, ast.Starred) for el in items[at:]):
+            # A call site that unpacks the tail (``[python, tool, *ARGS]``)
+            # has no fixed argv to read a ``--limit`` out of; its own callers
+            # are not in this source, so there is nothing to judge. Collected
+            # it would be a violation on an argv this guard cannot see.
             continue
         base = _cwd_of(node)
         out.append((node.lineno, _argv_of(tail), _repo_verdict(tail, base)))
@@ -1545,6 +1589,71 @@ def test_d():
     assert by_line[12] == (["--limit", "5"], True), by_line[12]
     # The git call names no tool, so it is not an invocation at all.
     assert 15 not in by_line, by_line
+
+
+def test_a_path_the_command_operates_on_is_not_a_call_to_the_tool():
+    """Naming the tool's path as *data* for another program is not invoking it.
+
+    The guard collected a ``subprocess`` call when the tool's path appeared
+    anywhere in its argv. So a sibling test doing its own repository work --
+    ``git log --oneline -- tools/related_surfaces.py`` -- failed this guard,
+    even though ``git`` is the program being run and the path is an argument
+    to it. Three shapes, all reproduced on claunch-o5il6.1 (s597-rev). The
+    widening to sibling modules is what made them reachable at all, and (c)
+    was a regression from the basename comparison in ``aa4d0291``, which bound
+    a *list* constant as if it were the path.
+
+    The guard now reads only the two positions that put a program in an argv:
+    the first element, or the second when the first is an interpreter. Both
+    directions are pinned -- a real call in either position is still
+    collected, because exempting one would be the under-blocking failure this
+    guard exists against."""
+    literal = 'x = subprocess.run(["git", "log", "--oneline", "--", "tools/related_surfaces.py"], cwd=str(ROOT))\n'
+    assert _tool_invocations(literal) == [], _tool_invocations(literal)
+
+    through_name = (
+        'TARGET = "tools/related_surfaces.py"\n'
+        'x = subprocess.run(["git", "log", "--oneline", "--", TARGET], cwd=str(ROOT))\n'
+    )
+    assert _tool_invocations(through_name) == [], _tool_invocations(through_name)
+
+    through_list = (
+        'CHANGED = ["tools/related_surfaces.py", "README.md"]\n'
+        'x = subprocess.run(["git", "diff", "--stat", "--", *CHANGED], cwd=str(ROOT))\n'
+    )
+    assert _tool_invocations(through_list) == [], _tool_invocations(through_list)
+
+    # The same path reached as data must not exempt a real call in the same
+    # source: both are present here, and only the real one is counted.
+    both = through_list + 'y = subprocess.run(["tools/related_surfaces.py", "--json"], cwd=str(ROOT))\n'
+    found = _tool_invocations(both)
+    assert len(found) == 1, found
+    assert found[0][1] == ["--json"], found
+
+
+def test_the_tool_is_collected_in_every_position_that_runs_it():
+    """``[tool, ...]`` and ``[interpreter, tool, ...]`` are the two run forms.
+
+    Both are real: a module with the tool already executable writes the first,
+    and the far more common shape is ``[sys.executable, <tool>, ...]``. The
+    interpreter is recognised as ``sys.executable``, ``str(...)`` of it, or a
+    literal whose file name starts with ``python`` -- versioned paths like
+    ``/usr/bin/python3.11`` are how a real argv is often written.
+
+    A bare tool call was missed outright before the naming fix on
+    claunch-o5il6; a versioned interpreter path was missed by the first draft
+    of this rule, which compared against a fixed list of names."""
+    for argv in (
+        '["tools/related_surfaces.py", "--json"]',
+        '[sys.executable, "tools/related_surfaces.py", "--json"]',
+        '[str(sys.executable), "tools/related_surfaces.py", "--json"]',
+        '["python3", "tools/related_surfaces.py", "--json"]',
+        '["/usr/bin/python3.11", "tools/related_surfaces.py", "--json"]',
+    ):
+        sample = f'x = subprocess.run({argv}, cwd=str(ROOT))\n'
+        found = _tool_invocations(sample)
+        assert len(found) == 1, (argv, found)
+        assert found[0][1] == ["--json"], (argv, found)
 
 
 def test_the_tool_is_recognised_by_its_file_name_in_another_module():
