@@ -957,6 +957,30 @@ def _hidden(category: str, include_killed: bool, include_archived: bool) -> bool
     return False
 
 
+def row_providers(row: dict) -> List[dict]:
+    """The per-provider parts a row counts toward in the provider filter.
+
+    A ledger row has its measured parts. A transcript row has none -- an
+    OAuth route writes no ledger line -- so its whole window figure is filed
+    under the provider its definition declares, marked ``declared``; without
+    it the strip on the Stats page could not name that provider and its
+    sessions would drop out of the table the moment any provider was picked.
+    A row with no figure at all (``source: "none"``) counts toward nothing.
+    """
+    if row.get("providers"):
+        return row["providers"]
+    declared = row.get("declared_provider") or ""
+    if row.get("source") != "transcript" or not declared:
+        return []
+    return [{
+        "provider": declared,
+        "input": row["input"], "cache_read": row["cache_read"],
+        "cache_write": row["cache_write"], "output": row["output"],
+        "total": row["total"], "requests": row["requests"],
+        "declared": True,
+    }]
+
+
 def _empty_row(name: str) -> dict:
     return {
         "session": name, "status": "", "category": "", "harness": "",
@@ -1139,15 +1163,23 @@ def overview(*, window: str = "today", include_ended: bool = False,
 
     rows.sort(key=lambda r: (-(r["total"] or 0), r["session"]))
 
+    # The strip's cards and, once one is picked, the page's summary tiles:
+    # each provider's part of every figure the window totals carry.
     by_provider: Dict[str, dict] = {}
     for row in rows:
-        for entry in row["providers"]:
-            acc = by_provider.setdefault(entry["provider"],
-                                         {"provider": entry["provider"],
-                                          "sessions": 0, "total": 0, "requests": 0})
+        for entry in row_providers(row):
+            acc = by_provider.setdefault(entry["provider"], {
+                "provider": entry["provider"], "sessions": 0, "declared": 0,
+                "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                "total": 0, "requests": 0})
             acc["sessions"] += 1
-            acc["total"] += entry["total"]
-            acc["requests"] += entry["requests"]
+            acc["declared"] += 1 if entry.get("declared") else 0
+            for key in ("input", "cache_read", "cache_write", "output",
+                        "total", "requests"):
+                acc[key] += entry[key]
+    for acc in by_provider.values():
+        acc["cache_share"] = (acc["cache_read"] / acc["total"]
+                              if acc["total"] else None)
     totals = {k: sum(r[k] for r in rows) for k in
               ("input", "cache_read", "cache_write", "output", "total", "requests")}
     total = totals["total"]

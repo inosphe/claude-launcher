@@ -148,7 +148,8 @@ new Function(
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
      "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
      "setStatsProvider", "statsProviderStrip",
-     "statsRowTotal", "statsRowRequests", "statsOverviewRows",
+     "statsRowParts", "statsRowTotal", "statsRowRequests",
+     "statsSummaryFigures", "statsOverviewRows",
      "statsOverviewTable", "statsOverviewRow", "statsSwitchList",
      "statsDetailWindow", "statsReadingSections", "statsDetailPanel",
      "statsControls", "renderStatsOverview", "renderStats", "parseHash",
@@ -363,6 +364,53 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
     .handlers.click[0]();
   check("picking it again shows every provider",
         ctx.state().provider === "" && withClass("stats-row").length === 3);
+
+  // The summary tiles follow the picked provider, and a transcript row is
+  // filed under the provider its profile declares (statsboard.row_providers).
+  ctx.setAnswer(byUrl({
+    providers: [
+      { provider: "fireworks", sessions: 1, declared: 0, input: 100,
+        cache_read: 900, cache_write: 0, output: 0, total: 1000, requests: 4 },
+      { provider: "claude", sessions: 1, declared: 1, input: 300,
+        cache_read: 0, cache_write: 0, output: 100, total: 400, requests: 7 },
+      { provider: "kimi", sessions: 1, declared: 0, input: 10, cache_read: 90,
+        cache_write: 0, output: 0, total: 100, requests: 1 },
+    ],
+    sessions: [...overview.sessions, sessionRow({
+      session: "oauth2", source: "transcript", harness: "claude",
+      provider: "claude", declared_provider: "claude", providers: [],
+      input: 300, cache_read: 0, cache_write: 0, output: 100, total: 400,
+      requests: 7, switches: [], days: { "2026-10-21": 400 },
+    })],
+  }));
+  ctx.refresh();
+  await tick();
+  const summaryText = () => withClass("window-summary")[0].words();
+  withClass("stats-provider").find((b) => b.dataset.provider === "claude")
+    .handlers.click[0]();
+  check("a transcript row is kept under its declared provider",
+        withClass("stats-row").map((r) => r.dataset.session).join() === "oauth2",
+        withClass("stats-row").map((r) => r.dataset.session));
+  check("the summary tiles carry the picked provider's figures",
+        summaryText().includes("400") && summaryText().includes("7 requests") &&
+        summaryText().includes("of 3 in the window, 1 by declared provider") &&
+        summaryText().includes("0.0%"), summaryText());
+  check("the page says the figures are narrowed",
+        withClass("stats-provider-note").length === 1 &&
+        view.words().includes("showing claude only"));
+  withClass("stats-provider").find((b) => b.dataset.provider === "fireworks")
+    .handlers.click[0]();
+  check("another provider's tiles replace them",
+        summaryText().includes("1.00k") && summaryText().includes("4 requests") &&
+        summaryText().includes("90.0%"), summaryText());
+  withClass("stats-provider").find((b) => b.dataset.provider === "")
+    .handlers.click[0]();
+  check("All providers restores the window's figures",
+        ctx.state().provider === "" && summaryText().includes("1.10k") &&
+        withClass("stats-provider-note").length === 0, summaryText());
+  ctx.setAnswer(byUrl());
+  ctx.refresh();
+  await tick();
 
   // The two ways a session ends have a box each, and each asks for its own.
   const boxes = withClass("stats-ended-box");

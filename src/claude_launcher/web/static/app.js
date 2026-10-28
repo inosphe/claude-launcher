@@ -33847,31 +33847,67 @@ function statsProviderStrip(d) {
              el("span", "stats-provider-total", usageShort(p.total || 0)),
              el("span", "stats-provider-sessions", `${p.sessions} sessions`));
     b.title = `${p.provider}: ${(p.requests || 0).toLocaleString()} requests ` +
-      `over ${p.sessions} session(s) in this window`;
+      `over ${p.sessions} session(s) in this window` +
+      (p.declared ? `; ${p.declared} of them read from a transcript and ` +
+        "filed under the provider their profile declares" : "");
     b.addEventListener("click", () => setStatsProvider(on ? "" : p.provider));
     box.appendChild(b);
   }
   return box;
 }
 
+/* The per-provider parts a row counts toward, as the strip counts them
+   (statsboard.row_providers): a ledger row's measured parts, or a transcript
+   row's whole figure under the provider its profile declares. */
+function statsRowParts(row) {
+  if ((row.providers || []).length) return row.providers;
+  if (row.source !== "transcript" || !row.declared_provider) return [];
+  return [{ provider: row.declared_provider, input: row.input || 0,
+            cache_read: row.cache_read || 0, cache_write: row.cache_write || 0,
+            output: row.output || 0, total: row.total || 0,
+            requests: row.requests || 0, declared: true }];
+}
+
 /* A row's figure for the table: the whole window, or one provider's part of
    it when the strip is narrowed. */
 function statsRowTotal(row) {
   if (!statsProvider) return row.total || 0;
-  const hit = (row.providers || []).find((p) => p.provider === statsProvider);
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
   return (hit && hit.total) || 0;
 }
 
 function statsRowRequests(row) {
   if (!statsProvider) return row.requests || 0;
-  const hit = (row.providers || []).find((p) => p.provider === statsProvider);
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
   return (hit && hit.requests) || 0;
+}
+
+/* The summary tiles' figures: the window's, or the picked provider's card
+   from the strip. A provider the window does not carry (picked under another
+   window) reads as zero rather than falling back to every provider. */
+function statsSummaryFigures(d) {
+  const counts = d.counts || {};
+  if (!statsProvider) {
+    return { totals: d.totals || {}, cacheShare: d.cache_share,
+             sessions: counts.sessions || 0,
+             detail: `${counts.metered || 0} metered, ` +
+               `${counts.unmetered || 0} unmetered` };
+  }
+  const p = (d.providers || []).find((x) => x.provider === statsProvider) || {};
+  const totals = {};
+  for (const k of ["input", "cache_read", "cache_write", "output", "total",
+                   "requests"]) totals[k] = p[k] || 0;
+  return { totals,
+           cacheShare: totals.total ? totals.cache_read / totals.total : null,
+           sessions: p.sessions || 0,
+           detail: `of ${counts.sessions || 0} in the window` +
+             (p.declared ? `, ${p.declared} by declared provider` : "") };
 }
 
 function statsOverviewRows(d) {
   const rows = (d.sessions || []).filter((r) => {
     if (!statsProvider) return true;
-    return (r.providers || []).some(
+    return statsRowParts(r).some(
       (p) => p.provider === statsProvider && (p.total || 0) > 0);
   });
   return rows.slice().sort((a, b) =>
@@ -34224,6 +34260,9 @@ const STATS_WINDOW_METHOD = [
   "provider changes: read from the upstream that answered each request. A " +
     "reborrow onto another profile's credentials shows here; the daemon keeps " +
     "only the borrow in force now, not its history.",
+  "provider filter: a provider card narrows the summary and the table to that " +
+    "provider's part of the window. A transcript row is filed under the " +
+    "provider its profile declares; a row shown as — counts toward none.",
 ];
 
 /* Compare mode (#/compare/<a,b,c>): several sessions side by side. One
@@ -34514,8 +34553,9 @@ function renderStatsOverview(main) {
     if (!statsOverviewError) main.appendChild(el("p", "wf-note", "loading…"));
     return;
   }
-  const totals = d.totals || {};
   const counts = d.counts || {};
+  const figures = statsSummaryFigures(d);
+  const totals = figures.totals;
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
     `${(totals.requests || 0).toLocaleString()} requests`));
@@ -34523,10 +34563,9 @@ function renderStatsOverview(main) {
     `cache read ${usageShort(totals.cache_read || 0)}`));
   summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
     `cache write ${usageShort(totals.cache_write || 0)}`));
-  summary.appendChild(statsCard("Cache share", statsPct(d.cache_share),
+  summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
-  summary.appendChild(statsCard("Sessions", counts.sessions || 0,
-    `${counts.metered || 0} metered, ${counts.unmetered || 0} unmetered`));
+  summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
   if (!statsIncludeKilled) held.push(`${counts.killed_excluded || 0} killed`);
   if (!statsIncludeArchived) held.push(`${counts.archived_excluded || 0} archived`);
@@ -34536,6 +34575,11 @@ function renderStatsOverview(main) {
   main.appendChild(summary);
 
   main.appendChild(statsProviderStrip(d));
+  if (statsProvider) {
+    main.appendChild(el("p", "wf-note stats-provider-note",
+      `showing ${statsProvider} only: the figures above and the table below ` +
+      "are that provider's part of the window"));
+  }
 
   const note = el("p", "wf-note stats-window-note",
     `${statsStamp(d.since)} → ${statsStamp(d.until)} (local ${d.zone || ""}). ` +

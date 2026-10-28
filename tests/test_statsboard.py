@@ -650,6 +650,53 @@ def test_a_session_the_ledger_cannot_speak_for_is_read_from_its_transcript(tmp_p
     assert row["first_at"] is None and row["last_at"] is None
 
 
+def test_a_transcript_row_counts_toward_its_declared_provider(tmp_path, ledger, monkeypatch):
+    # The Stats page's provider filter reads the strip: a transcript row has
+    # no ledger parts, so its figure is filed under the provider its profile
+    # declares -- and each card carries every part the summary tiles show.
+    write_ledger(tmp_path / "metering", [
+        record("metered", hour=9, upstream=FIREWORKS, fresh=0, cached=900,
+               output=100)])
+    ledger.refresh(NOW)
+    monkeypatch.setattr(statsboard, "declared_provider",
+                        lambda profile, borrow="", doc=None:
+                        "anthropic" if profile == "nc:claude" else "")
+    reader = transcripts(oauth=reading(
+        ("2026-10-21T09:00:00+09:00", 100, 900, 50, 4)))
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[meta("metered"),
+                  {**meta("oauth", harness="claude", profile="nc:claude"),
+                   "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader)
+    providers = {p["provider"]: p for p in payload["providers"]}
+    assert providers["anthropic"]["sessions"] == 1
+    assert providers["anthropic"]["declared"] == 1
+    assert (providers["anthropic"]["input"], providers["anthropic"]["cache_read"],
+            providers["anthropic"]["output"]) == (100, 900, 50)
+    assert providers["anthropic"]["total"] == 1050
+    assert providers["anthropic"]["requests"] == 4
+    assert providers["fireworks"]["declared"] == 0
+    assert providers["fireworks"]["cache_read"] == 900
+    assert providers["fireworks"]["cache_share"] == 0.9
+    # The row itself keeps no ledger parts: the detail panel still says the
+    # ledger has no record for it.
+    row = next(r for r in payload["sessions"] if r["session"] == "oauth")
+    assert row["providers"] == []
+    assert statsboard.row_providers(row)[0]["provider"] == "anthropic"
+    # Every card's figures add up to the window's.
+    for key in ("input", "cache_read", "cache_write", "output", "total",
+                "requests"):
+        assert sum(p[key] for p in payload["providers"]) == payload["totals"][key]
+
+
+def test_a_row_with_no_figure_counts_toward_no_provider():
+    row = statsboard._empty_row("oauth")
+    row["declared_provider"] = "anthropic"
+    assert statsboard.row_providers(row) == []
+
+
 def test_a_transcript_row_does_not_report_a_day_boundary_as_activity(tmp_path, ledger):
     """``transcript_window`` returns no activity stamps of its own.
 
