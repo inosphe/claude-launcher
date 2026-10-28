@@ -275,10 +275,11 @@ class Queues:
     :meth:`RestoreQueue.positions` over every queue that still has names
     waiting, so neither is lost.
 
-    A name can wait in two queues at once: woken by use before the boot's
-    queue reached it, then filed delayed again by a host loss. It is counted
-    once, in the first queue that holds it; later queues leave it out of
-    their totals and places (s511-rev)."""
+    A name can sit in two queues' lists: started by the boot's queue, or
+    woken by use before the boot's queue reached it, then filed delayed again
+    by a host loss. Each name is counted in one queue only (s511-rev,
+    s648-rev): the first that still has it waiting, else the first whose
+    list has it. The others leave it out of their totals and places."""
 
     def __init__(self, *queues: RestoreQueue) -> None:
         self.queues: List[RestoreQueue] = list(queues)
@@ -293,13 +294,8 @@ class Queues:
         """The live queues summed; ``next``, ``interval`` and
         ``pace_seconds`` are the first live queue's, ``eta_seconds`` the
         latest of theirs. ``None`` once none has anything left."""
-        live = []
-        counted: Set[str] = set()
-        for queue in self.queues:
-            status = queue.status(now, without=counted)
-            counted.update(queue.waiting())
-            if status is not None:
-                live.append(status)
+        live = [s for s in (q.status(now, without=others)
+                            for q, others in self._others()) if s is not None]
         if not live:
             return None
         if len(live) == 1:
@@ -313,6 +309,18 @@ class Queues:
     def positions(self, now: Optional[float] = None) -> Dict[str, dict]:
         """Each still-delayed name's place in the queue that holds it."""
         out: Dict[str, dict] = {}
-        for queue in self.queues:
-            out.update(queue.positions(now, without=out))
+        for queue, others in self._others():
+            out.update(queue.positions(now, without=others))
         return out
+
+    def _others(self) -> List[tuple]:
+        """``(queue, names another queue counts)`` for each queue."""
+        owner: Dict[str, int] = {}
+        for i, queue in enumerate(self.queues):
+            for name in queue.waiting():
+                owner.setdefault(name, i)
+        for i, queue in enumerate(self.queues):
+            for name in queue.order:
+                owner.setdefault(name, i)
+        return [(queue, {n for n, o in owner.items() if o != i})
+                for i, queue in enumerate(self.queues)]

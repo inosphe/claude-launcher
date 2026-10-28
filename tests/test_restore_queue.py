@@ -478,6 +478,10 @@ class _FakeQueue:
     def waiting(self):
         return list(self._positions)
 
+    @property
+    def order(self):
+        return list(self._positions)
+
     def status(self, now=None, without=()):
         return self._status
 
@@ -553,8 +557,8 @@ class _QueueManager:
 def test_a_name_the_boot_queue_has_passed_is_counted_once_when_delayed_again():
     """The boot's queue started A; a host loss then files A delayed again for
     the relaunch's own queue. The boot's queue never comes back to A, so A
-    waits in the relaunch's queue alone: three waiting, not four, and A's
-    place is the relaunch queue's (claunch-hor3b.2, s511-rev)."""
+    waits in the relaunch's queue alone: three names, three waiting, and A's
+    place is the relaunch queue's (claunch-hor3b.2, s511-rev, s648-rev)."""
     mgr = _QueueManager("A", "B", "C")
 
     async def go():
@@ -572,7 +576,8 @@ def test_a_name_the_boot_queue_has_passed_is_counted_once_when_delayed_again():
         try:
             assert boot.waiting() == ["B", "C"]
             status = view.status()
-            assert status["remaining"] == 3 and status["total"] == 4
+            assert (status["total"], status["done"], status["remaining"]) == (3, 0, 3)
+            assert status["started_by_queue"] == 1
             assert view.positions()["A"]["total"] == 1
         finally:
             await boot.stop()
@@ -583,8 +588,9 @@ def test_a_name_the_boot_queue_has_passed_is_counted_once_when_delayed_again():
 def test_a_name_woken_before_its_turn_and_delayed_again_is_counted_once():
     """The boot's queue [B, C, A] started B; A was woken by use before its
     turn. A host loss files A and B delayed again for the relaunch's queue
-    [A, B]. A now waits in both queues' lists; it is counted once, in the
-    boot's: three waiting, not four (claunch-hor3b.2, s511-rev)."""
+    [A, B]. A now waits in both queues; it is counted once, in the boot's,
+    and B in the relaunch's alone: three names, three waiting
+    (claunch-hor3b.2, s511-rev, s648-rev)."""
     mgr = _QueueManager("A", "B", "C")
 
     async def go():
@@ -603,11 +609,40 @@ def test_a_name_woken_before_its_turn_and_delayed_again_is_counted_once():
         try:
             assert boot.waiting() == ["C", "A"] and host.waiting() == ["A", "B"]
             status = view.status()
-            assert (status["total"], status["done"], status["remaining"]) == (4, 1, 3)
+            assert (status["total"], status["done"], status["remaining"]) == (3, 0, 3)
             places = view.positions()
             assert set(places) == {"A", "B", "C"}
-            assert places["A"] == {**places["A"], "rank": 3, "total": 3, "ahead": 1}
+            assert places["A"] == {**places["A"], "rank": 2, "total": 2, "ahead": 1}
             assert places["B"] == {**places["B"], "rank": 1, "total": 1, "ahead": 0}
+        finally:
+            await boot.stop()
+
+    asyncio.run(go())
+
+
+def test_a_name_both_queues_are_done_with_is_counted_once():
+    """The boot's queue [A, B, C] started A; a relaunch's queue [A, D] has A
+    awake again and D waiting. A is in both lists and waits in neither: it
+    is one name done, counted in the boot's queue (claunch-hor3b.2,
+    s648-rev)."""
+    mgr = _QueueManager("A", "B", "C", "D")
+
+    async def go():
+        boot = restore_queue.RestoreQueue(mgr, names=["A", "B", "C"], interval=60)
+        boot.start()
+        for _ in range(100):
+            if boot.started:
+                break
+            await asyncio.sleep(0.01)
+        assert boot.started == ["A"]
+        host = restore_queue.RestoreQueue(mgr, names=["A", "D"], interval=60)
+        host.order = ["A", "D"]
+        view = restore_queue.Queues(boot, host)
+        try:
+            status = view.status()
+            assert (status["total"], status["done"], status["remaining"]) == (4, 1, 3)
+            assert view.positions()["D"] == {**view.positions()["D"],
+                                             "rank": 1, "total": 1}
         finally:
             await boot.stop()
 
