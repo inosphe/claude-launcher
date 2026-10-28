@@ -2231,6 +2231,52 @@ def test_members_tool_response_is_linear_without_the_pair_table(monkeypatch):
     assert size_20 < 3.0 * size_10, f"{size_10} -> {size_20} looks quadratic"
 
 
+def test_the_spawn_schema_says_what_a_moved_child_changes():
+    """The four answers an agent gets wrong when it does not read further
+    (claunch-8fvr5): the board follows the workspace, the project does not
+    follow the directory, a reviewer needs `workflow: '-'`, and `profile` is
+    inherited because it is not offered. Each is a fact of the spawn path
+    pinned here so a shorter description cannot quietly drop it."""
+    from claude_launcher import mesh_mcp
+
+    spawn_tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "spawn")
+    props = spawn_tool["inputSchema"]["properties"]
+
+    def flat(text):
+        return " ".join(str(text).split()).lower()
+
+    blob = flat(spawn_tool["description"])
+    assert "which board" in blob and "refused rather than started without" in blob
+    assert "filed under your project" in blob
+    assert "spawn.allow_profile" in blob and "runs on yours" in blob
+    # the board rule is also on the two fields that move it
+    assert "board" in flat(props["workspace"]["description"])
+    assert "does not follow the directory" in flat(props["project"]["description"])
+    assert "board" in flat(props["issue"]["description"])
+    # the reviewer exception lives on the field a reviewer child sets
+    assert "reviewer" in flat(props["workflow"]["description"])
+    assert "filter_roles" in flat(props["workflow"]["description"])
+    # and the default role is named, since "empty" reads as "unknown"
+    assert "free-role" in flat(props["role"]["description"])
+
+
+def _pack_text(pack_id):
+    from claude_launcher import prompt_packs
+
+    return " ".join(prompt_packs.shipped(pack_id).body.split())
+
+
+def test_the_child_agents_pack_names_the_four_spawn_exceptions():
+    """`mesh`/`workflow` are the omit-bydefault fields, and the pack says
+    only that. The four places where omitting is wrong are what agents get
+    wrong in practice (claunch-8fvr5)."""
+    text = _pack_text("child-agents")
+    for needle in ("workspace", "project", "filter_roles", "spawn.allow_profile",
+                   "free-role"):
+        assert needle in text, needle
+    assert "`workflow: '-'`" in text
+
+
 def test_every_offered_spawn_field_is_forwarded():
     """A field the schema offers but the forwarder drops is a silent no-op
     the caller reads as 'the daemon ignored me' — the two lists must not

@@ -752,9 +752,10 @@ def test_card_facts_keep_what_the_spec_names(home, tmp_path):
     assert facts["profile"] == {"value": "p2", "inherited": False}
     # a named project with no directory starts in its default workspace
     assert facts["workspace"] == {"value": "hq", "inherited": False}
-    # a declined workflow and a missing role read as none
-    assert facts["workflow"] == {"value": "", "inherited": False}
-    assert facts["role"] == {"value": "", "inherited": False}
+    # a declined workflow and a missing role read as none — and the card says
+    # WHICH none, so a dash is not read as "the daemon lost it" (claunch-8fvr5)
+    assert facts["workflow"] == {"value": "", "inherited": False, "note": "no run"}
+    assert facts["role"] == {"value": "", "inherited": False, "note": "free-role"}
     named = spawn_gate.card_facts({"workspace": "hq"}, asker)["workspace"]
     assert named == {"value": "hq", "inherited": False}
 
@@ -773,9 +774,10 @@ def test_card_facts_show_the_workflow_a_child_inherits(home):
     assert named["workflow"] == {"value": "other", "inherited": False}
     declined = spawn_gate.card_facts({"workflow": "-"}, asker,
                                      paired_workflow="improv-worker-v2")
-    assert declined["workflow"] == {"value": "", "inherited": False}
+    assert declined["workflow"] == {"value": "", "inherited": False, "note": "no run"}
     # no pair: still none
-    assert spawn_gate.card_facts({}, asker)["workflow"] == {"value": "", "inherited": False}
+    assert spawn_gate.card_facts({}, asker)["workflow"] == {
+        "value": "", "inherited": False, "note": "no run"}
 
 
 def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monkeypatch):
@@ -813,7 +815,8 @@ def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monke
     assert by_id[kid]["facts"]["workflow"] == want
     assert got["request"]["facts"]["workflow"] == want
     # a declined pair is not looked up and reads as none
-    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False}
+    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False,
+                                                 "note": "no run"}
     assert set(asked) == {("op", "/w/op", "/w/op")}
 
 

@@ -179,6 +179,14 @@ def clean_reason(text) -> str:
 #: read as if the workspace were the checkout.
 CARD_FIELDS = ("project", "profile", "workspace", "worktree", "role", "workflow")
 
+#: What an EMPTY row means, for the rows where empty is a real answer. The
+#: card renders these beside the dash; a person reading "role —" cannot tell
+#: "nobody chose one" from "the daemon lost it" (claunch-8fvr5).
+_EMPTY_MEANS = {
+    "role": "free-role",
+    "workflow": "no run",
+}
+
 
 def _dir_label(path: str) -> str:
     """A directory as the person registered it: the workspace it lives in
@@ -303,6 +311,12 @@ def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
         facts["workflow"] = row("" if flow == "-" else flow)
     else:
         facts["workflow"] = row(paired_workflow.strip(), True)
+    # An empty row is an answer, and the card has to say WHICH one: a dash
+    # read as "the daemon could not fill this in" (claunch-8fvr5). These are
+    # the two rows where empty is a real outcome rather than a missing value.
+    for key, note in _EMPTY_MEANS.items():
+        if not facts[key]["value"]:
+            facts[key]["note"] = note
     return facts
 
 
