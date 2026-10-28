@@ -59463,37 +59463,54 @@ const gateReadIds = new Set(
    still applies. */
 const NOTICE_FILTERS = ["all", "marked", "unread"];
 
-/* Reminders (claunch-6scxn): a waiting request the reader does not want to
-   answer now, but does want back later. The press takes its card down and
-   puts it up again at 1h, 6h and 24h — counted from the press, not from when
-   the request arrived (the user's answer: 「누른시간으로부터 재줘」). A
-   request that had already stood for six hours therefore still comes back an
-   hour after the press, which is what the person pressing it asked for.
+/* Reminders (claunch-6scxn, claunch-gnlui): a waiting request the reader does
+   not want to answer now, but does want back later. The reader picks ONE of
+   1h, 6h and 24h; the card goes down and comes back once, that long after
+   the press — counted from the press, not from when the request arrived (the
+   user's answer: 「누른시간으로부터 재줘」). A request that had already stood
+   for six hours therefore still comes back an hour after a 1h press.
+
+   The three are exclusive choices, not steps of one schedule (claunch-gnlui:
+   the first cut read "1h, 6h, 24h" as a ladder that one Remind press walked
+   in full). A second pick replaces the first, and a reminder that has fired
+   is gone: the card is back, and the reader picks again or does not.
 
    Kept apart from NOTICE_HIDDEN_KEY on purpose: Hide says "I have dealt with
-   this", a reminder says "show me again at 1h", and the panel's hidden line
+   this", a reminder says "show me again at 6h", and the panel's hidden line
    counts the first meaning. One set holding both would make that line lie
-   about whichever meaning it did not pick.
+   about whichever meaning it did not pick. */
+const NOTICE_REMIND_CHOICES = [
+  { label: "1h", after: 3600 * 1000 },
+  { label: "6h", after: 6 * 3600 * 1000 },
+  { label: "24h", after: 24 * 3600 * 1000 },
+];
 
-   `down` is the card's state now — true while the reminder is still ahead,
-   false from the moment it fires. It is a field rather than "due > now"
-   because after the first reminder fires this entry carries the time of the
-   NEXT one, and a due in the future must not put the card back down. */
-const NOTICE_REMIND_STEPS = [3600 * 1000, 6 * 3600 * 1000, 24 * 3600 * 1000];
-const NOTICE_REMIND_LABELS = ["1h", "6h", "24h"];
+function noticeRemindChoice(after) {
+  return NOTICE_REMIND_CHOICES.find((c) => c.after === after) || null;
+}
 
-/* "<type>:<request id>" -> {type, rid, since, stage, due, down}. `since` is
-   the press (the clock every step counts from), `stage` indexes
-   NOTICE_REMIND_STEPS, `due` is when the next reminder is and is null once
-   the last one has fired. */
+/* A record the staged first cut saved ({since, stage, due, down}) is read as
+   the one pick it was waiting on: still down, it comes back when it was
+   going to; already up, there is nothing left to wait for. */
+function gateRemindAdopt(v) {
+  if (!v || typeof v !== "object" || !Number.isFinite(v.due)) return null;
+  if (noticeRemindChoice(v.after)) return v;
+  if (v.down !== true || !Number.isFinite(v.stage)) return null;
+  const choice = NOTICE_REMIND_CHOICES[v.stage];
+  return choice ? { type: v.type, rid: v.rid, since: v.since, after: choice.after, due: v.due }
+                : null;
+}
+
+/* "<type>:<request id>" -> {type, rid, since, after, due}. `since` is the
+   press, `after` the chosen wait, `due` = since + after. While an entry
+   stands the card is down; the tick that finds it due deletes it. */
 const gateRemindIds = new Map(
   (() => {
     const saved = noticeLoad(NOTICE_REMIND_KEY, {});
     if (!saved || typeof saved !== "object") return [];
-    return Object.entries(saved).filter(
-      ([k, v]) => typeof k === "string" && v && typeof v === "object" &&
-        Number.isFinite(v.since) && Number.isFinite(v.stage)
-    );
+    return Object.entries(saved)
+      .map(([k, v]) => [k, gateRemindAdopt(v)])
+      .filter(([k, v]) => typeof k === "string" && v);
   })()
 );
 
@@ -59507,84 +59524,40 @@ function gateRemindOf(type, rid) {
 
 /* The card is down because a reminder is still ahead of it. */
 function gateRemindDown(type, rid) {
-  const rec = gateRemindOf(type, rid);
-  return !!rec && rec.down === true;
+  return !!gateRemindOf(type, rid);
 }
 
-/* Which reminder this request is waiting on, as "1h"/"6h"/"24h", or null
-   when it has no reminder pending. The card and the panel row print it, so
-   a card that comes back reads as one the reader put aside rather than as a
-   request that just arrived. */
+/* Which wait the reader picked for this request, as "1h"/"6h"/"24h", or null
+   when it has no reminder pending. The panel row prints it, so a request
+   that is not in the corner reads as one the reader put aside. */
 function gateRemindLabel(type, rid) {
   const rec = gateRemindOf(type, rid);
-  if (!rec || rec.due === null) return null;
-  return NOTICE_REMIND_LABELS[rec.stage] || null;
-}
-
-/* The chips on screen that say which reminder is next, kept so the page's
-   one-second tick can move their words when a step fires: the card they are
-   on is kept across a poll (noticePanelPlace / noticeCardAdd), so a chip
-   drawn once would go on naming the step that has already passed. */
-const noticeRemindChips = new Set();   // {node, type, rid}
-
-function gateRemindChipText(rec) {
-  const label = gateRemindLabel(rec.type, rec.rid);
-  return label ? `remind ${label}` : "";
+  const choice = rec && noticeRemindChoice(rec.after);
+  return choice ? choice.label : null;
 }
 
 function gateRemindChip(type, rid) {
-  const node = el("span", "notice-chip remind");
+  const node = el("span", "notice-chip remind", `remind ${gateRemindLabel(type, rid)}`);
   node.title =
-    "this card is put aside until the next reminder; the request stays " +
+    "this card is put aside until the chosen time; the request stays " +
     "open and still runs to its deadline";
-  const rec = { node, type, rid: String(rid) };
-  node.textContent = gateRemindChipText(rec);
-  noticeRemindChips.add(rec);
   return node;
 }
 
-/* One pass over the chips: a chip whose reminder is spent or cleared leaves
-   the row, and one whose step moved says so. Nothing is written when neither
-   happened, which is every second but two per reminder. */
-function noticeRemindChipsPaint() {
-  for (const rec of [...noticeRemindChips]) {
-    if (rec.node.isConnected === false) { noticeRemindChips.delete(rec); continue; }
-    const text = gateRemindChipText(rec);
-    if (!text) {
-      if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
-      noticeRemindChips.delete(rec);
-      continue;
-    }
-    if (rec.node.textContent !== text) rec.node.textContent = text;
-  }
-}
-
-/* Remind: the card goes now and comes back at 1h, then 6h, then 24h, every
-   step counted from the press. A press on a card that is up because a step
-   fired continues the ladder rather than starting it over — that card is
-   the only place the later steps can be asked for, so restarting there
-   would leave 6h and 24h reachable only by never touching the card again
-   (s597-rev, claunch-6scxn). Once the last step has fired the ladder is
-   spent (due null) and the next press starts a fresh 1h. The request is
-   untouched — it waits on the daemon exactly as before. */
-function gateRemind(type, rid) {
+/* Remind: the card goes now and comes back once, `after` ms from this
+   press. A press while a reminder stands (the panel row, another tab)
+   replaces it — the picks are exclusive, and the last one is what the reader
+   asked for. The request is untouched — it waits on the daemon exactly as
+   before. */
+function gateRemind(type, rid, after) {
   const id = String(rid);
+  const choice = noticeRemindChoice(after) || NOTICE_REMIND_CHOICES[0];
   const now = Date.now();
-  const key = `${type}:${id}`;
-  const rec = gateRemindIds.get(key);
-  if (rec && rec.due !== null && rec.down !== true) {
-    // Back up because a step fired: put it down again for the step already
-    // scheduled. `since` and `stage` stand, so the wait is the 6h or 24h the
-    // chip named.
-    rec.down = true;
-  } else {
-    gateRemindIds.set(key, {
-      type, rid: id, since: now, stage: 0,
-      due: now + NOTICE_REMIND_STEPS[0], down: true,
-    });
-  }
+  gateRemindIds.set(`${type}:${id}`, {
+    type, rid: id, since: now, after: choice.after, due: now + choice.after,
+  });
   gateRemindSave();
-  noticeTabsPost({ t: "gate-remind", type, rid: id });
+  noticeTabsPost({ t: "gate-remind", type, rid: id, after: choice.after });
   noticeBellPaint();
   noticePanelPaint();
   noticeGateRefresh(type);
@@ -59602,35 +59575,23 @@ function gateRemindClear(type, rid) {
    do is the common case and costs one `size` read: no timers of its own, no
    DOM writes — the cost contract of claunch-qnq1c is about settled lists not
    touching the page, and a reminder that is not due is a settled list. A
-   reminder that comes due takes its card's kind through the same refresh
-   its poll uses, so the card comes back built the one way every card is. */
+   reminder that comes due is dropped and takes its card's kind through the
+   same refresh its poll uses, so the card comes back built the one way every
+   card is. */
 function noticeRemindPaint() {
-  if (gateRemindIds.size) {
-    const now = Date.now();
-    const fired = new Set();
-    for (const rec of gateRemindIds.values()) {
-      // A step fires whether or not the card is down. A card that is still
-      // up runs its clock on: letting the 1h appearance stand must not cost
-      // the 6h and 24h reminders, and the press that puts it back down
-      // (gateRemind) then names the longer wait instead of a fresh hour.
-      if (!Number.isFinite(rec.due) || rec.due > now) continue;
-      rec.down = false;
-      fired.add(rec.type);
-      if (rec.stage + 1 < NOTICE_REMIND_STEPS.length) {
-        rec.stage += 1;
-        rec.due = rec.since + NOTICE_REMIND_STEPS[rec.stage];
-      } else {
-        rec.due = null;
-      }
-    }
-    if (fired.size) {
-      gateRemindSave();
-      for (const type of fired) noticeGateRefresh(type);
-      noticeBellPaint();
-      noticePanelPaint();
-    }
+  if (!gateRemindIds.size) return;
+  const now = Date.now();
+  const fired = new Set();
+  for (const [key, rec] of [...gateRemindIds]) {
+    if (!Number.isFinite(rec.due) || rec.due > now) continue;
+    gateRemindIds.delete(key);
+    fired.add(rec.type);
   }
-  noticeRemindChipsPaint();
+  if (!fired.size) return;
+  gateRemindSave();
+  for (const type of fired) noticeGateRefresh(type);
+  noticeBellPaint();
+  noticePanelPaint();
 }
 
 function noticeFilterOf(value) {
@@ -59932,22 +59893,21 @@ function noticeTabsApply(msg) {
         gateUnhide(msg.type, String(msg.rid));
       }
     } else if (msg.t === "gate-remind" && msg.type) {
-      // Another tab put the card aside (claunch-6scxn). The ladder is a
-      // schedule, not a gesture: a tab that pressed from now would run a
-      // different one, and the two would disagree about which step is next.
-      // So the record the presser saved is adopted verbatim.
+      // Another tab put the card aside (claunch-6scxn). The due time is the
+      // presser's: a tab that pressed from its own clock would bring the
+      // card back at a different moment than the tab the reader used. So the
+      // record the presser saved is adopted verbatim.
       const key = `${msg.type}:${String(msg.rid)}`;
       const saved = noticeLoad(NOTICE_REMIND_KEY, {});
-      const rec = saved && typeof saved === "object" ? saved[key] : null;
-      if (rec && typeof rec === "object" && Number.isFinite(rec.since)) {
+      const rec = gateRemindAdopt(saved && typeof saved === "object" ? saved[key] : null);
+      if (rec) {
         gateRemindIds.set(key, rec);
         gateRemindSave();
         noticeBellPaint();
         noticePanelPaint();
         noticeGateRefresh(msg.type);
       } else if (!gateRemindDown(msg.type, String(msg.rid))) {
-        gateRemind(msg.type, String(msg.rid));
-        noticeGateRefresh(msg.type);
+        gateRemind(msg.type, String(msg.rid), msg.after);
       }
     } else if (msg.t === "gate-read" && msg.type) {
       if (gateIsRead(msg.type, msg.rid) !== !!msg.read) {
@@ -60170,37 +60130,39 @@ function gateHideButton(type, rid, key, title) {
   return btn;
 }
 
-/* The press beside Hide that answers nothing either, but asks for the card
-   back later (claunch-6scxn): it goes now and comes back at 1h, 6h and 24h,
-   counted from this press. Same shape as gateHideButton and for the same
-   reason — every gate kind draws its buttons through these, so a kind added
-   later gets both without its own author remembering. */
-function gateRemindButton(type, rid, key) {
-  const btn = el("button", "wf-btn gate-remind", "Remind");
-  btn.title =
-    "put this card aside and have it come back at 1h, 6h and 24h from now — " +
-    "nothing is answered, the request stays open and still runs to its deadline";
-  btn.addEventListener("click", (ev) => {
-    if (ev && ev.stopPropagation) ev.stopPropagation();
-    gateRemind(type, String(typeof rid === "function" ? rid() : rid));
-    dismissNotice(key);
-  });
-  return btn;
+/* The presses beside Hide that answer nothing either, but ask for the card
+   back later (claunch-6scxn, claunch-gnlui): one button per wait, 1h, 6h and
+   24h, each its own exclusive choice. Card and panel row draw the same group
+   through this, so the two surfaces cannot offer different waits. `onPick`
+   runs after the reminder is filed (the card uses it to dismiss itself). */
+function gateRemindChoices(type, rid, onPick) {
+  const box = el("span", "gate-remind");
+  box.appendChild(el("span", "gate-remind-label", "Remind"));
+  for (const choice of NOTICE_REMIND_CHOICES) {
+    const btn = el("button", "wf-btn gate-remind-choice", choice.label);
+    btn.type = "button";
+    btn.title =
+      `put this card aside and have it come back once, ${choice.label} from now — ` +
+      "nothing is answered, the request stays open and still runs to its deadline";
+    btn.addEventListener("click", (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      gateRemind(type, String(typeof rid === "function" ? rid() : rid), choice.after);
+      if (onPick) onPick();
+    });
+    box.appendChild(btn);
+  }
+  return box;
 }
 
-/* Both card-side presses, in the order they are drawn. A gate's card builder
-   calls this once instead of reaching for each button: the pair is one
-   decision ("what do I do with this card while I think"), and a kind that
-   got one without the other would be a gap nothing catches. */
+/* Every card-side press besides the answer, in the order they are drawn. A
+   gate's card builder calls this once instead of reaching for each button:
+   Hide and Remind are one decision ("what do I do with this card while I
+   think"), and a kind that got one without the other would be a gap nothing
+   catches. */
 function gateAsideActions(type, rid, key, hideTitle) {
   const box = el("span", "gate-aside");
-  const id = String(typeof rid === "function" ? rid() : rid);
-  // The step the card's Remind press would wait for, printed where the press
-  // is: after a reminder has fired the card is back, and without this it
-  // reads as a card nobody put aside — or as one whose Remind press was lost.
-  if (gateRemindLabel(type, id)) box.appendChild(gateRemindChip(type, id));
   box.appendChild(gateHideButton(type, rid, key, hideTitle));
-  box.appendChild(gateRemindButton(type, rid, key));
+  box.appendChild(gateRemindChoices(type, rid, () => dismissNotice(key)));
   return box;
 }
 
@@ -60392,7 +60354,7 @@ function noticePanelGateRow(type, rec) {
     ));
   }
   // The reminder this request is waiting on, if any (claunch-6scxn): the row
-  // says which step comes next, and Show card — the press a hidden row
+  // says which wait was picked, and Show card — the press a hidden row
   // already carries — brings it back now and ends the reminder with it.
   if (!hidden && gateRemindLabel(type, rid)) {
     head.appendChild(gateRemindChip(type, rid));
@@ -60400,14 +60362,11 @@ function noticePanelGateRow(type, rec) {
       "Show card", "", "bring this card back now and drop the reminder",
       () => gateUnhide(type, rid)
     ));
-  } else if (!hidden) {
-    // A request with no reminder can be given one from the panel too: the
-    // corner card's Remind press, in the row that answers for that card.
-    actions.appendChild(noticePanelButton(
-      "Remind", "", "put this card aside; it comes back at 1h, 6h and 24h",
-      () => gateRemind(type, rid)
-    ));
   }
+  // The corner card's Remind choices, in the row that answers for that card.
+  // A reminded row keeps them too: picking another wait replaces the one
+  // standing (claunch-gnlui).
+  if (!hidden) actions.appendChild(gateRemindChoices(type, rid));
   head.appendChild(noticePanelButton(
     read ? "Mark unread" : "Mark read", "notice-mark",
     read ? "count it in the waiting list and the bell again"
@@ -61045,14 +61004,12 @@ function noticeGateRowShape(rec) {
   ]);
 }
 
-/* The reminder's half of a waiting row's key (claunch-6scxn): which step the
-   row says is coming next, and whether the card is down for it. A rebuild
-   that moves either must build a new row, or the kept node goes on saying
-   the step that has already fired. */
+/* The reminder's half of a waiting row's key (claunch-6scxn): which wait the
+   row says was picked. A rebuild that changes it (a new pick, a reminder that
+   fired) must build a new row, or the kept node goes on naming the old one. */
 function noticeGateRemindShape(type, rid) {
   const rec = gateRemindOf(type, String(rid));
-  if (!rec) return "";
-  return `${rec.stage}:${rec.down === true ? "d" : "u"}:${rec.due === null ? "end" : "on"}`;
+  return rec ? `${rec.after}:${rec.due}` : "";
 }
 
 /* What one history row draws, as a short string: the flags noticePanelHistoryRow
