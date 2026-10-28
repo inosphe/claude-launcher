@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
@@ -1054,6 +1054,11 @@ def build_app(
     r.add_post("/api/cflow2/step-out", h_cflow2_step_out)
     r.add_post("/api/cflow2/move/resolve", h_cflow2_move_resolve)
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
+    # The landing queue a request WOULD be filed on, asked before it is made
+    # (claunch-od1mx.1). The same Router the push clock runs, so "somebody
+    # can merge this" is answered by the code that decides it rather than by
+    # a second reading.
+    r.add_get("/api/cflow2/landing-target", h_cflow2_landing_target)
     r.add_post("/api/cflow2/collection", h_cflow2_collection)
     r.add_post("/api/cflow2/inputs/check", h_cflow2_inputs_check)
     # Watching another session's cflow run (claunch-ijg51.1): read + subscribe.
@@ -7447,6 +7452,104 @@ async def h_cflow2_asks(request: web.Request) -> web.Response:
     cwd, scope = _cflow2_slot(request)
     data = await asyncio.to_thread(cflow2_approve.pending, cwd, scope)
     return json_response(data)
+
+
+async def h_cflow2_landing_target(request: web.Request) -> web.Response:
+    """Who a landing request from this run WOULD go to, asked before it is
+    filed (claunch-od1mx.1): the same :class:`.landing_route.Router` the
+    push clock runs, so the answer cannot drift from the one a real push
+    gets.
+
+    ``cwd`` and ``scope`` are the run's slot. The three inputs are built the
+    way the trigger path builds them -- deliberately, because a probe that
+    measured a different set of directories could say "somebody can merge"
+    where the push then found nobody:
+
+    * ``cwds`` is read through
+      :meth:`.cflow2_clock.Cflow2Clock.trigger_cwds`, the same method
+      :meth:`.cflow2_clock.Cflow2Clock.run_triggers` uses -- one expression,
+      so a probe cannot measure a different set of directories than the push
+      it is predicting. With no clock (v2 off, an app built without one)
+      there is no trigger path to agree with, and the walk gets the slot's
+      own directory alone.
+    * ``mesh`` and ``manager`` are the app's own -- the same objects the
+      clock pushes through.
+    * ``holders`` is :func:`.cflow2_triggers.landing_holders`, the closure
+      :func:`.cflow2_triggers.push_landing` hands its Router.
+
+    The direction (stacked, or the leader only) is the run's
+    ``inputs.relation``, the value ``integration-request``'s triggers
+    branch on -- not an argument. A caller outside a run may pass
+    ``relation`` to ask the question for a run it has no scope for.
+
+    Answers ``{owner, holder, why, passed, refused, undecidable}``:
+    ``holder`` null with ``undecidable`` false is the definite "nobody",
+    and with it true is "this could not be read". The probe
+    (``claunch gate landing-target``) turns those into exit 1 and 2.
+    ``refused`` is ``why`` split on ``"; "`` for a reader that wants the
+    sentences one at a time; the sentences are the Router's own.
+
+    The answer is a prediction, not a reservation: the set of directories
+    and the rosters can change between this call and the push. That race is
+    the one the ``NOT queued`` -> ``landing-nudge`` path already handles,
+    and it is why the push keeps its own routing rather than trusting this.
+    """
+    cwd, scope = _cflow2_slot(request)
+    relation = (request.query.get("relation") or "").strip()
+    if not relation:
+        relation = await asyncio.to_thread(_run_relation, cwd, scope)
+    clock = request.app.get("cflow2_clock")
+    if clock is not None:
+        cwds = await asyncio.to_thread(clock.trigger_cwds)
+    else:
+        cwds = [cwd]
+    mesh = request.app.get("mesh")
+    data = await asyncio.to_thread(
+        _landing_target, request.app["manager"], mesh, cwds, cwd, scope, relation
+    )
+    return json_response(data)
+
+
+def _run_relation(cwd: str, scope: str) -> str:
+    """The run's ``inputs.relation``, or "" when it cannot be read. An
+    unreadable run is not an error here: the probe reports the "" as a
+    verdict it could not form rather than as "stacked"."""
+    try:
+        state = cflow2_store.RunStore(cwd, scope).load_state()
+    except Exception:  # noqa: BLE001 - no run, unreadable run: no relation
+        return ""
+    relation = ((state.get("data") or {}).get("inputs") or {}).get("relation")
+    return str(relation or "").strip()
+
+
+def _landing_target(manager: Any, mesh: Any, cwds: Sequence[str], cwd: str,
+                    scope: str, relation: str) -> dict:
+    """Run the Router and render it for the probe. Blocking: call it in a
+    thread. A relation that is neither of the two the pushes use is a
+    question this endpoint cannot answer, and says so."""
+    from . import cflow2_triggers
+    from .landing_route import Router
+
+    if relation not in ("stacked", "independent"):
+        return {"owner": None, "holder": None, "undecidable": True,
+                "why": f"the run's relation is {relation!r}, not 'stacked' or "
+                       f"'independent' -- no push would be filed for it",
+                "passed": [], "refused": []}
+    router = Router(manager, mesh, cflow2_triggers.landing_holders(manager, cwds))
+    found = (router.independent(cwd, scope) if relation == "independent"
+             else router.stacked(cwd, scope))
+    holder = found.holder
+    return {
+        "owner": found.owner,
+        "holder": (None if holder is None else
+                   {"cwd": holder.cwd, "run": holder.run, "main": holder.main,
+                    "version": holder.version}),
+        "why": found.why,
+        "passed": list(found.passed),
+        "refused": [s for s in found.why.split("; ") if s],
+        "undecidable": found.undecidable,
+        "relation": relation,
+    }
 
 
 async def h_cflow_skip(request: web.Request) -> web.Response:
