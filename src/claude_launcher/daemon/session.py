@@ -469,6 +469,21 @@ async def _deliver_after_hold(session, text, **kwargs) -> bool:
     return await current.deliver(text, **kwargs)
 
 
+
+def _signallable(session) -> bool:
+    """Whether an ending asked of ``session`` now reaches a program: one is
+    attached, or the boot is adopting one (:attr:`Session.adopting`)."""
+    return session.pty is not None or getattr(session, "adopting", None) is not None
+
+
+def _terminate(session, force: bool) -> None:
+    """Signal ``session``'s program, or owe the signal to
+    :meth:`Session.adopt` while there is no PTY to signal yet."""
+    if session.pty is not None:
+        session.pty.terminate(force=force)
+    else:
+        session._ending_owed = bool(session._ending_owed) or force
+
 class Session:
     """Owns one PTY child; created and torn down by the SessionManager.
 
@@ -510,6 +525,19 @@ class Session:
         #: The PTY host record :meth:`detach` made (claunch-xnnct.1).
         self.detached_pty: Optional[dict] = None
         self._detaching = False
+        #: The saved PTY host record while the boot adopts this session
+        #: (claunch-opirg): staged, its screen being built off the loop, not
+        #: attached yet. The loop runs meanwhile, so a persist must still
+        #: find the host session (:meth:`pty_record`), and an ending asked
+        #: for has no PTY to signal yet -- it is owed (:attr:`_ending_owed`)
+        #: and :meth:`adopt` delivers it once attached.
+        self.adopting: Optional[dict] = None
+        #: ``force`` of an ending asked for while :attr:`adopting`; None when
+        #: none was.
+        self._ending_owed: Optional[bool] = None
+        #: A resize asked for while :attr:`adopting`, for :meth:`adopt` to
+        #: pass to the program once attached.
+        self._resize_owed = False
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
@@ -821,7 +849,10 @@ class Session:
             name=self.sdef.name,
         ))
 
-    def adopt(self, handle, replay: bytes, reply: dict, saved: dict) -> None:
+    def adopt(
+        self, handle, replay: bytes, reply: dict, saved: dict,
+        screen: Optional[ScreenState] = None,
+    ) -> None:
         """Take over a session the PTY host kept across a daemon restart
         (claunch-xnnct.1) instead of starting a program.
 
@@ -837,29 +868,80 @@ class Session:
         alone and the log is left as it is, so it can miss what the program
         wrote between the crash and now.
 
+        ``screen`` is that rebuilt screen when the caller already made it
+        with :meth:`adopted_screen` -- the boot does, on a worker thread
+        (claunch-opirg) -- and is built here otherwise. It must be built
+        before the replay is appended below: the tail it reads ends where
+        the replay begins.
+
         The replay is not fed to the activity or compaction scanners: it is
         old output, and the clocks those drive must not read it as new.
         """
+        if screen is None:
+            screen = self.adopted_screen(
+                replay, saved, self.screen.cols, self.screen.rows,
+                self.screen.history_limit,
+            )
         self.argv = list(saved.get("argv") or [])
         self._started_mono = time.monotonic()
         gap = int(reply.get("gap") or 0)
         if saved.get("seq") is not None:
-            tail = self._replay_tail()
-            if tail:
-                self.screen.feed(tail)
-            self.screen.apply_modes(saved.get("modes") or {})
             if gap:
                 self._append_log(lost_output_note(gap))
             if replay:
                 self._append_log(replay)
-        if replay:
-            self.screen.feed(replay)
+        self.screen.adopt(screen)
         # The program is running and has drawn; it is not STARTING, and it
         # took input before the restart.
         self._saw_output = True
         self._input_ready = True
         self._last_output_mono = time.monotonic()
+        self.adopting = None
         self._attach(handle)
+        if self._resize_owed:
+            self._resize_owed = False
+            self.pty.resize(self.sdef.cols, self.sdef.rows)
+        owed, self._ending_owed = self._ending_owed, None
+        if owed is not None:
+            # Asked for while the screen was being built: delivered now, so
+            # the exit reads as that kill, pause or hold.
+            self.pty.terminate(force=owed)
+
+    async def _until_adopted(self, timeout: float = 30.0) -> None:
+        """Wait while the boot adopts this session (:attr:`adopting`): a
+        writer that reaches it between its stage and its attach is held for
+        the attach (a fraction of a second) instead of told it has exited."""
+        deadline = time.monotonic() + timeout
+        while (self.pty is None and getattr(self, "adopting", None) is not None
+               and not self.exited and time.monotonic() < deadline):
+            await asyncio.sleep(0.02)
+
+    def adopted_screen(
+        self, replay: bytes, saved: dict, cols: int, rows: int, limit: int
+    ) -> ScreenState:
+        """The screen :meth:`adopt` takes over, built apart from the
+        session's own.
+
+        Safe on a worker thread: it reads the log and fills a screen of its
+        own, and touches nothing the loop holds (``cols``/``rows``/``limit``
+        are read off the session's screen by the caller, on the loop). The
+        log it reads is not written meanwhile: the session is not attached
+        yet, so nothing reads its program, and :meth:`adopt` appends the
+        replay only after this returns. The
+        pyte work is the boot's largest part -- 0.3s a session, 59.1s of a
+        112.1s restore of 162 sessions on 2026-10-28 (claunch-opirg) -- and
+        off the loop the loop serves everything else meanwhile.
+        """
+        screen = ScreenState(cols, rows, history=self._scrollback)
+        screen.set_history_limit(limit)
+        if saved.get("seq") is not None:
+            tail = self._replay_tail()
+            if tail:
+                screen.feed(tail)
+            screen.apply_modes(saved.get("modes") or {})
+        if replay:
+            screen.feed(replay)
+        return screen
 
     async def detach(self, timeout: float = 5.0) -> Optional[dict]:
         """Let go of a session that runs in the PTY host, leaving it running
@@ -911,6 +993,8 @@ class Session:
         detached = self.detached_pty
         if detached is not None:
             return detached
+        if self.adopting is not None:
+            return dict(self.adopting)
         pty = self.pty
         sid = getattr(pty, "sid", None)
         if self.exited or sid is None or not callable(getattr(pty, "detach", None)):
@@ -2210,6 +2294,7 @@ class Session:
         with a replacement character. See
         ``claunch-pty-shared-decoder-across-writers-o3cy4``.
         """
+        await self._until_adopted()
         if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         # One writer at a time. A session has several -- each viewer, the
@@ -2232,7 +2317,8 @@ class Session:
             self.pty.forget_writer(writer)
 
     def resize(self, cols: int, rows: int) -> None:
-        if self.exited or self.pty is None:
+        adopting = self.pty is None and getattr(self, "adopting", None) is not None
+        if self.exited or (self.pty is None and not adopting):
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         if cols == self.sdef.cols and rows == self.sdef.rows:
             # Same size, nothing changed — and a broadcast here has teeth now:
@@ -2241,7 +2327,12 @@ class Session:
             # The web terminal re-asserts the size on focus regain, so this is
             # not a rare corner; keep the no-op a no-op.
             return
-        self.pty.resize(cols, rows)
+        if adopting:
+            # Owed to the attach; the screen takes the size now, and
+            # :meth:`adopt` keeps it when it swaps the built one in.
+            self._resize_owed = True
+        else:
+            self.pty.resize(cols, rows)
         self.screen.resize(cols, rows)
         self.sdef = dataclasses.replace(self.sdef, cols=cols, rows=rows)
         self._broadcast(("resize", (cols, rows)))
@@ -2275,12 +2366,12 @@ class Session:
             self.ended_by = dict(by)
 
     def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         if by:
             self.note_ender(by)
         self.kill_requested = True
-        self.pty.terminate(force=force)
+        _terminate(self, force)
 
     def pause(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         """Kill, and mark the record as paused rather than killed.
@@ -2292,7 +2383,7 @@ class Session:
         running with the marker set, which the rail draws as "pausing" — the
         same window a plain kill has, made visible.
         """
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         self.paused_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2303,7 +2394,7 @@ class Session:
         Marker before signal, for the reason :meth:`pause` gives: the exit
         funnel reads it to decide that nothing has ended.
         """
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         self.held_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2319,12 +2410,19 @@ class Session:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         # An asked-for ending like kill(): redefine, migrate, archive and
         # clear --running end sessions through here, not through kill().
         self.kill_requested = True
-        self.pty.terminate(force=False)
+        _terminate(self, False)
+        # Mid-adoption the terminate is owed until the attach: wait for it,
+        # so the caller (archive, redefine) gets the session ended, not
+        # "still running".
+        if self.pty is None:
+            await self._until_adopted()
+        if self.pty is None:
+            return
         deadline = time.monotonic() + grace
         while not self.exited and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
