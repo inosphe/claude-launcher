@@ -22347,7 +22347,7 @@ function renderLinkPanel() {
     const chip = $(id);
     if (!chip) continue;
     // Only the grade and open classes are ours: toolbar.js puts its own
-    // (toolbar-overflow, compact) on the same button, and a whole-class write
+    // (toolbar-overflow) on the same button, and a whole-class write
     // every second took them off and set its measuring pass going again.
     for (const grade of ["ok", "warn", "down"]) chip.classList.toggle(grade, grade === g.grade);
     chip.classList.toggle("open", linkPanelOpen);

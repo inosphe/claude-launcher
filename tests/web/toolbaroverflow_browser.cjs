@@ -1,21 +1,26 @@
-/* The session header gives up its controls one at a time, keeping the labels.
+/* The session header gives up space in three ordered stages (claunch-xbhbg).
 
-   `toolbar.js` used to shrink the whole row to fixed-width glyphs the moment
-   the labelled row was a pixel too wide, and only then start moving controls
-   into the `⋯` menu. The two states differ by hundreds of pixels, so a 1px
-   change flipped the entire bar between "every label" and "every glyph", and
-   the menu never appeared while any label did. Measured on the shipped
-   markup, 21 controls: 2016.83px expanded against 962.72px compact, with the
-   first `⋯` item appearing only at 1026px (claunch-8ntfx).
+   `toolbar.js` used to keep every label while moving controls into the `⋯`
+   menu, and once more than half had left it turned the whole row into glyphs
+   at once. That flip was hundreds of pixels wide, so one pixel of column
+   changed the whole bar, and a put-back pass then brought narrow controls
+   back out of the menu, so which controls were where did not follow the
+   width in any order (claunch-8ntfx's rule, replaced at the user's request).
 
-   This drives the real header markup, style.css and toolbar.js in a browser
-   and holds the order the other way: the labels stay while controls are left
-   to move, the menu grows one item at a time as the column narrows, and the
-   glyph row appears only once more than half of the controls would have had
-   to leave. It also holds the menu to what the row cannot show: once the
-   glyphs are on, a control that had left only to save the labels comes back
-   if it fits, so nothing sits in the menu that the row has room for (review
-   of claunch-8ntfx, s1565-rev). */
+   The rule held here, on the real header markup, style.css and toolbar.js:
+
+     1. squeeze: the gap and the buttons' side padding shrink first, by the
+        missing width;
+     2. iconify: then one control at a time, in MINIMIZE_ORDER, becomes a glyph;
+     3. overflow: only once no control is left to iconify do controls go into
+        the menu, in the same order.
+
+   So as the column narrows a pixel at a time, no control ever gets wider,
+   the glyph set and the menu set only grow, the menu is empty while any
+   control could still turn into a glyph, and a step changes at most one
+   control's state (the step that brings up `⋯` itself excepted: the button
+   takes its own width). And a lit control that went into the menu lights the
+   menu's button, since it cannot be seen where it is. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -27,151 +32,240 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
-    const page = await browser.newPage({ viewport: { width: 2600, height: 900 } });
-    await page.setContent(`<div id="layout">${header}</div>`);
-    await page.addStyleTag({ path: path.join(root, "style.css") });
-    await page.addStyleTag({ content: "#layout { display:block; position:relative; width:100%; }" });
-    await page.evaluate(() => {
-      document.getElementById("term-header").classList.remove("hidden");
-      for (const [id, text] of Object.entries({
-        "term-title": "s1565", "term-status": "busy",
-        "term-timer": "Ⅱ role reminder in 7:12", "term-timer-skip": "⏭",
-        "term-hold": "delivery: would queue — busy", "term-zoom-level": "13px",
-      })) {
-        const el = document.getElementById(id);
-        if (!el) continue;
-        el.textContent = text;
-        el.classList.remove("hidden");
-      }
-    });
-    // index.html loads quietdom.js before every other script; its same-value
-    // guards are part of what the fitter sees on each repaint.
-    await page.addScriptTag({ path: path.join(root, "quietdom.js") });
-    await page.addScriptTag({ path: path.join(root, "toolbar.js") });
-    const settle = (frames = 4) => page.evaluate(n => new Promise(done => {
-      const step = () => (--n ? requestAnimationFrame(step) : done());
-      requestAnimationFrame(step);
-    }), frames);
-    const width = w => page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, w);
-    const read = () => page.evaluate(() => {
-      const h = document.getElementById("term-header");
-      // `.toolbar-overflow` is `display:none`, so a control that has left the
-      // row is only in this list by its class, not by its computed display.
-      const shown = [...h.children].flatMap(el => el.classList.contains("term-actions") ? [...el.children] : [el])
-        .filter(el => el.id !== "term-more" && el.id !== "term-details"
-          && (el.classList.contains("toolbar-overflow") || getComputedStyle(el).display !== "none"));
-      return {
-        compact: h.classList.contains("term-compact"),
-        overflow: shown.filter(el => el.classList.contains("toolbar-overflow")).length,
-        of: shown.length,
-        overflowsBox: h.scrollWidth > h.clientWidth,
-      };
-    });
-
-    // A coarse sweep down the column: what leaves the row, and in what state.
-    const rows = [];
-    for (const w of [2200, 2000, 1700, 1400, 1200, 1150, 1000, 800, 600, 400, 300]) {
-      await width(w);
-      await settle();
-      rows.push({ at: w, ...await read() });
-    }
-
-    assert.equal(rows[0].compact, false, `the widest column keeps its labels: ${JSON.stringify(rows[0])}`);
-    assert.equal(rows[0].overflow, 0, `the widest column needs no menu: ${JSON.stringify(rows[0])}`);
-
-    const labelled = rows.filter(r => !r.compact && r.overflow > 0);
-    assert(labelled.length >= 2,
-      `a column too narrow for its labels moves controls into the menu, keeping the labels: ${JSON.stringify(rows)}`);
-
-    // Within a row the menu takes more controls as the column narrows, but
-    // that is a trend, not a step function, and the assertion samples it. The
-    // peel goes from the right, where the least-used controls sit, so when a
-    // wide group has to leave it frees room for several narrow controls
-    // behind it and the count steps down: measured at 1px, 1734px holds 6
-    // (zoom, split, sims, category, qa, threads) and 1679px holds 4 (life out;
-    // zoom, split and sims back). Both states are minimal -- the check below
-    // holds every item in the menu to "the row cannot show it" -- so the menu
-    // holds what the priority order gives up, not a fixed count. The row kind
-    // itself never goes back: once the glyphs are on, no narrower column
-    // returns to the labelled row.
-    const glyphs = rows.filter(r => r.compact);
-    assert(glyphs.length > 0, `the glyph row still takes over once most of the row has left: ${JSON.stringify(rows)}`);
-    assert.equal(rows.findIndex(r => r.compact), rows.length - glyphs.length,
-      `the glyph row does not go back to labels as the column narrows: ${JSON.stringify(rows)}`);
-    for (const band of [rows.filter(r => !r.compact), glyphs]) {
-      for (let i = 1; i < band.length; i++) {
-        assert(band[i].overflow >= band[i - 1].overflow,
-          `the menu takes more controls as the column narrows (sampled widths): ${JSON.stringify(rows)}`);
-      }
-    }
-    for (const r of rows) assert.equal(r.overflowsBox, false, `the row still fits its box at ${r.at}px`);
-
-    // Minimality: no control sits in the menu that the row could show. Every
-    // one of them is put back, alone, and the row must then overflow -- that
-    // is the fitter's own criterion, measured synchronously so the refit does
-    // not undo the temporary class.
-    const leftover = [];
-    for (const w of [1100, 800, 600, 400]) {
-      await width(w);
-      await settle();
-      const check = await page.evaluate(() => {
-        const h = document.getElementById("term-header");
-        const more = document.getElementById("term-more");
-        const style = getComputedStyle(h);
-        const avail = h.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-        const gap = parseFloat(style.columnGap);
-        const items = [...h.children].flatMap(el => el.classList.contains("term-actions") ? [...el.children] : [el])
-          .filter(el => el !== more && el.id !== "term-details"
-            && (el.classList.contains("toolbar-overflow") || getComputedStyle(el).display !== "none"));
-        const needed = () => {
-          const visible = items.filter(el => !el.classList.contains("toolbar-overflow"));
-          if (!more.classList.contains("hidden")) visible.push(more);
-          return visible.reduce((sum, el) => sum + el.getBoundingClientRect().width, 0)
-            + Math.max(0, visible.length - 1) * gap;
-        };
-        const back = [];
-        for (const item of items.filter(el => el.classList.contains("toolbar-overflow"))) {
-          item.classList.remove("toolbar-overflow");
-          if (needed() <= avail + 0.5) back.push(item.id || item.className);
-          item.classList.add("toolbar-overflow");
+    const errors = [];
+    const open = async () => {
+      const page = await browser.newPage({ viewport: { width: 2600, height: 900 } });
+      page.on("pageerror", e => errors.push(String(e)));
+      await page.setContent(`<div id="layout">${header}</div>`);
+      await page.addStyleTag({ path: path.join(root, "style.css") });
+      await page.addStyleTag({ content: "#layout { display:block; position:relative; width:100%; }" });
+      await page.evaluate(() => {
+        document.getElementById("term-header").classList.remove("hidden");
+        for (const [id, text] of Object.entries({
+          "term-title": "s5860", "term-status": "busy",
+          "term-timer": "Ⅱ role reminder in 7:12", "term-timer-skip": "⏭",
+          "term-hold": "delivery: would queue — busy", "term-zoom-level": "13px",
+        })) {
+          const el = document.getElementById(id);
+          if (!el) continue;
+          el.textContent = text;
+          el.classList.remove("hidden");
         }
-        return { compact: h.classList.contains("term-compact"), avail, back };
       });
-      if (check.back.length) leftover.push({ at: w, ...check });
-    }
-    assert.deepEqual(leftover, [],
-      `no control sits in the menu that the row could show: ${JSON.stringify(leftover)}`);
+      // index.html loads quietdom.js before every other script; its same-value
+      // guards are part of what the fitter sees on each repaint.
+      await page.addScriptTag({ path: path.join(root, "quietdom.js") });
+      await page.addScriptTag({ path: path.join(root, "toolbar.js") });
+      return page;
+    };
 
-    // The regression pin: one pixel past the point where the labelled row
-    // fits costs one control, not every label on the row. The old fitter
-    // turned all of them into glyphs here.
-    let edge = null;
-    for (let w = 2200; w >= 1900; w--) {
-      await width(w);
-      await settle(2);
-      const r = await read();
-      if (r.compact || r.overflow > 0) { edge = { at: w, ...r }; break; }
-    }
-    assert(edge, "the labelled row stops fitting somewhere in 1900..2200px, found none");
-    assert.equal(edge.compact, false, `one pixel over the limit keeps the labels: ${JSON.stringify(edge)}`);
-    assert.equal(edge.overflow, 1, `one pixel over the limit costs exactly one control: ${JSON.stringify(edge)}`);
+    // One sweep inside a page: set the width, wait for the fitting frame (two
+    // frames: the resize is observed after layout, the fit runs on the next
+    // frame), record every control. ~2200 widths at two frames each is over a
+    // minute on one page, so four pages sweep a quarter each at once; each
+    // starts one pixel above its quarter so the seams are compared too.
+    const sweep = (page, from, to) => page.evaluate(async ({ from, to }) => {
+      const layout = document.getElementById("layout");
+      const h = document.getElementById("term-header");
+      const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const key = el => el.id || [...el.classList].find(c => c.startsWith("term-")) || "";
+      const out = [];
+      for (let w = from; w >= to; w--) {
+        layout.style.width = `${w}px`;
+        await frame();
+        const items = [...h.children].flatMap(el => el.classList.contains("term-actions") ? [...el.children] : [el])
+          .filter(el => el.id !== "term-more" && el.id !== "term-title"
+            && (el.classList.contains("toolbar-overflow") || getComputedStyle(el).display !== "none"));
+        const details = document.getElementById("term-details");
+        const row = {};
+        for (const el of [...items, details]) {
+          const state = el.classList.contains("toolbar-overflow") ? "menu"
+            : el.hasAttribute("data-toolbar-glyph") ? "icon" : "label";
+          row[key(el)] = { state, width: state === "menu" ? 0 : el.getBoundingClientRect().width };
+        }
+        out.push({
+          at: w, row,
+          gap: parseFloat(getComputedStyle(h).columnGap),
+          more: !document.getElementById("term-more").classList.contains("hidden"),
+          overflowsBox: h.scrollWidth > h.clientWidth + 0.5,
+        });
+      }
+      return out;
+    }, { from, to });
 
-    // Nothing here may feed itself: a held column must hold still.
-    for (const w of [edge.at, edge.at + 1]) {
-      await width(w);
-      await settle();
+    const [FROM, TO, PARTS] = [2400, 160, 4];
+    const cut = Math.ceil((FROM - TO + 1) / PARTS);
+    const pages = await Promise.all(Array.from({ length: PARTS }, open));
+    const page = pages[0];
+    const parts = await Promise.all(pages.map((p, i) =>
+      sweep(p, FROM - i * cut + (i ? 1 : 0), Math.max(TO, FROM - (i + 1) * cut + 1))));
+    const rows = parts.flatMap((part, i) => (i ? part.slice(1) : part));
+    for (let i = 1; i < rows.length; i++) assert.equal(rows[i].at, rows[i - 1].at - 1, "the quarters join up");
+    const at = w => rows.find(r => r.at === w);
+    const states = r => Object.values(r.row).map(c => c.state);
+    const full = rows[0];
+    assert(states(full).every(s => s === "label") && full.gap === 10 && !full.more,
+      `the widest column is the full row: ${JSON.stringify(full)}`);
+
+    const problems = [];
+    let squeezed = false;
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1];
+      const b = rows[i];
+      if (b.overflowsBox) problems.push(`${b.at}px: the row overflows its box`);
+      if (b.gap < a.gap - 2) problems.push(`${b.at}px: the gap jumped ${a.gap} -> ${b.gap}`);
+      if (b.gap > a.gap + 0.01) problems.push(`${b.at}px: the gap grew ${a.gap} -> ${b.gap}`);
+      if (b.gap < 10) squeezed = true;
+      let changed = 0;
+      for (const [k, cb] of Object.entries(b.row)) {
+        const ca = a.row[k];
+        if (!ca) continue;
+        if (cb.width > ca.width + 0.5) problems.push(`${b.at}px: ${k} grew ${ca.width.toFixed(1)} -> ${cb.width.toFixed(1)}`);
+        const rank = { label: 0, icon: 1, menu: 2 };
+        if (rank[cb.state] < rank[ca.state]) problems.push(`${b.at}px: ${k} went back ${ca.state} -> ${cb.state}`);
+        if (cb.state !== ca.state) changed++;
+        // Glyphs only once the spacing is as tight as it goes.
+        if (cb.state === "icon" && b.gap > 4.01) problems.push(`${b.at}px: ${k} is a glyph with gap ${b.gap}`);
+      }
+      if (changed > 1 && !(b.more && !a.more))
+        problems.push(`${b.at}px: ${changed} controls changed state in one pixel`);
+    }
+    assert(squeezed, "the spacing squeezes before anything else");
+    // The menu is empty while any control could still become a glyph: the
+    // controls that are labels at the first width with a menu are exactly the
+    // ones that are labels at the last width without it (their glyph is no
+    // narrower than their label, so they never iconify).
+    const firstMenu = rows.findIndex(r => r.more);
+    assert(firstMenu > 0, "the narrowest column needs the menu");
+    const lastRow = rows[firstMenu - 1];
+    const labelled = r => Object.entries(r.row).filter(([, c]) => c.state === "label").map(([k]) => k).sort();
+    assert.deepEqual(labelled(rows[firstMenu]).filter(k => rows[firstMenu].row[k].state !== "menu"),
+      labelled(lastRow).filter(k => rows[firstMenu].row[k].state !== "menu"),
+      "the menu opens only once nothing left on the row can still turn into a glyph");
+    assert.deepEqual(problems.slice(0, 10), [], `${problems.length} problems in the 1px sweep`);
+
+    // The order itself, pinned here and not read from toolbar.js, so a
+    // reordered MINIMIZE_ORDER fails until this list is changed with it.
+    // Every width must be one position on it: the controls that are glyphs
+    // or in the menu are a prefix of it (controls that never iconify, their
+    // glyph being no narrower than their label, left out), and the controls
+    // in the menu are a prefix of it without the details lane.
+    const ORDER = [
+      "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
+      "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
+      "term-zoom", "term-view", "term-life",
+      "term-chartbtn", "term-categorybtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+      "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
+      "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
+      "term-tps", "term-note", "term-handle", "term-status",
+    ];
+    const seen = Object.keys(full.row);
+    assert.deepEqual(seen.filter(k => !ORDER.includes(k)), [], "every control on the row has a place in the order");
+    const neverGlyph = new Set(seen.filter(k => rows.every(r => !r.row[k] || r.row[k].state !== "icon")
+      && lastRow.row[k] && lastRow.row[k].state === "label"));
+    const prefix = (list, on) => {
+      const flags = list.map(on);
+      const n = flags.indexOf(false);
+      return n < 0 || flags.slice(n).every(f => !f);
+    };
+    const orderProblems = [];
+    for (const r of rows) {
+      const present = ORDER.filter(k => r.row[k]);
+      const glyphs = present.filter(k => !neverGlyph.has(k));
+      if (!prefix(glyphs, k => r.row[k].state !== "label"))
+        orderProblems.push(`${r.at}px: glyphs ${glyphs.filter(k => r.row[k].state !== "label")} are not a prefix of the order`);
+      const leave = present.filter(k => k !== "term-details");
+      if (!prefix(leave, k => r.row[k].state === "menu"))
+        orderProblems.push(`${r.at}px: menu ${leave.filter(k => r.row[k].state === "menu")} is not a prefix of the order`);
+    }
+    assert.deepEqual(orderProblems.slice(0, 5), [], `${orderProblems.length} widths off the order`);
+    // And the first control to give up its label is the order's first one.
+    const firstGlyphRow = rows.find(r => states(r).includes("icon"));
+    assert.deepEqual(Object.keys(firstGlyphRow.row).filter(k => firstGlyphRow.row[k].state === "icon"),
+      [ORDER.filter(k => full.row[k] && !neverGlyph.has(k))[0]], "the first glyph is the first in the order");
+
+    // Nothing here may feed itself: a held column must hold still, on both
+    // sides of the first glyph and of the first menu item.
+    const firstIcon = rows.find(r => states(r).includes("icon")).at;
+    for (const w of [firstIcon, firstIcon + 1, rows[firstMenu].at, rows[firstMenu].at + 1]) {
+      await page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, w);
       const seq = await page.evaluate(() => new Promise(done => {
         const h = document.getElementById("term-header");
-        const sig = () => (h.classList.contains("term-compact") ? "C" : "E")
+        const sig = () => `${h.style.getPropertyValue("--tb-gap")}|${h.querySelectorAll("[data-toolbar-glyph]").length}|`
           + h.querySelectorAll(".toolbar-overflow").length;
-        const out = [sig()]; let n = 60;
-        const step = () => { out.push(sig()); (--n ? requestAnimationFrame(step) : done(out)); };
+        const out = []; let n = 60;
+        const step = () => { out.push(sig()); (--n ? requestAnimationFrame(step) : done(out.slice(5))); };
         requestAnimationFrame(step);
       }));
-      assert.equal(new Set(seq).size, 1, `the row holds still at ${w}px: ${[...new Set(seq)].join("|")}`);
+      assert.equal(new Set(seq).size, 1, `the row holds still at ${w}px: ${[...new Set(seq)].join(" / ")}`);
     }
 
-    console.log(`toolbaroverflow: labels kept to ⋯${Math.max(...labelled.map(r => r.overflow))} of ${edge.of},`
-      + ` glyphs take over at ${Math.max(...glyphs.map(r => r.at))}px`);
+    // app.js rewrites the whole class list of the status, tps, hold and link
+    // chips on every poll. The glyph state is an attribute so that write
+    // cannot take it off: the chip is still a glyph after the write.
+    const glyphHold = rows.find(r => r.row["term-hold"] && r.row["term-hold"].state === "icon").at;
+    await page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, glyphHold);
+    const kept = await page.evaluate(() => new Promise(done => {
+      const hold = document.getElementById("term-hold");
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const before = hold.hasAttribute("data-toolbar-glyph");
+        hold.className = "term-btn hold-chip";
+        const right = hold.hasAttribute("data-toolbar-glyph");
+        requestAnimationFrame(() => requestAnimationFrame(() =>
+          done({ before, right, after: hold.hasAttribute("data-toolbar-glyph") })));
+      }));
+    }));
+    assert.deepEqual(kept, { before: true, right: true, after: true },
+      `a whole-class write keeps the hold chip a glyph at ${glyphHold}px`);
+
+    // A lit control in the menu lights `⋯`; on the row it does not.
+    const lit = async (w, id, cls) => {
+      await page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, w);
+      await page.evaluate(({ id, cls }) => {
+        for (const el of document.querySelectorAll(".has-resource, .has-news")) el.classList.remove("has-resource", "has-news");
+        for (const [i, c] of id ? (Array.isArray(id) ? id : [[id, cls]]) : []) document.getElementById(i).classList.add(c);
+      }, { id, cls });
+      await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r)))));
+      return page.evaluate((id) => {
+        const more = document.getElementById("term-more");
+        return {
+          inMenu: id ? (Array.isArray(id) ? id : [[id]]).every(([i]) => document.getElementById(i).classList.contains("toolbar-overflow")) : null,
+          more: ["has-resource", "has-news"].filter(c => more.classList.contains(c)),
+        };
+      }, id);
+    };
+    assert.deepEqual(await lit(180, "term-qabtn", "has-resource"), { inMenu: true, more: ["has-resource"] },
+      "a lit QA button in the menu lights ⋯");
+    await page.locator("#term-more").click();
+    assert.equal(await page.locator("#term-overflow-menu .term-btn.has-resource").count(), 1,
+      "the QA button's proxy in the menu is lit too");
+    await page.keyboard.press("Escape");
+    assert.deepEqual(await lit(180, "term-threadsbtn", "has-news"), { inMenu: true, more: ["has-news"] },
+      "thread news in the menu lights ⋯ with the news colour");
+    assert.deepEqual(await lit(180, [["term-qabtn", "has-resource"], ["term-threadsbtn", "has-news"]]),
+      { inMenu: true, more: ["has-news"] }, "news and a resource both in the menu: ⋯ wears news alone");
+    assert.deepEqual(await lit(180, null), { inMenu: null, more: [] }, "nothing lit, ⋯ unlit");
+    // The menu lists what it holds in row order, whatever order it was
+    // filled in: the plain buttons' proxies follow the buttons on the row.
+    await page.locator("#term-more").click();
+    const menuOrder = await page.evaluate(() => {
+      const label = el => el.getAttribute("aria-label") || el.textContent;
+      const row = [...document.querySelectorAll("#term-header button.toolbar-overflow")].map(label);
+      const proxies = [...document.querySelectorAll("#term-overflow-menu .term-btn")].map(label).filter(l => row.includes(l));
+      return { row, proxies };
+    });
+    await page.keyboard.press("Escape");
+    assert(menuOrder.row.length > 2, `several buttons in the menu at 180px: ${menuOrder.row}`);
+    assert.deepEqual(menuOrder.proxies, menuOrder.row, "the menu lists its buttons in row order");
+    // At the widest column with a menu, the QA button is still on the row.
+    const roomy = rows[firstMenu].at;
+    const onRow = await lit(roomy, "term-qabtn", "has-resource");
+    assert.equal(onRow.inMenu, false, `QA is on the row at ${roomy}px`);
+    assert.deepEqual(onRow.more, [], "a lit control on the row does not light ⋯");
+    assert.deepEqual(errors, []);
+
+    const glyphs = Object.values(at(rows[firstMenu].at - 0 + 0).row).filter(c => c.state === "icon").length;
+    console.log(`toolbaroverflow: squeeze from ${rows.find(r => r.gap < 10).at}px, first glyph at ${firstIcon}px,`
+      + ` menu from ${rows[firstMenu].at}px (${glyphs} glyphs on the row then), 1px sweep 2400..160 monotonic`);
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

@@ -1,11 +1,47 @@
 /* Keep the session controls on one line at the actual column width. Original
- * controls retain their text and handlers. A column that is too narrow first
- * moves controls off the row into the overflow menu, one at a time from the
- * right, with their labels; CSS supplies the compact glyphs, which are used
- * only once no control is left to move. */
+ * controls retain their text and handlers. A column that is too narrow gives
+ * up space in three stages, each finished before the next starts
+ * (claunch-xbhbg):
+ *
+ *   1. squeeze — the gap between controls (10px -> 4px) and each button's
+ *      side padding (9px -> 4px) shrink by exactly the missing width, so a
+ *      pixel less column is a pixel less row;
+ *   2. iconify — one control at a time, in MINIMIZE_ORDER, trades its label
+ *      for its glyph (CSS, `[data-toolbar-glyph]` — an attribute, because
+ *      app.js rewrites whole class lists of the status, tps, hold and link
+ *      chips on every poll, and a class put there would be gone each time);
+ *   3. overflow — only once every control is a glyph and the row still does
+ *      not fit, controls leave for the `⋯` menu one at a time, in the same
+ *      order.
+ *
+ * The iconified and the overflowed controls are always a prefix of the order,
+ * so a narrower column never makes any control wider: every width is one
+ * position on one ordered list. */
 (() => {
   const header = document.getElementById("term-header");
   if (!header) return;
+  // Who gives up space first, first. Controls not named here (a control
+  // added later) go before all of these, in reverse row order, so a new
+  // control never pushes a named one out of its place. The title never
+  // moves; `details` floats in its own lane and only iconifies.
+  const MINIMIZE_ORDER = [
+    "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
+    "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
+    "term-zoom", "term-view", "term-life",
+    "term-chartbtn", "term-categorybtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+    "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
+    "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
+    "term-tps", "term-note", "term-handle", "term-status",
+  ];
+  // Squeeze range: [full, tightest] in px.
+  const GAP = [10, 4];
+  const PAD = [9, 4];
+  // The lane #term-details floats in (absolute, right: 14px): its width plus
+  // the inset and a gap, so no flowing control slides under it.
+  const DETAILS_INSET = 14 + 8;
+  // A lit control (a split pane with something in it, a thread with news)
+  // in the menu would be lit where no one can see it, so `⋯` wears it too.
+  const LIT = ["has-news", "has-resource"];
   const icons = {
     "term-goto": "⇱", "term-pin": "📌", "term-status": "●",
     "term-handle": "@", "term-tps": "↯", "term-timer": "◷",
@@ -16,9 +52,11 @@
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇", "term-categorybtn": "⌘", "term-qabtn": "?", "term-threadsbtn": "🗪",
-    "term-clibtn": "❯",
+    "term-clibtn": "❯", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
     "term-details": "ⓘ", "term-zoom-level": "A",
-    "term-zoom-out": "−", "term-zoom-in": "+",
+    // Already one character: described like the rest, but no glyph -- the
+    // fixed glyph width would make them wider, not narrower.
+    "term-zoom-out": null, "term-zoom-in": null,
   };
   const more = document.createElement("button");
   more.id = "term-more";
@@ -71,6 +109,7 @@
         }
         const proxy = document.createElement(source.matches("button") ? "button" : "span");
         proxy.className = "term-btn";
+        for (const cls of LIT) if (source.classList.contains(cls)) proxy.classList.add(cls);
         proxy.textContent = source.textContent.trim() || source.getAttribute("aria-label");
         proxy.setAttribute("aria-label", source.getAttribute("aria-label") || source.textContent);
         proxy.title = source.title;
@@ -151,7 +190,8 @@
     for (const [id, icon] of Object.entries(icons)) {
       const el = document.getElementById(id);
       if (!el) continue;
-      if (el.dataset.toolbarIcon !== icon) el.dataset.toolbarIcon = icon;
+      if (icon === null) { if ("toolbarIcon" in el.dataset) delete el.dataset.toolbarIcon; }
+      else if (el.dataset.toolbarIcon !== icon) el.dataset.toolbarIcon = icon;
       const label = el.textContent.trim() || id.replace("term-", "");
       const previous = descriptions.get(el);
       const description = previous && el.title === previous.rendered ? previous.description : el.title;
@@ -164,19 +204,54 @@
     }
     syncLifeTabstop();
   }
+  // Where the last fit left the row: how far it squeezed (0..1) and how many
+  // controls it turned into glyphs. With `overflow`, the three stages.
+  let squeeze = 0;
+  let iconified = 0;
+  // An item's name in MINIMIZE_ORDER: its id, or for a group without one
+  // (the zoom pair) its `term-` class.
+  const key = (el) => el.id || [...el.classList].find(c => c.startsWith("term-")) || "";
+  function setSqueeze(t) {
+    squeeze = t;
+    header.style.setProperty("--tb-gap", `${GAP[0] - (GAP[0] - GAP[1]) * t}px`);
+    header.style.setProperty("--tb-pad", `${PAD[0] - (PAD[0] - PAD[1]) * t}px`);
+  }
+  // The right padding follows `details` as it is now (squeezed, a glyph),
+  // so its lane shrinks with it instead of in one step.
+  function reserve(details) {
+    const width = details ? details.getBoundingClientRect().width : 0;
+    const value = `${width ? Math.ceil(width + DETAILS_INSET) : 14}px`;
+    if (header.style.getPropertyValue("--tb-reserve") !== value) header.style.setProperty("--tb-reserve", value);
+  }
+  // `⋯` lit as the most urgent lit control it holds (news over a resource).
+  function syncLit() {
+    const lit = LIT.find(cls => overflow.some(item =>
+      item.classList.contains(cls) || item.querySelector(`.${cls}:not(.hidden)`)));
+    for (const cls of LIT) {
+      if (more.classList.contains(cls) !== (cls === lit)) more.classList.toggle(cls, cls === lit);
+    }
+  }
   function fit() {
     frame = 0;
     tabular = new WeakMap();
     observer.disconnect();
     sizes.disconnect();
-    header.classList.remove("term-compact");
-    header.querySelectorAll(".toolbar-overflow").forEach(el => el.classList.remove("toolbar-overflow"));
+    header.querySelectorAll(".toolbar-overflow, [data-toolbar-glyph]").forEach((el) => {
+      el.classList.remove("toolbar-overflow");
+      el.removeAttribute("data-toolbar-glyph");
+    });
     more.classList.add("hidden");
     overflow = [];
+    iconified = 0;
+    setSqueeze(0);
     describe();
+    const shown = (el) => el && getComputedStyle(el).display !== "none";
     const items = [...header.children].flatMap(el => el.classList.contains("term-actions") ? [...el.children] : [el])
-      .filter(el => el !== more && el.id !== "term-details" && getComputedStyle(el).display !== "none");
+      .filter(el => el !== more && el.id !== "term-details" && shown(el));
+    const details = document.getElementById("term-details");
+    const lane = shown(details) ? details : null;
     const fits = () => {
+      reserve(lane);
       const style = getComputedStyle(header);
       const available = header.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
       const visible = items.filter(el => !el.classList.contains("toolbar-overflow"));
@@ -185,50 +260,52 @@
         + Math.max(0, visible.length - 1) * parseFloat(style.columnGap);
       return needed <= available + 0.5;
     };
-    // The controls leave the row one at a time, from the right, keeping their
-    // labels: a column a pixel too narrow costs one control instead of every
-    // label on the row (claunch-8ntfx). Labels are worth keeping only while
-    // they are most of what the row shows. Once more than half of the
-    // controls have had to leave, a labelled button or two beside a menu
-    // that holds everything else is the worse of the two rows -- so at that
-    // point the row gives up the labels instead and `term-compact` rebuilds
-    // each labelled control as a fixed-width glyph (CSS), which frees far
-    // more width than the pixel or two that started this.
-    //
-    // The peel starts over at that point: a control that left to save the
-    // labels may fit the row as a glyph, and a menu holding controls the row
-    // could show is the thing this order exists to avoid (review of
-    // claunch-8ntfx, s1565-rev). Only what the glyph row still cannot hold
-    // stays in the menu.
+    const rank = (el) => MINIMIZE_ORDER.indexOf(key(el));
+    const byRank = (list) => [...list.filter(el => rank(el) < 0).reverse(),
+      ...list.filter(el => rank(el) >= 0).sort((a, b) => rank(a) - rank(b))];
     const movable = items.filter(el => el.id !== "term-title");
-    const labelsUntil = Math.floor(movable.length / 2);
-    const leave = (item) => { item.classList.add("toolbar-overflow"); overflow.unshift(item); };
+    const glyphOrder = byRank(lane ? [...movable, lane] : movable);
+    const leaveOrder = byRank(movable);
     if (!fits()) {
-      more.classList.remove("hidden");
-      movable.reverse();
-      for (const item of movable) {
-        if (fits() || overflow.length >= labelsUntil) break;
-        leave(item);
-      }
-      if (!fits()) {
-        header.classList.add("term-compact");
-        for (const item of movable) item.classList.remove("toolbar-overflow");
-        overflow = [];
-        for (const item of movable) {
-          if (fits()) break;
-          leave(item);
+      // 1. Squeeze. The tightest spacing either fits or it does not; when it
+      // does, the least squeeze that fits is found by bisection (the slack
+      // is monotonic in it), so each pixel of column is a step of spacing.
+      setSqueeze(1);
+      if (fits()) {
+        let lo = 0;
+        let hi = 1;
+        for (let i = 0; i < 12; i++) {
+          const mid = (lo + hi) / 2;
+          setSqueeze(mid);
+          if (fits()) hi = mid; else lo = mid;
+        }
+        setSqueeze(hi);
+      } else {
+        // 2. Iconify, one control at a time. A control whose glyph is no
+        // narrower than its label (a label that is already one character)
+        // keeps its label: the glyph would cost width, not save it.
+        let done = false;
+        for (const el of glyphOrder) {
+          const before = el.getBoundingClientRect().width;
+          el.setAttribute("data-toolbar-glyph", "");
+          if (el.getBoundingClientRect().width >= before - 0.5) { el.removeAttribute("data-toolbar-glyph"); continue; }
+          iconified++;
+          if (fits()) { done = true; break; }
+        }
+        // 3. Overflow, in the same order, only once nothing is left to
+        // iconify. No put-back pass: what is in the menu is always a prefix
+        // of the order, so the menu's contents follow the column width alone.
+        if (!done) {
+          more.classList.remove("hidden");
+          for (const el of leaveOrder) {
+            if (fits()) break;
+            el.classList.add("toolbar-overflow");
+            overflow.push(el);
+          }
+          // The menu lists them in row order.
+          overflow.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
         }
       }
-      // The peel is greedy and stops at the first width that fits, so a
-      // narrow control behind a wide one can be left in the menu with room to
-      // spare. Put each of them back in turn; the row only grows as they
-      // return, so one pass is enough to leave nothing the row could hold.
-      for (const item of overflow.slice()) {
-        item.classList.remove("toolbar-overflow");
-        if (fits()) overflow.splice(overflow.indexOf(item), 1);
-        else item.classList.add("toolbar-overflow");
-      }
-      if (!overflow.length) more.classList.add("hidden");
     }
     if (menu.matches(":popover-open")) {
       if (!overflow.length) menu.hidePopover();
@@ -237,6 +314,7 @@
     // Again now the overflow is settled: a group moved into the menu has no
     // stop on the row.
     syncLifeTabstop();
+    syncLit();
     widths = new Map(items.map(el => [el, el.getBoundingClientRect().width]));
     texts = new Map(items.map(el => [el, el.textContent]));
     // Every item's settled size, to keep a width-neutral proof honest: if one
@@ -295,30 +373,30 @@
   // True when every text change in `records` sits inside an item the last
   // fit measured, on the row, at the width it was measured at. A change to
   // the row itself (an item added or removed) or to an item in the menu is
-  // not, and neither is anything the last fit did not see. Only a row that
-  // is neither compact nor overflowing is the state fit measures in, so only
-  // there does an unchanged width mean an unchanged answer: a compact button
-  // is a fixed-width glyph whatever its label says, and a settled row's item
-  // width is its share of the space rather than its content's. In those
+  // not, and neither is anything the last fit did not see. Only a full row
+  // (no squeeze, no glyph, no menu) is the state fit measures in, so only
+  // there does an unchanged width mean an unchanged answer: a glyph is a
+  // fixed width whatever its label says, and a squeezed row's spacing was
+  // solved for the widths it had, so a narrower label there could have
+  // needed less of it. In those
   // states a text change therefore has to be provably width-neutral — digits
   // swapped inside a tabular run, at the same length — before the same answer
   // can be assumed.
   //
   // A batch the proof covers needs no measurement at all (claunch-xy9s0):
   // digits of one width at the same positions leave the item's content the
-  // same width, and on a row that is neither compact nor overflowing an
-  // item's width is its content's. Reading a rect to confirm that was a
+  // same width, and on a full row an item's width is its content's. Reading a rect to confirm that was a
   // style and a layout of the header forced on every countdown tick — the
   // 1 Hz write this row takes for as long as a session is on screen, and in
   // the trace the read the observer spent a third of its batches on. The
   // measurement is not what holds the row together: `sizes` (in fit) reports
   // any item whose settled width actually moved, after layout and without a
   // forced reflow, so a proof that did not hold still ends in a fit. A
-  // settled row keeps the stricter rule above — a compact glyph or a share of
-  // the space is not provably unmoved by a text change the proof does not
+  // settled row keeps the stricter rule above — a glyph or a squeezed
+  // spacing is not provably unmoved by a text change the proof does not
   // cover — and a batch the proof does not cover is measured as before.
   function sameWidths(records) {
-    const settled = header.classList.contains("term-compact") || overflow.length > 0;
+    const settled = squeeze > 0 || iconified > 0 || overflow.length > 0;
     const touched = new Set();
     let proven = true;
     for (const r of records) {
@@ -346,7 +424,7 @@
   // A tooltip or a pressed state does not change what fits on the line, and
   // neither does a text change that leaves its item as wide as it was
   // (sameWidths), so those alone re-describe the controls without the
-  // measuring pass, which takes the compact and overflow classes off and
+  // measuring pass, which takes the squeeze, glyph and overflow states off and
   // puts them back.
   const quiet = r => r.type === "attributes" && (r.attributeName === "title" || r.attributeName === "aria-pressed" || r.attributeName === "aria-checked");
   const observer = new MutationObserver((records) => {
