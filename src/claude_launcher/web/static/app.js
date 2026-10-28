@@ -43322,6 +43322,25 @@ function cf2NodePaneBody(body, data, n, doc, live, post, host, onSelect) {
   }
   body.appendChild(move);
 
+  // releasing a frame from here (claunch-t2kvy): the same press as the
+  // callstack details, for this node and the frames around it
+  const outs = live ? cf2StepOutRows(data, n.id) : [];
+  if (outs.length) {
+    const nodes = (data.chart || {}).nodes || {};
+    const block = el("div", "cf2-pane-block cf2-pane-stepout");
+    block.appendChild(el("h5", null, "Step out"));
+    block.appendChild(el("p", "wf-note", "Cancels the frame's remaining work and returns the " +
+      "chosen outcome to its parent. Existing data and external changes remain."));
+    for (const row of outs) {
+      const line = el("div", "cf2-press");
+      line.dataset.instance = row.instance;
+      const label = el("span", "mono", `${(nodes[row.node] || {}).label || row.node} (${row.instance})`);
+      line.append(label, ...cf2StepOutPress(data, row, post, "step out from node pane"));
+      block.appendChild(line);
+    }
+    body.appendChild(block);
+  }
+
   // where it stands now
   const inst = (doc && doc.instances) || (data.instances || []).filter((i) => i.node === n.id);
   const facts = el("div", "cf2-facts");
@@ -44424,6 +44443,63 @@ function cflow2StackRows(data) {
   return rows;
 }
 
+/* The outcome select and the Step out button for one releasable frame
+   (row: an instance of data.instances with can_step_out). The callstack
+   details and the node pane both use it, so the confirmation and the
+   request body stay the same in both places. */
+function cf2StepOutPress(data, row, post, reason) {
+  const n = ((data.chart || {}).nodes || {})[row.node] || {};
+  const outcomes = cflow2ForceOutcomes(row);
+  const pick = el("select", "cf2-select");
+  pick.setAttribute("aria-label", `Step out outcome for ${row.instance}`);
+  for (const o of outcomes) {
+    const opt = el("option", null, o.name);
+    opt.value = o.name;
+    pick.appendChild(opt);
+  }
+  const release = el("button", "wf-btn sm force", "Step out");
+  release.title = "release this frame and continue its parent with the selected outcome";
+  release.addEventListener("click", async () => {
+    const o = outcomes.find((v) => v.name === pick.value);
+    if (!o) return;
+    let value = null;
+    if (o.required.length) {
+      const raw = prompt(`Return fields for '${o.name}' (JSON):`,
+        JSON.stringify(Object.fromEntries(o.required.map((f) => [f, ""]))));
+      if (raw === null) return;
+      try { value = JSON.parse(raw); } catch { alert("not valid JSON"); return; }
+    }
+    if (!confirm(`Release '${n.label || row.node}' with '${o.name}'?\n\n` +
+      "Its remaining work is cancelled; its parent continues with this result. " +
+      "Existing data and external changes remain.")) return;
+    release.disabled = true;
+    try { await post("/api/cflow2/step-out", { instance: row.instance, outcome: o.name,
+      run: data.run.run, value, reason }); }
+    finally { release.disabled = false; }
+  });
+  return [pick, release];
+}
+
+/* The frames the node pane offers to step out of: each live instance of the
+   node and the instances enclosing it, outermost first, keeping only those
+   that can be released. A task cannot step out itself, so for a task this is
+   the frames around it (claunch-t2kvy). */
+function cf2StepOutRows(data, nodeId) {
+  const instances = data.instances || [];
+  const byId = new Map(instances.map((i) => [i.instance, i]));
+  const rows = [], seen = new Set();
+  for (const leaf of instances.filter((i) => i.node === nodeId)) {
+    const path = [];
+    for (let i = leaf; i && !path.includes(i); i = byId.get(i.parent)) path.unshift(i);
+    for (const i of path) {
+      if (!i.can_step_out || seen.has(i.instance)) continue;
+      seen.add(i.instance);
+      rows.push(i);
+    }
+  }
+  return rows;
+}
+
 function cflow2Callstack(data, post, live) {
   const rows = cflow2StackRows(data);
   const sec = cf2Section("Callstack", rows.length);
@@ -44487,37 +44563,7 @@ function cflow2Callstack(data, post, live) {
         });
         actions.appendChild(rollback);
       }
-      if (row.can_step_out) {
-        const outcomes = cflow2ForceOutcomes(row);
-        const pick = el("select", "cf2-select");
-        pick.setAttribute("aria-label", `Step out outcome for ${row.instance}`);
-        for (const o of outcomes) {
-          const opt = el("option", null, o.name);
-          opt.value = o.name;
-          pick.appendChild(opt);
-        }
-        const release = el("button", "wf-btn sm force", "Step out");
-        release.title = "release this frame and continue its parent with the selected outcome";
-        release.addEventListener("click", async () => {
-          const o = outcomes.find((v) => v.name === pick.value);
-          if (!o) return;
-          let value = null;
-          if (o.required.length) {
-            const raw = prompt(`Return fields for '${o.name}' (JSON):`,
-              JSON.stringify(Object.fromEntries(o.required.map((f) => [f, ""]))));
-            if (raw === null) return;
-            try { value = JSON.parse(raw); } catch { alert("not valid JSON"); return; }
-          }
-          if (!confirm(`Release '${n.label || row.node}' with '${o.name}'?\n\n` +
-            "Its remaining work is cancelled; its parent continues with this result. " +
-            "Existing data and external changes remain.")) return;
-          release.disabled = true;
-          try { await post("/api/cflow2/step-out", { instance: row.instance, outcome: o.name,
-            run: data.run.run, value, reason: "step out from callstack" }); }
-          finally { release.disabled = false; }
-        });
-        actions.append(pick, release);
-      }
+      if (row.can_step_out) actions.append(...cf2StepOutPress(data, row, post, "step out from callstack"));
       card.appendChild(actions);
     }
     detail.appendChild(card);

@@ -195,7 +195,34 @@ const server = http.createServer((req, res) => {
     await page.keyboard.press('Enter');
     assert.equal(await view.locator('.cf2-stack-frame:visible').count(), 4, 'parallel details include all frames');
     assert.equal(posts, 2, 'callstack disclosures do not mutate run');
+    await view.locator('.cf2-row[data-node="task"]').first().click();
+    const paneOut = view.locator('.cf2-pane .cf2-pane-stepout');
+    await paneOut.waitFor();
+    assert.deepEqual(await paneOut.locator('.cf2-press').evaluateAll(ns => ns.map(n => n.dataset.instance)),
+      ['frame@1'], 'task pane offers its enclosing releasable frames only');
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
+      paneOut.getByRole('button', {name: 'Step out', exact: true}).click(),
+    ]);
+    assert.equal(actions.length, 3);
+    assert.equal(actions[2].path, '/api/cflow2/step-out');
+    assert.equal(actions[2].body.instance, 'frame@1');
+    assert.equal(actions[2].body.outcome, 'ok');
+    assert.equal(actions[2].body.reason, 'step out from node pane');
+    // the mobile pane covers the chart, so the row gets the click directly
+    await view.locator('.cf2-row[data-node="root"]').first().dispatchEvent('click');
+    await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="root"].selected'));
+    assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'root pane has no step out');
+    await view.locator('.cf2-row[data-node="frame"]').first().dispatchEvent('click');
+    await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="frame"].selected'));
+    assert.deepEqual(await paneOut.locator('.cf2-press').evaluateAll(ns => ns.map(n => n.dataset.instance)),
+      ['frame@1'], 'frame pane offers its own live instance');
+    detail.run.status = 'done';
+    await page.evaluate(() => refreshWf());
+    await view.locator('.cf2-pane').filter({hasText: 'the run is finished'}).waitFor();
+    assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'finished run offers no step out');
+    detail.run.status = 'running';
     assert.deepEqual(errors, []);
-    console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout passed`);
+    console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout, node pane stepout passed`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(e => { console.error(e); process.exit(1); });
