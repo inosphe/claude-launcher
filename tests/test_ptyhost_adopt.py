@@ -444,6 +444,42 @@ def test_a_persist_while_the_screen_is_built_keeps_the_host_session(
     asyncio.run(run())
 
 
+def test_a_record_replaced_while_the_screen_is_built_is_left_alone(
+    host, tmp_path, monkeypatch
+):
+    """A record replaced between the stage and the attach (a redefine, an
+    archive's DeadSession) is the new owner of the name: the adoption does
+    not hand the program to the staged session it no longer lists, and the
+    host session it was going to adopt is ended (claunch-opirg.1)."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        new = {}
+
+        def replace(staged):
+            new["rec"] = DeadSession(staged.sdef, exit_code=0)
+            mgr2._sessions["t1"] = new["rec"]
+
+        staged = await _restore_with_slow_build(mgr2, monkeypatch, replace)
+        assert mgr2.get("t1") is new["rec"]
+        assert mgr2.adopted == []
+        assert staged.adopting is None and staged.pty is None
+        assert _wait(lambda: not _pid_alive(pid))
+        await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
 def test_a_busy_adopted_session_joins_the_nudge_audience(host, tmp_path, monkeypatch):
     """``was_busy`` decides which resume-nudge list an adopted session
     lands on (claunch-slia4): a busy one joins ``resumed_busy`` the way a

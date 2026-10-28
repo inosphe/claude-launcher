@@ -4028,10 +4028,13 @@ class SessionManager:
             clock["adopt"] += work.seconds
         if self._sessions.get(session.sdef.name) is not session:
             # Dropped or replaced while its screen was built (an archive, a
-            # redefine): nothing is left to hand the program to.
+            # redefine): nothing is left to hand the program to. Ended
+            # before the handle is closed: a close drops the host session
+            # without ending its program, and the end then finds nothing
+            # (claunch-opirg.1).
             session.adopting = None
-            handle.close()
             self._end_kept(work.host, work.row)
+            handle.close()
             return
         t1 = _perf_counter()
         try:
