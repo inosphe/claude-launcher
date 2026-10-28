@@ -2848,9 +2848,13 @@ nodes:
         확정한 값이다:
           주 이슈: ${data.claim.issue}
           브랜치: ${result['branch-setup'].value.branch}
-          이 브랜치에 함께 실린 이슈: ${result['items'].value}
+          이 브랜치에 함께 실린 이슈: ${result['items-pass'].value}
         주 이슈는 이 회차가 처음 잡은 일감이고, 아래 「함께 실린 이슈」는
         같은 회차가 같은 브랜치에 배치로 더 실은 일감이다(claunch-7r1qr).
+        이 값은 `items-pass` 노드의 것이다 — 그 노드는 회차마다 완료되므로
+        앞 회차의 목록이 여기 남지 않는다(claunch-0adj8: `result['items']`는
+        일감 루프가 돈 회차에만 값이 있고, stack-only 회차에는 앞 회차 값이
+        그대로 남았다).
         그 값이 `[]`면 이 회차는 단일 일감이다 — 심사 범위는 주 이슈 하나다.
         비어 있지 않으면 **그 전부가 이번 심사 범위**다: 각 항목의 `issue`가
         이슈 id이고 `n`은 그 배치에서의 순번이다. 항목마다 그 커밋이 그
@@ -5414,7 +5418,25 @@ procedures:
                                 drained:
                                   description: 큐가 비었거나 배치 상한·무관 일감으로 여기서 끊는다 — 배치 전체를 착지 절차로 넘긴다
                                   then: {break: items}
-                  - else: []
+                  # stack-only 회차(위임 전용)에는 items가 돌지 않는다. 그런데
+                  # `result` 표는 라벨마다 한 칸이고 회차 경계에서 비워지지 않으므로
+                  # (cflow2/runtime.py의 node_key·_complete), 이 자리가 `[]`로 끝나면
+                  # 칸에는 앞 회차의 목록이 그대로 남는다. 그래서 peer-review ask가
+                  # `result['items'].value`를 읽으면 stack-only 회차의 「함께 실린
+                  # 이슈」가 이번 브랜치의 것이 아닌 목록으로 렌더된다(claunch-0adj8 —
+                  # 엔진 probe로 확인: full 회차 뒤의 stack-only 회차에서 앞 회차
+                  # 목록이 그대로 보였다).
+                  #
+                  # 답은 items-pass 자신이 회차마다 완료되는 것이다: cond의 두 갈래가
+                  # 모두 값을 내면 그 노드의 칸은 회차 안에서만 뜻이 있다. ask는 그
+                  # 칸(`result['items-pass'].value`)을 읽는다. else는 빈 foreach라
+                  # 값이 `[]`다 — 빈 목록이 「단일 일감」의 표기라는 ask의 문구가
+                  # 그대로 선다.
+                  - else:
+                      foreach:
+                        in: "[]"
+                        as: carried
+                        do: []
               # 시뮬레이션 게이트(claunch-qrh0a, qa-008521b4): simulation=required면
               # 착지 절차 전에 미결이 0이어야 한다. 구현을 고쳐야 하면 sim-recheck가
               # rework로 끝나고 아래 catch가 일감을 작업부터 다시 돌린다(full 회차만 —
