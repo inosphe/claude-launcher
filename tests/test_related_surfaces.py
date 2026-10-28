@@ -1603,6 +1603,24 @@ def test_every_test_module_that_names_the_tool_is_parsed():
     every_test = sorted((ROOT / "tests").rglob("*.py"))
     assert len(sources) < len(every_test), (len(sources), len(every_test))
 
+    # And what it finds in another module is actually checked: a sibling that
+    # reads this repository with no window must fail, one that names its
+    # window must pass. Written as source text and parsed the way the live
+    # guard parses a sibling, because importing a test module would run it.
+    reading_bare = """
+def test_sibling():
+    out = subprocess.run([sys.executable, "tools/related_surfaces.py", "--json"], cwd=str(ROOT))
+"""
+    reading_windowed = """
+def test_sibling():
+    out = subprocess.run(
+        [sys.executable, "tools/related_surfaces.py", "--limit", "100000"], cwd=str(ROOT))
+"""
+    bare = _tool_invocations(reading_bare)
+    assert len(bare) == 1 and bare[0][2] is True and not _names_a_window(bare[0][1]), bare
+    windowed = _tool_invocations(reading_windowed)
+    assert len(windowed) == 1 and windowed[0][2] is True and _names_a_window(windowed[0][1]), windowed
+
 
 def test_a_siblings_own_run_helper_is_not_this_files_run_helper():
     """A sibling's ``_run`` is a different function, not the tool.
@@ -1711,24 +1729,6 @@ def test_x():
     _lineno, argv, reads_here = found[0]
     assert argv == ["--base", "auto"], argv
     assert reads_here is True, reads_here
-
-    # And what it finds in another module is actually checked: a sibling that
-    # reads this repository with no window must fail, one that names its
-    # window must pass. Written as source text and parsed the way the live
-    # guard parses a sibling, because importing a test module would run it.
-    reading_bare = """
-def test_sibling():
-    out = subprocess.run([sys.executable, "tools/related_surfaces.py", "--json"], cwd=str(ROOT))
-"""
-    reading_windowed = """
-def test_sibling():
-    out = subprocess.run(
-        [sys.executable, "tools/related_surfaces.py", "--limit", "100000"], cwd=str(ROOT))
-"""
-    bare = _tool_invocations(reading_bare)
-    assert len(bare) == 1 and bare[0][2] is True and not _names_a_window(bare[0][1]), bare
-    windowed = _tool_invocations(reading_windowed)
-    assert len(windowed) == 1 and windowed[0][2] is True and _names_a_window(windowed[0][1]), windowed
 
 
 def test_the_surfaces_sample_does_not_put_two_calls_on_one_line():
