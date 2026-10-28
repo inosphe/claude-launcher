@@ -1124,11 +1124,7 @@ class Session:
             return None
         screen = ScreenState(cols, rows, history=self._scrollback)
         screen.set_history_limit(limit)
-        for at in range(0, len(data), REPLAY_SLICE_BYTES):
-            screen.feed(data[at:at + REPLAY_SLICE_BYTES])
-            time.sleep(0)  # hand the GIL to the loop between slices
-        screen.scroll_grid_into_history()
-        screen.forget_modes()
+        self._replay_into(screen, data, yield_gil=True)
         return screen
 
     def _replay_tail(self) -> bytes:
@@ -1142,9 +1138,25 @@ class Session:
         except OSError:
             return b""  # no log (or unreadable): an empty screen is honest enough
 
-    @staticmethod
-    def _replay_into(screen: ScreenState, data: bytes) -> None:
-        screen.feed(data)
+    def _replay_into(
+        self, screen: ScreenState, data: bytes, *, yield_gil: bool = False
+    ) -> None:
+        # Slice by slice, like ScreenFeeder: pyte raises on a sequence it
+        # parses but cannot dispatch, and one such sequence in the log must
+        # cost its slice, not the respawn of the whole session.
+        errors = 0
+        for at in range(0, len(data), REPLAY_SLICE_BYTES):
+            chunk = data[at:at + REPLAY_SLICE_BYTES]
+            try:
+                screen.feed(chunk)
+            except Exception:  # noqa: BLE001 — see above
+                errors += 1
+                if errors == 1:
+                    log.warning("session %s: screen replay error (slice of %d "
+                                "bytes dropped)", self.sdef.name, len(chunk),
+                                exc_info=True)
+            if yield_gil:
+                time.sleep(0)  # hand the GIL to the loop between slices
         screen.scroll_grid_into_history()
         screen.forget_modes()
 
