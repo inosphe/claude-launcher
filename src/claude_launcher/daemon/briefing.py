@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1282,6 +1283,33 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _index_briefing(name: str, payload, at: str) -> None:
+    """Mirror one composed briefing into the search index, never raising.
+
+    The index is a derived store and this runs *after* ``_persist_cache`` has
+    put the briefing on disk, so the answer the model wrote is already saved.
+    Raising here does not become a ``BriefingError`` -- :func:`compose`'s
+    callers catch that one and this is not one -- so it left the route as an
+    uncaught exception and the card showed a 500 that said nothing about the
+    index. The daemon's ``briefing`` trigger reported "could not be composed"
+    through ``cflow_clock.recompose_briefing`` for a briefing that had in fact
+    been composed and cached.
+
+    ``search_records.database()`` opens SQLite, creates the table and commits,
+    so the failure that arrives here is a ``sqlite3.Error`` -- not an
+    ``OSError``, and ``sqlite3.Error`` is not an ``OSError`` subclass (MRO:
+    OperationalError -> DatabaseError -> Error -> Exception). The guard is this
+    wide on purpose, matching ``session_events.record`` (claunch-mxar3) and the
+    observer's callers (claunch-remember-callers-guard).
+    """
+    from . import search_records
+
+    try:
+        search_records.capture(name, "briefing", payload, at)
+    except (OSError, sqlite3.Error):
+        log.exception("could not index the briefing for %s", name)
+
+
 async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     """The briefing payload for one session (the endpoint's 200 body).
 
@@ -1354,8 +1382,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     }
     _cache[name] = (cache_key, result)
     _persist_cache()
-    from . import search_records
-    search_records.capture(name, "briefing", parsed or {"raw": answer.text}, result["generated_at"])
+    _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
     return result
 
 
