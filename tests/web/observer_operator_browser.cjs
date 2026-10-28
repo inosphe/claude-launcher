@@ -687,6 +687,12 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       await page.setViewportSize({ width: 1280, height: 900 });
       await tab("ops-a").click();
       await page.waitForFunction(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("ops-a"));
+      // The form's lists (/api/projects, /api/profiles) answer after the
+      // form is drawn; under load that answer has landed between the press's
+      // down and up and its redraw took the button away (claunch-iu6z2.1.1).
+      // The profiles answer is held here and let go inside the press.
+      let releaseLists; const listsHeld = new Promise(r => { releaseLists = r; });
+      await page.route("**/api/profiles", async route => { await listsHeld; await route.continue(); });
       await page.click("#observer-operators .op-actions button:has-text('설정')");
       await page.waitForSelector("#observer-operators .op-form");
       // The box is read in the page: Playwright's own action check wants the
@@ -697,16 +703,21 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
         return { x: r.left, y: r.top, width: r.width, height: r.height };
       });
       const saves = sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length;
-      // Down on the button, one poll's redraw in between, then up. The click
-      // the browser dispatches after the up has to reach the form.
+      // Down on the button, the form's lists answering and one poll's redraw
+      // in between, then up. The click the browser dispatches after the up
+      // has to reach the form.
       await page.mouse.move(saveBox.x + saveBox.width / 2, saveBox.y + saveBox.height / 2);
       await page.mouse.down();
+      releaseLists();
+      await page.waitForResponse(r => r.url().endsWith("/api/profiles"));
+      // The page reads the body and draws after the response: give it that turn.
+      await page.evaluate(() => new Promise(r => setTimeout(r, 200)));
+      await page.unroute("**/api/profiles");
       await page.evaluate(() => globalThis.ObserverOperators.refresh());
       await page.mouse.up();
       // The save closes the form; the press that never landed leaves it open.
-      // Under load this wait has timed out with an empty call log, 1 run in
-      // 96 (claunch-iu6z2.1.1, cause unknown), so a timeout says what the page
-      // held: whether the PATCH went out and what sat under the pointer.
+      // A timeout says what the page held: whether the PATCH went out and
+      // what sat under the pointer.
       await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"), null, { timeout: 5000 })
         .catch(async error => {
           const state = await page.evaluate(({ x, y }) => {

@@ -225,7 +225,12 @@ async function openForm(op, message = "") {
   // The launchable selectors (profile:harness), as the new-session form offers them.
   profiles = (f.profile_options || []).map(o => ({value: o.value, label: o.label || o.value}));
   if(!profiles.length) profiles = (f.profiles || []).map(x => typeof x === "string" ? {value: x, label: x} : {value: x.name, label: x.name}).filter(x => x.value);
-  render();
+  // The two lists can come back after the form is already on screen and
+  // the reader is pressing 저장 in it -- on a loaded machine, between the
+  // pointer's down and up. That redraw waits for the release like a poll's
+  // does, or the button goes and the save never happens (claunch-iu6z2.1.1).
+  if(pressing) heldRender = true;
+  else render();
 }
 function formBox() {
   const box = node("form", "", "op-form");
