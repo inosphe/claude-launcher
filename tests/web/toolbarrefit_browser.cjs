@@ -22,7 +22,8 @@
    tick (1 read/tick in a 2026-10-23 trace of the dashboard, once per second
    for as long as a session is on screen). The proof says the width did not
    move, so there is nothing left to read. The row is checked in both states
-   that reach that code — compact and overflowing (the fixture's own header),
+   that reach that code — settled (squeezed at 1920px, iconified and
+   overflowing at 820px: the fixture's own header),
    and a row that fits — because the fit-to-a-share case is the one where a
    text change can matter without the item's own width moving.
 
@@ -156,8 +157,8 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       `a text change that is not a digit swap must re-fit (${relabelled} rect reads)`);
 
     /* To the other state that reaches sameWidths: a row that fits, where no
-       control has gone into the More menu and the header is not compact, so
-       an item's width is its content's. The countdown is covered there too;
+       control has gone into the More menu, none is a glyph and the spacing
+       is not squeezed, so an item's width is its content's. The countdown is covered there too;
        a relabel, which can move that width, still has to re-fit. */
     await page.locator("#layout").evaluate((el) => { el.style.width = "1920px"; });
     await settle();
@@ -172,11 +173,12 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     await settle();
     const fitting = await page.evaluate(() => {
       const h = document.getElementById("term-header");
-      return { compact: h.classList.contains("term-compact"),
+      return { squeezed: parseFloat(getComputedStyle(h).columnGap) < 10,
+               icons: h.querySelectorAll(".toolbar-icon").length,
                overflow: h.querySelectorAll(".toolbar-overflow").length };
     });
-    assert.deepEqual(fitting, { compact: false, overflow: 0 },
-      "the fitting-row case needs a header that fits, not one refitted into compact");
+    assert.deepEqual(fitting, { squeezed: false, icons: 0, overflow: 0 },
+      "the fitting-row case needs a full header, not one squeezed, iconified or overflowing");
     const fitted = await repaint(1920, COUNTDOWN);
     assert.equal(Math.max(...fitted.reads.slice(1)), 0,
       `a countdown tick must not measure a row that fits ` +
@@ -188,7 +190,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       `a relabel on a row that fits must re-fit (${refitted.reads.join(",")} rect reads)`);
 
     console.log(`toolbarrefit_browser: ok (${COUNTDOWN.length} countdown ticks, ` +
-                `0 rect reads each on compact and fitting rows; a longer countdown ` +
+                `0 rect reads each on settled and full rows; a longer countdown ` +
                 `re-fits with ${grew.reads[1]}, a relabel with ${relabelled})`);
   } finally {
     await browser.close();

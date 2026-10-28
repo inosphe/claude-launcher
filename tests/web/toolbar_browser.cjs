@@ -88,17 +88,17 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     // The countdown rewrites its text every second (claunch-i3es6): a rewrite
     // that leaves the chip as wide as it was re-describes the controls
     // without the measuring pass, and one that widens it still re-fits.
-    // `fits` counts the pass by its first query of the overflowed items. The
-    // skip holds only on a row that is neither compact nor overflowing (a
-    // compact button is a fixed-width glyph), so the column is made wide
-    // enough for every control first.
+    // `fits` counts the pass by its first query, the one that clears the
+    // overflowed and iconified items. The skip holds only on a full row (no
+    // squeeze, no glyph, no menu), so the column is made wide enough for
+    // every control first.
     await page.locator("#layout").evaluate(el => { el.style.width = "4000px"; });
     await settle();
     await page.evaluate(() => {
       const h = document.getElementById("term-header");
       const query = h.querySelectorAll.bind(h);
       window.fits = 0;
-      h.querySelectorAll = (sel) => { if (sel === ".toolbar-overflow") window.fits++; return query(sel); };
+      h.querySelectorAll = (sel) => { if (sel.startsWith(".toolbar-overflow")) window.fits++; return query(sel); };
     });
     const refits = async (text) => {
       await page.evaluate(text => {
@@ -113,7 +113,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       await settle();
       return page.evaluate(() => window.fits);
     };
-    assert.equal(await page.locator("#term-header").evaluate(el => el.classList.contains("term-compact")), false);
+    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll(".toolbar-icon").length), 0);
     assert.equal(await refits("Ⅱ role reminder in 7:12"), 0, "a same-width countdown text does not re-fit the row");
     assert.equal(await refits("Ⅱ role reminder in 7:12 and a good deal longer than it was"), 1,
       "a countdown text that widens the chip re-fits the row");
@@ -148,8 +148,12 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     assert(at >= 0 && menuText[at + 1] === "⏭", `menu keeps the reminder pair together: ${JSON.stringify(menuText)}`);
     await page.keyboard.press("Escape");
     // A hidden member of the group (nothing to skip) is not offered there.
+    // Without the skip the group is narrower and holds the row a little
+    // longer (it is late in the minimize order), so the column is narrower.
     await page.evaluate(() => document.getElementById("term-timer-skip").classList.add("hidden"));
-    await check(240);
+    await check(180);
+    assert.equal(await page.locator("#term-reminder").evaluate(el => el.classList.contains("toolbar-overflow")), true,
+      "the reminder group without its skip is in the menu at 180px");
     await page.locator("#term-more").click();
     const lone = await page.locator("#term-overflow-menu button").allTextContents();
     assert(lone.some(t => t.includes("role reminder")) && !lone.includes("⏭"),
@@ -209,8 +213,8 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     for (const width of [360, 800, 1193]) await check(width);
     assert.match(await page.locator("#term-hold").getAttribute("title"), /queued.*999.*Resume delivery/);
     // Back to the ordinary row: a short name and the socket up again. The
-    // header leaves compact mode once the row fits — what this asserts is
-    // that the compact state is undone, not how many pixels the stress step
+    // header turns its glyphs back into labels once the row fits — what this
+    // asserts is that the glyph state is undone, not how many pixels the stress step
     // above had to spare (the lifecycle group keeps all four of its
     // segments on the row, claunch-ndz47).
     await page.evaluate(() => {
@@ -218,7 +222,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       document.getElementById("term-link").classList.add("hidden");
     });
     await check(1920);
-    assert.equal(await page.locator("#term-header").evaluate(el => el.classList.contains("term-compact")), false);
+    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll(".toolbar-icon").length), 0);
     // The lifecycle group on the row is one Tab stop walked by the arrow keys
     // (claunch-468ec). Kill is checked but disabled here (and resume is
     // disabled), so the stop is the first segment that can be pressed, and
