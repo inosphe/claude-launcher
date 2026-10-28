@@ -74,8 +74,9 @@ coordinates are stale until handled:
    inputs conditionally, journaled as `rehome`), the plan carries it.
 3. Register an adopted session's issue on the new coordinator's `jobs`
    collection (`flow_fork`) — without it the coordinator's accounting
-   never sees that issue. (Phase 2 — the `jobs` collection arrives with
-   the coordinator role split, `claunch-fnnrk.1`.)
+   never sees that issue. (Phase 2 — the registration step lands with
+   `claunch-fnnrk.3`; the `jobs` collection itself already exists in
+   `improv-coordinator-v2.yaml`.)
 4. Announce the move: the moved session, the new parent, and the old
    parent get one batch send; leave the move (who, from, to, why) as a
    comment on the board's parent issue.
