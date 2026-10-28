@@ -535,6 +535,9 @@ class Session:
         #: ``force`` of an ending asked for while :attr:`adopting`; None when
         #: none was.
         self._ending_owed: Optional[bool] = None
+        #: A resize asked for while :attr:`adopting`, for :meth:`adopt` to
+        #: pass to the program once attached.
+        self._resize_owed = False
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
@@ -895,11 +898,23 @@ class Session:
         self._last_output_mono = time.monotonic()
         self.adopting = None
         self._attach(handle)
+        if self._resize_owed:
+            self._resize_owed = False
+            self.pty.resize(self.sdef.cols, self.sdef.rows)
         owed, self._ending_owed = self._ending_owed, None
         if owed is not None:
             # Asked for while the screen was being built: delivered now, so
             # the exit reads as that kill, pause or hold.
             self.pty.terminate(force=owed)
+
+    async def _until_adopted(self, timeout: float = 30.0) -> None:
+        """Wait while the boot adopts this session (:attr:`adopting`): a
+        writer that reaches it between its stage and its attach is held for
+        the attach (a fraction of a second) instead of told it has exited."""
+        deadline = time.monotonic() + timeout
+        while (self.pty is None and getattr(self, "adopting", None) is not None
+               and not self.exited and time.monotonic() < deadline):
+            await asyncio.sleep(0.02)
 
     def adopted_screen(
         self, replay: bytes, saved: dict, cols: int, rows: int, limit: int
@@ -2279,6 +2294,7 @@ class Session:
         with a replacement character. See
         ``claunch-pty-shared-decoder-across-writers-o3cy4``.
         """
+        await self._until_adopted()
         if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         # One writer at a time. A session has several -- each viewer, the
@@ -2301,7 +2317,8 @@ class Session:
             self.pty.forget_writer(writer)
 
     def resize(self, cols: int, rows: int) -> None:
-        if self.exited or self.pty is None:
+        adopting = self.pty is None and getattr(self, "adopting", None) is not None
+        if self.exited or (self.pty is None and not adopting):
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         if cols == self.sdef.cols and rows == self.sdef.rows:
             # Same size, nothing changed — and a broadcast here has teeth now:
@@ -2310,7 +2327,12 @@ class Session:
             # The web terminal re-asserts the size on focus regain, so this is
             # not a rare corner; keep the no-op a no-op.
             return
-        self.pty.resize(cols, rows)
+        if adopting:
+            # Owed to the attach; the screen takes the size now, and
+            # :meth:`adopt` keeps it when it swaps the built one in.
+            self._resize_owed = True
+        else:
+            self.pty.resize(cols, rows)
         self.screen.resize(cols, rows)
         self.sdef = dataclasses.replace(self.sdef, cols=cols, rows=rows)
         self._broadcast(("resize", (cols, rows)))

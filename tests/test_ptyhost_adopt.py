@@ -307,6 +307,40 @@ def test_an_ending_asked_while_the_screen_is_built_ends_the_program(
     asyncio.run(run())
 
 
+def test_input_and_a_resize_while_the_screen_is_built_reach_the_program(
+    host, tmp_path, monkeypatch
+):
+    """A viewer that types or resizes between the stage and the attach is
+    held for the attach, not told the running session has exited: the keys
+    reach the program and the size is the one the screen and program get."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        typed = {}
+
+        def during(staged):
+            staged.resize(100, 30)
+            typed["task"] = asyncio.ensure_future(staged.send_keys(["during", "Enter"]))
+
+        staged = await _restore_with_slow_build(mgr2, monkeypatch, during)
+        await typed["task"]
+        await _wait_screen(staged, "echo:during")
+        assert (staged.screen.cols, staged.screen.rows) == (100, 30)
+        assert (staged.sdef.cols, staged.sdef.rows) == (100, 30)
+        await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
 def test_a_persist_while_the_screen_is_built_keeps_the_host_session(
     host, tmp_path, monkeypatch
 ):

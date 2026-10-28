@@ -3840,7 +3840,10 @@ class SessionManager:
             "failed to adopt session %r from the PTY host; "
             "ending it there and restoring it", sdef.name,
         )
-        self._sessions.pop(sdef.name, None)
+        dropped = self._sessions.pop(sdef.name, None)
+        if dropped is not None:
+            # A writer held for the attach (Session.write_bytes) is let go.
+            dropped.adopting = None
         self._end_kept(host, row)
 
     def _relaunch_entry(
@@ -4019,6 +4022,7 @@ class SessionManager:
         if self._sessions.get(session.sdef.name) is not session:
             # Dropped or replaced while its screen was built (an archive, a
             # redefine): nothing is left to hand the program to.
+            session.adopting = None
             handle.close()
             self._end_kept(work.host, work.row)
             return
