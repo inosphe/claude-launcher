@@ -475,10 +475,13 @@ class _FakeQueue:
     def __init__(self, status, positions):
         self._status, self._positions = status, positions
 
-    def status(self, now=None):
+    def waiting(self):
+        return list(self._positions)
+
+    def status(self, now=None, without=()):
         return self._status
 
-    def positions(self, now=None):
+    def positions(self, now=None, without=()):
         return self._positions
 
 
@@ -571,6 +574,40 @@ def test_a_name_the_boot_queue_has_passed_is_counted_once_when_delayed_again():
             status = view.status()
             assert status["remaining"] == 3 and status["total"] == 4
             assert view.positions()["A"]["total"] == 1
+        finally:
+            await boot.stop()
+
+    asyncio.run(go())
+
+
+def test_a_name_woken_before_its_turn_and_delayed_again_is_counted_once():
+    """The boot's queue [B, C, A] started B; A was woken by use before its
+    turn. A host loss files A and B delayed again for the relaunch's queue
+    [A, B]. A now waits in both queues' lists; it is counted once, in the
+    boot's: three waiting, not four (claunch-hor3b.2, s511-rev)."""
+    mgr = _QueueManager("A", "B", "C")
+
+    async def go():
+        boot = restore_queue.RestoreQueue(mgr, names=["B", "C", "A"], interval=60)
+        boot.start()
+        for _ in range(100):
+            if boot.started:
+                break
+            await asyncio.sleep(0.01)
+        assert boot.order == ["B", "C", "A"] and boot.started == ["B"]
+        mgr.delay_again("B")
+        mgr.delay_again("A")
+        host = restore_queue.RestoreQueue(mgr, names=["A", "B"], interval=60)
+        host.order = ["A", "B"]  # ranked, not started: its run would wake A at once
+        view = restore_queue.Queues(boot, host)
+        try:
+            assert boot.waiting() == ["C", "A"] and host.waiting() == ["A", "B"]
+            status = view.status()
+            assert (status["total"], status["done"], status["remaining"]) == (4, 1, 3)
+            places = view.positions()
+            assert set(places) == {"A", "B", "C"}
+            assert places["A"] == {**places["A"], "rank": 3, "total": 3, "ahead": 1}
+            assert places["B"] == {**places["B"], "rank": 1, "total": 1, "ahead": 0}
         finally:
             await boot.stop()
 
