@@ -240,3 +240,43 @@ class RestoreQueue:
             self.started.append(name)
             self._last_start = time.monotonic()
         log.info("restore queue: done (%d started by the queue)", len(self.started))
+
+
+class Queues:
+    """Several :class:`RestoreQueue` runs read as one, for the dashboard.
+
+    A host relaunch starts a queue of its own (claunch-hor3b.1) while the
+    boot's may still be walking its list; putting the new one in the boot
+    queue's place hid the boot's progress until the relaunch's was done
+    (claunch-hor3b.2). This answers :meth:`RestoreQueue.status` and
+    :meth:`RestoreQueue.positions` over every queue that still has names
+    waiting, so neither is lost."""
+
+    def __init__(self, *queues: RestoreQueue) -> None:
+        self.queues: List[RestoreQueue] = list(queues)
+
+    def add(self, queue: RestoreQueue) -> None:
+        self.queues.append(queue)
+
+    def status(self, now: Optional[float] = None) -> Optional[dict]:
+        """The live queues summed; ``next``, ``interval`` and
+        ``pace_seconds`` are the first live queue's, ``eta_seconds`` the
+        latest of theirs. ``None`` once none has anything left."""
+        live = [s for s in (q.status(now) for q in self.queues) if s is not None]
+        if not live:
+            return None
+        if len(live) == 1:
+            return live[0]
+        out = dict(live[0])
+        for key in ("total", "done", "started_by_queue", "remaining"):
+            out[key] = sum(s[key] for s in live)
+        out["eta_seconds"] = max(s["eta_seconds"] for s in live)
+        return out
+
+    def positions(self, now: Optional[float] = None) -> Dict[str, dict]:
+        """Each still-delayed name's place in the queue that holds it."""
+        out: Dict[str, dict] = {}
+        for queue in self.queues:
+            for name, place in queue.positions(now).items():
+                out.setdefault(name, place)
+        return out

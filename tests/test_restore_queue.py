@@ -469,3 +469,49 @@ def test_rail_rows_carry_the_delayed_marker_and_the_queue_place(home):
     assert "restore_queue" not in rows["crashed"]
     assert body["restore_queue"]["remaining"] == 1
     assert body["restore_queue"]["next"] == "waiting"
+
+
+class _FakeQueue:
+    def __init__(self, status, positions):
+        self._status, self._positions = status, positions
+
+    def status(self, now=None):
+        return self._status
+
+    def positions(self, now=None):
+        return self._positions
+
+
+def test_a_host_relaunch_queue_does_not_hide_the_boot_queue():
+    """The dashboard reads one restore queue; a host relaunch's queue used to
+    replace the boot's there while the boot's was still walking its list
+    (claunch-hor3b.2). Queues answers for both."""
+    boot = _FakeQueue(
+        {"total": 4, "done": 1, "started_by_queue": 1, "remaining": 3, "next": "b2",
+         "interval": 3.0, "pace_seconds": 5.0, "eta_seconds": 15},
+        {"b2": {"rank": 2, "total": 4, "ahead": 0, "eta_seconds": 5},
+         "b3": {"rank": 3, "total": 4, "ahead": 1, "eta_seconds": 10}},
+    )
+    host = _FakeQueue(
+        {"total": 2, "done": 0, "started_by_queue": 0, "remaining": 2, "next": "h1",
+         "interval": 3.0, "pace_seconds": 3.0, "eta_seconds": 30},
+        {"h1": {"rank": 1, "total": 2, "ahead": 0, "eta_seconds": 3}},
+    )
+    view = restore_queue.Queues(boot)
+    view.add(host)
+    status = view.status()
+    assert (status["total"], status["done"], status["remaining"]) == (6, 1, 5)
+    assert status["next"] == "b2" and status["eta_seconds"] == 30
+    assert set(view.positions()) == {"b2", "b3", "h1"}
+
+
+def test_a_finished_queue_leaves_the_view_to_the_live_one():
+    done = _FakeQueue(None, {})
+    live = _FakeQueue(
+        {"total": 1, "done": 0, "started_by_queue": 0, "remaining": 1, "next": "h1",
+         "interval": 3.0, "pace_seconds": 3.0, "eta_seconds": 3},
+        {"h1": {"rank": 1, "total": 1, "ahead": 0, "eta_seconds": 3}},
+    )
+    assert restore_queue.Queues(done).status() is None
+    view = restore_queue.Queues(done, live)
+    assert view.status() == live.status() and list(view.positions()) == ["h1"]
