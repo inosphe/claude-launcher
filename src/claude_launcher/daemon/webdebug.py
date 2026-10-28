@@ -728,12 +728,20 @@ class Hub:
         if refused:
             # The window says what it is, so the state above is honest; the
             # viewer that asked for the other answer is told it did not take.
-            await ws.send_json({
-                "type": "error",
-                "message": ("this browser would not change the certificate answer; "
-                            "the window is still "
-                            f"{'ignoring' if win.insecure_tls else 'checking'} certificates"),
-            })
+            # This viewer is already in win.viewers, so a write that fails here
+            # escapes attach before h_ws reaches the try/finally that detaches
+            # it: a closing peer raises ClientConnectionResetError, which is not
+            # a WebDebugError, so the dead viewer would stay registered and the
+            # window would never be reaped (claunch-9a3k4). The state above has
+            # already carried the truth; this note is the extra, so it may be
+            # dropped -- like every other send in this class.
+            with contextlib.suppress(Exception):
+                await ws.send_json({
+                    "type": "error",
+                    "message": ("this browser would not change the certificate answer; "
+                                "the window is still "
+                                f"{'ignoring' if win.insecure_tls else 'checking'} certificates"),
+                })
         return win
 
     async def detach(self, win: Window, ws: web.WebSocketResponse) -> None:
