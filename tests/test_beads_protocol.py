@@ -906,6 +906,15 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     assert "그 답이 **이 줄**을 낳았다" in text
     assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in text
     assert "저널은 **런 전체**를 읽는다" in text
+    # the pairing value is the ask_routed..ask_answered window — ask_answered
+    # carries no tip (s404-rev, s490-rev, s511-rev, s1236-rev2, s648-rev)
+    assert "`ask_answered`에는" in text
+    assert "`ask_routed`와" in text
+    assert "`ask_answered`의 시각이 그 ask의 `ask_routed` 시각과" in text
+    assert "응답자는 보드에 **먼저 쓰고 답한다**" in text
+    assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in text
+    # the line count is never pinned in the prose — the journal grows
+    assert "줄 수를 문면에 박지 않는다" in text
     # the `resolves` fact the first implementation got wrong
     assert "`resolves`는 최상위에" in text
     assert "그룹마다의 `resolves` 필드는 없다" in text

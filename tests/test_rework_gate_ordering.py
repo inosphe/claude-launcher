@@ -352,6 +352,28 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     assert "이 런의 `peer-review` 질문에 **실제로 답한**" in prompt
     assert "저널은 **런 전체**를 읽는다" in prompt
     assert "`decision`이 `changes`이고" in prompt
+    # the pairing value must be one the journal actually carries — an
+    # ask_answered has no tip field, so pairing on "the tip the answer
+    # judged" left (b) unstanding for 5 of 12 answers (s404-rev, s490-rev,
+    # s511-rev, s1236-rev2, s648-rev)
+    assert "는 tip이 없다" in prompt
+    assert "`ask`·`node`·`instance`·`decision`·" in prompt
+    # the count must not be pinned in the prose — the journal grows with
+    # every answer (s1262-rev: "14 lines" was already 17)
+    assert "수치는 저널이 자라므로" in prompt
+    assert "줄 수를 문면에 박지 않는다" in prompt
+    assert "그 줄이 그 답의" in prompt
+    # the pairing is the ask_routed..ask_answered time window, not a tip
+    assert "**`ask_routed`와" in prompt
+    assert "`ask_answered`의 시각이 그 ask의 `ask_routed` 시각과" in prompt
+    assert "peer-review@<N>`" in prompt
+    # the responder writes the board line BEFORE answering — the earlier
+    # "first line after the answer" had the direction backwards
+    assert "응답자는 보드에 **먼저 쓰고 답한다**" in prompt
+    assert "「답 이후 첫 줄」은 방향이" in prompt
+    # and the line's @tip is not the pairing key, with the reason given
+    assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in prompt
+    assert "저널에 대조할 tip 값이 없어서" in prompt
     # the `resolves` fact the first implementation got wrong: it is top-level
     assert "`resolves`는 최상위에" in prompt
     assert "그룹마다의 `resolves` 필드는 없다" in prompt
