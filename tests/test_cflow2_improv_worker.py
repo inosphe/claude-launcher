@@ -139,8 +139,21 @@ V2_INSTEAD_BATCH = """상한 10개에 닿으면) 배치의 이슈 전부를 in_r
 의존하는 것)은 영역이 달라도 한 배치에 싣고, 배치 안 일감에만 막힌
 의존은 blocked로 세지 않는다 — 연속 작업 하나는 PR(착지 요청) 하나다."""
 
+#: claunch-eyz0s.2 (v2 only): v2's landing check 4 tells a reviewer's verdict
+#: from the upper session's decline by the ``@ <tip>``, so the shared marker
+#: list has to show the tip-carrying form. A reviewer that copies v1's
+#: tip-less spelling leaves a marker check 4 reads as "no round named" and
+#: escalates -- the rework round then waits on a person forever, which is the
+#: defect this issue fixes. v1 keeps its own spelling: it has no such rule.
+V1_ONLY_MARKER = """`REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /"""
+V2_INSTEAD_MARKER = """`REVIEWED: pass @ <hash>` /
+      `CHANGES REQUESTED @ <hash>: <무엇을>` (상위가 착지를 거절하며 남기는
+      tip 없는 `CHANGES REQUESTED: <무엇을>`은 리뷰 판정이 아니라 상위의
+      제동이다 — 그 둘은 `@ <hash>`의 유무로 갈린다) /"""
+
 #: Every declared v2 divergence from the v1 block, as (v1 text, v2 text).
-DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH)]
+DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH),
+               (V1_ONLY_MARKER, V2_INSTEAD_MARKER)]
 
 
 def _words(text: str) -> str:

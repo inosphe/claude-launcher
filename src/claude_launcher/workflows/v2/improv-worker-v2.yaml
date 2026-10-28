@@ -3030,6 +3030,15 @@ nodes:
         적으면 상위가 심사 있음으로 읽는다 — 그 구별이 이 줄의 목적이다
         (claunch-n74fs.1). 어느 쪽이든 이 줄이 없는 묶음은 심사 근거가
         없는 것이다.
+      - **미해소 제동 마커** — 이슈 코멘트를 다시 읽어(CHANGES REQUESTED /
+        HOLD / BLOCKED) 아직 풀리지 않은 것이 있는지 적는다:
+        `미해소 마커: <종류> @ <tip> — <왜 풀렸다고 보지 않는가>` 또는
+        `미해소 마커 없음`. 재작업 회차가 착지 확인 4를 「재심 대기」로
+        통과해 올라왔더라도, 재심이 무응답 통과(otherwise:self:pass)나
+        `review-unrouted`의 `skip`으로 끝났으면 옛 마커는 해소 코멘트 없이
+        그대로다(claunch-eyz0s.2 재심 지적). 그 경우 이 줄이 상위에게
+        「심사는 돌았지만 마커는 남아 있다」를 말하는 유일한 자리다 —
+        무응답 통과를 적는 위 줄과 함께 읽어야 판정이 선다.
       - 목표·범위, 브랜치 이름, 기능 커밋·머지 커밋 해시, 테스트 수치
         (표적 실행임을 명시하고 돌린 모듈을 적는다 — 전체 스윕은 리더의
         통합 단계에서 배치로 한 번, subagent 안에서 돈다). 표적 테스트를
@@ -3158,10 +3167,14 @@ nodes:
     # (claunch-eyz0s.1). 착지 라우팅은 이 세션이 가입한 모든 메시를 훑고
     # (landing_route.Router), 질문 라우팅은 런이 시작 때 고정한 한 메시의 명부만
     # 읽는다(asks.plan_route · state.mesh). 그래서 착지가 안 풀려 메시를 하나 더
-    # 가입하면 질문이 ambiguous로 서고, 반대로 런의 메시만 고르면 다른 메시의
-    # leader가 착지 후보에서 빠진다. 두 쪽을 함께 세우려면 런의 메시를
-    # `claunch cflow2 mesh <이름>`으로 지목한다. 같은 이름의 다른 머신 세션은
-    # 양쪽이 같은 규칙으로 거른다(local 판정). docs 「라우팅 명부」 절.
+    # 가입하면 질문이 ambiguous로 선다. 두 쪽은 서로 다른 손잡이로 움직인다:
+    # `claunch cflow2 mesh <이름>`은 state.mesh와 라우팅 중인 ask의 메시만 쓰고
+    # (runtime.set_mesh), 착지 라우팅은 state.mesh를 읽지 않는다 — 런의 메시를
+    # 지목하면 질문 쪽만 바뀌고 착지 후보는 세션의 메시 가입 그대로다.
+    # 같은 이름의 다른 머신 세션은 양쪽이 같은 규칙으로 거른다(local 판정) —
+    # 착지는 MeshManager.is_local_member, 질문은 responders.Responder.answerable
+    # (self.local, _pool_from이 채운다). _handle_in은 묻는 세션 자신의 핸들을
+    # 찾는 함수이고 후보를 거르지 않는다. docs 「라우팅 명부」 절.
     # 요청을 실제로 세운 회차만 착지 큐에 올린다(claunch-improver-
     # integration-request-blocked-o6paj). `_queue_triggers`는 노드가 결과와
     # 무관하게 `_complete`로 빠져나갈 때 불리므로(runtime._complete의
@@ -4992,13 +5005,25 @@ procedures:
                  (c) 확인 2가 지금 tip의 수치를 세웠다(또는 셀프 게이트 생략이
                      지금 tip에 대한 것이다) — 확인 2가 이미 요구하는 그 판정이다
                셋 중 하나라도 안 서면 escalate다. 「아마 고쳤다」는 판정이 아니다.
+               **tip의 자리는 정해져 있지 않다.** 마커의 `@ <tip>`을 줄 어디에서
+               찾든 마커의 tip이다 — `CHANGES REQUESTED: <무엇을> @ <tip>`
+               (이 런의 s162 판정이 그 형태다)과 `CHANGES REQUESTED @ <tip>:
+               <무엇을>`은 같은 판정이고, 판정은 오직 `@ <hex>`가 있는가와 그
+               해시뿐이다. 어느 쪽으로도 못 찾으면 escalate다.
                재심 대기를 request로 읽는 것이 방어선을 지우지 않는 이유는
                순서다: `submit`은 `align`(리베이스) → `reviewer-ensure` →
                `peer-review`를 `integration-request` **앞에서** 돈다. 그래서
                리뷰어의 새 판정(`REVIEWED: pass @ <tip>` 또는 새 `CHANGES
                REQUESTED`)이 요청보다 먼저 보드에 서고, 새 판정이 다시
                `changes`면 `peer-review-loop`가 rework로 되감아 요청이 나가지
-               않는다. 옛 마커가 그대로인 채로 보드에 요청이 실리는 경로는 없다.
+               않는다. **다만 그 순서는 리뷰어가 답했을 때의 보장이다**: 응답자가
+               아무도 없거나 900초 안에 아무도 답하지 않으면 `peer-review`는
+               `otherwise: self:pass`로 끝나고, `review-unrouted`의 `skip`도
+               리뷰 없이 요청으로 간다. 그 두 경우 옛 마커는 해소 코멘트 없이
+               남는다. 그래서 재작업 대기를 request로 올리는 회차는 그 사실을
+               `integration-request`의 증거 묶음에 한 줄로 적는다 —
+               `미해소 마커: CHANGES REQUESTED @ <tip> — 재심은 <무응답 통과|skip>`
+               또는 `미해소 마커 없음`. 적지 않으면 상위가 심사 있음으로 읽는다.
                reason에 마커의 tip, 그 뒤 커밋 수, 재심 대기로 읽었다는 것,
                그 재심이 `submit`에서 요청 앞에 돈다는 것을 적는다.
             5. 상위가 걸어 둔 동결·정지 지시가 없다(메시로 온 freeze/hold 공지,

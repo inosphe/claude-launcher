@@ -86,6 +86,28 @@ def _land_chart(tmp_path):
                                  resolve_include=layers.resolver(str(tmp_path)))
 
 
+def _real_review_outcome(answer: str) -> str:
+    """이 파일의 스텁이 그 선택지에 대해 보고해야 하는 outcome 이름.
+
+    스텁은 이 파일이 세운 것이지만 **무엇을 보고**하는지는 정본에서 읽는다.
+    스텁이 ``"changes"``를 하드코딩하면 ``options.changes.outcome``을 ``ok``로
+    바꾼 변이가 살아남는다(재심 지적, s1262-rev): 그러면 실제 워크플로에서는
+    재심이 고칠 것을 골라도 요청이 나가는데 테스트는 green이다. 그래서 선택지
+    → outcome 매핑은 정의 파일에서 읽고, 그 이름이 선언돼 있지 않으면 그
+    자리에서 죽는다(스텁이 낼 수 없는 이름을 지어내지 않는다).
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    options = (doc["nodes"]["peer-review"].get("ask") or {}).get("options") or {}
+    declared = [str((o or {}).get("outcome") or "") for o in options.values()]
+    named = {str(name): str((o or {}).get("outcome") or "")
+             for name, o in options.items()}
+    # ``answer``는 이 파일이 쓰는 답의 이름이다. 옵션 이름이면 그 옵션의
+    # outcome을, 이미 outcome 이름이면 그대로 쓴다.
+    outcome = named.get(answer) or (answer if answer in declared else "")
+    assert outcome, f"peer-review declares no such option or outcome: {answer!r} ({named})"
+    return outcome
+
+
 def _drive(tmp_path, monkeypatch, review_answer):
     """실제 ``land``를 몰고 지나간 라벨을 순서대로 낸다.
 
@@ -95,6 +117,9 @@ def _drive(tmp_path, monkeypatch, review_answer):
     """
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    # 매핑을 정본에서 먼저 읽는다 — 스텁이 낼 수 없는 이름이면 그 자체가
+    # 드리프트이므로 아래 report가 거절하고 테스트가 그 자리에서 죽는다.
+    review_outcome = _real_review_outcome(review_answer)
     st = runtime.start(_land_chart(tmp_path), caps={}, **kw)
     path, humans = [], []
     for _ in range(60):
@@ -116,9 +141,9 @@ def _drive(tmp_path, monkeypatch, review_answer):
         label = task["label"].rsplit("/", 1)[-1]
         path.append(label)
         if label == "peer-review":
-            st = runtime.report(task["instance"], review_answer,
+            st = runtime.report(task["instance"], review_outcome,
                                 {"what": "1) 표적 테스트가 범위를 덮지 않는다"} if
-                                review_answer == "changes" else {}, **kw)
+                                review_outcome == "changes" else {}, **kw)
         else:
             st = runtime.report(task["instance"], "ok", VALUES.get(label, {}), **kw)
     return path, humans
@@ -196,6 +221,51 @@ def test_check_four_separates_pending_rereview_from_unresolved():
     # 그리고 그 판정이 안전한 이유가 순서다 — 이 문장이 빠지면 다음 편집자가
     # 재심을 요청 뒤로 옮겨도 문구가 항변하지 않는다
     assert "`integration-request` **앞에서** 돈다" in prompt
+
+
+def test_the_gate_reads_a_tip_wherever_the_marker_puts_it():
+    """tip의 자리는 형태가 아니다. 이 런의 판정 자체가 ``CHANGES REQUESTED:
+    <무엇을> @ <tip>`` 형태였으므로(s162), 판독이 ``@ <tip>:`` 접두 형태만
+    인정하면 고치려던 그 마커를 못 읽는다(s404-rev 지적). 두 형태를 같은
+    판정으로 읽는다는 규칙이 정본에 있어야 한다."""
+    prompt = _words(_land_prompt())
+    assert "**tip의 자리는 정해져 있지 않다.**" in prompt
+    assert "`CHANGES REQUESTED: <무엇을> @ <tip>`" in prompt
+    assert "판정은 오직 `@ <hex>`가 있는가와 그 해시뿐이다" in prompt
+
+
+def test_the_order_claim_is_scoped_to_an_answered_review():
+    """순서는 리뷰어가 **답했을 때**의 보장이다: 응답이 없으면
+    ``otherwise: self:pass``로 통과하고 ``review-unrouted``의 ``skip``도
+    리뷰 없이 요청으로 간다. 그 두 경우 옛 마커가 남으므로, 문구가 「경로는
+    없다」로 총칭하면 거짓이 된다(s490-rev·s511-rev·s404-rev 지적)."""
+    prompt = _words(_land_prompt())
+    assert "**다만 그 순서는 리뷰어가 답했을 때의 보장이다**" in prompt
+    assert "otherwise: self:pass" in prompt
+    assert "옛 마커가 그대로인 채로 보드에 요청이 실리는 경로는 없다" not in prompt
+
+
+def test_the_bundle_must_record_a_marker_the_rereview_did_not_clear():
+    """무응답 통과·skip으로 요청이 나가는 경우, 남은 마커를 상위가 알 자리는
+    증거 묶음의 한 줄뿐이다. 이 줄이 없으면 상위는 심사 있음으로 읽는다."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    text = _words(" ".join(str(v) for v in _walk(doc["nodes"]["integration-request"])))
+    assert "**미해소 제동 마커**" in text, text[:400]
+    assert "미해소 마커 없음" in text
+
+
+def test_the_shared_marker_list_shows_the_tip_form():
+    """공통 조각이 tip 없는 형태를 정본으로 보여 주면, 그 조각을 읽는 리뷰어는
+    tip 없는 마커를 쓴다 — 새 확인 4는 그것을 escalate한다. 표기를 의무화한
+    변경이 공통 규칙에서도 서야 재작업 회차의 원래 결함이 그 경로로 남지
+    않는다(s597-rev·s1304·s1389-rev 지적)."""
+    common = V2.parent / "improv-common.yaml"
+    doc = yaml.safe_load(common.read_text(encoding="utf-8"))
+    block = _words(doc["fragments"]["beads-common"])
+    assert "`CHANGES REQUESTED @ <hash>: <무엇을>`" in block
+    # 그리고 상위의 거절과의 구별이 그 목록에도 있어야 한다 — 없으면 다음
+    # 독자가 tip 없는 형태를 옛 표기로만 읽는다
+    assert "리뷰 판정이 아니라 상위의 제동이다" in block
 
 
 def test_the_gate_still_escalates_on_the_uppers_brake():

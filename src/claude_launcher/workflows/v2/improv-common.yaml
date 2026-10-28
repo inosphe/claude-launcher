@@ -41,7 +41,10 @@ fragments:
       merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
       마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
       `REMEASURE REQUESTED @ <hash>` /
-      `REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /
+      `REVIEWED: pass @ <hash>` /
+      `CHANGES REQUESTED @ <hash>: <무엇을>` (상위가 착지를 거절하며 남기는
+      tip 없는 `CHANGES REQUESTED: <무엇을>`은 리뷰 판정이 아니라 상위의
+      제동이다 — 그 둘은 `@ <hash>`의 유무로 갈린다) /
       `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
       문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
       산문은 무게만 늘리고 되짚을 때 읽히지 않는다. 긴 묶음은 파일로 붙인다:
