@@ -1234,14 +1234,32 @@ class OperatorsV2:
         self.system(rec, gate_mod.outcome_message(row), thread=basis["thread"] if basis else None, refs=refs)
 
     def open_requests(self, name):
-        """The spawn and resume requests this session filed that still wait."""
+        """The spawn and resume requests this session filed that still wait.
+
+        A request the person took over by hand keeps its status ``pending``
+        but its clock is paused (:data:`spawn_gate.HOLD_MANUAL`), so the
+        ``deadline`` it still carries is only where the countdown stopped.
+        Reporting it would read to the operator as "expires soon, a session
+        is about to be built", so a held row ships ``hold`` and no deadline
+        (claunch-iv4mh)."""
         from . import spawn_gate as gate_mod
 
         gate = self.spawn_gate()
         if gate is None:
             return []
-        return [{k: r.get(k) for k in ("id", "kind", "status", "target", "deadline", "reason")}
-                for r in gate.list() if r.get("session") == name and r.get("status") in gate_mod.OPEN]
+        rows = []
+        for r in gate.list():
+            if r.get("session") != name or r.get("status") not in gate_mod.OPEN:
+                continue
+            hold = r.get("hold")
+            rows.append({"id": r.get("id"),
+                         "kind": r.get("kind"),
+                         "status": r.get("status"),
+                         "target": r.get("target"),
+                         "deadline": None if hold else r.get("deadline"),
+                         "reason": r.get("reason"),
+                         "hold": hold})
+        return rows
 
     # -- what the operator polls -------------------------------------------
     async def poll(self, name, since=None):
