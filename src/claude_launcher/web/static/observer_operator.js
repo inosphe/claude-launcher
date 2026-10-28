@@ -610,7 +610,22 @@ function render() {
   // stays at the end, so a new entry in the view's own conversation shows.
   const page = opts.scroller?.(), top = page?.scrollTop;
   const atEnd = !!page && page.scrollHeight - page.scrollTop - page.clientHeight < 24;
+  // A field being typed in keeps the caret. Not every redraw waits for the
+  // reader (openForm's, once the projects and profiles arrive, does not), and
+  // one that replaced the focused field dropped what came after: a name typed
+  // as the form's lists arrived lost its text, the empty required name then
+  // blocked 「만들기」 with no message (claunch-iu6z2). The fields read their
+  // values from `form`, which every keystroke updates, so the new node holds
+  // the same text.
+  const active = document.activeElement;
+  const keep = active?.id && area.contains(active) && active.matches("input,textarea,select")
+    ? {id: active.id, start: active.selectionStart, end: active.selectionEnd} : null;
   area.replaceChildren(...parts);
+  const again = keep && document.getElementById(keep.id);
+  if(again && again !== active && area.contains(again)) {
+    again.focus({preventScroll: true});
+    if(keep.start != null) try { again.setSelectionRange(keep.start, keep.end); } catch {}
+  }
   sessionBar(op);
   if(page) page.scrollTop = opts.composer && atEnd ? page.scrollHeight : top;
   if(input) input.send.disabled = busy || !op;

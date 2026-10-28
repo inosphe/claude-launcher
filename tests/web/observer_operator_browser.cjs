@@ -489,9 +489,24 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => !document.querySelector('.observer-card[data-session="s2"] .observer-ask-operator')?.disabled);
 
     // Create: two projects by check box, with a profile; then a name clash.
+    // The name is typed while the form's profile list is still on its way:
+    // the redraw that list brings must leave the caret in the field, so the
+    // rest of the name lands. It used to drop it -- on a loaded machine the
+    // list arrived inside a fill, the name stayed empty and 「만들기」 was
+    // refused by the required field (claunch-iu6z2).
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route("**/api/profiles", async route => { await held; await route.continue(); });
     await page.click("text=+ 새 operator");
     await page.waitForSelector("#observer-operators .op-projects input[value=beta]");
-    await page.fill("#observer-op-name", "two");
+    await page.click("#observer-op-name");
+    await page.keyboard.type("tw");
+    const typed = await page.$("#observer-op-name");
+    release();
+    await page.waitForFunction(field => !field.isConnected, typed);
+    await page.unroute("**/api/profiles");
+    await page.keyboard.type("o");
+    assert.equal(await page.inputValue("#observer-op-name"), "two", "a redraw of the form keeps the field being typed in");
     await page.check("#observer-operators .op-projects input[value=alpha]");
     await page.check("#observer-operators .op-projects input[value=beta]");
     await page.selectOption("#observer-op-profile", "p1:claude");
