@@ -94,6 +94,10 @@ function closeSplit() { splitFor = null; splitKind = null; calls.closed++; }
 // syncSplitPane asks of it.
 let operatorSessions = new Set();
 function isOperatorSession(name) { return operatorSessions.has(name); }
+// ...and which of those keep session QA in their record (app.js operatorQa,
+// exercised in sessionresources_check). syncSplitPane is the only asker.
+let operatorQaSessions = new Set();
+function operatorQa(name) { return operatorQaSessions.has(name); }
 // The 🗪 threads button's news mark (threadspane_check holds what it reads).
 function threadsNews() { return true; }
 function markThreadsSeen(name) { calls.seen.push(name); }
@@ -108,6 +112,7 @@ Object.assign(exports, {
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
   setOperator: (n, on) => { if (on) operatorSessions.add(n); else operatorSessions.delete(n); },
+  setOperatorQa: (n, on) => { if (on) operatorQaSessions.add(n); else operatorQaSessions.delete(n); },
   setTranscript: (n, m = null) => { transcriptName = n; transcriptMachine = m; },
 });`;
 
@@ -290,6 +295,29 @@ check("the key carries the base path",
   check("a session that is not an operator's keeps its threads pane",
         !w.nodes["term-wf"].classes.has("hidden")
         && w.calls.kinds[w.calls.kinds.length - 1] === "threads");
+}
+/* A gds6 operator keeps session QA when its record does (operator_qa), so a
+   qa pane is honoured there — while threads, and a pane showing both, still
+   go (its conversation with the user is the Operator view). */
+{
+  const w = build({ stored: JSON.stringify({ s15: { split: true, pane: "qa", ratio: 0.55 } }) });
+  w.ctx.setOperator("s15", true);
+  w.ctx.setOperatorQa("s15", true);
+  w.ctx.syncSplitPane();
+  check("a QA-keeping operator keeps its qa pane",
+        !w.nodes["term-wf"].classes.has("hidden")
+        && w.nodes["term-qabtn"].attrs["aria-pressed"] === "true",
+        { hidden: w.nodes["term-wf"].classes.has("hidden") });
+  w.ctx.setSessLayout("s15", { pane: "both" });
+  w.ctx.syncSplitPane();
+  check("...not a pane that also shows threads",
+        w.nodes["term-wf"].classes.has("hidden"));
+  w.ctx.setOperatorQa("s15", false);
+  w.ctx.setSessLayout("s15", { pane: "qa" });
+  w.ctx.syncSplitPane();
+  check("the switch off takes the qa pane with it",
+        w.nodes["term-wf"].classes.has("hidden")
+        && w.nodes["term-qabtn"].attrs["aria-pressed"] === "false");
 }
 {
   const w = build({ stored: JSON.stringify({ s15: { split: true } }),

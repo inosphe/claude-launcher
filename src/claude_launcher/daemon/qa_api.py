@@ -326,18 +326,26 @@ def install(app, store: Optional[qa_store.QaStore] = None):
             return False
 
     def operator_session(name: str) -> bool:
-        """Whether ``name`` is an operator v2's bound session.
+        """Whether ``name`` is an operator v2's bound session whose record
+        leaves session QA off.
 
         Such a session has no session QA: the user it talks to is in the
         Operator view, where its questions are ``opv2_ask``. The MCP server
         hides the ``qa_*`` tools from it (mcp_server._hidden_tools); this is
         the enforcement, since a session started before that switch — or one
         whose environment is not the MCP server's — could still call the
-        routes. ``operators_v2`` is read late, like the threads store above.
+        routes. An operator whose record keeps QA (``qa: true``: a gds6
+        operator asks some questions in the QA pane) is not one of these.
+        ``operators_v2`` is read late, like the threads store above.
         """
         ops = app.get("operators_v2")
         try:
-            return bool(ops is not None and ops.operator_of_session(name))
+            if ops is None or not ops.operator_of_session(name):
+                return False
+            # A store that predates the switch (or a stand-in in a test) has
+            # no ``qa_allowed``; its operators keep QA off, as they always had.
+            allowed = getattr(ops, "qa_allowed", None)
+            return not (allowed(name) if callable(allowed) else False)
         except Exception:  # noqa: BLE001 -- an unreadable operator store refuses nothing
             log.exception("qa: could not read the operator bindings")
             return False

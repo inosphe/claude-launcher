@@ -4972,11 +4972,23 @@ moves into one thread titled 「이전 대화」 and the original record is kept
 `<id>.feed-backup.json` beside it; the move runs once and a repeat changes
 nothing. **Start** picks a profile
 (and the model and effort when its harness declares them) and creates one
-session running the bundled `operator-v2` workflow with the operator's id as
-its input; **Stop** ends it (an agent may not stop an operator — that is the
-user's). The same conversation opens as a dialog over any page from the
-Operator segment of the floating dock at the bottom right, or **Alt+O**
-(Escape, the × button or a click on the dimmed backdrop around it closes it); the
+session running the workflow its record names — the bundled `operator-v2`
+unless the form picked another — with the operator's id as its input;
+**Stop** ends it (an agent may not stop an operator — that is
+the user's). **Workflow** starts the operator on `gds-operator-v2` instead
+for a project built with gds6: that one reads the project's planning and
+realization ledger (`/api/plane/progress`, `frames/summary`, `delivery`,
+`beads`, `/api/scan`) and posts a single next action with the value that
+makes it next, a review of what finished since its last pass, and the
+questions it cannot answer itself. Its **gds6 server** row names the address
+(default `http://localhost:8888`), and **세션 QA도 함께 쓰기** keeps `qa_*` on
+its surface beside the Operator view, for a question you work through in the
+QA pane. It reads the ledger and never writes to it; the stage order, the
+nudge and review shapes, and the three question channels are in
+`docs/gds6-operator.md`. The same conversation opens as a dialog over any
+page from the Operator segment of the floating dock at the bottom right, or
+**Alt+O** (Escape, the × button or a click on the dimmed backdrop around it
+closes it); the
 dialog preselects an operator whose scope covers the session on screen, and
 its management lives on the Observer page. Above the conversation, in the
 dock and the dialog alike, a session line that does not scroll names the

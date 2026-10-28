@@ -7107,6 +7107,31 @@ async def h_cflow_watch_unsubscribe(request: web.Request) -> web.Response:
     return await board.h_unsubscribe(request)
 
 
+def _operator_rail_fields(app, rows):
+    """Add ``operator`` and ``operator_qa`` to rail rows, from the operator store.
+
+    The header's 🗪 threads and ? qa buttons are drawn from the rail: an
+    operator's session talks in the Operator view, so neither belongs there --
+    except QA, which a gds6 operator may keep (``operators_v2.qa_allowed``).
+    The workflow name alone answers half of that (a record names which
+    workflow its session runs), so the store answers the other half. A store
+    that cannot be read leaves the rows as they were.
+    """
+    ops = app.get("operators_v2") if hasattr(app, "get") else None
+    if ops is None or not rows:
+        return rows
+    for name, row in rows.items():
+        try:
+            bound = ops.operator_of_session(name)
+            if not bound:
+                continue
+            row["operator"] = True
+            row["operator_qa"] = bool(ops.qa_allowed(name))
+        except Exception:  # noqa: BLE001 -- an unreadable store says nothing about this row
+            log.exception("operator fields for rail row %s failed", name)
+    return rows
+
+
 async def h_cflow2_rail(request: web.Request) -> web.Response:
     """The session rail's v2 lines: ``{"rows": {session: entry}}`` for each
     registered session whose own directory holds a v2 run under the session's own
@@ -7126,7 +7151,8 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
         if cwd:
             pairs.append((session.sdef.name, cwd))
     rows = await asyncio.to_thread(cflow2_web.rail_entries, pairs)
-    return json_response({"rows": rows, "now": time.time()})
+    return json_response({"rows": _operator_rail_fields(request.app, rows),
+                          "now": time.time()})
 
 
 async def h_cflow2_definition(request: web.Request) -> web.Response:
