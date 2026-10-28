@@ -125,15 +125,26 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       ['workspace', '/repo/alpha'], ['worktree', 'new (generated name)'],
       ['role', '—'], ['workflow', 'improv-worker-v2']]);
     assert.match(spawnText, /no answer in 4:[0-3]\d: no top-level session — created as op1's child instead/);
-    const buttons = async card => (await card.locator('.gate-actions button').allInnerTexts()).map(t => t.trim());
-    assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
+    // Two groups, two questions (claunch-odk2w.1). The answer buttons are the
+    // card's own semantics, and each card asserts its own list exactly. The
+    // aside group — Hide plus the reminder waits — is drawn for every kind by
+    // one helper (`gateAsideActions`), so a whole-list assertion per card made
+    // one new shared choice fail four times and named the wrong culprit: the
+    // card was right and the list was stale. Its content is written once here
+    // and every other card is required to draw that same group, which is the
+    // invariant the helper exists for.
+    const texts = async (card, sel) => card.locator(sel)
+      .evaluateAll(nodes => nodes.map(n => n.textContent.trim()));
+    const buttons = card => texts(card, '.gate-actions > button');
+    const asideButtons = card => texts(card, '.gate-actions > .gate-aside button');
+    assert.deepEqual(await buttons(spawnCard), ['Approve', 'Manual', 'Reject', '+5 min']);
 
     const resumeText = await resumeCard.innerText();
     assert.match(resumeText, /old1/);
     assert.match(resumeText, /otherwise a new session: issue alpha-7/);
     assert.equal((await factRows(resumeCard))[0][1], 'alpha', 'the fallback spec fills the rows');
     assert.match(resumeText, /not resumed — a new session is asked for instead — in 4:[0-3]\d \(extended 1×\)/);
-    assert.deepEqual(await buttons(resumeCard), ['Resume', 'New session', 'Reject', '+5 min', 'Hide']);
+    assert.deepEqual(await buttons(resumeCard), ['Resume', 'New session', 'Reject', '+5 min']);
     const childText = await childCard.innerText();
     assert.match(childText, /child session requested under w1/);
     assert.match(childText, /name kid — Write the parser tests/);
@@ -141,13 +152,23 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       ['workspace', 'alpha (inherited from w1)'], ['worktree', 'kid-wt'],
       ['role', 'worker'], ['workflow', 'improv-worker-v2']]);
     assert.match(childText, /auto-approves in 4:[0-3]\d — created as asked/);
-    assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min', 'Hide']);
+    assert.deepEqual(await buttons(childCard), ['Approve', 'Manual', 'Reject', '+5 min']);
     assert.equal(await page.evaluate(() => gatePending.spawn.length), 4, 'the bell counts all four');
     // A request taken over by hand stays on the card with its clock paused
     // and the form reachable again (claunch-uzo40).
     const heldText = await heldCard.innerText();
     assert.match(heldText, /taken by hand \(web\) — no clock: approve, reject, or \+5 min to start the countdown again/);
-    assert.deepEqual(await buttons(heldCard), ['Approve', 'Open form', 'Reject', '+5 min', 'Hide']);
+    assert.deepEqual(await buttons(heldCard), ['Approve', 'Open form', 'Reject', '+5 min']);
+    // The aside group, written once: Hide, then the three reminder waits in
+    // the order the card draws them. Every other card must draw this exact
+    // group — a kind that lost the helper loses Hide and Remind together,
+    // which is the gap `gateAsideActions` was introduced to close.
+    assert.deepEqual(await asideButtons(spawnCard), ['Hide', '1h', '6h', '24h'],
+      'the aside group is Hide and the reminder waits');
+    for (const [card, name] of [[resumeCard, 'resume'], [childCard, 'child'], [heldCard, 'held']]) {
+      assert.deepEqual(await asideButtons(card), await asideButtons(spawnCard),
+        `the ${name} card draws the same aside group as the spawn card`);
+    }
     // An empty row says which empty it is (claunch-8fvr5)
     const heldRows = Object.fromEntries(await factRows(heldCard));
     assert.equal(heldRows.role, '— (from the handle, else free-role)');
@@ -162,12 +183,16 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       .some(n => n.textContent.includes('extended 2×')));
     assert.deepEqual(posts.at(-1), ['bbb222', 'extend']);
 
-    // the panel row offers the same answers
-    const panelButtons = await page.evaluate(() => {
+    // the panel row offers the same answers, and the card's reminder waits
+    // (Hide is the card's own press: the row is already inside the panel)
+    const panelRow = await page.evaluate(() => {
       const row = noticePanelGateRow('spawn', gatePending.spawn.find(r => r.kind === 'resume'));
-      return [...row.querySelectorAll('.gate-actions button')].map(b => b.textContent);
+      const texts = sel => [...row.querySelectorAll(sel)].map(b => b.textContent.trim());
+      return { answers: texts('.gate-actions > button'), remind: texts('.gate-actions > .gate-remind button') };
     });
-    assert.deepEqual(panelButtons.slice(0, 4), ['Resume', 'New session', 'Reject', '+5 min']);
+    assert.deepEqual(panelRow.answers, ['Resume', 'New session', 'Reject', '+5 min']);
+    assert.deepEqual(panelRow.remind, (await asideButtons(resumeCard)).slice(1),
+      'the panel row offers the card\'s reminder waits, in the same order');
 
     // New session on the resume card files the fallback; the card goes
     await resumeCard.getByRole('button', { name: 'New session' }).click();
