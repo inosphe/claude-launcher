@@ -51,6 +51,18 @@ function build() {
         contains: (c) => n.className.split(" ").includes(c),
       },
       appendChild: (c) => { c.parentNode = n; n.children.push(c); return c; },
+      // A card is placed among the others by its own stamp rather than always
+      // at the head (claunch-notice-card-order-animate-9znvg), so the stub
+      // models the two parent calls that reaches: the insert and the first
+      // child. Before that rule the insert only ran for a strip that already
+      // held a card, so a harness with one card never needed it.
+      insertBefore: (c, ref) => {
+        const i = n.children.indexOf(ref);
+        c.parentNode = n;
+        if (i < 0) n.children.push(c); else n.children.splice(i, 0, c);
+        return c;
+      },
+      get firstChild() { return n.children[0] || null; },
       removeChild: (c) => {
         const i = n.children.indexOf(c);
         if (i >= 0) n.children.splice(i, 1);
@@ -144,8 +156,17 @@ function build() {
              nodes.notices.children.forEach(walk);
              return out;
            },
-           buttons: () => {
-             const card = nodes.notices.children[0];
+           /* The presses of the card that is about `target`, found by what the
+              card says rather than by where it sits. Position was a stand-in
+              for identity and it only ever worked because this stub used to
+              leave `firstChild` out: the page places each card at the head, so
+              a faithful stub draws the last request on top and `children[0]`
+              is a different card than the one the runner meant
+              (claunch-notice-card-order-animate-9znvg). */
+           buttons: (target) => {
+             const card = target
+               ? nodes.notices.children.find((c) => c.text().includes(target))
+               : nodes.notices.children[0];
              if (!card) return [];
              const row = card.children.find(
                (c) => c.className.includes("gate-actions"));
@@ -318,9 +339,10 @@ function pending(rec) {
   w.gate.recs = [pending(), pending({ id: "g2", target_session: "w2" })];
   (async () => {
     await w.api.refreshGotoGate();
-    const ignore = w.buttons().find((b) => b.textContent === "Hide");
+    // g1 is the request this block hides; the other card is g2's (w2).
+    const ignore = w.buttons("w1").find((b) => b.textContent === "Hide");
     check("the card offers a third press that answers nothing",
-          ignore !== undefined, w.buttons().map((b) => b.textContent));
+          ignore !== undefined, w.buttons("w1").map((b) => b.textContent));
 
     ignore.click();
     check("Hide takes its own card down", w.strip().length === 1, w.said());

@@ -207,8 +207,10 @@ let noticeText = "";
 function notice(text) { noticeText = text; }
 /* -- the form ---------------------------------------------------------- */
 async function openForm(op, message = "") {
-  form = op ? {id: op.id, name: op.name, all: op.all, projects: [...(op.projects || [])], profile: op.profile || "", watch: op.watch}
-            : {id: "", name: "", all: false, projects: [], profile: "", watch: true};
+  form = op ? {id: op.id, name: op.name, all: op.all, projects: [...(op.projects || [])], profile: op.profile || "", watch: op.watch,
+               workflow: op.workflow || "operator-v2", qa: !!op.qa, gds6_url: op.gds6_url || ""}
+            : {id: "", name: "", all: false, projects: [], profile: "", watch: true,
+               workflow: "operator-v2", qa: false, gds6_url: ""};
   formError = message;
   render();
   const [p, f] = await Promise.all([call("api/projects").catch(() => ({})), call("api/profiles").catch(() => ({}))]);
@@ -252,16 +254,47 @@ function formBox() {
   watch.type = "checkbox"; watch.checked = form.watch;
   watch.onchange = () => { form.watch = watch.checked; };
   const watchLabel = node("label", "");watchLabel.append(watch, " 감시 켜기");
+  /* The workflow its session runs (daemon/operators_v2.OPERATOR_WORKFLOWS): the
+     standard watcher, or the gds6 operator that nudges a project's next action. */
+  const workflows = [["operator-v2", "기본 (세션 감시·안내)"], ["gds-operator-v2", "gds6 프로젝트 안내"]];
+  const workflow = document.createElement("select");
+  workflow.id = "observer-op-workflow";
+  for(const [value, label] of workflows) { const o = node("option", label);o.value = value;workflow.append(o); }
+  if(!workflows.some(w => w[0] === form.workflow)) form.workflow = "operator-v2";
+  workflow.value = form.workflow;
+  const qa = document.createElement("input");
+  qa.type = "checkbox"; qa.id = "observer-op-qa"; qa.checked = form.qa;
+  const url = document.createElement("input");
+  url.id = "observer-op-gds6-url"; url.value = form.gds6_url; url.maxLength = 200;
+  url.placeholder = "http://localhost:8888";
+  const gds = node("fieldset", "", "op-gds6");
+  const urlLabel = node("label", "서버 주소 ");
+  urlLabel.append(url);
+  gds.append(node("legend", "gds6"), urlLabel);
+  const showGds = () => { gds.hidden = form.workflow !== "gds-operator-v2"; };
+  workflow.onchange = () => {
+    form.workflow = workflow.value;
+    /* A gds6 operator reads its ledger over HTTP and asks some questions in the
+       QA pane; the record's switch is what lets its session keep qa_*. */
+    if(form.workflow === "gds-operator-v2") { form.qa = true; qa.checked = true; }
+    showGds();
+  };
+  url.oninput = () => { form.gds6_url = url.value.trim(); };
+  qa.onchange = () => { form.qa = qa.checked; };
+  const workflowLabel = node("label", "워크플로 ");workflowLabel.append(workflow);
+  const qaLabel = node("label", "");qaLabel.append(qa, " 세션 QA도 함께 쓰기");
+  showGds();
   const save = node("button", form.id ? "저장" : "만들기");save.type = "submit";save.disabled = busy;
   const cancel = node("button", "취소");cancel.type = "button";
   cancel.onclick = () => { form = null; formError = ""; render(); };
   const row = node("div", "", "op-form-actions");row.append(save, cancel);
-  box.append(nameLabel, everyLabel, set, profileLabel, watchLabel, row);
+  box.append(nameLabel, everyLabel, set, profileLabel, workflowLabel, gds, qaLabel, watchLabel, row);
   if(formError) box.append(node("p", formError, "op-error"));
   box.onsubmit = event => {
     event.preventDefault();
     if(!form.all && !form.projects.length) { formError = "프로젝트를 하나 이상 고르거나 「전체 프로젝트」를 켜십시오."; render(); return; }
-    const body = {name: form.name.trim(), all: form.all, projects: form.all ? [] : form.projects, profile: form.profile || null, watch: form.watch};
+    const body = {name: form.name.trim(), all: form.all, projects: form.all ? [] : form.projects, profile: form.profile || null, watch: form.watch,
+                  workflow: form.workflow, qa: form.qa, gds6_url: form.workflow === "gds-operator-v2" ? (form.gds6_url || null) : null};
     act(async () => {
       const saved = form.id ? await call(opPath(form.id), "PATCH", body) : await call("api/operators", "POST", body);
       choose(saved.id); form = null;
@@ -537,6 +570,13 @@ function render() {
     tab.setAttribute("role", "tab");tab.setAttribute("aria-selected", String(op.id === selected));
     tab.dataset.operator = op.id;
     tab.append(dot(op), node("span", op.name));
+    /* A gds6 operator nudges a project's next action instead of only watching
+       sessions; the tab says which one it is without opening the form. */
+    if(op.workflow === "gds-operator-v2") {
+      const chip = node("span", "gds6", "op-chip");
+      chip.title = `gds6 프로젝트 안내${op.gds6_url ? ` (${op.gds6_url})` : ""}`;
+      tab.append(chip);
+    }
     if(op.unseen > 0 || op.pending > 0) {
       const badge = node("span", String(op.unseen || op.pending), `op-badge${op.unseen ? " unseen" : ""}`);
       badge.title = `답변을 기다리는 질문 ${op.pending}개${op.unseen ? ` · 새 질문 ${op.unseen}개` : ""}`;

@@ -2892,6 +2892,8 @@ _LIVE_KEYS = (
     "basetemp_sweep_hours", "basetemp_orphan_days",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
+    # read by the daemon on every sync pause check (claunch-z6da6)
+    "reposync_pause_precard_s",
     # read by improv-worker-v2 at each delegation (claunch-yl0to)
     "delegate_profile", "delegate_model",
 )
@@ -2901,7 +2903,9 @@ _LIVE_KEYS = (
 #: session (CLAUNCH_SESSION set) may read them but not write them.
 #: delegate_*: which profile (and so whose account and bill) an agent's
 #: delegated work runs on is the person's choice (claunch-yl0to).
-_PERSON_ONLY_KEYS = ("reposync_push", "delegate_profile", "delegate_model")
+#: reposync_pause_precard_s: a leader that could shorten it would lift the
+#: sync merge pause it is held to (claunch-z6da6).
+_PERSON_ONLY_KEYS = ("reposync_push", "reposync_pause_precard_s", "delegate_profile", "delegate_model")
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:

@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from .. import atomic
 from . import paths
 
 log = logging.getLogger(__name__)
@@ -109,10 +110,10 @@ def _load(session: str) -> List[dict]:
 
 def _write_doc(session: str, doc: dict) -> None:
     path = ledger_file(session)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
+    text = json.dumps(doc, ensure_ascii=False, indent=1)
+    with atomic.scratch(path) as tmp:
+        tmp.write_text(text, encoding="utf-8")
+        atomic.replace(tmp, path)
 
 
 def _save(session: str, rows: List[dict]) -> None:

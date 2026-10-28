@@ -1,0 +1,418 @@
+# gds-operator-v2 — the service loop of one gds6 operator session.
+#
+# The session is started from the operators API exactly like operator-v2's
+# (POST /api/operators/{id}/start, daemon/operators_v2.py), which binds it to
+# the operator and starts this workflow with the start inputs `operator` (the
+# operator's id) and `gds6_url` (the server to read). An operator record
+# whose `workflow` is this one is a gds6 operator: it guides a project built
+# with gds6 — reads the planning/realization ledger, says what the next
+# action is and why, reviews what the last action produced — and it keeps
+# session QA (`qa: true` on the record), so a question the user works through
+# in the QA pane has a place to live beside the Operator view.
+#
+# The surface is the same one operator-v2 uses: every opv2_* call is granted
+# by the binding (daemon/operators_v2.py), so this workflow adds no tools.
+# What it adds is the work: a stage model and an order to nudge along.
+#
+#   greet -> service loop { watch-gate -> observe -> rest }
+#
+# - watch-gate waits on `claunch operators watch` (exit 0 = the operator's
+#   watch is on, 1 = off), the same probe operator-v2 uses: it reads the
+#   record file, not the daemon.
+# - observe is one pass: answer the user's input, poll the scope, read the
+#   gds6 ledger, then post — a review of what finished, and the one next
+#   action with its evidence. Nothing to say means nothing posted.
+# - rest is the 180s timer between passes (operator-v2's cadence).
+#
+# The loop has no round boundary, so node visits pile up for the session's
+# life: max_visits: 0 (check warning unbounded-visits, as in operator-v2).
+# The loop's `max` still bounds it; reaching it ends the run without a
+# wrap-up, and the user restarts the operator.
+cflow: 2
+name: gds-operator-v2
+description: >-
+  gds6 operator 세션의 서비스 루프. gds6의 기획·실현 평면 원장을 읽어 지금 할
+  다음 동작을 순서와 근거와 함께 nudge하고, 끝난 단계의 결과를 리뷰하며, 사용자
+  입력에는 opv2_*로 답한다. 감시가 켜진 동안 180초마다 한 번씩 돈다.
+max_visits: 0
+
+inputs:
+  operator:
+    type: string
+    required: true
+    label: Operator id
+    help: 이 세션이 맡은 operator v2의 id(POST /api/operators/{id}/start가 채운다)
+  gds6_url:
+    type: string
+    default: "http://localhost:8888"
+    label: gds6 서버 주소
+    help: >-
+      원장을 읽을 gds6 서버. 두 평면이 한 프로세스에 뜬 주소다(gds6의 PORT,
+      기본 8888). 워크스페이스가 기본 별칭이 아니면 /w/<slug> 접두사를 쓴다
+
+fragments:
+  inbox: |
+    사용자 입력 처리: `opv2_inbox`를 부른다. 메시지마다 답을 `opv2_post`로
+    게시한다(참조한 세션은 `refs`에). 처리할 입력이 없으면 아무것도 게시하지 않는다.
+    - thread: 사용자와의 대화는 thread 여러 개로 나뉜다. inbox 항목마다 `thread`가
+      있고, 그 항목에 대한 답·`opv2_ask`·`opv2_dispatch`에는 그 값을 `thread`로
+      넘긴다(그 항목을 `reply_to`로 지정해도 같은 thread에 간다). `thread`와
+      `reply_to`가 둘 다 없으면 가장 최근에 활성인 thread에 게시되므로, 여러 thread의
+      입력을 한 번에 받았을 때 답이 다른 thread에 간다. 사용자에게 새 주제를 꺼낼
+      때는 `opv2_thread_open`으로 thread를 열고 그 id에 쓴다.
+    `opv2_post`·`opv2_ask`의 본문은 markdown으로 쓴다(rule `markdown-body`).
+    - 지시 전달: 사용자가 다른 세션에 무엇을 하라고 지시했으면 `opv2_dispatch`에 그
+      메시지의 id를 `on_behalf_of`로 실어 대상 세션에 전달하고, 사용자가 한 말을
+      옮긴다. 대상이나 내용이 모호하면 전달하기 전에 `opv2_ask`(choice 또는 text)로
+      묻는다. ask의 답(승인·거절·선택·텍스트)도 inbox로 온다. 거절된 것은 전달하지
+      않는다.
+    - 일감 배정: 사용자가 일을 맡기면 그 일을 이미 하고 있는 세션을 먼저 찾는다 —
+      `opv2_sessions`로 진행 중 세션을, `opv2_session`·`opv2_issue`로 그 세션의
+      task·이슈가 이 일과 같은지 확인한다. 같은 일감(같은 이슈, 또는 같은 기능의
+      후속)을 하는 실행 중 세션이 있으면 그 세션에 `opv2_dispatch`로 전달한다.
+      그 일을 하던 세션이 종료됐으면(`opv2_sessions` state `ended`) `opv2_resume`으로
+      재개를 요청하고, 재개되지 않을 때 만들 새 세션을 `fallback`(task, project,
+      issue)으로 함께 싣는다. 하던 세션이 없을 때만 `opv2_spawn`으로 새 세션을
+      요청한다. 두 요청 모두 사용자의 메시지 id를 `on_behalf_of`로 싣고, 카드에 보일
+      `reason`(왜 이 세션인가, 왜 새 세션인가)을 적는다.
+      요청은 사용자 알림 카드로 5분 기다린다. 새 세션 요청은 최상위 세션 요청이다 —
+      승인되면 최상위로 만들어지고, 무응답이면 최상위를 만들지 않고 같은 세션(project·
+      task·issue·name·workflow)을 이 operator의 자식으로 만든다. 재개 요청은 무응답이면
+      재개하지 않고 `fallback`을 새 세션 요청으로 올린다.
+      결과(승인·거절·manual·실패)는 터미널에 `[claunch spawn-request <id>]`로 오고
+      요청한 thread에도 남는다. 대기 중인 요청은 `opv2_poll`의 `requests`에 있다. 같은 일로
+      요청을 다시 올리지 않는다. 거절되면 그 사실을 사용자에게 게시하고 지시를
+      기다린다. 새 세션이 만들어지면 그 이름을 사용자에게 알린다.
+      맡겨받은 일이 무거우면(긴 조사·여러 파일의 변경) 그 일을 이 operator가 직접 하지
+      않고 spawn 요청으로 자식 세션에 위임한다 — 자식의 workflow는 자율 선택. 이때도
+      사용자 메시지를 `on_behalf_of`로 싣고 같은 승인 게이트를 거친다. 가벼운 일은
+      operator가 그 자리에서 처리한다.
+    - 작업 질문: 처리 중이거나 처리했던 일감·작업을 물으면 근거를 찾아 답한다 —
+      `opv2_sessions`(진행 중·종료 세션 목록), `opv2_session`(세션의 task·상태·이슈·
+      체크·커밋), `opv2_issue`(보드 이슈와 코멘트), `opv2_commits`,
+      `opv2_transcript_search`(세션 하나 또는 범위 전체의 대화 검색), `opv2_history`
+      (이 operator가 전에 게시·질문·전달한 기록). 답에는 근거가 된 세션 이름, 이슈 id,
+      커밋 해시를 적는다. 찾지 못했으면 찾지 못했다고 쓰고 추측으로 채우지 않는다.
+    - 착지 질문: 일이 어디까지 왔는지, 머지됐는지를 물으면 `opv2_landing`을 부른다 —
+      범위 안 세션마다 이슈와 상태, 브랜치, 기록된 PR, `landed`를 한 번에 준다. 착지는
+      `landed`로 판정한다: `merged`(PR 하나가 머지됨), `open`, `closed`(머지 없이 닫힘),
+      `no-pr`(기록된 PR 없음), `unknown`(상태가 기록되지 않은 PR). 커밋이 master의
+      조상인지로 판정하지 않는다 — squash 머지는 브랜치의 커밋을 master 밖에 남긴다.
+      `no-pr`는 미착지라는 뜻이 아니다(로컬 착지일 수 있다) — `opv2_issue`의
+      `merged <해시>` 코멘트로 확인한다. `branch`는 첫 호출에서 null일 수 있고 다음 호출에서
+      채워진다. `opv2_sessions`·`opv2_session`의 `checks`(C/M/T/D)는 세션이 스스로
+      보고한 값이다 — 답에 쓰면 세션의 보고라고 밝히고, 머지 여부는 `landed`를 따른다.
+    - 범위: 도구가 403으로 거절한 세션·이슈는 이 operator의 범위 밖이다. 범위 밖이라고
+      답하고 다른 경로로 읽으려 하지 않는다.
+  survey: |
+    gds6 원장 읽기 — 이 회차가 어느 단계에 서 있는지 근거로 잰다. 서버 주소는
+    `${data.inputs.gds6_url}` 이다. 셸에서 `curl -s --max-time 10 '<주소>/<경로>'`로
+    읽고 **JSON을 그대로** 판단한다(화면을 열지 않는다). 한 번의 observe에서 아래를
+    순서대로 읽는다. 실패한 호출은 실패했다고 적고 그 부분을 빼고 판단한다 — 읽지
+    못한 것을 「없다」로 읽지 않는다.
+    1. 기획 평면의 다음 단계: `GET /api/plane/progress` → `next`(단계 키 또는 null)와
+       `steps[]`(각 `key`·`label`·`state`(done|stale|pending)·`reason`·`effect`·`count`).
+       이 일곱 단계가 기획의 순서다: `extract`(규칙 추출) → `anchors`(대상 이름 통합)
+       → `catalog`(기능 이름 묶기) → `review`(문서 간 묶음 검토) → `scenarios`(시나리오
+       구성) → `decisions`(결정) → `frames`(작업 범위).
+    2. 범위 밖 규칙의 크기: `GET /api/backlog` (실현 평면. 기획 평면이 안 붙어 있으면
+       503이다 — 그때는 이 항목을 건너뛴다).
+    3. 코드 실측: `GET /api/scan` → `scan`이 null이면 아직 스캔이 없다(`note`가 그렇게
+       말한다). 있으면 `scan.kinds`·`scan.unscheduled`를 읽는다.
+    4. 작업 범위(프레임) 목록: `GET /api/plane/frames` → `frames[]`(각 `frame_id`·
+       `revision`·`title`·`goal`·`archived_at`·`targets`·`context`·`excluded`·`drifted`).
+       기획에서 만든 프레임 전부다. 기획의 `frames` 단계가 done이 아니면 비어 있거나
+       의미가 없다 — 그때는 건너뛴다.
+    5. 작업 범위별 실현 상태: `GET /api/frames/summary` → `frames[<frame_id>]`마다
+       `works`(설계 일감 수)·`issues_origin`·`issues_repo`(보드별 이슈 수)·`run`
+       (`stage`·`status`, 없으면 null).
+       **이 요약은 실현 이력이 있는 프레임만 담는다** — gds6의 `issue-gen/src/server.ts`
+       가 영향·이슈·실행 기록에서 발견한 `frame_id`만 넣기 때문이다. 그래서 4의 목록에
+       있고 5에 없는 프레임은 「없는 프레임」이 아니라 **아직 실현이 시작되지 않은 새
+       프레임**이다. `frames: {}`를 「할 일 없음」으로 읽지 않는다: 기획의 `frames` 단계가
+       done이고 4의 목록이 비어 있지 않으면, 그 프레임들이 8~11단계의 다음 후보다.
+    6. 활성 범위의 실행: 4·5를 합쳐 고른 프레임 하나로
+       `GET /api/delivery?frame_id=<frame_id>` → `run`(활성 실행: `stage`·`status`)과
+       `diagnosis`(`scan`·`targets`·`wired`·`works`·`warnings`)를 읽는다. 활성 실행이
+       없으면 `diagnosis`가 지금 어디서 시작해야 하는지 말한다.
+    7. 그 프레임의 이슈와 열린 결정: `GET /api/beads?frame_id=<frame_id>`,
+       `GET /api/impl-decisions?frame_id=<frame_id>&status=open`,
+       `GET /api/impact/<frame_id>`(규칙-코드 연결 `edges` 가운데 `kind: wire`와 설계
+       일감 `works`).
+    8. 사용자 입력·세션: `opv2_poll`(직전 응답의 `cursor`로)과 `opv2_sessions`.
+       gds6가 만든 분석 세션(`job-<id>`)은 claunch 세션이므로 여기서 보인다 — 상태와
+       마지막 활동을 읽고, 끝났는데 결과가 저장되지 않은 것은 리뷰 대상이다.
+  order: |
+    단계 순서와 화면 — nudge는 이 순서에서 **가장 앞선 미완료 단계** 하나를 가리킨다.
+    기획: 1 규칙 추출(`/plane/#/documents`) → 2 대상 이름 통합 02-1(`/plane/#/anchors`)
+    → 3 기능 이름 묶기 02-2(`/plane/#/features`) → 4 문서 간 묶음 검토 02-3
+    (`/plane/#/relation-review`) → 5 시나리오 구성(`/plane/#/scenarios`) → 6 결정
+    (`/plane/#/decisions`) → 7 작업 범위(`/plane/#/frames`).
+    실현: 8 코드 실측(`/#/code`) → 9 규칙-코드 연결·ECS 설계 일감
+    (`/plane/#/frames/<frame_id>?tab=works`) → 10 전달 실행(연결→설계→패킷→이슈,
+    `/plane/#/frames/<frame_id>?tab=delivery`) → 11 beads 이슈 만들기·저장소 보드로
+    내보내기(`/plane/#/frames/<frame_id>?tab=issues`) → 12 구현(세션·일감,
+    `/#/backlog`·`/#/jobs`).
+    예외 둘: 기획의 `decisions` 단계가 `done`이 아니면 실현의 9~11은 근거가 없다 —
+    먼저 결정을 가리킨다. 그리고 기획의 `next`가 `decisions`이면 그것이 순서상
+    뒤 단계여도 먼저다(결정 없는 어긋남은 구현을 막는다).
+  nudge: |
+    nudge 하나의 모양 — 다음 동작을 정했으면 `opv2_post` 한 건으로 올린다. 여러 건을
+    한꺼번에 올리지 않는다. 본문은 네 줄이다:
+    - 첫 줄: 지금 할 동작 하나(단계 이름 + 무엇을 하는가).
+    - 둘째 줄: 왜 지금인가 — 읽은 값 그대로(`next: extract`, `stale`, `wired 3/12`,
+      `run stage: packet status: rejected` 처럼).
+    - 셋째 줄: 어디로 가는가 — 화면 경로 또는 프로브. 화면 경로는 `${data.inputs.gds6_url}`
+      뒤에 붙인다.
+    - 넷째 줄: 끝났다는 것을 무엇으로 아는가 — 그 단계가 `done`이 되는 근거(예:
+      `/api/plane/progress`의 `steps[extract].state == done`, `delivery run`의 다음
+      `stage`, `issues_repo`가 0에서 늘어남).
+    사용자가 결정해야 다음으로 갈 수 있는 것이면 `opv2_ask`(choice)로 묻고, 그 답을
+    기다리는 동안 다른 동작을 nudge하지 않는다. **여러 번에 걸쳐 답할 질문 묶음**이거나
+    사용자가 QA 창에서 관리해야 하는 질문이면 `qa_ask`로 남긴다(rule `qa-when`).
+    같은 nudge를 매 주기 다시 올리지 않는다. 다시 올리는 것은 셋뿐이다: 동작이
+    바뀌었을 때, 사용자가 물었을 때, 같은 동작이 아직 안 끝난 채 30분이 지났을 때
+    (그때는 첫 줄에 「아직 그대로다」를 붙인다).
+  review: |
+    리뷰 — 직전 관찰과 이번 관찰을 견줘 **끝난 것**을 먼저 말한다. 직전 관찰은
+    `$CLAUNCH_SCRATCH/gds-operator-state.json`에 적어 두고 다음 주기에 읽는다
+    (`/tmp`나 저장소에 쓰지 않는다). 적는 값은 `{at, next, steps: {key: state},
+    frames: {id: {works, issues_repo, run}}, run: {frame, stage, status}}` 이다.
+    바뀐 것이 있으면 `opv2_post`로 리뷰 한 건을 올린다:
+    - 무엇이 끝났나: 단계 키와 이전→지금 상태.
+    - 수치: 끝난 단계가 남긴 수(규칙 수·연결 수·이슈 수·설계 일감 수)를 이전 값과
+      함께. 읽지 못한 수치는 「재지 못함」으로 적는다.
+    - 남은 것: 그 단계가 `done`인데도 남아 있는 경고(`warnings`·`unscheduled`·
+      `unknown`)와 다음 단계.
+    리뷰는 판정이 아니다 — 「잘했다/못했다」를 쓰지 않고, 원장이 말한 값만 쓴다.
+    값이 그대로면 리뷰를 올리지 않는다. 첫 관찰에는 리뷰가 없다(견줄 것이 없다).
+
+rules:
+  opv2-channel:
+    text: |
+      사용자와의 대화는 터미널이 아니라 opv2_* 도구로만 한다 — 터미널에 쓴 글은
+      사용자에게 보이지 않는다. v1 operator_* 도구는 쓰지 않는다.
+    why: >-
+      Operator v2의 화면은 Observer의 operator thread 대화다(daemon/operators_v2.py).
+      operator_* 도구는 v1의 프로젝트당 bot에 묶여 v2 세션은 거절된다.
+    deliver: all
+  inbox-anytime:
+    text: |
+      어느 작업에 있든, 런이 대기(watch-gate·rest)에 있든 `[Operator v2]` 넛지가
+      오면 사용자 입력 처리(opv2_inbox)를 즉시 한다. 그 처리는 런을 움직이지 않는다 —
+      작업 중이면 처리 뒤 그 작업을 이어 하고, 대기 중이면 처리 뒤 턴을 끝낸다.
+      대기 중에 손으로 폴링하지 않는다. 데몬의 시계가 런을 깨운다.
+    why: >-
+      사용자 입력은 감시 주기와 무관하게 바로 답해야 한다. 감시가 꺼진 operator는
+      watch-gate에 계속 머물며 답만 한다.
+    deliver: all
+  dispatch-on-behalf:
+    text: |
+      다른 세션에 대한 지시는 사용자의 메시지나 승인된 ask를 `on_behalf_of`로 둘 때만
+      `opv2_dispatch`로 전달한다. 세션 생성·재개 요청(`opv2_spawn`·`opv2_resume`)도
+      같은 근거가 있을 때만 올린다. 네가 해석한 새 작업을 만들지 않는다. cflow 게이트
+      승인과 다른 세션의 질문에 대한 답은 사용자의 것이다 — 대신 답하지 않는다.
+    why: >-
+      v1 operator와 같은 권한 범위. operators_v2.dispatch·spawn·resume이 on_behalf_of
+      없는 요청을 403으로 거절한다.
+    deliver: all
+  existing-session-first:
+    text: |
+      일을 받으면 그 일을 이미 하고 있는 실행 중 세션에 맡기는 것이 먼저다
+      (`opv2_dispatch`). 그 세션이 종료됐으면 `opv2_resume`, 그런 세션이 없을 때만
+      `opv2_spawn`이다. `claunch new-session`이나 spawn 같은 다른 생성 경로는 쓰지 않는다.
+    why: >-
+      사용자 결정(claunch-iw5i8.15, thread th-d9e343): 실행 중 세션 우선, 종료된 연결
+      세션은 재개 승인 알림, 새 세션은 5분 승인 알림을 거친다(daemon/spawn_gate.py).
+      무응답인 새 세션 요청은 operator의 자식으로 만든다(claunch-iw5i8.16, th-715f44).
+    deliver: all
+  heavy-work-delegate:
+    text: |
+      사용자가 맡긴 일이 무거우면(긴 조사·여러 파일의 변경·맥락을 오래 쓰는 일) operator가
+      직접 수행하지 않고 spawn으로 자식 세션에 위임한다 — 자식이 쓸 workflow는 위임하는
+      쪽이 자율 선택한다. 요청은 사용자의 메시지를 `on_behalf_of`로 싣고 카드에 이유를
+      적어 같은 5분 승인 게이트를 거친다. 자식이 생기면 이름을 사용자에게 알리고 진행은
+      감시 poll로 따라간다. 가벼운 일(질문 답·조회·전달·nudge)은 그 자리에서 한다.
+    why: >-
+      사용자 지시(2026-10-22, claunch-h9l3d): 무거운 작업은 적극적으로 spawn child로
+      위임하도록 operator 지침을 갱신한다(workflow 자율 선택).
+    deliver: all
+  markdown-body:
+    text: |
+      `opv2_post`·`opv2_ask`의 `text`는 markdown으로 쓴다. 결론을 첫 줄에 두고, 세션
+      이름·이슈 id·커밋 해시는 `코드`로, 여러 항목은 목록으로, 표가 필요하면 markdown
+      표로 쓴다. 제목(#)은 쓰지 않는다. 터미널용 정렬 공백이나 ANSI 문자를 넣지 않는다.
+    why: >-
+      Observer의 operator thread 대화와 Operator 대화창이 본문을 markdown으로 렌더링한다
+      (claunch-iw5i8.10, 사용자 지시 2026-10-18).
+    deliver: all
+  stage-order:
+    text: |
+      nudge는 gds6 파이프라인의 순서에서 가장 앞선 미완료 단계 하나를 가리킨다:
+      규칙 추출 → 대상 이름 통합 → 기능 이름 묶기 → 문서 간 묶음 검토 → 시나리오 구성
+      → 결정 → 작업 범위 → 코드 실측 → 규칙-코드 연결·설계 일감 → 전달 실행 → beads
+      이슈 → 구현. 뒤 단계를 앞 단계보다 먼저 가리키지 않는다. 예외는 둘뿐이다:
+      기획의 `decisions`가 `done`이 아니면 실현 단계를 가리키지 않고, 어긋남을 푸는
+      결정이 남아 있으면 순서와 무관하게 결정이 먼저다.
+    why: >-
+      gds6 README가 일감의 길을 「작업 범위 구성 → 규칙·시나리오 분류 → 코드 연결·실측
+      → 패킷 → beads 이슈」로 정하고, `/api/plane/progress`의 `next`가 같은 순서를
+      원장에서 계산한다(plane/src/progress.ts). 순서를 operator가 다시 정하면 두 판정이
+      갈린다.
+    deliver: all
+  evidence-before-nudge:
+    text: |
+      nudge마다 근거를 붙인다 — 어느 엔드포인트에서 읽은 어떤 값이 그 동작을 지금의
+      다음으로 만드는지. 읽지 못한 것을 「없다」로 쓰지 않고, 기억으로 단계 상태를
+      말하지 않는다. nudge의 첫 줄은 동작, 둘째 줄은 근거 값, 넷째 줄은 그 동작이
+      끝났다는 것을 아는 방법이다.
+    why: >-
+      gds6의 설계 원칙(README 「없는 변경을 있다고 말하지 않는다」, notes/stages.md)이
+      요구하는 것은 값이지 인상이 아니다. 근거 없는 nudge는 사용자가 확인할 수 없고,
+      틀렸을 때 틀린 이유도 남지 않는다.
+    deliver: all
+  review-before-nudge:
+    text: |
+      직전 관찰과 이번 관찰 사이에 단계가 `done`이 되었거나 전달 실행의 `stage`가
+      움직였으면, 다음 동작을 nudge하기 전에 그 결과를 리뷰 한 건으로 올린다. 리뷰는
+      값만 쓴다(이전→지금, 남은 경고). 바뀐 것이 없으면 리뷰를 올리지 않는다.
+    why: >-
+      사용자 지시의 「결과를 리뷰하는 operator」가 이 자리다. 리뷰를 nudge 뒤에 두면
+      사용자는 다음 일로 넘어간 뒤에야 끝난 일을 듣는다.
+    deliver: all
+  one-action-per-post:
+    text: |
+      한 번의 게시에는 다음 동작 하나만 싣는다. 목록으로 여러 단계를 늘어놓지 않는다.
+      여러 동작이 남아 있으면 가장 앞선 하나를 고르고 나머지는 그 동작이 끝난 뒤의
+      관찰에 맡긴다. 같은 nudge를 매 주기 다시 올리지 않는다(30분 규칙은 fragment
+      `nudge`에 있다).
+    why: >-
+      Operator v2의 응답 규칙(role-operator: 「Say only what changes what the user
+      does next」)과 같은 이유다. 목록은 사용자가 스스로 순서를 다시 정하게 만든다.
+    deliver: all
+  qa-when:
+    text: |
+      질문의 채널은 셋이다. 하나를 고른다.
+      - 다음 동작의 문을 여는 단일 결정 → `opv2_ask`(approve/choice/text). 답은
+        Operator 화면의 그 thread로 온다.
+      - 여러 항목을 한 번에 답해야 하거나, 사용자가 QA 창에서 다시 열어 볼 질문 →
+        `qa_ask`. 답은 터미널에 `[claunch qa]` 블록으로 온다.
+      - gds6 화면에서 사람이 직접 고르는 판정(대상 이름 통합·기능 묶기·어긋남 결정) →
+        질문을 만들지 않고 그 화면을 nudge에 적는다. operator는 그 판정을 대신하지
+        않는다.
+      같은 질문을 두 채널에 함께 올리지 않는다. `qa_ask`로 올린 질문에는
+      `opv2_post`로 그 사실과 qa id를 한 줄 알린다.
+    why: >-
+      사용자 지시(2026-10-27): operator 표면 안에서 간단한 QA 도구도 쓸 수 있게 한다.
+      두 채널을 겹쳐 쓰면 같은 질문에 두 곳에서 답하게 된다.
+    deliver: all
+  no-decisions:
+    text: |
+      판정은 사용자와 gds6 화면의 몫이다. operator는 대상 이름을 통합하지 않고, 기능을
+      묶지 않고, 어긋남을 어느 쪽으로 풀지 정하지 않고, 프레임을 고르지 않는다(어느
+      프레임을 먼저 볼지는 「남은 작업이 있는 프레임」이라는 원장 값으로 고른다).
+      gds6의 API에 쓰기 호출을 하지 않는다 — 이 operator는 읽기만 한다.
+    why: >-
+      gds6의 원칙: 판단은 저장하고 파생은 저장하지 않는다(README). 원장에 쓰는 것은
+      그 화면의 검증을 통과한 제안과 사람의 승인뿐이고(notes/llm-jobs.md), operator가
+      대신 쓰면 누가 정했는지가 사라진다.
+    deliver: all
+
+nodes:
+  greet:
+    title: 시작 — 대기 중인 사용자 입력 처리
+    prompt: |
+      너는 gds6 operator v2(id `${data.inputs.operator}`)다. 담당 범위와 이름은 세션의
+      오프닝 task에 있고, gds6 서버는 `${data.inputs.gds6_url}` 이다.
+      ${frag:inbox}
+      시작할 때 쌓여 있던 입력을 모두 처리하고 처리 건수를 보고한다. 입력이 없으면 0건이다.
+      오프닝의 gds6-operator 묶음에 단계 표와 nudge 규칙이 있다 — 이 런은 그것을 실행하는
+      순서일 뿐이고, 묶음과 이 런의 문구가 다르면 묶음을 따른다.
+      관찰(opv2_poll·gds6 읽기)은 이 작업에서 하지 않는다 — 감시가 켜져 있으면 다음
+      단계가 한다.
+    done_when: opv2_inbox의 입력을 모두 읽고 각각에 답(또는 전달·질문)했으며 처리 건수가 보고에 있다.
+    returns:
+      ok: {handled: int}
+    effects: [fs.read, mesh.send]
+
+  observe:
+    title: 관찰·리뷰·nudge
+    prompt: |
+      감시가 켜져 있다. 한 번 관찰하고, 사용자가 다음에 할 일을 바꾸는 것만 게시한다.
+      순서는 넷이다.
+
+      1. ${frag:inbox}
+
+      2. 관찰: ${frag:survey}
+         `opv2_poll`의 커서는 `$CLAUNCH_SCRATCH/opv2-cursor.txt`에 적어 두고 읽는다
+         (`/tmp`나 저장소에 쓰지 않는다). `more: true`면 같은 판단 안에서 다시 부른다.
+         응답의 `watch`가 false면 감시가 방금 꺼진 것이다 — 게시하지 않고 커서만 적어
+         두고 이 작업을 끝낸다. poll이 실패하면(연결 timeout, 데몬 무응답) 커서는 그대로
+         두고, 감시가 끊겼다는 카드를 `level: attention`으로 한 번 올리고 그 카드 id를
+         `$CLAUNCH_SCRATCH/opv2-outage-card.txt`에 적는다. 실패가 이어지는 동안 같은
+         카드를 다시 올리지 않는다. 다음 poll이 성공하면 그 카드 id를 `reply_to`로 해서
+         복구를 `level: info`로 게시하고 파일을 지운다. `degraded`에 항목이 있으면 이번
+         응답에 그 부분이 빠졌다 — 게시하지 않고 다음 관찰에서 다시 본다.
+
+      3. 리뷰: ${frag:review}
+         gds6 읽기가 하나도 성립하지 않았으면(모든 호출 실패) nudge를 만들지 않고,
+         읽지 못했다는 사실과 실패한 경로를 `level: attention`으로 한 번 게시한다.
+
+      4. nudge: ${frag:order}
+         ${frag:nudge}
+         여러 건이면 리뷰 한 건 + nudge 한 건까지다. 게시할 것이 없으면 0건이다.
+         사용자 입력에 대한 답은 이미 1에서 했다 — 여기서 되풀이하지 않는다.
+
+      5. 보고: 게시·질문 건수, 커서, 읽은 엔드포인트 수를 보고한다.
+    done_when: >-
+      opv2_inbox의 입력에 모두 답했고, opv2_poll을 커서로 불러 새 이벤트를 판단했으며,
+      gds6 원장을 읽어 다음 동작을 정했거나(정했으면 게시했다) 게시할 것이 없다는 근거가
+      있고, 게시·질문 건수와 커서가 보고에 있다.
+    returns:
+      ok: {posted: int, asked: int, reviewed: int, cursor: "str?"}
+    effects: [fs.read, fs.write, mesh.send]
+
+  probe-failed:
+    title: 감시 상태를 읽지 못함
+    prompt: |
+      감시 상태 probe(`claunch operators watch`)가 연속으로 판정 불가(종료 코드 2)를
+      냈다. 이 operator의 레코드(`<데몬 디렉터리>/operators/${data.inputs.operator}.json`)를
+      찾지 못했거나 읽지 못한 것이다. 직접 `claunch operators watch`를 한 번 실행해
+      stderr의 사유를 확인한다.
+      사용자에게 `opv2_post`(`level: attention`)로 한 번 알린다: 감시 상태를 읽지
+      못해 감시를 쉬고 있고, 10분 뒤 다시 확인한다는 것과 사유. operator가 삭제됐으면
+      (레코드 없음) 그렇게 적는다. 같은 사유로 이미 올린 카드가 있으면(`opv2_history`)
+      다시 올리지 않는다. 사용자 입력 처리는 이 동안에도 계속한다.
+    done_when: probe 사유를 확인했고, 사용자에게 알렸거나 이미 알린 카드 id가 보고에 있다.
+    returns:
+      ok: {reason: str}
+    effects: [fs.read, mesh.send]
+
+body:
+  seq:
+    - greet
+    - id: service
+      loop:
+        while: "true"
+        max: 100000
+        do:
+          seq:
+            - id: watch-gate
+              wait:
+                probe: [claunch, operators, watch]
+                poll: 30
+                seconds: 3600
+                undecided_max: 5
+                describe: 이 operator의 감시(watch)가 켜져 있다
+              on:
+                # 감시가 꺼진 채 한 시간이 지났다: 같은 대기를 새로 시작한다.
+                timeout: {continue: null}
+                undecidable:
+                  seq:
+                    - probe-failed
+                    - id: probe-backoff
+                      wait: {seconds: 600}
+                    - {continue: null}
+            - observe
+            - id: rest
+              wait: {seconds: 180}

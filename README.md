@@ -3181,7 +3181,17 @@ work-branch push; the line under the picker says what the chosen mode does:
   after execution fails. Pending or refused approval and stale plans do not
   trigger recovery.
 
-For A or B, choose a live **parent session**. The child inherits its settings,
+For A or B, choose a live or held **parent session**. When a mesh leader works
+in this repository, only its leaders are offered: while the child's
+`reposync-merge-push-v2` run stands in `prepare` through `execute`, ordinary
+merges into the repository pause (`tools/delayed_sweep.py admit` refuses every
+candidate but the sync's own issue, naming the sync session and its base local
+commit). The pause ends at `receipt`, when the run ends or is aborted, or when
+the child session ends; it lasts at most until the approval card's deadline
+plus 10 minutes, and before any card until the run's last report plus
+`daemon.reposync_pause_precard_s` (default 1800 seconds). With no leader for
+the repository, only sessions in no mesh are offered, marked "no merge pause".
+The child inherits its settings,
 uses the normal spawn policy and board onboarding, and gets a new worktree
 based on the selected local commit. Its task includes the repository, remote,
 source and destination, recorded tips, and the original error for B. The panel
@@ -4972,11 +4982,23 @@ moves into one thread titled 「이전 대화」 and the original record is kept
 `<id>.feed-backup.json` beside it; the move runs once and a repeat changes
 nothing. **Start** picks a profile
 (and the model and effort when its harness declares them) and creates one
-session running the bundled `operator-v2` workflow with the operator's id as
-its input; **Stop** ends it (an agent may not stop an operator — that is the
-user's). The same conversation opens as a dialog over any page from the
-Operator segment of the floating dock at the bottom right, or **Alt+O**
-(Escape, the × button or a click on the dimmed backdrop around it closes it); the
+session running the workflow its record names — the bundled `operator-v2`
+unless the form picked another — with the operator's id as its input;
+**Stop** ends it (an agent may not stop an operator — that is
+the user's). **Workflow** starts the operator on `gds-operator-v2` instead
+for a project built with gds6: that one reads the project's planning and
+realization ledger (`/api/plane/progress`, `frames/summary`, `delivery`,
+`beads`, `/api/scan`) and posts a single next action with the value that
+makes it next, a review of what finished since its last pass, and the
+questions it cannot answer itself. Its **gds6 server** row names the address
+(default `http://localhost:8888`), and **세션 QA도 함께 쓰기** keeps `qa_*` on
+its surface beside the Operator view, for a question you work through in the
+QA pane. It reads the ledger and never writes to it; the stage order, the
+nudge and review shapes, and the three question channels are in
+`docs/gds6-operator.md`. The same conversation opens as a dialog over any
+page from the Operator segment of the floating dock at the bottom right, or
+**Alt+O** (Escape, the × button or a click on the dimmed backdrop around it
+closes it); the
 dialog preselects an operator whose scope covers the session on screen, and
 its management lives on the Observer page. Above the conversation, in the
 dock and the dialog alike, a session line that does not scroll names the

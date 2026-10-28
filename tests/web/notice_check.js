@@ -62,6 +62,17 @@ function build(opts) {
         },
       },
       appendChild: (c) => { c.parentNode = n; n.children.push(c); return c; },
+      // A card is placed among the others by its own stamp rather than always
+      // at the head (claunch-notice-card-order-animate-9znvg), so the stub
+      // models the parent calls that reaches: the insert, the first child and
+      // removeChild below.
+      insertBefore: (c, ref) => {
+        const i = n.children.indexOf(ref);
+        c.parentNode = n;
+        if (i < 0) n.children.push(c); else n.children.splice(i, 0, c);
+        return c;
+      },
+      get firstChild() { return n.children[0] || null; },
       removeChild: (c) => {
         const i = n.children.indexOf(c);
         if (i >= 0) n.children.splice(i, 1);

@@ -135,14 +135,18 @@ function build() {
     "notice-settings": node("hidden"),
     "notice-settings-body": node(),
   };
-  // Every rebuild of the panel starts by clearing the body; count those, and
-  // count the nodes one costs.
-  const body = nodes["notice-panel-body"];
-  const innerHTML = Object.getOwnPropertyDescriptor(body, "innerHTML");
-  Object.defineProperty(body, "innerHTML", {
-    get: innerHTML.get,
-    set: (v) => { seen.rebuilds += 1; innerHTML.set(v); },
-  });
+  // One rebuild of the panel is one pass through noticePanelPaint that got
+  // past its state check, and every such pass ends in noticePanelPlace
+  // (claunch-notice-card-order-animate-9znvg). The counter is that call,
+  // reached from outside: the placement binding in the sandbox is wrapped
+  // below, and noticePanelPaint resolves the same binding, so a loop of
+  // repaints is a loop here too.
+  //
+  // The teardown this harness was built on (`innerHTML = ""`) is gone — an
+  // unchanged row keeps its node now — so counting that alone counted zero of
+  // everything.
+  const count = () => { seen.rebuilds += 1; };
+  globalThis.__noticeRebuildCount = count;
 
   const clock = { at: BASE };
   class FakeDate extends Date {
@@ -181,6 +185,10 @@ function build() {
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
     "confirm", "prompt", "document", "window",
     code +
+    "\n;(function () {\n" +
+    "  const place = noticePanelPlace;\n" +
+    "  noticePanelPlace = (b, r) => { globalThis.__noticeRebuildCount(); return place(b, r); };\n" +
+    "})();" +
     "\nreturn {noticePanelToggle, runGateSync, noticePanelBatch, noticePanelPaint," +
     " noticeClocksPaint, noticeClocks, noticeHistory, gatePending, noticeBellPaint," +
     " refreshRestartGate, refreshSpawnGate};"

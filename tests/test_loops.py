@@ -102,6 +102,29 @@ def test_a_key_updates_the_open_entry_in_place(home):
     assert loops.close_key("s1", "resend:team:lead")[0]["id"] == third["id"]
 
 
+def test_a_transient_winerror_5_on_the_ledger_rename_is_retried(home, monkeypatch):
+    import os
+
+    from claude_launcher import atomic
+
+    real, calls = os.replace, []
+
+    def flaky(src, dest):
+        calls.append(dest)
+        if len(calls) < 3:
+            err = PermissionError(13, "Access is denied")
+            err.winerror = 5
+            raise err
+        real(src, dest)
+
+    monkeypatch.setattr(atomic.os, "replace", flaky)
+    monkeypatch.setattr(atomic.time, "sleep", lambda _s: None)
+    entry = loops.add("s1", "wait through a scanner holding the file")
+    assert len(calls) == 3
+    assert [r["id"] for r in loops.open_entries("s1")] == [entry["id"]]
+    assert [p.name for p in loops.ledger_file("s1").parent.glob("*.tmp")] == []
+
+
 def test_what_is_required_and_the_horizon_must_be_positive(home):
     with pytest.raises(ValueError):
         loops.add("s1", "   ")

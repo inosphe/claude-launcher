@@ -84,7 +84,7 @@ class FakeManager:
         return True
 
 
-def run(tmp_path, scenario, sessions=None, operator_sessions=()):
+def run(tmp_path, scenario, sessions=None, operator_sessions=(), operator_qa=()):
     sessions = sessions or [FakeSession("s1"), FakeSession("s2")]
     mgr = FakeManager(sessions)
     app = web.Application()
@@ -94,6 +94,9 @@ def run(tmp_path, scenario, sessions=None, operator_sessions=()):
         class _Operators:
             def operator_of_session(self, name):
                 return {"id": f"op-{name}"} if name in operator_sessions else None
+
+            def qa_allowed(self, name):
+                return name in operator_qa
         app["operators_v2"] = _Operators()
     qa_api.install(app, Q.QaStore(tmp_path / "qa.sqlite3"))
 
@@ -183,6 +186,22 @@ def test_an_operator_session_has_no_session_qa(tmp_path):
         await req("POST", "/api/qa", {"session": "s2", "title": "Q2"}, status=200)
     run(tmp_path, scenario, [FakeSession("s1"), FakeSession("s2"), FakeSession("op1")],
         operator_sessions={"op1"})
+
+
+def test_an_operator_that_keeps_qa_asks_in_the_pane(tmp_path):
+    """A gds6 operator's record may keep session QA (operators_v2 ``qa``).
+
+    The same store decides both ways: an operator whose record leaves QA off
+    keeps the old refusal, and one whose record keeps it owns its questions
+    in the QA pane beside the Operator view.
+    """
+    async def scenario(req, mgr):
+        q = (await req("POST", "/api/qa", {"session": "op1", "title": "Q"}))["question"]
+        await req("POST", f"/api/qa/{q['id']}", {"session": "op1", "revision": 1, "title": "Q2"})
+        assert (await req("GET", "/api/qa?session=op1"))["questions"]
+        await req("POST", "/api/qa", {"session": "op2", "title": "Q"}, status=403)
+    run(tmp_path, scenario, [FakeSession("s1"), FakeSession("op1"), FakeSession("op2")],
+        operator_sessions={"op1", "op2"}, operator_qa={"op1"})
 
 
 def test_a_held_session_is_woken_with_the_answer(tmp_path):

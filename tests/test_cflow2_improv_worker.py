@@ -3418,6 +3418,101 @@ def test_the_request_prompt_states_what_a_blocked_round_does_not_do():
     assert "`blocked`" in prompt
 
 
+def test_the_prompt_narrows_the_trigger_to_a_round_that_arrives_blocked():
+    """The trigger the prompt gives has to be one that reaches this node.
+
+    ``86a8a77b`` wrote the first trigger as "``land``'s landing decision ended
+    in escalation and the answer was *do not raise it this time*". That round
+    never arrives here: a ``hold`` answer makes ``landing-review-route``'s
+    ``on.hold`` return ``held`` from ``land`` itself, so everything under
+    ``submit`` -- including this node -- is skipped. The prompt was telling the
+    session holding this node to report a disposition it could only be given
+    by a path that cannot reach it.
+
+    Read from ``prompt`` alone. The same idea also appears in ``done_when``,
+    so a union-wide guard would stay green with the prompt unchanged -- the
+    vacuous-assertion class this issue family has paid for four times
+    (claunch-improver-blocked-prompt-fixes-jcjai).
+
+    Two halves, because either one alone can be satisfied by the wrong text:
+    the unreachable trigger is gone, **and** the prompt states why a hold
+    never reaches here, with the field that carries the answer away.
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    prompt = _words(doc["nodes"]["integration-request"]["prompt"])
+
+    # The unreachable trigger, as 86a8a77b wrote it.
+    assert _words("`land`의 착지 결정이 escalate로 끝나 그 답이") not in prompt
+
+    # The remaining trigger is the state this node can observe on entry.
+    assert _words("이 스텝에 들어설 때 착지가 막혀 있으면") in prompt
+
+    # ...and the hold answer is named as the one that never arrives, with the
+    # mechanism (return: held from land) and the consequence (submit is skipped
+    # and this step does not run). Naming the mechanism is what makes the
+    # sentence checkable by a later reader; the consequence is what tells the
+    # session that a held round is not its outcome to report.
+    assert _words("상위의 `hold` 답") in prompt
+    assert _words("`return: held`") in prompt
+    assert _words("`submit` 아래의 이 스텝이 실행되지 않는다") in prompt
+
+
+def test_the_prompt_tells_the_next_round_how_to_clear_the_blocked_marker():
+    """``BLOCKED:`` is a brake marker, and the prompt must say how it is lifted.
+
+    ``land``'s landing check 4 reads ``claunch beads comments`` for
+    ``CHANGES REQUESTED`` / ``HOLD`` / ``BLOCKED`` that are not resolved, and
+    escalates when one is. ``claunch beads comments`` has ``add`` and ``list``
+    with no delete, so a ``BLOCKED:`` this node writes can only ever be lifted
+    by a later comment -- and without that instruction the marker this node
+    was just told to write becomes a latch: the same issue, picked up next
+    round, escalates at check 4 forever.
+
+    The two precedents in this file state the resolution alongside the marker
+    (``sim-gate`` at :1329, ``remote-setup`` at :1153). This asserts the same
+    for the marker this prompt introduces, and asserts the three properties
+    that make the instruction usable rather than decorative:
+
+    * the resolution comment has a fixed spelling a later reader can look for,
+      carrying the marker's own ``@ <tip>`` so one round's resolution cannot
+      silently clear another round's marker;
+    * who may write it is stated (the marker's author or the ancestor that
+      set it) -- a resolution anyone can write is not a gate;
+    * the reason is required to be a checkable condition, because check 4
+      escalates when it cannot decide whether a marker is resolved.
+
+    The lift spelling is ``CLEARED``, not ``UNBLOCKED``: check 4 looks for
+    ``BLOCKED``, and ``UNBLOCKED`` contains it, so the resolution comment
+    would read as a live brake to anyone scanning for the marker. This test
+    pins that, because it is a property of the spelling rather than of any
+    one sentence and the obvious word for "lift a block" is the broken one.
+
+    Read from ``prompt`` alone, for the reason given in the sibling tests.
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    prompt = _words(doc["nodes"]["integration-request"]["prompt"])
+
+    assert _words("CLEARED: 착지 요청 없음 @ <tip>") in prompt
+    # The prompt must carry the reason the lift word is CLEARED and not the
+    # obvious UNBLOCKED: check 4 looks for `BLOCKED`, which sits inside
+    # `UNBLOCKED`. Asserting "BLOCKED" not in "CLEARED" would measure this
+    # test's own literals and could never fail -- so the guard is that the
+    # prompt states the trap, which is what stops a later author putting the
+    # word back.
+    assert _words("낱말을 `UNBLOCKED`로 쓰지 않는 이유") in prompt
+    # who may write it, named: the marker's author or the ancestor that set it.
+    # Asserted as the named parties, not as the word "자격" -- a survivor of a
+    # half-applied edit kept that word while losing the parties, and the first
+    # version of this test stayed green on it.
+    assert _words("남긴 세션 자신(다음 회차의 같은 세션이다)과, 마커를 상위가 건 경우 그 상위다") in prompt
+    assert _words("확인 가능한 조건") in prompt
+    # the marker it resolves is the one this same prompt has the node write,
+    # and the check that reads it is named -- otherwise "clear the marker"
+    # points at nothing the session can find
+    assert _words("BLOCKED: 착지 요청 없음") in prompt
+    assert _words("착지 확인 4") in prompt
+
+
 def test_a_blocked_request_reaches_queue_recheck(tmp_path, monkeypatch):
     """The wiring, driven: a ``blocked`` request keeps the round loop going.
 

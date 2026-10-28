@@ -2788,6 +2788,68 @@ def test_the_base_worktree_is_removed_after_the_run(repo, split_gate):
     assert listed.count("worktree ") == 1, listed
 
 
+def test_a_failed_remove_drops_only_its_own_worktree(
+    repo, split_gate, tmp_path, monkeypatch, capsys
+):
+    """claunch-wuaup.1: no repository-wide ``git worktree prune`` as fallback.
+
+    Another session's worktree whose directory is out of sight at that moment
+    (here: renamed away) is exactly what a global prune would unregister. The
+    fallback must leave it registered and still remove the base worktree.
+    """
+    other, away = tmp_path / "other-wt", tmp_path / "other-wt-away"
+    _git(repo, "worktree", "add", "-q", "--detach", str(other), "master")
+    other.rename(away)
+
+    real_git = changed_tests._git
+    calls = []
+
+    def git(where, *args, **kw):
+        calls.append(args)
+        if args[:2] == ("worktree", "remove"):
+            raise LookupError("simulated: remove refused")
+        return real_git(where, *args, **kw)
+
+    monkeypatch.setattr(changed_tests, "_git", git)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    try:
+        assert split_gate() == 0
+    finally:
+        away.rename(other)
+
+    assert ("worktree", "prune") not in calls
+    listed = _git(repo, "worktree", "list", "--porcelain")
+    assert listed.count("worktree ") == 2, listed
+    assert other.as_posix() in listed.replace("\\", "/"), listed
+    assert not list((tmp_path / "scratch").glob("*-base-*"))
+    assert "WARNING: the base worktree was not fully removed" not in (
+        capsys.readouterr().err
+    )
+
+
+def test_the_base_cache_is_keyed_by_the_interpreter(repo, split_gate, monkeypatch):
+    """A base verdict taken under one Python does not answer for another."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert split_gate() == 0
+    assert split_gate.receipt()["base_cached"] is False
+
+    monkeypatch.setattr(changed_tests, "interpreter_tag", lambda: "cpython-9.9.9-test")
+    _write(repo, "src/pkg/mesh.py", "x = 3\n")
+    assert split_gate() == 0
+
+    assert split_gate.runs() == "hbhb"
+    assert split_gate.receipt()["base_cached"] is False
+    commit = _git(repo, "rev-parse", "master").strip()
+    names = sorted(
+        p.name
+        for p in changed_tests.receipts_dir(repo, split_gate.receipts).glob(
+            f"base-{commit}-*.json"
+        )
+    )
+    assert len(names) == 2, names
+    assert any(n.endswith("-cpython-9.9.9-test.json") for n in names), names
+
+
 def test_deselected_node_ids_reach_the_run_and_the_receipt(repo, split_gate, tmp_path):
     """What a hand-run pytest left nowhere is now in the receipt and its key."""
     _write(repo, "src/pkg/mesh.py", "x = 2\n")

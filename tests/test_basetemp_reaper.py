@@ -68,6 +68,16 @@ def _session(name: str) -> SimpleNamespace:
     return SimpleNamespace(sdef=SimpleNamespace(name=name))
 
 
+def _age(path: Path, days: float) -> None:
+    """Backdate a tree so the age gate treats it as abandoned."""
+    stamp = time.time() - days * 86400.0
+    for target in [path, *path.iterdir()]:
+        try:
+            os.utime(target, (stamp, stamp))
+        except OSError:
+            pass
+
+
 # ---- naming ---------------------------------------------------------------- #
 
 @pytest.mark.parametrize("name, session, expected", [
@@ -519,6 +529,174 @@ def test_the_clock_runs_the_pass_off_the_event_loop_and_stops(tmp_path):
 
     assert not old.exists()
     assert [Path(r["path"]).name for r in rows] == ["s1w2"]
+# ---- abandoned trees: who they belong to --------------------------------- #
+# A tree whose session is in no registry has only its name (claunch-2hnyf):
+# the prefix before the stamp, the trailing w or the first dash.
+
+@pytest.mark.parametrize("name, expected", [
+    ("s995c1011010955", "s995"),
+    ("s995w", "s995"),
+    ("s995-iso", "s995"),
+    ("s995-rev2w", "s995-rev2"),
+    ("s995-rev2c1011010955", "s995-rev2"),
+    ("s995-", None),
+    ("unrelated", None),
+    ("pytest-of-user", "pytest"),
+])
+def test_derived_owner_is_the_longest_session_shaped_prefix(name, expected):
+    assert br.derived_owner(name) == expected
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("s995", True),
+    ("s995-rev2", True),
+    ("s995c1011010955", False),   # a basetemp name, not a session name
+    ("pytest", False),
+    ("worker-3", False),
+])
+def test_looks_like_session_accepts_the_loops_names_only(name, expected):
+    assert br.looks_like_session(name) is expected
+
+
+def test_candidates_take_ended_and_abandoned_trees_and_keep_live_ones(tmp_path):
+    root = tmp_path / "t"
+    ended = _run_tree(root, "s1c1011010955")
+    alive = _run_tree(root, "s2c1011010955")
+    held_alive = _run_tree(root, "s3c1011010955")
+    abandoned = _run_tree(root, "s42c1011010955")
+    reused_name = _run_tree(root, "s43-rev2c1011010955")
+    for path in (ended, alive, held_alive, abandoned, reused_name):
+        _age(path, 5)
+    fresh = _run_tree(root, "s45c1011010955")
+    not_a_session = _run_tree(root, "logs-2026")
+    _age(not_a_session, 5)
+    sessions = [("s1", True), ("s2", False), ("s3", False)]
+
+    picked = _reaper(tmp_path, sessions).candidates()
+
+    assert sorted(path.name for _session_name, path in picked) == [
+        "s1c1011010955", "s42c1011010955", "s43-rev2c1011010955",
+    ]
+    owners = {path.name: name for name, path in picked}
+    assert owners["s42c1011010955"] == "s42"
+    assert owners["s43-rev2c1011010955"] == "s43-rev2"
+    assert fresh.is_dir()
+
+
+def test_candidates_use_the_longest_known_owner(tmp_path):
+    # s99 is live and s995 ended; s995's tree is not s99's to keep.
+    root = tmp_path / "t"
+    theirs = _run_tree(root, "s99c1011010955")
+    theirs2 = _run_tree(root, "s995c1011010955")
+    _age(theirs, 5)
+    _age(theirs2, 5)
+
+    picked = _reaper(tmp_path, [("s99", False), ("s995", True)]).candidates()
+
+    assert [path.name for _name, path in picked] == ["s995c1011010955"]
+
+
+def test_candidates_spare_a_name_live_in_another_instance(tmp_path):
+    root = tmp_path / "t"
+    theirs = _run_tree(root, "s42c1011010955")
+    _age(theirs, 5)
+
+    picked = _reaper(tmp_path, [], foreign={"s42"}).candidates()
+
+    assert picked == []
+
+
+def test_prune_dry_run_deletes_nothing_and_writes_no_history(tmp_path):
+    root = tmp_path / "t"
+    ended = _run_tree(root, "s1c1011010955")
+    abandoned = _run_tree(root, "s42c1011010955")
+    _age(ended, 5)
+    _age(abandoned, 5)
+
+    rows = _reaper(tmp_path, [("s1", True)]).prune()
+
+    assert ended.is_dir() and abandoned.is_dir()
+    assert not (tmp_path / "daemon" / br.HISTORY_NAME).exists()
+    assert {row["outcome"] for row in rows} == {"dry-run"}
+    assert {row["session"] for row in rows} == {"s1", "s42"}
+
+
+def test_prune_apply_writes_the_history_row_before_removing(tmp_path, monkeypatch):
+    root = tmp_path / "t"
+    tree = _run_tree(root, "s1c1011010955")
+    _age(tree, 5)
+    history = tmp_path / "daemon" / br.HISTORY_NAME
+    real_rmtree = br.shutil.rmtree
+    seen = []
+
+    def rmtree(path, **kw):
+        # The record must exist by the time the tree is touched.
+        seen.append((Path(path).name, history.is_file() and history.read_text(encoding="utf-8")))
+        real_rmtree(path, **kw)
+
+    monkeypatch.setattr(br.shutil, "rmtree", rmtree)
+    _reaper(tmp_path, [("s1", True)]).prune(apply=True)
+
+    assert seen and seen[0][0] == "s1c1011010955"
+    assert '"outcome": "removed"' in seen[0][1]
+    assert not tree.exists()
+    [row] = _rows(tmp_path)
+    assert row["session"] == "s1"
+    assert row["outcome"] == "removed"
+
+
+def test_prune_apply_corrects_a_locked_tree_with_a_second_row(tmp_path, monkeypatch):
+    root = tmp_path / "t"
+    locked = _run_tree(root, "s1c1011010955")
+    _age(locked, 5)
+    real_rmtree = br.shutil.rmtree
+
+    def rmtree(path, **kw):
+        if Path(path) == locked:
+            handler = kw.get("onexc") or kw.get("onerror")
+            handler(os.unlink, str(locked / "popen-gw0"), PermissionError())
+            return
+        real_rmtree(path, **kw)
+
+    monkeypatch.setattr(br.shutil, "rmtree", rmtree)
+    _reaper(tmp_path, [("s1", True)]).prune(apply=True)
+
+    outcomes = [(row["outcome"], row["path"]) for row in _rows(tmp_path)]
+    assert [outcome for outcome, _path in outcomes] == ["removed", "locked"]
+    assert locked.is_dir()
+
+
+# ---- the boot sweep of abandoned trees ----------------------------------- #
+
+def test_boot_sweep_takes_only_old_abandoned_session_trees(tmp_path):
+    root = tmp_path / "t"
+    abandoned = _run_tree(root, "s42c1011010955")
+    fresh = _run_tree(root, "s43c1011010955")
+    not_a_session = _run_tree(root, "notes-2026")
+    alive = _run_tree(root, "s1c1011010955")
+    for path in (abandoned, not_a_session, alive):
+        _age(path, br.ORPHAN_AGE_DAYS + 2)
+
+    _reaper(tmp_path, [("s1", False)]).reap_ended()
+
+    assert not abandoned.exists()
+    assert fresh.is_dir() and not_a_session.is_dir() and alive.is_dir()
+    assert [(row["session"], row["outcome"]) for row in _rows(tmp_path)] == [
+        ("s42", "removed")
+    ]
+
+
+def test_boot_sweep_keeps_a_held_sessions_trees(tmp_path):
+    # registry_view reports a held session as not ended (Session.held_at),
+    # which is the whole of the hold exemption here (claunch-2hnyf).
+    root = tmp_path / "t"
+    held = _run_tree(root, "s1c1011010955")
+    _age(held, br.ORPHAN_AGE_DAYS + 2)
+
+    _reaper(tmp_path, [("s1", False)]).reap_ended()
+
+    assert held.is_dir()
+    assert not (tmp_path / "daemon" / br.HISTORY_NAME).exists()
 
 
 # ---- the history file -------------------------------------------------------- #

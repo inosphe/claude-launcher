@@ -205,6 +205,23 @@ check("reported events, newest first, with the task's own name",
       [["commit", "fail", "user", "2026-10-08 19:02:00", ""],
        ["work", "ok", "", "2026-10-08 19:00:00", "did it"]]);
 
+{
+  const rep = (ts) => ({ ts, event: "reported", node: "round/item/work", text: "same" });
+  const keys = (j) => fns.cflow2Reports(j).map((r) => r.key);
+  const two = [rep("2026-10-08T10:00:00+00:00"), rep("2026-10-08T10:01:00+00:00")];
+  check("each report is keyed by its node and stamp",
+        keys(two), ["report:round/item/work@2026-10-08T10:01:00+00:00",
+                    "report:round/item/work@2026-10-08T10:00:00+00:00"]);
+  check("a newer report in front leaves the older keys alone",
+        keys([...two, rep("2026-10-08T10:02:00+00:00")]).slice(1), keys(two));
+  check("one node reporting twice in one stamp counts from the oldest",
+        keys([rep("2026-10-08T10:00:00+00:00"), rep("2026-10-08T10:00:00+00:00"),
+              rep("2026-10-08T10:00:00+00:00")]),
+        ["report:round/item/work@2026-10-08T10:00:00+00:00#2",
+         "report:round/item/work@2026-10-08T10:00:00+00:00#1",
+         "report:round/item/work@2026-10-08T10:00:00+00:00"]);
+}
+
 /* ---- the run page's presses (the v1 bar's counterparts) ---- */
 check("a live run offers nudge and abort",
       fns.cflow2RunActions({ run: { status: "running" } }, {}), ["nudge", "abort"]);

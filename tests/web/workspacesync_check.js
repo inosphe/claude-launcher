@@ -127,7 +127,7 @@ vm.runInContext(
        "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval", "wsAgo", "wsSyncUnmergedRow",
        "wsSyncWhyDisabled", "wsSyncButtonRow", "commitRef", "commitText"].map(slice),
-   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncPromptText",
+   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncParentNote", "wsSyncPromptText",
        "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview", "wsLocalSyncControls"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
@@ -461,6 +461,15 @@ async function tick() {
   "s29 (nc:claude) · leader @ claunch, no role @ ops");
   assert.equal(ctx.wsSyncParentLabel({ name: "s7", profile: "p", held: true, meshes: [] }),
     "s7 (p, hold — woken on delegate) · no mesh");
+  /* claunch-z6da6: with no leader, a parent outside any mesh pauses nobody's merges. */
+  assert.equal(ctx.wsSyncParentLabel({ name: "s8", profile: "p", meshes: [], merge_pause: false }),
+    "s8 (p) · no mesh · no merge pause");
+  assert.match(ctx.wsSyncParentNote({ agent_parents_mode: "leader", agent_parents: [{ name: "l" }] }),
+    /mesh leader.*merges pause/);
+  assert.match(ctx.wsSyncParentNote({ agent_parents_mode: "no-leader", agent_parents: [{ name: "s8" }] }),
+    /no merges are paused/);
+  assert.match(ctx.wsSyncParentNote({ agent_parents_mode: "no-leader", agent_parents: [] }),
+    /Start a leader, or a session in no mesh/);
   parentPick.value = "parent";
   parentPick.handlers.change[0]();
   const delegated = { status: "delegated", agent: { session: "child", status: "busy" },

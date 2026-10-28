@@ -7457,13 +7457,19 @@ function isPiDurable(name) {
 /* An operator v2's bound session (daemon/operators_v2.py) talks to the user
    in the Operator view, not in this session's panes: its conversation is a
    thread owned by `operator:<id>`, which the session-thread surfaces leave
-   out (threads/store.py), and its questions are opv2_ask, not session QA.
-   🗪 threads and ? qa are dead doors there, so they are not drawn. The rail
-   already carries the run's workflow for every session, so its name is the
-   mark — no extra request, and the daemon refused the QA writes besides
-   (daemon/qa_api.py). */
+   out (threads/store.py), and its questions are opv2_ask -- except a gds6
+   operator's, which may keep session QA (its record's `qa`). 🗪 threads is
+   always a dead door there; ? qa is one only when the record leaves QA off.
+   The rail carries both answers (`operator`, `operator_qa`): the run's
+   workflow name alone would say an operator session is one but not whether
+   its QA door is live. */
+const OPERATOR_WORKFLOWS = new Set(["operator-v2", "gds-operator-v2"]);
 function isOperatorSession(name) {
-  return !!name && (cflow2RailCache[name]?.workflow || "") === "operator-v2";
+  const row = (name && cflow2RailCache[name]) || {};
+  return !!name && (row.operator === true || OPERATOR_WORKFLOWS.has(row.workflow || ""));
+}
+function operatorQa(name) {
+  return !!name && ((cflow2RailCache[name] || {}).operator_qa === true);
 }
 
 function syncSessionResourceButtons() {
@@ -7481,16 +7487,18 @@ function syncSessionResourceButtons() {
   if (chart && chart.classList.contains("hidden") === isPiDurable(name))
     chart.classList.toggle("hidden", !isPiDurable(name));
   const operator = isOperatorSession(name);
+  const qaDoor = !operator || operatorQa(name);
+  const hide = { "term-qabtn": !qaDoor, "term-threadsbtn": operator };
   for (const id of ["term-qabtn", "term-threadsbtn"]) {
     const btn = $(id);
-    if (btn && btn.classList.contains("hidden") !== operator)
-      btn.classList.toggle("hidden", operator);
+    if (btn && btn.classList.contains("hidden") !== hide[id])
+      btn.classList.toggle("hidden", hide[id]);
   }
   const present = {
     "term-simsbtn": !!name && sessionSimCache.some(s => s.owner === name),
     "term-splitbtn": !!name && !!(sessCflowRun(name) || cflow2RailCache[name]),
     "term-chartbtn": isPiDurable(name),
-    "term-qabtn": !operator && !!name && (qaRailCache[name]?.unresolved || 0) > 0,
+    "term-qabtn": qaDoor && !!name && (qaRailCache[name]?.unresolved || 0) > 0,
     "term-threadsbtn": !operator && !!name && (threadsRailCache[name]?.open || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
@@ -7601,8 +7609,10 @@ function markQaSeen(name) {
    opens only for questions still waiting: its closed history is no news. */
 function maybeOpenQaPane() {
   const name = currentPage === "terminal" ? currentName : null;
-  // An operator session has no session QA pane to open (isOperatorSession).
-  if (isOperatorSession(name)) { markQaSeen(name); return; }
+  // An operator session has no session QA pane to open (isOperatorSession),
+  // unless its record keeps session QA (operatorQa) — a gds6 operator asks
+  // there, so a new question opens the pane like any other session's.
+  if (isOperatorSession(name) && !operatorQa(name)) { markQaSeen(name); return; }
   const row = name && qaRailCache[name];
   if (!row || !row.agent_seq) return;
   const seen = loadQaSeen()[name];
@@ -22347,7 +22357,7 @@ function renderLinkPanel() {
     const chip = $(id);
     if (!chip) continue;
     // Only the grade and open classes are ours: toolbar.js puts its own
-    // (toolbar-overflow, compact) on the same button, and a whole-class write
+    // (toolbar-overflow) on the same button, and a whole-class write
     // every second took them off and set its measuring pass going again.
     for (const grade of ["ok", "warn", "down"]) chip.classList.toggle(grade, grade === g.grade);
     chip.classList.toggle("open", linkPanelOpen);
@@ -25961,9 +25971,12 @@ function syncSplitPane() {
   const remembered = name ? sessLayoutFor(name) : null;
   // An operator session has neither a threads nor a session QA pane (see
   // isOperatorSession); a layout remembered from before it became one is
-  // not honoured, so the terminal takes the column back.
+  // not honoured, so the terminal takes the column back. A gds6 operator
+  // whose record keeps session QA (operatorQa) keeps a qa-only pane —
+  // anything that would show threads still goes.
   const talkAway = !!remembered && isOperatorSession(name)
-    && (talkShows(remembered.pane, "threads") || talkShows(remembered.pane, "qa"));
+    && (talkShows(remembered.pane, "threads")
+        || (talkShows(remembered.pane, "qa") && !operatorQa(name)));
   const lay = talkAway ? null : remembered;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
   $("term-split").classList.toggle("hidden", !up);
@@ -41289,7 +41302,22 @@ async function wsSyncPreviewPrompt(name, kind) {
 function wsSyncParentLabel(p) {
   const meshes = (p.meshes || []).map((m) => `${m.role || "no role"} @ ${m.mesh}`);
   const held = p.held ? ", hold — woken on delegate" : "";
-  return `${p.name} (${p.profile}${held}) · ${meshes.length ? meshes.join(", ") : "no mesh"}`;
+  const pause = p.merge_pause === false ? " · no merge pause" : "";
+  return `${p.name} (${p.profile}${held}) · ${meshes.length ? meshes.join(", ") : "no mesh"}${pause}`;
+}
+
+/* Why the parent list holds what it holds (claunch-z6da6): a repository with
+   a mesh leader offers only its leaders, whose merges the sync pauses; one
+   without offers only sessions in no mesh, and nobody's merges are paused. */
+function wsSyncParentNote(doc) {
+  const empty = !(doc && (doc.agent_parents || []).length);
+  if (doc && doc.agent_parents_mode === "leader") {
+    return "Only this repository's mesh leader can parent a sync agent: its merges pause from prepare until the push.";
+  }
+  if (empty) {
+    return "No mesh leader works in this repository and no session outside a mesh is running. Start a leader, or a session in no mesh, to enable delegation.";
+  }
+  return "No mesh leader works in this repository: only sessions in no mesh are listed, and no merges are paused during the sync.";
 }
 
 /* What each execution mode does, shown under the picker for the one picked. */
@@ -41320,9 +41348,7 @@ function wsSyncAgentControls(st, name) {
     for (const p of (st.doc && st.doc.agent_parents) || []) {
       parent.appendChild(new Option(wsSyncParentLabel(p), p.name));
     }
-    if (!(st.doc && (st.doc.agent_parents || []).length)) {
-      box.appendChild(el("p", "wf-note", "Start a parent agent session to enable delegation."));
-    }
+    if (st.doc) box.appendChild(el("p", "wf-note ws-sync-parent-note", wsSyncParentNote(st.doc)));
     parent.value = st.agentParent;
     parent.disabled = !!st.busy;
     parent.addEventListener("change", () => { st.agentParent = parent.value; renderWorkspaces(); });
@@ -43123,13 +43149,23 @@ function cflow2ForceOutcomes(task) {
 /* The agent's reports in the journal tail, newest first: which task, the
    outcome, who reported (by: user for a forced one), when, and the prose
    summary it gave (markdown). Pure. */
+/* Each report carries a key from its journal entry, node and stamp, so the
+   page can keep a report's fold on that report while newer ones arrive in
+   front of it (claunch-qb42y). Repeats of one node and stamp are counted
+   from the oldest, which a newer entry does not renumber. */
 function cflow2Reports(journal) {
-  return (journal || []).filter((e) => e && e.event === "reported").reverse().map((e) => ({
-    node: e.node || "", label: String(e.node || "").split("/").pop(),
-    outcome: e.outcome || "ok", by: e.by || "",
-    ts: localStamp(e.ts),
-    text: typeof e.text === "string" ? e.text : "", value: e.value,
-  }));
+  const seen = new Map();
+  return (journal || []).filter((e) => e && e.event === "reported").map((e) => {
+    const base = `report:${e.node || ""}@${e.ts || ""}`, n = seen.get(base) || 0;
+    seen.set(base, n + 1);
+    return {
+      node: e.node || "", label: String(e.node || "").split("/").pop(),
+      outcome: e.outcome || "ok", by: e.by || "",
+      ts: localStamp(e.ts),
+      text: typeof e.text === "string" ? e.text : "", value: e.value,
+      key: n ? `${base}#${n}` : base,
+    };
+  }).reverse();
 }
 
 const CFLOW2_STATUS_CLS = {
@@ -44572,26 +44608,73 @@ function cflow2Callstack(data, post, live) {
   return sec;
 }
 
+/* Where an element of the run view sits, as a name that survives the poll's
+   rebuild (claunch-qb42y). A `data-cf2-key` names itself; anything else is
+   named by its path from the box, one step per ancestor: tag, first class,
+   the title its first child carries (a summary or a section heading, digits
+   dropped so "inputs (18)" stays "inputs ()" as values arrive), and its place
+   among the siblings that share all three. So a section that appears above
+   it or a count moving in its title leaves the name alone. A sibling with the
+   same title added in front of it moves the place: a list that grows at the
+   top with repeating titles (the reports) gives its items a key. One walk names every element below the box, calling
+   visit(node, name) on each: the journal grid alone is hundreds of siblings,
+   so the places are counted on the way down rather than per node. */
+function cf2StateWalk(box, visit) {
+  const base = (n) => {
+    const head = n.firstElementChild;
+    const title = head && /^(SUMMARY|H[2-5])$/.test(head.tagName)
+      ? head.textContent.replace(/\d+/g, "").replace(/\s+/g, " ").trim().slice(0, 120) : "";
+    return `${n.tagName}.${(n.classList && n.classList[0]) || ""}[${title}]`;
+  };
+  const walk = (parent, prefix) => {
+    const seen = new Map();
+    for (const n of parent.children) {
+      const own = n.dataset && n.dataset.cf2Key;
+      let name;
+      if (own) name = "k:" + own;
+      else {
+        const b = base(n), i = seen.get(b) || 0;
+        seen.set(b, i + 1);
+        name = (prefix ? prefix + ">" : "") + `${b}:${i}`;
+      }
+      visit(n, name);
+      walk(n, name);
+    }
+  };
+  walk(box, "");
+}
+
+/* What a poll's rebuild of the run view would cost the reader, taken before
+   the wipe and handed back after it: whether each details is open or shut,
+   and where every scrolled box inside the view and every scroller around it
+   stands. Only what was on screen before is put back -- a details that is
+   new this poll keeps the default its renderer gave it. */
 function captureCflow2View(box) {
   const scrolls = [];
   for (let node = box; node; node = node.parentElement) {
     scrolls.push([node, node.scrollTop, node.scrollLeft]);
   }
-  const inner = [".cf2-tree", ".cf2g-wrap", ".cf2-pane-body", ".cf2-col-main", ".cf2-col-chart"]
-    .map((selector) => {
-      const node = box.querySelector(selector);
-      return node ? [selector, node.scrollTop, node.scrollLeft] : null;
-    }).filter(Boolean);
-  const opened = Array.from(box.querySelectorAll("details[data-cf2-key], details.cf2-journal"))
-    .filter((n) => n.open).map((n) => n.dataset.cf2Key || "journal");
+  // the fixed panes are kept even at 0: the graph is a reused node, and its
+  // place must follow the reader back to the top as well
+  const fixed = new Set(box.querySelectorAll(
+    ".cf2-tree, .cf2g-wrap, .cf2-pane-body, .cf2-col-main, .cf2-col-chart"));
+  const opened = new Map(), inner = new Map();
+  cf2StateWalk(box, (node, name) => {
+    if (node.tagName === "DETAILS") opened.set(name, node.open);
+    if (node.scrollTop || node.scrollLeft || fixed.has(node)) {
+      inner.set(name, [node.scrollTop, node.scrollLeft]);
+    }
+  });
   return () => {
-    for (const node of box.querySelectorAll("details[data-cf2-key], details.cf2-journal")) {
-      node.open = opened.includes(node.dataset.cf2Key || "journal");
-    }
-    for (const [selector, top, left] of inner) {
-      const node = box.querySelector(selector);
-      if (node) { node.scrollTop = top; node.scrollLeft = left; }
-    }
+    // the folds first: a scroll position only holds once the content it
+    // measures is back at its height
+    const later = [];
+    cf2StateWalk(box, (node, name) => {
+      if (node.tagName === "DETAILS" && opened.has(name)) node.open = opened.get(name);
+      const at = inner.get(name);
+      if (at) later.push([node, at]);
+    });
+    for (const [node, [top, left]] of later) { node.scrollTop = top; node.scrollLeft = left; }
     for (const [node, top, left] of scrolls) { node.scrollTop = top; node.scrollLeft = left; }
   };
 }
@@ -44955,9 +45038,15 @@ function cflow2RedrawAllowed(force, handInBox) {
 function renderCflow2Into(box, data, ui, force = false) {
   ui = ui || {};
   const act = document.activeElement;
-  const hand = !!act && act !== document.body && box.contains(act) &&
+  const field = !!act && act !== document.body && box.contains(act) &&
     act.matches("input, textarea, select");
-  if (!cflow2RedrawAllowed(force, hand)) return;
+  // Text being selected on the view is a hand on it too: the rebuild would
+  // drop the selection under the pointer (claunch-qb42y). The poll keeps its
+  // signature unset, so the next one after the selection ends draws.
+  const pick = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  const selecting = !!pick && !pick.isCollapsed &&
+    (box.contains(pick.anchorNode) || box.contains(pick.focusNode));
+  if (!cflow2RedrawAllowed(force, field || selecting)) return;
   const signature = JSON.stringify(data);
   if (!force && box._cf2Signature === signature && box.querySelector(".cf2")) return;
   const identity = JSON.stringify([data.cwd, data.scope, (data.run || {}).run]);
@@ -45331,6 +45420,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     reports.forEach((r, i) => {
       const d = document.createElement("details");
       d.className = "cf2-report";
+      d.dataset.cf2Key = r.key;
       if (i === 0) d.open = true;
       const s = el("summary", "cf2-report-head");
       s.appendChild(el("span", "cf2-head", r.label));
@@ -58951,17 +59041,126 @@ function noticeEntryShown(entry) {
   return noticeSourceShown(noticeSourceOf(entry));
 }
 
-/* New cards go on top of the corner strip (claunch-efpoi), the history's
-   order. Every card of the strip is put up through here, and the card's
-   bottom line — when the thing it is about arrived at this browser, and how
-   long ago that was — is drawn here too (claunch-egqrq), so a card added
-   later carries it without its own author remembering. `at` is the history
-   row's stamp (`gateSeenAt` for a gate request, `rec.at` for a notice); a
-   card raised as it is drawn passes nothing and is stamped now. */
+/* The one ordering rule the notification feed has: a newer notice is above
+   an older one (claunch-notice-card-order-animate-9znvg). The corner strip
+   and the panel's History list are the same feed drawn twice, so both read
+   this — a rule written at each surface drifts, and this file has been
+   through that with the interpreter list in tests/test_related_surfaces.py.
+
+   "Newer" is the stamp the card already carries, not when it was drawn: a
+   card that is put up again — a gate poll rebuilding a request's card with
+   a moved countdown — keeps the age it shows, so it belongs where that age
+   says and not on top. Before this, the strip inserted every card at the
+   head, so a rebuilt old card jumped above newer ones while its own bottom
+   line still read "1h ago".
+
+   The panel's "Waiting on you" list is NOT ordered by this and does not
+   call it: that list is the queue of requests to answer, and
+   claunch-l9znm.1 orders it longest-waiting first so the request that has
+   stood longest is read first (noticeWaitOrder). */
+function noticeNewerFirst(a, b) {
+  return (b.at || 0) - (a.at || 0);
+}
+
+/* Which request the "Waiting on you" list puts first: the one that has
+   waited longest, on the same stamp the row shows as its age
+   (claunch-l9znm.1). Kept beside noticeNewerFirst so the two orders the
+   panel offers are both named here rather than one being implicit. */
+function noticeWaitOrder(a, b) {
+  return (a.at || 0) - (b.at || 0);
+}
+
+/* Whether this reader asked the page not to animate. A person who set
+   `prefers-reduced-motion` gets the reorder without the movement — the rows
+   still land in the new order, they just do not slide there. Read the way
+   sessionTabMotionOff reads it: a world with no `matchMedia` (the reduced
+   harnesses' stub DOM) animates nothing because it lays nothing out. */
+function noticeReducedMotion() {
+  if (typeof matchMedia !== "function") return false;
+  try {
+    const q = matchMedia("(prefers-reduced-motion: reduce)");
+    return !!(q && q.matches);
+  } catch { return false; }
+}
+
+/* The top of every child of `host`, keyed by the child, for FLIP. Read
+   before a change and handed back to noticeFlipMove after it. A harness
+   with no layout (a stub node has no getBoundingClientRect) gets null, and
+   the caller then has nothing to animate — the reorder still happens. */
+function noticeFlipRead(host) {
+  if (!host || typeof host.getBoundingClientRect !== "function") return null;
+  const tops = new Map();
+  for (const child of host.children) {
+    if (typeof child.getBoundingClientRect !== "function") continue;
+    tops.set(child, child.getBoundingClientRect().top);
+  }
+  return tops.size ? tops : null;
+}
+
+/* A node's top, or null where the world cannot lay it out. */
+function noticeTopOf(node) {
+  if (!node || typeof node.getBoundingClientRect !== "function") return null;
+  return node.getBoundingClientRect().top;
+}
+
+/* Shows the cards that moved sliding from where they were to where they
+   are (FLIP). `tops` is noticeFlipRead from before the change. A node that
+   was not in `tops` is newly added and does not move — it appeared. */
+function noticeFlipMove(tops) {
+  if (!tops || noticeReducedMotion()) return;
+  if (typeof requestAnimationFrame !== "function") return;
+  for (const [node, was] of tops) {
+    if (!node.isConnected) continue;
+    const now = noticeTopOf(node);
+    if (now === null || Math.abs(was - now) < 1) continue;
+    if (!node.style) continue;
+    // Jump it back to where the reader last saw it, with no transition, so
+    // the paint that follows does not read as a slide *to* the old spot.
+    node.style.transition = "none";
+    node.style.transform = `translateY(${Math.round(was - now)}px)`;
+    requestAnimationFrame(() => {
+      if (!node.isConnected) return;
+      node.style.transition = "transform 180ms ease";
+      node.style.transform = "";
+    });
+  }
+}
+
+/* New cards go into the corner strip in the feed's order (claunch-efpoi,
+   and see noticeNewerFirst), and the cards that move to make room slide
+   there (claunch-notice-card-order-animate-9znvg). Every card of the strip
+   is put up through here, and the card's bottom line — when the thing it is
+   about arrived at this browser, and how long ago that was — is drawn here
+   too (claunch-egqrq), so a card added later carries it without its own
+   author remembering. `at` is the history row's stamp (`gateSeenAt` for a
+   gate request, `rec.at` for a notice); a card raised as it is drawn passes
+   nothing and is stamped now.
+
+   Placing by stamp rather than at the head is what makes a rebuilt card
+   land where its own age says: a gate card is taken down and put up again
+   when its poll moves a countdown, and it must not thereby jump above
+   cards newer than it. A child with no stamp predates this rule or is not
+   a notice card at all, and is treated as the oldest thing there — the new
+   card goes above it, which is the order the strip always drew. */
 function noticeCardAdd(host, node, at) {
-  node.appendChild(noticeAgeLine(Number.isFinite(at) ? at : Date.now()));
-  if (host.firstChild) host.insertBefore(node, host.firstChild);
+  const stamp = Number.isFinite(at) ? at : Date.now();
+  node.__noticeAt = stamp;
+  node.appendChild(noticeAgeLine(stamp));
+  const tops = noticeFlipRead(host);
+  let ref = null;
+  for (const child of host.children) {
+    if (child === node) continue;
+    const other = Number.isFinite(child.__noticeAt) ? child.__noticeAt : -Infinity;
+    // The same comparator the panel's History sorts by, read as a place:
+    // go before the first child this card is not older than. `>= 0` (not
+    // `> 0`) so two notices stamped in the same millisecond keep arrival
+    // order with the later one above, the way the head-insert always drew
+    // them.
+    if (noticeNewerFirst({ at: other }, { at: stamp }) >= 0) { ref = child; break; }
+  }
+  if (ref) host.insertBefore(node, ref);
   else host.appendChild(node);
+  noticeFlipMove(tops);
 }
 
 /* Each row carries `read` (claunch-x76l8): set by a click on its card or
@@ -59988,9 +60187,16 @@ function noticePanelHistoryRow(entry) {
 
 /* While a kind is hidden the panel says so above its lists, with how much
    it leaves out and a press that opens the settings (claunch-efpoi.1): a
-   hidden kind that nothing mentions is the missing row this replaced. */
-function noticePanelHiddenLine(body) {
-  if (!noticeSourcesHidden.size) return;
+   hidden kind that nothing mentions is the missing row this replaced.
+
+   Returns {key, node} rather than appending it, so the rebuild can key it like
+   every other row and keep the node it already has (see noticePanelPlace).
+   The key carries the three counts the line draws: the line never moves (it
+   is the first row), but a rebuild that changes one of them has to draw a new
+   line, and a constant key would keep the old one saying the old thing. It
+   returns nothing when no kind is hidden, and then there is no line. */
+function noticePanelHiddenLine() {
+  if (!noticeSourcesHidden.size) return null;
   const rows = noticeHistory.filter((e) => !noticeEntryShown(e)).length;
   const waiting = gateHiddenKindCount();
   const line = el("div", "notice-hidden-line");
@@ -60003,7 +60209,7 @@ function noticePanelHiddenLine(body) {
     "Settings", "", "choose which kinds the panel, the bell and the corner show",
     () => noticeSettingsToggle(true)
   ));
-  body.appendChild(line);
+  return { key: `hidden-line:${noticeSourcesHidden.size}:${rows}:${waiting}`, node: line };
 }
 
 /* The settings overlay over the panel (claunch-efpoi.1): a checkbox per
@@ -60126,7 +60332,21 @@ function noticePanelState() {
 
 /* Rebuilt from the state above whenever that state changes while the panel
    is open, so a request settled elsewhere drops out of the waiting list on
-   its own. */
+   its own.
+
+   What the state changed, not what it now says, decides what is drawn
+   (claunch-notice-card-order-animate-9znvg): a row whose subject and
+   wording the rebuild produces again is kept — the same node, moved to
+   where the order now puts it — and only a row that is new is built. That
+   is what lets a reorder be animated at all: a node torn down and put up
+   again did not move, so there is no movement to show. The clock still
+   runs on the kept nodes (noticeAgesPaint / noticeClocksPaint), so an age
+   or a countdown that moved with the second is not a reason to rebuild.
+
+   `__noticeRowKey` on each row is what makes "the same row" nameable: the
+   waiting rows key on gate type and request id, the history rows on the
+   history id, and the section headings, notes and buttons key on what they
+   say. */
 function noticePanelPaint() {
   if (noticePanelBatchDepth) { noticePanelPaintWanted = true; return; }
   if (!noticePanelOpen()) return;
@@ -60135,16 +60355,15 @@ function noticePanelPaint() {
   const state = noticePanelState();
   if (state === noticePanelPainted) return;
   noticePanelPainted = state;
-  body.innerHTML = "";
   // Read waiting requests are listed too, apart from the ones not yet seen:
   // their rows keep the buttons and the countdown, and Mark unread puts them
   // back under the count (claunch-qqy2i).
   // Every gate kind of NOTICE_SOURCES the reader shows, longest-waiting
-  // first: the request that has stood longest is the one to answer. The
-  // order is the same stamp the row shows as its age, so a row that says
-  // "1h ago" is above one that says "2m ago" — before claunch-l9znm.1 it
-  // was when this browser first saw them, which is the same order only when
-  // the page was open the whole time.
+  // first (noticeWaitOrder): the request that has stood longest is the one
+  // to answer. The order is the same stamp the row shows as its age, so a
+  // row that says "1h ago" is above one that says "2m ago" — before
+  // claunch-l9znm.1 it was when this browser first saw them, which is the
+  // same order only when the page was open the whole time.
   const waiting = [];
   for (const [type, recs] of Object.entries(gatePending)) {
     if (!noticeSourceShown(type)) continue;
@@ -60156,22 +60375,34 @@ function noticePanelPaint() {
     if (Number.isFinite(entry.opened)) return openedOnThisClock(entry.opened);
     return entry.at || 0;
   };
-  waiting.sort((a, b) => openedAt(a) - openedAt(b));
-  noticePanelHiddenLine(body);
+  waiting.sort((a, b) => noticeWaitOrder({ at: openedAt(a) }, { at: openedAt(b) }));
+  // The rows this rebuild produces, in the order they go in. Each entry is
+  // {key, build}; a kept node is reused as it is and only moved.
+  const rows = [];
+  const keep = (key, build) => rows.push({ key, build });
+  const shownHidden = noticePanelHiddenLine();
+  if (shownHidden) keep(shownHidden.key, () => shownHidden.node);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
-  body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
+  keep(`head:waiting:${unread.length}`,
+       () => el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
   if (!waiting.length) {
-    body.appendChild(el("p", "wf-note", "no request is waiting on a person"));
+    keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
   } else if (!unread.length) {
-    body.appendChild(el("p", "wf-note", "every waiting request has been read"));
+    keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
   }
-  for (const [type, rec] of unread) body.appendChild(noticePanelGateRow(type, rec));
+  for (const [type, rec] of unread) {
+    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}`,
+         () => noticePanelGateRow(type, rec));
+  }
   if (read.length) {
-    body.appendChild(el(
+    keep(`head:read:${read.length}`, () => el(
       "h3", "notice-panel-section", `Read, still open (${read.length})`
     ));
-    for (const [type, rec] of read) body.appendChild(noticePanelGateRow(type, rec));
+    for (const [type, rec] of read) {
+      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}`,
+           () => noticePanelGateRow(type, rec));
+    }
   }
 
   const past = noticeHistory.filter(
@@ -60179,8 +60410,13 @@ function noticePanelPaint() {
   );
   const markedCount = past.filter((e) => e.marked).length;
   const unreadCount = past.filter(noticeUnread).length;
-  const shown = noticeFilter === "marked" ? past.filter((e) => e.marked)
-    : noticeFilter === "unread" ? past.filter(noticeUnread) : past;
+  // History is the same feed the corner strip draws, newest first, by the
+  // one ordering rule (noticeNewerFirst). `noticeHistory` is already
+  // newest-first, so this sort is what says so here rather than leaving the
+  // order to depend on how the array happens to be held.
+  const shown = (noticeFilter === "marked" ? past.filter((e) => e.marked)
+    : noticeFilter === "unread" ? past.filter(noticeUnread) : past.slice())
+    .sort(noticeNewerFirst);
   const sectionHead = el("div", "notice-panel-section-row");
   sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
   const filters = el("div", "notice-filter");
@@ -60221,14 +60457,131 @@ function noticePanelPaint() {
       }
     ));
   }
-  body.appendChild(sectionHead);
+  // The section head carries the filter buttons' active state and the two
+  // count-driven presses, so its key carries all of that: a rebuild that
+  // changes any of it builds the head again instead of keeping one whose
+  // buttons say the old thing. It never moves (it is the first row of its
+  // list), so rebuilding it costs no animation.
+  const headKey = [
+    "section-head", noticeFilter, past.length, markedCount, unreadCount,
+    unreadIds.length, shown.length,
+  ].join(":");
+  keep(headKey, () => sectionHead);
   if (!shown.length) {
-    body.appendChild(el("p", "wf-note", noticeFilter === "marked"
+    keep("note:none-shown", () => el("p", "wf-note", noticeFilter === "marked"
       ? "no row is kept — ☆ on a row keeps it here"
       : noticeFilter === "unread" ? "every row has been read"
       : "nothing has been shown in this browser yet"));
   }
-  for (const entry of shown) body.appendChild(noticePanelHistoryRow(entry));
+  for (const entry of shown) {
+    // The key carries what the row draws, not only its identity: a row that
+    // is rebuilt because its own state moved (read, ★, settled) must be a
+    // new key, or the kept node would keep the old wording. What a key does
+    // NOT carry is anything the panel state does not already list — that is
+    // why the clock is excluded (noticePanelState says why).
+    keep(`history:${entry.id}:${noticeRowShape(entry)}`,
+         () => noticePanelHistoryRow(entry));
+  }
+  noticePanelPlace(body, rows);
+}
+
+/* What a waiting request's row draws, as a short string: the fields its own
+   drawer (the NOTICE_SOURCES `row` for its kind, plus noticePanelGateRow's
+   read/hidden buttons) decides wording, class and buttons from. It is the
+   part of the row's key that moves with the request, so a poll that changes
+   one of them builds a new node rather than keeping one that says the old
+   thing — while a poll that changes none keeps the node and it only moves.
+   The clock fields are left out on purpose: the countdown and the age are
+   carried by noticeClocksPaint/noticeAgesPaint on the node itself, and a
+   rebuild for them would undo what keeping the node is for. */
+function noticeGateRowShape(rec) {
+  return JSON.stringify([
+    rec.id, rec.session, rec.step, rec.from, rec.reason, rec.status,
+    rec.kind, rec.hold, rec.extensions || 0, rec.deadline, rec.prompt,
+    rec.message, rec.target_session, rec.workflow, rec.profile, rec.model,
+    rec.workspace, rec.role, rec.mesh, rec.handle, rec.machine,
+  ]);
+}
+
+/* What one history row draws, as a short string: the flags noticePanelHistoryRow
+   reads to decide wording, class and buttons. It is the half of the row's key
+   that moves with the row's own state (read, ★, settled, hidden), so a
+   rebuild that changes any of them builds a new node instead of keeping one
+   that says the old thing — while a rebuild that changes none of them keeps
+   the node and lets it move. See noticePanelPlace. */
+function noticeRowShape(entry) {
+  const t = entry.session && entry.target;
+  const openable = !!(t && (t.thread || t.qa));
+  return [
+    entry.read ? "r" : "u",
+    entry.marked ? "s" : "",
+    openable ? "o" : "",
+    entry.kind || "",
+    entry.status || "",
+    entry.hidden ? "h" : "",
+    entry.settledAt ? "e" : "",
+  ].join("");
+}
+
+/* Puts `rows` into `body` in that order, reusing the node a row already
+   has, and slides the ones that moved (claunch-notice-card-order-animate-9znvg).
+
+   A row is the same row when its key is the same key: the node is kept and
+   moved to its new place, so its buttons, focus and listeners survive the
+   reorder and the movement is a movement. A key that was not there before
+   is built; one that is gone is removed. Nodes are compared by identity
+   rather than by rebuilding, which is also what keeps this honest against
+   tests/web/noticecost_browser.cjs: an unchanged list adds and removes
+   nothing.
+
+   The move itself is FLIP — read every top, put the rows in order, then
+   show each moved row from where it was. With `prefers-reduced-motion` the
+   order still changes and nothing slides. */
+function noticePanelPlace(body, rows) {
+  const want = new Map(rows.map((r) => [r.key, r]));
+  const had = new Map();
+  for (const node of [...body.children]) {
+    const key = node.__noticeRowKey;
+    // A node this rebuild does not know how to name is not ours to keep:
+    // it cannot be matched to anything, so leaving it would put a stale row
+    // in the list for good.
+    if (!key || !want.has(key) || had.has(key)) continue;
+    had.set(key, node);
+  }
+  const tops = noticeFlipRead(body);
+  const ordered = [];
+  for (const { key, build } of rows) {
+    let node = had.get(key);
+    if (node) {
+      had.delete(key);
+    } else {
+      node = build();
+      node.__noticeRowKey = key;
+    }
+    ordered.push(node);
+  }
+  // Every child that is not one of the kept rows is not ours — a row that
+  // left the list, a node from before this rule, or one this rebuild
+  // declined. Remove it, so the panel ends with exactly `ordered` and no
+  // stale row is left behind for good.
+  const keep = new Set(ordered);
+  for (const node of [...body.children]) {
+    if (!keep.has(node)) {
+      node.__noticeRowKey = "";
+      body.removeChild(node);
+    }
+  }
+  // Put them in order, walking the position and moving only a row that is
+  // not already there — a node in its place is not touched, so an unchanged
+  // list is no DOM change at all. Read through `children` rather than
+  // `nextSibling` because that is the whole of what this needs from the
+  // parent, and a harness that models a node models this much.
+  for (let i = 0; i < ordered.length; i += 1) {
+    const node = ordered[i];
+    if (body.children[i] === node) continue;
+    body.insertBefore(node, body.children[i] || null);
+  }
+  noticeFlipMove(tops);
 }
 
 // The bell's dot for what an earlier visit left unread, before any poll.

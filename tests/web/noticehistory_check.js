@@ -80,6 +80,12 @@ function check(name, cond, extra) {
 
 const BASE = 1700000000000;
 
+/* A world with layout (`build({layout: true})`) stacks one row per child, so
+   a node's `top` is its index times this. The number is arbitrary; what the
+   FLIP code reads is only that a node that changed place has a different
+   top, and a node that did not has the same one. */
+const LAYOUT_ROW_H = 48;
+
 function memoryStorage() {
   const data = new Map();
   return {
@@ -141,6 +147,20 @@ function build(opts) {
       isConnected: true,
       text: () => [n.textContent, ...n.children.map((c) => c.text())].join(" "),
     };
+    // A world with layout (o.layout): every node has a box, stacked one row
+    // per child under its parent's first row. That is all the FLIP code
+    // reads — a top before the change and a top after it — so a card or a
+    // row that moves is a number that moved, and one that does not is not.
+    if (o.layout) {
+      n.style = {};
+      n.getBoundingClientRect = () => {
+        const top = (x) => (x.parentNode
+          ? top(x.parentNode) + x.parentNode.children.indexOf(x) * LAYOUT_ROW_H : 0);
+        const at = top(n);
+        return { top: at, bottom: at + LAYOUT_ROW_H, height: LAYOUT_ROW_H,
+                 left: 0, right: 0, width: 100 };
+      };
+    }
     Object.defineProperty(n, "innerHTML", {
       get: () => "",
       set: () => { n.children.forEach((c) => { c.parentNode = null; }); n.children = []; },
@@ -267,6 +287,8 @@ function build(opts) {
     // refreshCflow2Rail does from an answer's `now`.
     " setRailSkew(v) { railClockSkew = v; }," +
     " noticeClocksPaint," +
+    " noticeCardAdd, noticeFlipRead, noticeFlipMove, noticeNewerFirst," +
+    " mk: (cls, text) => el(\"div\", cls, text)," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -438,13 +460,20 @@ function gotoRec(rec) {
     check("clicking a history row marks it read",
           w.api.noticeHistory.find((e) => e.title === "two").read === true && w.badge() === "1",
           w.badge());
-    w.press(rowOf("two"), "Mark unread").click();
+    // The row is drawn again when its own read flag moves (noticeRowShape is
+    // part of its key), so the press is looked up on the current row and
+    // reported as a check rather than crashing the harness if it is missing.
+    const unmark = w.press(rowOf("two"), "Mark unread");
+    check("a read row offers Mark unread", !!unmark, rowOf("two").text());
+    if (unmark) unmark.click();
     check("Mark unread counts it again",
           w.api.noticeHistory.find((e) => e.title === "two").read === false && w.badge() === "2" &&
             rowOf("two").classList.contains("unread"), w.badge());
     check("and stays in this browser",
           JSON.parse(w.storage.getItem("claunch.noticeHistory")).find((e) => e.title === "two").read === false);
-    w.press(rowOf("three"), "Mark read").click();
+    const markRead = w.press(rowOf("three"), "Mark read");
+    check("an unread row offers Mark read", !!markRead, rowOf("three").text());
+    if (markRead) markRead.click();
     check("Mark read on a row reads only it", w.badge() === "1" &&
             w.api.noticeHistory.find((e) => e.title === "three").read === true, w.badge());
     w.press(w.nodes["notice-panel-body"], "Mark all read").click();
@@ -1695,6 +1724,232 @@ function gotoRec(rec) {
     check("the waiting list has the longest-waiting request first, whatever its kind",
           rows.length === 2 && /kill/i.test(rows[0].text()) && !/kill/i.test(rows[1].text()),
           rows.map((r) => r.text()));
+  }
+
+  /* --- both surfaces put the newer notice above the older --------------- */
+  {
+    // The corner strip and the panel's History are the same feed drawn
+    // twice, and one comparator (noticeNewerFirst) orders both
+    // (claunch-notice-card-order-animate-9znvg). The check is that the two
+    // agree on one feed, not that each is sorted some way of its own.
+    const w = build();
+    w.api.notify("oldest", "", { source: "page", key: "k1" });
+    w.clock.at += 1000;
+    w.api.notify("middle", "", { source: "page", key: "k2" });
+    w.clock.at += 1000;
+    w.api.notify("newest", "", { source: "page", key: "k3" });
+    const stripTitles = w.strip().map((c) => c.querySelector(".notice-title").textContent);
+    check("the strip draws the newest notice first",
+          stripTitles.join(",") === "newest,middle,oldest", stripTitles);
+    w.api.noticePanelToggle(true);
+    const panelTitles = w.panelRows().map((r) => r.querySelector(".notice-title").textContent);
+    check("the panel's history draws the same feed in the same order",
+          panelTitles.join(",") === "newest,middle,oldest", panelTitles);
+    // One rule, named once: the doors a card and a row go through both call
+    // it, so a change to the order cannot reach one surface and miss the
+    // other (the failure tests/test_related_surfaces.py exists for).
+    const defs = src.split("function noticeNewerFirst(").length - 1;
+    check("the feed's order is defined once", defs === 1, defs);
+    check("the strip places a card by that one rule",
+          /function noticeCardAdd\([\s\S]*?noticeNewerFirst\(/.test(src));
+    check("and the panel's history sorts by it",
+          /\.sort\(noticeNewerFirst\)/.test(src));
+  }
+
+  /* --- a rebuilt card keeps the place its own age puts it in ------------ */
+  {
+    // A gate card is taken down and put up again when its poll moves a
+    // countdown. Inserting at the head made that old card jump above newer
+    // ones while its own bottom line still read "1h ago" — the defect this
+    // ordering is for.
+    const w = build();
+    const older = w.api.mk("notice", "older");
+    const newer = w.api.mk("notice", "newer");
+    w.api.noticeCardAdd(w.nodes.notices, older, BASE);
+    w.api.noticeCardAdd(w.nodes.notices, newer, BASE + 60000);
+    check("a newer card goes above an older one", w.strip()[0] === newer,
+          w.strip().map((c) => c.text()));
+    // The older card, rebuilt: a fresh node carrying the same stamp.
+    const rebuilt = w.api.mk("notice", "older");
+    w.api.noticeCardAdd(w.nodes.notices, rebuilt, BASE);
+    check("a rebuilt older card does not jump above a newer one",
+          w.strip()[0] === newer, w.strip().map((c) => c.text()));
+    check("it lands above the equal-stamped card it replaces",
+          w.strip().indexOf(rebuilt) < w.strip().indexOf(older),
+          w.strip().map((c) => c.text()));
+    // Two notices stamped in the same millisecond keep arrival order with
+    // the later one above — what the head-insert drew before this rule.
+    const twin = w.api.mk("notice", "twin");
+    w.api.noticeCardAdd(w.nodes.notices, twin, BASE + 60000);
+    check("a card stamped with another keeps the later one above",
+          w.strip().indexOf(twin) < w.strip().indexOf(newer),
+          w.strip().map((c) => c.text()));
+  }
+
+  /* --- a card that changes place slides there --------------------------- */
+  {
+    // FLIP against a world with layout (build({layout: true})) and a stub
+    // frame clock: the card that was pushed down carries a transform back to
+    // where it was, and the frame after clears it into the transition.
+    const frames = [];
+    const realFrame = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
+    try {
+      const w = build({ layout: true });
+      const below = w.api.mk("notice", "below");
+      w.api.noticeCardAdd(w.nodes.notices, below, BASE);
+      check("a card alone on the strip has no transform", !below.style.transform,
+            below.style.transform);
+      const above = w.api.mk("notice", "above");
+      w.api.noticeCardAdd(w.nodes.notices, above, BASE + 1000);
+      check("a card pushed down is drawn from where it was",
+            below.style.transform === `translateY(-${LAYOUT_ROW_H}px)`,
+            below.style.transform);
+      check("and slides with no transition until the next frame",
+            below.style.transition === "none", below.style.transition);
+      check("the card that went on top does not move", !above.style.transform,
+            above.style.transform);
+      check("the move waits for a frame", frames.length === 1, frames.length);
+      frames.splice(0).forEach((fn) => fn());
+      check("the next frame hands the rest of the move to the transition",
+            below.style.transform === "" && /transform 180ms/.test(below.style.transition),
+            [below.style.transform, below.style.transition]);
+    } finally {
+      if (realFrame === undefined) delete globalThis.requestAnimationFrame;
+      else globalThis.requestAnimationFrame = realFrame;
+    }
+  }
+
+  /* --- a panel row is kept, not rebuilt, so its move can be shown ------- */
+  {
+    const frames = [];
+    const realFrame = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
+    try {
+      const w = build({ layout: true });
+      w.api.notify("older", "", { source: "page", key: "p1" });
+      w.clock.at += 1000;
+      w.api.notify("newer", "", { source: "page", key: "p2" });
+      w.api.noticePanelToggle(true);
+      const rowOf = (t) => w.panelRows()
+        .find((r) => r.querySelector(".notice-title").textContent === t);
+      const olderRow = rowOf("older");
+      const newerRow = rowOf("newer");
+      check("both history rows are drawn", !!olderRow && !!newerRow, w.panel());
+      w.clock.at += 1000;
+      w.api.notify("newest", "", { source: "page", key: "p3" });
+      check("a row still listed after the rebuild is the same node",
+            rowOf("older") === olderRow && rowOf("newer") === newerRow,
+            [rowOf("older") === olderRow, rowOf("newer") === newerRow]);
+      check("the new row goes above them",
+            w.panelRows()[0].querySelector(".notice-title").textContent === "newest",
+            w.panelRows().map((r) => r.text()));
+      // One row was inserted above them, so each of the two moved down
+      // exactly one place — the transform is each row's own displacement,
+      // not its distance from the top.
+      check("the rows it pushed down are drawn from where they were",
+            olderRow.style.transform === `translateY(-${LAYOUT_ROW_H}px)` &&
+              newerRow.style.transform === `translateY(-${LAYOUT_ROW_H}px)`,
+            [olderRow.style.transform, newerRow.style.transform]);
+      frames.splice(0).forEach((fn) => fn());
+      check("and then hand the rest to the transition",
+            olderRow.style.transform === "" && /transform 180ms/.test(olderRow.style.transition),
+            [olderRow.style.transform, olderRow.style.transition]);
+    } finally {
+      if (realFrame === undefined) delete globalThis.requestAnimationFrame;
+      else globalThis.requestAnimationFrame = realFrame;
+    }
+  }
+
+  /* --- prefers-reduced-motion: the order changes, nothing slides -------- */
+  {
+    const frames = [];
+    const realFrame = globalThis.requestAnimationFrame;
+    const realMatch = globalThis.matchMedia;
+    globalThis.requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
+    globalThis.matchMedia = (q) => ({ matches: /prefers-reduced-motion/.test(q) && /reduce/.test(q) });
+    try {
+      const w = build({ layout: true });
+      const below = w.api.mk("notice", "below");
+      w.api.noticeCardAdd(w.nodes.notices, below, BASE);
+      const above = w.api.mk("notice", "above");
+      w.api.noticeCardAdd(w.nodes.notices, above, BASE + 1000);
+      check("the newer card still goes on top", w.strip()[0] === above,
+            w.strip().map((c) => c.text()));
+      check("and nothing is asked to move", !below.style.transform && !frames.length,
+            [below.style.transform, frames.length]);
+      w.api.notify("older", "", { source: "page", key: "m1" });
+      w.clock.at += 1000;
+      w.api.notify("newer", "", { source: "page", key: "m2" });
+      w.api.noticePanelToggle(true);
+      const rows = w.panelRows();
+      check("the panel keeps the newest-first order",
+            rows[0].querySelector(".notice-title").textContent === "newer",
+            rows.map((r) => r.text()));
+      w.clock.at += 1000;
+      w.api.notify("newest", "", { source: "page", key: "m3" });
+      check("a pushed row carries no transform under reduced motion",
+            w.panelRows().every((r) => !r.style.transform),
+            w.panelRows().map((r) => r.style.transform));
+    } finally {
+      if (realFrame === undefined) delete globalThis.requestAnimationFrame;
+      else globalThis.requestAnimationFrame = realFrame;
+      if (realMatch === undefined) delete globalThis.matchMedia;
+      else globalThis.matchMedia = realMatch;
+    }
+  }
+
+  /* --- a kept row never keeps stale wording ----------------------------- */
+  {
+    // Keeping a node is what lets its move be animated; what it must not do
+    // is keep the wording the node was built with. These two hold the other
+    // half of the key: a row whose own state moved (read, ★, settled) has to
+    // be drawn again even though its id is unchanged.
+    const w = build();
+    w.api.notify("row", "", { source: "page", key: "s1" });
+    w.api.noticePanelToggle(true);
+    const before = w.panelRows()[0];
+    check("an unread history row offers Mark read", !!w.press(before, "Mark read"), before.text());
+    w.press(before, "Mark read").click();
+    const after = w.panelRows()[0];
+    check("once read, the row offers Mark unread",
+          !!w.press(after, "Mark unread"), after.text());
+    check("and is drawn as read", after.classList.contains("read"),
+          after.className);
+    // The same for a waiting request: marking it read moves it under "Read,
+    // still open", so a kept node would be left in the waiting list saying
+    // Mark read while the list says it has been read.
+    w.api.gatePending.spawn = [gateRec("spawn", "sp-1")];
+    w.api.gateHistoryOpen("spawn", "sp-1", "spawn asked", "", {});
+    w.api.noticePanelPaint();
+    const gateRow = () => w.panelRows().find((r) => r.classList.contains("pending"));
+    check("a waiting request offers Mark read", !!w.press(gateRow(), "Mark read"),
+          gateRow().text());
+    w.press(gateRow(), "Mark read").click();
+    check("once read it offers Mark unread",
+          !!w.press(gateRow(), "Mark unread"), gateRow().text());
+    check("and is dimmed as read", gateRow().classList.contains("read"),
+          gateRow().className);
+    check("under its own heading", /Read, still open \(1\)/.test(w.panel()), w.panel());
+  }
+  {
+    // The same half of the key for a waiting request's row: the request's own
+    // fields decide what the row says, so a poll that moves one of them must
+    // draw the row again. A kept node would go on saying the old thing while
+    // the daemon holds the new one.
+    const w = build();
+    w.gate.restart = restartRec();
+    await w.api.refreshRestartGate();
+    w.api.noticePanelToggle(true);
+    const row = () => w.panelRows().find((r) => r.classList.contains("pending"));
+    check("the restart row says nothing about extensions yet",
+          !!row() && !/extended/.test(row().text()), row() && row().text());
+    // +5 min from the panel, then the poll that returns the moved record.
+    w.press(w.nodes["notice-panel-body"], "+5 min").click();
+    await new Promise((r) => setImmediate(r));
+    await w.api.refreshRestartGate();
+    check("after the extension the row says how many it has taken",
+          /extended 1×/.test(row().text()), row().text());
   }
 
   /* --- every card names its kind and goes through one door ------------ */

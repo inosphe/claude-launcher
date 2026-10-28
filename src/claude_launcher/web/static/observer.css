@@ -386,6 +386,11 @@
 :is(#observer-operators, #opfab-view) .op-dot.on.starting { background: #58a6ff; }
 :is(#observer-operators, #opfab-view) .op-badge { min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #30343b; color: #c9d1d9; }
 :is(#observer-operators, #opfab-view) .op-badge.unseen { background: #9e6a03; color: #fff; }
+/* A gds6 operator's tab (daemon/operators_v2.GDS_WORKFLOW): it nudges a
+   project's next action, so the tab names the kind beside the name. */
+:is(#observer-operators, #opfab-view) .op-chip { padding: 0 6px; border-radius: 9px; font-size: 10px; line-height: 16px; background: #1f4d3a; color: #7ee2b8; letter-spacing: .02em; }
+:is(#observer-operators, #opfab-view) .op-form .op-gds6 { display: grid; gap: 6px; margin: 0; padding: 8px 10px; border: 1px solid #3b424e; border-radius: 6px; }
+:is(#observer-operators, #opfab-view) .op-form .op-gds6[hidden] { display: none; }
 /* The session line above the conversation (claunch-iw5i8.13): one row that
    stays put while the conversation scrolls. On a phone the dock is part of
    the page, so the row holds to the top of the screen instead. */
