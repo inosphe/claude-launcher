@@ -1265,6 +1265,88 @@ def test_a_window_whose_screencast_failed_is_still_reaped(home, monkeypatch):
     asyncio.run(run())
 
 
+def _timing_out_browser(times=None):
+    """A fake browser whose set_insecure_tls times out. 504 is CDP.send's
+    "the browser did not answer within <timeout>s" -- the answer may still
+    land late, which is not the same thing as the browser saying no.
+    ``times``: how many calls time out before it starts working (None =
+    always)."""
+
+    class _TimingOut(_FakeBrowser):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def set_insecure_tls(self, session_id, value):
+            self.attempts += 1
+            if times is None or self.attempts <= times:
+                raise webdebug.WebDebugError(504, "the browser did not answer "
+                                                  "Security.setIgnoreCertificateErrors within 30s")
+            await super().set_insecure_tls(session_id, value)
+
+    return _TimingOut()
+
+
+def test_a_timed_out_answer_is_not_reported_as_a_refusal(home, monkeypatch):
+    """(claunch-9a3k4.2) A 504 is "no answer", not "no". Folding it into
+    "refused" would keep the window on the old value while the page applies the
+    change late -- the same divergence claunch-9a3k4 removed, reached by the
+    timeout path. The window must not move, and the viewer must be told the
+    change is unconfirmed rather than that the browser refused it."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _timing_out_browser()
+        try:
+            viewer = _Viewer()
+            win = await hub.attach("w1", "s1", viewer, insecure=True)
+            before = win.insecure_tls
+            viewer.json.clear()
+            await webdebug._viewer_message(hub, win, {"type": "insecure", "insecure": not before})
+            assert win.insecure_tls is before, "the window moved on an answer nobody gave"
+            errors = [m["message"] for m in viewer.json if m.get("type") == "error"]
+            assert errors, "the unconfirmed answer was not reported to the viewer"
+            assert "unconfirmed" in errors[-1], (
+                f"a timeout was reported as a refusal: {errors[-1]!r}")
+            assert not any("would not change" in m for m in errors), (
+                "a timeout was described as the browser refusing")
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_slow_answer_is_retried_before_it_is_called_unknown(home, monkeypatch):
+    """(claunch-9a3k4.2) setIgnoreCertificateErrors is idempotent and most 504s
+    are one slow reply, so a timeout is retried once. When the retry lands, the
+    answer is definite and the window records it -- "unknown" is what survives
+    a second timeout, not what the first one produces."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _timing_out_browser(times=1)
+        try:
+            viewer = _Viewer()
+            win = await hub.attach("w1", "s1", viewer, insecure=True)
+            before = win.insecure_tls
+            viewer.json.clear()
+            await webdebug._viewer_message(hub, win, {"type": "insecure", "insecure": not before})
+            assert hub.browser.attempts == 2, (
+                f"the timed-out answer was not retried (attempts={hub.browser.attempts})")
+            assert win.insecure_tls is not before, "the retry landed but the window kept the old answer"
+            assert win.insecure_tls is bool(not before)
+            assert not [m for m in viewer.json if m.get("type") == "error"], (
+                "a retried-and-applied answer was still reported as an error")
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
 def test_the_setting_route_reads_and_writes_the_three(home, monkeypatch):
     """(2) The Settings page's route: GET shows the stored values, the effective
     values and the environment that overrides them; PUT writes and null resets."""
