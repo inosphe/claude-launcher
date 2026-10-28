@@ -243,6 +243,16 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => document.querySelectorAll("#observer-operators .op-entry").length > 0);
     await page.waitForFunction(() => !document.querySelector("#observer-operators .op-badge.unseen"));
     assert(lastSent("POST", "/api/operators/op1/seen"), "the open operator is marked seen");
+    // The poll after the seen mark reads nothing new and draws nothing
+    // (claunch-iu6z2.1): the view kept the pre-seen count and rebuilt the
+    // conversation on the next poll, which on a loaded machine landed
+    // between the steps below picking an entry and dragging over it.
+    {
+      await page.evaluate(() => { window.__entry = document.querySelector("#observer-operators .op-entry"); });
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      assert.equal(await page.evaluate(() => window.__entry.isConnected), true, "a poll after the seen mark redraws nothing");
+    }
     assert.equal(await page.locator("#observer-operators .op-badge").innerText(), "2", "two asks still wait");
     assert.match(await page.locator("#observer-operators .op-scope").innerText(), /범위: alpha · 정지됨/);
     // The session line above the conversation (claunch-iw5i8.13): outside the

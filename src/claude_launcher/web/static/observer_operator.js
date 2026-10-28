@@ -174,6 +174,13 @@ function refresh() {
         if(detail.unseen > 0 && !document.hidden && opts.active?.()) {
           const seen = await call(opPath(selected, "/seen"), "POST", {});
           list = list.map(o => o.id === seen.id ? {...o, ...seen} : o);
+          // The view's copy takes the new counts too. The detail is the
+          // summary plus the conversation, so the next poll reads exactly
+          // this; left at the old count it differed from what was drawn and
+          // rebuilt the whole conversation once more for no news -- under a
+          // drag-select about to start or a copy button just pressed
+          // (claunch-iu6z2.1).
+          if(detail.id === seen.id) detail = {...detail, ...seen};
         }
       } catch(err) { detail = {id: selected, error: err.message, feed: [], threads: []}; }
     } else detail = null;
