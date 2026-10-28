@@ -59331,16 +59331,30 @@ function noticeRemindChipsPaint() {
   }
 }
 
-/* Remind: the card goes now and comes back at 1h, then 6h, then 24h. Every
-   step counts from this press, and a second press starts the sequence over.
-   The request is untouched — it waits on the daemon exactly as before. */
+/* Remind: the card goes now and comes back at 1h, then 6h, then 24h, every
+   step counted from the press. A press on a card that is up because a step
+   fired continues the ladder rather than starting it over — that card is
+   the only place the later steps can be asked for, so restarting there
+   would leave 6h and 24h reachable only by never touching the card again
+   (s597-rev, claunch-6scxn). Once the last step has fired the ladder is
+   spent (due null) and the next press starts a fresh 1h. The request is
+   untouched — it waits on the daemon exactly as before. */
 function gateRemind(type, rid) {
   const id = String(rid);
   const now = Date.now();
-  gateRemindIds.set(`${type}:${id}`, {
-    type, rid: id, since: now, stage: 0,
-    due: now + NOTICE_REMIND_STEPS[0], down: true,
-  });
+  const key = `${type}:${id}`;
+  const rec = gateRemindIds.get(key);
+  if (rec && rec.due !== null && rec.down !== true) {
+    // Back up because a step fired: put it down again for the step already
+    // scheduled. `since` and `stage` stand, so the wait is the 6h or 24h the
+    // chip named.
+    rec.down = true;
+  } else {
+    gateRemindIds.set(key, {
+      type, rid: id, since: now, stage: 0,
+      due: now + NOTICE_REMIND_STEPS[0], down: true,
+    });
+  }
   gateRemindSave();
   noticeTabsPost({ t: "gate-remind", type, rid: id });
   noticeBellPaint();
@@ -59367,10 +59381,10 @@ function noticeRemindPaint() {
     const now = Date.now();
     const fired = new Set();
     for (const rec of gateRemindIds.values()) {
-      // The step fires whether or not the card is down: a reader who let the
-      // first reminder through and did nothing still has the 6h and 24h
-      // steps taken, and the press then on the card names the longer wait
-      // instead of starting over at an hour.
+      // A step fires whether or not the card is down. A card that is still
+      // up runs its clock on: letting the 1h appearance stand must not cost
+      // the 6h and 24h reminders, and the press that puts it back down
+      // (gateRemind) then names the longer wait instead of a fresh hour.
       if (!Number.isFinite(rec.due) || rec.due > now) continue;
       rec.down = false;
       fired.add(rec.type);
@@ -59690,10 +59704,20 @@ function noticeTabsApply(msg) {
         gateUnhide(msg.type, String(msg.rid));
       }
     } else if (msg.t === "gate-remind" && msg.type) {
-      // Another tab put the card aside (claunch-6scxn). Each tab runs its own
-      // clock, so the press it is told about is a press here too: the same
-      // three steps, counted from now.
-      if (!gateRemindDown(msg.type, String(msg.rid))) {
+      // Another tab put the card aside (claunch-6scxn). The ladder is a
+      // schedule, not a gesture: a tab that pressed from now would run a
+      // different one, and the two would disagree about which step is next.
+      // So the record the presser saved is adopted verbatim.
+      const key = `${msg.type}:${String(msg.rid)}`;
+      const saved = noticeLoad(NOTICE_REMIND_KEY, {});
+      const rec = saved && typeof saved === "object" ? saved[key] : null;
+      if (rec && typeof rec === "object" && Number.isFinite(rec.since)) {
+        gateRemindIds.set(key, rec);
+        gateRemindSave();
+        noticeBellPaint();
+        noticePanelPaint();
+        noticeGateRefresh(msg.type);
+      } else if (!gateRemindDown(msg.type, String(msg.rid))) {
         gateRemind(msg.type, String(msg.rid));
         noticeGateRefresh(msg.type);
       }
