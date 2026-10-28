@@ -1509,8 +1509,10 @@ def register(sub) -> None:
     p.add_argument("--external", action="store_true",
                    help="send as a non-member (e.g. a human operator)")
     p.add_argument("--type", default="say",
-                   help="message intent: say (default), ask, or the no-reply "
-                        "fyi/ack -- recipients owe no answer to fyi/ack")
+                   help="message intent: say (default) and ask invite a reply; "
+                        "fyi, ack, ping, decide and nudge do not -- nudge is a "
+                        "chaser for a request already on the record, so it "
+                        "opens no debt of its own")
     p.add_argument("--reply-to", dest="reply_to", metavar="MSGID",
                    help="thread this message to an earlier message id "
                         "(ids are shown in delivery blocks and history)")
